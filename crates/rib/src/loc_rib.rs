@@ -1966,22 +1966,71 @@ mod tests {
     }
 
     #[test]
+    /// Load-bearing proof: restoring first-match, selecting the maximum,
+    /// rejecting either exact type, a different ASN, or finite zero (including
+    /// `-0`), or accepting negative/non-finite values breaks an assertion below.
     fn route_link_bandwidth_accessor() {
         let v4 = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24);
-        let mut route = make_route(1, v4, 100);
-
-        // No extended communities → no link bandwidth.
-        assert!(route.link_bandwidth().is_none());
-
-        // A Link Bandwidth community surfaces its bandwidth (bytes/second);
-        // an unrelated Route Target sitting alongside it is ignored.
+        let read = |communities| {
+            let mut route = make_route(1, v4, 100);
+            Arc::make_mut(&mut route.attributes)
+                .push(PathAttribute::ExtendedCommunities(communities));
+            route.link_bandwidth()
+        };
+        let lb = |type_byte: u8, asn: u16, bw: f32| {
+            let asn = asn.to_be_bytes();
+            let bw = bw.to_be_bytes();
+            ExtendedCommunity::new(u64::from_be_bytes([
+                type_byte, 0x04, asn[0], asn[1], bw[0], bw[1], bw[2], bw[3],
+            ]))
+        };
         let rt = ExtendedCommunity::new(u64::from_be_bytes([0x00, 0x02, 0xFD, 0xE9, 0, 0, 0, 100]));
-        let lb = ExtendedCommunity::link_bandwidth(65001, 1.25e9_f32);
-        Arc::make_mut(&mut route.attributes).push(PathAttribute::ExtendedCommunities(vec![rt, lb]));
 
-        let bw = route.link_bandwidth().expect("link bandwidth present");
-        // Exact round-trip through IEEE-754 bytes — assert bitwise equality.
-        assert_eq!(bw.to_bits(), 1.25e9_f32.to_bits());
+        assert!(read(vec![]).is_none());
+        let mut mixed = vec![
+            rt,
+            lb(0x00, 64512, 90.0),
+            lb(0x40, 65001, 40.0),
+            lb(0x40, 65001, 40.0),
+            lb(0x00, 65534, 30.0),
+        ];
+        assert_eq!(read(mixed.clone()), Some(30.0));
+        mixed.reverse();
+        assert_eq!(read(mixed), Some(30.0));
+
+        assert_eq!(read(vec![lb(0x40, 1, -5.0), lb(0x00, 2, 5.0)]), Some(5.0));
+        assert!(read(vec![lb(0x40, 1, -5.0)]).is_none());
+
+        assert_eq!(
+            read(vec![lb(0x00, 1, 0.0)]).unwrap().to_bits(),
+            0.0_f32.to_bits()
+        );
+        for zeros in [[0.0, -0.0], [-0.0, 0.0]] {
+            assert_eq!(
+                read(zeros.map(|bw| lb(0x40, 1, bw)).to_vec())
+                    .unwrap()
+                    .to_bits(),
+                (-0.0_f32).to_bits()
+            );
+        }
+
+        assert_eq!(
+            read(vec![
+                lb(0x00, 1, f32::NAN),
+                lb(0x40, 2, f32::INFINITY),
+                lb(0x00, 3, f32::NEG_INFINITY),
+                lb(0x40, 4, 7.0),
+            ]),
+            Some(7.0)
+        );
+        assert!(
+            read(vec![
+                lb(0x00, 1, f32::NAN),
+                lb(0x40, 2, f32::INFINITY),
+                lb(0x00, 3, f32::NEG_INFINITY),
+            ])
+            .is_none()
+        );
     }
 
     #[test]

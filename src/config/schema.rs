@@ -554,9 +554,10 @@ pub struct Global {
     #[serde(default)]
     pub multipath_relax: bool,
     /// ADR-0068 weighted multipath (FRR's `bgp bestpath bandwidth`). When `true`,
-    /// unicast ECMP next-hops are weighted by their Link Bandwidth Extended
-    /// Community (draft-ietf-idr-link-bandwidth) when the whole equal-cost group
-    /// carries one; otherwise they stay equal-cost. Off by default. Like
+    /// unicast ECMP next-hops are weighted using the lowest finite nonnegative
+    /// RFC 10005 Link Bandwidth value on each route. Weighting applies only when
+    /// every path in the equal-cost group has a positive value; zero, missing,
+    /// or unusable values keep the whole group equal-cost. Off by default. Like
     /// `multipath_relax` it is a best-path-wide knob and is inert unless a table
     /// sets `maximum_paths`, `maximum_paths_ebgp`, or `maximum_paths_ibgp` above
     /// 1.

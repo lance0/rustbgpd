@@ -1005,7 +1005,7 @@
           "default": false
         },
         "link_bandwidth_weighted": {
-          "description": "ADR-0068 weighted multipath (FRR's `bgp bestpath bandwidth`). When `true`,\nunicast ECMP next-hops are weighted by their Link Bandwidth Extended\nCommunity (draft-ietf-idr-link-bandwidth) when the whole equal-cost group\ncarries one; otherwise they stay equal-cost. Off by default. Like\n`multipath_relax` it is a best-path-wide knob and is inert unless a table\nsets `maximum_paths`, `maximum_paths_ebgp`, or `maximum_paths_ibgp` above\n1.",
+          "description": "ADR-0068 weighted multipath (FRR's `bgp bestpath bandwidth`). When `true`,\nunicast ECMP next-hops are weighted using the lowest finite nonnegative\nRFC 10005 Link Bandwidth value on each route. Weighting applies only when\nevery path in the equal-cost group has a positive value; zero, missing,\nor unusable values keep the whole group equal-cost. Off by default. Like\n`multipath_relax` it is a best-path-wide knob and is inert unless a table\nsets `maximum_paths`, `maximum_paths_ebgp`, or `maximum_paths_ibgp` above\n1.",
           "type": "boolean",
           "default": false
         },

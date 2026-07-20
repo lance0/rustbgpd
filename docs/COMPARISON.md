@@ -267,8 +267,9 @@ IPv4/IPv6 `Prefix` routes.
     Per-class caps (`maximum_paths_ebgp` / `maximum_paths_ibgp`, FRR parity) let
     eBGP and iBGP groups carry different widths. The global
     `[global].link_bandwidth_weighted` knob (ADR-0068) weights ECMP next-hops by
-    their Link Bandwidth Extended Community (draft-ietf-idr-link-bandwidth, FRR's
-    `bgp bestpath bandwidth`) for unequal-cost load balancing. Add-Path
+    their lowest usable RFC 10005 Link Bandwidth Extended Community (receiver
+    subset; exact type 0x00/0x40). Zero or unusable values use equal-cost
+    fallback; FRR calls the weighting mode `bgp bestpath bandwidth`. Add-Path
     multi-path *send* (RFC 7911, route-server mode) and EVPN aliasing ECMP
     (ADR-0059 FDB nexthop groups, default-on) also ship.
 
