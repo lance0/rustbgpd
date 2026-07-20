@@ -16,19 +16,89 @@ jobs:
   extended-corpus:
     if: github.repository == 'lance0/rustbgpd'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # 64 reductions x 20s plus the isolated baseline fit below this job cap,
+    # leaving time for build, the full sweep, log upload, and failure restore.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           key: update-group-fault
+      - name: Verify exact ignored corpus test exists
+        shell: bash
+        run: |
+          set -euo pipefail
+          test_name='manager::tests::update_groups_fault_corpus::deterministic_fault_corpus_extended'
+          listing="$(cargo test -p rustbgpd-rib --lib "$test_name" -- --ignored --exact --list)"
+          printf '%s\n' "$listing"
+          if ! grep -Fqx "$test_name: test" <<<"$listing"; then
+            echo "exact ignored test missing: $test_name" >&2
+            exit 1
+          fi
       - name: Run hard-capped deterministic corpus
+        id: corpus
+        shell: bash
         env:
           RUSTBGPD_UPDATE_GROUP_SEED_START: "0x35700000"
           RUSTBGPD_UPDATE_GROUP_SEED_COUNT: "24"
           RUSTBGPD_UPDATE_GROUP_MAX_OPS: "64"
-        run: >-
-          cargo test -p rustbgpd-rib
-          deterministic_fault_corpus_extended
-          -- --ignored
+        run: |
+          set -uo pipefail
+          test_name='manager::tests::update_groups_fault_corpus::deterministic_fault_corpus_extended'
+          log='update-group-fault.log'
+          : >"$log"
+
+          set +e
+          cargo test -p rustbgpd-rib --lib "$test_name" -- \
+            --ignored --exact --nocapture 2>&1 | tee -a "$log"
+          pipeline_status=("${PIPESTATUS[@]}")
+          corpus_status=${pipeline_status[0]}
+          corpus_tee_status=${pipeline_status[1]}
+          set -e
+          printf '\nOriginal corpus exit status: %s (tee: %s)\n' \
+            "$corpus_status" "$corpus_tee_status" | tee -a "$log"
+
+          if (( corpus_status != 0 )); then
+            failure_case="$(grep -E '^UPDATE_GROUP_FAILURE_CASE seed=0x[0-9a-f]+ scenario=[a-z0-9-]+$' "$log" | tail -n 1 || true)"
+            if [[ -n "$failure_case" ]]; then
+              seed="${failure_case#*seed=}"
+              seed="${seed%% *}"
+              scenario="${failure_case##*scenario=}"
+              printf '\nMinimizing seed=%s scenario=%s\n' "$seed" "$scenario" | tee -a "$log"
+              set +e
+              RUSTBGPD_UPDATE_GROUP_SEED_START="$seed" \
+              RUSTBGPD_UPDATE_GROUP_SEED_COUNT=1 \
+              RUSTBGPD_UPDATE_GROUP_SCENARIO="$scenario" \
+              RUSTBGPD_UPDATE_GROUP_MINIMIZE=1 \
+                cargo test -p rustbgpd-rib --lib "$test_name" -- \
+                  --ignored --exact --nocapture 2>&1 | tee -a "$log"
+              pipeline_status=("${PIPESTATUS[@]}")
+              minimize_status=${pipeline_status[0]}
+              minimize_tee_status=${pipeline_status[1]}
+              set -e
+              printf '\nMinimizer exit status: %s (tee: %s)\n' \
+                "$minimize_status" "$minimize_tee_status" | tee -a "$log"
+            else
+              printf '\nNo exact failure-case marker was emitted; minimization skipped.\n' | tee -a "$log"
+            fi
+          fi
+
+          result_status=$corpus_status
+          if (( result_status == 0 && corpus_tee_status != 0 )); then
+            result_status=$corpus_tee_status
+          fi
+          echo "status=$result_status" >>"$GITHUB_OUTPUT"
+      - name: Upload failing corpus log
+        if: steps.corpus.outputs.status != '0'
+        uses: actions/upload-artifact@v7
+        with:
+          name: update-group-fault-${{ github.run_id }}
+          path: update-group-fault.log
+          if-no-files-found: error
+      - name: Preserve corpus failure
+        if: steps.corpus.outputs.status != '0'
+        shell: bash
+        env:
+          CORPUS_STATUS: ${{ steps.corpus.outputs.status }}
+        run: exit "$CORPUS_STATUS"

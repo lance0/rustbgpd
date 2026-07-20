@@ -42,9 +42,9 @@ membership churn, and Add-Path cap changes:
 cargo test -p rustbgpd-rib deterministic_fault_corpus -- --nocapture
 ```
 
-Failure output includes the scenario name, seed, comparison mode, and ordered
-operation log. To run the hard-capped 24-seed corpus used by the weekly
-GitHub-hosted workflow:
+Failure output includes the scenario name, seed, comparison mode, original
+operation indices, and ordered operation log. To run the hard-capped 24-seed
+corpus used by the weekly GitHub-hosted workflow:
 
 ```bash
 cargo test -p rustbgpd-rib deterministic_fault_corpus_extended -- --ignored --nocapture
@@ -52,23 +52,50 @@ cargo test -p rustbgpd-rib deterministic_fault_corpus_extended -- --ignored --no
 
 Seeds vary valid fixture identities; they do not randomize operation ordering
 or scenario length. The defaults are seed start `0x35700000`, 24 fixture sets,
-and at most 64 operations per schedule. Replay one failing fixture set with:
+and at most 64 operations per schedule. Replay one exact failing scenario and
+its original operation indices with:
 
 ```bash
 RUSTBGPD_UPDATE_GROUP_SEED_START=0x35700007 \
 RUSTBGPD_UPDATE_GROUP_SEED_COUNT=1 \
 RUSTBGPD_UPDATE_GROUP_MAX_OPS=64 \
-cargo test -p rustbgpd-rib deterministic_fault_corpus_extended -- --ignored --nocapture
+RUSTBGPD_UPDATE_GROUP_SCENARIO=dirty-policy-regroup-transitions \
+RUSTBGPD_UPDATE_GROUP_OP_INDICES=0,1,2,7,8 \
+cargo test -p rustbgpd-rib --lib \
+  manager::tests::update_groups_fault_corpus::deterministic_fault_corpus_extended \
+  -- --ignored --exact --nocapture
 ```
+
+Indices always refer to the original fixed schedule, even after operations are
+removed. `RUSTBGPD_UPDATE_GROUP_OP_INDICES=none` explicitly selects an empty
+retained set; an empty set is useful for exact replay/serialization but is
+rejected as a minimizer candidate because it omits required session setup.
+Omit `RUSTBGPD_UPDATE_GROUP_OP_INDICES` to retain the full named scenario.
+
+To shrink a reproduced failure, add `RUSTBGPD_UPDATE_GROUP_MINIMIZE=1` to that
+exact seed/scenario command. The reducer is capped at 64 candidate evaluations
+by default; set `RUSTBGPD_UPDATE_GROUP_MINIMIZE_EVALUATIONS` to `1..=256` to
+change the cap. Each baseline/candidate runs as a separate invocation of the
+current test executable with a 20-second wall-clock deadline, so a hung
+operation or detached manager task is killed and reaped before the next case.
+Only the same normalized failure classification is accepted. Session-start
+boundaries and assertion prerequisites are retained to avoid shrinking into a
+different, structurally invalid fixture. Output always prints the best replay,
+the evaluation count, and whether a complete single-deletion pass established
+that no remaining removable operation preserves the failure.
+
+On failure, the weekly workflow extracts the exact seed/scenario marker,
+appends the bounded minimizer run to `update-group-fault.log`, uploads that log
+as a failure-only artifact, and then exits with the original corpus status.
 
 `RUSTBGPD_UPDATE_GROUP_SEED_COUNT` must be `1..=64`; max operations must be
 `18..=64`, where 18 is the longest fixed schedule and is test-ratcheted when a
 schedule changes. Every path must finish with the terminal sentinel in the
 current transport generation; equal empty, truncated, or predecessor-session
-streams fail before grouped/per-peer equality is considered. Invalid values
-and overflowing seed ranges fail before a manager starts. The corpus uses
-virtual time and hard caps; it is not a replacement for a live or multi-day
-soak.
+streams fail before grouped/per-peer equality is considered. Invalid values,
+unknown scenarios, out-of-range operation indices, and overflowing seed ranges
+fail before a manager starts. The corpus uses virtual time and hard caps; it is
+not a replacement for a live or multi-day soak.
 
 The clippy-reason ratchet currently covers the paths listed in
 `DEFAULT_PATHS` in `scripts/check-clippy-reasons.py`. Any
