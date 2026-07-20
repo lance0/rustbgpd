@@ -321,10 +321,11 @@ impl RibManager {
 
         self.clear_peer_adj_rib_in(peer);
 
-        self.metrics
-            .set_adj_rib_out_prefixes(&peer.to_string(), "all", 0);
-        self.metrics
-            .set_adj_rib_out_prefixes(&peer.to_string(), "evpn", 0);
+        let peer_label = peer.to_string();
+        for family in ["all", "flowspec", "evpn", "bgpls", "vpn", "labeled", "rtc"] {
+            self.metrics
+                .set_adj_rib_out_prefixes(&peer_label, family, 0);
+        }
         self.clear_outbound_peer_state(peer);
         self.peer_asn.remove(&peer);
         self.peer_group.remove(&peer);

@@ -941,6 +941,59 @@ async fn route_event_carries_best_path_id() {
 
 // --- Prometheus gauge tests ---
 
+#[test]
+fn peer_down_zeroes_all_adj_rib_out_family_gauges() {
+    let metrics = BgpMetrics::new();
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let peer_label = peer.to_string();
+    let families = ["all", "flowspec", "evpn", "bgpls", "vpn", "labeled", "rtc"];
+
+    for (index, family) in families.iter().enumerate() {
+        metrics.set_adj_rib_out_prefixes(
+            &peer_label,
+            family,
+            i64::try_from(index + 1).expect("fixture count fits i64"),
+        );
+    }
+
+    manager.handle_update(RibUpdate::PeerDown {
+        peer,
+        session_id: 0,
+    });
+
+    // Load-bearing proof: removing any family from the production teardown
+    // reset leaves that family's seeded nonzero series behind and fails here.
+    let gathered = metrics.registry().gather();
+    let gauge = gathered
+        .iter()
+        .find(|family| family.name() == "bgp_rib_adj_out_prefixes")
+        .expect("Adj-RIB-Out gauge family remains registered");
+    for family in families {
+        let observed = gauge
+            .metric
+            .iter()
+            .find(|metric| {
+                metric
+                    .get_label()
+                    .iter()
+                    .any(|label| label.name() == "peer" && label.value() == peer_label)
+                    && metric
+                        .get_label()
+                        .iter()
+                        .any(|label| label.name() == "afi_safi" && label.value() == family)
+            })
+            .unwrap_or_else(|| panic!("PeerDown removed the {family} Adj-RIB-Out series"))
+            .get_gauge()
+            .value();
+        assert!(
+            observed.abs() < f64::EPSILON,
+            "PeerDown left the {family} Adj-RIB-Out gauge at {observed}"
+        );
+    }
+}
+
 #[tokio::test]
 #[expect(
     clippy::cast_possible_truncation,
