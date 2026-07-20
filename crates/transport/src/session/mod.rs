@@ -355,6 +355,8 @@ pub(crate) struct PeerSession {
     /// `[policy.reject_retention].enabled`). Read on the inbound UPDATE
     /// path to skip retention entirely when disabled.
     reject_retention_enabled: bool,
+    #[cfg(test)]
+    rejected_route_prototype_builds: std::sync::atomic::AtomicUsize,
     /// Bounded per-session store of rejected inbound routes with their
     /// reject reason (LAN-472) — the looking-glass filtered-route
     /// surface behind `PolicyService.ListRejectedRoutes`. Cleared on
@@ -970,6 +972,8 @@ impl PeerSession {
                 explain_cache_size,
             ),
             reject_retention_enabled,
+            #[cfg(test)]
+            rejected_route_prototype_builds: std::sync::atomic::AtomicUsize::new(0),
             rejected_routes: rejected_routes::RejectedRouteStore::with_capacity(
                 reject_retention_capacity,
             ),
@@ -1114,6 +1118,8 @@ impl PeerSession {
                 explain_cache_size,
             ),
             reject_retention_enabled,
+            #[cfg(test)]
+            rejected_route_prototype_builds: std::sync::atomic::AtomicUsize::new(0),
             rejected_routes: rejected_routes::RejectedRouteStore::with_capacity(
                 reject_retention_capacity,
             ),

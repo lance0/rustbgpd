@@ -1963,6 +1963,10 @@ capacity = 1024
 | `enabled`  | bool    | no       | `true`  | Gates retention entirely. When `false`, the reject paths skip entry construction (one boolean check per gate) and the query surface reports the disabled state as a configuration fact rather than an empty answer. |
 | `capacity` | integer | no       | `1024`  | Per-peer retention cap, LRU on rejection recency — a reject storm converges on the most recent `capacity` rejections. Each entry is one rejected `(AFI, SAFI, prefix, path_id)` with its reason and a compact attribute summary, ≤ ~512 bytes realistic worst case ⇒ ~0.5 MiB bound per peer at the default. Raise it toward the expected member announcement count for full coverage on route-server fleets. |
 
+With retention enabled, a clean permitted UPDATE does not construct a
+rejection summary. The first policy, OTC, or next-hop-ownership rejection in
+an UPDATE builds one bounded prototype shared by that UPDATE's identities.
+
 Like `[policy.explain]`, this is **diagnostic state only** — it never
 affects which routes are accepted. Scope is IPv4 / IPv6 unicast
 (max-prefix violations tear the session down, so there is no per-route

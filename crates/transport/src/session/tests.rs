@@ -14959,9 +14959,12 @@ async fn shared_group_wire_equivalence_proof_ignores_only_byte_inert_fields() {
 /// still flow, a previously accepted identity is retired treat-as-withdraw
 /// style, and a first-seen rejection stays silent. The spoofed UPDATE
 /// carries RFC 7999 BLACKHOLE, pinning ADR-0107 §5: a community is never
-/// an ownership bypass.
+/// an ownership bypass. Break-to-red: eager prototype construction fails the
+/// conforming zero count; per-identity ownership construction fails count one.
 #[tokio::test]
 async fn strict_peer_next_hop_rejects_foreign_ipv4_body_and_withdraws_replacement() {
+    use rustbgpd_telemetry::reason_labels::ImportRejectReason;
+
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
     session.config.next_hop_ownership_strict_peer = true;
     session.negotiated = Some(negotiated_session(65002, false));
@@ -15004,6 +15007,7 @@ async fn strict_peer_next_hop_rejects_foreign_ipv4_body_and_withdraws_replacemen
         1,
         "conforming next-hop must be accepted under strict_peer"
     );
+    assert_eq!(rejected_route_prototype_builds(&session), 0);
     // Foreign next-hop (another member's address) + BLACKHOLE: rejected
     // pre-policy; the accepted identity is withdrawn, the first-seen one
     // stays silent, and the explicit withdrawal is preserved.
@@ -15052,6 +15056,18 @@ async fn strict_peer_next_hop_rejects_foreign_ipv4_body_and_withdraws_replacemen
         "first-seen rejections must stay silent"
     );
     assert_eq!(session.known_prefix_count(), 0);
+    let retained = session.rejected_routes.snapshot();
+    assert_eq!(retained.len(), 2);
+    assert_eq!(retained[0].1.rejected_at, retained[1].1.rejected_at);
+    assert_eq!(rejected_route_prototype_builds(&session), 1);
+    for (key, entry) in retained {
+        assert!(
+            key == retention_key(accepted) || key == retention_key(first_seen),
+            "ownership retention must keep each rejected identity"
+        );
+        assert_eq!(entry.reason, ImportRejectReason::NextHopOwnership);
+        assert_eq!(entry.next_hop, Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9))));
+    }
 }
 
 /// ADR-0107 strict-peer over MP IPv6 unicast: a conforming global
@@ -15987,6 +16003,133 @@ fn retention_key(prefix: Ipv4Prefix) -> RetentionKey {
     }
 }
 
+fn rejected_route_prototype_builds(session: &PeerSession) -> usize {
+    session
+        .rejected_route_prototype_builds
+        .load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Clean permitted UPDATEs must not construct reject-only diagnostic state.
+/// Break-to-red: eagerly initializing the prototype makes the build-count
+/// assertion fail, while dropping accepted paths fails the state assertions.
+#[tokio::test]
+async fn reject_retention_permitted_update_builds_no_prototype() {
+    let first = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
+    let second = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+    let (mut session, _metrics) = retention_session_with_chain(None, |_| {});
+
+    session
+        .process_update(retention_update(&[first, second], &[]))
+        .await;
+
+    assert_eq!(rejected_route_prototype_builds(&session), 0);
+    assert!(session.rejected_routes.is_empty());
+    assert_eq!(session.known_prefix_count(), 2);
+    assert_eq!(session.import_policy_routes_permitted, 2);
+}
+
+/// Body and MP policy denies in one UPDATE share one bounded prototype and
+/// timestamp; the next UPDATE constructs fresh state from its own attributes.
+/// Break-to-red: per-identity construction changes the first count/timestamps;
+/// cross-UPDATE reuse makes the third entry retain the first UPDATE's summary.
+#[tokio::test]
+async fn reject_retention_shares_prototype_across_body_and_mp_policy_denies() {
+    use rustbgpd_wire::{MpReachNlri, NlriEntry};
+
+    let chain = PolicyChain::new(vec![Policy {
+        entries: vec![],
+        default_action: PolicyAction::Deny,
+    }]);
+    let (mut session, _metrics) = retention_session_with_chain(Some(chain), |_| {});
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.negotiated_families = vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
+    install_test_negotiated_session(&mut session, negotiated);
+    let body = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
+    let mp = Prefix::V6(Ipv6Prefix::new("2001:db8:505::".parse().unwrap(), 64));
+    let later = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+
+    let first_attrs = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002])],
+        }),
+        PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+        PathAttribute::Communities(vec![100]),
+        PathAttribute::MpReachNlri(MpReachNlri {
+            afi: Afi::Ipv6,
+            safi: Safi::Unicast,
+            next_hop: "2001:db8::2".parse().unwrap(),
+            link_local_next_hop: None,
+            announced: vec![NlriEntry {
+                path_id: 0,
+                prefix: mp,
+            }],
+            flowspec_announced: vec![],
+            evpn_announced: vec![],
+            bgpls_announced: vec![],
+            labeled_announced: vec![],
+            vpn_announced: vec![],
+            rtc_announced: vec![],
+        }),
+    ];
+    session
+        .process_update(UpdateMessage::build(
+            &[Ipv4NlriEntry {
+                path_id: 0,
+                prefix: body,
+            }],
+            &[],
+            &first_attrs,
+            true,
+            false,
+            Ipv4UnicastMode::Body,
+        ))
+        .await;
+    let entries = session.rejected_routes.snapshot();
+    assert_eq!(entries.len(), 2);
+    assert!(entries.iter().any(|(key, _)| *key == retention_key(body)));
+    assert!(entries.iter().any(|(key, _)| {
+        *key == RetentionKey {
+            afi: Afi::Ipv6,
+            safi: Safi::Unicast,
+            prefix: mp,
+            path_id: 0,
+        }
+    }));
+    assert_eq!(entries[0].1.rejected_at, entries[1].1.rejected_at);
+    assert_eq!(rejected_route_prototype_builds(&session), 1);
+
+    let second_attrs = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002, 65003])],
+        }),
+        PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+        PathAttribute::Communities(vec![200]),
+    ];
+    session
+        .process_update(UpdateMessage::build(
+            &[Ipv4NlriEntry {
+                path_id: 0,
+                prefix: later,
+            }],
+            &[],
+            &second_attrs,
+            true,
+            false,
+            Ipv4UnicastMode::Body,
+        ))
+        .await;
+    let entries = session.rejected_routes.snapshot();
+    let later_entry = entries
+        .iter()
+        .find(|(key, _)| *key == retention_key(later))
+        .expect("second UPDATE rejection retained");
+    assert_eq!(rejected_route_prototype_builds(&session), 2);
+    assert_eq!(later_entry.1.as_path, "65002 65003");
+    assert_eq!(later_entry.1.communities, vec![200]);
+}
+
 /// LAN-472 pin: a policy deny retains the route with reason
 /// `policy_reject` and the attribute summary the member-support surface
 /// renders; a permitted sibling in the same UPDATE is not retained. The
@@ -16201,7 +16344,8 @@ async fn reject_retention_cap_evicts_oldest_reject() {
 
 /// LAN-472 pin: `[policy.reject_retention] enabled = false` records
 /// nothing, and the command surface reports the disabled state as a
-/// configuration fact rather than an empty answer.
+/// configuration fact rather than an empty answer. Break-to-red: constructing
+/// despite the off switch makes the prototype-count assertion fail.
 #[tokio::test]
 async fn reject_retention_disabled_records_nothing_and_reports_disabled() {
     let denied = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
@@ -16215,6 +16359,8 @@ async fn reject_retention_disabled_records_nothing_and_reports_disabled() {
     session
         .process_update(retention_update(&[denied], &[]))
         .await;
+    assert_eq!(session.import_policy_routes_denied, 1);
+    assert_eq!(rejected_route_prototype_builds(&session), 0);
     assert!(session.rejected_routes.is_empty());
     assert_eq!(metrics.rejected_routes_retained("10.0.0.2:179"), 0);
 
@@ -16266,18 +16412,26 @@ async fn reject_retention_records_as_path_loop_reason() {
 
 /// LAN-472 pin: an RFC 9234 OTC ingress drop (a pre-policy hygiene
 /// gate) retains the announced identity with the OTC reason token and
-/// the canonical sub-reason detail.
+/// the canonical sub-reason detail. Break-to-red: constructing per rejected
+/// identity makes the shared timestamp or exact build count fail.
 #[tokio::test]
 async fn reject_retention_records_otc_ingress_drop_with_detail() {
     use rustbgpd_telemetry::reason_labels::ImportRejectReason;
-    let dropped = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let first = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let second = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
     let (mut session, metrics) = retention_session_with_chain(None, |_| {});
     session.config.peer.local_role = Some(BgpRole::RouteServer);
     let update = UpdateMessage::build(
-        &[Ipv4NlriEntry {
-            path_id: 0,
-            prefix: dropped,
-        }],
+        &[
+            Ipv4NlriEntry {
+                path_id: 0,
+                prefix: first,
+            },
+            Ipv4NlriEntry {
+                path_id: 0,
+                prefix: second,
+            },
+        ],
         &[],
         &[
             PathAttribute::Origin(Origin::Igp),
@@ -16293,15 +16447,20 @@ async fn reject_retention_records_otc_ingress_drop_with_detail() {
     );
     session.process_update(update).await;
     let entries = session.rejected_routes.snapshot();
-    assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].0, retention_key(dropped));
-    assert_eq!(entries[0].1.reason, ImportRejectReason::OtcRouteLeak);
-    assert_eq!(
-        entries[0].1.detail.as_deref(),
-        Some("ingress_from_customer_rsclient"),
-        "the canonical OTC sub-reason token rides in the detail field"
-    );
-    assert_eq!(metrics.rejected_routes_retained("10.0.0.2:179"), 1);
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].1.rejected_at, entries[1].1.rejected_at);
+    assert_eq!(rejected_route_prototype_builds(&session), 1);
+    for (key, entry) in entries {
+        assert!(key == retention_key(first) || key == retention_key(second));
+        assert_eq!(entry.reason, ImportRejectReason::OtcRouteLeak);
+        assert_eq!(entry.next_hop, None, "OTC does not invent a next-hop");
+        assert_eq!(
+            entry.detail.as_deref(),
+            Some("ingress_from_customer_rsclient"),
+            "the canonical OTC sub-reason token rides in the detail field"
+        );
+    }
+    assert_eq!(metrics.rejected_routes_retained("10.0.0.2:179"), 2);
 }
 
 /// LAN-472 pin: the retention store is per-session diagnostic state —
