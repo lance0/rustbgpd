@@ -14,6 +14,11 @@ mixed-fleet partition, compensating rollback, and a readiness bypass. This ADR
 records that design as built. It does not broaden the fast path or change its
 behavior.
 
+The separately proposed continuation for the ordinary authoritative per-peer
+fallback is described in
+[ADR-0111](0111-authoritative-policy-replacement-continuation.md); it does not
+alter this cohort transaction unless accepted and implemented.
+
 "Atomic" has two different scopes here. The RIB's clean cohort commit is
 observationally atomic inside the RIB actor: ordinary RIB work cannot observe
 staged state, and no member changes group or receives the new payload before
