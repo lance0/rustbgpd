@@ -65,7 +65,10 @@ jobs:
           cargo test --test reloadstall_scenario_emitted_check
           bash -n bench/compare-criterion.sh
           bash -n bench/scale/route-server-1000/run-receipt.sh
-          shellcheck bench/scale/route-server-1000/run-receipt.sh
+          bash -n bench/tests/test-route-server-1000-receipt.sh
+          shellcheck bench/scale/route-server-1000/run-receipt.sh \
+            bench/tests/test-route-server-1000-receipt.sh
+          bash bench/tests/test-route-server-1000-receipt.sh
           bash -n bench/scale/compare-rrharness.sh
           bash bench/tests/test-rrharness-driver.sh
           python3 bench/scale/rebaseline/test_classifiers.py
