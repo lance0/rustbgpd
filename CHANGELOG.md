@@ -73,6 +73,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- FlowSpec exports now enforce source and policy-added `NO_ADVERTISE`, apply
+  generic export-policy path-attribute modifications, ignore inapplicable
+  next-hop rewrites, and withdraw only the exact prior `(AFI, rule)` identity.
 - EVPN exports now enforce stored-route `NO_ADVERTISE` before policy and
   policy-added `NO_ADVERTISE` before Adj-RIB-Out commit, withdrawing only the
   exact prior advertisement and remaining silent for first-seen suppression.

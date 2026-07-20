@@ -793,3 +793,320 @@ async fn flowspec_llgr_eor_sweeps_non_readvertised() {
     drop(tx);
     handle.await.unwrap();
 }
+
+fn with_flowspec_communities(mut route: FlowSpecRoute, communities: Vec<u32>) -> FlowSpecRoute {
+    route
+        .attributes
+        .retain(|attr| !matches!(attr, PathAttribute::Communities(_)));
+    route
+        .attributes
+        .push(PathAttribute::Communities(communities));
+    route
+}
+
+fn flowspec_policy_statement(
+    marker: u32,
+    modifications: rustbgpd_policy::RouteModifications,
+) -> rustbgpd_policy::PolicyStatement {
+    rustbgpd_policy::PolicyStatement {
+        prefix: None,
+        ge: None,
+        le: None,
+        action: rustbgpd_policy::PolicyAction::Permit,
+        match_community: vec![rustbgpd_policy::CommunityMatch::Standard { value: marker }],
+        match_as_path: None,
+        match_neighbor_set: None,
+        match_route_type: None,
+        match_evpn_route_type: None,
+        match_rpki_validation: None,
+        match_aspa_validation: None,
+        match_as_path_length_ge: None,
+        match_as_path_length_le: None,
+        match_local_pref_ge: None,
+        match_local_pref_le: None,
+        match_med_ge: None,
+        match_med_le: None,
+        match_next_hop: None,
+        modifications,
+    }
+}
+
+async fn replace_flowspec_routes(
+    tx: &mpsc::Sender<RibUpdate>,
+    source: IpAddr,
+    routes: Vec<FlowSpecRoute>,
+) {
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: routes,
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let _ = query_flowspec_routes(tx).await;
+}
+
+/// Source `NO_ADVERTISE` outranks a policy that removes it. Suppression stays
+/// silent until an exact prior `(AFI, rule)` advertisement must be withdrawn.
+///
+/// Break-to-red: deleting the source guard announces the first route; removing
+/// the Adj-RIB-Out membership check emits a first-seen withdrawal; using only
+/// rule identity withdraws the same-looking IPv6 route; wrong-rule or broadened
+/// withdrawal churns the sibling; sticky suppression blocks recovery.
+#[tokio::test]
+async fn flowspec_source_no_advertise_precedes_removal_policy() {
+    let mut removal = rustbgpd_policy::RouteModifications::default();
+    removal
+        .communities_remove
+        .push(rustbgpd_wire::COMMUNITY_NO_ADVERTISE);
+    let policy = rustbgpd_policy::PolicyChain::new(vec![rustbgpd_policy::Policy {
+        entries: vec![flowspec_policy_statement(
+            rustbgpd_wire::COMMUNITY_NO_ADVERTISE,
+            removal,
+        )],
+        default_action: rustbgpd_policy::PolicyAction::Permit,
+    }]);
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+    let source_addr = Ipv4Addr::new(198, 51, 100, 41);
+    let source = IpAddr::V4(source_addr);
+    let target = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 41));
+    let (out_tx, mut out_rx) = mpsc::channel(16);
+    tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
+        interpret_rfc1997: true,
+        session_id: 0,
+        peer: target,
+        peer_asn: 65100,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: Some(policy),
+        sendable_families: vec![(Afi::Ipv4, Safi::FlowSpec), (Afi::Ipv6, Safi::FlowSpec)],
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+        negotiated_llgr_families: Vec::new(),
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut out_rx).await;
+
+    let victim = make_destless_flowspec_route(Afi::Ipv4, source_addr, 6);
+    let victim_key = victim.selection_key();
+    let first_scoped =
+        with_flowspec_communities(victim.clone(), vec![rustbgpd_wire::COMMUNITY_NO_ADVERTISE]);
+    replace_flowspec_routes(&tx, source, vec![first_scoped.clone()]).await;
+    assert!(
+        out_rx.try_recv().is_err(),
+        "first-seen scoped rule is silent"
+    );
+
+    let mut changed_scoped = first_scoped;
+    changed_scoped.attributes.push(PathAttribute::Med(41));
+    replace_flowspec_routes(&tx, source, vec![changed_scoped]).await;
+    assert!(
+        out_rx.try_recv().is_err(),
+        "changed-attribute scoped rule remains silent"
+    );
+
+    let sibling = make_destless_flowspec_route(Afi::Ipv4, source_addr, 17);
+    let sibling_key = sibling.selection_key();
+    let mut other_afi = victim.clone();
+    other_afi.afi = Afi::Ipv6;
+    let other_afi_key = other_afi.selection_key();
+    replace_flowspec_routes(&tx, source, vec![victim.clone(), sibling, other_afi]).await;
+    let plain = out_rx.try_recv().expect("plain rules advertise");
+    assert_eq!(plain.flowspec_announce.len(), 3);
+    assert!(plain.flowspec_withdraw.is_empty());
+    for key in [&victim_key, &sibling_key, &other_afi_key] {
+        assert!(
+            plain
+                .flowspec_announce
+                .iter()
+                .any(|route| route.selection_key() == *key)
+        );
+    }
+
+    let scoped_replacement =
+        with_flowspec_communities(victim.clone(), vec![rustbgpd_wire::COMMUNITY_NO_ADVERTISE]);
+    replace_flowspec_routes(&tx, source, vec![scoped_replacement]).await;
+    let withdrawn = out_rx
+        .try_recv()
+        .expect("source restriction withdraws exact prior rule");
+    assert!(withdrawn.flowspec_announce.is_empty());
+    assert_eq!(withdrawn.flowspec_withdraw, vec![victim_key.clone()]);
+
+    let recovered = with_flowspec_communities(victim, vec![(65000u32 << 16) | 0x01BD]);
+    replace_flowspec_routes(&tx, source, vec![recovered]).await;
+    let recovery = out_rx.try_recv().expect("plain rule recovers");
+    assert_eq!(recovery.flowspec_announce.len(), 1);
+    assert_eq!(recovery.flowspec_announce[0].selection_key(), victim_key);
+    assert!(recovery.flowspec_withdraw.is_empty());
+    assert!(
+        out_rx.try_recv().is_err(),
+        "sibling and IPv6 rule do not churn"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// Export modifications apply to `FlowSpec` except `set_next_hop`, and a
+/// policy-added `NO_ADVERTISE` suppresses or withdraws only the exact prior.
+///
+/// Break-to-red: deleting modification application loses every rewritten
+/// attribute; deleting the post-policy guard announces scoped rules; removing
+/// the membership check emits a first-seen withdrawal; passing `set_next_hop`
+/// to the shared helper inserts legacy `NEXT_HOP`; wrong/broad withdrawal churns
+/// the sibling; sticky suppression blocks both recovery announcements.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one actor sequence proves modification, suppression, withdrawal, and recovery semantics"
+)]
+async fn flowspec_policy_modifications_suppress_and_recover_without_next_hop() {
+    let suppress_marker = (65000u32 << 16) | 0x01BD;
+    let permit_marker = (65000u32 << 16) | 0x01BE;
+    let added_standard = (65000u32 << 16) | 0x01BF;
+    let added_large = rustbgpd_wire::LargeCommunity::new(65000, 4, 45);
+    let modifications = rustbgpd_policy::RouteModifications {
+        set_local_pref: Some(275),
+        set_med: Some(44),
+        set_next_hop: Some(rustbgpd_policy::NextHopAction::Specific(IpAddr::V4(
+            Ipv4Addr::new(203, 0, 113, 44),
+        ))),
+        communities_add: vec![added_standard],
+        large_communities_add: vec![added_large],
+        as_path_prepend: Some((64512, 2)),
+        ..rustbgpd_policy::RouteModifications::default()
+    };
+    let mut suppress_modifications = modifications.clone();
+    suppress_modifications
+        .communities_add
+        .push(rustbgpd_wire::COMMUNITY_NO_ADVERTISE);
+    let policy = rustbgpd_policy::PolicyChain::new(vec![rustbgpd_policy::Policy {
+        entries: vec![
+            flowspec_policy_statement(suppress_marker, suppress_modifications),
+            flowspec_policy_statement(permit_marker, modifications),
+        ],
+        default_action: rustbgpd_policy::PolicyAction::Permit,
+    }]);
+
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+    let source_addr = Ipv4Addr::new(198, 51, 100, 42);
+    let source = IpAddr::V4(source_addr);
+    let target = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 42));
+    let (out_tx, mut out_rx) = mpsc::channel(16);
+    tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
+        interpret_rfc1997: true,
+        session_id: 0,
+        peer: target,
+        peer_asn: 65100,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: Some(policy),
+        sendable_families: ipv4_flowspec_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+        negotiated_llgr_families: Vec::new(),
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut out_rx).await;
+
+    let mut victim = make_flowspec_route(source_addr);
+    victim.attributes.push(PathAttribute::AsPath(AsPath {
+        segments: vec![AsPathSegment::AsSequence(vec![65001])],
+    }));
+    let victim_key = victim.selection_key();
+    let sibling = make_flowspec_route_alt(source_addr);
+    let sibling_key = sibling.selection_key();
+    let scoped = with_flowspec_communities(victim.clone(), vec![suppress_marker]);
+    replace_flowspec_routes(&tx, source, vec![scoped.clone(), sibling]).await;
+    let first = out_rx.try_recv().expect("unscoped sibling advertises");
+    assert_eq!(first.flowspec_announce.len(), 1);
+    assert_eq!(first.flowspec_announce[0].selection_key(), sibling_key);
+    assert!(first.flowspec_withdraw.is_empty());
+
+    let mut changed_scoped = scoped;
+    changed_scoped
+        .attributes
+        .push(PathAttribute::LocalPref(999));
+    replace_flowspec_routes(&tx, source, vec![changed_scoped]).await;
+    assert!(
+        out_rx.try_recv().is_err(),
+        "changed-attribute policy-scoped rule remains silent"
+    );
+
+    let assert_modified = |route: &FlowSpecRoute| {
+        assert_eq!(route.local_pref_attr(), Some(275));
+        assert_eq!(route.med_attr(), Some(44));
+        assert!(route.communities().contains(&added_standard));
+        assert!(route.large_communities().contains(&added_large));
+        assert_eq!(
+            route.as_path().unwrap().segments,
+            vec![AsPathSegment::AsSequence(vec![64512, 64512, 65001])]
+        );
+        assert!(
+            route
+                .attributes
+                .iter()
+                .all(|attr| !matches!(attr, PathAttribute::NextHop(_))),
+            "FlowSpec must not acquire legacy NEXT_HOP"
+        );
+    };
+
+    let permitted = with_flowspec_communities(victim.clone(), vec![permit_marker]);
+    replace_flowspec_routes(&tx, source, vec![permitted]).await;
+    let recovery = out_rx.try_recv().expect("permitted rule recovers");
+    assert_eq!(recovery.flowspec_announce.len(), 1);
+    assert_eq!(recovery.flowspec_announce[0].selection_key(), victim_key);
+    assert_modified(&recovery.flowspec_announce[0]);
+
+    let rescoped = with_flowspec_communities(victim.clone(), vec![suppress_marker]);
+    replace_flowspec_routes(&tx, source, vec![rescoped.clone()]).await;
+    let withdrawn = out_rx
+        .try_recv()
+        .expect("post-policy restriction withdraws exact prior rule");
+    assert!(withdrawn.flowspec_announce.is_empty());
+    assert_eq!(withdrawn.flowspec_withdraw, vec![victim_key.clone()]);
+
+    let mut changed_again = rescoped;
+    changed_again.attributes.push(PathAttribute::Med(999));
+    replace_flowspec_routes(&tx, source, vec![changed_again]).await;
+    assert!(
+        out_rx.try_recv().is_err(),
+        "repeated suppression stays silent"
+    );
+
+    let recovered_again = with_flowspec_communities(victim, vec![permit_marker]);
+    replace_flowspec_routes(&tx, source, vec![recovered_again]).await;
+    let final_recovery = out_rx.try_recv().expect("rule recovers again");
+    assert_eq!(final_recovery.flowspec_announce.len(), 1);
+    assert_eq!(
+        final_recovery.flowspec_announce[0].selection_key(),
+        victim_key
+    );
+    assert_modified(&final_recovery.flowspec_announce[0]);
+    assert!(final_recovery.flowspec_withdraw.is_empty());
+    assert!(out_rx.try_recv().is_err(), "sibling rule does not churn");
+
+    drop(tx);
+    handle.await.unwrap();
+}
