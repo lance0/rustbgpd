@@ -39,6 +39,28 @@ fn set_path(root: &mut serde_yaml::Value, path: &[&str], new: serde_yaml::Value)
         );
 }
 
+fn set_client(root: &mut serde_yaml::Value, n: usize, path: &[&str], new: serde_yaml::Value) {
+    set_path(&mut root["clients"][n], path, new);
+}
+
+fn set_client_multihop(root: &mut serde_yaml::Value, n: usize, ttl: u64) {
+    set_client(root, n, &["cfg", "multihop"], ttl.into());
+}
+
+fn set_client_announce(root: &mut serde_yaml::Value, n: usize, value: bool) {
+    set_client(
+        root,
+        n,
+        &["cfg", "blackhole_filtering", "announce_to_client"],
+        value.into(),
+    );
+}
+
+fn set_blackhole_policy(root: &mut serde_yaml::Value, family: &str, policy: Option<&str>) {
+    let value = policy.map_or(serde_yaml::Value::Null, |p| p.into());
+    set_path(root, &["cfg", "blackhole_filtering", family], value);
+}
+
 fn to_yaml(value: &serde_yaml::Value) -> String {
     serde_yaml::to_string(value).expect("value serializes")
 }
@@ -264,6 +286,134 @@ fn refusal_matrix() {
             "no refusal containing {marker:?} for {path:?}: {items:?}"
         );
     }
+}
+
+#[test]
+/// Load-bearing: removing either field/refusal makes a nonzero case render;
+/// ignoring precedence wrongly refuses AS4242_1's explicit zero override.
+fn effective_nonzero_multihop_is_refused() {
+    use serde_yaml::Value;
+    for (general, client, id, ttl) in [(2, Some(0), "AS197000_1", 2), (0, Some(3), "AS4242_1", 3)] {
+        let mut value = healthy_value();
+        set_path(
+            &mut value,
+            &["cfg", "multihop"],
+            Value::Number(general.into()),
+        );
+        if let Some(client) = client {
+            set_client_multihop(&mut value, 0, client);
+        }
+        assert_eq!(
+            refusals(render(&to_yaml(&value), &rtr_options())),
+            [format!(
+                "client {id}: effective multihop={ttl} is not rendered; set this client to 0 or disable general multihop"
+            )]
+        );
+    }
+}
+
+#[test]
+/// Load-bearing: dropping parsing, fallback, IPv6 applicability, or explicit
+/// false precedence breaks one of these exact refusal/success verdicts.
+fn effective_rfc8950_is_refused_only_for_ipv6_sessions() {
+    use serde_yaml::Value;
+    let mut inherited = healthy_value();
+    set_path(&mut inherited, &["cfg", "rfc8950"], Value::Bool(true));
+    inherited["clients"][1]["cfg"]
+        .as_mapping_mut()
+        .unwrap()
+        .remove(Value::String("rfc8950".into()));
+    assert_eq!(
+        refusals(render(&to_yaml(&inherited), &rtr_options())),
+        ["client AS197000_1: effective rfc8950=true is not rendered on IPv6 sessions"]
+    );
+
+    let mut client = healthy_value();
+    set_client(&mut client, 1, &["cfg", "rfc8950"], Value::Bool(true));
+    assert_eq!(
+        refusals(render(&to_yaml(&client), &rtr_options())),
+        ["client AS197000_1: effective rfc8950=true is not rendered on IPv6 sessions"]
+    );
+
+    let mut inert = healthy_value();
+    set_path(&mut inert, &["cfg", "rfc8950"], Value::Bool(true));
+    render(&to_yaml(&inert), &rtr_options()).expect("client false overrides general true");
+    set_client(&mut inert, 0, &["cfg", "rfc8950"], Value::Bool(true));
+    render(&to_yaml(&inert), &rtr_options()).expect("RFC8950 is inert on an IPv4 session");
+}
+
+#[test]
+/// Load-bearing: removing policy/announce parsing misses a refusal; dropping
+/// family/value guards rejects an asserted inert case.
+fn blackhole_policy_and_matching_client_override_are_refused() {
+    use serde_yaml::Value;
+    let mut ipv6 = healthy_value();
+    set_blackhole_policy(&mut ipv6, "policy_ipv6", Some("rewrite-next-hop"));
+    set_client_announce(&mut ipv6, 0, false);
+    assert_eq!(
+        refusals(render(&to_yaml(&ipv6), &rtr_options())),
+        ["general: blackhole_filtering.policy_ipv6 `rewrite-next-hop` is not rendered"]
+    );
+
+    let mut overridden = healthy_value();
+    set_blackhole_policy(&mut overridden, "policy_ipv4", Some("propagate-unchanged"));
+    set_client_announce(&mut overridden, 0, false);
+    assert_eq!(
+        refusals(render(&to_yaml(&overridden), &rtr_options())),
+        [
+            "general: blackhole_filtering.policy_ipv4 `propagate-unchanged` is not rendered",
+            "client AS4242_1: blackhole announce_to_client override is not rendered",
+        ]
+    );
+
+    set_blackhole_policy(&mut overridden, "policy_ipv4", None);
+    render(&to_yaml(&overridden), &rtr_options()).expect("override is inert without a policy");
+
+    let mut rfc8950 = healthy_value();
+    set_blackhole_policy(&mut rfc8950, "policy_ipv4", Some("propagate-unchanged"));
+    set_client(&mut rfc8950, 1, &["cfg", "rfc8950"], Value::Bool(true));
+    set_client_announce(&mut rfc8950, 1, false);
+    assert_eq!(
+        refusals(render(&to_yaml(&rfc8950), &rtr_options())),
+        [
+            "general: blackhole_filtering.policy_ipv4 `propagate-unchanged` is not rendered",
+            "client AS197000_1: effective rfc8950=true is not rendered on IPv6 sessions",
+            "client AS197000_1: blackhole announce_to_client override is not rendered",
+        ]
+    );
+}
+
+#[test]
+/// Load-bearing: deleting the refusal exits zero and overwrites the sentinel bytes.
+fn cli_refusal_is_exit_two_and_writes_nothing() {
+    use serde_yaml::Value;
+    use std::{fs, process::Command};
+    let mut value = healthy_value();
+    set_client(&mut value, 1, &["cfg", "rfc8950"], Value::Bool(true));
+    let tmp = tempfile::tempdir().unwrap();
+    let context = tmp.path().join("context.yml");
+    let out = tmp.path().join("out");
+    let config = out.join("config.toml");
+    fs::write(&context, to_yaml(&value)).unwrap();
+    fs::create_dir(&out).unwrap();
+    fs::write(&config, b"last-good\n").unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_rs-config-render"))
+        .arg("--context")
+        .arg(context)
+        .arg("--out-dir")
+        .arg(out)
+        .arg("--rtr-cache")
+        .arg("127.0.0.1:3323")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("client AS197000_1: effective rfc8950=true is not rendered on IPv6 sessions"),
+        "{output:?}"
+    );
+    assert_eq!(fs::read(config).unwrap(), b"last-good\n");
 }
 
 #[test]
