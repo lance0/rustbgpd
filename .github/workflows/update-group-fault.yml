@@ -44,7 +44,7 @@ jobs:
           RUSTBGPD_UPDATE_GROUP_SEED_COUNT: "24"
           RUSTBGPD_UPDATE_GROUP_MAX_OPS: "64"
         run: |
-          set -uo pipefail
+          set -euo pipefail
           test_name='manager::tests::update_groups_fault_corpus::deterministic_fault_corpus_extended'
           log='update-group-fault.log'
           : >"$log"
