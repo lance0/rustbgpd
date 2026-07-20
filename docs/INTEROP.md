@@ -17,6 +17,23 @@ are called out explicitly.
 
 ## Test Matrix
 
+### IXP looking-glass contract oracle
+
+The path-scoped `ixp-compat.yml` workflow executes the pinned Bird's Eye v2.1.0
+HTTP contract through IXP Manager v7.3.1's concrete Bird's Eye consumer. It
+captures success shapes and exact production-mode 400/403/404/503 responses
+against a deterministic fake `birdc`; upstream source is cloned temporarily and
+installed from its lockfiles. See
+[`tests/compat/ixp-manager-birdseye/README.md`](../tests/compat/ixp-manager-birdseye/README.md)
+for the pins, fixture provenance, and local reproduction command.
+
+This oracle is intentionally **not** a runtime compatibility claim. Current
+rustbgpd gRPC surfaces do not provide a complete rejected-route reason
+inventory, less-specific lookup, or an atomic all-candidate table snapshot, and
+the example Birdwatcher adapter has no runtime protocol-alias configuration.
+Those gaps must be closed and tested before an adapter can be described as IXP
+Manager / Bird's Eye compatible.
+
 ### CI coverage
 
 The hosted `.github/workflows/interop.yml` path gates the following

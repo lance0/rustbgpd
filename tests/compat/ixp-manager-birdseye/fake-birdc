@@ -1,0 +1,84 @@
+#!/bin/sh
+set -eu
+
+ready='BIRD 2.0.12 ready.'
+emit_route() {
+  case "$1" in
+    protocol) med=10; community=100; reason=7 ;;
+    table) med=20; community=200; reason=8 ;;
+    export) med=30; community=300; reason=9 ;;
+    wildcard) med=40; community=400; reason=10 ;;
+    *) exit 64 ;;
+  esac
+  printf '%s\n' "$ready"
+  printf '%s\n' '192.0.2.0/24 via 198.51.100.1 on eth0 [pb_as64496 2026-07-19 12:00:00] * (100) [AS64496i]'
+  printf '\t%s\n' 'Type: BGP unicast univ' 'BGP.origin: IGP' 'BGP.as_path: 64496' \
+    'BGP.next_hop: 198.51.100.1' "BGP.med: $med" 'BGP.local_pref: 100' \
+    "BGP.community: (64496,$community)" "BGP.large_community: (64496, 1101, $reason)"
+}
+
+case "${1:-}" in
+  'show status')
+    printf '%s\n%s\n' "$ready" 'BIRD 2.0.12
+Router ID is 192.0.2.1
+Current server time is 2026-07-19 12:00:00
+Last reboot on 2026-07-19 11:00:00
+Last reconfiguration on 2026-07-19 11:30:00
+Daemon is up and running'
+    ;;
+  'show symbols')
+    printf '%s\n%s\n' "$ready" 'pb_as64496 protocol
+pb_fail_as64497 protocol
+pb_large_as64498 protocol
+master4 routing table'
+    ;;
+  'show protocols all')
+    printf '%s\n%s\n' "$ready" 'name proto table state since info
+device Device master4 up 2026-07-19 11:00:00
+  Preference: 240
+
+pb_as64496 BGP master4 up 2026-07-19 11:30:00 Established
+  Description: Synthetic RFC documentation peer
+  Preference: 100
+  Input filter: ACCEPT
+  Output filter: ACCEPT
+  Routes: 1 imported, 1 exported, 1 preferred
+  BGP state: Established
+    Neighbor address: 198.51.100.1
+    Neighbor AS: 64496
+    Neighbor ID: 198.51.100.1
+    Neighbor caps: refresh AS4
+    Session: external route-server AS4
+    Source address: 192.0.2.1
+    Hold timer: 120/180
+    Keepalive timer: 30/60
+
+pb_fail_as64497 BGP master4 up 2026-07-19 11:30:00 Established
+  Description: Deterministic failure sentinel
+  Routes: 0 imported, 0 exported, 0 preferred
+  BGP state: Established
+
+pb_large_as64498 BGP master4 up 2026-07-19 11:30:00 Established
+  Description: Deterministic route-limit sentinel
+  Routes: 3 imported, 3 exported, 1 preferred
+  BGP state: Established'
+    ;;
+  'show route protocol pb_fail_as64497 count')
+    printf '%s\n' 'deterministic birdc failure'
+    exit 1
+    ;;
+  'show route protocol pb_large_as64498 count')
+    printf '%s\n%s\n' "$ready" '3 of 3 routes for 3 networks'
+    ;;
+  'show route protocol pb_as64496 count'|'show route table master4 count'|'show route export pb_as64496 count')
+    printf '%s\n%s\n' "$ready" '1 of 1 routes for 1 network'
+    ;;
+  'show route protocol pb_as64496 all'|'show route for 192.0.2.0/24 protocol pb_as64496 all') emit_route protocol ;;
+  'show route table master4 all'|'show route for 192.0.2.0/24 table master4 all') emit_route table ;;
+  'show route export pb_as64496 all'|'show route for 192.0.2.0/24 export pb_as64496 all') emit_route export ;;
+  'show route all filter { if bgp_large_community ~ [( 64496, 1101, * )] then accept;} protocol pb_as64496') emit_route wildcard ;;
+  *)
+    printf '%s\n' "unexpected fake birdc command: ${1:-<empty>}" >&2
+    exit 64
+    ;;
+esac

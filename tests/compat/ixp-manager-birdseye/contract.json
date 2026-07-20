@@ -1,0 +1,14 @@
+{
+  "birdseye_commit": "7f8c2375e610578bcf6ea5ceec630a180f945b89",
+  "ixp_manager_commit": "bfbbc23533e56c56a4102178676ec7b3d0d990fa",
+  "protocol_aliases": {
+    "member-v4": "pb_as64496"
+  },
+  "runtime_compatibility": false,
+  "unsupported": [
+    "complete-rejected-route-reason-inventory",
+    "less-specific-longest-prefix-match",
+    "atomic-all-candidate-table-snapshot",
+    "runtime-protocol-alias-configuration"
+  ]
+}
