@@ -72,7 +72,7 @@ for name, expected_status in EXPECTED.items():
         api = parsed.get("api", {})
         leaked = {"env", "cache_disabled", "ip_whitelisted"} & set(api)
         if leaked:
-            fail(f"{name}: APP_DEBUG is not production-false: {sorted(leaked)}")
+            fail(f"{name}: production response leaked debug-only API keys: {sorted(leaked)}")
     responses[name] = {"status": status, "content_type": content_type, "body": body}
 
 actual = json.dumps(
