@@ -62,7 +62,10 @@ jobs:
           cargo fmt --manifest-path bench/scale/reloadstall/Cargo.toml -- --check
           cargo test --manifest-path bench/scale/rrharness/Cargo.toml --locked
           cargo test --manifest-path bench/scale/reloadstall/Cargo.toml --locked
+          cargo test --test reloadstall_scenario_emitted_check
           bash -n bench/compare-criterion.sh
+          bash -n bench/scale/route-server-1000/run-receipt.sh
+          shellcheck bench/scale/route-server-1000/run-receipt.sh
           bash -n bench/scale/compare-rrharness.sh
           bash bench/tests/test-rrharness-driver.sh
           python3 bench/scale/rebaseline/test_classifiers.py

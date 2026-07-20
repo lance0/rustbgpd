@@ -1,0 +1,86 @@
+{
+  "decision": "advertise",
+  "peer_address": "127.1.0.2",
+  "prefix": "20.0.0.0/24",
+  "next_hop": "10.9.0.1",
+  "route_peer_address": "127.1.0.1",
+  "route_type": "external",
+  "reasons": [
+    {
+      "code": "ebgp_route",
+      "message": "best route was learned from an eBGP peer"
+    },
+    {
+      "code": "policy_permitted",
+      "message": "export policy \"member-out:tag\" permitted this route"
+    }
+  ],
+  "modifications": {
+    "communities_add": [
+      "65400:1000"
+    ],
+    "communities_remove": [],
+    "extended_communities_add": [],
+    "extended_communities_remove": [],
+    "large_communities_add": [],
+    "large_communities_remove": []
+  },
+  "gates": [
+    {
+      "gate": "best_route",
+      "code": "ebgp_route",
+      "verdict": "pass",
+      "detail": "best route was learned from an eBGP peer (Loc-RIB best from 127.1.0.1)"
+    },
+    {
+      "gate": "split_horizon",
+      "code": "split_horizon",
+      "verdict": "pass",
+      "detail": "route did not originate from the target peer"
+    },
+    {
+      "gate": "rr_reflection",
+      "code": "rr_reflection",
+      "verdict": "pass",
+      "detail": "iBGP split-horizon / RFC 4456 reflection rules permit this route"
+    },
+    {
+      "gate": "family",
+      "code": "family",
+      "verdict": "pass",
+      "detail": "peer negotiated ipv4 unicast"
+    },
+    {
+      "gate": "llgr",
+      "code": "llgr",
+      "verdict": "pass",
+      "detail": "route is not LLGR-stale"
+    },
+    {
+      "gate": "orf",
+      "code": "orf",
+      "verdict": "not_applicable",
+      "detail": "peer installed no Outbound Route Filter"
+    },
+    {
+      "gate": "export_policy",
+      "code": "policy_permitted",
+      "verdict": "pass",
+      "detail": "export policy \"member-out:tag\" permitted this route"
+    },
+    {
+      "gate": "otc",
+      "code": "otc",
+      "verdict": "not_applicable",
+      "detail": "RFC 9234 OTC egress suppression does not apply to this local role"
+    },
+    {
+      "gate": "adj_rib_out",
+      "code": "already_advertised",
+      "verdict": "pass",
+      "detail": "identical route already advertised — peer is in sync, no re-announcement"
+    }
+  ],
+  "update_group_id": 0,
+  "already_advertised": true
+}

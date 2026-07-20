@@ -1,0 +1,8 @@
+working_directory=$REPO
+env -u CARGO_TARGET_DIR -u RUSTFLAGS cargo build --release --locked -p rustbgpd -p rustbgpctl
+env -u CARGO_TARGET_DIR -u RUSTFLAGS cargo build --release --locked --manifest-path bench/scale/reloadstall/Cargo.toml
+python3 $REPO/bench/scale/reloadstall/gen-scenario.py 1000 $RUN 1790 1000 
+$REPO/target/release/rustbgpd --check $RUN/config.toml 
+$REPO/target/release/rustbgpd $RUN/config.toml 
+timeout -k 10 600 $REPO/bench/scale/reloadstall/target/release/reloadstall 1000 400000 1790 1965881 $RUN/member.rpol $RUN/gen-a.rpol $RUN/gen-b.rpol 4 30 1000 
+timeout -k 1 5 $REPO/target/release/rbgp -s unix://$RUN/grpc.sock -j rib --prefix 20.0.0.0/24 advertised 127.1.0.2 --explain 
