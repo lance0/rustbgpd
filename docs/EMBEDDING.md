@@ -403,6 +403,31 @@ gRPC consumer gains from the recent proto additions
   screen-scraping. The response's `update_group_id` and
   `NeighborState.update_group` expose ADR-0098 group membership for
   fleet-level diagnostics.
+- **Live update-group comparison** — set
+  `GetNeighborStateRequest.compare_address` (plus the matching
+  `compare_interface` identity field when present) to compare two configured
+  peers.
+  The response's optional `NeighborState.update_group_comparison` carries an
+  ID-free `shared`, `separate`, `private`, or `unknown` verdict, each side's
+  membership (`grouped`, `unknown`, or a private-path reason), and the stable
+  semantic differences between two separate groups: export policy, session
+  kind, RR-client role, local BGP role, RFC 1997 mode, negotiated families, and
+  LLGR families. `private` means at least one side uses a per-peer fallback;
+  inspect the two membership fields for the reason. `unknown` means at least
+  one configured peer has no live outbound registration or its group metadata
+  is unavailable. Process-local values such as `NeighborState.update_group =
+  "group:N"` remain diagnostic only and must not be persisted as identifiers.
+
+  The primary peer still uses `GetNeighborStateRequest.address` plus
+  `interface`. Both peers must exist. IPv6 global addresses are supported, but
+  the daemon currently rejects a comparison involving an IPv6 link-local peer,
+  even when the usual `fe80::1` + `interface = "eth0"` scoped form is supplied.
+  The compare request/response fields were added to the existing proto, so an
+  older daemon ignores the unknown request fields and returns no
+  `update_group_comparison`; treat absence after a compare request as "feature
+  unsupported", not as `shared` and not as permission to compare `group:N`
+  strings. The in-tree `rbgp` client reports this case as
+  `update-group comparison is not supported by this daemon`.
 - **`send_hold_time` (RFC 9687)** — settable in `AddNeighbor`'s
   `NeighborConfig` and in `PeerGroupDefinition`, with the same
   validation as the config path; `ListNeighbors` reports the
