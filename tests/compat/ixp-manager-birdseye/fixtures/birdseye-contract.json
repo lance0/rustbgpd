@@ -1,0 +1,100 @@
+{
+  "provenance": {
+    "birdseye_commit": "7f8c2375e610578bcf6ea5ceec630a180f945b89",
+    "license": "MIT",
+    "source": "https://github.com/inex/birdseye",
+    "synthetic_data": "RFC 5737 and RFC 5398 documentation values"
+  },
+  "responses": {
+    "bad_prefix": {
+      "body": "{\n    \"message\": \"Bad IP address\"\n}",
+      "content_type": "application/json",
+      "status": 400
+    },
+    "bird_failure": {
+      "body": "{\n    \"message\": \"Error querying bird\"\n}",
+      "content_type": "application/json",
+      "status": 503
+    },
+    "export_count": {
+      "body": "{\"api\":{\"from_cache\":false,\"version\":\"2.1.0\",\"max_routes\":2},\"count\":{\"routes\":1}}",
+      "content_type": "application/json",
+      "status": 200
+    },
+    "export_routes": {
+      "body": "{\"api\":{\"from_cache\":false,\"version\":\"2.1.0\",\"max_routes\":2},\"routes\":[{\"network\":\"192.0.2.0\\/24\",\"gateway\":\"via 198.51.100.1 on eth0\",\"interface\":\"none\",\"from_protocol\":\"eth0\",\"learnt_from\":\"2026-07-19 12:00:00\",\"primary\":false,\"metric\":0,\"type\":[\"BGP\",\"unicast\",\"univ\"],\"bgp\":{\"origin\":\"IGP\",\"as_path\":[\"64496\"],\"next_hop\":\"198.51.100.1\",\"med\":30,\"local_pref\":\"100\",\"communities\":[[64496,300]],\"large_communities\":[[64496,1101,9]]}}]}",
+      "content_type": "application/json",
+      "status": 200
+    },
+    "lookup_export": {
+      "body": "{\"api\":{\"from_cache\":false,\"version\":\"2.1.0\",\"max_routes\":2},\"routes\":[{\"network\":\"192.0.2.0\\/24\",\"gateway\":\"via 198.51.100.1 on eth0\",\"interface\":\"none\",\"from_protocol\":\"eth0\",\"learnt_from\":\"2026-07-19 12:00:00\",\"primary\":false,\"metric\":0,\"type\":[\"BGP\",\"unicast\",\"univ\"],\"bgp\":{\"origin\":\"IGP\",\"as_path\":[\"64496\"],\"next_hop\":\"198.51.100.1\",\"med\":30,\"local_pref\":\"100\",\"communities\":[[64496,300]],\"large_communities\":[[64496,1101,9]]}}]}",
+      "content_type": "application/json",
+      "status": 200
+    },
+    "lookup_protocol": {
+      "body": "{\"api\":{\"from_cache\":false,\"version\":\"2.1.0\",\"max_routes\":2},\"routes\":[{\"network\":\"192.0.2.0\\/24\",\"gateway\":\"via 198.51.100.1 on eth0\",\"interface\":\"none\",\"from_protocol\":\"eth0\",\"learnt_from\":\"2026-07-19 12:00:00\",\"primary\":false,\"metric\":0,\"type\":[\"BGP\",\"unicast\",\"univ\"],\"bgp\":{\"origin\":\"IGP\",\"as_path\":[\"64496\"],\"next_hop\":\"198.51.100.1\",\"med\":10,\"local_pref\":\"100\",\"communities\":[[64496,100]],\"large_communities\":[[64496,1101,7]]}}]}",
+      "content_type": "application/json",
+      "status": 200
+    },
+    "lookup_table": {
+      "body": "{\"api\":{\"from_cache\":false,\"version\":\"2.1.0\",\"max_routes\":2},\"routes\":[{\"network\":\"192.0.2.0\\/24\",\"gateway\":\"via 198.51.100.1 on eth0\",\"interface\":\"none\",\"from_protocol\":\"eth0\",\"learnt_from\":\"2026-07-19 12:00:00\",\"primary\":false,\"metric\":0,\"type\":[\"BGP\",\"unicast\",\"univ\"],\"bgp\":{\"origin\":\"IGP\",\"as_path\":[\"64496\"],\"next_hop\":\"198.51.100.1\",\"med\":20,\"local_pref\":\"100\",\"communities\":[[64496,200]],\"large_communities\":[[64496,1101,8]]}}]}",
+      "content_type": "application/json",
+      "status": 200
+    },
+    "missing_protocol": {
+      "body": "{\n    \"message\": \"Protocol not found\"\n}",
+      "content_type": "application/json",
+      "status": 404
+    },
+    "over_limit": {
+      "body": "{\n    \"message\": \"Number of routes exceeds maximum allowed (3/2)\"\n}",
+      "content_type": "application/json",
+      "status": 403
+    },
+    "protocol": {
+      "body": "{\"api\":{\"from_cache\":false,\"version\":\"2.1.0\",\"max_routes\":2},\"protocol\":{\"protocol\":\"pb_as64496\",\"bird_protocol\":\"BGP\",\"table\":\"master4\",\"state\":\"up\",\"state_changed\":\"2026-07-19T11:30:00+00:00\",\"connection\":\" Established\",\"description\":\"Synthetic RFC documentation peer\",\"preference\":100,\"input_filter\":\"ACCEPT\",\"output_filter\":\"ACCEPT\",\"routes\":{\"imported\":1,\"exported\":1,\"preferred\":0},\"bgp_state\":\"Established\",\"neighbor_address\":\"198.51.100.1\",\"neighbor_as\":64496,\"neighbor_id\":\"198.51.100.1\",\"neighbor_capabilities\":[\"refresh\",\"AS4\"],\"bgp_session\":[\"external\",\"route-server\",\"AS4\"],\"source_address\":\"192.0.2.1\",\"hold_timer\":180,\"hold_timer_now\":120,\"keepalive\":60,\"keepalive_now\":30,\"route_limit_at\":1}}",
+      "content_type": "application/json",
+      "status": 200
+    },
+    "protocol_count": {
+      "body": "{\"api\":{\"from_cache\":false,\"version\":\"2.1.0\",\"max_routes\":2},\"count\":{\"routes\":1}}",
+      "content_type": "application/json",
+      "status": 200
+    },
+    "protocol_routes": {
+      "body": "{\"api\":{\"from_cache\":false,\"version\":\"2.1.0\",\"max_routes\":2},\"routes\":[{\"network\":\"192.0.2.0\\/24\",\"gateway\":\"via 198.51.100.1 on eth0\",\"interface\":\"none\",\"from_protocol\":\"eth0\",\"learnt_from\":\"2026-07-19 12:00:00\",\"primary\":false,\"metric\":0,\"type\":[\"BGP\",\"unicast\",\"univ\"],\"bgp\":{\"origin\":\"IGP\",\"as_path\":[\"64496\"],\"next_hop\":\"198.51.100.1\",\"med\":10,\"local_pref\":\"100\",\"communities\":[[64496,100]],\"large_communities\":[[64496,1101,7]]}}]}",
+      "content_type": "application/json",
+      "status": 200
+    },
+    "protocols": {
+      "body": "{\"api\":{\"from_cache\":false,\"version\":\"2.1.0\",\"max_routes\":2},\"protocols\":{\"pb_as64496\":{\"protocol\":\"pb_as64496\",\"bird_protocol\":\"BGP\",\"table\":\"master4\",\"state\":\"up\",\"state_changed\":\"2026-07-19T11:30:00+00:00\",\"connection\":\" Established\",\"description\":\"Synthetic RFC documentation peer\",\"preference\":100,\"input_filter\":\"ACCEPT\",\"output_filter\":\"ACCEPT\",\"routes\":{\"imported\":1,\"exported\":1,\"preferred\":0},\"bgp_state\":\"Established\",\"neighbor_address\":\"198.51.100.1\",\"neighbor_as\":64496,\"neighbor_id\":\"198.51.100.1\",\"neighbor_capabilities\":[\"refresh\",\"AS4\"],\"bgp_session\":[\"external\",\"route-server\",\"AS4\"],\"source_address\":\"192.0.2.1\",\"hold_timer\":180,\"hold_timer_now\":120,\"keepalive\":60,\"keepalive_now\":30,\"route_limit_at\":1},\"pb_fail_as64497\":{\"protocol\":\"pb_fail_as64497\",\"bird_protocol\":\"BGP\",\"table\":\"master4\",\"state\":\"up\",\"state_changed\":\"2026-07-19T11:30:00+00:00\",\"connection\":\" Established\",\"description\":\"Deterministic failure sentinel\",\"routes\":{\"imported\":0,\"exported\":0,\"preferred\":0},\"bgp_state\":\"Established\",\"route_limit_at\":0},\"pb_large_as64498\":{\"protocol\":\"pb_large_as64498\",\"bird_protocol\":\"BGP\",\"table\":\"master4\",\"state\":\"up\",\"state_changed\":\"2026-07-19T11:30:00+00:00\",\"connection\":\" Established\",\"description\":\"Deterministic route-limit sentinel\",\"routes\":{\"imported\":3,\"exported\":3,\"preferred\":0},\"bgp_state\":\"Established\",\"route_limit_at\":3}}}",
+      "content_type": "application/json",
+      "status": 200
+    },
+    "status": {
+      "body": "{\"api\":{\"from_cache\":false,\"version\":\"2.1.0\",\"max_routes\":2},\"status\":{\"version\":\"2.0.12\",\"router_id\":\"192.0.2.1\",\"server_time\":\"2026-07-19T12:00:00+00:00\",\"last_reboot\":\"2026-07-19T11:00:00+00:00\",\"last_reconfig\":\"2026-07-19T11:30:00+00:00\",\"message\":\"Daemon is up and running\"}}",
+      "content_type": "application/json",
+      "status": 200
+    },
+    "symbols": {
+      "body": "{\"api\":{\"from_cache\":false,\"version\":\"2.1.0\",\"max_routes\":2},\"symbols\":{\"protocol\":[\"pb_as64496\",\"pb_fail_as64497\",\"pb_large_as64498\"],\"routing table\":[\"master4\"]}}",
+      "content_type": "application/json",
+      "status": 200
+    },
+    "table_count": {
+      "body": "{\"api\":{\"from_cache\":false,\"version\":\"2.1.0\",\"max_routes\":2},\"count\":{\"routes\":1}}",
+      "content_type": "application/json",
+      "status": 200
+    },
+    "table_routes": {
+      "body": "{\"api\":{\"from_cache\":false,\"version\":\"2.1.0\",\"max_routes\":2},\"routes\":[{\"network\":\"192.0.2.0\\/24\",\"gateway\":\"via 198.51.100.1 on eth0\",\"interface\":\"none\",\"from_protocol\":\"eth0\",\"learnt_from\":\"2026-07-19 12:00:00\",\"primary\":false,\"metric\":0,\"type\":[\"BGP\",\"unicast\",\"univ\"],\"bgp\":{\"origin\":\"IGP\",\"as_path\":[\"64496\"],\"next_hop\":\"198.51.100.1\",\"med\":20,\"local_pref\":\"100\",\"communities\":[[64496,200]],\"large_communities\":[[64496,1101,8]]}}]}",
+      "content_type": "application/json",
+      "status": 200
+    },
+    "wildcard": {
+      "body": "{\"api\":{\"from_cache\":false,\"version\":\"2.1.0\",\"max_routes\":2},\"routes\":[{\"network\":\"192.0.2.0\\/24\",\"gateway\":\"via 198.51.100.1 on eth0\",\"interface\":\"none\",\"from_protocol\":\"eth0\",\"learnt_from\":\"2026-07-19 12:00:00\",\"primary\":false,\"metric\":0,\"type\":[\"BGP\",\"unicast\",\"univ\"],\"bgp\":{\"origin\":\"IGP\",\"as_path\":[\"64496\"],\"next_hop\":\"198.51.100.1\",\"med\":40,\"local_pref\":\"100\",\"communities\":[[64496,400]],\"large_communities\":[[64496,1101,10]]}}]}",
+      "content_type": "application/json",
+      "status": 200
+    }
+  }
+}

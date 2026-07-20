@@ -1,0 +1,27 @@
+name: IXP Manager / Bird's Eye contract oracle
+
+on:
+  pull_request:
+    paths:
+      - "tests/compat/ixp-manager-birdseye/**"
+      - ".github/workflows/ixp-compat.yml"
+      - "docs/INTEROP.md"
+  push:
+    branches: [main]
+    paths:
+      - "tests/compat/ixp-manager-birdseye/**"
+      - ".github/workflows/ixp-compat.yml"
+      - "docs/INTEROP.md"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pinned-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - name: Verify the pinned upstream contract
+        run: tests/compat/ixp-manager-birdseye/run.sh
