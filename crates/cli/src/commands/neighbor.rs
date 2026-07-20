@@ -2,7 +2,7 @@ use crate::connection::Connection;
 use crate::error::CliError;
 use crate::output::{
     self, JsonNeighbor, JsonNeighborDetail, JsonPathsLimit, JsonSelectionDeferralFamily,
-    JsonTcpAoKeyState, JsonTcpAoState,
+    JsonTcpAoKeyState, JsonTcpAoState, JsonUpdateGroupComparison,
 };
 use crate::proto::neighbor_service_client::NeighborServiceClient;
 use crate::proto::{
@@ -64,17 +64,99 @@ pub async fn list(connection: Connection, json: bool, wide: bool) -> Result<(), 
 const EMPTY_NEIGHBOR_LIST: &str =
     "no neighbors configured — add one: rbgp neighbor <addr> add --remote-asn <asn>";
 
-pub async fn show(connection: Connection, address: &str, json: bool) -> Result<(), CliError> {
+fn json_update_group_comparison(
+    primary_neighbor: &str,
+    comparison_neighbor: &str,
+    value: Option<&crate::proto::UpdateGroupComparison>,
+) -> Result<JsonUpdateGroupComparison, CliError> {
+    let value = value.ok_or_else(|| {
+        CliError::Rpc("update-group comparison is not supported by this daemon".into())
+    })?;
+    Ok(JsonUpdateGroupComparison {
+        primary_neighbor: primary_neighbor.to_string(),
+        comparison_neighbor: comparison_neighbor.to_string(),
+        verdict: comparison_verdict_label(value.verdict).to_string(),
+        primary_membership: comparison_membership_label(value.primary_membership).to_string(),
+        comparison_membership: comparison_membership_label(value.comparison_membership).to_string(),
+        differences: value
+            .differences
+            .iter()
+            .map(|value| comparison_difference_label(*value).to_string())
+            .collect(),
+    })
+}
+
+#[derive(Debug)]
+enum NeighborShow {
+    Comparison(JsonUpdateGroupComparison),
+    Detail(Box<crate::proto::NeighborState>),
+}
+
+async fn query_neighbor(
+    connection: Connection,
+    address: &str,
+    compare: Option<&str>,
+) -> Result<NeighborShow, CliError> {
     let mut client =
         NeighborServiceClient::with_interceptor(connection.channel(), connection.interceptor());
     let (address_only, interface) = split_scoped_address(address);
-    let n = client
+    let (compare_address, compare_interface) =
+        compare.map(split_scoped_address).unwrap_or_default();
+    let state = client
         .get_neighbor_state(GetNeighborStateRequest {
             address: address_only,
             interface,
+            compare_address,
+            compare_interface,
         })
         .await?
         .into_inner();
+    match compare {
+        Some(comparison) => json_update_group_comparison(
+            address,
+            comparison,
+            state.update_group_comparison.as_ref(),
+        )
+        .map(NeighborShow::Comparison),
+        None => Ok(NeighborShow::Detail(Box::new(state))),
+    }
+}
+
+fn render_update_group_comparison(value: &JsonUpdateGroupComparison) -> String {
+    let mut output = format!(
+        "Update Group Compare: {} vs {} — {} ({} / {})\n",
+        value.primary_neighbor,
+        value.comparison_neighbor,
+        value.verdict,
+        value.primary_membership,
+        value.comparison_membership
+    );
+    if !value.differences.is_empty() {
+        output.push_str(&format!(
+            "Differences:          {}\n",
+            value.differences.join(", ")
+        ));
+    }
+    output
+}
+
+pub async fn show(
+    connection: Connection,
+    address: &str,
+    compare: Option<&str>,
+    json: bool,
+) -> Result<(), CliError> {
+    let n = match query_neighbor(connection, address, compare).await? {
+        NeighborShow::Comparison(comparison) => {
+            if json {
+                output::print_json_pretty(&comparison)?;
+            } else {
+                print!("{}", render_update_group_comparison(&comparison));
+            }
+            return Ok(());
+        }
+        NeighborShow::Detail(state) => *state,
+    };
 
     let cfg = n.config.as_ref();
     let distribution_mode = effective_distribution_mode_label(
@@ -409,6 +491,44 @@ pub async fn show(connection: Connection, address: &str, json: bool) -> Result<(
         }
     }
     Ok(())
+}
+
+fn comparison_verdict_label(value: i32) -> &'static str {
+    match crate::proto::UpdateGroupComparisonVerdict::try_from(value) {
+        Ok(crate::proto::UpdateGroupComparisonVerdict::Unknown) => "unknown",
+        Ok(crate::proto::UpdateGroupComparisonVerdict::Private) => "private",
+        Ok(crate::proto::UpdateGroupComparisonVerdict::Shared) => "shared",
+        Ok(crate::proto::UpdateGroupComparisonVerdict::Separate) => "separate",
+        Ok(crate::proto::UpdateGroupComparisonVerdict::Unspecified) | Err(_) => "unknown",
+    }
+}
+
+fn comparison_membership_label(value: i32) -> &'static str {
+    use crate::proto::UpdateGroupComparisonMembership as M;
+    match M::try_from(value) {
+        Ok(M::Grouped) => "grouped",
+        Ok(M::PolicyPeerContext) => "policy_peer_context",
+        Ok(M::AddPathSend) => "add_path_send",
+        Ok(M::PerClientBest) => "per_client_best",
+        Ok(M::OrrVantage) => "orr_vantage",
+        Ok(M::OrfInstalled) => "orf_installed",
+        Ok(M::SlowPeer) => "slow_peer",
+        Ok(M::Unknown | M::Unspecified) | Err(_) => "unknown",
+    }
+}
+
+fn comparison_difference_label(value: i32) -> &'static str {
+    use crate::proto::UpdateGroupComparisonDifference as D;
+    match D::try_from(value) {
+        Ok(D::ExportPolicy) => "export_policy",
+        Ok(D::SessionKind) => "session_kind",
+        Ok(D::RouteReflectorClient) => "route_reflector_client",
+        Ok(D::LocalRole) => "local_role",
+        Ok(D::Rfc1997Mode) => "rfc1997_mode",
+        Ok(D::NegotiatedFamilies) => "negotiated_families",
+        Ok(D::LlgrFamilies) => "llgr_families",
+        Ok(D::Unspecified) | Err(_) => "unknown",
+    }
 }
 
 fn authentication_label(value: i32) -> &'static str {
@@ -770,6 +890,54 @@ mod tests {
         assert_eq!(max_prefix_action_label("", None), "shutdown");
         assert_eq!(max_prefix_action_label("", Some(30)), "restart");
         assert_eq!(max_prefix_action_label("shutdown", Some(30)), "shutdown");
+    }
+
+    #[tokio::test]
+    #[rustfmt::skip]
+    async fn comparison_request_mapping_and_output_branch_are_exact() {
+        use crate::proto::{UpdateGroupComparisonDifference as D,
+            UpdateGroupComparisonMembership as M, UpdateGroupComparisonVerdict as V};
+        use rustbgpd_api::proto::{GetNeighborStateRequest as ServerRequest, UpdateGroupComparison as P};
+        let value = P {
+            verdict: V::Separate.into(),
+            primary_membership: M::AddPathSend.into(),
+            comparison_membership: M::SlowPeer.into(),
+            differences: vec![D::ExportPolicy.into(), D::SessionKind.into(), D::RouteReflectorClient.into(),
+                D::LocalRole.into(), D::Rfc1997Mode.into(), D::NegotiatedFamilies.into(), D::LlgrFamilies.into()],
+        };
+        let server = spawn_mock_server(None).await;
+        *server.state.neighbor_comparison.lock().await = Some(value);
+        // The mock pins CLI scope splitting; daemon scope rejection is tested separately.
+        let connection = connect(&server.addr, None).await.unwrap();
+        let NeighborShow::Comparison(comparison) = query_neighbor(
+            connection.clone(), "fe80::1%eth0", Some("fe80::2%eth1")).await.unwrap() else {
+            panic!("comparison request selected neighbor detail output");
+        };
+        let request = server.state.last_get_neighbor_state.lock().await.clone().unwrap();
+        assert_eq!(request, ServerRequest { address: "fe80::1".into(), interface: "eth0".into(),
+            compare_address: "fe80::2".into(), compare_interface: "eth1".into() });
+        assert_eq!(comparison, JsonUpdateGroupComparison { primary_neighbor: "fe80::1%eth0".into(),
+            comparison_neighbor: "fe80::2%eth1".into(), verdict: "separate".into(),
+            primary_membership: "add_path_send".into(), comparison_membership: "slow_peer".into(),
+            differences: "export_policy session_kind route_reflector_client local_role rfc1997_mode negotiated_families llgr_families"
+                .split_whitespace().map(str::to_string).collect() });
+        assert_eq!(render_update_group_comparison(&comparison),
+            "Update Group Compare: fe80::1%eth0 vs fe80::2%eth1 — separate (add_path_send / slow_peer)\n\
+             Differences:          export_policy, session_kind, route_reflector_client, local_role, rfc1997_mode, negotiated_families, llgr_families\n"
+        );
+        assert!(matches!(query_neighbor(connection, "192.0.2.1", None).await.unwrap(), NeighborShow::Detail(_)));
+        *server.state.neighbor_comparison.lock().await = None;
+        let error = query_neighbor(connect(&server.addr, None).await.unwrap(), "192.0.2.1", Some("192.0.2.2")).await.unwrap_err();
+        assert_eq!(error.to_string(), "update-group comparison is not supported by this daemon");
+
+        macro_rules! labels {
+            ($mapper:expr; $($input:expr => $expected:literal),+ $(,)?) => {
+                $(assert_eq!($mapper($input.into()), $expected);)+
+            };
+        }
+        labels!(comparison_verdict_label; V::Unknown => "unknown", V::Private => "private", V::Shared => "shared", V::Separate => "separate", V::Unspecified => "unknown", i32::MAX => "unknown");
+        labels!(comparison_membership_label; M::Unknown => "unknown", M::Grouped => "grouped", M::PolicyPeerContext => "policy_peer_context", M::AddPathSend => "add_path_send", M::PerClientBest => "per_client_best", M::OrrVantage => "orr_vantage", M::OrfInstalled => "orf_installed", M::SlowPeer => "slow_peer", M::Unspecified => "unknown", i32::MAX => "unknown");
+        labels!(comparison_difference_label; D::ExportPolicy => "export_policy", D::SessionKind => "session_kind", D::RouteReflectorClient => "route_reflector_client", D::LocalRole => "local_role", D::Rfc1997Mode => "rfc1997_mode", D::NegotiatedFamilies => "negotiated_families", D::LlgrFamilies => "llgr_families", D::Unspecified => "unknown", i32::MAX => "unknown");
     }
 
     #[test]

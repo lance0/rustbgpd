@@ -77,8 +77,9 @@ pub use update::{
     PeerOutboundState, PlannedGroupability, RibCommandError, RibReadinessError, RibReadinessQuery,
     RibUpdate, RoutePage, RoutePageError, RoutePageVersion, RouteQueryFilter, RouteQueryKey,
     RouteQueryScope, SelectionDeferralPeerFamilyState, SharedGroupEncode,
-    UpdateGroupClassification, UpdateGroupClassifierInput, UpdateGroupFamilyImpact,
+    UpdateGroupClassification, UpdateGroupClassifierInput, UpdateGroupComparisonDifference,
+    UpdateGroupComparisonMembership, UpdateGroupComparisonVerdict, UpdateGroupFamilyImpact,
     UpdateGroupFingerprint, UpdateGroupImpactPlan, UpdateGroupImpactRollup,
-    UpdateGroupPeerSnapshot, UpdateGroupSnapshot, WarmMrtSnapshotBudget, WarmMrtSnapshotView,
-    classify_update_group, route_query_key,
+    UpdateGroupPeerComparison, UpdateGroupPeerSnapshot, UpdateGroupSnapshot, WarmMrtSnapshotBudget,
+    WarmMrtSnapshotView, classify_update_group, route_query_key,
 };

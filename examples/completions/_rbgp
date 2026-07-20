@@ -275,6 +275,7 @@ esac
 ;;
 (neighbor)
 _arguments "${_arguments_options[@]}" : \
+'(--wide)--compare=[Compare this peer'\''s live update-group membership with another configured peer without exposing internal group identifiers]:NEIGHBOR:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
@@ -419,6 +420,7 @@ esac
 ;;
 (summary)
 _arguments "${_arguments_options[@]}" : \
+'(--wide)--compare=[Compare this peer'\''s live update-group membership with another configured peer without exposing internal group identifiers]:NEIGHBOR:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \

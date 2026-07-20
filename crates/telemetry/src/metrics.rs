@@ -156,7 +156,7 @@ pub struct BgpMetrics {
     rib_policy_transition_last_duration_milliseconds: IntGauge,
     rib_policy_transition_actor_poll_duration_seconds: HistogramVec,
 
-    // ── Update groups (shadow-mode fingerprint registry) ────────
+    // ── Update groups (shared outbound staging) ─────────────────
     update_groups: IntGauge,
     update_group_members: IntGaugeVec,
     peer_update_group: IntGaugeVec,
@@ -732,8 +732,7 @@ impl BgpMetrics {
         let update_groups = IntGauge::new(
             "bgp_update_groups",
             "Update groups with at least one member peer in the RIB manager's \
-             fingerprint registry (shadow mode: membership is recorded and \
-             observable, but distribution still runs per peer).",
+             live shared outbound-staging registry.",
         )
         .expect("valid metric definition");
 
@@ -754,9 +753,9 @@ impl BgpMetrics {
                 "The stable update-group id a peer currently belongs to \
                  (matches the `group` label of bgp_update_group_members). \
                  Grouped peers carry their group id (0, 1, 2, …); the sentinel \
-                 -1 marks a peer on the per-peer/ungrouped fallback path (a v1 \
-                 disqualifier — per-peer policy, Add-Path send, ORR vantage, or \
-                 negotiated ORF). Refreshed on every membership change.",
+                 -1 marks a private path (peer-context policy, Add-Path send, \
+                 per-client best, ORR vantage, negotiated ORF, or recoverable \
+                 slow-peer isolation). Refreshed on every membership change.",
             ),
             &["peer"],
         )
@@ -773,10 +772,9 @@ impl BgpMetrics {
 
         let update_group_fallback_peers = IntGauge::new(
             "bgp_update_group_fallback_peers",
-            "Peers ungrouped by a v1 disqualifier (peer-context policy, Add-Path \
-             send, ORR vantage, or negotiated ORF) and therefore permanently on \
-             the per-peer distribution path. Per-peer reasons surface in the \
-             neighbor status API.",
+            "Peers using private distribution due to peer-context policy, \
+             Add-Path send, per-client best, ORR vantage, negotiated ORF, or \
+             recoverable slow-peer isolation. Reasons surface in neighbor status.",
         )
         .expect("valid metric definition");
 

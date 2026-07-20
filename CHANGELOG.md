@@ -28,6 +28,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `rbgp neighbor A --compare B` explains live update-group sharing with stable,
+  ID-free reasons.
 - **Opt-in timed restart after max-prefix teardown.** Neighbors and peer groups
   accept a non-zero `max_prefix_restart_seconds`; the default remains an
   indefinite fail-closed shutdown latch. The peer manager makes one

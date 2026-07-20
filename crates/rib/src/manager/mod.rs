@@ -2175,6 +2175,13 @@ impl RibManager {
             RibUpdate::QueryUpdateGroupSnapshot { reply } => {
                 self.handle_query_update_group_snapshot(reply);
             }
+            RibUpdate::QueryUpdateGroupComparison {
+                primary,
+                comparison,
+                reply,
+            } => {
+                self.handle_query_update_group_comparison(primary, comparison, reply);
+            }
             #[cfg(test)]
             RibUpdate::TestQueryVpnAdvertised { peer, reply } => {
                 self.handle_test_query_vpn_advertised(peer, reply);
