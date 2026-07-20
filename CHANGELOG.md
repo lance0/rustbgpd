@@ -73,6 +73,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Rejected-route retention now builds its bounded attribute prototype lazily
+  on the first actual rejection in an UPDATE, avoiding reject-only summary and
+  timestamp construction on clean permitted UPDATEs while preserving one
+  shared prototype per rejected batch.
 - FlowSpec exports now enforce source and policy-added `NO_ADVERTISE`, apply
   generic export-policy path-attribute modifications, ignore inapplicable
   next-hop rewrites, and withdraw only the exact prior `(AFI, rule)` identity.

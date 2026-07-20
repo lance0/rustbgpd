@@ -661,6 +661,36 @@ impl PeerSession {
         entry
     }
 
+    /// Build the bounded prototype shared by one UPDATE's retained rejects.
+    #[allow(clippy::unused_self, reason = "test-only build counter uses self")]
+    fn build_rejected_route_prototype(
+        &self,
+        (as_path, communities, large_communities): (
+            Option<&AsPath>,
+            &[u32],
+            &[rustbgpd_wire::LargeCommunity],
+        ),
+    ) -> RejectedRouteEntry {
+        #[cfg(test)]
+        self.rejected_route_prototype_builds
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut prototype = RejectedRouteEntry {
+            reason: ImportRejectReason::PolicyReject,
+            detail: None,
+            next_hop: None,
+            as_path: as_path.map(AsPath::to_aspath_string).unwrap_or_default(),
+            communities: communities.to_vec(),
+            communities_dropped: 0,
+            large_communities: large_communities.to_vec(),
+            large_communities_dropped: 0,
+            rpki: rustbgpd_wire::RpkiValidation::NotFound,
+            aspa: rustbgpd_wire::AspaValidation::Unknown,
+            rejected_at: SystemTime::now(),
+        };
+        prototype.enforce_bounds();
+        prototype
+    }
+
     /// Deliver a `RoutesReceived` batch to the RIB manager — block, never
     /// drop (ADR-0078). The fast path is a `try_send`; when the channel
     /// is full the saturation counter increments and the session task
@@ -1771,32 +1801,11 @@ impl PeerSession {
         // happens only on an actual deny, so the clean permit path pays
         // nothing.
         let retention_enabled = self.reject_retention_enabled;
-        // One bounded attribute summary per UPDATE: the AS-path render
-        // and community copies happen exactly once, truncated to the
-        // retention byte caps up front, and every rejected identity
-        // below clones this ≤ 512 B prototype (overriding the per-route
-        // fields) instead of re-deriving unbounded wire data per
-        // identity. Built only when retention is on and only from
-        // already-parsed attributes, so the clean path pays nothing.
-        let reject_proto = retention_enabled.then(|| {
-            let mut proto = RejectedRouteEntry {
-                reason: ImportRejectReason::PolicyReject,
-                detail: None,
-                next_hop: None,
-                as_path: parsed_as_path
-                    .map(AsPath::to_aspath_string)
-                    .unwrap_or_default(),
-                communities: update_communities.to_vec(),
-                communities_dropped: 0,
-                large_communities: update_large_communities.to_vec(),
-                large_communities_dropped: 0,
-                rpki: rustbgpd_wire::RpkiValidation::NotFound,
-                aspa: rustbgpd_wire::AspaValidation::Unknown,
-                rejected_at: SystemTime::now(),
-            };
-            proto.enforce_bounds();
-            proto
-        });
+        // One bounded attribute summary per UPDATE. It is initialized on the
+        // first actual policy, OTC, or ownership rejection; clean permitted
+        // UPDATEs avoid the AS-path render, community copies, and timestamp.
+        let reject_proto_attrs = (parsed_as_path, update_communities, update_large_communities);
+        let mut reject_proto: Option<RejectedRouteEntry> = None;
         let mut rejected_retained: Vec<(Prefix, u32, RejectedRouteEntry)> = Vec::new();
         // A denied announcement replaces any prior accepted path under the
         // same wire identity; retire it after explicit withdrawals below.
@@ -1879,7 +1888,10 @@ impl PeerSession {
                         ));
                     }
                     if result.action != rustbgpd_policy::PolicyAction::Permit {
-                        if let Some(proto) = reject_proto.as_ref() {
+                        if retention_enabled {
+                            let proto = reject_proto.get_or_insert_with(|| {
+                                self.build_rejected_route_prototype(reject_proto_attrs)
+                            });
                             let mut reject_entry = proto.clone();
                             reject_entry.detail.clone_from(&evaluation.matched_policy);
                             reject_entry.next_hop = Some(body_next_hop);
@@ -2522,7 +2534,10 @@ impl PeerSession {
                                 aspa_context,
                             });
                         } else {
-                            if let Some(proto) = reject_proto.as_ref() {
+                            if retention_enabled {
+                                let proto = reject_proto.get_or_insert_with(|| {
+                                    self.build_rejected_route_prototype(reject_proto_attrs)
+                                });
                                 let mut reject_entry = proto.clone();
                                 reject_entry.detail.clone_from(&evaluation.matched_policy);
                                 reject_entry.next_hop = Some(mp.next_hop);
@@ -2642,10 +2657,12 @@ impl PeerSession {
         // bounded per-UPDATE prototype — the attribute summary is
         // identical across the rejected identities, so each identity
         // clones the ≤ 512 B prototype instead of re-deriving it.
-        if let Some(proto) = reject_proto.as_ref() {
+        if retention_enabled {
             if let OtcIngressAction::DropUnicastAnnouncements(otc_reason) = otc_action
                 && !otc_rejected_unicast.is_empty()
             {
+                let proto = reject_proto
+                    .get_or_insert_with(|| self.build_rejected_route_prototype(reject_proto_attrs));
                 let mut entry = proto.clone();
                 entry.reason = ImportRejectReason::OtcRouteLeak;
                 entry.detail = Some(otc_reason.as_str().to_owned());
@@ -2656,6 +2673,8 @@ impl PeerSession {
             if let Some((ownership_reason, violating_next_hop, _)) = next_hop_ownership_rejection
                 && !ownership_rejected_unicast.is_empty()
             {
+                let proto = reject_proto
+                    .get_or_insert_with(|| self.build_rejected_route_prototype(reject_proto_attrs));
                 let mut entry = proto.clone();
                 entry.reason = ImportRejectReason::NextHopOwnership;
                 entry.detail = Some(ownership_reason.as_str().to_owned());
