@@ -907,7 +907,13 @@ impl RibManager {
         debug!(%peer, "peer up — registering for outbound updates");
         let peer_label = peer.to_string();
         self.metrics.set_rib_prefixes(&peer_label, "all", 0);
-        self.metrics.set_adj_rib_out_prefixes(&peer_label, "all", 0);
+        // Selective steady-state refresh relies on every family series already
+        // existing. Eager zeroes also keep scrape shape stable for a peer that
+        // never advertises one of the negotiated families.
+        for family in ["all", "flowspec", "evpn", "bgpls", "vpn", "labeled", "rtc"] {
+            self.metrics
+                .set_adj_rib_out_prefixes(&peer_label, family, 0);
+        }
         self.outbound_peers.insert(peer, outbound_tx);
         self.outbound_session_ids.insert(peer, session_id);
         self.metrics.set_rib_outbound_registered_peers(

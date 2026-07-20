@@ -941,6 +941,179 @@ async fn route_event_carries_best_path_id() {
 
 // --- Prometheus gauge tests ---
 
+const ADJ_RIB_OUT_FAMILIES: [&str; 7] =
+    ["all", "flowspec", "evpn", "bgpls", "vpn", "labeled", "rtc"];
+
+#[test]
+fn peer_up_initializes_every_adj_rib_out_family_series() {
+    let metrics = BgpMetrics::new();
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let peer_label = peer.to_string();
+    let (outbound_tx, _outbound_rx) = mpsc::channel(8);
+
+    manager.handle_peer_up(
+        peer,
+        1,
+        65_000,
+        Ipv4Addr::new(192, 0, 2, 2),
+        outbound_tx,
+        None,
+        ipv4_sendable(),
+        true,
+        false,
+        None,
+        false,
+        true,
+        Vec::new(),
+        0,
+        Vec::new(),
+        Vec::new(),
+    );
+
+    // Load-bearing proof: deleting any family from PeerUp's eager-zero loop
+    // removes that labeled series and fails the lookup below.
+    let gathered = metrics.registry().gather();
+    let gauge = gathered
+        .iter()
+        .find(|family| family.name() == "bgp_rib_adj_out_prefixes")
+        .expect("Adj-RIB-Out gauge family remains registered");
+    for family in ADJ_RIB_OUT_FAMILIES {
+        let observed = gauge
+            .metric
+            .iter()
+            .find(|metric| {
+                metric
+                    .get_label()
+                    .iter()
+                    .any(|label| label.name() == "peer" && label.value() == peer_label)
+                    && metric
+                        .get_label()
+                        .iter()
+                        .any(|label| label.name() == "afi_safi" && label.value() == family)
+            })
+            .unwrap_or_else(|| panic!("PeerUp omitted the {family} Adj-RIB-Out series"))
+            .get_gauge()
+            .value();
+        assert!(
+            observed.abs() < f64::EPSILON,
+            "PeerUp initialized {family} to {observed}"
+        );
+    }
+}
+
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "fixture gauge values are exact small nonnegative integers"
+)]
+fn commit_family_gauge_fixture(
+    announce: Vec<Route>,
+    vpn_announce: Vec<VpnRibRoute>,
+) -> (AdjRibOutCommitStats, [i64; 7]) {
+    let metrics = BgpMetrics::new();
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    let peer = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 44));
+    let peer_label = peer.to_string();
+    for (index, family) in ADJ_RIB_OUT_FAMILIES.iter().enumerate() {
+        metrics.set_adj_rib_out_prefixes(
+            &peer_label,
+            family,
+            i64::try_from(index + 10).expect("sentinel fits i64"),
+        );
+    }
+    let (outbound_tx, _outbound_rx) = mpsc::channel(8);
+    manager.outbound_peers.insert(peer, outbound_tx);
+    manager
+        .peer_export_encoders
+        .insert(peer, permissive_test_exact_export_encoder());
+    manager.adj_rib_out_commit_stats = AdjRibOutCommitStats::default();
+    let next_hop_override = vec![None; announce.len()].into();
+    assert!(manager.try_send_and_commit_outbound_update(
+        peer,
+        next_hop_override,
+        announce.into(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        vpn_announce,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    ));
+    let gathered = metrics.registry().gather();
+    let gauge = gathered
+        .iter()
+        .find(|family| family.name() == "bgp_rib_adj_out_prefixes")
+        .expect("Adj-RIB-Out gauge family remains registered");
+    let values = std::array::from_fn(|index| {
+        gauge
+            .metric
+            .iter()
+            .find(|metric| {
+                metric
+                    .get_label()
+                    .iter()
+                    .any(|label| label.name() == "peer" && label.value() == peer_label)
+                    && metric.get_label().iter().any(|label| {
+                        label.name() == "afi_safi" && label.value() == ADJ_RIB_OUT_FAMILIES[index]
+                    })
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "commit removed the {} Adj-RIB-Out series",
+                    ADJ_RIB_OUT_FAMILIES[index]
+                )
+            })
+            .get_gauge()
+            .value() as i64
+    });
+    (manager.adj_rib_out_commit_stats, values)
+}
+
+#[test]
+fn adj_rib_out_commit_refreshes_only_touched_family_gauges() {
+    let source = Ipv4Addr::new(198, 51, 100, 44);
+    let (vpn_only, vpn_only_values) =
+        commit_family_gauge_fixture(Vec::new(), vec![make_vpn_rib_route(source, 44, 1044, 100)]);
+    assert_eq!(vpn_only.successful_commits, 1);
+    assert_eq!(vpn_only.successful_enqueues, 1);
+    assert_eq!(vpn_only.family_gauge_writes, 1);
+    assert_eq!(vpn_only.last_family_gauge_write_mask, 0x10);
+    assert_eq!(
+        vpn_only_values,
+        [10, 11, 12, 13, 1, 15, 16],
+        "VPN-only commit changes VPN truth and preserves every untouched sentinel"
+    );
+
+    let unicast = make_route(Ipv4Prefix::new(Ipv4Addr::new(10, 44, 0, 0), 24), source);
+    let (mixed, mixed_values) = commit_family_gauge_fixture(
+        vec![unicast],
+        vec![make_vpn_rib_route(source, 45, 1045, 100)],
+    );
+    // Load-bearing proof: restoring unconditional seven-family refresh makes
+    // these counts/masks 7/0x7f; omitting either final-vector predicate makes
+    // the VPN-only or mixed assertion fail.
+    assert_eq!(mixed.successful_commits, 1);
+    assert_eq!(mixed.successful_enqueues, 1);
+    assert_eq!(mixed.family_gauge_writes, 2);
+    assert_eq!(mixed.last_family_gauge_write_mask, 0x11);
+    assert_eq!(
+        mixed_values,
+        [1, 11, 12, 13, 1, 15, 16],
+        "mixed commit changes unicast/VPN truth and preserves untouched sentinels"
+    );
+}
+
 #[test]
 fn peer_down_zeroes_all_adj_rib_out_family_gauges() {
     let metrics = BgpMetrics::new();
@@ -948,7 +1121,7 @@ fn peer_down_zeroes_all_adj_rib_out_family_gauges() {
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
     let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let peer_label = peer.to_string();
-    let families = ["all", "flowspec", "evpn", "bgpls", "vpn", "labeled", "rtc"];
+    let families = ADJ_RIB_OUT_FAMILIES;
 
     for (index, family) in families.iter().enumerate() {
         metrics.set_adj_rib_out_prefixes(

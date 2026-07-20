@@ -458,8 +458,10 @@ refresh, and bounded-channel enqueue; it does not include session-writer or
 network I/O. In-code receipts require one update group, one full real probe per
 changed route, compatible reuse for every remaining member, one successful
 route-bearing commit and enqueue per peer, no dirty or ungrouped fallback, and
-exact family-gauge values. The unchanged-behavior control refreshes all seven
-family gauges per peer.
+exact family-gauge values. The immediately preceding harness commit is the
+unchanged-behavior control (seven family refreshes per peer); the optimized
+target refreshes only the touched family while retaining all seven eager-zero
+series from PeerUp onward.
 
 The July 2026 receipt compares the first real-probe baseline against ordered
 batch probing with the live prepared-attribute memo key:

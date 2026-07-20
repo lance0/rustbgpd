@@ -373,11 +373,10 @@ fn assert_adj_rib_out_gauge_receipt(receipt: AdjRibOutFanoutBenchReceipt, peers:
         "every committed route-bearing envelope must be enqueued"
     );
     assert_eq!(
-        receipt.family_gauge_writes,
-        7 * peers,
-        "control refreshes all seven family gauges per peer"
+        receipt.family_gauge_writes, peers,
+        "unicast-only fanout refreshes one family gauge per peer"
     );
-    assert_eq!(receipt.last_family_gauge_write_mask, 0x7f);
+    assert_eq!(receipt.last_family_gauge_write_mask, 0x01);
     assert_eq!(
         receipt.first_peer_family_values,
         [
