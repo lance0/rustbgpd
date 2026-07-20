@@ -495,6 +495,10 @@ retained as stale. By default the peer is not automatically re-enabled — use
 Setting the inheritable, non-zero `max_prefix_restart_seconds` opts that peer
 into exactly one restart attempt after the hold-down. A second breach creates a
 new hold-down; a failed attempt remains latched off until explicit enable.
+Peers whose hold-downs expire together share one 500 ms command-delivery window,
+so a stalled session cannot multiply the restart delay across the due set.
+Delivery failure replaces `last_error` with the cause and the exact
+`rbgp neighbor <addr> enable` recovery action.
 A restart-duration change, session-generation replacement, explicit disable,
 neighbor removal, or dynamic-range replacement invalidates an existing
 countdown rather than carrying it into new policy.
