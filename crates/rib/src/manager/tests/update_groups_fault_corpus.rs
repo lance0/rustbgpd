@@ -10,7 +10,7 @@ use std::fs::{self, File};
 use std::io::Read;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -52,6 +52,9 @@ const CANDIDATE_TIMEOUT: Duration = Duration::from_secs(20);
 const FAILURE_FINGERPRINT_MARKER: &str = "UPDATE_GROUP_FAILURE_FINGERPRINT=";
 const EXTENDED_TEST_NAME: &str =
     "manager::tests::update_groups_fault_corpus::deterministic_fault_corpus_extended";
+const TIMEOUT_FIXTURE_TEST_NAME: &str =
+    "manager::tests::update_groups_fault_corpus::minimizer_timeout_fixture";
+const TIMEOUT_FIXTURE_ENV: &str = "RUSTBGPD_UPDATE_GROUP_TIMEOUT_FIXTURE";
 const TEST_RT: u64 = 0x0002_FDE8_0000_002A;
 static CHILD_LOG_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -440,6 +443,9 @@ enum Evaluation {
         fingerprint: FailureFingerprint,
         detail: String,
     },
+    UnclassifiedFailure {
+        detail: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -454,13 +460,38 @@ fn failure_fingerprint(detail: &str) -> FailureFingerprint {
     if headline.starts_with("forced fault-corpus failure at original op ") {
         return FailureFingerprint(headline.to_owned());
     }
-    let stable = ["scenario=", ": {", " on an Err value:", ": Err(", "Id("]
+    let normalized = normalize_join_error_task_id(headline);
+    let mut delimiters = vec!["scenario=", ": {", ": Err("];
+    if !normalized.contains("JoinError::Panic(") {
+        delimiters.push(" on an Err value:");
+    }
+    let stable = delimiters
         .into_iter()
-        .filter_map(|delimiter| headline.find(delimiter))
+        .filter_map(|delimiter| normalized.find(delimiter))
         .min()
-        .map_or(headline, |end| &headline[..end])
+        .map_or(normalized.as_str(), |end| &normalized[..end])
         .trim_end_matches([' ', ':']);
     FailureFingerprint(stable.to_owned())
+}
+
+fn normalize_join_error_task_id(headline: &str) -> String {
+    let mut normalized = headline.to_owned();
+    let prefix = "JoinError::Panic(Id(";
+    let Some(start) = normalized.find(prefix) else {
+        return normalized;
+    };
+    let digits_start = start + prefix.len();
+    let Some(relative_end) = normalized[digits_start..].find(')') else {
+        return normalized;
+    };
+    let end = digits_start + relative_end;
+    if normalized[digits_start..end]
+        .chars()
+        .all(|character| character.is_ascii_digit())
+    {
+        normalized.replace_range(digits_start..end, "_");
+    }
+    normalized
 }
 
 fn panic_detail(payload: &(dyn std::any::Any + Send)) -> String {
@@ -485,6 +516,31 @@ fn failure_marker(output: &str) -> Option<FailureFingerprint> {
         line.strip_prefix(FAILURE_FINGERPRINT_MARKER)
             .map(|value| FailureFingerprint(value.to_owned()))
     })
+}
+
+fn classify_nonzero_child(exit: &str, output: String) -> Evaluation {
+    match failure_marker(&output) {
+        Some(fingerprint) => Evaluation::Failed {
+            fingerprint,
+            detail: output,
+        },
+        None => Evaluation::UnclassifiedFailure {
+            detail: format!("child {exit} without {FAILURE_FINGERPRINT_MARKER}\n{output}"),
+        },
+    }
+}
+
+fn minimization_target(evaluation: Evaluation) -> Result<(FailureFingerprint, String), String> {
+    match evaluation {
+        Evaluation::Passed => Err("configured minimization case no longer fails".to_owned()),
+        Evaluation::Failed {
+            fingerprint,
+            detail,
+        } => Ok((fingerprint, detail)),
+        Evaluation::UnclassifiedFailure { detail } => Err(format!(
+            "original child failure was unclassified; refusing to minimize:\n{detail}"
+        )),
+    }
 }
 
 fn minimize_failure<F>(
@@ -573,6 +629,88 @@ fn child_log_path() -> PathBuf {
     ))
 }
 
+struct ReapingChild {
+    child: Child,
+    reaped: bool,
+}
+
+impl ReapingChild {
+    fn new(child: Child) -> Self {
+        Self {
+            child,
+            reaped: false,
+        }
+    }
+
+    fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>> {
+        let status = self.child.try_wait()?;
+        if status.is_some() {
+            self.reaped = true;
+        }
+        Ok(status)
+    }
+
+    fn terminate_and_reap(&mut self) -> std::io::Result<ExitStatus> {
+        let kill = self.child.kill();
+        match self.child.wait() {
+            Ok(status) => {
+                // A failed kill can mean the process exited between try_wait
+                // and kill. A successful wait still proves it was reaped.
+                self.reaped = true;
+                Ok(status)
+            }
+            Err(wait_error) => {
+                if let Err(kill_error) = kill {
+                    return Err(std::io::Error::new(
+                        wait_error.kind(),
+                        format!("kill failed ({kill_error}); wait failed ({wait_error})"),
+                    ));
+                }
+                Err(wait_error)
+            }
+        }
+    }
+}
+
+impl Drop for ReapingChild {
+    fn drop(&mut self) {
+        if !self.reaped {
+            // This guard covers every early return after spawn, including a
+            // try_wait error. Both calls are best effort because Drop cannot
+            // report an I/O failure; the main timeout path reports failures.
+            let _ = self.child.kill();
+            if self.child.wait().is_ok() {
+                self.reaped = true;
+            }
+        }
+    }
+}
+
+fn wait_for_child(
+    child: &mut ReapingChild,
+    timeout: Duration,
+) -> Result<Option<ExitStatus>, String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child
+            .try_wait()
+            .map_err(|error| format!("poll isolated fault-corpus candidate: {error}"))?
+        {
+            Some(status) => return Ok(Some(status)),
+            None if Instant::now() < deadline => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                thread::sleep(remaining.min(Duration::from_millis(20)));
+            }
+            None => {
+                child.terminate_and_reap().map_err(|error| {
+                    format!("terminate timed-out fault-corpus candidate: {error}")
+                })?;
+                return Ok(None);
+            }
+        }
+    }
+}
+
 fn evaluate_isolated_candidate(
     schedule: &ReplaySchedule,
     max_ops: usize,
@@ -607,28 +745,12 @@ fn evaluate_isolated_candidate(
         command.env_remove(FORCE_FAILURE_OP_ENV);
     }
 
-    let mut child = command
-        .spawn()
-        .map_err(|error| format!("spawn isolated fault-corpus candidate: {error}"))?;
-    let deadline = Instant::now() + CANDIDATE_TIMEOUT;
-    let status = loop {
-        match child
-            .try_wait()
-            .map_err(|error| format!("poll isolated fault-corpus candidate: {error}"))?
-        {
-            Some(status) => break Some(status),
-            None if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
-            None => {
-                child
-                    .kill()
-                    .map_err(|error| format!("kill timed-out fault-corpus candidate: {error}"))?;
-                child
-                    .wait()
-                    .map_err(|error| format!("reap timed-out fault-corpus candidate: {error}"))?;
-                break None;
-            }
-        }
-    };
+    let mut child = ReapingChild::new(
+        command
+            .spawn()
+            .map_err(|error| format!("spawn isolated fault-corpus candidate: {error}"))?,
+    );
+    let status = wait_for_child(&mut child, CANDIDATE_TIMEOUT)?;
 
     let mut output = String::new();
     File::open(&log_path)
@@ -655,18 +777,10 @@ fn evaluate_isolated_candidate(
         return Ok(Evaluation::Passed);
     }
 
-    let fingerprint = failure_marker(&output).unwrap_or_else(|| {
-        FailureFingerprint(format!(
-            "candidate-exit-{}",
-            status
-                .code()
-                .map_or_else(|| "signal".to_owned(), |code| code.to_string())
-        ))
-    });
-    Ok(Evaluation::Failed {
-        fingerprint,
-        detail: output,
-    })
+    Ok(classify_nonzero_child(
+        &format!("exited with {status}"),
+        output,
+    ))
 }
 
 fn unicast() -> Vec<(Afi, Safi)> {
@@ -1809,16 +1923,8 @@ fn minimize_configured_failure(config: &ExtendedConfig) -> ! {
     let original_evaluation =
         evaluate_isolated_candidate(&original, config.max_ops, config.force_failure_op)
             .unwrap_or_else(|error| panic!("evaluate original fault-corpus failure: {error}"));
-    let (target, original_detail) = match original_evaluation {
-        Evaluation::Passed => panic!(
-            "configured minimization case no longer fails: {}",
-            original.replay_command()
-        ),
-        Evaluation::Failed {
-            fingerprint,
-            detail,
-        } => (fingerprint, detail),
-    };
+    let (target, original_detail) = minimization_target(original_evaluation)
+        .unwrap_or_else(|error| panic!("{error}: {}", original.replay_command()));
 
     eprintln!(
         "update-group minimizer: target={:?} original_ops={} evaluation_cap={} candidate_timeout={}s",
@@ -1848,6 +1954,11 @@ fn minimize_configured_failure(config: &ExtendedConfig) -> ! {
                 eprintln!(
                     "update-group minimizer: rejected different failure target={:?} candidate={:?} ops={indices:?}",
                     target.0, fingerprint.0
+                );
+            }
+            if let Evaluation::UnclassifiedFailure { detail } = &evaluation {
+                eprintln!(
+                    "update-group minimizer: rejected unclassified candidate ops={indices:?}: {detail}"
                 );
             }
             evaluation
@@ -2185,12 +2296,65 @@ fn failure_classification_marker_is_stable_across_replay_details() {
     assert_eq!(paths_one, paths_two);
 
     let join_one = failure_fingerprint(
-        "called `Result::unwrap()` on an `Err` value: JoinError::Panic(Id(7), ...)",
+        "called `Result::unwrap()` on an `Err` value: JoinError::Panic(Id(7), \"manager invariant failed\", ...)",
     );
     let join_two = failure_fingerprint(
-        "called `Result::unwrap()` on an `Err` value: JoinError::Panic(Id(99), ...)",
+        "called `Result::unwrap()` on an `Err` value: JoinError::Panic(Id(99), \"manager invariant failed\", ...)",
     );
     assert_eq!(join_one, join_two);
+    let different_join_cause = failure_fingerprint(
+        "called `Result::unwrap()` on an `Err` value: JoinError::Panic(Id(99), \"different invariant failed\", ...)",
+    );
+    assert_ne!(join_one, different_join_cause);
+    let inner_id_one = failure_fingerprint(
+        "called `Result::unwrap()` on an `Err` value: JoinError::Panic(Id(7), \"peer Id(41) failed\", ...)",
+    );
+    let inner_id_two = failure_fingerprint(
+        "called `Result::unwrap()` on an `Err` value: JoinError::Panic(Id(99), \"peer Id(42) failed\", ...)",
+    );
+    assert_ne!(inner_id_one, inner_id_two);
+}
+
+#[test]
+fn markerless_exit_101_is_unclassified_and_cannot_reduce() {
+    let target = FailureFingerprint("target assertion".to_owned());
+    let marked_output = format!("panic output\n{FAILURE_FINGERPRINT_MARKER}{}\n", target.0);
+    let marked = classify_nonzero_child("exited with status 101", marked_output.clone());
+    assert!(preserves_failure(&marked, &target));
+
+    let markerless_output = marked_output.replace(FAILURE_FINGERPRINT_MARKER, "removed-marker=");
+    let markerless = classify_nonzero_child("exited with status 101", markerless_output);
+    assert!(matches!(
+        &markerless,
+        Evaluation::UnclassifiedFailure { .. }
+    ));
+    assert!(!preserves_failure(&markerless, &target));
+
+    let unrelated = classify_nonzero_child(
+        "exited with status 101",
+        "different test-harness failure with the same exit code".to_owned(),
+    );
+    assert!(matches!(&unrelated, Evaluation::UnclassifiedFailure { .. }));
+    let legacy_exit_code_fingerprint = FailureFingerprint("candidate-exit-101".to_owned());
+    let reduction = minimize_failure(vec![0, 1], &legacy_exit_code_fingerprint, 4, |candidate| {
+        if candidate == [1] {
+            markerless.clone()
+        } else {
+            unrelated.clone()
+        }
+    });
+    assert_eq!(reduction.retained_indices, vec![0, 1]);
+}
+
+#[test]
+fn markerless_baseline_aborts_minimization() {
+    let unclassified = classify_nonzero_child(
+        "exited with status 101",
+        "unrelated test-harness panic without a fingerprint marker".to_owned(),
+    );
+    let error = minimization_target(unclassified)
+        .expect_err("an unclassified baseline must not supply a minimization target");
+    assert!(error.contains("original child failure was unclassified"));
 }
 
 #[test]
@@ -2210,6 +2374,39 @@ fn isolated_candidate_runs_the_exact_ignored_test_and_classifies_its_failure() {
             assert!(detail.contains(FAILURE_FINGERPRINT_MARKER));
         }
         Evaluation::Passed => panic!("forced isolated candidate unexpectedly passed"),
+        Evaluation::UnclassifiedFailure { detail } => {
+            panic!("forced isolated candidate was not classified: {detail}")
+        }
+    }
+}
+
+#[test]
+fn isolated_wait_timeout_kills_and_reaps_child() {
+    let executable = env::current_exe().expect("locate current test executable");
+    let child = Command::new(executable)
+        .arg(TIMEOUT_FIXTURE_TEST_NAME)
+        .args(["--ignored", "--exact"])
+        .env(TIMEOUT_FIXTURE_ENV, "1")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn timeout fixture");
+    let mut child = ReapingChild::new(child);
+    let started = Instant::now();
+    let status = wait_for_child(&mut child, Duration::from_millis(50)).unwrap();
+    assert!(status.is_none(), "timeout fixture unexpectedly exited");
+    assert!(child.reaped, "timed-out child was not reaped");
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "50ms child deadline was not wall-clock bounded"
+    );
+}
+
+#[test]
+#[ignore = "child-process fixture for the minimizer wall-clock timeout proof"]
+fn minimizer_timeout_fixture() {
+    if env::var(TIMEOUT_FIXTURE_ENV).as_deref() == Ok("1") {
+        thread::sleep(Duration::from_mins(1));
     }
 }
 
