@@ -851,6 +851,38 @@ async fn replace_flowspec_routes(
     let _ = query_flowspec_routes(tx).await;
 }
 
+async fn flowspec_export_peer_up(
+    tx: &mpsc::Sender<RibUpdate>,
+    peer: IpAddr,
+    is_ebgp: bool,
+    interpret_rfc1997: bool,
+    export_policy: Option<rustbgpd_policy::PolicyChain>,
+) -> mpsc::Receiver<OutboundRouteUpdate> {
+    let (out_tx, mut out_rx) = mpsc::channel(32);
+    tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
+        interpret_rfc1997,
+        session_id: 0,
+        peer,
+        peer_asn: if is_ebgp { 65100 } else { 65000 },
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy,
+        sendable_families: ipv4_flowspec_sendable(),
+        is_ebgp,
+        route_reflector_client: false,
+        orr_vantage: None,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+        negotiated_llgr_families: Vec::new(),
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut out_rx).await;
+    out_rx
+}
+
 /// Source `NO_ADVERTISE` outranks a policy that removes it. Suppression stays
 /// silent until an exact prior `(AFI, rule)` advertisement must be withdrawn.
 ///
@@ -955,6 +987,119 @@ async fn flowspec_source_no_advertise_precedes_removal_policy() {
         out_rx.try_recv().is_err(),
         "sibling and IPv6 rule do not churn"
     );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// `FlowSpec` honors source-route `NO_EXPORT_SUBCONFED` only for eBGP peers
+/// that enable RFC 1997 interpretation. The source gate precedes policy,
+/// while a policy-added `NO_EXPORT` remains part of the delivered rule.
+///
+/// Break-to-red: deleting the `FlowSpec` source predicate announces the tagged
+/// rule to the honor peer instead of withdrawing its exact `(AFI, rule)` key;
+/// moving it after policy lets the removal policy bypass it; checking every
+/// peer suppresses the transparent and iBGP announcements; checking the
+/// post-policy rule suppresses the policy-added announcement.
+#[tokio::test]
+async fn flowspec_no_export_honors_neighbor_mode_and_source_precedence() {
+    let mut remove_subconfed = rustbgpd_policy::RouteModifications::default();
+    remove_subconfed
+        .communities_remove
+        .push(rustbgpd_wire::COMMUNITY_NO_EXPORT_SUBCONFED);
+    let removal_policy = rustbgpd_policy::PolicyChain::new(vec![rustbgpd_policy::Policy {
+        entries: vec![flowspec_policy_statement(
+            rustbgpd_wire::COMMUNITY_NO_EXPORT_SUBCONFED,
+            remove_subconfed,
+        )],
+        default_action: rustbgpd_policy::PolicyAction::Permit,
+    }]);
+    let marker = (65000u32 << 16) | 0x01D3;
+    let mut add_no_export = rustbgpd_policy::RouteModifications::default();
+    add_no_export
+        .communities_add
+        .push(rustbgpd_wire::COMMUNITY_NO_EXPORT);
+    let add_policy = rustbgpd_policy::PolicyChain::new(vec![rustbgpd_policy::Policy {
+        entries: vec![flowspec_policy_statement(marker, add_no_export)],
+        default_action: rustbgpd_policy::PolicyAction::Permit,
+    }]);
+
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+    let honor: IpAddr = "192.0.2.120".parse().unwrap();
+    let transparent: IpAddr = "192.0.2.121".parse().unwrap();
+    let internal: IpAddr = "192.0.2.122".parse().unwrap();
+    let policy_adder: IpAddr = "192.0.2.123".parse().unwrap();
+    let mut honor_rx = flowspec_export_peer_up(&tx, honor, true, true, Some(removal_policy)).await;
+    let mut transparent_rx = flowspec_export_peer_up(&tx, transparent, true, false, None).await;
+    let mut internal_rx = flowspec_export_peer_up(&tx, internal, false, true, None).await;
+    let mut adder_rx =
+        flowspec_export_peer_up(&tx, policy_adder, true, true, Some(add_policy)).await;
+
+    let source_addr = Ipv4Addr::new(198, 51, 100, 120);
+    let source = IpAddr::V4(source_addr);
+    let policy_added_route = with_flowspec_communities(
+        make_destless_flowspec_route(Afi::Ipv4, source_addr, 47),
+        vec![marker],
+    );
+    let added_key = policy_added_route.selection_key();
+    let primary = make_destless_flowspec_route(Afi::Ipv4, source_addr, 6);
+    let primary_key = primary.selection_key();
+    let sibling = make_destless_flowspec_route(Afi::Ipv4, source_addr, 17);
+    let sibling_key = sibling.selection_key();
+    replace_flowspec_routes(
+        &tx,
+        source,
+        vec![policy_added_route, primary.clone(), sibling],
+    )
+    .await;
+
+    for out_rx in [&mut honor_rx, &mut transparent_rx, &mut internal_rx] {
+        let update = out_rx.try_recv().expect("plain FlowSpec rules advertise");
+        assert_eq!(update.flowspec_announce.len(), 3);
+        assert!(update.flowspec_withdraw.is_empty());
+    }
+    let added_update = adder_rx
+        .try_recv()
+        .expect("policy-added NO_EXPORT FlowSpec rule is delivered");
+    let added_rule = added_update
+        .flowspec_announce
+        .iter()
+        .find(|route| route.selection_key() == added_key)
+        .expect("marker rule is present in the policy-modified update");
+    assert!(
+        added_rule
+            .communities()
+            .contains(&rustbgpd_wire::COMMUNITY_NO_EXPORT),
+        "policy-added NO_EXPORT must remain on the delivered FlowSpec rule"
+    );
+
+    replace_flowspec_routes(
+        &tx,
+        source,
+        vec![with_flowspec_communities(
+            primary,
+            vec![rustbgpd_wire::COMMUNITY_NO_EXPORT_SUBCONFED],
+        )],
+    )
+    .await;
+
+    let honor_update = honor_rx
+        .try_recv()
+        .expect("honor-mode eBGP peer receives exact withdrawal");
+    assert!(honor_update.flowspec_announce.is_empty());
+    assert_eq!(honor_update.flowspec_withdraw, vec![primary_key.clone()]);
+    for out_rx in [&mut transparent_rx, &mut internal_rx] {
+        let update = out_rx
+            .try_recv()
+            .expect("transparent and iBGP peers retain the tagged rule");
+        assert_eq!(update.flowspec_announce.len(), 1);
+        assert_eq!(update.flowspec_announce[0].selection_key(), primary_key);
+        assert!(update.flowspec_withdraw.is_empty());
+    }
+    assert!(honor_rx.try_recv().is_err(), "sibling must not churn");
+    assert_ne!(primary_key, sibling_key, "fixture keys must be distinct");
 
     drop(tx);
     handle.await.unwrap();

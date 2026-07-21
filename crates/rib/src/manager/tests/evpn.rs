@@ -48,6 +48,81 @@ fn evpn_no_advertise_policy(
     }])
 }
 
+fn evpn_no_export_policy(
+    matched_community: u32,
+    add: bool,
+    remove: bool,
+) -> rustbgpd_policy::PolicyChain {
+    rustbgpd_policy::PolicyChain::new(vec![rustbgpd_policy::Policy {
+        entries: vec![rustbgpd_policy::PolicyStatement {
+            prefix: None,
+            ge: None,
+            le: None,
+            action: rustbgpd_policy::PolicyAction::Permit,
+            match_community: vec![rustbgpd_policy::CommunityMatch::Standard {
+                value: matched_community,
+            }],
+            match_as_path: None,
+            match_neighbor_set: None,
+            match_route_type: None,
+            match_evpn_route_type: None,
+            match_rpki_validation: None,
+            match_aspa_validation: None,
+            match_as_path_length_ge: None,
+            match_as_path_length_le: None,
+            match_local_pref_ge: None,
+            match_local_pref_le: None,
+            match_med_ge: None,
+            match_med_le: None,
+            match_next_hop: None,
+            modifications: rustbgpd_policy::RouteModifications {
+                communities_add: add
+                    .then_some(rustbgpd_wire::COMMUNITY_NO_EXPORT)
+                    .into_iter()
+                    .collect(),
+                communities_remove: remove
+                    .then_some(rustbgpd_wire::COMMUNITY_NO_EXPORT)
+                    .into_iter()
+                    .collect(),
+                ..rustbgpd_policy::RouteModifications::default()
+            },
+        }],
+        default_action: rustbgpd_policy::PolicyAction::Permit,
+    }])
+}
+
+async fn evpn_export_peer_up(
+    tx: &mpsc::Sender<RibUpdate>,
+    peer: IpAddr,
+    is_ebgp: bool,
+    interpret_rfc1997: bool,
+    export_policy: Option<rustbgpd_policy::PolicyChain>,
+) -> mpsc::Receiver<OutboundRouteUpdate> {
+    let (out_tx, mut out_rx) = mpsc::channel(32);
+    tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
+        interpret_rfc1997,
+        session_id: 0,
+        peer,
+        peer_asn: if is_ebgp { 65100 } else { 65000 },
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy,
+        sendable_families: evpn_sendable(),
+        is_ebgp,
+        route_reflector_client: false,
+        orr_vantage: None,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+        negotiated_llgr_families: Vec::new(),
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut out_rx).await;
+    out_rx
+}
+
 /// Regression: EVPN routes learned from a peer that goes down must be
 /// withdrawn from remaining peers. Before this fix, `handle_peer_down` removed
 /// the dead peer's Adj-RIB-In but never called `recompute_and_distribute_evpn`,
@@ -1247,6 +1322,136 @@ async fn enhanced_route_refresh_evpn_replacement_preserves_route() {
     let best = query_evpn_routes(&tx).await;
     assert_eq!(best.len(), 1, "refreshed EVPN route must survive EoRR");
     assert_eq!(best[0].key(), imet_key);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// EVPN honors source-route `NO_EXPORT` only for eBGP peers that enable RFC
+/// 1997 interpretation. The source gate precedes policy, while a policy-added
+/// community remains part of the delivered route.
+///
+/// Break-to-red: deleting or moving the EVPN source predicate after policy
+/// fails to emit the exact withdrawal after the removal policy strips the
+/// community, leaving the prior Adj-RIB-Out entry stale; checking every peer
+/// suppresses the transparent and iBGP announcements; checking the post-policy
+/// route suppresses the policy-added announcement.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one actor sequence pins honor, transparent, iBGP, policy, and exact-withdrawal semantics"
+)]
+async fn evpn_no_export_honors_neighbor_mode_and_source_precedence() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+    let honor: IpAddr = "192.0.2.110".parse().unwrap();
+    let transparent: IpAddr = "192.0.2.111".parse().unwrap();
+    let internal: IpAddr = "192.0.2.112".parse().unwrap();
+    let policy_adder: IpAddr = "192.0.2.113".parse().unwrap();
+    let marker = (65000u32 << 16) | 0x01D2;
+
+    let mut honor_rx = evpn_export_peer_up(
+        &tx,
+        honor,
+        true,
+        true,
+        Some(evpn_no_export_policy(
+            rustbgpd_wire::COMMUNITY_NO_EXPORT,
+            false,
+            true,
+        )),
+    )
+    .await;
+    let mut transparent_rx = evpn_export_peer_up(&tx, transparent, true, false, None).await;
+    let mut internal_rx = evpn_export_peer_up(&tx, internal, false, true, None).await;
+    let mut adder_rx = evpn_export_peer_up(
+        &tx,
+        policy_adder,
+        true,
+        true,
+        Some(evpn_no_export_policy(marker, true, false)),
+    )
+    .await;
+
+    let source_addr = Ipv4Addr::new(198, 51, 100, 110);
+    let source = IpAddr::V4(source_addr);
+    let mut policy_added_route = with_evpn_community(make_evpn_imet(source_addr, 510), marker);
+    policy_added_route.origin_type = crate::route::RouteOrigin::Ebgp;
+    let added_key = policy_added_route.key();
+    let mut primary = make_evpn_imet(source_addr, 520);
+    primary.origin_type = crate::route::RouteOrigin::Ebgp;
+    let primary_key = primary.key();
+    let mut sibling = make_evpn_imet(source_addr, 530);
+    sibling.origin_type = crate::route::RouteOrigin::Ebgp;
+    let sibling_key = sibling.key();
+
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![policy_added_route, primary.clone(), sibling],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let _ = query_evpn_routes(&tx).await;
+
+    for out_rx in [&mut honor_rx, &mut transparent_rx, &mut internal_rx] {
+        let update = out_rx.try_recv().expect("plain EVPN routes advertise");
+        assert_eq!(update.evpn_announce.len(), 3);
+        assert!(update.evpn_withdraw.is_empty());
+    }
+    let added_update = adder_rx
+        .try_recv()
+        .expect("policy-added NO_EXPORT EVPN route is delivered");
+    let added_route = added_update
+        .evpn_announce
+        .iter()
+        .find(|route| route.key() == added_key)
+        .expect("marker route is present in the policy-modified update");
+    assert!(
+        added_route
+            .communities()
+            .contains(&rustbgpd_wire::COMMUNITY_NO_EXPORT),
+        "policy-added NO_EXPORT must remain on the delivered EVPN route"
+    );
+
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![with_evpn_community(
+            primary,
+            rustbgpd_wire::COMMUNITY_NO_EXPORT,
+        )],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let _ = query_evpn_routes(&tx).await;
+
+    let honor_update = honor_rx
+        .try_recv()
+        .expect("honor-mode eBGP peer receives exact withdrawal");
+    assert!(honor_update.evpn_announce.is_empty());
+    assert_eq!(honor_update.evpn_withdraw, vec![primary_key]);
+    for out_rx in [&mut transparent_rx, &mut internal_rx] {
+        let update = out_rx
+            .try_recv()
+            .expect("transparent and iBGP peers retain the tagged route");
+        assert_eq!(update.evpn_announce.len(), 1);
+        assert_eq!(update.evpn_announce[0].key(), primary_key);
+        assert!(update.evpn_withdraw.is_empty());
+    }
+    assert!(honor_rx.try_recv().is_err(), "sibling must not churn");
+    assert_ne!(primary_key, sibling_key, "fixture keys must be distinct");
 
     drop(tx);
     handle.await.unwrap();
