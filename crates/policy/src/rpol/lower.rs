@@ -48,13 +48,16 @@
 //! both stack depth and total nodes before lowering ever runs.
 
 use std::collections::HashMap;
+use std::net::Ipv4Addr;
 use std::sync::Arc;
 
 use rustbgpd_wire::ExtendedCommunity;
 
 use crate::datasets::DatasetBindings;
 use crate::engine::{
-    AsPathRegex, CommunityMatch, NeighborSetMatch, NextHopAction, PolicyAction, RouteModifications,
+    AsPathRegex, CommunityMatch, NeighborSetMatch, NextHopAction, PolicyAction,
+    RouteExtendedCommunityAdmin, RouteExtendedCommunityKind, RouteModifications,
+    encode_route_extended_community,
 };
 use crate::eval::checked_arith;
 use crate::ir::{
@@ -211,22 +214,17 @@ pub(super) fn ext_community_value(
     local: u32,
     ipv4_admin: bool,
 ) -> ExtendedCommunity {
-    let subtype: u8 = if route_target { 0x02 } else { 0x03 };
-    let raw = if ipv4_admin || global > u32::from(u16::MAX) {
-        let type_byte: u8 = if ipv4_admin { 0x01 } else { 0x02 };
-        let g = global.to_be_bytes();
-        let l = u16::try_from(local)
-            .expect("checked at parse time")
-            .to_be_bytes();
-        u64::from_be_bytes([type_byte, subtype, g[0], g[1], g[2], g[3], l[0], l[1]])
+    let kind = if route_target {
+        RouteExtendedCommunityKind::Target
     } else {
-        let g = u16::try_from(global)
-            .expect("2-octet form checked above")
-            .to_be_bytes();
-        let l = local.to_be_bytes();
-        u64::from_be_bytes([0x00, subtype, g[0], g[1], l[0], l[1], l[2], l[3]])
+        RouteExtendedCommunityKind::Origin
     };
-    ExtendedCommunity::new(raw)
+    let admin = if ipv4_admin {
+        RouteExtendedCommunityAdmin::Ipv4(Ipv4Addr::from(global))
+    } else {
+        RouteExtendedCommunityAdmin::Asn(global)
+    };
+    encode_route_extended_community(kind, admin, local).expect("checked at parse time")
 }
 
 /// The lowering context: interned set tables shared by every policy

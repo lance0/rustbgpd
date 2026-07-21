@@ -3983,26 +3983,93 @@ fn neither_prefix_nor_community_nor_aspath_rejected() {
 }
 
 #[test]
-fn set_community_rt_4byte_asn_rejected() {
-    // build_rt_ec only supports 2-octet AS — 4-byte ASN should fail at config time.
+fn set_route_communities_use_rfc_admin_specific_encodings_for_add_and_remove() {
+    // Red proof: routing numeric AS4 or dotted-IPv4 administrators through the
+    // old type-0x00-only TOML builders makes the exact byte matrix fail (or
+    // rejects the AS4 values); dropping original spelling makes the IPv4 rows
+    // become type 0x02, and wiring only add or remove breaks the parity assert.
     let toml = community_toml(
         r#"action = "permit"
             prefix = "10.0.0.0/8"
-            set_community_add = ["RT:100000:100"]"#,
+            set_community_add = [
+                "RT:65001:100", "RO:65001:200",
+                "RT:100000:100", "RO:100000:200",
+                "RT:192.0.2.1:100", "RO:192.0.2.1:200",
+                "RT:65535:70000"
+            ]
+            set_community_remove = [
+                "RT:65001:100", "RO:65001:200",
+                "RT:100000:100", "RO:100000:200",
+                "RT:192.0.2.1:100", "RO:192.0.2.1:200",
+                "RT:65535:70000"
+            ]"#,
     );
-    let err = parse(&toml).unwrap_err();
-    assert!(matches!(err, ConfigError::InvalidPolicyEntry { .. }));
+    let cfg = parse(&toml).unwrap();
+    let neighbor = &cfg.neighbors[0];
+    let (import, _export) = cfg.effective_policy_chains_for_neighbor(neighbor).unwrap();
+    let statement = &import.expect("import chain configured").policies[0].entries[0];
+    let expected = vec![
+        0x0002_FDE9_0000_0064,
+        0x0003_FDE9_0000_00C8,
+        0x0202_0001_86A0_0064,
+        0x0203_0001_86A0_00C8,
+        0x0102_C000_0201_0064,
+        0x0103_C000_0201_00C8,
+        0x0002_FFFF_0001_1170,
+    ];
+    let added: Vec<u64> = statement
+        .modifications
+        .extended_communities_add
+        .iter()
+        .map(|community| community.as_u64())
+        .collect();
+    let removed: Vec<u64> = statement
+        .modifications
+        .extended_communities_remove
+        .iter()
+        .map(|community| community.as_u64())
+        .collect();
+    assert_eq!(added, expected);
+    assert_eq!(removed, expected);
 }
 
 #[test]
-fn set_community_ro_4byte_asn_rejected() {
+fn set_route_community_rejects_as4_local_that_exceeds_u16() {
+    // Red proof: deleting `parse_community_match`'s AS4 local-width check
+    // routes the invalid value to the shared encoder, changing this exact
+    // parser diagnostic and failing the equality assertion below.
     let toml = community_toml(
         r#"action = "permit"
             prefix = "10.0.0.0/8"
-            set_community_remove = ["RO:100000:200"]"#,
+            set_community_add = ["RT:100000:70000"]"#,
     );
-    let err = parse(&toml).unwrap_err();
-    assert!(matches!(err, ConfigError::InvalidPolicyEntry { .. }));
+    let ConfigError::InvalidPolicyEntry { reason } = parse(&toml).unwrap_err() else {
+        panic!("expected invalid policy entry")
+    };
+    assert_eq!(
+        reason,
+        "invalid local admin 70000: exceeds 65535 for 4-octet ASN 100000"
+    );
+}
+
+#[test]
+fn set_route_community_rejects_ipv4_local_that_exceeds_u16() {
+    // Red proof: deleting `parse_community_match`'s dotted-IPv4 local-width
+    // check routes the invalid value to the shared encoder and changes this
+    // exact parser diagnostic; treating the spelling as an ASN also changes
+    // the administrator kind.
+    let toml = community_toml(
+        r#"action = "permit"
+            prefix = "10.0.0.0/8"
+            set_community_remove = ["RO:192.0.2.1:70000"]"#,
+    );
+    let ConfigError::InvalidPolicyEntry { reason } = parse(&toml).unwrap_err() else {
+        panic!("expected invalid policy entry")
+    };
+    assert_eq!(
+        reason,
+        "invalid local admin 70000: exceeds 65535 for IPv4 global administrator 192.0.2.1"
+    );
 }
 
 #[test]
