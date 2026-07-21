@@ -9,6 +9,23 @@ use rustbgpd_policy::RouteType;
 use rustbgpd_wire::{Afi, BgpRole, Safi};
 use tempfile::NamedTempFile;
 
+const TEST_ONLY_GRPC_OPERATOR_PRINCIPAL: &str = "rustbgpd://operator/test-only";
+const TEST_ONLY_GRPC_TOKEN_CONTAINER_PATH: &str = "/run/rustbgpd/grpc-test-only-operator.token";
+const TEST_ONLY_GRPC_TOKEN_REPO_PATH: &str = "tests/fixtures/grpc-test-only-operator.token";
+
+fn materialize_shared_test_only_grpc_token(source: &str) -> String {
+    let host_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(TEST_ONLY_GRPC_TOKEN_REPO_PATH);
+    assert!(
+        host_path.is_file(),
+        "shared test-only gRPC token fixture must exist at {}",
+        host_path.display()
+    );
+    let host_path = host_path
+        .to_str()
+        .expect("repository test-token path must be UTF-8");
+    source.replace(TEST_ONLY_GRPC_TOKEN_CONTAINER_PATH, host_path)
+}
+
 fn valid_toml() -> &'static str {
     // Shared test fixture used by hundreds of config tests below.
     // Opts into `enforcement = "legacy"` explicitly so the fixture
@@ -115,6 +132,11 @@ fn config_examples_parse() {
         let source = fs::read_to_string(&path).unwrap_or_else(|err| {
             panic!("failed to read example config {label}: {err}");
         });
+        // The Docker Compose quick-start mounts the repository's public,
+        // test-only bearer fixture at a container-absolute path. Substitute
+        // the same fixture's host path so this production-path validation
+        // proves the shipped config without weakening token-file checks.
+        let source = materialize_shared_test_only_grpc_token(&source);
         // Strict parse (not the legacy-injecting `parse`) so every shipped
         // example is validated under the production v0.24.0
         // `enforcement = "tier"` default. Injection would mask examples that
@@ -135,6 +157,113 @@ fn config_examples_parse() {
             panic!("example config {label} failed validation under the tier default: {err}");
         });
     }
+}
+
+#[test]
+fn shared_test_only_operator_auth_is_tier_valid_and_wired() {
+    // Load-bearing foundation for incrementally moving ordinary interop
+    // configs off legacy authorization. Both migrated configs must use the
+    // same public test-only credential path and stable operator principal;
+    // their harnesses must mount that exact credential and opt into the
+    // shared grpcurl helper.
+    for (label, source) in [
+        (
+            "M1 ordinary interop",
+            include_str!("../../tests/interop/configs/rustbgpd-m1-frr.toml"),
+        ),
+        (
+            "Docker Compose quick-start",
+            include_str!("../../examples/docker-compose/rustbgpd.toml"),
+        ),
+    ] {
+        assert!(
+            source.contains(TEST_ONLY_GRPC_TOKEN_CONTAINER_PATH),
+            "{label} must use the shared test-only token path"
+        );
+        let materialized = materialize_shared_test_only_grpc_token(source);
+        let config = parse_strict(&materialized)
+            .unwrap_or_else(|err| panic!("{label} must validate under tier enforcement: {err}"));
+
+        assert_eq!(
+            config.security.grpc.enforcement,
+            GrpcEnforcementConfig::Tier,
+            "{label} must not fall back to legacy authorization"
+        );
+        let tcp = config
+            .global
+            .telemetry
+            .grpc_tcp
+            .as_ref()
+            .unwrap_or_else(|| panic!("{label} must configure gRPC TCP"));
+        assert!(tcp.enabled, "{label} gRPC TCP listener must be enabled");
+        assert_eq!(
+            tcp.principal.as_deref(),
+            Some(TEST_ONLY_GRPC_OPERATOR_PRINCIPAL),
+            "{label} must preserve the stable test-only operator principal"
+        );
+        assert_eq!(
+            config
+                .security
+                .grpc
+                .roles
+                .get(TEST_ONLY_GRPC_OPERATOR_PRINCIPAL),
+            Some(&GrpcRoleConfig::Operator),
+            "{label} principal must map to the operator role"
+        );
+    }
+
+    let m1_topology: serde_yaml::Value =
+        serde_yaml::from_str(include_str!("../../tests/interop/m1-frr.clab.yml"))
+            .expect("M1 topology must be YAML");
+    let m1_binds = m1_topology["topology"]["nodes"]["rustbgpd"]["binds"]
+        .as_sequence()
+        .expect("M1 rustbgpd binds must be a sequence");
+    assert!(
+        m1_binds.iter().any(|bind| {
+            bind.as_str()
+                == Some(
+                    "../fixtures/grpc-test-only-operator.token:/run/rustbgpd/grpc-test-only-operator.token:ro",
+                )
+        }),
+        "M1 must mount the shared test-only token at its configured path"
+    );
+
+    let compose: serde_yaml::Value = serde_yaml::from_str(include_str!(
+        "../../examples/docker-compose/docker-compose.yml"
+    ))
+    .expect("Docker Compose quick-start must be YAML");
+    let compose_service = &compose["services"]["rustbgpd"];
+    let compose_volumes = compose_service["volumes"]
+        .as_sequence()
+        .expect("Compose rustbgpd volumes must be a sequence");
+    assert!(
+        compose_volumes.iter().any(|volume| {
+            volume.as_str()
+                == Some(
+                    "../../tests/fixtures/grpc-test-only-operator.token:/run/rustbgpd/grpc-test-only-operator.token:ro",
+                )
+        }),
+        "Compose must mount the shared test-only token at its configured path"
+    );
+    assert_eq!(
+        compose_service["environment"]["RUSTBGPD_TOKEN_FILE"].as_str(),
+        Some(TEST_ONLY_GRPC_TOKEN_CONTAINER_PATH),
+        "Compose must inject the shared token path into in-container rbgp"
+    );
+
+    let m1_driver = include_str!("../../tests/interop/scripts/test-m1-frr.sh");
+    assert!(
+        m1_driver.contains("INTEROP_TEST_OPERATOR_AUTH=1"),
+        "M1 must opt into shared test-only grpcurl authentication"
+    );
+    assert!(
+        m1_driver.matches("grpcurl_call").count() >= 2,
+        "M1 route queries must use the shared grpcurl helper"
+    );
+    assert!(
+        !m1_driver.contains("grpcurl -plaintext"),
+        "M1 must not copy bearer-token plumbing around the shared helper"
+    );
 }
 
 fn route_server_example_config() -> Config {

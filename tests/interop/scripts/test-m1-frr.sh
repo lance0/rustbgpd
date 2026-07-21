@@ -11,6 +11,9 @@
 
 TOPO="m1-frr"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+INTEROP_TEST_OPERATOR_AUTH=1
+export INTEROP_TEST_OPERATOR_AUTH
+# shellcheck source=tests/interop/scripts/test-lib.sh
 source "$SCRIPT_DIR/test-lib.sh"
 FRR="clab-${TOPO}-frr"
 
@@ -18,12 +21,12 @@ FRR="clab-${TOPO}-frr"
 # Resolve rustbgpd container management IP for gRPC access
 
 grpc_list_routes() {
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         "$GRPC_ADDR" rustbgpd.v1.RibService/ListReceivedRoutes 2>/dev/null
 }
 
 grpc_list_routes_for_peer() {
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         -d "{\"neighbor_address\": \"$1\"}" \
         "$GRPC_ADDR" rustbgpd.v1.RibService/ListReceivedRoutes 2>/dev/null
 }
@@ -207,6 +210,8 @@ main() {
     log "Topology: $TOPO"
 
     resolve_grpc_addr
+    # Intentional: the shared helper defaults its optional extra arguments.
+    # shellcheck disable=SC2119
     start_rustbgpd
 
     test_routes_received

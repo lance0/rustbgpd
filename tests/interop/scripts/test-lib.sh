@@ -9,7 +9,7 @@
 # Provides:
 #   - Pre-flight checks (docker, grpcurl, containerlab topology running)
 #   - Timestamped log/ok/fail helpers
-#   - resolve_grpc_addr, resolve_ip
+#   - resolve_grpc_addr, resolve_ip, grpcurl_call
 #   - start_rustbgpd with gRPC health wait
 #   - wait_established (FRR vtysh polling)
 #   - Trap-based cleanup: auto-destroy containerlab on EXIT if CLEANUP=1
@@ -27,6 +27,13 @@ GRPC_ADDR=""
 # `pe1` / `pe2` rather than the single-rustbgpd `rustbgpd` shape)
 # can set RUSTBGPD before sourcing this lib.
 RUSTBGPD="${RUSTBGPD:-clab-${TOPO}-rustbgpd}"
+
+# Ordinary interop slices can opt into the shared, deliberately public
+# test-only operator credential by setting this to 1 before sourcing the
+# library. Dedicated authentication tests keep their own identities and
+# credential paths; they do not set this flag and are unaffected.
+INTEROP_TEST_OPERATOR_AUTH="${INTEROP_TEST_OPERATOR_AUTH:-0}"
+readonly INTEROP_TEST_OPERATOR_TOKEN_FILE="tests/fixtures/grpc-test-only-operator.token"
 
 pass=0
 fail=0
@@ -66,6 +73,12 @@ preflight() {
         errors=$((errors + 1))
     fi
 
+    if [ "$INTEROP_TEST_OPERATOR_AUTH" = "1" ] \
+        && [ ! -s "$INTEROP_TEST_OPERATOR_TOKEN_FILE" ]; then
+        echo "ERROR: shared test-only gRPC token missing or empty at $INTEROP_TEST_OPERATOR_TOKEN_FILE" >&2
+        errors=$((errors + 1))
+    fi
+
     if ! docker inspect "$RUSTBGPD" &>/dev/null; then
         echo "ERROR: container $RUSTBGPD not running — deploy topology first:" >&2
         echo "  containerlab deploy -t tests/interop/${TOPO}.clab.yml" >&2
@@ -101,8 +114,28 @@ resolve_grpc_addr() {
     log "gRPC endpoint: $GRPC_ADDR"
 }
 
-grpc_health() {
+# Run grpcurl with the repository's common import flags and, for ordinary
+# slices that opt in, the shared test-only bearer credential. Keeping the
+# header here lets future fixture migrations avoid copied token plumbing in
+# every call site. Arguments are passed through unchanged to grpcurl.
+grpcurl_call() {
+    local -a auth_args=()
+    if [ "$INTEROP_TEST_OPERATOR_AUTH" = "1" ]; then
+        local token=""
+        IFS= read -r token < "$INTEROP_TEST_OPERATOR_TOKEN_FILE"
+        if [ -z "$token" ]; then
+            echo "ERROR: shared test-only gRPC token is empty" >&2
+            return 1
+        fi
+        auth_args=(-H "authorization: Bearer $token")
+    fi
+
     grpcurl -plaintext -import-path . -proto "$PROTO" \
+        "${auth_args[@]}" "$@"
+}
+
+grpc_health() {
+    grpcurl_call \
         "$GRPC_ADDR" rustbgpd.v1.ControlService/GetHealth 2>/dev/null
 }
 

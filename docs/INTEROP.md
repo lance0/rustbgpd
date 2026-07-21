@@ -485,10 +485,14 @@ FRR advertises: 192.168.1.0/24, 192.168.2.0/24, 10.10.0.0/16 via `network` state
 ### Test 1: Routes Appear in RIB
 
 After session reaches Established, wait for UPDATEs to propagate (typically <5s).
-Query via gRPC:
+The topology uses the repository's public test-only operator token. The
+automated M1 driver adds this header through the shared helper; for a manual
+query, load the same fixture:
 
 ```sh
+TOKEN=$(cat tests/fixtures/grpc-test-only-operator.token)
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -H "authorization: Bearer $TOKEN" \
   -d '{"neighbor_address": "10.0.0.2"}' \
   <rustbgpd-mgmt-ip>:50051 rustbgpd.v1.RibService/ListReceivedRoutes
 ```
@@ -568,7 +572,9 @@ match the Adj-RIB-In received routes, with `best: true` set.
 ### Test 1: ListBestRoutes Returns Correct Routes
 
 ```sh
+TOKEN=$(cat tests/fixtures/grpc-test-only-operator.token)
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -H "authorization: Bearer $TOKEN" \
   <rustbgpd-mgmt-ip>:50051 rustbgpd.v1.RibService/ListBestRoutes
 ```
 
@@ -580,11 +586,13 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 ```sh
 # Page 1 (size 2)
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -H "authorization: Bearer $TOKEN" \
   -d '{"page_size": 2}' \
   <rustbgpd-mgmt-ip>:50051 rustbgpd.v1.RibService/ListBestRoutes
 
 # Page 2
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -H "authorization: Bearer $TOKEN" \
   -d '{"page_size": 2, "page_token": "2"}' \
   <rustbgpd-mgmt-ip>:50051 rustbgpd.v1.RibService/ListBestRoutes
 ```

@@ -5,10 +5,12 @@
 #
 # Usage:
 #   docker compose up -d
+# The rustbgpd service sets RUSTBGPD_TOKEN_FILE for in-container rbgp calls.
 #   docker compose exec rustbgpd rbgp -s http://127.0.0.1:50051 neighbor
 #   docker compose exec rustbgpd rbgp -s http://127.0.0.1:50051 top
 #
 # From the host (gRPC exposed on localhost:50051):
+#   export RUSTBGPD_TOKEN_FILE="$PWD/../../tests/fixtures/grpc-test-only-operator.token"
 #   cargo run -p rustbgpctl --bin rbgp -- -s http://127.0.0.1:50051 neighbor
 #   cargo run -p rustbgpctl --bin rbgp -- -s http://127.0.0.1:50051 top
 
@@ -17,6 +19,11 @@ services:
     build: ../..
     volumes:
       - ./rustbgpd.toml:/etc/rustbgpd/config.toml:ro
+      # Public test-only credential shared with the interop harness. It is a
+      # runnable example, never a production secret.
+      - ../../tests/fixtures/grpc-test-only-operator.token:/run/rustbgpd/grpc-test-only-operator.token:ro
+    environment:
+      RUSTBGPD_TOKEN_FILE: /run/rustbgpd/grpc-test-only-operator.token
     networks:
       bgp:
         ipv4_address: 10.99.0.10

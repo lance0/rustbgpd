@@ -60,6 +60,9 @@ docker compose up -d
 
 Once both containers are running (a few seconds):
 
+The Compose service supplies its committed, public **test-only** bearer token
+to in-container `rbgp` commands. It is for this runnable demo, not deployment.
+
 ```bash
 # See the FRR peer come up
 docker compose exec rustbgpd rbgp -s http://127.0.0.1:50051 summary
