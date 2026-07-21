@@ -312,9 +312,12 @@ deviations; [docs/INTEROP.md](INTEROP.md) has the interop matrix,
 ### AS_TRANS Handling
 
 - When encoding for a 2-byte-only peer: replace any ASN > 65535 with
-  AS_TRANS in AS_PATH. Emitting a compensating AS4_PATH is not implemented.
+  AS_TRANS in AS_PATH. Emitting a compensating AS4_PATH is not implemented;
+  ADR-0114 proposes the complete ingress and egress migration contract.
 - AS4_PATH and AS4_AGGREGATOR remain opaque attributes; inbound AS4_PATH is
-  not reconstructed into AS_PATH per RFC 6793 §4.2.3.
+  not reconstructed into AS_PATH per RFC 6793 §4.2.3. See
+  [ADR-0114](adr/0114-as4-path-migration.md); its status is Proposed and this
+  note continues to describe shipped behavior.
 
 ## RFC 9774 — AS_SET / AS_CONFED_SET Deprecation
 
