@@ -11540,6 +11540,7 @@ async fn runtime_lowering_per_family_limit_enforces_immediately() {
                 max_prefixes_ipv4: Some(1),
                 max_prefixes_ipv6: None,
                 gr_stale_routes_time: 360,
+                gr_peer_restart_time_max: 4095,
                 local_ipv6_nexthop: None,
                 remove_private_as: RemovePrivateAs::Disabled,
                 reply,
@@ -11587,6 +11588,7 @@ async fn runtime_lowering_aggregate_limit_keeps_next_update_semantics() {
                 max_prefixes_ipv4: None,
                 max_prefixes_ipv6: None,
                 gr_stale_routes_time: 360,
+                gr_peer_restart_time_max: 4095,
                 local_ipv6_nexthop: None,
                 remove_private_as: RemovePrivateAs::Disabled,
                 reply,
@@ -11714,6 +11716,35 @@ async fn notification_teardown_with_n_bit_uses_peer_graceful_restart() {
         _ => panic!("expected PeerGracefulRestart"),
     }
 }
+
+#[tokio::test]
+async fn peer_gr_restart_time_is_capped_before_rib_retention() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let mut neg = negotiated_session(65002, false);
+    neg.peer_gr_capable = true;
+    neg.peer_restart_time = 4095;
+    neg.peer_gr_families = vec![rustbgpd_wire::GracefulRestartFamily {
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+        forwarding_preserved: false,
+    }];
+    session.config.peer.graceful_restart = true;
+    session.config.gr_peer_restart_time_max = 300;
+    session.negotiated = Some(neg);
+
+    session.execute_actions(vec![Action::SessionDown]).await;
+
+    // Load-bearing regression proof: removing the `.min()` at the
+    // SessionDown-to-RIB boundary makes this observe the peer's 4095 instead
+    // of the local 300-second safety bound.
+    match rib_rx.try_recv().unwrap() {
+        RibUpdate::PeerGracefulRestart { restart_time, .. } => {
+            assert_eq!(restart_time, 300);
+        }
+        _ => panic!("expected PeerGracefulRestart"),
+    }
+}
+
 #[tokio::test]
 async fn hard_reset_always_bypasses_gr_even_with_n_bit() {
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
@@ -14792,6 +14823,7 @@ async fn export_profile_generation_changes_once_per_wire_runtime_mutation() {
                     max_prefixes_ipv4: None,
                     max_prefixes_ipv6: None,
                     gr_stale_routes_time: 999,
+                    gr_peer_restart_time_max: 333,
                     local_ipv6_nexthop,
                     remove_private_as,
                     reply,
@@ -14814,6 +14846,10 @@ async fn export_profile_generation_changes_once_per_wire_runtime_mutation() {
     }
 
     runtime_update(&mut session, None, RemovePrivateAs::Disabled).await;
+    assert_eq!(
+        session.config.gr_peer_restart_time_max, 333,
+        "dropping the hot-apply assignment leaves the default 4095"
+    );
     assert_eq!(
         session.export_encoder.snapshot().generation(),
         generation,

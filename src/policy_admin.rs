@@ -203,6 +203,7 @@ pub(crate) fn api_peer_group_to_config(definition: PeerGroupDefinition) -> PeerG
         families: definition.families,
         graceful_restart: definition.graceful_restart,
         gr_restart_time: definition.gr_restart_time,
+        gr_peer_restart_time_max: definition.gr_peer_restart_time_max,
         gr_stale_routes_time: definition.gr_stale_routes_time,
         llgr_stale_time: definition.llgr_stale_time,
         local_ipv6_nexthop: definition.local_ipv6_nexthop,
@@ -252,6 +253,7 @@ pub(crate) fn config_peer_group_to_api(definition: &PeerGroupConfig) -> PeerGrou
         families: definition.families.clone(),
         graceful_restart: definition.graceful_restart,
         gr_restart_time: definition.gr_restart_time,
+        gr_peer_restart_time_max: definition.gr_peer_restart_time_max,
         gr_stale_routes_time: definition.gr_stale_routes_time,
         llgr_stale_time: definition.llgr_stale_time,
         local_ipv6_nexthop: definition.local_ipv6_nexthop.clone(),
@@ -467,6 +469,7 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
                         .collect(),
                     graceful_restart: Some(cfg.graceful_restart),
                     gr_restart_time: Some(cfg.gr_restart_time),
+                    gr_peer_restart_time_max: Some(cfg.gr_peer_restart_time_max),
                     gr_stale_routes_time: Some(cfg.gr_stale_routes_time),
                     llgr_stale_time: if cfg.llgr_stale_time > 0 {
                         Some(cfg.llgr_stale_time)
@@ -915,6 +918,7 @@ remote_asn = 65002
                     families: vec![(rustbgpd_wire::Afi::Ipv4, rustbgpd_wire::Safi::Unicast)],
                     graceful_restart: true,
                     gr_restart_time: 120,
+                    gr_peer_restart_time_max: 4095,
                     gr_stale_routes_time: 360,
                     llgr_stale_time: 0,
                     gr_restart_eligible: false,

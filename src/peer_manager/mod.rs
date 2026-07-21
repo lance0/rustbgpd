@@ -686,6 +686,7 @@ impl PeerManager {
         transport.ttl_security = config.ttl_security;
         transport.local_ipv6_nexthop = config.local_ipv6_nexthop;
         transport.gr_stale_routes_time = config.gr_stale_routes_time;
+        transport.gr_peer_restart_time_max = config.gr_peer_restart_time_max;
         transport.llgr_stale_time = config.llgr_stale_time;
         transport.gr_restart_until = if config.gr_restart_eligible && config.graceful_restart {
             self.local_gr_restart_until

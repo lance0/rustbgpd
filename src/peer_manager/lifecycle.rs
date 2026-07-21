@@ -340,6 +340,7 @@ impl PeerManager {
             families: tc.peer.families.clone(),
             graceful_restart: tc.peer.graceful_restart,
             gr_restart_time: tc.peer.gr_restart_time,
+            gr_peer_restart_time_max: tc.gr_peer_restart_time_max,
             gr_stale_routes_time: tc.gr_stale_routes_time,
             llgr_stale_time: tc.llgr_stale_time,
             // Runtime delete rollback re-adds through the still-original
@@ -705,6 +706,7 @@ impl PeerManager {
                     || tc.max_prefixes_ipv4 != config.max_prefixes_ipv4
                     || tc.max_prefixes_ipv6 != config.max_prefixes_ipv6
                     || tc.gr_stale_routes_time != config.gr_stale_routes_time
+                    || tc.gr_peer_restart_time_max != config.gr_peer_restart_time_max
                     || export_knobs_changed,
                 export_knobs_changed,
                 managed.import_policy != config.import_policy
@@ -740,6 +742,7 @@ impl PeerManager {
                     config.max_prefixes_ipv4,
                     config.max_prefixes_ipv6,
                     config.gr_stale_routes_time,
+                    config.gr_peer_restart_time_max,
                     config.local_ipv6_nexthop,
                     config.remove_private_as,
                     PEER_POLICY_UPDATE_TIMEOUT,
@@ -823,6 +826,7 @@ impl PeerManager {
         managed.transport_config.max_prefixes_ipv4 = config.max_prefixes_ipv4;
         managed.transport_config.max_prefixes_ipv6 = config.max_prefixes_ipv6;
         managed.transport_config.gr_stale_routes_time = config.gr_stale_routes_time;
+        managed.transport_config.gr_peer_restart_time_max = config.gr_peer_restart_time_max;
         managed.transport_config.local_ipv6_nexthop = config.local_ipv6_nexthop;
         managed.transport_config.remove_private_as = config.remove_private_as;
         info!(%peer, "hot-applied neighbor config change in place (no session rebuild)");

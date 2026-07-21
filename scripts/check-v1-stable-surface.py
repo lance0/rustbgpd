@@ -36,6 +36,7 @@ EXPECTED_EFFECTIVE_DEFAULT_PATHS = (
     "Global.dynamic_neighbor_limit",
     "Neighbor.disable_ipv4_unicast",
     "Neighbor.families",
+    "Neighbor.gr_peer_restart_time_max",
     "Neighbor.gr_restart_time",
     "Neighbor.gr_stale_routes_time",
     "Neighbor.graceful_restart",
@@ -188,7 +189,7 @@ def check_effective_default_assertion_block(test_region: str, test: str) -> None
     ):
         fail(
             f"effective-default validation test {test!r} must assert exactly the "
-            "nine scalar scoped full paths in sorted order"
+            "ten scalar scoped full paths in sorted order"
         )
     for path, actual, _ in assertions:
         field = path.partition(".")[2]
@@ -329,7 +330,7 @@ def check_effective_defaults(
         lambda: check_effective_default_assertion_block(
             EFFECTIVE_DEFAULT_ASSERTION_RE.sub("", test_region), test
         ),
-        "must assert exactly the nine scalar scoped full paths",
+        "must assert exactly the ten scalar scoped full paths",
         "missing effective-default runtime assertion block",
     )
     for broken_macro, label in (

@@ -39,7 +39,8 @@ waiting for a natural flap. The matrix calls this out per row as
 fields "session reset".
 
 Static-neighbor edits whose **every** changed field is hot-applied
-(`description`, `max_prefixes`, `max_prefix_restart_seconds`, `gr_stale_routes_time`,
+(`description`, `max_prefixes`, `max_prefix_restart_seconds`,
+`gr_peer_restart_time_max`, `gr_stale_routes_time`,
 `local_ipv6_nexthop`, `remove_private_as`, `log_level`, and the
 import/export policy and chain fields) are applied **in place**: the
 session task, its TCP connection, and the FSM are untouched, and policy
@@ -112,6 +113,7 @@ reload).
 | `families` | live (effective next session) | Address families to negotiate in OPEN. Negotiated capability set is fixed for the life of a session. |
 | `graceful_restart` | live (effective next session) | GR capability advertised in OPEN. Toggling on an established session has no in-session effect. |
 | `gr_restart_time` | live (effective next session) | Advertised in GR capability. |
+| `gr_peer_restart_time_max` | live | Local-only cap on the received GR Restart Time. Hot-applied in place; the new value governs the next GR peer-down event and never changes the OPEN capability. |
 | `gr_stale_routes_time` | live | Used by the local stale-route reaper for received GR routes. Hot-applied in place; the new value governs the next GR peer-down event. |
 | `llgr_stale_time` | live (effective next session) | RFC 9494 LLGR capability stale time. |
 | `local_ipv6_nexthop` | live | Used on outbound advertisements; new value applied on next route emission. |
@@ -154,6 +156,7 @@ configure their keyring directly.
 | `families` | live (effective next session) | |
 | `graceful_restart` | live (effective next session) | |
 | `gr_restart_time` | live (effective next session) | |
+| `gr_peer_restart_time_max` | live (static session reset; dynamic next reconnect) | Inherited local helper cap. Peer-group edits rebuild static members; already accepted dynamic members keep their running cap until reconnect. A committed config transaction follows the transaction-overlay behavior above and bounces enabled dynamic members. |
 | `gr_stale_routes_time` | live | |
 | `llgr_stale_time` | live (effective next session) | |
 | `local_ipv6_nexthop` | live | |

@@ -332,7 +332,8 @@ pub enum PeerCommand {
     /// tearing the session task down (LAN-341). Every carried field is
     /// re-read from the session config on each evaluation (inbound UPDATE
     /// for `max_prefixes`, outbound emission for `local_ipv6_nexthop` /
-    /// `remove_private_as`, GR peer-down for `gr_stale_routes_time`), so
+    /// `remove_private_as`, GR peer-down for `gr_stale_routes_time` and
+    /// `gr_peer_restart_time_max`), so
     /// the swap takes effect on the next evaluation.
     UpdateRuntimeConfig {
         /// Maximum prefixes accepted before Cease/1 (None = unlimited).
@@ -345,6 +346,8 @@ pub enum PeerCommand {
         max_prefixes_ipv6: Option<u32>,
         /// Stale-route retention after peer restart (seconds).
         gr_stale_routes_time: u64,
+        /// Upper bound on the peer-advertised GR Restart Time.
+        gr_peer_restart_time_max: u16,
         /// Explicit IPv6 next-hop for eBGP (None = derive from socket).
         local_ipv6_nexthop: Option<std::net::Ipv6Addr>,
         /// Private AS removal mode for outbound `AS_PATH`.
@@ -1635,6 +1638,7 @@ impl PeerHandle {
         max_prefixes_ipv4: Option<u32>,
         max_prefixes_ipv6: Option<u32>,
         gr_stale_routes_time: u64,
+        gr_peer_restart_time_max: u16,
         local_ipv6_nexthop: Option<std::net::Ipv6Addr>,
         remove_private_as: crate::config::RemovePrivateAs,
         deadline: Duration,
@@ -1648,6 +1652,7 @@ impl PeerHandle {
                     max_prefixes_ipv4,
                     max_prefixes_ipv6,
                     gr_stale_routes_time,
+                    gr_peer_restart_time_max,
                     local_ipv6_nexthop,
                     remove_private_as,
                     reply: reply_tx,

@@ -1218,6 +1218,10 @@ impl Config {
             .gr_stale_routes_time
             .or_else(|| group.and_then(|g| g.gr_stale_routes_time))
             .unwrap_or(360);
+        transport.gr_peer_restart_time_max = neighbor
+            .gr_peer_restart_time_max
+            .or_else(|| group.and_then(|g| g.gr_peer_restart_time_max))
+            .unwrap_or(4095);
         transport.llgr_stale_time = neighbor
             .llgr_stale_time
             .or_else(|| group.and_then(|g| g.llgr_stale_time))
@@ -1347,6 +1351,7 @@ impl Config {
             families: Vec::new(),
             graceful_restart: None,
             gr_restart_time: None,
+            gr_peer_restart_time_max: None,
             gr_stale_routes_time: None,
             llgr_stale_time: None,
             local_ipv6_nexthop: None,
@@ -2096,6 +2101,7 @@ fn config_field_impact(field: &str) -> Option<(ConfigFieldImpact, &'static str)>
         | "max_prefixes_ipv4"
         | "max_prefixes_ipv6"
         | "max_prefix_restart_seconds"
+        | "gr_peer_restart_time_max"
         | "gr_stale_routes_time"
         | "local_ipv6_nexthop"
         | "remove_private_as"
@@ -2268,6 +2274,7 @@ pub fn describe_neighbor_changes(old: &Neighbor, new: &Neighbor) -> Vec<FieldCha
     cmp_field!(families);
     cmp_field!(graceful_restart);
     cmp_field!(gr_restart_time);
+    cmp_field!(gr_peer_restart_time_max);
     cmp_field!(gr_stale_routes_time);
     cmp_field!(llgr_stale_time);
     cmp_field!(local_ipv6_nexthop);
@@ -2390,6 +2397,7 @@ fn neighbor_runtime_equal(old: &Neighbor, new: &Neighbor) -> bool {
         && old.families == new.families
         && old.graceful_restart == new.graceful_restart
         && old.gr_restart_time == new.gr_restart_time
+        && old.gr_peer_restart_time_max == new.gr_peer_restart_time_max
         && old.gr_stale_routes_time == new.gr_stale_routes_time
         && old.llgr_stale_time == new.llgr_stale_time
         && old.local_ipv6_nexthop == new.local_ipv6_nexthop
@@ -3046,6 +3054,12 @@ impl Config {
                     .gr_restart_time
                     .or_else(|| group.and_then(|g| g.gr_restart_time))
                     .unwrap_or(120),
+            );
+            neighbor.gr_peer_restart_time_max = Some(
+                neighbor
+                    .gr_peer_restart_time_max
+                    .or_else(|| group.and_then(|g| g.gr_peer_restart_time_max))
+                    .unwrap_or(4095),
             );
             neighbor.gr_stale_routes_time = Some(
                 neighbor
@@ -5494,6 +5508,7 @@ pub fn describe_peer_group_changes(
     cmp_field!(families);
     cmp_field!(graceful_restart);
     cmp_field!(gr_restart_time);
+    cmp_field!(gr_peer_restart_time_max);
     cmp_field!(gr_stale_routes_time);
     cmp_field!(llgr_stale_time);
     cmp_field!(local_ipv6_nexthop);

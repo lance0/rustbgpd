@@ -399,7 +399,9 @@ fn find_hold_time_span(source: &str, value: u16) -> Option<(Range<usize>, String
 
 /// Try to locate a GR-related field from the error reason text.
 fn try_gr_field_span(source: &str, reason: &str) -> Option<(Range<usize>, String)> {
-    let field = if reason.contains("gr_restart_time") {
+    let field = if reason.contains("gr_peer_restart_time_max") {
+        "gr_peer_restart_time_max"
+    } else if reason.contains("gr_restart_time") {
         "gr_restart_time"
     } else if reason.contains("gr_stale_routes_time") {
         "gr_stale_routes_time"

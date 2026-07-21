@@ -357,6 +357,9 @@ pub struct TransportConfig {
     pub local_ipv6_nexthop: Option<Ipv6Addr>,
     /// Time to retain stale routes after peer restart (seconds). RFC 4724.
     pub gr_stale_routes_time: u64,
+    /// Local upper bound on the peer-advertised RFC 4724 Restart Time used
+    /// for initial disconnected stale-route retention.
+    pub gr_peer_restart_time_max: u16,
     /// Long-lived stale routes time (RFC 9494, seconds). 0 = disabled.
     pub llgr_stale_time: u32,
     /// Local restarting-speaker GR window. When set, outbound OPEN messages
@@ -478,6 +481,7 @@ impl TransportConfig {
             ttl_security: false,
             local_ipv6_nexthop: None,
             gr_stale_routes_time: 360,
+            gr_peer_restart_time_max: 4095,
             llgr_stale_time: 0,
             gr_restart_until: None,
             route_reflector_client: false,

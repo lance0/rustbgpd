@@ -894,6 +894,9 @@ message PeerGroupDefinition {
   repeated string families = 5;
   optional bool graceful_restart = 6;
   optional uint32 gr_restart_time = 7;
+  // Local upper bound on the peer-advertised RFC 4724 Restart Time used for
+  // disconnected stale-route retention. Unset inherits; valid range 1..4095.
+  optional uint32 gr_peer_restart_time_max = 27;
   optional uint64 gr_stale_routes_time = 8;
   optional uint32 llgr_stale_time = 9;
   optional string local_ipv6_nexthop = 10;
