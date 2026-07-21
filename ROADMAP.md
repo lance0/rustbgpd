@@ -390,10 +390,12 @@ new AFI/SAFI and EVPN dataplane expansion.
   compared under channel saturation/virtual retry, dirty policy swaps and
   repeated regrouping, stale session generations, and RTC membership churn,
   with fixed PR schedules plus a hard-capped weekly 24-fixture parameter sweep.
-  Seeds vary identities, not operation ordering or scenario length. Remaining:
-  automated failure minimization, a broader fault matrix, restart/persistence,
-  growth measurement, and long-running folded-state comparison (LAN-18) rather
-  than relying only on bounded convergence receipts.
+  Seeds vary identities, not operation ordering or scenario length. Automated
+  failure minimization is also shipped
+  ([#1049](https://github.com/lance0/rustbgpd/pull/1049)). Remaining: a broader
+  fault matrix, restart/persistence, growth measurement, and long-running
+  folded-state comparison (LAN-18) rather than relying only on bounded
+  convergence receipts.
 - **Turn shipped shadow tooling into external evidence.** The canonical semantic
   diff engine, `rbgp diff`, incumbent snapshot adapters, and BMP Adj-RIB-Out
   importer are shipped. The remaining adoption gate is a real BIRD/FRR/GoBGP
@@ -491,8 +493,10 @@ Details in the "Recently shipped" section below and ADR-0097.
   onboarding and per-RFC receipts/conformance page current, and keep the
   published Grafana dashboard aligned with the shipped metrics. The secure
   route-server profile and RFC 9687 Send Hold Timer pieces are now shipped.
-  OSS-Fuzz submission #15874 is open and build-checked; upstream review,
-  merge, and the first hosted green build remain before onboarding is done.
+  OSS-Fuzz submission
+  [#15874](https://github.com/google/oss-fuzz/pull/15874) was closed because the
+  project does not yet meet the upstream adoption threshold; local
+  ClusterFuzzLite adoption is deferred and tracked as LAN-525.
 - **Route-server adoption polish** — the ADR-0101/M83 profile shipped the
   secure preset: RFC 7947 transparency, Add-Path and `per_client_best`
   path-hiding mitigation, RFC 9234 OTC toward members (including dynamic /
