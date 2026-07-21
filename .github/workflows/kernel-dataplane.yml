@@ -376,6 +376,22 @@ jobs:
           cargo test -p rustbgpd-transport --lib "$receipt" -- \
             --ignored --exact --nocapture
 
+      - name: Run TCP-AO deletion and listener-queue boundary receipt
+        if: steps.tcp_ao.outputs.supported == 'true'
+        run: |
+          set -euo pipefail
+          receipt='socket_opts::tests::tcp_ao_delete_kernel_receipt_preserves_covering_owners_and_queue_boundary'
+          test_count="$({
+            cargo test -p rustbgpd-transport --lib -- --list
+          } | awk -v target="${receipt}:" \
+            '$1 == target && $2 == "test" { count++ } END { print count + 0 }')"
+          if [ "$test_count" -ne 1 ]; then
+            echo "error: expected exactly one kernel receipt named $receipt; found $test_count" >&2
+            exit 1
+          fi
+          cargo test -p rustbgpd-transport --lib "$receipt" -- \
+            --ignored --exact --nocapture
+
       # Buildx GHA layer cache (LAN-252): the bird.nic.cz tarball fetch and
       # the full BIRD source build live in layers keyed on the Dockerfile
       # content (which pins BIRD_VERSION and the configure flags), so warm
