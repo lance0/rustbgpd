@@ -904,7 +904,7 @@ Query the routing information base and subscribe to real-time route changes.
 | `ListReceivedRoutes` | Adj-RIB-In: all routes received from peers |
 | `ListBestRoutes` | Loc-RIB: best route per prefix after path selection |
 | `ListAdvertisedRoutes` | Adj-RIB-Out: routes advertised to a specific peer |
-| `ExplainAdvertisedRoute` | Dry-run export decision for one prefix (or, with `rd`, one VPN identity) to one peer: the full gate ladder in live evaluation order (split horizon, RFC 4456 reflection, family, RFC 9494 LLGR, RFC 5291 ORF, RFC 4684 RT membership, export policy with per-term labels, Adj-RIB-Out diff), produced by a dry run of the live staging body |
+| `ExplainAdvertisedRoute` | Dry-run export decision for one prefix (or, with `rd`, one VPN identity) to one peer: the full gate ladder in live evaluation order (split horizon, RFC 4456 reflection, family, RFC 9494 LLGR, RFC 5291 ORF, RFC 4684 RT membership, export policy with per-term labels, Adj-RIB-Out diff), produced by a dry run of the live staging body. For negotiated unicast Add-Path send, optional `source { peer_address, path_id }` selects one exact Adj-RIB-In candidate. |
 | `ExplainBestPath` | Show all candidates for a prefix with decisive comparison reasons; optional `peer_address` field scopes to that peer's Add-Path send view |
 | `ListFlowSpecRoutes` | FlowSpec routes in Adj-RIB-In / Loc-RIB view |
 | `ListEvpnRoutes` | EVPN routes (RFC 7432) in Loc-RIB view, filterable by route type / peer / RD |
@@ -986,6 +986,27 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 This dry-runs the current export decision for a single prefix and peer. The
 response includes the final decision, decisive reasons, selected best-route
 identity, and any export modifications that would be applied.
+
+For an IPv4/IPv6 unicast peer with negotiated Add-Path send, set the optional
+presence-bearing `source` message to explain one exact Adj-RIB-In candidate:
+
+```bash
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"peer_address":"10.0.0.2","prefix":"203.0.113.0","prefix_length":24,"source":{"peer_address":"198.51.100.7","path_id":0}}' \
+  localhost:50051 rustbgpd.v1.RibService/ExplainAdvertisedRoute
+```
+
+The echoed `source.path_id` remains the inbound Add-Path identity. The
+top-level response `path_id` is the independent, compact outbound rank
+rustbgpd would assign after eligibility and export policy. That outbound rank
+is 0 for a pre-selection/policy denial or a candidate
+beyond `add_path_send_max`. A later OTC or exact-wire denial retains the
+attempted non-zero rank, and the `adj_rib_out` rung compares that exact rank.
+Inbound ID 0 remains selectable because message presence, not a sentinel,
+distinguishes selection from the legacy winner-oriented query. Unknown source
+identity returns `NOT_FOUND`; a source selector without negotiated unicast
+Add-Path send returns `FAILED_PRECONDITION`. `source` is mutually exclusive
+with `rd` and `labeled`.
 
 Best-path explain is also available via `ExplainBestPath` RPC — it returns all
 candidates for a prefix with the decisive comparison reason for each. Set

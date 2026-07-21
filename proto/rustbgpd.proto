@@ -1750,6 +1750,19 @@ message ExplainAdvertisedRouteRequest {
   // export ladder for the prefix instead of the unicast ladder.
   // Mutually exclusive with rd.
   bool labeled = 5;
+  // Optional RFC 7911 Adj-RIB-In identity. When present, explain this
+  // exact source path instead of the Loc-RIB winner. Supported only for
+  // negotiated IPv4/IPv6 unicast Add-Path send; `path_id = 0` is a real
+  // source identity and is therefore distinct from this field being absent.
+  RouteSourceIdentity source = 6;
+}
+
+// Stable identity of one route in an Adj-RIB-In. RFC 7911 path identifiers
+// are assigned locally by the advertising speaker, so this inbound identity
+// is independent of the outbound rank returned as `path_id` by export explain.
+message RouteSourceIdentity {
+  string peer_address = 1;
+  uint32 path_id = 2;
 }
 
 // Verdict of one export gate for one (route, peer) explain.
@@ -1856,6 +1869,10 @@ message ExplainAdvertisedRouteResponse {
   // Route Distinguisher echoed back for a VPN explain; empty for
   // unicast.
   string rd = 16;
+  // Echo of the requested Adj-RIB-In source identity. Absent for the
+  // legacy winner-oriented query. `path_id` above remains the independently
+  // assigned outbound Add-Path rank (0 when the source is not selected).
+  RouteSourceIdentity source = 17;
 }
 
 message ExplainBestPathRequest {

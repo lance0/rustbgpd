@@ -65,6 +65,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Exact per-candidate export explain for unicast Add-Path.**
+  `ExplainAdvertisedRoute` and `rbgp rib advertised --explain` can select a
+  presence-bearing Adj-RIB-In source peer/path ID (including ID 0) for a peer
+  with negotiated IPv4/IPv6 unicast Add-Path send. The response keeps that
+  inbound identity separate from the independently assigned compact outbound
+  rank, explains policy/cap/OTC/exact-wire denials, and diffs the exact rank
+  against Adj-RIB-Out. Selector absence preserves the existing winner view.
+
 - **TCP-AO successors can be selected live in a second immutable generation.**
   After an add-only SIGHUP installs the successor everywhere, a later SIGHUP
   sets only local RNext and commits predecessor deprecation after one

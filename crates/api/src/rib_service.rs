@@ -13,11 +13,12 @@ use tracing::debug;
 use crate::event_service::{route_event_to_bgp_event, stream_lag_bgp_event};
 use crate::proto;
 use rustbgpd_rib::{
-    BgpLsFamily, BgpLsRibRoute, EvpnRibRoute, ExplainAdvertisedRoute, ExplainBestPath,
-    ExplainDecision, ExportGateVerdict, FlowSpecRoute, LabeledRibRoute, OrrLinkSnapshot,
-    OrrNodeSnapshot, OrrStatusSnapshot, OrrTopologySnapshot, OrrVantageStatus, RibUpdate, Route,
-    RouteEventType, RoutePage, RoutePageError, RoutePageVersion, RouteQueryFilter, RouteQueryKey,
-    RouteQueryScope, RtcRibRoute, VpnRibRoute, route_query_key,
+    BgpLsFamily, BgpLsRibRoute, EvpnRibRoute, ExplainAdvertisedRoute, ExplainAdvertisedRouteError,
+    ExplainBestPath, ExplainDecision, ExportGateVerdict, FlowSpecRoute, LabeledRibRoute,
+    OrrLinkSnapshot, OrrNodeSnapshot, OrrStatusSnapshot, OrrTopologySnapshot, OrrVantageStatus,
+    RibUpdate, Route, RouteEventType, RoutePage, RoutePageError, RoutePageVersion,
+    RouteQueryFilter, RouteQueryKey, RouteQueryScope, RouteSourceIdentity, RtcRibRoute,
+    VpnRibRoute, route_query_key,
 };
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::{
@@ -31,6 +32,15 @@ pub type BlackholeDiscardSnapshotFn =
 /// Live snapshot provider for daemon-owned general FIB route status.
 pub type FibRouteSnapshotFn =
     std::sync::Arc<dyn Fn() -> Vec<proto::FibRouteStatus> + Send + Sync + 'static>;
+
+fn explain_advertised_error_status(error: ExplainAdvertisedRouteError) -> Status {
+    match error {
+        ExplainAdvertisedRouteError::NotFound(message) => Status::not_found(message),
+        ExplainAdvertisedRouteError::FailedPrecondition(message) => {
+            Status::failed_precondition(message)
+        }
+    }
+}
 
 /// One CRUD operation for the daemon FIB-table control hook (`[[fib_tables]]`).
 ///
@@ -248,7 +258,8 @@ impl RibService {
         prefix: Prefix,
         rd: Option<rustbgpd_wire::RouteDistinguisher>,
         labeled: bool,
-    ) -> Result<Option<ExplainAdvertisedRoute>, Status> {
+        source: Option<RouteSourceIdentity>,
+    ) -> Result<ExplainAdvertisedRoute, Status> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.rib_tx
             .send(RibUpdate::ExplainAdvertisedRoute {
@@ -256,6 +267,7 @@ impl RibService {
                 prefix,
                 rd,
                 labeled,
+                source,
                 reply: reply_tx,
             })
             .await
@@ -263,7 +275,8 @@ impl RibService {
 
         reply_rx
             .await
-            .map_err(|_| Status::internal("RIB manager dropped reply"))
+            .map_err(|_| Status::internal("RIB manager dropped reply"))?
+            .map_err(explain_advertised_error_status)
     }
 
     async fn query_explain_best_path(
@@ -1137,6 +1150,10 @@ fn explain_to_proto(explain: ExplainAdvertisedRoute) -> proto::ExplainAdvertised
         update_group_id: explain.update_group_id,
         already_advertised: explain.already_advertised,
         rd: explain.rd.map_or_else(String::new, |rd| rd.to_string()),
+        source: explain.source.map(|source| proto::RouteSourceIdentity {
+            peer_address: source.peer.to_string(),
+            path_id: source.path_id,
+        }),
     }
 }
 
@@ -1468,14 +1485,32 @@ impl proto::rib_service_server::RibService for RibService {
                 "rd and labeled are mutually exclusive: a route is VPN or labeled-unicast, not both",
             ));
         }
-        let Some(explain) = self
-            .query_explain_advertised_route(peer, prefix, rd, req.labeled)
-            .await?
-        else {
-            return Err(Status::not_found(
-                "peer not registered for outbound updates",
+        if req.source.is_some() && (rd.is_some() || req.labeled) {
+            return Err(Status::invalid_argument(
+                "source is mutually exclusive with rd and labeled",
             ));
-        };
+        }
+        let source = req
+            .source
+            .map(|source| {
+                source
+                    .peer_address
+                    .parse::<IpAddr>()
+                    .map(|peer| RouteSourceIdentity {
+                        peer,
+                        path_id: source.path_id,
+                    })
+                    .map_err(|_| {
+                        Status::invalid_argument(format!(
+                            "invalid source peer_address: {}",
+                            source.peer_address
+                        ))
+                    })
+            })
+            .transpose()?;
+        let explain = self
+            .query_explain_advertised_route(peer, prefix, rd, req.labeled, source)
+            .await?;
         Ok(Response::new(explain_to_proto(explain)))
     }
 
@@ -4038,12 +4073,32 @@ mod tests {
             prefix_length: 24,
             rd: String::new(),
             labeled: false,
+            source: None,
         });
         let err = svc.explain_advertised_route(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
     }
 
+    #[test]
+    fn explain_advertised_route_errors_map_to_grpc_codes() {
+        let not_found = explain_advertised_error_status(ExplainAdvertisedRouteError::NotFound(
+            "source path ID 9 is unknown".to_string(),
+        ));
+        assert_eq!(not_found.code(), tonic::Code::NotFound);
+        assert!(not_found.message().contains("path ID 9"));
+
+        let precondition = explain_advertised_error_status(
+            ExplainAdvertisedRouteError::FailedPrecondition("Add-Path send not active".to_string()),
+        );
+        assert_eq!(precondition.code(), tonic::Code::FailedPrecondition);
+        // Load-bearing proof: swapping or collapsing either mapping makes this test red.
+    }
+
     #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one RPC round trip proves every export-explain field including source presence"
+    )]
     async fn explain_advertised_route_round_trips() {
         let (tx, mut rx) = mpsc::channel(16);
         let svc = RibService::new(tx);
@@ -4053,6 +4108,10 @@ mod tests {
             prefix_length: 24,
             rd: String::new(),
             labeled: false,
+            source: Some(proto::RouteSourceIdentity {
+                peer_address: "198.51.100.2".to_string(),
+                path_id: 0,
+            }),
         });
 
         let call = tokio::spawn(async move { svc.explain_advertised_route(req).await });
@@ -4063,11 +4122,19 @@ mod tests {
                 prefix,
                 rd,
                 labeled,
+                source,
                 reply,
             } => {
                 assert_eq!(peer, "192.0.2.1".parse::<IpAddr>().unwrap());
                 assert_eq!(rd, None);
                 assert!(!labeled);
+                assert_eq!(
+                    source,
+                    Some(RouteSourceIdentity {
+                        peer: "198.51.100.2".parse().unwrap(),
+                        path_id: 0,
+                    })
+                );
                 assert_eq!(
                     prefix,
                     Prefix::V4(Ipv4Prefix::new("203.0.113.0".parse().unwrap(), 24))
@@ -4077,7 +4144,7 @@ mod tests {
             _ => panic!("unexpected update variant"),
         };
         reply
-            .send(Some(ExplainAdvertisedRoute {
+            .send(Ok(ExplainAdvertisedRoute {
                 decision: ExplainDecision::Advertise,
                 peer: "192.0.2.1".parse().unwrap(),
                 prefix: Prefix::V4(Ipv4Prefix::new("203.0.113.0".parse().unwrap(), 24)),
@@ -4116,6 +4183,10 @@ mod tests {
                 update_group_id: Some(3),
                 already_advertised: true,
                 rd: None,
+                source: Some(RouteSourceIdentity {
+                    peer: "198.51.100.2".parse().unwrap(),
+                    path_id: 0,
+                }),
             }))
             .unwrap();
 
@@ -4143,6 +4214,15 @@ mod tests {
         assert_eq!(resp.update_group_id, Some(3));
         assert!(resp.already_advertised);
         assert_eq!(resp.rd, "");
+        assert_eq!(resp.source.as_ref().map(|source| source.path_id), Some(0));
+        assert_eq!(
+            resp.source
+                .as_ref()
+                .map(|source| source.peer_address.as_str()),
+            Some("198.51.100.2")
+        );
+        // Load-bearing proof: replacing presence with path_id != 0 drops this
+        // source at either API boundary and makes both assertions red.
     }
 
     #[test]

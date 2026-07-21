@@ -498,6 +498,16 @@ pub struct JsonExplainAdvertisedRoute {
     /// Route Distinguisher for a VPN explain; absent for unicast.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub rd: String,
+    /// Requested Adj-RIB-In source identity; absent on legacy winner explain.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<JsonRouteSourceIdentity>,
+}
+
+#[derive(Serialize)]
+pub struct JsonRouteSourceIdentity {
+    pub peer_address: String,
+    /// Inbound RFC 7911 path identifier. Zero is retained in JSON.
+    pub path_id: u32,
 }
 
 #[derive(Serialize)]

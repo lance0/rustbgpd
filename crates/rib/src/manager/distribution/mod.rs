@@ -993,6 +993,7 @@ impl ExportGateTrace {
             update_group_id,
             already_advertised: self.suppressed_identical,
             rd,
+            source: None,
         }
     }
 }

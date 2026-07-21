@@ -7736,7 +7736,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__rib__subcmd__advertised)
-            opts="-a -s -j -h --family --explain --rd --labeled --addr --token-file --json --no-color --help"
+            opts="-a -s -j -h --family --explain --rd --labeled --source-peer --source-path-id --addr --token-file --json --no-color --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -7751,6 +7751,14 @@ _rbgp() {
                     return 0
                     ;;
                 --rd)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --source-peer)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --source-path-id)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;

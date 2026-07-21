@@ -7,6 +7,13 @@ resolved.
 
 ## Resolved
 
+- **Add-Path export explain covers exact candidates (resolved).** For
+  negotiated IPv4/IPv6 unicast Add-Path send, `ExplainAdvertisedRoute` and
+  `rbgp rib advertised --explain` accept a presence-bearing Adj-RIB-In source
+  peer/path ID (including ID 0), then report its independent compact outbound
+  rank and rank-specific Adj-RIB-Out state. Legacy winner, VPN, labeled, ORR,
+  and `ExplainBestPath` behavior is unchanged when the selector is absent.
+
 - **Large community duplicates normalized (resolved).** Per RFC 8092,
   received duplicate values are silently removed and locally constructed
   duplicates are removed again at encode. Both boundaries retain first-seen
@@ -349,9 +356,6 @@ resolved.
   to invoke `FlowSpecRule::validate_encoded_len` first. The prior
   silent-truncation behavior is fixed in `rustbgpd-wire` 0.9.2; this
   note is retained as documentation of the resulting hard cap.
-- **Add-Path explain only covers best path.** `ExplainAdvertisedRoute`
-  operates on the single Loc-RIB best path. For Add-Path peers, non-best
-  candidates that are actually advertised are invisible to explain.
 - **MRT `originated_time` silently clamps to `u32::MAX`.** The MRT
   `TABLE_DUMP_V2` encoder clamps `originated_time` to `u32::MAX`
   instead of returning an error when the timestamp exceeds the 32-bit

@@ -1539,6 +1539,27 @@ async fn add_path_explain_does_not_mark_exact_rejected_rank_as_advertised() {
         .expect("rank-two candidate");
     assert_eq!(rejected.advertised_path_id, 0);
 
+    let selected = query_explain_advertised_source(
+        &tx,
+        target,
+        Prefix::V4(prefix),
+        crate::update::RouteSourceIdentity {
+            peer: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 21)),
+            path_id: 0,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(selected.decision, crate::update::ExplainDecision::Deny);
+    assert_eq!(selected.path_id, 2, "exact denial retains attempted rank");
+    assert_eq!(
+        selected.gates.last().map(|step| (step.gate, step.code)),
+        Some(("exact_export", "exact_export_rejected"))
+    );
+
+    // Load-bearing proof: removing the exact-export overlay makes this
+    // candidate advertise; assigning rank after the overlay makes path_id 0.
+
     drop(tx);
     handle.await.unwrap();
 }
