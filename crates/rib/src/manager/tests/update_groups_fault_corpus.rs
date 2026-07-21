@@ -233,6 +233,7 @@ enum PolicySpec {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MembershipExpectation {
     SharedGroup,
+    SeparateSharedGroupFrom(Ipv4Addr),
     PeerContextFallback,
     AddPathFallback,
     OrfFallback,
@@ -964,6 +965,24 @@ async fn assert_membership(
             label.starts_with("group:"),
             "grouped path did not group {peer}: {label}"
         ),
+        MembershipExpectation::SeparateSharedGroupFrom(other) if force_ungrouped => {
+            let other_label = oracle.group_label(other).await;
+            assert!(
+                !label.starts_with("group:") && !other_label.starts_with("group:"),
+                "forced oracle unexpectedly grouped comparison peers: \
+                 {peer}={label}, {other}={other_label}"
+            );
+        }
+        MembershipExpectation::SeparateSharedGroupFrom(other) => {
+            let other_label = oracle.group_label(other).await;
+            assert!(
+                label.starts_with("group:")
+                    && other_label.starts_with("group:")
+                    && label != other_label,
+                "policy regroup did not split shared update groups: \
+                 {peer}={label}, {other}={other_label}"
+            );
+        }
         MembershipExpectation::PeerContextFallback => assert!(
             !label.starts_with("group:") && (force_ungrouped || label == "policy_peer_context"),
             "peer-context transition did not reach per-peer path for {peer}: {label}"
@@ -1851,7 +1870,103 @@ fn replacement_during_resync_schedule(seed: u64) -> Schedule {
     }
 }
 
-fn schedules(seed: u64) -> [Schedule; 6] {
+fn combined_saturation_regroup_replacement_schedule(seed: u64) -> Schedule {
+    let first_octet = seed_octet(seed, 7);
+    let second_octet = distinct_seed_octet(seed, 8, first_octet);
+    let stale_octet = distinct_seed_octet_from(seed, 9, &[first_octet, second_octet]);
+    let first = pfx(first_octet, 14);
+    let second = pfx(second_octet, 15);
+    let stale = pfx(stale_octet, 16);
+    Schedule {
+        name: "combined-saturation-regroup-session-replacement",
+        seed,
+        comparison: ComparisonMode::SemanticFold,
+        require_vpn_churn: false,
+        ops: vec![
+            Op::PeerUp {
+                peer: SOURCE,
+                generation: 2,
+                capacity: 64,
+                families: FamilySet::Unicast,
+            },
+            Op::PeerUp {
+                peer: LEFT,
+                generation: 2,
+                capacity: 64,
+                families: FamilySet::Unicast,
+            },
+            Op::PeerUp {
+                peer: RIGHT,
+                generation: 2,
+                capacity: 64,
+                families: FamilySet::Unicast,
+            },
+            // Replace RIGHT before injecting faults so generation 3 owns
+            // both the full outbound channel and the dirty/regroup residue.
+            Op::PeerUp {
+                peer: RIGHT,
+                generation: 3,
+                capacity: 1,
+                families: FamilySet::Unicast,
+            },
+            Op::DrainOne(RIGHT),
+            Op::Announce {
+                peer: SOURCE,
+                generation: 2,
+                prefix: first,
+                local_pref: 100,
+            },
+            Op::Announce {
+                peer: SOURCE,
+                generation: 2,
+                prefix: second,
+                local_pref: 110,
+            },
+            // The second announce misses the full generation-3 channel.
+            // Regroup while that current session is dirty, then inject the
+            // superseded generation's teardown and best-path candidate.
+            Op::ReplacePolicy {
+                peer: RIGHT,
+                policy: PolicySpec::DenyOne(first),
+            },
+            // Removing the policy-replacement membership recompute leaves
+            // RIGHT in LEFT's group and makes this boundary fail.
+            Op::AssertMembership {
+                peer: RIGHT,
+                expectation: MembershipExpectation::SeparateSharedGroupFrom(LEFT),
+            },
+            Op::PeerDown {
+                peer: RIGHT,
+                generation: 2,
+            },
+            Op::Announce {
+                peer: RIGHT,
+                generation: 2,
+                prefix: stale,
+                local_pref: 250,
+            },
+            // Clearing generation 3 on the stale PeerDown, or allowing this
+            // predecessor route through the session fence, makes this fail.
+            Op::AssertLocRibAbsent(stale),
+            Op::DrainOne(RIGHT),
+            Op::AdvanceRetry,
+            // The stale generation must not undo the dirty current session's
+            // regroup while its retry is pending.
+            Op::AssertMembership {
+                peer: RIGHT,
+                expectation: MembershipExpectation::SeparateSharedGroupFrom(LEFT),
+            },
+            Op::DrainOne(RIGHT),
+            Op::ReplacePolicy {
+                peer: RIGHT,
+                policy: PolicySpec::Permit,
+            },
+            Op::DrainAvailable,
+        ],
+    }
+}
+
+fn schedules(seed: u64) -> [Schedule; 7] {
     [
         saturation_schedule(seed),
         dirty_policy_schedule(seed),
@@ -1859,6 +1974,7 @@ fn schedules(seed: u64) -> [Schedule; 6] {
         add_path_membership_schedule(seed),
         orf_membership_schedule(seed),
         replacement_during_resync_schedule(seed),
+        combined_saturation_regroup_replacement_schedule(seed),
     ]
 }
 
@@ -2113,7 +2229,7 @@ fn completion_gate_rejects_equal_but_incomplete_streams() {
 #[test]
 fn extended_seed_sweep_varies_every_schedule_operation_fixture() {
     let baseline = schedules(DEFAULT_SEED_START);
-    let mut varied = [false; 6];
+    let mut varied = vec![false; baseline.len()];
     for offset in 1..DEFAULT_SEED_COUNT {
         let seed = DEFAULT_SEED_START
             + u64::try_from(offset).expect("extended seed count is capped at 64");
@@ -2124,7 +2240,7 @@ fn extended_seed_sweep_varies_every_schedule_operation_fixture() {
     }
 
     // Reverting the mixer to raw little-endian seed bytes leaves four of
-    // these six actual operation fixtures unchanged across the default sweep.
+    // these actual operation fixtures unchanged across the default sweep.
     for (schedule, varied) in baseline.iter().zip(varied) {
         assert!(
             varied,
