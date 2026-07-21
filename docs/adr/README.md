@@ -122,6 +122,7 @@ consequences so future contributors understand *why*, not just *what*.
 | [0111](0111-authoritative-policy-replacement-continuation.md) | Actor-owned authoritative export-policy replacement continuation | Proposed | 2026-07-20 |
 | [0112](0112-rfc-8212-ebgp-requires-policy.md) | Opt-in RFC 8212 explicit-policy enforcement for eBGP | Proposed | 2026-07-21 |
 | [0113](0113-outbound-prefix-limits.md) | Per-peer outbound unicast prefix limits | Proposed | 2026-07-21 |
+| [0114](0114-as4-path-migration.md) | RFC 6793 AS4 path migration across legacy peers | Proposed | 2026-07-21 |
 
 ## Template
 
