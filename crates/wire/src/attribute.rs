@@ -688,7 +688,8 @@ pub enum PathAttribute {
     Communities(Vec<u32>),
     /// RFC 4360 EXTENDED COMMUNITIES.
     ExtendedCommunities(Vec<ExtendedCommunity>),
-    /// RFC 8092 LARGE COMMUNITIES.
+    /// RFC 8092 LARGE COMMUNITIES. Duplicate values are normalized at
+    /// decode and encode boundaries while retaining first-seen order.
     LargeCommunities(Vec<LargeCommunity>),
     /// RFC 4456 `ORIGINATOR_ID` — original router-id of the route.
     OriginatorId(Ipv4Addr),
@@ -1242,14 +1243,16 @@ fn decode_attribute_value(
                     ),
                 });
             }
+            let mut seen = std::collections::HashSet::with_capacity(value.len() / 12);
             let communities = value
                 .chunks_exact(12)
-                .map(|c| {
-                    LargeCommunity::new(
+                .filter_map(|c| {
+                    let community = LargeCommunity::new(
                         u32::from_be_bytes([c[0], c[1], c[2], c[3]]),
                         u32::from_be_bytes([c[4], c[5], c[6], c[7]]),
                         u32::from_be_bytes([c[8], c[9], c[10], c[11]]),
-                    )
+                    );
+                    seen.insert(community).then_some(community)
                 })
                 .collect();
             Ok(PathAttribute::LargeCommunities(communities))
@@ -2223,7 +2226,11 @@ pub fn encode_path_attributes(
             PathAttribute::LargeCommunities(communities) => {
                 flags = attr_flags::OPTIONAL | attr_flags::TRANSITIVE;
                 type_code = attr_type::LARGE_COMMUNITIES;
+                let mut seen = std::collections::HashSet::with_capacity(communities.len());
                 for &c in communities {
+                    if !seen.insert(c) {
+                        continue;
+                    }
                     value.extend_from_slice(&c.global_admin.to_be_bytes());
                     value.extend_from_slice(&c.local_data1.to_be_bytes());
                     value.extend_from_slice(&c.local_data2.to_be_bytes());
@@ -4676,6 +4683,23 @@ mod tests {
         );
     }
     #[test]
+    fn decode_large_community_duplicates_preserves_first_seen_order() {
+        // RFC 8092 §3: a receiver silently removes redundant values.
+        // Load-bearing: removing receive-side dedup returns [b, a, a];
+        // reversing/sorting the retained values returns [a, b].
+        let a = LargeCommunity::new(65001, 100, 200);
+        let b = LargeCommunity::new(65002, 300, 400);
+        let mut buf = vec![0xC0, 32, 36];
+        for community in [b, a, a] {
+            buf.extend_from_slice(&community.global_admin.to_be_bytes());
+            buf.extend_from_slice(&community.local_data1.to_be_bytes());
+            buf.extend_from_slice(&community.local_data2.to_be_bytes());
+        }
+
+        let attrs = decode_path_attributes(&buf, true, &[]).unwrap();
+        assert_eq!(attrs, vec![PathAttribute::LargeCommunities(vec![b, a])]);
+    }
+    #[test]
     fn decode_large_community_bad_length() {
         // 10 bytes — not a multiple of 12
         let buf = [0xC0, 32, 10, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0];
@@ -4713,6 +4737,28 @@ mod tests {
         let decoded = decode_path_attributes(&buf, true, &[]).unwrap();
         assert_eq!(decoded.len(), 1);
         assert_eq!(decoded[0], PathAttribute::LargeCommunities(lcs));
+    }
+    #[test]
+    fn encode_large_community_duplicates_preserves_first_seen_order() {
+        // RFC 8092 §3: duplicate values must not be transmitted.
+        // Load-bearing: removing encode-side dedup changes the raw length to
+        // 36 and emits a third value; reversing/sorting emits [a, b].
+        let a = LargeCommunity::new(65001, 100, 200);
+        let b = LargeCommunity::new(65002, 300, 400);
+        let attr = PathAttribute::LargeCommunities(vec![b, a, a]);
+        let mut buf = Vec::new();
+        encode_path_attributes(&[attr], &mut buf, true, false).unwrap();
+
+        let mut expected = vec![0xC0, 32, 24];
+        for community in [b, a] {
+            expected.extend_from_slice(&community.global_admin.to_be_bytes());
+            expected.extend_from_slice(&community.local_data1.to_be_bytes());
+            expected.extend_from_slice(&community.local_data2.to_be_bytes());
+        }
+        assert_eq!(buf, expected);
+
+        let decoded = decode_path_attributes(&buf, true, &[]).unwrap();
+        assert_eq!(decoded, vec![PathAttribute::LargeCommunities(vec![b, a])]);
     }
     #[test]
     fn large_community_expected_flags_validated() {

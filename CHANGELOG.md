@@ -11,6 +11,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **RFC 8092 Large Community duplicate normalization.** Received attributes
+  silently retain only the first occurrence of each value, and the encoder
+  applies the same stable deduplication so locally constructed API or policy
+  attributes cannot transmit duplicates. Distinct-value order, flags,
+  length-encoding rules, and malformed-length behavior remain unchanged; the
+  emitted length is recomputed from the retained values.
+
 - **TCP-AO RNext updates preserve socket policy and fresh counters.** Runtime
   RNext selection now read-modify-writes Linux `TCP_AO_INFO` without forcing
   Current or resetting counters, and composite inspection returns the trailing
