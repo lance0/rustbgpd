@@ -11,6 +11,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Peer-advertised Graceful Restart retention can be bounded locally.**
+  Neighbors and peer groups accept `gr_peer_restart_time_max` (default 4095)
+  to cap the RFC 4724 Restart Time used for initial disconnected stale-route
+  retention without changing the Restart Time rustbgpd advertises in its OPEN.
+
 - **RFC 1997 export parity for EVPN and FlowSpec.** Source routes carrying
   `NO_EXPORT` or `NO_EXPORT_SUBCONFED` are suppressed toward honor-mode eBGP
   peers across live updates, initial dumps, route refresh, and forced resync;

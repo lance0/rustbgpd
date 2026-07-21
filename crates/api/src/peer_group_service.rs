@@ -81,6 +81,11 @@ fn proto_definition_to_input(
         .map(u16::try_from)
         .transpose()
         .map_err(|_| Status::invalid_argument("gr_restart_time exceeds u16 range"))?;
+    let gr_peer_restart_time_max = definition
+        .gr_peer_restart_time_max
+        .map(u16::try_from)
+        .transpose()
+        .map_err(|_| Status::invalid_argument("gr_peer_restart_time_max exceeds u16 range"))?;
     let import_policy = definition
         .import_policy
         .into_iter()
@@ -133,6 +138,7 @@ fn proto_definition_to_input(
         families,
         graceful_restart: definition.graceful_restart,
         gr_restart_time,
+        gr_peer_restart_time_max,
         gr_stale_routes_time: definition.gr_stale_routes_time,
         llgr_stale_time: definition.llgr_stale_time,
         local_ipv6_nexthop: definition.local_ipv6_nexthop,
@@ -189,6 +195,7 @@ fn input_definition_to_proto(definition: &PeerGroupDefinition) -> proto::PeerGro
         families: definition.families.clone(),
         graceful_restart: definition.graceful_restart,
         gr_restart_time: definition.gr_restart_time.map(u32::from),
+        gr_peer_restart_time_max: definition.gr_peer_restart_time_max.map(u32::from),
         gr_stale_routes_time: definition.gr_stale_routes_time,
         llgr_stale_time: definition.llgr_stale_time,
         local_ipv6_nexthop: definition.local_ipv6_nexthop.clone(),
@@ -705,6 +712,18 @@ mod tests {
         let err = proto_definition_to_input(invalid).unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
         assert!(err.message().contains("orr_vantage"));
+    }
+
+    /// Load-bearing: dropping either conversion assignment loses the cap on
+    /// one side of the peer-group CRUD round trip.
+    #[test]
+    fn gr_peer_restart_time_max_round_trips() {
+        let mut definition = sample_definition();
+        definition.gr_peer_restart_time_max = Some(300);
+        let input = proto_definition_to_input(definition).unwrap();
+        assert_eq!(input.gr_peer_restart_time_max, Some(300));
+        let back = input_definition_to_proto(&input);
+        assert_eq!(back.gr_peer_restart_time_max, Some(300));
     }
 
     /// RFC 9687 `send_hold_time` round-trips proto -> input -> proto.

@@ -646,6 +646,24 @@ impl Config {
                 });
             }
             if let Some(t) = neighbor
+                .gr_peer_restart_time_max
+                .or_else(|| group.and_then(|g| g.gr_peer_restart_time_max))
+                && t == 0
+            {
+                return Err(ConfigError::InvalidGrConfig {
+                    reason: "gr_peer_restart_time_max must be > 0".to_string(),
+                });
+            }
+            if let Some(t) = neighbor
+                .gr_peer_restart_time_max
+                .or_else(|| group.and_then(|g| g.gr_peer_restart_time_max))
+                && t > 4095
+            {
+                return Err(ConfigError::InvalidGrConfig {
+                    reason: format!("gr_peer_restart_time_max {t} exceeds 4095 (12-bit max)"),
+                });
+            }
+            if let Some(t) = neighbor
                 .gr_stale_routes_time
                 .or_else(|| group.and_then(|g| g.gr_stale_routes_time))
                 && t == 0
@@ -2121,6 +2139,22 @@ fn validate_peer_group(
         return Err(ConfigError::InvalidGrConfig {
             reason: format!(
                 "peer_group {name:?}: gr_restart_time must be > 0 when graceful_restart is enabled"
+            ),
+        });
+    }
+    if let Some(t) = group.gr_peer_restart_time_max
+        && t == 0
+    {
+        return Err(ConfigError::InvalidGrConfig {
+            reason: format!("peer_group {name:?}: gr_peer_restart_time_max must be > 0"),
+        });
+    }
+    if let Some(t) = group.gr_peer_restart_time_max
+        && t > 4095
+    {
+        return Err(ConfigError::InvalidGrConfig {
+            reason: format!(
+                "peer_group {name:?}: gr_peer_restart_time_max {t} exceeds 4095 (12-bit max)"
             ),
         });
     }

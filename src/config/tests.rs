@@ -541,6 +541,7 @@ families = ["ipv6_unicast"]
 hold_time = 300
 graceful_restart = false
 gr_restart_time = 0
+gr_peer_restart_time_max = 1800
 gr_stale_routes_time = 900
 llgr_stale_time = 1800
 disable_ipv4_unicast = true
@@ -551,6 +552,7 @@ hold_time = 300
 send_hold_time = 800
 graceful_restart = false
 gr_restart_time = 0
+gr_peer_restart_time_max = 1800
 gr_stale_routes_time = 900
 llgr_stale_time = 1800
 disable_ipv4_unicast = true
@@ -573,6 +575,7 @@ hold_time = 45
 send_hold_time = 1000
 graceful_restart = true
 gr_restart_time = 240
+gr_peer_restart_time_max = 300
 gr_stale_routes_time = 720
 llgr_stale_time = 60
 disable_ipv4_unicast = false
@@ -659,6 +662,7 @@ fn v1_stable_effective_defaults_match_runtime_resolution() {
         explicit_dynamic_neighbor_limit,
     );
     let disable_ipv4_unicast = bare_peer.disable_ipv4_unicast;
+    let gr_peer_restart_time_max = bare_transport.gr_peer_restart_time_max;
     let gr_restart_time = bare_peer.gr_restart_time;
     let gr_stale_routes_time = bare_transport.gr_stale_routes_time;
     let graceful_restart = bare_peer.graceful_restart;
@@ -675,6 +679,11 @@ fn v1_stable_effective_defaults_match_runtime_resolution() {
         (100, 500)
     );
     assert_v1_effective_default!("Neighbor.disable_ipv4_unicast", disable_ipv4_unicast, false);
+    assert_v1_effective_default!(
+        "Neighbor.gr_peer_restart_time_max",
+        gr_peer_restart_time_max,
+        4095
+    );
     assert_v1_effective_default!("Neighbor.gr_restart_time", gr_restart_time, 120);
     assert_v1_effective_default!("Neighbor.gr_stale_routes_time", gr_stale_routes_time, 360);
     assert_v1_effective_default!("Neighbor.graceful_restart", graceful_restart, true);
@@ -713,6 +722,7 @@ fn v1_stable_effective_defaults_match_runtime_resolution() {
             transport.peer.send_hold_time,
             transport.peer.graceful_restart,
             transport.peer.gr_restart_time,
+            transport.gr_peer_restart_time_max,
             transport.gr_stale_routes_time,
             (transport.peer.llgr_stale_time, transport.llgr_stale_time),
             transport.peer.disable_ipv4_unicast,
@@ -723,13 +733,13 @@ fn v1_stable_effective_defaults_match_runtime_resolution() {
     // field, or replacing derived send-hold max(480, 2 * 300) with 480, fails.
     assert_eq!(
         effective(&inherited),
-        (300, 600, false, 0, 900, (1800, 1800), true)
+        (300, 600, false, 0, 1800, 900, (1800, 1800), true)
     );
     // Mutation-red: making peer-group values outrank any direct Neighbor
     // override changes this tuple (and disable_ipv4_unicast may fail validation).
     assert_eq!(
         effective(&overridden),
-        (45, 1000, true, 240, 720, (60, 60), false)
+        (45, 1000, true, 240, 300, 720, (60, 60), false)
     );
 
     let rr =
@@ -2895,6 +2905,84 @@ fn gr_restart_time_zero_with_gr_enabled_rejected() {
 fn gr_restart_time_zero_with_gr_disabled_accepted() {
     let toml = gr_toml("graceful_restart = false\ngr_restart_time = 0");
     assert!(parse(&toml).is_ok());
+}
+
+#[test]
+fn gr_peer_restart_time_max_outside_wire_range_rejected() {
+    // Load-bearing: deleting either boundary validation makes one case load.
+    for value in [0, 4096] {
+        let err = parse(&gr_toml(&format!("gr_peer_restart_time_max = {value}"))).unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidGrConfig { .. }));
+    }
+}
+
+#[test]
+fn gr_peer_restart_time_max_peer_group_only_bounds_rejected() {
+    let base = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[peer_groups.rr]
+"#;
+
+    // Load-bearing: these groups have no members, so removing the dedicated
+    // validate_peer_group bounds branch makes both invalid configs load.
+    for value in [0, 4096] {
+        let err = parse(&format!("{base}gr_peer_restart_time_max = {value}\n")).unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidGrConfig { .. }));
+    }
+}
+
+#[test]
+fn gr_peer_restart_time_max_neighbor_overrides_peer_group() {
+    let toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[peer_groups.rr]
+gr_peer_restart_time_max = 900
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+peer_group = "rr"
+
+[[neighbors]]
+address = "10.0.0.3"
+remote_asn = 65003
+peer_group = "rr"
+gr_peer_restart_time_max = 300
+"#;
+    let config = parse(toml).unwrap();
+
+    // Load-bearing: removing group fallback makes the first value 4095;
+    // making the group outrank the neighbor makes the second value 900.
+    assert_eq!(
+        config
+            .resolve_neighbor(&config.neighbors[0])
+            .unwrap()
+            .transport_config
+            .gr_peer_restart_time_max,
+        900
+    );
+    assert_eq!(
+        config
+            .resolve_neighbor(&config.neighbors[1])
+            .unwrap()
+            .transport_config
+            .gr_peer_restart_time_max,
+        300
+    );
 }
 
 #[test]
@@ -5432,6 +5520,7 @@ fn test_neighbor(addr: &str, asn: u32) -> Neighbor {
         families: Vec::new(),
         graceful_restart: None,
         gr_restart_time: None,
+        gr_peer_restart_time_max: None,
         gr_stale_routes_time: None,
         llgr_stale_time: None,
         local_ipv6_nexthop: None,
@@ -6170,6 +6259,7 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
             families: Vec::new(),
             graceful_restart: None,
             gr_restart_time: None,
+            gr_peer_restart_time_max: None,
             gr_stale_routes_time: None,
             llgr_stale_time: None,
             local_ipv6_nexthop: None,
@@ -6225,6 +6315,7 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
         families: Vec::new(),
         graceful_restart: None,
         gr_restart_time: None,
+        gr_peer_restart_time_max: None,
         gr_stale_routes_time: None,
         llgr_stale_time: None,
         local_ipv6_nexthop: None,
@@ -6269,6 +6360,7 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
         families: Vec::new(),
         graceful_restart: None,
         gr_restart_time: None,
+        gr_peer_restart_time_max: None,
         gr_stale_routes_time: None,
         llgr_stale_time: None,
         local_ipv6_nexthop: None,
@@ -6342,6 +6434,7 @@ fn diff_config_does_not_mark_tcp_ao_neighbor_add_as_reload_applied() {
         families: Vec::new(),
         graceful_restart: None,
         gr_restart_time: None,
+        gr_peer_restart_time_max: None,
         gr_stale_routes_time: None,
         llgr_stale_time: None,
         local_ipv6_nexthop: None,
@@ -6444,6 +6537,7 @@ fn config_field_impact_surfaces_reload_matrix_classes() {
     assert_eq!(class("md5_password"), Some(SessionReset));
     // Hot-applied: a description edit never touches the session.
     assert_eq!(class("description"), Some(HotApplied));
+    assert_eq!(class("gr_peer_restart_time_max"), Some(HotApplied));
     assert_eq!(class("log_level"), Some(HotApplied));
     assert_eq!(class("max_prefixes"), Some(HotApplied));
     // Restart-required, matching the reload matrix pins.
@@ -6466,6 +6560,7 @@ fn neighbor_change_hot_applicable_partitions_by_impact_class() {
     // Hot-applied-only edit → in-place apply.
     let mut hot = old.clone();
     hot.description = Some("edge".to_string());
+    hot.gr_peer_restart_time_max = Some(300);
     hot.max_prefixes = Some(500);
     hot.import_policy_chain = vec!["allow-all".to_string()];
     assert!(super::neighbor_change_hot_applicable(&old, &hot));
@@ -12985,6 +13080,7 @@ const RELOAD_MATRIX_NEIGHBOR_FIELDS: &[&str] = &[
     "ttl_security",
     "families",
     "graceful_restart",
+    "gr_peer_restart_time_max",
     "gr_restart_time",
     "gr_stale_routes_time",
     "llgr_stale_time",
@@ -13018,6 +13114,7 @@ const RELOAD_MATRIX_PEER_GROUP_FIELDS: &[&str] = &[
     "ttl_security",
     "families",
     "graceful_restart",
+    "gr_peer_restart_time_max",
     "gr_restart_time",
     "gr_stale_routes_time",
     "llgr_stale_time",
@@ -13050,13 +13147,24 @@ fn load_reload_matrix() -> String {
     })
 }
 
+fn reload_matrix_section<'a>(matrix: &'a str, start: &str, end: &str) -> &'a str {
+    matrix
+        .split_once(start)
+        .unwrap_or_else(|| panic!("reload matrix is missing section {start}"))
+        .1
+        .split_once(end)
+        .unwrap_or_else(|| panic!("reload matrix section {start} is missing terminator {end}"))
+        .0
+}
+
 #[test]
 fn reload_matrix_documents_every_neighbor_field() {
     let matrix = load_reload_matrix();
+    let section = reload_matrix_section(&matrix, "## `[[neighbors]]`", "## `[peer_groups.<name>]`");
     for field in RELOAD_MATRIX_NEIGHBOR_FIELDS {
         let needle = format!("`{field}`");
         assert!(
-            matrix.contains(&needle),
+            section.contains(&needle),
             "Neighbor field {needle} is in RELOAD_MATRIX_NEIGHBOR_FIELDS \
              (src/config/tests.rs) but absent from docs/reload-matrix.md. \
              Either add a row for it in the [[neighbors]] section of the \
@@ -13068,10 +13176,15 @@ fn reload_matrix_documents_every_neighbor_field() {
 #[test]
 fn reload_matrix_documents_every_peer_group_field() {
     let matrix = load_reload_matrix();
+    let section = reload_matrix_section(
+        &matrix,
+        "## `[peer_groups.<name>]`",
+        "## `[[dynamic_neighbors]]`",
+    );
     for field in RELOAD_MATRIX_PEER_GROUP_FIELDS {
         let needle = format!("`{field}`");
         assert!(
-            matrix.contains(&needle),
+            section.contains(&needle),
             "PeerGroupConfig field {needle} is in \
              RELOAD_MATRIX_PEER_GROUP_FIELDS (src/config/tests.rs) but \
              absent from docs/reload-matrix.md. Either add a row for it \
@@ -13132,6 +13245,23 @@ fn reload_matrix_pins_load_bearing_field_classes() {
             );
         }
     }
+
+    let cap_rows = reload_matrix_rows_for(&matrix, "gr_peer_restart_time_max");
+    assert_eq!(
+        cap_rows.len(),
+        2,
+        "the GR peer restart cap must have neighbor and peer-group rows"
+    );
+    assert!(
+        cap_rows[0].contains("| live |"),
+        "the neighbor cap is hot-applied in place: {}",
+        cap_rows[0]
+    );
+    assert!(
+        cap_rows[1].contains("| live (static session reset; dynamic next reconnect) |"),
+        "peer-group cap edits do not selectively hot-fanout: {}",
+        cap_rows[1]
+    );
 }
 
 #[test]
@@ -15048,6 +15178,10 @@ remote_asn = 65002
     assert!(rendered.contains("hold_time = 90"), "{rendered}");
     assert!(rendered.contains("send_hold_time = 480"), "{rendered}");
     assert!(rendered.contains("graceful_restart = true"), "{rendered}");
+    assert!(
+        rendered.contains("gr_peer_restart_time_max = 4095"),
+        "{rendered}"
+    );
     assert!(rendered.contains("gr_restart_time = 120"), "{rendered}");
     assert!(
         rendered.contains("gr_stale_routes_time = 360"),
@@ -15094,6 +15228,10 @@ peer_group = "rr-clients"
         assert_eq!(materialized.send_hold_time, Some(peer.send_hold_time));
         assert_eq!(materialized.graceful_restart, Some(peer.graceful_restart));
         assert_eq!(materialized.gr_restart_time, Some(peer.gr_restart_time));
+        assert_eq!(
+            materialized.gr_peer_restart_time_max,
+            Some(resolved.transport_config.gr_peer_restart_time_max)
+        );
         assert_eq!(
             materialized.gr_stale_routes_time,
             Some(resolved.transport_config.gr_stale_routes_time)

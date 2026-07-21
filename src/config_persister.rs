@@ -228,6 +228,7 @@ log_format = "json"
             families: Vec::new(),
             graceful_restart: None,
             gr_restart_time: None,
+            gr_peer_restart_time_max: None,
             gr_stale_routes_time: None,
             llgr_stale_time: None,
             local_ipv6_nexthop: None,

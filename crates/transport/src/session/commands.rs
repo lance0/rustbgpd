@@ -685,6 +685,7 @@ impl PeerSession {
                 max_prefixes_ipv4,
                 max_prefixes_ipv6,
                 gr_stale_routes_time,
+                gr_peer_restart_time_max,
                 local_ipv6_nexthop,
                 remove_private_as,
                 reply,
@@ -704,6 +705,7 @@ impl PeerSession {
                 self.config.max_prefixes_ipv4 = max_prefixes_ipv4;
                 self.config.max_prefixes_ipv6 = max_prefixes_ipv6;
                 self.config.gr_stale_routes_time = gr_stale_routes_time;
+                self.config.gr_peer_restart_time_max = gr_peer_restart_time_max;
                 self.config.local_ipv6_nexthop = local_ipv6_nexthop;
                 self.config.remove_private_as = remove_private_as;
                 self.publish_export_profile();

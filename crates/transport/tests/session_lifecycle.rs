@@ -91,6 +91,7 @@ fn transport_config(addr: SocketAddr) -> TransportConfig {
         local_ipv6_nexthop: None,
         peer_group: None,
         gr_stale_routes_time: 360,
+        gr_peer_restart_time_max: 4095,
         llgr_stale_time: 0,
         gr_restart_until: None,
         route_reflector_client: false,

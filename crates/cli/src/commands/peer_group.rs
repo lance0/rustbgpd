@@ -48,6 +48,8 @@ struct JsonPeerGroupDetail {
     #[serde(skip_serializing_if = "Option::is_none")]
     gr_restart_time: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    gr_peer_restart_time_max: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     gr_stale_routes_time: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     llgr_stale_time: Option<u32>,
@@ -90,6 +92,7 @@ fn json_peer_group_detail(
         families: def.families.clone(),
         graceful_restart: def.graceful_restart,
         gr_restart_time: def.gr_restart_time,
+        gr_peer_restart_time_max: def.gr_peer_restart_time_max,
         gr_stale_routes_time: def.gr_stale_routes_time,
         llgr_stale_time: def.llgr_stale_time,
         local_ipv6_nexthop: def.local_ipv6_nexthop.clone(),
@@ -194,6 +197,9 @@ pub async fn get(connection: Connection, name: &str, json: bool) -> Result<(), C
         }
         if let Some(t) = def.gr_restart_time {
             println!("GR Restart Time:       {t}");
+        }
+        if let Some(t) = def.gr_peer_restart_time_max {
+            println!("GR Peer Restart Max:   {t}");
         }
         if let Some(t) = def.gr_stale_routes_time {
             println!("GR Stale Routes Time:  {t}");
@@ -356,6 +362,22 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(value["max_prefix_restart_seconds"], 300);
+    }
+
+    /// Load-bearing projection proof: dropping the cap from the peer-group
+    /// JSON mapper removes the operator's configured value.
+    #[test]
+    fn detail_json_preserves_gr_peer_restart_time_max() {
+        let definition = crate::proto::PeerGroupDefinition {
+            gr_peer_restart_time_max: Some(300),
+            ..Default::default()
+        };
+        let value = serde_json::to_value(json_peer_group_detail(
+            "ix-members".to_string(),
+            &definition,
+        ))
+        .unwrap();
+        assert_eq!(value["gr_peer_restart_time_max"], 300);
     }
 
     #[tokio::test]

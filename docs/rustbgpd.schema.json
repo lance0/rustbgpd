@@ -1742,6 +1742,16 @@
             "type": "string"
           }
         },
+        "gr_peer_restart_time_max": {
+          "description": "Local upper bound on the peer-advertised GR Restart Time used while\nretaining stale routes after a disconnect (seconds, 1..=4095).\nDefault: 4095 (the full RFC 4724 wire range).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
         "gr_restart_time": {
           "description": "Restart time advertised in GR capability (seconds, max 4095). Default: 120.",
           "type": [
@@ -2143,6 +2153,16 @@
           "items": {
             "type": "string"
           }
+        },
+        "gr_peer_restart_time_max": {
+          "description": "Maximum peer-advertised GR Restart Time used for disconnected stale\nretention. See the neighbor-level `gr_peer_restart_time_max`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
         },
         "gr_restart_time": {
           "description": "GR restart time (seconds). See the neighbor-level `gr_restart_time`.",

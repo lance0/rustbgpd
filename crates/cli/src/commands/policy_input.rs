@@ -176,6 +176,8 @@ pub struct JsonPeerGroupDefinition {
     #[serde(default)]
     pub gr_restart_time: Option<u32>,
     #[serde(default)]
+    pub gr_peer_restart_time_max: Option<u32>,
+    #[serde(default)]
     pub gr_stale_routes_time: Option<u64>,
     #[serde(default)]
     pub llgr_stale_time: Option<u32>,
@@ -224,6 +226,7 @@ impl From<JsonPeerGroupDefinition> for proto::PeerGroupDefinition {
             families: j.families,
             graceful_restart: j.graceful_restart,
             gr_restart_time: j.gr_restart_time,
+            gr_peer_restart_time_max: j.gr_peer_restart_time_max,
             gr_stale_routes_time: j.gr_stale_routes_time,
             llgr_stale_time: j.llgr_stale_time,
             local_ipv6_nexthop: j.local_ipv6_nexthop,

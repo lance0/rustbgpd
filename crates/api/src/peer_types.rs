@@ -977,7 +977,7 @@ pub enum PeerManagerCommand {
     /// SIGHUP reload path routes a changed neighbor here instead of
     /// `ReconcilePeers.changed` when the changed-field set is entirely
     /// hot-applicable (`description`, `max_prefixes`,
-    /// `gr_stale_routes_time`, `local_ipv6_nexthop`,
+    /// `gr_peer_restart_time_max`, `gr_stale_routes_time`, `local_ipv6_nexthop`,
     /// `remove_private_as`, `log_level`, import/export policies and
     /// chains).
     HotUpdatePeer {
@@ -1514,6 +1514,8 @@ pub struct PeerGroupDefinition {
     pub graceful_restart: Option<bool>,
     /// Optional GR restart time override.
     pub gr_restart_time: Option<u16>,
+    /// Optional upper bound on peer-advertised GR Restart Time.
+    pub gr_peer_restart_time_max: Option<u16>,
     /// Optional GR stale-routes-time override.
     pub gr_stale_routes_time: Option<u64>,
     /// Optional LLGR stale-time override.
@@ -1607,6 +1609,9 @@ pub struct PeerManagerNeighborConfig {
     pub graceful_restart: bool,
     /// GR restart time value advertised in OPEN (seconds).
     pub gr_restart_time: u16,
+    /// Local upper bound on the peer-advertised GR Restart Time used for
+    /// disconnected stale-route retention.
+    pub gr_peer_restart_time_max: u16,
     /// Time to retain stale routes after peer restart (seconds).
     pub gr_stale_routes_time: u64,
     /// Long-lived stale routes time (RFC 9494, seconds). 0 = disabled.

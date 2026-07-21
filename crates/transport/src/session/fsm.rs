@@ -646,7 +646,9 @@ impl PeerSession {
                             Some(RibUpdate::PeerGracefulRestart {
                                 peer: self.peer_ip,
                                 session_id: self.session_identity.id,
-                                restart_time: neg.peer_restart_time,
+                                restart_time: neg
+                                    .peer_restart_time
+                                    .min(self.config.gr_peer_restart_time_max),
                                 stale_routes_time: self.config.gr_stale_routes_time,
                                 gr_families,
                                 peer_llgr_capable: neg.peer_llgr_capable,

@@ -617,6 +617,7 @@ dynamic-only deployment where peers are added at runtime via gRPC.
 | `families`             | [string] | no       | (auto)  | Address families to negotiate (see below)        |
 | `graceful_restart`     | bool     | no       | true    | Enable Graceful Restart receiving speaker (RFC 4724) |
 | `gr_restart_time`      | u16      | no       | 120     | Restart time advertised in GR capability (seconds, 1--4095) |
+| `gr_peer_restart_time_max` | u16  | no       | 4095    | Local upper bound on the peer-advertised Restart Time used for initial disconnected stale-route retention (seconds, 1--4095); does not change this daemon's OPEN |
 | `gr_stale_routes_time` | u64      | no       | 360     | Time to retain stale routes after peer reconnects (seconds, 1--3600) |
 | `route_server_client`  | bool     | no       | false   | Transparent route-server mode for eBGP peers (see below) |
 | `per_client_best`      | bool     | no       | false   | RFC 7947 §2.3.2 per-client best-path for route-server clients: when export policy denies the Loc-RIB best toward this peer, advertise the best *permitted* candidate instead of hiding the prefix. Requires `route_server_client = true`; inherits from the peer-group (see below) |
@@ -1137,8 +1138,18 @@ address = "10.0.0.2"
 remote_asn = 65002
 graceful_restart = true      # default: true
 gr_restart_time = 120        # seconds, advertised in GR capability (max 4095)
+gr_peer_restart_time_max = 300 # cap the peer's advertised time while disconnected (max 4095)
 gr_stale_routes_time = 360   # seconds, how long to wait for EoR after reconnect (max 3600)
 ```
+
+The three timers are directional and apply at different stages.
+`gr_restart_time` is advertised in this daemon's OPEN for peers helping this
+daemon restart. `gr_peer_restart_time_max` is not advertised: it caps the
+Restart Time received from this peer before rustbgpd starts the initial
+disconnected stale-route timer. The default `4095` preserves the full RFC 4724
+wire range. After the peer reconnects, `gr_stale_routes_time` bounds the wait
+for its per-family End-of-RIB markers. The cap inherits from a peer group and a
+neighbor value overrides the group.
 
 To disable GR for a specific peer:
 
@@ -3572,6 +3583,8 @@ starting:
 | `families` entries must be `"ipv4_unicast"`, `"ipv6_unicast"`, `"ipv4_flowspec"`, `"ipv6_flowspec"`, `"l2vpn_evpn"`, `"linkstate"`, `"linkstate_vpn"`, `"l3vpn_ipv4_unicast"`, `"l3vpn_ipv6_unicast"`, `"ipv4_labeled_unicast"`, `"ipv6_labeled_unicast"`, or `"rtc"` | `unknown address family` |
 | `gr_restart_time` must be <= 4095 | `gr_restart_time exceeds 4095` |
 | `gr_restart_time` must be > 0 when `graceful_restart` is enabled | `gr_restart_time must be > 0` |
+| `gr_peer_restart_time_max` must be > 0 | `gr_peer_restart_time_max must be > 0` |
+| `gr_peer_restart_time_max` must be <= 4095 | `gr_peer_restart_time_max <value> exceeds 4095 (12-bit max)` |
 | `gr_stale_routes_time` must be > 0 and <= 3600 | `invalid gr_stale_routes_time` |
 | Policy prefix length must not exceed AFI max (32 for IPv4, 128 for IPv6) | `invalid prefix length` |
 | Policy entry must have at least one match condition (`prefix`, `match_community`, `match_as_path`, `match_as_path_length_ge`, `match_as_path_length_le`, `match_rpki_validation`, or `match_aspa_validation`) | `must have at least one match condition` |
@@ -3621,6 +3634,7 @@ starting:
 | `ttl_security` | `false` |
 | `families` | `["ipv4_unicast"]` for IPv4 peers; `["ipv4_unicast", "ipv6_unicast"]` for IPv6 peers |
 | `graceful_restart` | `true` |
+| `gr_peer_restart_time_max` | 4095 seconds (full peer-advertised RFC 4724 range) |
 | `gr_restart_time` | 120 seconds |
 | `gr_stale_routes_time` | 360 seconds |
 | `llgr_stale_time` | 0 (disabled) |

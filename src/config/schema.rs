@@ -826,6 +826,10 @@ pub struct Neighbor {
     pub graceful_restart: Option<bool>,
     /// Restart time advertised in GR capability (seconds, max 4095). Default: 120.
     pub gr_restart_time: Option<u16>,
+    /// Local upper bound on the peer-advertised GR Restart Time used while
+    /// retaining stale routes after a disconnect (seconds, 1..=4095).
+    /// Default: 4095 (the full RFC 4724 wire range).
+    pub gr_peer_restart_time_max: Option<u16>,
     /// Time to retain stale routes after peer restart (seconds). Default: 360.
     pub gr_stale_routes_time: Option<u64>,
     /// Long-lived stale routes time (RFC 9494, seconds). Default: 0 (disabled).
@@ -961,6 +965,7 @@ impl fmt::Debug for Neighbor {
             .field("families", &self.families)
             .field("graceful_restart", &self.graceful_restart)
             .field("gr_restart_time", &self.gr_restart_time)
+            .field("gr_peer_restart_time_max", &self.gr_peer_restart_time_max)
             .field("gr_stale_routes_time", &self.gr_stale_routes_time)
             .field("llgr_stale_time", &self.llgr_stale_time)
             .field("local_ipv6_nexthop", &self.local_ipv6_nexthop)
@@ -1152,6 +1157,9 @@ pub struct PeerGroupConfig {
     pub graceful_restart: Option<bool>,
     /// GR restart time (seconds). See the neighbor-level `gr_restart_time`.
     pub gr_restart_time: Option<u16>,
+    /// Maximum peer-advertised GR Restart Time used for disconnected stale
+    /// retention. See the neighbor-level `gr_peer_restart_time_max`.
+    pub gr_peer_restart_time_max: Option<u16>,
     /// GR stale-routes time (seconds). See the neighbor-level
     /// `gr_stale_routes_time`.
     pub gr_stale_routes_time: Option<u64>,
@@ -1239,6 +1247,7 @@ impl fmt::Debug for PeerGroupConfig {
             .field("families", &self.families)
             .field("graceful_restart", &self.graceful_restart)
             .field("gr_restart_time", &self.gr_restart_time)
+            .field("gr_peer_restart_time_max", &self.gr_peer_restart_time_max)
             .field("gr_stale_routes_time", &self.gr_stale_routes_time)
             .field("llgr_stale_time", &self.llgr_stale_time)
             .field("local_ipv6_nexthop", &self.local_ipv6_nexthop)

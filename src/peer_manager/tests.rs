@@ -57,6 +57,7 @@ fn make_config(addr: IpAddr, asn: u32) -> PeerManagerNeighborConfig {
         families: vec![(Afi::Ipv4, Safi::Unicast)],
         graceful_restart: true,
         gr_restart_time: 120,
+        gr_peer_restart_time_max: 4095,
         gr_stale_routes_time: 360,
         llgr_stale_time: 0,
         gr_restart_eligible: false,
@@ -1200,6 +1201,31 @@ fn insert_test_managed_peer_with_asn(
         },
     );
     mgr.register_session(1, &peer_key);
+}
+
+fn recording_runtime_config_handle() -> (PeerHandle, mpsc::UnboundedReceiver<u16>) {
+    use rustbgpd_transport::PeerCommand;
+
+    let (commands, mut command_rx) = mpsc::channel(16);
+    let (seen_tx, seen_rx) = mpsc::unbounded_channel();
+    let task = tokio::spawn(async move {
+        while let Some(command) = command_rx.recv().await {
+            match command {
+                PeerCommand::UpdateRuntimeConfig {
+                    gr_peer_restart_time_max,
+                    reply,
+                    ..
+                } => {
+                    let _ = seen_tx.send(gr_peer_restart_time_max);
+                    let _ = reply.send(Ok(()));
+                }
+                PeerCommand::Shutdown => break,
+                _ => {}
+            }
+        }
+        Ok(())
+    });
+    (PeerHandle::from_parts(commands, task), seen_rx)
 }
 
 fn established_export_policy_test_session(
@@ -2584,6 +2610,7 @@ fn config_neighbor(addr: IpAddr, remote_asn: u32) -> crate::config::Neighbor {
         families: Vec::new(),
         graceful_restart: None,
         gr_restart_time: None,
+        gr_peer_restart_time_max: None,
         gr_stale_routes_time: None,
         llgr_stale_time: None,
         local_ipv6_nexthop: None,
@@ -2809,6 +2836,40 @@ async fn hot_update_peer_applies_in_place_without_session_rebuild() {
     assert_eq!(managed.max_prefixes, Some(500));
     assert_eq!(managed.transport_config.max_prefixes, Some(500));
     assert_eq!(managed.transport_config.gr_stale_routes_time, 300);
+}
+
+#[tokio::test]
+async fn hot_update_peer_forwards_and_records_gr_peer_restart_cap() {
+    let (_tx, rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let mut mgr = PeerManager::new(
+        rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 82));
+    let (handle, mut seen_rx) = recording_runtime_config_handle();
+    insert_test_managed_peer(&mut mgr, addr, handle, false);
+    let session_id = mgr.peers[&key(addr)].session_id;
+
+    let mut updated = make_config(addr, 65002);
+    updated.gr_peer_restart_time_max = 300;
+    mgr.hot_update_peer(updated).await.unwrap();
+
+    // Load-bearing end-to-end proof for the manager seam:
+    // - removing the comparison sends no command;
+    // - forwarding the old/default cap observes 4095 instead of 300;
+    // - removing the manager-side copy leaves the stored value at 4095.
+    assert_eq!(seen_rx.try_recv().unwrap(), 300);
+    assert!(seen_rx.try_recv().is_err(), "cap-only edit sent twice");
+    let managed = &mgr.peers[&key(addr)];
+    assert_eq!(managed.session_id, session_id);
+    assert_eq!(managed.transport_config.gr_peer_restart_time_max, 300);
 }
 
 /// Load-bearing hot-update boundary proof: an unrelated accepted edit keeps
@@ -3724,6 +3785,7 @@ peer_group = "edge"
                 families: Vec::new(),
                 graceful_restart: None,
                 gr_restart_time: None,
+                gr_peer_restart_time_max: None,
                 gr_stale_routes_time: None,
                 llgr_stale_time: None,
                 local_ipv6_nexthop: None,
@@ -3761,6 +3823,7 @@ fn edge_group_definition(hold_time: Option<u16>) -> rustbgpd_api::peer_types::Pe
         families: Vec::new(),
         graceful_restart: None,
         gr_restart_time: None,
+        gr_peer_restart_time_max: None,
         gr_stale_routes_time: None,
         llgr_stale_time: None,
         local_ipv6_nexthop: None,
@@ -6320,6 +6383,7 @@ fn build_transport_config_reflects_every_transport_field() {
         families: vec![(Afi::Ipv6, Safi::Unicast)],
         graceful_restart: true,
         gr_restart_time: 300,
+        gr_peer_restart_time_max: 301,
         gr_stale_routes_time: 720,
         llgr_stale_time: 3600,
         gr_restart_eligible: false,
@@ -6364,6 +6428,7 @@ fn build_transport_config_reflects_every_transport_field() {
         families,
         graceful_restart,
         gr_restart_time,
+        gr_peer_restart_time_max,
         gr_stale_routes_time,
         llgr_stale_time,
         gr_restart_eligible,
@@ -6420,6 +6485,10 @@ fn build_transport_config_reflects_every_transport_field() {
         "graceful_restart"
     );
     assert_eq!(t.peer.gr_restart_time, *gr_restart_time, "gr_restart_time");
+    assert_eq!(
+        t.gr_peer_restart_time_max, *gr_peer_restart_time_max,
+        "gr_peer_restart_time_max"
+    );
     assert_eq!(
         t.gr_stale_routes_time, *gr_stale_routes_time,
         "gr_stale_routes_time"
