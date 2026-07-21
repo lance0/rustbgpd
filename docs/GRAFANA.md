@@ -61,7 +61,7 @@ the next scrape.
 ## Alert rules
 
 A ready-to-load Prometheus alert-rule pack (session down/flapping,
-empty Adj-RIB-In, max-prefix breach, empty RPKI VRP table, event-outbox
+empty Adj-RIB-In, max-prefix near-limit and breach, empty RPKI VRP table, event-outbox
 degradation, update-group residue growth, stalled policy transition, a slow
 peer endpoint, actor polls above 200ms, and daemon down) ships at
 [`examples/prometheus/rustbgpd-alerts.yml`](../examples/prometheus/rustbgpd-alerts.yml),
@@ -74,6 +74,11 @@ with per-rule unit tests in
 
 - Counters are plotted with `rate(...[$__rate_interval])`; gauges are
   plotted raw. Single-stats use last-not-null.
+- Max-prefix capacity panels use the session endpoint label and the bounded
+  `aggregate`, `ipv4_unicast`, and `ipv6_unicast` scopes. Limit/headroom series
+  are intentionally absent for unlimited scopes, and every capacity series is
+  absent while the session is down; no-data is therefore distinct from zero
+  headroom.
 - Outbound queue depth is an absolute gauge of coalesced UPDATE frames, sampled
   at enqueue-batch and writer-drain boundaries. A short convergence spike is
   not itself a slow peer; `bgp_peer_slow` is the daemon's persistent 0/1 state.

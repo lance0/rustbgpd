@@ -18,11 +18,6 @@
 # Session-level metrics label peers as "<addr>:<port>" (the transport
 # remote address); RIB metrics use the bare configured neighbor address.
 #
-# Not expressible with the current metric surface (noted, not faked):
-#   - prefix-limit "approaching" (>=80%): the daemon exports only the
-#     breach counter `bgp_max_prefix_exceeded_total`, no
-#     current/configured-limit gauge pair.
-#
 # Unit tests: rustbgpd-alerts_test.yml (`promtool test rules`).
 
 groups:
@@ -123,9 +118,27 @@ groups:
           summary: "Peer {{ $labels.peer }} exceeded its max-prefix limit"
           description: >-
             Peer {{ $labels.peer }} on {{ $labels.instance }} breached
-            its configured `max_prefixes` ceiling in the last 10 minutes;
+            a configured max-prefix ceiling in the last 10 minutes;
             the session was torn down with a Cease / Maximum Number of
             Prefixes Reached NOTIFICATION.
+
+      - alert: BgpMaxPrefixNearLimit
+        # Limit series exist only for finite configured bounds. Unlimited
+        # scopes are absent rather than represented by a fake zero, and
+        # disconnected sessions reap all three capacity series.
+        expr: bgp_max_prefix_usage / bgp_max_prefix_limit >= 0.8
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: >-
+            Peer {{ $labels.peer }} max-prefix {{ $labels.scope }} usage is high
+          description: >-
+            Peer {{ $labels.peer }} on {{ $labels.instance }} has remained at
+            or above 80% of its finite {{ $labels.scope }} max-prefix limit for
+            10 minutes. Continued accepted-route growth can exhaust
+            bgp_max_prefix_headroom and eventually trigger Cease / Maximum
+            Number of Prefixes Reached.
 
       - alert: RpkiVrpTableEmpty
         # Series only exist once an RTR cache has delivered data, so

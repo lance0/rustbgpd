@@ -50,6 +50,15 @@ TARGETS = {
         "clamp_min(time() - bgp_policy_generation_loaded_timestamp_seconds"
         '{instance=~"$instance"}, 0)'
     ),
+    ("Max-prefix usage and finite limit", "A"): (
+        'bgp_max_prefix_usage{instance=~"$instance",peer=~"$peer"}'
+    ),
+    ("Max-prefix usage and finite limit", "B"): (
+        'bgp_max_prefix_limit{instance=~"$instance",peer=~"$peer"}'
+    ),
+    ("Max-prefix remaining headroom", "A"): (
+        'bgp_max_prefix_headroom{instance=~"$instance",peer=~"$peer"}'
+    ),
 }
 
 WORKFLOW_PATHS = {

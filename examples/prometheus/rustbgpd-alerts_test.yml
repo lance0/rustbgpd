@@ -158,10 +158,48 @@ tests:
             exp_annotations:
               summary: "Peer 192.0.2.5:179 exceeded its max-prefix limit"
               description: >-
-                Peer 192.0.2.5:179 on edge1:9179 breached its configured
-                `max_prefixes` ceiling in the last 10 minutes; the
+                Peer 192.0.2.5:179 on edge1:9179 breached a configured
+                max-prefix ceiling in the last 10 minutes; the
                 session was torn down with a Cease / Maximum Number of
                 Prefixes Reached NOTIFICATION.
+
+  # ── BgpMaxPrefixNearLimit ─────────────────────────────────────
+  # Load-bearing: deleting the usage/limit ratio, changing the 80% boundary,
+  # or dropping the 10-minute hold changes an exact firing/non-firing case.
+  # The no-limit peer pins unlimited-as-absence: usage alone must not alert.
+  - interval: 1m
+    input_series:
+      - series: 'bgp_max_prefix_usage{peer="192.0.2.7:179", scope="aggregate", instance="edge1:9179"}'
+        values: "80x15"
+      - series: 'bgp_max_prefix_limit{peer="192.0.2.7:179", scope="aggregate", instance="edge1:9179"}'
+        values: "100x15"
+      - series: 'bgp_max_prefix_usage{peer="192.0.2.8:179", scope="ipv4_unicast", instance="edge1:9179"}'
+        values: "79x15"
+      - series: 'bgp_max_prefix_limit{peer="192.0.2.8:179", scope="ipv4_unicast", instance="edge1:9179"}'
+        values: "100x15"
+      - series: 'bgp_max_prefix_usage{peer="192.0.2.9:179", scope="ipv6_unicast", instance="edge1:9179"}'
+        values: "100x15"
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: BgpMaxPrefixNearLimit
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: BgpMaxPrefixNearLimit
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              peer: 192.0.2.7:179
+              scope: aggregate
+              instance: edge1:9179
+            exp_annotations:
+              summary: >-
+                Peer 192.0.2.7:179 max-prefix aggregate usage is high
+              description: >-
+                Peer 192.0.2.7:179 on edge1:9179 has remained at or above 80%
+                of its finite aggregate max-prefix limit for 10 minutes.
+                Continued accepted-route growth can exhaust
+                bgp_max_prefix_headroom and eventually trigger Cease / Maximum
+                Number of Prefixes Reached.
 
   # ── BgpPeerSlow ───────────────────────────────────────────────
   # Load-bearing: reverting `== 1`, shortening/lengthening `for: 5m`,

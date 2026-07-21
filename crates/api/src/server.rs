@@ -1037,7 +1037,7 @@ async fn run_listener(
             .await
         }
         ListenerEndpoint::Uds { path, mode } => {
-            run_uds_listener(
+            Box::pin(run_uds_listener(
                 path,
                 mode,
                 access_mode,
@@ -1093,7 +1093,7 @@ async fn run_listener(
                 shutdown_rx,
                 rpc_shutdown_tx,
                 config_tx,
-            )
+            ))
             .await
         }
     }

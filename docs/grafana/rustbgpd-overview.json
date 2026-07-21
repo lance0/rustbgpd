@@ -2515,6 +2515,48 @@
           "refId": "A"
         }
       ]
+    },
+    {
+      "id": 55,
+      "type": "timeseries",
+      "title": "Max-prefix usage and finite limit",
+      "description": "Authoritative live session-actor usage and finite configured limit by bounded scope. Limit series are absent for unlimited scopes; every series is absent while disconnected.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 144 },
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 0, "min": 0 }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "bgp_max_prefix_usage{instance=~\"$instance\",peer=~\"$peer\"}",
+          "legendFormat": "{{peer}} {{scope}} usage",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "bgp_max_prefix_limit{instance=~\"$instance\",peer=~\"$peer\"}",
+          "legendFormat": "{{peer}} {{scope}} limit",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 56,
+      "type": "timeseries",
+      "title": "Max-prefix remaining headroom",
+      "description": "Saturating finite-limit headroom by live session endpoint and scope. No data means unlimited or disconnected, not zero headroom.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 144 },
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 0, "min": 0 }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "asc" } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "bgp_max_prefix_headroom{instance=~\"$instance\",peer=~\"$peer\"}",
+          "legendFormat": "{{peer}} {{scope}}",
+          "refId": "A"
+        }
+      ]
     }
   ]
 }

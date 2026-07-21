@@ -136,6 +136,9 @@ pub struct BgpMetrics {
     config_transaction_lifecycle: IntCounterVec,
 
     // ── Policy ──────────────────────────────────────────────────
+    max_prefix_usage: IntGaugeVec,
+    max_prefix_limit: IntGaugeVec,
+    max_prefix_headroom: IntGaugeVec,
     max_prefix_exceeded: IntCounterVec,
 
     // ── RIB drops ───────────────────────────────────────────────
@@ -573,6 +576,33 @@ impl BgpMetrics {
                 "Number of times a peer exceeded its max-prefix limit",
             ),
             &["peer"],
+        )
+        .expect("valid metric definition");
+
+        let max_prefix_usage = IntGaugeVec::new(
+            Opts::new(
+                "bgp_max_prefix_usage",
+                "Accepted NLRI identities currently counted toward max-prefix enforcement.",
+            ),
+            &["peer", "scope"],
+        )
+        .expect("valid metric definition");
+
+        let max_prefix_limit = IntGaugeVec::new(
+            Opts::new(
+                "bgp_max_prefix_limit",
+                "Finite configured maximum for max-prefix enforcement; absent when unlimited.",
+            ),
+            &["peer", "scope"],
+        )
+        .expect("valid metric definition");
+
+        let max_prefix_headroom = IntGaugeVec::new(
+            Opts::new(
+                "bgp_max_prefix_headroom",
+                "Remaining accepted NLRI identities before the finite max-prefix limit; absent when unlimited.",
+            ),
+            &["peer", "scope"],
         )
         .expect("valid metric definition");
 
@@ -1657,6 +1687,15 @@ impl BgpMetrics {
             .register(Box::new(config_transaction_lifecycle.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(max_prefix_usage.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(max_prefix_limit.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(max_prefix_headroom.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(max_prefix_exceeded.clone()))
             .expect("metric not already registered");
         registry
@@ -2032,6 +2071,9 @@ impl BgpMetrics {
             grpc_authz_decisions,
             grpc_credential_reloads,
             config_transaction_lifecycle,
+            max_prefix_usage,
+            max_prefix_limit,
+            max_prefix_headroom,
             max_prefix_exceeded,
             outbound_route_drops,
             inbound_rib_backpressure,
@@ -2189,6 +2231,9 @@ impl BgpMetrics {
         Self::reap_peer_series_from_vec(&self.peer_update_group, peer);
         Self::reap_peer_series_from_vec(&self.rib_prefixes, peer);
         Self::reap_peer_series_from_vec(&self.rib_adj_out_prefixes, peer);
+        Self::reap_peer_series_from_vec(&self.max_prefix_usage, peer);
+        Self::reap_peer_series_from_vec(&self.max_prefix_limit, peer);
+        Self::reap_peer_series_from_vec(&self.max_prefix_headroom, peer);
         Self::reap_peer_series_from_vec(&self.max_prefix_exceeded, peer);
         Self::reap_peer_series_from_vec(&self.outbound_route_drops, peer);
         Self::reap_peer_series_from_vec(&self.rib_outbound_registration_replaced, peer);
@@ -2606,6 +2651,51 @@ impl BgpMetrics {
     /// Record a max-prefix-exceeded event for a peer.
     pub fn record_max_prefix_exceeded(&self, peer: &str) {
         self.max_prefix_exceeded.with_label_values(&[peer]).inc();
+    }
+
+    /// Publish one authoritative max-prefix accounting scope.
+    ///
+    /// `scope` is deliberately bounded to the aggregate and the two unicast
+    /// families whose independent limits are enforced by the session actor.
+    /// An unlimited scope keeps its usage series but removes limit and
+    /// headroom instead of manufacturing a misleading zero.
+    pub fn set_max_prefix_capacity(
+        &self,
+        peer: &str,
+        scope: &str,
+        usage: usize,
+        limit: Option<u32>,
+    ) {
+        debug_assert!(matches!(
+            scope,
+            "aggregate" | "ipv4_unicast" | "ipv6_unicast"
+        ));
+        let labels = [peer, scope];
+        let usage = i64::try_from(usage).unwrap_or(i64::MAX);
+        self.max_prefix_usage.with_label_values(&labels).set(usage);
+        if let Some(limit) = limit {
+            self.max_prefix_limit
+                .with_label_values(&labels)
+                .set(i64::from(limit));
+            self.max_prefix_headroom
+                .with_label_values(&labels)
+                .set(i64::from(
+                    limit.saturating_sub(u32::try_from(usage).unwrap_or(u32::MAX)),
+                ));
+        } else {
+            let _ = self.max_prefix_limit.remove_label_values(&labels);
+            let _ = self.max_prefix_headroom.remove_label_values(&labels);
+        }
+    }
+
+    /// Remove every max-prefix capacity series owned by one live session.
+    ///
+    /// This is narrower than [`Self::reap_peer_series`]: session teardown
+    /// must not erase durable peer counters such as max-prefix exceed events.
+    pub fn reap_max_prefix_capacity(&self, peer: &str) {
+        Self::reap_peer_series_from_vec(&self.max_prefix_usage, peer);
+        Self::reap_peer_series_from_vec(&self.max_prefix_limit, peer);
+        Self::reap_peer_series_from_vec(&self.max_prefix_headroom, peer);
     }
 
     /// Record an outbound route update drop for a peer.
@@ -5202,6 +5292,7 @@ mod tests {
         m.set_peer_slow(peer, true);
         m.set_rejected_routes_retained(peer, 4);
         m.set_peer_update_group(peer, 1);
+        m.set_max_prefix_capacity(peer, "aggregate", 80, Some(100));
         m.record_max_prefix_exceeded(peer);
         m.record_outbound_route_drop(peer);
         m.record_inbound_rib_backpressure(peer);
@@ -5266,8 +5357,8 @@ mod tests {
         let m = BgpMetrics::new();
         populate_all_peer_families(&m, "10.0.0.1");
         populate_all_peer_families(&m, "10.0.0.2");
-        // 40 peer-labeled families; state transitions hold two series.
-        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 40);
+        // 43 peer-labeled families; state transitions hold two series.
+        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 43);
 
         m.reap_peer_series("10.0.0.1");
 
@@ -5277,7 +5368,66 @@ mod tests {
             "peer-labeled families not reaped: {leftovers:?}"
         );
         // The other peer's series are untouched.
-        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 40);
+        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 43);
+    }
+
+    /// Load-bearing finite/unlimited proof: removing either finite gauge
+    /// update, the saturating headroom calculation, or the unlimited removal
+    /// leaves an exact value or absence assertion red.
+    #[test]
+    fn max_prefix_capacity_keeps_unlimited_distinct_from_zero() {
+        let m = BgpMetrics::new();
+        let peer = "10.0.0.1:179";
+
+        m.set_max_prefix_capacity(peer, "aggregate", 80, Some(100));
+        m.set_max_prefix_capacity(peer, "ipv4_unicast", 12, None);
+
+        let text = gather_text(&m);
+        assert!(text.contains(r#"bgp_max_prefix_usage{peer="10.0.0.1:179",scope="aggregate"} 80"#));
+        assert!(
+            text.contains(r#"bgp_max_prefix_limit{peer="10.0.0.1:179",scope="aggregate"} 100"#)
+        );
+        assert!(
+            text.contains(r#"bgp_max_prefix_headroom{peer="10.0.0.1:179",scope="aggregate"} 20"#)
+        );
+        assert!(
+            text.contains(r#"bgp_max_prefix_usage{peer="10.0.0.1:179",scope="ipv4_unicast"} 12"#)
+        );
+        assert!(
+            !text.contains(r#"bgp_max_prefix_limit{peer="10.0.0.1:179",scope="ipv4_unicast"}"#)
+        );
+        assert!(
+            !text.contains(r#"bgp_max_prefix_headroom{peer="10.0.0.1:179",scope="ipv4_unicast"}"#)
+        );
+
+        m.set_max_prefix_capacity(peer, "aggregate", 101, None);
+        let text = gather_text(&m);
+        assert!(
+            text.contains(r#"bgp_max_prefix_usage{peer="10.0.0.1:179",scope="aggregate"} 101"#)
+        );
+        assert!(!text.contains(r#"bgp_max_prefix_limit{peer="10.0.0.1:179",scope="aggregate"}"#));
+        assert!(
+            !text.contains(r#"bgp_max_prefix_headroom{peer="10.0.0.1:179",scope="aggregate"}"#)
+        );
+    }
+
+    /// Load-bearing session-reap proof: replacing the narrow reap with a zero
+    /// write leaves live capacity series, while using the broad peer reap also
+    /// deletes the durable exceed counter; either mutation makes this red.
+    #[test]
+    fn max_prefix_capacity_reap_spares_peer_history() {
+        let m = BgpMetrics::new();
+        let peer = "10.0.0.1:179";
+        m.set_max_prefix_capacity(peer, "aggregate", 80, Some(100));
+        m.record_max_prefix_exceeded(peer);
+
+        m.reap_max_prefix_capacity(peer);
+
+        let text = gather_text(&m);
+        assert!(!text.contains("bgp_max_prefix_usage"));
+        assert!(!text.contains("bgp_max_prefix_limit"));
+        assert!(!text.contains("bgp_max_prefix_headroom"));
+        assert!(text.contains(r#"bgp_max_prefix_exceeded_total{peer="10.0.0.1:179"} 1"#));
     }
 
     #[test]

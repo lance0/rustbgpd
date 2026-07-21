@@ -762,6 +762,12 @@ impl PeerSession {
                 let _ = reply.send(Ok(()));
                 ControlFlow::Continue(())
             }
+            PeerCommand::ActivateMaxPrefixMetrics { reply } => {
+                self.max_prefix_metric_lease.active = true;
+                self.sync_max_prefix_capacity_metrics();
+                let _ = reply.send(());
+                ControlFlow::Continue(())
+            }
             PeerCommand::CollisionDump => {
                 info!(peer = %self.peer_label, "collision dump: sending Cease/7");
                 self.stop_requested = true;

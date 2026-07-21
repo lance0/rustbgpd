@@ -47,7 +47,7 @@ use crate::event_sink::{NoopTransportEventSink, TransportEventSink};
 use crate::framing::ReadBuffer;
 use crate::handle::{
     PeerCommand, PeerSessionState, SessionIdentity, SessionLifecycleNotification,
-    SessionNotification, SessionNotificationDirection, SessionNotificationEvent,
+    SessionNotification, SessionNotificationDirection, SessionNotificationEvent, SessionRole,
 };
 use crate::timer::{Timers, poll_timer};
 
@@ -58,6 +58,39 @@ use self::export::remove_private_asns;
 use self::export::{SessionExportEncoder, SessionExportProfile};
 #[cfg(test)]
 use self::fsm::{hard_reset_notification_in_actions, notification_teardown_event};
+
+/// Final cleanup for shared session-owned max-prefix gauge series.
+///
+/// Keeping this as a field guard, rather than implementing `Drop` on the
+/// complete session, preserves callers' ability to move owned diagnostic
+/// fields out of a stopped `PeerSession` while still covering task abort.
+struct MaxPrefixMetricLease {
+    metrics: BgpMetrics,
+    peer: String,
+    active: bool,
+}
+
+impl MaxPrefixMetricLease {
+    fn new(metrics: BgpMetrics, peer: String, active: bool) -> Self {
+        Self {
+            metrics,
+            peer,
+            active,
+        }
+    }
+
+    fn reap(&self) {
+        if self.active {
+            self.metrics.reap_max_prefix_capacity(&self.peer);
+        }
+    }
+}
+
+impl Drop for MaxPrefixMetricLease {
+    fn drop(&mut self) {
+        self.reap();
+    }
+}
 
 /// Runtime for a single BGP peer session.
 ///
@@ -203,6 +236,11 @@ pub(crate) struct PeerSession {
     /// behavior remain authoritative.
     session_event_tx: Option<mpsc::Sender<SessionNotificationEvent>>,
     session_identity: SessionIdentity,
+    /// Whether this actor owns the shared per-peer max-prefix gauge series.
+    /// Live collision candidates stay inactive until `PeerManager` has fully
+    /// quiesced the old primary, preventing either loser from erasing the
+    /// surviving actor's values.
+    max_prefix_metric_lease: MaxPrefixMetricLease,
     /// Optional BMP event sender (None when BMP not configured).
     bmp_tx: Option<mpsc::Sender<BmpEvent>>,
     /// A `RouteMonitoring` event for this session was dropped on a full
@@ -523,6 +561,37 @@ impl PeerSession {
             + self.known_rtc.len()
     }
 
+    /// Publish all three bounded max-prefix scopes from the session actor's
+    /// O(1) enforcement accounting. Never derive these values from the RIB:
+    /// its rows have different Add-Path and lifecycle semantics.
+    fn sync_max_prefix_capacity_metrics(&self) {
+        if !self.max_prefix_metric_lease.active || self.fsm.state() != SessionState::Established {
+            return;
+        }
+        self.metrics.set_max_prefix_capacity(
+            &self.peer_label,
+            "aggregate",
+            self.known_prefix_count(),
+            self.config.max_prefixes,
+        );
+        self.metrics.set_max_prefix_capacity(
+            &self.peer_label,
+            "ipv4_unicast",
+            self.known_unicast_v4,
+            self.config.max_prefixes_ipv4,
+        );
+        self.metrics.set_max_prefix_capacity(
+            &self.peer_label,
+            "ipv6_unicast",
+            self.known_unicast_v6,
+            self.config.max_prefixes_ipv6,
+        );
+    }
+
+    fn reap_max_prefix_capacity_metrics(&self) {
+        self.max_prefix_metric_lease.reap();
+    }
+
     /// First exceeded max-prefix bound, checked in a fixed order: the
     /// legacy aggregate `max_prefixes` (all counted families), then
     /// `max_prefixes_ipv4`, then `max_prefixes_ipv6` (unique unicast
@@ -567,6 +636,7 @@ impl PeerSession {
     /// (4 octets); the aggregate keeps its historical empty data. Returns
     /// `true` when a teardown was driven.
     async fn enforce_max_prefix_limits(&mut self, include_aggregate: bool) -> bool {
+        self.sync_max_prefix_capacity_metrics();
         let Some(violation) = self.max_prefix_violation(include_aggregate) else {
             return false;
         };
@@ -884,6 +954,11 @@ impl PeerSession {
         let import_needs_as_path_string =
             Self::import_chain_needs_as_path_string(import_policy.as_ref(), explain_enabled);
         let (outbound_tx, outbound_rx) = mpsc::channel(OUTBOUND_BUFFER);
+        let max_prefix_metric_lease = MaxPrefixMetricLease::new(
+            metrics.clone(),
+            peer_label.clone(),
+            session_identity.role == SessionRole::Primary,
+        );
         let export_encoder = Arc::new(SessionExportEncoder::new(SessionExportProfile::initial(
             &config,
             None,
@@ -924,6 +999,7 @@ impl PeerSession {
             session_lifecycle_tx,
             session_event_tx,
             session_identity,
+            max_prefix_metric_lease,
             bmp_tx,
             bmp_stream_diverged: false,
             bmp_repair_timer: None,
@@ -1018,6 +1094,11 @@ impl PeerSession {
         let import_needs_as_path_string =
             Self::import_chain_needs_as_path_string(import_policy.as_ref(), explain_enabled);
         let (outbound_tx, outbound_rx) = mpsc::channel(OUTBOUND_BUFFER);
+        let max_prefix_metric_lease = MaxPrefixMetricLease::new(
+            metrics.clone(),
+            peer_label.clone(),
+            session_identity.role == SessionRole::Primary,
+        );
         let export_encoder = Arc::new(SessionExportEncoder::new(SessionExportProfile::initial(
             &config,
             stream.local_addr().ok().map(|addr| addr.ip()),
@@ -1070,6 +1151,7 @@ impl PeerSession {
             session_lifecycle_tx,
             session_event_tx,
             session_identity,
+            max_prefix_metric_lease,
             bmp_tx,
             bmp_stream_diverged: false,
             bmp_repair_timer: None,

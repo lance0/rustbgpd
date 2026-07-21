@@ -1520,6 +1520,7 @@ struct FakePeerCounters {
     collision_dump: AtomicU32,
     query_state: AtomicU32,
     route_refresh: AtomicU32,
+    activate_max_prefix_metrics: AtomicU32,
     shutdown: AtomicU32,
     stop: AtomicU32,
 }
@@ -1776,6 +1777,12 @@ fn fake_peer_handle_with_route_refresh_reply(
                     } else {
                         pending_route_refresh_replies.push(reply);
                     }
+                }
+                PeerCommand::ActivateMaxPrefixMetrics { reply } => {
+                    counters
+                        .activate_max_prefix_metrics
+                        .fetch_add(1, Ordering::SeqCst);
+                    let _ = reply.send(());
                 }
                 PeerCommand::CollisionDump => {
                     counters.collision_dump.fetch_add(1, Ordering::SeqCst);
@@ -15136,11 +15143,151 @@ async fn primary_back_to_idle_promotes_pending_inbound_candidate() {
 
     assert_eq!(primary.shutdown.load(Ordering::SeqCst), 1);
     assert_eq!(pending.shutdown.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        pending.activate_max_prefix_metrics.load(Ordering::SeqCst),
+        1,
+        "BackToIdle promotion must transfer capacity-metric ownership"
+    );
     assert!(
         mgr.peers
             .get(&key(peer_addr))
             .is_some_and(|m| m.pending_inbound.is_none() && m.session_id == 2),
         "pending inbound candidate should be promoted when the primary idles"
+    );
+}
+
+fn max_prefix_capacity_gauge(
+    metrics: &BgpMetrics,
+    family: &str,
+    peer: &str,
+    scope: &str,
+) -> Option<f64> {
+    metrics
+        .registry()
+        .gather()
+        .into_iter()
+        .find(|metric_family| metric_family.name() == family)
+        .and_then(|metric_family| {
+            metric_family.get_metric().iter().find_map(|metric| {
+                let has_peer = metric
+                    .get_label()
+                    .iter()
+                    .any(|label| label.name() == "peer" && label.value() == peer);
+                let has_scope = metric
+                    .get_label()
+                    .iter()
+                    .any(|label| label.name() == "scope" && label.value() == scope);
+                (has_peer && has_scope).then(|| metric.get_gauge().value())
+            })
+        })
+}
+
+/// Load-bearing production ordering proof: deleting `PeerManager`'s activation
+/// leaves the gauge absent after primary termination; moving activation before
+/// `quiesce_retiring_session` makes the primary's final reap erase the exact
+/// candidate value and sets `activated_before_termination`.
+#[tokio::test]
+async fn production_collision_promotion_transfers_capacity_after_primary_termination() {
+    use rustbgpd_transport::PeerCommand;
+
+    let mut mgr = test_peer_manager();
+    let peer_addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let peer_label = sock(peer_addr).to_string();
+    let terminated = Arc::new(AtomicBool::new(false));
+    let activated_before_termination = Arc::new(AtomicBool::new(false));
+    let activation_count = Arc::new(AtomicU32::new(0));
+
+    mgr.metrics
+        .set_max_prefix_capacity(&peer_label, "aggregate", 2, Some(10));
+    let (primary_tx, mut primary_rx) = mpsc::channel::<PeerCommand>(8);
+    let primary_metrics = mgr.metrics.clone();
+    let primary_peer_label = peer_label.clone();
+    let primary_terminated = terminated.clone();
+    let primary_task = tokio::spawn(async move {
+        while let Some(command) = primary_rx.recv().await {
+            if matches!(command, PeerCommand::Shutdown) {
+                primary_metrics.reap_max_prefix_capacity(&primary_peer_label);
+                primary_terminated.store(true, Ordering::SeqCst);
+                break;
+            }
+        }
+        Ok(())
+    });
+    insert_test_managed_peer(
+        &mut mgr,
+        peer_addr,
+        PeerHandle::from_parts(primary_tx, primary_task),
+        false,
+    );
+
+    let (candidate_tx, mut candidate_rx) = mpsc::channel::<PeerCommand>(8);
+    let candidate_metrics = mgr.metrics.clone();
+    let candidate_peer_label = peer_label.clone();
+    let candidate_terminated = terminated.clone();
+    let candidate_early = activated_before_termination.clone();
+    let candidate_activations = activation_count.clone();
+    let candidate_task = tokio::spawn(async move {
+        while let Some(command) = candidate_rx.recv().await {
+            match command {
+                PeerCommand::ActivateMaxPrefixMetrics { reply } => {
+                    if !candidate_terminated.load(Ordering::SeqCst) {
+                        candidate_early.store(true, Ordering::SeqCst);
+                    }
+                    candidate_metrics.set_max_prefix_capacity(
+                        &candidate_peer_label,
+                        "aggregate",
+                        1,
+                        Some(10),
+                    );
+                    candidate_activations.fetch_add(1, Ordering::SeqCst);
+                    let _ = reply.send(());
+                }
+                PeerCommand::Shutdown => {
+                    candidate_metrics.reap_max_prefix_capacity(&candidate_peer_label);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    });
+    attach_test_pending_inbound(
+        &mut mgr,
+        peer_addr,
+        PeerHandle::from_parts(candidate_tx, candidate_task),
+        2,
+    );
+
+    assert_eq!(
+        max_prefix_capacity_gauge(
+            &mgr.metrics,
+            "bgp_max_prefix_usage",
+            &peer_label,
+            "aggregate"
+        ),
+        Some(2.0),
+        "inactive candidate must not overwrite the primary"
+    );
+
+    mgr.resolve_collision(key(peer_addr), Ipv4Addr::new(10, 0, 0, 2))
+        .await;
+
+    assert!(terminated.load(Ordering::SeqCst));
+    assert!(!activated_before_termination.load(Ordering::SeqCst));
+    assert_eq!(activation_count.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        max_prefix_capacity_gauge(
+            &mgr.metrics,
+            "bgp_max_prefix_usage",
+            &peer_label,
+            "aggregate"
+        ),
+        Some(1.0)
+    );
+    assert!(
+        mgr.peers
+            .get(&key(peer_addr))
+            .is_some_and(|managed| managed.session_id == 2 && managed.pending_inbound.is_none())
     );
 }
 

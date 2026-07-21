@@ -1053,6 +1053,12 @@ impl PeerSession {
                 loop_rtc_withdrawn.push(key);
             }
         }
+        // This RFC 7606/loop-rejection path only removes accepted routes and
+        // therefore does not call max-prefix enforcement. Publish after its
+        // complete accounting transaction and before the first awaited RIB
+        // delivery so actor state and gauges cannot diverge on backpressure or
+        // channel failure.
+        self.sync_max_prefix_capacity_metrics();
         if !loop_withdrawn.is_empty()
             || !loop_fs_withdrawn.is_empty()
             || !loop_evpn_withdrawn.is_empty()

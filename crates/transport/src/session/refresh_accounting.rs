@@ -125,6 +125,7 @@ impl PeerSession {
         };
         self.arm_refresh_accounting_timer();
         self.sweep_refresh_accounting(window.stale);
+        self.sync_max_prefix_capacity_metrics();
     }
 
     /// Reconcile every due family. Called before each buffered PDU decode and

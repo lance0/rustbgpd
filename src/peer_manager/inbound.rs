@@ -546,10 +546,11 @@ impl PeerManager {
                 };
                 if let Some((old_handle, old_session_id, new_session_id)) = promoted {
                     self.register_session(new_session_id, &peer_key);
-                    self.quiesce_retiring_session(
+                    self.finish_inbound_promotion(
                         &peer_key,
                         old_session_id,
                         old_handle,
+                        new_session_id,
                         "remote-wins collision loser",
                         true,
                     )
@@ -584,7 +585,7 @@ impl PeerManager {
     pub(super) fn promote_pending_inbound_handle(
         &mut self,
         peer_key: &PeerKey,
-    ) -> Option<(PeerHandle, u64)> {
+    ) -> Option<(PeerHandle, u64, u64)> {
         let (old_handle, old_session_id, new_session_id) = {
             let managed = self.peers.get_mut(peer_key)?;
             let pending = managed.pending_inbound.take()?;
@@ -594,24 +595,80 @@ impl PeerManager {
             (old_handle, old_session_id, pending.session_id)
         };
         self.register_session(new_session_id, peer_key);
-        Some((old_handle, old_session_id))
+        Some((old_handle, old_session_id, new_session_id))
     }
 
     pub(super) async fn promote_pending_inbound(&mut self, peer_key: &PeerKey) -> bool {
-        let Some((old_handle, old_session_id)) = self.promote_pending_inbound_handle(peer_key)
+        let Some((old_handle, old_session_id, new_session_id)) =
+            self.promote_pending_inbound_handle(peer_key)
         else {
             return false;
         };
+        self.finish_inbound_promotion(
+            peer_key,
+            old_session_id,
+            old_handle,
+            new_session_id,
+            "promote pending inbound old primary",
+            false,
+        )
+        .await;
+        true
+    }
+
+    async fn finish_inbound_promotion(
+        &mut self,
+        peer_key: &PeerKey,
+        old_session_id: u64,
+        old_handle: PeerHandle,
+        new_session_id: u64,
+        context: &'static str,
+        collision_dump: bool,
+    ) {
         let _ = self
             .quiesce_retiring_session(
                 peer_key,
                 old_session_id,
                 old_handle,
-                "promote pending inbound old primary",
-                false,
+                context,
+                collision_dump,
             )
             .await;
-        true
+        self.activate_promoted_max_prefix_metrics(peer_key, new_session_id)
+            .await;
+    }
+
+    async fn activate_promoted_max_prefix_metrics(
+        &self,
+        peer_key: &PeerKey,
+        expected_session_id: u64,
+    ) {
+        let Some(managed) = self.peers.get(peer_key) else {
+            return;
+        };
+        if managed.session_id != expected_session_id {
+            warn!(
+                peer = %peer_key.address,
+                expected_session_id,
+                current_session_id = managed.session_id,
+                "skipping stale max-prefix metric ownership transfer"
+            );
+            return;
+        }
+        if let Err(error) = managed
+            .handle
+            .activate_max_prefix_metrics_timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT)
+            .await
+        {
+            // Missing gauges are safer than allowing a collision loser to
+            // publish or reap the winner's shared peer label.
+            warn!(
+                peer = %peer_key.address,
+                session_id = expected_session_id,
+                %error,
+                "failed to activate promoted session max-prefix metrics"
+            );
+        }
     }
 
     pub(super) async fn replace_with_inbound(

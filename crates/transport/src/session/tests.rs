@@ -173,6 +173,38 @@ fn make_test_session_with_rib(
     (session, rib_rx)
 }
 
+fn make_test_session_with_metrics_and_identity(
+    metrics: BgpMetrics,
+    session_identity: SessionIdentity,
+) -> (PeerSession, mpsc::Receiver<RibUpdate>) {
+    let mut peer_config = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
+    peer_config.connect_retry_secs = 30;
+    peer_config.families = vec![(Afi::Ipv4, Safi::Unicast)];
+    let mut config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
+    config.max_prefixes = Some(10);
+    config.max_prefixes_ipv4 = Some(5);
+    let (_cmd_tx, cmd_rx) = mpsc::channel(8);
+    let (rib_tx, rib_rx) = mpsc::channel(64);
+    (
+        PeerSession::new_with_identity_and_lifecycle(
+            config,
+            metrics,
+            cmd_rx,
+            rib_tx,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            session_identity,
+        ),
+        rib_rx,
+    )
+}
+
 fn make_test_session_with_channels(
     local_asn: u32,
     remote_asn: u32,
@@ -263,6 +295,36 @@ fn install_test_negotiated_session(session: &mut PeerSession, negotiated: Negoti
         })
         .collect();
     session.negotiated = Some(negotiated);
+}
+
+fn max_prefix_gauge(metrics: &BgpMetrics, name: &str, peer: &str, scope: &str) -> Option<f64> {
+    metrics
+        .registry()
+        .gather()
+        .into_iter()
+        .find(|family| family.name() == name)
+        .and_then(|family| {
+            family.get_metric().iter().find_map(|metric| {
+                let has_peer = metric
+                    .get_label()
+                    .iter()
+                    .any(|label| label.name() == "peer" && label.value() == peer);
+                let has_scope = metric
+                    .get_label()
+                    .iter()
+                    .any(|label| label.name() == "scope" && label.value() == scope);
+                (has_peer && has_scope).then(|| metric.get_gauge().value())
+            })
+        })
+}
+
+fn assert_max_prefix_gauge(session: &PeerSession, name: &str, scope: &str, expected: Option<f64>) {
+    assert_eq!(
+        max_prefix_gauge(&session.metrics, name, &session.peer_label, scope),
+        expected,
+        "unexpected {name} for {} scope {scope}",
+        session.peer_label
+    );
 }
 
 fn install_enhanced_refresh_session(
@@ -11161,6 +11223,248 @@ async fn add_path_multiplicity_counts_one_prefix_for_max_prefix() {
     );
 }
 
+/// Load-bearing metric proof: removing the ordinary UPDATE sync leaves the
+/// announce/withdraw assertions stale; counting Add-Path IDs instead of unique
+/// prefixes changes `1` to `2`; removing finite-to-unlimited child removal
+/// leaves limit/headroom present after the runtime update.
+#[tokio::test]
+async fn max_prefix_capacity_metrics_follow_updates_and_runtime_limits() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    session.config.max_prefixes = Some(10);
+    session.config.max_prefixes_ipv4 = Some(5);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    while rib_rx.try_recv().is_ok() {}
+    install_dual_stack_session(&mut session, true);
+
+    for scope in ["aggregate", "ipv4_unicast", "ipv6_unicast"] {
+        assert_max_prefix_gauge(&session, "bgp_max_prefix_usage", scope, Some(0.0));
+    }
+    assert_max_prefix_gauge(&session, "bgp_max_prefix_limit", "aggregate", Some(10.0));
+    assert_max_prefix_gauge(
+        &session,
+        "bgp_max_prefix_headroom",
+        "ipv4_unicast",
+        Some(5.0),
+    );
+    assert_max_prefix_gauge(&session, "bgp_max_prefix_limit", "ipv6_unicast", None);
+
+    let prefix = v4_prefix(1);
+    session.process_update(ipv4_announce(prefix, 1, true)).await;
+    session.process_update(ipv4_announce(prefix, 2, true)).await;
+    assert_max_prefix_gauge(&session, "bgp_max_prefix_usage", "aggregate", Some(1.0));
+    assert_max_prefix_gauge(&session, "bgp_max_prefix_usage", "ipv4_unicast", Some(1.0));
+    assert_max_prefix_gauge(
+        &session,
+        "bgp_max_prefix_headroom",
+        "ipv4_unicast",
+        Some(4.0),
+    );
+
+    session.process_update(ipv4_withdraw(prefix, 1, true)).await;
+    assert_max_prefix_gauge(&session, "bgp_max_prefix_usage", "ipv4_unicast", Some(1.0));
+    session.process_update(ipv4_withdraw(prefix, 2, true)).await;
+    assert_max_prefix_gauge(&session, "bgp_max_prefix_usage", "aggregate", Some(0.0));
+    assert_max_prefix_gauge(&session, "bgp_max_prefix_usage", "ipv4_unicast", Some(0.0));
+
+    let (reply, done) = oneshot::channel();
+    assert_eq!(
+        session
+            .handle_command(PeerCommand::UpdateRuntimeConfig {
+                max_prefixes: None,
+                max_prefixes_ipv4: None,
+                max_prefixes_ipv6: None,
+                gr_stale_routes_time: session.config.gr_stale_routes_time,
+                gr_peer_restart_time_max: session.config.gr_peer_restart_time_max,
+                local_ipv6_nexthop: session.config.local_ipv6_nexthop,
+                remove_private_as: session.config.remove_private_as,
+                reply,
+            })
+            .await,
+        ControlFlow::Continue(())
+    );
+    done.await.unwrap().unwrap();
+    for scope in ["aggregate", "ipv4_unicast", "ipv6_unicast"] {
+        assert_max_prefix_gauge(&session, "bgp_max_prefix_usage", scope, Some(0.0));
+        assert_max_prefix_gauge(&session, "bgp_max_prefix_limit", scope, None);
+        assert_max_prefix_gauge(&session, "bgp_max_prefix_headroom", scope, None);
+    }
+}
+
+/// Load-bearing lifecycle proof: replacing the `SessionDown` reap with zeroes
+/// leaves a live series while disconnected, and removing the Established sync
+/// leaves the reconnect snapshot absent rather than freshly zeroed.
+#[tokio::test]
+async fn max_prefix_capacity_metrics_reap_on_down_and_republish_on_reconnect() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    session.config.max_prefixes = Some(10);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    while rib_rx.try_recv().is_ok() {}
+    session
+        .process_update(ipv4_announce(v4_prefix(1), 0, false))
+        .await;
+    assert_max_prefix_gauge(&session, "bgp_max_prefix_usage", "aggregate", Some(1.0));
+
+    session.drive_fsm(Event::ManualStop { reason: None }).await;
+    assert_eq!(session.fsm.state(), SessionState::Idle);
+    assert_max_prefix_gauge(&session, "bgp_max_prefix_usage", "aggregate", None);
+    assert_max_prefix_gauge(&session, "bgp_max_prefix_limit", "aggregate", None);
+    assert_max_prefix_gauge(&session, "bgp_max_prefix_headroom", "aggregate", None);
+
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    assert_max_prefix_gauge(&session, "bgp_max_prefix_usage", "aggregate", Some(0.0));
+    assert_max_prefix_gauge(&session, "bgp_max_prefix_limit", "aggregate", Some(10.0));
+    assert_max_prefix_gauge(&session, "bgp_max_prefix_headroom", "aggregate", Some(10.0));
+}
+
+/// Load-bearing collision-loser proof: allowing an inbound candidate to own
+/// or reap the shared label changes the primary's exact `2` usage or removes
+/// it when the losing candidate drops.
+#[tokio::test]
+async fn collision_candidate_cannot_overwrite_or_reap_primary_capacity_metrics() {
+    let metrics = BgpMetrics::new();
+    let (mut primary, mut primary_rib_rx) =
+        make_test_session_with_metrics_and_identity(metrics.clone(), SessionIdentity::primary(1));
+    let (mut candidate, mut candidate_rib_rx) =
+        make_test_session_with_metrics_and_identity(metrics, SessionIdentity::inbound_candidate(2));
+    let (primary_client, _primary_server) = connected_stream_pair().await;
+    primary.test_install_stream(primary_client);
+    establish_test_session(&mut primary, 65002).await;
+    while primary_rib_rx.try_recv().is_ok() {}
+    primary
+        .process_update(ipv4_announce(v4_prefix(1), 0, false))
+        .await;
+    primary
+        .process_update(ipv4_announce(v4_prefix(2), 0, false))
+        .await;
+
+    let (candidate_client, _candidate_server) = connected_stream_pair().await;
+    candidate.test_install_stream(candidate_client);
+    establish_test_session(&mut candidate, 65002).await;
+    while candidate_rib_rx.try_recv().is_ok() {}
+    candidate
+        .process_update(ipv4_announce(v4_prefix(3), 0, false))
+        .await;
+    assert_max_prefix_gauge(&primary, "bgp_max_prefix_usage", "aggregate", Some(2.0));
+
+    drop(candidate);
+    assert_max_prefix_gauge(&primary, "bgp_max_prefix_usage", "aggregate", Some(2.0));
+}
+
+/// Load-bearing promoted-actor proof: removing either the activation command's
+/// ownership flip or its synchronous snapshot leaves the exact `1` usage and
+/// `9` headroom absent. `PeerManager` ordering is covered by its production-path
+/// collision test.
+#[tokio::test]
+async fn promoted_collision_candidate_publishes_after_old_primary_quiesces() {
+    let metrics = BgpMetrics::new();
+    let (mut primary, mut primary_rib_rx) =
+        make_test_session_with_metrics_and_identity(metrics.clone(), SessionIdentity::primary(1));
+    let (mut candidate, mut candidate_rib_rx) =
+        make_test_session_with_metrics_and_identity(metrics, SessionIdentity::inbound_candidate(2));
+    let (primary_client, _primary_server) = connected_stream_pair().await;
+    primary.test_install_stream(primary_client);
+    establish_test_session(&mut primary, 65002).await;
+    while primary_rib_rx.try_recv().is_ok() {}
+    primary
+        .process_update(ipv4_announce(v4_prefix(1), 0, false))
+        .await;
+    primary
+        .process_update(ipv4_announce(v4_prefix(2), 0, false))
+        .await;
+
+    let (candidate_client, _candidate_server) = connected_stream_pair().await;
+    candidate.test_install_stream(candidate_client);
+    establish_test_session(&mut candidate, 65002).await;
+    while candidate_rib_rx.try_recv().is_ok() {}
+    candidate
+        .process_update(ipv4_announce(v4_prefix(3), 0, false))
+        .await;
+
+    drop(primary);
+    assert_max_prefix_gauge(&candidate, "bgp_max_prefix_usage", "aggregate", None);
+    let (reply, done) = oneshot::channel();
+    assert_eq!(
+        candidate
+            .handle_command(PeerCommand::ActivateMaxPrefixMetrics { reply })
+            .await,
+        ControlFlow::Continue(())
+    );
+    done.await.unwrap();
+    assert_max_prefix_gauge(&candidate, "bgp_max_prefix_usage", "aggregate", Some(1.0));
+    assert_max_prefix_gauge(
+        &candidate,
+        "bgp_max_prefix_headroom",
+        "aggregate",
+        Some(9.0),
+    );
+}
+
+/// Load-bearing refresh proof: removing the post-sweep metric sync leaves
+/// usage at `2` after `EoRR` and at `2` after timeout instead of the exact `1`
+/// then `0` snapshots below.
+#[tokio::test(start_paused = true)]
+async fn max_prefix_capacity_metrics_follow_eorr_and_timeout_reconciliation() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    session.config.max_prefixes = Some(10);
+    session.config.max_prefixes_ipv4 = Some(5);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    while rib_rx.try_recv().is_ok() {}
+    install_enhanced_refresh_session(&mut session, vec![(Afi::Ipv4, Safi::Unicast)], false);
+
+    let replayed = v4_prefix(1);
+    let omitted = v4_prefix(2);
+    session
+        .process_update(ipv4_announce(replayed, 0, false))
+        .await;
+    session
+        .process_update(ipv4_announce(omitted, 0, false))
+        .await;
+    while rib_rx.try_recv().is_ok() {}
+    session.begin_refresh_accounting(Afi::Ipv4, Safi::Unicast);
+    session
+        .process_update(ipv4_announce(replayed, 0, false))
+        .await;
+    session.end_refresh_accounting(Afi::Ipv4, Safi::Unicast);
+    assert_max_prefix_gauge(&session, "bgp_max_prefix_usage", "aggregate", Some(1.0));
+    assert_max_prefix_gauge(
+        &session,
+        "bgp_max_prefix_headroom",
+        "ipv4_unicast",
+        Some(4.0),
+    );
+
+    session
+        .process_update(ipv4_announce(omitted, 0, false))
+        .await;
+    while rib_rx.try_recv().is_ok() {}
+    session.begin_refresh_accounting(Afi::Ipv4, Safi::Unicast);
+    tokio::time::advance(rustbgpd_rib::ERR_REFRESH_TIMEOUT).await;
+    session.expire_refresh_accounting_windows().await.unwrap();
+    assert!(matches!(
+        rib_rx.try_recv(),
+        Ok(RibUpdate::RouteRefreshTimeout {
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+            ..
+        })
+    ));
+    assert_max_prefix_gauge(&session, "bgp_max_prefix_usage", "aggregate", Some(0.0));
+    assert_max_prefix_gauge(
+        &session,
+        "bgp_max_prefix_headroom",
+        "ipv4_unicast",
+        Some(5.0),
+    );
+}
+
 /// Negotiate IPv4+IPv6 unicast on an established fixture session.
 fn install_dual_stack_session(session: &mut PeerSession, add_path: bool) {
     let mut negotiated = negotiated_session(65002, false);
@@ -15575,7 +15879,9 @@ fn assert_single_malformed_disposition(session: &PeerSession, disposition: &str)
 
 /// RFC 7606 §7.4 + §2: a malformed MED treats the UPDATE as though its
 /// routes had been withdrawn — previously accepted routes for the same
-/// NLRI are removed — and the session stays Established.
+/// NLRI are removed — and the session stays Established. Load-bearing metric
+/// proof: removing the dedicated treat-as-withdraw sync leaves usage at `2`
+/// after the production accounting removed both routes.
 #[tokio::test]
 async fn rfc7606_treat_as_withdraw_removes_routes_and_keeps_session() {
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
@@ -15596,6 +15902,7 @@ async fn rfc7606_treat_as_withdraw_removes_routes_and_keeps_session() {
         panic!("expected initial accepted routes");
     };
     assert_eq!(announced.len(), 2);
+    assert_max_prefix_gauge(&session, "bgp_max_prefix_usage", "aggregate", Some(2.0));
     // Re-announce with a malformed MED appended (length 3, must be 4).
     session
         .process_update(rfc7606_update(
@@ -15619,6 +15926,7 @@ async fn rfc7606_treat_as_withdraw_removes_routes_and_keeps_session() {
     assert!(withdrawn.contains(&(Prefix::V4(prefix_a), 0)));
     assert!(withdrawn.contains(&(Prefix::V4(prefix_b), 0)));
     assert_eq!(session.known_prefix_count(), 0);
+    assert_max_prefix_gauge(&session, "bgp_max_prefix_usage", "aggregate", Some(0.0));
     assert_eq!(
         session.fsm.state(),
         SessionState::Established,
