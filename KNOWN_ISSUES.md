@@ -7,6 +7,12 @@ resolved.
 
 ## Resolved
 
+- **Large community duplicates normalized (resolved).** Per RFC 8092,
+  received duplicate values are silently removed and locally constructed
+  duplicates are removed again at encode. Both boundaries retain first-seen
+  order with expected linear work; flags, distinct-value order, and malformed
+  length handling are unchanged.
+
 - **Implicit IPv4 prevents IPv6-only peers (resolved).** Per RFC 4760
   §8, IPv4 unicast was implicitly added whenever it was not explicitly
   negotiated via the MultiProtocol capability, so a peer could not be
@@ -318,10 +324,6 @@ resolved.
   route/FIB ownership across restart or verify that forwarding state survived.
   ADR-0061 FIB programming is opt-in and scoped; crash-left rows are preserved
   as foreign rather than adopted.
-- **Large community duplicates preserved.** Duplicate large communities
-  in received UPDATEs are stored and re-advertised unchanged. Strict
-  RFC 8092 normalization (dedup on receipt and before encode) is deferred
-  as a hardening item.
 - **RT/RO extended communities are 2-octet AS-Specific only.** The
   `set_community_add`/`set_community_remove` policy actions encode RT/RO
   as 2-octet AS-Specific sub-type (type 0x00). ASNs > 65535 are rejected

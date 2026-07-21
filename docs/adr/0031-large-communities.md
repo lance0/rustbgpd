@@ -21,8 +21,14 @@ communities (8 bytes). This is table stakes for any operator using
 
 `PathAttribute::LargeCommunities(Vec<LargeCommunity>)` variant with
 type code 32, flags `OPTIONAL | TRANSITIVE`. Decode validates length
-is a multiple of 12 and parses `chunks_exact(12)` into three `u32`s.
-Encode outputs three `u32::to_be_bytes()` per community.
+is a non-zero multiple of 12 and parses `chunks_exact(12)` into three
+`u32`s. Per RFC 8092 Section 3, decode silently removes duplicate values,
+retaining deterministic first-seen order. Encode repeats the same stable
+deduplication at the wire boundary so directly constructed API or policy
+attributes cannot transmit duplicates. Both boundaries use expected O(n)
+set membership; distinct-value ordering, flags, and length encoding are
+otherwise unchanged. Encode outputs three `u32::to_be_bytes()` per retained
+community.
 
 ### RIB
 
@@ -53,4 +59,6 @@ use the same `"LC:65001:100:200"` format. Applied by
 
 - 4-byte ASN operators can use community-based policy with rustbgpd
 - Wire codec adds one new attribute type (well-tested pattern)
+- Received and locally constructed duplicate values normalize before storage
+  or transmission, respectively
 - Consistent with existing community handling at all layers
