@@ -40,6 +40,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Per-neighbor max-prefix headroom is operator-visible.** Neighbor detail now
+  exposes the authoritative O(1) aggregate max-prefix-counted NLRI identity
+  count plus unique IPv4- and IPv6-unicast prefix counts, with effective finite
+  limits and remaining headroom through gRPC, human CLI, and JSON. Unlimited
+  limits use presence instead of a fake zero, and stale session snapshots
+  withhold non-authoritative headroom.
+
 - `rbgp neighbor A --compare B` explains live update-group sharing with stable,
   ID-free reasons.
 - **Opt-in timed restart after max-prefix teardown.** Neighbors and peer groups

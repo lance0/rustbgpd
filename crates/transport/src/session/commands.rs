@@ -3,7 +3,7 @@ use super::{
     RibUpdate, RouteRefreshMessage, Safi, SessionNotificationDirection, SessionState,
     cease_subcode, debug, info, warn,
 };
-use crate::handle::{PeerCommandError, WarmCheckpointSessionState};
+use crate::handle::{MaxPrefixState, PeerCommandError, WarmCheckpointSessionState};
 
 struct TcpAoSessionAddOnlyPlan {
     connected_peer: std::net::IpAddr,
@@ -80,6 +80,10 @@ fn sorted_family_limits<T>(
     let mut limits: Vec<_> = limits.collect();
     limits.sort_by_key(|((afi, safi), _)| (*afi as u16, *safi as u8));
     limits
+}
+
+fn remaining_prefix_headroom(limit: Option<u32>, count: usize) -> Option<u32> {
+    limit.map(|limit| limit.saturating_sub(u32::try_from(count).unwrap_or(u32::MAX)))
 }
 
 impl PeerSession {
@@ -443,11 +447,30 @@ impl PeerSession {
                 let neg = self.fsm.negotiated().or(self.negotiated.as_ref());
                 let (messages_received, messages_sent) =
                     self.metrics.peer_message_totals(&self.peer_label);
+                let prefix_count = self.known_prefix_count();
+                let prefix_count_ipv4 = self.known_unicast_v4;
+                let prefix_count_ipv6 = self.known_unicast_v6;
                 let state = PeerSessionState {
                     fsm_state: self.fsm.state(),
                     peer_ip: self.peer_ip,
                     peer_asn: neg.map(|n| n.peer_asn),
-                    prefix_count: self.known_prefix_count(),
+                    prefix_count,
+                    max_prefix: MaxPrefixState {
+                        prefix_count_ipv4,
+                        prefix_count_ipv6,
+                        max_prefixes: self.config.max_prefixes,
+                        max_prefixes_ipv4: self.config.max_prefixes_ipv4,
+                        max_prefixes_ipv6: self.config.max_prefixes_ipv6,
+                        headroom: remaining_prefix_headroom(self.config.max_prefixes, prefix_count),
+                        headroom_ipv4: remaining_prefix_headroom(
+                            self.config.max_prefixes_ipv4,
+                            prefix_count_ipv4,
+                        ),
+                        headroom_ipv6: remaining_prefix_headroom(
+                            self.config.max_prefixes_ipv6,
+                            prefix_count_ipv6,
+                        ),
+                    },
                     negotiated_hold_time: neg.map(|n| n.hold_time),
                     four_octet_as: neg.map(|n| n.four_octet_as),
                     remote_router_id: neg.map(|n| n.peer_router_id),

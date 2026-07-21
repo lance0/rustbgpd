@@ -169,6 +169,10 @@ pub async fn show(
         &n.max_prefix_action,
         cfg.and_then(|config| config.max_prefix_restart_seconds),
     );
+    let effective_max_prefixes = effective_max_prefix_limit(
+        n.effective_max_prefixes,
+        cfg.map(|config| config.max_prefixes).unwrap_or(0),
+    );
     if json {
         let out = JsonNeighborDetail {
             address: cfg.map(|c| c.address.clone()).unwrap_or_default(),
@@ -180,6 +184,8 @@ pub async fn show(
             graceful_shutdown_advertise_intent: n.graceful_shutdown_advertise_intent,
             uptime_seconds: n.uptime_seconds,
             prefixes_received: n.prefixes_received,
+            prefixes_received_ipv4: n.prefixes_received_ipv4,
+            prefixes_received_ipv6: n.prefixes_received_ipv6,
             prefixes_sent: n.prefixes_sent,
             updates_received: n.updates_received,
             updates_sent: n.updates_sent,
@@ -189,6 +195,12 @@ pub async fn show(
             messages_sent: n.messages_sent,
             flap_count: n.flap_count,
             last_error: n.last_error.clone(),
+            effective_max_prefixes,
+            effective_max_prefixes_ipv4: n.effective_max_prefixes_ipv4,
+            effective_max_prefixes_ipv6: n.effective_max_prefixes_ipv6,
+            max_prefix_headroom: n.max_prefix_headroom,
+            max_prefix_headroom_ipv4: n.max_prefix_headroom_ipv4,
+            max_prefix_headroom_ipv6: n.max_prefix_headroom_ipv6,
             max_prefix_action: max_prefix_action.to_string(),
             max_prefix_restart_seconds: cfg.and_then(|c| c.max_prefix_restart_seconds),
             max_prefix_restart_remaining_millis: n.max_prefix_restart_remaining_millis,
@@ -390,6 +402,28 @@ pub async fn show(
             output::format_duration(n.uptime_seconds)
         );
         println!("Prefixes Received:     {}", n.prefixes_received);
+        println!("  IPv4 Unicast:        {}", n.prefixes_received_ipv4);
+        println!("  IPv6 Unicast:        {}", n.prefixes_received_ipv6);
+        println!(
+            "Max Prefixes:          {}",
+            max_prefix_capacity_label(effective_max_prefixes, n.max_prefix_headroom, n.stale)
+        );
+        println!(
+            "Max Prefixes IPv4:     {}",
+            max_prefix_capacity_label(
+                n.effective_max_prefixes_ipv4,
+                n.max_prefix_headroom_ipv4,
+                n.stale
+            )
+        );
+        println!(
+            "Max Prefixes IPv6:     {}",
+            max_prefix_capacity_label(
+                n.effective_max_prefixes_ipv6,
+                n.max_prefix_headroom_ipv6,
+                n.stale
+            )
+        );
         println!("Prefixes Sent:         {}", n.prefixes_sent);
         println!("Updates Received:      {}", n.updates_received);
         println!("Updates Sent:          {}", n.updates_sent);
@@ -557,6 +591,19 @@ fn max_prefix_action_label(reported: &str, restart_seconds: Option<u32>) -> &str
         }
     } else {
         reported
+    }
+}
+
+fn effective_max_prefix_limit(reported: Option<u32>, legacy: u32) -> Option<u32> {
+    reported.or_else(|| (legacy != 0).then_some(legacy))
+}
+
+fn max_prefix_capacity_label(limit: Option<u32>, headroom: Option<u32>, stale: bool) -> String {
+    match (limit, headroom, stale) {
+        (None, _, _) => "unlimited".to_string(),
+        (Some(limit), _, true) => format!("{limit} (headroom unavailable: stale state)"),
+        (Some(limit), Some(headroom), false) => format!("{limit} ({headroom} remaining)"),
+        (Some(limit), None, false) => format!("{limit} (headroom unavailable)"),
     }
 }
 
@@ -890,6 +937,30 @@ mod tests {
         assert_eq!(max_prefix_action_label("", None), "shutdown");
         assert_eq!(max_prefix_action_label("", Some(30)), "restart");
         assert_eq!(max_prefix_action_label("shutdown", Some(30)), "shutdown");
+    }
+
+    /// Load-bearing: collapsing protobuf absence into zero, or deriving
+    /// headroom from a stale zero count, changes these operator-facing labels.
+    #[test]
+    fn max_prefix_capacity_distinguishes_finite_unlimited_and_stale() {
+        assert_eq!(
+            max_prefix_capacity_label(Some(20), Some(9), false),
+            "20 (9 remaining)"
+        );
+        assert_eq!(max_prefix_capacity_label(None, None, false), "unlimited");
+        assert_eq!(
+            max_prefix_capacity_label(Some(20), None, true),
+            "20 (headroom unavailable: stale state)"
+        );
+    }
+
+    /// Load-bearing: ignoring the legacy config value makes a new CLI call an
+    /// older daemon's finite aggregate limit unlimited during rolling upgrade.
+    #[test]
+    fn effective_max_prefix_limit_falls_back_without_inventing_zero() {
+        assert_eq!(effective_max_prefix_limit(Some(20), 10), Some(20));
+        assert_eq!(effective_max_prefix_limit(None, 10), Some(10));
+        assert_eq!(effective_max_prefix_limit(None, 0), None);
     }
 
     #[tokio::test]

@@ -636,6 +636,15 @@ dynamic-only deployment where peers are added at runtime via gRPC.
 | `add_path`             | table    | no       | --      | Add-Path (RFC 7911) config table (see below)                         |
 | `log_level`            | string   | no       | --      | Override log level for this peer: `"error"`, `"warn"`, `"info"`, `"debug"`, or `"trace"` |
 
+Use `rbgp neighbor <addr>` to inspect the actor's current aggregate
+max-prefix-counted NLRI identity count and unique IPv4- and IPv6-unicast prefix
+counts alongside each effective finite limit and remaining headroom. The
+aggregate includes every NLRI family covered by `max_prefixes`; the two family
+counts are unicast-only. Human output
+prints `unlimited` when a limit is absent, while JSON and gRPC preserve that
+state as field absence rather than a synthetic zero. A stale neighbor snapshot
+withholds headroom because its zero count is only a placeholder.
+
 IPv6 link-local neighbors (`fe80::/10`) must set `interface`, because a
 link-local address is not globally unique (RFC 4007). Numbered IPv4 / IPv6
 neighbors must not set `interface`. Duplicate numbered peers are rejected by

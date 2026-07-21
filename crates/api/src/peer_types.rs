@@ -1918,6 +1918,22 @@ pub struct PeerInfo {
     pub graceful_shutdown_advertise_intent: bool,
     /// Number of accepted prefixes from this peer.
     pub prefix_count: usize,
+    /// Number of accepted unique IPv4-unicast prefixes from this peer.
+    pub prefix_count_ipv4: usize,
+    /// Number of accepted unique IPv6-unicast prefixes from this peer.
+    pub prefix_count_ipv6: usize,
+    /// Effective aggregate max-prefix limit (`None` = unlimited).
+    pub max_prefixes_effective: Option<u32>,
+    /// Effective IPv4-unicast max-prefix limit (`None` = unlimited).
+    pub max_prefixes_ipv4_effective: Option<u32>,
+    /// Effective IPv6-unicast max-prefix limit (`None` = unlimited).
+    pub max_prefixes_ipv6_effective: Option<u32>,
+    /// Aggregate capacity remaining, absent when unlimited or state is stale.
+    pub max_prefix_headroom: Option<u32>,
+    /// IPv4-unicast capacity remaining, absent when unlimited or state is stale.
+    pub max_prefix_headroom_ipv4: Option<u32>,
+    /// IPv6-unicast capacity remaining, absent when unlimited or state is stale.
+    pub max_prefix_headroom_ipv6: Option<u32>,
     /// Configured hold time override (None = default).
     pub hold_time: Option<u16>,
     /// Effective RFC 9687 send hold time in seconds (0 = disabled).

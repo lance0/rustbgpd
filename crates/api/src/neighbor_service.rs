@@ -691,6 +691,14 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
         max_prefix_action: info.max_prefix_action.clone(),
         max_prefix_restart_remaining_millis: info.max_prefix_restart_remaining_millis,
         update_group_comparison: None,
+        prefixes_received_ipv4: info.prefix_count_ipv4 as u64,
+        prefixes_received_ipv6: info.prefix_count_ipv6 as u64,
+        effective_max_prefixes: info.max_prefixes_effective,
+        effective_max_prefixes_ipv4: info.max_prefixes_ipv4_effective,
+        effective_max_prefixes_ipv6: info.max_prefixes_ipv6_effective,
+        max_prefix_headroom: info.max_prefix_headroom,
+        max_prefix_headroom_ipv4: info.max_prefix_headroom_ipv4,
+        max_prefix_headroom_ipv6: info.max_prefix_headroom_ipv6,
     }
 }
 
@@ -1505,6 +1513,14 @@ mod tests {
         assert!(source.contains("optional uint32 max_prefix_restart_seconds = 19;"));
         assert!(source.contains("string max_prefix_action = 38;"));
         assert!(source.contains("optional uint64 max_prefix_restart_remaining_millis = 39;"));
+        assert!(source.contains("uint64 prefixes_received_ipv4 = 41;"));
+        assert!(source.contains("uint64 prefixes_received_ipv6 = 42;"));
+        assert!(source.contains("optional uint32 effective_max_prefixes = 43;"));
+        assert!(source.contains("optional uint32 effective_max_prefixes_ipv4 = 44;"));
+        assert!(source.contains("optional uint32 effective_max_prefixes_ipv6 = 45;"));
+        assert!(source.contains("optional uint32 max_prefix_headroom = 46;"));
+        assert!(source.contains("optional uint32 max_prefix_headroom_ipv4 = 47;"));
+        assert!(source.contains("optional uint32 max_prefix_headroom_ipv6 = 48;"));
     }
 
     fn test_static_peer_config() -> PeerManagerNeighborConfig {
@@ -2379,6 +2395,33 @@ mod tests {
         assert_eq!(state.config.unwrap().max_prefix_restart_seconds, Some(30));
         assert_eq!(state.max_prefix_action, "restart");
         assert_eq!(state.max_prefix_restart_remaining_millis, Some(12_345));
+    }
+
+    /// Load-bearing: removing any max-prefix field from the API conversion
+    /// yields a protobuf zero/absence instead of one of these exact values.
+    #[test]
+    fn peer_info_to_proto_preserves_max_prefix_observability() {
+        let mut info = peer_info("10.0.0.2".parse().unwrap());
+        info.prefix_count = 11;
+        info.prefix_count_ipv4 = 7;
+        info.prefix_count_ipv6 = 3;
+        info.max_prefixes_effective = Some(20);
+        info.max_prefixes_ipv4_effective = Some(10);
+        info.max_prefixes_ipv6_effective = None;
+        info.max_prefix_headroom = Some(9);
+        info.max_prefix_headroom_ipv4 = Some(3);
+        info.max_prefix_headroom_ipv6 = None;
+
+        let state = peer_info_to_proto(&info);
+        assert_eq!(state.prefixes_received, 11);
+        assert_eq!(state.prefixes_received_ipv4, 7);
+        assert_eq!(state.prefixes_received_ipv6, 3);
+        assert_eq!(state.effective_max_prefixes, Some(20));
+        assert_eq!(state.effective_max_prefixes_ipv4, Some(10));
+        assert_eq!(state.effective_max_prefixes_ipv6, None);
+        assert_eq!(state.max_prefix_headroom, Some(9));
+        assert_eq!(state.max_prefix_headroom_ipv4, Some(3));
+        assert_eq!(state.max_prefix_headroom_ipv6, None);
     }
 
     #[test]

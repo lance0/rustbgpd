@@ -5,6 +5,7 @@ use rustbgpd_api::peer_types::{
     SessionLifecycleEventType,
 };
 use rustbgpd_fsm::SessionState;
+use rustbgpd_transport::handle::MaxPrefixState;
 use rustbgpd_transport::{PeerSessionState, TcpAoRotationStatus, WarmCheckpointSessionState};
 use rustbgpd_wire::{
     Capability, Message, OpenMessage, decode_message, encode_message, peek_message_length,
@@ -1240,6 +1241,7 @@ fn established_export_policy_test_session_with_queries(
                         peer_ip: addr,
                         peer_asn: Some(65002),
                         prefix_count: 0,
+                        max_prefix: MaxPrefixState::default(),
                         negotiated_hold_time: Some(90),
                         four_octet_as: Some(true),
                         remote_router_id: None,
@@ -1313,6 +1315,7 @@ fn rollback_ordering_policy_session(
                         peer_ip: addr,
                         peer_asn: Some(65002),
                         prefix_count: 0,
+                        max_prefix: MaxPrefixState::default(),
                         negotiated_hold_time: Some(90),
                         four_octet_as: Some(true),
                         remote_router_id: None,
@@ -1392,6 +1395,7 @@ fn stalled_export_policy_test_session(
                         peer_ip: addr,
                         peer_asn: Some(65002),
                         prefix_count: 0,
+                        max_prefix: MaxPrefixState::default(),
                         negotiated_hold_time: Some(90),
                         four_octet_as: Some(true),
                         remote_router_id: None,
@@ -1543,6 +1547,7 @@ fn max_prefix_on_command_peer_handle(
                         peer_ip: peer_addr,
                         peer_asn: Some(65002),
                         prefix_count: 0,
+                        max_prefix: MaxPrefixState::default(),
                         negotiated_hold_time: None,
                         four_octet_as: None,
                         remote_router_id: None,
@@ -1712,6 +1717,7 @@ fn fake_peer_handle_with_route_refresh_reply(
                         peer_ip: peer_addr,
                         peer_asn: None,
                         prefix_count: 0,
+                        max_prefix: MaxPrefixState::default(),
                         negotiated_hold_time: None,
                         four_octet_as: None,
                         remote_router_id,
@@ -2008,6 +2014,68 @@ async fn unavailable_session_preserves_graceful_shutdown_advertise_intent() {
     let info = super::snapshot::build_peer_info(&peer_key, managed, None);
     assert!(info.graceful_shutdown_advertise_intent);
     assert!(info.stale);
+
+    let managed = mgr.peers.remove(&peer_key).unwrap();
+    managed.handle.shutdown().await.unwrap().unwrap();
+}
+
+/// Load-bearing: sourcing live counts from config or deriving stale headroom
+/// from zero placeholders makes at least one exact snapshot assertion fail.
+#[tokio::test]
+async fn max_prefix_snapshot_uses_live_accounting_and_withholds_stale_headroom() {
+    let mut mgr = test_peer_manager();
+    let addr: IpAddr = "10.0.0.46".parse().unwrap();
+    let handle = fake_peer_handle(
+        addr,
+        SessionState::Idle,
+        None,
+        Arc::new(FakePeerCounters::default()),
+    );
+    insert_test_managed_peer(&mut mgr, addr, handle, false);
+    let peer_key = key(addr);
+    let managed = mgr.peers.get_mut(&peer_key).unwrap();
+    managed.max_prefixes = Some(30);
+    managed.transport_config.max_prefixes_ipv4 = Some(20);
+    managed.transport_config.max_prefixes_ipv6 = Some(10);
+
+    let mut state = policy_test_peer_state(addr, SessionState::Established);
+    state.prefix_count = 11;
+    state.max_prefix.prefix_count_ipv4 = 7;
+    state.max_prefix.prefix_count_ipv6 = 3;
+    state.max_prefix.max_prefixes = Some(25);
+    state.max_prefix.max_prefixes_ipv4 = Some(15);
+    state.max_prefix.max_prefixes_ipv6 = None;
+    state.max_prefix.headroom = Some(14);
+    state.max_prefix.headroom_ipv4 = Some(8);
+
+    let live = super::snapshot::build_peer_info(&peer_key, managed, Some(&state));
+    assert_eq!(
+        (
+            live.prefix_count,
+            live.prefix_count_ipv4,
+            live.prefix_count_ipv6
+        ),
+        (11, 7, 3)
+    );
+    assert_eq!(live.max_prefixes_effective, Some(25));
+    assert_eq!(live.max_prefixes_ipv4_effective, Some(15));
+    assert_eq!(live.max_prefixes_ipv6_effective, None);
+    assert_eq!(live.max_prefix_headroom, Some(14));
+    assert_eq!(live.max_prefix_headroom_ipv4, Some(8));
+    assert_eq!(live.max_prefix_headroom_ipv6, None);
+
+    let stale_info = super::snapshot::build_peer_info(&peer_key, managed, None);
+    assert_eq!(stale_info.max_prefixes_effective, Some(30));
+    assert_eq!(stale_info.max_prefixes_ipv4_effective, Some(20));
+    assert_eq!(stale_info.max_prefixes_ipv6_effective, Some(10));
+    assert_eq!(
+        (
+            stale_info.max_prefix_headroom,
+            stale_info.max_prefix_headroom_ipv4,
+            stale_info.max_prefix_headroom_ipv6,
+        ),
+        (None, None, None)
+    );
 
     let managed = mgr.peers.remove(&peer_key).unwrap();
     managed.handle.shutdown().await.unwrap().unwrap();
@@ -4380,6 +4448,7 @@ async fn promoted_dynamic_max_prefix_latch_survives_idle_until_explicit_enable()
                         peer_ip: addr,
                         peer_asn: Some(65002),
                         prefix_count: 0,
+                        max_prefix: MaxPrefixState::default(),
                         negotiated_hold_time: None,
                         four_octet_as: None,
                         remote_router_id: None,
@@ -7075,6 +7144,7 @@ fn acking_counted_policy_handle(peer_addr: IpAddr, counters: Arc<FakePeerCounter
                         peer_ip: peer_addr,
                         peer_asn: None,
                         prefix_count: 0,
+                        max_prefix: MaxPrefixState::default(),
                         negotiated_hold_time: None,
                         four_octet_as: None,
                         remote_router_id: None,
@@ -8003,6 +8073,7 @@ fn policy_test_peer_state(peer_addr: IpAddr, state: SessionState) -> PeerSession
         peer_ip: peer_addr,
         peer_asn: None,
         prefix_count: 0,
+        max_prefix: MaxPrefixState::default(),
         negotiated_hold_time: None,
         four_octet_as: None,
         remote_router_id: None,
@@ -8045,6 +8116,7 @@ fn acking_policy_handle(peer_addr: IpAddr, state: SessionState) -> PeerHandle {
                         peer_ip: peer_addr,
                         peer_asn: None,
                         prefix_count: 0,
+                        max_prefix: MaxPrefixState::default(),
                         negotiated_hold_time: None,
                         four_octet_as: None,
                         remote_router_id: None,
@@ -8158,6 +8230,7 @@ fn sequenced_policy_state_handle(
                         peer_ip: peer_addr,
                         peer_asn: None,
                         prefix_count: 0,
+                        max_prefix: MaxPrefixState::default(),
                         negotiated_hold_time: None,
                         four_octet_as: None,
                         remote_router_id: None,
@@ -8226,6 +8299,7 @@ fn export_fails_once_policy_handle(peer_addr: IpAddr, state: SessionState) -> Pe
                         peer_ip: peer_addr,
                         peer_asn: None,
                         prefix_count: 0,
+                        max_prefix: MaxPrefixState::default(),
                         negotiated_hold_time: None,
                         four_octet_as: None,
                         remote_router_id: None,
@@ -8291,6 +8365,7 @@ fn route_refresh_failing_handle(peer_addr: IpAddr, state: SessionState) -> PeerH
                         peer_ip: peer_addr,
                         peer_asn: None,
                         prefix_count: 0,
+                        max_prefix: MaxPrefixState::default(),
                         negotiated_hold_time: None,
                         four_octet_as: None,
                         remote_router_id: None,
@@ -8354,6 +8429,7 @@ fn route_refresh_failing_after_first_handle(peer_addr: IpAddr, state: SessionSta
                         peer_ip: peer_addr,
                         peer_asn: None,
                         prefix_count: 0,
+                        max_prefix: MaxPrefixState::default(),
                         negotiated_hold_time: None,
                         four_octet_as: None,
                         remote_router_id: None,
@@ -9183,6 +9259,7 @@ async fn back_to_back_updates_do_not_lose_pending_refresh() {
                         peer_ip: addr,
                         peer_asn: None,
                         prefix_count: 0,
+                        max_prefix: MaxPrefixState::default(),
                         negotiated_hold_time: Some(90),
                         four_octet_as: Some(true),
                         remote_router_id: Some(Ipv4Addr::new(10, 0, 0, 2)),
@@ -9298,6 +9375,7 @@ async fn peer_deletion_after_failed_update_drops_pending_retry_cleanly() {
                         peer_ip: addr,
                         peer_asn: None,
                         prefix_count: 0,
+                        max_prefix: MaxPrefixState::default(),
                         negotiated_hold_time: Some(90),
                         four_octet_as: Some(true),
                         remote_router_id: Some(Ipv4Addr::new(10, 0, 0, 2)),
@@ -9431,6 +9509,7 @@ async fn content_equal_policy_fanout_skips_unaffected_peers() {
                             peer_ip: addr,
                             peer_asn: None,
                             prefix_count: 0,
+                            max_prefix: MaxPrefixState::default(),
                             negotiated_hold_time: Some(90),
                             four_octet_as: Some(true),
                             remote_router_id: None,
@@ -12887,6 +12966,7 @@ async fn export_policy_apply_times_out_when_rib_reply_wedges() {
                         peer_ip: addr,
                         peer_asn: None,
                         prefix_count: 0,
+                        max_prefix: MaxPrefixState::default(),
                         negotiated_hold_time: None,
                         four_octet_as: None,
                         remote_router_id: None,
@@ -13022,6 +13102,7 @@ async fn honor_graceful_shutdown_hot_apply_targets_ebgp_only() {
                             peer_ip: addr,
                             peer_asn: None,
                             prefix_count: 0,
+                            max_prefix: MaxPrefixState::default(),
                             negotiated_hold_time: Some(90),
                             four_octet_as: Some(true),
                             remote_router_id: Some(Ipv4Addr::new(10, 0, 0, 2)),
@@ -13200,6 +13281,7 @@ async fn import_apply_failure_on_established_peer_bails_without_refresh() {
                         peer_ip: task_addr,
                         peer_asn: None,
                         prefix_count: 0,
+                        max_prefix: MaxPrefixState::default(),
                         negotiated_hold_time: Some(90),
                         four_octet_as: Some(true),
                         remote_router_id: Some(Ipv4Addr::new(10, 0, 0, 2)),
@@ -13381,6 +13463,7 @@ async fn import_apply_failure_on_idle_peer_bails_and_sets_pending_refresh() {
                         peer_ip: task_addr,
                         peer_asn: None,
                         prefix_count: 0,
+                        max_prefix: MaxPrefixState::default(),
                         negotiated_hold_time: None,
                         four_octet_as: None,
                         remote_router_id: None,
@@ -13556,6 +13639,7 @@ async fn export_apply_failure_bails_without_advancing_bookkeeping() {
                         peer_ip: task_addr,
                         peer_asn: None,
                         prefix_count: 0,
+                        max_prefix: MaxPrefixState::default(),
                         negotiated_hold_time: None,
                         four_octet_as: None,
                         remote_router_id: None,
@@ -13762,6 +13846,7 @@ async fn import_succeeds_export_fails_then_retry_fires_refresh() {
                         peer_ip: task_addr,
                         peer_asn: None,
                         prefix_count: 0,
+                        max_prefix: MaxPrefixState::default(),
                         negotiated_hold_time: Some(90),
                         four_octet_as: Some(true),
                         remote_router_id: Some(Ipv4Addr::new(10, 0, 0, 2)),
@@ -13989,6 +14074,7 @@ async fn rib_failure_preserves_pending_refresh_for_retry() {
                         peer_ip: task_addr,
                         peer_asn: None,
                         prefix_count: 0,
+                        max_prefix: MaxPrefixState::default(),
                         negotiated_hold_time: Some(90),
                         four_octet_as: Some(true),
                         remote_router_id: Some(Ipv4Addr::new(10, 0, 0, 2)),
@@ -14359,6 +14445,7 @@ async fn simultaneous_active_open_runs_inbound_candidate_before_primary_idle() {
                         peer_ip: peer_addr,
                         peer_asn: None,
                         prefix_count: 0,
+                        max_prefix: MaxPrefixState::default(),
                         negotiated_hold_time: None,
                         four_octet_as: None,
                         remote_router_id: None,
@@ -14582,6 +14669,7 @@ async fn max_prefix_latch_arriving_during_idle_query_blocks_inbound_replace() {
                         peer_ip: peer_addr,
                         peer_asn: Some(65002),
                         prefix_count: 0,
+                        max_prefix: MaxPrefixState::default(),
                         negotiated_hold_time: None,
                         four_octet_as: None,
                         remote_router_id: None,

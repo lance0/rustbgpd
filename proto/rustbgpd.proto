@@ -555,6 +555,21 @@ message NeighborState {
   // Present only while a timed max-prefix restart hold-down is active.
   optional uint64 max_prefix_restart_remaining_millis = 39;
   UpdateGroupComparison update_group_comparison = 40;
+  // Authoritative O(1) unique-prefix accounting from the session actor.
+  // prefixes_received remains the aggregate across every counted family;
+  // these two fields are the IPv4/IPv6 unicast subsets.
+  uint64 prefixes_received_ipv4 = 41;
+  uint64 prefixes_received_ipv6 = 42;
+  // Effective finite max-prefix bounds. Absence means unlimited, including
+  // for aggregate max_prefixes (whose legacy NeighborConfig field uses 0).
+  optional uint32 effective_max_prefixes = 43;
+  optional uint32 effective_max_prefixes_ipv4 = 44;
+  optional uint32 effective_max_prefixes_ipv6 = 45;
+  // Remaining capacity before each finite bound is exceeded. Absent when the
+  // corresponding limit is unlimited or this NeighborState is stale.
+  optional uint32 max_prefix_headroom = 46;
+  optional uint32 max_prefix_headroom_ipv4 = 47;
+  optional uint32 max_prefix_headroom_ipv6 = 48;
 }
 
 message UpdateGroupComparison {

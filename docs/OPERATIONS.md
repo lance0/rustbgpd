@@ -504,8 +504,15 @@ neighbor removal, or dynamic-range replacement invalidates an existing
 countdown rather than carrying it into new policy.
 
 `rbgp neighbor <addr>` reports the effective current action (`shutdown` or
-`restart`), configured restart duration, and live hold-down milliseconds. The
-same fields are available in JSON and the neighbor gRPC response.
+`restart`), configured restart duration, live hold-down milliseconds, and the
+session actor's O(1) aggregate max-prefix-counted NLRI identity count plus
+unique IPv4- and IPv6-unicast prefix counts. Each count is paired with its
+effective finite limit and remaining headroom;
+an absent limit is rendered as `unlimited` and remains absent (never zero) in
+JSON and gRPC. The aggregate includes all max-prefix-counted NLRI, while the
+family counts cover unicast only. If the session query times out, the snapshot
+is marked stale: configured limits remain visible, but headroom is withheld
+rather than derived from placeholder zero counts.
 
 ---
 

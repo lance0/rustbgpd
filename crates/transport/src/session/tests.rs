@@ -426,6 +426,40 @@ async fn query_state_sorts_both_paths_limit_vectors_by_numeric_family() {
     );
 }
 
+/// Load-bearing: replacing any `QueryState` max-prefix assignment with a
+/// default makes its exact count, finite limit, or headroom assertion fail.
+#[tokio::test]
+async fn query_state_reports_exact_max_prefix_counts_limits_and_headroom() {
+    let mut session = make_test_session(65001, 65002);
+    session.config.max_prefixes = Some(9);
+    session.config.max_prefixes_ipv4 = Some(4);
+    session.config.max_prefixes_ipv6 = Some(6);
+
+    let v4 = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24));
+    let v6 = Prefix::V6(Ipv6Prefix::new(Ipv6Addr::LOCALHOST, 128));
+    assert!(session.remember_known_path(v4, 0));
+    assert!(session.remember_known_path(v6, 0));
+
+    let (reply, state) = oneshot::channel();
+    assert!(matches!(
+        session
+            .handle_command(PeerCommand::QueryState { reply })
+            .await,
+        ControlFlow::Continue(())
+    ));
+    let state = state.await.unwrap();
+
+    assert_eq!(state.prefix_count, 2);
+    assert_eq!(state.max_prefix.prefix_count_ipv4, 1);
+    assert_eq!(state.max_prefix.prefix_count_ipv6, 1);
+    assert_eq!(state.max_prefix.max_prefixes, Some(9));
+    assert_eq!(state.max_prefix.max_prefixes_ipv4, Some(4));
+    assert_eq!(state.max_prefix.max_prefixes_ipv6, Some(6));
+    assert_eq!(state.max_prefix.headroom, Some(7));
+    assert_eq!(state.max_prefix.headroom_ipv4, Some(3));
+    assert_eq!(state.max_prefix.headroom_ipv6, Some(5));
+}
+
 #[tokio::test]
 async fn warm_checkpoint_query_uses_current_gr_and_add_path_receive_direction() {
     let mut session = make_test_session(65001, 65002);
