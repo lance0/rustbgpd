@@ -11,6 +11,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **TCP-AO RNext updates preserve socket policy and fresh counters.** Runtime
+  RNext selection now read-modify-writes Linux `TCP_AO_INFO` without forcing
+  Current or resetting counters, and composite inspection returns the trailing
+  INFO snapshot so errors arriving during key enumeration remain visible.
+
 - **Peer-advertised Graceful Restart retention can be bounded locally.**
   Neighbors and peer groups accept `gr_peer_restart_time_max` (default 4095)
   to cap the RFC 4724 Restart Time used for initial disconnected stale-route
