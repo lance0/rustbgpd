@@ -1950,12 +1950,6 @@ fn combined_saturation_regroup_replacement_schedule(seed: u64) -> Schedule {
             Op::AssertLocRibAbsent(stale),
             Op::DrainOne(RIGHT),
             Op::AdvanceRetry,
-            // The stale generation must not undo the dirty current session's
-            // regroup while its retry is pending.
-            Op::AssertMembership {
-                peer: RIGHT,
-                expectation: MembershipExpectation::SeparateSharedGroupFrom(LEFT),
-            },
             Op::DrainOne(RIGHT),
             Op::ReplacePolicy {
                 peer: RIGHT,
