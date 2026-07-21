@@ -125,6 +125,9 @@ pub fn validate_open(
     ) = open
         .capabilities
         .iter()
+        // RFC 4724 section 3 requires duplicate instances to be ignored
+        // except for the last one carried in the OPEN.
+        .rev()
         .find_map(|c| match c {
             Capability::GracefulRestart {
                 restart_state,
@@ -935,6 +938,56 @@ mod tests {
         assert_eq!(neg.peer_restart_time, 120);
         assert_eq!(neg.peer_gr_families.len(), 1);
         assert!(neg.peer_gr_families[0].forwarding_preserved);
+    }
+
+    /// Load-bearing RFC 4724 section 3 proof: selecting the first duplicate
+    /// Graceful Restart capability instead of the last changes every asserted
+    /// restart flag, timer, and family-forwarding value to the first fixture.
+    #[test]
+    fn duplicate_graceful_restart_capability_uses_last_instance() {
+        let mut cfg = test_config();
+        cfg.graceful_restart = true;
+        cfg.families = vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
+        let first = Capability::GracefulRestart {
+            restart_state: false,
+            notification: false,
+            restart_time: 30,
+            families: vec![GracefulRestartFamily {
+                afi: Afi::Ipv4,
+                safi: Safi::Unicast,
+                forwarding_preserved: false,
+            }],
+        };
+        let last = Capability::GracefulRestart {
+            restart_state: true,
+            notification: true,
+            restart_time: 240,
+            families: vec![GracefulRestartFamily {
+                afi: Afi::Ipv6,
+                safi: Safi::Unicast,
+                forwarding_preserved: true,
+            }],
+        };
+        let mut open = peer_open();
+        open.capabilities.push(Capability::MultiProtocol {
+            afi: Afi::Ipv6,
+            safi: Safi::Unicast,
+        });
+        open.capabilities.extend([first, last]);
+
+        let neg = validate_open(&open, &cfg).unwrap();
+        assert!(neg.peer_gr_capable);
+        assert!(neg.peer_restart_state);
+        assert!(neg.peer_notification_gr);
+        assert_eq!(neg.peer_restart_time, 240);
+        assert_eq!(
+            neg.peer_gr_families,
+            vec![GracefulRestartFamily {
+                afi: Afi::Ipv6,
+                safi: Safi::Unicast,
+                forwarding_preserved: true,
+            }]
+        );
     }
 
     #[test]
