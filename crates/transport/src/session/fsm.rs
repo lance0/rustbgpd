@@ -438,6 +438,10 @@ impl PeerSession {
                     self.negotiated = Some(*neg);
                     self.publish_export_profile();
                     self.established_at = Some(Instant::now());
+                    // Publish the empty/current capacity snapshot only after
+                    // this actor owns a live Established session. Collision
+                    // candidates remain suppressed until manager promotion.
+                    self.sync_max_prefix_capacity_metrics();
 
                     // Emit BMP Peer Up event — reliable (awaited): losing
                     // it would leave collectors permanently blind to
@@ -664,6 +668,10 @@ impl PeerSession {
                     self.negotiated_families.clear();
                     self.add_path_receive_families.clear();
                     self.clear_known_routes();
+                    // A disconnected session has no live capacity usage.
+                    // Remove, rather than zero, so reconnect and GR-retained
+                    // RIB rows cannot masquerade as current actor state.
+                    self.reap_max_prefix_capacity_metrics();
                     self.local_open_pdu = None;
                     self.remote_open_pdu = None;
                     self.last_down_reason = None;

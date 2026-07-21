@@ -385,6 +385,13 @@ pub enum PeerCommand {
         /// Reply channel for success/failure.
         reply: oneshot::Sender<Result<(), PeerCommandError>>,
     },
+    /// Transfer ownership of shared max-prefix capacity gauges to a promoted
+    /// inbound collision candidate after the old primary has quiesced.
+    ActivateMaxPrefixMetrics {
+        /// Acknowledges that actor ownership is active and any Established
+        /// snapshot has been published.
+        reply: oneshot::Sender<()>,
+    },
     /// Collision resolution: send Cease/7 NOTIFICATION and tear down.
     CollisionDump,
     /// ADR-0073: query this session's import-decision cache. Read-only
@@ -1199,6 +1206,40 @@ impl PeerHandle {
     pub async fn collision_dump_timeout(&self, deadline: Duration) -> Result<(), PeerCommandError> {
         self.send_simple_command_timeout(PeerCommand::CollisionDump, "collision_dump", deadline)
             .await
+    }
+
+    /// Activate shared max-prefix capacity metrics after collision promotion.
+    ///
+    /// The command is acknowledged only after an already-Established actor has
+    /// published its exact current snapshot. The manager sends it after the
+    /// retiring primary has terminated, so that primary's final reap cannot erase
+    /// the promoted owner.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the session is unreachable or does not acknowledge
+    /// within `deadline`.
+    pub async fn activate_max_prefix_metrics_timeout(
+        &self,
+        deadline: Duration,
+    ) -> Result<(), PeerCommandError> {
+        let commands = self.commands.clone();
+        match tokio::time::timeout(deadline, async move {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            commands
+                .send(PeerCommand::ActivateMaxPrefixMetrics { reply: reply_tx })
+                .await
+                .map_err(|_| PeerCommandError::SessionExited)?;
+            reply_rx.await.map_err(|_| PeerCommandError::ReplyDropped)
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(_elapsed) => Err(PeerCommandError::TimedOut {
+                operation: "activate_max_prefix_metrics",
+                deadline,
+            }),
+        }
     }
 
     /// Send a ROUTE-REFRESH message for the given address family.

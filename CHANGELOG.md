@@ -45,6 +45,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Max-prefix capacity is alertable before teardown.** Prometheus and the
+  shipped Grafana overview expose actor-owned usage, finite limits, and
+  headroom for aggregate, IPv4-unicast, and IPv6-unicast scopes. Unlimited and
+  disconnected scopes remain absent instead of reporting fake zeroes, and the
+  example alert pack warns on sustained 80% utilization.
+
 - **Per-neighbor max-prefix headroom is operator-visible.** Neighbor detail now
   exposes the authoritative O(1) aggregate max-prefix-counted NLRI identity
   count plus unique IPv4- and IPv6-unicast prefix counts, with effective finite

@@ -514,6 +514,17 @@ family counts cover unicast only. If the session query times out, the snapshot
 is marked stale: configured limits remain visible, but headroom is withheld
 rather than derived from placeholder zero counts.
 
+Prometheus exposes the same live actor authority as
+`bgp_max_prefix_usage`, `bgp_max_prefix_limit`, and
+`bgp_max_prefix_headroom`, keyed by `peer` and bounded `scope`
+(`aggregate`, `ipv4_unicast`, or `ipv6_unicast`). Usage is the session
+actor's enforcement count, not an alias for `bgp_rib_prefixes`: in particular,
+unicast Add-Path IDs collapse to one unique prefix while the aggregate also
+includes max-prefix-counted non-unicast identities. Limit and headroom series
+exist only for finite configured bounds. All three capacity families are
+removed when the session goes down and republished from fresh actor state on
+reconnect; GR-retained RIB rows therefore never appear as live session usage.
+
 ---
 
 ## Key metrics to watch
@@ -552,9 +563,12 @@ All `peer`-labeled series are removed when the peer is **deleted** — a static
 neighbor delete (CLI/gRPC/config reload) or a dynamic peer's auto-removal
 when its session ends. Prometheus marks the removed series stale at the next
 scrape, so deleted peers stop appearing in instant queries instead of
-freezing at their last value. A session flap or admin disable does *not*
-remove anything: a flapping peer keeps its counters and history. If a deleted
-peer is later re-added, its per-peer counters restart from zero — PromQL
+freezing at their last value. A session flap or admin disable does not remove
+durable counters or history. The live `bgp_max_prefix_usage`,
+`bgp_max_prefix_limit`, and `bgp_max_prefix_headroom` gauges are the deliberate
+exception: they are removed while the session is down and republished on
+Established. If a deleted peer is later re-added, its per-peer counters restart
+from zero — PromQL
 `rate()` / `increase()` treat that as an ordinary counter reset, so
 dashboards see no negative-rate artifacts. Process-global counters and
 families keyed by other identities (AFI/SAFI, VRF, VNI, BMP collector) are
@@ -581,6 +595,9 @@ authenticated sensitive-read surface.
 | `bgp_rib_loc_prefixes{afi_safi}` | Loc-RIB size (best paths) per AFI/SAFI |
 | `bgp_rib_prefixes{peer,afi_safi}` | Adj-RIB-In size per peer + AFI/SAFI (received) |
 | `bgp_rib_adj_out_prefixes{peer,afi_safi}` | Adj-RIB-Out size per peer + AFI/SAFI (advertised) |
+| `bgp_max_prefix_usage{peer,scope}` | Live session-actor max-prefix enforcement count for `aggregate`, `ipv4_unicast`, or `ipv6_unicast`; series are absent while the session is down |
+| `bgp_max_prefix_limit{peer,scope}` | Effective finite bound for the same scope; absent means unlimited, never zero |
+| `bgp_max_prefix_headroom{peer,scope}` | Saturating `limit - usage` for a finite scope; absent when unlimited or disconnected |
 | `bgp_rib_attr_intern_global_size` | Unique attribute sets in the daemon-wide cross-peer intern table (attribute-memory dedup across ALL peers). Tracks reclaim sweeps and growth under churn; a monotonic slope under steady-state churn indicates an intern leak. Replaces the per-peer `bgp_rib_attr_intern_size{peer}` gauge |
 | `bgp_messages_received_total` | Inbound BGP messages by type |
 | `bgp_messages_sent_total` | Outbound BGP messages by type |
@@ -676,6 +693,13 @@ without a `reason` label encode the mechanism in the metric name.
 | `bgp_update_malformed_total{peer,disposition}` | Malformed UPDATE messages by the RFC 7606 disposition applied: `attribute_discard` (offending attribute dropped, UPDATE proceeds), `treat_as_withdraw` (every route in the UPDATE handled as withdrawn, session stays Established), or `session_reset` (NOTIFICATION + teardown, retained where the NLRI cannot be trusted — including the §5.2 escalation when a treat-as-withdraw-class error arrives with no reachable NLRI). One increment per malformed UPDATE, labeled with the strongest-action disposition that governed it (§3 (h)). Each increment is accompanied by a warn log line per malformed attribute and, at DEBUG, the §6 full-message hex capture |
 | `bgp_exact_export_rejections_total{peer,family,reason}` | Post-policy announcements rejected before Adj-RIB-Out commit because the session's exact one-route encoder could not produce a legal wire message. `family` is a bounded OpenConfig AFI/SAFI label; `reason` is `encoding`, `missing_ipv6_next_hop`, `ipv4_requires_extended_next_hop`, or `message_too_long`. Alert on a sustained increase, then correlate the peer/family with the warning log's bounded route identity and detail. Series are reaped only when the configured peer is deleted. |
 | `bgp_max_prefix_exceeded_total{peer}` | `max_prefixes` ceiling breaches; each increment is followed by max-prefix teardown: bare Cease/1 without Notification GR, or RFC 8538 Hard Reset encapsulating Cease/1 when the N-bit was negotiated (see "Peer max-prefix exceeded" above) |
+
+The shipped `BgpMaxPrefixNearLimit` example alert warns after a finite scope
+has remained at or above 80% usage for ten minutes. This threshold lives in the
+editable Prometheus rule, not daemon configuration. Unlimited and disconnected
+scopes cannot fire because their limit series is absent; the existing
+`BgpMaxPrefixLimitExceeded` counter alert remains the durable post-teardown
+signal.
 
 ### Event Streams
 
