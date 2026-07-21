@@ -570,6 +570,33 @@ message NeighborState {
   optional uint32 max_prefix_headroom = 46;
   optional uint32 max_prefix_headroom_ipv4 = 47;
   optional uint32 max_prefix_headroom_ipv6 = 48;
+  // Presence distinguishes an older daemon that does not expose negotiation
+  // state from a current daemon reporting no Established session.
+  optional bool negotiation_available = 49;
+  // Actor-authoritative values from the current Established session. Absent
+  // while down, during OpenConfirm, or when the actor query is stale.
+  NegotiatedSessionState negotiated_session = 50;
+}
+
+message NegotiatedSessionState {
+  // Scalars are optional so false/zero negotiated values remain distinct from
+  // fields not exposed by an older daemon during a rolling upgrade.
+  optional uint32 hold_time_seconds = 1;
+  optional string remote_router_id = 2;
+  optional bool four_octet_as = 3;
+  repeated string families = 4;
+  // Present only when the peer advertised usable GR coverage for at least one
+  // mutually negotiated family supported by the local helper.
+  NegotiatedGracefulRestartState graceful_restart = 5;
+}
+
+message NegotiatedGracefulRestartState {
+  repeated string peer_families = 1;
+  // Peer-advertised Restart Time. Presence preserves a negotiated zero.
+  optional uint32 peer_restart_time_seconds = 2;
+  // Initial disconnected retention after the live local cap. Absent when the
+  // local GR helper is disabled.
+  optional uint32 effective_retention_time_seconds = 3;
 }
 
 message UpdateGroupComparison {

@@ -7,8 +7,8 @@ use bytes::Bytes;
 use rustbgpd_fsm::SessionState;
 use rustbgpd_policy::PolicyChain;
 use rustbgpd_transport::{
-    ImportExplainReply, ImportPolicyTermHits, RejectedRoutesReply, RemovePrivateAs,
-    TcpAoInfoSnapshot, TcpAoKeyring, TransportAuthSecret,
+    ImportExplainReply, ImportPolicyTermHits, NegotiatedSessionState, RejectedRoutesReply,
+    RemovePrivateAs, TcpAoInfoSnapshot, TcpAoKeyring, TransportAuthSecret,
 };
 use rustbgpd_wire::{Afi, BgpRole, Prefix, Safi};
 use tokio::net::TcpStream;
@@ -1953,6 +1953,9 @@ pub struct PeerInfo {
     pub max_prefix_restart_remaining_millis: Option<u64>,
     /// Configured address families.
     pub families: Vec<(Afi, Safi)>,
+    /// Actor-authoritative values for the current Established session. Absent
+    /// while down, while the actor query is stale, or before establishment.
+    pub negotiated_session: Option<NegotiatedSessionState>,
     /// Private AS removal mode.
     pub remove_private_as: RemovePrivateAs,
     /// Whether this eBGP peer is a transparent route-server client.

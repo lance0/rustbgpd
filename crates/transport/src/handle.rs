@@ -496,6 +496,34 @@ pub struct MaxPrefixState {
     pub headroom_ipv6: Option<u32>,
 }
 
+/// Graceful Restart values negotiated for the current Established session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NegotiatedGracefulRestartState {
+    /// Usable peer GR families: mutually negotiated and supported by the
+    /// local helper implementation.
+    pub peer_families: Vec<(Afi, Safi)>,
+    /// Restart Time advertised by the peer in its current OPEN.
+    pub peer_restart_time: u16,
+    /// Initial disconnected retention after applying the live local cap.
+    /// Absent when the local GR helper is disabled.
+    pub effective_retention_time: Option<u16>,
+}
+
+/// Authoritative negotiation values for the current Established session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NegotiatedSessionState {
+    /// Negotiated Hold Time in seconds.
+    pub hold_time: u16,
+    /// Remote BGP Identifier.
+    pub remote_router_id: Ipv4Addr,
+    /// Whether both speakers negotiated four-octet AS support.
+    pub four_octet_as: bool,
+    /// Address families mutually negotiated in the OPEN exchange.
+    pub families: Vec<(Afi, Safi)>,
+    /// Usable peer Graceful Restart coverage, when any exists.
+    pub graceful_restart: Option<NegotiatedGracefulRestartState>,
+}
+
 /// Snapshot of a peer session's runtime state.
 #[derive(Debug, Clone)]
 pub struct PeerSessionState {
@@ -515,6 +543,10 @@ pub struct PeerSessionState {
     pub four_octet_as: Option<bool>,
     /// Remote BGP router ID, if session reached `OpenConfirm`.
     pub remote_router_id: Option<Ipv4Addr>,
+    /// Established-only negotiated runtime state. This deliberately remains
+    /// absent during `OpenConfirm` even though collision handling can already
+    /// observe the identity fields above.
+    pub negotiated_session: Option<NegotiatedSessionState>,
     /// Locally configured BGP Role, if advertised.
     pub local_role: Option<BgpRole>,
     /// Remote BGP Role advertised in OPEN, if present.

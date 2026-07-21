@@ -1312,6 +1312,24 @@ counters stop moving is wedged), flap count, an RR-client marker, and the
 overloaded `State/PfxRcd` column (a number means Established and shows the
 prefixes received). Display-only: `-j` output always carries every field.
 
+`rbgp neighbor <address>` reports actor-authoritative negotiation state only
+for the current Established session: negotiated hold time, remote router ID,
+four-octet-AS result, mutual families, and usable peer Graceful Restart family
+coverage. When GR coverage is usable it also shows the peer-advertised Restart
+Time and the effective initial disconnected retention after
+`gr_peer_restart_time_max`; the effective value is absent when the local GR
+helper is disabled. It does not substitute configured families or timers.
+
+Human output distinguishes `unknown (not exposed by daemon)` during a rolling
+CLI upgrade, `unknown (stale state)` after a timed-out actor query,
+`unavailable (session not Established)`, `unsupported for negotiated
+families`, `peer capable; disabled locally`, and active helper state. JSON and
+gRPC expose the same distinction with optional `negotiation_available`, an
+optional `negotiated_session` object, an optional nested `graceful_restart`
+object, and optional `effective_retention_time_seconds`. Scalar presence is
+meaningful: a negotiated hold or Restart Time of zero and
+`four_octet_as = false` are explicit values, not missing data.
+
 ### Add a peer at runtime
 
 ```bash

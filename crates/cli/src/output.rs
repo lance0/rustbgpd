@@ -280,6 +280,12 @@ pub struct JsonNeighborDetail {
     /// Effective RFC 9687 send hold time in seconds (0 = disabled).
     pub send_hold_time: u32,
     pub families: Vec<String>,
+    /// Presence distinguishes an older daemon from a current daemon that has
+    /// no Established-session negotiation snapshot.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub negotiation_available: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub negotiated_session: Option<JsonNegotiatedSession>,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub peer_group: String,
     pub route_reflector_client: bool,
@@ -315,6 +321,28 @@ pub struct JsonNeighborDetail {
     pub update_group: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub selection_deferral: Vec<JsonSelectionDeferralFamily>,
+}
+
+#[derive(Serialize)]
+pub struct JsonNegotiatedSession {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hold_time_seconds: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_router_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub four_octet_as: Option<bool>,
+    pub families: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub graceful_restart: Option<JsonNegotiatedGracefulRestart>,
+}
+
+#[derive(Serialize)]
+pub struct JsonNegotiatedGracefulRestart {
+    pub peer_families: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peer_restart_time_seconds: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effective_retention_time_seconds: Option<u32>,
 }
 
 #[derive(Debug, PartialEq, Serialize)]
@@ -985,6 +1013,16 @@ mod tests {
         assert_json_shape(value, contract, contract_id);
         for nested in contract["nested_json_contracts"].as_array().unwrap() {
             match nested["path"].as_str().unwrap() {
+                "negotiated_session" => {
+                    assert_json_shape(&value["negotiated_session"], nested, contract_id);
+                }
+                "negotiated_session.graceful_restart" => {
+                    assert_json_shape(
+                        &value["negotiated_session"]["graceful_restart"],
+                        nested,
+                        contract_id,
+                    );
+                }
                 "selection_deferral[]" => {
                     for row in value["selection_deferral"].as_array().unwrap() {
                         assert_json_shape(row, nested, contract_id);
@@ -1244,6 +1282,18 @@ mod tests {
             hold_time: 90,
             send_hold_time: 480,
             families: vec!["ipv4_unicast".to_string()],
+            negotiation_available: Some(true),
+            negotiated_session: Some(JsonNegotiatedSession {
+                hold_time_seconds: Some(0),
+                remote_router_id: Some("192.0.2.7".to_string()),
+                four_octet_as: Some(false),
+                families: vec!["ipv4_unicast".to_string()],
+                graceful_restart: Some(JsonNegotiatedGracefulRestart {
+                    peer_families: vec!["ipv4_unicast".to_string()],
+                    peer_restart_time_seconds: Some(0),
+                    effective_retention_time_seconds: None,
+                }),
+            }),
             peer_group: "rs-clients".to_string(),
             route_reflector_client: false,
             route_server_client: true,
@@ -1371,6 +1421,21 @@ mod tests {
         assert_eq!(value["messages_received"], 20);
         assert_eq!(value["messages_sent"], 21);
         assert_eq!(value["route_reflector_client"], false);
+        // Load-bearing: dropping protobuf scalar presence at the JSON
+        // boundary, collapsing false/zero, or renaming either nested family
+        // field makes these exact assertions or the inventory shape check red.
+        assert_eq!(value["negotiation_available"], true);
+        assert_eq!(value["negotiated_session"]["hold_time_seconds"], 0);
+        assert_eq!(value["negotiated_session"]["four_octet_as"], false);
+        assert_eq!(
+            value["negotiated_session"]["graceful_restart"]["peer_restart_time_seconds"],
+            0
+        );
+        assert!(
+            value["negotiated_session"]["graceful_restart"]
+                .get("effective_retention_time_seconds")
+                .is_none()
+        );
         assert_eq!(value["graceful_shutdown_advertise_intent"], true);
         assert_eq!(value["selection_deferral"][0]["afi"], 1);
         assert_eq!(
@@ -1388,10 +1453,14 @@ mod tests {
         detail.graceful_shutdown_advertise_intent = None;
         detail.effective_max_prefixes = None;
         detail.max_prefix_headroom = None;
+        detail.negotiation_available = None;
+        detail.negotiated_session = None;
         let value = serde_json::to_value(&detail).expect("JSON serialize");
         assert!(value.get("graceful_shutdown_advertise_intent").is_none());
         assert!(value.get("effective_max_prefixes").is_none());
         assert!(value.get("max_prefix_headroom").is_none());
+        assert!(value.get("negotiation_available").is_none());
+        assert!(value.get("negotiated_session").is_none());
     }
 
     fn table_fixture() -> Vec<proto::NeighborState> {

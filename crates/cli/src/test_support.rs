@@ -813,6 +813,18 @@ impl rustbgpd_api::proto::neighbor_service_server::NeighborService for MockNeigh
             max_prefix_headroom: None,
             max_prefix_headroom_ipv4: None,
             max_prefix_headroom_ipv6: None,
+            negotiation_available: Some(true),
+            negotiated_session: Some(server_proto::NegotiatedSessionState {
+                hold_time_seconds: Some(87),
+                remote_router_id: Some("192.0.2.7".to_string()),
+                four_octet_as: Some(true),
+                families: vec!["ipv4_unicast".to_string()],
+                graceful_restart: Some(server_proto::NegotiatedGracefulRestartState {
+                    peer_families: vec!["ipv4_unicast".to_string()],
+                    peer_restart_time_seconds: Some(777),
+                    effective_retention_time_seconds: Some(300),
+                }),
+            }),
         };
         response.update_group_comparison = self.state.neighbor_comparison.lock().await.clone();
         Ok(Response::new(response))

@@ -586,6 +586,33 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
         rustbgpd_fsm::SessionState::Established => proto::SessionState::Established,
     };
 
+    let negotiated_session =
+        info.negotiated_session
+            .as_ref()
+            .map(|negotiated| proto::NegotiatedSessionState {
+                hold_time_seconds: Some(u32::from(negotiated.hold_time)),
+                remote_router_id: Some(negotiated.remote_router_id.to_string()),
+                four_octet_as: Some(negotiated.four_octet_as),
+                families: negotiated
+                    .families
+                    .iter()
+                    .map(|(afi, safi)| family_to_string(*afi, *safi))
+                    .collect(),
+                graceful_restart: negotiated.graceful_restart.as_ref().map(|gr| {
+                    proto::NegotiatedGracefulRestartState {
+                        peer_families: gr
+                            .peer_families
+                            .iter()
+                            .map(|(afi, safi)| family_to_string(*afi, *safi))
+                            .collect(),
+                        peer_restart_time_seconds: Some(u32::from(gr.peer_restart_time)),
+                        effective_retention_time_seconds: gr
+                            .effective_retention_time
+                            .map(u32::from),
+                    }
+                }),
+            });
+
     let tcp_ao_health = if info.authentication != "tcp_ao" {
         proto::TcpAoHealth::NotApplicable
     } else if let Some(ao) = info.tcp_ao_info.as_ref() {
@@ -699,6 +726,8 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
         max_prefix_headroom: info.max_prefix_headroom,
         max_prefix_headroom_ipv4: info.max_prefix_headroom_ipv4,
         max_prefix_headroom_ipv6: info.max_prefix_headroom_ipv6,
+        negotiation_available: Some(negotiated_session.is_some()),
+        negotiated_session,
     }
 }
 
@@ -2424,6 +2453,42 @@ mod tests {
         assert_eq!(state.max_prefix_headroom, Some(9));
         assert_eq!(state.max_prefix_headroom_ipv4, Some(3));
         assert_eq!(state.max_prefix_headroom_ipv6, None);
+    }
+
+    /// Load-bearing proof: replacing the actor snapshot with defaults, losing
+    /// optional scalar presence, or omitting the nested GR mapping makes the
+    /// exact non-default/false/zero assertions below fail.
+    #[test]
+    fn peer_info_to_proto_preserves_negotiated_session_presence_and_values() {
+        let mut info = peer_info("10.0.0.2".parse().unwrap());
+        info.negotiated_session = Some(rustbgpd_transport::NegotiatedSessionState {
+            hold_time: 0,
+            remote_router_id: "192.0.2.7".parse().unwrap(),
+            four_octet_as: false,
+            families: vec![(Afi::Ipv6, Safi::Unicast)],
+            graceful_restart: Some(rustbgpd_transport::NegotiatedGracefulRestartState {
+                peer_families: vec![(Afi::Ipv6, Safi::Unicast)],
+                peer_restart_time: 0,
+                effective_retention_time: Some(300),
+            }),
+        });
+
+        let state = peer_info_to_proto(&info);
+        assert_eq!(state.negotiation_available, Some(true));
+        let negotiated = state.negotiated_session.unwrap();
+        assert_eq!(negotiated.hold_time_seconds, Some(0));
+        assert_eq!(negotiated.remote_router_id.as_deref(), Some("192.0.2.7"));
+        assert_eq!(negotiated.four_octet_as, Some(false));
+        assert_eq!(negotiated.families, vec!["ipv6_unicast"]);
+        let gr = negotiated.graceful_restart.unwrap();
+        assert_eq!(gr.peer_families, vec!["ipv6_unicast"]);
+        assert_eq!(gr.peer_restart_time_seconds, Some(0));
+        assert_eq!(gr.effective_retention_time_seconds, Some(300));
+
+        info.negotiated_session = None;
+        let unavailable = peer_info_to_proto(&info);
+        assert_eq!(unavailable.negotiation_available, Some(false));
+        assert!(unavailable.negotiated_session.is_none());
     }
 
     #[test]
