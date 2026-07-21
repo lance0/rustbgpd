@@ -3405,6 +3405,7 @@ fn classify_effective_distribution_mode(
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
 
+    use rustbgpd_policy::Policy;
     use rustbgpd_wire::{
         Ipv4Prefix, MplsLabelEntry, Origin, PathAttribute, RouteDistinguisher, VpnNlri, VpnPrefix,
     };
@@ -3425,6 +3426,180 @@ mod tests {
             sendable_vpnv6: false,
             rtc_negotiated: false,
             llgr_families: vec![(1, 1)],
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct GrowthSnapshot {
+        key_slots: usize,
+        interned_chains: usize,
+        registered_members: usize,
+        active_cells: usize,
+        active_cell_members: usize,
+        inactive_key_slots: usize,
+        dirty_peers: usize,
+        regroup_baselines: usize,
+        extra_withdraw_sets: usize,
+    }
+
+    fn growth_snapshot(manager: &RibManager) -> GrowthSnapshot {
+        let active_cells = manager.group_ribs.len();
+        GrowthSnapshot {
+            key_slots: manager.update_groups.groups.len(),
+            interned_chains: manager.update_groups.chains.len(),
+            registered_members: manager.update_groups.members.len(),
+            active_cells,
+            active_cell_members: manager
+                .group_ribs
+                .values()
+                .map(|group| group.members.len())
+                .sum(),
+            inactive_key_slots: manager
+                .update_groups
+                .groups
+                .len()
+                .saturating_sub(active_cells),
+            dirty_peers: manager.dirty_peers.len(),
+            regroup_baselines: manager.pending_regroup_baseline.len(),
+            extra_withdraw_sets: manager.pending_extra_withdraws.len(),
+        }
+    }
+
+    fn empty_policy(default_action: PolicyAction) -> PolicyChain {
+        PolicyChain::new(vec![Policy {
+            entries: Vec::new(),
+            default_action,
+        }])
+    }
+
+    fn register_growth_peer(
+        manager: &mut RibManager,
+        peer: IpAddr,
+        session_id: u64,
+    ) -> tokio::sync::mpsc::Receiver<crate::update::OutboundRouteUpdate> {
+        let (outbound_tx, mut outbound_rx) = tokio::sync::mpsc::channel(16);
+        manager.handle_update(crate::RibUpdate::PeerUp {
+            peer,
+            session_id,
+            peer_asn: 65_000,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            outbound_tx,
+            export_policy: None,
+            sendable_families: vec![(Afi::Ipv4, Safi::Unicast)],
+            is_ebgp: false,
+            route_reflector_client: false,
+            orr_vantage: None,
+            per_client_best: false,
+            interpret_rfc1997: true,
+            add_path_send_families: Vec::new(),
+            add_path_send_max: 0,
+            negotiated_orf_recv: Vec::new(),
+            negotiated_llgr_families: Vec::new(),
+        });
+        assert_eq!(
+            outbound_rx.try_recv().unwrap().end_of_rib,
+            vec![(Afi::Ipv4, Safi::Unicast)]
+        );
+        outbound_rx
+    }
+
+    fn replace_growth_policy(manager: &mut RibManager, peer: IpAddr, policy: Option<PolicyChain>) {
+        assert_eq!(
+            manager.replace_peer_export_policy_synchronously(peer, policy),
+            Ok(())
+        );
+    }
+
+    /// Load-bearing bounded-growth regression: removing the production
+    /// membership erase in `remove_update_group_member`, or the empty-cell
+    /// reap in `leave_group_without_gauge_refresh`, makes the post-delete
+    /// snapshot differ from `quiescent` on the first completed cycle.
+    #[test]
+    fn repeated_regroup_delete_recreate_returns_to_bounded_state() {
+        const REPEATED_CYCLES: u64 = 16;
+        let (_tx, rx) = tokio::sync::mpsc::channel(1);
+        let (_query_tx, query_rx) = tokio::sync::mpsc::channel(1);
+        let mut manager = RibManager::new(
+            rx,
+            query_rx,
+            None,
+            None,
+            rustbgpd_telemetry::BgpMetrics::new(),
+        );
+        let peer = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 45));
+        let permit = empty_policy(PolicyAction::Permit);
+        let deny = empty_policy(PolicyAction::Deny);
+
+        // Warm the finite key set once. The registry deliberately retains one
+        // slot per distinct key/chain for process-stable group IDs; the live
+        // group cell and every member/transient entry must still be reaped.
+        let receiver = register_growth_peer(&mut manager, peer, 1);
+        replace_growth_policy(&mut manager, peer, Some(permit.clone()));
+        replace_growth_policy(&mut manager, peer, Some(deny.clone()));
+        replace_growth_policy(&mut manager, peer, None);
+        manager.handle_update(crate::RibUpdate::PeerDown {
+            peer,
+            session_id: 1,
+        });
+        manager.handle_update(crate::RibUpdate::PeerDeleted { peer });
+        drop(receiver);
+
+        let active = GrowthSnapshot {
+            key_slots: 3,
+            interned_chains: 2,
+            registered_members: 1,
+            active_cells: 1,
+            active_cell_members: 1,
+            inactive_key_slots: 2,
+            dirty_peers: 0,
+            regroup_baselines: 0,
+            extra_withdraw_sets: 0,
+        };
+        let quiescent = GrowthSnapshot {
+            key_slots: 3,
+            interned_chains: 2,
+            registered_members: 0,
+            active_cells: 0,
+            active_cell_members: 0,
+            inactive_key_slots: 3,
+            dirty_peers: 0,
+            regroup_baselines: 0,
+            extra_withdraw_sets: 0,
+        };
+        assert_eq!(growth_snapshot(&manager), quiescent, "warm-up teardown");
+
+        for cycle in 0..REPEATED_CYCLES {
+            let session_id = cycle + 2;
+            let receiver = register_growth_peer(&mut manager, peer, session_id);
+            assert_eq!(growth_snapshot(&manager), active, "cycle {cycle}: join");
+
+            replace_growth_policy(&mut manager, peer, Some(permit.clone()));
+            assert_eq!(
+                growth_snapshot(&manager),
+                active,
+                "cycle {cycle}: first regroup"
+            );
+            replace_growth_policy(&mut manager, peer, Some(deny.clone()));
+            assert_eq!(
+                growth_snapshot(&manager),
+                active,
+                "cycle {cycle}: second regroup"
+            );
+            replace_growth_policy(&mut manager, peer, None);
+            assert_eq!(
+                growth_snapshot(&manager),
+                active,
+                "cycle {cycle}: return regroup"
+            );
+
+            manager.handle_update(crate::RibUpdate::PeerDown { peer, session_id });
+            manager.handle_update(crate::RibUpdate::PeerDeleted { peer });
+            drop(receiver);
+            assert_eq!(
+                growth_snapshot(&manager),
+                quiescent,
+                "cycle {cycle}: delete must return to the bounded steady state"
+            );
         }
     }
 
