@@ -31,6 +31,21 @@ pub(super) fn build_peer_info(
         enabled: managed.enabled,
         graceful_shutdown_advertise_intent: managed.advertise_graceful_shutdown,
         prefix_count: session_state.map_or(0, |s| s.prefix_count),
+        prefix_count_ipv4: session_state.map_or(0, |s| s.max_prefix.prefix_count_ipv4),
+        prefix_count_ipv6: session_state.map_or(0, |s| s.max_prefix.prefix_count_ipv6),
+        max_prefixes_effective: session_state
+            .map_or(managed.max_prefixes, |s| s.max_prefix.max_prefixes),
+        max_prefixes_ipv4_effective: session_state
+            .map_or(managed.transport_config.max_prefixes_ipv4, |s| {
+                s.max_prefix.max_prefixes_ipv4
+            }),
+        max_prefixes_ipv6_effective: session_state
+            .map_or(managed.transport_config.max_prefixes_ipv6, |s| {
+                s.max_prefix.max_prefixes_ipv6
+            }),
+        max_prefix_headroom: session_state.and_then(|s| s.max_prefix.headroom),
+        max_prefix_headroom_ipv4: session_state.and_then(|s| s.max_prefix.headroom_ipv4),
+        max_prefix_headroom_ipv6: session_state.and_then(|s| s.max_prefix.headroom_ipv6),
         hold_time: managed.hold_time,
         send_hold_time: managed.transport_config.peer.send_hold_time,
         max_prefixes: managed.max_prefixes,

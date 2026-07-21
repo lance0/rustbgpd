@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use rustbgpd_fsm::SessionState;
+use rustbgpd_transport::handle::MaxPrefixState;
 use rustbgpd_transport::{PeerCommand, PeerHandle, PeerSessionState};
 use tokio::sync::{Notify, mpsc};
 
@@ -63,6 +64,7 @@ fn established_policy_handle(peer: IpAddr, acks: EstablishedPolicyPeerAcks) -> P
                         peer_ip: peer,
                         peer_asn: None,
                         prefix_count: 0,
+                        max_prefix: MaxPrefixState::default(),
                         negotiated_hold_time: None,
                         four_octet_as: None,
                         remote_router_id: Some(Ipv4Addr::UNSPECIFIED),

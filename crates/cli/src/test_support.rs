@@ -805,6 +805,14 @@ impl rustbgpd_api::proto::neighbor_service_server::NeighborService for MockNeigh
             max_prefix_action: "shutdown".to_string(),
             max_prefix_restart_remaining_millis: None,
             update_group_comparison: None,
+            prefixes_received_ipv4: 0,
+            prefixes_received_ipv6: 0,
+            effective_max_prefixes: None,
+            effective_max_prefixes_ipv4: None,
+            effective_max_prefixes_ipv6: None,
+            max_prefix_headroom: None,
+            max_prefix_headroom_ipv4: None,
+            max_prefix_headroom_ipv6: None,
         };
         response.update_group_comparison = self.state.neighbor_comparison.lock().await.clone();
         Ok(Response::new(response))

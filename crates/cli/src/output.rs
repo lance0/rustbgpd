@@ -237,6 +237,8 @@ pub struct JsonNeighborDetail {
     pub graceful_shutdown_advertise_intent: Option<bool>,
     pub uptime_seconds: u64,
     pub prefixes_received: u64,
+    pub prefixes_received_ipv4: u64,
+    pub prefixes_received_ipv6: u64,
     pub prefixes_sent: u64,
     pub updates_received: u64,
     pub updates_sent: u64,
@@ -247,6 +249,18 @@ pub struct JsonNeighborDetail {
     pub messages_sent: u64,
     pub flap_count: u64,
     pub last_error: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effective_max_prefixes: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effective_max_prefixes_ipv4: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effective_max_prefixes_ipv6: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_prefix_headroom: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_prefix_headroom_ipv4: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_prefix_headroom_ipv6: Option<u32>,
     pub max_prefix_action: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_prefix_restart_seconds: Option<u32>,
@@ -1174,7 +1188,9 @@ mod tests {
             slow_peer: true,
             graceful_shutdown_advertise_intent: Some(true),
             uptime_seconds: 42,
-            prefixes_received: 1,
+            prefixes_received: 11,
+            prefixes_received_ipv4: 7,
+            prefixes_received_ipv6: 3,
             prefixes_sent: 2,
             updates_received: 3,
             updates_sent: 4,
@@ -1184,6 +1200,12 @@ mod tests {
             messages_sent: 21,
             flap_count: 7,
             last_error: String::new(),
+            effective_max_prefixes: Some(20),
+            effective_max_prefixes_ipv4: Some(10),
+            effective_max_prefixes_ipv6: None,
+            max_prefix_headroom: Some(9),
+            max_prefix_headroom_ipv4: Some(3),
+            max_prefix_headroom_ipv6: None,
             max_prefix_action: "restart".to_string(),
             max_prefix_restart_seconds: Some(30),
             max_prefix_restart_remaining_millis: Some(15_000),
@@ -1284,6 +1306,15 @@ mod tests {
         assert_eq!(value["max_prefix_action"], "restart");
         assert_eq!(value["max_prefix_restart_seconds"], 30);
         assert_eq!(value["max_prefix_restart_remaining_millis"], 15_000);
+        assert_eq!(value["prefixes_received"], 11);
+        assert_eq!(value["prefixes_received_ipv4"], 7);
+        assert_eq!(value["prefixes_received_ipv6"], 3);
+        assert_eq!(value["effective_max_prefixes"], 20);
+        assert_eq!(value["effective_max_prefixes_ipv4"], 10);
+        assert!(value.get("effective_max_prefixes_ipv6").is_none());
+        assert_eq!(value["max_prefix_headroom"], 9);
+        assert_eq!(value["max_prefix_headroom_ipv4"], 3);
+        assert!(value.get("max_prefix_headroom_ipv6").is_none());
         assert_eq!(value["tcp_ao"]["keys"][0]["algorithm"], "hmac(sha256)");
         // Load-bearing: additive fields at either redacted TCP-AO boundary
         // must be reviewed rather than silently expanding secret exposure.
@@ -1355,8 +1386,12 @@ mod tests {
         let value = serde_json::to_value(&detail).expect("JSON serialize");
         assert_eq!(value["graceful_shutdown_advertise_intent"], false);
         detail.graceful_shutdown_advertise_intent = None;
+        detail.effective_max_prefixes = None;
+        detail.max_prefix_headroom = None;
         let value = serde_json::to_value(&detail).expect("JSON serialize");
         assert!(value.get("graceful_shutdown_advertise_intent").is_none());
+        assert!(value.get("effective_max_prefixes").is_none());
+        assert!(value.get("max_prefix_headroom").is_none());
     }
 
     fn table_fixture() -> Vec<proto::NeighborState> {
