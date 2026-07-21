@@ -412,6 +412,13 @@ impl PeerSession {
     /// Callers must log their own truthful cause before entering this common
     /// primitive (writer saturation, exact-snapshot invariant breach, etc.).
     pub(super) fn trigger_outbound_out_of_resources_teardown(&mut self) {
+        // `handle_tcp_disconnect` clears the priority sender on the first
+        // trigger. A second failure can already be in the synchronous caller
+        // stack; do not emit another notification event/counter for a writer
+        // that can no longer receive the NOTIFICATION.
+        if self.writer_priority_tx.is_none() {
+            return;
+        }
         let notif = rustbgpd_wire::NotificationMessage::new(
             NotificationCode::Cease,
             cease_subcode::OUT_OF_RESOURCES,

@@ -6769,6 +6769,128 @@ async fn extended_flowspec_chunk_probe_grows_and_preserves_exact_order() {
     );
 }
 
+/// Load-bearing: retaining `failed_upper` after a successful chunk leaves the
+/// first region's failed 1,024-entry probe as a permanent cap. This real
+/// `FlowSpec` encoder receipt starts with entries large enough to force a
+/// 512-entry chunk, then switches to small entries that must pack beyond that
+/// stale 1,024-entry upper bound without reordering or duplication.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one real-encoder mixed-entry receipt"
+)]
+async fn extended_flowspec_chunk_probe_resets_failed_upper_for_smaller_entries() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.negotiated_families = vec![(Afi::Ipv6, Safi::FlowSpec)];
+    negotiated.peer_extended_message = true;
+    install_test_negotiated_session(&mut session, negotiated);
+
+    let large_rules = 700_u32;
+    let rule_count = 12_000_u32;
+    let rules: Vec<FlowSpecRule> = (0..rule_count)
+        .map(|i| {
+            let components = if i < large_rules {
+                let prefix =
+                    FlowSpecComponent::DestinationPrefix(FlowSpecPrefix::V6(Ipv6PrefixOffset {
+                        prefix: Ipv6Prefix::new(
+                            Ipv6Addr::from(
+                                0x2001_0db8_0005_0000_0000_0000_0000_0000_u128 + u128::from(i),
+                            ),
+                            128,
+                        ),
+                        offset: 0,
+                    }));
+                let mut ports: Vec<NumericMatch> = (0..48)
+                    .map(|port| NumericMatch {
+                        end_of_list: false,
+                        and_bit: port != 0,
+                        lt: false,
+                        gt: false,
+                        eq: true,
+                        value: port,
+                    })
+                    .collect();
+                ports.last_mut().unwrap().end_of_list = true;
+                vec![prefix, FlowSpecComponent::Port(ports)]
+            } else {
+                vec![FlowSpecComponent::IpProtocol(vec![NumericMatch {
+                    end_of_list: true,
+                    and_bit: false,
+                    lt: false,
+                    gt: false,
+                    eq: true,
+                    value: u64::from(i % 200),
+                }])]
+            };
+            FlowSpecRule { components }
+        })
+        .collect();
+    let routes = rules
+        .iter()
+        .cloned()
+        .map(|rule| FlowSpecRoute {
+            rule,
+            afi: Afi::Ipv6,
+            peer: IpAddr::V6("2001:db8::2".parse().unwrap()),
+            attributes: vec![PathAttribute::Origin(Origin::Igp)],
+            received_at: Instant::now(),
+            origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            is_stale: false,
+            is_llgr_stale: false,
+            path_id: 0,
+        })
+        .collect();
+    session.send_route_update(OutboundRouteUpdate {
+        exact_export_snapshot: Some(session.publish_export_profile()),
+        flowspec_announce: routes,
+        ..empty_outbound_update()
+    });
+
+    let mut actual = Vec::new();
+    let mut chunk_sizes = Vec::new();
+    while let Ok(raw) = tokio::time::timeout(
+        Duration::from_millis(500),
+        read_single_raw_bgp_message(&mut server),
+    )
+    .await
+    {
+        assert!(raw.len() <= usize::from(rustbgpd_wire::EXTENDED_MAX_MESSAGE_LEN));
+        let mut buf = Bytes::from(raw);
+        let Message::Update(update) =
+            rustbgpd_wire::decode_message(&mut buf, rustbgpd_wire::EXTENDED_MAX_MESSAGE_LEN)
+                .unwrap()
+        else {
+            continue;
+        };
+        let parsed = update.parse(true, false, &[]).unwrap();
+        let announced = parsed
+            .attributes
+            .iter()
+            .find_map(|attribute| match attribute {
+                PathAttribute::MpReachNlri(mp) => Some(&mp.flowspec_announced),
+                _ => None,
+            })
+            .expect("FlowSpec announcement uses MP_REACH");
+        chunk_sizes.push(announced.len());
+        actual.extend(announced.iter().cloned());
+    }
+
+    assert_eq!(actual, rules, "FlowSpec rules must stay exact and ordered");
+    assert_eq!(
+        chunk_sizes.first(),
+        Some(&512),
+        "large first region must halve"
+    );
+    assert!(
+        chunk_sizes.contains(&4096),
+        "smaller later entries must reach the bounded 4,096-entry probe beyond the earlier failed upper bound: {chunk_sizes:?}"
+    );
+}
+
 #[tokio::test]
 async fn destinationless_flowspec_withdrawal_uses_explicit_afi() {
     let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
@@ -13359,11 +13481,16 @@ async fn rr_originator_loop_withdraws_mp_add_paths_before_gr_and_preserves_sibli
 /// rather than blackholing routes silently. Drives
 /// `trigger_outbound_saturation_teardown` directly to verify the
 /// invariants without trying to force kernel TCP buffer saturation
-/// from a unit test.
+/// from a unit test. Load-bearing idempotency proof: removing the live-writer
+/// guard makes the second trigger increment both notification counters and
+/// emit a second `SessionNotificationEvent`, even though its notification
+/// cannot reach the already-closed writer.
 #[tokio::test]
 async fn outbound_saturation_teardown_emits_cease_out_of_resources() {
     use rustbgpd_wire::notification::{NotificationCode, cease_subcode};
     let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (event_tx, mut event_rx) = mpsc::channel(4);
+    session.session_event_tx = Some(event_tx);
     let (client, mut server) = connected_stream_pair().await;
     session.test_install_stream(client);
     // Sanity: writer is up before the trigger.
@@ -13372,6 +13499,28 @@ async fn outbound_saturation_teardown_emits_cease_out_of_resources() {
     assert!(session.writer_priority_tx.is_some());
     assert!(session.writer_join.is_some());
     session.trigger_outbound_saturation_teardown();
+    session.trigger_outbound_saturation_teardown();
+    assert_eq!(
+        session.notifications_sent, 1,
+        "a duplicate saturation trigger must not invent another sent notification"
+    );
+    let prometheus_count = counter_value(
+        &session.metrics,
+        "bgp_notifications_sent_total",
+        &session.peer_label,
+    );
+    assert!(
+        (prometheus_count - 1.0).abs() < f64::EPSILON,
+        "Prometheus must count the Cease/8 once"
+    );
+    let event = event_rx.try_recv().expect("one sent-notification event");
+    assert_eq!(event.direction, SessionNotificationDirection::Sent);
+    assert_eq!(event.code, NotificationCode::Cease.as_u8());
+    assert_eq!(event.subcode, cease_subcode::OUT_OF_RESOURCES);
+    assert!(
+        matches!(event_rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+        "duplicate trigger must not publish another sent-notification event"
+    );
     // Post-trigger invariants: read half + writer senders dropped, but
     // the JoinHandle stays in place so the run loop's writer-exit arm
     // can still observe the writer's natural exit.
