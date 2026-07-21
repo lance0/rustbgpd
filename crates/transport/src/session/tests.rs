@@ -2085,6 +2085,7 @@ async fn accepted_query_test_session_with_config(
         false,
         crate::SessionIdentity::default(),
         tcp_ao_info,
+        None,
         crate::TcpAoRotationGeneration::STARTUP,
     )
 }
@@ -2096,6 +2097,53 @@ async fn tcp_ao_query_refreshes_degraded_cumulative_counters() {
     let snapshot = session.tcp_ao_info.unwrap();
     assert_eq!(snapshot.pkt_good, 43);
     assert_eq!(snapshot.pkt_bad, 1);
+}
+
+#[tokio::test]
+async fn tcp_ao_disconnect_physically_clears_socket_selected_owner_and_observation_baseline() {
+    let mut session = accepted_query_test_session(None).await;
+    // A disconnect must clear only evidence tied to the dead socket. Clearing
+    // either durable field below would make an identical-generation retry lose
+    // its candidate or misclassify an accepted dynamic session as active-open.
+    let selected_owner = crate::listener::TcpAoSelectedOwner {
+        owner: crate::TcpAoListenerOwnerKind::Dynamic,
+        peer: "127.0.0.0".parse().unwrap(),
+        prefix_len: 24,
+    };
+    let pending = crate::TcpAoSessionSelection {
+        generation: crate::TcpAoRotationGeneration::new(2).unwrap(),
+        active_keyring: None,
+        accepted_owners: vec![crate::TcpAoRotationOwner {
+            owner: crate::TcpAoListenerOwnerKind::Dynamic,
+            peer: selected_owner.peer,
+            prefix_len: selected_owner.prefix_len,
+            keyring: crate::TcpAoKeyring(vec![crate::TcpAoConfig {
+                key: "retained-selection-secret".into(),
+                send_id: 7,
+                recv_id: 9,
+                algorithm: crate::TcpAoAlgorithm::HmacSha256,
+                preferred: true,
+                deprecated: false,
+            }]),
+        }]
+        .into(),
+        accepted_selected_owner: Some(selected_owner),
+    };
+    session.tcp_ao_stream_was_accepted = true;
+    session.tcp_ao_accept_only_session = true;
+    session.tcp_ao_selected_owner = Some(selected_owner);
+    session.tcp_ao_pending_selection = Some(pending.clone());
+    session.tcp_ao_successor_pkt_good_baseline = Some(41);
+    session.tcp_ao_selection_observed = true;
+
+    session.close_tcp();
+
+    assert!(!session.tcp_ao_stream_was_accepted);
+    assert!(session.tcp_ao_accept_only_session);
+    assert!(session.tcp_ao_selected_owner.is_none());
+    assert_eq!(session.tcp_ao_pending_selection.as_ref(), Some(&pending));
+    assert!(session.tcp_ao_successor_pkt_good_baseline.is_none());
+    assert!(!session.tcp_ao_selection_observed);
 }
 
 #[tokio::test]

@@ -12,6 +12,61 @@ use super::{
     ManagedPeer, PEER_LIFECYCLE_COMMAND_TIMEOUT, PEER_QUERY_TIMEOUT, PeerManager, PendingInbound,
 };
 
+fn accepted_selected_owner(
+    managed: &ManagedPeer,
+) -> rustbgpd_transport::listener::TcpAoSelectedOwner {
+    if let Some(range) = managed.accepted_dynamic_range.as_ref() {
+        rustbgpd_transport::listener::TcpAoSelectedOwner {
+            owner: rustbgpd_transport::TcpAoListenerOwnerKind::Dynamic,
+            peer: range.addr,
+            prefix_len: range.prefix_len,
+        }
+    } else {
+        rustbgpd_transport::listener::TcpAoSelectedOwner {
+            owner: rustbgpd_transport::TcpAoListenerOwnerKind::Static,
+            peer: managed.transport_config.remote_addr.ip(),
+            prefix_len: if managed.transport_config.remote_addr.is_ipv4() {
+                32
+            } else {
+                128
+            },
+        }
+    }
+}
+
+fn reconcile_selected_owner_metadata(
+    keyring: &mut rustbgpd_transport::TcpAoKeyring,
+    selected_owner: rustbgpd_transport::listener::TcpAoSelectedOwner,
+    accepted: &TcpAoInfoSnapshot,
+) -> Result<(), &'static str> {
+    let metadata = keyring
+        .0
+        .iter()
+        .map(|key| {
+            let mut matches = accepted.keys.iter().filter(|state| {
+                state.peer == selected_owner.peer
+                    && state.prefix_len == selected_owner.prefix_len
+                    && state.send_id == key.send_id
+                    && state.recv_id == key.recv_id
+                    && state.algorithm == key.algorithm
+            });
+            let Some(state) = matches.next() else {
+                return Err("accepted socket is missing a selected-owner key");
+            };
+            if matches.next().is_some() {
+                return Err("accepted socket has duplicate selected-owner keys");
+            }
+            Ok((state.preferred, state.deprecated))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    for (key, (preferred, deprecated)) in keyring.0.iter_mut().zip(metadata) {
+        key.preferred = preferred;
+        key.deprecated = deprecated;
+    }
+    Ok(())
+}
+
 fn tcp_ao_accept_generation_valid(
     protected: bool,
     accepted: Option<TcpAoRotationGeneration>,
@@ -20,11 +75,19 @@ fn tcp_ao_accept_generation_valid(
     match (protected, accepted) {
         (false, None) => true,
         (true, Some(generation)) => match rotation.phase {
-            rustbgpd_transport::TcpAoRotationPhase::AddOnly => {
-                generation == rotation.applied || generation == rotation.desired
+            rustbgpd_transport::TcpAoRotationPhase::AddOnly
+            | rustbgpd_transport::TcpAoRotationPhase::Selecting
+            | rustbgpd_transport::TcpAoRotationPhase::AwaitingPeer => {
+                (rotation.desired == rotation.applied && generation == rotation.applied)
+                    || (rotation
+                        .applied
+                        .next()
+                        .is_some_and(|desired| desired == rotation.desired)
+                        && (generation == rotation.applied || generation == rotation.desired))
             }
             rustbgpd_transport::TcpAoRotationPhase::Idle
-            | rustbgpd_transport::TcpAoRotationPhase::AddOnlyFailed => {
+            | rustbgpd_transport::TcpAoRotationPhase::AddOnlyFailed
+            | rustbgpd_transport::TcpAoRotationPhase::SelectionFailed => {
                 generation == rotation.applied
             }
         },
@@ -69,6 +132,9 @@ impl PeerManager {
         let import_policy = managed.import_policy.clone();
         let export_policy = managed.export_policy.clone();
         let advertise_graceful_shutdown = managed.advertise_graceful_shutdown;
+        let tcp_ao_selected_owner = tcp_ao_info
+            .as_ref()
+            .map(|_| accepted_selected_owner(managed));
         let session_id = self.allocate_session_id();
         let handle = PeerHandle::spawn_inbound_at_tcp_ao_generation(
             transport_config,
@@ -86,6 +152,7 @@ impl PeerManager {
             SessionIdentity::inbound_candidate(session_id),
             self.transport_event_sink.clone(),
             tcp_ao_info,
+            tcp_ao_selected_owner,
             tcp_ao_generation,
         );
 
@@ -224,6 +291,7 @@ impl PeerManager {
                     .unwrap_or_else(|| format!("dynamic:{}", range.peer_group));
                 let peer_group_name = range.peer_group.clone();
                 let accepted_dynamic_range = range.accepted_attribution();
+                let mut accepted_tcp_ao_keyring = range.tcp_ao.clone();
 
                 // Resolve the dynamic neighbor config from the peer group
                 let resolved = match self.current_config.resolve_dynamic_neighbor(
@@ -245,7 +313,7 @@ impl PeerManager {
                 };
 
                 let cfg = Self::peer_manager_config_from_resolved(resolved, false);
-                let transport = self.build_transport_config(&cfg);
+                let mut transport = self.build_transport_config(&cfg);
                 let import_policy = cfg.import_policy.clone();
                 let export_policy = cfg.export_policy.clone();
                 let advertise_graceful_shutdown = self
@@ -253,6 +321,49 @@ impl PeerManager {
                     .get(&peer_ip)
                     .is_some_and(|pending| pending.graceful_shutdown);
                 let tcp_ao_protected = tcp_ao_info.is_some();
+                if tcp_ao_protected != accepted_tcp_ao_keyring.is_some() {
+                    warn!(
+                        %peer_ip,
+                        "dynamic inbound TCP-AO socket protection differs from its explicit selected-owner keyring, dropping"
+                    );
+                    return;
+                }
+                let tcp_ao_selected_owner =
+                    tcp_ao_protected.then_some(rustbgpd_transport::listener::TcpAoSelectedOwner {
+                        owner: rustbgpd_transport::TcpAoListenerOwnerKind::Dynamic,
+                        peer: accepted_dynamic_range.addr,
+                        prefix_len: accepted_dynamic_range.prefix_len,
+                    });
+                if tcp_ao_protected {
+                    let (Some(keyring), Some(selected_owner), Some(accepted)) = (
+                        accepted_tcp_ao_keyring.as_mut(),
+                        tcp_ao_selected_owner,
+                        tcp_ao_info.as_ref(),
+                    ) else {
+                        warn!(
+                            %peer_ip,
+                            "protected dynamic TCP-AO accept lacks selected-owner metadata, dropping"
+                        );
+                        return;
+                    };
+                    if let Err(error) =
+                        reconcile_selected_owner_metadata(keyring, selected_owner, accepted)
+                    {
+                        warn!(
+                            %peer_ip,
+                            error,
+                            "failed to reconcile protected dynamic TCP-AO accept, dropping"
+                        );
+                        return;
+                    }
+                }
+                // `resolve_dynamic_neighbor` intentionally derives session
+                // policy from the peer group and has no per-host TCP-AO field.
+                // Seed the exact most-specific direct owner's keyring before
+                // cloning this transport into PeerSession and retaining it on
+                // ManagedPeer. This makes fresh-start selection authoritative
+                // without falling back to the accepted socket's owner union.
+                transport.tcp_ao = accepted_tcp_ao_keyring;
 
                 let session_id = self.allocate_session_id();
                 let handle = PeerHandle::spawn_inbound_at_tcp_ao_generation(
@@ -271,6 +382,7 @@ impl PeerManager {
                     SessionIdentity::primary(session_id),
                     self.transport_event_sink.clone(),
                     tcp_ao_info,
+                    tcp_ao_selected_owner,
                     accepted_generation,
                 );
 
@@ -305,11 +417,15 @@ impl PeerManager {
                     pending_inbound: None,
                     is_dynamic: true,
                     tcp_ao_protected,
-                    tcp_ao_rotation: rustbgpd_transport::TcpAoRotationStatus {
-                        desired: accepted_generation,
-                        applied: accepted_generation,
-                        phase: rustbgpd_transport::TcpAoRotationPhase::Idle,
-                        last_error: None,
+                    tcp_ao_rotation: if tcp_ao_protected {
+                        self.tcp_ao_rotation.clone()
+                    } else {
+                        rustbgpd_transport::TcpAoRotationStatus {
+                            desired: accepted_generation,
+                            applied: accepted_generation,
+                            phase: rustbgpd_transport::TcpAoRotationPhase::Idle,
+                            last_error: None,
+                        }
                     },
                     accepted_dynamic_range: Some(accepted_dynamic_range),
                     pending_refresh: false,
@@ -689,6 +805,9 @@ impl PeerManager {
             // session so a flap or collision-replace doesn't silently
             // drop the GShut state mid-maintenance.
             let advertise_graceful_shutdown = managed.advertise_graceful_shutdown;
+            let tcp_ao_selected_owner = tcp_ao_info
+                .as_ref()
+                .map(|_| accepted_selected_owner(managed));
             let old_session_id = managed.session_id;
             let old_handle = std::mem::replace(
                 &mut managed.handle,
@@ -708,6 +827,7 @@ impl PeerManager {
                     SessionIdentity::primary(session_id),
                     self.transport_event_sink.clone(),
                     tcp_ao_info,
+                    tcp_ao_selected_owner,
                     tcp_ao_generation,
                 ),
             );
@@ -771,7 +891,7 @@ mod generation_tests {
 
         let applying = rustbgpd_transport::TcpAoRotationStatus {
             phase: rustbgpd_transport::TcpAoRotationPhase::AddOnly,
-            ..idle
+            ..idle.clone()
         };
         assert!(tcp_ao_accept_generation_valid(true, Some(two), &applying));
         assert!(!tcp_ao_accept_generation_valid(true, Some(one), &applying));
@@ -798,5 +918,41 @@ mod generation_tests {
         };
         assert!(tcp_ao_accept_generation_valid(true, Some(one), &failed));
         assert!(!tcp_ao_accept_generation_valid(true, Some(two), &failed));
+
+        for phase in [
+            rustbgpd_transport::TcpAoRotationPhase::Selecting,
+            rustbgpd_transport::TcpAoRotationPhase::AwaitingPeer,
+        ] {
+            let recovered = rustbgpd_transport::TcpAoRotationStatus {
+                phase,
+                ..idle.clone()
+            };
+            assert!(tcp_ao_accept_generation_valid(true, Some(two), &recovered));
+            assert!(!tcp_ao_accept_generation_valid(true, Some(one), &recovered));
+            let selecting = rustbgpd_transport::TcpAoRotationStatus {
+                desired: two,
+                applied: one,
+                phase,
+                last_error: None,
+            };
+            assert!(tcp_ao_accept_generation_valid(true, Some(one), &selecting));
+            assert!(tcp_ao_accept_generation_valid(true, Some(two), &selecting));
+        }
+        let selection_failed = rustbgpd_transport::TcpAoRotationStatus {
+            desired: two,
+            applied: one,
+            phase: rustbgpd_transport::TcpAoRotationPhase::SelectionFailed,
+            last_error: Some("observation failed".to_string()),
+        };
+        assert!(tcp_ao_accept_generation_valid(
+            true,
+            Some(one),
+            &selection_failed
+        ));
+        assert!(!tcp_ao_accept_generation_valid(
+            true,
+            Some(two),
+            &selection_failed
+        ));
     }
 }

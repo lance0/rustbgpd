@@ -566,8 +566,10 @@ active-open sessions install the selected key and remaining MKTs before
 `listen()`. Accepted protected sockets are validated fail-closed, live
 KeyIDs/counters are queryable through the neighbor API/CLI, and M43 covers BIRD
 interop. SIGHUP can append nonpreferred successor keys across the listener and
-managed protected sessions without changing Current/RNext; selection,
-deprecation, deletion, and protected-owner changes remain restart-required.
+managed protected sessions without changing Current/RNext, then in a later
+immutable generation select an installed successor as local RNext and commit
+predecessor deprecation only after cohort observation. Linux Current remains
+peer-driven; deletion and protected-owner changes remain restart-required.
 
 **GTSM (RFC 5082):** Supported in v1 as a configurable option (`ttl_security = true` per neighbor). Sets `IP_TTL` to 255 on outbound and checks inbound TTL >= 254. Simple, effective, and prevents most remote session hijacking.
 
@@ -665,7 +667,7 @@ This matrix tracks every protocol behavior: its RFC basis, implementation status
 | FlowSpec | 8955 | post-v0.3.0 | — | IPv4/IPv6 unicast FlowSpec implemented; speaker-mode hardening continues |
 | Graceful restart (receiving speaker) | 4724 | v0.3.0 | FRR | Stale demotion, per-family EoR, two-phase timer (ADR-0024) |
 | LLGR (two-phase GR timer) | 9494 | post-v0.3.0 | FRR | Implemented; GR-stale → LLGR-stale promotion, configurable stale time |
-| TCP-AO | 5925 | Post-v1 | BIRD | Static and direct dynamic-prefix keyrings; fail-closed accept validation and live API/CLI health; add-only successor reload |
+| TCP-AO | 5925 | Post-v1 | BIRD | Static and direct dynamic-prefix keyrings; fail-closed accept validation and live API/CLI health; two-generation successor install and observation-gated RNext selection |
 | BMP exporter | 7854 | post-v0.3.0 | — | Implemented (ADR-0041); reconnect replay + periodic stats + coordinated-shutdown termination |
 | MRT dump export | 6396 | post-v0.3.0 | — | Implemented (ADR-0044); TABLE_DUMP_V2 periodic + on-demand, gzip optional |
 | RPKI / RTR client | 8210 | post-v0.3.0 | — | Implemented (ADR-0034); runtime gRPC management deferred |

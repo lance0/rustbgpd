@@ -2771,7 +2771,7 @@
           "type": "string"
         },
         "deprecated": {
-          "description": "Mark this key as deprecated for local startup selection and health\nmetadata. Deprecated keys are still installed and may remain usable\nwhen peer-selected, but rustbgpd never selects one as its startup\nfallback. Changing this flag on an existing live MKT remains\nrestart-required.",
+          "description": "Mark this key as deprecated for local startup selection and health\nmetadata. Deprecated keys are still installed and may remain usable\nwhen peer-selected, but rustbgpd never selects one as its startup\nfallback. SIGHUP may set this flag only after generation-relative peer\nuse of the newly selected successor is observed across the cohort.",
           "type": "boolean",
           "default": false
         },
@@ -2780,7 +2780,7 @@
           "type": "string"
         },
         "preferred": {
-          "description": "Mark this key as the preferred current send key for socket installation.\nChanging the preferred selection on live sockets remains\nrestart-required.",
+          "description": "Mark this key as the preferred current send key for socket installation.\nSIGHUP may select an already-installed successor without changing\nLinux Current; adding and selecting a key in one generation is rejected.",
           "type": "boolean",
           "default": false
         },

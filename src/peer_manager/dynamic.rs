@@ -3,6 +3,7 @@ use std::net::IpAddr;
 use tracing::{info, warn};
 
 use rustbgpd_api::peer_types::{DynamicRangeError, PeerKey};
+use rustbgpd_transport::{TcpAoAlgorithm, TcpAoConfig as TransportTcpAoConfig, TcpAoKeyring};
 
 use crate::config::Config;
 
@@ -15,6 +16,10 @@ pub(super) struct DynamicRange {
     pub(super) peer_group: String,
     pub(super) remote_asn: u32,
     pub(super) description: Option<String>,
+    /// Exact keyring for this direct listener owner. This is seeded into an
+    /// accepted dynamic session's transport config; it is not inferred from a
+    /// covering-owner socket inventory.
+    pub(super) tcp_ao: Option<TcpAoKeyring>,
 }
 
 /// Canonical dynamic range that accepted a live peer.
@@ -138,6 +143,22 @@ impl PeerManager {
                     peer_group: dn.peer_group.clone(),
                     remote_asn: dn.remote_asn,
                     description: dn.description.clone(),
+                    tcp_ao: dn.tcp_ao.as_ref().map(|tcp_ao| {
+                        TcpAoKeyring(
+                            tcp_ao
+                                .iter()
+                                .map(|key| TransportTcpAoConfig {
+                                    key: key.key.clone().into(),
+                                    send_id: key.send_id,
+                                    recv_id: key.recv_id,
+                                    algorithm: TcpAoAlgorithm::from_linux_name(&key.algorithm)
+                                        .expect("validated dynamic TCP-AO algorithm"),
+                                    preferred: key.preferred,
+                                    deprecated: key.deprecated,
+                                })
+                                .collect(),
+                        )
+                    }),
                 })
             })
             .collect()
@@ -226,6 +247,7 @@ impl PeerManager {
             peer_group: peer_group.clone(),
             remote_asn,
             description: description.clone(),
+            tcp_ao: None,
         });
         self.current_config
             .dynamic_neighbors
@@ -501,6 +523,7 @@ mod tests {
             peer_group: group.to_string(),
             remote_asn: 65000,
             description: None,
+            tcp_ao: None,
         }
     }
 

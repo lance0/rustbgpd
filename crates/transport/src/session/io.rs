@@ -476,6 +476,9 @@ impl PeerSession {
         self.read_buf.clear();
         self.tcp_ao_info = None;
         self.tcp_ao_stream_was_accepted = false;
+        self.tcp_ao_selected_owner = None;
+        self.tcp_ao_successor_pkt_good_baseline = None;
+        self.tcp_ao_selection_observed = false;
         self.clear_bmp_stream_repair();
         self.reset_slow_peer_state();
     }
@@ -495,6 +498,9 @@ impl PeerSession {
         self.read_buf.clear();
         self.tcp_ao_info = None;
         self.tcp_ao_stream_was_accepted = false;
+        self.tcp_ao_selected_owner = None;
+        self.tcp_ao_successor_pkt_good_baseline = None;
+        self.tcp_ao_selection_observed = false;
         self.clear_bmp_stream_repair();
         self.reset_slow_peer_state();
     }

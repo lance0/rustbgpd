@@ -21,6 +21,7 @@ topology:
       binds:
         - ./configs/rustbgpd-m43-tcp-ao.toml:/etc/rustbgpd/config.toml:ro
         - ./configs/rustbgpd-m43-tcp-ao-successor.toml:/etc/rustbgpd/config-successor.toml:ro
+        - ./configs/rustbgpd-m43-tcp-ao-selection.toml:/etc/rustbgpd/config-selection.toml:ro
         - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
       exec:
         - ip addr add 10.0.43.1/24 dev eth1
@@ -34,6 +35,7 @@ topology:
       binds:
         - ./configs/bird-m43-tcp-ao.conf:/etc/bird/bird.conf:ro
         - ./configs/bird-m43-tcp-ao-bad.conf:/etc/bird/bird-bad.conf:ro
+        - ./configs/bird-m43-tcp-ao-successor.conf:/etc/bird/bird-successor.conf:ro
       exec:
         - ip addr add 10.0.43.2/24 dev eth1
         - ip link set eth1 up

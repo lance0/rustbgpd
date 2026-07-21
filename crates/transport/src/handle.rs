@@ -59,6 +59,9 @@ pub enum PeerCommandError {
     /// verification failed. The session has already discarded that stream;
     /// the peer manager must reset every sibling collision candidate too.
     TcpAoMutationFailed(String),
+    /// Local `RNext` is selected, but the peer has not yet proved bidirectional
+    /// successor use. A later identical SIGHUP should observe once again.
+    TcpAoAwaitingPeer(String),
 }
 
 impl fmt::Display for PeerCommandError {
@@ -74,7 +77,9 @@ impl fmt::Display for PeerCommandError {
             Self::RouteRefreshUnsupported => f.write_str("peer lacks Route Refresh capability"),
             Self::FamilyNotNegotiated { afi, safi } => write!(f, "{afi:?}/{safi:?} not negotiated"),
             Self::SendFailed(error) => write!(f, "send failed: {error}"),
-            Self::CommandFailed(error) | Self::TcpAoMutationFailed(error) => f.write_str(error),
+            Self::CommandFailed(error)
+            | Self::TcpAoMutationFailed(error)
+            | Self::TcpAoAwaitingPeer(error) => f.write_str(error),
         }
     }
 }
@@ -366,6 +371,28 @@ pub enum PeerCommand {
     /// immutable owner inventory without mutating its socket or configuration.
     PreflightTcpAoAddOnly {
         desired: crate::TcpAoSessionGeneration,
+        reply: oneshot::Sender<Result<(), PeerCommandError>>,
+    },
+    /// Validate exact unchanged inventory and explicit owner selection before
+    /// any local `RNext` mutation.
+    PreflightTcpAoSelection {
+        desired: crate::config::TcpAoSessionSelection,
+        reply: oneshot::Sender<Result<(), PeerCommandError>>,
+    },
+    /// Select the already-installed successor as local `RNext` once.
+    ApplyTcpAoSelection {
+        desired: crate::config::TcpAoSessionSelection,
+        reply: oneshot::Sender<Result<(), PeerCommandError>>,
+    },
+    /// Observe peer-driven successor use once without polling.
+    ObserveTcpAoSelection {
+        desired: crate::config::TcpAoSessionSelection,
+        reply: oneshot::Sender<Result<(), PeerCommandError>>,
+    },
+    /// Commit declaration-only preferred/deprecated metadata after the whole
+    /// cohort has passed observation.
+    CommitTcpAoSelection {
+        desired: crate::config::TcpAoSessionSelection,
         reply: oneshot::Sender<Result<(), PeerCommandError>>,
     },
     /// Discard this session's connected stream after any sibling may have
@@ -1002,6 +1029,7 @@ impl PeerHandle {
             session_identity,
             None,
             None,
+            None,
         )
     }
 
@@ -1030,6 +1058,7 @@ impl PeerHandle {
         session_identity: SessionIdentity,
         event_sink: Option<Arc<dyn TransportEventSink>>,
         tcp_ao_info: Option<crate::TcpAoInfoSnapshot>,
+        tcp_ao_selected_owner: Option<crate::listener::TcpAoSelectedOwner>,
     ) -> Self {
         Self::spawn_inbound_at_tcp_ao_generation(
             config,
@@ -1047,6 +1076,7 @@ impl PeerHandle {
             session_identity,
             event_sink,
             tcp_ao_info,
+            tcp_ao_selected_owner,
             crate::TcpAoRotationGeneration::STARTUP,
         )
     }
@@ -1074,6 +1104,7 @@ impl PeerHandle {
         session_identity: SessionIdentity,
         event_sink: Option<Arc<dyn TransportEventSink>>,
         tcp_ao_info: Option<crate::TcpAoInfoSnapshot>,
+        tcp_ao_selected_owner: Option<crate::listener::TcpAoSelectedOwner>,
         tcp_ao_generation: crate::TcpAoRotationGeneration,
     ) -> Self {
         let (tx, rx) = mpsc::channel(COMMAND_BUFFER);
@@ -1099,6 +1130,7 @@ impl PeerHandle {
                     advertise_graceful_shutdown,
                     session_identity,
                     tcp_ao_info,
+                    tcp_ao_selected_owner,
                     tcp_ao_generation,
                 );
                 if let Some(sink) = event_sink {

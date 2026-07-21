@@ -1003,15 +1003,15 @@ pub struct TcpAoConfig {
     /// Linux TCP-AO MAC/KDF algorithm name, e.g. `"hmac(sha256)"`.
     pub algorithm: String,
     /// Mark this key as the preferred current send key for socket installation.
-    /// Changing the preferred selection on live sockets remains
-    /// restart-required.
+    /// SIGHUP may select an already-installed successor without changing
+    /// Linux Current; adding and selecting a key in one generation is rejected.
     #[serde(default)]
     pub preferred: bool,
     /// Mark this key as deprecated for local startup selection and health
     /// metadata. Deprecated keys are still installed and may remain usable
     /// when peer-selected, but rustbgpd never selects one as its startup
-    /// fallback. Changing this flag on an existing live MKT remains
-    /// restart-required.
+    /// fallback. SIGHUP may set this flag only after generation-relative peer
+    /// use of the newly selected successor is observed across the cohort.
     #[serde(default)]
     pub deprecated: bool,
 }
@@ -1031,7 +1031,8 @@ impl fmt::Debug for TcpAoConfig {
 
 /// Ordered TCP-AO keyring. A singleton retains the legacy table wire shape;
 /// two or more entries use an ordered array of tables. Live reload supports
-/// appending nonpreferred successor keys without redefining existing entries.
+/// appending a nonpreferred successor and, in a later immutable generation,
+/// selecting that installed successor with observation-gated deprecation.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TcpAoKeyringConfig(pub Vec<TcpAoConfig>);
 

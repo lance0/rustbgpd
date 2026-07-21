@@ -19,7 +19,8 @@ use tracing::{error, info, warn};
 
 use rustbgpd_transport::{
     TcpAoKeyring, TcpAoListenerGeneration, TcpAoListenerHandle, TcpAoListenerKey,
-    TcpAoListenerOwnerKind, TcpAoRotationGeneration, TcpAoRotationPhase, TcpAoRotationStatus,
+    TcpAoListenerOwnerKind, TcpAoRotationGeneration, TcpAoRotationOperation, TcpAoRotationPhase,
+    TcpAoRotationStatus,
 };
 
 use crate::config::{self, Config};
@@ -100,15 +101,16 @@ struct ReloadStepFailure {
     error: String,
 }
 
-struct TcpAoAddOnlyPlan {
+struct TcpAoRotationPlan {
     generation: TcpAoRotationGeneration,
+    operation: TcpAoRotationOperation,
     listener_keys: Vec<TcpAoListenerKey>,
     static_keyrings: Vec<(rustbgpd_api::peer_types::PeerKey, TcpAoKeyring)>,
 }
 
 enum TcpAoReloadPlan {
     Unchanged,
-    AddOnly(TcpAoAddOnlyPlan),
+    Rotation(TcpAoRotationPlan),
     Unsupported(String),
 }
 
@@ -137,11 +139,51 @@ fn selected_transport_key_index(keyring: &TcpAoKeyring) -> Option<usize> {
         .or_else(|| keyring.0.iter().position(|key| !key.deprecated))
 }
 
+fn transport_key_core_eq(
+    current: &rustbgpd_transport::TcpAoConfig,
+    desired: &rustbgpd_transport::TcpAoConfig,
+) -> bool {
+    current.key == desired.key
+        && current.send_id == desired.send_id
+        && current.recv_id == desired.recv_id
+        && current.algorithm == desired.algorithm
+}
+
+fn config_key_core_eq(current: &config::TcpAoConfig, desired: &config::TcpAoConfig) -> bool {
+    current.key == desired.key
+        && current.send_id == desired.send_id
+        && current.recv_id == desired.recv_id
+        && current.algorithm == desired.algorithm
+}
+
+fn transport_keyring_is_selection(current: &TcpAoKeyring, desired: &TcpAoKeyring) -> bool {
+    let desired_selected = selected_transport_key_index(desired);
+    current.0.len() == desired.0.len()
+        && current.0.iter().zip(&desired.0).all(|(current, desired)| {
+            transport_key_core_eq(current, desired) && (!current.deprecated || desired.deprecated)
+        })
+        && selected_transport_key_index(current) != desired_selected
+        && desired_selected.is_some_and(|index| desired.0[index].preferred)
+}
+
+fn config_keyring_is_selection(
+    current: &config::TcpAoKeyringConfig,
+    desired: &config::TcpAoKeyringConfig,
+) -> bool {
+    let desired_selected = selected_config_key_index(desired);
+    current.0.len() == desired.0.len()
+        && current.0.iter().zip(&desired.0).all(|(current, desired)| {
+            config_key_core_eq(current, desired) && (!current.deprecated || desired.deprecated)
+        })
+        && selected_config_key_index(current) != desired_selected
+        && desired_selected.is_some_and(|index| desired.0[index].preferred)
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "the compiler must validate static and dynamic owner inventories together before issuing one immutable generation plan"
 )]
-fn prepare_tcp_ao_add_only_plan(
+fn prepare_tcp_ao_rotation_plan(
     current: &Config,
     desired: &Config,
     listener_status: &TcpAoRotationStatus,
@@ -171,7 +213,7 @@ fn prepare_tcp_ao_add_only_plan(
     let desired_static = static_map(desired_resolved.clone());
     if current_static.keys().collect::<Vec<_>>() != desired_static.keys().collect::<Vec<_>>() {
         return Ok(TcpAoReloadPlan::Unsupported(
-            "add-only rotation may not add or remove a protected static owner".to_string(),
+            "live TCP-AO rotation may not add or remove a protected static owner".to_string(),
         ));
     }
 
@@ -190,26 +232,31 @@ fn prepare_tcp_ao_add_only_plan(
     let desired_dynamic = dynamic_map(desired);
     if current_dynamic.keys().collect::<Vec<_>>() != desired_dynamic.keys().collect::<Vec<_>>() {
         return Ok(TcpAoReloadPlan::Unsupported(
-            "add-only rotation may not add, remove, or move a protected dynamic owner".to_string(),
+            "live TCP-AO rotation may not add, remove, or move a protected dynamic owner"
+                .to_string(),
         ));
     }
 
-    let mut changed = false;
+    let mut saw_add_only = false;
+    let mut saw_selection = false;
     for (peer, old) in &current_static {
         let new = &desired_static[peer];
         if old == new {
             continue;
         }
-        changed = true;
-        if !keyring_is_append_only(
+        if keyring_is_append_only(
             &old.0,
             &new.0,
             selected_transport_key_index(old),
             selected_transport_key_index(new),
-        ) || new.0[old.0.len()..].iter().any(|key| key.preferred)
+        ) && !new.0[old.0.len()..].iter().any(|key| key.preferred)
         {
+            saw_add_only = true;
+        } else if transport_keyring_is_selection(old, new) {
+            saw_selection = true;
+        } else {
             return Ok(TcpAoReloadPlan::Unsupported(format!(
-                "protected static peer {peer} changes an existing key, selection, order, or removal"
+                "protected static peer {peer} changes an existing key, order, removal, or unsupported metadata"
             )));
         }
     }
@@ -218,29 +265,55 @@ fn prepare_tcp_ao_add_only_plan(
         if old == new {
             continue;
         }
-        changed = true;
-        if !keyring_is_append_only(
+        if keyring_is_append_only(
             &old.0,
             &new.0,
             selected_config_key_index(old),
             selected_config_key_index(new),
-        ) || new.0[old.0.len()..].iter().any(|key| key.preferred)
+        ) && !new.0[old.0.len()..].iter().any(|key| key.preferred)
         {
+            saw_add_only = true;
+        } else if config_keyring_is_selection(old, new) {
+            saw_selection = true;
+        } else {
             return Ok(TcpAoReloadPlan::Unsupported(format!(
-                "protected dynamic owner {}/{} changes an existing key, selection, order, or removal",
+                "protected dynamic owner {}/{} changes an existing key, order, removal, or unsupported metadata",
                 selector.0, selector.1
             )));
         }
     }
-    let recovering_listener_commit = matches!(
-        listener_status.phase,
-        TcpAoRotationPhase::AddOnly | TcpAoRotationPhase::AddOnlyFailed
-    );
-    if !changed && !recovering_listener_commit {
+    if saw_add_only && saw_selection {
+        return Ok(TcpAoReloadPlan::Unsupported(
+            "one TCP-AO generation may not add an MKT and select a successor together".to_string(),
+        ));
+    }
+    let recovering_operation = match listener_status.phase {
+        TcpAoRotationPhase::AddOnly | TcpAoRotationPhase::AddOnlyFailed => {
+            Some(TcpAoRotationOperation::AddOnly)
+        }
+        TcpAoRotationPhase::Selecting
+        | TcpAoRotationPhase::AwaitingPeer
+        | TcpAoRotationPhase::SelectionFailed => Some(TcpAoRotationOperation::Selection),
+        TcpAoRotationPhase::Idle => None,
+    };
+    let operation = if saw_selection {
+        Some(TcpAoRotationOperation::Selection)
+    } else if saw_add_only {
+        Some(TcpAoRotationOperation::AddOnly)
+    } else {
+        recovering_operation
+    };
+    let Some(operation) = operation else {
         return Ok(TcpAoReloadPlan::Unchanged);
+    };
+    if recovering_operation.is_some_and(|retained| retained != operation) {
+        return Ok(TcpAoReloadPlan::Unsupported(
+            "TCP-AO retry changed the retained generation operation or full desired inventory"
+                .to_string(),
+        ));
     }
 
-    let generation = if recovering_listener_commit {
+    let generation = if recovering_operation.is_some() {
         listener_status.desired
     } else {
         listener_status
@@ -265,8 +338,9 @@ fn prepare_tcp_ao_add_only_plan(
         (key.peer, key.prefix_len, owner)
     });
     let static_keyrings = desired_static.into_iter().collect();
-    Ok(TcpAoReloadPlan::AddOnly(TcpAoAddOnlyPlan {
+    Ok(TcpAoReloadPlan::Rotation(TcpAoRotationPlan {
         generation,
+        operation,
         listener_keys,
         static_keyrings,
     }))
@@ -274,11 +348,12 @@ fn prepare_tcp_ao_add_only_plan(
 
 async fn send_tcp_ao_preflight(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
-    plan: &TcpAoAddOnlyPlan,
+    plan: &TcpAoRotationPlan,
 ) -> Result<(), String> {
     send_pm_step(peer_mgr_tx, |reply| {
-        PeerManagerCommand::PreflightTcpAoAddOnly {
+        PeerManagerCommand::PreflightTcpAoRotation {
             generation: plan.generation,
+            operation: plan.operation,
             listener_keys: plan.listener_keys.clone(),
             static_keyrings: plan.static_keyrings.clone(),
             reply,
@@ -289,13 +364,16 @@ async fn send_tcp_ao_preflight(
 
 async fn send_tcp_ao_apply(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
-    plan: &TcpAoAddOnlyPlan,
+    plan: &TcpAoRotationPlan,
 ) -> Result<(), String> {
-    send_pm_step(peer_mgr_tx, |reply| PeerManagerCommand::ApplyTcpAoAddOnly {
-        generation: plan.generation,
-        listener_keys: plan.listener_keys.clone(),
-        static_keyrings: plan.static_keyrings.clone(),
-        reply,
+    send_pm_step(peer_mgr_tx, |reply| {
+        PeerManagerCommand::ApplyTcpAoRotation {
+            generation: plan.generation,
+            operation: plan.operation,
+            listener_keys: plan.listener_keys.clone(),
+            static_keyrings: plan.static_keyrings.clone(),
+            reply,
+        }
     })
     .await
 }
@@ -303,18 +381,20 @@ async fn send_tcp_ao_apply(
 async fn mark_tcp_ao_failed(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
     generation: TcpAoRotationGeneration,
+    operation: TcpAoRotationOperation,
     error: String,
 ) {
     let result = send_pm_step(peer_mgr_tx, |reply| {
-        PeerManagerCommand::MarkTcpAoAddOnlyFailed {
+        PeerManagerCommand::MarkTcpAoRotationFailed {
             generation,
+            operation,
             error,
             reply,
         }
     })
     .await;
     if let Err(mark_error) = result {
-        warn!(%mark_error, "failed to publish TCP-AO add-only failure to peer status");
+        warn!(%mark_error, "failed to publish TCP-AO rotation failure to peer status");
     }
 }
 
@@ -840,10 +920,10 @@ pub(crate) async fn reload_config_with_tcp_ao(
     // a socket or session yet. The fully pinned runtime candidate must pass
     // validation below before the first external mutation.
     let tcp_ao_rotation_plan = if let Some(listener) = tcp_ao_listener {
-        match prepare_tcp_ao_add_only_plan(current, &new_config, &listener.status()) {
+        match prepare_tcp_ao_rotation_plan(current, &new_config, &listener.status()) {
             Ok(plan) => plan,
             Err(error) => {
-                error!(%error, "failed to compile TCP-AO add-only generation");
+                error!(%error, "failed to compile TCP-AO rotation generation");
                 return None;
             }
         }
@@ -851,11 +931,25 @@ pub(crate) async fn reload_config_with_tcp_ao(
         TcpAoReloadPlan::Unchanged
     };
     if let TcpAoReloadPlan::Unsupported(reason) = &tcp_ao_rotation_plan {
-        error!(%reason, "TCP-AO reload is outside the add-only live-rotation phase; retaining restart-pinned runtime inventory");
+        let retained = tcp_ao_listener.is_some_and(|listener| {
+            matches!(
+                listener.status().phase,
+                TcpAoRotationPhase::AddOnly
+                    | TcpAoRotationPhase::AddOnlyFailed
+                    | TcpAoRotationPhase::Selecting
+                    | TcpAoRotationPhase::AwaitingPeer
+                    | TcpAoRotationPhase::SelectionFailed
+            )
+        });
+        if retained {
+            error!(%reason, "TCP-AO reload changed a retained immutable generation; halting before unrelated reload work");
+            return None;
+        }
+        error!(%reason, "TCP-AO reload is outside the non-destructive live-rotation phases; retaining restart-pinned runtime inventory");
     }
-    let tcp_ao_rotation_candidate = matches!(&tcp_ao_rotation_plan, TcpAoReloadPlan::AddOnly(_));
+    let tcp_ao_rotation_candidate = matches!(&tcp_ao_rotation_plan, TcpAoReloadPlan::Rotation(_));
 
-    // TCP-AO edits outside the successfully committed add-only shape remain
+    // TCP-AO edits outside the successfully committed non-destructive rotation shapes remain
     // pinned. Static and dynamic pinning run in separate passes, so their
     // combination can synthesize a new authentication-boundary conflict.
     // For example, a desired reload may remove a protected dynamic range and
@@ -870,9 +964,9 @@ pub(crate) async fn reload_config_with_tcp_ao(
     if tcp_ao_pinned_neighbors > 0 {
         error!(
             neighbors = tcp_ao_pinned_neighbors,
-            "[[neighbors]].tcp_ao is outside the live add-only successor shape: \
-             restart rustbgpd to add/remove owners, remove/edit/reorder keys, or change \
-             selection/deprecation. Peer-group and policy dependencies \
+            "[[neighbors]].tcp_ao is outside the live non-destructive rotation shapes: \
+             restart rustbgpd to add/remove owners or remove/edit/reorder keys. \
+             Adding and selecting in one generation is also rejected. Peer-group and policy dependencies \
              referenced by pinned TCP-AO neighbors, plus restart-required global fields \
              that affect neighbor validation, are also kept at their live startup values \
              for this reload."
@@ -887,10 +981,10 @@ pub(crate) async fn reload_config_with_tcp_ao(
     if pinned_dynamic_tcp_ao > 0 {
         error!(
             ranges = pinned_dynamic_tcp_ao,
-            "[[dynamic_neighbors]].tcp_ao is outside the live add-only successor shape: \
+            "[[dynamic_neighbors]].tcp_ao is outside the live non-destructive rotation shapes: \
              protected range CRUD and overlapping replacements remain pinned to the live \
-             snapshot. Restart rustbgpd to add, remove, move, edit, reorder, select, \
-             deprecate, or delete dynamic TCP-AO keys."
+             snapshot. Restart rustbgpd to add, remove, move, edit, reorder, or delete \
+             dynamic TCP-AO keys; adding and selecting together is rejected."
         );
     }
 
@@ -902,47 +996,103 @@ pub(crate) async fn reload_config_with_tcp_ao(
         return None;
     }
 
-    // TCP-AO add-only rotation is the first fallible external apply. The
+    // TCP-AO rotation is the first fallible external apply. The
     // complete pinned candidate is valid now; preflight every managed session,
     // then commit listener and session inventories in that order.
     let mut tcp_ao_rotation_applied = false;
-    if let TcpAoReloadPlan::AddOnly(plan) = &tcp_ao_rotation_plan {
-        let listener = tcp_ao_listener.expect("add-only plan requires a listener handle");
+    if let TcpAoReloadPlan::Rotation(plan) = &tcp_ao_rotation_plan {
+        let listener = tcp_ao_listener.expect("TCP-AO plan requires a listener handle");
         let desired_listener =
             TcpAoListenerGeneration::new(plan.generation, plan.listener_keys.clone());
-        if let Err(error) = listener.preflight_add_only(desired_listener.clone()).await {
-            mark_tcp_ao_failed(peer_mgr_tx, plan.generation, error.to_string()).await;
-            error!(error = %error, "TCP-AO add-only generation rejected during complete listener kernel preflight");
+        let listener_preflight = match plan.operation {
+            TcpAoRotationOperation::AddOnly => {
+                listener.preflight_add_only(desired_listener.clone()).await
+            }
+            TcpAoRotationOperation::Selection => {
+                listener.preflight_selection(desired_listener.clone()).await
+            }
+        };
+        if let Err(error) = listener_preflight {
+            mark_tcp_ao_failed(
+                peer_mgr_tx,
+                plan.generation,
+                plan.operation,
+                error.to_string(),
+            )
+            .await;
+            error!(error = %error, "TCP-AO generation rejected during complete listener kernel preflight");
             return None;
         }
         if let Err(error) = send_tcp_ao_preflight(peer_mgr_tx, plan).await {
-            error!(error = %error, "TCP-AO add-only generation rejected during global session preflight");
+            error!(error = %error, "TCP-AO generation rejected during global session preflight");
             return None;
         }
-        if let Err(error) = listener.apply_add_only(desired_listener).await {
-            mark_tcp_ao_failed(peer_mgr_tx, plan.generation, error.to_string()).await;
-            error!(error = %error, "TCP-AO add-only generation failed on listener; old usable MKTs remain installed and the generation is retryable");
+        let listener_apply = match plan.operation {
+            TcpAoRotationOperation::AddOnly => listener.apply_add_only(desired_listener).await,
+            TcpAoRotationOperation::Selection => listener.begin_selection(desired_listener).await,
+        };
+        if let Err(error) = listener_apply {
+            mark_tcp_ao_failed(
+                peer_mgr_tx,
+                plan.generation,
+                plan.operation,
+                error.to_string(),
+            )
+            .await;
+            error!(error = %error, "TCP-AO generation failed on listener; old usable MKTs remain installed and the generation is retryable");
             return None;
         }
         if let Err(error) = send_tcp_ao_apply(peer_mgr_tx, plan).await {
+            if plan.operation == TcpAoRotationOperation::Selection
+                && error.starts_with(crate::peer_manager::TCP_AO_AWAITING_PEER_PREFIX)
+            {
+                if let Err(marker_error) = listener
+                    .mark_awaiting_peer(plan.generation, error.clone())
+                    .await
+                {
+                    warn!(error = %marker_error, "TCP-AO listener awaiting-peer marker was not acknowledged");
+                }
+                info!(error = %error, generation = plan.generation.as_u64(), "TCP-AO successor selected; peer-use observation remains pending until a later identical SIGHUP");
+                return None;
+            }
             if let Err(marker_error) = listener
                 .mark_dependent_failure(plan.generation, error.clone())
                 .await
             {
                 warn!(error = %marker_error, "TCP-AO listener dependent-failure marker was not acknowledged; staged generation remains globally uncommitted");
             }
-            error!(error = %error, "TCP-AO add-only generation failed on an established session; listener accepts remain generation-fenced until retry");
+            error!(error = %error, "TCP-AO generation failed on an established session; listener accepts remain generation-fenced until retry");
+            return None;
+        }
+        if plan.operation == TcpAoRotationOperation::Selection
+            && let Err(error) = listener.finalize_selection(plan.generation).await
+        {
+            mark_tcp_ao_failed(
+                peer_mgr_tx,
+                plan.generation,
+                plan.operation,
+                error.to_string(),
+            )
+            .await;
+            error!(error = %error, "TCP-AO session cohort observed successor use, but listener metadata commit failed; retrying the identical generation is required");
             return None;
         }
         if let Err(error) = listener.acknowledge_global_commit(plan.generation).await {
-            mark_tcp_ao_failed(peer_mgr_tx, plan.generation, error.to_string()).await;
-            error!(error = %error, "TCP-AO add-only generation reached sessions but listener global commit acknowledgement failed; retrying the same immutable generation is required");
+            mark_tcp_ao_failed(
+                peer_mgr_tx,
+                plan.generation,
+                plan.operation,
+                error.to_string(),
+            )
+            .await;
+            error!(error = %error, "TCP-AO generation reached sessions but listener global commit acknowledgement failed; retrying the same immutable generation is required");
             return None;
         }
         tcp_ao_rotation_applied = true;
         info!(
             generation = plan.generation.as_u64(),
-            "TCP-AO add-only generation applied to listener and established sessions"
+            operation = ?plan.operation,
+            "TCP-AO generation applied to listener and established sessions"
         );
     }
 
@@ -4788,14 +4938,60 @@ tcp_ao = [
         let current = Config::load_toml_with_diagnostics(&initial, "current").unwrap();
         let desired = Config::load_toml_with_diagnostics(&candidate, "desired").unwrap();
         let plan =
-            prepare_tcp_ao_add_only_plan(&current, &desired, &TcpAoRotationStatus::default())
+            prepare_tcp_ao_rotation_plan(&current, &desired, &TcpAoRotationStatus::default())
                 .unwrap();
-        let TcpAoReloadPlan::AddOnly(plan) = plan else {
+        let TcpAoReloadPlan::Rotation(plan) = plan else {
             panic!("append-only successor should compile as a live generation");
         };
         assert_eq!(plan.generation.as_u64(), 2);
         assert_eq!(plan.static_keyrings.len(), 1);
         assert_eq!(plan.static_keyrings[0].1.0.len(), 2);
+    }
+
+    #[test]
+    fn tcp_ao_plan_selects_installed_successor_and_reuses_awaiting_generation() {
+        let current_toml = baseline_toml().replace(
+            "hold_time = 90",
+            r#"hold_time = 90
+tcp_ao = [
+  { key = "old", send_id = 1, recv_id = 11, algorithm = "hmac(sha256)" },
+  { key = "successor", send_id = 2, recv_id = 12, algorithm = "hmac(sha256)" }
+]"#,
+        );
+        let desired_toml = baseline_toml().replace(
+            "hold_time = 90",
+            r#"hold_time = 90
+tcp_ao = [
+  { key = "old", send_id = 1, recv_id = 11, algorithm = "hmac(sha256)", deprecated = true },
+  { key = "successor", send_id = 2, recv_id = 12, algorithm = "hmac(sha256)", preferred = true }
+]"#,
+        );
+        let current = Config::load_toml_with_diagnostics(&current_toml, "current").unwrap();
+        let desired = Config::load_toml_with_diagnostics(&desired_toml, "desired").unwrap();
+        let TcpAoReloadPlan::Rotation(plan) =
+            prepare_tcp_ao_rotation_plan(&current, &desired, &TcpAoRotationStatus::default())
+                .unwrap()
+        else {
+            panic!("installed successor selection should compile as a live generation");
+        };
+        assert_eq!(plan.operation, TcpAoRotationOperation::Selection);
+        assert_eq!(plan.generation, TcpAoRotationGeneration::new(2).unwrap());
+
+        let awaiting = TcpAoRotationStatus {
+            desired: plan.generation,
+            applied: TcpAoRotationGeneration::STARTUP,
+            phase: TcpAoRotationPhase::AwaitingPeer,
+            last_error: Some("awaiting successor traffic".to_string()),
+        };
+        let TcpAoReloadPlan::Rotation(retry) =
+            prepare_tcp_ao_rotation_plan(&current, &desired, &awaiting).unwrap()
+        else {
+            panic!("awaiting selection should retain the same generation");
+        };
+        assert_eq!(retry.operation, TcpAoRotationOperation::Selection);
+        assert_eq!(retry.generation, plan.generation);
+        assert_eq!(retry.listener_keys, plan.listener_keys);
+        assert_eq!(retry.static_keyrings, plan.static_keyrings);
     }
 
     #[test]
@@ -4821,8 +5017,8 @@ tcp_ao = [
             phase: TcpAoRotationPhase::AddOnlyFailed,
             last_error: Some("session apply failed".to_string()),
         };
-        let TcpAoReloadPlan::AddOnly(retry) =
-            prepare_tcp_ao_add_only_plan(&current, &desired, &status).unwrap()
+        let TcpAoReloadPlan::Rotation(retry) =
+            prepare_tcp_ao_rotation_plan(&current, &desired, &status).unwrap()
         else {
             panic!("failed add-only generation should remain retryable");
         };
@@ -4834,8 +5030,8 @@ tcp_ao = [
             phase: TcpAoRotationPhase::AddOnly,
             last_error: None,
         };
-        let TcpAoReloadPlan::AddOnly(retry) =
-            prepare_tcp_ao_add_only_plan(&current, &desired, &lost_marker_status).unwrap()
+        let TcpAoReloadPlan::Rotation(retry) =
+            prepare_tcp_ao_rotation_plan(&current, &desired, &lost_marker_status).unwrap()
         else {
             panic!("unacknowledged listener generation should remain retryable");
         };
@@ -4847,7 +5043,7 @@ tcp_ao = [
         );
         let selected = Config::load_toml_with_diagnostics(&selected, "selected").unwrap();
         assert!(matches!(
-            prepare_tcp_ao_add_only_plan(&current, &selected, &TcpAoRotationStatus::default())
+            prepare_tcp_ao_rotation_plan(&current, &selected, &TcpAoRotationStatus::default())
                 .unwrap(),
             TcpAoReloadPlan::Unsupported(_)
         ));
@@ -4877,8 +5073,8 @@ tcp_ao = [
                 last_error: (phase == TcpAoRotationPhase::AddOnlyFailed)
                     .then(|| "injected commit rejection".to_string()),
             };
-            let TcpAoReloadPlan::AddOnly(recovery) =
-                prepare_tcp_ao_add_only_plan(&current, &desired, &unacknowledged).unwrap()
+            let TcpAoReloadPlan::Rotation(recovery) =
+                prepare_tcp_ao_rotation_plan(&current, &desired, &unacknowledged).unwrap()
             else {
                 panic!("equal config must recover the staged listener generation");
             };
@@ -4897,8 +5093,8 @@ tcp_ao = [
             phase: TcpAoRotationPhase::Idle,
             last_error: None,
         };
-        let TcpAoReloadPlan::AddOnly(next) =
-            prepare_tcp_ao_add_only_plan(&current, &later, &committed).unwrap()
+        let TcpAoReloadPlan::Rotation(next) =
+            prepare_tcp_ao_rotation_plan(&current, &later, &committed).unwrap()
         else {
             panic!("later append should not remain fenced after recovery");
         };

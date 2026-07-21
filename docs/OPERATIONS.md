@@ -1254,8 +1254,14 @@ guarantee.
 The same neighbor view reports TCP-AO rotation `desired`, `applied`, and
 `phase` values. `idle` means the peer has acknowledged the desired immutable
 inventory; `add_only` is an in-progress successor install; and
-`add_only_failed` includes a secret-free actionable error. A failed add-only
-generation does not select or delete keys and is safe to retry with SIGHUP.
+`add_only_failed` includes a secret-free actionable error. `selecting` means an
+installed successor is being assigned as local RNext; `awaiting_peer` means the
+one-shot observation did not yet see the peer use that successor; and
+`selection_failed` is a hard inventory/counter/commit failure. While awaiting,
+`desired=N` and `applied=N-1`; a later SIGHUP must present the identical full
+desired config and retries that same N. Selection never sets Linux Current,
+deletes an MKT, or commits predecessor deprecation before every affected session shows a
+generation-relative increase in the successor's verified-packet counter.
 If listener mutation may have started, affected protected passive accepts can
 reject until the same generation is retried or the daemon restarts; established
 sessions keep their prior selectable keys. A child queued before a successful

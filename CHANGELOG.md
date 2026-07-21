@@ -50,6 +50,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **TCP-AO successors can be selected live in a second immutable generation.**
+  After an add-only SIGHUP installs the successor everywhere, a later SIGHUP
+  sets only local RNext and commits predecessor deprecation after one
+  generation-relative peer-traffic observation across affected sessions.
+  `awaiting_peer` retries the identical generation on a later SIGHUP; live
+  selection never deletes an MKT or sets Linux Current.
+
 - **Negotiated session and Graceful Restart state is visible per neighbor.**
   Neighbor detail reports the current Established session's negotiated hold
   time, remote router ID, four-octet-AS result, mutual families, usable peer GR

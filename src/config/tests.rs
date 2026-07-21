@@ -13217,8 +13217,8 @@ fn reload_matrix_rows_for<'a>(matrix: &'a str, field: &str) -> Vec<&'a str> {
 /// telemetry tracing reload handle), so the doc claim is finally true; if
 /// someone regresses it back to inert and re-marks the row restart-required
 /// (or vice versa) this fails. `tcp_ao` pins its deliberately narrow SIGHUP
-/// exception: only a strictly add-only successor generation is live, while
-/// every other edit remains restart-required. `bfd` pins the unconditional
+/// exception: add-only install and later observation-gated selection are live,
+/// while destructive/identity edits remain restart-required. `bfd` pins the unconditional
 /// restart-required side so a blanket "mark everything live" edit also fails.
 #[test]
 fn reload_matrix_pins_load_bearing_field_classes() {
@@ -13227,7 +13227,7 @@ fn reload_matrix_pins_load_bearing_field_classes() {
         ("log_level", "| live |"),
         (
             "tcp_ao",
-            "| live (add-only generation) / otherwise restart-required |",
+            "| live (non-destructive generations) / otherwise restart-required |",
         ),
         ("bfd", "| restart-required |"),
     ] {

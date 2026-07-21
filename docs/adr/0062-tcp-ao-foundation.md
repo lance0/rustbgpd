@@ -91,9 +91,19 @@ slices have now shipped static-neighbor and startup-only dynamic-range support:
 - SIGHUP can install an immutable add-only successor generation when protected
   owners and existing key material/order are unchanged and every appended MKT
   is non-preferred. Listener and managed session inventories are globally
-  preflighted, completely verified, and fenced by generation. Selection,
-  deprecation, deletion, edits/reordering, and protected-owner changes remain
-  restart-required and pinned.
+  preflighted, completely verified, and fenced by generation.
+- A later immutable generation can select an already-installed preferred
+  successor while keeping the exact owner union, key cores, and order. It sets
+  only local RNext, captures the successor's per-key `pkt_good` immediately
+  beforehand, and observes the affected session cohort once for matching
+  Current/RNext, a strict generation-relative counter increase, and clean
+  authentication counters. Only then does it commit predecessor deprecation
+  metadata. `awaiting_peer` retains desired N over applied N-1; a later SIGHUP
+  must present the identical full candidate and retries N without actor polling.
+- Accepted sockets preserve their complete covering-owner union for both
+  selection and inspection; static exact ownership wins, otherwise dynamic
+  longest-prefix match selects the owner. Selection never deletes an MKT or
+  sets Linux Current.
 - Runtime deletion of a configured TCP-AO neighbor is rejected until listener
   MKT deletion / live rotation support exists.
 - Protected active-open and accepted passive sockets are inspected with
@@ -143,8 +153,8 @@ every MKT is installed and reconciled. At most one key may be preferred, each
 direction's KeyIDs must be unique within the ring, and at least one key must be
 non-deprecated.
 
-Still deferred: live key selection, deprecation, deletion, and protected-owner
-CRUD, plus peer-group inheritance. API/CLI neighbor state exposes redacted live
+Still deferred: live key deletion, key edits/reordering, protected-owner CRUD,
+and peer-group inheritance. API/CLI neighbor state exposes redacted live
 inspection results (KeyIDs, validity flags, per-key inventory, and counters)
 and secret-free desired/applied generation, phase, and failure details for
 static and direct dynamic-prefix protected sessions.

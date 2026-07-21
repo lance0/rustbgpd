@@ -537,9 +537,10 @@ message NeighborState {
   // coordinator and the generation fully applied to this peer session.
   uint64 tcp_ao_desired_generation = 32;
   uint64 tcp_ao_applied_generation = 33;
-  // Stable values: idle, add_only, add_only_failed.
+  // Stable values: idle, add_only, add_only_failed, selecting,
+  // awaiting_peer, selection_failed.
   string tcp_ao_rotation_phase = 34;
-  // Secret-free actionable add failure. Empty when the phase is healthy.
+  // Secret-free actionable rotation failure. Empty when the phase is healthy.
   string tcp_ao_rotation_error = 35;
   // Slow-peer flag: the session is alive but its outbound queue has
   // stayed above the configured backlog threshold for the configured
