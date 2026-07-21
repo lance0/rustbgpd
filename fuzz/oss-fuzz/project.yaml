@@ -1,6 +1,7 @@
 homepage: "https://github.com/lance0/rustbgpd"
 main_repo: "https://github.com/lance0/rustbgpd"
 language: rust
+base_os_version: ubuntu-24-04
 primary_contact: "lancey3@gmail.com"
 sanitizers:
   - address

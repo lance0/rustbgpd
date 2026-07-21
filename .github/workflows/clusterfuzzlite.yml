@@ -1,0 +1,39 @@
+name: ClusterFuzzLite
+
+on:
+  workflow_dispatch:
+
+permissions: read-all
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  code-change:
+    runs-on: ubuntu-latest
+    # A cold run without stored corpus artifacts spent about 6m42s per target
+    # waiting for each missing artifact before fuzzing. Leave enough room for
+    # all 17 targets plus the observed 14-minute ASan build.
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v7
+      - name: Prove exact fail-closed fuzz target inventory
+        run: |
+          python3 -m unittest -v scripts/test_check_fuzz_target_inventory.py
+          python3 scripts/check_fuzz_target_inventory.py
+      - name: Build address-sanitized fuzzers
+        uses: google/clusterfuzzlite/actions/build_fuzzers@v1
+        with:
+          language: rust
+          sanitizer: address
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Run code-change fuzzing
+        uses: google/clusterfuzzlite/actions/run_fuzzers@v1
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          fuzz-seconds: 300
+          language: rust
+          mode: code-change
+          sanitizer: address
+          output-sarif: true

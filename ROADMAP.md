@@ -495,8 +495,19 @@ Details in the "Recently shipped" section below and ADR-0097.
   route-server profile and RFC 9687 Send Hold Timer pieces are now shipped.
   OSS-Fuzz submission
   [#15874](https://github.com/google/oss-fuzz/pull/15874) was closed because the
-  project does not yet meet the upstream adoption threshold; local
-  ClusterFuzzLite adoption is deferred and tracked as LAN-525.
+  project does not yet meet the upstream wide-user-base eligibility threshold,
+  despite its 17-target build/check passing. **The ClusterFuzzLite PR gate was
+  measured and rejected; the on-demand integration remains:** PR #1061's
+  commissioning run took 40m42s before intentional cancellation (14m14s to
+  build, then more than 25m to complete three targets and begin the fourth
+  because each absent corpus artifact cost about 6m42s outside the nominal
+  300-second total engine budget). ClusterFuzzLite is therefore manual-dispatch
+  only with a 180-minute cold-start bound and no crash-injection requirement on
+  a PR. The existing cargo-fuzz workflow is the sole nightly campaign, while
+  the ordinary PR/push CI check enforces the exact fail-closed 17-target
+  manifest/source inventory. Batch fuzzing, corpus pruning, storage, and
+  coverage are not part of this slice; the official Rust integration currently
+  supports AddressSanitizer only.
 - **Route-server adoption polish** — the ADR-0101/M83 profile shipped the
   secure preset: RFC 7947 transparency, Add-Path and `per_client_best`
   path-hiding mitigation, RFC 9234 OTC toward members (including dynamic /

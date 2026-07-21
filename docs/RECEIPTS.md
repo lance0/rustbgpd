@@ -179,13 +179,28 @@ artifacts under [`artifacts/soak/`](artifacts/soak/). Harnesses live in
 
 | Workflow | Trigger | What it re-proves |
 |----------|---------|-------------------|
-| [`ci.yml`](../.github/workflows/ci.yml) | every PR / push | fmt, clippy (warnings denied), workspace tests, rustdoc, kernel-primitive gate |
+| [`ci.yml`](../.github/workflows/ci.yml) | every PR / push | fmt, clippy (warnings denied), workspace tests, rustdoc, kernel-primitive gate, and the exact fail-closed 17-target fuzz inventory |
 | [`interop.yml`](../.github/workflows/interop.yml) | every PR / push | The PR-gated M-series table above, one containerlab job per milestone |
 | [`kernel-dataplane.yml`](../.github/workflows/kernel-dataplane.yml) | PR, push, nightly 07:00 UTC | Privileged EVPN/FIB/BFD/TCP-AO dataplane receipts + netns selectors |
-| [`fuzz.yml`](../.github/workflows/fuzz.yml) | nightly 04:00 UTC + manual dispatch | libFuzzer wire, policy, EVPN route-target, MRT snapshot, and warm-bundle manifest harnesses |
+| [`fuzz.yml`](../.github/workflows/fuzz.yml) | nightly 04:00 UTC + manual dispatch | The sole scheduled fuzz campaign: libFuzzer wire, policy, EVPN route-target, MRT snapshot, and warm-bundle manifest harnesses |
+| [`clusterfuzzlite.yml`](../.github/workflows/clusterfuzzlite.yml) | manual dispatch | On-demand official ClusterFuzzLite address-sanitized code-change fuzzing for the exact 17-target inventory; not a PR or scheduled gate |
 | [`bench-nightly.yml`](../.github/workflows/bench-nightly.yml) | nightly 05:00 UTC | Benchmark tracking on the bench runner |
 | [`audit.yml`](../.github/workflows/audit.yml) | daily 06:00 UTC | `cargo audit` / dependency advisories |
 | [`privileged-interop.yml`](../.github/workflows/privileged-interop.yml) | manual dispatch | Direct-`cargo` privileged netns suites |
+
+ClusterFuzzLite's PR commissioning run
+[`29855791034`](https://github.com/lance0/rustbgpd/actions/runs/29855791034)
+is retained as a rejection receipt for PR gating. The single job was
+intentionally cancelled after 40m42s: inventory passed in about 2s, the
+address-sanitized build passed in 14m14s, and `run_fuzzers` listed all 17
+targets but completed only three before spending the cancellation point in the
+fourth target's corpus download. Each completed target waited about 6m42s for
+its absent corpus artifact before roughly 18s of fuzzing. The 300-second budget
+covers engine time, not those sequential artifact waits. A cold extrapolation
+is about 134 minutes, so the manual-only workflow uses a conservative
+180-minute bound. This proves the hosted wall-clock cost is unsuitable for
+rustbgpd's PR critical path; it is not a crash-injection receipt, and no
+injected PR crash is required for that scheduling conclusion.
 
 ## Adding a receipt
 

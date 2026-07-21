@@ -26,6 +26,10 @@ jobs:
           components: rustfmt, clippy
       - uses: ./.github/actions/install-protobuf
       - uses: Swatinem/rust-cache@v2
+      - name: Prove exact fail-closed fuzz target inventory
+        run: |
+          python3 -m unittest -v scripts/test_check_fuzz_target_inventory.py
+          python3 scripts/check_fuzz_target_inventory.py
       - name: Install receipt-tool dependencies
         run: |
           sudo apt-get update
