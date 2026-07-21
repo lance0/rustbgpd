@@ -73,6 +73,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   rank, explains policy/cap/OTC/exact-wire denials, and diffs the exact rank
   against Adj-RIB-Out. Selector absence preserves the existing winner view.
 
+- **Required OPEN address families.** Neighbors and peer groups can declare
+  `required_families`; rustbgpd now rejects an OPEN with RFC 5492 Unsupported
+  Capability (2/7) when any required family is absent from the final negotiated
+  intersection. The notification Data lists only the missing MultiProtocol
+  capabilities in configured order, while the default empty list preserves
+  partial-family and capability-less IPv4 compatibility.
+
 - **TCP-AO successors can be selected live in a second immutable generation.**
   After an add-only SIGHUP installs the successor everywhere, a later SIGHUP
   sets only local RNext and commits predecessor deprecation after one

@@ -144,6 +144,14 @@ resolved.
 
 ## Limitations (by design, not bugs)
 
+- **Required-family enforcement is local.** `required_families` lets rustbgpd
+  require selected AFI/SAFIs from a peer's OPEN, but BGP has no symmetric
+  standard capability that makes the remote implementation enforce rustbgpd's
+  advertised set. Configure the equivalent policy independently on both ends;
+  BIRD 3.3.1 exposes this as per-channel `mandatory on`. The rustbgpd rejection
+  interop fixture deliberately leaves BIRD `mandatory` off so rustbgpd remains
+  the rejecting speaker under test.
+
 - **RFC 9687 send hold timer is a per-write deadline, not the RFC's
   free-running timer.** The RFC models a `SendHoldTimer` restarted on
   every sent message; rustbgpd instead bounds each individual

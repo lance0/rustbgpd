@@ -177,6 +177,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subc
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from add" -l send-hold-time -d 'RFC 9687 send hold time in seconds (0 disables; must exceed the hold time; default: max(480, 2 x hold time))' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from add" -l max-prefixes -d 'Max prefix limit' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from add" -l families -d 'Address families (comma-separated)' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from add" -l required-families -d 'Families that must be negotiated (comma-separated)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from add" -l role -d 'Local BGP Role for RFC 9234 route-leak protection' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from add" -l add-path-send-max -d 'Max paths per prefix for Add-Path send' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from add" -l paths-limit-receive-max -d 'Experimental Paths-Limit preference for Add-Path receive families' -r
@@ -237,6 +238,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subco
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from add" -l send-hold-time -d 'RFC 9687 send hold time in seconds (0 disables; must exceed the hold time; default: max(480, 2 x hold time))' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from add" -l max-prefixes -d 'Max prefix limit' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from add" -l families -d 'Address families (comma-separated)' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from add" -l required-families -d 'Families that must be negotiated (comma-separated)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from add" -l role -d 'Local BGP Role for RFC 9234 route-leak protection' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from add" -l add-path-send-max -d 'Max paths per prefix for Add-Path send' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from add" -l paths-limit-receive-max -d 'Experimental Paths-Limit preference for Add-Path receive families' -r

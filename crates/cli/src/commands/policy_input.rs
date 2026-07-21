@@ -172,6 +172,8 @@ pub struct JsonPeerGroupDefinition {
     #[serde(default)]
     pub families: Vec<String>,
     #[serde(default)]
+    pub required_families: Vec<String>,
+    #[serde(default)]
     pub graceful_restart: Option<bool>,
     #[serde(default)]
     pub gr_restart_time: Option<u32>,
@@ -224,6 +226,7 @@ impl From<JsonPeerGroupDefinition> for proto::PeerGroupDefinition {
             md5_password: j.md5_password,
             ttl_security: j.ttl_security,
             families: j.families,
+            required_families: j.required_families,
             graceful_restart: j.graceful_restart,
             gr_restart_time: j.gr_restart_time,
             gr_peer_restart_time_max: j.gr_peer_restart_time_max,

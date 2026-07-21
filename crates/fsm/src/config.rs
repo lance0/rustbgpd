@@ -83,6 +83,9 @@ pub struct PeerConfig {
     pub connect_retry_secs: u32,
     /// Address families to advertise in OPEN capabilities.
     pub families: Vec<(Afi, Safi)>,
+    /// Configured families whose negotiation is mandatory. An empty list
+    /// preserves RFC 4760 partial-intersection behavior.
+    pub required_families: Vec<(Afi, Safi)>,
     /// Enable Graceful Restart capability (RFC 4724).
     pub graceful_restart: bool,
     /// Restart time advertised in GR capability (seconds, max 4095).
@@ -127,6 +130,7 @@ impl Default for PeerConfig {
             send_hold_time: default_send_hold_time(DEFAULT_HOLD_TIME),
             connect_retry_secs: 120,
             families: Vec::new(),
+            required_families: Vec::new(),
             graceful_restart: false,
             gr_restart_time: 0,
             llgr_stale_time: 0,
@@ -384,6 +388,7 @@ mod tests {
             send_hold_time: default_send_hold_time(90),
             connect_retry_secs: 30,
             families: vec![(Afi::Ipv4, Safi::Unicast)],
+            required_families: Vec::new(),
             graceful_restart: false,
             gr_restart_time: 120,
             llgr_stale_time: 0,

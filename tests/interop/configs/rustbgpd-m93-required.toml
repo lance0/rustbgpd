@@ -1,0 +1,21 @@
+# M93 — require IPv6 unicast even though the BGP transport is IPv4.
+
+[global]
+asn = 65093
+router_id = "10.93.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+[[neighbors]]
+address = "10.93.0.2"
+remote_asn = 65093
+families = ["ipv4_unicast", "ipv6_unicast"]
+required_families = ["ipv6_unicast"]
+
+[security.grpc]
+enforcement = "legacy"

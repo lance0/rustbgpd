@@ -43,6 +43,7 @@ struct JsonPeerGroupDetail {
     #[serde(skip_serializing_if = "Option::is_none")]
     ttl_security: Option<bool>,
     families: Vec<String>,
+    required_families: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     graceful_restart: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -90,6 +91,7 @@ fn json_peer_group_detail(
         has_md5_password: def.has_md5_password.unwrap_or(false),
         ttl_security: def.ttl_security,
         families: def.families.clone(),
+        required_families: def.required_families.clone(),
         graceful_restart: def.graceful_restart,
         gr_restart_time: def.gr_restart_time,
         gr_peer_restart_time_max: def.gr_peer_restart_time_max,
@@ -191,6 +193,12 @@ pub async fn get(connection: Connection, name: &str, json: bool) -> Result<(), C
         }
         if !def.families.is_empty() {
             println!("Families:              {}", def.families.join(", "));
+        }
+        if !def.required_families.is_empty() {
+            println!(
+                "Required Families:     {}",
+                def.required_families.join(", ")
+            );
         }
         if let Some(g) = def.graceful_restart {
             println!("Graceful Restart:      {g}");
@@ -380,6 +388,25 @@ mod tests {
         assert_eq!(value["gr_peer_restart_time_max"], 300);
     }
 
+    #[test]
+    fn detail_json_preserves_raw_required_families() {
+        // Load-bearing: dropping the raw group field from the mapper removes
+        // this exact ordered list from the operator-facing JSON contract.
+        let definition = crate::proto::PeerGroupDefinition {
+            required_families: vec!["ipv6_unicast".to_string()],
+            ..Default::default()
+        };
+        let value = serde_json::to_value(json_peer_group_detail(
+            "ix-members".to_string(),
+            &definition,
+        ))
+        .unwrap();
+        assert_eq!(
+            value["required_families"],
+            serde_json::json!(["ipv6_unicast"])
+        );
+    }
+
     #[tokio::test]
     async fn list_renders_empty() {
         let server = spawn_mock_server(None).await;
@@ -395,7 +422,7 @@ mod tests {
         let mut tmp = tempfile::NamedTempFile::new().unwrap();
         write!(
             tmp,
-            r#"{{"hold_time":120,"families":["ipv4_unicast"],"import_policy_chain":["a"],"add_path_send":true,"add_path_send_max":4}}"#
+            r#"{{"hold_time":120,"families":["ipv4_unicast","ipv6_unicast"],"required_families":["ipv6_unicast"],"import_policy_chain":["a"],"add_path_send":true,"add_path_send_max":4}}"#
         )
         .unwrap();
         tmp.flush().unwrap();
@@ -414,7 +441,11 @@ mod tests {
         assert_eq!(captured.name, "transit");
         let def = captured.definition.unwrap();
         assert_eq!(def.hold_time, Some(120));
-        assert_eq!(def.families, vec!["ipv4_unicast".to_string()]);
+        assert_eq!(
+            def.families,
+            vec!["ipv4_unicast".to_string(), "ipv6_unicast".to_string()]
+        );
+        assert_eq!(def.required_families, vec!["ipv6_unicast".to_string()]);
         assert_eq!(def.import_policy_chain, vec!["a".to_string()]);
         assert_eq!(def.add_path_send, Some(true));
         assert_eq!(def.add_path_send_max, Some(4));

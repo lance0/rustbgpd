@@ -1937,6 +1937,14 @@
             "null"
           ]
         },
+        "required_families": {
+          "description": "Families that must be negotiated before the session may establish.\nEmpty inherits a non-empty peer-group value; when both are empty,\npartial family intersection remains allowed.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
         "role": {
           "description": "Local BGP Role for RFC 9234 route-leak prevention. eBGP only.",
           "anyOf": [
@@ -2328,6 +2336,14 @@
             "string",
             "null"
           ]
+        },
+        "required_families": {
+          "description": "Families every inheriting session must negotiate. Must be a subset\nof each member's effective configured family set.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
         },
         "role": {
           "description": "Local BGP Role (RFC 9234) inherited by neighbors in this group.",

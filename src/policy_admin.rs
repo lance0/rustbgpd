@@ -201,6 +201,7 @@ pub(crate) fn api_peer_group_to_config(definition: PeerGroupDefinition) -> PeerG
         ttl_security: definition.ttl_security,
         bfd: None,
         families: definition.families,
+        required_families: definition.required_families,
         graceful_restart: definition.graceful_restart,
         gr_restart_time: definition.gr_restart_time,
         gr_peer_restart_time_max: definition.gr_peer_restart_time_max,
@@ -251,6 +252,7 @@ pub(crate) fn config_peer_group_to_api(definition: &PeerGroupConfig) -> PeerGrou
         md5_password: definition.md5_password.as_deref().map(Into::into),
         ttl_security: definition.ttl_security,
         families: definition.families.clone(),
+        required_families: definition.required_families.clone(),
         graceful_restart: definition.graceful_restart,
         gr_restart_time: definition.gr_restart_time,
         gr_peer_restart_time_max: definition.gr_peer_restart_time_max,
@@ -463,6 +465,19 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
                             }
                             (rustbgpd_wire::Afi::Ipv6, rustbgpd_wire::Safi::FlowSpec) => {
                                 "ipv6_flowspec".to_string()
+                            }
+                            _ => format!("{afi:?}_{safi:?}"),
+                        })
+                        .collect(),
+                    required_families: cfg
+                        .required_families
+                        .iter()
+                        .map(|(afi, safi)| match (afi, safi) {
+                            (rustbgpd_wire::Afi::Ipv4, rustbgpd_wire::Safi::Unicast) => {
+                                "ipv4_unicast".to_string()
+                            }
+                            (rustbgpd_wire::Afi::Ipv6, rustbgpd_wire::Safi::Unicast) => {
+                                "ipv6_unicast".to_string()
                             }
                             _ => format!("{afi:?}_{safi:?}"),
                         })
@@ -916,6 +931,7 @@ remote_asn = 65002
                     ),
                     ttl_security: false,
                     families: vec![(rustbgpd_wire::Afi::Ipv4, rustbgpd_wire::Safi::Unicast)],
+                    required_families: Vec::new(),
                     graceful_restart: true,
                     gr_restart_time: 120,
                     gr_peer_restart_time_max: 4095,

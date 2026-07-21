@@ -898,6 +898,9 @@ enum NeighborAction {
         /// Address families (comma-separated)
         #[arg(long, value_delimiter = ',')]
         families: Vec<String>,
+        /// Families that must be negotiated (comma-separated)
+        #[arg(long, value_delimiter = ',')]
+        required_families: Vec<String>,
         /// Enable transparent route-server client mode (eBGP only)
         #[arg(long)]
         route_server_client: bool,
@@ -2109,6 +2112,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                     send_hold_time,
                     max_prefixes,
                     families,
+                    required_families,
                     route_server_client,
                     per_client_best,
                     role,
@@ -2129,6 +2133,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                         send_hold_time,
                         max_prefixes,
                         families,
+                        required_families,
                         route_server_client,
                         per_client_best,
                         role,

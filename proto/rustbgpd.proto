@@ -445,6 +445,10 @@ message NeighborConfig {
   // Optional non-zero hold-down before one automatic restart attempt after a
   // max-prefix shutdown. Unset preserves the fail-closed shutdown latch.
   optional uint32 max_prefix_restart_seconds = 19;
+  // Families that must be present in the final negotiated intersection.
+  // Empty inherits a non-empty peer-group list; when both are empty, legacy
+  // partial-intersection behavior is preserved.
+  repeated string required_families = 20;
 }
 
 message PathsLimitState {
@@ -956,6 +960,9 @@ message PeerGroupDefinition {
   optional bool per_client_best = 24;
   // Experimental Paths-Limit receiver preference inherited by neighbors.
   optional uint32 paths_limit_receive_max = 25;
+  // Families every inheriting session must negotiate. Empty means no
+  // requirement; a non-empty neighbor value overrides this list.
+  repeated string required_families = 28;
 }
 
 message NamedPeerGroup {

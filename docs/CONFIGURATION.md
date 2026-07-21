@@ -615,6 +615,7 @@ dynamic-only deployment where peers are added at runtime via gRPC.
 | `bfd`                  | table    | no       | --      | Single-hop BFD attachment referencing a `[[bfd_profiles]]` entry (RFC 5880/5881/5882; static neighbors only, restart-required edits) |
 | `ttl_security`         | bool     | no       | false   | Enable GTSM / TTL security (RFC 5082, Linux only) |
 | `families`             | [string] | no       | (auto)  | Address families to negotiate (see below)        |
+| `required_families`    | [string] | no       | `[]`    | Families that must appear in the final negotiated intersection; must be a subset of effective `families` |
 | `graceful_restart`     | bool     | no       | true    | Enable Graceful Restart receiving speaker (RFC 4724) |
 | `gr_restart_time`      | u16      | no       | 120     | Restart time advertised in GR capability (seconds, 1--4095) |
 | `gr_peer_restart_time_max` | u16  | no       | 4095    | Local upper bound on the peer-advertised Restart Time used for initial disconnected stale-route retention (seconds, 1--4095); does not change this daemon's OPEN |
@@ -912,6 +913,23 @@ address type:
 - IPv4 neighbor address → `["ipv4_unicast"]`
 - IPv6 neighbor address → `["ipv4_unicast", "ipv6_unicast"]`
 
+Set `required_families` when partial negotiation is unsafe for a particular
+session. The list defaults to empty, preserving ordinary RFC 4760 partial
+intersection. A non-empty neighbor list overrides the peer-group list; an
+empty or omitted neighbor list inherits a non-empty group list (an explicit
+empty list cannot clear it). Every required family must remain in the effective
+configured set after `disable_ipv4_unicast` is applied. If the peer's OPEN does
+not negotiate every required family, rustbgpd sends OPEN Message Error /
+Unsupported Capability (2/7); Data contains only the missing six-byte
+MultiProtocol capability TLVs, in configured order. Capability-less legacy
+IPv4 peers still satisfy a required `ipv4_unicast` through RFC 4760 §8.
+
+```toml
+[peer_groups.dual-stack]
+families = ["ipv4_unicast", "ipv6_unicast"]
+required_families = ["ipv6_unicast"]
+```
+
 ### IPv6-only peering (`disable_ipv4_unicast`)
 
 Per RFC 4760 §8, IPv4 unicast is implicitly available on a BGP session
@@ -962,6 +980,7 @@ mutations persist back to TOML.
 [peer_groups.rs-clients]
 hold_time = 90
 families = ["ipv4_unicast", "ipv6_unicast"]
+required_families = ["ipv6_unicast"]
 route_server_client = true
 export_policy_chain = ["tag-ixp"]
 

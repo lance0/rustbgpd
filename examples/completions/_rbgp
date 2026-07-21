@@ -305,6 +305,7 @@ _arguments "${_arguments_options[@]}" : \
 '--send-hold-time=[RFC 9687 send hold time in seconds (0 disables; must exceed the hold time; default\: max(480, 2 x hold time))]:SEND_HOLD_TIME:_default' \
 '--max-prefixes=[Max prefix limit]:MAX_PREFIXES:_default' \
 '*--families=[Address families (comma-separated)]:FAMILIES:_default' \
+'*--required-families=[Families that must be negotiated (comma-separated)]:REQUIRED_FAMILIES:_default' \
 '--role=[Local BGP Role for RFC 9234 route-leak protection]:ROLE:_default' \
 '--add-path-send-max=[Max paths per prefix for Add-Path send]:ADD_PATH_SEND_MAX:_default' \
 '--paths-limit-receive-max=[Experimental Paths-Limit preference for Add-Path receive families]:PATHS_LIMIT_RECEIVE_MAX:_default' \
@@ -450,6 +451,7 @@ _arguments "${_arguments_options[@]}" : \
 '--send-hold-time=[RFC 9687 send hold time in seconds (0 disables; must exceed the hold time; default\: max(480, 2 x hold time))]:SEND_HOLD_TIME:_default' \
 '--max-prefixes=[Max prefix limit]:MAX_PREFIXES:_default' \
 '*--families=[Address families (comma-separated)]:FAMILIES:_default' \
+'*--required-families=[Families that must be negotiated (comma-separated)]:REQUIRED_FAMILIES:_default' \
 '--role=[Local BGP Role for RFC 9234 route-leak protection]:ROLE:_default' \
 '--add-path-send-max=[Max paths per prefix for Add-Path send]:ADD_PATH_SEND_MAX:_default' \
 '--paths-limit-receive-max=[Experimental Paths-Limit preference for Add-Path receive families]:PATHS_LIMIT_RECEIVE_MAX:_default' \

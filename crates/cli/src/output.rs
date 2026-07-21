@@ -280,6 +280,8 @@ pub struct JsonNeighborDetail {
     /// Effective RFC 9687 send hold time in seconds (0 = disabled).
     pub send_hold_time: u32,
     pub families: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub required_families: Vec<String>,
     /// Presence distinguishes an older daemon from a current daemon that has
     /// no Established-session negotiation snapshot.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1292,6 +1294,7 @@ mod tests {
             hold_time: 90,
             send_hold_time: 480,
             families: vec!["ipv4_unicast".to_string()],
+            required_families: vec!["ipv4_unicast".to_string()],
             negotiation_available: Some(true),
             negotiated_session: Some(JsonNegotiatedSession {
                 hold_time_seconds: Some(0),

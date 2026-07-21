@@ -338,6 +338,7 @@ impl PeerManager {
             tcp_ao: tc.tcp_ao.clone(),
             ttl_security: tc.ttl_security,
             families: tc.peer.families.clone(),
+            required_families: tc.peer.required_families.clone(),
             graceful_restart: tc.peer.graceful_restart,
             gr_restart_time: tc.peer.gr_restart_time,
             gr_peer_restart_time_max: tc.gr_peer_restart_time_max,

@@ -138,6 +138,7 @@ covered by later CI receipts). Procedures and results:
 | M84 | Multi-cache RTR/ASPA epoch conformance (LAN-243): per-cache load at validated EoD, v2→v1 fallback, restart retention + session rotation, ASPA replace / empty-provider withdrawal, serial-regression resync | FRR + Routinator 0.15.2 + StayRTR + RTR v2 mock |
 | M90 | ADR-0110 filtering differential: one arouteserver site produces BIRD and rustbgpd policy, with exact verdict/explain parity over 11 announcements and a red-producing policy mutation | BIRD 2.0.12 + GoBGP 3.37.0 ×3 + arouteserver 1.23.2 |
 | M92 | Dual-stack route-server differential: exact inventories, wire EoR completeness, and baseline/mutant/restore semantic diff | GoBGP 4.7.0 ×3 + BIRD 2.0.12 |
+| M93 | Exact required-family OPEN 2/7 rejection, dual-stack recovery, and empty-requirement partial-negotiation compatibility | BIRD 2.0.12 |
 
 ## Performance and scale receipts
 

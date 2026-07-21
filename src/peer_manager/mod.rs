@@ -653,6 +653,7 @@ impl PeerManager {
             .unwrap_or_else(|| rustbgpd_fsm::default_send_hold_time(peer.hold_time));
         peer.connect_retry_secs = DEFAULT_CONNECT_RETRY_SECS;
         peer.families = families;
+        peer.required_families.clone_from(&config.required_families);
         peer.graceful_restart = config.graceful_restart;
         peer.gr_restart_time = config.gr_restart_time;
         peer.llgr_stale_time = config.llgr_stale_time;

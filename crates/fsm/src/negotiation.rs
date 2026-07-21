@@ -92,6 +92,27 @@ pub fn validate_open(
     // Intersect address families: only families both sides advertise
     let negotiated_families = intersect_families(config, &open.capabilities);
 
+    // RFC 5492 §3: a speaker may reject an OPEN when a capability it needs
+    // was not advertised. Compare against the final negotiated set so the
+    // RFC 4760 §8 capability-less IPv4 compatibility rule is honored.
+    let missing_required: Vec<_> = config
+        .required_families
+        .iter()
+        .copied()
+        .filter(|family| !negotiated_families.contains(family))
+        .collect();
+    if !missing_required.is_empty() {
+        let mut data = bytes::BytesMut::new();
+        for (afi, safi) in missing_required {
+            let _ = (Capability::MultiProtocol { afi, safi }).encode(&mut data);
+        }
+        return Err(NotificationMessage::new(
+            NotificationCode::OpenMessage,
+            open_subcode::UNSUPPORTED_CAPABILITY,
+            data.freeze(),
+        ));
+    }
+
     // No common address family: nothing could ever be exchanged on this
     // session. Reject with OPEN error / Unsupported Capability, matching
     // FRR's "Configured AFI/SAFIs do not overlap with received MP
@@ -527,6 +548,7 @@ mod tests {
             send_hold_time: crate::config::default_send_hold_time(90),
             connect_retry_secs: 30,
             families: vec![(Afi::Ipv4, Safi::Unicast)],
+            required_families: Vec::new(),
             graceful_restart: false,
             gr_restart_time: 120,
             llgr_stale_time: 0,
@@ -888,6 +910,76 @@ mod tests {
         let err = validate_open(&open, &cfg).unwrap_err();
         assert_eq!(err.code, NotificationCode::OpenMessage);
         assert_eq!(err.subcode, open_subcode::UNSUPPORTED_CAPABILITY);
+    }
+
+    #[test]
+    fn required_family_rejects_before_generic_empty_intersection() {
+        // Load-bearing: removing this guard or moving it below the generic
+        // empty-intersection guard changes Data from only missing IPv6 to all
+        // configured families, making this exact byte assertion red.
+        let mut cfg = test_config();
+        cfg.families = vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
+        cfg.required_families = vec![(Afi::Ipv6, Safi::Unicast)];
+        let mut open = peer_open();
+        open.capabilities = vec![Capability::MultiProtocol {
+            afi: Afi::BgpLs,
+            safi: Safi::BgpLs,
+        }];
+
+        let err = validate_open(&open, &cfg).unwrap_err();
+        assert_eq!(err.code, NotificationCode::OpenMessage);
+        assert_eq!(err.subcode, open_subcode::UNSUPPORTED_CAPABILITY);
+        assert_eq!(err.data.as_ref(), &[1, 4, 0, 2, 0, 1]);
+    }
+
+    #[test]
+    fn required_family_negotiation_matrix_and_missing_order() {
+        // Load-bearing: removing the guard makes the v4-only case succeed;
+        // rejecting every required configuration breaks the dual-stack case;
+        // using local families rather than ordered missing requirements adds
+        // IPv4 or reorders the final exact Data assertion.
+        let mut cfg = test_config();
+        cfg.families = vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
+        cfg.required_families = vec![(Afi::Ipv6, Safi::Unicast)];
+        let mut open = peer_open();
+        open.capabilities = vec![Capability::MultiProtocol {
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+        }];
+        assert_eq!(
+            validate_open(&open, &cfg).unwrap_err().data.as_ref(),
+            &[1, 4, 0, 2, 0, 1]
+        );
+        open.capabilities.push(Capability::MultiProtocol {
+            afi: Afi::Ipv6,
+            safi: Safi::Unicast,
+        });
+        assert_eq!(
+            validate_open(&open, &cfg).unwrap().negotiated_families,
+            cfg.families
+        );
+
+        cfg.families.push((Afi::Ipv4, Safi::LabeledUnicast));
+        cfg.required_families
+            .push((Afi::Ipv4, Safi::LabeledUnicast));
+        open.capabilities.truncate(1);
+        assert_eq!(
+            validate_open(&open, &cfg).unwrap_err().data.as_ref(),
+            &[1, 4, 0, 2, 0, 1, 1, 4, 0, 1, 0, 4]
+        );
+    }
+
+    #[test]
+    fn required_ipv4_accepts_capability_less_legacy_peer() {
+        // Load-bearing: comparing required families against raw MP
+        // capabilities instead of the final intersection rejects this OPEN.
+        let mut cfg = test_config();
+        cfg.required_families = vec![(Afi::Ipv4, Safi::Unicast)];
+        let mut open = peer_open();
+        open.capabilities.clear();
+
+        let negotiated = validate_open(&open, &cfg).unwrap();
+        assert_eq!(negotiated.negotiated_families, cfg.required_families);
     }
 
     #[test]

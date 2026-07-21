@@ -894,7 +894,7 @@ jobs:
           script: tests/interop/scripts/test-m83-routeserver-multistack.sh
 
   m85:
-    name: M85 — RR core reflection + GR against BIRD 2 clients
+    name: M85/M93 — RR core + required-family enforcement against BIRD 2
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -932,6 +932,13 @@ jobs:
           label: M85
           topology: tests/interop/m85-rr-bird.clab.yml
           script: tests/interop/scripts/test-m85-rr-bird.sh
+
+      - name: Run M93 (required-family OPEN enforcement)
+        uses: ./.github/actions/run-interop-test
+        with:
+          label: M93
+          topology: tests/interop/m93-required-families-bird.clab.yml
+          script: tests/interop/scripts/test-m93-required-families-bird.sh
 
   m86:
     name: M86 — RR core reflection + GR truth against OpenBGPD 9.1 clients
