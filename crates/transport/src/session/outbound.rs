@@ -1205,8 +1205,9 @@ impl PeerSession {
         // clone/encode probe bounded even when Extended Messages are
         // negotiated, but grow beyond the conservative first 1,024 entries
         // after an exact build proves that candidate fits. Remember the
-        // successful lower and failed upper bounds: after 1,024 succeeds and
-        // 2,048 fails, for example, probe 1,536, then binary-search between
+        // successful lower and failed upper bounds for the current region:
+        // after 1,024 succeeds and 2,048 fails, for example, probe 1,536,
+        // then binary-search between
         // the proven bounds rather than retrying 2,048 or regressing below
         // 1,024. Exact build/length checks still guard every enqueue.
         const MAX_PROBE_ENTRIES: usize = 4096;
@@ -1265,6 +1266,11 @@ impl PeerSession {
             idx = end;
             if idx < entries.len() {
                 successful_lower = successful_lower.max(probe_size);
+                // The next slice is a new size region. Entry widths vary, so
+                // an upper bound learned from the preceding slice is stale;
+                // retain the successful starting point but let this region
+                // grow until one of its own exact probes fails.
+                failed_upper = None;
                 chunk_size = match failed_upper {
                     Some(upper) if successful_lower + 1 < upper => {
                         successful_lower + (upper - successful_lower) / 2
