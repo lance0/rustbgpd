@@ -1791,6 +1791,11 @@ rbgp rib --prefix 203.0.113.0/24 --explain --explain-peer 10.0.0.2
 # route back.
 rbgp rib --prefix 203.0.113.0/24 advertised 10.0.0.2 --explain
 
+# Negotiated unicast Add-Path: select one exact Adj-RIB-In candidate.
+# The inbound ID may be zero; the response reports its independent outbound rank.
+rbgp rib --prefix 203.0.113.0/24 advertised 10.0.0.2 --explain \
+  --source-peer 198.51.100.7 --source-path-id 0
+
 # VPNv4/VPNv6 (SAFI 128): explain the (RD, prefix) identity instead --
 # the ladder additionally includes the RFC 4684 RT-Constrain
 # membership gate.
@@ -1849,9 +1854,17 @@ topology inputs are present, the stable
 `orr_topology_input_diagnostics` reason is explicitly aggregate and
 non-decisive; it does not replace the winner's decisive interior-cost reason.
 `rbgp orr` always prints a `Topology inputs:` aggregate line; JSON and
-`ListOrrStatus` expose the same five counters. An Add-Path-send
-peer's explain covers the best path -- per-rank advertisement detail
-lives in `rbgp rib --prefix X --explain --explain-peer`.
+`ListOrrStatus` expose the same five counters. For negotiated IPv4/IPv6
+unicast Add-Path send, `--source-peer` plus `--source-path-id` makes export
+explain follow one exact Adj-RIB-In path through eligibility, policy, compact
+outbound ranking, OTC/exact-wire checks, and the rank-specific Adj-RIB-Out
+diff. The source flags are paired, require `--explain`, and conflict with
+`--rd`/`--labeled`; an unknown source fails rather than falling back to the
+winner. The returned outbound Path ID is independently assigned per RFC 7911:
+rank 0 means the candidate was filtered, denied, or beyond `send_max`, while a
+post-rank OTC/exact-wire denial retains its attempted rank. Use
+`rbgp rib --prefix X --explain --explain-peer` when the question is instead
+which candidates make the peer's whole ranked send view.
 
 ### Manage policies, peer groups, and neighbor sets
 

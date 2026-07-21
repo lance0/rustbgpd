@@ -2,7 +2,7 @@ use crate::connection::Connection;
 use crate::error::CliError;
 use crate::output::{
     self, JsonExplainAdvertisedRoute, JsonExplainModifications, JsonExplainReason,
-    JsonOrrExplainCandidate,
+    JsonOrrExplainCandidate, JsonRouteSourceIdentity,
 };
 use crate::proto::injection_service_client::InjectionServiceClient;
 use crate::proto::policy_service_client::PolicyServiceClient;
@@ -1090,6 +1090,13 @@ fn explain_to_json(
         update_group_id: explain.update_group_id,
         already_advertised: explain.already_advertised,
         rd: explain.rd.clone(),
+        source: explain
+            .source
+            .as_ref()
+            .map(|source| JsonRouteSourceIdentity {
+                peer_address: source.peer_address.clone(),
+                path_id: source.path_id,
+            }),
     }
 }
 
@@ -1111,6 +1118,16 @@ fn gate_verdict_label(verdict: i32) -> &'static str {
 /// Render an ORR vantage cost for text output (`12` / `unreachable`).
 fn orr_cost_label(cost: Option<u64>) -> String {
     cost.map_or_else(|| "unreachable".to_string(), |c| c.to_string())
+}
+
+fn advertised_path_id_line(
+    explain: &crate::proto::ExplainAdvertisedRouteResponse,
+) -> Option<String> {
+    if explain.source.is_some() {
+        Some(format!("Outbound path ID: {}", explain.path_id))
+    } else {
+        (explain.path_id != 0).then(|| format!("Path ID: {}", explain.path_id))
+    }
 }
 
 fn print_explain_advertised(
@@ -1137,6 +1154,12 @@ fn print_explain_advertised(
     if !explain.rd.is_empty() {
         println!("RD:         {}", explain.rd);
     }
+    if let Some(source) = &explain.source {
+        println!(
+            "Source path: {} inbound path ID {}",
+            source.peer_address, source.path_id
+        );
+    }
     if let Some(group_id) = explain.update_group_id {
         println!("Update group: {group_id} (shared staging; split horizon applied per member)");
     }
@@ -1149,8 +1172,8 @@ fn print_explain_advertised(
     if !explain.next_hop.is_empty() {
         println!("Next hop:   {}", explain.next_hop);
     }
-    if explain.path_id != 0 {
-        println!("Path ID:    {}", explain.path_id);
+    if let Some(line) = advertised_path_id_line(explain) {
+        println!("{line}");
     }
     if !explain.orr_vantage.is_empty() {
         println!("ORR vantage: {}", explain.orr_vantage);
@@ -1816,12 +1839,18 @@ pub async fn advertised(
     print_routes(&routes, json)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "CLI export explain maps the peer, family identity, optional source identity, and output mode"
+)]
 pub async fn explain_advertised(
     connection: Connection,
     address: &str,
     prefix: &str,
     rd: Option<&str>,
     labeled: bool,
+    source_peer: Option<&str>,
+    source_path_id: Option<u32>,
     json: bool,
 ) -> Result<(), CliError> {
     let (addr, len) = output::parse_prefix(prefix).map_err(CliError::Argument)?;
@@ -1834,6 +1863,12 @@ pub async fn explain_advertised(
             prefix_length: len,
             rd: rd.unwrap_or_default().to_string(),
             labeled,
+            source: source_peer.zip(source_path_id).map(|(peer, path_id)| {
+                crate::proto::RouteSourceIdentity {
+                    peer_address: peer.to_string(),
+                    path_id,
+                }
+            }),
         })
         .await?
         .into_inner();
@@ -2009,6 +2044,8 @@ mod tests {
             "203.0.113.0/24",
             None,
             false,
+            Some("198.51.100.2"),
+            Some(0),
             false,
         )
         .await
@@ -2025,6 +2062,14 @@ mod tests {
         assert_eq!(req.prefix, "203.0.113.0");
         assert_eq!(req.prefix_length, 24);
         assert_eq!(req.rd, "");
+        assert_eq!(req.source.as_ref().map(|source| source.path_id), Some(0));
+        assert_eq!(
+            req.source
+                .as_ref()
+                .map(|source| source.peer_address.as_str()),
+            Some("198.51.100.2")
+        );
+        // Load-bearing proof: treating zero as absence makes these assertions red.
     }
 
     #[tokio::test]
@@ -2038,6 +2083,8 @@ mod tests {
             "10.0.7.0/24",
             Some("65000:1"),
             false,
+            None,
+            None,
             false,
         )
         .await
@@ -2383,6 +2430,10 @@ mod tests {
             prefix: "198.51.100.0".to_string(),
             prefix_length: 24,
             next_hop: "10.0.2.1".to_string(),
+            source: Some(crate::proto::RouteSourceIdentity {
+                peer_address: "192.0.2.9".to_string(),
+                path_id: 0,
+            }),
             orr_vantage: "10.0.1.1".to_string(),
             orr_candidates: vec![
                 crate::proto::OrrExplainCandidate {
@@ -2413,6 +2464,11 @@ mod tests {
             "unreachable cost serializes as null"
         );
         assert_eq!(value["orr_candidates"][1]["selected"], false);
+        assert_eq!(value["source"]["path_id"], 0);
+        assert_eq!(
+            advertised_path_id_line(&resp).as_deref(),
+            Some("Outbound path ID: 0")
+        );
     }
 
     #[test]
@@ -2428,6 +2484,8 @@ mod tests {
         assert!(value.get("update_group_id").is_none());
         assert!(value.get("already_advertised").is_none());
         assert!(value.get("rd").is_none());
+        assert!(value.get("source").is_none());
+        assert_eq!(advertised_path_id_line(&resp), None);
     }
 
     #[test]

@@ -34,10 +34,11 @@ use crate::best_path::best_path_cmp_with_reason;
 use crate::event::{RouteEvent, RouteEventType};
 use crate::loc_rib::LocRib;
 use crate::update::{
-    BestPathCandidate, ExactExportEncoder, ExactExportKey, ExplainAdvertisedRoute, ExplainBestPath,
-    MrtPeerEntry, MrtSnapshotData, NeighborPolicyStats, OutboundRouteUpdate, RibReadinessError,
-    RibReadinessQuery, RibUpdate, RoutePage, RoutePageError, RoutePageVersion, RouteQueryFilter,
-    RouteQueryKey, RouteQueryScope, WarmMrtSnapshotBudget, WarmMrtSnapshotView, route_query_key,
+    BestPathCandidate, ExactExportEncoder, ExactExportKey, ExplainAdvertisedRoute,
+    ExplainAdvertisedRouteError, ExplainBestPath, MrtPeerEntry, MrtSnapshotData,
+    NeighborPolicyStats, OutboundRouteUpdate, RibReadinessError, RibReadinessQuery, RibUpdate,
+    RoutePage, RoutePageError, RoutePageVersion, RouteQueryFilter, RouteQueryKey, RouteQueryScope,
+    WarmMrtSnapshotBudget, WarmMrtSnapshotView, route_query_key,
 };
 
 use helpers::{
@@ -2145,8 +2146,9 @@ impl RibManager {
                 prefix,
                 rd,
                 labeled,
+                source,
                 reply,
-            } => self.handle_explain_advertised_route(peer, prefix, rd, labeled, reply),
+            } => self.handle_explain_advertised_route(peer, prefix, rd, labeled, source, reply),
             RibUpdate::SubscribeRouteEvents { reply } => {
                 self.handle_subscribe_route_events(reply);
             }
@@ -3043,18 +3045,52 @@ impl RibManager {
         prefix: Prefix,
         rd: Option<rustbgpd_wire::RouteDistinguisher>,
         labeled: bool,
-        reply: tokio::sync::oneshot::Sender<Option<ExplainAdvertisedRoute>>,
+        source: Option<crate::update::RouteSourceIdentity>,
+        reply: tokio::sync::oneshot::Sender<
+            Result<ExplainAdvertisedRoute, ExplainAdvertisedRouteError>,
+        >,
     ) {
         if !self.peer_sendable_families.contains_key(&peer) {
-            let _ = reply.send(None);
+            let _ = reply.send(Err(ExplainAdvertisedRouteError::NotFound(
+                "peer not registered for outbound updates".to_string(),
+            )));
             return;
+        }
+        if source.is_some() && (rd.is_some() || labeled) {
+            let _ = reply.send(Err(ExplainAdvertisedRouteError::FailedPrecondition(
+                "source selection is supported only for unicast Add-Path export explain"
+                    .to_string(),
+            )));
+            return;
+        }
+        if let Some(source) = source {
+            if self.add_path_send_max_for_prefix(peer, &prefix) == 0 {
+                let _ = reply.send(Err(ExplainAdvertisedRouteError::FailedPrecondition(
+                    format!("peer {peer} did not negotiate Add-Path send for this prefix family"),
+                )));
+                return;
+            }
+            let exists = self.ribs.get(&source.peer).is_some_and(|rib| {
+                rib.iter_prefix(&prefix)
+                    .any(|route| route.path_id == source.path_id)
+            });
+            if !exists {
+                let _ = reply.send(Err(ExplainAdvertisedRouteError::NotFound(format!(
+                    "source path {}/{} from {} with path ID {} not found in Adj-RIB-In",
+                    prefix.addr_string(),
+                    prefix.prefix_len(),
+                    source.peer,
+                    source.path_id
+                ))));
+                return;
+            }
         }
         let explanation = match (rd, labeled) {
             (Some(rd), _) => self.explain_vpn_export(peer, prefix, rd),
             (None, true) => self.explain_labeled_export(peer, prefix),
-            (None, false) => self.explain_unicast_export(peer, prefix),
+            (None, false) => self.explain_unicast_export(peer, prefix, source),
         };
-        if reply.send(Some(explanation)).is_err() {
+        if reply.send(Ok(explanation)).is_err() {
             warn!("query caller dropped before receiving response");
         }
     }
@@ -3148,14 +3184,21 @@ impl RibManager {
         clippy::too_many_lines,
         reason = "the explain path mirrors the complete live unicast gate ladder"
     )]
-    fn explain_unicast_export(&mut self, peer: IpAddr, prefix: Prefix) -> ExplainAdvertisedRoute {
+    fn explain_unicast_export(
+        &mut self,
+        peer: IpAddr,
+        prefix: Prefix,
+        source: Option<crate::update::RouteSourceIdentity>,
+    ) -> ExplainAdvertisedRoute {
         let family = prefix_family(&prefix);
         if self
             .peer_orf_pending
             .get(&peer)
             .is_some_and(|gated| gated.contains(&family))
         {
-            return Self::orf_gated_explain(peer, prefix, None);
+            let mut explanation = Self::orf_gated_explain(peer, prefix, None);
+            explanation.source = source;
+            return explanation;
         }
 
         let sendable = self.peer_sendable_families.get(&peer);
@@ -3206,6 +3249,7 @@ impl RibManager {
                 self.export_policy_for(peer),
                 orr_ctx,
                 per_client_best,
+                source,
             );
             return self.apply_exact_export_overlay_to_explain(
                 peer,

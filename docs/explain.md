@@ -81,6 +81,15 @@ RT-Constrain membership gate; `--labeled` explains the RFC 8277
 labeled-unicast ladder. Rung-by-rung semantics:
 [OPERATIONS.md](OPERATIONS.md#explain-an-export-decision-why-diddidnt-route-x-go-to-peer-y).
 
+For a negotiated unicast Add-Path send peer, add the paired
+`--source-peer <addr> --source-path-id <id>` flags to answer the same question
+for one exact Adj-RIB-In candidate (including inbound ID 0). The source
+identity is echoed separately from the outbound `path_id`: RFC 7911 requires
+the re-advertiser to assign its own ID, so the latter is the compact eligible,
+policy-permitted rank. It stays 0 before ranking or beyond `send_max`; an OTC
+or exact-wire denial after ranking retains the attempted rank. Omit the flags
+for the legacy winner-oriented explanation.
+
 ## Import explain — the per-session decision cache
 
 What did import policy decide when this prefix arrived from this

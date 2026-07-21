@@ -1144,6 +1144,24 @@ enum RibAction {
         /// for the prefix instead of the plain unicast ladder
         #[arg(long, requires = "explain", conflicts_with = "rd")]
         labeled: bool,
+        /// Adj-RIB-In peer that supplied the exact Add-Path candidate to
+        /// explain; must be paired with --source-path-id
+        #[arg(
+            long,
+            value_name = "PEER",
+            requires_all = ["explain", "source_path_id"],
+            conflicts_with_all = ["rd", "labeled"]
+        )]
+        source_peer: Option<String>,
+        /// Inbound RFC 7911 path identifier of the exact source candidate;
+        /// zero is valid and distinct from omitting the selector
+        #[arg(
+            long,
+            value_name = "ID",
+            requires_all = ["explain", "source_peer"],
+            conflicts_with_all = ["rd", "labeled"]
+        )]
+        source_path_id: Option<u32>,
     },
     /// Show RFC 7999 BLACKHOLE discard install status
     Blackholes,
@@ -2367,6 +2385,8 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                     explain: explain_advertised,
                     rd,
                     labeled,
+                    source_peer,
+                    source_path_id,
                 }) => {
                     if explain {
                         return Err(CliError::Argument(
@@ -2400,6 +2420,8 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                             prefix,
                             rd.as_deref(),
                             labeled,
+                            source_peer.as_deref(),
+                            source_path_id,
                             json,
                         )
                         .await
@@ -3584,22 +3606,62 @@ mod tests {
             "advertised",
             "192.0.2.1",
             "--explain",
+            "--source-peer",
+            "198.51.100.2",
+            "--source-path-id",
+            "0",
         ])
         .unwrap();
         if let Command::Rib {
-            action: Some(RibAction::Advertised {
-                address, explain, ..
-            }),
+            action:
+                Some(RibAction::Advertised {
+                    address,
+                    explain,
+                    source_peer,
+                    source_path_id,
+                    ..
+                }),
             prefix,
             ..
         } = cli.command
         {
             assert_eq!(address, "192.0.2.1");
             assert!(explain);
+            assert_eq!(source_peer.as_deref(), Some("198.51.100.2"));
+            assert_eq!(source_path_id, Some(0));
             assert_eq!(prefix.as_deref(), Some("203.0.113.0/24"));
         } else {
             panic!("expected Rib Advertised explain command");
         }
+    }
+
+    #[test]
+    fn rib_advertised_source_selector_is_paired_and_unicast_only() {
+        let base = [
+            "rbgp",
+            "rib",
+            "--prefix",
+            "203.0.113.0/24",
+            "advertised",
+            "192.0.2.1",
+            "--explain",
+        ];
+        assert!(
+            Cli::try_parse_from(base.into_iter().chain(["--source-peer", "198.51.100.2"])).is_err()
+        );
+        assert!(Cli::try_parse_from(base.into_iter().chain(["--source-path-id", "0"])).is_err());
+        assert!(
+            Cli::try_parse_from(base.into_iter().chain([
+                "--source-peer",
+                "198.51.100.2",
+                "--source-path-id",
+                "0",
+                "--labeled",
+            ]))
+            .is_err()
+        );
+        // Load-bearing proof: removing either pairing direction or the family conflicts makes
+        // one of these invalid command lines parse successfully.
     }
 
     #[test]

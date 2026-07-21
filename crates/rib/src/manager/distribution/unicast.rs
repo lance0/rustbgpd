@@ -175,6 +175,7 @@ impl RibManager {
         export_pol: Option<&PolicyChain>,
         orr: Option<(&crate::orr::OrrTopology, &crate::orr::SpfResult, IpAddr)>,
         per_client_best: bool,
+        source: Option<crate::update::RouteSourceIdentity>,
     ) -> ExplainAdvertisedRoute {
         use crate::best_path::{
             BestPathReason, best_path_cmp_orr, best_path_cmp_orr_with_reason,
@@ -198,6 +199,7 @@ impl RibManager {
             update_group_id: None,
             already_advertised: false,
             rd: None,
+            source,
         };
         let gate = |gates: &mut Vec<crate::update::ExportGateStep>,
                     g: &'static str,
@@ -283,7 +285,29 @@ impl RibManager {
         // `distribute_orr_best_prefix` (same collection via
         // `orr_candidates`, same comparator). A plain peer explains the
         // Loc-RIB best, unchanged.
-        let best = if let Some((topology, spf, vantage)) = orr {
+        let best = if let Some(source) = source {
+            if let Some((_, _, vantage)) = orr {
+                explain.orr_vantage = Some(vantage);
+            }
+            let selected = ribs
+                .get(&source.peer)
+                .and_then(|rib| {
+                    rib.iter_prefix(&prefix)
+                        .find(|route| route.path_id == source.path_id)
+                })
+                .expect("source identity was validated before export explain");
+            gate(
+                &mut explain.gates,
+                "best_route",
+                "source_selected",
+                Pass,
+                format!(
+                    "selected Adj-RIB-In path from {} with inbound path ID {}",
+                    source.peer, source.path_id
+                ),
+            );
+            selected
+        } else if let Some((topology, spf, vantage)) = orr {
             explain.orr_vantage = Some(vantage);
             let input_diagnostics = topology.input_diagnostics();
             if input_diagnostics.noteworthy() {
@@ -752,6 +776,29 @@ impl RibManager {
             });
             return explain;
         }
+        if let Some((rs_asn, peer_asn)) = rs_control_asn.zip(target_peer_asn)
+            && super::rs_control::rs_control_export_suppressed(
+                best.communities(),
+                best.large_communities(),
+                rs_asn,
+                peer_asn,
+            )
+        {
+            explain.decision = ExplainDecision::Deny;
+            let message = "route carries an RFC 7947 route-server control community that forbids announcing it toward this peer's ASN".to_string();
+            gate(
+                &mut explain.gates,
+                "rs_control",
+                "rs_control_suppressed",
+                Stop,
+                message.clone(),
+            );
+            explain.reasons.push(ExplainReason {
+                code: "rs_control_suppressed",
+                message,
+            });
+            return explain;
+        }
         let aspath_str = if export_pol.is_some_and(PolicyChain::requires_as_path_string) {
             best.as_path()
                 .map_or_else(String::new, rustbgpd_wire::AsPath::to_aspath_string)
@@ -837,7 +884,7 @@ impl RibManager {
 
         explain.modifications = result.modifications.clone();
         let mut post_policy_memo = super::ExportMemo::default();
-        let (post_policy_candidate, _) = post_policy_memo.apply(best, &result.modifications);
+        let (mut post_policy_candidate, _) = post_policy_memo.apply(best, &result.modifications);
         if super::no_advertise_export_suppressed(post_policy_candidate.communities()) {
             explain.decision = ExplainDecision::Deny;
             let message = "export policy produced a route carrying NO_ADVERTISE; RFC 1997 \
@@ -855,6 +902,130 @@ impl RibManager {
                 message,
             });
             return explain;
+        }
+
+        // RFC 7911 requires a re-advertiser to assign its own Path
+        // Identifier. For a source-scoped query, derive that outbound ID
+        // from the same best-first, policy-compacted walk as live Add-Path
+        // distribution. Eligibility/policy failures above retain rank 0;
+        // OTC and exact-wire rejection occur after assignment and therefore
+        // retain the attempted outbound rank.
+        if let Some(source) = source {
+            let mut ranked: Vec<&crate::route::Route> = multipath_candidates(
+                ribs,
+                prefix_peers,
+                peer_is_rr_client,
+                &prefix,
+                target_peer,
+                target_is_ebgp,
+                interpret_rfc1997,
+                rs_control_asn.zip(target_peer_asn),
+                target_is_rr_client,
+                cluster_id,
+                family,
+                llgr,
+            )
+            .collect();
+            match orr {
+                Some((topology, spf, _)) => ranked.sort_by(|a, b| {
+                    best_path_cmp_orr(
+                        a,
+                        b,
+                        spf.cost_to(topology, a.next_hop),
+                        spf.cost_to(topology, b.next_hop),
+                    )
+                }),
+                None => ranked.sort_by(|a, b| crate::best_path::best_path_cmp(a, b)),
+            }
+
+            let needs_as_path_string = export_pol.is_some_and(PolicyChain::requires_as_path_string);
+            let mut rank = 1_u32;
+            let mut rank_memo = super::ExportMemo::default();
+            let mut selected_rank = None;
+            for candidate in ranked {
+                let candidate_aspath = if needs_as_path_string {
+                    candidate
+                        .as_path()
+                        .map_or_else(String::new, rustbgpd_wire::AsPath::to_aspath_string)
+                } else {
+                    String::new()
+                };
+                let candidate_ctx = RouteContext {
+                    prefix: Some(prefix),
+                    next_hop: Some(candidate.next_hop),
+                    extended_communities: candidate.extended_communities(),
+                    communities: candidate.communities(),
+                    large_communities: candidate.large_communities(),
+                    as_path_str: &candidate_aspath,
+                    as_path: candidate.as_path(),
+                    as_path_len: candidate.as_path().map_or(0, rustbgpd_wire::AsPath::len),
+                    origin_asn: candidate
+                        .as_path()
+                        .and_then(rustbgpd_wire::AsPath::origin_asn),
+                    validation_state: candidate.validation_state,
+                    aspa_state: candidate.aspa_state,
+                    peer_address: Some(target_peer),
+                    peer_asn: target_peer_asn,
+                    peer_group: target_peer_group,
+                    route_type: Some(route_type(candidate.origin_type)),
+                    family: Some(unicast_route_family(&prefix)),
+                    evpn_route_type: None,
+                    local_pref: candidate.local_pref_attr(),
+                    med: candidate.med_attr(),
+                };
+                let candidate_result = match export_pol {
+                    Some(chain) => chain.compiled().evaluate_with_attribution(&candidate_ctx).0,
+                    None => rustbgpd_policy::PolicyResult::permit(),
+                };
+                if candidate_result.action != PolicyAction::Permit {
+                    continue;
+                }
+                let (candidate_modified, _) =
+                    rank_memo.apply(candidate, &candidate_result.modifications);
+                if super::no_advertise_export_suppressed(candidate_modified.communities()) {
+                    continue;
+                }
+                if candidate.peer == source.peer && candidate.path_id == source.path_id {
+                    selected_rank = Some(rank);
+                    break;
+                }
+                rank += 1;
+            }
+            let outbound_rank = selected_rank
+                .expect("selected source passed the same eligibility and policy gates");
+            if outbound_rank > add_path_send_max {
+                explain.decision = ExplainDecision::Deny;
+                let message = format!(
+                    "source is eligible at outbound rank {outbound_rank}, beyond this peer's \
+                     Add-Path send_max {add_path_send_max}"
+                );
+                gate(
+                    &mut explain.gates,
+                    "add_path_send_max",
+                    "beyond_send_max",
+                    Stop,
+                    message.clone(),
+                );
+                explain.reasons.push(ExplainReason {
+                    code: "beyond_send_max",
+                    message,
+                });
+                return explain;
+            }
+            explain.path_id = outbound_rank;
+            if let (Some(rs_asn), Some(peer_asn)) = (rs_control_asn, target_peer_asn) {
+                let prepend = super::rs_control::rs_control_prepend_count(
+                    best.large_communities(),
+                    rs_asn,
+                    peer_asn,
+                );
+                super::rs_control::apply_rs_control_egress(
+                    &mut post_policy_candidate,
+                    rs_asn,
+                    prepend,
+                );
+            }
+            post_policy_candidate.path_id = outbound_rank;
         }
         if super::otc_egress_blocked(&post_policy_candidate, target_local_role) {
             explain.decision = ExplainDecision::Deny;
@@ -916,7 +1087,40 @@ impl RibManager {
         // the ranked multipath top-N — the single-best (path_id 0) diff
         // below would not describe it, so the diff is skipped with a
         // pointer at the per-candidate view.
-        if add_path_send_max > 0 {
+        if source.is_some() {
+            let existing = rib_out.and_then(|out| out.get(&prefix, explain.path_id));
+            let in_sync =
+                existing.is_some_and(|existing| routes_equal(existing, &post_policy_candidate));
+            explain.already_advertised = in_sync;
+            if in_sync {
+                gate(
+                    &mut explain.gates,
+                    "adj_rib_out",
+                    "already_advertised",
+                    Pass,
+                    "identical source path already occupies this outbound rank — peer is in sync"
+                        .to_string(),
+                );
+            } else if existing.is_some() {
+                gate(
+                    &mut explain.gates,
+                    "adj_rib_out",
+                    "staged_announce",
+                    Pass,
+                    "selected source differs from the route at this outbound rank — would re-announce"
+                        .to_string(),
+                );
+            } else {
+                gate(
+                    &mut explain.gates,
+                    "adj_rib_out",
+                    "staged_announce",
+                    Pass,
+                    "selected source is not present at this outbound rank — would announce"
+                        .to_string(),
+                );
+            }
+        } else if add_path_send_max > 0 {
             gate(
                 &mut explain.gates,
                 "adj_rib_out",

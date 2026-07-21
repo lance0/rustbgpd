@@ -355,11 +355,32 @@ async fn query_explain_advertised_route(
         prefix,
         rd: None,
         labeled: false,
+        source: None,
         reply: reply_tx,
     })
     .await
     .unwrap();
     reply_rx.await.unwrap().unwrap()
+}
+
+async fn query_explain_advertised_source(
+    tx: &mpsc::Sender<RibUpdate>,
+    peer: IpAddr,
+    prefix: Prefix,
+    source: crate::update::RouteSourceIdentity,
+) -> Result<crate::update::ExplainAdvertisedRoute, crate::update::ExplainAdvertisedRouteError> {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(RibUpdate::ExplainAdvertisedRoute {
+        peer,
+        prefix,
+        rd: None,
+        labeled: false,
+        source: Some(source),
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
+    reply_rx.await.unwrap()
 }
 
 /// VPN-key export explain helper (`rd` set) for the export-explain tests.
@@ -375,6 +396,7 @@ async fn query_explain_advertised_vpn_route(
         prefix,
         rd: Some(rd),
         labeled: false,
+        source: None,
         reply: reply_tx,
     })
     .await
@@ -395,6 +417,7 @@ async fn query_explain_advertised_labeled_route(
         prefix,
         rd: None,
         labeled: true,
+        source: None,
         reply: reply_tx,
     })
     .await

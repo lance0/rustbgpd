@@ -900,6 +900,34 @@ impl std::fmt::Display for RibCommandError {
 
 impl std::error::Error for RibCommandError {}
 
+/// Failure returned by an export-explain query.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExplainAdvertisedRouteError {
+    /// Target peer or selected source path does not exist.
+    NotFound(String),
+    /// The selected explain mode was not negotiated for the target peer.
+    FailedPrecondition(String),
+}
+
+impl std::fmt::Display for ExplainAdvertisedRouteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound(message) | Self::FailedPrecondition(message) => f.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for ExplainAdvertisedRouteError {}
+
+/// Stable identity of one unicast path in an Adj-RIB-In.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RouteSourceIdentity {
+    /// Peer that advertised the path.
+    pub peer: IpAddr,
+    /// RFC 7911 inbound path identifier. Zero is a valid identity.
+    pub path_id: u32,
+}
+
 /// Structured explanation for whether a route would be advertised to a peer.
 #[derive(Debug, Clone)]
 pub struct ExplainAdvertisedRoute {
@@ -946,6 +974,9 @@ pub struct ExplainAdvertisedRoute {
     pub already_advertised: bool,
     /// Route Distinguisher for a VPN explain; `None` for unicast.
     pub rd: Option<rustbgpd_wire::RouteDistinguisher>,
+    /// Requested Adj-RIB-In identity. `None` preserves the legacy
+    /// winner-oriented explanation.
+    pub source: Option<RouteSourceIdentity>,
 }
 
 /// Verdict of one export gate for one (route, peer) explain.
@@ -1579,8 +1610,11 @@ pub enum RibUpdate {
         /// for `prefix` instead of the plain unicast prefix. Mutually
         /// exclusive with `rd` (callers validate; `rd` wins here).
         labeled: bool,
+        /// Optional exact Adj-RIB-In path to explain. Supported only for
+        /// negotiated unicast Add-Path send.
+        source: Option<RouteSourceIdentity>,
         /// Response channel.
-        reply: oneshot::Sender<Option<ExplainAdvertisedRoute>>,
+        reply: oneshot::Sender<Result<ExplainAdvertisedRoute, ExplainAdvertisedRouteError>>,
     },
     /// Subscribe to route change events via broadcast channel.
     SubscribeRouteEvents {

@@ -106,6 +106,51 @@ async fn explain_peer_up(
     out_rx
 }
 
+async fn add_path_explain_peer_up(
+    tx: &mpsc::Sender<RibUpdate>,
+    peer: IpAddr,
+    send_max: u32,
+    export_policy: Option<PolicyChain>,
+) -> mpsc::Receiver<OutboundRouteUpdate> {
+    let (out_tx, mut out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
+        interpret_rfc1997: true,
+        session_id: 0,
+        peer,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        add_path_send_families: ipv4_sendable(),
+        add_path_send_max: send_max,
+        negotiated_orf_recv: vec![],
+        negotiated_llgr_families: vec![],
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut out_rx).await;
+    out_rx
+}
+
+fn deny_local_pref_at_least(threshold: u32) -> PolicyChain {
+    let mut deny = statement(
+        Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0),
+        PolicyAction::Deny,
+    );
+    deny.ge = Some(0);
+    deny.le = Some(32);
+    deny.match_local_pref_ge = Some(threshold);
+    PolicyChain::new(vec![Policy {
+        entries: vec![deny],
+        default_action: PolicyAction::Permit,
+    }])
+}
+
 async fn feed_routes(tx: &mpsc::Sender<RibUpdate>, peer: IpAddr, announced: Vec<Route>) {
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
@@ -168,6 +213,254 @@ async fn no_best_route_stops_the_ladder_at_best_route() {
     let stop = stopped_gate(&explain).expect("ladder must stop");
     assert_eq!((stop.gate, stop.code), ("best_route", "no_best_route"));
 
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn add_path_source_explain_separates_inbound_identity_from_outbound_rank_and_adj_rib() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+    let target: IpAddr = "192.0.2.50".parse().unwrap();
+    let source_a = Ipv4Addr::new(198, 51, 100, 50);
+    let source_b = Ipv4Addr::new(198, 51, 100, 51);
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 120, 0), 24);
+    let _out_rx = add_path_explain_peer_up(&tx, target, 3, None).await;
+
+    let mut best = make_route_with_lp(prefix, source_a, 300);
+    best.path_id = 77;
+    feed_routes(&tx, IpAddr::V4(source_a), vec![best]).await;
+    let mut selected = make_route_with_lp(prefix, source_b, 200);
+    selected.path_id = 0;
+    feed_routes(&tx, IpAddr::V4(source_b), vec![selected]).await;
+
+    let source = crate::update::RouteSourceIdentity {
+        peer: IpAddr::V4(source_b),
+        path_id: 0,
+    };
+    let explain = query_explain_advertised_source(&tx, target, Prefix::V4(prefix), source)
+        .await
+        .unwrap();
+    assert_eq!(explain.source, Some(source));
+    assert_eq!(explain.route_peer, Some(IpAddr::V4(source_b)));
+    assert_eq!(explain.path_id, 2, "outbound rank is not the inbound ID");
+    assert!(explain.already_advertised);
+    assert_eq!(
+        explain.gates.last().map(|step| (step.gate, step.code)),
+        Some(("adj_rib_out", "already_advertised"))
+    );
+
+    let legacy = query_explain_advertised_route(&tx, target, Prefix::V4(prefix)).await;
+    assert_eq!(legacy.source, None);
+    assert_eq!(legacy.route_peer, Some(IpAddr::V4(source_a)));
+
+    // Load-bearing proof: removing request→RIB selector plumbing makes the
+    // route_peer/source assertions red; copying the inbound path ID to the
+    // response makes path_id=0 instead of 2; bypassing live Adj-RIB equality
+    // makes already_advertised false / removes the terminal gate.
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn add_path_source_explain_compacts_policy_rank_and_enforces_send_max() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+    let target: IpAddr = "192.0.2.60".parse().unwrap();
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 121, 0), 24);
+    let _out_rx =
+        add_path_explain_peer_up(&tx, target, 1, Some(deny_local_pref_at_least(300))).await;
+
+    let sources = [
+        (Ipv4Addr::new(198, 51, 100, 60), 41, 300),
+        (Ipv4Addr::new(198, 51, 100, 61), 42, 200),
+        (Ipv4Addr::new(198, 51, 100, 62), 43, 100),
+    ];
+    for (peer, path_id, local_pref) in sources {
+        let mut route = make_route_with_lp(prefix, peer, local_pref);
+        route.path_id = path_id;
+        feed_routes(&tx, IpAddr::V4(peer), vec![route]).await;
+    }
+
+    let denied = query_explain_advertised_source(
+        &tx,
+        target,
+        Prefix::V4(prefix),
+        crate::update::RouteSourceIdentity {
+            peer: IpAddr::V4(sources[0].0),
+            path_id: sources[0].1,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(denied.decision, crate::update::ExplainDecision::Deny);
+    assert_eq!(denied.path_id, 0);
+    assert_eq!(
+        stopped_gate(&denied).map(|step| (step.gate, step.code)),
+        Some(("export_policy", "policy_denied"))
+    );
+
+    let selected = query_explain_advertised_source(
+        &tx,
+        target,
+        Prefix::V4(prefix),
+        crate::update::RouteSourceIdentity {
+            peer: IpAddr::V4(sources[1].0),
+            path_id: sources[1].1,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(selected.decision, crate::update::ExplainDecision::Advertise);
+    assert_eq!(selected.path_id, 1, "policy-denied rank was compacted out");
+
+    let beyond = query_explain_advertised_source(
+        &tx,
+        target,
+        Prefix::V4(prefix),
+        crate::update::RouteSourceIdentity {
+            peer: IpAddr::V4(sources[2].0),
+            path_id: sources[2].1,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(beyond.decision, crate::update::ExplainDecision::Deny);
+    assert_eq!(beyond.path_id, 0);
+    assert_eq!(
+        stopped_gate(&beyond).map(|step| (step.gate, step.code)),
+        Some(("add_path_send_max", "beyond_send_max"))
+    );
+
+    // Load-bearing proof: ranking before policy makes the selected path rank
+    // 2 (and falsely beyond send_max); deleting policy denial makes the first
+    // query advertise; deleting the cap makes the third query carry rank 2.
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn add_path_source_explain_retains_attempted_rank_on_post_rank_otc_denial() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+    let target: IpAddr = "192.0.2.70".parse().unwrap();
+    tx.send(RibUpdate::SetPeerExportContext {
+        peer: target,
+        session_id: 0,
+        local_role: Some(rustbgpd_wire::BgpRole::Customer),
+    })
+    .await
+    .unwrap();
+    let _out_rx = add_path_explain_peer_up(&tx, target, 2, None).await;
+    let source_peer = Ipv4Addr::new(198, 51, 100, 70);
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 122, 0), 24);
+    let mut route = make_route_with_lp(prefix, source_peer, 200);
+    route.path_id = 9;
+    Arc::make_mut(&mut route.attributes).push(PathAttribute::OnlyToCustomer(64512));
+    feed_routes(&tx, IpAddr::V4(source_peer), vec![route]).await;
+
+    let explain = query_explain_advertised_source(
+        &tx,
+        target,
+        Prefix::V4(prefix),
+        crate::update::RouteSourceIdentity {
+            peer: IpAddr::V4(source_peer),
+            path_id: 9,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(explain.decision, crate::update::ExplainDecision::Deny);
+    assert_eq!(explain.path_id, 1);
+    assert_eq!(
+        stopped_gate(&explain).map(|step| (step.gate, step.code)),
+        Some(("otc", "otc_egress_blocked"))
+    );
+
+    // Load-bearing proof: assigning the outbound rank after OTC denial makes
+    // path_id 0; removing the OTC precommit mirror changes the verdict.
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn add_path_source_explain_fails_closed_for_mode_and_identity_mismatch() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+    let classic: IpAddr = "192.0.2.80".parse().unwrap();
+    let add_path: IpAddr = "192.0.2.81".parse().unwrap();
+    let source_peer = Ipv4Addr::new(198, 51, 100, 80);
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 123, 0), 24);
+    let _classic_rx = explain_peer_up(
+        &tx,
+        classic,
+        ipv4_sendable(),
+        true,
+        false,
+        None,
+        vec![],
+        vec![],
+    )
+    .await;
+    tx.send(RibUpdate::SetPeerRsControl {
+        peer: add_path,
+        session_id: 0,
+        rs_control_asn: Some(64512),
+    })
+    .await
+    .unwrap();
+    let _add_path_rx = add_path_explain_peer_up(&tx, add_path, 2, None).await;
+    feed_routes(
+        &tx,
+        IpAddr::V4(source_peer),
+        vec![make_route(prefix, source_peer)],
+    )
+    .await;
+
+    let source = crate::update::RouteSourceIdentity {
+        peer: IpAddr::V4(source_peer),
+        path_id: 0,
+    };
+    assert!(matches!(
+        query_explain_advertised_source(&tx, classic, Prefix::V4(prefix), source).await,
+        Err(crate::update::ExplainAdvertisedRouteError::FailedPrecondition(_))
+    ));
+    assert!(matches!(
+        query_explain_advertised_source(
+            &tx,
+            add_path,
+            Prefix::V4(prefix),
+            crate::update::RouteSourceIdentity {
+                peer: IpAddr::V4(source_peer),
+                path_id: 99,
+            },
+        )
+        .await,
+        Err(crate::update::ExplainAdvertisedRouteError::NotFound(message))
+            if message.contains("path ID 99")
+    ));
+
+    let controlled_prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 124, 0), 24);
+    let mut controlled = make_route(controlled_prefix, source_peer);
+    controlled.attributes = Arc::new(vec![PathAttribute::Communities(vec![65000])]);
+    feed_routes(&tx, IpAddr::V4(source_peer), vec![controlled]).await;
+    let controlled =
+        query_explain_advertised_source(&tx, add_path, Prefix::V4(controlled_prefix), source)
+            .await
+            .unwrap();
+    assert_eq!(controlled.path_id, 0);
+    assert_eq!(
+        stopped_gate(&controlled).map(|step| (step.gate, step.code)),
+        Some(("rs_control", "rs_control_suppressed"))
+    );
+
+    // Load-bearing proof: removing either fail-closed validation turns the
+    // corresponding error into a fabricated candidate explanation; removing
+    // the RS-control gate makes the candidate-rank walk panic instead of deny.
     drop(tx);
     handle.await.unwrap();
 }

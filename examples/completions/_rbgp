@@ -709,6 +709,8 @@ _arguments "${_arguments_options[@]}" : \
 '-a+[Address family filter]:FAMILY:_default' \
 '--family=[Address family filter]:FAMILY:_default' \
 '--rd=[Route Distinguisher ("asn\:nn" or "ip\:nn") - explain the VPNv4/VPNv6 export ladder for the (RD, prefix) identity, including the RFC 4684 RT-Constrain membership gate]:RD:_default' \
+'(--rd --labeled)--source-peer=[Adj-RIB-In peer that supplied the exact Add-Path candidate to explain; must be paired with --source-path-id]:PEER:_default' \
+'(--rd --labeled)--source-path-id=[Inbound RFC 7911 path identifier of the exact source candidate; zero is valid and distinct from omitting the selector]:ID:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
@@ -727,6 +729,8 @@ _arguments "${_arguments_options[@]}" : \
 '-a+[Address family filter]:FAMILY:_default' \
 '--family=[Address family filter]:FAMILY:_default' \
 '--rd=[Route Distinguisher ("asn\:nn" or "ip\:nn") - explain the VPNv4/VPNv6 export ladder for the (RD, prefix) identity, including the RFC 4684 RT-Constrain membership gate]:RD:_default' \
+'(--rd --labeled)--source-peer=[Adj-RIB-In peer that supplied the exact Add-Path candidate to explain; must be paired with --source-path-id]:PEER:_default' \
+'(--rd --labeled)--source-path-id=[Inbound RFC 7911 path identifier of the exact source candidate; zero is valid and distinct from omitting the selector]:ID:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \

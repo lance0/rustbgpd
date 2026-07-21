@@ -1303,6 +1303,7 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
                 update_group_id: Some(1),
                 already_advertised: true,
                 rd: String::new(),
+                source: None,
             },
         ))
     }
