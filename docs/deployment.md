@@ -427,7 +427,7 @@ Four flags cover the config lifecycle, from bootstrap to reload:
 
 | Command | What it does |
 |---|---|
-| `rustbgpd --init-config <lab\|edge> --stdout` | Print a curated, commented starter TOML to stdout and exit (file output is not yet supported). `lab` is a minimal single-box profile (gRPC over a local UDS, no auth); `edge` is an eBGP edge skeleton with a default-route-dropping import chain. Cannot be combined with `--check` / `--diff`. |
+| `rustbgpd --init-config <lab\|edge> --stdout` | Print a curated, commented starter TOML to stdout and exit (file output is not yet supported). `lab` is a minimal single-box profile; `edge` is an eBGP edge skeleton with a default-route-dropping import chain. Both use a mode-`0600` local UDS whose filesystem permissions authenticate access and whose stable `operator` principal is tier-authorized. Cannot be combined with `--check` / `--diff`. |
 | `rustbgpd --check <file>` | Parse + validate; print `config OK` or rustc-style diagnostic. Does not start the daemon. |
 | `rustbgpd --diff <file>` | Compute the diff against the running daemon's view; print per-section change list with expected reload class. |
 | `systemctl reload rustbgpd` (or `kill -HUP $(pidof rustbgpd)`) | Apply the diff. Live fields hot-apply; restart-required fields are pinned and logged at `ERROR` (the live values are kept). |

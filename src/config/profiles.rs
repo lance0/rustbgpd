@@ -27,7 +27,8 @@ pub fn profile_toml(name: &str) -> Option<&'static str> {
 
 /// `lab` — a minimal single-box setup for experimenting locally: one
 /// eBGP neighbor, gRPC over a local Unix socket, runtime state under
-/// `/tmp`. No gRPC auth — fine for a throwaway lab, never production.
+/// `/tmp`. Local gRPC access is authenticated by Unix-socket filesystem
+/// permissions and authorized through a stable operator principal.
 const LAB: &str = r#"# rustbgpd "lab" profile — a minimal local setup for experimenting on
 # one machine. Edit the ASNs and addresses for your topology, then:
 #   rustbgpd config-lab.toml          # (after saving this output)
@@ -45,14 +46,23 @@ runtime_state_dir = "/tmp/rustbgpd"
 prometheus_addr = "127.0.0.1:9179"
 log_format = "json"
 
-# Local control socket for rbgp. The lab profile ships NO gRPC
-# auth — do not use this posture outside a trusted local box.
+# Local control socket for rbgp. Filesystem permissions authenticate access to
+# the socket; the stable principal below drives authorization and audit logs.
+# When adapting this profile, change the example path and principal label for
+# your deployment, and keep the matching role key below in sync.
 [global.telemetry.grpc_uds]
+enabled = true
 path = "/tmp/rustbgpd/grpc.sock"
+mode = 0o600
+principal = "operator"
 
 [security.grpc]
-# Legacy: listener-wide access, no per-principal role ceilings.
-enforcement = "legacy"
+# Per-principal authorization. The UDS principal is not a credential: socket
+# filesystem permissions authenticate access, and this role grants its ceiling.
+enforcement = "tier"
+
+[security.grpc.roles]
+operator = "operator"
 
 # One eBGP neighbor to bring a session up against.
 [[neighbors]]
@@ -80,8 +90,23 @@ runtime_state_dir = "/var/lib/rustbgpd"
 prometheus_addr = "0.0.0.0:9179"
 log_format = "json"
 
+# Local control socket for rbgp. Filesystem permissions authenticate access to
+# the socket; the stable principal below drives authorization and audit logs.
+# When adapting this profile, change the example path and principal label for
+# your deployment, and keep the matching role key below in sync.
+[global.telemetry.grpc_uds]
+enabled = true
+path = "/var/lib/rustbgpd/grpc.sock"
+mode = 0o600
+principal = "operator"
+
 [security.grpc]
-enforcement = "legacy"
+# Per-principal authorization. The UDS principal is not a credential: socket
+# filesystem permissions authenticate access, and this role grants its ceiling.
+enforcement = "tier"
+
+[security.grpc.roles]
+operator = "operator"
 
 # Named import policy: permit by default, but drop the IPv4 default
 # route from upstream. Add more statements (RPKI, AS_PATH, communities)
@@ -107,7 +132,7 @@ hold_time = 90
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Config;
+    use crate::config::{Config, GrpcEnforcementConfig, GrpcRoleConfig};
 
     #[test]
     fn every_profile_validates() {
@@ -118,6 +143,48 @@ mod tests {
             let toml = profile_toml(name).expect("listed profile must resolve");
             Config::load_toml_with_diagnostics(toml, name)
                 .unwrap_or_else(|e| panic!("--init-config {name} must validate, got:\n{e}"));
+        }
+    }
+
+    #[test]
+    fn every_profile_has_an_explicit_tier_authorized_uds_operator() {
+        // Load-bearing bootstrap contract: restoring legacy enforcement,
+        // removing the UDS principal or its matching role, downgrading that
+        // role, or disabling the only listener makes this test or the strict
+        // config load fail instead of shipping an unsafe or unusable profile.
+        for name in PROFILE_NAMES {
+            let toml = profile_toml(name).expect("listed profile must resolve");
+            let config = Config::load_toml_with_diagnostics(toml, name)
+                .unwrap_or_else(|e| panic!("--init-config {name} must validate, got:\n{e}"));
+
+            assert_eq!(
+                config.security.grpc.enforcement,
+                GrpcEnforcementConfig::Tier,
+                "--init-config {name} must use tier gRPC enforcement"
+            );
+
+            let uds = config
+                .global
+                .telemetry
+                .grpc_uds
+                .as_ref()
+                .unwrap_or_else(|| panic!("--init-config {name} must declare grpc_uds"));
+            assert!(
+                uds.enabled,
+                "--init-config {name} must enable its declared grpc_uds listener"
+            );
+            let principal = uds.principal.as_deref().unwrap_or_else(|| {
+                panic!("--init-config {name} grpc_uds must declare a stable principal")
+            });
+            assert_eq!(
+                principal, "operator",
+                "--init-config {name} must preserve its stable UDS audit principal"
+            );
+            assert_eq!(
+                config.security.grpc.roles.get(principal),
+                Some(&GrpcRoleConfig::Operator),
+                "--init-config {name} grpc_uds principal must map to the operator role"
+            );
         }
     }
 
