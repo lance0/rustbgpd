@@ -3675,6 +3675,34 @@ remote_asn = 65030
         )
     }
 
+    fn dynamic_required_families_toml(required: bool) -> String {
+        let required = if required {
+            "required_families = [\"ipv6_unicast\"]"
+        } else {
+            "required_families = []"
+        };
+        format!(
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+[security.grpc]
+enforcement = "legacy"
+[peer_groups.ix]
+families = ["ipv4_unicast", "ipv6_unicast"]
+{required}
+[[dynamic_neighbors]]
+prefix = "10.30.0.0/16"
+peer_group = "ix"
+remote_asn = 65030
+"#
+        )
+    }
+
     /// Peer group with one static member and one `[[dynamic_neighbors]]`
     /// range: a hold-time edit reshapes the static member and resets the
     /// range's live dynamic sessions.
@@ -5842,6 +5870,62 @@ default_action = "permit"
             "{}",
             response.human_text
         );
+    }
+
+    #[tokio::test]
+    async fn apply_required_family_reshape_bounces_dynamic_range_after_persist_ack() {
+        // Load-bearing: reverting the config field makes the candidate
+        // invalid; removing dynamic SessionReshape targeting or the
+        // post-persist range bounce produces zero exact bounce calls.
+        let previous_toml = dynamic_required_families_toml(false);
+        let candidate_toml = dynamic_required_families_toml(true);
+        let snapshot_toml = Arc::new(Mutex::new(previous_toml));
+        let peers = Arc::new(Mutex::new(Vec::new()));
+        let bounce_calls = Arc::new(Mutex::new(Vec::new()));
+        let (peer_tx, peer_rx) = mpsc::channel(8);
+        tokio::spawn(fake_snapshot_peer_manager_recording_bounces(
+            peer_rx,
+            peer_session_reshape_plan(),
+            snapshot_toml.clone(),
+            peers,
+            bounce_calls.clone(),
+        ));
+        let (config_tx, mut config_rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            if let Some(ConfigEvent::ConfigTransactionCommitted {
+                candidate_toml,
+                ack: Some(ack),
+            }) = config_rx.recv().await
+            {
+                assert!(candidate_toml.contains("required_families = [\"ipv6_unicast\"]"));
+                let _ = ack.send(Ok(()));
+            }
+        });
+
+        let response = apply_config_transaction(
+            deps(None, peer_tx, Some(config_tx), Vec::new()),
+            proto::ApplyConfigTransactionRequest {
+                candidate_toml: candidate_toml.clone(),
+                expected_runtime_snapshot_token: "kv1:old:1".to_string(),
+                client_request_id: String::new(),
+                comment: String::new(),
+                confirm_id: String::new(),
+                confirm_timeout_seconds: 0,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            response.status,
+            proto::ConfigTransactionPlanStatus::Committable as i32
+        );
+        assert_eq!(*snapshot_toml.lock().await, candidate_toml);
+        let bounce_calls = bounce_calls.lock().await;
+        assert_eq!(bounce_calls.len(), 1, "{bounce_calls:?}");
+        assert_eq!(bounce_calls[0].len(), 1);
+        assert_eq!(bounce_calls[0][0].addr.to_string(), "10.30.0.0");
+        assert_eq!(bounce_calls[0][0].prefix_len, 16);
     }
 
     #[tokio::test]

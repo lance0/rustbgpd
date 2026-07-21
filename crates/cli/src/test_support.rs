@@ -755,6 +755,7 @@ impl rustbgpd_api::proto::neighbor_service_server::NeighborService for MockNeigh
                 per_client_best: false,
                 max_prefixes: 0,
                 families: vec!["ipv4_unicast".to_string()],
+                required_families: Vec::new(),
                 remove_private_as: String::new(),
                 peer_group: String::new(),
                 route_server_client: true,

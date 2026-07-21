@@ -4423,6 +4423,109 @@ disable_ipv4_unicast = true
 }
 
 #[test]
+fn required_families_inherit_and_neighbor_nonempty_override_is_validated() {
+    // Load-bearing: changing resolution to union/group-first makes the first
+    // peer inherit IPv6 despite its non-empty IPv4 override; removing subset
+    // validation lets the second, impossible peer load.
+    let valid = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+[peer_groups.fabric]
+families = ["ipv4_unicast", "ipv6_unicast"]
+required_families = ["ipv6_unicast"]
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+peer_group = "fabric"
+required_families = ["ipv4_unicast"]
+"#;
+    let config = parse(valid).unwrap();
+    assert_eq!(
+        config.to_peer_configs().unwrap()[0]
+            .0
+            .peer
+            .required_families,
+        vec![(Afi::Ipv4, Safi::Unicast)]
+    );
+
+    let invalid = valid.replace(
+        "required_families = [\"ipv4_unicast\"]",
+        "families = [\"ipv4_unicast\"]",
+    );
+    let err = parse(&invalid).unwrap_err();
+    assert!(err.to_string().contains("required_families"), "{err}");
+}
+
+#[test]
+fn required_families_validate_after_disable_ipv4_unicast() {
+    // Load-bearing: validating against raw configured families before the
+    // IPv4 suppression would accept a requirement the session can never meet.
+    let toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+[[neighbors]]
+address = "2001:db8::2"
+remote_asn = 65002
+families = ["ipv4_unicast", "ipv6_unicast"]
+required_families = ["ipv4_unicast"]
+disable_ipv4_unicast = true
+"#;
+    let err = parse(toml).unwrap_err();
+    assert!(err.to_string().contains("required_families"), "{err}");
+}
+
+#[test]
+fn dynamic_ipv4_default_rejects_inherited_ipv6_requirement() {
+    // Load-bearing: skipping representative-address validation for dynamic
+    // ranges would accept this IPv4 range even though its default family set
+    // cannot satisfy the inherited IPv6 requirement.
+    let toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+[peer_groups.dynamic]
+required_families = ["ipv6_unicast"]
+[[dynamic_neighbors]]
+prefix = "192.0.2.0/24"
+peer_group = "dynamic"
+"#;
+    let err = parse(toml).unwrap_err();
+    assert!(err.to_string().contains("required family"), "{err}");
+}
+
+#[test]
+fn unreferenced_group_can_defer_address_dependent_required_family_validation() {
+    // Load-bearing: blindly treating an empty group family list as IPv4 would
+    // reject this reusable definition before an address-bearing consumer exists.
+    let toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+[peer_groups.future_ipv6]
+required_families = ["ipv6_unicast"]
+"#;
+    parse(toml).unwrap();
+}
+
+#[test]
 fn to_peer_configs_maps_route_server_client() {
     let toml_str = r#"
 [global]
@@ -5585,6 +5688,7 @@ fn test_neighbor(addr: &str, asn: u32) -> Neighbor {
         bfd: None,
         ttl_security: Some(false),
         families: Vec::new(),
+        required_families: Vec::new(),
         graceful_restart: None,
         gr_restart_time: None,
         gr_peer_restart_time_max: None,
@@ -6324,6 +6428,7 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
             ttl_security: None,
             bfd: None,
             families: Vec::new(),
+            required_families: Vec::new(),
             graceful_restart: None,
             gr_restart_time: None,
             gr_peer_restart_time_max: None,
@@ -6380,6 +6485,7 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
         ),
         ttl_security: None,
         families: Vec::new(),
+        required_families: Vec::new(),
         graceful_restart: None,
         gr_restart_time: None,
         gr_peer_restart_time_max: None,
@@ -6425,6 +6531,7 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
         bfd: None,
         ttl_security: None,
         families: Vec::new(),
+        required_families: Vec::new(),
         graceful_restart: None,
         gr_restart_time: None,
         gr_peer_restart_time_max: None,
@@ -6499,6 +6606,7 @@ fn diff_config_does_not_mark_tcp_ao_neighbor_add_as_reload_applied() {
         ),
         ttl_security: None,
         families: Vec::new(),
+        required_families: Vec::new(),
         graceful_restart: None,
         gr_restart_time: None,
         gr_peer_restart_time_max: None,
@@ -11020,6 +11128,52 @@ remote_asn = 65030
 }
 
 #[test]
+fn transaction_v1_required_family_edit_reshapes_dynamic_range() {
+    // Load-bearing: reverting the config field makes the candidate fail to
+    // parse; removing changed-group attribution for dynamic ranges leaves no
+    // exact SessionReshape impact for this prefix.
+    let config = |required: &str| {
+        format!(
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+[security.grpc]
+enforcement = "legacy"
+[peer_groups.ix]
+families = ["ipv4_unicast", "ipv6_unicast"]
+required_families = [{required}]
+[[dynamic_neighbors]]
+prefix = "10.30.0.0/16"
+peer_group = "ix"
+remote_asn = 65030
+"#
+        )
+    };
+    let old = parse(&config("")).unwrap();
+    let new = parse(&config("\"ipv6_unicast\"")).unwrap();
+    let diff = diff_config(&old, &new);
+    let class = classify_config_transaction_v1(&diff);
+
+    assert!(class.is_committable(), "{class:?}");
+    assert_eq!(
+        diff.effective_neighbor_impact
+            .iter()
+            .map(|impact| (&impact.address, impact.kind, impact.is_dynamic_range))
+            .collect::<Vec<_>>(),
+        vec![(
+            &"10.30.0.0/16".to_string(),
+            EffectiveNeighborImpactKind::SessionReshape,
+            true,
+        )]
+    );
+}
+
+#[test]
 fn transaction_v1_classifies_dynamic_range_combined_transport_and_policy_change_as_session_reshape()
 {
     // A peer-group edit that moves BOTH the resolved policy chain AND a
@@ -13146,6 +13300,7 @@ const RELOAD_MATRIX_NEIGHBOR_FIELDS: &[&str] = &[
     "bfd",
     "ttl_security",
     "families",
+    "required_families",
     "graceful_restart",
     "gr_peer_restart_time_max",
     "gr_restart_time",
@@ -13180,6 +13335,7 @@ const RELOAD_MATRIX_PEER_GROUP_FIELDS: &[&str] = &[
     "bfd",
     "ttl_security",
     "families",
+    "required_families",
     "graceful_restart",
     "gr_peer_restart_time_max",
     "gr_restart_time",

@@ -226,6 +226,7 @@ log_format = "json"
             bfd: None,
             ttl_security: Some(false),
             families: Vec::new(),
+            required_families: Vec::new(),
             graceful_restart: None,
             gr_restart_time: None,
             gr_peer_restart_time_max: None,

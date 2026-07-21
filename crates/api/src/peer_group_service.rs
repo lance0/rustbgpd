@@ -100,6 +100,14 @@ fn proto_definition_to_input(
         .into_iter()
         .map(|(afi, safi)| family_to_string(afi, safi))
         .collect();
+    let required_families = if definition.required_families.is_empty() {
+        Vec::new()
+    } else {
+        parse_families_proto(&definition.required_families)?
+            .into_iter()
+            .map(|(afi, safi)| family_to_string(afi, safi))
+            .collect()
+    };
     let remove_private_as = definition
         .remove_private_as
         .as_deref()
@@ -136,6 +144,7 @@ fn proto_definition_to_input(
         md5_password: definition.md5_password.map(Into::into),
         ttl_security: definition.ttl_security,
         families,
+        required_families,
         graceful_restart: definition.graceful_restart,
         gr_restart_time,
         gr_peer_restart_time_max,
@@ -193,6 +202,7 @@ fn input_definition_to_proto(definition: &PeerGroupDefinition) -> proto::PeerGro
         has_md5_password: Some(definition.md5_password.is_some()),
         ttl_security: definition.ttl_security,
         families: definition.families.clone(),
+        required_families: definition.required_families.clone(),
         graceful_restart: definition.graceful_restart,
         gr_restart_time: definition.gr_restart_time.map(u32::from),
         gr_peer_restart_time_max: definition.gr_peer_restart_time_max.map(u32::from),
@@ -689,10 +699,27 @@ mod tests {
     fn sample_definition() -> proto::PeerGroupDefinition {
         proto::PeerGroupDefinition {
             families: vec!["ipv4_unicast".into()],
+            required_families: vec!["ipv4_unicast".into()],
             md5_password: Some("secret".into()),
             route_server_client: Some(true),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn required_families_round_trip_without_defaulting_empty_to_ipv4() {
+        // Load-bearing: parsing required families through the ordinary
+        // defaulting helper turns an empty list into IPv4 and fails the first
+        // assertion; dropping either conversion loses the non-empty value.
+        let empty = proto_definition_to_input(proto::PeerGroupDefinition::default()).unwrap();
+        assert!(empty.required_families.is_empty());
+
+        let input = proto_definition_to_input(sample_definition()).unwrap();
+        assert_eq!(input.required_families, vec!["ipv4_unicast"]);
+        assert_eq!(
+            input_definition_to_proto(&input).required_families,
+            vec!["ipv4_unicast"]
+        );
     }
 
     /// `orr_vantage` round-trips proto string → typed `IpAddr` → proto

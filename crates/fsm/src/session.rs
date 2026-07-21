@@ -626,6 +626,7 @@ mod tests {
             send_hold_time: crate::config::default_send_hold_time(90),
             connect_retry_secs: 30,
             families: vec![(Afi::Ipv4, Safi::Unicast)],
+            required_families: Vec::new(),
             graceful_restart: false,
             gr_restart_time: 120,
             llgr_stale_time: 0,
@@ -926,6 +927,40 @@ mod tests {
         assert!(has_action(&actions, |a| matches!(
             a,
             Action::SendNotification(_)
+        )));
+    }
+
+    #[test]
+    fn opensent_missing_required_family_sends_exact_notification_and_closes() {
+        // Load-bearing: removing required-family enforcement advances to
+        // OpenConfirm; moving it below the generic empty-intersection guard
+        // changes the exact Data bytes from only missing IPv6.
+        let mut cfg = test_config();
+        cfg.families = vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
+        cfg.required_families = vec![(Afi::Ipv6, Safi::Unicast)];
+        let mut s = Session::new(cfg);
+        s.handle_event(Event::ManualStart);
+        s.handle_event(Event::TcpConnectionConfirmed);
+        let mut open = peer_open();
+        open.capabilities = vec![Capability::MultiProtocol {
+            afi: Afi::BgpLs,
+            safi: Safi::BgpLs,
+        }];
+
+        let actions = s.handle_event(Event::OpenReceived(open));
+
+        assert_eq!(s.state(), SessionState::Idle);
+        assert!(s.negotiated().is_none());
+        assert!(has_action(&actions, |action| matches!(
+            action,
+            Action::SendNotification(notification)
+                if notification.code == NotificationCode::OpenMessage
+                    && notification.subcode == open_subcode::UNSUPPORTED_CAPABILITY
+                    && notification.data.as_ref() == [1, 4, 0, 2, 0, 1]
+        )));
+        assert!(has_action(&actions, |action| matches!(
+            action,
+            Action::CloseTcpConnection
         )));
     }
 

@@ -245,6 +245,7 @@ pub async fn show(
             hold_time: cfg.map(|c| c.hold_time).unwrap_or(0),
             send_hold_time: cfg.and_then(|c| c.send_hold_time).unwrap_or(0),
             families: cfg.map(|c| c.families.clone()).unwrap_or_default(),
+            required_families: cfg.map(|c| c.required_families.clone()).unwrap_or_default(),
             negotiation_available,
             negotiated_session,
             peer_group: cfg.map(|c| c.peer_group.clone()).unwrap_or_default(),
@@ -334,6 +335,12 @@ pub async fn show(
             "Families:              {}",
             cfg.map(|c| c.families.join(", ")).unwrap_or_default()
         );
+        if let Some(required) = cfg
+            .map(|c| &c.required_families)
+            .filter(|required| !required.is_empty())
+        {
+            println!("Required Families:     {}", required.join(", "));
+        }
         println!("Negotiation:           {}", negotiation_status_label(&n));
         if let Some(negotiated) = n.negotiated_session.as_ref() {
             println!(
@@ -777,6 +784,7 @@ pub struct AddNeighborOpts {
     pub send_hold_time: Option<u32>,
     pub max_prefixes: Option<u32>,
     pub families: Vec<String>,
+    pub required_families: Vec<String>,
     pub route_server_client: bool,
     pub per_client_best: bool,
     pub role: Option<String>,
@@ -807,6 +815,7 @@ pub async fn add(
                 send_hold_time: opts.send_hold_time,
                 max_prefixes: opts.max_prefixes.unwrap_or(0),
                 families: opts.families,
+                required_families: opts.required_families,
                 peer_group: String::new(),
                 remove_private_as: String::new(),
                 route_server_client: opts.route_server_client,
@@ -1251,6 +1260,7 @@ mod tests {
                 send_hold_time: Some(480),
                 max_prefixes: Some(1000),
                 families: vec!["ipv4_unicast".to_string(), "ipv6_unicast".to_string()],
+                required_families: vec!["ipv6_unicast".to_string()],
                 route_server_client: true,
                 per_client_best: false,
                 role: Some("rs".to_string()),
@@ -1274,6 +1284,7 @@ mod tests {
         assert_eq!(request.add_path_send_max, 4);
         assert_eq!(request.paths_limit_receive_max, 3);
         assert_eq!(request.remote_asn, 65002);
+        assert_eq!(request.required_families, vec!["ipv6_unicast"]);
     }
 
     /// The zero-peer human output must say what happened AND hand the

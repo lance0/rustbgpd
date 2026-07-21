@@ -499,6 +499,11 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
         max_prefixes: info.max_prefixes.unwrap_or(0),
         max_prefix_restart_seconds: info.max_prefix_restart_seconds,
         families,
+        required_families: info
+            .required_families
+            .iter()
+            .map(|(afi, safi)| family_to_string(*afi, *safi))
+            .collect(),
         remove_private_as: remove_private_as_to_string(info.remove_private_as),
         peer_group: info.peer_group.clone().unwrap_or_default(),
         route_server_client: info.route_server_client,
@@ -849,6 +854,19 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         }
 
         let families = parse_families_proto(&config.families)?;
+        let required_families = if config.required_families.is_empty() {
+            Vec::new()
+        } else {
+            parse_families_proto(&config.required_families)?
+        };
+        if let Some(missing) = required_families
+            .iter()
+            .find(|family| !families.contains(family))
+        {
+            return Err(Status::invalid_argument(format!(
+                "required family {missing:?} is not in families"
+            )));
+        }
         let remove_private_as = parse_remove_private_as_proto(&config.remove_private_as)?;
         let local_role = parse_bgp_role_proto(&config.role)?;
         let paths_limit_receive_max = u16::try_from(config.paths_limit_receive_max)
@@ -917,6 +935,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             tcp_ao: None,
             ttl_security: false,
             families,
+            required_families,
             graceful_restart: true,
             gr_restart_time: 120,
             gr_peer_restart_time_max: 4095,
@@ -1571,6 +1590,7 @@ mod tests {
             tcp_ao: None,
             ttl_security: false,
             families: vec![(Afi::Ipv4, Safi::Unicast)],
+            required_families: Vec::new(),
             graceful_restart: true,
             gr_restart_time: 120,
             gr_peer_restart_time_max: 4095,
@@ -1693,6 +1713,26 @@ mod tests {
         let err = svc.add_neighbor(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
         assert!(err.message().contains("hold_time"));
+    }
+
+    #[tokio::test]
+    async fn add_neighbor_rejects_required_family_outside_configured_set() {
+        // Load-bearing: removing AddNeighbor's subset check lets this request
+        // reach the peer-manager channel instead of returning InvalidArgument.
+        let svc = make_service();
+        let req = Request::new(proto::AddNeighborRequest {
+            config: Some(proto::NeighborConfig {
+                address: "10.0.0.2".into(),
+                remote_asn: 65002,
+                hold_time: 90,
+                families: vec!["ipv4_unicast".into()],
+                required_families: vec!["ipv6_unicast".into()],
+                ..Default::default()
+            }),
+        });
+        let err = svc.add_neighbor(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("required family"));
     }
 
     /// RFC 9687 §4.4 parity with the config path: a non-zero
@@ -2358,6 +2398,7 @@ mod tests {
         let mut info = peer_info("10.0.0.1".parse().unwrap());
         info.remote_asn = 65001;
         info.families = vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
+        info.required_families = vec![(Afi::Ipv6, Safi::Unicast)];
         info.remove_private_as = RemovePrivateAs::All;
         info.local_role = Some(BgpRole::RouteServer);
         info.strict_role = true;
@@ -2371,6 +2412,7 @@ mod tests {
         let state = peer_info_to_proto(&info);
         let config = state.config.unwrap();
         assert_eq!(config.families, vec!["ipv4_unicast", "ipv6_unicast"]);
+        assert_eq!(config.required_families, vec!["ipv6_unicast"]);
         assert_eq!(config.remove_private_as, "all");
         assert_eq!(config.role, "rs");
         assert!(config.strict_role);
@@ -2783,6 +2825,7 @@ mod tests {
                     hold_time: 90,
                     max_prefixes: 0,
                     families: vec!["ipv4_unicast".into()],
+                    required_families: vec!["ipv4_unicast".into()],
                     peer_group: String::new(),
                     remove_private_as: String::new(),
                     ..Default::default()
@@ -2798,6 +2841,7 @@ mod tests {
                 reply,
             } => {
                 assert_eq!(config.address.to_string(), "10.0.0.2");
+                assert_eq!(config.required_families, vec![(Afi::Ipv4, Safi::Unicast)]);
                 assert!(sync_config_snapshot);
                 reply.send(Ok(())).unwrap();
             }
@@ -2807,6 +2851,7 @@ mod tests {
         match config_rx.recv().await.unwrap() {
             ConfigEvent::NeighborAdded { config, ack } => {
                 assert_eq!(config.address.to_string(), "10.0.0.2");
+                assert_eq!(config.required_families, vec![(Afi::Ipv4, Safi::Unicast)]);
                 let ack = ack.unwrap();
                 assert!(
                     tokio::time::timeout(Duration::from_millis(20), &mut call)

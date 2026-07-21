@@ -58,6 +58,7 @@ pub(super) fn build_peer_info(
         max_prefix_restart_seconds: managed.max_prefix_restart_seconds,
         max_prefix_restart_remaining_millis: None,
         families: managed.transport_config.peer.families.clone(),
+        required_families: managed.transport_config.peer.required_families.clone(),
         negotiated_session: session_state.and_then(|state| state.negotiated_session.clone()),
         remove_private_as: managed.transport_config.remove_private_as,
         route_server_client: managed.transport_config.route_server_client,

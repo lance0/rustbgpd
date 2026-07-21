@@ -1058,6 +1058,21 @@ impl Config {
         Ok(f)
     }
 
+    fn resolved_required_families(
+        neighbor: &Neighbor,
+        group: Option<&PeerGroupConfig>,
+    ) -> Result<Vec<(Afi, Safi)>, ConfigError> {
+        if !neighbor.required_families.is_empty() {
+            return parse_families(&neighbor.required_families);
+        }
+        group
+            .filter(|group| !group.required_families.is_empty())
+            .map_or_else(
+                || Ok(Vec::new()),
+                |group| parse_families(&group.required_families),
+            )
+    }
+
     fn resolved_remove_private_as(
         neighbor: &Neighbor,
         group: Option<&PeerGroupConfig>,
@@ -1124,6 +1139,7 @@ impl Config {
             .unwrap_or_else(|| rustbgpd_fsm::default_send_hold_time(peer.hold_time));
         peer.connect_retry_secs = DEFAULT_CONNECT_RETRY_SECS;
         peer.families = families;
+        peer.required_families = Self::resolved_required_families(neighbor, group)?;
         peer.graceful_restart = neighbor
             .graceful_restart
             .or_else(|| group.and_then(|g| g.graceful_restart))
@@ -1349,6 +1365,7 @@ impl Config {
             bfd: None,
             ttl_security: None,
             families: Vec::new(),
+            required_families: Vec::new(),
             graceful_restart: None,
             gr_restart_time: None,
             gr_peer_restart_time_max: None,
@@ -2120,6 +2137,7 @@ fn config_field_impact(field: &str) -> Option<(ConfigFieldImpact, &'static str)>
         ),
         "hold_time"
         | "families"
+        | "required_families"
         | "graceful_restart"
         | "gr_restart_time"
         | "llgr_stale_time"
@@ -2272,6 +2290,7 @@ pub fn describe_neighbor_changes(old: &Neighbor, new: &Neighbor) -> Vec<FieldCha
     cmp_field!(max_prefix_restart_seconds);
     cmp_field!(ttl_security);
     cmp_field!(families);
+    cmp_field!(required_families);
     cmp_field!(graceful_restart);
     cmp_field!(gr_restart_time);
     cmp_field!(gr_peer_restart_time_max);
@@ -2395,6 +2414,7 @@ fn neighbor_runtime_equal(old: &Neighbor, new: &Neighbor) -> bool {
         && old.md5_password == new.md5_password
         && old.ttl_security == new.ttl_security
         && old.families == new.families
+        && old.required_families == new.required_families
         && old.graceful_restart == new.graceful_restart
         && old.gr_restart_time == new.gr_restart_time
         && old.gr_peer_restart_time_max == new.gr_peer_restart_time_max
@@ -3147,6 +3167,13 @@ impl Config {
                     .or_else(|| group.and_then(|g| g.disable_ipv4_unicast))
                     .unwrap_or(false),
             );
+            if neighbor.required_families.is_empty()
+                && let Some(group_required) = group
+                    .map(|g| &g.required_families)
+                    .filter(|families| !families.is_empty())
+            {
+                neighbor.required_families.clone_from(group_required);
+            }
             if neighbor.families.is_empty() {
                 if let Some(group_families) = group.map(|g| &g.families).filter(|f| !f.is_empty()) {
                     neighbor.families.clone_from(group_families);
@@ -5506,6 +5533,7 @@ pub fn describe_peer_group_changes(
     cmp_field!(max_prefix_restart_seconds);
     cmp_field!(ttl_security);
     cmp_field!(families);
+    cmp_field!(required_families);
     cmp_field!(graceful_restart);
     cmp_field!(gr_restart_time);
     cmp_field!(gr_peer_restart_time_max);

@@ -1516,6 +1516,8 @@ pub struct PeerGroupDefinition {
     pub ttl_security: Option<bool>,
     /// Address families override.
     pub families: Vec<String>,
+    /// Families every inheriting session must negotiate.
+    pub required_families: Vec<String>,
     /// Optional GR enable override.
     pub graceful_restart: Option<bool>,
     /// Optional GR restart time override.
@@ -1611,6 +1613,8 @@ pub struct PeerManagerNeighborConfig {
     pub ttl_security: bool,
     /// Negotiated address families for this peer.
     pub families: Vec<(Afi, Safi)>,
+    /// Families that must be present in the final negotiated intersection.
+    pub required_families: Vec<(Afi, Safi)>,
     /// Whether to advertise Graceful Restart capability.
     pub graceful_restart: bool,
     /// GR restart time value advertised in OPEN (seconds).
@@ -1959,6 +1963,8 @@ pub struct PeerInfo {
     pub max_prefix_restart_remaining_millis: Option<u64>,
     /// Configured address families.
     pub families: Vec<(Afi, Safi)>,
+    /// Effective configured families that must be negotiated.
+    pub required_families: Vec<(Afi, Safi)>,
     /// Actor-authoritative values for the current Established session. Absent
     /// while down, while the actor query is stale, or before establishment.
     pub negotiated_session: Option<NegotiatedSessionState>,

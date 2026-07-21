@@ -613,6 +613,36 @@ impl Config {
                 }
             }
 
+            let required_families = if !neighbor.required_families.is_empty() {
+                parse_families(&neighbor.required_families)?
+            } else if let Some(group) = group.filter(|g| !g.required_families.is_empty()) {
+                parse_families(&group.required_families)?
+            } else {
+                Vec::new()
+            };
+            if !required_families.is_empty() {
+                let peer_addr: IpAddr = neighbor.address.parse().expect("validated above");
+                let mut effective = Self::resolved_families(neighbor, group, peer_addr)?;
+                if disable_ipv4_unicast {
+                    effective.retain(|family| {
+                        *family != (rustbgpd_wire::Afi::Ipv4, rustbgpd_wire::Safi::Unicast)
+                    });
+                }
+                if let Some(missing) = required_families
+                    .iter()
+                    .find(|family| !effective.contains(family))
+                {
+                    return Err(ConfigError::InvalidNeighborConfig {
+                        address: neighbor.address.clone(),
+                        field: "required_families".to_string(),
+                        reason: format!(
+                            "required family {:?}/{:?} is not in the effective configured family set",
+                            missing.0, missing.1
+                        ),
+                    });
+                }
+            }
+
             // Validate log_level
             validate_log_level(
                 neighbor
@@ -924,6 +954,47 @@ impl Config {
                     ),
                 });
             };
+
+            if !group.required_families.is_empty() {
+                let required = parse_families(&group.required_families).map_err(|err| {
+                    ConfigError::InvalidDynamicNeighbor {
+                        reason: format!(
+                            "dynamic_neighbors[{i}]: peer_group {:?} has invalid required_families: {err}",
+                            dn.peer_group
+                        ),
+                    }
+                })?;
+                let mut effective = if group.families.is_empty() {
+                    let mut defaults =
+                        vec![(rustbgpd_wire::Afi::Ipv4, rustbgpd_wire::Safi::Unicast)];
+                    if addr.is_ipv6() {
+                        defaults.push((rustbgpd_wire::Afi::Ipv6, rustbgpd_wire::Safi::Unicast));
+                    }
+                    defaults
+                } else {
+                    parse_families(&group.families).map_err(|err| {
+                        ConfigError::InvalidDynamicNeighbor {
+                            reason: format!(
+                                "dynamic_neighbors[{i}]: peer_group {:?} has invalid families: {err}",
+                                dn.peer_group
+                            ),
+                        }
+                    })?
+                };
+                if group.disable_ipv4_unicast.unwrap_or(false) {
+                    effective.retain(|family| {
+                        *family != (rustbgpd_wire::Afi::Ipv4, rustbgpd_wire::Safi::Unicast)
+                    });
+                }
+                if let Some(missing) = required.iter().find(|family| !effective.contains(family)) {
+                    return Err(ConfigError::InvalidDynamicNeighbor {
+                        reason: format!(
+                            "dynamic_neighbors[{i}]: required family {:?}/{:?} from peer_group {:?} is not in the effective configured family set",
+                            missing.0, missing.1, dn.peer_group
+                        ),
+                    });
+                }
+            }
 
             // v1 BFD is static-neighbors only (ADR-0067). A dynamic range whose
             // peer group enables BFD would silently get no BFD session — reject
@@ -2108,6 +2179,30 @@ fn validate_peer_group(
 
     if !group.families.is_empty() {
         parse_families(&group.families)?;
+    }
+    if !group.required_families.is_empty() {
+        let required = parse_families(&group.required_families)?;
+        // A group with no configured families has no address-dependent
+        // default until it is consumed; validate those effective consumers
+        // above instead of rejecting an otherwise reusable definition.
+        if !group.families.is_empty() {
+            let mut effective = parse_families(&group.families)?;
+            if group.disable_ipv4_unicast.unwrap_or(false) {
+                effective.retain(|family| {
+                    *family != (rustbgpd_wire::Afi::Ipv4, rustbgpd_wire::Safi::Unicast)
+                });
+            }
+            if let Some(missing) = required.iter().find(|family| !effective.contains(family)) {
+                return Err(ConfigError::InvalidNeighborConfig {
+                    address: format!("peer_group.{name}"),
+                    field: "required_families".to_string(),
+                    reason: format!(
+                        "required family {:?}/{:?} is not in the configured family set",
+                        missing.0, missing.1
+                    ),
+                });
+            }
+        }
     }
 
     if let Some(mode) = group.remove_private_as.as_deref() {

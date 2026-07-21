@@ -636,6 +636,11 @@ added at runtime.
 
 ### Add a neighbor
 
+`NeighborConfig.required_families` must be a subset of `families`; otherwise
+`AddNeighbor` returns `INVALID_ARGUMENT`. Empty inherits a non-empty peer-group
+list; when both are empty, partial negotiation is preserved.
+`NeighborState.config.required_families` reports the effective inherited list.
+
 ```bash
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   -d '{"config": {"address": "10.0.0.2", "remote_asn": 65002, "description": "peer-2"}}' \
@@ -860,6 +865,11 @@ without a new `md5_password`; set `has_md5_password = false` with no
 `md5_password` to clear it explicitly. Use the configuration file or write-side
 source of truth to inspect credential material.
 
+`PeerGroupDefinition.required_families` is the raw group list returned by
+peer-group CRUD. An empty neighbor list inherits it and cannot clear it; a
+non-empty neighbor list overrides it. Every effective requirement must be a
+subset of the member's effective configured families.
+
 | RPC | Description |
 |-----|-------------|
 | `ListPeerGroups` | List all peer-group definitions |
@@ -877,6 +887,7 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
     "name": "rs-clients",
     "definition": {
       "families": ["ipv4_unicast", "ipv6_unicast"],
+      "required_families": ["ipv6_unicast"],
       "hold_time": 90,
       "route_server_client": true,
       "export_policy_chain": ["tag-ixp", "suppress-leaks"]

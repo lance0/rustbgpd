@@ -822,6 +822,11 @@ pub struct Neighbor {
     /// is also included by default.
     #[serde(default)]
     pub families: Vec<String>,
+    /// Families that must be negotiated before the session may establish.
+    /// Empty inherits a non-empty peer-group value; when both are empty,
+    /// partial family intersection remains allowed.
+    #[serde(default)]
+    pub required_families: Vec<String>,
     /// Enable Graceful Restart (RFC 4724). Default: true.
     pub graceful_restart: Option<bool>,
     /// Restart time advertised in GR capability (seconds, max 4095). Default: 120.
@@ -963,6 +968,7 @@ impl fmt::Debug for Neighbor {
             .field("bfd", &self.bfd)
             .field("ttl_security", &self.ttl_security)
             .field("families", &self.families)
+            .field("required_families", &self.required_families)
             .field("graceful_restart", &self.graceful_restart)
             .field("gr_restart_time", &self.gr_restart_time)
             .field("gr_peer_restart_time_max", &self.gr_peer_restart_time_max)
@@ -1153,6 +1159,10 @@ pub struct PeerGroupConfig {
     /// Address families to negotiate (e.g., `["ipv4_unicast", "ipv6_unicast"]`).
     #[serde(default)]
     pub families: Vec<String>,
+    /// Families every inheriting session must negotiate. Must be a subset
+    /// of each member's effective configured family set.
+    #[serde(default)]
+    pub required_families: Vec<String>,
     /// Enable Graceful Restart (RFC 4724). See the neighbor-level
     /// `graceful_restart`.
     pub graceful_restart: Option<bool>,
@@ -1246,6 +1256,7 @@ impl fmt::Debug for PeerGroupConfig {
             .field("ttl_security", &self.ttl_security)
             .field("bfd", &self.bfd)
             .field("families", &self.families)
+            .field("required_families", &self.required_families)
             .field("graceful_restart", &self.graceful_restart)
             .field("gr_restart_time", &self.gr_restart_time)
             .field("gr_peer_restart_time_max", &self.gr_peer_restart_time_max)

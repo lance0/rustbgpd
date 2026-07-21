@@ -111,6 +111,7 @@ reload).
 | `bfd` | restart-required | Pinned by `pin_bfd_startup_only_runtime`. The ADR-0067 BFD actor resolves `[[bfd_profiles]]` plus per-neighbor/peer-group `bfd` once at startup. Logged at `ERROR` during reload. |
 | `ttl_security` | live (effective next session) | New value passed through reconcile; takes effect on next TCP connect (GTSM is a socket option). |
 | `families` | live (effective next session) | Address families to negotiate in OPEN. Negotiated capability set is fixed for the life of a session. |
+| `required_families` | live (effective next session) | OPEN-time minimum negotiated family set. Static peers are rebuilt; accepted dynamic sessions keep their running config until reconnect unless a committed config transaction bounces the affected enabled range after persistence. |
 | `graceful_restart` | live (effective next session) | GR capability advertised in OPEN. Toggling on an established session has no in-session effect. |
 | `gr_restart_time` | live (effective next session) | Advertised in GR capability. |
 | `gr_peer_restart_time_max` | live | Local-only cap on the received GR Restart Time. Hot-applied in place; the new value governs the next GR peer-down event and never changes the OPEN capability. |
@@ -154,6 +155,7 @@ configure their keyring directly.
 | `bfd` | restart-required | Pinned. |
 | `ttl_security` | live (effective next session) | |
 | `families` | live (effective next session) | |
+| `required_families` | live (static session reset; dynamic next reconnect) | Non-empty neighbor value overrides; empty/absent inherits. A committed config transaction classifies the effective change as `SessionReshape` and bounces affected enabled dynamic ranges after persistence. |
 | `graceful_restart` | live (effective next session) | |
 | `gr_restart_time` | live (effective next session) | |
 | `gr_peer_restart_time_max` | live (static session reset; dynamic next reconnect) | Inherited local helper cap. Peer-group edits rebuild static members; already accepted dynamic members keep their running cap until reconnect. A committed config transaction follows the transaction-overlay behavior above and bounces enabled dynamic members. |

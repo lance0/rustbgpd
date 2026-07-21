@@ -55,6 +55,7 @@ fn make_config(addr: IpAddr, asn: u32) -> PeerManagerNeighborConfig {
         tcp_ao: None,
         ttl_security: false,
         families: vec![(Afi::Ipv4, Safi::Unicast)],
+        required_families: Vec::new(),
         graceful_restart: true,
         gr_restart_time: 120,
         gr_peer_restart_time_max: 4095,
@@ -2680,6 +2681,7 @@ fn config_neighbor(addr: IpAddr, remote_asn: u32) -> crate::config::Neighbor {
         bfd: None,
         ttl_security: None,
         families: Vec::new(),
+        required_families: Vec::new(),
         graceful_restart: None,
         gr_restart_time: None,
         gr_peer_restart_time_max: None,
@@ -3855,6 +3857,7 @@ peer_group = "edge"
                 md5_password: None,
                 ttl_security: None,
                 families: Vec::new(),
+                required_families: Vec::new(),
                 graceful_restart: None,
                 gr_restart_time: None,
                 gr_peer_restart_time_max: None,
@@ -3893,6 +3896,7 @@ fn edge_group_definition(hold_time: Option<u16>) -> rustbgpd_api::peer_types::Pe
         md5_password: None,
         ttl_security: None,
         families: Vec::new(),
+        required_families: Vec::new(),
         graceful_restart: None,
         gr_restart_time: None,
         gr_peer_restart_time_max: None,
@@ -3938,6 +3942,38 @@ fn peer_group_reshape_manager(config: Config) -> PeerManager {
         None,
         config,
     )
+}
+
+#[tokio::test]
+async fn targeted_required_family_edit_revalidates_dynamic_consumers() {
+    // Load-bearing: skipping whole-config validation in SetPeerGroup commits
+    // IPv6 as required even though the existing IPv4 dynamic range defaults
+    // to IPv4 only. The static IPv6 member proves the group is referenced by
+    // both consumer shapes without itself making the edit invalid.
+    let config = load_test_config(&format!(
+        "{}\n[[dynamic_neighbors]]\nprefix = \"192.0.2.0/24\"\npeer_group = \"edge\"\n",
+        EDGE_GROUP_TOML
+            .replace("10.0.0.2", "2001:db8::2")
+            .replace("10.0.0.3", "2001:db8::3")
+            .replace("10.0.0.4", "2001:db8::4")
+    ));
+    let prior = config.clone();
+    let mut mgr = peer_group_reshape_manager(config);
+    let mut definition = edge_group_definition(Some(90));
+    definition.required_families = vec!["ipv6_unicast".to_string()];
+    let err = mgr
+        .apply_peer_group_change(
+            rustbgpd_api::peer_types::ConfigEvent::SetPeerGroup {
+                name: "edge".to_string(),
+                definition,
+                ack: None,
+            },
+            vec!["2001:db8::2".parse().unwrap()],
+        )
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("required family"), "{err}");
+    assert_eq!(mgr.current_config, prior);
 }
 
 const EDGE_GROUP_TOML: &str = r#"
@@ -4391,6 +4427,69 @@ async fn peer_group_reshape_skips_dynamic_peers_without_bouncing() {
             .hold_time,
         Some(45),
         "the definition edit itself still commits"
+    );
+}
+
+#[tokio::test]
+async fn required_family_group_reconcile_waits_for_dynamic_reconnect() {
+    // Load-bearing: this shared SIGHUP/targeted-group reconcile primitive must
+    // not reconfigure an accepted dynamic peer in place, while the committed
+    // group must advance what its next connection resolves.
+    let config = load_test_config(EDGE_GROUP_TOML);
+    let mut mgr = peer_group_reshape_manager(config);
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let counters = Arc::new(FakePeerCounters::default());
+    insert_test_managed_peer(
+        &mut mgr,
+        addr,
+        fake_peer_handle(addr, SessionState::Established, None, counters.clone()),
+        false,
+    );
+    mgr.peers.get_mut(&key(addr)).unwrap().is_dynamic = true;
+    assert!(
+        mgr.peers[&key(addr)]
+            .transport_config
+            .peer
+            .required_families
+            .is_empty()
+    );
+
+    let mut definition =
+        crate::policy_admin::config_peer_group_to_api(&mgr.current_config.peer_groups["edge"]);
+    definition.required_families = vec!["ipv4_unicast".to_string()];
+    mgr.apply_peer_group_change(
+        rustbgpd_api::peer_types::ConfigEvent::SetPeerGroup {
+            name: "edge".to_string(),
+            definition,
+            ack: None,
+        },
+        vec![addr],
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(counters.shutdown.load(Ordering::SeqCst), 0);
+    assert!(
+        mgr.peers[&key(addr)]
+            .transport_config
+            .peer
+            .required_families
+            .is_empty(),
+        "accepted dynamic session must retain its running OPEN contract"
+    );
+    let reconnect = mgr
+        .current_config
+        .resolve_dynamic_neighbor(
+            addr,
+            65002,
+            "reconnect",
+            &mgr.current_config.peer_groups["edge"],
+            "edge",
+        )
+        .unwrap();
+    assert_eq!(
+        reconnect.transport_config.peer.required_families,
+        vec![(Afi::Ipv4, Safi::Unicast)]
     );
 }
 
@@ -6454,6 +6553,7 @@ fn build_transport_config_reflects_every_transport_field() {
         ),
         ttl_security: true,
         families: vec![(Afi::Ipv6, Safi::Unicast)],
+        required_families: vec![(Afi::Ipv6, Safi::Unicast)],
         graceful_restart: true,
         gr_restart_time: 300,
         gr_peer_restart_time_max: 301,
@@ -6499,6 +6599,7 @@ fn build_transport_config_reflects_every_transport_field() {
         tcp_ao,
         ttl_security,
         families,
+        required_families,
         graceful_restart,
         gr_restart_time,
         gr_peer_restart_time_max,
@@ -6553,6 +6654,10 @@ fn build_transport_config_reflects_every_transport_field() {
     assert_eq!(t.tcp_ao, *tcp_ao, "tcp_ao");
     assert_eq!(t.ttl_security, *ttl_security, "ttl_security");
     assert_eq!(t.peer.families, *families, "families");
+    assert_eq!(
+        t.peer.required_families, *required_families,
+        "required_families"
+    );
     assert_eq!(
         t.peer.graceful_restart, *graceful_restart,
         "graceful_restart"

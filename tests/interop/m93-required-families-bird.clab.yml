@@ -1,0 +1,33 @@
+# M93 — required-family OPEN enforcement against BIRD 2.
+
+name: m93-required-families-bird
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m93-required.toml:/fixtures/required.toml:ro
+      exec:
+        - ip addr add 10.93.0.1/24 dev eth1
+        - ip -6 addr add 2001:db8:93::1/64 dev eth1 nodad
+        - ip link set eth1 up
+      env:
+        RUST_LOG: info
+
+    bird:
+      kind: linux
+      image: bird:2-bookworm
+      cmd: sleep infinity
+      binds:
+        - ./configs/bird-m93-dual.conf:/fixtures/dual.conf:ro
+      exec:
+        - ip addr add 10.93.0.2/24 dev eth1
+        - ip -6 addr add 2001:db8:93::2/64 dev eth1 nodad
+        - ip link set eth1 up
+        - mkdir -p /run/bird
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "bird:eth1"]
