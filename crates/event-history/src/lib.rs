@@ -45,7 +45,10 @@
 
 #![deny(unsafe_code)]
 #![warn(clippy::all)]
-#![allow(clippy::module_name_repetitions)]
+#![allow(
+    clippy::module_name_repetitions,
+    reason = "public cross-crate types keep the event-history domain explicit"
+)]
 
 mod cursor;
 mod error;
@@ -364,9 +367,11 @@ impl EventHistorySender {
     /// event, increments its drop counter, and flips the degraded
     /// flag. Never blocks the producer.
     // mpsc::error::TrySendError carries the envelope on the Full /
-    // Closed variants — useful for telemetry but ~200B per Err.
-    // Boxing keeps the Result small on the success path.
-    #[allow(clippy::result_large_err)]
+    // Closed variants — useful for delivery accounting despite the ~200B Err.
+    #[allow(
+        clippy::result_large_err,
+        reason = "TrySendError returns the original event when delivery fails"
+    )]
     pub fn try_send(
         &self,
         env: EventEnvelope,

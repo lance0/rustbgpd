@@ -132,7 +132,10 @@ pub async fn list(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "CLI arguments map directly to one EVPN route request"
+)]
 pub async fn add_mac_ip(
     connection: Connection,
     rd: String,
@@ -169,7 +172,10 @@ pub async fn add_mac_ip(
     output::print_result(json, "add_evpn", "", "EVPN Type 2 route added")
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "CLI arguments map directly to one EVPN route request"
+)]
 pub async fn add_imet(
     connection: Connection,
     rd: String,
@@ -203,7 +209,10 @@ pub async fn add_imet(
     output::print_result(json, "add_evpn", "", "EVPN Type 3 route added")
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "CLI arguments map directly to one EVPN route request"
+)]
 pub async fn add_ip_prefix(
     connection: Connection,
     rd: String,

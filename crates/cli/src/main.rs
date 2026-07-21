@@ -9,7 +9,10 @@ mod test_support;
 mod tui;
 
 pub mod proto {
-    #![allow(clippy::large_enum_variant)]
+    #![allow(
+        clippy::large_enum_variant,
+        reason = "generated protobuf types preserve the wire schema"
+    )]
 
     tonic::include_proto!("rustbgpd.v1");
 }

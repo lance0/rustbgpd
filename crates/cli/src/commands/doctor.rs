@@ -764,7 +764,10 @@ fn dir_writable(path: &Path) -> bool {
 }
 
 fn human_bytes(bytes: u64) -> String {
-    #[allow(clippy::cast_precision_loss)]
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "human-readable GiB display does not need integer precision"
+    )]
     let gib = bytes as f64 / (1024.0 * 1024.0 * 1024.0);
     if gib >= 1.0 {
         format!("{gib:.1} GiB")

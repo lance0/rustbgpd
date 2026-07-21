@@ -10,6 +10,8 @@ import sys
 
 
 DEFAULT_PATHS = (
+    "crates/cli/src",
+    "crates/event-history/src",
     "crates/api/src",
     "crates/rib/src",
     "crates/fsm/src",
@@ -20,7 +22,7 @@ DEFAULT_PATHS = (
     "crates/wire/src",
     "crates/bmp/src",
 )
-ATTRIBUTE_HEAD = re.compile(r"#\[\s*(?:allow|expect)\s*\(")
+ATTRIBUTE_HEAD = re.compile(r"#!?\[\s*(?:allow|expect)\s*\(")
 REASON = re.compile(r"\breason\s*=")
 
 
@@ -40,7 +42,8 @@ def find_attribute_end(text: str, start: int) -> int | None:
     in_string = False
     escaped = False
     depth = 0
-    for idx in range(start + 2, len(text)):
+    body_start = start + (3 if text.startswith("#![", start) else 2)
+    for idx in range(body_start, len(text)):
         ch = text[idx]
         if in_string:
             if escaped:
