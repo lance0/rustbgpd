@@ -56,7 +56,13 @@ Adj-RIB-Out state. It may own at most one clean or authoritative policy
 transition at a time; the two continuation types are mutually exclusive.
 Acceptance transfers the authoritative command, its reply sender, and all
 staged work into RibManager-owned state. Dropping the reply receiver does not
-cancel accepted work.
+cancel accepted work. In particular, PeerManager's existing five-second RIB
+reply timeout may drop that receiver while the accepted forward owner is still
+running. The owner must finish normally; any rollback replacement registered
+after the timeout remains ordered behind it in the RIB channel and runs only
+after the forward owner reaches a terminal state. The continuation must not
+turn receiver closure into cancellation or let rollback overtake the accepted
+forward command.
 
 While an authoritative continuation is pending, RibManager services only its
 read-only `RibReadinessQuery` lane between polls. General queries, route
@@ -81,6 +87,14 @@ Creating the peer workset is itself resumable. The implementation must not hide
 an O(peers) `collect`, or a data-dependent `retain`, clone, drop, or destructor
 tail, at a phase boundary.
 
+The cooperative destruction bound applies to every normal terminal path,
+including primary-channel closure: an accepted owner finishes and incrementally
+retires its state before the run loop observes shutdown. External actor-task
+abort and process/runtime teardown cannot receive further continuation polls
+and are outside the actor-readiness latency contract. They must not be modeled
+as command cancellation or a transactional rollback; all normal exits still
+need bounded retirement rather than relying on a final large `Drop`.
+
 An in-progress destination prestage remains behind the same fence. A matching
 partial destination must be detached for bounded discard rather than adopted;
 an unrelated prestage stays paused until the authoritative owner releases.
@@ -98,12 +112,19 @@ After that point the continuation must not invent transactional rollback.
 Failures follow the current authoritative path's fail-closed repair contract:
 dirty state and residue remain available for retry, and cleanup runs to a safe
 bounded stopping point before the command completes or reports failure.
+Ordinary post-commit output failure currently retains dirty, residue, or sparse
+rejection-overlay repair state and completes the RIB command with `Ok`; it is not
+promoted into a command error. The continuation preserves that result contract.
 
-In particular, exact-export owner or generation drift after
-`CommitMembership` is not a transaction abort. It preserves current-compatible
-fail-closed behavior: emit nothing, do not advance Adj-RIB-Out, and retain the
-peer's dirty/residue state for a later repair pass. Membership is not rolled
-back.
+Transport currently validates an outbound snapshot's concrete profile type and
+owner, but does not compare its generation with the encoder's current
+generation. A continuation that parks a snapshot across polls must therefore
+revalidate the current encoder owner and generation in the RIB immediately
+before the irreversible send. This is a new continuation stale-plan fence, not
+an existing transport check. Owner or generation drift after
+`CommitMembership` is not a transaction abort: emit nothing, do not advance
+Adj-RIB-Out, retain the peer's dirty/residue state for a later repair pass, and
+do not roll membership back.
 
 ### Seven continuation phases
 
@@ -148,12 +169,18 @@ back.
    ORR/per-client best, every supported family, OTC and policy filtering,
    rejected-route overlays, residue, and End-of-RIB duties. Preserve exact
    probe order, cardinality, and cache lifetime. Reserve and send each staged
-   envelope once; commit Adj-RIB-Out only after that send succeeds. Channel
-   failure keeps the peer dirty and retains residue. Per-candidate exact-export
-   rejection suppresses that announcement, persists the sparse rejection
-   overlay, and stages an owed withdrawal when the identity was previously
-   advertised. Whole-envelope owner/generation drift emits nothing and does
-   not advance Adj-RIB-Out.
+   envelope once; commit Adj-RIB-Out only after that send succeeds. The current
+   synchronous path instead holds a borrowed `Permit<'_>`, commits Adj-RIB-Out,
+   and consumes the already-reserved permit in one non-yielding frame; the
+   reservation makes that final enqueue infallible. A continuation cannot park
+   that borrow or split that proof implicitly. It needs an explicit owned
+   permit/send/commit protocol that names the irrevocable send point, preserves
+   repair state across every later commit poll, and cannot duplicate or skip an
+   envelope on retry. Channel failure keeps the peer dirty and retains residue.
+   Per-candidate exact-export rejection suppresses that announcement, persists
+   the sparse rejection overlay, and stages an owed withdrawal when the
+   identity was previously advertised. Whole-envelope owner/generation drift
+   emits nothing and does not advance Adj-RIB-Out.
 
 7. **RetireAndFinish.** Incrementally retire an empty prior group and its
    route-bearing storage, prune overlay/residue maps, and update counters and
@@ -223,7 +250,10 @@ prototypes:
    continuation through the exact-export interface. Prepared
    `SessionExportProfile` attribute and encoded-length caches must survive
    polls while preserving ordered scalar/cardinality fail-closed semantics,
-   without unsafe code or self-referential borrowing.
+   without unsafe code or self-referential borrowing. The same prototype must
+   demonstrate the owned permit/send/commit protocol; changing the permit type
+   without proving the one-send and post-send repair boundaries does not pass
+   this gate.
 
 Passing these gates permits an implementation proposal and review; it is not
 approval to merge production code. Stop and revisit the design if a prototype
@@ -239,12 +269,14 @@ A future implementation must dispatch a real `ReplacePeerExportPolicy` command
 and prove readiness at exact production cursor sentinels. Coverage must include
 Add-Path/ORR candidate-level continuation; mixed families; last-member and
 cleanup tails; unrelated dirty/forced peers; the general-work fence; a dropped
-reply; send failure and exact-export rejection; a real
+reply and the five-second forward-timeout/FIFO-rollback ordering; send failure
+and exact-export rejection; a real
 `SessionExportProfile` cache surviving polls; scalar/cardinality probe fallback;
 per-candidate rejection-overlay and owed-withdraw reconciliation; and the
-30-second stalled verdict under virtual time. Independent sentinel values must
-identify the production subwalk so that a shared phase bitmask cannot make the
-suite vacuously green.
+30-second stalled verdict under virtual time. Primary-channel closure must prove
+the accepted owner reaches terminal bounded retirement before actor shutdown.
+Independent sentinel values must identify the production subwalk so that a
+shared phase bitmask cannot make the suite vacuously green.
 
 For each test, the implementation PR must state the production break that makes
 it red: removing the relevant cursor check, fence, ownership transfer,
