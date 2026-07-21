@@ -296,9 +296,13 @@ key. A rustbgpd SIGHUP appends its directionally matching successor, converges
 desired/applied generation 2, and reports exactly three rows without changing
 Current/RNext, BIRD's Established-since token, or the route. The job also runs a
 direct kernel receipt for the accepted-child/listener-flip race through a
-dynamic `127.0.0.0/24` owner, retaining its logical owner metadata. Finally, it
-restarts BIRD with the preferred key's secret mismatched and requires
-fail-closed withdrawal. Live selection/deprecation/deletion remain deferred.
+dynamic `127.0.0.0/24` owner, retaining its logical owner metadata. The
+successor-selection extension reuses generation 3 for selection, one-shot
+peer-use observation, and predecessor deprecation; if observation is not ready
+the driver expects `awaiting_peer` with applied generation 2 and reissues the
+identical SIGHUP without a BGP flap. Finally, it restarts BIRD with the
+preferred key's secret mismatched and requires fail-closed withdrawal. MKT
+deletion remains deferred.
 
 ### Network Layouts
 

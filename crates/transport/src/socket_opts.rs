@@ -250,6 +250,7 @@ struct TcpAoMktCore {
 
 #[cfg(target_os = "linux")]
 struct TcpAoMktMetadata {
+    owner: crate::listener::TcpAoListenerOwnerKind,
     peer: IpAddr,
     prefix_len: u8,
     preferred: bool,
@@ -259,6 +260,7 @@ struct TcpAoMktMetadata {
 /// One configured listener owner used to build an owned-union receipt.
 #[cfg(target_os = "linux")]
 pub(crate) struct TcpAoMktOwner<'a> {
+    pub(crate) owner: crate::listener::TcpAoListenerOwnerKind,
     pub(crate) peer: IpAddr,
     pub(crate) prefix_len: u8,
     pub(crate) keyring: &'a TcpAoKeyring,
@@ -272,6 +274,41 @@ pub(crate) struct TcpAoAddOnlyPreflight {
     desired: TcpAoMktReceipt,
     present: Vec<bool>,
     selection: Option<TcpAoSelection>,
+}
+
+/// Opaque proof that successor selection targets one key in an exact,
+/// unchanged owner-union inventory.
+#[cfg(target_os = "linux")]
+pub(crate) struct TcpAoRnextPreflight {
+    desired: TcpAoMktReceipt,
+    selected_index: usize,
+    target_send_id: u8,
+    target_recv_id: u8,
+    target_algorithm: TcpAoAlgorithm,
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) struct TcpAoRnextPreflight;
+
+/// Verified result of one nonblocking local `RNext` selection.
+pub(crate) struct TcpAoRnextApplied {
+    pub(crate) snapshot: TcpAoInfoSnapshot,
+    pub(crate) successor_pkt_good_baseline: u64,
+}
+
+/// One-shot peer-convergence observation result.
+pub(crate) enum TcpAoSuccessorObservationError {
+    AwaitingPeer(String),
+    Failed(io::Error),
+}
+
+impl std::fmt::Display for TcpAoSuccessorObservationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AwaitingPeer(error) => f.write_str(error),
+            Self::Failed(error) => error.fmt(f),
+        }
+    }
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -378,6 +415,7 @@ pub(crate) struct TcpAoMktReceipt;
 
 #[cfg(not(target_os = "linux"))]
 pub(crate) struct TcpAoMktOwner<'a> {
+    pub(crate) owner: crate::listener::TcpAoListenerOwnerKind,
     pub(crate) peer: std::net::IpAddr,
     pub(crate) prefix_len: u8,
     pub(crate) keyring: &'a crate::config::TcpAoKeyring,
@@ -772,6 +810,7 @@ fn desired_add_only_receipt(
                 config,
             )?);
             metadata.push(TcpAoMktMetadata {
+                owner: owner.owner,
                 peer: owner.peer,
                 prefix_len: owner.prefix_len,
                 preferred: config.preferred,
@@ -1313,8 +1352,11 @@ where
     K: FnMut() -> io::Result<Vec<TcpAoGetSockOpt>>,
 {
     for _ in 0..TCP_AO_KEY_QUERY_ATTEMPTS {
-        // Read INFO after the key dump so counters that change during
-        // GET_KEYS are not hidden by an earlier snapshot.
+        // Read the secret-bearing inventory first, then use and
+        // consistency-check only a trailing INFO value. In particular,
+        // authentication errors that arrive during GET_KEYS must not be hidden
+        // by an earlier clean snapshot. A leading INFO read cannot rule out an
+        // ABA transition and would only add a syscall.
         let keys = key_query()?;
         let info = info_query()?;
         if tcp_ao_inventory_consistent(&info, &keys) {
@@ -1416,6 +1458,7 @@ fn receipt_from_raw_inventory(
     Ok(TcpAoMktReceipt {
         cores: vec![mkt_core(matching[0])?],
         metadata: vec![TcpAoMktMetadata {
+            owner: crate::listener::TcpAoListenerOwnerKind::Static,
             peer,
             prefix_len,
             preferred: config.preferred,
@@ -1457,6 +1500,7 @@ fn keyring_receipt_from_raw_inventory(
         used[index] = true;
         cores.push(mkt_core(&keys[index])?);
         metadata.push(TcpAoMktMetadata {
+            owner: crate::listener::TcpAoListenerOwnerKind::Static,
             peer,
             prefix_len,
             preferred: config.preferred,
@@ -1504,6 +1548,7 @@ fn owned_receipt_from_raw_inventory(
             used[index] = true;
             cores.push(mkt_core(&keys[index])?);
             metadata.push(TcpAoMktMetadata {
+                owner: owner.owner,
                 peer: owner.peer,
                 prefix_len: owner.prefix_len,
                 preferred: config.preferred,
@@ -1850,6 +1895,279 @@ pub(crate) fn get_tcp_ao_info_for_receipt(
     Ok(info)
 }
 
+#[cfg(target_os = "linux")]
+fn selected_owner_target<'a>(
+    owners: &'a [TcpAoMktOwner<'_>],
+    selected_owner: crate::listener::TcpAoSelectedOwner,
+) -> io::Result<&'a TcpAoConfig> {
+    let mut matching = owners.iter().filter(|owner| {
+        owner.owner == selected_owner.owner
+            && owner.peer == selected_owner.peer
+            && owner.prefix_len == selected_owner.prefix_len
+    });
+    let owner = matching.next().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "TCP-AO selected owner is absent from the complete owner union",
+        )
+    })?;
+    if matching.next().is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "TCP-AO selected owner is duplicated in the complete owner union",
+        ));
+    }
+    let target = owner.keyring.selected().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "TCP-AO selected owner has no selectable successor",
+        )
+    })?;
+    if !target.preferred {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "TCP-AO live successor selection requires an explicitly preferred target",
+        ));
+    }
+    Ok(target)
+}
+
+#[cfg(target_os = "linux")]
+fn selected_key_state<'a>(
+    info: &'a TcpAoInfoSnapshot,
+    selected_owner: crate::listener::TcpAoSelectedOwner,
+    target: &TcpAoConfig,
+) -> io::Result<&'a TcpAoKeyState> {
+    let mut matching = info.keys.iter().filter(|key| {
+        key.peer == selected_owner.peer
+            && key.prefix_len == selected_owner.prefix_len
+            && key.send_id == target.send_id
+            && key.recv_id == target.recv_id
+            && key.algorithm == target.algorithm
+    });
+    let state = matching.next().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "TCP-AO selected successor is absent from the exact socket inventory",
+        )
+    })?;
+    if matching.next().is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "TCP-AO selected successor is duplicated in the exact socket inventory",
+        ));
+    }
+    Ok(state)
+}
+
+#[cfg(target_os = "linux")]
+fn tcp_ao_auth_counters_are_clean(info: &TcpAoInfoSnapshot) -> bool {
+    info.pkt_bad == 0
+        && info.pkt_key_not_found == 0
+        && info.pkt_ao_required == 0
+        && info.keys.iter().all(|key| key.pkt_bad == 0)
+}
+
+#[cfg(target_os = "linux")]
+fn current_key_is_installed(info: &TcpAoInfoSnapshot) -> bool {
+    info.has_current_key
+        && info
+            .keys
+            .iter()
+            .filter(|key| key.is_current && key.send_id == info.current_key)
+            .take(2)
+            .count()
+            == 1
+}
+
+#[cfg(target_os = "linux")]
+fn successor_observation_converged(
+    info: &TcpAoInfoSnapshot,
+    target_state: &TcpAoKeyState,
+    target: &TcpAoConfig,
+    successor_pkt_good_baseline: u64,
+) -> bool {
+    info.has_rnext_key
+        && info.rnext_key == target.recv_id
+        && target_state.is_rnext
+        && info.has_current_key
+        && info.current_key == target.send_id
+        && target_state.is_current
+        && target_state.pkt_good > successor_pkt_good_baseline
+}
+
+/// Reconcile the exact unchanged inventory and prove one explicit owner/key
+/// target before any `TCP_AO_INFO` mutation.
+#[cfg(target_os = "linux")]
+pub(crate) fn preflight_tcp_ao_rnext(
+    socket: &impl AsRawFd,
+    owners: &[TcpAoMktOwner<'_>],
+    selected_owner: crate::listener::TcpAoSelectedOwner,
+    connected_peer: IpAddr,
+) -> io::Result<TcpAoRnextPreflight> {
+    let target = selected_owner_target(owners, selected_owner)?;
+    let desired = desired_add_only_receipt(owners, Some(connected_peer))?;
+    let info = get_tcp_ao_info_for_receipt(socket, &desired, connected_peer)?;
+    let _ = selected_key_state(&info, selected_owner, target)?;
+    if !current_key_is_installed(&info) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "TCP-AO Current does not identify exactly one installed MKT",
+        ));
+    }
+    let selected_indices = desired
+        .metadata
+        .iter()
+        .enumerate()
+        .filter(|(_, metadata)| {
+            metadata.owner == selected_owner.owner
+                && metadata.peer == selected_owner.peer
+                && metadata.prefix_len == selected_owner.prefix_len
+        })
+        .filter_map(|(index, _)| {
+            let core = &desired.cores[index];
+            (core.send_id == target.send_id
+                && core.recv_id == target.recv_id
+                && core.algorithm == target.algorithm)
+                .then_some(index)
+        })
+        .collect::<Vec<_>>();
+    if selected_indices.len() != 1 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "TCP-AO selected successor is not unique in its explicit owner keyring",
+        ));
+    }
+    Ok(TcpAoRnextPreflight {
+        desired,
+        selected_index: selected_indices[0],
+        target_send_id: target.send_id,
+        target_recv_id: target.recv_id,
+        target_algorithm: target.algorithm,
+    })
+}
+
+/// Set only `RNext`, then verify the exact inventory, selected target, installed
+/// Current, and clean authentication counters in one trailing snapshot.
+#[cfg(target_os = "linux")]
+pub(crate) fn apply_tcp_ao_rnext(
+    socket: &impl AsRawFd,
+    preflight: &TcpAoRnextPreflight,
+    selected_owner: crate::listener::TcpAoSelectedOwner,
+    connected_peer: IpAddr,
+) -> Result<TcpAoRnextApplied, TcpAoAddOnlyApplyError> {
+    let before = get_tcp_ao_info_for_receipt(socket, &preflight.desired, connected_peer)
+        .map_err(|error| apply_error(error, false))?;
+    let metadata = &preflight.desired.metadata[preflight.selected_index];
+    if metadata.owner != selected_owner.owner
+        || metadata.peer != selected_owner.peer
+        || metadata.prefix_len != selected_owner.prefix_len
+    {
+        return Err(apply_error(
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "TCP-AO selected owner differs from its preflight proof",
+            ),
+            false,
+        ));
+    }
+    let baseline = before
+        .keys
+        .iter()
+        .find(|key| {
+            key.peer == selected_owner.peer
+                && key.prefix_len == selected_owner.prefix_len
+                && key.send_id == preflight.target_send_id
+                && key.recv_id == preflight.target_recv_id
+                && key.algorithm == preflight.target_algorithm
+        })
+        .ok_or_else(|| {
+            apply_error(
+                io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "TCP-AO selected successor disappeared before RNext mutation",
+                ),
+                false,
+            )
+        })?
+        .pkt_good;
+    if !current_key_is_installed(&before) || !tcp_ao_auth_counters_are_clean(&before) {
+        return Err(apply_error(
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "TCP-AO selection precondition has invalid Current or authentication counters",
+            ),
+            false,
+        ));
+    }
+
+    set_tcp_ao_rnext(socket, preflight.target_recv_id).map_err(|error| apply_error(error, true))?;
+    let after = get_tcp_ao_info_for_receipt(socket, &preflight.desired, connected_peer)
+        .map_err(|error| apply_error(error, true))?;
+    let target_rnext = after.keys.iter().filter(|key| {
+        key.peer == selected_owner.peer
+            && key.prefix_len == selected_owner.prefix_len
+            && key.send_id == preflight.target_send_id
+            && key.recv_id == preflight.target_recv_id
+            && key.algorithm == preflight.target_algorithm
+            && key.is_rnext
+            && after.rnext_key == key.recv_id
+    });
+    if !after.has_rnext_key
+        || target_rnext.take(2).count() != 1
+        || !current_key_is_installed(&after)
+        || !tcp_ao_auth_counters_are_clean(&after)
+    {
+        return Err(apply_error(
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "TCP-AO post-selection state lacks exact target RNext, installed Current, or clean counters",
+            ),
+            true,
+        ));
+    }
+    Ok(TcpAoRnextApplied {
+        snapshot: after,
+        successor_pkt_good_baseline: baseline,
+    })
+}
+
+/// Observe peer-driven successor adoption once. `AwaitingPeer` is a normal,
+/// retryable result for a later SIGHUP; all inventory/counter failures are
+/// terminal for this attempt.
+#[cfg(target_os = "linux")]
+pub(crate) fn observe_tcp_ao_successor(
+    socket: &impl AsRawFd,
+    owners: &[TcpAoMktOwner<'_>],
+    selected_owner: crate::listener::TcpAoSelectedOwner,
+    connected_peer: IpAddr,
+    successor_pkt_good_baseline: u64,
+) -> Result<TcpAoInfoSnapshot, TcpAoSuccessorObservationError> {
+    let target = selected_owner_target(owners, selected_owner)
+        .map_err(TcpAoSuccessorObservationError::Failed)?;
+    let desired = desired_add_only_receipt(owners, Some(connected_peer))
+        .map_err(TcpAoSuccessorObservationError::Failed)?;
+    let info = get_tcp_ao_info_for_receipt(socket, &desired, connected_peer)
+        .map_err(TcpAoSuccessorObservationError::Failed)?;
+    let target_state = selected_key_state(&info, selected_owner, target)
+        .map_err(TcpAoSuccessorObservationError::Failed)?;
+    if !tcp_ao_auth_counters_are_clean(&info) {
+        return Err(TcpAoSuccessorObservationError::Failed(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "TCP-AO successor observation found bad, missing-key, or unsigned packets",
+        )));
+    }
+    let converged =
+        successor_observation_converged(&info, target_state, target, successor_pkt_good_baseline);
+    if !converged {
+        return Err(TcpAoSuccessorObservationError::AwaitingPeer(format!(
+            "TCP-AO successor observation is awaiting peer adoption: target_send_id={}, target_recv_id={}, current_key={}, rnext_key={}, successor_pkt_good={}, baseline={successor_pkt_good_baseline}",
+            target.send_id, target.recv_id, info.current_key, info.rnext_key, target_state.pkt_good,
+        )));
+    }
+    Ok(info)
+}
+
 /// Select only `RNext` on an accepted child. `Current` is peer-selected by the
 /// authenticated handshake and must never be overwritten by the passive side.
 #[cfg(target_os = "linux")]
@@ -1859,9 +2177,10 @@ pub(crate) fn get_tcp_ao_info_for_receipt(
     reason = "TCP-AO RNext selection uses the raw Linux TCP_AO_INFO ABI"
 )]
 pub(crate) fn set_tcp_ao_rnext(socket: &impl AsRawFd, recv_id: u8) -> io::Result<()> {
-    // Linux assigns both policy flags on every TCP_AO_INFO set. Preserve them
-    // without copying Current, RNext-presence, or counter setter bits from the
-    // getter into this deliberately fresh setter.
+    // Linux assigns ao_required and accept_icmps on every TCP_AO_INFO set,
+    // even when only SET_RNEXT is requested. Preserve both settings with a
+    // deliberate read-modify-write, while constructing a fresh setter so the
+    // getter's Current/RNext presence bits can never force Current or counters.
     let current = get_tcp_ao_info_only(socket)?;
     let info = tcp_ao_rnext_update(recv_id, &current);
     let ret = unsafe {
@@ -2037,6 +2356,55 @@ pub(crate) fn set_tcp_ao_rnext<T>(_socket: &T, _recv_id: u8) -> io::Result<()> {
         io::ErrorKind::Unsupported,
         "TCP-AO RNext selection is only supported on Linux",
     ))
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn preflight_tcp_ao_rnext<T>(
+    _socket: &T,
+    owners: &[TcpAoMktOwner<'_>],
+    _selected_owner: crate::listener::TcpAoSelectedOwner,
+    _connected_peer: std::net::IpAddr,
+) -> io::Result<TcpAoRnextPreflight> {
+    for owner in owners {
+        let _ = (owner.owner, owner.peer, owner.prefix_len, owner.keyring);
+    }
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "TCP-AO RNext selection is only supported on Linux",
+    ))
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn apply_tcp_ao_rnext<T>(
+    _socket: &T,
+    _preflight: TcpAoRnextPreflight,
+    _selected_owner: crate::listener::TcpAoSelectedOwner,
+    _connected_peer: std::net::IpAddr,
+) -> Result<TcpAoRnextApplied, TcpAoAddOnlyApplyError> {
+    Err(TcpAoAddOnlyApplyError {
+        error: io::Error::new(
+            io::ErrorKind::Unsupported,
+            "TCP-AO RNext selection is only supported on Linux",
+        ),
+        mutation_started: false,
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn observe_tcp_ao_successor<T>(
+    _socket: &T,
+    owners: &[TcpAoMktOwner<'_>],
+    _selected_owner: crate::listener::TcpAoSelectedOwner,
+    _connected_peer: std::net::IpAddr,
+    _successor_pkt_good_baseline: u64,
+) -> Result<TcpAoInfoSnapshot, TcpAoSuccessorObservationError> {
+    for owner in owners {
+        let _ = (owner.owner, owner.peer, owner.prefix_len, owner.keyring);
+    }
+    Err(TcpAoSuccessorObservationError::Failed(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "TCP-AO successor observation is only supported on Linux",
+    )))
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -2937,11 +3305,13 @@ mod tests {
         }]);
         let owners = [
             TcpAoMktOwner {
+                owner: crate::listener::TcpAoListenerOwnerKind::Dynamic,
                 peer: covering_peer,
                 prefix_len: 24,
                 keyring: &covering,
             },
             TcpAoMktOwner {
+                owner: crate::listener::TcpAoListenerOwnerKind::Static,
                 peer: connected,
                 prefix_len: 32,
                 keyring: &exact,
@@ -3046,6 +3416,65 @@ mod tests {
         assert_eq!(update.pkt_key_not_found, 0);
         assert_eq!(update.pkt_ao_required, 0);
         assert_eq!(update.pkt_dropped_icmp, 0);
+    }
+
+    #[test]
+    fn tcp_ao_successor_observation_requires_generation_relative_key_progress() {
+        let target = TcpAoConfig {
+            key: "successor".into(),
+            send_id: 7,
+            recv_id: 9,
+            algorithm: TcpAoAlgorithm::HmacSha256,
+            preferred: true,
+            deprecated: false,
+        };
+        let state = TcpAoKeyState {
+            peer: IpAddr::from([192, 0, 2, 1]),
+            prefix_len: 32,
+            send_id: 7,
+            recv_id: 9,
+            algorithm: TcpAoAlgorithm::HmacSha256,
+            is_current: true,
+            is_rnext: true,
+            preferred: true,
+            deprecated: false,
+            vrf_ifindex: None,
+            pkt_good: 41,
+            pkt_bad: 0,
+        };
+        let info = TcpAoInfoSnapshot {
+            has_current_key: true,
+            has_rnext_key: true,
+            ao_required: true,
+            accept_icmps: false,
+            current_key: 7,
+            rnext_key: 9,
+            pkt_good: 41,
+            pkt_bad: 0,
+            pkt_key_not_found: 0,
+            pkt_ao_required: 0,
+            pkt_dropped_icmp: 0,
+            keys: vec![state.clone()],
+        };
+        assert!(!successor_observation_converged(&info, &state, &target, 41));
+        assert!(successor_observation_converged(&info, &state, &target, 40));
+        assert!(tcp_ao_auth_counters_are_clean(&info));
+
+        let mut bad_key = info.clone();
+        bad_key.keys[0].pkt_bad = 1;
+        assert!(!tcp_ao_auth_counters_are_clean(&bad_key));
+        let mut missing_key = info.clone();
+        missing_key.pkt_key_not_found = 1;
+        assert!(!tcp_ao_auth_counters_are_clean(&missing_key));
+
+        let mut wrong_current = info.clone();
+        wrong_current.current_key = 1;
+        assert!(!successor_observation_converged(
+            &wrong_current,
+            &state,
+            &target,
+            40
+        ));
     }
 
     #[test]

@@ -611,7 +611,7 @@ dynamic-only deployment where peers are added at runtime via gRPC.
 | `max_prefixes_ipv6`    | u32      | no       | --      | IPv6-unicast sibling of `max_prefixes_ipv4` (ADR-0108) |
 | `max_prefix_restart_seconds` | non-zero u32 | no | -- | Opt in to one timed restart attempt after max-prefix teardown. Omit to retain the fail-closed latch until explicit enable; a failed timed attempt stays latched off |
 | `md5_password`         | string   | no       | --      | TCP MD5 authentication password (RFC 2385, Linux only) |
-| `tcp_ao`               | table or array | no | -- | Ordered TCP-AO keyring for static neighbors (RFC 5925; Linux; append-only non-preferred successors can be installed on SIGHUP) |
+| `tcp_ao`               | table or array | no | -- | Ordered TCP-AO keyring for static neighbors (RFC 5925; Linux; append a non-preferred successor, then select it in a later observation-gated SIGHUP generation) |
 | `bfd`                  | table    | no       | --      | Single-hop BFD attachment referencing a `[[bfd_profiles]]` entry (RFC 5880/5881/5882; static neighbors only, restart-required edits) |
 | `ttl_security`         | bool     | no       | false   | Enable GTSM / TTL security (RFC 5082, Linux only) |
 | `families`             | [string] | no       | (auto)  | Address families to negotiate (see below)        |
@@ -714,12 +714,24 @@ before the listener flip still has the exact immediately previous inventory;
 rustbgpd adds only that generation's missing suffix, requires an exact final
 current inventory, and then stamps the current generation. Arbitrary subsets,
 partial successor inventories, and children older than the immediate previous
-generation are rejected. Changing selection, marking an existing key
-deprecated, removing/editing/reordering a key, or changing a protected owner
-remains restart-required and is pinned to the live snapshot. Runtime deletion
-of a configured TCP-AO neighbor also remains rejected.
+generation are rejected.
 
-If an add-only apply fails, the old selectable keys remain usable and the same
+After that successor is installed everywhere, a later SIGHUP may select it as
+local RNext and mark its predecessor deprecated in one immutable generation.
+The reload must keep the exact owner union, MKT order, keys, IDs, and
+algorithms; adding and selecting in the same generation is rejected. Selection
+never sets Linux Current. The daemon captures the successor's per-key
+`pkt_good` immediately before setting RNext, performs one observation pass, and
+commits final deprecation metadata only after every affected protected session reports
+the successor as both Current and RNext with `pkt_good` strictly above that
+baseline and all authentication error counters still zero. If a peer is not
+ready, status remains `awaiting_peer` with `desired=N`, `applied=N-1`; a later
+SIGHUP must carry the identical full desired config and retries the same N.
+There is no actor-side polling. Removing/editing/reordering a key or changing a
+protected owner remains restart-required and pinned. Runtime deletion of a
+configured TCP-AO neighbor also remains rejected.
+
+If a non-destructive generation fails, installed keys remain usable and the same
 desired generation is retryable with another SIGHUP. Some successor MKTs may
 already be present; retries accept them only when their kernel-normalized key
 material is identical. If listener mutation failed partway, affected protected
@@ -748,7 +760,9 @@ tcp_ao = {
 }
 ```
 
-A restart-coordinated two-key rollover can be staged as an ordered array:
+A two-key rollover can be staged as an ordered array. First append the
+non-preferred successor with SIGHUP; after that generation commits, make the
+successor preferred and the predecessor deprecated, then SIGHUP again:
 
 ```toml
 [[neighbors]]
@@ -773,8 +787,9 @@ unique. At most one entry may be `preferred`; a preferred key cannot also be
 preferred entry, declaration order is significant because the first
 non-deprecated key is selected. Reordering is therefore a restart-required
 configuration change. Appending a non-preferred successor can be installed
-live on SIGHUP; selecting it, deprecating an existing key, and deleting an MKT
-remain restart-coordinated.
+live on SIGHUP; a later SIGHUP can select that installed successor and
+observation-gate predecessor deprecation in the same immutable generation.
+Deleting an MKT remains restart-coordinated.
 
 ### BFD (RFC 5880 / 5881 / 5882)
 
@@ -1028,7 +1043,7 @@ Dynamic peers:
 | `peer_group`  | string | yes      | --      | Peer group whose settings dynamic peers inherit |
 | `remote_asn`  | u32    | no       | `0`     | Expected remote ASN. `0` means accept any ASN from the peer's OPEN |
 | `description` | string | no       | --      | Optional description applied to accepted dynamic peers |
-| `tcp_ao`      | table or array | no | -- | Direct ordered TCP-AO prefix keyring; Linux; append-only non-preferred successors can be installed on SIGHUP |
+| `tcp_ao`      | table or array | no | -- | Direct ordered TCP-AO prefix keyring; Linux; append a non-preferred successor, then select it in a later observation-gated SIGHUP generation |
 
 When `remote_asn = 0`, the accepted peer keeps the configured range as
 accept-any, but the ephemeral peer's session state uses the ASN learned from the

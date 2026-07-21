@@ -601,7 +601,7 @@ fn runtime_dynamic_add_rejects_static_tcp_ao_neighbor_coverage() {
 }
 
 #[tokio::test]
-async fn dynamic_tcp_ao_snapshot_reports_protected_without_synthesized_key_config() {
+async fn dynamic_tcp_ao_snapshot_reports_protected_from_explicit_range_keyring() {
     let (tx, rx) = mpsc::channel(16);
     let (_internal_tx, internal_rx) = mpsc::unbounded_channel();
     let (rib_tx, _rib_rx) = mpsc::channel(64);
@@ -643,7 +643,20 @@ async fn dynamic_tcp_ao_snapshot_reports_protected_without_synthesized_key_confi
             pkt_key_not_found: 0,
             pkt_ao_required: 0,
             pkt_dropped_icmp: 0,
-            keys: Vec::new(),
+            keys: vec![rustbgpd_transport::TcpAoKeyState {
+                peer: "127.0.0.0".parse().unwrap(),
+                prefix_len: 8,
+                send_id: 1,
+                recv_id: 1,
+                algorithm: rustbgpd_transport::TcpAoAlgorithm::HmacSha256,
+                is_current: true,
+                is_rnext: true,
+                preferred: false,
+                deprecated: false,
+                vrf_ifindex: None,
+                pkt_good: 1,
+                pkt_bad: 0,
+            }],
         }),
         tcp_ao_generation: Some(rustbgpd_transport::TcpAoRotationGeneration::STARTUP),
     })
@@ -15645,6 +15658,14 @@ async fn dynamic_inbound_peer_is_created_and_removed_on_back_to_idle() {
         None,
         make_dynamic_manager_config(),
     );
+    mgr.tcp_ao_rotation = TcpAoRotationStatus {
+        desired: rustbgpd_transport::TcpAoRotationGeneration::STARTUP
+            .next()
+            .unwrap(),
+        applied: rustbgpd_transport::TcpAoRotationGeneration::STARTUP,
+        phase: rustbgpd_transport::TcpAoRotationPhase::Selecting,
+        last_error: None,
+    };
 
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let listener_addr = listener.local_addr().unwrap();
@@ -15664,6 +15685,11 @@ async fn dynamic_inbound_peer_is_created_and_removed_on_back_to_idle() {
     assert!(info.is_dynamic, "peer should be marked dynamic");
     assert_eq!(info.peer_group.as_deref(), Some("ix-members"));
     assert_eq!(info.description, "ix-auto");
+    assert_eq!(
+        mgr.peers[&key(peer_addr)].tcp_ao_rotation,
+        TcpAoRotationStatus::default(),
+        "plaintext dynamic accepts must not inherit an unrelated TCP-AO rollout"
+    );
 
     let peers = mgr.list_peers().await;
     assert_eq!(peers.len(), 1);
@@ -15755,6 +15781,265 @@ async fn dynamic_inbound_peer_records_most_specific_accepted_range() {
     assert_eq!(accepted.peer_group, "narrow-members");
 
     drop(client_stream);
+}
+
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "fresh-start regression keeps dynamic config, accepted metadata, manager retention, and session preflight together"
+)]
+async fn fresh_dynamic_tcp_ao_inbound_seeds_selected_owner_keyring_for_manager_and_session() {
+    let (_tx, rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let mut config = make_dynamic_manager_config();
+    let current = test_tcp_ao();
+    let successor = crate::config::TcpAoConfig {
+        key: "fresh-start-successor".to_string(),
+        send_id: 2,
+        recv_id: 2,
+        algorithm: "hmac(sha256)".to_string(),
+        preferred: false,
+        deprecated: false,
+    };
+    config.dynamic_neighbors[0].tcp_ao = Some(crate::config::TcpAoKeyringConfig(vec![
+        current.clone(),
+        successor,
+    ]));
+    let mut manager = PeerManager::new_with_config(
+        rx,
+        mpsc::unbounded_channel().1,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+        None,
+        config,
+    );
+
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let connect = TcpStream::connect(listener.local_addr().unwrap());
+    let accept = listener.accept();
+    let (client, accepted) = tokio::join!(connect, accept);
+    let client = client.unwrap();
+    let (server, remote_addr) = accepted.unwrap();
+    let peer_addr = remote_addr.ip();
+    let owner_peer: IpAddr = "127.0.0.0".parse().unwrap();
+    let key_state = |send_id, is_selected| rustbgpd_transport::TcpAoKeyState {
+        peer: owner_peer,
+        prefix_len: 8,
+        send_id,
+        recv_id: send_id,
+        algorithm: rustbgpd_transport::TcpAoAlgorithm::HmacSha256,
+        is_current: is_selected,
+        is_rnext: is_selected,
+        preferred: false,
+        deprecated: false,
+        vrf_ifindex: None,
+        pkt_good: u64::from(is_selected),
+        pkt_bad: 0,
+    };
+    manager
+        .handle_inbound(
+            server,
+            sock(peer_addr),
+            Some(rustbgpd_transport::TcpAoInfoSnapshot {
+                has_current_key: true,
+                has_rnext_key: true,
+                ao_required: false,
+                accept_icmps: false,
+                current_key: 1,
+                rnext_key: 1,
+                pkt_good: 1,
+                pkt_bad: 0,
+                pkt_key_not_found: 0,
+                pkt_ao_required: 0,
+                pkt_dropped_icmp: 0,
+                keys: vec![key_state(1, true), key_state(2, false)],
+            }),
+            Some(rustbgpd_transport::TcpAoRotationGeneration::STARTUP),
+        )
+        .await;
+
+    let peer_key = key(peer_addr);
+    let dynamic_peer = manager
+        .peers
+        .get(&peer_key)
+        .expect("fresh protected dynamic peer must be created");
+    let current_keyring = dynamic_peer
+        .transport_config
+        .tcp_ao
+        .clone()
+        .expect("ManagedPeer must retain the explicit direct-range keyring");
+    assert_eq!(current_keyring.0.len(), 2);
+    let commands = dynamic_peer.handle.commands_sender();
+    let mut desired_keyring = current_keyring.clone();
+    desired_keyring.0[0].deprecated = true;
+    desired_keyring.0[1].preferred = true;
+    let selected_owner = rustbgpd_transport::listener::TcpAoSelectedOwner {
+        owner: rustbgpd_transport::TcpAoListenerOwnerKind::Dynamic,
+        peer: owner_peer,
+        prefix_len: 8,
+    };
+    let desired = rustbgpd_transport::TcpAoSessionSelection {
+        generation: rustbgpd_transport::TcpAoRotationGeneration::new(2).unwrap(),
+        active_keyring: Some(desired_keyring.clone()),
+        accepted_owners: vec![rustbgpd_transport::TcpAoRotationOwner {
+            owner: rustbgpd_transport::TcpAoListenerOwnerKind::Dynamic,
+            peer: owner_peer,
+            prefix_len: 8,
+            keyring: desired_keyring,
+        }]
+        .into(),
+        accepted_selected_owner: Some(selected_owner),
+    };
+    let (reply, response) = oneshot::channel();
+    commands
+        .send(rustbgpd_transport::PeerCommand::PreflightTcpAoSelection { desired, reply })
+        .await
+        .unwrap();
+    let error = tokio::time::timeout(Duration::from_secs(1), response)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err()
+        .to_string();
+    // The test stream is deliberately plaintext, so low-level kernel
+    // preflight fails. Reaching that boundary proves PeerSession received the
+    // same selected-owner keyring; without seeding it fails earlier with
+    // "lacks its current selected-owner keyring".
+    assert!(
+        error.contains("failed to preflight exact TCP-AO selection inventory"),
+        "PeerSession did not retain the fresh-start direct-range keyring: {error}"
+    );
+    assert!(!error.contains("lacks its current selected-owner keyring"));
+
+    manager.peers[&peer_key].handle.abort_for_transport_safety();
+    drop(client);
+}
+
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "queued-accept regression keeps stale config, staged listener metadata, and manager rotation truth together"
+)]
+async fn queued_dynamic_selection_accept_reconciles_metadata_and_rotation_status() {
+    let (_tx, rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let mut config = make_dynamic_manager_config();
+    config.dynamic_neighbors[0].tcp_ao = Some(crate::config::TcpAoKeyringConfig(vec![
+        test_tcp_ao(),
+        crate::config::TcpAoConfig {
+            key: "queued-selection-successor".to_string(),
+            send_id: 2,
+            recv_id: 2,
+            algorithm: "hmac(sha256)".to_string(),
+            preferred: false,
+            deprecated: false,
+        },
+    ]));
+    let mut manager = PeerManager::new_with_config(
+        rx,
+        mpsc::unbounded_channel().1,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+        None,
+        config,
+    );
+
+    // Model an accept queued by the listener after its desired-generation
+    // selection snapshot was staged but before PeerManager installed the new
+    // config snapshot. The direct-owner secrets and key identities still come
+    // exclusively from the old current config; only redacted selection
+    // metadata is reconciled from the already-validated accepted socket.
+    let desired_generation = rustbgpd_transport::TcpAoRotationGeneration::STARTUP
+        .next()
+        .unwrap();
+    let selection_status = TcpAoRotationStatus {
+        desired: desired_generation,
+        applied: rustbgpd_transport::TcpAoRotationGeneration::STARTUP,
+        phase: rustbgpd_transport::TcpAoRotationPhase::Selecting,
+        last_error: None,
+    };
+    manager.tcp_ao_rotation = selection_status.clone();
+    let mut expected_keyring = manager.dynamic_ranges[0].tcp_ao.clone().unwrap();
+    expected_keyring.0[1].preferred = true;
+
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let connect = TcpStream::connect(listener.local_addr().unwrap());
+    let accept = listener.accept();
+    let (client, accepted) = tokio::join!(connect, accept);
+    let client = client.unwrap();
+    let (server, remote_addr) = accepted.unwrap();
+    let peer_addr = remote_addr.ip();
+    let owner_peer: IpAddr = "127.0.0.0".parse().unwrap();
+    let key_state =
+        |peer, prefix_len, send_id, preferred, is_selected| rustbgpd_transport::TcpAoKeyState {
+            peer,
+            prefix_len,
+            send_id,
+            recv_id: send_id,
+            algorithm: rustbgpd_transport::TcpAoAlgorithm::HmacSha256,
+            is_current: is_selected,
+            is_rnext: is_selected,
+            preferred,
+            deprecated: false,
+            vrf_ifindex: None,
+            pkt_good: u64::from(is_selected),
+            pkt_bad: 0,
+        };
+    manager
+        .handle_inbound(
+            server,
+            sock(peer_addr),
+            Some(rustbgpd_transport::TcpAoInfoSnapshot {
+                has_current_key: true,
+                has_rnext_key: true,
+                ao_required: false,
+                accept_icmps: false,
+                current_key: 2,
+                rnext_key: 2,
+                pkt_good: 1,
+                pkt_bad: 0,
+                pkt_key_not_found: 0,
+                pkt_ao_required: 0,
+                pkt_dropped_icmp: 0,
+                keys: vec![
+                    // A covering owner with the same key identity must not
+                    // influence the explicit /8 owner's local metadata.
+                    key_state("0.0.0.0".parse().unwrap(), 0, 2, false, false),
+                    key_state(owner_peer, 8, 1, false, false),
+                    key_state(owner_peer, 8, 2, true, true),
+                ],
+            }),
+            Some(desired_generation),
+        )
+        .await;
+
+    let peer_key = key(peer_addr);
+    let accepted_peer = manager
+        .peers
+        .get(&peer_key)
+        .expect("queued desired-generation dynamic peer must be created");
+    assert_eq!(
+        accepted_peer.transport_config.tcp_ao.as_ref(),
+        Some(&expected_keyring),
+        "accepted selection metadata must update the configured direct-owner keyring without replacing its secrets"
+    );
+    assert_eq!(
+        accepted_peer.tcp_ao_rotation, selection_status,
+        "a desired-generation accept must retain the in-progress global rotation truth"
+    );
+
+    accepted_peer.handle.abort_for_transport_safety();
+    drop(client);
 }
 
 #[tokio::test]

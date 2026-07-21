@@ -45,7 +45,7 @@ those.
 | EVPN-VXLAN: multi-homing (ESI, Type-1/4, DF election, BUM suppression, aliasing ECMP) | Partial (alpha) | Production-default enforcement with opt-out |
 | EVPN-VXLAN: symmetric IRB (Type-5 / L3VNI, 9136 §4.4.2) | Partial (alpha) | Receive-side GW-IP overlay-index recursion shipped; native GW-IP + ESI overlay-index origination shipped; single-active ESI overlay-index receive v1 shipped; all-active ESI overlay-index Type 5 writer shipped with same-host netns proof and M72 real-peer proof (ADR-0087/0090, FRR consume-side M68 for GW-IP, GoBGP receive-side M71 for single-active ESI recursion, GoBGP ×2 receive-side M72 for all-active ESI recursion) |
 | FIB / dataplane: unicast Linux FIB install, ECMP, weighted multipath, BLACKHOLE discard | Shipped | Opt-in `[[fib_tables]]` (ADR-0061/0066/0068) |
-| Security: TCP MD5, GTSM, TCP-AO keyrings + live successor rotation (selection/deletion restart-required), native gRPC mTLS + tier authz | Shipped | TCP-AO BIRD-interop incl. live rotation (M43); ADR-0064 authz |
+| Security: TCP MD5, GTSM, TCP-AO keyrings + live successor install/selection (deletion restart-required), native gRPC mTLS + tier authz | Shipped | TCP-AO BIRD-interop incl. observation-gated live rotation (M43); ADR-0062/0064 |
 | RPKI origin validation (6811 + 8210) | Partial | VRP table and policy match shipped; RTR epoch/reconnect-retention/identity/transaction-bound corrections shipped; M84 multi-cache RTR/ASPA epoch conformance lab shipped |
 | ASPA verification | Partial | Role-aware verification and policy match shipped; RTR v2 replacement/withdrawal semantics shipped; M84 RTR/ASPA epoch conformance lab shipped |
 | Policy: prefix lists, named chains, actions, community/AS_PATH/validation match | Shipped | GoBGP-style chain evaluation |
@@ -1447,14 +1447,15 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
 
 ### Maybe / demand-shaped
 
-- **TCP-AO rotation polish.** Static TCP-AO + BIRD interop (M43), direct
+- **TCP-AO remaining rotation polish.** Static TCP-AO + BIRD interop (M43), direct
   dynamic-prefix listener MKTs, fail-closed accepted-socket validation, and
   live neighbor API/CLI inspection are shipped. Ordered startup keyrings allow
   a restart-coordinated rollover: every key is installed, with a preferred or
   declaration-order-selected non-deprecated key used for startup transmission.
-  SIGHUP can also append non-preferred successors while owner sets and existing
-  key entries, order, and selection remain unchanged. Selection, deprecation,
-  removal, and edits/reordering (LAN-16 / #159), protected-owner CRUD, and
+  SIGHUP can append non-preferred successors while owner sets and existing key
+  entries remain unchanged, then a later immutable generation can select an
+  installed successor as local RNext and deprecate its predecessor only after
+  observed peer use. Removal, edits/reordering, protected-owner CRUD, and
   per-socket metrics remain demand-shaped rather than core-feature blockers.
 - **Dataplane-aware readiness.** The shipped `/readyz` (and the bounded
   `GetHealth`) probe scopes readiness to the **control-plane core** — PeerManager

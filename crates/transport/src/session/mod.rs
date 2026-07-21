@@ -361,6 +361,19 @@ pub(crate) struct PeerSession {
     /// listener. After disconnect, a reconnect is active-open and uses the
     /// exact static owner instead of the listener covering-owner union.
     tcp_ao_stream_was_accepted: bool,
+    /// True until an accepted session is replaced by an active-open socket.
+    /// This carries no listener owner identity across disconnect.
+    tcp_ao_accept_only_session: bool,
+    /// Listener-resolved owner that controls selection for the current
+    /// accepted stream. Kept independently from the full owner-union metadata.
+    tcp_ao_selected_owner: Option<crate::listener::TcpAoSelectedOwner>,
+    /// Immutable final selection/deprecation candidate retained between
+    /// one-shot SIGHUP observation attempts.
+    tcp_ao_pending_selection: Option<crate::config::TcpAoSessionSelection>,
+    /// Successor per-MKT good-packet counter captured immediately before the
+    /// local `RNext` setter. A later observation requires a strict increase.
+    tcp_ao_successor_pkt_good_baseline: Option<u64>,
+    tcp_ao_selection_observed: bool,
     /// Teardown was triggered by NOTIFICATION semantics (inbound or outbound).
     /// RFC 8538: only preserves routes when Notification GR was negotiated.
     notification_teardown: bool,
@@ -433,19 +446,29 @@ struct TcpAoKeyMetadata {
 fn tcp_ao_key_metadata(
     config: &TransportConfig,
     initial: Option<&crate::TcpAoInfoSnapshot>,
+    accepted_selected_owner: Option<crate::listener::TcpAoSelectedOwner>,
 ) -> Vec<TcpAoKeyMetadata> {
+    let config_peer = accepted_selected_owner.map_or_else(
+        || {
+            (
+                config.remote_addr.ip(),
+                if config.remote_addr.is_ipv4() {
+                    32
+                } else {
+                    128
+                },
+            )
+        },
+        |owner| (owner.peer, owner.prefix_len),
+    );
     let mut metadata: Vec<_> = config
         .tcp_ao
         .as_ref()
         .into_iter()
         .flat_map(|keyring| keyring.iter())
         .map(|key| TcpAoKeyMetadata {
-            peer: config.remote_addr.ip(),
-            prefix_len: if config.remote_addr.is_ipv4() {
-                32
-            } else {
-                128
-            },
+            peer: config_peer.0,
+            prefix_len: config_peer.1,
             send_id: key.send_id,
             recv_id: key.recv_id,
             algorithm: key.algorithm,
@@ -950,7 +973,7 @@ impl PeerSession {
         let reject_retention_enabled = config.reject_retention_enabled;
         let reject_retention_capacity = config.reject_retention_capacity;
         let tcp_ao_protected = config.tcp_ao.is_some();
-        let tcp_ao_key_metadata = tcp_ao_key_metadata(&config, None);
+        let tcp_ao_key_metadata = tcp_ao_key_metadata(&config, None, None);
         let import_needs_as_path_string =
             Self::import_chain_needs_as_path_string(import_policy.as_ref(), explain_enabled);
         let (outbound_tx, outbound_rx) = mpsc::channel(OUTBOUND_BUFFER);
@@ -1039,6 +1062,11 @@ impl PeerSession {
             tcp_ao_protected,
             tcp_ao_generation,
             tcp_ao_stream_was_accepted: false,
+            tcp_ao_accept_only_session: false,
+            tcp_ao_selected_owner: None,
+            tcp_ao_pending_selection: None,
+            tcp_ao_successor_pkt_good_baseline: None,
+            tcp_ao_selection_observed: false,
             notification_teardown: false,
             received_hard_reset: false,
             sent_hard_reset: false,
@@ -1078,6 +1106,7 @@ impl PeerSession {
         advertise_graceful_shutdown: bool,
         session_identity: SessionIdentity,
         tcp_ao_info: Option<crate::TcpAoInfoSnapshot>,
+        tcp_ao_selected_owner: Option<crate::listener::TcpAoSelectedOwner>,
         tcp_ao_generation: crate::TcpAoRotationGeneration,
     ) -> Self {
         let peer_label = config.remote_addr.to_string();
@@ -1090,7 +1119,9 @@ impl PeerSession {
         let reject_retention_capacity = config.reject_retention_capacity;
         let tcp_ao_protected = config.tcp_ao.is_some() || tcp_ao_info.is_some();
         let tcp_ao_stream_was_accepted = tcp_ao_info.is_some();
-        let tcp_ao_key_metadata = tcp_ao_key_metadata(&config, tcp_ao_info.as_ref());
+        let tcp_ao_accept_only_session = tcp_ao_stream_was_accepted;
+        let tcp_ao_key_metadata =
+            tcp_ao_key_metadata(&config, tcp_ao_info.as_ref(), tcp_ao_selected_owner);
         let import_needs_as_path_string =
             Self::import_chain_needs_as_path_string(import_policy.as_ref(), explain_enabled);
         let (outbound_tx, outbound_rx) = mpsc::channel(OUTBOUND_BUFFER);
@@ -1191,6 +1222,11 @@ impl PeerSession {
             tcp_ao_protected,
             tcp_ao_generation,
             tcp_ao_stream_was_accepted,
+            tcp_ao_accept_only_session,
+            tcp_ao_selected_owner,
+            tcp_ao_pending_selection: None,
+            tcp_ao_successor_pkt_good_baseline: None,
+            tcp_ao_selection_observed: false,
             notification_teardown: false,
             received_hard_reset: false,
             sent_hard_reset: false,
@@ -1686,8 +1722,13 @@ impl PeerSession {
                             );
                             self.read_half = Some(rh);
                             self.tcp_ao_info = tcp_ao_info;
-                            self.tcp_ao_key_metadata = tcp_ao_key_metadata(&self.config, None);
+                            self.tcp_ao_key_metadata =
+                                tcp_ao_key_metadata(&self.config, None, None);
                             self.tcp_ao_stream_was_accepted = false;
+                            self.tcp_ao_accept_only_session = false;
+                            self.tcp_ao_selected_owner = None;
+                            self.tcp_ao_successor_pkt_good_baseline = None;
+                            self.tcp_ao_selection_observed = false;
                             self.writer_bulk_tx = Some(handle.bulk_tx);
                             self.writer_priority_tx = Some(handle.priority_tx);
                             self.writer_keepalive_tx = Some(handle.keepalive_tx);

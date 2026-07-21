@@ -6,8 +6,10 @@
 #   2. GET_KEYS exposes the complete redacted inventory and selected IDs.
 #   3. SIGHUP appends a nonpreferred successor without changing selection or
 #      flapping the BIRD session.
-#   4. BIRD advertises a route throughout the protected live rotation.
-#   5. A mismatch in the selected key fails closed and does not re-establish.
+#   4. A later immutable generation selects the installed successor, first
+#      reports awaiting_peer, then observation-gates predecessor deprecation.
+#   5. BIRD advertises a route without a session flap throughout both phases.
+#   6. A mismatch in the selected key fails closed and does not re-establish.
 #
 # Prerequisites:
 #   - BIRD image built:
@@ -226,6 +228,108 @@ apply_successor_generation() {
     ok "SIGHUP delivered for the add-only successor generation"
 }
 
+deliver_rust_sighup() {
+    docker exec "$RUSTBGPD" sh -lc '
+        pid=$(pidof rustbgpd)
+        [ -n "$pid" ]
+        kill -HUP "$pid"
+    '
+}
+
+begin_selection_generation() {
+    log "Selecting the installed TCP-AO successor with SIGHUP..."
+    docker exec "$RUSTBGPD" cp \
+        /etc/rustbgpd/config-selection.toml /tmp/m43-config.toml
+    if ! deliver_rust_sighup; then
+        fail "could not deliver selection SIGHUP to rustbgpd"
+        return 1
+    fi
+}
+
+wait_selection_awaiting() {
+    log "Waiting for the one-shot selection pass to report awaiting_peer..."
+    local state='{}'
+    for i in $(seq 1 20); do
+        state=$(grpc_neighbor_state || echo '{}')
+        if jq -e '
+            (.tcpAoDesiredGeneration | tonumber) == 3 and
+            (.tcpAoAppliedGeneration | tonumber) == 2 and
+            .tcpAoRotationPhase == "awaiting_peer" and
+            .tcpAo.rnextKeyId == 13 and
+            any(.tcpAo.keys[];
+              .sendId == 2 and .recvId == 12 and .deprecated != true) and
+            any(.tcpAo.keys[];
+              .sendId == 3 and .recvId == 13 and
+              .preferred == true and .deprecated != true)
+        ' >/dev/null <<<"$state"; then
+            ok "Generation 3 is awaiting peer successor use (attempt $i)"
+            return 0
+        fi
+        sleep 1
+    done
+    fail "selection generation did not expose desired=3/applied=2 awaiting_peer"
+    printf '%s\n' "$state" >&2
+    dump_diagnostics
+    return 1
+}
+
+select_bird_successor() {
+    log "Reconfiguring BIRD to prefer the preinstalled successor..."
+    if ! docker exec "$BIRD" birdc 'configure "/etc/bird/bird-successor.conf"'; then
+        fail "BIRD rejected successor-key reconfiguration"
+        dump_diagnostics
+        return 1
+    fi
+}
+
+wait_selection_generation() {
+    log "Retrying the identical generation 3 until one-shot observation commits..."
+    local state='{}'
+    for i in $(seq 1 30); do
+        if ! deliver_rust_sighup; then
+            fail "could not deliver identical selection retry SIGHUP"
+            return 1
+        fi
+        sleep 2
+        state=$(grpc_neighbor_state || echo '{}')
+        if printf '%s' "$state" | grep -Eq \
+            'interop-(old|next|successor)-secret-m43|wrong-next-secret-m43'; then
+            fail "Neighbor state leaked TCP-AO secret material after selection"
+            return 1
+        fi
+        if jq -e '
+            (.tcpAoDesiredGeneration | tonumber) == 3 and
+            (.tcpAoAppliedGeneration | tonumber) == 3 and
+            .tcpAoRotationPhase == "idle" and
+            (.tcpAoRotationError // "") == "" and
+            .tcpAoHealth == "TCP_AO_HEALTH_HEALTHY" and
+            .tcpAo.currentKeyId == 3 and
+            .tcpAo.rnextKeyId == 13 and
+            ((.tcpAo.packetsBad // 0) | tonumber) == 0 and
+            ((.tcpAo.packetsKeyNotFound // 0) | tonumber) == 0 and
+            ((.tcpAo.packetsAoRequired // 0) | tonumber) == 0 and
+            (.tcpAo.keys | length) == 3 and
+            any(.tcpAo.keys[];
+              .sendId == 1 and .recvId == 11 and .deprecated == true) and
+            any(.tcpAo.keys[];
+              .sendId == 2 and .recvId == 12 and
+              .preferred != true and .deprecated == true) and
+            any(.tcpAo.keys[];
+              .sendId == 3 and .recvId == 13 and
+              .preferred == true and .deprecated != true and
+              .isCurrent == true and .isRnext == true and
+              ((.packetsGood // 0) | tonumber) > 0)
+        ' >/dev/null <<<"$state"; then
+            ok "Generation 3 selected and observed the successor (attempt $i)"
+            return 0
+        fi
+    done
+    fail "TCP-AO selection generation did not converge within 60s"
+    printf '%s\n' "$state" >&2
+    dump_diagnostics
+    return 1
+}
+
 wait_route_absent() {
     log "Waiting for $TEST_PREFIX/32 to be absent..."
     for i in $(seq 1 20); do
@@ -289,6 +393,25 @@ main() {
         ok "Session did not flap across SIGHUP (BIRD since $rotated_since; flapCount $rotated_flaps)"
     else
         fail "Session flapped across SIGHUP (BIRD since $established_since -> $rotated_since; flapCount $initial_flaps -> $rotated_flaps)"
+        dump_diagnostics
+        return 1
+    fi
+
+    begin_selection_generation
+    wait_selection_awaiting
+    select_bird_successor
+    wait_selection_generation
+    wait_route_present
+    wait_bird_established
+    local selected_since
+    local selected_flaps
+    selected_since=$(bird_since)
+    selected_flaps=$(grpc_neighbor_state | jq -r '((.flapCount // 0) | tonumber)')
+    if [ "$selected_since" = "$established_since" ] && \
+        [ "$selected_flaps" -eq "$initial_flaps" ]; then
+        ok "Session did not flap across selection (BIRD since $selected_since; flapCount $selected_flaps)"
+    else
+        fail "Session flapped across selection (BIRD since $established_since -> $selected_since; flapCount $initial_flaps -> $selected_flaps)"
         dump_diagnostics
         return 1
     fi

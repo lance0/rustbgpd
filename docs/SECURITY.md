@@ -410,8 +410,9 @@ the roadmap:
   [`docs/OPERATIONS.md`](OPERATIONS.md#grpc-authorization-audit-and-resource-guardrails);
   only the durable in-daemon sink remains deferred until file/syslog
   backpressure and failure semantics are designed.
-- TCP-AO (RFC 5925) live key selection/deprecation/deletion and per-socket
-  metrics for BGP session protection
+- TCP-AO (RFC 5925) MKT deletion and additional per-socket metrics for BGP
+  session protection (non-destructive install and observation-gated
+  selection/deprecation are live)
 
 ## Current gaps
 

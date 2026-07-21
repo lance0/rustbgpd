@@ -25,7 +25,7 @@ deviations; [docs/INTEROP.md](INTEROP.md) has the interop matrix,
 | VPN / MPLS families (RR / controller-feed only, ADR-0077) | RFC 4364/4659 VPNv4/v6 (SAFI 128), RFC 4684 RT-Constrain (SAFI 132), RFC 8277 labeled-unicast (SAFI 4), RFC 9552 BGP-LS (SAFI 71/72) | RD/label/next-hop/RT preserved verbatim; no VRF import, no MPLS FIB, no local BGP-LS production |
 | EVPN (Linux/VXLAN alpha) | RFC 7432, RFC 9135/9136 (symmetric IRB), RFC 9012/8365 (VXLAN encap) | Route types 1-5; RR + VTEP + multi-homing building blocks |
 | Origin / path security | RFC 6811 + RFC 8210 (RPKI/RTR), ASPA, RFC 9234 (Roles + OTC, ADR-0071) | Origin validation, AS-path verification, leak prevention |
-| Transport security | RFC 5925 (TCP-AO), TCP MD5, RFC 5082 (GTSM) | TCP-AO: static-neighbor and direct dynamic-prefix keyrings on Linux; add-only successor installation on SIGHUP |
+| Transport security | RFC 5925 (TCP-AO), TCP MD5, RFC 5082 (GTSM) | TCP-AO: static-neighbor and direct dynamic-prefix keyrings on Linux; add-only successor installation followed by observation-gated successor selection/deprecation on SIGHUP |
 | FlowSpec / blackhole | RFC 8955/8956 (FlowSpec, SAFI 133), RFC 7999 (BLACKHOLE) | Receiver scoping + opt-in Linux FIB discard |
 | Liveness | RFC 5880/5881/5882 (BFD), RFC 9687 (Send Hold Timer) | Single-hop async BFD for static neighbors |
 | Maintenance | RFC 8326 (Graceful Shutdown), RFC 8203 (Admin Shutdown Communication) | Receiver gating + initiator toggle |

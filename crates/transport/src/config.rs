@@ -74,8 +74,8 @@ impl ZeroizeOnDrop for TransportAuthSecret {}
 /// Monotonic identity for one immutable TCP-AO desired inventory.
 ///
 /// Generation one is the socket inventory installed at daemon startup. Live
-/// add-only rotation publishes later generations only after every configured
-/// owner has passed preflight.
+/// non-destructive rotation publishes later generations only after every
+/// configured owner has passed preflight.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TcpAoRotationGeneration(u64);
 
@@ -117,6 +117,26 @@ pub enum TcpAoRotationPhase {
     /// The add-only attempt failed. Old usable MKTs remain installed; the
     /// generation must be retried or the daemon restarted.
     AddOnlyFailed,
+    /// An already-installed successor is being selected as local `RNext`.
+    /// Linux `Current` remains exclusively peer-driven.
+    Selecting,
+    /// Selection is applied, but the peer has not yet proved bidirectional
+    /// successor use. A later SIGHUP observes the same immutable candidate.
+    AwaitingPeer,
+    /// Selection, observation, or metadata commit failed. No global rollback
+    /// is attempted; kernel MKTs remain installed and the identical
+    /// generation is retryable.
+    SelectionFailed,
+}
+
+/// Internal mutation shape for one immutable TCP-AO generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TcpAoRotationOperation {
+    /// Install additional MKTs without changing selection metadata.
+    AddOnly,
+    /// Select an already-installed successor, observe peer use, then commit
+    /// declaration-only deprecation metadata.
+    Selection,
 }
 
 impl TcpAoRotationPhase {
@@ -127,6 +147,9 @@ impl TcpAoRotationPhase {
             Self::Idle => "idle",
             Self::AddOnly => "add_only",
             Self::AddOnlyFailed => "add_only_failed",
+            Self::Selecting => "selecting",
+            Self::AwaitingPeer => "awaiting_peer",
+            Self::SelectionFailed => "selection_failed",
         }
     }
 }
@@ -149,6 +172,9 @@ pub struct TcpAoRotationStatus {
 /// dynamic ranges are reconciled as their complete union.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TcpAoRotationOwner {
+    /// Explicit configuration owner kind; host-length dynamic ranges remain
+    /// distinct from static exact owners.
+    pub owner: crate::listener::TcpAoListenerOwnerKind,
     /// Configured listener selector network.
     pub peer: IpAddr,
     /// Configured listener selector prefix length.
@@ -157,16 +183,33 @@ pub struct TcpAoRotationOwner {
     pub keyring: TcpAoKeyring,
 }
 
-/// Immutable per-session projection of a global add-only generation.
+/// Immutable per-session projection of a global inventory generation.
 #[derive(Debug, Clone)]
 pub struct TcpAoSessionGeneration {
     /// Global immutable inventory identity.
     pub generation: TcpAoRotationGeneration,
-    /// Exact static owner used by active-open sockets. Dynamic peers have no
-    /// active-open target.
+    /// Exact selected-owner keyring retained in the session transport config.
+    /// Static peers use it for active-open; accepted dynamic peers use their
+    /// explicit most-specific direct owner.
     pub active_keyring: Option<TcpAoKeyring>,
     /// Full owned union used by protected accepted sockets.
     pub accepted_owners: Arc<[TcpAoRotationOwner]>,
+}
+
+/// Immutable per-session projection for successor selection and the later
+/// observation-gated metadata deprecation generation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TcpAoSessionSelection {
+    /// Global immutable inventory identity.
+    pub generation: TcpAoRotationGeneration,
+    /// Exact selected-owner keyring retained in the session transport config.
+    /// Static peers use it for active-open; accepted dynamic peers use their
+    /// explicit most-specific direct owner.
+    pub active_keyring: Option<TcpAoKeyring>,
+    /// Full covering-owner union required on protected accepted sockets.
+    pub accepted_owners: Arc<[TcpAoRotationOwner]>,
+    /// Explicit selection owner, resolved as static exact then dynamic LPM.
+    pub accepted_selected_owner: Option<crate::listener::TcpAoSelectedOwner>,
 }
 
 impl Default for TcpAoRotationStatus {

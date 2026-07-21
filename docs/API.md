@@ -298,13 +298,20 @@ inconsistent INFO/inventory pair is never published as degraded state.
 
 For TCP-AO peers, `NeighborState.tcp_ao_desired_generation`,
 `tcp_ao_applied_generation`, `tcp_ao_rotation_phase`, and
-`tcp_ao_rotation_error` expose the secret-free add-only rollout state. A phase
+`tcp_ao_rotation_error` expose the secret-free non-destructive rollout state. A phase
 of `add_only_failed` retains the prior selectable keys and is retryable with
 another SIGHUP. During `add_only`, protected accepts may carry either the
 globally applied generation or the exactly proved desired generation. During
 `add_only_failed`, only the applied generation may enter the peer manager;
 fully installed but uncommitted children remain fail-closed. A partial listener
 mutation may reject affected passive accepts until retry or restart.
+During `selecting` and `awaiting_peer`, the applied or exactly adjacent desired
+generation may enter; `selection_failed` admits only the applied generation.
+`awaiting_peer` is a one-shot result, not actor polling: the next identical
+SIGHUP re-observes the same generation. Selection sets only local RNext, never
+Linux Current, and predecessor deprecation metadata commits only after the
+whole affected session cohort has observed verified successor traffic beyond its
+per-socket pre-selection baseline.
 
 `NeighborState.effective_distribution_mode` reports the live RIB selection
 surface. When multiple mechanisms apply, its primary-label precedence is

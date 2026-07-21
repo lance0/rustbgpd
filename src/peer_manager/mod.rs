@@ -39,6 +39,7 @@ mod notifications;
 mod policy;
 mod reconcile;
 mod rotation;
+pub(crate) use rotation::TCP_AO_AWAITING_PEER_PREFIX;
 mod snapshot;
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -208,6 +209,7 @@ struct MaxPrefixLatch {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TcpAoDesiredInventory {
     generation: rustbgpd_transport::TcpAoRotationGeneration,
+    operation: rustbgpd_transport::TcpAoRotationOperation,
     listener_keys: Vec<rustbgpd_transport::TcpAoListenerKey>,
     static_keyrings: Vec<(
         rustbgpd_api::peer_types::PeerKey,
@@ -310,9 +312,9 @@ pub struct PeerManager {
     next_session_id: u64,
     /// Globally committed TCP-AO inventory generation. Protected accepts from
     /// a newer listener generation are rejected until established-session
-    /// add-only convergence commits the same generation here.
+    /// rotation convergence commits the same generation here.
     tcp_ao_generation: rustbgpd_transport::TcpAoRotationGeneration,
-    /// Global add-only phase gates protected accepts between preflight and
+    /// Global rotation phase gates protected accepts between preflight and
     /// established-session commit so no new session can escape the preflight
     /// inventory.
     tcp_ao_rotation: rustbgpd_transport::TcpAoRotationStatus,
@@ -1011,16 +1013,16 @@ impl PeerManager {
                         PeerManagerCommand::AcceptInbound { stream, peer_addr, tcp_ao_info, tcp_ao_generation } => {
                             self.accept_inbound(stream, peer_addr, tcp_ao_info, tcp_ao_generation).await;
                         }
-                        PeerManagerCommand::ApplyTcpAoAddOnly { generation, listener_keys, static_keyrings, reply } => {
-                            let result = self.apply_tcp_ao_add_only(generation, &listener_keys, &static_keyrings).await;
+                        PeerManagerCommand::ApplyTcpAoRotation { generation, operation, listener_keys, static_keyrings, reply } => {
+                            let result = self.apply_tcp_ao_rotation(generation, operation, &listener_keys, &static_keyrings).await;
                             let _ = reply.send(result);
                         }
-                        PeerManagerCommand::PreflightTcpAoAddOnly { generation, listener_keys, static_keyrings, reply } => {
-                            let result = self.preflight_tcp_ao_add_only(generation, &listener_keys, &static_keyrings).await;
+                        PeerManagerCommand::PreflightTcpAoRotation { generation, operation, listener_keys, static_keyrings, reply } => {
+                            let result = self.preflight_tcp_ao_rotation(generation, operation, &listener_keys, &static_keyrings).await;
                             let _ = reply.send(result);
                         }
-                        PeerManagerCommand::MarkTcpAoAddOnlyFailed { generation, error, reply } => {
-                            self.mark_tcp_ao_add_only_failed(generation, &error);
+                        PeerManagerCommand::MarkTcpAoRotationFailed { generation, operation, error, reply } => {
+                            self.mark_tcp_ao_rotation_failed(generation, operation, &error);
                             let _ = reply.send(Ok(()));
                         }
                         PeerManagerCommand::ReconcilePeers { added, removed, changed, reply } => {
