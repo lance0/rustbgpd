@@ -11,6 +11,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **RFC 1997 export parity for EVPN and FlowSpec.** Source routes carrying
+  `NO_EXPORT` or `NO_EXPORT_SUBCONFED` are suppressed toward honor-mode eBGP
+  peers across live updates, initial dumps, route refresh, and forced resync;
+  iBGP and transparent route-server sessions remain eligible, policy-added
+  communities remain deliverable, and prior advertisements withdraw by exact
+  family key.
+
 - **BIRD config imports report standalone `include` statements.** The bounded
   single-file importer preserves their source lines in every parser context,
   gives explicit flattening guidance, and exits 2 with the translated skeleton
