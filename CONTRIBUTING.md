@@ -36,7 +36,9 @@ All PRs must pass (enforced by CI in `.github/workflows/ci.yml`):
 The PR-sized parameterized fixed-scenario corpus compares the grouped manager
 path with the forced-per-peer oracle under bounded channel saturation, dirty
 policy regroup, stale and replacement session generations, RT-Constrain/ORF
-membership churn, and Add-Path cap changes:
+membership churn, and Add-Path cap changes. One fixed schedule deliberately
+combines saturation, a dirty regroup, and current/superseded session traffic
+rather than testing only those faults in isolation:
 
 ```bash
 cargo test -p rustbgpd-rib deterministic_fault_corpus -- --nocapture
