@@ -13,9 +13,9 @@
 # limitations under the License.
 
 FROM gcr.io/oss-fuzz-base/base-builder-rust:ubuntu-24-04
-RUN git clone --depth 1 https://github.com/lance0/rustbgpd rustbgpd
-WORKDIR rustbgpd
+COPY . $SRC/rustbgpd
+WORKDIR $SRC/rustbgpd
 RUN toolchain="$(cat fuzz/rust-nightly.txt)" \
     && rustup toolchain install "$toolchain" --profile minimal --target x86_64-unknown-linux-gnu \
     && cargo "+$toolchain" install cargo-fuzz --version 0.13.2 --locked
-COPY build.sh $SRC/
+COPY .clusterfuzzlite/build.sh $SRC/

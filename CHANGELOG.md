@@ -58,6 +58,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   daemons, stale queries, down sessions, unsupported GR, locally disabled GR,
   and active helper state without substituting configured defaults.
 
+- **Official ClusterFuzzLite integration for all 17 cargo-fuzz targets.** The
+  address-sanitized code-change workflow is manual-dispatch only; the existing
+  cargo-fuzz workflow remains the sole nightly campaign. The ordinary PR/push
+  CI check and the shared OSS-Fuzz / ClusterFuzzLite build path enforce the
+  exact manifest/source inventory, whose mutation tests remove every manifest
+  and source target in turn and inject empty, failed, and redirected
+  enumeration, an unexpected fuzz crate, and a cross-crate target-name
+  collision. PR #1061's 40m42s commissioning run rejected putting this work on
+  the PR critical path, without requiring an injected PR crash. Batch fuzzing,
+  pruning, storage, and coverage are not part of this integration.
+
 - **Max-prefix capacity is alertable before teardown.** Prometheus and the
   shipped Grafana overview expose actor-owned usage, finite limits, and
   headroom for aggregate, IPv4-unicast, and IPv6-unicast scopes. Unlimited and

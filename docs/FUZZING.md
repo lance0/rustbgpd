@@ -63,8 +63,7 @@ A crash writes a reproducer under `fuzz/artifacts/<target>/`; replay it with
   configs). Fix any fuzzer-found bug by adding its minimized reproducer here
   as a regression seed.
 - `fuzz/corpus/<target>/` — the growing machine-generated corpus,
-  **gitignored**; CI grows its own from the seeds, and OSS-Fuzz will do the
-  same after onboarding completes.
+  **gitignored**; local and nightly runs grow their own from the seeds.
 
 ## CI
 
@@ -74,19 +73,74 @@ from the tracked seeds. Crash artifacts upload on failure. Budget choice:
 all targets briefly rather than a rotating subset — every surface gets
 nightly coverage and the whole job stays bounded by per-target timers.
 
-## OSS-Fuzz onboarding
+`.github/workflows/fuzz.yml` is the sole scheduled fuzz campaign.
+`.github/workflows/clusterfuzzlite.yml` is an on-demand integration receipt:
+manual dispatch runs the official address-sanitized `code-change` actions with
+a 300-second total fuzzing budget and a 180-minute cold-start job bound. It does
+not run on pull requests and is not a required merge check. No external storage
+repository or long-lived PAT is configured.
+
+That split is based on the PR #1061 commissioning receipt, not an estimate.
+[Run 29855791034](https://github.com/lance0/rustbgpd/actions/runs/29855791034)
+at head `ee41f8f3` was intentionally cancelled after 40m42s: runner acquisition
+took 12s, the exact inventory took about 2s, the address-sanitized build passed
+in 14m14s, and `run_fuzzers` listed all 17 targets but completed only three and
+was waiting for the fourth target's corpus when the job was cancelled after a
+further 25m38s. Each completed target spent about 6m42s waiting for its absent
+corpus artifact before roughly 18s of fuzzing. ClusterFuzzLite's 300 seconds is
+a total engine budget, not a job wall-clock budget; targets run sequentially
+and corpus, setup, and cleanup sit outside it. A cold extrapolation is about
+134 minutes for the 14-minute build, 17 artifact waits, and five total fuzzing
+minutes, so the manual job uses a conservative 180-minute bound. That observed
+cost rejected ClusterFuzzLite as a PR critical-path check. No crash was
+deliberately injected into a PR: crash injection is not required to establish
+that scheduling decision. Manual runs retain ClusterFuzzLite's SARIF output and
+crash-artifact handling.
+
+Scheduled ClusterFuzzLite batch/prune operation remains out of scope. Its
+GitHub artifact backend treats corpus download and upload failures as non-fatal,
+which cannot meet rustbgpd's fail-closed corpus-reuse rule. ClusterFuzzLite's
+Rust integration also documents AddressSanitizer as the only supported
+sanitizer, so the manual workflow does not claim unsupported coverage mode.
+
+`scripts/check_fuzz_target_inventory.py` gates the exact 17-target inventory in
+the ordinary PR/push `CI / check` job, before a manual ClusterFuzzLite build,
+and again inside the shared fuzzer build path. It compares cargo metadata and
+`fuzz_targets/*.rs` against an explicit globally-unique inventory, including
+both MRT targets. Its mutation tests remove every manifest target and every
+source target one at a time and inject empty, failed, and source-redirected
+enumeration, an unexpected fuzz crate, and a cross-crate target-name collision,
+so the fail-closed behavior is itself CI-proved.
+
+## OSS-Fuzz eligibility outcome and shared build
 
 The standard OSS-Fuzz project files are staged in `fuzz/oss-fuzz/`
-(`project.yaml`, `Dockerfile`, `build.sh`). `build.sh` builds all four fuzz
-crates with `cargo fuzz build -O --debug-assertions` and ships each
+(`project.yaml`, `Dockerfile`, `build.sh`). OSS-Fuzz and ClusterFuzzLite both
+delegate to `fuzz/build-fuzzers.sh`, which validates and builds all four fuzz
+crates with `cargo fuzz build -O --debug-assertions`. The crates share one
+Cargo target directory so compatible sanitizer build-std and dependency
+artifacts can be reused across crate builds. The integration ships each
 `fuzz/seeds/<target>/` directory as a `<target>_seed_corpus.zip`.
+Both hosted builders install the reviewed nightly named by
+`fuzz/rust-nightly.txt`; this avoids depending on the older compiler bundled
+in the upstream Rust builder image and must remain at or above the workspace
+MSRV. They also install cargo-fuzz 0.13.2 explicitly because the Ubuntu 24.04
+Rust builder does not bundle it.
 
-[google/oss-fuzz#15874](https://github.com/google/oss-fuzz/pull/15874) has
-been submitted and its OSS-Fuzz build/check helpers pass. Onboarding is still
-pending upstream review, merge, and the first green hosted build. After that
-first hosted build, confirm crash notifications reach the primary contact and
-mirror any OSS-Fuzz-found reproducers into `fuzz/seeds/` as regression seeds.
+The shared build uses one explicit Cargo target directory for all four fuzz
+crates and fails unless every expected executable exists before copying it to
+the integration output. This is a build-layout invariant, not a wall-clock
+performance claim; this change carries no retained benchmark harness or
+quantitative build-speed assertion.
 
-Keep `fuzz/oss-fuzz/` in sync when adding fuzz crates: `build.sh` discovers
-targets per crate automatically, but a new fuzz *directory* must be added to
-its `FUZZ_DIRS` list.
+[google/oss-fuzz#15874](https://github.com/google/oss-fuzz/pull/15874) was
+closed on eligibility, not build correctness: upstream targets projects that
+already have a wide user base and judged rustbgpd not mature enough yet. Its
+17-target address-sanitized OSS-Fuzz build and check had passed before that
+decision. ClusterFuzzLite is the current on-demand hosted fuzzing path; the
+OSS-Fuzz files remain ready for a future resubmission if adoption clears the
+upstream threshold.
+
+Adding or removing a target now requires deliberately updating the explicit
+inventory and its documentation. A new fuzz crate also requires updating the
+shared build loop and both integration Dockerfiles.
