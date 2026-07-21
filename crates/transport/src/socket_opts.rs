@@ -167,6 +167,23 @@ struct TcpAoAdd {
     key: [u8; 80],
 }
 
+/// Linux `tcp_ao_del`. Selection replacement fields deliberately remain
+/// zero: rustbgpd never uses deletion to force Current or `RNext`.
+#[cfg(target_os = "linux")]
+#[repr(C, align(8))]
+struct TcpAoDel {
+    addr: libc::sockaddr_storage,
+    ifindex: libc::c_int,
+    flags: u32,
+    reserved2: u16,
+    prefix: u8,
+    sndid: u8,
+    rcvid: u8,
+    current_key: u8,
+    rnext: u8,
+    keyflags: u8,
+}
+
 #[cfg(target_os = "linux")]
 impl Drop for TcpAoAdd {
     fn drop(&mut self) {
@@ -287,6 +304,36 @@ pub(crate) struct TcpAoRnextPreflight {
     target_algorithm: TcpAoAlgorithm,
 }
 
+#[cfg(target_os = "linux")]
+struct TcpAoDeleteTarget {
+    receipt_index: usize,
+    command: TcpAoDel,
+}
+
+/// Opaque proof binding a delete attempt to one exact current inventory and
+/// one exact survivor inventory. It is intentionally non-cloneable and
+/// non-formatting; normalized key material remains inside its zeroizing
+/// receipt until apply consumes the proof.
+#[cfg(target_os = "linux")]
+#[allow(
+    dead_code,
+    reason = "transport deletion foundation is consumed by the later coordinator slice"
+)]
+pub(crate) struct TcpAoDeletePreflight {
+    current: TcpAoMktReceipt,
+    survivor_indices: Vec<usize>,
+    targets: Vec<TcpAoDeleteTarget>,
+    selection: Option<TcpAoSelection>,
+    connected_peer: Option<IpAddr>,
+}
+
+#[cfg(not(target_os = "linux"))]
+#[allow(
+    dead_code,
+    reason = "transport deletion foundation is consumed by the later coordinator slice"
+)]
+pub(crate) struct TcpAoDeletePreflight;
+
 #[cfg(not(target_os = "linux"))]
 pub(crate) struct TcpAoRnextPreflight;
 
@@ -330,6 +377,49 @@ struct TcpAoSelection {
 pub(crate) struct TcpAoAddOnlyApplyError {
     error: io::Error,
     mutation_started: bool,
+}
+
+/// A live delete failure annotated with whether any `TCP_AO_DEL_KEY` syscall
+/// may already have succeeded. A later coordinator must discard a connected
+/// stream whenever mutation began rather than trust a partially shrunk MKT
+/// inventory.
+#[allow(
+    dead_code,
+    reason = "transport deletion foundation is consumed by the later coordinator slice"
+)]
+pub(crate) struct TcpAoDeleteApplyError {
+    error: io::Error,
+    mutation_started: bool,
+}
+
+#[allow(
+    dead_code,
+    reason = "transport deletion foundation is consumed by the later coordinator slice"
+)]
+impl TcpAoDeleteApplyError {
+    #[must_use]
+    pub(crate) const fn mutation_started(&self) -> bool {
+        self.mutation_started
+    }
+
+    pub(crate) fn into_inner(self) -> io::Error {
+        self.error
+    }
+}
+
+impl std::fmt::Display for TcpAoDeleteApplyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.error.fmt(f)
+    }
+}
+
+impl std::fmt::Debug for TcpAoDeleteApplyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TcpAoDeleteApplyError")
+            .field("error", &self.error)
+            .field("mutation_started", &self.mutation_started)
+            .finish()
+    }
 }
 
 impl TcpAoAddOnlyApplyError {
@@ -505,6 +595,8 @@ pub enum TcpAoSupport {
 #[cfg(target_os = "linux")]
 const TCP_AO_ADD_KEY: libc::c_int = 38;
 #[cfg(target_os = "linux")]
+const TCP_AO_DEL_KEY: libc::c_int = 39;
+#[cfg(target_os = "linux")]
 #[allow(dead_code)]
 const TCP_AO_INFO: libc::c_int = 40;
 #[cfg(target_os = "linux")]
@@ -544,6 +636,8 @@ const fn tcp_ao_u16_bitfield_mask(index: u32, big_endian: bool) -> u16 {
 const TCP_AO_ADD_SET_CURRENT: u32 = tcp_ao_u32_bitfield_mask(0, TCP_AO_TARGET_BIG_ENDIAN);
 #[cfg(target_os = "linux")]
 const TCP_AO_ADD_SET_RNEXT: u32 = tcp_ao_u32_bitfield_mask(1, TCP_AO_TARGET_BIG_ENDIAN);
+#[cfg(target_os = "linux")]
+const TCP_AO_DEL_ASYNC: u32 = tcp_ao_u32_bitfield_mask(2, TCP_AO_TARGET_BIG_ENDIAN);
 #[cfg(target_os = "linux")]
 const TCP_AO_INFO_SET_CURRENT: u32 = tcp_ao_u32_bitfield_mask(0, TCP_AO_TARGET_BIG_ENDIAN);
 #[cfg(target_os = "linux")]
@@ -856,8 +950,20 @@ fn reconcile_add_only_subset(
     desired: &TcpAoMktReceipt,
     connected_peer: Option<IpAddr>,
 ) -> io::Result<Vec<bool>> {
-    let mut present = vec![false; desired.cores.len()];
-    for raw in keys {
+    Ok(reconcile_receipt_records(keys, desired, connected_peer)?
+        .into_iter()
+        .map(|record| record.is_some())
+        .collect())
+}
+
+#[cfg(target_os = "linux")]
+fn reconcile_receipt_records(
+    keys: &[TcpAoGetSockOpt],
+    desired: &TcpAoMktReceipt,
+    connected_peer: Option<IpAddr>,
+) -> io::Result<Vec<Option<usize>>> {
+    let mut matched_records = vec![None; desired.cores.len()];
+    for (raw_index, raw) in keys.iter().enumerate() {
         let state = decode_tcp_ao_key_state(raw)?;
         let core = mkt_core(raw)?;
         let matches = desired
@@ -866,7 +972,7 @@ fn reconcile_add_only_subset(
             .zip(&desired.metadata)
             .enumerate()
             .filter(|(index, (candidate, metadata))| {
-                !present[*index]
+                matched_records[*index].is_none()
                     && match connected_peer {
                         Some(peer) => target_record_matches_receipt_entry(&state, peer, metadata),
                         None => {
@@ -883,9 +989,9 @@ fn reconcile_add_only_subset(
                 "TCP-AO target inventory contains a foreign, redefined, duplicate, or ambiguous MKT",
             ));
         }
-        present[matches[0]] = true;
+        matched_records[matches[0]] = Some(raw_index);
     }
-    Ok(present)
+    Ok(matched_records)
 }
 
 #[cfg(target_os = "linux")]
@@ -1099,6 +1205,327 @@ pub(crate) fn apply_tcp_ao_add_only(
         .map(|peer| get_tcp_ao_info_for_receipt(socket, desired_receipt, peer))
         .transpose()
         .map_err(|error| apply_error(error, mutation_started))
+}
+
+#[cfg(target_os = "linux")]
+fn delete_error(error: io::Error, mutation_started: bool) -> TcpAoDeleteApplyError {
+    TcpAoDeleteApplyError {
+        error,
+        mutation_started,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn delete_metadata_eq(left: &TcpAoMktMetadata, right: &TcpAoMktMetadata) -> bool {
+    left.owner == right.owner
+        && left.peer == right.peer
+        && left.prefix_len == right.prefix_len
+        && left.preferred == right.preferred
+        && left.deprecated == right.deprecated
+}
+
+/// Return the current-receipt indices retained by `desired`, preserving
+/// declaration order and rejecting metadata edits disguised as deletion.
+#[cfg(target_os = "linux")]
+fn deletion_survivor_indices(
+    current: &TcpAoMktReceipt,
+    desired: &TcpAoMktReceipt,
+) -> io::Result<Vec<usize>> {
+    if desired.cores.is_empty() || desired.cores.len() >= current.cores.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "TCP-AO deletion requires a nonempty strict survivor inventory",
+        ));
+    }
+    let mut survivors = Vec::with_capacity(desired.cores.len());
+    for (desired_core, desired_metadata) in desired.cores.iter().zip(&desired.metadata) {
+        let matches = current
+            .cores
+            .iter()
+            .zip(&current.metadata)
+            .enumerate()
+            .filter(|(index, (current_core, current_metadata))| {
+                !survivors.contains(index)
+                    && *current_core == desired_core
+                    && delete_metadata_eq(current_metadata, desired_metadata)
+            })
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        if matches.len() != 1 || survivors.last().is_some_and(|last| *last >= matches[0]) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "TCP-AO survivor inventory reorders, redefines, duplicates, or adds an MKT",
+            ));
+        }
+        survivors.push(matches[0]);
+    }
+    Ok(survivors)
+}
+
+#[cfg(target_os = "linux")]
+fn build_tcp_ao_del(raw: &TcpAoGetSockOpt, listener: bool) -> io::Result<TcpAoDel> {
+    decode_tcp_ao_key_state(raw)?;
+    let mut command = TcpAoDel {
+        // `sockaddr_storage` is a plain C value and contains no key material.
+        addr: raw.addr,
+        ifindex: raw.ifindex,
+        flags: 0,
+        reserved2: 0,
+        prefix: raw.prefix,
+        sndid: raw.sndid,
+        rcvid: raw.rcvid,
+        current_key: 0,
+        rnext: 0,
+        keyflags: raw.keyflags,
+    };
+    if listener {
+        command.flags = TCP_AO_DEL_ASYNC;
+    }
+    Ok(command)
+}
+
+#[cfg(target_os = "linux")]
+#[allow(
+    unsafe_code,
+    clippy::cast_possible_truncation,
+    reason = "TCP-AO key deletion uses the raw Linux socket-option ABI"
+)]
+fn delete_tcp_ao_key(socket: &impl AsRawFd, command: &TcpAoDel) -> io::Result<()> {
+    let ret = unsafe {
+        libc::setsockopt(
+            socket.as_raw_fd(),
+            libc::IPPROTO_TCP,
+            TCP_AO_DEL_KEY,
+            std::ptr::from_ref(command).cast(),
+            std::mem::size_of::<TcpAoDel>() as libc::socklen_t,
+        )
+    };
+    if ret < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn delete_inventory(
+    socket: &impl AsRawFd,
+    current: &TcpAoMktReceipt,
+    connected_peer: Option<IpAddr>,
+    expected_selection: Option<TcpAoSelection>,
+) -> io::Result<(Vec<bool>, Vec<bool>)> {
+    let (info, keys) = query_rotation_inventory(socket, connected_peer)?;
+    if info
+        .as_ref()
+        .map(selection)
+        .zip(expected_selection)
+        .is_some_and(|(actual, expected)| actual != expected)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "TCP-AO deletion changed Current/RNext selection",
+        ));
+    }
+    let records = reconcile_receipt_records(&keys, current, connected_peer)?;
+    let mut selected = vec![false; records.len()];
+    for (index, raw_index) in records.iter().enumerate() {
+        if let Some(raw_index) = raw_index {
+            selected[index] =
+                keys[*raw_index].flags & (TCP_AO_GET_IS_CURRENT | TCP_AO_GET_IS_RNEXT) != 0;
+        }
+    }
+    Ok((
+        records.into_iter().map(|record| record.is_some()).collect(),
+        selected,
+    ))
+}
+
+/// Prove an exact current-to-survivor deletion without mutating the socket.
+/// Connected targets use the selector returned by `GET_KEYS`, so inherited
+/// covering-owner entries are deleted with the exact kernel-returned selector.
+#[cfg(target_os = "linux")]
+#[allow(
+    dead_code,
+    reason = "transport deletion foundation is consumed by the later coordinator slice"
+)]
+pub(crate) fn preflight_tcp_ao_delete(
+    socket: &impl AsRawFd,
+    current: &[TcpAoMktOwner<'_>],
+    desired: &[TcpAoMktOwner<'_>],
+    connected_peer: Option<IpAddr>,
+) -> io::Result<TcpAoDeletePreflight> {
+    let current_receipt = desired_add_only_receipt(current, connected_peer)?;
+    let desired_receipt = desired_add_only_receipt(desired, connected_peer)?;
+    let survivor_indices = deletion_survivor_indices(&current_receipt, &desired_receipt)?;
+    let (info, keys) = query_rotation_inventory(socket, connected_peer)?;
+    let records = reconcile_receipt_records(&keys, &current_receipt, connected_peer)?;
+    if records.iter().any(Option::is_none) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "TCP-AO kernel inventory does not equal the declared current deletion inventory",
+        ));
+    }
+    let mut targets = Vec::new();
+    for (receipt_index, raw_index) in records.into_iter().enumerate() {
+        if survivor_indices.contains(&receipt_index) {
+            continue;
+        }
+        let raw = &keys[raw_index.expect("complete current inventory was checked")];
+        if raw.flags & (TCP_AO_GET_IS_CURRENT | TCP_AO_GET_IS_RNEXT) != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "refusing to delete a TCP-AO Current or RNext MKT",
+            ));
+        }
+        targets.push(TcpAoDeleteTarget {
+            receipt_index,
+            command: build_tcp_ao_del(raw, connected_peer.is_none())?,
+        });
+    }
+    Ok(TcpAoDeletePreflight {
+        current: current_receipt,
+        survivor_indices,
+        targets,
+        selection: info.as_ref().map(selection),
+        connected_peer,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn run_delete_sequence<V, D>(
+    present: &mut Vec<bool>,
+    survivor_mask: &[bool],
+    target_indices: &[usize],
+    mut verify: V,
+    mut delete: D,
+) -> Result<bool, TcpAoDeleteApplyError>
+where
+    V: FnMut() -> io::Result<(Vec<bool>, Vec<bool>)>,
+    D: FnMut(usize) -> io::Result<()>,
+{
+    let mut mutation_started = false;
+    let (initial, selected) = verify().map_err(|error| delete_error(error, false))?;
+    if initial.iter().any(|entry| !entry) {
+        return Err(delete_error(
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "TCP-AO deletion did not begin from the exact current inventory",
+            ),
+            false,
+        ));
+    }
+    *present = initial;
+    for (target_position, receipt_index) in target_indices.iter().copied().enumerate() {
+        if selected.get(receipt_index).copied().unwrap_or(true) {
+            return Err(delete_error(
+                io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "refusing to delete a TCP-AO Current or RNext MKT",
+                ),
+                mutation_started,
+            ));
+        }
+        let (before, selected_now) =
+            verify().map_err(|error| delete_error(error, mutation_started))?;
+        if before != *present {
+            return Err(delete_error(
+                io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "TCP-AO target inventory changed between deletion steps",
+                ),
+                mutation_started,
+            ));
+        }
+        if selected_now.get(receipt_index).copied().unwrap_or(true) {
+            return Err(delete_error(
+                io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "refusing to delete a TCP-AO Current or RNext MKT",
+                ),
+                mutation_started,
+            ));
+        }
+        mutation_started = true;
+        delete(target_position).map_err(|error| delete_error(error, true))?;
+        let (after, _) = verify().map_err(|error| delete_error(error, true))?;
+        let mut expected = present.clone();
+        expected[receipt_index] = false;
+        if after != expected {
+            return Err(delete_error(
+                io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "TCP-AO post-delete inventory did not equal the expected survivor step",
+                ),
+                true,
+            ));
+        }
+        *present = after;
+    }
+    let (final_present, _) = verify().map_err(|error| delete_error(error, mutation_started))?;
+    if final_present != survivor_mask || final_present != *present {
+        return Err(delete_error(
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "TCP-AO deletion did not converge to the exact survivor inventory",
+            ),
+            mutation_started,
+        ));
+    }
+    Ok(mutation_started)
+}
+
+/// Consume an exact deletion proof, revalidate Current/RNext immediately
+/// before every syscall, and require the exact survivor inventory afterward.
+#[cfg(target_os = "linux")]
+#[allow(
+    dead_code,
+    reason = "transport deletion foundation is consumed by the later coordinator slice"
+)]
+pub(crate) fn apply_tcp_ao_delete(
+    socket: &impl AsRawFd,
+    preflight: TcpAoDeletePreflight,
+    desired: &[TcpAoMktOwner<'_>],
+) -> Result<Option<TcpAoInfoSnapshot>, TcpAoDeleteApplyError> {
+    let TcpAoDeletePreflight {
+        current,
+        survivor_indices: preflight_survivors,
+        targets,
+        selection: expected_selection,
+        connected_peer,
+    } = preflight;
+    let desired_receipt = desired_add_only_receipt(desired, connected_peer)
+        .map_err(|error| delete_error(error, false))?;
+    let survivor_indices = deletion_survivor_indices(&current, &desired_receipt)
+        .map_err(|error| delete_error(error, false))?;
+    if survivor_indices != preflight_survivors {
+        return Err(delete_error(
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "TCP-AO apply survivor inventory differs from its preflight proof",
+            ),
+            false,
+        ));
+    }
+    let survivor_mask = (0..current.cores.len())
+        .map(|index| survivor_indices.contains(&index))
+        .collect::<Vec<_>>();
+    let target_indices = targets
+        .iter()
+        .map(|target| target.receipt_index)
+        .collect::<Vec<_>>();
+    let verify = || delete_inventory(socket, &current, connected_peer, expected_selection);
+    let mut present = vec![true; current.cores.len()];
+    let mutation_started = run_delete_sequence(
+        &mut present,
+        &survivor_mask,
+        &target_indices,
+        verify,
+        |target_position| delete_tcp_ao_key(socket, &targets[target_position].command),
+    )?;
+    connected_peer
+        .map(|peer| get_tcp_ao_info_for_receipt(socket, &desired_receipt, peer))
+        .transpose()
+        .map_err(|error| delete_error(error, mutation_started))
 }
 
 /// Inspect runtime TCP-AO socket state.
@@ -2424,6 +2851,26 @@ pub(crate) fn preflight_tcp_ao_add_only<T>(
 }
 
 #[cfg(not(target_os = "linux"))]
+#[allow(
+    dead_code,
+    reason = "transport deletion foundation is consumed by the later coordinator slice"
+)]
+pub(crate) fn preflight_tcp_ao_delete<T>(
+    _socket: &T,
+    current: &[TcpAoMktOwner<'_>],
+    desired: &[TcpAoMktOwner<'_>],
+    _connected_peer: Option<std::net::IpAddr>,
+) -> io::Result<TcpAoDeletePreflight> {
+    for owner in current.iter().chain(desired) {
+        let _ = (owner.owner, owner.peer, owner.prefix_len, owner.keyring);
+    }
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "TCP-AO key deletion is only supported on Linux",
+    ))
+}
+
+#[cfg(not(target_os = "linux"))]
 pub(crate) fn apply_tcp_ao_add_only<T>(
     _socket: &T,
     _preflight: TcpAoAddOnlyPreflight,
@@ -2437,6 +2884,28 @@ pub(crate) fn apply_tcp_ao_add_only<T>(
         error: io::Error::new(
             io::ErrorKind::Unsupported,
             "TCP-AO live rotation is only supported on Linux",
+        ),
+        mutation_started: false,
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+#[allow(
+    dead_code,
+    reason = "transport deletion foundation is consumed by the later coordinator slice"
+)]
+pub(crate) fn apply_tcp_ao_delete<T>(
+    _socket: &T,
+    _preflight: TcpAoDeletePreflight,
+    desired: &[TcpAoMktOwner<'_>],
+) -> Result<Option<TcpAoInfoSnapshot>, TcpAoDeleteApplyError> {
+    for owner in desired {
+        let _ = (owner.owner, owner.peer, owner.prefix_len, owner.keyring);
+    }
+    Err(TcpAoDeleteApplyError {
+        error: io::Error::new(
+            io::ErrorKind::Unsupported,
+            "TCP-AO key deletion is only supported on Linux",
         ),
         mutation_started: false,
     })
@@ -2728,10 +3197,14 @@ mod tests {
 
     assert_not_impl!(TcpAoAdd: std::fmt::Debug);
     assert_not_impl!(TcpAoAdd: Clone);
+    assert_not_impl!(TcpAoDel: std::fmt::Debug);
+    assert_not_impl!(TcpAoDel: Clone);
     assert_not_impl!(TcpAoGetSockOpt: std::fmt::Debug);
     assert_not_impl!(TcpAoGetSockOpt: Clone);
     assert_not_impl!(TcpAoMktCore: std::fmt::Debug);
     assert_not_impl!(TcpAoMktCore: Clone);
+    assert_not_impl!(TcpAoDeletePreflight: std::fmt::Debug);
+    assert_not_impl!(TcpAoDeletePreflight: Clone);
 
     fn base_key() -> TcpAoKey<'static> {
         TcpAoKey {
@@ -2785,6 +3258,19 @@ mod tests {
         assert_eq!(mem::offset_of!(TcpAoAdd, keylen), 207);
         assert_eq!(mem::offset_of!(TcpAoAdd, key), 208);
 
+        assert_eq!(mem::size_of::<TcpAoDel>(), 144);
+        assert_eq!(mem::align_of::<TcpAoDel>(), 8);
+        assert_eq!(mem::offset_of!(TcpAoDel, addr), 0);
+        assert_eq!(mem::offset_of!(TcpAoDel, ifindex), 128);
+        assert_eq!(mem::offset_of!(TcpAoDel, flags), 132);
+        assert_eq!(mem::offset_of!(TcpAoDel, reserved2), 136);
+        assert_eq!(mem::offset_of!(TcpAoDel, prefix), 138);
+        assert_eq!(mem::offset_of!(TcpAoDel, sndid), 139);
+        assert_eq!(mem::offset_of!(TcpAoDel, rcvid), 140);
+        assert_eq!(mem::offset_of!(TcpAoDel, current_key), 141);
+        assert_eq!(mem::offset_of!(TcpAoDel, rnext), 142);
+        assert_eq!(mem::offset_of!(TcpAoDel, keyflags), 143);
+
         assert_eq!(mem::size_of::<TcpAoInfoOpt>(), 48);
         assert_eq!(mem::align_of::<TcpAoInfoOpt>(), 8);
         assert_eq!(mem::offset_of!(TcpAoInfoOpt, current_key), 6);
@@ -2806,6 +3292,7 @@ mod tests {
     #[test]
     fn tcp_ao_constants_match_linux_header() {
         assert_eq!(TCP_AO_ADD_KEY, 38);
+        assert_eq!(TCP_AO_DEL_KEY, 39);
         assert_eq!(TCP_AO_INFO, 40);
         assert_eq!(TCP_AO_GET_KEYS, 41);
         assert_eq!(TCP_AO_MAXKEYLEN, 80);
@@ -2816,6 +3303,10 @@ mod tests {
         assert_eq!(
             TCP_AO_ADD_SET_RNEXT,
             tcp_ao_u32_bitfield_mask(1, TCP_AO_TARGET_BIG_ENDIAN)
+        );
+        assert_eq!(
+            TCP_AO_DEL_ASYNC,
+            tcp_ao_u32_bitfield_mask(2, TCP_AO_TARGET_BIG_ENDIAN)
         );
         assert_eq!(
             TCP_AO_INFO_SET_CURRENT,
@@ -3639,6 +4130,66 @@ mod tests {
     }
 
     #[test]
+    fn tcp_ao_delete_encodes_kernel_selector_without_forcing_selection() {
+        let connected = IpAddr::from([192, 0, 2, 9]);
+        let mut child = raw_dump_key(connected, "hmac(sha256)", b"retired");
+        child.sndid = 17;
+        child.rcvid = 23;
+        child.flags = 0;
+        let command = build_tcp_ao_del(&child, false).unwrap();
+        assert_eq!(read_sockaddr(&command.addr).unwrap(), connected);
+        assert_eq!(command.prefix, 32);
+        assert_eq!(command.sndid, 17);
+        assert_eq!(command.rcvid, 23);
+        assert_eq!(command.flags, 0);
+        assert_eq!(command.current_key, 0);
+        assert_eq!(command.rnext, 0);
+
+        child.prefix = 24;
+        let listener_command = build_tcp_ao_del(&child, true).unwrap();
+        assert_eq!(listener_command.flags, TCP_AO_DEL_ASYNC);
+        assert_eq!(listener_command.current_key, 0);
+        assert_eq!(listener_command.rnext, 0);
+    }
+
+    #[test]
+    fn tcp_ao_delete_survivors_are_a_strict_ordered_metadata_preserving_subset() {
+        fn receipt(entries: &[(u8, bool, bool)]) -> TcpAoMktReceipt {
+            let peer = IpAddr::from([192, 0, 2, 1]);
+            let mut cores = Vec::new();
+            let mut metadata = Vec::new();
+            for (id, preferred, deprecated) in entries {
+                let mut raw = raw_dump_key(peer, "hmac(sha256)", &[*id; 8]);
+                raw.sndid = *id;
+                raw.rcvid = *id;
+                cores.push(mkt_core(&raw).unwrap());
+                metadata.push(TcpAoMktMetadata {
+                    owner: crate::listener::TcpAoListenerOwnerKind::Static,
+                    peer,
+                    prefix_len: 32,
+                    preferred: *preferred,
+                    deprecated: *deprecated,
+                });
+            }
+            TcpAoMktReceipt { cores, metadata }
+        }
+
+        let current = receipt(&[(1, false, true), (2, true, false), (3, false, true)]);
+        let survivors = receipt(&[(1, false, true), (2, true, false)]);
+        assert_eq!(
+            deletion_survivor_indices(&current, &survivors).unwrap(),
+            vec![0, 1]
+        );
+
+        let reordered = receipt(&[(2, true, false), (1, false, true)]);
+        assert!(deletion_survivor_indices(&current, &reordered).is_err());
+        let metadata_edit = receipt(&[(1, false, false), (2, true, false)]);
+        assert!(deletion_survivor_indices(&current, &metadata_edit).is_err());
+        let unchanged = receipt(&[(1, false, true), (2, true, false), (3, false, true)]);
+        assert!(deletion_survivor_indices(&current, &unchanged).is_err());
+    }
+
+    #[test]
     fn tcp_ao_rejects_invalid_prefix_and_key_lengths() {
         let mut key = base_key();
         key.prefix_len = 33;
@@ -3772,6 +4323,262 @@ mod tests {
         .unwrap_err();
         assert!(error.mutation_started());
         assert!(error.to_string().contains("Current/RNext"));
+    }
+
+    #[test]
+    fn delete_sequence_refuses_selected_targets_before_syscall_and_checks_post_state() {
+        let delete_calls = std::cell::Cell::new(0_usize);
+        let mut present = vec![true, true];
+        let error = run_delete_sequence(
+            &mut present,
+            &[true, false],
+            &[1],
+            || Ok((vec![true, true], vec![false, true])),
+            |_| {
+                delete_calls.set(delete_calls.get() + 1);
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(!error.mutation_started());
+        assert_eq!(delete_calls.get(), 0, "selected MKT reached DEL_KEY");
+
+        let verify_calls = std::cell::Cell::new(0_usize);
+        let delete_calls = std::cell::Cell::new(0_usize);
+        let mut present = vec![true, true];
+        let error = run_delete_sequence(
+            &mut present,
+            &[true, false],
+            &[1],
+            || {
+                let call = verify_calls.get();
+                verify_calls.set(call + 1);
+                let selected = if call == 0 {
+                    vec![false, false]
+                } else {
+                    vec![false, true]
+                };
+                Ok((vec![true, true], selected))
+            },
+            |_| {
+                delete_calls.set(delete_calls.get() + 1);
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(!error.mutation_started());
+        assert_eq!(verify_calls.get(), 2, "selection was not rechecked");
+        assert_eq!(delete_calls.get(), 0, "newly selected MKT reached DEL_KEY");
+
+        let actual = std::cell::RefCell::new(vec![true, true]);
+        let mut present = actual.borrow().clone();
+        let error = run_delete_sequence(
+            &mut present,
+            &[true, false],
+            &[1],
+            || Ok((actual.borrow().clone(), vec![false, false])),
+            |_| Ok(()),
+        )
+        .unwrap_err();
+        assert!(error.mutation_started());
+        assert!(error.to_string().contains("post-delete inventory"));
+    }
+
+    /// Linux receipt for the LAN-545 deletion foundation. It proves both
+    /// sides of the listener race: a child queued before `DEL_KEY` retains the
+    /// old inventory, while a later child inherits only the survivors.
+    #[test]
+    #[ignore = "requires a Linux kernel with CONFIG_TCP_AO=y"]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one real socket lifecycle proves the listener queue boundary and exact child deletion"
+    )]
+    fn tcp_ao_delete_kernel_receipt_preserves_covering_owners_and_queue_boundary() {
+        use socket2::{Domain, Protocol, SockAddr, Type};
+
+        fn key(secret: &str, id: u8, preferred: bool, deprecated: bool) -> TcpAoConfig {
+            TcpAoConfig {
+                key: secret.into(),
+                send_id: id,
+                recv_id: id,
+                algorithm: TcpAoAlgorithm::HmacSha256,
+                preferred,
+                deprecated,
+            }
+        }
+
+        fn connect_from(source: IpAddr, destination: SocketAddr, keyring: &TcpAoKeyring) -> Socket {
+            let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).unwrap();
+            socket
+                .bind(&SockAddr::from(SocketAddr::new(source, 0)))
+                .unwrap();
+            for (index, config) in keyring.startup_order().into_iter().enumerate() {
+                set_tcp_ao_config(
+                    &socket,
+                    destination.ip(),
+                    32,
+                    config,
+                    if index == 0 {
+                        TcpAoSocketRole::ActiveOpen
+                    } else {
+                        TcpAoSocketRole::Listener
+                    },
+                )
+                .unwrap();
+            }
+            socket
+                .connect_timeout(
+                    &SockAddr::from(destination),
+                    std::time::Duration::from_secs(2),
+                )
+                .unwrap();
+            socket
+        }
+
+        let source = IpAddr::from([127, 0, 0, 2]);
+        let covering_peer = IpAddr::from([127, 0, 0, 0]);
+        let current_covering = TcpAoKeyring(vec![
+            key("lan545-retired-covering", 1, false, true),
+            key("lan545-covering-survivor", 4, false, false),
+        ]);
+        let desired_covering = TcpAoKeyring(vec![key("lan545-covering-survivor", 4, false, false)]);
+        let exact = TcpAoKeyring(vec![key("lan545-successor", 3, true, false)]);
+        let client_current = TcpAoKeyring(vec![
+            key("lan545-retired-covering", 1, false, true),
+            key("lan545-covering-survivor", 4, false, false),
+            key("lan545-successor", 3, true, false),
+        ]);
+        let client_desired = TcpAoKeyring(vec![
+            key("lan545-covering-survivor", 4, false, false),
+            key("lan545-successor", 3, true, false),
+        ]);
+        let current = [
+            TcpAoMktOwner {
+                owner: crate::listener::TcpAoListenerOwnerKind::Dynamic,
+                peer: covering_peer,
+                prefix_len: 24,
+                keyring: &current_covering,
+            },
+            TcpAoMktOwner {
+                owner: crate::listener::TcpAoListenerOwnerKind::Static,
+                peer: source,
+                prefix_len: 32,
+                keyring: &exact,
+            },
+        ];
+        let desired = [
+            TcpAoMktOwner {
+                owner: crate::listener::TcpAoListenerOwnerKind::Dynamic,
+                peer: covering_peer,
+                prefix_len: 24,
+                keyring: &desired_covering,
+            },
+            TcpAoMktOwner {
+                owner: crate::listener::TcpAoListenerOwnerKind::Static,
+                peer: source,
+                prefix_len: 32,
+                keyring: &exact,
+            },
+        ];
+
+        let listener = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).unwrap();
+        listener
+            .bind(&SockAddr::from(
+                "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
+            ))
+            .unwrap();
+        for owner in &current {
+            for config in owner.keyring {
+                set_tcp_ao_config(
+                    &listener,
+                    owner.peer,
+                    owner.prefix_len,
+                    config,
+                    TcpAoSocketRole::Listener,
+                )
+                .unwrap();
+            }
+        }
+        listener.listen(8).unwrap();
+        let destination = listener.local_addr().unwrap().as_socket().unwrap();
+
+        // Complete the handshake but leave the accepted child queued while
+        // the listener inventory shrinks.
+        let queued_client = connect_from(source, destination, &client_current);
+        let listener_preflight = preflight_tcp_ao_delete(&listener, &current, &desired, None)
+            .expect("inactive listener MKT is deletable");
+        assert!(
+            apply_tcp_ao_delete(&listener, listener_preflight, &desired)
+                .unwrap()
+                .is_none()
+        );
+        let listener_keys =
+            get_tcp_ao_keys_with(|entries| query_tcp_ao_keys(&listener, entries)).unwrap();
+        let mut listener_ids = listener_keys
+            .iter()
+            .map(|raw| raw.sndid)
+            .collect::<Vec<_>>();
+        listener_ids.sort_unstable();
+        assert_eq!(listener_ids, vec![3, 4]);
+
+        let (queued_child, _) = listener.accept().unwrap();
+        set_tcp_ao_rnext(&queued_child, 3).unwrap();
+        let queued_before = get_tcp_ao_info(&queued_child).unwrap();
+        assert_eq!(queued_before.keys.len(), 3);
+        let child_preflight =
+            preflight_tcp_ao_delete(&queued_child, &current, &desired, Some(source))
+                .expect("queued child retains an exact deletable previous inventory");
+        let queued_after = apply_tcp_ao_delete(&queued_child, child_preflight, &desired)
+            .unwrap()
+            .expect("connected deletion returns an exact snapshot");
+        assert_eq!(queued_after.current_key, 3);
+        assert_eq!(queued_after.rnext_key, 3);
+        assert_eq!(queued_after.keys.len(), 2);
+        assert!(queued_after.keys.iter().any(|state| {
+            state.peer == covering_peer && state.prefix_len == 24 && state.send_id == 4
+        }));
+        assert!(
+            queued_after.keys.iter().any(|state| {
+                state.peer == source && state.prefix_len == 32 && state.send_id == 3
+            })
+        );
+
+        // A connection completed after listener deletion inherits only the
+        // covering owner plus the exact-owner successor.
+        let post_client = connect_from(source, destination, &client_desired);
+        let (post_child, _) = listener.accept().unwrap();
+        set_tcp_ao_rnext(&post_child, 3).unwrap();
+        let post_info = get_tcp_ao_info(&post_child).unwrap();
+        let mut post_ids = post_info
+            .keys
+            .iter()
+            .map(|state| state.send_id)
+            .collect::<Vec<_>>();
+        post_ids.sort_unstable();
+        assert_eq!(post_ids, vec![3, 4]);
+
+        // The foundation refuses a selected target before DEL_KEY. Exact
+        // inspection afterward proves that refusal did not mutate the child.
+        let covering_only = [TcpAoMktOwner {
+            owner: crate::listener::TcpAoListenerOwnerKind::Dynamic,
+            peer: covering_peer,
+            prefix_len: 24,
+            keyring: &desired_covering,
+        }];
+        let error = preflight_tcp_ao_delete(&post_child, &desired, &covering_only, Some(source))
+            .err()
+            .expect("Current/RNext successor deletion must be refused");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        let after_refusal = get_tcp_ao_info(&post_child).unwrap();
+        let mut after_refusal_ids = after_refusal
+            .keys
+            .iter()
+            .map(|state| state.send_id)
+            .collect::<Vec<_>>();
+        after_refusal_ids.sort_unstable();
+        assert_eq!(after_refusal_ids, vec![3, 4]);
+
+        drop((queued_client, queued_child, post_client, post_child));
     }
 
     #[test]

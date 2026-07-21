@@ -159,6 +159,19 @@ inspection results (KeyIDs, validity flags, per-key inventory, and counters)
 and secret-free desired/applied generation, phase, and failure details for
 static and direct dynamic-prefix protected sessions.
 
+The transport layer contains a deletion foundation but no runtime caller yet.
+It binds Linux `TCP_AO_DEL_KEY` to opaque exact-current and exact-survivor
+receipts, refuses Current/RNext targets before the syscall, never requests a
+forced replacement, uses the exact kernel-returned accepted-child selector,
+and verifies the exact post-delete inventory. The Linux 6.17 hosted receipt
+proves that an established child preserves and accepts its inherited `/24`
+selector for deletion; callers must not replace it with `/32`. The receipt also
+fixes the accept-race fact: a child queued before listener deletion retains the
+prior inventory, while a later child inherits only the survivors. SIGHUP
+deletion, generation advancement, and protected-owner CRUD remain deferred
+until the coordinator can reconcile that adjacent-previous child without
+weakening the covering-owner union invariant.
+
 ## Linux UAPI secrecy and normalization boundary
 
 The Linux v6.17 [`tcp_ao_add`
