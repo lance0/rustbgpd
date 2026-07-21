@@ -104,7 +104,10 @@ pub async fn list(connection: Connection, json: bool) -> Result<(), CliError> {
     render(&resp, json)
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "CLI arguments map directly to one FIB-table request"
+)]
 pub async fn set(
     connection: Connection,
     name: &str,

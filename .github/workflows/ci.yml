@@ -35,7 +35,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ripgrep
       - run: cargo fmt --check
-      - run: python3 scripts/check-clippy-reasons.py
+      - name: Check clippy suppression reasons
+        run: |
+          python3 -m unittest -v scripts/test_check_clippy_reasons.py
+          python3 scripts/check-clippy-reasons.py
       - run: python3 scripts/check-v1-stable-surface.py
       - run: python3 scripts/reflow-release-notes.py --selftest
       - run: cargo clippy --workspace --all-targets -- -D warnings
