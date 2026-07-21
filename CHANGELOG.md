@@ -45,6 +45,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Negotiated session and Graceful Restart state is visible per neighbor.**
+  Neighbor detail reports the current Established session's negotiated hold
+  time, remote router ID, four-octet-AS result, mutual families, usable peer GR
+  coverage, peer-advertised Restart Time, and locally capped effective
+  retention through gRPC, human CLI, and JSON. Presence distinguishes older
+  daemons, stale queries, down sessions, unsupported GR, locally disabled GR,
+  and active helper state without substituting configured defaults.
+
 - **Max-prefix capacity is alertable before teardown.** Prometheus and the
   shipped Grafana overview expose actor-owned usage, finite limits, and
   headroom for aggregate, IPv4-unicast, and IPv6-unicast scopes. Unlimited and

@@ -68,6 +68,7 @@ fn established_policy_handle(peer: IpAddr, acks: EstablishedPolicyPeerAcks) -> P
                         negotiated_hold_time: None,
                         four_octet_as: None,
                         remote_router_id: Some(Ipv4Addr::UNSPECIFIED),
+                        negotiated_session: None,
                         local_role: None,
                         remote_role: None,
                         role_negotiated: false,

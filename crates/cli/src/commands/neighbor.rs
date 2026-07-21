@@ -1,8 +1,9 @@
 use crate::connection::Connection;
 use crate::error::CliError;
 use crate::output::{
-    self, JsonNeighbor, JsonNeighborDetail, JsonPathsLimit, JsonSelectionDeferralFamily,
-    JsonTcpAoKeyState, JsonTcpAoState, JsonUpdateGroupComparison,
+    self, JsonNegotiatedGracefulRestart, JsonNegotiatedSession, JsonNeighbor, JsonNeighborDetail,
+    JsonPathsLimit, JsonSelectionDeferralFamily, JsonTcpAoKeyState, JsonTcpAoState,
+    JsonUpdateGroupComparison,
 };
 use crate::proto::neighbor_service_client::NeighborServiceClient;
 use crate::proto::{
@@ -174,6 +175,7 @@ pub async fn show(
         cfg.map(|config| config.max_prefixes).unwrap_or(0),
     );
     if json {
+        let (negotiation_available, negotiated_session) = negotiated_session_json(&n);
         let out = JsonNeighborDetail {
             address: cfg.map(|c| c.address.clone()).unwrap_or_default(),
             interface: cfg.map(|c| c.interface.clone()).unwrap_or_default(),
@@ -243,6 +245,8 @@ pub async fn show(
             hold_time: cfg.map(|c| c.hold_time).unwrap_or(0),
             send_hold_time: cfg.and_then(|c| c.send_hold_time).unwrap_or(0),
             families: cfg.map(|c| c.families.clone()).unwrap_or_default(),
+            negotiation_available,
+            negotiated_session,
             peer_group: cfg.map(|c| c.peer_group.clone()).unwrap_or_default(),
             route_reflector_client: n.route_reflector_client,
             route_server_client: cfg.map(|c| c.route_server_client).unwrap_or(false),
@@ -330,6 +334,46 @@ pub async fn show(
             "Families:              {}",
             cfg.map(|c| c.families.join(", ")).unwrap_or_default()
         );
+        println!("Negotiation:           {}", negotiation_status_label(&n));
+        if let Some(negotiated) = n.negotiated_session.as_ref() {
+            println!(
+                "Negotiated Hold Time: {}",
+                optional_seconds_label(negotiated.hold_time_seconds)
+            );
+            println!(
+                "Remote Router ID:     {}",
+                negotiated.remote_router_id.as_deref().unwrap_or("unknown")
+            );
+            println!(
+                "Four-Octet AS:        {}",
+                optional_bool_label(negotiated.four_octet_as)
+            );
+            println!(
+                "Negotiated Families:  {}",
+                negotiated_families_label(&negotiated.families)
+            );
+            println!(
+                "Graceful Restart:     {}",
+                graceful_restart_status_label(negotiated.graceful_restart.as_ref())
+            );
+            if let Some(gr) = negotiated.graceful_restart.as_ref() {
+                println!(
+                    "GR Peer Families:    {}",
+                    negotiated_families_label(&gr.peer_families)
+                );
+                println!(
+                    "GR Peer Restart Time: {}",
+                    optional_seconds_label(gr.peer_restart_time_seconds)
+                );
+                println!(
+                    "GR Effective Retention: {}",
+                    gr.effective_retention_time_seconds.map_or_else(
+                        || "disabled locally".to_string(),
+                        |seconds| format!("{seconds}s")
+                    )
+                );
+            }
+        }
         let peer_group = cfg.map(|c| c.peer_group.as_str()).unwrap_or("");
         if !peer_group.is_empty() {
             println!("Peer Group:            {peer_group}");
@@ -525,6 +569,68 @@ pub async fn show(
         }
     }
     Ok(())
+}
+
+fn negotiation_status_label(state: &crate::proto::NeighborState) -> &'static str {
+    match state.negotiation_available {
+        None => "unknown (not exposed by daemon)",
+        Some(false) if state.stale => "unknown (stale state)",
+        Some(false) => "unavailable (session not Established)",
+        Some(true) if state.negotiated_session.is_some() => "negotiated",
+        Some(true) => "unknown (incomplete daemon response)",
+    }
+}
+
+fn negotiated_session_json(
+    state: &crate::proto::NeighborState,
+) -> (Option<bool>, Option<JsonNegotiatedSession>) {
+    let negotiated = state
+        .negotiated_session
+        .as_ref()
+        .map(|negotiated| JsonNegotiatedSession {
+            hold_time_seconds: negotiated.hold_time_seconds,
+            remote_router_id: negotiated.remote_router_id.clone(),
+            four_octet_as: negotiated.four_octet_as,
+            families: negotiated.families.clone(),
+            graceful_restart: negotiated.graceful_restart.as_ref().map(|gr| {
+                JsonNegotiatedGracefulRestart {
+                    peer_families: gr.peer_families.clone(),
+                    peer_restart_time_seconds: gr.peer_restart_time_seconds,
+                    effective_retention_time_seconds: gr.effective_retention_time_seconds,
+                }
+            }),
+        });
+    (state.negotiation_available, negotiated)
+}
+
+fn optional_seconds_label(value: Option<u32>) -> String {
+    value.map_or_else(|| "unknown".to_string(), |seconds| format!("{seconds}s"))
+}
+
+fn optional_bool_label(value: Option<bool>) -> &'static str {
+    match value {
+        Some(true) => "true",
+        Some(false) => "false",
+        None => "unknown",
+    }
+}
+
+fn negotiated_families_label(families: &[String]) -> String {
+    if families.is_empty() {
+        "none".to_string()
+    } else {
+        families.join(", ")
+    }
+}
+
+fn graceful_restart_status_label(
+    state: Option<&crate::proto::NegotiatedGracefulRestartState>,
+) -> &'static str {
+    match state.and_then(|gr| gr.effective_retention_time_seconds) {
+        None if state.is_none() => "unsupported for negotiated families",
+        None => "peer capable; disabled locally",
+        Some(_) => "peer capable; helper active",
+    }
 }
 
 fn comparison_verdict_label(value: i32) -> &'static str {
@@ -961,6 +1067,106 @@ mod tests {
         assert_eq!(effective_max_prefix_limit(Some(20), 10), Some(20));
         assert_eq!(effective_max_prefix_limit(None, 10), Some(10));
         assert_eq!(effective_max_prefix_limit(None, 0), None);
+    }
+
+    /// Load-bearing proof: collapsing protobuf presence, ignoring stale, or
+    /// treating peer GR capability as local helper activation changes at
+    /// least one exact label in this six-state operator matrix.
+    #[test]
+    fn negotiated_runtime_labels_cover_rolling_upgrade_and_gr_states() {
+        let mut state = crate::proto::NeighborState::default();
+        assert_eq!(
+            negotiation_status_label(&state),
+            "unknown (not exposed by daemon)"
+        );
+        assert_eq!(negotiated_session_json(&state).0, None);
+        assert!(negotiated_session_json(&state).1.is_none());
+
+        state.negotiation_available = Some(false);
+        state.stale = true;
+        assert_eq!(negotiation_status_label(&state), "unknown (stale state)");
+        assert_eq!(negotiated_session_json(&state).0, Some(false));
+        assert!(negotiated_session_json(&state).1.is_none());
+
+        state.stale = false;
+        assert_eq!(
+            negotiation_status_label(&state),
+            "unavailable (session not Established)"
+        );
+        assert_eq!(negotiated_session_json(&state).0, Some(false));
+        assert!(negotiated_session_json(&state).1.is_none());
+
+        state.negotiation_available = Some(true);
+        state.negotiated_session = Some(crate::proto::NegotiatedSessionState {
+            hold_time_seconds: Some(0),
+            remote_router_id: Some("192.0.2.7".to_string()),
+            four_octet_as: Some(false),
+            families: vec!["ipv4_unicast".to_string()],
+            graceful_restart: None,
+        });
+        assert_eq!(negotiation_status_label(&state), "negotiated");
+        let negotiated = state.negotiated_session.as_ref().unwrap();
+        assert_eq!(
+            graceful_restart_status_label(negotiated.graceful_restart.as_ref()),
+            "unsupported for negotiated families"
+        );
+        assert_eq!(optional_seconds_label(negotiated.hold_time_seconds), "0s");
+        assert_eq!(optional_bool_label(negotiated.four_octet_as), "false");
+        let (available, json) = negotiated_session_json(&state);
+        assert_eq!(available, Some(true));
+        let json = json.unwrap();
+        assert_eq!(json.hold_time_seconds, Some(0));
+        assert_eq!(json.four_octet_as, Some(false));
+        assert!(json.graceful_restart.is_none());
+
+        state.negotiated_session.as_mut().unwrap().graceful_restart =
+            Some(crate::proto::NegotiatedGracefulRestartState {
+                peer_families: vec!["ipv4_unicast".to_string()],
+                peer_restart_time_seconds: Some(0),
+                effective_retention_time_seconds: None,
+            });
+        let gr = state
+            .negotiated_session
+            .as_ref()
+            .unwrap()
+            .graceful_restart
+            .as_ref();
+        assert_eq!(
+            graceful_restart_status_label(gr),
+            "peer capable; disabled locally"
+        );
+        let json = negotiated_session_json(&state).1.unwrap();
+        let json_gr = json.graceful_restart.unwrap();
+        assert_eq!(json_gr.peer_restart_time_seconds, Some(0));
+        assert_eq!(json_gr.effective_retention_time_seconds, None);
+
+        state
+            .negotiated_session
+            .as_mut()
+            .unwrap()
+            .graceful_restart
+            .as_mut()
+            .unwrap()
+            .effective_retention_time_seconds = Some(300);
+        let gr = state
+            .negotiated_session
+            .as_ref()
+            .unwrap()
+            .graceful_restart
+            .as_ref();
+        assert_eq!(
+            graceful_restart_status_label(gr),
+            "peer capable; helper active"
+        );
+        assert_eq!(
+            negotiated_session_json(&state)
+                .1
+                .unwrap()
+                .graceful_restart
+                .unwrap()
+                .effective_retention_time_seconds,
+            Some(300)
+        );
     }
 
     #[tokio::test]

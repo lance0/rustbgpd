@@ -1271,6 +1271,7 @@ fn established_export_policy_test_session_with_queries(
                         negotiated_hold_time: Some(90),
                         four_octet_as: Some(true),
                         remote_router_id: None,
+                        negotiated_session: None,
                         local_role: None,
                         remote_role: None,
                         role_negotiated: false,
@@ -1345,6 +1346,7 @@ fn rollback_ordering_policy_session(
                         negotiated_hold_time: Some(90),
                         four_octet_as: Some(true),
                         remote_router_id: None,
+                        negotiated_session: None,
                         local_role: None,
                         remote_role: None,
                         role_negotiated: false,
@@ -1425,6 +1427,7 @@ fn stalled_export_policy_test_session(
                         negotiated_hold_time: Some(90),
                         four_octet_as: Some(true),
                         remote_router_id: None,
+                        negotiated_session: None,
                         local_role: None,
                         remote_role: None,
                         role_negotiated: false,
@@ -1578,6 +1581,7 @@ fn max_prefix_on_command_peer_handle(
                         negotiated_hold_time: None,
                         four_octet_as: None,
                         remote_router_id: None,
+                        negotiated_session: None,
                         local_role: None,
                         remote_role: None,
                         role_negotiated: false,
@@ -1748,6 +1752,7 @@ fn fake_peer_handle_with_route_refresh_reply(
                         negotiated_hold_time: None,
                         four_octet_as: None,
                         remote_router_id,
+                        negotiated_session: None,
                         local_role: None,
                         remote_role: None,
                         role_negotiated: false,
@@ -2109,6 +2114,53 @@ async fn max_prefix_snapshot_uses_live_accounting_and_withholds_stale_headroom()
         ),
         (None, None, None)
     );
+
+    let managed = mgr.peers.remove(&peer_key).unwrap();
+    managed.handle.shutdown().await.unwrap().unwrap();
+}
+
+/// Load-bearing proof: copying configured families or the `OpenConfirm` identity
+/// fields when the actor snapshot is absent makes the stale assertion fail;
+/// dropping the live actor projection makes the exact live assertion fail.
+#[tokio::test]
+async fn negotiated_snapshot_uses_only_fresh_established_actor_state() {
+    let mut mgr = test_peer_manager();
+    let addr: IpAddr = "10.0.0.47".parse().unwrap();
+    let handle = fake_peer_handle(
+        addr,
+        SessionState::Idle,
+        None,
+        Arc::new(FakePeerCounters::default()),
+    );
+    insert_test_managed_peer(&mut mgr, addr, handle, false);
+    let peer_key = key(addr);
+    let managed = mgr.peers.get_mut(&peer_key).unwrap();
+    managed.transport_config.peer.families = vec![(Afi::Ipv4, Safi::Unicast)];
+
+    let mut state = policy_test_peer_state(addr, SessionState::Established);
+    state.negotiated_hold_time = Some(90);
+    state.four_octet_as = Some(true);
+    state.remote_router_id = Some(Ipv4Addr::new(198, 51, 100, 1));
+    state.negotiated_session = Some(rustbgpd_transport::NegotiatedSessionState {
+        hold_time: 33,
+        remote_router_id: Ipv4Addr::new(192, 0, 2, 7),
+        four_octet_as: false,
+        families: vec![(Afi::Ipv6, Safi::Unicast)],
+        graceful_restart: None,
+    });
+
+    let live = super::snapshot::build_peer_info(&peer_key, managed, Some(&state));
+    assert_eq!(live.negotiated_session, state.negotiated_session);
+
+    let stale_info = super::snapshot::build_peer_info(&peer_key, managed, None);
+    assert!(stale_info.stale);
+    assert!(stale_info.negotiated_session.is_none());
+
+    state.fsm_state = SessionState::Idle;
+    state.negotiated_session = None;
+    let fresh_down = super::snapshot::build_peer_info(&peer_key, managed, Some(&state));
+    assert!(!fresh_down.stale);
+    assert!(fresh_down.negotiated_session.is_none());
 
     let managed = mgr.peers.remove(&peer_key).unwrap();
     managed.handle.shutdown().await.unwrap().unwrap();
@@ -4522,6 +4574,7 @@ async fn promoted_dynamic_max_prefix_latch_survives_idle_until_explicit_enable()
                         negotiated_hold_time: None,
                         four_octet_as: None,
                         remote_router_id: None,
+                        negotiated_session: None,
                         local_role: None,
                         remote_role: None,
                         role_negotiated: false,
@@ -7224,6 +7277,7 @@ fn acking_counted_policy_handle(peer_addr: IpAddr, counters: Arc<FakePeerCounter
                         negotiated_hold_time: None,
                         four_octet_as: None,
                         remote_router_id: None,
+                        negotiated_session: None,
                         local_role: None,
                         remote_role: None,
                         role_negotiated: false,
@@ -8153,6 +8207,7 @@ fn policy_test_peer_state(peer_addr: IpAddr, state: SessionState) -> PeerSession
         negotiated_hold_time: None,
         four_octet_as: None,
         remote_router_id: None,
+        negotiated_session: None,
         local_role: None,
         remote_role: None,
         role_negotiated: false,
@@ -8196,6 +8251,7 @@ fn acking_policy_handle(peer_addr: IpAddr, state: SessionState) -> PeerHandle {
                         negotiated_hold_time: None,
                         four_octet_as: None,
                         remote_router_id: None,
+                        negotiated_session: None,
                         local_role: None,
                         remote_role: None,
                         role_negotiated: false,
@@ -8310,6 +8366,7 @@ fn sequenced_policy_state_handle(
                         negotiated_hold_time: None,
                         four_octet_as: None,
                         remote_router_id: None,
+                        negotiated_session: None,
                         local_role: None,
                         remote_role: None,
                         role_negotiated: false,
@@ -8379,6 +8436,7 @@ fn export_fails_once_policy_handle(peer_addr: IpAddr, state: SessionState) -> Pe
                         negotiated_hold_time: None,
                         four_octet_as: None,
                         remote_router_id: None,
+                        negotiated_session: None,
                         local_role: None,
                         remote_role: None,
                         role_negotiated: false,
@@ -8445,6 +8503,7 @@ fn route_refresh_failing_handle(peer_addr: IpAddr, state: SessionState) -> PeerH
                         negotiated_hold_time: None,
                         four_octet_as: None,
                         remote_router_id: None,
+                        negotiated_session: None,
                         local_role: None,
                         remote_role: None,
                         role_negotiated: false,
@@ -8509,6 +8568,7 @@ fn route_refresh_failing_after_first_handle(peer_addr: IpAddr, state: SessionSta
                         negotiated_hold_time: None,
                         four_octet_as: None,
                         remote_router_id: None,
+                        negotiated_session: None,
                         local_role: None,
                         remote_role: None,
                         role_negotiated: false,
@@ -9339,6 +9399,7 @@ async fn back_to_back_updates_do_not_lose_pending_refresh() {
                         negotiated_hold_time: Some(90),
                         four_octet_as: Some(true),
                         remote_router_id: Some(Ipv4Addr::new(10, 0, 0, 2)),
+                        negotiated_session: None,
                         local_role: None,
                         remote_role: None,
                         role_negotiated: false,
@@ -9455,6 +9516,7 @@ async fn peer_deletion_after_failed_update_drops_pending_retry_cleanly() {
                         negotiated_hold_time: Some(90),
                         four_octet_as: Some(true),
                         remote_router_id: Some(Ipv4Addr::new(10, 0, 0, 2)),
+                        negotiated_session: None,
                         local_role: None,
                         remote_role: None,
                         role_negotiated: false,
@@ -9589,6 +9651,7 @@ async fn content_equal_policy_fanout_skips_unaffected_peers() {
                             negotiated_hold_time: Some(90),
                             four_octet_as: Some(true),
                             remote_router_id: None,
+                            negotiated_session: None,
                             local_role: None,
                             remote_role: None,
                             role_negotiated: false,
@@ -13046,6 +13109,7 @@ async fn export_policy_apply_times_out_when_rib_reply_wedges() {
                         negotiated_hold_time: None,
                         four_octet_as: None,
                         remote_router_id: None,
+                        negotiated_session: None,
                         local_role: None,
                         remote_role: None,
                         role_negotiated: false,
@@ -13182,6 +13246,7 @@ async fn honor_graceful_shutdown_hot_apply_targets_ebgp_only() {
                             negotiated_hold_time: Some(90),
                             four_octet_as: Some(true),
                             remote_router_id: Some(Ipv4Addr::new(10, 0, 0, 2)),
+                            negotiated_session: None,
                             local_role: None,
                             remote_role: None,
                             role_negotiated: false,
@@ -13361,6 +13426,7 @@ async fn import_apply_failure_on_established_peer_bails_without_refresh() {
                         negotiated_hold_time: Some(90),
                         four_octet_as: Some(true),
                         remote_router_id: Some(Ipv4Addr::new(10, 0, 0, 2)),
+                        negotiated_session: None,
                         local_role: None,
                         remote_role: None,
                         role_negotiated: false,
@@ -13543,6 +13609,7 @@ async fn import_apply_failure_on_idle_peer_bails_and_sets_pending_refresh() {
                         negotiated_hold_time: None,
                         four_octet_as: None,
                         remote_router_id: None,
+                        negotiated_session: None,
                         local_role: None,
                         remote_role: None,
                         role_negotiated: false,
@@ -13719,6 +13786,7 @@ async fn export_apply_failure_bails_without_advancing_bookkeeping() {
                         negotiated_hold_time: None,
                         four_octet_as: None,
                         remote_router_id: None,
+                        negotiated_session: None,
                         local_role: None,
                         remote_role: None,
                         role_negotiated: false,
@@ -13926,6 +13994,7 @@ async fn import_succeeds_export_fails_then_retry_fires_refresh() {
                         negotiated_hold_time: Some(90),
                         four_octet_as: Some(true),
                         remote_router_id: Some(Ipv4Addr::new(10, 0, 0, 2)),
+                        negotiated_session: None,
                         local_role: None,
                         remote_role: None,
                         role_negotiated: false,
@@ -14154,6 +14223,7 @@ async fn rib_failure_preserves_pending_refresh_for_retry() {
                         negotiated_hold_time: Some(90),
                         four_octet_as: Some(true),
                         remote_router_id: Some(Ipv4Addr::new(10, 0, 0, 2)),
+                        negotiated_session: None,
                         local_role: None,
                         remote_role: None,
                         role_negotiated: false,
@@ -14525,6 +14595,7 @@ async fn simultaneous_active_open_runs_inbound_candidate_before_primary_idle() {
                         negotiated_hold_time: None,
                         four_octet_as: None,
                         remote_router_id: None,
+                        negotiated_session: None,
                         local_role: None,
                         remote_role: None,
                         role_negotiated: false,
@@ -14749,6 +14820,7 @@ async fn max_prefix_latch_arriving_during_idle_query_blocks_inbound_replace() {
                         negotiated_hold_time: None,
                         four_octet_as: None,
                         remote_router_id: None,
+                        negotiated_session: None,
                         local_role: None,
                         remote_role: None,
                         role_negotiated: false,

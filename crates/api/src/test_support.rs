@@ -53,6 +53,7 @@ pub(crate) fn peer_info(address: IpAddr) -> PeerInfo {
         max_prefix_restart_seconds: None,
         max_prefix_restart_remaining_millis: None,
         families: Vec::new(),
+        negotiated_session: None,
         remove_private_as: RemovePrivateAs::Disabled,
         route_server_client: false,
         per_client_best: false,

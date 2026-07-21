@@ -450,6 +450,39 @@ impl PeerSession {
                 let prefix_count = self.known_prefix_count();
                 let prefix_count_ipv4 = self.known_unicast_v4;
                 let prefix_count_ipv6 = self.known_unicast_v6;
+                let negotiated_session = (self.fsm.state() == SessionState::Established)
+                    .then(|| {
+                        let negotiated = neg?;
+                        let mut families = negotiated.negotiated_families.clone();
+                        families.sort_by_key(|(afi, safi)| (*afi as u16, *safi as u8));
+                        let graceful_restart = negotiated.peer_gr_capable.then(|| {
+                            let mut peer_families = negotiated
+                                .peer_gr_families
+                                .iter()
+                                .map(|family| (family.afi, family.safi))
+                                .collect::<Vec<_>>();
+                            peer_families.sort_by_key(|(afi, safi)| (*afi as u16, *safi as u8));
+                            crate::NegotiatedGracefulRestartState {
+                                peer_families,
+                                peer_restart_time: negotiated.peer_restart_time,
+                                effective_retention_time: self.config.peer.graceful_restart.then(
+                                    || {
+                                        negotiated
+                                            .peer_restart_time
+                                            .min(self.config.gr_peer_restart_time_max)
+                                    },
+                                ),
+                            }
+                        });
+                        Some(crate::NegotiatedSessionState {
+                            hold_time: negotiated.hold_time,
+                            remote_router_id: negotiated.peer_router_id,
+                            four_octet_as: negotiated.four_octet_as,
+                            families,
+                            graceful_restart,
+                        })
+                    })
+                    .flatten();
                 let state = PeerSessionState {
                     fsm_state: self.fsm.state(),
                     peer_ip: self.peer_ip,
@@ -474,6 +507,7 @@ impl PeerSession {
                     negotiated_hold_time: neg.map(|n| n.hold_time),
                     four_octet_as: neg.map(|n| n.four_octet_as),
                     remote_router_id: neg.map(|n| n.peer_router_id),
+                    negotiated_session,
                     local_role: neg.and_then(|n| n.local_role),
                     remote_role: neg.and_then(|n| n.remote_role),
                     role_negotiated: neg.is_some_and(|n| n.role_negotiated),

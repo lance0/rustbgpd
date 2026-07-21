@@ -25,6 +25,10 @@ fn make_test_session(local_asn: u32, remote_asn: u32) -> PeerSession {
     peer_config.connect_retry_secs = 30;
     peer_config.families = vec![(Afi::Ipv4, Safi::Unicast)];
     peer_config.gr_restart_time = 120;
+    make_test_session_with_peer_config(peer_config)
+}
+
+fn make_test_session_with_peer_config(peer_config: PeerConfig) -> PeerSession {
     let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
     let metrics = BgpMetrics::new();
     let (_cmd_tx, cmd_rx) = mpsc::channel(8);
@@ -574,6 +578,142 @@ async fn warm_checkpoint_query_uses_current_gr_and_add_path_receive_direction() 
     assert_eq!(
         state.add_path_receive_families,
         vec![(Afi::Ipv4, Safi::Unicast), (Afi::L2Vpn, Safi::Evpn),]
+    );
+}
+
+/// Load-bearing proof: removing the Established-state gate, copying configured
+/// families, omitting the peer/local restart-time cap, or projecting the raw
+/// GR capability families instead of their usable intersection makes an exact
+/// field assertion below fail.
+#[tokio::test]
+async fn query_state_projects_established_negotiation_and_capped_gr_runtime() {
+    let mut peer_config = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
+    peer_config.connect_retry_secs = 30;
+    peer_config.families = vec![(Afi::Ipv6, Safi::Unicast), (Afi::Ipv4, Safi::Unicast)];
+    peer_config.graceful_restart = true;
+    peer_config.gr_restart_time = 120;
+    let mut session = make_test_session_with_peer_config(peer_config);
+    session.config.gr_peer_restart_time_max = 300;
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    session.drive_fsm(Event::ManualStart).await;
+    session
+        .drive_fsm(Event::OpenReceived(rustbgpd_wire::OpenMessage {
+            version: 4,
+            my_as: 65002,
+            hold_time: 87,
+            bgp_identifier: Ipv4Addr::new(192, 0, 2, 7),
+            capabilities: vec![
+                Capability::MultiProtocol {
+                    afi: Afi::Ipv4,
+                    safi: Safi::Unicast,
+                },
+                Capability::FourOctetAs { asn: 65002 },
+                Capability::GracefulRestart {
+                    restart_state: false,
+                    notification: false,
+                    restart_time: 777,
+                    families: vec![
+                        rustbgpd_wire::GracefulRestartFamily {
+                            afi: Afi::Ipv6,
+                            safi: Safi::Unicast,
+                            forwarding_preserved: false,
+                        },
+                        rustbgpd_wire::GracefulRestartFamily {
+                            afi: Afi::Ipv4,
+                            safi: Safi::Unicast,
+                            forwarding_preserved: true,
+                        },
+                        rustbgpd_wire::GracefulRestartFamily {
+                            afi: Afi::L2Vpn,
+                            safi: Safi::Evpn,
+                            forwarding_preserved: true,
+                        },
+                    ],
+                },
+            ],
+        }))
+        .await;
+
+    let (pre_reply, pre_state) = oneshot::channel();
+    let _ = session
+        .handle_command(PeerCommand::QueryState { reply: pre_reply })
+        .await;
+    assert!(pre_state.await.unwrap().negotiated_session.is_none());
+
+    session.drive_fsm(Event::KeepaliveReceived).await;
+    let (reply, state) = oneshot::channel();
+    let _ = session
+        .handle_command(PeerCommand::QueryState { reply })
+        .await;
+    let negotiated = state
+        .await
+        .unwrap()
+        .negotiated_session
+        .expect("Established session exposes negotiated values");
+    assert_eq!(negotiated.hold_time, 87);
+    assert_eq!(negotiated.remote_router_id, Ipv4Addr::new(192, 0, 2, 7));
+    assert!(negotiated.four_octet_as);
+    assert_eq!(negotiated.families, vec![(Afi::Ipv4, Safi::Unicast)]);
+    assert_eq!(
+        negotiated.graceful_restart,
+        Some(crate::NegotiatedGracefulRestartState {
+            peer_families: vec![(Afi::Ipv4, Safi::Unicast)],
+            peer_restart_time: 777,
+            effective_retention_time: Some(300),
+        })
+    );
+}
+
+/// Load-bearing proof: deriving effective retention solely from peer GR
+/// capability makes this test fail because the local helper is disabled.
+#[tokio::test]
+async fn query_state_with_local_gr_helper_disabled_omits_effective_retention() {
+    let mut session = make_test_session(65001, 65002);
+    session.config.peer.graceful_restart = false;
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    session.drive_fsm(Event::ManualStart).await;
+    session
+        .drive_fsm(Event::OpenReceived(rustbgpd_wire::OpenMessage {
+            version: 4,
+            my_as: 65002,
+            hold_time: 0,
+            bgp_identifier: Ipv4Addr::new(192, 0, 2, 8),
+            capabilities: vec![
+                Capability::MultiProtocol {
+                    afi: Afi::Ipv4,
+                    safi: Safi::Unicast,
+                },
+                Capability::GracefulRestart {
+                    restart_state: false,
+                    notification: false,
+                    restart_time: 0,
+                    families: vec![rustbgpd_wire::GracefulRestartFamily {
+                        afi: Afi::Ipv4,
+                        safi: Safi::Unicast,
+                        forwarding_preserved: false,
+                    }],
+                },
+            ],
+        }))
+        .await;
+    session.drive_fsm(Event::KeepaliveReceived).await;
+
+    let (reply, state) = oneshot::channel();
+    let _ = session
+        .handle_command(PeerCommand::QueryState { reply })
+        .await;
+    let negotiated = state.await.unwrap().negotiated_session.unwrap();
+    assert_eq!(negotiated.hold_time, 0);
+    assert!(!negotiated.four_octet_as);
+    assert_eq!(
+        negotiated.graceful_restart,
+        Some(crate::NegotiatedGracefulRestartState {
+            peer_families: vec![(Afi::Ipv4, Safi::Unicast)],
+            peer_restart_time: 0,
+            effective_retention_time: None,
+        })
     );
 }
 
