@@ -47,7 +47,7 @@ unicast Linux FIB, the BFD socket actor, and the EVPN dataplane glue).
 | `rustbgpd-evpn-linux` | Linux kernel dataplane for EVPN VTEP mode (`cfg(target_os = "linux")`). Reconciles remote-MAC FDB programming via rtnetlink, surfaces local-MAC observations from `RTNLGRP_NEIGH` upward (plus `RTNLGRP_IPV4_ROUTE` / `RTNLGRP_IPV6_ROUTE` for slice 6a sub-second IP-VRF route observation), supplies Linux rtnetlink dumps for VRF / L3VXLAN inventory (Gate 9), implements the `Dataplane::probe_ip_vrfs` IRB readiness call, and programs FDB nexthop groups via `NDA_NH_ID` / `NHA_FDB` for aliasing-ECMP receive paths (ADR-0059). `linux::nexthop_raw` is the raw-netlink primitive (rtnetlink 0.21 has no nexthop API); `linux::fdb_nhg` is the apply primitive with the CVE-2025-39851 guard; `group_state` + `nh_id_alloc` carry the refcount + NHID-tagging state the reconcile coordinator uses. Consumes domain types from `rustbgpd-evpn`; never imports `rib` or `transport`. See ADR-0054, ADR-0055, ADR-0058, ADR-0059. |
 | `rustbgpd-api` | gRPC server (tonic). Twelve services (eleven native, plus the vendored OpenConfig `gnmi.gNMI` service — Capabilities/Get/Set/Subscribe), proto codegen at build time. |
 | `rustbgpd-telemetry` | Prometheus metrics + structured tracing. |
-| `rbgp` | CLI tool. Client-only generated gRPC stubs; depends on `wire` for shared route/address-family parsing and formatting. Dev tests use `api` and `evpn` mock surfaces. |
+| `rustbgpctl` | CLI Cargo package/library; ships the `rbgp` binary. Client-only generated gRPC stubs; depends on `wire` for shared route/address-family parsing and formatting and on `policy` for policy tooling. Dev tests use `api` and `evpn` mock surfaces. |
 
 ### Hard rules
 
