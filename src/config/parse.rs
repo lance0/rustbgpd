@@ -4,7 +4,10 @@ use super::{
     PeerGroupConfig, Policy, PolicyAction, PolicyChain, PolicyStatement, PolicyStatementConfig,
     Prefix, RouteModifications, Safi, parse_community_match,
 };
-use rustbgpd_policy::{NeighborSetMatch, RouteType};
+use rustbgpd_policy::{
+    NeighborSetMatch, RouteExtendedCommunityAdmin, RouteExtendedCommunityKind, RouteType,
+    encode_route_extended_community,
+};
 
 /// Parse and validate a single CIDR prefix string with optional ge/le bounds.
 fn parse_prefix_entry(
@@ -597,10 +600,20 @@ fn parse_community_values(strings: &[String]) -> Result<CommunityValues, ConfigE
         match cm {
             CommunityMatch::Standard { value } => standard.push(value),
             CommunityMatch::RouteTarget { global, local } => {
-                extended.push(build_rt_ec(global, local)?);
+                extended.push(encode_config_route_community(
+                    s,
+                    RouteExtendedCommunityKind::Target,
+                    global,
+                    local,
+                )?);
             }
             CommunityMatch::RouteOrigin { global, local } => {
-                extended.push(build_ro_ec(global, local)?);
+                extended.push(encode_config_route_community(
+                    s,
+                    RouteExtendedCommunityKind::Origin,
+                    global,
+                    local,
+                )?);
             }
             CommunityMatch::LargeCommunity {
                 global_admin,
@@ -621,44 +634,29 @@ fn parse_community_values(strings: &[String]) -> Result<CommunityValues, ConfigE
     })
 }
 
-/// Build a 2-octet AS Route Target extended community.
-///
-/// Rejects `global` > 65535 since the 2-octet AS-Specific sub-type only
-/// carries a `u16` AS number.
-fn build_rt_ec(global: u32, local: u32) -> Result<ExtendedCommunity, ConfigError> {
-    let asn: u16 = global
-        .try_into()
-        .map_err(|_| ConfigError::InvalidPolicyEntry {
-            reason: format!(
-                "RT extended community ASN {global} exceeds 65535 (2-octet AS sub-type)"
-            ),
-        })?;
-    let mut b = [0u8; 8];
-    b[0] = 0x00; // Transitive Two-Octet AS-Specific
-    b[1] = 0x02; // Route Target
-    b[2..4].copy_from_slice(&asn.to_be_bytes());
-    b[4..8].copy_from_slice(&local.to_be_bytes());
-    Ok(ExtendedCommunity::new(u64::from_be_bytes(b)))
-}
+/// Encode an RT/RO config action without losing whether its administrator was
+/// written as a numeric ASN or a dotted IPv4 address. `CommunityMatch` stays
+/// encoding-agnostic, so this action-only path recovers the spelling from the
+/// already validated config literal.
+fn encode_config_route_community(
+    spelling: &str,
+    kind: RouteExtendedCommunityKind,
+    global: u32,
+    local: u32,
+) -> Result<ExtendedCommunity, ConfigError> {
+    let admin_spelling = spelling
+        .split(':')
+        .nth(1)
+        .expect("validated RT/RO literal has a global administrator");
+    let admin = if let Ok(address) = admin_spelling.parse::<Ipv4Addr>() {
+        debug_assert_eq!(u32::from(address), global);
+        RouteExtendedCommunityAdmin::Ipv4(address)
+    } else {
+        RouteExtendedCommunityAdmin::Asn(global)
+    };
 
-/// Build a 2-octet AS Route Origin extended community.
-///
-/// Rejects `global` > 65535 since the 2-octet AS-Specific sub-type only
-/// carries a `u16` AS number.
-fn build_ro_ec(global: u32, local: u32) -> Result<ExtendedCommunity, ConfigError> {
-    let asn: u16 = global
-        .try_into()
-        .map_err(|_| ConfigError::InvalidPolicyEntry {
-            reason: format!(
-                "RO extended community ASN {global} exceeds 65535 (2-octet AS sub-type)"
-            ),
-        })?;
-    let mut b = [0u8; 8];
-    b[0] = 0x00; // Transitive Two-Octet AS-Specific
-    b[1] = 0x03; // Route Origin
-    b[2..4].copy_from_slice(&asn.to_be_bytes());
-    b[4..8].copy_from_slice(&local.to_be_bytes());
-    Ok(ExtendedCommunity::new(u64::from_be_bytes(b)))
+    encode_route_extended_community(kind, admin, local)
+        .map_err(|reason| ConfigError::InvalidPolicyEntry { reason })
 }
 
 /// Parse a list of address family strings into `(Afi, Safi)` pairs.

@@ -11,6 +11,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **RFC-correct RT/RO policy action encoding.** TOML
+  `set_community_add` / `set_community_remove` and `.rpol` `add` / `remove`
+  actions now share the same typed encoder: numeric ASNs through 65535 use RFC
+  4360 type `0x00`, larger ASNs use RFC 5668 type `0x02`, and dotted IPv4
+  administrators preserve their spelling and use RFC 4360 type `0x01`. The
+  narrow AS4/IPv4 forms reject local administrators above 65535 with an
+  actionable config error.
+
 - **RFC 8092 Large Community duplicate normalization.** Received attributes
   silently retain only the first occurrence of each value, and the encoder
   applies the same stable deduplication so locally constructed API or policy

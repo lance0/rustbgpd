@@ -2108,10 +2108,19 @@ accept these formats:
 |--------|---------|------|
 | `ASN:VALUE` | `"65001:100"` | Standard community |
 | Well-known name | `"NO_EXPORT"`, `"NO_ADVERTISE"`, `"NO_EXPORT_SUBCONFED"`, `"BLACKHOLE"`, `"GRACEFUL_SHUTDOWN"` | Standard community |
-| `RT:ASN:VALUE` | `"RT:65001:100"` | Extended community (route target) |
-| `RO:ASN:VALUE` | `"RO:65001:200"` | Extended community (route origin) |
+| `RT:ADMIN:VALUE` | `"RT:65001:100"`, `"RT:192.0.2.1:100"` | Extended community (route target) |
+| `RO:ADMIN:VALUE` | `"RO:65001:200"`, `"RO:192.0.2.1:200"` | Extended community (route origin) |
 | Well-known name | `"OV_VALID"`, `"OV_NOT_FOUND"`, `"OV_INVALID"` | Extended community (RFC 8097 origin-validation state; matched/added/removed by exact wire value) |
 | `LC:G:L1:L2` | `"LC:65001:100:200"` | Large community (RFC 8092) |
+
+RT/RO actions select the administrator-specific wire format from the literal:
+numeric ASNs through 65535 use the RFC 4360 two-octet-AS form (type `0x00`)
+with a 32-bit local administrator, larger ASNs use the RFC 5668 four-octet-AS
+form (type `0x02`) with a 16-bit local administrator, and dotted IPv4
+administrators use the RFC 4360 IPv4-specific form (type `0x01`) with a 16-bit
+local administrator. Thus `RT:65535:70000` is valid, while
+`RT:65536:70000` and `RT:192.0.2.1:70000` are rejected. Match expressions
+remain encoding-agnostic across the three forms.
 
 ### AS_PATH regex
 
@@ -3608,7 +3617,7 @@ starting:
 | `set_*` fields cannot be used with `action = "deny"` | `set_* fields cannot be used with action = "deny"` |
 | `set_as_path_prepend.count` must be 1--10 | `count must be 1-10` |
 | `match_as_path` must be a valid regex | `invalid regex` |
-| RT/RO extended community ASN must be <= 65535 (2-octet AS sub-type) | `ASN exceeds 65535` |
+| RT/RO local administrator must be <= 65535 for a 4-octet ASN or dotted IPv4 administrator; numeric ASNs <= 65535 carry a u32 local value | `local admin ... exceeds 65535 for ...` |
 | RPKI `refresh_interval`, `retry_interval`, `expire_interval` must be > 0 | `must be > 0` |
 | RPKI `expire_interval` must be >= `refresh_interval` | `expire_interval must be >= refresh_interval` |
 | Named policy referenced in chain must exist in `[policy.definitions]` | `undefined policy` |

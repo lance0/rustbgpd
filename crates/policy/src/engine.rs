@@ -523,6 +523,87 @@ fn merge_equivalent_list<T: Copy>(
     current_remove.extend(new_remove);
 }
 
+/// The well-known route extended-community subtype to encode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RouteExtendedCommunityKind {
+    /// Route Target (subtype `0x02`).
+    Target,
+    /// Route Origin (subtype `0x03`).
+    Origin,
+}
+
+/// The typed global administrator of a route extended community.
+///
+/// Keeping the administrator kind explicit matters because a dotted IPv4
+/// address and a numeric ASN can have the same `u32` value but require
+/// different RFC 4360 wire encodings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RouteExtendedCommunityAdmin {
+    /// An Autonomous System number.
+    Asn(u32),
+    /// An IPv4-address administrator.
+    Ipv4(Ipv4Addr),
+}
+
+/// Encode a transitive Route Target or Route Origin extended community.
+///
+/// RFC 4360 uses the two-octet-AS form (type `0x00`) for ASNs through 65535
+/// and the IPv4-specific form (type `0x01`) for dotted IPv4 administrators.
+/// RFC 5668 adds the four-octet-AS form (type `0x02`). The two latter forms
+/// have a two-octet local administrator; the two-octet-AS form has four.
+///
+/// # Errors
+///
+/// Returns an actionable error when the local administrator cannot fit the
+/// selected wire format.
+pub fn encode_route_extended_community(
+    kind: RouteExtendedCommunityKind,
+    admin: RouteExtendedCommunityAdmin,
+    local: u32,
+) -> Result<ExtendedCommunity, String> {
+    let (label, subtype) = match kind {
+        RouteExtendedCommunityKind::Target => ("RT", 0x02),
+        RouteExtendedCommunityKind::Origin => ("RO", 0x03),
+    };
+
+    let raw = match admin {
+        RouteExtendedCommunityAdmin::Asn(asn) => {
+            if let Ok(global) = u16::try_from(asn) {
+                let global = global.to_be_bytes();
+                let local = local.to_be_bytes();
+                u64::from_be_bytes([
+                    0x00, subtype, global[0], global[1], local[0], local[1], local[2], local[3],
+                ])
+            } else {
+                let local = u16::try_from(local).map_err(|_| {
+                    format!(
+                        "{label} extended community local administrator {local} exceeds 65535 for 4-octet ASN {asn}"
+                    )
+                })?;
+                let global = asn.to_be_bytes();
+                let local = local.to_be_bytes();
+                u64::from_be_bytes([
+                    0x02, subtype, global[0], global[1], global[2], global[3], local[0], local[1],
+                ])
+            }
+        }
+        RouteExtendedCommunityAdmin::Ipv4(address) => {
+            let local = u16::try_from(local).map_err(|_| {
+                format!(
+                    "{label} extended community local administrator {local} exceeds 65535 for IPv4 global administrator {address}"
+                )
+            })?;
+            let global = address.octets();
+            let local = local.to_be_bytes();
+            u64::from_be_bytes([
+                0x01, subtype, global[0], global[1], global[2], global[3], local[0], local[1],
+            ])
+        }
+    };
+
+    Ok(ExtendedCommunity::new(raw))
+}
+
 /// A match criterion for community values (standard, extended, or large).
 ///
 /// Extended community matching is encoding-agnostic: a 2-octet AS RT,
@@ -699,25 +780,28 @@ pub fn parse_community_match(s: &str) -> Result<CommunityMatch, String> {
         }
         // Extended community: "TYPE:GLOBAL:LOCAL"
         3 => {
-            let (global, local_must_fit_u16): (u32, bool) = if let Ok(asn) = parts[1].parse::<u32>()
-            {
-                (asn, asn > u32::from(u16::MAX))
-            } else if let Ok(ipv4) = parts[1].parse::<Ipv4Addr>() {
-                (u32::from(ipv4), true)
-            } else {
-                return Err(format!(
-                    "invalid global admin {:?}: expected ASN (u32) or IPv4 address",
-                    parts[1]
-                ));
-            };
+            let (global, narrow_local_admin): (u32, Option<&str>) =
+                if let Ok(asn) = parts[1].parse::<u32>() {
+                    (asn, (asn > u32::from(u16::MAX)).then_some("4-octet ASN"))
+                } else if let Ok(ipv4) = parts[1].parse::<Ipv4Addr>() {
+                    (u32::from(ipv4), Some("IPv4 global administrator"))
+                } else {
+                    return Err(format!(
+                        "invalid global admin {:?}: expected ASN (u32) or IPv4 address",
+                        parts[1]
+                    ));
+                };
 
             let local: u32 = parts[2]
                 .parse()
                 .map_err(|_| format!("invalid local admin {:?}: expected u32", parts[2]))?;
 
-            if local_must_fit_u16 && local > u32::from(u16::MAX) {
+            if let Some(admin_kind) = narrow_local_admin
+                && local > u32::from(u16::MAX)
+            {
                 return Err(format!(
-                    "invalid local admin {local:?}: exceeds 65535 for IPv4-specific or 4-octet-AS RT/RO"
+                    "invalid local admin {local}: exceeds 65535 for {admin_kind} {}",
+                    parts[1]
                 ));
             }
 
@@ -1819,6 +1903,39 @@ fn apply_as_path_prepend(attrs: &mut Vec<PathAttribute>, asn: u32, count: u8) {
 /// Statement-level chain attribution for explain surfaces. Explain-only:
 /// the live evaluation path never routes through this module.
 pub mod explain;
+
+#[cfg(test)]
+mod route_extended_community_encoder_tests {
+    use super::*;
+
+    #[test]
+    fn narrow_local_administrators_reject_overflow() {
+        // Red proof: removing either `u16::try_from(local)` guard from the
+        // shared encoder makes its corresponding assertion return `Ok`.
+        assert_eq!(
+            encode_route_extended_community(
+                RouteExtendedCommunityKind::Target,
+                RouteExtendedCommunityAdmin::Asn(100_000),
+                70_000,
+            ),
+            Err(
+                "RT extended community local administrator 70000 exceeds 65535 for 4-octet ASN 100000"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            encode_route_extended_community(
+                RouteExtendedCommunityKind::Origin,
+                RouteExtendedCommunityAdmin::Ipv4(Ipv4Addr::new(192, 0, 2, 1)),
+                70_000,
+            ),
+            Err(
+                "RO extended community local administrator 70000 exceeds 65535 for IPv4 global administrator 192.0.2.1"
+                    .to_string()
+            )
+        );
+    }
+}
 
 #[cfg(test)]
 mod tests;

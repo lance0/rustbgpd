@@ -334,6 +334,59 @@ fn modification_actions_lower_to_route_modifications() {
     assert_eq!(ec.route_target(), Some((65001, 100)));
 }
 
+#[test]
+fn route_community_actions_lower_to_exact_rfc_bytes() {
+    // Red proof: changing `.rpol` lowering to select type from only the numeric
+    // global value makes the dotted-IPv4 rows type 0x02; forcing type 0x00,
+    // swapping either subtype, or delegating only add/remove breaks this exact
+    // byte matrix and its add/remove parity.
+    let chain = compile_ok(
+        "policy p {
+             term t {
+                 add ext-community RT:65001:100;
+                 add ext-community RO:65001:200;
+                 add ext-community RT:100000:100;
+                 add ext-community RO:100000:200;
+                 add ext-community RT:192.0.2.1:100;
+                 add ext-community RO:192.0.2.1:200;
+                 add ext-community RT:65535:70000;
+                 remove ext-community RT:65001:100;
+                 remove ext-community RO:65001:200;
+                 remove ext-community RT:100000:100;
+                 remove ext-community RO:100000:200;
+                 remove ext-community RT:192.0.2.1:100;
+                 remove ext-community RO:192.0.2.1:200;
+                 remove ext-community RT:65535:70000;
+                 accept
+             }
+         }",
+    );
+    let TermAction::Permit(mods) = &chain.policies[0].terms[0].action else {
+        panic!("expected permit")
+    };
+    let expected = vec![
+        0x0002_FDE9_0000_0064,
+        0x0003_FDE9_0000_00C8,
+        0x0202_0001_86A0_0064,
+        0x0203_0001_86A0_00C8,
+        0x0102_C000_0201_0064,
+        0x0103_C000_0201_00C8,
+        0x0002_FFFF_0001_1170,
+    ];
+    let added: Vec<u64> = mods
+        .extended_communities_add
+        .iter()
+        .map(|community| community.as_u64())
+        .collect();
+    let removed: Vec<u64> = mods
+        .extended_communities_remove
+        .iter()
+        .map(|community| community.as_u64())
+        .collect();
+    assert_eq!(added, expected);
+    assert_eq!(removed, expected);
+}
+
 // ── diagnostics (every error path asserts its rendering) ──────────
 
 #[test]
