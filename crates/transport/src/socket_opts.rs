@@ -513,6 +513,8 @@ const TCP_AO_INFO_SET_RNEXT: u32 = tcp_ao_u32_bitfield_mask(1, TCP_AO_TARGET_BIG
 #[cfg(target_os = "linux")]
 const TCP_AO_INFO_AO_REQUIRED: u32 = tcp_ao_u32_bitfield_mask(2, TCP_AO_TARGET_BIG_ENDIAN);
 #[cfg(target_os = "linux")]
+const TCP_AO_INFO_SET_COUNTERS: u32 = tcp_ao_u32_bitfield_mask(3, TCP_AO_TARGET_BIG_ENDIAN);
+#[cfg(target_os = "linux")]
 const TCP_AO_INFO_ACCEPT_ICMPS: u32 = tcp_ao_u32_bitfield_mask(4, TCP_AO_TARGET_BIG_ENDIAN);
 #[cfg(target_os = "linux")]
 const TCP_AO_GET_IS_CURRENT: u16 = tcp_ao_u16_bitfield_mask(0, TCP_AO_TARGET_BIG_ENDIAN);
@@ -1311,8 +1313,10 @@ where
     K: FnMut() -> io::Result<Vec<TcpAoGetSockOpt>>,
 {
     for _ in 0..TCP_AO_KEY_QUERY_ATTEMPTS {
-        let info = info_query()?;
+        // Read INFO after the key dump so counters that change during
+        // GET_KEYS are not hidden by an earlier snapshot.
         let keys = key_query()?;
+        let info = info_query()?;
         if tcp_ao_inventory_consistent(&info, &keys) {
             return Ok((info, keys));
         }
@@ -1855,7 +1859,11 @@ pub(crate) fn get_tcp_ao_info_for_receipt(
     reason = "TCP-AO RNext selection uses the raw Linux TCP_AO_INFO ABI"
 )]
 pub(crate) fn set_tcp_ao_rnext(socket: &impl AsRawFd, recv_id: u8) -> io::Result<()> {
-    let info = tcp_ao_rnext_update(recv_id);
+    // Linux assigns both policy flags on every TCP_AO_INFO set. Preserve them
+    // without copying Current, RNext-presence, or counter setter bits from the
+    // getter into this deliberately fresh setter.
+    let current = get_tcp_ao_info_only(socket)?;
+    let info = tcp_ao_rnext_update(recv_id, &current);
     let ret = unsafe {
         libc::setsockopt(
             socket.as_raw_fd(),
@@ -1873,9 +1881,18 @@ pub(crate) fn set_tcp_ao_rnext(socket: &impl AsRawFd, recv_id: u8) -> io::Result
 }
 
 #[cfg(target_os = "linux")]
-fn tcp_ao_rnext_update(recv_id: u8) -> TcpAoInfoOpt {
+fn tcp_ao_rnext_update(recv_id: u8, current: &TcpAoInfoSnapshot) -> TcpAoInfoOpt {
+    let mut flags = TCP_AO_INFO_SET_RNEXT;
+    if current.ao_required {
+        flags |= TCP_AO_INFO_AO_REQUIRED;
+    }
+    if current.accept_icmps {
+        flags |= TCP_AO_INFO_ACCEPT_ICMPS;
+    }
+    debug_assert_eq!(flags & TCP_AO_INFO_SET_CURRENT, 0);
+    debug_assert_eq!(flags & TCP_AO_INFO_SET_COUNTERS, 0);
     TcpAoInfoOpt {
-        flags: TCP_AO_INFO_SET_RNEXT,
+        flags,
         reserved2: 0,
         current_key: 0,
         rnext: recv_id,
@@ -3000,11 +3017,66 @@ mod tests {
     }
 
     #[test]
-    fn tcp_ao_passive_rnext_update_never_forces_current() {
-        let update = tcp_ao_rnext_update(19);
-        assert_eq!(update.flags, TCP_AO_INFO_SET_RNEXT);
+    fn tcp_ao_passive_rnext_update_preserves_policy_without_forcing_current_or_counters() {
+        let current = TcpAoInfoSnapshot::from_raw(&TcpAoInfoOpt {
+            flags: TCP_AO_INFO_SET_CURRENT
+                | TCP_AO_INFO_SET_RNEXT
+                | TCP_AO_INFO_AO_REQUIRED
+                | TCP_AO_INFO_ACCEPT_ICMPS,
+            reserved2: 0,
+            current_key: 7,
+            rnext: 9,
+            pkt_good: 11,
+            pkt_bad: 13,
+            pkt_key_not_found: 17,
+            pkt_ao_required: 19,
+            pkt_dropped_icmp: 23,
+        });
+        let update = tcp_ao_rnext_update(29, &current);
+        assert_eq!(
+            update.flags,
+            TCP_AO_INFO_SET_RNEXT | TCP_AO_INFO_AO_REQUIRED | TCP_AO_INFO_ACCEPT_ICMPS
+        );
+        assert_eq!(update.flags & TCP_AO_INFO_SET_CURRENT, 0);
+        assert_eq!(update.flags & TCP_AO_INFO_SET_COUNTERS, 0);
         assert_eq!(update.current_key, 0);
-        assert_eq!(update.rnext, 19);
+        assert_eq!(update.rnext, 29);
+        assert_eq!(update.pkt_good, 0);
+        assert_eq!(update.pkt_bad, 0);
+        assert_eq!(update.pkt_key_not_found, 0);
+        assert_eq!(update.pkt_ao_required, 0);
+        assert_eq!(update.pkt_dropped_icmp, 0);
+    }
+
+    #[test]
+    fn tcp_ao_composite_snapshot_uses_trailing_info_counters() {
+        let key_queried = std::cell::Cell::new(false);
+        let (info, _) = get_tcp_ao_snapshot_with(
+            || {
+                Ok(TcpAoInfoSnapshot::from_raw(&TcpAoInfoOpt {
+                    flags: TCP_AO_INFO_SET_CURRENT | TCP_AO_INFO_SET_RNEXT,
+                    reserved2: 0,
+                    current_key: 7,
+                    rnext: 9,
+                    pkt_good: 1,
+                    pkt_bad: u64::from(key_queried.get()),
+                    pkt_key_not_found: 0,
+                    pkt_ao_required: 0,
+                    pkt_dropped_icmp: 0,
+                }))
+            },
+            || {
+                key_queried.set(true);
+                Ok(vec![raw_dump_key(
+                    IpAddr::from([192, 0, 2, 1]),
+                    "hmac(sha256)",
+                    b"secret",
+                )])
+            },
+        )
+        .unwrap();
+        assert!(key_queried.get());
+        assert_eq!(info.pkt_bad, 1);
     }
 
     #[test]
