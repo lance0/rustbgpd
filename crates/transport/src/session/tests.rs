@@ -2274,6 +2274,81 @@ fn connect_failure_is_retained_for_neighbor_diagnostics() {
     session.record_connect_failure(&error);
     assert_eq!(session.last_error, error.to_string());
 }
+
+/// Mutant: removing the sent-cause assignment leaves this snapshot empty.
+#[tokio::test]
+async fn required_family_rejection_reports_descriptive_sent_notification() {
+    let mut config = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
+    config.families = vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
+    config.required_families = vec![(Afi::Ipv6, Safi::Unicast)];
+    let mut session = make_test_session_with_peer_config(config);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    session.drive_fsm(Event::ManualStart).await;
+    session
+        .drive_fsm(Event::OpenReceived(rustbgpd_wire::OpenMessage {
+            version: 4,
+            my_as: 65002,
+            hold_time: 90,
+            bgp_identifier: Ipv4Addr::new(10, 0, 0, 2),
+            capabilities: vec![Capability::MultiProtocol {
+                afi: Afi::BgpLs,
+                safi: Safi::BgpLs,
+            }],
+        }))
+        .await;
+
+    let (reply, state) = oneshot::channel();
+    let _ = session
+        .handle_command(PeerCommand::QueryState { reply })
+        .await;
+    assert_eq!(
+        state.await.unwrap().last_error,
+        "sent NOTIFICATION 2/7 (Unsupported Capability)"
+    );
+}
+/// Mutant: restoring numeric-only receive state loses direction and description.
+#[tokio::test]
+async fn received_notification_reports_direction_and_description() {
+    let mut session = make_test_session(65001, 65002);
+    let notification = NotificationMessage::new(
+        NotificationCode::Cease,
+        cease_subcode::OUT_OF_RESOURCES,
+        Bytes::new(),
+    );
+    session.read_buf.buf.extend_from_slice(
+        &rustbgpd_wire::encode_message(&Message::Notification(notification)).unwrap(),
+    );
+    session.process_read_buffer().await;
+    assert_eq!(
+        session.last_error,
+        "received NOTIFICATION 6/8 (Out of Resources)"
+    );
+}
+/// Mutant: removing the sent-admin guard mislabels intentional local maintenance.
+#[test]
+fn administrative_notifications_keep_directional_maintenance_semantics() {
+    let mut session = make_test_session(65001, 65002);
+    session.last_error = "previous actionable failure".to_string();
+    for subcode in [
+        cease_subcode::ADMINISTRATIVE_SHUTDOWN,
+        cease_subcode::ADMINISTRATIVE_RESET,
+    ] {
+        let notification = NotificationMessage::new(NotificationCode::Cease, subcode, Bytes::new());
+        session.record_notification_cause(SessionNotificationDirection::Sent, &notification);
+        assert_eq!(session.last_error, "previous actionable failure");
+    }
+    let reset = NotificationMessage::new(
+        NotificationCode::Cease,
+        cease_subcode::ADMINISTRATIVE_RESET,
+        Bytes::new(),
+    );
+    session.record_notification_cause(SessionNotificationDirection::Received, &reset);
+    assert_eq!(
+        session.last_error,
+        "received NOTIFICATION 6/4 (Administrative Reset)"
+    );
+}
 /// LAN-201: a partial repair attempt — `PeerDown` enqueued, `PeerUp` hits
 /// a full channel — leaves the latch set and retries. The collector-visible
 /// sequence carries a duplicate `PeerDown`, which is acceptable: RFC 7854
@@ -14006,8 +14081,8 @@ async fn rr_originator_loop_withdraws_mp_add_paths_before_gr_and_preserves_sibli
 /// invariants without trying to force kernel TCP buffer saturation
 /// from a unit test. Load-bearing idempotency proof: removing the live-writer
 /// guard makes the second trigger increment both notification counters and
-/// emit a second `SessionNotificationEvent`, even though its notification
-/// cannot reach the already-closed writer.
+/// emit a second `SessionNotificationEvent`, while removing the cause recorder
+/// loses the exact `last_error`; its notification cannot reach the closed writer.
 #[tokio::test]
 async fn outbound_saturation_teardown_emits_cease_out_of_resources() {
     use rustbgpd_wire::notification::{NotificationCode, cease_subcode};
@@ -14026,6 +14101,10 @@ async fn outbound_saturation_teardown_emits_cease_out_of_resources() {
     assert_eq!(
         session.notifications_sent, 1,
         "a duplicate saturation trigger must not invent another sent notification"
+    );
+    assert_eq!(
+        session.last_error,
+        "sent NOTIFICATION 6/8 (Out of Resources)"
     );
     let prometheus_count = counter_value(
         &session.metrics,
