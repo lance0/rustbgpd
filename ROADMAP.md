@@ -50,7 +50,7 @@ those.
 | ASPA verification | Partial | Role-aware verification and policy match shipped; RTR v2 replacement/withdrawal semantics shipped; M84 RTR/ASPA epoch conformance lab shipped |
 | Policy: prefix lists, named chains, actions, community/AS_PATH/validation match | Shipped | GoBGP-style chain evaluation |
 | Policy: `.rpol` typed compiled language (ADR-0096) | Shipped | Named sets, `u32` parameters, in-language tests (`rbgp policy check`), live-RIB dry run (`rbgp policy test`), per-term explain traces + live hit counters (`rbgp policy stats`); M80 FRR route-map parity receipt |
-| BFD single-hop async + RFC 5882 coupling | Partial | M51 base receipt; receive-work budgeting and remote-AdminDown coupling corrections shipped; re-receipt queued |
+| BFD single-hop async + RFC 5882 coupling | Partial | M51 receipt revalidated green on current main by #1093 (`8b8f76e8`); receive-work budgeting and remote-AdminDown coupling corrections shipped; authentication remains demand/interoperability gated by ADR-0117 |
 | Observability & API: gRPC (11 services), Prometheus, structured logs, durable event history | Shipped | ADR-0072 outbox + `SubscribeFromEvent` |
 | gNMI / OpenConfig telemetry + Set subset | Partial | `Get` / `Subscribe`, BGP state subset; static numbered-neighbor `Set` + commit-confirmed; broader OpenConfig config/state deferred |
 | BMP trio (7854 + 8671 Adj-RIB-Out + 9069 Loc-RIB) + BMPv4/path-marking drafts, MRT dump (6396) | Shipped | Per-collector views + `version = 3\|4`; ADR-0097, M81 receipt |
