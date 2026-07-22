@@ -804,6 +804,24 @@ does not change that boundary.
 
 ---
 
+## RFC 9072 — Extended OPEN Optional Parameters Length
+
+- Outbound OPEN messages retain the RFC 4271 format while the complete
+  Optional Parameters field is at most 255 octets. Larger fields use Optional
+  Parameter type 255 as the extended-length marker, a 16-bit aggregate length,
+  and 16-bit lengths for each enclosed Optional Parameter.
+- Extended-format OPEN messages are accepted even when their aggregate length
+  is 255 or less, including zero. The non-extended length octet is ignored
+  after the type-255 marker is recognized, as required by RFC 9072 §2.
+- The Capabilities Optional Parameter remains type 2, and individual capability
+  TLVs retain their 8-bit value lengths. Unknown capabilities are preserved;
+  an unknown Optional Parameter type is rejected with OPEN Message Error /
+  Unsupported Optional Parameter (2/4) and empty Notification Data.
+- RFC 8654 does not extend OPEN: both classic and RFC 9072 encodings remain
+  subject to the 4096-byte message maximum.
+
+---
+
 ## RFC 7911 — Add-Path
 
 ### Experimental Paths-Limit

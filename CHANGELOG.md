@@ -69,6 +69,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **RFC 9072 extended BGP OPEN Optional Parameters lengths.** OPEN messages
+  keep the RFC 4271 encoding through 255 optional-parameter octets and use the
+  extended aggregate and per-parameter lengths only above that boundary.
+  Receivers accept extended encodings at any length, including zero, while
+  OPEN remains bounded to 4096 bytes. Unsupported Optional Parameter types
+  now produce OPEN Message Error / Unsupported Optional Parameter (2/4);
+  unknown capabilities inside the Capabilities parameter remain accepted.
+
 - **Fail-closed live TCP-AO MKT deletion on SIGHUP.** After a successor has
   been selected and its predecessor deprecated, a later immutable generation
   can remove only deprecated MKTs that are neither Current nor RNext while

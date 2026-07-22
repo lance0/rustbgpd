@@ -1,6 +1,6 @@
 use bytes::{Buf, BufMut};
 
-use crate::constants::{self, HEADER_LEN, MARKER, MARKER_LEN, MIN_MESSAGE_LEN};
+use crate::constants::{self, HEADER_LEN, MARKER, MARKER_LEN, MAX_MESSAGE_LEN, MIN_MESSAGE_LEN};
 use crate::error::DecodeError;
 
 /// BGP message type codes.
@@ -68,7 +68,8 @@ impl BgpHeader {
     ///
     /// `max_message_len` is the negotiated maximum message length: 4096
     /// normally, or 65535 when Extended Messages (RFC 8654) has been
-    /// negotiated.
+    /// negotiated. OPEN and KEEPALIVE are excluded by RFC 8654 and remain
+    /// capped at 4096 regardless of the supplied session limit.
     ///
     /// # Errors
     ///
@@ -97,6 +98,11 @@ impl BgpHeader {
         let type_byte = buf.get_u8();
         let message_type =
             MessageType::from_u8(type_byte).ok_or(DecodeError::UnknownMessageType(type_byte))?;
+        if matches!(message_type, MessageType::Open | MessageType::Keepalive)
+            && length > MAX_MESSAGE_LEN
+        {
+            return Err(DecodeError::InvalidLength { length });
+        }
 
         Ok(Self {
             length,
@@ -120,6 +126,8 @@ impl BgpHeader {
 ///
 /// `max_message_len` is the negotiated maximum message length: 4096
 /// normally, or 65535 when Extended Messages (RFC 8654) has been negotiated.
+/// OPEN and KEEPALIVE remain capped at 4096 and are rejected here before a
+/// framing caller buffers the declared body.
 ///
 /// Does NOT advance the buffer.
 ///
@@ -143,8 +151,12 @@ pub fn peek_message_length(buf: &[u8], max_message_len: u16) -> Result<Option<u1
     }
 
     let type_byte = buf[18];
-    if MessageType::from_u8(type_byte).is_none() {
-        return Err(DecodeError::UnknownMessageType(type_byte));
+    let message_type =
+        MessageType::from_u8(type_byte).ok_or(DecodeError::UnknownMessageType(type_byte))?;
+    if matches!(message_type, MessageType::Open | MessageType::Keepalive)
+        && length > MAX_MESSAGE_LEN
+    {
+        return Err(DecodeError::InvalidLength { length });
     }
 
     Ok(Some(length))
@@ -276,6 +288,20 @@ mod tests {
     }
 
     #[test]
+    fn extended_limit_excludes_open_and_keepalive_during_header_decode() {
+        for msg_type in [MessageType::Open, MessageType::Keepalive] {
+            let mut buf = make_header(4097, msg_type.as_u8()).freeze();
+
+            // Mutation-red: removing either per-type branch lets its 4097-byte
+            // header through under the negotiated extended limit.
+            assert_eq!(
+                BgpHeader::decode(&mut buf, EXTENDED_MAX_MESSAGE_LEN),
+                Err(DecodeError::InvalidLength { length: 4097 })
+            );
+        }
+    }
+
+    #[test]
     fn standard_rejects_4097() {
         let mut buf = make_header(4097, 2).freeze();
         assert!(matches!(
@@ -291,6 +317,20 @@ mod tests {
             peek_message_length(&buf, EXTENDED_MAX_MESSAGE_LEN).unwrap(),
             Some(5000)
         );
+    }
+
+    #[test]
+    fn peek_extended_limit_excludes_open_and_keepalive_before_buffering() {
+        for msg_type in [MessageType::Open, MessageType::Keepalive] {
+            let buf = make_header(4097, msg_type.as_u8());
+
+            // Mutation-red: removing the peek guard returns Some(4097), which
+            // makes transport wait for and buffer an invalid excluded PDU.
+            assert_eq!(
+                peek_message_length(&buf, EXTENDED_MAX_MESSAGE_LEN),
+                Err(DecodeError::InvalidLength { length: 4097 })
+            );
+        }
     }
 
     #[test]
