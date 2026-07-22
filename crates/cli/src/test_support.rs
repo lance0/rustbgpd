@@ -746,6 +746,7 @@ impl rustbgpd_api::proto::neighbor_service_server::NeighborService for MockNeigh
         *self.state.last_get_neighbor_state.lock().await = Some(request.into_inner());
         let mut response = server_proto::NeighborState {
             config: Some(server_proto::NeighborConfig {
+                min_hold_time: None,
                 address: "10.0.0.2".to_string(),
                 interface: String::new(),
                 remote_asn: 65002,

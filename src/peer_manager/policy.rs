@@ -2221,6 +2221,7 @@ impl PeerManager {
             })
             .cloned()
             .unwrap_or_else(|| crate::config::Neighbor {
+                min_hold_time: None,
                 address: address.to_string(),
                 interface: managed.transport_config.peer_interface.clone(),
                 remote_asn: managed.remote_asn,
@@ -2462,6 +2463,7 @@ impl PeerManager {
             description: resolved.label,
             peer_group: resolved.peer_group,
             hold_time: Some(tc.peer.hold_time),
+            min_hold_time: tc.peer.min_hold_time,
             send_hold_time: Some(tc.peer.send_hold_time),
             max_prefixes: tc.max_prefixes,
             max_prefixes_ipv4: tc.max_prefixes_ipv4,

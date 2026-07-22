@@ -888,6 +888,9 @@ enum NeighborAction {
         /// Hold time in seconds
         #[arg(long)]
         hold_time: Option<u32>,
+        /// Minimum hold time accepted from the peer (3..=65535)
+        #[arg(long)]
+        min_hold_time: Option<u32>,
         /// RFC 9687 send hold time in seconds (0 disables; must exceed
         /// the hold time; default: max(480, 2 x hold time))
         #[arg(long)]
@@ -2109,6 +2112,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                     asn,
                     description,
                     hold_time,
+                    min_hold_time,
                     send_hold_time,
                     max_prefixes,
                     families,
@@ -2130,6 +2134,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                         asn,
                         description,
                         hold_time,
+                        min_hold_time,
                         send_hold_time,
                         max_prefixes,
                         families,

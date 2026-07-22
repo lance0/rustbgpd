@@ -73,6 +73,9 @@ pub struct PeerConfig {
     pub local_router_id: Ipv4Addr,
     /// Proposed hold time in seconds (0 = no keepalives, or >= 3).
     pub hold_time: u16,
+    /// Minimum hold time accepted from the peer. When configured, a peer
+    /// proposal of zero is also rejected.
+    pub min_hold_time: Option<u16>,
     /// Send hold time in seconds (RFC 9687): tear the session down when
     /// outbound BGP data cannot be handed to the peer's TCP stream for
     /// this long. 0 = disabled. When non-zero it MUST be greater than
@@ -127,6 +130,7 @@ impl Default for PeerConfig {
             remote_asn: 0,
             local_router_id: Ipv4Addr::UNSPECIFIED,
             hold_time: DEFAULT_HOLD_TIME,
+            min_hold_time: None,
             send_hold_time: default_send_hold_time(DEFAULT_HOLD_TIME),
             connect_retry_secs: 120,
             families: Vec::new(),
@@ -385,6 +389,7 @@ mod tests {
             remote_asn: 65002,
             local_router_id: Ipv4Addr::new(10, 0, 0, 1),
             hold_time: 90,
+            min_hold_time: None,
             send_hold_time: default_send_hold_time(90),
             connect_retry_secs: 30,
             families: vec![(Afi::Ipv4, Safi::Unicast)],

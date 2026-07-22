@@ -54,6 +54,19 @@ pub fn validate_open(
         ));
     }
 
+    // RFC 4271 §6.2 permits rejecting a locally unacceptable proposed
+    // Hold Time with OPEN Message Error / Unacceptable Hold Time.
+    if config
+        .min_hold_time
+        .is_some_and(|minimum| open.hold_time < minimum)
+    {
+        return Err(NotificationMessage::new(
+            NotificationCode::OpenMessage,
+            open_subcode::UNACCEPTABLE_HOLD_TIME,
+            Bytes::new(),
+        ));
+    }
+
     // RFC 4271 §6.2 — BGP Identifier must not be zero
     if open.bgp_identifier == std::net::Ipv4Addr::UNSPECIFIED {
         return Err(NotificationMessage::new(
@@ -563,6 +576,7 @@ mod tests {
             remote_asn: 65002,
             local_router_id: Ipv4Addr::new(10, 0, 0, 1),
             hold_time: 90,
+            min_hold_time: None,
             send_hold_time: crate::config::default_send_hold_time(90),
             connect_retry_secs: 30,
             families: vec![(Afi::Ipv4, Safi::Unicast)],
@@ -646,6 +660,31 @@ mod tests {
         let neg = validate_open(&open, &cfg).unwrap();
         assert_eq!(neg.hold_time, 0);
         assert_eq!(neg.keepalive_interval, 0);
+    }
+
+    #[test]
+    fn configured_minimum_hold_time_enforces_zero_and_boundary() {
+        // Mutation-red: deleting validate_open's floor comparison makes the
+        // 0 and 29 proposals succeed instead of returning OPEN 2/6.
+        let mut cfg = test_config();
+        cfg.min_hold_time = Some(30);
+
+        for proposed in [0, 29] {
+            let mut open = peer_open();
+            open.hold_time = proposed;
+            let err = validate_open(&open, &cfg).unwrap_err();
+            assert_eq!(err.code, NotificationCode::OpenMessage);
+            assert_eq!(err.subcode, open_subcode::UNACCEPTABLE_HOLD_TIME);
+        }
+
+        let mut open = peer_open();
+        open.hold_time = 30;
+        assert_eq!(validate_open(&open, &cfg).unwrap().hold_time, 30);
+
+        // Unset preserves the RFC 4271 zero-hold compatibility behavior.
+        cfg.min_hold_time = None;
+        open.hold_time = 0;
+        assert_eq!(validate_open(&open, &cfg).unwrap().hold_time, 0);
     }
 
     #[test]

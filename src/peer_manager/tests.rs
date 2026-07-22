@@ -38,6 +38,7 @@ fn sock(addr: IpAddr) -> SocketAddr {
 
 fn make_config(addr: IpAddr, asn: u32) -> PeerManagerNeighborConfig {
     PeerManagerNeighborConfig {
+        min_hold_time: None,
         address: addr,
         interface: None,
         scope_id: None,
@@ -2016,6 +2017,8 @@ async fn warm_checkpoint_session_query_skips_unusable_gr_sessions() {
 
 #[tokio::test]
 async fn unavailable_session_authentication_uses_durable_managed_protection() {
+    // Mutation-red for min_hold_time: deleting snapshot propagation yields
+    // None instead of the configured 30.
     let mut mgr = test_peer_manager();
     let addr: IpAddr = "10.0.0.44".parse().unwrap();
     let handle = fake_peer_handle(
@@ -2031,9 +2034,11 @@ async fn unavailable_session_authentication_uses_durable_managed_protection() {
         let managed = mgr.peers.get_mut(&peer_key).unwrap();
         managed.is_dynamic = true;
         managed.tcp_ao_protected = true;
+        managed.transport_config.peer.min_hold_time = Some(30);
         assert!(managed.transport_config.tcp_ao.is_none());
         let info = super::snapshot::build_peer_info(&peer_key, managed, None);
         assert_eq!(info.authentication, "tcp_ao");
+        assert_eq!(info.min_hold_time, Some(30));
         assert!(info.tcp_ao_info.is_none());
         assert!(info.stale);
 
@@ -2677,6 +2682,7 @@ async fn readiness_straddle_cannot_accept_a_late_max_prefix_start() {
 
 fn config_neighbor(addr: IpAddr, remote_asn: u32) -> crate::config::Neighbor {
     crate::config::Neighbor {
+        min_hold_time: None,
         address: addr.to_string(),
         interface: None,
         remote_asn,
@@ -3811,6 +3817,8 @@ async fn reconcile_changed_peer_preserves_disabled_state() {
 
 #[tokio::test]
 async fn peer_group_change_preserves_disabled_state() {
+    // Mutation-red for min_hold_time: deleting DTO/config/runtime projection
+    // breaks the exact managed-peer or API readback assertion below.
     let config = load_test_config(
         r#"
 [global]
@@ -3865,6 +3873,7 @@ peer_group = "edge"
         rustbgpd_api::peer_types::ConfigEvent::SetPeerGroup {
             name: "edge".to_string(),
             definition: rustbgpd_api::peer_types::PeerGroupDefinition {
+                min_hold_time: Some(30),
                 hold_time: Some(45),
                 send_hold_time: None,
                 max_prefixes: None,
@@ -3899,11 +3908,19 @@ peer_group = "edge"
 
     let managed = mgr.peers.get(&key(addr)).expect("reconfigured peer");
     assert_eq!(managed.hold_time, Some(45));
+    assert_eq!(managed.transport_config.peer.min_hold_time, Some(30));
+    assert_eq!(
+        crate::policy_admin::named_peer_group_from_config(&mgr.current_config, "edge")
+            .unwrap()
+            .min_hold_time,
+        Some(30)
+    );
     assert!(!managed.enabled);
 }
 
 fn edge_group_definition(hold_time: Option<u16>) -> rustbgpd_api::peer_types::PeerGroupDefinition {
     rustbgpd_api::peer_types::PeerGroupDefinition {
+        min_hold_time: None,
         hold_time,
         send_hold_time: None,
         max_prefixes: None,
@@ -6541,6 +6558,7 @@ fn build_transport_config_reflects_every_transport_field() {
     );
 
     let config = PeerManagerNeighborConfig {
+        min_hold_time: Some(30),
         address: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
         interface: Some("test-if".to_string()),
         scope_id: Some(7),
@@ -6645,6 +6663,7 @@ fn build_transport_config_reflects_every_transport_field() {
         disable_ipv4_unicast,
         import_policy: _import_policy, // NON-TRANSPORT: RIB-side policy chain.
         export_policy: _export_policy, // NON-TRANSPORT: RIB-side policy chain.
+        min_hold_time,
     } = &config;
 
     let t = mgr.build_transport_config(&config);
@@ -6655,6 +6674,7 @@ fn build_transport_config_reflects_every_transport_field() {
     assert_eq!(t.peer.remote_asn, *remote_asn, "remote_asn");
     assert_eq!(t.peer_group, *peer_group, "peer_group");
     assert_eq!(t.peer.hold_time, hold_time.unwrap(), "hold_time");
+    assert_eq!(t.peer.min_hold_time, *min_hold_time, "min_hold_time");
     assert_eq!(t.max_prefixes_ipv4, *max_prefixes_ipv4, "max_prefixes_ipv4");
     assert_eq!(t.max_prefixes_ipv6, *max_prefixes_ipv6, "max_prefixes_ipv6");
     assert_eq!(

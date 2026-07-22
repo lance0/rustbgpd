@@ -47,6 +47,7 @@ pub(crate) fn build_peer_mgr_config(
         description: label.to_string(),
         peer_group,
         hold_time: Some(tc.peer.hold_time),
+        min_hold_time: tc.peer.min_hold_time,
         send_hold_time: Some(tc.peer.send_hold_time),
         max_prefixes: tc.max_prefixes,
         max_prefixes_ipv4: tc.max_prefixes_ipv4,
@@ -6905,6 +6906,7 @@ remote_asn = 65002
         event_tx
             .send(ConfigEvent::NeighborAdded {
                 config: PeerManagerNeighborConfig {
+                    min_hold_time: None,
                     address: "10.0.0.9".parse().unwrap(),
                     interface: None,
                     scope_id: None,
@@ -7013,6 +7015,7 @@ remote_asn = 65002
         event_tx
             .send(ConfigEvent::NeighborAdded {
                 config: PeerManagerNeighborConfig {
+                    min_hold_time: None,
                     address: "10.0.0.9".parse().unwrap(),
                     interface: None,
                     scope_id: None,

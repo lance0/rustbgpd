@@ -184,6 +184,8 @@ deviations; [docs/INTEROP.md](INTEROP.md) has the interop matrix,
   hold times. If the negotiated value is non-zero and less than 3 seconds,
   send NOTIFICATION (2, 6) — Unacceptable Hold Time. Zero means no
   keepalives (supported but discouraged in config docs).
+  With `min_hold_time`, zero and peer proposals below the configured floor are
+  rejected with the same NOTIFICATION before negotiation.
 - **BGP Identifier:** RFC 6286 defines this as any non-zero unsigned 32-bit
   integer rendered in dotted-quad form; multicast, loopback, and other
   non-unicast-shaped values are valid. Zero and an iBGP peer using the local
@@ -384,6 +386,8 @@ If the negotiated hold time is non-zero and less than 3 seconds,
 rustbgpd sends NOTIFICATION (2, 6) — Unacceptable Hold Time. This
 prevents pathologically short hold times that would cause false flaps.
 RFC 4271 recommends a minimum of 3 seconds; we enforce it.
+An optional per-neighbor or peer-group `min_hold_time` raises that acceptance
+floor and also rejects a zero proposal with NOTIFICATION (2, 6).
 
 ---
 

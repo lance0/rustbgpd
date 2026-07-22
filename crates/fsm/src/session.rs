@@ -623,6 +623,7 @@ mod tests {
             remote_asn: 65002,
             local_router_id: Ipv4Addr::new(10, 0, 0, 1),
             hold_time: 90,
+            min_hold_time: None,
             send_hold_time: crate::config::default_send_hold_time(90),
             connect_retry_secs: 30,
             families: vec![(Afi::Ipv4, Safi::Unicast)],

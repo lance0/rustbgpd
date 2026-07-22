@@ -1884,6 +1884,17 @@
             "null"
           ]
         },
+        "min_hold_time": {
+          "description": "Minimum hold time accepted from this peer (3..=65535). When set,\nthe effective local `hold_time` must be non-zero and at least this\nvalue. A peer proposal of zero is rejected.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "default": null,
+          "maximum": 65535,
+          "minimum": 3
+        },
         "next_hop_ownership": {
           "description": "Pre-policy `NEXT_HOP` ownership enforcement for this route-server\nclient (ADR-0107, RFC 7948 §4.8). `\"strict_peer\"` accepts a\nunicast announcement only when every address component of its\ndecoded wire next-hop identity is the advertising session's own\naddress; non-conforming announcements are rejected before import\npolicy runs, fail-closed and treat-as-withdraw for previously\naccepted identities. Requires `route_server_client = true`.\nUnset = no ownership enforcement (RFC 7947 transparency only).",
           "anyOf": [
@@ -2296,6 +2307,17 @@
             "string",
             "null"
           ]
+        },
+        "min_hold_time": {
+          "description": "Minimum accepted peer hold time inherited by group members. See the\nneighbor-level `min_hold_time`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "default": null,
+          "maximum": 65535,
+          "minimum": 3
         },
         "next_hop_ownership": {
           "description": "ADR-0107 `NEXT_HOP` ownership enforcement inherited by neighbors in\nthis group. See the neighbor-level `next_hop_ownership`.",

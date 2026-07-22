@@ -446,6 +446,7 @@ fn empty_neighbor(address: IpAddr) -> Neighbor {
         description: None,
         peer_group: None,
         hold_time: None,
+        min_hold_time: None,
         send_hold_time: None,
         slow_peer_threshold_pct: None,
         slow_peer_duration: None,

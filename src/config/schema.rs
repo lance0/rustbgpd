@@ -770,6 +770,11 @@ pub struct Neighbor {
     pub peer_group: Option<String>,
     /// Hold time in seconds: 0 disables, otherwise >= 3. Default 90.
     pub hold_time: Option<u16>,
+    /// Minimum hold time accepted from this peer (3..=65535). When set,
+    /// the effective local `hold_time` must be non-zero and at least this
+    /// value. A peer proposal of zero is rejected.
+    #[schemars(default, range(min = 3))]
+    pub min_hold_time: Option<u16>,
     /// Send hold time in seconds (RFC 9687): tear the session down when
     /// the peer stops draining its TCP socket for this long. 0 disables.
     /// Non-zero values must be greater than the effective `hold_time`
@@ -951,6 +956,7 @@ impl fmt::Debug for Neighbor {
             .field("description", &self.description)
             .field("peer_group", &self.peer_group)
             .field("hold_time", &self.hold_time)
+            .field("min_hold_time", &self.min_hold_time)
             .field("send_hold_time", &self.send_hold_time)
             .field("slow_peer_threshold_pct", &self.slow_peer_threshold_pct)
             .field("slow_peer_duration", &self.slow_peer_duration)
@@ -1126,6 +1132,10 @@ pub struct PeerGroupConfig {
     /// Hold time inherited by neighbors in this group. See the
     /// neighbor-level `hold_time`.
     pub hold_time: Option<u16>,
+    /// Minimum accepted peer hold time inherited by group members. See the
+    /// neighbor-level `min_hold_time`.
+    #[schemars(default, range(min = 3))]
+    pub min_hold_time: Option<u16>,
     /// Send hold time in seconds (RFC 9687) inherited by neighbors in
     /// this group. See the neighbor-level `send_hold_time`.
     pub send_hold_time: Option<u32>,
@@ -1240,6 +1250,7 @@ impl fmt::Debug for PeerGroupConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PeerGroupConfig")
             .field("hold_time", &self.hold_time)
+            .field("min_hold_time", &self.min_hold_time)
             .field("send_hold_time", &self.send_hold_time)
             .field("slow_peer_threshold_pct", &self.slow_peer_threshold_pct)
             .field("slow_peer_duration", &self.slow_peer_duration)
@@ -2274,6 +2285,12 @@ pub enum ConfigError {
     InvalidGrpcConfig { reason: String },
     #[error("invalid hold_time {value}: must be 0 or >= 3")]
     InvalidHoldTime { value: u16 },
+    #[error("invalid min_hold_time {value}: must be between 3 and 65535")]
+    InvalidMinHoldTime { value: u16 },
+    #[error(
+        "invalid min_hold_time {minimum}: effective hold_time {hold_time} must be non-zero and at least min_hold_time"
+    )]
+    InvalidMinHoldTimeForHoldTime { minimum: u16, hold_time: u16 },
     #[error(
         "invalid send_hold_time {value}: must be 0 (disabled) or greater than hold_time \
          {hold_time} (RFC 9687 §4.4)"

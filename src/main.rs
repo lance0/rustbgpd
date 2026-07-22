@@ -4273,6 +4273,7 @@ async fn run<T>(
                     description: label.clone(),
                     peer_group,
                     hold_time: Some(transport_config.peer.hold_time),
+                    min_hold_time: transport_config.peer.min_hold_time,
                     send_hold_time: Some(transport_config.peer.send_hold_time),
                     max_prefixes: transport_config.max_prefixes,
                     max_prefixes_ipv4: transport_config.max_prefixes_ipv4,
@@ -6283,6 +6284,7 @@ tcp_ao = {{ key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)"
             security: crate::config::SecurityConfig::default(),
             neighbors: vec![
                 crate::config::Neighbor {
+                    min_hold_time: None,
                     address: "10.0.0.2".to_string(),
                     interface: None,
                     remote_asn: 65002,
@@ -6329,6 +6331,7 @@ tcp_ao = {{ key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)"
                     log_level: None,
                 },
                 crate::config::Neighbor {
+                    min_hold_time: None,
                     address: "10.0.0.3".to_string(),
                     interface: None,
                     remote_asn: 65003,
@@ -6375,6 +6378,7 @@ tcp_ao = {{ key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)"
                     log_level: None,
                 },
                 crate::config::Neighbor {
+                    min_hold_time: None,
                     address: "10.0.0.4".to_string(),
                     interface: None,
                     remote_asn: 65004,

@@ -493,6 +493,7 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
         remote_asn: info.remote_asn,
         description: info.description.clone(),
         hold_time: info.hold_time.map_or(0, u32::from),
+        min_hold_time: info.min_hold_time.map(u32::from),
         // Effective value (configured or the RFC 9687 §6 derived
         // default); 0 = disabled.
         send_hold_time: Some(info.send_hold_time),
@@ -816,6 +817,13 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         if config.hold_time > 0 && config.hold_time < 3 {
             return Err(Status::invalid_argument("hold_time must be 0 or >= 3"));
         }
+        if let Some(minimum) = config.min_hold_time
+            && (minimum < 3 || minimum > u32::from(u16::MAX))
+        {
+            return Err(Status::invalid_argument(
+                "min_hold_time must be between 3 and 65535",
+            ));
+        }
         // RFC 9687 §4.4 parity with the config path: a non-zero send
         // hold time must exceed the effective hold time (0 = disabled,
         // unset = derived default). hold_time 0 here means "use the
@@ -922,6 +930,11 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             } else {
                 None
             },
+            min_hold_time: config
+                .min_hold_time
+                .map(u16::try_from)
+                .transpose()
+                .map_err(|_| Status::invalid_argument("min_hold_time exceeds u16 range"))?,
             send_hold_time: config.send_hold_time,
             max_prefixes: if config.max_prefixes > 0 {
                 Some(config.max_prefixes)
@@ -1574,6 +1587,7 @@ mod tests {
 
     fn test_static_peer_config() -> PeerManagerNeighborConfig {
         PeerManagerNeighborConfig {
+            min_hold_time: None,
             address: "10.0.0.2".parse().unwrap(),
             interface: None,
             scope_id: None,
@@ -1783,6 +1797,53 @@ mod tests {
         match peer_mgr_rx.recv().await.unwrap() {
             PeerManagerCommand::AddPeer { config, reply, .. } => {
                 assert_eq!(config.send_hold_time, Some(0));
+                reply.send(Ok(())).unwrap();
+            }
+            _ => panic!("expected AddPeer"),
+        }
+        call.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn add_neighbor_forwards_and_validates_minimum_hold_time() {
+        // Mutation-red: deleting local range validation accepts 2; deleting
+        // the DTO assignment forwards None instead of the inherited-safe 100.
+        let svc = make_service();
+        let err = svc
+            .add_neighbor(Request::new(proto::AddNeighborRequest {
+                config: Some(proto::NeighborConfig {
+                    address: "10.0.0.2".into(),
+                    remote_asn: 65002,
+                    min_hold_time: Some(2),
+                    ..Default::default()
+                }),
+            }))
+            .await
+            .unwrap_err();
+        assert!(err.message().contains("min_hold_time"));
+
+        let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(1);
+        let (rib_tx, _rib_rx) = mpsc::channel(1);
+        let svc = NeighborService::new(65001, AccessMode::ReadWrite, peer_mgr_tx, rib_tx, None);
+        let call = tokio::spawn(async move {
+            svc.add_neighbor(Request::new(proto::AddNeighborRequest {
+                config: Some(proto::NeighborConfig {
+                    address: "10.0.0.2".into(),
+                    remote_asn: 65002,
+                    peer_group: "long-hold".into(),
+                    // Zero is the existing API unset sentinel. Do not reject
+                    // before peer-group resolution can supply hold_time=120.
+                    hold_time: 0,
+                    min_hold_time: Some(100),
+                    ..Default::default()
+                }),
+            }))
+            .await
+        });
+        match peer_mgr_rx.recv().await.unwrap() {
+            PeerManagerCommand::AddPeer { config, reply, .. } => {
+                assert_eq!(config.peer_group.as_deref(), Some("long-hold"));
+                assert_eq!(config.min_hold_time, Some(100));
                 reply.send(Ok(())).unwrap();
             }
             _ => panic!("expected AddPeer"),
@@ -2395,8 +2456,11 @@ mod tests {
 
     #[test]
     fn peer_info_to_proto_includes_families() {
+        // Mutation-red for min_hold_time: deleting proto projection yields
+        // None instead of the configured 30.
         let mut info = peer_info("10.0.0.1".parse().unwrap());
         info.remote_asn = 65001;
+        info.min_hold_time = Some(30);
         info.families = vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
         info.required_families = vec![(Afi::Ipv6, Safi::Unicast)];
         info.remove_private_as = RemovePrivateAs::All;
@@ -2412,6 +2476,7 @@ mod tests {
         let state = peer_info_to_proto(&info);
         let config = state.config.unwrap();
         assert_eq!(config.families, vec!["ipv4_unicast", "ipv6_unicast"]);
+        assert_eq!(config.min_hold_time, Some(30));
         assert_eq!(config.required_families, vec!["ipv6_unicast"]);
         assert_eq!(config.remove_private_as, "all");
         assert_eq!(config.role, "rs");

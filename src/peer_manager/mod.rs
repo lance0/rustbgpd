@@ -647,6 +647,7 @@ impl PeerManager {
         };
         let mut peer = PeerConfig::new(self.local_asn, config.remote_asn, self.router_id);
         peer.hold_time = config.hold_time.unwrap_or(DEFAULT_HOLD_TIME);
+        peer.min_hold_time = config.min_hold_time;
         // RFC 9687 §6 default: greater of 8 minutes or 2× hold time.
         peer.send_hold_time = config
             .send_hold_time

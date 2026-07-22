@@ -74,6 +74,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Minimum accepted BGP hold time.** Per-neighbor and peer-group
+  `min_hold_time` controls cause the daemon to reject peer OPEN proposals
+  below the configured floor (including zero) with OPEN Error 2/6. Unset
+  configuration preserves RFC 4271 compatibility.
+
 - **RFC 9072 extended BGP OPEN Optional Parameters lengths.** OPEN messages
   keep the RFC 4271 encoding through 255 optional-parameter octets and use the
   extended aggregate and per-parameter lengths only above that boundary.

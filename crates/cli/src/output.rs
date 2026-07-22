@@ -282,6 +282,8 @@ pub struct JsonNeighborDetail {
     pub tcp_ao: Option<JsonTcpAoState>,
     pub description: String,
     pub hold_time: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_hold_time: Option<u32>,
     /// Effective RFC 9687 send hold time in seconds (0 = disabled).
     pub send_hold_time: u32,
     pub families: Vec<String>,
@@ -1240,7 +1242,10 @@ mod tests {
 
     #[test]
     fn test_json_neighbor_detail_serializes_dynamic_peer_fields() {
+        // Mutation-red for min_hold_time: omitting the field or mapping None
+        // removes the exact JSON value asserted below.
         let mut detail = JsonNeighborDetail {
+            min_hold_time: Some(30),
             address: "10.0.0.2".to_string(),
             interface: "eth0".to_string(),
             remote_asn: 65002,
@@ -1367,6 +1372,7 @@ mod tests {
         assert_inventory_json_contract(&value, "neighbor-detail-v1");
 
         assert_eq!(value["peer_group"], "rs-clients");
+        assert_eq!(value["min_hold_time"], 30);
         assert_eq!(value["route_server_client"], true);
         assert_eq!(value["role"], "rs");
         assert_eq!(value["strict_role"], true);

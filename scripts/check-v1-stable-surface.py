@@ -42,6 +42,7 @@ EXPECTED_EFFECTIVE_DEFAULT_PATHS = (
     "Neighbor.graceful_restart",
     "Neighbor.hold_time",
     "Neighbor.llgr_stale_time",
+    "Neighbor.min_hold_time",
     "Neighbor.send_hold_time",
 )
 EXPECTED_EFFECTIVE_DEFAULT_ASSERTION_PATHS = tuple(
@@ -50,6 +51,7 @@ EXPECTED_EFFECTIVE_DEFAULT_ASSERTION_PATHS = tuple(
 EXPECTED_SCHEMA_REPRESENTATION_DEFAULTS = {
     "Global.dynamic_neighbor_limit": None,
     "Neighbor.families": [],
+    "Neighbor.min_hold_time": None,
 }
 EXPECTED_EFFECTIVE_FAMILY_CASES = (
     '"bare_ipv4",bare.transport_config.peer.families,&[(Afi::Ipv4,Safi::Unicast)]',
@@ -189,7 +191,7 @@ def check_effective_default_assertion_block(test_region: str, test: str) -> None
     ):
         fail(
             f"effective-default validation test {test!r} must assert exactly the "
-            "ten scalar scoped full paths in sorted order"
+            "eleven scalar scoped full paths in sorted order"
         )
     for path, actual, _ in assertions:
         field = path.partition(".")[2]
@@ -283,12 +285,12 @@ def check_effective_defaults(
         fail("config.effective_defaults.paths must be a non-empty string list")
     require_sorted_unique(paths, "config.effective_defaults.paths")
     if paths != list(EXPECTED_EFFECTIVE_DEFAULT_PATHS):
-        fail("config.effective_defaults.paths must match the exact ten-path scoped set")
+        fail("config.effective_defaults.paths must match the exact twelve-path scoped set")
     schema_defaults = effective["schema_representation_defaults"]
     if schema_defaults != EXPECTED_SCHEMA_REPRESENTATION_DEFAULTS:
         fail(
             "config.effective_defaults.schema_representation_defaults must match "
-            "the exact two-path representation map"
+            "the exact three-path representation map"
         )
     for path in paths:
         definition, separator, field = path.partition(".")
@@ -330,7 +332,7 @@ def check_effective_defaults(
         lambda: check_effective_default_assertion_block(
             EFFECTIVE_DEFAULT_ASSERTION_RE.sub("", test_region), test
         ),
-        "must assert exactly the ten scalar scoped full paths",
+        "must assert exactly the eleven scalar scoped full paths",
         "missing effective-default runtime assertion block",
     )
     for broken_macro, label in (

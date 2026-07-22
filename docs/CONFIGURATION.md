@@ -605,6 +605,7 @@ dynamic-only deployment where peers are added at runtime via gRPC.
 | `description`          | string   | no       | --      | Human-readable label (used in logs; defaults to address if absent) |
 | `peer_group`           | string   | no       | --      | Named peer-group to inherit transport and policy defaults from      |
 | `hold_time`            | u16      | no       | 90      | BGP hold timer in seconds (0 or >= 3)            |
+| `min_hold_time`        | u16      | no       | unset   | Minimum hold time accepted from the peer (3..=65535). The effective local `hold_time` must be non-zero and at least this value; a peer proposal of 0 is rejected. |
 | `send_hold_time`       | u32      | no       | (auto)  | RFC 9687 send hold timer in seconds: tear the session down when the peer stops draining its TCP socket for this long. 0 disables; non-zero must be > `hold_time`. Default: `max(480, 2 × hold_time)` per RFC 9687 §6 |
 | `slow_peer_threshold_pct` | u8    | no       | 50      | Slow-peer detection: backlog threshold as a percentage (1--100) of the outbound writer buffer. The peer is a slow-peer candidate while its buffered outbound updates stay at or above this fraction |
 | `slow_peer_duration`   | u32      | no       | 30      | How long (seconds) the backlog must persist above the threshold before the peer is flagged slow (neighbor status flag, warn log, `bgp_peer_slow` metric). 0 disables detection. Purely observational unless `slow_peer_isolation` is set |
@@ -997,6 +998,7 @@ mutations persist back to TOML.
 ```toml
 [peer_groups.rs-clients]
 hold_time = 90
+min_hold_time = 30
 families = ["ipv4_unicast", "ipv6_unicast"]
 required_families = ["ipv6_unicast"]
 route_server_client = true
@@ -3641,6 +3643,7 @@ starting:
 | `[security.grpc.roles]` principal keys must not be empty; role values must be `observer`, `automation`, or `operator` | `invalid gRPC config` / TOML parse error |
 | If `grpc_tcp`/`grpc_uds` tables are present, at least one listener must be enabled | `invalid gRPC config` |
 | `hold_time` must be 0 (disabled) or >= 3 seconds | `invalid hold_time` |
+| `min_hold_time` must be 3..=65535 and no greater than a non-zero effective `hold_time` | `invalid min_hold_time` |
 | `send_hold_time` must be 0 (disabled) or greater than the effective `hold_time` (RFC 9687 §4.4) | `invalid send_hold_time` |
 | `families` entries must be `"ipv4_unicast"`, `"ipv6_unicast"`, `"ipv4_flowspec"`, `"ipv6_flowspec"`, `"l2vpn_evpn"`, `"linkstate"`, `"linkstate_vpn"`, `"l3vpn_ipv4_unicast"`, `"l3vpn_ipv6_unicast"`, `"ipv4_labeled_unicast"`, `"ipv6_labeled_unicast"`, or `"rtc"` | `unknown address family` |
 | `gr_restart_time` must be <= 4095 | `gr_restart_time exceeds 4095` |
@@ -3690,6 +3693,7 @@ starting:
 | Field | Default value |
 |-------|---------------|
 | `hold_time` | 90 seconds |
+| `min_hold_time` | unset (RFC 4271 compatibility: accept 0 or >= 3) |
 | `send_hold_time` | `max(480, 2 × hold_time)` seconds (RFC 9687 §6) |
 | `connect_retry_secs` | 5 seconds (not configurable) |
 | gRPC listener | UDS at `<runtime_state_dir>/grpc.sock` with mode `0o600` |

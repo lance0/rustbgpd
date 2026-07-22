@@ -244,6 +244,7 @@ pub async fn show(
             }),
             description: cfg.map(|c| c.description.clone()).unwrap_or_default(),
             hold_time: cfg.map(|c| c.hold_time).unwrap_or(0),
+            min_hold_time: cfg.and_then(|c| c.min_hold_time),
             send_hold_time: cfg.and_then(|c| c.send_hold_time).unwrap_or(0),
             families: cfg.map(|c| c.families.clone()).unwrap_or_default(),
             required_families: cfg.map(|c| c.required_families.clone()).unwrap_or_default(),
@@ -321,6 +322,9 @@ pub async fn show(
             "Hold Time:             {}",
             cfg.map(|c| c.hold_time).unwrap_or(0)
         );
+        if let Some(minimum) = cfg.and_then(|c| c.min_hold_time) {
+            println!("Minimum Hold Time:     {minimum}");
+        }
         println!(
             "Send Hold Time:        {}",
             cfg.and_then(|c| c.send_hold_time).unwrap_or(0)
@@ -782,6 +786,7 @@ pub struct AddNeighborOpts {
     pub asn: u32,
     pub description: Option<String>,
     pub hold_time: Option<u32>,
+    pub min_hold_time: Option<u32>,
     pub send_hold_time: Option<u32>,
     pub max_prefixes: Option<u32>,
     pub families: Vec<String>,
@@ -813,6 +818,7 @@ pub async fn add(
                 remote_asn: opts.asn,
                 description: opts.description.unwrap_or_default(),
                 hold_time: opts.hold_time.unwrap_or(0),
+                min_hold_time: opts.min_hold_time,
                 send_hold_time: opts.send_hold_time,
                 max_prefixes: opts.max_prefixes.unwrap_or(0),
                 families: opts.families,
@@ -1248,6 +1254,8 @@ mod tests {
 
     #[tokio::test]
     async fn add_sends_route_server_and_add_path_fields() {
+        // Mutation-red for min_hold_time: removing the request assignment
+        // makes the captured request carry None instead of 30.
         let server = spawn_mock_server(None).await;
         let connection = connect(&server.addr, None).await.unwrap();
 
@@ -1255,6 +1263,7 @@ mod tests {
             connection,
             "10.0.0.2",
             AddNeighborOpts {
+                min_hold_time: Some(30),
                 asn: 65002,
                 description: Some("peer-2".to_string()),
                 hold_time: Some(90),
@@ -1285,6 +1294,7 @@ mod tests {
         assert_eq!(request.add_path_send_max, 4);
         assert_eq!(request.paths_limit_receive_max, 3);
         assert_eq!(request.remote_asn, 65002);
+        assert_eq!(request.min_hold_time, Some(30));
         assert_eq!(request.required_families, vec!["ipv6_unicast"]);
     }
 

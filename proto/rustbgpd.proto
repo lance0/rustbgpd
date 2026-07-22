@@ -449,6 +449,9 @@ message NeighborConfig {
   // Empty inherits a non-empty peer-group list; when both are empty, legacy
   // partial-intersection behavior is preserved.
   repeated string required_families = 20;
+  // Minimum hold time accepted from the peer. Valid range 3..65535.
+  // When set, a peer proposal of zero is rejected.
+  optional uint32 min_hold_time = 21;
 }
 
 message PathsLimitState {
@@ -963,6 +966,8 @@ message PeerGroupDefinition {
   // Families every inheriting session must negotiate. Empty means no
   // requirement; a non-empty neighbor value overrides this list.
   repeated string required_families = 28;
+  // Minimum hold time accepted from group members. Valid range 3..65535.
+  optional uint32 min_hold_time = 29;
 }
 
 message NamedPeerGroup {
