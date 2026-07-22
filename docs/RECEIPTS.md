@@ -3,8 +3,8 @@
 rustbgpd's development rule is simple: **every wire-behavior claim has a lab
 that proves it, and every performance claim has a measured receipt.** A
 feature is not "done" when the code merges — it is done when a containerlab
-topology against a real peer implementation (FRR, BIRD, GoBGP), a real kernel
-dataplane, or a documented same-host measurement demonstrates the claimed
+topology against a real peer implementation (FRR, BIRD, GoBGP, ExaBGP), a real
+kernel dataplane, or a documented same-host measurement demonstrates the claimed
 behavior, and that evidence is checked in. This page is the single index of
 those receipts: the M-series interop labs, the performance and scale
 measurements, the archived long-running soaks, and the CI schedules that keep
@@ -75,6 +75,8 @@ id matches the milestone. Full procedures: [`INTEROP.md`](INTEROP.md).
 | M81 | BMP trio (rib-in, rib-out, loc-rib) + BMPv4 against three independent decoders | GoBGP ×2 + pmacct + gobmp + tshark |
 | M82 | ADR-0092 EVPN VLAN-Aware Bundle (non-zero Ethernet Tag) reflection: tag as route identity, same MAC under two tags uncollapsed, tag-verbatim NLRIs, tag-scoped withdraw — synthetic leg in CI plus the **first vendor-NOS receipt** (local lab) | GoBGP 3.37.0 ×2 (CI) + Nokia SR Linux 25.10.1 (local) |
 | M83 | RFC 7947 route-server profile, multi-stack: byte-level transparency, OTC, per-member views, ROV explain, and the §2.3 path-hiding contrast (single-best / per-client-best / Add-Path, ADR-0101) | BIRD 2.0.12 + GoBGP 3.37.0 + FRR 10.3.1 + StayRTR |
+| M93 | Exact required-family OPEN 2/7 rejection, dual-stack recovery, and empty-requirement partial-negotiation compatibility | BIRD 2.0.12 |
+| M94 | RFC 6793 legacy ingress reconstruction, semantic loop rejection, exact type 2/17 + type 7/18 egress, withdrawal, and session continuity | ExaBGP 5.0.9 source + independent Python OLD-speaker sink |
 
 ## Interop labs — kernel dataplane, PR + nightly (`kernel-dataplane.yml`)
 
@@ -138,7 +140,6 @@ covered by later CI receipts). Procedures and results:
 | M84 | Multi-cache RTR/ASPA epoch conformance (LAN-243): per-cache load at validated EoD, v2→v1 fallback, restart retention + session rotation, ASPA replace / empty-provider withdrawal, serial-regression resync | FRR + Routinator 0.15.2 + StayRTR + RTR v2 mock |
 | M90 | ADR-0110 filtering differential: one arouteserver site produces BIRD and rustbgpd policy, with exact verdict/explain parity over 11 announcements and a red-producing policy mutation | BIRD 2.0.12 + GoBGP 3.37.0 ×3 + arouteserver 1.23.2 |
 | M92 | Dual-stack route-server differential: exact inventories, wire EoR completeness, and baseline/mutant/restore semantic diff | GoBGP 4.7.0 ×3 + BIRD 2.0.12 |
-| M93 | Exact required-family OPEN 2/7 rejection, dual-stack recovery, and empty-requirement partial-negotiation compatibility | BIRD 2.0.12 |
 
 ## Performance and scale receipts
 
