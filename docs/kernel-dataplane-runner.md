@@ -81,7 +81,15 @@ issue #187) so reviewers can distinguish real stability from flake masking.
   add/select/deprecate/delete rotation against BIRD 3.3.1 (conditional on the
   runner advertising `CONFIG_TCP_AO=y`). The deletion phase proves the exact
   sole-survivor inventory, unchanged session, the route present at every sample
-  from a 100 ms polling oracle, and authenticated post-delete traffic.
+  from a 100 ms polling oracle, and authenticated post-delete traffic. A
+  separate clean-topology mode SIGKILLs rustbgpd after add-only, while
+  selection/deprecation is `awaiting_peer`, and after delete. Every restart
+  must use the copied process-durable config, get a new PID, recover fresh
+  generation `1/1` / `idle`, re-establish only with TCP-AO, restore the exact
+  phase inventory and Current/RNext, and receive the BIRD route again. The
+  selection restart first requires authenticated `degraded` Current `2` /
+  RNext `13` while BIRD still sends the deprecated key, then `healthy` `3/13`
+  only after BIRD switches.
 - M60: ADR-0079 EVPN adoption sweep kill-and-restart against FRR.
 - M61: ADR-0079 EVPN L3 adoption sweep kill-and-restart against FRR.
 - M62: ADR-0079 blackhole adoption sweep kill-and-restart against FRR.

@@ -395,6 +395,15 @@ impl TcpAoDeleteApplyError {
             mutation_started: false,
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn after_mutation(error: io::Error) -> Self {
+        Self {
+            error,
+            mutation_started: true,
+        }
+    }
+
     #[must_use]
     pub(crate) const fn mutation_started(&self) -> bool {
         self.mutation_started

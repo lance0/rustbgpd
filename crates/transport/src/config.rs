@@ -132,9 +132,10 @@ pub enum TcpAoRotationPhase {
     Deleting,
     /// Deletion stopped after the listener or a session may have mutated.
     /// The identical generation is retryable unless the detailed error reports
-    /// failed exact-prior-inventory restoration; that condition requires
-    /// restart. Affected connected streams are discarded rather than reused
-    /// with an ambiguous inventory.
+    /// failed exact-prior-inventory restoration; a retry must then re-prove the
+    /// exact current inventory before another mutation, or restart if that
+    /// inventory remains partial or cannot be proven. Affected connected
+    /// streams are discarded rather than reused with an ambiguous inventory.
     DeleteFailed,
 }
 

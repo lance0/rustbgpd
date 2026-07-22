@@ -299,7 +299,7 @@ jobs:
           script: tests/interop/scripts/test-m51-bfd-frr.sh
 
   m43:
-    name: M43 — TCP-AO queued-child and full live key rotation (BIRD 3.3.1)
+    name: M43 — TCP-AO live rotation and crash recovery (BIRD 3.3.1)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -417,6 +417,14 @@ jobs:
           label: M43
           topology: tests/interop/m43-tcp-ao-bird.clab.yml
           script: tests/interop/scripts/test-m43-tcp-ao-bird.sh
+
+      - name: Run M43 crash-restart recovery (deploy + test + destroy with retry)
+        if: steps.tcp_ao.outputs.supported == 'true'
+        uses: ./.github/actions/run-interop-test
+        with:
+          label: M43 crash-restart
+          topology: tests/interop/m43-tcp-ao-bird.clab.yml
+          script: tests/interop/scripts/test-m43-tcp-ao-bird-crash-restart.sh
 
   m46:
     name: M46 — EVPN HRW DF election (rustbgpd ×2)

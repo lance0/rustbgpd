@@ -92,7 +92,7 @@ proved with kernel evidence (routes, FDB rows, nexthop groups, netdev state).
 | M39b | Auto-derived Route Targets cross-vendor (RFC 8365 `AS:VNI`) | FRR 10.3.1 |
 | M40 | ADR-0059 EVPN aliasing dataplane ECMP via FDB nexthop groups | FRR EVPN-MH |
 | M42 | ADR-0061 opt-in general unicast Linux FIB runtime | FRR 10.3.1 |
-| M43 | TCP-AO dynamic `/24` queued-child deletion-foundation receipt plus full live SIGHUP add/select/deprecate/delete proof with an unchanged session, the route present at every sample from a 100 ms polling oracle, and authenticated traffic on the sole survivor (probed; skips only if the runner kernel lacks TCP-AO) | BIRD 3.3.1 |
+| M43 | TCP-AO dynamic `/24` queued-child deletion-foundation receipt plus two BIRD modes: uninterrupted SIGHUP add/select/deprecate/delete with a 100 ms route-continuity oracle, and SIGKILL/restart recovery after add-only, selection/deprecation `awaiting_peer`, and delete. Every restart requires BIRD disconnect, a new daemon PID, fresh `1/1` / `idle`, exact MKT inventory, mandatory TCP-AO, route/session recovery, and phase-correct Current/RNext; selection explicitly proves authenticated `degraded` `2/13` before the peer moves, then `healthy` `3/13` (probed; skips only if the runner kernel lacks TCP-AO) | BIRD 3.3.1 |
 | M46 | RFC 8584 Highest Random Weight DF election | rustbgpd ×2 |
 | M47 / M48 | ADR-0063 runtime EVPN tenant teardown (control plane / kernel L3 datapath) | FRR 10.3.1 |
 | M49 / M69 | RFC 9785 Highest-Preference DF election (rustbgpd↔rustbgpd and cross-vendor) | rustbgpd ×2 / FRR |

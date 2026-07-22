@@ -744,10 +744,12 @@ prior-inventory restoration, or after the listener already reached the desired
 inventory, the same immutable desired generation is retryable with another
 SIGHUP. Some successor MKTs may already be present; retries accept them only
 when their kernel-normalized key material is identical. If partial listener
-deletion cannot restore the exact prior inventory, restart is required; an
-intermediate kernel subset is not a resumable generation. Affected protected
-passive accepts may reject until an eligible retry or restart, and a fully
-installed but globally uncommitted generation remains fenced. A deletion that
+deletion cannot restore the exact prior inventory, a retry must re-prove that
+exact inventory before another mutation; otherwise it is rejected and the
+daemon must be restarted. An intermediate kernel subset is not a resumable
+generation. Affected protected passive accepts may reject until an eligible
+retry or restart, and a fully installed but globally uncommitted generation
+remains fenced. A deletion that
 may have changed any protected session closes the whole
 changed session cohort before reporting failure; failure to reset every affected
 task aborts them all. Established sessions otherwise retain their prior
