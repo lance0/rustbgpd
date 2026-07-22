@@ -1,7 +1,10 @@
 name: CI
 
+# Feature branches without a PR must use a draft PR or the local quartet;
+# hosted push CI is intentionally main-only to avoid duplicating PR runs.
 on:
   push:
+    branches: [main]
     paths-ignore:
       - "**/*.md"
   pull_request:
@@ -21,6 +24,23 @@ jobs:
           # Need history so the wire-readme freshness gate can diff
           # against the previous commit / PR base.
           fetch-depth: 0
+      - name: Check CI trigger contract
+        shell: bash
+        run: |
+          actual="$(sed -n '/^on:/,/^jobs:/p' .github/workflows/ci.yml | sed '$d')"
+          expected='on:
+            push:
+              branches: [main]
+              paths-ignore:
+                - "**/*.md"
+            pull_request:
+              paths-ignore:
+                - "**/*.md"'
+          if [[ "$actual" != "$expected" ]]; then
+            diff -u <(printf '%s\n' "$expected") <(printf '%s\n' "$actual") || true
+            echo "CI triggers must keep main-only pushes, all PRs, and Markdown ignores" >&2
+            exit 1
+          fi
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
