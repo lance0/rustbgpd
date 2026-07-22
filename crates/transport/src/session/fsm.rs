@@ -6,6 +6,34 @@ use super::{
 };
 
 impl PeerSession {
+    /// Retain a bounded, secret-free reset cause for snapshots, without
+    /// replacing an actionable error during intentional local maintenance.
+    pub(super) fn record_notification_cause(
+        &mut self,
+        direction: SessionNotificationDirection,
+        notification: &rustbgpd_wire::NotificationMessage,
+    ) {
+        if direction == SessionNotificationDirection::Sent
+            && notification.code == NotificationCode::Cease
+            && matches!(
+                notification.subcode,
+                cease_subcode::ADMINISTRATIVE_SHUTDOWN | cease_subcode::ADMINISTRATIVE_RESET
+            )
+        {
+            return;
+        }
+        let direction = match direction {
+            SessionNotificationDirection::Sent => "sent",
+            SessionNotificationDirection::Received => "received",
+        };
+        self.last_error = format!(
+            "{direction} NOTIFICATION {}/{} ({})",
+            notification.code.as_u8(),
+            notification.subcode,
+            rustbgpd_wire::notification::description(notification.code, notification.subcode)
+        );
+    }
+
     /// Handle a hold-timer expiry observed by the select loop.
     ///
     /// ADR-0078 rule 3: pending unprocessed input counts as peer
@@ -171,6 +199,7 @@ impl PeerSession {
                 Action::SendNotification(notif) => {
                     let code = notif.code;
                     let subcode = notif.subcode;
+                    self.record_notification_cause(SessionNotificationDirection::Sent, &notif);
                     // RFC 8538: track outbound Hard Reset to bypass GR
                     if code == NotificationCode::Cease && subcode == cease_subcode::HARD_RESET {
                         self.sent_hard_reset = true;

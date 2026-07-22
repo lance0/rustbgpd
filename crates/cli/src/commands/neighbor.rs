@@ -46,6 +46,7 @@ pub async fn list(connection: Connection, json: bool, wide: bool) -> Result<(), 
                     messages_received: n.messages_received,
                     messages_sent: n.messages_sent,
                     flap_count: n.flap_count,
+                    last_error: n.last_error.clone(),
                     route_reflector_client: n.route_reflector_client,
                     description: cfg.map(|c| c.description.clone()).unwrap_or_default(),
                 }

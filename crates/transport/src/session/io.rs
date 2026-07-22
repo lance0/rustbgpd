@@ -408,7 +408,7 @@ impl PeerSession {
         self.trigger_outbound_out_of_resources_teardown();
     }
 
-    /// Emit Cease/8 and hard-close the writer without assigning a cause.
+    /// Emit Cease/8, record its bounded cause, and hard-close the writer.
     /// Callers must log their own truthful cause before entering this common
     /// primitive (writer saturation, exact-snapshot invariant breach, etc.).
     pub(super) fn trigger_outbound_out_of_resources_teardown(&mut self) {
@@ -424,6 +424,7 @@ impl PeerSession {
             cease_subcode::OUT_OF_RESOURCES,
             bytes::Bytes::new(),
         );
+        self.record_notification_cause(SessionNotificationDirection::Sent, &notif);
         // Classify the upcoming BMP Peer Down truthfully: reason 1
         // (local system sent NOTIFICATION) carrying the Cease/8 PDU,
         // instead of the reason-4 "remote closed" default.
@@ -579,7 +580,10 @@ impl PeerSession {
                                     Some(PeerDownReason::RemoteNotification(raw_pdu.clone()));
                             }
                             self.notifications_received += 1;
-                            self.last_error = format!("{}/{}", notif.code.as_u8(), notif.subcode);
+                            self.record_notification_cause(
+                                SessionNotificationDirection::Received,
+                                &notif,
+                            );
                             self.metrics.record_notification_received(
                                 &self.peer_label,
                                 &notif.code.as_u8().to_string(),

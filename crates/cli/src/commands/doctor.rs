@@ -414,6 +414,7 @@ fn nofile_check(pid: u32, soft: u64, hard: u64, run_context: &str) -> Check {
 
 /// Pure per-peer session checks: state (with time-in-state derived from
 /// the most recent session event) and flap count.
+#[expect(clippy::too_many_arguments, reason = "snapshot fields")]
 fn peer_checks(
     address: &str,
     state: &str,
@@ -422,6 +423,7 @@ fn peer_checks(
     flap_count: u64,
     last_transition_unix: Option<u64>,
     now: u64,
+    last_error: &str,
 ) -> Vec<Check> {
     let mut checks = Vec::new();
     if stale {
@@ -457,10 +459,15 @@ fn peer_checks(
                 "with no recent state transition".to_string(),
             ),
         };
+        let cause = if last_error.is_empty() {
+            String::new()
+        } else {
+            format!("; last error: {last_error}")
+        };
         checks.push(Check {
             name: format!("peer.{address}.session"),
             status,
-            detail: format!("peer {address} in {state} {since}"),
+            detail: format!("peer {address} in {state} {since}{cause}"),
         });
     }
     if flap_count >= FLAP_FAIL_THRESHOLD {
@@ -1174,6 +1181,7 @@ pub(crate) async fn run(
                                 messages_received: n.messages_received,
                                 messages_sent: n.messages_sent,
                                 flap_count: n.flap_count,
+                                last_error: redact_text(&n.last_error),
                                 route_reflector_client: n.route_reflector_client,
                                 description: redact_text(
                                     &cfg.map(|c| c.description.clone()).unwrap_or_default(),
@@ -1197,6 +1205,7 @@ pub(crate) async fn run(
                             snapshot.flap_count,
                             transitions.get(&snapshot.address).copied(),
                             now,
+                            &snapshot.last_error,
                         ) {
                             reporter.record(check.name, check.status, check.detail);
                         }
@@ -1594,7 +1603,16 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
 
     #[test]
     fn established_peer_is_green() {
-        let checks = peer_checks("10.0.0.2", "Established", false, 3600, 0, None, 1_000_000);
+        let checks = peer_checks(
+            "10.0.0.2",
+            "Established",
+            false,
+            3600,
+            0,
+            None,
+            1_000_000,
+            "",
+        );
         assert_eq!(checks.len(), 1);
         assert!(checks[0].status == CheckStatus::Ok);
         assert!(checks[0].detail.contains("Established"));
@@ -1604,7 +1622,16 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
     fn peer_stuck_in_connect_past_threshold_is_red_with_duration() {
         let now = 1_000_000;
         let transitioned = now - (4 * 3600 + 12 * 60); // 4h12m ago
-        let checks = peer_checks("10.0.0.2", "Connect", false, 0, 0, Some(transitioned), now);
+        let checks = peer_checks(
+            "10.0.0.2",
+            "Connect",
+            false,
+            0,
+            0,
+            Some(transitioned),
+            now,
+            "",
+        );
         assert_eq!(checks.len(), 1);
         assert!(checks[0].status == CheckStatus::Fail);
         assert!(
@@ -1625,13 +1652,14 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             0,
             Some(now - STUCK_PEER_SECS + 1),
             now,
+            "",
         );
         assert!(checks[0].status == CheckStatus::Warn);
     }
 
     #[test]
     fn peer_in_connect_with_no_transition_event_is_red() {
-        let checks = peer_checks("10.0.0.2", "Connect", false, 0, 0, None, 1_000_000);
+        let checks = peer_checks("10.0.0.2", "Connect", false, 0, 0, None, 1_000_000, "");
         assert!(checks[0].status == CheckStatus::Fail);
         assert!(checks[0].detail.contains("no recent state transition"));
     }
@@ -1646,6 +1674,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             FLAP_FAIL_THRESHOLD,
             None,
             1_000_000,
+            "",
         );
         assert_eq!(checks.len(), 2);
         assert!(checks[1].status == CheckStatus::Fail);
@@ -1654,7 +1683,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
 
     #[test]
     fn stale_peer_is_warn() {
-        let checks = peer_checks("10.0.0.2", "Stale", true, 0, 0, None, 1_000_000);
+        let checks = peer_checks("10.0.0.2", "Stale", true, 0, 0, None, 1_000_000, "");
         assert!(checks[0].status == CheckStatus::Warn);
         assert!(checks[0].detail.contains("stale"));
     }
@@ -2143,8 +2172,10 @@ paths = ["x"]
         ));
         // State 2 = Connect, no session events => stuck with no recent
         // transition => red.
-        *server.state.list_neighbors_response.lock().await =
-            vec![neighbor("10.0.0.9", 2, 0, "stuck peer")];
+        let mut stuck = neighbor("10.0.0.9", 2, 0, "stuck peer");
+        stuck.last_error =
+            "sent NOTIFICATION 2/7 (Unsupported Capability)\ntoken=must-not-escape".to_string();
+        *server.state.list_neighbors_response.lock().await = vec![stuck];
         let connection = connect(&server.addr, None).await;
         let dir = tempfile::tempdir().unwrap();
         let bundle_path = dir.path().join("bundle.tar.gz");
@@ -2170,7 +2201,19 @@ paths = ["x"]
             c["name"] == "peer.10.0.0.9.session"
                 && c["status"] == "fail"
                 && c["detail"].as_str().unwrap().contains("in Connect")
+                && c["detail"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Unsupported Capability")
+                && c["detail"].as_str().unwrap().contains("[REDACTED]")
         }));
+        let peers: serde_json::Value =
+            serde_json::from_str(find(&files, "peers/neighbors.json")).unwrap();
+        assert_eq!(
+            peers[0]["last_error"],
+            "sent NOTIFICATION 2/7 (Unsupported Capability)\n[REDACTED]"
+        );
+        assert!(!find(&files, "manifest.json").contains("must-not-escape"));
     }
 
     /// LAN-324 scope item 5: a seeded `md5_password` value and a bearer

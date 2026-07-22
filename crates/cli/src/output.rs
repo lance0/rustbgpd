@@ -213,6 +213,7 @@ pub struct JsonNeighbor {
     pub messages_received: u64,
     pub messages_sent: u64,
     pub flap_count: u64,
+    pub last_error: String,
     pub route_reflector_client: bool,
     pub description: String,
 }
