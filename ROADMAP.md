@@ -1290,8 +1290,8 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
   (`RouteAttrBundle` / `materialize_attrs`), cutting per-UPDATE attribute-clone
   churn. Cold-start BGP reconnect also retries the first TCP-level dial misses
   quickly before returning to the slower exponential guard, reducing boot-order
-  establishment delay when rustbgpd starts before passive peers. Remaining
-  backlog, in rough priority order. Remaining FIB projection table-name
+  establishment delay when rustbgpd starts before passive peers. The remaining
+  backlog follows in rough priority order. FIB projection table-name
   ownership and lower-volume API/CLI serializer cleanup are measurement-gated.
   - FIB projection: shipped the configured-table policy precompile so
     `allowed_neighbors` is parsed once per projection pass and peer /

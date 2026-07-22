@@ -268,7 +268,7 @@ exceeding the fail-closed inspection path. SIGHUP can append a globally
 preflighted non-preferred successor generation without changing Current/RNext;
 a later immutable generation can select that installed successor and deprecate
 its predecessor after authenticated peer use is observed across the affected
-session cohort. Deletion, edits or reordering of existing MKTs, protected-owner
+session cohort. Deletion, edits, or reordering of existing MKTs, protected-owner
 CRUD, and Prometheus exposure of per-socket inspection remain deferred.
 
 ## Shutdown warm-checkpoint confidentiality
@@ -431,7 +431,7 @@ the roadmap:
 - TCP-AO supports ordered static-neighbor and direct dynamic-prefix keyrings,
   add-only non-preferred successor installation on SIGHUP, and a later
   observation-gated SIGHUP generation that selects the installed successor and
-  deprecates its predecessor. Deletion, edits/reordering of existing MKTs, and
+  deprecates its predecessor. Deletion, edits, or reordering of existing MKTs, and
   protected-owner CRUD require a restart.
   Protected static-neighbor interop is covered by M43 against BIRD 3.3.1 on
   Linux with `CONFIG_TCP_AO=y`.
