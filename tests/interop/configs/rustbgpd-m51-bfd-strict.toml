@@ -1,0 +1,37 @@
+# Network: 10.0.0.0/24 — rustbgpd (10.0.0.1) ↔ frr1 (10.0.0.2).
+# Strict-mode companion to rustbgpd-m51-bfd.toml for the M51 remote-AdminDown
+# phase.  The only behavioral difference is `strict = true`: BGP must be
+# withheld while local BFD is Down, then permitted when FRR administratively
+# disables its BFD peer per RFC 5882 section 4.1.
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+token_file = "/run/rustbgpd/grpc-test-only-operator.token"
+principal = "rustbgpd://operator/test-only"
+
+[[bfd_profiles]]
+name = "fast"
+min_tx_interval = 300
+min_rx_interval = 300
+multiplier = 3
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+description = "frr1-m51-strict"
+hold_time = 90
+bfd = { profile = "fast", strict = true }
+
+[security.grpc]
+enforcement = "tier"
+
+[security.grpc.roles]
+"rustbgpd://operator/test-only" = "operator"
