@@ -678,9 +678,11 @@ impl PeerManager {
                 .await;
             }
             SessionState::OpenConfirm => {
-                // We already have router-id from negotiation; start a live
-                // inbound candidate and resolve immediately.
-                let remote_router_id = current_state.and_then(|s| s.remote_router_id);
+                // We already have the negotiated identity; start a live inbound
+                // candidate and resolve immediately without consulting config's
+                // dynamic-neighbor ASN wildcard.
+                let remote_identity =
+                    current_state.and_then(|state| state.remote_router_id.zip(state.peer_asn));
                 let started = self
                     .spawn_pending_inbound(
                         peer_key.clone(),
@@ -689,14 +691,14 @@ impl PeerManager {
                         accepted_generation,
                     )
                     .await;
-                if let Some(rid) = remote_router_id {
+                if let Some((router_id, peer_asn)) = remote_identity {
                     if started {
-                        self.resolve_collision(peer_key, rid).await;
+                        self.resolve_collision(peer_key, router_id, peer_asn).await;
                     }
                 } else {
                     // Shouldn't happen; the live candidate can still notify
                     // us once it receives the peer OPEN.
-                    warn!(%peer_addr, "OpenConfirm but no remote_router_id, waiting for inbound candidate notification");
+                    warn!(%peer_addr, "OpenConfirm but no negotiated peer identity, waiting for inbound candidate notification");
                 }
             }
         }
@@ -706,18 +708,29 @@ impl PeerManager {
         &mut self,
         peer_key: PeerKey,
         remote_router_id: Ipv4Addr,
+        peer_asn: u32,
     ) {
         let peer_addr = peer_key.address;
         let local_id = u32::from(self.router_id);
         let remote_id = u32::from(remote_router_id);
+        let equal_router_ids = local_id == remote_id;
+        let collision_order = match local_id.cmp(&remote_id) {
+            // RFC 6286 section 2.3: with equal eBGP identifiers, preserve the
+            // connection initiated by the speaker with the larger AS number.
+            std::cmp::Ordering::Equal => self.local_asn.cmp(&peer_asn),
+            ordering => ordering,
+        };
 
-        match local_id.cmp(&remote_id) {
+        match collision_order {
             std::cmp::Ordering::Greater => {
                 // We win — keep existing session, drop inbound
                 info!(
                     %peer_addr,
                     local_id = %self.router_id,
                     remote_id = %remote_router_id,
+                    self.local_asn,
+                    peer_asn,
+                    equal_router_ids,
                     "collision: local wins, dropping inbound"
                 );
                 if let Some(pending) = self
@@ -741,6 +754,9 @@ impl PeerManager {
                     %peer_addr,
                     local_id = %self.router_id,
                     remote_id = %remote_router_id,
+                    self.local_asn,
+                    peer_asn,
+                    equal_router_ids,
                     "collision: remote wins, replacing with inbound"
                 );
                 let promoted = {
@@ -767,11 +783,14 @@ impl PeerManager {
                 }
             }
             std::cmp::Ordering::Equal => {
-                // Equal router-ids — should not happen; drop inbound
+                // Equal iBGP identifiers are rejected during OPEN negotiation.
+                // If inconsistent metadata reaches here, do not promote it.
                 warn!(
                     %peer_addr,
                     router_id = %self.router_id,
-                    "collision: equal router-ids, dropping inbound"
+                    self.local_asn,
+                    peer_asn,
+                    "collision: equal router-id and AS, dropping inbound"
                 );
                 if let Some(pending) = self
                     .peers
@@ -782,7 +801,7 @@ impl PeerManager {
                         &peer_key,
                         pending.session_id,
                         pending.handle,
-                        "equal-router-id collision loser",
+                        "equal-identity collision loser",
                         true,
                     )
                     .await;

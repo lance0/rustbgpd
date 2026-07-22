@@ -110,6 +110,7 @@ impl PeerManager {
                 role,
                 peer_addr,
                 remote_router_id,
+                peer_asn,
             } => {
                 let Some(peer_key) = self.peer_key_for_session(session_id) else {
                     debug!(%peer_addr, session_id, ?role, "ignoring notification for unknown peer session");
@@ -130,7 +131,8 @@ impl PeerManager {
                     .get(&peer_key)
                     .is_some_and(|m| m.pending_inbound.is_some())
                 {
-                    self.resolve_collision(peer_key, remote_router_id).await;
+                    self.resolve_collision(peer_key, remote_router_id, peer_asn)
+                        .await;
                 }
             }
             SessionNotification::BackToIdle {

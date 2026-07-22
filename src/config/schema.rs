@@ -2256,6 +2256,8 @@ pub enum ConfigError {
     Io(#[from] std::io::Error),
     #[error("failed to parse TOML: {0}")]
     Parse(#[from] toml::de::Error),
+    #[error("invalid local ASN {value}: AS 0 is reserved (RFC 7607 section 2)")]
+    InvalidLocalAsn { value: u32 },
     #[error("invalid router_id {value:?}: {reason}")]
     InvalidRouterId { value: String, reason: String },
     #[error("invalid neighbor address {value:?}: {reason}")]

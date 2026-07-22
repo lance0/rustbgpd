@@ -5090,6 +5090,7 @@ async fn local_wins_collision_preserves_candidate_terminal_breach() {
             role: rustbgpd_transport::SessionRole::InboundCandidate,
             peer_addr: addr,
             remote_router_id: Ipv4Addr::new(10, 0, 0, 2),
+            peer_asn: 65002,
         })
         .unwrap();
 
@@ -5147,6 +5148,7 @@ async fn remote_wins_collision_preserves_old_primary_terminal_breach() {
             role: rustbgpd_transport::SessionRole::InboundCandidate,
             peer_addr: addr,
             remote_router_id: Ipv4Addr::new(10, 0, 0, 2),
+            peer_asn: 65002,
         })
         .unwrap();
 
@@ -14815,10 +14817,12 @@ async fn simultaneous_active_open_runs_inbound_candidate_before_primary_idle() {
         SessionNotification::OpenReceived {
             role,
             remote_router_id,
+            peer_asn,
             ..
         } => {
             assert_eq!(*role, rustbgpd_transport::SessionRole::InboundCandidate);
             assert_eq!(*remote_router_id, Ipv4Addr::new(10, 0, 0, 2));
+            assert_eq!(*peer_asn, 65002);
         }
         other @ (SessionNotification::BackToIdle { .. }
         | SessionNotification::StateChanged { .. }
@@ -15227,6 +15231,7 @@ async fn collision_local_wins_drops_inbound_candidate() {
         role: rustbgpd_transport::SessionRole::InboundCandidate,
         peer_addr,
         remote_router_id: Ipv4Addr::new(10, 0, 0, 2),
+        peer_asn: 65002,
     })
     .await;
 
@@ -15242,7 +15247,9 @@ async fn collision_local_wins_drops_inbound_candidate() {
 }
 
 #[tokio::test]
-async fn collision_equal_router_ids_drops_inbound_candidate() {
+async fn collision_equal_router_ids_larger_remote_as_promotes_dynamic_inbound() {
+    // Mutation-red: deleting the AS tie-break, reversing it, or consulting the
+    // configured wildcard ASN 0 leaves the primary session in place.
     let (_cmd_tx, cmd_rx) = mpsc::channel(16);
     let (rib_tx, _rib_rx) = mpsc::channel(64);
     let metrics = BgpMetrics::new();
@@ -15262,7 +15269,7 @@ async fn collision_equal_router_ids_drops_inbound_candidate() {
     insert_test_managed_peer_with_asn(
         &mut mgr,
         peer_addr,
-        65002,
+        0,
         fake_peer_handle(
             peer_addr,
             SessionState::OpenConfirm,
@@ -15288,6 +15295,72 @@ async fn collision_equal_router_ids_drops_inbound_candidate() {
         role: rustbgpd_transport::SessionRole::InboundCandidate,
         peer_addr,
         remote_router_id: Ipv4Addr::new(10, 0, 0, 2),
+        peer_asn: 4_200_000_001,
+    })
+    .await;
+
+    wait_counter(&primary.collision_dump, 1).await;
+    assert_eq!(primary.collision_dump.load(Ordering::SeqCst), 1);
+    assert_eq!(pending.collision_dump.load(Ordering::SeqCst), 0);
+    assert!(
+        mgr.peers
+            .get(&key(peer_addr))
+            .is_some_and(|m| m.pending_inbound.is_none() && m.session_id == 2),
+        "the larger remote four-octet AS must preserve its inbound connection; \
+         using ManagedPeer.remote_asn would read the dynamic wildcard 0 and fail"
+    );
+}
+
+#[tokio::test]
+async fn collision_equal_router_ids_larger_local_four_octet_as_drops_inbound() {
+    // Mutation-red: reversing the AS comparison promotes the pending inbound
+    // connection even though the larger local AS initiated the primary.
+    let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let metrics = BgpMetrics::new();
+    let mut mgr = PeerManager::new(
+        cmd_rx,
+        4_200_000_001,
+        Ipv4Addr::new(10, 0, 0, 2),
+        None,
+        None,
+        metrics,
+        rib_tx,
+        None,
+    );
+    let peer_addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let primary = Arc::new(FakePeerCounters::default());
+    let pending = Arc::new(FakePeerCounters::default());
+    insert_test_managed_peer_with_asn(
+        &mut mgr,
+        peer_addr,
+        0,
+        fake_peer_handle(
+            peer_addr,
+            SessionState::OpenConfirm,
+            Some(Ipv4Addr::new(10, 0, 0, 2)),
+            primary.clone(),
+        ),
+        false,
+    );
+    attach_test_pending_inbound(
+        &mut mgr,
+        peer_addr,
+        fake_peer_handle(
+            peer_addr,
+            SessionState::OpenConfirm,
+            Some(Ipv4Addr::new(10, 0, 0, 2)),
+            pending.clone(),
+        ),
+        2,
+    );
+
+    mgr.handle_session_notification(SessionNotification::OpenReceived {
+        session_id: 2,
+        role: rustbgpd_transport::SessionRole::InboundCandidate,
+        peer_addr,
+        remote_router_id: Ipv4Addr::new(10, 0, 0, 2),
+        peer_asn: 65002,
     })
     .await;
 
@@ -15298,7 +15371,71 @@ async fn collision_equal_router_ids_drops_inbound_candidate() {
         mgr.peers
             .get(&key(peer_addr))
             .is_some_and(|m| m.pending_inbound.is_none() && m.session_id == 1),
-        "equal router-id collision must keep the primary session"
+        "the larger local four-octet AS must preserve its outbound connection"
+    );
+}
+
+#[tokio::test]
+async fn collision_equal_router_id_and_as_drops_inbound_defensively() {
+    // Mutation-red: treating an impossible equal identity as remote-wins
+    // replaces the primary session instead of failing closed.
+    let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let metrics = BgpMetrics::new();
+    let mut mgr = PeerManager::new(
+        cmd_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 2),
+        None,
+        None,
+        metrics,
+        rib_tx,
+        None,
+    );
+    let peer_addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let primary = Arc::new(FakePeerCounters::default());
+    let pending = Arc::new(FakePeerCounters::default());
+    insert_test_managed_peer_with_asn(
+        &mut mgr,
+        peer_addr,
+        0,
+        fake_peer_handle(
+            peer_addr,
+            SessionState::OpenConfirm,
+            Some(Ipv4Addr::new(10, 0, 0, 2)),
+            primary.clone(),
+        ),
+        false,
+    );
+    attach_test_pending_inbound(
+        &mut mgr,
+        peer_addr,
+        fake_peer_handle(
+            peer_addr,
+            SessionState::OpenConfirm,
+            Some(Ipv4Addr::new(10, 0, 0, 2)),
+            pending.clone(),
+        ),
+        2,
+    );
+
+    mgr.handle_session_notification(SessionNotification::OpenReceived {
+        session_id: 2,
+        role: rustbgpd_transport::SessionRole::InboundCandidate,
+        peer_addr,
+        remote_router_id: Ipv4Addr::new(10, 0, 0, 2),
+        peer_asn: 65001,
+    })
+    .await;
+
+    wait_counter(&pending.collision_dump, 1).await;
+    assert_eq!(primary.collision_dump.load(Ordering::SeqCst), 0);
+    assert_eq!(pending.collision_dump.load(Ordering::SeqCst), 1);
+    assert!(
+        mgr.peers
+            .get(&key(peer_addr))
+            .is_some_and(|m| m.pending_inbound.is_none() && m.session_id == 1),
+        "equal AS and router ID is invalid iBGP identity and must not promote inbound"
     );
 }
 
@@ -15474,7 +15611,7 @@ async fn production_collision_promotion_transfers_capacity_after_primary_termina
         "inactive candidate must not overwrite the primary"
     );
 
-    mgr.resolve_collision(key(peer_addr), Ipv4Addr::new(10, 0, 0, 2))
+    mgr.resolve_collision(key(peer_addr), Ipv4Addr::new(10, 0, 0, 2), 65002)
         .await;
 
     assert!(terminated.load(Ordering::SeqCst));
@@ -15543,6 +15680,7 @@ async fn stale_collision_notifications_do_not_mutate_current_peer() {
         role: rustbgpd_transport::SessionRole::InboundCandidate,
         peer_addr,
         remote_router_id: Ipv4Addr::new(10, 0, 0, 2),
+        peer_asn: 65002,
     })
     .await;
     mgr.handle_session_notification(SessionNotification::BackToIdle {

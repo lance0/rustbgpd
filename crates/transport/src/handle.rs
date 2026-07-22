@@ -228,6 +228,8 @@ pub enum SessionNotification {
         peer_addr: IpAddr,
         /// Router ID from the peer's OPEN message.
         remote_router_id: Ipv4Addr,
+        /// Peer ASN from OPEN negotiation, including a four-octet capability.
+        peer_asn: u32,
     },
     /// Session fell back to Idle.
     BackToIdle {

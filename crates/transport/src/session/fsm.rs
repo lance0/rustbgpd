@@ -313,6 +313,7 @@ impl PeerSession {
                                 role: self.session_identity.role,
                                 peer_addr: self.peer_ip,
                                 remote_router_id: neg.peer_router_id,
+                                peer_asn: neg.peer_asn,
                             })
                         {
                             warn!(
