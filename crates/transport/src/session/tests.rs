@@ -11,7 +11,7 @@ use rustbgpd_wire::{
     AddressPrefixOrf, AsPath, AsPathSegment, FlowSpecComponent, FlowSpecPrefix, FlowSpecRule,
     Ipv4NlriEntry, Ipv4Prefix, Ipv6Prefix, Ipv6PrefixOffset, LlgrFamily, Message, MplsLabelEntry,
     NumericMatch, OrfAction, OrfEntries, OrfEntryGroup, OrfMatch, OrfPayload, OrfType, Origin,
-    PathAttribute, RouteDistinguisher, VpnNlri, VpnPrefix, WhenToRefresh,
+    PathAttribute, RawAttribute, RouteDistinguisher, VpnNlri, VpnPrefix, WhenToRefresh,
     bgpls::{BgpLsNlri, BgpLsNlriType, decode_bgpls_nlri, decode_bgpls_vpn_nlri},
 };
 use std::collections::HashMap;
@@ -16457,6 +16457,92 @@ async fn rfc7606_attribute_discard_keeps_announcement_and_session() {
     };
     assert_eq!(announced.len(), 1);
     assert_eq!(announced[0].prefix, Prefix::V4(prefix));
+    assert_eq!(session.fsm.state(), SessionState::Established);
+    assert_single_malformed_disposition(&session, "attribute_discard");
+}
+
+/// RFC 9552 §8.2.2: malformed TLV framing discards the complete BGP-LS
+/// Attribute while preserving its BGP-LS NLRI and the session.
+///
+/// Load-bearing live proof: bypassing the Attribute 29 parser leaves type 29
+/// on the delivered route and fails the absence assertion; changing its
+/// disposition to treat-as-withdraw removes the announcement and fails the
+/// `BgpLsRoutesReceived` assertion.
+#[tokio::test]
+async fn bgpls_attribute_discard_keeps_nlri_and_session() {
+    use rustbgpd_wire::MpReachNlri;
+
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    rfc7606_drain(&mut rib_rx);
+
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.negotiated_families = vec![(Afi::BgpLs, Safi::BgpLs)];
+    install_test_negotiated_session(&mut session, negotiated);
+
+    let nlri = BgpLsNlri::try_new(
+        BgpLsNlriType::Unknown(65_000),
+        None,
+        Bytes::from_static(&[0xaa, 0xbb, 0xcc]),
+    )
+    .unwrap();
+    let attrs = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002])],
+        }),
+        PathAttribute::MpReachNlri(MpReachNlri {
+            afi: Afi::BgpLs,
+            safi: Safi::BgpLs,
+            next_hop: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2)),
+            link_local_next_hop: None,
+            announced: vec![],
+            flowspec_announced: vec![],
+            evpn_announced: vec![],
+            bgpls_announced: vec![nlri.clone()],
+            labeled_announced: vec![],
+            vpn_announced: vec![],
+            rtc_announced: vec![],
+        }),
+        PathAttribute::Unknown(RawAttribute {
+            flags: rustbgpd_wire::constants::attr_flags::OPTIONAL,
+            type_code: rustbgpd_wire::constants::attr_type::BGP_LS,
+            // IGP Metric TLV 1095 declares four bytes but only three remain.
+            data: Bytes::from_static(&[0x04, 0x47, 0, 4, 0, 0, 7]),
+        }),
+    ];
+
+    session
+        .process_update(UpdateMessage::build(
+            &[],
+            &[],
+            &attrs,
+            true,
+            false,
+            Ipv4UnicastMode::Body,
+        ))
+        .await;
+
+    let RibUpdate::BgpLsRoutesReceived {
+        announced,
+        withdrawn,
+        ..
+    } = rib_rx.try_recv().expect("BGP-LS NLRI must survive")
+    else {
+        panic!("expected BgpLsRoutesReceived");
+    };
+    assert_eq!(announced.len(), 1);
+    assert_eq!(announced[0].nlri, nlri);
+    assert!(withdrawn.is_empty());
+    assert!(
+        !announced[0]
+            .attributes
+            .iter()
+            .any(|attr| attr.type_code() == rustbgpd_wire::constants::attr_type::BGP_LS),
+        "the malformed Attribute 29 must not enter Adj-RIB-In"
+    );
     assert_eq!(session.fsm.state(), SessionState::Established);
     assert_single_malformed_disposition(&session, "attribute_discard");
 }

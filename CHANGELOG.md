@@ -11,6 +11,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **RFC 9552 BGP-LS Attribute fault isolation.** Attribute 29 now enforces its
+  optional non-transitive flags and contained TLV framing. Malformed contained
+  framing discards only the complete attribute while preserving the BGP-LS
+  NLRI and session; valid unknown TLVs remain byte-stable for reflection.
+
 - **GShut receiver verification is executable from `rbgp`.** The runbook uses
   the parse-valid received-RIB command, whose JSON now exposes optional
   `local_pref_attr` so operators can distinguish an explicit demotion to zero.

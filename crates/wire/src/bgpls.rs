@@ -284,6 +284,25 @@ pub fn encode_bgpls_nlri(routes: &[BgpLsNlri], out: &mut Vec<u8>) -> Result<(), 
 /// Returns `DecodeError` if a TLV header or value is structurally truncated.
 pub fn decode_bgpls_tlvs(input: &[u8]) -> Result<Vec<BgpLsTlv>, DecodeError> {
     let mut tlvs = Vec::new();
+    visit_bgpls_tlvs(input, |type_code, value| {
+        tlvs.push(BgpLsTlv {
+            type_code,
+            value: Bytes::copy_from_slice(value),
+        });
+    })?;
+    Ok(tlvs)
+}
+
+/// Validate a sequence of BGP-LS TLV boundaries without retaining values.
+///
+/// # Errors
+///
+/// Returns `DecodeError` if a TLV header or value is structurally truncated.
+pub(crate) fn validate_bgpls_tlv_framing(input: &[u8]) -> Result<(), DecodeError> {
+    visit_bgpls_tlvs(input, |_, _| {})
+}
+
+fn visit_bgpls_tlvs(input: &[u8], mut visit: impl FnMut(u16, &[u8])) -> Result<(), DecodeError> {
     let mut offset = 0;
     while offset < input.len() {
         let remaining = input.len() - offset;
@@ -304,13 +323,10 @@ pub fn decode_bgpls_tlvs(input: &[u8]) -> Result<Vec<BgpLsTlv>, DecodeError> {
             )));
         }
 
-        tlvs.push(BgpLsTlv {
-            type_code,
-            value: Bytes::copy_from_slice(&input[offset..offset + value_len]),
-        });
+        visit(type_code, &input[offset..offset + value_len]);
         offset += value_len;
     }
-    Ok(tlvs)
+    Ok(())
 }
 
 /// Encode BGP-LS TLVs into `out`.
