@@ -155,6 +155,8 @@ pub mod attr_type {
     /// RFC 6514 §5: PMSI Tunnel attribute (used by EVPN Type 3 IMET
     /// for ingress-replication BUM).
     pub const PMSI_TUNNEL: u8 = 22;
+    /// RFC 9552 §5.3: BGP-LS Attribute.
+    pub const BGP_LS: u8 = 29;
     /// RFC 9234 §5: Only-to-Customer (OTC).
     pub const ONLY_TO_CUSTOMER: u8 = 35;
 }

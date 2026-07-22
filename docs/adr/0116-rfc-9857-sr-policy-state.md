@@ -105,19 +105,19 @@ must use the corrected term.
 RFC 9857 inherits RFC 9552 fault handling, which refines the RFC 7606 recovery
 model for BGP-LS:
 
-- Outer UPDATE, MP_REACH/MP_UNREACH, NLRI, TLV, and sub-TLV containment,
-  length sums, and the permitted lengths of recognized TLVs and sub-TLVs are
-  syntax.  Recoverably malformed NLRIs are discarded individually.  A framing
-  failure that prevents locating the next NLRI uses AFI/SAFI disable where
-  available, otherwise session reset.
+- Outer UPDATE, MP_REACH/MP_UNREACH, NLRI, TLV, and recognized sub-TLV
+  containment and length sums are syntax.  Recoverably malformed NLRIs are
+  discarded individually.  A framing failure that prevents locating the next
+  NLRI uses AFI/SAFI disable where available, otherwise session reset.
 - A syntactically malformed TLV inside Attribute 29 discards the complete
   BGP-LS Attribute, not just that TLV.  The NLRI remains propagatable without
   Attribute 29 so consumers can distinguish lost attributes from a withdrawn
   object.
-- Missing mandatory TLVs, unexpected TLVs, field values, flag combinations,
-  and whether a TLV is meaningful for a particular NLRI are semantic checks.
-  A propagator must not reject an object for those reasons.  That judgment
-  belongs to the consuming application.
+- Missing mandatory TLVs, unexpected TLVs, fixed or variable value-length
+  constraints, field values, TLV-internal flag combinations, and whether a TLV
+  is meaningful for a particular NLRI are semantic checks.  A propagator must
+  not reject an object for those reasons.  That judgment belongs to the
+  consuming application.
 - Unknown NLRI/TLV/segment extensions remain opaque and round-trip.  RFC 4271
   path-attribute framing and flag rules still apply outside the more specific
   BGP-LS recovery behavior.

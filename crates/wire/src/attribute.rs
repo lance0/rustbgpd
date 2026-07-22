@@ -905,6 +905,9 @@ pub struct RevisedAttributeDecode {
 /// - §7.6/§7.7: `ATOMIC_AGGREGATE` with a non-zero length and `AGGREGATOR`
 ///   with a length other than 6/8 (by the 4-octet-AS negotiation) are
 ///   attribute-discard. The legacy decoder passes both through opaquely.
+/// - RFC 9552 §8.2.2: malformed TLV framing inside Attribute 29 is
+///   attribute-discard; the attribute is omitted while the NLRI remains
+///   available to the caller.
 ///
 /// `is_ibgp` selects the internal-neighbor branch of
 /// [`malformed_attr_disposition`] for `LOCAL_PREF` / `ORIGINATOR_ID` /
@@ -1090,8 +1093,18 @@ fn decode_attribute_value(
     add_path_families: &[(Afi, Safi)],
     bgpls_discarded: &mut u32,
 ) -> Result<PathAttribute, DecodeError> {
-    // Validate Optional + Transitive flags for known attribute types (RFC 4271 §6.3).
-    let flags_mask = attr_flags::OPTIONAL | attr_flags::TRANSITIVE;
+    // Validate the required flags for known attribute types (RFC 4271 §6.3).
+    // RFC 4271 §4.3 requires Partial=0 for optional non-transitive
+    // attributes. Existing typed attributes predate strict Partial checking;
+    // include it for newly recognized Attribute 29 without broadening their
+    // error surface in this change.
+    let flags_mask = attr_flags::OPTIONAL
+        | attr_flags::TRANSITIVE
+        | if type_code == attr_type::BGP_LS {
+            attr_flags::PARTIAL
+        } else {
+            0
+        };
     if let Some(expected) = expected_flags(type_code)
         && (flags & flags_mask) != expected
     {
@@ -1264,6 +1277,24 @@ fn decode_attribute_value(
         attr_type::PMSI_TUNNEL => {
             let pmsi = crate::pmsi::PmsiTunnel::decode(value)?;
             Ok(PathAttribute::PmsiTunnel(pmsi))
+        }
+        attr_type::BGP_LS => {
+            // RFC 9552 §8.2.2: an intact path-attribute boundary containing
+            // malformed TLV framing discards the whole BGP-LS Attribute. Do
+            // not validate fixed/variable value lengths or semantics here;
+            // a BGP-LS propagator is explicitly forbidden from doing so.
+            crate::bgpls::validate_bgpls_tlv_framing(value).map_err(|error| {
+                DecodeError::UpdateAttributeError {
+                    subcode: update_subcode::ATTRIBUTE_LENGTH_ERROR,
+                    data: attr_error_data(flags, type_code, value),
+                    detail: error.to_string(),
+                }
+            })?;
+            Ok(PathAttribute::Unknown(RawAttribute {
+                flags,
+                type_code,
+                data: Bytes::copy_from_slice(value),
+            }))
         }
         attr_type::ONLY_TO_CUSTOMER => {
             // Preserve as Unknown(RawAttribute) in two cases — both keep
@@ -1984,7 +2015,8 @@ fn expected_flags(type_code: u8) -> Option<u8> {
         | attr_type::ORIGINATOR_ID
         | attr_type::CLUSTER_LIST
         | attr_type::MP_REACH_NLRI
-        | attr_type::MP_UNREACH_NLRI => Some(attr_flags::OPTIONAL),
+        | attr_type::MP_UNREACH_NLRI
+        | attr_type::BGP_LS => Some(attr_flags::OPTIONAL),
         // Optional transitive
         attr_type::AGGREGATOR
         | attr_type::COMMUNITIES
@@ -2289,8 +2321,11 @@ pub fn encode_path_attributes(
                 value.extend_from_slice(&raw.data);
             }
         }
-        // Use extended length if value > 255 bytes
-        if value.len() > 255 {
+        // Preserve an explicitly received Extended Length encoding on opaque
+        // attributes even when the value would fit in one octet. Otherwise
+        // Unknown reflection would retain the flag but emit a one-octet
+        // length, corrupting the attribute boundary.
+        if value.len() > 255 || (flags & attr_flags::EXTENDED_LENGTH) != 0 {
             buf.push(flags | attr_flags::EXTENDED_LENGTH);
             buf.push(type_code);
             #[expect(
@@ -5326,6 +5361,108 @@ mod tests {
         buf.extend(valid_next_hop_bytes());
         buf.extend_from_slice(extra);
         buf
+    }
+    /// Load-bearing flag proof: removing Attribute 29 from `expected_flags`,
+    /// or omitting its Partial-bit check, accepts one of these fixtures.
+    #[test]
+    fn revised_bgpls_attribute_enforces_exact_flags() {
+        let value = [0x04, 0x47, 0, 1, 7]; // IGP Metric TLV, 1-byte value
+        for bad_flags in [
+            attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
+            attr_flags::OPTIONAL | attr_flags::PARTIAL,
+        ] {
+            let decoded = decode_path_attributes_revised(
+                &attr_bytes(bad_flags, attr_type::BGP_LS, &value),
+                true,
+                false,
+                &[],
+            )
+            .unwrap();
+            assert!(decoded.attributes.is_empty());
+            assert_eq!(decoded.malformed.len(), 1);
+            assert_eq!(decoded.malformed[0].type_code, attr_type::BGP_LS);
+            assert_eq!(
+                decoded.malformed[0].disposition,
+                ErrorDisposition::TreatAsWithdraw
+            );
+            assert!(matches!(
+                decoded.malformed[0].error,
+                DecodeError::UpdateAttributeError {
+                    subcode: update_subcode::ATTRIBUTE_FLAGS_ERROR,
+                    ..
+                }
+            ));
+        }
+    }
+    /// Load-bearing framing and disposition proof: bypassing the Attribute 29
+    /// TLV parser accepts this value, while changing its RFC 9552 disposition
+    /// to treat-as-withdraw fails the exact verdict below.
+    #[test]
+    fn revised_bgpls_attribute_truncated_tlv_is_attribute_discard() {
+        // Recognized IGP Metric TLV 1095 declares four value octets but only
+        // three remain inside the intact Attribute 29 boundary.
+        let value = [0x04, 0x47, 0, 4, 0, 0, 7];
+        let decoded = decode_path_attributes_revised(
+            &attr_bytes(attr_flags::OPTIONAL, attr_type::BGP_LS, &value),
+            true,
+            false,
+            &[],
+        )
+        .unwrap();
+        assert!(decoded.attributes.is_empty());
+        assert_eq!(decoded.malformed.len(), 1);
+        assert_eq!(decoded.malformed[0].type_code, attr_type::BGP_LS);
+        assert_eq!(
+            decoded.malformed[0].disposition,
+            ErrorDisposition::AttributeDiscard
+        );
+    }
+    /// Load-bearing forward-compatibility proof: rejecting a structurally
+    /// complete recognized TLV for a semantically impermissible value length,
+    /// rejecting an unknown TLV, or failing to retain the raw Attribute 29
+    /// payload makes the byte equality fail. Removing Attribute 29 flag
+    /// recognition accepts the mutated-flags copy and fails the final verdict.
+    #[test]
+    fn bgpls_attribute_unknown_tlv_roundtrips_byte_for_byte() {
+        let mut value = Vec::with_capacity(12);
+        // Node Flag Bits TLV 1024 has a specified one-octet value. A complete
+        // two-octet value is semantically impermissible, but RFC 9552 §8.2.2
+        // forbids a propagator from treating that as malformed.
+        value.extend_from_slice(&1024_u16.to_be_bytes());
+        value.extend_from_slice(&2_u16.to_be_bytes());
+        value.extend_from_slice(&[0xff, 0xff]);
+        // Unknown TLVs remain opaque and propagatable under RFC 9552 §5.1.
+        value.extend_from_slice(&65_000_u16.to_be_bytes());
+        value.extend_from_slice(&2_u16.to_be_bytes());
+        value.extend_from_slice(&[0xde, 0xad]);
+
+        let mut encoded = vec![
+            attr_flags::OPTIONAL | attr_flags::EXTENDED_LENGTH,
+            attr_type::BGP_LS,
+        ];
+        encoded.extend_from_slice(&u16::try_from(value.len()).unwrap().to_be_bytes());
+        encoded.extend_from_slice(&value);
+
+        let decoded = decode_path_attributes(&encoded, true, &[]).unwrap();
+        let [PathAttribute::Unknown(raw)] = decoded.as_slice() else {
+            panic!("valid BGP-LS Attribute must remain opaque");
+        };
+        assert_eq!(raw.type_code, attr_type::BGP_LS);
+        assert_eq!(raw.data.as_ref(), value);
+
+        let mut reencoded = Vec::new();
+        encode_path_attributes(&decoded, &mut reencoded, true, false).unwrap();
+        assert_eq!(reencoded, encoded);
+
+        let mut bad_flags = encoded;
+        bad_flags[0] |= attr_flags::TRANSITIVE;
+        let rejected = decode_path_attributes_revised(&bad_flags, true, false, &[]).unwrap();
+        assert!(rejected.attributes.is_empty());
+        assert_eq!(rejected.malformed.len(), 1);
+        assert_eq!(
+            rejected.malformed[0].disposition,
+            ErrorDisposition::TreatAsWithdraw
+        );
     }
     #[test]
     fn revised_malformed_med_is_treat_as_withdraw() {

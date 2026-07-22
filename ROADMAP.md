@@ -525,11 +525,11 @@ Details in the "Recently shipped" section below and ADR-0097.
 - **RFC 9857 SR Policy state in BGP-LS** (receive/reflect/API) — ADR-0116
   records a bounded fit for the controller-feed / RR niche, but feature code is
   a no-go until a named controller demand supplies a real producer, consumer,
-  and UPDATE capture. The type-5 NLRI and Attribute 29 bytes already pass opaquely;
-  generic RFC 9552 Attribute 29 framing/discard correctness and a consumer-
-  shaped API are prerequisites for typed SAFI-71 support. Origination, PCEP /
-  SRPM, TE computation, dataplane programming, Add-Path changes, and typed
-  SAFI-72 claims remain out of scope.
+  and UPDATE capture. The type-5 NLRI and Attribute 29 bytes pass opaquely, and
+  generic RFC 9552 Attribute 29 framing/discard correctness is shipped. A
+  consumer-shaped API remains a prerequisite for typed SAFI-71 support.
+  Origination, PCEP / SRPM, TE computation, dataplane programming, Add-Path
+  changes, and typed SAFI-72 claims remain out of scope.
 - ~~**ASPA/RTRv2 conformance refresh**~~ **Shipped (M84/#759, LAN-243):**
   multi-cache RTR v1/v2 epoch, reconnect, replacement, withdrawal, and serial-
   regression behavior is retained in the interop receipt.

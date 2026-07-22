@@ -61,7 +61,7 @@ analyzers, test harnesses, MRT readers, etc.
 | 9136 | EVPN Type 5: IP Prefix advertisement |
 | 9234 | BGP Roles (OPEN capability code 9, `BgpRole`) + Only-to-Customer path attribute (type 35, `PathAttribute::OnlyToCustomer`). Codec only; malformed-length OTC is preserved as `Unknown` (not a fatal decode) so transport can apply RFC 7606 treat-as-withdraw. Negotiation + ingress/egress rules live in the daemon (ADR-0071) |
 | 9494 | Long-lived graceful restart capability |
-| 9552 | BGP-LS and BGP-LS-VPN NLRI/TLV codec with opaque preservation of unknown NLRI types and TLVs. The daemon consumes it for the ADR-0077 receive/API tranche. Typed topology read accessors now live in the crate (the `bgpls_topo` module); outbound reflection and topology production remain outside the wire crate |
+| 9552 | BGP-LS and BGP-LS-VPN NLRI/TLV codec with opaque preservation of unknown NLRI types and TLVs. Attribute 29 enforces optional non-transitive flags and structural TLV framing; malformed contained framing uses RFC 9552 whole-attribute discard while retaining the NLRI. The daemon consumes the codec for the ADR-0077 receive/API tranche. Typed topology read accessors live in `bgpls_topo`; local topology production remains outside the wire crate |
 | 9687 | Send Hold Timer: NOTIFICATION code 8 (`NotificationCode::SendHoldTimerExpired`, subcode always 0 per §6). Codec only — the timer itself lives in the daemon |
 | 9785 §3 | DF Election preference algorithms + Don't-Preempt bit, extending the RFC 8584 DF Election Extended Community |
 | draft-abraitis-idr-addpath-paths-limit-04 | Experimental Paths-Limit capability (`PathsLimitFamily`, IANA-assigned capability code 76). The draft is expired and archived; interoperability and behavior remain experimental |

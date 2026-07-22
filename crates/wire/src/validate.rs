@@ -39,14 +39,19 @@ impl ErrorDisposition {
 /// malformation is treat-as-withdraw.
 ///
 /// `MP_REACH_NLRI` / `MP_UNREACH_NLRI` stay session-reset (§7.11: the NLRI
-/// cannot be reliably located). `ATOMIC_AGGREGATE` and `AGGREGATOR` are
-/// attribute-discard (§7.6, §7.7). Everything else — including `AS_PATH`
-/// (§7.2) — is treat-as-withdraw.
+/// cannot be reliably located). `ATOMIC_AGGREGATE` and `AGGREGATOR` use
+/// attribute-discard for their RFC 7606 §7.6/§7.7 length errors; the BGP-LS
+/// Attribute uses attribute-discard for contained TLV-framing errors
+/// (RFC 9552 §8.2.2). Attribute-flag conflicts are upgraded separately to
+/// treat-as-withdraw per RFC 7606 §3(c). Everything else — including
+/// `AS_PATH` (§7.2) — is treat-as-withdraw.
 #[must_use]
 pub fn malformed_attr_disposition(type_code: u8, is_ibgp: bool) -> ErrorDisposition {
     match type_code {
         attr_type::MP_REACH_NLRI | attr_type::MP_UNREACH_NLRI => ErrorDisposition::SessionReset,
-        attr_type::ATOMIC_AGGREGATE | attr_type::AGGREGATOR => ErrorDisposition::AttributeDiscard,
+        attr_type::ATOMIC_AGGREGATE | attr_type::AGGREGATOR | attr_type::BGP_LS => {
+            ErrorDisposition::AttributeDiscard
+        }
         attr_type::LOCAL_PREF | attr_type::ORIGINATOR_ID | attr_type::CLUSTER_LIST if !is_ibgp => {
             ErrorDisposition::AttributeDiscard
         }
