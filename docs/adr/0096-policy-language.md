@@ -180,7 +180,8 @@ verdicts only; XR profiles attached policies; Batfish is offline). We
 ship, in one verb:
 
 ```
-rbgp policy test my-policy.rpol --rib live --direction import --peer 10.0.0.1
+rbgp policy test my-policy.rpol --policy 'customer-in(200)' \
+  --direction import --neighbor 10.0.0.1
   → accepted / rejected / modified counts
   → per-term hit counters
   → sample before/after attribute diffs (--show-changes N)

@@ -44,7 +44,7 @@ its generic deny, and test both the exception and an unauthorized control.
   path, the route server advertises the best *permitted* candidate instead
   of hiding the prefix — the BIRD-`secondary` equivalent. Trade-off: such
   peers are excluded from update-group sharing (visible as the
-  `per_client_best` reason in `rbgp neighbor show`).
+  `per_client_best` reason in `rbgp neighbor <addr>`).
 
 ## RFC 1997 `NO_EXPORT` and route-server transparency
 
@@ -65,7 +65,7 @@ rbgp policy check hygiene.rpol
 
 # Run, then inspect a member:
 rbgp neighbor 198.51.100.3                 # Distribution Mode: per-client-best
-rbgp rib advertised 198.51.100.3 --explain --prefix 203.0.113.0/24
+rbgp rib --prefix 203.0.113.0/24 advertised 198.51.100.3 --explain
 ```
 
 The explain output for a per-client-best member shows the ranked candidate
