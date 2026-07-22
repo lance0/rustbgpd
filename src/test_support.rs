@@ -18,8 +18,94 @@ use rustbgpd_wire::{
     AsPath, MacAddress, Origin, PathAttribute, Prefix, RouteDistinguisher, RpkiValidation,
 };
 
-use crate::config::FibTableConfig;
+use crate::config::{Config, FibTableConfig, GrpcEnforcementConfig, GrpcRoleConfig};
 use crate::fib::FibRouteKey;
+
+const TEST_GRPC_OPERATOR_PRINCIPAL: &str = "rustbgpd://operator/test-only";
+
+/// Add the smallest production-valid Tier authorization surface to a
+/// unit-test config that does not exercise gRPC configuration itself.
+///
+/// Callers opt in explicitly so production config loaders always see
+/// exactly the text they were given. UDS filesystem permissions provide
+/// the authentication boundary; the stable principal supplies the Tier
+/// authorization identity.
+pub(crate) fn tier_authorized_uds_test_config(source: &str) -> String {
+    assert!(
+        !source.contains("[security.grpc"),
+        "tier-authorized UDS test helper requires a config without security.grpc"
+    );
+    assert!(
+        !source.contains("[global.telemetry.grpc_uds]"),
+        "tier-authorized UDS test helper requires a config without grpc_uds"
+    );
+
+    format!(
+        r#"{source}
+
+[global.telemetry.grpc_uds]
+path = "/tmp/rustbgpd-test.sock"
+principal = "rustbgpd://operator/test-only"
+
+[security.grpc]
+enforcement = "tier"
+
+[security.grpc.roles]
+"rustbgpd://operator/test-only" = "operator"
+"#
+    )
+}
+
+pub(crate) fn assert_tier_authorized_test_config(config: &Config) {
+    assert_eq!(
+        config.security.grpc.enforcement,
+        GrpcEnforcementConfig::Tier
+    );
+    assert_eq!(
+        config.security.grpc.roles.get(TEST_GRPC_OPERATOR_PRINCIPAL),
+        Some(&GrpcRoleConfig::Operator)
+    );
+    let principal = if let Some(uds) = config.global.telemetry.grpc_uds.as_ref() {
+        assert_eq!(uds.path.as_deref(), Some("/tmp/rustbgpd-test.sock"));
+        uds.principal.as_deref()
+    } else {
+        let tcp = config.global.telemetry.grpc_tcp.as_ref().unwrap();
+        assert!(tcp.token_file.is_some());
+        tcp.principal.as_deref()
+    };
+    assert_eq!(principal, Some(TEST_GRPC_OPERATOR_PRINCIPAL));
+}
+
+#[cfg(test)]
+mod tier_auth_tests {
+    use super::*;
+
+    #[test]
+    fn tier_auth_helper_preserves_array_table_and_validates() {
+        let source = concat!(
+            "[global]\nasn = 65000\nrouter_id = \"10.0.0.1\"\nlisten_port = 179\n\n[global.telemetry]\nlog_format = \"json\"\n\n",
+            "[[neighbors]]\naddress = \"192.0.2.1\"\nremote_asn = 65001\n",
+        );
+        let augmented = tier_authorized_uds_test_config(source);
+        let config = Config::load_toml_with_diagnostics(&augmented, "tier auth helper").unwrap();
+
+        assert_eq!(config.neighbors[0].address, "192.0.2.1");
+        assert_eq!(config.neighbors[0].remote_asn, 65001);
+        assert_tier_authorized_test_config(&config);
+    }
+
+    #[test]
+    #[should_panic(expected = "requires a config without security.grpc")]
+    fn tier_auth_helper_rejects_preexisting_legacy_security() {
+        tier_authorized_uds_test_config("[security.grpc]\nenforcement = \"legacy\"\n");
+    }
+
+    #[test]
+    #[should_panic(expected = "requires a config without grpc_uds")]
+    fn tier_auth_helper_rejects_preexisting_uds_listener() {
+        tier_authorized_uds_test_config("[global.telemetry.grpc_uds]\npath = \"/tmp/x\"\n");
+    }
+}
 
 pub(crate) fn ip(s: &str) -> IpAddr {
     s.parse().unwrap()

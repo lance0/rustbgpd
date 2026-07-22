@@ -3448,9 +3448,11 @@ fn evpn_runtime_candidate_from_toml(
             "candidate_toml must contain a full rustbgpd config".to_string(),
         ));
     }
+    let candidate_toml = crate::test_support::tier_authorized_uds_test_config(candidate_toml);
     let candidate =
-        Config::load_toml_with_diagnostics(candidate_toml, "candidate EVPN runtime config")
+        Config::load_toml_with_diagnostics(&candidate_toml, "candidate EVPN runtime config")
             .map_err(GrpcEvpnRuntimeApplyError::InvalidArgument)?;
+    crate::test_support::assert_tier_authorized_test_config(&candidate);
     evpn_runtime_candidate_from_config(&candidate)
 }
 
@@ -3899,8 +3901,6 @@ listen_port = 179
 [global.telemetry]
 log_format = "json"
 
-[security.grpc]
-enforcement = "legacy"
 "#
     }
 
@@ -3913,9 +3913,6 @@ listen_port = 179
 
 [global.telemetry]
 log_format = "json"
-
-[security.grpc]
-enforcement = "legacy"
 
 [[evpn_instances]]
 vni = 100
@@ -3934,9 +3931,6 @@ listen_port = 179
 
 [global.telemetry]
 log_format = "json"
-
-[security.grpc]
-enforcement = "legacy"
 
 [[evpn_instances]]
 vni = 100
@@ -3963,9 +3957,6 @@ listen_port = 179
 
 [global.telemetry]
 log_format = "json"
-
-[security.grpc]
-enforcement = "legacy"
 
 [[evpn_instances]]
 vni = 100
@@ -3997,9 +3988,6 @@ listen_port = 179
 
 [global.telemetry]
 log_format = "json"
-
-[security.grpc]
-enforcement = "legacy"
 
 [[evpn_instances]]
 vni = 100
@@ -4037,9 +4025,6 @@ listen_port = 179
 [global.telemetry]
 log_format = "json"
 
-[security.grpc]
-enforcement = "legacy"
-
 [[evpn_instances]]
 vni = 100
 rd = "65000:100"
@@ -4071,9 +4056,6 @@ listen_port = 179
 
 [global.telemetry]
 log_format = "json"
-
-[security.grpc]
-enforcement = "legacy"
 
 [[evpn_instances]]
 vni = 100
@@ -4114,9 +4096,6 @@ listen_port = 179
 [global.telemetry]
 log_format = "json"
 
-[security.grpc]
-enforcement = "legacy"
-
 [[evpn_instances]]
 vni = 100
 rd = "65000:100"
@@ -4151,9 +4130,6 @@ listen_port = 179
 
 [global.telemetry]
 log_format = "json"
-
-[security.grpc]
-enforcement = "legacy"
 
 [[evpn_instances]]
 vni = 100
@@ -4190,9 +4166,6 @@ listen_port = 179
 
 [global.telemetry]
 log_format = "json"
-
-[security.grpc]
-enforcement = "legacy"
 
 [[evpn_instances]]
 vni = 100
@@ -4254,9 +4227,6 @@ listen_port = 179
 [global.telemetry]
 log_format = "json"
 
-[security.grpc]
-enforcement = "legacy"
-
 [[evpn_instances]]
 vni = 100
 rd = "65000:100"
@@ -4310,9 +4280,6 @@ listen_port = 179
 [global.telemetry]
 log_format = "json"
 
-[security.grpc]
-enforcement = "legacy"
-
 [[evpn_instances]]
 vni = 100
 rd = "65000:100"
@@ -4342,9 +4309,6 @@ listen_port = 179
 
 [global.telemetry]
 log_format = "json"
-
-[security.grpc]
-enforcement = "legacy"
 
 [[evpn_instances]]
 vni = 100
@@ -4383,9 +4347,6 @@ listen_port = 179
 [global.telemetry]
 log_format = "json"
 
-[security.grpc]
-enforcement = "legacy"
-
 [[evpn_instances]]
 vni = 100
 rd = "65000:100"
@@ -4422,9 +4383,6 @@ listen_port = 179
 
 [global.telemetry]
 log_format = "json"
-
-[security.grpc]
-enforcement = "legacy"
 
 [[evpn_instances]]
 vni = 100
@@ -4463,9 +4421,6 @@ listen_port = 179
 [global.telemetry]
 log_format = "json"
 
-[security.grpc]
-enforcement = "legacy"
-
 [[evpn_instances]]
 vni = 100
 rd = "65000:111"
@@ -4502,9 +4457,6 @@ listen_port = 179
 [global.telemetry]
 log_format = "json"
 
-[security.grpc]
-enforcement = "legacy"
-
 [[evpn_instances]]
 vni = 200
 rd = "65000:222"
@@ -4528,9 +4480,6 @@ listen_port = 179
 
 [global.telemetry]
 log_format = "json"
-
-[security.grpc]
-enforcement = "legacy"
 
 [[evpn_instances]]
 vni = 100
@@ -4561,9 +4510,6 @@ listen_port = 179
 [global.telemetry]
 log_format = "json"
 
-[security.grpc]
-enforcement = "legacy"
-
 [[evpn_instances]]
 vni = 100
 rd = "65000:100"
@@ -4588,9 +4534,6 @@ listen_port = 179
 [global.telemetry]
 log_format = "json"
 
-[security.grpc]
-enforcement = "legacy"
-
 [[evpn_instances]]
 vni = 100
 rd = "65000:100"
@@ -4614,9 +4557,6 @@ listen_port = 179
 
 [global.telemetry]
 log_format = "json"
-
-[security.grpc]
-enforcement = "legacy"
 
 [[evpn_instances]]
 vni = 200
@@ -4644,9 +4584,6 @@ listen_port = 179
 
 [global.telemetry]
 log_format = "json"
-
-[security.grpc]
-enforcement = "legacy"
 
 [[evpn_instances]]
 vni = 100
@@ -4676,9 +4613,6 @@ listen_port = 179
 [global.telemetry]
 log_format = "json"
 
-[security.grpc]
-enforcement = "legacy"
-
 [[evpn_instances]]
 vni = 100
 rd = "65000:111"
@@ -4705,9 +4639,6 @@ listen_port = 179
 
 [global.telemetry]
 log_format = "json"
-
-[security.grpc]
-enforcement = "legacy"
 
 [[evpn_instances]]
 vni = 100
@@ -4736,9 +4667,6 @@ listen_port = 179
 [global.telemetry]
 log_format = "json"
 
-[security.grpc]
-enforcement = "legacy"
-
 [[evpn_instances]]
 vni = 100
 rd = "65000:111"
@@ -4764,9 +4692,6 @@ listen_port = 179
 
 [global.telemetry]
 log_format = "json"
-
-[security.grpc]
-enforcement = "legacy"
 
 [[evpn_instances]]
 vni = 100
@@ -4804,9 +4729,6 @@ listen_port = 179
 [global.telemetry]
 log_format = "json"
 
-[security.grpc]
-enforcement = "legacy"
-
 [[evpn_instances]]
 vni = 100
 rd = "65000:111"
@@ -4835,9 +4757,6 @@ listen_port = 179
 
 [global.telemetry]
 log_format = "json"
-
-[security.grpc]
-enforcement = "legacy"
 
 [[evpn_instances]]
 vni = 100
@@ -4874,9 +4793,6 @@ listen_port = 179
 [global.telemetry]
 log_format = "json"
 
-[security.grpc]
-enforcement = "legacy"
-
 [[evpn_ip_vrfs]]
 name = "tenant-blue"
 vni = 5000
@@ -4903,9 +4819,6 @@ listen_port = 179
 
 [global.telemetry]
 log_format = "json"
-
-[security.grpc]
-enforcement = "legacy"
 
 [[evpn_instances]]
 vni = 100
@@ -4947,9 +4860,6 @@ listen_port = 179
 
 [global.telemetry]
 log_format = "json"
-
-[security.grpc]
-enforcement = "legacy"
 
 [[evpn_instances]]
 vni = 100
@@ -4994,9 +4904,6 @@ listen_port = 179
 [global.telemetry]
 log_format = "json"
 
-[security.grpc]
-enforcement = "legacy"
-
 [[evpn_ip_vrfs]]
 name = "tenant-blue"
 vni = 5000
@@ -5031,9 +4938,6 @@ listen_port = 179
 [global.telemetry]
 log_format = "json"
 
-[security.grpc]
-enforcement = "legacy"
-
 [[evpn_ip_vrfs]]
 name = "tenant-blue"
 vni = 5000
@@ -5057,9 +4961,6 @@ listen_port = 179
 [global.telemetry]
 log_format = "json"
 
-[security.grpc]
-enforcement = "legacy"
-
 [[evpn_ip_vrfs]]
 name = "tenant-blue"
 vni = 5001
@@ -5082,9 +4983,6 @@ listen_port = 179
 
 [global.telemetry]
 log_format = "json"
-
-[security.grpc]
-enforcement = "legacy"
 
 [[evpn_instances]]
 vni = 100
@@ -5114,9 +5012,6 @@ listen_port = 179
 
 [global.telemetry]
 log_format = "json"
-
-[security.grpc]
-enforcement = "legacy"
 
 [[evpn_ip_vrfs]]
 name = "tenant-blue"
@@ -5151,9 +5046,6 @@ listen_port = 179
 
 [global.telemetry]
 log_format = "json"
-
-[security.grpc]
-enforcement = "legacy"
 
 [[evpn_ip_vrfs]]
 name = "tenant-blue"
@@ -5244,9 +5136,37 @@ table_id = 6000
         evpn_runtime_candidate_from_toml(toml).unwrap()
     }
 
+    fn load_runtime_test_config(toml: &str, source: &str) -> Config {
+        let config = Config::load_toml_with_diagnostics(
+            &crate::test_support::tier_authorized_uds_test_config(toml),
+            source,
+        )
+        .unwrap();
+        crate::test_support::assert_tier_authorized_test_config(&config);
+        config
+    }
+
     fn runtime_model_from_toml(toml: &str) -> rustbgpd_evpn::EvpnRuntimeModel {
         let candidate = runtime_candidate_from_toml(toml);
         rustbgpd_evpn::EvpnRuntimeModel::startup(
+            candidate.instances().clone(),
+            candidate.ip_vrfs().clone(),
+            candidate.ethernet_segments().to_vec(),
+        )
+    }
+
+    fn pre_authorized_runtime_candidate_from_toml(
+        toml: &str,
+    ) -> rustbgpd_evpn::EvpnRuntimeCandidate {
+        let config =
+            Config::load_toml_with_diagnostics(toml, "pre-authorized test config").unwrap();
+        crate::test_support::assert_tier_authorized_test_config(&config);
+        evpn_runtime_candidate_from_config(&config).unwrap()
+    }
+
+    fn pre_authorized_runtime_model_from_toml(toml: &str) -> rustbgpd_evpn::EvpnRuntimeModel {
+        let candidate = pre_authorized_runtime_candidate_from_toml(toml);
+        rustbgpd_evpn::EvpnRuntimeModel::coordinator_startup(
             candidate.instances().clone(),
             candidate.ip_vrfs().clone(),
             candidate.ethernet_segments().to_vec(),
@@ -5911,9 +5831,7 @@ local_vtep_ip = "10.0.0.1"
     /// the commit and advances the reload baseline on its own.
     #[tokio::test]
     async fn apply_request_dropped_mid_converge_still_commits_and_advances_baseline() {
-        let baseline =
-            Config::load_toml_with_diagnostics(minimal_runtime_candidate_toml(), "test baseline")
-                .unwrap();
+        let baseline = load_runtime_test_config(minimal_runtime_candidate_toml(), "test baseline");
         let coordinator = empty_evpn_runtime_coordinator();
         let entered = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Semaphore::new(0));
@@ -5960,12 +5878,8 @@ local_vtep_ip = "10.0.0.1"
     /// the abort must not cancel an EVPN converge already past planning.
     #[tokio::test]
     async fn reload_apply_dropped_mid_converge_still_commits_and_advances_baseline() {
-        let baseline =
-            Config::load_toml_with_diagnostics(minimal_runtime_candidate_toml(), "test baseline")
-                .unwrap();
-        let candidate =
-            Config::load_toml_with_diagnostics(l2vni_runtime_candidate_toml(), "test candidate")
-                .unwrap();
+        let baseline = load_runtime_test_config(minimal_runtime_candidate_toml(), "test baseline");
+        let candidate = load_runtime_test_config(l2vni_runtime_candidate_toml(), "test candidate");
         let coordinator = empty_evpn_runtime_coordinator();
         let entered = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Semaphore::new(0));
@@ -6013,16 +5927,13 @@ local_vtep_ip = "10.0.0.1"
     /// coordinator's watch — both directions: bind and unbind.
     #[tokio::test]
     async fn committed_config_advance_republishes_es_link_bindings() {
-        let baseline = Config::load_toml_with_diagnostics(
-            l2vni_one_es_runtime_candidate_toml(),
-            "test baseline",
-        )
-        .unwrap();
+        let baseline =
+            load_runtime_test_config(l2vni_one_es_runtime_candidate_toml(), "test baseline");
         let bound_toml = format!(
             "{}interface = \"bond0\"\nrecovery_delay_secs = 5\n",
             l2vni_one_es_runtime_candidate_toml()
         );
-        let bound = Config::load_toml_with_diagnostics(&bound_toml, "test candidate").unwrap();
+        let bound = load_runtime_test_config(&bound_toml, "test candidate");
 
         // Coordinator already holds the baseline model, so the
         // binding-only candidate is a planner no-op.
@@ -6062,11 +5973,8 @@ local_vtep_ip = "10.0.0.1"
         assert_eq!(binding.recovery_delay, Duration::from_secs(5));
 
         // Unbind: removing the keys republishes the empty map.
-        let unbound = Config::load_toml_with_diagnostics(
-            l2vni_one_es_runtime_candidate_toml(),
-            "test candidate",
-        )
-        .unwrap();
+        let unbound =
+            load_runtime_test_config(l2vni_one_es_runtime_candidate_toml(), "test candidate");
         let attempt = reload_apply
             .apply_config_if_changed(&unbound, evpn_runtime_changed_for_test)
             .await;
@@ -9022,12 +8930,14 @@ local_vtep_ip = "10.0.0.1"
         // diff to an atomic tenant teardown (L2VNI 100 + its Ethernet
         // Segment). Guards the smoke against drift in either the configs or
         // the teardown classifier.
-        let current = runtime_model_from_candidate_toml(&materialize_shared_test_only_grpc_token(
-            include_str!("../tests/interop/configs/rustbgpd-m47-pe1.toml"),
-        ));
-        let candidate = runtime_candidate_from_toml(&materialize_shared_test_only_grpc_token(
-            include_str!("../tests/interop/configs/rustbgpd-m47-teardown.toml"),
-        ));
+        let current =
+            pre_authorized_runtime_model_from_toml(&materialize_shared_test_only_grpc_token(
+                include_str!("../tests/interop/configs/rustbgpd-m47-pe1.toml"),
+            ));
+        let candidate =
+            pre_authorized_runtime_candidate_from_toml(&materialize_shared_test_only_grpc_token(
+                include_str!("../tests/interop/configs/rustbgpd-m47-teardown.toml"),
+            ));
         let plan = current.plan_candidate(&candidate);
 
         assert_eq!(plan.evpn_instances.deleted, vec![100]);
@@ -9050,12 +8960,14 @@ local_vtep_ip = "10.0.0.1"
         // referenced by L2VNI 10, so dropping both routes through the teardown
         // path rather than a standalone IP-VRF delete). Guards the smoke
         // against drift in either the configs or the teardown classifier.
-        let current = runtime_model_from_candidate_toml(&materialize_shared_test_only_grpc_token(
-            include_str!("../tests/interop/configs/rustbgpd-m48-pe1.toml"),
-        ));
-        let candidate = runtime_candidate_from_toml(&materialize_shared_test_only_grpc_token(
-            include_str!("../tests/interop/configs/rustbgpd-m48-teardown.toml"),
-        ));
+        let current =
+            pre_authorized_runtime_model_from_toml(&materialize_shared_test_only_grpc_token(
+                include_str!("../tests/interop/configs/rustbgpd-m48-pe1.toml"),
+            ));
+        let candidate =
+            pre_authorized_runtime_candidate_from_toml(&materialize_shared_test_only_grpc_token(
+                include_str!("../tests/interop/configs/rustbgpd-m48-teardown.toml"),
+            ));
         let plan = current.plan_candidate(&candidate);
 
         assert_eq!(plan.evpn_instances.deleted, vec![10]);
@@ -11501,9 +11413,6 @@ listen_port = 179
 
 [global.telemetry]
 log_format = "json"
-
-[security.grpc]
-enforcement = "legacy"
 
 [[evpn_instances]]
 vni = 100

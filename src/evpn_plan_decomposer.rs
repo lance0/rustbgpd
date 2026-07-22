@@ -402,9 +402,13 @@ pub(crate) fn decompose_evpn_runtime_candidate(
 mod tests {
     use super::*;
     use crate::config::Config;
+    use crate::test_support::{
+        assert_tier_authorized_test_config, tier_authorized_uds_test_config,
+    };
 
     fn candidate_from_toml(toml: &str) -> EvpnRuntimeCandidate {
         let config = Config::load_toml_with_diagnostics(toml, "decomposer test config").unwrap();
+        assert_tier_authorized_test_config(&config);
         EvpnRuntimeCandidate::new(
             config.resolve_evpn_instances().unwrap(),
             config.resolve_evpn_ip_vrfs().unwrap(),
@@ -439,13 +443,10 @@ listen_port = 179
 
 [global.telemetry]
 log_format = "json"
-
-[security.grpc]
-enforcement = "legacy"
 "#;
 
     fn with_header(body: &str) -> String {
-        format!("{HEADER}{body}")
+        tier_authorized_uds_test_config(&format!("{HEADER}{body}"))
     }
 
     fn vni(raw: u32) -> EvpnInstanceId {
