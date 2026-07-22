@@ -79,9 +79,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   listener remained exact, restored its exact prior inventory, or already
   reached desired; a failed prior-inventory restoration requires restart.
   Key edits/reordering, selected or non-deprecated-key deletion, and
-  protected-owner CRUD remain restart-required. M43 proves the Linux
-  listener/queued-child deletion foundation; full BIRD SIGHUP deletion interop
-  remains the next receipt extension.
+  protected-owner CRUD remain restart-required. M43 proves the full live
+  add/select/deprecate/delete lifecycle against BIRD while preserving the
+  established session and received route.
 
 - **Exact per-candidate export explain for unicast Add-Path.**
   `ExplainAdvertisedRoute` and `rbgp rib advertised --explain` can select a

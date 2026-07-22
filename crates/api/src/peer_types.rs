@@ -934,7 +934,7 @@ pub enum PeerManagerCommand {
         tcp_ao_generation: Option<rustbgpd_transport::TcpAoRotationGeneration>,
     },
     /// Apply the established-session portion of one globally preflighted
-    /// non-destructive TCP-AO rotation generation.
+    /// ordered TCP-AO rotation generation.
     ApplyTcpAoRotation {
         generation: rustbgpd_transport::TcpAoRotationGeneration,
         /// Internal mutation shape; this is actor plumbing, not an RPC field.
@@ -2042,7 +2042,7 @@ pub struct PeerInfo {
     /// including `KeyID` validity flags and cumulative verification counters.
     /// Health classification is derived at the protobuf/API boundary.
     pub tcp_ao_info: Option<TcpAoInfoSnapshot>,
-    /// Desired/applied non-destructive rotation generation and actionable failure.
+    /// Desired/applied ordered TCP-AO rotation generation and actionable failure.
     pub tcp_ao_rotation: rustbgpd_transport::TcpAoRotationStatus,
     /// True for peers auto-created from a `[[dynamic_neighbors]]` range.
     pub is_dynamic: bool,
