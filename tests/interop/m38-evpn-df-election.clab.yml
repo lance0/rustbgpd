@@ -41,6 +41,7 @@ topology:
       cmd: sleep infinity
       binds:
         - ./configs/rustbgpd-m38-pe1.toml:/etc/rustbgpd/config.toml:ro
+        - ../fixtures/grpc-test-only-operator.token:/run/rustbgpd/grpc-test-only-operator.token:ro
         - ./scripts/start-rustbgpd-segment.sh:/usr/local/bin/start-rustbgpd-segment.sh:ro
       exec:
         - ip addr add 10.0.0.1/24 dev eth1
@@ -55,6 +56,7 @@ topology:
       cmd: sleep infinity
       binds:
         - ./configs/rustbgpd-m38-pe2.toml:/etc/rustbgpd/config.toml:ro
+        - ../fixtures/grpc-test-only-operator.token:/run/rustbgpd/grpc-test-only-operator.token:ro
         - ./scripts/start-rustbgpd-segment.sh:/usr/local/bin/start-rustbgpd-segment.sh:ro
       exec:
         - ip addr add 10.0.0.2/24 dev eth1

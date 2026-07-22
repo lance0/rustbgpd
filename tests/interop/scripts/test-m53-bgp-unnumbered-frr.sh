@@ -9,6 +9,8 @@ set -euo pipefail
 
 TOPO="m53-bgp-unnumbered-frr"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+INTEROP_TEST_OPERATOR_AUTH=1
+export INTEROP_TEST_OPERATOR_AUTH
 source "$SCRIPT_DIR/test-lib.sh"
 
 FRR1="clab-${TOPO}-frr1"
@@ -25,24 +27,24 @@ resolve_grpc_addr
 start_rustbgpd
 
 grpc_list_received() {
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         "$GRPC_ADDR" rustbgpd.v1.RibService/ListReceivedRoutes
 }
 
 grpc_list_fib() {
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         "$GRPC_ADDR" rustbgpd.v1.RibService/ListFibRoutes
 }
 
 grpc_list_neighbors() {
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         "$GRPC_ADDR" rustbgpd.v1.NeighborService/ListNeighbors
 }
 
 grpc_inject_route() {
     local addr=${INJECTED_PREFIX%/*}
     local plen=${INJECTED_PREFIX#*/}
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         -d "{\"prefix\": \"$addr\", \"prefix_length\": $plen, \"next_hop\": \"$LOCAL_LL\", \"origin\": 0}" \
         "$GRPC_ADDR" rustbgpd.v1.InjectionService/AddPath >/dev/null
 }

@@ -94,8 +94,8 @@
 # principals — an operator (bearer-token TCP listener) and an
 # observer (UDS listener) — so the driver can assert the drain RPC's
 # ADR-0064 operator_only ceiling (observer → PermissionDenied) with
-# rbgp, the M54 denial pattern. The VTEP keeps the M65 legacy
-# fixture shape.
+# rbgp, the M54 denial pattern. The VTEP uses the shared public
+# test-only operator identity used by ordinary interop fixtures.
 #
 # Usage:
 #   docker build --target dev -t rustbgpd:dev .
@@ -113,6 +113,7 @@ topology:
       cmd: sleep infinity
       binds:
         - ./configs/rustbgpd-m66-vtep.toml:/etc/rustbgpd/config.toml:ro
+        - ../fixtures/grpc-test-only-operator.token:/run/rustbgpd/grpc-test-only-operator.token:ro
         - ./scripts/start-rustbgpd-vtep.sh:/usr/local/bin/start-rustbgpd-vtep.sh:ro
       exec:
         - sh -c "echo 1 > /proc/sys/net/ipv6/conf/all/disable_ipv6"
@@ -141,6 +142,7 @@ topology:
         - bridge fdb append 00:00:00:00:00:00 dev vxlan100 dst 10.0.2.2 self permanent
       env:
         RUST_LOG: info,rustbgpd_evpn_linux=debug,rustbgpd::evpn_dataplane=debug
+        RUSTBGPD_TOKEN_FILE: /run/rustbgpd/grpc-test-only-operator.token
 
     pe1:
       kind: linux

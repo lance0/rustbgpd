@@ -73,6 +73,8 @@ TOPO="m65-evpn-single-active-failover"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 RUSTBGPD="clab-${TOPO}-vtep"
 export RUSTBGPD
+INTEROP_TEST_OPERATOR_AUTH=1
+export INTEROP_TEST_OPERATOR_AUTH
 # shellcheck source=test-lib.sh
 source "$SCRIPT_DIR/test-lib.sh"
 

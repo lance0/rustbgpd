@@ -10,6 +10,8 @@ set -euo pipefail
 
 TOPO="m42-fib-runtime-frr"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+INTEROP_TEST_OPERATOR_AUTH=1
+export INTEROP_TEST_OPERATOR_AUTH
 source "$SCRIPT_DIR/test-lib.sh"
 FRR="clab-${TOPO}-frr"
 TABLE_ID=1000
@@ -24,7 +26,7 @@ start_rustbgpd
 wait_frr_established "$FRR" "10.0.0.1" "rustbgpd ↔ FRR"
 
 grpc_fib_routes() {
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         "$GRPC_ADDR" rustbgpd.v1.RibService/ListFibRoutes
 }
 
@@ -79,7 +81,7 @@ dump_state_on_failure() {
     echo "===== rustbgpd main table =====" >&2
     docker exec "$RUSTBGPD" ip route show >&2 || true
     echo "===== rustbgpd NeighborState 10.0.0.2 =====" >&2
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         -d '{"address":"10.0.0.2"}' \
         "$GRPC_ADDR" rustbgpd.v1.NeighborService/GetNeighborState 2>&1 \
         | head -80 >&2 || true

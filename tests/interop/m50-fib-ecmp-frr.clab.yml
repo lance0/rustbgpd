@@ -28,6 +28,7 @@ topology:
       cmd: sleep infinity
       binds:
         - ./configs/rustbgpd-m50-fib-ecmp.toml:/etc/rustbgpd/config.toml:ro
+        - ../fixtures/grpc-test-only-operator.token:/run/rustbgpd/grpc-test-only-operator.token:ro
         - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
       exec:
         - ip addr add 10.0.0.1/24 dev eth1

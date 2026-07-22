@@ -36,6 +36,8 @@ PE2="clab-${TOPO}-pe2"
 RUSTBGPD="$PE1"
 export RUSTBGPD
 
+INTEROP_TEST_OPERATOR_AUTH=1
+export INTEROP_TEST_OPERATOR_AUTH
 # shellcheck source=test-lib.sh
 source "$SCRIPT_DIR/test-lib.sh"
 
@@ -62,7 +64,7 @@ EXPECTED_AUTO_RT="65000:100"
 # ---------------------------------------------------------------------------
 
 grpc_list_evpn() {
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         -d '{}' \
         "$GRPC_ADDR" rustbgpd.v1.RibService/ListEvpnRoutes 2>/dev/null || true
 }

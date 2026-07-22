@@ -5,6 +5,8 @@ set -euo pipefail
 
 TOPO="m55-bgp-roles-otc-frr"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+INTEROP_TEST_OPERATOR_AUTH=1
+export INTEROP_TEST_OPERATOR_AUTH
 source "$SCRIPT_DIR/test-lib.sh"
 
 FRR_CUSTOMER="clab-${TOPO}-frr-customer"
@@ -24,12 +26,12 @@ RUST_IP=$(resolve_ip "$RUSTBGPD")
 start_rustbgpd
 
 grpc_list_neighbors() {
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         "$GRPC_ADDR" rustbgpd.v1.NeighborService/ListNeighbors
 }
 
 grpc_list_received() {
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         "$GRPC_ADDR" rustbgpd.v1.RibService/ListReceivedRoutes
 }
 
@@ -37,7 +39,7 @@ grpc_inject_route() {
     local prefix=$1
     local addr=${prefix%/*}
     local plen=${prefix#*/}
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         -d "{\"prefix\": \"$addr\", \"prefix_length\": $plen, \"next_hop\": \"10.55.1.1\", \"origin\": 0}" \
         "$GRPC_ADDR" rustbgpd.v1.InjectionService/AddPath >/dev/null
 }

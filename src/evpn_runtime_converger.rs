@@ -5232,6 +5232,14 @@ table_id = 6000
         )
     }
 
+    fn materialize_shared_test_only_grpc_token(toml: &str) -> String {
+        let token = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/grpc-test-only-operator.token"
+        );
+        toml.replace("/run/rustbgpd/grpc-test-only-operator.token", token)
+    }
+
     fn runtime_candidate_from_toml(toml: &str) -> rustbgpd_evpn::EvpnRuntimeCandidate {
         evpn_runtime_candidate_from_toml(toml).unwrap()
     }
@@ -9014,11 +9022,11 @@ local_vtep_ip = "10.0.0.1"
         // diff to an atomic tenant teardown (L2VNI 100 + its Ethernet
         // Segment). Guards the smoke against drift in either the configs or
         // the teardown classifier.
-        let current = runtime_model_from_candidate_toml(include_str!(
-            "../tests/interop/configs/rustbgpd-m47-pe1.toml"
+        let current = runtime_model_from_candidate_toml(&materialize_shared_test_only_grpc_token(
+            include_str!("../tests/interop/configs/rustbgpd-m47-pe1.toml"),
         ));
-        let candidate = runtime_candidate_from_toml(include_str!(
-            "../tests/interop/configs/rustbgpd-m47-teardown.toml"
+        let candidate = runtime_candidate_from_toml(&materialize_shared_test_only_grpc_token(
+            include_str!("../tests/interop/configs/rustbgpd-m47-teardown.toml"),
         ));
         let plan = current.plan_candidate(&candidate);
 
@@ -9042,11 +9050,11 @@ local_vtep_ip = "10.0.0.1"
         // referenced by L2VNI 10, so dropping both routes through the teardown
         // path rather than a standalone IP-VRF delete). Guards the smoke
         // against drift in either the configs or the teardown classifier.
-        let current = runtime_model_from_candidate_toml(include_str!(
-            "../tests/interop/configs/rustbgpd-m48-pe1.toml"
+        let current = runtime_model_from_candidate_toml(&materialize_shared_test_only_grpc_token(
+            include_str!("../tests/interop/configs/rustbgpd-m48-pe1.toml"),
         ));
-        let candidate = runtime_candidate_from_toml(include_str!(
-            "../tests/interop/configs/rustbgpd-m48-teardown.toml"
+        let candidate = runtime_candidate_from_toml(&materialize_shared_test_only_grpc_token(
+            include_str!("../tests/interop/configs/rustbgpd-m48-teardown.toml"),
         ));
         let plan = current.plan_candidate(&candidate);
 

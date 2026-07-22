@@ -29,6 +29,8 @@
 
 TOPO="m47-evpn-tenant-teardown"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+INTEROP_TEST_OPERATOR_AUTH=1
+export INTEROP_TEST_OPERATOR_AUTH
 # shellcheck source=tests/interop/scripts/test-lib.sh
 source "$SCRIPT_DIR/test-lib.sh"
 
@@ -47,7 +49,7 @@ fi
 # ---------------------------------------------------------------------------
 
 grpc_list_evpn() {
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         -d '{}' \
         "$GRPC_ADDR" rustbgpd.v1.RibService/ListEvpnRoutes 2>/dev/null || true
 }
@@ -65,7 +67,7 @@ evpn_has_route_type() {
 # handles the multi-line escaping.
 grpc_apply_teardown() {
     jq -Rs '{candidateToml: ., validateOnly: false}' <"$TEARDOWN_TOML" \
-        | grpcurl -plaintext -import-path . -proto "$PROTO" -d @ \
+        | grpcurl_call -d @ \
             "$GRPC_ADDR" rustbgpd.v1.EvpnService/ApplyEvpnRuntime 2>&1 || true
 }
 

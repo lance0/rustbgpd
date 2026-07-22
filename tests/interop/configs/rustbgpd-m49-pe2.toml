@@ -17,6 +17,8 @@ prometheus_addr = "0.0.0.0:9179"
 
 [global.telemetry.grpc_tcp]
 address = "0.0.0.0:50051"
+token_file = "/run/rustbgpd/grpc-test-only-operator.token"
+principal = "rustbgpd://operator/test-only"
 
 [[evpn_instances]]
 vni = 200
@@ -42,4 +44,7 @@ hold_time = 30
 families = ["l2vpn_evpn"]
 
 [security.grpc]
-enforcement = "legacy"
+enforcement = "tier"
+
+[security.grpc.roles]
+"rustbgpd://operator/test-only" = "operator"

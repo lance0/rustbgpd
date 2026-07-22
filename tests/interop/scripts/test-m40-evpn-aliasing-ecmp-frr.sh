@@ -48,6 +48,8 @@ PE_C="clab-${TOPO}-pe-c"
 RUSTBGPD="$PE_RB"
 export RUSTBGPD
 
+INTEROP_TEST_OPERATOR_AUTH=1
+export INTEROP_TEST_OPERATOR_AUTH
 # shellcheck source=test-lib.sh
 source "$SCRIPT_DIR/test-lib.sh"
 

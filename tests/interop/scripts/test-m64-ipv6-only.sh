@@ -40,6 +40,8 @@ set -eu
 
 TOPO="m64-ipv6-only"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+INTEROP_TEST_OPERATOR_AUTH=1
+export INTEROP_TEST_OPERATOR_AUTH
 # shellcheck source=test-lib.sh
 source "$SCRIPT_DIR/test-lib.sh"
 
@@ -58,14 +60,14 @@ frr_neighbor_json() {
 }
 
 grpc_routes_from_peer() {
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         -d "{\"neighbor_address\": \"$1\"}" \
         "$GRPC_ADDR" rustbgpd.v1.RibService/ListReceivedRoutes 2>/dev/null
 }
 
 inject_route() {
     local prefix=$1 len=$2 next_hop=$3
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         -d "{
             \"prefix\": \"${prefix}\",
             \"prefix_length\": ${len},

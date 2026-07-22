@@ -26,6 +26,9 @@ PE2="clab-${TOPO}-pe2"
 ESI="00:00:00:00:00:00:00:00:00:01"
 VNI="100"
 PROTO="proto/rustbgpd.proto"
+TEST_OPERATOR_TOKEN_FILE="tests/fixtures/grpc-test-only-operator.token"
+IFS= read -r TEST_OPERATOR_TOKEN < "$TEST_OPERATOR_TOKEN_FILE"
+GRPC_AUTH=(-H "authorization: Bearer $TEST_OPERATOR_TOKEN")
 
 # Type 0x06 / Subtype 0x02 = ES-Import RT (RFC 7432 §7.6).
 # Type 0x06 / Subtype 0x01 = ESI Label (RFC 7432 §7.5).
@@ -100,6 +103,7 @@ grpc_list_evpn() {
     ip=$(resolve_ip "$container")
     [ -z "$ip" ] && return 1
     grpcurl -plaintext -import-path . -proto "$PROTO" \
+        "${GRPC_AUTH[@]}" \
         -d "{\"route_type_filter\": $route_type}" \
         "${ip}:50051" rustbgpd.v1.RibService/ListEvpnRoutes 2>/dev/null
 }

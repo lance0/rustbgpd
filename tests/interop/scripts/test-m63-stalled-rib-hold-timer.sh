@@ -56,6 +56,8 @@ set -eu
 
 TOPO="m63-stalled-rib-hold-timer"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+INTEROP_TEST_OPERATOR_AUTH=1
+export INTEROP_TEST_OPERATOR_AUTH
 # shellcheck source=test-lib.sh
 source "$SCRIPT_DIR/test-lib.sh"
 
@@ -106,7 +108,7 @@ prom_labeled_sum() {
 }
 
 grpc_neighbor_state() {
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         -d "{\"address\":\"${FRR_IP}\"}" \
         "$GRPC_ADDR" rustbgpd.v1.NeighborService/GetNeighborState 2>/dev/null
 }
@@ -117,7 +119,7 @@ grpc_neighbor_state() {
 # call can block ~one stall interval and wreck the 1 s poll grain. A
 # timeout is an unknown reading (and itself evidence of the stall).
 grpc_neighbor_state_quick() {
-    grpcurl -plaintext -max-time 2 -import-path . -proto "$PROTO" \
+    grpcurl_call -max-time 2 \
         -d "{\"address\":\"${FRR_IP}\"}" \
         "$GRPC_ADDR" rustbgpd.v1.NeighborService/GetNeighborState 2>/dev/null
 }
@@ -126,7 +128,7 @@ grpc_neighbor_state_quick() {
 # from the RIB, not the transport's own bookkeeping). total_count is
 # pagination-proof.
 rib_received_count() {
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         -d "{\"neighbor_address\":\"${FRR_IP}\"}" \
         "$GRPC_ADDR" rustbgpd.v1.RibService/ListReceivedRoutes 2>/dev/null \
         | jq -r '.totalCount // 0'

@@ -20,6 +20,7 @@ topology:
       cmd: sleep infinity
       binds:
         - ./configs/rustbgpd-m43-tcp-ao.toml:/etc/rustbgpd/config.toml:ro
+        - ../fixtures/grpc-test-only-operator.token:/run/rustbgpd/grpc-test-only-operator.token:ro
         - ./configs/rustbgpd-m43-tcp-ao-successor.toml:/etc/rustbgpd/config-successor.toml:ro
         - ./configs/rustbgpd-m43-tcp-ao-selection.toml:/etc/rustbgpd/config-selection.toml:ro
         - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
