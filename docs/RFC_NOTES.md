@@ -444,7 +444,9 @@ Interpretation decisions:
   Messages) plus an explicit enumeration of the NLRI involved (prefixes and
   Add-Path path IDs, per family, announcements and withdrawals). DEBUG-only
   so a hostile peer cannot spam operators at info/warn; nothing is rendered
-  when DEBUG is disabled. Per-disposition counters are a follow-up.
+  when DEBUG is disabled. `bgp_update_malformed_total{peer,disposition}` counts
+  each malformed UPDATE once under the strongest applied disposition:
+  `attribute_discard`, `treat_as_withdraw`, or `session_reset`.
 - AS4_PATH / AS4_AGGREGATOR are not decoded as typed attributes (they pass
   through opaquely). The RFC 9774 set-segment inspection above is the narrow
   exception; other AS4_PATH malformations are not detected.
