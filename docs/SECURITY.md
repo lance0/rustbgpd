@@ -266,8 +266,10 @@ transport binding enforce the same 4,096-MKT inspection ceiling independently
 for each listener address family, preventing a valid configuration from
 exceeding the fail-closed inspection path. SIGHUP can append a globally
 preflighted non-preferred successor generation without changing Current/RNext;
-selection, deprecation, deletion, protected-owner CRUD, and metrics exposure of
-per-socket inspection remain deferred.
+a later immutable generation can select that installed successor and deprecate
+its predecessor after authenticated peer use is observed across the affected
+session cohort. Deletion, edits or reordering of existing MKTs, protected-owner
+CRUD, and Prometheus exposure of per-socket inspection remain deferred.
 
 ## Shutdown warm-checkpoint confidentiality
 
@@ -427,9 +429,10 @@ the roadmap:
   controls, client deadlines, and the documented `grpc_authz` / stream metrics
   to detect or constrain accepted-client abuse in v1.
 - TCP-AO supports ordered static-neighbor and direct dynamic-prefix keyrings,
-  plus add-only non-preferred successor installation on SIGHUP. Selection,
-  deprecation, deletion, edits/reordering, and protected-owner CRUD require a
-  restart.
+  add-only non-preferred successor installation on SIGHUP, and a later
+  observation-gated SIGHUP generation that selects the installed successor and
+  deprecates its predecessor. Deletion, edits/reordering of existing MKTs, and
+  protected-owner CRUD require a restart.
   Protected static-neighbor interop is covered by M43 against BIRD 3.3.1 on
   Linux with `CONFIG_TCP_AO=y`.
 - gRPC token and mTLS material behind unchanged paths rotate on SIGHUP as one
