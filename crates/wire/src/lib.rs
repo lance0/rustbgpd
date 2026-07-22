@@ -238,8 +238,9 @@ impl std::str::FromStr for AspaValidation {
 
 // Re-export attribute types
 pub use attribute::{
-    AsPath, AsPathSegment, ExtendedCommunity, LargeCommunity, MalformedAttribute, MpReachNlri,
-    MpUnreachNlri, Origin, PathAttribute, RawAttribute, RevisedAttributeDecode, is_private_asn,
+    Aggregator, AsPath, AsPathSegment, ExtendedCommunity, LargeCommunity, MalformedAttribute,
+    MpReachNlri, MpUnreachNlri, Origin, PathAttribute, RawAttribute, RevisedAttributeDecode,
+    is_private_asn,
 };
 pub use bgpls::{
     BGP_LS_AFI, BGP_LS_ROUTE_DISTINGUISHER_LEN, BGP_LS_SAFI, BGP_LS_VPN_SAFI, BgpLsNlri,
