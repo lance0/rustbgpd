@@ -110,7 +110,10 @@ slices have now shipped static-neighbor and startup-only dynamic-range support:
   failure discards the whole changed cohort, and incomplete reset aborts every
   affected task. Failed generations retry only the identical retained inventory
   and only while the listener remains exact (before mutation, after exact-prior
-  restoration, or already at desired); failed restoration requires restart.
+  restoration, or already at desired). After failed restoration, exact-current
+  reinspection must succeed before another mutation; otherwise retry is rejected
+  and a daemon restart is required while the inventory remains partial or
+  unprovable.
 - Accepted sockets preserve their complete covering-owner union for both
   selection and inspection; static exact ownership wins, otherwise dynamic
   longest-prefix match selects the owner. The selection generation never
@@ -183,7 +186,19 @@ drives the full SIGHUP add/select/deprecate/delete coordinator against BIRD
 3.3.1. It requires the exact sole-survivor inventory, unchanged Established
 token and flap count, the route present at every sample from a 100 ms polling
 oracle, and an increased authenticated-packet count on the surviving MKT before
-running the existing mismatched-key fail-closed finale.
+running the existing mismatched-key fail-closed finale. A separate M43 mode
+tests process-crash recovery rather than uninterrupted rotation: after the
+add-only generation, during selection/deprecation `awaiting_peer`, and after
+delete, it SIGKILLs the daemon and requires BIRD to observe the disconnect. A
+new daemon PID starts from the last copied config as fresh generation `1/1` /
+`idle` and must recover the exact declared inventory, mandatory TCP-AO with no
+authentication fallback, the route and Established session, and the expected
+Current/RNext pair. For the selection phase, recovery occurs before BIRD moves:
+the exact three-key session is authenticated but correctly `degraded` at
+Current `2` / RNext `13` because deprecated key `2` is still in use. The same
+fresh generation must become `healthy` at Current `3` / RNext `13` after BIRD
+selects the successor. This is process-restart proof inside a surviving
+container; it is not a host-reboot persistence claim.
 
 ## Linux UAPI secrecy and normalization boundary
 

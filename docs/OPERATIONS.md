@@ -1265,7 +1265,9 @@ listener through queued accepted children and every protected primary/pending
 session; `delete_failed` retains that immutable generation and its secret-free
 error. An identical SIGHUP retry is safe before mutation, after successful
 exact-prior restoration, or when the listener already reached desired. Failed
-restoration leaves a non-resumable intermediate inventory and requires restart.
+restoration leaves a non-resumable intermediate inventory: a retry must first
+re-prove the exact prior inventory or it is rejected before mutation, and a
+daemon restart is required if the inventory remains partial or unprovable.
 While awaiting,
 `desired=N` and `applied=N-1`; a later SIGHUP must present the identical full
 desired config and retries that same N. Selection never sets Linux Current,

@@ -45,7 +45,7 @@ those.
 | EVPN-VXLAN: multi-homing (ESI, Type-1/4, DF election, BUM suppression, aliasing ECMP) | Partial (alpha) | Production-default enforcement with opt-out |
 | EVPN-VXLAN: symmetric IRB (Type-5 / L3VNI, 9136 §4.4.2) | Partial (alpha) | Receive-side GW-IP overlay-index recursion shipped; native GW-IP + ESI overlay-index origination shipped; single-active ESI overlay-index receive v1 shipped; all-active ESI overlay-index Type 5 writer shipped with same-host netns proof and M72 real-peer proof (ADR-0087/0090, FRR consume-side M68 for GW-IP, GoBGP receive-side M71 for single-active ESI recursion, GoBGP ×2 receive-side M72 for all-active ESI recursion) |
 | FIB / dataplane: unicast Linux FIB install, ECMP, weighted multipath, BLACKHOLE discard | Shipped | Opt-in `[[fib_tables]]` (ADR-0061/0066/0068) |
-| Security: TCP MD5, GTSM, TCP-AO keyrings + live successor install/selection/deprecated-key deletion, native gRPC mTLS + tier authz | Shipped | TCP-AO BIRD-interop incl. observation-gated live rotation and deletion (M43); ADR-0062/0064 |
+| Security: TCP MD5, GTSM, TCP-AO keyrings + live successor install/selection/deprecated-key deletion, native gRPC mTLS + tier authz | Shipped | TCP-AO BIRD-interop incl. observation-gated live rotation, deletion, and process-crash recovery from every durable phase config (M43); ADR-0062/0064 |
 | RPKI origin validation (6811 + 8210) | Partial | VRP table and policy match shipped; RTR epoch/reconnect-retention/identity/transaction-bound corrections shipped; M84 multi-cache RTR/ASPA epoch conformance lab shipped |
 | ASPA verification | Partial | Role-aware verification and policy match shipped; RTR v2 replacement/withdrawal semantics shipped; M84 RTR/ASPA epoch conformance lab shipped |
 | Policy: prefix lists, named chains, actions, community/AS_PATH/validation match | Shipped | GoBGP-style chain evaluation |
@@ -1466,7 +1466,10 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
   listener/queued-child deletion receipt with a full SIGHUP deletion against
   BIRD, preserving the established session and the route at every sample from
   a 100 ms polling oracle while authenticated traffic continues on the sole
-  surviving MKT.
+  surviving MKT. Its separate crash mode restarts from each durable phase
+  config (add-only, selection/deprecation `awaiting_peer`, and delete) and
+  requires a fresh exact authenticated inventory plus route/session recovery;
+  it does not claim persistence across a container or host reboot.
 - **Dataplane-aware readiness.** The shipped `/readyz` (and the bounded
   `GetHealth`) probe scopes readiness to the **control-plane core** — PeerManager
   + RIB responsiveness within a 200 ms deadline — and deliberately excludes the

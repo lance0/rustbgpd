@@ -24,6 +24,8 @@
 #
 # Usage:
 #   bash tests/interop/scripts/test-m43-tcp-ao-bird.sh
+#   M43_MODE=crash-restart \
+#     bash tests/interop/scripts/test-m43-tcp-ao-bird.sh
 
 TOPO="m43-tcp-ao-bird"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -38,6 +40,7 @@ TEST_PREFIX="203.0.113.43"
 POST_DELETE_PROBE_PREFIX="203.0.113.44"
 ROUTE_CONTINUITY_PID=""
 ROUTE_CONTINUITY_FAILURE=""
+CRASHED_RUST_PID=""
 
 grpc_list_received() {
     grpcurl_call \
@@ -54,6 +57,10 @@ grpc_neighbor_state() {
 
 bird_state() {
     docker exec "$BIRD" birdc show protocols rustbgpd 2>/dev/null || true
+}
+
+bird_state_strict() {
+    docker exec "$BIRD" birdc show protocols rustbgpd 2>/dev/null
 }
 
 bird_since() {
@@ -349,13 +356,17 @@ begin_selection_generation() {
 }
 
 wait_selection_awaiting() {
+    local desired_generation=${1:-3}
+    local applied_generation=${2:-2}
     log "Waiting for the one-shot selection pass to report awaiting_peer..."
     local state='{}'
     for i in $(seq 1 20); do
         state=$(grpc_neighbor_state || echo '{}')
-        if jq -e '
-            (.tcpAoDesiredGeneration | tonumber) == 3 and
-            (.tcpAoAppliedGeneration | tonumber) == 2 and
+        if jq -e \
+            --argjson desired "$desired_generation" \
+            --argjson applied "$applied_generation" '
+            (.tcpAoDesiredGeneration | tonumber) == $desired and
+            (.tcpAoAppliedGeneration | tonumber) == $applied and
             .tcpAoRotationPhase == "awaiting_peer" and
             .tcpAo.rnextKeyId == 13 and
             any(.tcpAo.keys[];
@@ -364,12 +375,12 @@ wait_selection_awaiting() {
               .sendId == 3 and .recvId == 13 and
               .preferred == true and .deprecated != true)
         ' >/dev/null <<<"$state"; then
-            ok "Generation 3 is awaiting peer successor use (attempt $i)"
+            ok "Generation $desired_generation is awaiting peer successor use (attempt $i)"
             return 0
         fi
         sleep 1
     done
-    fail "selection generation did not expose desired=3/applied=2 awaiting_peer"
+    fail "selection generation did not expose desired=$desired_generation/applied=$applied_generation awaiting_peer"
     printf '%s\n' "$state" >&2
     dump_diagnostics
     return 1
@@ -455,7 +466,8 @@ apply_deletion_generation() {
 }
 
 wait_deletion_generation() {
-    log "Waiting for TCP-AO deletion generation 4 to converge..."
+    local expected_generation=${1:-4}
+    log "Waiting for TCP-AO deletion generation $expected_generation to converge..."
     local state='{}'
     for i in $(seq 1 20); do
         state=$(grpc_neighbor_state || echo '{}')
@@ -464,9 +476,9 @@ wait_deletion_generation() {
             fail "Neighbor state leaked TCP-AO secret material after deletion"
             return 1
         fi
-        if jq -e '
-            (.tcpAoDesiredGeneration | tonumber) == 4 and
-            (.tcpAoAppliedGeneration | tonumber) == 4 and
+        if jq -e --argjson generation "$expected_generation" '
+            (.tcpAoDesiredGeneration | tonumber) == $generation and
+            (.tcpAoAppliedGeneration | tonumber) == $generation and
             .tcpAoRotationPhase == "idle" and
             (.tcpAoRotationError // "") == "" and
             .authentication == "AUTHENTICATION_MODE_TCP_AO" and
@@ -484,12 +496,192 @@ wait_deletion_generation() {
               .preferred == true and .deprecated != true and
               .isCurrent == true and .isRnext == true)
         ' >/dev/null <<<"$state"; then
-            ok "Generation 4 deleted both predecessors and preserved the exact selected successor (attempt $i)"
+            ok "Generation $expected_generation deleted both predecessors and preserved the exact selected successor (attempt $i)"
             return 0
         fi
         sleep 1
     done
     fail "TCP-AO deletion generation did not converge within 20s"
+    printf '%s\n' "$state" >&2
+    dump_diagnostics
+    return 1
+}
+
+rust_pid() {
+    docker exec "$RUSTBGPD" sh -lc '
+        pids=$(pidof rustbgpd 2>/dev/null || true)
+        set -- $pids
+        [ "$#" -eq 1 ]
+        printf "%s\n" "$1"
+    '
+}
+
+crash_rustbgpd_and_prove_disconnect() {
+    local proof=${1:?}
+    local pid
+    if ! pid=$(rust_pid); then
+        fail "$proof: expected exactly one live rustbgpd process before SIGKILL"
+        dump_diagnostics
+        return 1
+    fi
+
+    log "$proof: SIGKILL rustbgpd PID $pid"
+    if ! docker exec "$RUSTBGPD" sh -lc "kill -KILL $pid"; then
+        fail "$proof: could not SIGKILL rustbgpd PID $pid"
+        return 1
+    fi
+
+    local process_gone=false
+    for _ in $(seq 1 20); do
+        if ! docker exec "$RUSTBGPD" test -d "/proc/$pid"; then
+            process_gone=true
+            break
+        fi
+        sleep 0.1
+    done
+    if [ "$process_gone" != true ]; then
+        fail "$proof: rustbgpd PID $pid remained after SIGKILL"
+        dump_diagnostics
+        return 1
+    fi
+
+    local disconnected=false
+    local state=''
+    for _ in $(seq 1 30); do
+        if state=$(bird_state_strict) && awk '
+            $1 == "rustbgpd" { found = 1; established = ($0 ~ /Established/) }
+            END { exit (found && !established) ? 0 : 1 }
+        ' <<<"$state"; then
+            disconnected=true
+            break
+        fi
+        sleep 0.1
+    done
+    if [ "$disconnected" != true ]; then
+        fail "$proof: BIRD did not observe the crashed rustbgpd disconnect"
+        dump_diagnostics
+        return 1
+    fi
+
+    CRASHED_RUST_PID=$pid
+    ok "$proof: SIGKILL removed rustbgpd PID $pid and BIRD left Established"
+}
+
+restart_rustbgpd_from_durable_config() {
+    local proof=${1:?}
+    if [ -z "$CRASHED_RUST_PID" ]; then
+        fail "$proof: no crashed rustbgpd PID was recorded"
+        return 1
+    fi
+
+    log "$proof: restarting from the durable /tmp/m43-config.toml"
+    start_rustbgpd "exec /usr/local/bin/rustbgpd /tmp/m43-config.toml"
+
+    local restarted_pid
+    if ! restarted_pid=$(rust_pid); then
+        fail "$proof: expected exactly one rustbgpd process after restart"
+        dump_diagnostics
+        return 1
+    fi
+    if [ "$restarted_pid" = "$CRASHED_RUST_PID" ]; then
+        fail "$proof: restart reused crashed PID $CRASHED_RUST_PID"
+        dump_diagnostics
+        return 1
+    fi
+
+    ok "$proof: rustbgpd restarted with new PID $restarted_pid (was $CRASHED_RUST_PID)"
+    CRASHED_RUST_PID=""
+}
+
+wait_fresh_restart_recovery() {
+    local proof=${1:?}
+    local inventory=${2:?}
+    local expected_current=${3:?}
+    local expected_rnext=${4:?}
+    local expected_health=${5:-TCP_AO_HEALTH_HEALTHY}
+    log "$proof: waiting for authenticated fresh-start recovery"
+
+    local state='{}'
+    local routes='{}'
+    for i in $(seq 1 45); do
+        state=$(grpc_neighbor_state || echo '{}')
+        routes=$(grpc_list_received || echo '{}')
+        if printf '%s' "$state" | grep -Eq \
+            'interop-(old|next|successor)-secret-m43|wrong-(next|successor)-secret-m43'; then
+            fail "$proof: neighbor state leaked TCP-AO secret material"
+            return 1
+        fi
+
+        if bird_state | grep -q 'Established' &&
+            printf '%s' "$routes" | grep -q "\"prefix\": \"$TEST_PREFIX\"" &&
+            jq -e \
+                --arg inventory "$inventory" \
+                --arg health "$expected_health" \
+                --argjson current "$expected_current" \
+                --argjson rnext "$expected_rnext" '
+                def mkt($send; $recv):
+                  .peerAddress == "10.0.43.2" and .prefixLength == 32 and
+                  .sendId == $send and .recvId == $recv and
+                  .algorithm == "hmac(sha256)";
+                (.tcpAoDesiredGeneration | tonumber) == 1 and
+                (.tcpAoAppliedGeneration | tonumber) == 1 and
+                .tcpAoRotationPhase == "idle" and
+                (.tcpAoRotationError // "") == "" and
+                .authentication == "AUTHENTICATION_MODE_TCP_AO" and
+                .tcpAoHealth == $health and
+                .tcpAo.currentKeyId == $current and
+                .tcpAo.rnextKeyId == $rnext and
+                ((.tcpAo.packetsBad // 0) | tonumber) == 0 and
+                ((.tcpAo.packetsKeyNotFound // 0) | tonumber) == 0 and
+                ((.tcpAo.packetsAoRequired // 0) | tonumber) == 0 and
+                (if $inventory == "add-only" then
+                    (.tcpAo.keys | length) == 3 and
+                    any(.tcpAo.keys[];
+                      mkt(1; 11) and .deprecated == true and
+                      .preferred != true and .isCurrent != true and
+                      .isRnext != true) and
+                    any(.tcpAo.keys[];
+                      mkt(2; 12) and .deprecated != true and
+                      .preferred == true and .isCurrent == true and
+                      .isRnext == true) and
+                    any(.tcpAo.keys[];
+                      mkt(3; 13) and .deprecated != true and
+                      .preferred != true and .isCurrent != true and
+                      .isRnext != true)
+                 elif $inventory == "selection" then
+                    (.tcpAo.keys | length) == 3 and
+                    any(.tcpAo.keys[];
+                      mkt(1; 11) and .deprecated == true and
+                      .preferred != true and .isCurrent != true and
+                      .isRnext != true) and
+                    any(.tcpAo.keys[];
+                      mkt(2; 12) and .deprecated == true and
+                      .preferred != true and
+                      ((.isCurrent == true) == ($current == 2)) and
+                      ((.isRnext == true) == ($rnext == 12))) and
+                    any(.tcpAo.keys[];
+                      mkt(3; 13) and .deprecated != true and
+                      .preferred == true and
+                      ((.isCurrent == true) == ($current == 3)) and
+                      ((.isRnext == true) == ($rnext == 13))) and
+                    (($current == 2 and $rnext == 13) or
+                     ($current == 3 and $rnext == 13))
+                 elif $inventory == "delete" then
+                    (.tcpAo.keys | length) == 1 and
+                    (.tcpAo.keys[0] |
+                      mkt(3; 13) and
+                      .deprecated != true and .preferred == true and
+                      .isCurrent == true and .isRnext == true)
+                 else false
+                 end)
+            ' >/dev/null <<<"$state"; then
+            ok "$proof: fresh 1/1 idle, exact $inventory inventory, mandatory TCP-AO ($expected_health), route/session recovery, Current/RNext=$expected_current/$expected_rnext (attempt $i)"
+            return 0
+        fi
+        sleep 2
+    done
+
+    fail "$proof: fresh authenticated recovery did not converge"
     printf '%s\n' "$state" >&2
     dump_diagnostics
     return 1
@@ -595,7 +787,7 @@ assert_bad_key_does_not_establish() {
     ok "BIRD stayed observable and non-Established throughout the 40s wrong-key window"
 }
 
-main() {
+main_uninterrupted() {
     log "M43 interop test: TCP-AO full live key rotation with BIRD 3.3.1"
     log "Topology: $TOPO"
 
@@ -705,4 +897,69 @@ main() {
     print_summary
 }
 
-main "$@"
+main_crash_restart() {
+    log "M43 crash-restart proof: durable TCP-AO rotation recovery with BIRD 3.3.1"
+    log "Topology: $TOPO"
+
+    # Load-bearing mutation receipts:
+    # - restarting add-only from the initial two-key config fails its exact
+    #   inventory assertion;
+    # - restarting selection from the add-only config fails its preferred /
+    #   deprecated metadata assertion;
+    # - restarting delete from the selection config fails its sole-key
+    #   inventory assertion; and
+    # - making strict BIRD inspection fail cannot satisfy the disconnect
+    #   assertion because the named protocol row must remain observable.
+
+    resolve_grpc_addr
+    start_bird "$GOOD_CONF"
+    docker exec "$RUSTBGPD" cp /etc/rustbgpd/config.toml /tmp/m43-config.toml
+    start_rustbgpd "exec /usr/local/bin/rustbgpd /tmp/m43-config.toml"
+
+    wait_bird_established
+    wait_route_present
+    assert_two_key_inventory
+
+    local proof="add-only crash-restart proof"
+    log "BEGIN: $proof"
+    apply_successor_generation
+    wait_successor_generation
+    crash_rustbgpd_and_prove_disconnect "$proof"
+    restart_rustbgpd_from_durable_config "$proof"
+    wait_fresh_restart_recovery "$proof" add-only 2 12
+
+    proof="selection/deprecation awaiting-peer crash-restart proof"
+    log "BEGIN: $proof"
+    begin_selection_generation
+    wait_selection_awaiting 2 1
+    crash_rustbgpd_and_prove_disconnect "$proof"
+    restart_rustbgpd_from_durable_config "$proof"
+    wait_fresh_restart_recovery \
+        "$proof before peer switch" selection 2 13 TCP_AO_HEALTH_DEGRADED
+    select_bird_successor
+    wait_fresh_restart_recovery \
+        "$proof after peer switch" selection 3 13 TCP_AO_HEALTH_HEALTHY
+
+    proof="delete crash-restart proof"
+    log "BEGIN: $proof"
+    apply_deletion_generation
+    wait_deletion_generation 2
+    crash_rustbgpd_and_prove_disconnect "$proof"
+    restart_rustbgpd_from_durable_config "$proof"
+    wait_fresh_restart_recovery "$proof" delete 3 13
+
+    print_summary
+}
+
+case "${M43_MODE:-uninterrupted}" in
+    uninterrupted)
+        main_uninterrupted "$@"
+        ;;
+    crash-restart)
+        main_crash_restart "$@"
+        ;;
+    *)
+        echo "ERROR: M43_MODE must be 'uninterrupted' or 'crash-restart'" >&2
+        exit 2
+        ;;
+esac

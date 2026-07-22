@@ -1205,10 +1205,6 @@ impl BgpListener {
         self.apply_delete_generation_with(desired, verify_complete_listener_inventory)
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "listener deletion keeps exact apply, adjacent-generation retention, and prior-inventory restoration in one transaction boundary"
-    )]
     fn apply_delete_generation_with<F>(
         &mut self,
         desired: &TcpAoListenerGeneration,
@@ -1216,6 +1212,66 @@ impl BgpListener {
     ) -> std::io::Result<TcpAoRotationStatus>
     where
         F: FnOnce(&TcpListener, &[crate::socket_opts::TcpAoMktOwner<'_>]) -> std::io::Result<()>,
+    {
+        self.apply_delete_generation_with_operations(
+            desired,
+            verify_exact,
+            |listener, current, desired| {
+                crate::socket_opts::preflight_tcp_ao_delete(listener, current, desired, None)
+                    .map_err(crate::socket_opts::TcpAoDeleteApplyError::before_mutation)
+            },
+            |listener, preflight, desired| {
+                crate::socket_opts::apply_tcp_ao_delete(listener, preflight, desired).map(
+                    |snapshot| match snapshot {
+                        None => (),
+                        Some(_) => {
+                            unreachable!("listener deletion cannot return a connected snapshot")
+                        }
+                    },
+                )
+            },
+            |listener, current| {
+                crate::socket_opts::preflight_tcp_ao_add_only(listener, &[], current, None)
+            },
+            |listener, preflight, current| {
+                crate::socket_opts::apply_tcp_ao_add_only(listener, preflight, current, None)
+                    .map(drop)
+                    .map_err(crate::socket_opts::TcpAoAddOnlyApplyError::into_inner)
+            },
+        )
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "listener deletion keeps exact apply, adjacent-generation retention, and prior-inventory restoration in one transaction boundary"
+    )]
+    fn apply_delete_generation_with_operations<F, P, D, RP, RA, T, RT>(
+        &mut self,
+        desired: &TcpAoListenerGeneration,
+        verify_exact: F,
+        preflight_delete: P,
+        apply_delete: D,
+        preflight_restore: RP,
+        apply_restore: RA,
+    ) -> std::io::Result<TcpAoRotationStatus>
+    where
+        F: FnOnce(&TcpListener, &[crate::socket_opts::TcpAoMktOwner<'_>]) -> std::io::Result<()>,
+        P: FnOnce(
+            &TcpListener,
+            &[crate::socket_opts::TcpAoMktOwner<'_>],
+            &[crate::socket_opts::TcpAoMktOwner<'_>],
+        ) -> Result<T, crate::socket_opts::TcpAoDeleteApplyError>,
+        D: FnOnce(
+            &TcpListener,
+            T,
+            &[crate::socket_opts::TcpAoMktOwner<'_>],
+        ) -> Result<(), crate::socket_opts::TcpAoDeleteApplyError>,
+        RP: FnOnce(&TcpListener, &[crate::socket_opts::TcpAoMktOwner<'_>]) -> std::io::Result<RT>,
+        RA: FnOnce(
+            &TcpListener,
+            RT,
+            &[crate::socket_opts::TcpAoMktOwner<'_>],
+        ) -> std::io::Result<()>,
     {
         if desired.generation == self.tcp_ao_generation
             && desired.keys.as_ref() == self.tcp_ao_keys.keys.as_slice()
@@ -1275,19 +1331,11 @@ impl BgpListener {
                 keyring: &owner.config,
             })
             .collect::<Vec<_>>();
-        let result = crate::socket_opts::preflight_tcp_ao_delete(
-            &self.listener,
-            &current,
-            &desired_owners,
-            None,
-        )
-        .map_err(crate::socket_opts::TcpAoDeleteApplyError::before_mutation)
-        .and_then(|preflight| {
-            crate::socket_opts::apply_tcp_ao_delete(&self.listener, preflight, &desired_owners)
-        });
+        let result = preflight_delete(&self.listener, &current, &desired_owners)
+            .and_then(|preflight| apply_delete(&self.listener, preflight, &desired_owners));
 
         match result {
-            Ok(None) => {
+            Ok(()) => {
                 let previous_keys = std::mem::replace(
                     &mut self.tcp_ao_keys,
                     TcpAoListenerKeyIndex::new(desired.keys.to_vec()),
@@ -1306,7 +1354,6 @@ impl BgpListener {
                 self.rotation_status_tx.send_replace(status.clone());
                 Ok(status)
             }
-            Ok(Some(_)) => unreachable!("listener deletion cannot return a connected snapshot"),
             Err(error) => {
                 let mutation_started = error.mutation_started();
                 let mut detail = error.into_inner().to_string();
@@ -1316,25 +1363,14 @@ impl BgpListener {
                     // already deprecated and unselected; restoring them keeps
                     // the last committed generation usable and makes the
                     // identical deletion retryable.
-                    let recovery = crate::socket_opts::preflight_tcp_ao_add_only(
-                        &self.listener,
-                        &[],
-                        &current,
-                        None,
-                    )
-                    .and_then(|preflight| {
-                        crate::socket_opts::apply_tcp_ao_add_only(
-                            &self.listener,
-                            preflight,
-                            &current,
-                            None,
-                        )
-                        .map(drop)
-                        .map_err(crate::socket_opts::TcpAoAddOnlyApplyError::into_inner)
-                    });
+                    let recovery = preflight_restore(&self.listener, &current)
+                        .and_then(|preflight| apply_restore(&self.listener, preflight, &current));
                     if let Err(recovery) = recovery {
                         detail = format!(
-                            "{detail}; failed to restore the exact prior listener inventory: {recovery}"
+                            "{detail}; failed to restore the exact prior listener inventory: \
+                             {recovery}; the exact prior inventory must be re-established and \
+                             verified before retry; restart the daemon if the kernel inventory \
+                             remains partial or cannot be proven exact"
                         );
                     }
                 }
@@ -2349,6 +2385,46 @@ mod tests {
         }
     }
 
+    fn tcp_ao_delete_generations() -> (TcpAoListenerKey, TcpAoListenerGeneration) {
+        let mut current = tcp_ao_owner();
+        current.config.0[0].deprecated = true;
+
+        let mut successor = current.config.0[0].clone();
+        successor.key = "successor".into();
+        successor.send_id = 11;
+        successor.recv_id = 13;
+        successor.preferred = true;
+        successor.deprecated = false;
+
+        let mut retired_tail = current.config.0[0].clone();
+        retired_tail.key = "retired-tail".into();
+        retired_tail.send_id = 17;
+        retired_tail.recv_id = 19;
+        current.config.0.push(successor.clone());
+        current.config.0.push(retired_tail);
+
+        let mut desired = current.clone();
+        desired.config = TcpAoKeyring(vec![successor]);
+        (
+            current,
+            TcpAoListenerGeneration::new(TcpAoRotationGeneration::new(2).unwrap(), vec![desired]),
+        )
+    }
+
+    fn listener_owner_inventory(
+        owners: &[crate::socket_opts::TcpAoMktOwner<'_>],
+    ) -> Vec<TcpAoListenerKey> {
+        owners
+            .iter()
+            .map(|owner| TcpAoListenerKey {
+                owner: owner.owner,
+                peer: owner.peer,
+                prefix_len: owner.prefix_len,
+                config: owner.keyring.clone(),
+            })
+            .collect()
+    }
+
     fn listener_options_with_key_count(key_count: usize) -> ListenerSocketOptions {
         let tcp_ao_keys = (0..key_count.div_ceil(256))
             .map(|owner_index| {
@@ -2792,6 +2868,196 @@ mod tests {
             rejected.rotation_status_tx.borrow().phase,
             TcpAoRotationPhase::Idle
         );
+    }
+
+    /// Load-bearing: removing the mutating-failure restoration makes the
+    /// same-generation retry fail its exact-current assertion.
+    #[tokio::test]
+    async fn partial_listener_deletion_restores_exact_inventory_before_retry() {
+        let (current, desired) = tcp_ao_delete_generations();
+        let prior_inventory = vec![current.clone()];
+        let desired_inventory = desired.keys.to_vec();
+        assert_eq!(
+            prior_inventory[0]
+                .config
+                .iter()
+                .map(|config| config.send_id)
+                .collect::<Vec<_>>(),
+            vec![7, 11, 17]
+        );
+
+        let (accept_tx, _accept_rx) = mpsc::channel(1);
+        let mut listener = BgpListener::bind("127.0.0.1:0".parse().unwrap(), accept_tx)
+            .await
+            .unwrap();
+        listener.tcp_ao_keys = TcpAoListenerKeyIndex::new(vec![current]);
+
+        let kernel_inventory = RefCell::new(prior_inventory.clone());
+        let delete_mutations = std::cell::Cell::new(0_u8);
+        let restore_preflights = std::cell::Cell::new(0_u8);
+        let restore_applies = std::cell::Cell::new(0_u8);
+        let error = listener
+            .apply_delete_generation_with_operations(
+                &desired,
+                |_, _| panic!("real deletion must not take the metadata-only path"),
+                |_, current, desired| {
+                    assert_eq!(listener_owner_inventory(current), prior_inventory);
+                    assert_eq!(listener_owner_inventory(desired), desired_inventory);
+                    assert_eq!(*kernel_inventory.borrow(), prior_inventory);
+                    Ok(())
+                },
+                |_, (), _| {
+                    delete_mutations.set(delete_mutations.get() + 1);
+                    kernel_inventory.borrow_mut()[0].config.0.remove(0);
+                    Err(crate::socket_opts::TcpAoDeleteApplyError::after_mutation(
+                        std::io::Error::other("injected second deletion failure"),
+                    ))
+                },
+                |_, current| {
+                    restore_preflights.set(restore_preflights.get() + 1);
+                    assert_eq!(
+                        listener_owner_inventory(current),
+                        prior_inventory,
+                        "restore preflight lost owner or key declaration order"
+                    );
+                    Ok(())
+                },
+                |_, (), current| {
+                    restore_applies.set(restore_applies.get() + 1);
+                    *kernel_inventory.borrow_mut() = listener_owner_inventory(current);
+                    Ok(())
+                },
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("second deletion failure"));
+        assert_eq!(restore_preflights.get(), 1);
+        assert_eq!(restore_applies.get(), 1);
+        assert_eq!(*kernel_inventory.borrow(), prior_inventory);
+        assert_eq!(listener.tcp_ao_generation, TcpAoRotationGeneration::STARTUP);
+        assert_eq!(listener.pending_tcp_ao_generation.as_ref(), Some(&desired));
+
+        let status = listener
+            .apply_delete_generation_with_operations(
+                &desired,
+                |_, _| panic!("retry must not take the metadata-only path"),
+                |_, current, desired| {
+                    assert_eq!(listener_owner_inventory(current), prior_inventory);
+                    assert_eq!(
+                        *kernel_inventory.borrow(),
+                        prior_inventory,
+                        "retry did not begin from the restored exact inventory"
+                    );
+                    assert_eq!(listener_owner_inventory(desired), desired_inventory);
+                    Ok(())
+                },
+                |_, (), desired| {
+                    delete_mutations.set(delete_mutations.get() + 1);
+                    *kernel_inventory.borrow_mut() = listener_owner_inventory(desired);
+                    Ok(())
+                },
+                |_, _| -> std::io::Result<()> {
+                    panic!("successful retry must not preflight restoration")
+                },
+                |_, (), _| panic!("successful retry must not apply restoration"),
+            )
+            .unwrap();
+        assert_eq!(delete_mutations.get(), 2);
+        assert_eq!(*kernel_inventory.borrow(), desired_inventory);
+        assert_eq!(status.phase, TcpAoRotationPhase::Deleting);
+        assert_eq!(listener.tcp_ao_generation, desired.generation);
+        assert_eq!(listener.tcp_ao_keys.keys.as_slice(), desired.keys.as_ref());
+    }
+
+    /// Load-bearing: removing the recovery diagnostic or bypassing the retry's
+    /// exact-current preflight makes this test fail.
+    #[tokio::test]
+    async fn failed_listener_restoration_requires_exact_reinspection_before_retry() {
+        let (current, desired) = tcp_ao_delete_generations();
+        let prior_inventory = vec![current.clone()];
+        let (accept_tx, _accept_rx) = mpsc::channel(1);
+        let mut listener = BgpListener::bind("127.0.0.1:0".parse().unwrap(), accept_tx)
+            .await
+            .unwrap();
+        listener.tcp_ao_keys = TcpAoListenerKeyIndex::new(vec![current]);
+
+        let kernel_inventory = RefCell::new(prior_inventory.clone());
+        let delete_preflights = std::cell::Cell::new(0_u8);
+        let delete_mutations = std::cell::Cell::new(0_u8);
+        let restore_preflights = std::cell::Cell::new(0_u8);
+        let restore_applies = std::cell::Cell::new(0_u8);
+        let error = listener
+            .apply_delete_generation_with_operations(
+                &desired,
+                |_, _| panic!("real deletion must not take the metadata-only path"),
+                |_, current, _| {
+                    delete_preflights.set(delete_preflights.get() + 1);
+                    assert_eq!(listener_owner_inventory(current), prior_inventory);
+                    assert_eq!(*kernel_inventory.borrow(), prior_inventory);
+                    Ok(())
+                },
+                |_, (), _| {
+                    delete_mutations.set(delete_mutations.get() + 1);
+                    kernel_inventory.borrow_mut()[0].config.0.remove(0);
+                    Err(crate::socket_opts::TcpAoDeleteApplyError::after_mutation(
+                        std::io::Error::other("injected partial deletion"),
+                    ))
+                },
+                |_, current| {
+                    restore_preflights.set(restore_preflights.get() + 1);
+                    assert_eq!(listener_owner_inventory(current), prior_inventory);
+                    Ok(())
+                },
+                |_, (), current| {
+                    restore_applies.set(restore_applies.get() + 1);
+                    assert_eq!(listener_owner_inventory(current), prior_inventory);
+                    Err(std::io::Error::other("injected restoration refusal"))
+                },
+            )
+            .unwrap_err();
+        let detail = error.to_string();
+        assert!(detail.contains("failed to restore the exact prior listener inventory"));
+        assert!(detail.contains("must be re-established and verified before retry"));
+        assert!(detail.contains("restart the daemon if the kernel inventory remains partial"));
+        assert_eq!(delete_mutations.get(), 1);
+        assert_eq!(restore_preflights.get(), 1);
+        assert_eq!(restore_applies.get(), 1);
+
+        let retry = listener
+            .apply_delete_generation_with_operations(
+                &desired,
+                |_, _| panic!("retry must not take the metadata-only path"),
+                |_, current, _| {
+                    delete_preflights.set(delete_preflights.get() + 1);
+                    if *kernel_inventory.borrow() != listener_owner_inventory(current) {
+                        return Err(crate::socket_opts::TcpAoDeleteApplyError::before_mutation(
+                            std::io::Error::new(
+                                std::io::ErrorKind::PermissionDenied,
+                                "injected exact-current preflight rejection",
+                            ),
+                        ));
+                    }
+                    Ok(())
+                },
+                |_, (), _| {
+                    delete_mutations.set(delete_mutations.get() + 1);
+                    Err(crate::socket_opts::TcpAoDeleteApplyError::after_mutation(
+                        std::io::Error::other(
+                            "injected exact-current preflight rejection was bypassed; partial \
+                             inventory reached a second deletion mutation",
+                        ),
+                    ))
+                },
+                |_, _| Ok(()),
+                |_, (), _| Ok(()),
+            )
+            .unwrap_err();
+        assert!(retry.to_string().contains("exact-current preflight"));
+        assert_eq!(delete_preflights.get(), 2);
+        assert_eq!(delete_mutations.get(), 1);
+        assert_eq!(restore_preflights.get(), 1);
+        assert_eq!(restore_applies.get(), 1);
+        assert_eq!(listener.tcp_ao_generation, TcpAoRotationGeneration::STARTUP);
+        assert_eq!(listener.pending_tcp_ao_generation.as_ref(), Some(&desired));
     }
 
     #[tokio::test]
