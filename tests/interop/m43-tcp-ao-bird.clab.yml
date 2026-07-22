@@ -1,7 +1,8 @@
 # Containerlab topology: rustbgpd ↔ BIRD 3.x (M43 — TCP-AO)
 #
-# Validates an ordered TCP-AO startup keyring and no-flap add-only successor
-# rotation against a real BIRD 3.x peer on a Linux kernel with CONFIG_TCP_AO=y.
+# Validates an ordered TCP-AO startup keyring and no-flap successor add, select,
+# deprecate, and delete lifecycle against a real BIRD 3.x peer on a Linux kernel
+# with CONFIG_TCP_AO=y.
 #
 # Usage:
 #   docker build -t bird:3.3.1-tcpao -f tests/interop/Dockerfile.bird3 tests/interop
@@ -23,6 +24,7 @@ topology:
         - ../fixtures/grpc-test-only-operator.token:/run/rustbgpd/grpc-test-only-operator.token:ro
         - ./configs/rustbgpd-m43-tcp-ao-successor.toml:/etc/rustbgpd/config-successor.toml:ro
         - ./configs/rustbgpd-m43-tcp-ao-selection.toml:/etc/rustbgpd/config-selection.toml:ro
+        - ./configs/rustbgpd-m43-tcp-ao-deletion.toml:/etc/rustbgpd/config-deletion.toml:ro
         - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
       exec:
         - ip addr add 10.0.43.1/24 dev eth1

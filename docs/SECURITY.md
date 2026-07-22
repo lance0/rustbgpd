@@ -239,10 +239,14 @@ editing/reordering keys, or deleting a selected or non-deprecated MKT remains
 restart-gated.
 Static-neighbor protected interop is validated by M43 against BIRD 3.3.1:
 matching keys establish and import a route, a nonpreferred successor is added
-with SIGHUP without flapping the session, and a mismatched preferred key
-withdraws the route and does not re-establish within the fail-closed window. The
-hosted `kernel-dataplane` workflow includes M43, and the current hosted
-runner advertises `CONFIG_TCP_AO=y` and runs the topology. The workflow keeps a
+with SIGHUP, a later generation selects it and deprecates both predecessors,
+and a final generation deletes the deprecated MKTs without flapping the session
+while the route remains present at every sample from a 100 ms polling oracle.
+The sole survivor remains Current/RNext and carries authenticated post-delete
+traffic. A mismatched preferred key then withdraws the route and does not
+re-establish within the fail-closed window. The hosted
+`kernel-dataplane` workflow includes M43, and the current hosted runner
+advertises `CONFIG_TCP_AO=y` and runs the topology. The workflow keeps a
 warning-only skip guard for future runner kernels without TCP-AO support.
 Dynamic prefix MKTs are installed before `listen()` without setting the
 listener-wide `ao_required` bit. Protected accepted sockets are discarded
@@ -443,7 +447,9 @@ the roadmap:
   that are neither Current nor RNext. Edits/reordering, selected or
   non-deprecated-key deletion, and protected-owner CRUD require a restart.
   Protected static-neighbor interop is covered by M43 against BIRD 3.3.1 on
-  Linux with `CONFIG_TCP_AO=y`.
+  Linux with `CONFIG_TCP_AO=y`, including the full no-flap
+  add/select/deprecate/delete lifecycle and authenticated traffic on the sole
+  survivor.
 - gRPC token and mTLS material behind unchanged paths rotate on SIGHUP as one
   all-listener generation. Alert on
   `bgp_grpc_credential_reloads_total{outcome="failure"}`; failures retain the
