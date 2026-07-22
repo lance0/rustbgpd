@@ -292,17 +292,24 @@ mod stub {
         pub async fn shutdown(self) {}
     }
 
-    /// BFD is unsupported off Linux; the actor never starts.
-    #[must_use]
+    /// BFD is unsupported off Linux; disabled startup is a no-op and
+    /// configured startup fails closed.
     pub fn spawn(
-        _desired_rx: watch::Receiver<BfdRuntimeConfig>,
+        desired_rx: watch::Receiver<BfdRuntimeConfig>,
         _metrics: BgpMetrics,
         _status_tx: watch::Sender<Vec<BfdStatus>>,
         _event_tx: broadcast::Sender<BfdRuntimeEvent>,
         _state_change_tx: BfdStateChangeSender,
         _shutdown: CancellationToken,
-    ) -> Option<BfdRuntimeHandle> {
-        None
+    ) -> std::io::Result<Option<BfdRuntimeHandle>> {
+        if desired_rx.borrow().enabled() {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "configured BFD runtime requires Linux",
+            ))
+        } else {
+            Ok(None)
+        }
     }
 }
 
@@ -387,11 +394,51 @@ mod linux {
         }
     }
 
+    /// Sockets owned by one BFD actor. Opening them before spawning the task
+    /// makes socket acquisition part of daemon startup instead of an
+    /// eventually logged background failure.
+    struct RuntimeSockets {
+        rx_v4: AsyncFd<std::net::UdpSocket>,
+        rx_v6: AsyncFd<std::net::UdpSocket>,
+        tx_v4: UdpSocket,
+        tx_v6: UdpSocket,
+    }
+
+    impl RuntimeSockets {
+        fn open() -> std::io::Result<Self> {
+            let rx_v4 = AsyncFd::new(rx_socket(false)?)?;
+            let rx_v6 = AsyncFd::new(rx_socket(true)?)?;
+            let tx_v4 = UdpSocket::from_std(tx_socket(false)?)?;
+            let tx_v6 = UdpSocket::from_std(tx_socket(true)?)?;
+            Ok(Self {
+                rx_v4,
+                rx_v6,
+                tx_v4,
+                tx_v6,
+            })
+        }
+    }
+
+    fn prepare_runtime_sockets(
+        enabled: bool,
+        opener: impl FnOnce() -> std::io::Result<RuntimeSockets>,
+    ) -> std::io::Result<Option<RuntimeSockets>> {
+        if !enabled {
+            return Ok(None);
+        }
+        opener().map(Some).map_err(|error| {
+            std::io::Error::new(error.kind(), format!("BFD socket startup failed: {error}"))
+        })
+    }
+
     /// Spawn the BFD actor. Returns `None` when the initial desired set is
     /// empty (no BFD-configured neighbors at startup) — BFD config is
     /// restart-required, so the actor's existence is fixed at startup; the
     /// `desired_rx` watch then drives enable/disable/strict among that set.
-    #[must_use]
+    ///
+    /// All receive and transmit sockets are opened synchronously before the
+    /// actor task is spawned. A configured runtime therefore returns an error
+    /// to daemon startup instead of letting BGP serve without BFD coupling.
     pub fn spawn(
         desired_rx: watch::Receiver<BfdRuntimeConfig>,
         metrics: BgpMetrics,
@@ -399,13 +446,16 @@ mod linux {
         event_tx: broadcast::Sender<BfdRuntimeEvent>,
         state_change_tx: BfdStateChangeSender,
         shutdown: CancellationToken,
-    ) -> Option<BfdRuntimeHandle> {
-        if !desired_rx.borrow().enabled() {
-            return None;
-        }
+    ) -> std::io::Result<Option<BfdRuntimeHandle>> {
+        let Some(sockets) =
+            prepare_runtime_sockets(desired_rx.borrow().enabled(), RuntimeSockets::open)?
+        else {
+            return Ok(None);
+        };
         let task_shutdown = shutdown.clone();
         let task = tokio::spawn(async move {
-            if let Err(e) = run(
+            run(
+                sockets,
                 desired_rx,
                 &metrics,
                 &status_tx,
@@ -413,12 +463,9 @@ mod linux {
                 &state_change_tx,
                 &task_shutdown,
             )
-            .await
-            {
-                warn!(error = %e, "BFD actor exited with error");
-            }
+            .await;
         });
-        Some(BfdRuntimeHandle { shutdown, task })
+        Ok(Some(BfdRuntimeHandle { shutdown, task }))
     }
 
     /// One running session plus its provenance.
@@ -498,22 +545,27 @@ mod linux {
     }
 
     async fn run(
+        sockets: RuntimeSockets,
         mut desired_rx: watch::Receiver<BfdRuntimeConfig>,
         metrics: &BgpMetrics,
         status_tx: &watch::Sender<Vec<BfdStatus>>,
         event_tx: &broadcast::Sender<BfdRuntimeEvent>,
         state_change_tx: &BfdStateChangeSender,
         shutdown: &CancellationToken,
-    ) -> std::io::Result<()> {
-        let rx_v4 = AsyncFd::new(rx_socket(false)?)?;
-        let rx_v6 = AsyncFd::new(rx_socket(true)?)?;
+    ) {
+        let RuntimeSockets {
+            rx_v4,
+            rx_v6,
+            tx_v4,
+            tx_v6,
+        } = sockets;
         let mut actor = Actor {
             sessions: BTreeMap::new(),
             discriminators: DiscriminatorAllocator::new(),
             by_discriminator: HashMap::new(),
             timers: BinaryHeap::new(),
-            tx_v4: UdpSocket::from_std(tx_socket(false)?)?,
-            tx_v6: UdpSocket::from_std(tx_socket(true)?)?,
+            tx_v4,
+            tx_v6,
             event_tx: event_tx.clone(),
             state_change_tx: state_change_tx.clone(),
             jitter_state: 0x9E37_79B9_7F4A_7C15,
@@ -540,13 +592,13 @@ mod linux {
                 biased;
                 () = shutdown.cancelled() => {
                     actor.drain(metrics, status_tx).await;
-                    return Ok(());
+                    return;
                 }
                 changed = desired_rx.changed() => {
                     if changed.is_err() {
                         // The desired-set sender is gone (daemon shutting down).
                         actor.drain(metrics, status_tx).await;
-                        return Ok(());
+                        return;
                     }
                     let desired = desired_rx.borrow_and_update().clone();
                     actor.reconcile(&desired, metrics, status_tx).await;
@@ -1015,26 +1067,43 @@ mod linux {
     }
 
     fn rx_socket(v6: bool) -> std::io::Result<std::net::UdpSocket> {
+        rx_socket_with(v6, BFD_CONTROL_PORT, enable_recv_ttl)
+    }
+
+    fn rx_socket_with(
+        v6: bool,
+        port: u16,
+        recv_ttl_enabler: impl FnOnce(i32, bool) -> std::io::Result<()>,
+    ) -> std::io::Result<std::net::UdpSocket> {
         let domain = if v6 { Domain::IPV6 } else { Domain::IPV4 };
         let socket = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
         socket.set_reuse_address(true)?;
         let bind: SocketAddr = if v6 {
-            SocketAddr::new(
-                IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
-                BFD_CONTROL_PORT,
-            )
+            SocketAddr::new(IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED), port)
         } else {
-            SocketAddr::new(
-                IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
-                BFD_CONTROL_PORT,
-            )
+            SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), port)
         };
         if v6 {
             socket.set_only_v6(true)?;
         }
-        socket.bind(&bind.into())?;
+        socket.bind(&bind.into()).map_err(|error| {
+            std::io::Error::new(
+                error.kind(),
+                format!("failed to bind BFD receive socket {bind}: {error}"),
+            )
+        })?;
         socket.set_nonblocking(true)?;
-        enable_recv_ttl(socket.as_raw_fd(), v6);
+        let (family, option) = if v6 {
+            ("IPv6", "IPV6_RECVHOPLIMIT")
+        } else {
+            ("IPv4", "IP_RECVTTL")
+        };
+        recv_ttl_enabler(socket.as_raw_fd(), v6).map_err(|error| {
+            std::io::Error::new(
+                error.kind(),
+                format!("failed to enable {option} on {family} BFD receive socket {bind}: {error}"),
+            )
+        })?;
         Ok(socket.into())
     }
 
@@ -1086,29 +1155,34 @@ mod linux {
     // Raw setsockopt: socket2 / the safe wrappers don't expose IP_RECVTTL /
     // IPV6_RECVHOPLIMIT. The call is a textbook c_int option set on an owned fd.
     #[allow(unsafe_code)]
-    fn enable_recv_ttl(fd: i32, v6: bool) {
+    fn enable_recv_ttl(fd: i32, v6: bool) -> std::io::Result<()> {
         let on: libc::c_int = 1;
         let (level, opt) = if v6 {
             (libc::IPPROTO_IPV6, libc::IPV6_RECVHOPLIMIT)
         } else {
             (libc::IPPROTO_IP, libc::IP_RECVTTL)
         };
-        let Ok(optlen) = libc::socklen_t::try_from(std::mem::size_of::<libc::c_int>()) else {
-            warn!("failed to enable BFD recv TTL: c_int size does not fit socklen_t");
-            return;
-        };
+        let optlen =
+            libc::socklen_t::try_from(std::mem::size_of::<libc::c_int>()).map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "c_int size does not fit socklen_t",
+                )
+            })?;
         // SAFETY: `fd` is a valid socket fd we own; `&on` points to a live
         // c_int of the declared length for the option's lifetime.
         let ret =
             unsafe { libc::setsockopt(fd, level, opt, std::ptr::addr_of!(on).cast(), optlen) };
-        if ret != 0 {
-            warn!(error = %std::io::Error::last_os_error(), "failed to enable BFD recv TTL");
+        if ret == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
         }
     }
 
     #[cfg(test)]
     mod unit {
-        use super::{Deadline, kind_key};
+        use super::{Deadline, enable_recv_ttl, kind_key, prepare_runtime_sockets, rx_socket_with};
         use rustbgpd_bfd::TimerKind;
         use std::net::IpAddr;
         use tokio::time::Instant;
@@ -1143,6 +1217,65 @@ mod linux {
         #[test]
         fn kind_key_is_injective() {
             assert_ne!(kind_key(TimerKind::Tx), kind_key(TimerKind::Detect));
+        }
+
+        #[test]
+        fn configured_startup_propagates_socket_open_failure() {
+            // Load-bearing proof: changing `prepare_runtime_sockets` back to
+            // the old log-and-continue behavior (`Err(_) => Ok(None)`) makes
+            // this assertion red.
+            let result = prepare_runtime_sockets(true, || {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::AddrInUse,
+                    "injected UDP/3784 collision",
+                ))
+            });
+            let Err(error) = result else {
+                panic!("configured BFD startup accepted a socket-open failure");
+            };
+            assert_eq!(error.kind(), std::io::ErrorKind::AddrInUse);
+            assert_eq!(
+                error.to_string(),
+                "BFD socket startup failed: injected UDP/3784 collision"
+            );
+        }
+
+        #[test]
+        fn disabled_startup_does_not_open_sockets() {
+            // Load-bearing proof: removing the `!enabled` early return makes
+            // the injected opener panic and this test red.
+            let result = prepare_runtime_sockets(false, || {
+                panic!("disabled BFD startup attempted to open sockets")
+            });
+            assert!(matches!(result, Ok(None)));
+        }
+
+        #[test]
+        fn receive_ttl_enable_failure_propagates_with_socket_context() {
+            // Load-bearing proof: ignoring the enabler result makes this
+            // return `Ok`, while dropping the context makes the message
+            // assertion red.
+            let result = rx_socket_with(false, 0, |_fd, v6| {
+                assert!(!v6);
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "injected option denial",
+                ))
+            });
+            let error = result.expect_err("receive-TTL option failure must fail startup");
+            assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+            assert_eq!(
+                error.to_string(),
+                "failed to enable IP_RECVTTL on IPv4 BFD receive socket 0.0.0.0:0: injected option denial"
+            );
+        }
+
+        #[test]
+        fn receive_ttl_setsockopt_preserves_errno() {
+            // Load-bearing proof: restoring the old log-and-continue path or
+            // replacing `last_os_error` with a generic error makes this red.
+            let error = enable_recv_ttl(-1, false).expect_err("invalid fd must fail setsockopt");
+            assert_eq!(error.raw_os_error(), Some(libc::EBADF));
         }
 
         #[test]
@@ -1228,6 +1361,7 @@ mod linux {
                 state_change_tx,
                 shutdown.clone(),
             )
+            .expect("actor sockets open")
             .expect("actor spawns with one session");
             // The actor is up once it has published its session status.
             assert!(
@@ -1782,6 +1916,7 @@ remote_asn = 65002
                 state_change_tx,
                 shutdown.clone(),
             )
+            .expect("actor sockets open")
             .expect("actor should start with one session");
 
             // The up gauge is seeded to 0 at session creation, before any
