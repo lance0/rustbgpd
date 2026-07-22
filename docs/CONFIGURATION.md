@@ -856,8 +856,9 @@ per RFC 5882 §4.1 as administrative, not a liveness failure: the BGP adjacency 
 session is released. (BGP keeps its own hold-timer liveness; BFD is simply not in
 use while the peer has it administratively down. Our local BFD session state
 stays `Down` in this case — the remote-AdminDown cause is tracked separately — so
-`GetBfdSessions` still shows `Down`; only the BGP coupling treats it as
-permitting BGP.) Genuine failures — a detection timeout or a remote-signaled
+`GetBfdSessions` still shows `Down` and reports
+`remote_administrative_down = true`; the BGP coupling uses that cause to permit
+BGP.) Genuine failures — a detection timeout or a remote-signaled
 `Down` — still tear BGP down (non-strict) or keep it withheld (strict). A *local*
 operator disable/delete of the neighbor stops BGP through the normal lifecycle,
 not this path.
@@ -869,7 +870,9 @@ deferred even though the BGP neighbor itself can be interface scoped. Like
 TCP-AO, BFD edits are **restart-required**: on SIGHUP rustbgpd pins
 `[[bfd_profiles]]` and neighbor / peer-group `bfd` back to the live snapshot and
 reports them as restart-required in `--diff`. Inspect sessions with
-`rbgp bfd` / `BfdService.GetBfdSessions` (see [API.md](API.md)).
+`rbgp bfd` / `BfdService.GetBfdSessions` (see [API.md](API.md)); an older daemon
+that omits the optional cause field is shown explicitly as unknown rather than
+silently treated as a genuine failure.
 
 ### Address families
 

@@ -2119,7 +2119,7 @@ there is no mutating RPC here.
 
 | RPC | Description |
 |-----|-------------|
-| `GetBfdSessions` | List BFD sessions (peer address, state, last diagnostic, strict flag), optionally filtered to one `peer_address` |
+| `GetBfdSessions` | List BFD sessions (peer address, state, last diagnostic, strict flag, remote-AdminDown cause), optionally filtered to one `peer_address` |
 
 ```bash
 # All BFD sessions
@@ -2133,6 +2133,11 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 ```
 
 `state` is a `BfdSessionState` (`BFD_SESSION_STATE_{ADMIN_DOWN,DOWN,INIT,UP}`).
+`remote_administrative_down` is an explicit-presence boolean: `true` explains
+that the peer disabled BFD and RFC 5882 section 4.1 permits BGP even though the
+local BFD `state` remains `DOWN`; `false` means a current daemon observed no
+such cause. An absent field means the serving daemon predates this visibility
+and the cause is unknown—clients must not default absence to `false`.
 Live state-change events are available on `EventService.WatchEvents` with
 `EVENT_CATEGORY_BFD` (opt-in). RFC 5882 BGP coupling — strict (withhold BGP
 until BFD Up) and non-strict (tear BGP down on BFD-down before the hold timer) —

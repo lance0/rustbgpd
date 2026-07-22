@@ -1658,6 +1658,12 @@ message BfdSession {
   string diagnostic = 3;
   // RFC 5882 strict mode: BGP is withheld from Established until BFD is Up.
   bool strict = 4;
+  // Whether the peer's most recently received BFD control packet signaled
+  // AdminDown. This is distinct from the local `state`, which remains DOWN
+  // when RFC 5882 section 4.1 permits BGP because the peer disabled BFD.
+  // Explicit presence preserves rolling-upgrade truth: absent means the
+  // serving daemon predates this cause signal, not `false`.
+  optional bool remote_administrative_down = 5;
 }
 
 message GetBfdSessionsResponse {

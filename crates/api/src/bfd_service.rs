@@ -68,7 +68,16 @@ mod tests {
             state: state as i32,
             diagnostic: "none".to_string(),
             strict: false,
+            remote_administrative_down: None,
         }
+    }
+
+    /// Load-bearing proof: renumbering field 5 or removing proto3 presence
+    /// makes this compatibility contract red before generated clients drift.
+    #[test]
+    fn remote_admin_down_proto_field_is_optional_and_append_only() {
+        let proto_source = include_str!("../../../proto/rustbgpd.proto");
+        assert!(proto_source.contains("optional bool remote_administrative_down = 5;"));
     }
 
     #[tokio::test]

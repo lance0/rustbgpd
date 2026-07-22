@@ -2006,6 +2006,19 @@ fn bfd_diagnostic_to_str(diag: rustbgpd_bfd::Diagnostic) -> &'static str {
     }
 }
 
+/// Project the actor-owned BFD snapshot into the presence-aware public API.
+/// New daemons always publish `Some(false|true)`; `None` is reserved for an
+/// older serving daemon whose field 5 was absent on the wire.
+fn bfd_status_to_proto(status: &bfd_runtime::BfdStatus) -> rustbgpd_api::proto::BfdSession {
+    rustbgpd_api::proto::BfdSession {
+        peer_address: status.peer.to_string(),
+        state: bfd_session_state_to_proto(status.state) as i32,
+        diagnostic: bfd_diagnostic_to_str(status.diagnostic).to_string(),
+        strict: status.strict,
+        remote_administrative_down: Some(status.remote_admin_down),
+    }
+}
+
 /// The `rustbgpd(8)` man page, hand-maintained roff. The daemon's arg
 /// parser is hand-rolled (no clap), so this mirrors the `--help` text
 /// above — keep the two in sync when adding a flag.
@@ -4143,17 +4156,7 @@ async fn run<T>(
         dataplane_route_events: Some(fib_bgp_event_tx),
         bfd_session_snapshot: {
             let rx = bfd_status_rx.clone();
-            Arc::new(move || {
-                rx.borrow()
-                    .iter()
-                    .map(|status| rustbgpd_api::proto::BfdSession {
-                        peer_address: status.peer.to_string(),
-                        state: bfd_session_state_to_proto(status.state) as i32,
-                        diagnostic: bfd_diagnostic_to_str(status.diagnostic).to_string(),
-                        strict: status.strict,
-                    })
-                    .collect()
-            })
+            Arc::new(move || rx.borrow().iter().map(bfd_status_to_proto).collect())
         },
         bfd_events: Some(bfd_bgp_event_tx),
         event_history: event_history_handle.clone(),
@@ -4915,6 +4918,26 @@ mod tests {
     use crate::test_support::{
         assert_tier_authorized_test_config, tier_authorized_uds_test_config,
     };
+
+    /// Load-bearing proof: deleting the field-5 projection (or defaulting it
+    /// absent) makes both explicit-presence assertions red.
+    #[test]
+    fn bfd_status_projection_preserves_remote_admin_down_presence() {
+        let mut status = bfd_runtime::BfdStatus {
+            peer: "192.0.2.1".parse().unwrap(),
+            state: rustbgpd_bfd::SessionState::Down,
+            diagnostic: rustbgpd_bfd::Diagnostic::None,
+            strict: true,
+            remote_admin_down: true,
+        };
+
+        let projected = bfd_status_to_proto(&status);
+        assert_eq!(projected.remote_administrative_down, Some(true));
+
+        status.remote_admin_down = false;
+        let projected = bfd_status_to_proto(&status);
+        assert_eq!(projected.remote_administrative_down, Some(false));
+    }
 
     fn unique_temp_path(name: &str) -> PathBuf {
         let suffix = SystemTime::now()
