@@ -221,13 +221,13 @@ substitution is not the RFC algorithm.
 `AGGREGATOR` becomes a typed canonical attribute rather than remaining opaque.
 Migration handling covers type 18 in the same tranche as type 17:
 
-| Received from legacy peer | Canonical result | AS4 path handling |
+| Received from legacy peer | Canonical aggregator result | Independent AS4 path handling |
 |---|---|---|
-| `AGGREGATOR` only | Its two-octet ASN and router ID | Reconstruct if type 17 exists |
+| `AGGREGATOR` only | Its two-octet ASN and router ID | Reconstruct type 17 if present |
 | Both, ordinary ASN is not `AS_TRANS` | Ordinary aggregator | Ignore type 18 and type 17 |
-| Both, ordinary ASN is `AS_TRANS` | Type 18 ASN and router ID | Reconstruct from type 17 |
-| `AS4_AGGREGATOR` only | Type 18 ASN and router ID | Reconstruct if type 17 exists |
-| Neither | No aggregator | Reconstruct if type 17 exists |
+| Both, ordinary ASN is `AS_TRANS` | Type 18 ASN and router ID | Reconstruct type 17 if present |
+| `AS4_AGGREGATOR` only | Type 18 ASN and router ID | Reconstruct type 17 if present |
+| Neither | No aggregator | Reconstruct type 17 if present |
 
 The both-present rows are normative RFC 6793 behavior. The lone type 18 row is
 an explicit interoperability decision for an underspecified input: retain its

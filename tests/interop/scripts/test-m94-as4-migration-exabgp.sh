@@ -78,8 +78,10 @@ accepted_route_is_exact() {
 }
 
 accepted_route_is_absent() {
-    ! rbgp rib received "$SOURCE_PEER" -j 2>/dev/null | jq -e \
-        --arg prefix "$ACCEPTED_PREFIX" '.[] | select(.prefix == $prefix)' >/dev/null
+    rbgp rib received "$SOURCE_PEER" -j 2>/dev/null | jq -e \
+        --arg prefix "$ACCEPTED_PREFIX" '
+        [.[] | select(.prefix == $prefix)] | length == 0
+    ' >/dev/null
 }
 
 loop_route_is_rejected() {
