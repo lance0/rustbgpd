@@ -22,22 +22,24 @@
 
 TOPO="m18-extnexthop-frr"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+INTEROP_TEST_OPERATOR_AUTH=1
+export INTEROP_TEST_OPERATOR_AUTH
 source "$SCRIPT_DIR/test-lib.sh"
 FRR="clab-${TOPO}-frr"
 
 
 grpc_list_received() {
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         "$GRPC_ADDR" rustbgpd.v1.RibService/ListReceivedRoutes 2>/dev/null
 }
 
 grpc_list_best() {
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         "$GRPC_ADDR" rustbgpd.v1.RibService/ListBestRoutes 2>/dev/null
 }
 
 grpc_inject_route() {
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         -d "{\"prefix\": \"$1\", \"prefix_length\": $2, \"next_hop\": \"$3\", \"origin\": 0}" \
         "$GRPC_ADDR" rustbgpd.v1.InjectionService/AddPath 2>/dev/null
 }

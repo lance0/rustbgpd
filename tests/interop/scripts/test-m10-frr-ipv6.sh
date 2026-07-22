@@ -11,6 +11,8 @@
 
 TOPO="m10-frr-ipv6"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+INTEROP_TEST_OPERATOR_AUTH=1
+export INTEROP_TEST_OPERATOR_AUTH
 source "$SCRIPT_DIR/test-lib.sh"
 FRR="clab-${TOPO}-frr"
 
@@ -18,18 +20,18 @@ FRR="clab-${TOPO}-frr"
 # Resolve rustbgpd container management IP for gRPC access
 
 grpc_list_routes() {
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         "$GRPC_ADDR" rustbgpd.v1.RibService/ListReceivedRoutes 2>/dev/null
 }
 
 grpc_list_routes_for_peer() {
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         -d "{\"neighbor_address\": \"$1\"}" \
         "$GRPC_ADDR" rustbgpd.v1.RibService/ListReceivedRoutes 2>/dev/null
 }
 
 grpc_list_best_routes() {
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         "$GRPC_ADDR" rustbgpd.v1.RibService/ListBestRoutes 2>/dev/null
 }
 
@@ -197,7 +199,7 @@ test_ipv6_injection() {
     log "Test 6: IPv6 route injection via gRPC"
 
     local result
-    result=$(grpcurl -plaintext -import-path . -proto "$PROTO" \
+    result=$(grpcurl_call \
         -d '{
             "prefix": "2001:db8:ff::",
             "prefix_length": 48,
@@ -220,7 +222,7 @@ test_ipv6_injection() {
     fi
 
     # Clean up: withdraw injected route
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         -d '{
             "prefix": "2001:db8:ff::",
             "prefix_length": 48

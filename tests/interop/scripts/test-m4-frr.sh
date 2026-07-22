@@ -11,6 +11,8 @@
 
 TOPO="m4-frr"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+INTEROP_TEST_OPERATOR_AUTH=1
+export INTEROP_TEST_OPERATOR_AUTH
 source "$SCRIPT_DIR/test-lib.sh"
 
 
@@ -20,7 +22,7 @@ grpc() {
     local args=("$@")
     local method="${args[-1]}"
     unset 'args[-1]'
-    grpcurl -plaintext -import-path . -proto "$PROTO" "${args[@]}" "$GRPC_ADDR" "$method" 2>/dev/null
+    grpcurl_call "${args[@]}" "$GRPC_ADDR" "$method" 2>/dev/null
 }
 
 grpc_list_neighbors() {

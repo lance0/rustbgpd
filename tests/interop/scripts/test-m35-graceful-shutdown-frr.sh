@@ -24,6 +24,8 @@ set -euo pipefail
 
 TOPO="m35-graceful-shutdown-frr"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+INTEROP_TEST_OPERATOR_AUTH=1
+export INTEROP_TEST_OPERATOR_AUTH
 source "$SCRIPT_DIR/test-lib.sh"
 FRR="clab-${TOPO}-frr"
 
@@ -40,7 +42,7 @@ wait_frr_established "$FRR" "10.0.0.1" "rustbgpd ↔ FRR"
 GSHUT_VALUE=$(( (65535 << 16) | 0 ))    # 4294901760 = 0xFFFF_0000
 
 grpc_list_received() {
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         "$GRPC_ADDR" rustbgpd.v1.RibService/ListReceivedRoutes 2>/dev/null
 }
 
@@ -78,7 +80,7 @@ dump_state_on_failure() {
     echo "===== rustbgpd ListReceivedRoutes (raw) =====" >&2
     grpc_list_received | jq . >&2 || true
     echo "===== rustbgpd NeighborState 10.0.0.2 =====" >&2
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         -d '{"address":"10.0.0.2"}' \
         "$GRPC_ADDR" rustbgpd.v1.NeighborService/GetNeighborState 2>&1 \
         | head -60 >&2 || true
@@ -223,7 +225,7 @@ frr_has_route() {
 }
 
 log "Injecting 172.16.0.0/24 via InjectionService.AddPath (steady state)..."
-grpcurl -plaintext -import-path . -proto "$PROTO" \
+grpcurl_call \
     -d '{"prefix":"172.16.0.0","prefixLength":24,"nextHop":"10.0.0.1","origin":2,"asPath":[]}' \
     "$GRPC_ADDR" rustbgpd.v1.InjectionService/AddPath > /dev/null
 
@@ -245,7 +247,7 @@ done
 
 log "Toggling GRACEFUL_SHUTDOWN advertise ON for 10.0.0.2 via gRPC..."
 log "(no delete + re-add — this exercises RibUpdate::RefreshPeerOutbound force-emit)"
-grpcurl -plaintext -import-path . -proto "$PROTO" \
+grpcurl_call \
     -d '{"address":"10.0.0.2","enabled":true}' \
     "$GRPC_ADDR" rustbgpd.v1.NeighborService/SetGracefulShutdown > /dev/null
 
@@ -275,7 +277,7 @@ done
 # ---------------------------------------------------------------------------
 
 log "Toggling GRACEFUL_SHUTDOWN advertise OFF for 10.0.0.2 via gRPC..."
-grpcurl -plaintext -import-path . -proto "$PROTO" \
+grpcurl_call \
     -d '{"address":"10.0.0.2","enabled":false}' \
     "$GRPC_ADDR" rustbgpd.v1.NeighborService/SetGracefulShutdown > /dev/null
 

@@ -19,6 +19,8 @@
 
 TOPO="m27-aspa-rtr2"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+INTEROP_TEST_OPERATOR_AUTH=1
+export INTEROP_TEST_OPERATOR_AUTH
 source "$SCRIPT_DIR/test-lib.sh"
 FRR_A="clab-${TOPO}-frr-a"
 FRR_B="clab-${TOPO}-frr-b"
@@ -74,25 +76,25 @@ start_with_custom_config() {
 
 grpc_list_received_peer() {
     local peer=$1
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         -d "{\"neighbor_address\": \"$peer\"}" \
         "$GRPC_ADDR" rustbgpd.v1.RibService/ListReceivedRoutes 2>/dev/null
 }
 
 grpc_list_received_all() {
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         "$GRPC_ADDR" rustbgpd.v1.RibService/ListReceivedRoutes 2>/dev/null
 }
 
 grpc_list_best() {
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         "$GRPC_ADDR" rustbgpd.v1.RibService/ListBestRoutes 2>/dev/null
 }
 
 grpc_explain() {
     local prefix=$1
     local prefix_len=$2
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         -d "{\"prefix\": \"$prefix\", \"prefix_length\": $prefix_len}" \
         "$GRPC_ADDR" rustbgpd.v1.RibService/ExplainBestPath 2>/dev/null
 }

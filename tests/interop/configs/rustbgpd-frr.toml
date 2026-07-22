@@ -7,11 +7,19 @@ listen_port = 179
 prometheus_addr = "0.0.0.0:9179"
 log_format = "json"
 
+[global.telemetry.grpc_uds]
+path = "/tmp/rustbgpd.sock"
+mode = 0o600
+principal = "rustbgpd://operator/test-only"
+
+[security.grpc]
+enforcement = "tier"
+
+[security.grpc.roles]
+"rustbgpd://operator/test-only" = "operator"
+
 [[neighbors]]
 address = "10.0.0.2"
 remote_asn = 65002
 description = "frr-m0"
 hold_time = 90
-
-[security.grpc]
-enforcement = "legacy"

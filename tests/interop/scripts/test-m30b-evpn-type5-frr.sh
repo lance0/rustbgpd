@@ -23,6 +23,8 @@
 
 TOPO="m30b-evpn-type5-frr"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+INTEROP_TEST_OPERATOR_AUTH=1
+export INTEROP_TEST_OPERATOR_AUTH
 # shellcheck source=test-lib.sh
 source "$SCRIPT_DIR/test-lib.sh"
 
@@ -44,7 +46,7 @@ EXPECTED_RT_U64="842122827661412"
 # ---------------------------------------------------------------------------
 
 grpc_list_evpn() {
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         -d '{}' \
         "$GRPC_ADDR" rustbgpd.v1.RibService/ListEvpnRoutes 2>/dev/null
 }

@@ -34,6 +34,8 @@
 
 TOPO="m20-privateas-frr"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+INTEROP_TEST_OPERATOR_AUTH=1
+export INTEROP_TEST_OPERATOR_AUTH
 source "$SCRIPT_DIR/test-lib.sh"
 FRR_SOURCE="clab-${TOPO}-frr-source"
 FRR_REMOVE="clab-${TOPO}-frr-remove"
@@ -42,7 +44,7 @@ FRR_REPLACE="clab-${TOPO}-frr-replace"
 
 
 grpc_list_received() {
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         "$GRPC_ADDR" rustbgpd.v1.RibService/ListReceivedRoutes 2>/dev/null
 }
 

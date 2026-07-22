@@ -17,6 +17,8 @@
 
 TOPO="m24-bmp-frr"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+INTEROP_TEST_OPERATOR_AUTH=1
+export INTEROP_TEST_OPERATOR_AUTH
 source "$SCRIPT_DIR/test-lib.sh"
 FRR="clab-${TOPO}-frr"
 BMP_RECEIVER="clab-${TOPO}-bmp-receiver"

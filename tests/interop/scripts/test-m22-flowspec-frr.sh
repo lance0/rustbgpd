@@ -30,6 +30,8 @@
 
 TOPO="m22-flowspec-frr"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+INTEROP_TEST_OPERATOR_AUTH=1
+export INTEROP_TEST_OPERATOR_AUTH
 source "$SCRIPT_DIR/test-lib.sh"
 FRR="clab-${TOPO}-frr"
 
@@ -39,19 +41,19 @@ FRR="clab-${TOPO}-frr"
 # ---------------------------------------------------------------------------
 
 grpc_add_flowspec() {
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         -d "$1" \
         "$GRPC_ADDR" rustbgpd.v1.InjectionService/AddFlowSpec 2>/dev/null
 }
 
 grpc_delete_flowspec() {
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         -d "$1" \
         "$GRPC_ADDR" rustbgpd.v1.InjectionService/DeleteFlowSpec 2>/dev/null
 }
 
 grpc_list_flowspec() {
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         -d '{"afiSafi": "ADDRESS_FAMILY_IPV4_FLOWSPEC"}' \
         "$GRPC_ADDR" rustbgpd.v1.RibService/ListFlowSpecRoutes 2>/dev/null
 }
