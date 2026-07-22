@@ -2398,7 +2398,7 @@ mod tests {
             (concat!("load_tier", "_test_config("), 29),
             (concat!("load_tier", "_test_toml("), 6),
             (concat!("tier_authorized_uds", "_test_config("), 2),
-            (concat!("assert_tier_authorized", "_test_config("), 18),
+            (concat!("assert_tier_authorized", "_test_config("), 17),
         ];
 
         assert!(!source.contains(legacy_toml));
@@ -7166,15 +7166,28 @@ remote_asn = 65002
             "gRPC-style mutation after SIGHUP must persist on top of refreshed desired base"
         );
         assert_tier_authorized_test_config(&runtime);
-        let mut normalized_disk = disk.clone();
-        normalized_disk
+        assert_eq!(
+            disk.security.grpc.enforcement,
+            crate::config::GrpcEnforcementConfig::Tier
+        );
+        let disk_uds = disk
             .global
             .telemetry
             .grpc_uds
-            .as_mut()
-            .unwrap()
-            .path = Some("/tmp/rustbgpd-test.sock".to_string());
-        assert_tier_authorized_test_config(&normalized_disk);
+            .as_ref()
+            .expect("persisted Tier config must keep its UDS listener");
+        assert!(
+            disk_uds.path.is_some(),
+            "persisted UDS path must remain set"
+        );
+        let disk_principal = disk_uds
+            .principal
+            .as_deref()
+            .expect("persisted UDS principal must remain set");
+        assert_eq!(
+            disk.security.grpc.roles.get(disk_principal),
+            Some(&crate::config::GrpcRoleConfig::Operator)
+        );
         (runtime, disk)
     }
 
