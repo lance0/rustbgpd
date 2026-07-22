@@ -53,6 +53,18 @@ fn error_span_and_label(source: &str, error: &ConfigError) -> Option<(Range<usiz
             "not a valid socket address",
         ),
         ConfigError::InvalidHoldTime { value } => find_hold_time_span(source, *value),
+        ConfigError::InvalidMinHoldTime { value } => find_value_anywhere(
+            source,
+            "min_hold_time",
+            &value.to_string(),
+            "must be between 3 and 65535",
+        ),
+        ConfigError::InvalidMinHoldTimeForHoldTime { minimum, hold_time } => find_value_anywhere(
+            source,
+            "min_hold_time",
+            &minimum.to_string(),
+            &format!("effective hold_time {hold_time} must be non-zero and at least min_hold_time"),
+        ),
         ConfigError::InvalidSendHoldTime { value, hold_time } => find_value_anywhere(
             source,
             "send_hold_time",

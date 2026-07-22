@@ -386,6 +386,17 @@ impl Config {
             if hold_time != 0 && hold_time < 3 {
                 return Err(ConfigError::InvalidHoldTime { value: hold_time });
             }
+            let min_hold_time = neighbor
+                .min_hold_time
+                .or_else(|| group.and_then(|g| g.min_hold_time));
+            if let Some(minimum) = min_hold_time {
+                if minimum < 3 {
+                    return Err(ConfigError::InvalidMinHoldTime { value: minimum });
+                }
+                if hold_time == 0 || minimum > hold_time {
+                    return Err(ConfigError::InvalidMinHoldTimeForHoldTime { minimum, hold_time });
+                }
+            }
 
             // RFC 9687 §4.4: a non-zero SendHoldTime MUST be greater
             // than the hold time. Checked on the effective (inherited)
@@ -2177,6 +2188,14 @@ fn validate_peer_group(
     let hold_time = group.hold_time.unwrap_or(DEFAULT_HOLD_TIME);
     if hold_time != 0 && hold_time < 3 {
         return Err(ConfigError::InvalidHoldTime { value: hold_time });
+    }
+    if let Some(minimum) = group.min_hold_time {
+        if minimum < 3 {
+            return Err(ConfigError::InvalidMinHoldTime { value: minimum });
+        }
+        if hold_time == 0 || minimum > hold_time {
+            return Err(ConfigError::InvalidMinHoldTimeForHoldTime { minimum, hold_time });
+        }
     }
 
     // RFC 9687 §4.4 on the group's own values; neighbor-effective

@@ -1129,6 +1129,9 @@ impl Config {
             .hold_time
             .or_else(|| group.and_then(|g| g.hold_time))
             .unwrap_or(DEFAULT_HOLD_TIME);
+        peer.min_hold_time = neighbor
+            .min_hold_time
+            .or_else(|| group.and_then(|g| g.min_hold_time));
         // RFC 9687 §6 default: greater of 8 minutes or 2× hold time.
         peer.send_hold_time = neighbor
             .send_hold_time
@@ -1343,6 +1346,7 @@ impl Config {
         // Build a synthetic Neighbor that references the peer group.
         // All fields come from the group via the normal resolution path.
         let neighbor = Neighbor {
+            min_hold_time: None,
             address: addr.to_string(),
             interface: None,
             remote_asn,
@@ -2098,6 +2102,7 @@ fn config_field_impact(field: &str) -> Option<(ConfigFieldImpact, &'static str)>
             "session reset: reassignment rebuilds the session",
         ),
         "hold_time"
+        | "min_hold_time"
         | "families"
         | "required_families"
         | "graceful_restart"
@@ -2245,6 +2250,7 @@ pub fn describe_neighbor_changes(old: &Neighbor, new: &Neighbor) -> Vec<FieldCha
     cmp_field!(description);
     cmp_field!(peer_group);
     cmp_field!(hold_time);
+    cmp_field!(min_hold_time);
     cmp_field!(send_hold_time);
     cmp_field!(max_prefixes);
     cmp_field!(max_prefixes_ipv4);
@@ -2368,6 +2374,7 @@ fn neighbor_runtime_equal(old: &Neighbor, new: &Neighbor) -> bool {
         && old.description == new.description
         && old.peer_group == new.peer_group
         && old.hold_time == new.hold_time
+        && old.min_hold_time == new.min_hold_time
         && old.send_hold_time == new.send_hold_time
         && old.max_prefixes == new.max_prefixes
         && old.max_prefixes_ipv4 == new.max_prefixes_ipv4
@@ -2989,7 +2996,7 @@ impl Config {
     /// The running post-defaults config for `rbgp config effective`:
     /// a clone of this config with per-neighbor session defaults
     /// materialized (peer-group inheritance and computed defaults such
-    /// as `hold_time` / RFC 9687 `send_hold_time` resolved to the
+    /// as `hold_time`, `min_hold_time`, and RFC 9687 `send_hold_time` resolved to the
     /// values the daemon is using) and secret material replaced with
     /// [`REDACTED_SECRET`].
     ///
@@ -3019,6 +3026,9 @@ impl Config {
                 .or_else(|| group.and_then(|g| g.hold_time))
                 .unwrap_or(DEFAULT_HOLD_TIME);
             neighbor.hold_time = Some(hold_time);
+            neighbor.min_hold_time = neighbor
+                .min_hold_time
+                .or_else(|| group.and_then(|g| g.min_hold_time));
             neighbor.send_hold_time = Some(
                 neighbor
                     .send_hold_time
@@ -5488,6 +5498,7 @@ pub fn describe_peer_group_changes(
     }
 
     cmp_field!(hold_time);
+    cmp_field!(min_hold_time);
     cmp_field!(send_hold_time);
     cmp_field!(max_prefixes);
     cmp_field!(max_prefixes_ipv4);

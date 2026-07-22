@@ -76,6 +76,16 @@ fn proto_definition_to_input(
         .map(u16::try_from)
         .transpose()
         .map_err(|_| Status::invalid_argument("hold_time exceeds u16 range"))?;
+    let min_hold_time = definition
+        .min_hold_time
+        .map(u16::try_from)
+        .transpose()
+        .map_err(|_| Status::invalid_argument("min_hold_time exceeds u16 range"))?;
+    if min_hold_time.is_some_and(|minimum| minimum < 3) {
+        return Err(Status::invalid_argument(
+            "min_hold_time must be between 3 and 65535",
+        ));
+    }
     let gr_restart_time = definition
         .gr_restart_time
         .map(u16::try_from)
@@ -138,6 +148,7 @@ fn proto_definition_to_input(
 
     Ok(PeerGroupDefinition {
         hold_time,
+        min_hold_time,
         send_hold_time: definition.send_hold_time,
         max_prefixes: definition.max_prefixes,
         max_prefix_restart_seconds: definition.max_prefix_restart_seconds,
@@ -194,6 +205,7 @@ fn proto_definition_to_input(
 fn input_definition_to_proto(definition: &PeerGroupDefinition) -> proto::PeerGroupDefinition {
     proto::PeerGroupDefinition {
         hold_time: definition.hold_time.map(u32::from),
+        min_hold_time: definition.min_hold_time.map(u32::from),
         send_hold_time: definition.send_hold_time,
         max_prefixes: definition.max_prefixes,
         max_prefix_restart_seconds: definition.max_prefix_restart_seconds,
@@ -764,6 +776,23 @@ mod tests {
         assert_eq!(input.send_hold_time, Some(500));
         let back = input_definition_to_proto(&input);
         assert_eq!(back.send_hold_time, Some(500));
+    }
+
+    #[test]
+    fn minimum_hold_time_round_trips_and_rejects_invalid_range() {
+        // Mutation-red: dropping either conversion loses 30 on one leg;
+        // dropping range validation accepts 2.
+        let mut definition = sample_definition();
+        definition.min_hold_time = Some(30);
+        let input = proto_definition_to_input(definition).unwrap();
+        assert_eq!(input.min_hold_time, Some(30));
+        assert_eq!(input_definition_to_proto(&input).min_hold_time, Some(30));
+
+        let mut invalid = sample_definition();
+        invalid.min_hold_time = Some(2);
+        let err = proto_definition_to_input(invalid).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("min_hold_time"));
     }
 
     /// The timed max-prefix policy survives both peer-group API conversion

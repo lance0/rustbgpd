@@ -329,6 +329,7 @@ impl PeerManager {
             description: managed.description.clone(),
             peer_group: managed.peer_group.clone(),
             hold_time: managed.hold_time,
+            min_hold_time: tc.peer.min_hold_time,
             send_hold_time: Some(tc.peer.send_hold_time),
             max_prefixes: managed.max_prefixes,
             max_prefixes_ipv4: tc.max_prefixes_ipv4,

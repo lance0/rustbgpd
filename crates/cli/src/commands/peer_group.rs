@@ -34,6 +34,8 @@ struct JsonPeerGroupDetail {
     #[serde(skip_serializing_if = "Option::is_none")]
     hold_time: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    min_hold_time: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     send_hold_time: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_prefixes: Option<u32>,
@@ -85,6 +87,7 @@ fn json_peer_group_detail(
     JsonPeerGroupDetail {
         name,
         hold_time: def.hold_time,
+        min_hold_time: def.min_hold_time,
         send_hold_time: def.send_hold_time,
         max_prefixes: def.max_prefixes,
         max_prefix_restart_seconds: def.max_prefix_restart_seconds,
@@ -175,6 +178,9 @@ pub async fn get(connection: Connection, name: &str, json: bool) -> Result<(), C
         println!("Name:                  {}", resp.name);
         if let Some(h) = def.hold_time {
             println!("Hold Time:             {h}");
+        }
+        if let Some(h) = def.min_hold_time {
+            println!("Minimum Hold Time:     {h}");
         }
         if let Some(h) = def.send_hold_time {
             println!("Send Hold Time:        {h}");
@@ -416,13 +422,15 @@ mod tests {
 
     #[tokio::test]
     async fn set_reads_json_and_sends_definition() {
+        // Mutation-red for min_hold_time: removing JSON/proto mapping rejects
+        // the input or captures None instead of 30.
         let server = spawn_mock_server(None).await;
         let connection = connect(&server.addr, None).await.unwrap();
 
         let mut tmp = tempfile::NamedTempFile::new().unwrap();
         write!(
             tmp,
-            r#"{{"hold_time":120,"families":["ipv4_unicast","ipv6_unicast"],"required_families":["ipv6_unicast"],"import_policy_chain":["a"],"add_path_send":true,"add_path_send_max":4}}"#
+            r#"{{"hold_time":120,"min_hold_time":30,"families":["ipv4_unicast","ipv6_unicast"],"required_families":["ipv6_unicast"],"import_policy_chain":["a"],"add_path_send":true,"add_path_send_max":4}}"#
         )
         .unwrap();
         tmp.flush().unwrap();
@@ -441,6 +449,7 @@ mod tests {
         assert_eq!(captured.name, "transit");
         let def = captured.definition.unwrap();
         assert_eq!(def.hold_time, Some(120));
+        assert_eq!(def.min_hold_time, Some(30));
         assert_eq!(
             def.families,
             vec!["ipv4_unicast".to_string(), "ipv6_unicast".to_string()]

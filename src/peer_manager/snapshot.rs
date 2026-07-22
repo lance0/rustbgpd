@@ -47,6 +47,7 @@ pub(super) fn build_peer_info(
         max_prefix_headroom_ipv4: session_state.and_then(|s| s.max_prefix.headroom_ipv4),
         max_prefix_headroom_ipv6: session_state.and_then(|s| s.max_prefix.headroom_ipv6),
         hold_time: managed.hold_time,
+        min_hold_time: managed.transport_config.peer.min_hold_time,
         send_hold_time: managed.transport_config.peer.send_hold_time,
         max_prefixes: managed.max_prefixes,
         max_prefix_action: if managed.max_prefix_restart_seconds.is_some() {

@@ -1016,6 +1016,7 @@ fn v1_stable_effective_defaults_match_runtime_resolution() {
     let gr_stale_routes_time = bare_transport.gr_stale_routes_time;
     let graceful_restart = bare_peer.graceful_restart;
     let hold_time = bare_peer.hold_time;
+    let min_hold_time = bare_peer.min_hold_time;
     let llgr_stale_time = (bare_peer.llgr_stale_time, bare_transport.llgr_stale_time);
     let send_hold_time = bare_peer.send_hold_time;
 
@@ -1038,6 +1039,7 @@ fn v1_stable_effective_defaults_match_runtime_resolution() {
     assert_v1_effective_default!("Neighbor.graceful_restart", graceful_restart, true);
     assert_v1_effective_default!("Neighbor.hold_time", hold_time, 90);
     assert_v1_effective_default!("Neighbor.llgr_stale_time", llgr_stale_time, (0, 0));
+    assert_v1_effective_default!("Neighbor.min_hold_time", min_hold_time, None);
     assert_v1_effective_default!("Neighbor.send_hold_time", send_hold_time, 480);
 
     // Mutation-red: changing the address-derived default, removing peer-group
@@ -1349,6 +1351,134 @@ remote_asn = 65002
 
     let peers = config.to_peer_configs().unwrap();
     assert_eq!(peers[0].0.peer.hold_time, 90);
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one end-to-end inheritance and negotiation matrix keeps the floor contract coherent"
+)]
+fn minimum_hold_time_validates_effective_static_and_group_values() {
+    // Mutation-red: deleting validation accepts invalid pairs; deleting the
+    // resolver assignment loses static inheritance and dynamic OPEN 2/6.
+    let below_range =
+        parse(&valid_toml().replace("hold_time = 90", "hold_time = 90\nmin_hold_time = 2"))
+            .unwrap_err();
+    assert!(matches!(
+        below_range,
+        ConfigError::InvalidMinHoldTime { value: 2 }
+    ));
+
+    for (hold_time, minimum) in [(0, 30), (30, 31)] {
+        let invalid = parse(&valid_toml().replace(
+            "hold_time = 90",
+            &format!("hold_time = {hold_time}\nmin_hold_time = {minimum}"),
+        ))
+        .unwrap_err();
+        assert!(matches!(
+            invalid,
+            ConfigError::InvalidMinHoldTimeForHoldTime {
+                minimum: actual_minimum,
+                hold_time: actual_hold
+            } if actual_minimum == minimum && actual_hold == hold_time
+        ));
+    }
+
+    let inherited_invalid = format!(
+        r#"
+{GLOBAL_HEADER}
+[peer_groups.clients]
+min_hold_time = 30
+[[neighbors]]
+address = "10.0.0.3"
+remote_asn = 65003
+peer_group = "clients"
+hold_time = 20
+"#,
+        GLOBAL_HEADER = valid_toml()
+    );
+    assert!(matches!(
+        parse(&inherited_invalid).unwrap_err(),
+        ConfigError::InvalidMinHoldTimeForHoldTime {
+            minimum: 30,
+            hold_time: 20
+        }
+    ));
+
+    let inherited = format!(
+        r#"
+{GLOBAL_HEADER}
+
+[peer_groups.clients]
+min_hold_time = 30
+
+[[neighbors]]
+address = "10.0.0.3"
+remote_asn = 65003
+peer_group = "clients"
+hold_time = 45
+
+[[neighbors]]
+address = "10.0.0.4"
+remote_asn = 65004
+peer_group = "clients"
+hold_time = 45
+min_hold_time = 20
+
+[[dynamic_neighbors]]
+prefix = "192.0.2.0/24"
+peer_group = "clients"
+"#,
+        GLOBAL_HEADER = valid_toml()
+    );
+    let config = parse(&inherited).unwrap();
+    assert_eq!(
+        config
+            .resolve_neighbor(&config.neighbors[1])
+            .unwrap()
+            .transport_config
+            .peer
+            .min_hold_time,
+        Some(30)
+    );
+    assert_eq!(
+        config
+            .resolve_neighbor(&config.neighbors[2])
+            .unwrap()
+            .transport_config
+            .peer
+            .min_hold_time,
+        Some(20)
+    );
+    let group = &config.peer_groups["clients"];
+    let dynamic = config
+        .resolve_dynamic_neighbor(
+            "192.0.2.1".parse().unwrap(),
+            65005,
+            "dynamic",
+            group,
+            "clients",
+        )
+        .unwrap();
+    assert_eq!(dynamic.transport_config.peer.min_hold_time, Some(30));
+
+    let mut open = rustbgpd_wire::OpenMessage {
+        version: 4,
+        my_as: 65005,
+        hold_time: 29,
+        bgp_identifier: "192.0.2.1".parse().unwrap(),
+        capabilities: Vec::new(),
+    };
+    let err = rustbgpd_fsm::negotiation::validate_open(&open, &dynamic.transport_config.peer)
+        .unwrap_err();
+    assert_eq!(
+        err.subcode,
+        rustbgpd_wire::notification::open_subcode::UNACCEPTABLE_HOLD_TIME
+    );
+    open.hold_time = 30;
+    assert!(
+        rustbgpd_fsm::negotiation::validate_open(&open, &dynamic.transport_config.peer).is_ok()
+    );
 }
 
 #[test]
@@ -6044,6 +6174,7 @@ peer_group = "missing"
 
 fn test_neighbor(addr: &str, asn: u32) -> Neighbor {
     Neighbor {
+        min_hold_time: None,
         address: addr.to_string(),
         interface: None,
         remote_asn: asn,
@@ -6790,6 +6921,7 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
     new.peer_groups.insert(
         "new-group".to_string(),
         PeerGroupConfig {
+            min_hold_time: None,
             hold_time: Some(60),
             send_hold_time: None,
             slow_peer_threshold_pct: None,
@@ -6831,6 +6963,7 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
         },
     );
     new.neighbors.push(Neighbor {
+        min_hold_time: None,
         address: "10.0.0.3".into(),
         interface: None,
         remote_asn: 65003,
@@ -6887,6 +7020,7 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
         log_level: None,
     });
     new.neighbors.push(Neighbor {
+        min_hold_time: None,
         address: "10.0.0.4".into(),
         interface: None,
         remote_asn: 65004,
@@ -6952,6 +7086,7 @@ fn diff_config_does_not_mark_tcp_ao_neighbor_add_as_reload_applied() {
     let old = parse(valid_toml()).unwrap();
     let mut new = old.clone();
     new.neighbors.push(Neighbor {
+        min_hold_time: None,
         address: "10.0.0.3".into(),
         interface: None,
         remote_asn: 65003,
@@ -7078,11 +7213,14 @@ fn describe_neighbor_changes_hides_tcp_ao_key() {
 
 #[test]
 fn config_field_impact_surfaces_reload_matrix_classes() {
+    // Mutation-red for min_hold_time: removing its impact-map or either
+    // neighbor/group diff row breaks the exact assertions below.
     use super::ConfigFieldImpact::{HotApplied, RestartRequired, SessionReset};
     let class = |field: &str| super::config_field_impact(field).map(|(class, _)| class);
 
     // Session-affecting: a hold_time edit classifies as session reset.
     assert_eq!(class("hold_time"), Some(SessionReset));
+    assert_eq!(class("min_hold_time"), Some(SessionReset));
     assert_eq!(class("families"), Some(SessionReset));
     assert_eq!(class("md5_password"), Some(SessionReset));
     // Hot-applied: a description edit never touches the session.
@@ -7099,6 +7237,22 @@ fn config_field_impact_surfaces_reload_matrix_classes() {
     // session resets in the diff annotations.
     assert_eq!(class("remote_asn"), Some(SessionReset));
     assert_eq!(class("peer_group"), Some(SessionReset));
+
+    let old = test_neighbor("10.0.0.2", 65002);
+    let mut new = old.clone();
+    new.min_hold_time = Some(30);
+    let changes = super::describe_neighbor_changes(&old, &new);
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0].field, "min_hold_time");
+    assert_eq!(changes[0].impact, Some(SessionReset));
+
+    let old_group = PeerGroupConfig::default();
+    let mut new_group = old_group.clone();
+    new_group.min_hold_time = Some(30);
+    let group_changes = super::describe_peer_group_changes(&old_group, &new_group);
+    assert_eq!(group_changes.len(), 1);
+    assert_eq!(group_changes[0].field, "min_hold_time");
+    assert_eq!(group_changes[0].impact, Some(SessionReset));
 }
 
 // ── LAN-341: hot-applicable partition predicate ───────────────────────
@@ -7123,6 +7277,10 @@ fn neighbor_change_hot_applicable_partitions_by_impact_class() {
     let mut reset = old.clone();
     reset.hold_time = Some(30);
     assert!(!super::neighbor_change_hot_applicable(&old, &reset));
+
+    let mut minimum = old.clone();
+    minimum.min_hold_time = Some(30);
+    assert!(!super::neighbor_change_hot_applicable(&old, &minimum));
 
     // Mixed hot + session-reset → rebuild (one bounce applies both).
     let mut mixed = hot.clone();
@@ -11483,6 +11641,23 @@ remote_asn = 65030
         "{:?}",
         diff.effective_neighbor_impact
     );
+
+    // The accepted-hold floor is also inherited session state, so changing it
+    // must take the same dynamic reshape path rather than a hot update.
+    // Removing it from resolved PeerConfig leaves no floor SessionReshape.
+    let with_minimum = |minimum: u32| {
+        config(90).replace(
+            "hold_time = 90",
+            &format!("hold_time = 90\nmin_hold_time = {minimum}"),
+        )
+    };
+    let floor_diff = diff_config(
+        &parse(&with_minimum(30)).unwrap(),
+        &parse(&with_minimum(45)).unwrap(),
+    );
+    assert!(floor_diff.effective_neighbor_impact.iter().any(|impact| {
+        impact.kind == EffectiveNeighborImpactKind::SessionReshape && impact.is_dynamic_range
+    }));
 }
 
 #[test]
@@ -13641,6 +13816,7 @@ const RELOAD_MATRIX_NEIGHBOR_FIELDS: &[&str] = &[
     "description",
     "peer_group",
     "hold_time",
+    "min_hold_time",
     "slow_peer_threshold_pct",
     "slow_peer_duration",
     "slow_peer_isolation",
@@ -13677,6 +13853,7 @@ const RELOAD_MATRIX_NEIGHBOR_FIELDS: &[&str] = &[
 /// TCP-AO.
 const RELOAD_MATRIX_PEER_GROUP_FIELDS: &[&str] = &[
     "hold_time",
+    "min_hold_time",
     "slow_peer_threshold_pct",
     "slow_peer_duration",
     "slow_peer_isolation",
@@ -15840,6 +16017,7 @@ log_format = "json"
 
 [peer_groups.rr-clients]
 hold_time = 30
+min_hold_time = 20
 gr_restart_time = 200
 
 [[neighbors]]
@@ -15859,6 +16037,7 @@ peer_group = "rr-clients"
         let resolved = config.resolve_neighbor(original).unwrap();
         let peer = &resolved.transport_config.peer;
         assert_eq!(materialized.hold_time, Some(peer.hold_time));
+        assert_eq!(materialized.min_hold_time, peer.min_hold_time);
         assert_eq!(materialized.send_hold_time, Some(peer.send_hold_time));
         assert_eq!(materialized.graceful_restart, Some(peer.graceful_restart));
         assert_eq!(materialized.gr_restart_time, Some(peer.gr_restart_time));

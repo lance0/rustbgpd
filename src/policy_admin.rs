@@ -180,6 +180,7 @@ fn config_neighbor_set_to_api(definition: &NeighborSetConfig) -> NeighborSetDefi
 pub(crate) fn api_peer_group_to_config(definition: PeerGroupDefinition) -> PeerGroupConfig {
     PeerGroupConfig {
         hold_time: definition.hold_time,
+        min_hold_time: definition.min_hold_time,
         send_hold_time: definition.send_hold_time,
         // Slow-peer knobs are config-file knobs (LAN-470); the gRPC
         // peer-group surface does not carry them.
@@ -244,6 +245,7 @@ pub(crate) fn api_peer_group_to_config(definition: PeerGroupDefinition) -> PeerG
 pub(crate) fn config_peer_group_to_api(definition: &PeerGroupConfig) -> PeerGroupDefinition {
     PeerGroupDefinition {
         hold_time: definition.hold_time,
+        min_hold_time: definition.min_hold_time,
         send_hold_time: definition.send_hold_time,
         max_prefixes: definition.max_prefixes,
         max_prefix_restart_seconds: definition
@@ -430,6 +432,7 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
                     description: Some(cfg.description.clone()),
                     peer_group: cfg.peer_group.clone(),
                     hold_time: cfg.hold_time,
+                    min_hold_time: cfg.min_hold_time,
                     send_hold_time: cfg.send_hold_time,
                     // Not carried on the runtime neighbor-add surface:
                     // persist as unset so resolution re-applies the
@@ -896,13 +899,16 @@ remote_asn = 65002
     }
 
     #[test]
-    fn neighbor_added_event_preserves_tcp_ao_key_material() {
+    fn neighbor_added_event_preserves_session_fields() {
+        // Mutation-red for min_hold_time: deleting persistence projection
+        // leaves the inserted neighbor at None instead of 30.
         let mut config = minimal_config();
 
         apply_config_event(
             &mut config,
             &ConfigEvent::NeighborAdded {
                 config: rustbgpd_api::peer_types::PeerManagerNeighborConfig {
+                    min_hold_time: Some(30),
                     address: "10.0.0.3".parse().unwrap(),
                     interface: None,
                     scope_id: None,
@@ -970,6 +976,7 @@ remote_asn = 65002
             .find(|neighbor| neighbor.address == "10.0.0.3")
             .unwrap();
         let tcp_ao = neighbor.tcp_ao.as_ref().expect("tcp_ao preserved");
+        assert_eq!(neighbor.min_hold_time, Some(30));
         let tcp_ao = &tcp_ao.0[0];
         assert_eq!(tcp_ao.key, "ao-secret");
         assert_eq!(tcp_ao.send_id, 7);

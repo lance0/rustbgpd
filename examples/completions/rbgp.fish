@@ -174,6 +174,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and not __fish_seen_
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from add" -l remote-asn -l asn -d 'Remote AS number of the peer (the local AS is `rbgp global`)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from add" -l description -d 'Description' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from add" -l hold-time -d 'Hold time in seconds' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from add" -l min-hold-time -d 'Minimum hold time accepted from the peer (3..=65535)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from add" -l send-hold-time -d 'RFC 9687 send hold time in seconds (0 disables; must exceed the hold time; default: max(480, 2 x hold time))' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from add" -l max-prefixes -d 'Max prefix limit' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from add" -l families -d 'Address families (comma-separated)' -r
@@ -235,6 +236,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and not __fish_seen_s
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from add" -l remote-asn -l asn -d 'Remote AS number of the peer (the local AS is `rbgp global`)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from add" -l description -d 'Description' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from add" -l hold-time -d 'Hold time in seconds' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from add" -l min-hold-time -d 'Minimum hold time accepted from the peer (3..=65535)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from add" -l send-hold-time -d 'RFC 9687 send hold time in seconds (0 disables; must exceed the hold time; default: max(480, 2 x hold time))' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from add" -l max-prefixes -d 'Max prefix limit' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from add" -l families -d 'Address families (comma-separated)' -r
