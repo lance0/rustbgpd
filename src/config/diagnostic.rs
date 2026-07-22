@@ -63,7 +63,7 @@ fn error_span_and_label(source: &str, error: &ConfigError) -> Option<(Range<usiz
             source,
             "min_hold_time",
             &minimum.to_string(),
-            &format!("must not exceed non-zero effective hold_time {hold_time}"),
+            &format!("effective hold_time {hold_time} must be non-zero and at least min_hold_time"),
         ),
         ConfigError::InvalidSendHoldTime { value, hold_time } => find_value_anywhere(
             source,
