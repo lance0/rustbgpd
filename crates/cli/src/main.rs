@@ -127,10 +127,10 @@ enum Command {
         #[command(subcommand)]
         action: Option<NeighborAction>,
 
-        /// Append the classic summary columns to the list: MsgRcvd,
-        /// MsgSent, Flaps, RRC (route-reflector client), and
-        /// State/PfxRcd (prefix count when Established). Display-only;
-        /// -j already carries every field
+        /// Append summary columns to the list: MsgRcvd, MsgSent, Flaps,
+        /// RRC (route-reflector client), Slow (`!` marks a slow peer), and
+        /// State/PfxRcd (prefix count when Established). Display-only; JSON
+        /// is unaffected by --wide and may omit optional false healthy-state fields
         #[arg(long, conflicts_with = "address")]
         wide: bool,
 
@@ -3415,6 +3415,10 @@ mod tests {
         let help = neighbor.render_long_help().to_string();
         assert!(help.contains("--wide"), "help was: {help}");
         assert!(help.contains("MsgRcvd"), "help was: {help}");
+        // Load-bearing: removing the slow-peer column from the help while
+        // retaining the older wide columns makes this assertion red.
+        assert!(help.contains("Slow"), "help was: {help}");
+        assert!(help.contains("unaffected by --wide"), "help was: {help}");
     }
 
     #[test]
