@@ -395,6 +395,18 @@ pub enum PeerCommand {
         desired: crate::config::TcpAoSessionSelection,
         reply: oneshot::Sender<Result<(), PeerCommandError>>,
     },
+    /// Validate an exact current-to-survivor deletion without mutating the
+    /// currently owned connected socket.
+    PreflightTcpAoDelete {
+        desired: crate::TcpAoSessionDeletion,
+        reply: oneshot::Sender<Result<(), PeerCommandError>>,
+    },
+    /// Delete deprecated, unselected MKTs from the currently owned connected
+    /// socket and advance future active-open configuration.
+    ApplyTcpAoDelete {
+        desired: crate::TcpAoSessionDeletion,
+        reply: oneshot::Sender<Result<(), PeerCommandError>>,
+    },
     /// Discard this session's connected stream after any sibling may have
     /// partially mutated the immutable TCP-AO generation.
     ResetTcpAoAfterFailedMutation {

@@ -13783,7 +13783,7 @@ fn reload_matrix_pins_load_bearing_field_classes() {
         ("log_level", "| live |"),
         (
             "tcp_ao",
-            "| live (non-destructive generations) / otherwise restart-required |",
+            "| live (ordered rotation generations) / otherwise restart-required |",
         ),
         ("bfd", "| restart-required |"),
     ] {

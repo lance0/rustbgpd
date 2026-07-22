@@ -92,7 +92,7 @@ proved with kernel evidence (routes, FDB rows, nexthop groups, netdev state).
 | M39b | Auto-derived Route Targets cross-vendor (RFC 8365 `AS:VNI`) | FRR 10.3.1 |
 | M40 | ADR-0059 EVPN aliasing dataplane ECMP via FDB nexthop groups | FRR EVPN-MH |
 | M42 | ADR-0061 opt-in general unicast Linux FIB runtime | FRR 10.3.1 |
-| M43 | TCP-AO dynamic `/24` queued-child receipt plus live SIGHUP successor/no-flap proof (probed; skips only if the runner kernel lacks TCP-AO) | BIRD 3.3.1 |
+| M43 | TCP-AO dynamic `/24` queued-child deletion-foundation receipt plus live SIGHUP successor/no-flap proof; full SIGHUP deletion-coordinator extension queued (probed; skips only if the runner kernel lacks TCP-AO) | BIRD 3.3.1 |
 | M46 | RFC 8584 Highest Random Weight DF election | rustbgpd ×2 |
 | M47 / M48 | ADR-0063 runtime EVPN tenant teardown (control plane / kernel L3 datapath) | FRR 10.3.1 |
 | M49 / M69 | RFC 9785 Highest-Preference DF election (rustbgpd↔rustbgpd and cross-vendor) | rustbgpd ×2 / FRR |

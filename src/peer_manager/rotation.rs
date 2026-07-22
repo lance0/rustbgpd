@@ -4,8 +4,8 @@ use futures::future::join_all;
 use rustbgpd_api::peer_types::PeerKey;
 use rustbgpd_transport::{
     PeerCommand, TcpAoKeyring, TcpAoListenerKey, TcpAoRotationGeneration, TcpAoRotationOperation,
-    TcpAoRotationOwner, TcpAoRotationPhase, TcpAoRotationStatus, TcpAoSessionGeneration,
-    TcpAoSessionSelection,
+    TcpAoRotationOwner, TcpAoRotationPhase, TcpAoRotationStatus, TcpAoSessionDeletion,
+    TcpAoSessionGeneration, TcpAoSessionSelection,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -25,6 +25,15 @@ struct SessionSelectionPlanEntry {
 }
 
 type SessionSelectionPlan = Vec<SessionSelectionPlanEntry>;
+
+struct SessionDeletionPlanEntry {
+    peer: PeerKey,
+    desired: TcpAoSessionDeletion,
+    sessions: Vec<mpsc::Sender<PeerCommand>>,
+    deletion_changed: bool,
+}
+
+type SessionDeletionPlan = Vec<SessionDeletionPlanEntry>;
 
 pub(crate) const TCP_AO_AWAITING_PEER_PREFIX: &str = "awaiting_peer:";
 
@@ -208,7 +217,7 @@ fn complete_tcp_ao_generation<'a>(
     record_tcp_ao_generation_applied(global, generation);
 }
 
-fn target_for_peer(
+pub(super) fn target_for_peer(
     peer: &PeerKey,
     is_dynamic: bool,
     listener_keys: &[TcpAoListenerKey],
@@ -371,6 +380,17 @@ async fn reset_affected_selection_cohort(
     join_all(resets).await.into_iter().flatten().collect()
 }
 
+async fn reset_affected_deletion_cohort(
+    plan: &SessionDeletionPlan,
+    generation: TcpAoRotationGeneration,
+) -> Vec<String> {
+    let resets = plan
+        .iter()
+        .filter(|entry| entry.deletion_changed)
+        .map(|entry| reset_sessions_after_failed_mutation(&entry.sessions, generation));
+    join_all(resets).await.into_iter().flatten().collect()
+}
+
 async fn preflight_session(
     commands: mpsc::Sender<PeerCommand>,
     desired: TcpAoSessionGeneration,
@@ -489,6 +509,56 @@ async fn commit_selection_session(
         .map_err(|error| error.to_string())
 }
 
+async fn preflight_delete_session(
+    commands: mpsc::Sender<PeerCommand>,
+    desired: TcpAoSessionDeletion,
+) -> Result<(), String> {
+    let (reply, response) = oneshot::channel();
+    tokio::time::timeout(
+        PEER_LIFECYCLE_COMMAND_TIMEOUT,
+        commands.send(PeerCommand::PreflightTcpAoDelete { desired, reply }),
+    )
+    .await
+    .map_err(|_| "TCP-AO deletion preflight delivery timed out".to_string())?
+    .map_err(|_| "TCP-AO session task exited before deletion preflight".to_string())?;
+    tokio::time::timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT, response)
+        .await
+        .map_err(|_| "TCP-AO deletion preflight acknowledgement timed out".to_string())?
+        .map_err(|_| "TCP-AO deletion preflight acknowledgement dropped".to_string())?
+        .map_err(|error| error.to_string())
+}
+
+async fn apply_delete_session(
+    commands: mpsc::Sender<PeerCommand>,
+    desired: TcpAoSessionDeletion,
+) -> Result<(), SessionApplyFailure> {
+    let (reply, response) = oneshot::channel();
+    tokio::time::timeout(
+        PEER_LIFECYCLE_COMMAND_TIMEOUT,
+        commands.send(PeerCommand::ApplyTcpAoDelete { desired, reply }),
+    )
+    .await
+    .map_err(|_| SessionApplyFailure::before_mutation("TCP-AO deletion delivery timed out"))?
+    .map_err(|_| {
+        SessionApplyFailure::before_mutation("TCP-AO session task exited before deletion apply")
+    })?;
+    let response = tokio::time::timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT, response)
+        .await
+        .map_err(|_| {
+            SessionApplyFailure::after_delivery("TCP-AO deletion acknowledgement timed out")
+        })?
+        .map_err(|_| {
+            SessionApplyFailure::after_delivery("TCP-AO deletion acknowledgement dropped")
+        })?;
+    response.map_err(|error| SessionApplyFailure {
+        mutation_may_have_started: matches!(
+            &error,
+            rustbgpd_transport::PeerCommandError::TcpAoMutationFailed(_)
+        ),
+        message: error.to_string(),
+    })
+}
+
 impl PeerManager {
     fn abort_affected_selection_cohort(&self, plan: &SessionSelectionPlan) {
         for entry in plan.iter().filter(|entry| entry.selection_changed) {
@@ -496,6 +566,19 @@ impl PeerManager {
                 .peers
                 .get(&entry.peer)
                 .expect("selection plan peer remains owned");
+            managed.handle.abort_for_transport_safety();
+            if let Some(pending) = &managed.pending_inbound {
+                pending.handle.abort_for_transport_safety();
+            }
+        }
+    }
+
+    fn abort_affected_deletion_cohort(&self, plan: &SessionDeletionPlan) {
+        for entry in plan.iter().filter(|entry| entry.deletion_changed) {
+            let managed = self
+                .peers
+                .get(&entry.peer)
+                .expect("deletion plan peer remains owned");
             managed.handle.abort_for_transport_safety();
             if let Some(pending) = &managed.pending_inbound {
                 pending.handle.abort_for_transport_safety();
@@ -512,6 +595,7 @@ impl PeerManager {
         let phase = match operation {
             TcpAoRotationOperation::AddOnly => TcpAoRotationPhase::AddOnlyFailed,
             TcpAoRotationOperation::Selection => TcpAoRotationPhase::SelectionFailed,
+            TcpAoRotationOperation::Delete => TcpAoRotationPhase::DeleteFailed,
         };
         self.tcp_ao_rotation = TcpAoRotationStatus {
             desired: generation,
@@ -639,12 +723,92 @@ impl PeerManager {
         Ok(plan)
     }
 
+    fn build_tcp_ao_deletion_plan(
+        &self,
+        generation: TcpAoRotationGeneration,
+        current_listener_keys: &[TcpAoListenerKey],
+        desired_listener_keys: &[TcpAoListenerKey],
+        current_static_keyrings: &[(PeerKey, TcpAoKeyring)],
+        desired_static_keyrings: &[(PeerKey, TcpAoKeyring)],
+    ) -> Result<SessionDeletionPlan, String> {
+        let current_generation = TcpAoRotationGeneration::new(
+            generation
+                .as_u64()
+                .checked_sub(1)
+                .ok_or_else(|| "TCP-AO deletion generation has no predecessor".to_string())?,
+        )
+        .ok_or_else(|| "TCP-AO deletion predecessor generation is invalid".to_string())?;
+        if self.tcp_ao_generation != current_generation && self.tcp_ao_generation != generation {
+            return Err(
+                "TCP-AO deletion generation is not current or the immediate applied successor"
+                    .to_string(),
+            );
+        }
+        let mut plan = Vec::new();
+        let mut peers = self.peers.keys().cloned().collect::<Vec<_>>();
+        peers.sort();
+        for peer in peers {
+            let managed = &self.peers[&peer];
+            if !managed.tcp_ao_protected {
+                continue;
+            }
+            let current = target_for_peer(
+                &peer,
+                managed.is_dynamic,
+                current_listener_keys,
+                current_static_keyrings,
+                current_generation,
+            );
+            let desired = target_for_peer(
+                &peer,
+                managed.is_dynamic,
+                desired_listener_keys,
+                desired_static_keyrings,
+                generation,
+            );
+            if !managed.is_dynamic
+                && (current.active_keyring.is_none() || desired.active_keyring.is_none())
+            {
+                return Err(format!(
+                    "TCP-AO deletion omits protected static peer {peer:?}"
+                ));
+            }
+            if managed.is_dynamic
+                && (current.accepted_owners.is_empty() || desired.accepted_owners.is_empty())
+            {
+                return Err(format!(
+                    "TCP-AO deletion has no covering listener owner for dynamic peer {peer:?}"
+                ));
+            }
+            let deletion_changed = current.active_keyring != desired.active_keyring
+                || current.accepted_owners != desired.accepted_owners;
+            let desired = TcpAoSessionDeletion {
+                generation,
+                current,
+                desired,
+            };
+            let mut sessions = vec![managed.handle.commands_sender()];
+            if let Some(pending) = &managed.pending_inbound {
+                sessions.push(pending.handle.commands_sender());
+            }
+            plan.push(SessionDeletionPlanEntry {
+                peer,
+                desired,
+                sessions,
+                deletion_changed,
+            });
+        }
+        Ok(plan)
+    }
+
     pub(super) async fn preflight_tcp_ao_rotation(
         &mut self,
         generation: TcpAoRotationGeneration,
         operation: TcpAoRotationOperation,
         listener_keys: &[TcpAoListenerKey],
+        current_listener_keys: &[TcpAoListenerKey],
         static_keyrings: &[(PeerKey, TcpAoKeyring)],
+        current_static_keyrings: &[(PeerKey, TcpAoKeyring)],
     ) -> Result<(), String> {
         match operation {
             TcpAoRotationOperation::AddOnly => {
@@ -655,6 +819,16 @@ impl PeerManager {
                 self.preflight_tcp_ao_selection(generation, listener_keys, static_keyrings)
                     .await
             }
+            TcpAoRotationOperation::Delete => {
+                self.preflight_tcp_ao_delete(
+                    generation,
+                    current_listener_keys,
+                    listener_keys,
+                    current_static_keyrings,
+                    static_keyrings,
+                )
+                .await
+            }
         }
     }
 
@@ -663,7 +837,9 @@ impl PeerManager {
         generation: TcpAoRotationGeneration,
         operation: TcpAoRotationOperation,
         listener_keys: &[TcpAoListenerKey],
+        current_listener_keys: &[TcpAoListenerKey],
         static_keyrings: &[(PeerKey, TcpAoKeyring)],
+        current_static_keyrings: &[(PeerKey, TcpAoKeyring)],
     ) -> Result<(), String> {
         match operation {
             TcpAoRotationOperation::AddOnly => {
@@ -673,6 +849,16 @@ impl PeerManager {
             TcpAoRotationOperation::Selection => {
                 self.apply_tcp_ao_selection(generation, listener_keys, static_keyrings)
                     .await
+            }
+            TcpAoRotationOperation::Delete => {
+                self.apply_tcp_ao_delete(
+                    generation,
+                    current_listener_keys,
+                    listener_keys,
+                    current_static_keyrings,
+                    static_keyrings,
+                )
+                .await
             }
         }
     }
@@ -897,6 +1083,218 @@ impl PeerManager {
                     .map(|owner| owner.keyring.clone())
             } else {
                 desired.active_keyring
+            };
+            record_tcp_ao_generation_applied(&mut managed.tcp_ao_rotation, generation);
+        }
+        self.tcp_ao_generation = generation;
+        self.tcp_ao_desired_inventory = None;
+        complete_tcp_ao_generation(
+            &mut self.tcp_ao_rotation,
+            self.peers
+                .values_mut()
+                .filter(|managed| managed.tcp_ao_protected)
+                .map(|managed| &mut managed.tcp_ao_rotation),
+            generation,
+        );
+        Ok(())
+    }
+
+    async fn preflight_tcp_ao_delete(
+        &mut self,
+        generation: TcpAoRotationGeneration,
+        current_listener_keys: &[TcpAoListenerKey],
+        desired_listener_keys: &[TcpAoListenerKey],
+        current_static_keyrings: &[(PeerKey, TcpAoKeyring)],
+        desired_static_keyrings: &[(PeerKey, TcpAoKeyring)],
+    ) -> Result<(), String> {
+        let inventory = canonical_desired_inventory(
+            generation,
+            TcpAoRotationOperation::Delete,
+            desired_listener_keys,
+            desired_static_keyrings,
+        );
+        if let Err(error) = retain_desired_inventory(&mut self.tcp_ao_desired_inventory, inventory)
+        {
+            self.mark_tcp_ao_rotation_failed(generation, TcpAoRotationOperation::Delete, &error);
+            return Err(error);
+        }
+        let plan = match self.build_tcp_ao_deletion_plan(
+            generation,
+            current_listener_keys,
+            desired_listener_keys,
+            current_static_keyrings,
+            desired_static_keyrings,
+        ) {
+            Ok(plan) => plan,
+            Err(error) => {
+                self.mark_tcp_ao_rotation_failed(
+                    generation,
+                    TcpAoRotationOperation::Delete,
+                    &error,
+                );
+                return Err(error);
+            }
+        };
+        self.tcp_ao_rotation = TcpAoRotationStatus {
+            desired: generation,
+            applied: self.tcp_ao_generation,
+            phase: TcpAoRotationPhase::Deleting,
+            last_error: None,
+        };
+        for entry in &plan {
+            let applied = self.peers[&entry.peer].tcp_ao_rotation.applied;
+            self.peers
+                .get_mut(&entry.peer)
+                .expect("peer came from current map")
+                .tcp_ao_rotation = TcpAoRotationStatus {
+                desired: generation,
+                applied,
+                phase: TcpAoRotationPhase::Deleting,
+                last_error: None,
+            };
+        }
+        let mut preflights = Vec::new();
+        for entry in &plan {
+            for commands in &entry.sessions {
+                let peer = entry.peer.clone();
+                let desired = entry.desired.clone();
+                let commands = commands.clone();
+                preflights
+                    .push(async move { (peer, preflight_delete_session(commands, desired).await) });
+            }
+        }
+        for (peer, result) in join_all(preflights).await {
+            if let Err(error) = result {
+                let error = format!("TCP-AO deletion preflight failed for {peer:?}: {error}");
+                self.mark_tcp_ao_rotation_failed(
+                    generation,
+                    TcpAoRotationOperation::Delete,
+                    &error,
+                );
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the deletion transaction keeps concurrent apply, fail-closed cohort reset, and generation commit ordering together"
+    )]
+    async fn apply_tcp_ao_delete(
+        &mut self,
+        generation: TcpAoRotationGeneration,
+        current_listener_keys: &[TcpAoListenerKey],
+        desired_listener_keys: &[TcpAoListenerKey],
+        current_static_keyrings: &[(PeerKey, TcpAoKeyring)],
+        desired_static_keyrings: &[(PeerKey, TcpAoKeyring)],
+    ) -> Result<(), String> {
+        let inventory = canonical_desired_inventory(
+            generation,
+            TcpAoRotationOperation::Delete,
+            desired_listener_keys,
+            desired_static_keyrings,
+        );
+        if let Err(error) = retain_desired_inventory(&mut self.tcp_ao_desired_inventory, inventory)
+        {
+            self.mark_tcp_ao_rotation_failed(generation, TcpAoRotationOperation::Delete, &error);
+            return Err(error);
+        }
+        let plan = match self.build_tcp_ao_deletion_plan(
+            generation,
+            current_listener_keys,
+            desired_listener_keys,
+            current_static_keyrings,
+            desired_static_keyrings,
+        ) {
+            Ok(plan) => plan,
+            Err(error) => {
+                self.mark_tcp_ao_rotation_failed(
+                    generation,
+                    TcpAoRotationOperation::Delete,
+                    &error,
+                );
+                return Err(error);
+            }
+        };
+        for entry in &plan {
+            let applied = self.peers[&entry.peer].tcp_ao_rotation.applied;
+            self.peers
+                .get_mut(&entry.peer)
+                .expect("peer came from current map")
+                .tcp_ao_rotation = TcpAoRotationStatus {
+                desired: generation,
+                applied,
+                phase: TcpAoRotationPhase::Deleting,
+                last_error: None,
+            };
+        }
+
+        let mut applies = Vec::new();
+        for entry in &plan {
+            for commands in &entry.sessions {
+                let peer = entry.peer.clone();
+                let desired = entry.desired.clone();
+                let commands = commands.clone();
+                let changed = entry.deletion_changed;
+                applies.push(async move {
+                    (peer, changed, apply_delete_session(commands, desired).await)
+                });
+            }
+        }
+        let results = join_all(applies).await;
+        if let Some((peer, detail)) = results.iter().find_map(|(peer, _, result)| {
+            result
+                .as_ref()
+                .err()
+                .map(|failure| (peer.clone(), failure.message.clone()))
+        }) {
+            let mutation_may_have_started = results.iter().any(|(_, changed, result)| {
+                *changed
+                    && result
+                        .as_ref()
+                        .map_or_else(|error| error.mutation_may_have_started, |()| true)
+            });
+            let mut reset_failures = Vec::new();
+            if mutation_may_have_started {
+                reset_failures = reset_affected_deletion_cohort(&plan, generation).await;
+                if !reset_failures.is_empty() {
+                    self.abort_affected_deletion_cohort(&plan);
+                }
+            }
+            let mut detail = detail;
+            if !reset_failures.is_empty() {
+                detail = format!(
+                    "{detail}; fail-closed deletion cohort reset was incomplete and all affected session tasks were aborted: {}",
+                    reset_failures.join(", ")
+                );
+            }
+            let error = format!("TCP-AO deletion generation failed for {peer:?}: {detail}");
+            self.mark_tcp_ao_rotation_failed(generation, TcpAoRotationOperation::Delete, &error);
+            return Err(error);
+        }
+
+        for entry in &plan {
+            let managed = self
+                .peers
+                .get_mut(&entry.peer)
+                .expect("committed deletion peer remains owned");
+            managed.transport_config.tcp_ao = if managed.is_dynamic {
+                let selected = selected_owner_for_peer(desired_listener_keys, entry.peer.address)
+                    .expect("preflighted protected peer has an explicit selected owner");
+                entry
+                    .desired
+                    .desired
+                    .accepted_owners
+                    .iter()
+                    .find(|owner| {
+                        owner.owner == selected.owner
+                            && owner.peer == selected.peer
+                            && owner.prefix_len == selected.prefix_len
+                    })
+                    .map(|owner| owner.keyring.clone())
+            } else {
+                entry.desired.desired.active_keyring.clone()
             };
             record_tcp_ao_generation_applied(&mut managed.tcp_ao_rotation, generation);
         }
@@ -1576,6 +1974,34 @@ mod tests {
         PeerHandle::from_parts(commands, task)
     }
 
+    fn deletion_apply_reset_peer_handle(
+        label: &'static str,
+        order: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        apply_result: Result<(), PeerCommandError>,
+    ) -> PeerHandle {
+        let (commands, mut rx) = mpsc::channel(4);
+        let task = tokio::spawn(async move {
+            while let Some(command) = rx.recv().await {
+                match command {
+                    PeerCommand::ApplyTcpAoDelete { reply, .. } => {
+                        order.lock().unwrap().push(format!("apply-{label}"));
+                        let _ = reply.send(apply_result.clone());
+                    }
+                    PeerCommand::ResetTcpAoAfterFailedMutation { reply, .. } => {
+                        order.lock().unwrap().push(format!("reset-{label}"));
+                        let _ = reply.send(());
+                    }
+                    PeerCommand::Shutdown
+                    | PeerCommand::Stop { .. }
+                    | PeerCommand::CollisionDump => break,
+                    _ => {}
+                }
+            }
+            Ok(())
+        });
+        PeerHandle::from_parts(commands, task)
+    }
+
     fn install_rotation_peer(
         manager: &mut PeerManager,
         address: IpAddr,
@@ -1968,6 +2394,82 @@ mod tests {
         // live on A, so both affected sessions must fail closed.
         assert!(order.iter().any(|step| step == "reset-a"));
         assert!(order.iter().any(|step| step == "reset-b"));
+    }
+
+    #[tokio::test]
+    async fn concurrent_deletion_failure_discards_every_affected_session() {
+        let old = TcpAoRotationGeneration::STARTUP;
+        let generation = old.next().unwrap();
+        let (_manager_tx, manager_rx) = mpsc::channel(4);
+        let (rib_tx, _rib_rx) = mpsc::channel(4);
+        let mut manager = PeerManager::new(
+            manager_rx,
+            65_001,
+            Ipv4Addr::new(10, 0, 0, 1),
+            None,
+            None,
+            BgpMetrics::new(),
+            rib_tx,
+            None,
+        );
+        let mut retired = key(1, 11);
+        retired.deprecated = true;
+        let mut successor = key(2, 12);
+        successor.preferred = true;
+        let current = TcpAoKeyring(vec![retired, successor.clone()]);
+        let desired = TcpAoKeyring(vec![successor]);
+        let order = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let peer_a = install_rotation_peer(
+            &mut manager,
+            "192.0.2.1".parse().unwrap(),
+            1,
+            deletion_apply_reset_peer_handle("a", order.clone(), Ok(())),
+            current.clone(),
+        );
+        manager.peers.get_mut(&peer_a).unwrap().pending_inbound =
+            Some(super::super::PendingInbound {
+                handle: deletion_apply_reset_peer_handle("a-pending", order.clone(), Ok(())),
+                session_id: 3,
+            });
+        let peer_b = install_rotation_peer(
+            &mut manager,
+            "192.0.2.2".parse().unwrap(),
+            2,
+            deletion_apply_reset_peer_handle(
+                "b",
+                order.clone(),
+                Err(PeerCommandError::TcpAoMutationFailed(
+                    "injected partial deletion failure".to_string(),
+                )),
+            ),
+            current.clone(),
+        );
+        let current_static = vec![(peer_a.clone(), current.clone()), (peer_b.clone(), current)];
+        let desired_static = vec![(peer_a, desired.clone()), (peer_b, desired)];
+
+        let error = manager
+            .apply_tcp_ao_delete(generation, &[], &[], &current_static, &desired_static)
+            .await
+            .unwrap_err();
+        assert!(error.contains("injected partial deletion failure"));
+        assert_eq!(
+            manager.tcp_ao_rotation.phase,
+            TcpAoRotationPhase::DeleteFailed
+        );
+        let order = order.lock().unwrap();
+        for expected in [
+            "apply-a",
+            "apply-a-pending",
+            "apply-b",
+            "reset-a",
+            "reset-a-pending",
+            "reset-b",
+        ] {
+            assert!(
+                order.iter().any(|actual| actual == expected),
+                "missing {expected}"
+            );
+        }
     }
 
     #[tokio::test]

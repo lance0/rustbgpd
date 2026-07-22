@@ -229,8 +229,14 @@ installs every configured peer key before `listen()`. Listener key-install
 failures abort startup rather than running a partially protected listener;
 active-open key-install failures fail the connection attempt and retry later
 without falling back to unauthenticated TCP.
-Runtime deletion of configured TCP-AO neighbors is rejected because listener
-MKTs are installed on the startup listener socket and are not deleted yet.
+After successor selection and observation-gated predecessor deprecation,
+SIGHUP can delete deprecated MKTs that are neither Current nor RNext across the
+listener, queued accepted children, and every protected primary/pending
+session. The immutable generation preserves owner identity, survivor order,
+key definitions, and the selected MKT; any ambiguous partial session mutation
+discards the whole changed cohort. Removing a protected neighbor/owner,
+editing/reordering keys, or deleting a selected or non-deprecated MKT remains
+restart-gated.
 Static-neighbor protected interop is validated by M43 against BIRD 3.3.1:
 matching keys establish and import a route, a nonpreferred successor is added
 with SIGHUP without flapping the session, and a mismatched preferred key
@@ -243,8 +249,8 @@ listener-wide `ao_required` bit. Protected accepted sockets are discarded
 unless `TCP_AO_INFO` and `TCP_AO_GET_KEYS` confirm valid selection state, clean
 authentication counters, and the complete configured keyring. Kernel-returned
 MKT material is compared only inside zeroizing transport-local buffers and is
-never logged or exported. Protected-owner CRUD and non-additive keyring reloads
-remain restart-gated. Neighbor API/CLI queries refresh read-only TCP-AO KeyIDs,
+never logged or exported. Protected-owner CRUD and key edits/reordering remain
+restart-gated. Neighbor API/CLI queries refresh read-only TCP-AO KeyIDs,
 redacted MKT inventory, and cumulative verification counters from the live
 connected socket without exposing key material. Ordered keyrings are
 supported. Static exact owners take precedence over dynamic longest-prefix
@@ -268,8 +274,10 @@ exceeding the fail-closed inspection path. SIGHUP can append a globally
 preflighted non-preferred successor generation without changing Current/RNext;
 a later immutable generation can select that installed successor and deprecate
 its predecessor after authenticated peer use is observed across the affected
-session cohort. Deletion, edits, or reordering of existing MKTs, protected-owner
-CRUD, and Prometheus exposure of per-socket inspection remain deferred.
+session cohort; a still-later generation can delete deprecated MKTs that are
+neither Current nor RNext. Key edits/reordering, selected or non-deprecated-key
+deletion, and protected-owner CRUD remain restart-gated. Prometheus exposure of
+additional per-socket inspection remains deferred.
 
 ## Shutdown warm-checkpoint confidentiality
 
@@ -412,9 +420,9 @@ the roadmap:
   [`docs/OPERATIONS.md`](OPERATIONS.md#grpc-authorization-audit-and-resource-guardrails);
   only the durable in-daemon sink remains deferred until file/syslog
   backpressure and failure semantics are designed.
-- TCP-AO (RFC 5925) MKT deletion and additional per-socket metrics for BGP
-  session protection (non-destructive install and observation-gated
-  selection/deprecation are live)
+- Additional TCP-AO per-socket metrics for BGP session protection (ordered
+  install, observation-gated selection/deprecation, and deprecated unselected
+  MKT deletion are live).
 
 ## Current gaps
 
@@ -431,8 +439,9 @@ the roadmap:
 - TCP-AO supports ordered static-neighbor and direct dynamic-prefix keyrings,
   add-only non-preferred successor installation on SIGHUP, and a later
   observation-gated SIGHUP generation that selects the installed successor and
-  deprecates its predecessor. Deletion, edits, or reordering of existing MKTs, and
-  protected-owner CRUD require a restart.
+  deprecates its predecessor. A still-later SIGHUP can delete deprecated MKTs
+  that are neither Current nor RNext. Edits/reordering, selected or
+  non-deprecated-key deletion, and protected-owner CRUD require a restart.
   Protected static-neighbor interop is covered by M43 against BIRD 3.3.1 on
   Linux with `CONFIG_TCP_AO=y`.
 - gRPC token and mTLS material behind unchanged paths rotate on SIGHUP as one

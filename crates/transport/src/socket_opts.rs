@@ -383,20 +383,18 @@ pub(crate) struct TcpAoAddOnlyApplyError {
 /// may already have succeeded. A later coordinator must discard a connected
 /// stream whenever mutation began rather than trust a partially shrunk MKT
 /// inventory.
-#[allow(
-    dead_code,
-    reason = "transport deletion foundation is consumed by the later coordinator slice"
-)]
 pub(crate) struct TcpAoDeleteApplyError {
     error: io::Error,
     mutation_started: bool,
 }
 
-#[allow(
-    dead_code,
-    reason = "transport deletion foundation is consumed by the later coordinator slice"
-)]
 impl TcpAoDeleteApplyError {
+    pub(crate) fn before_mutation(error: io::Error) -> Self {
+        Self {
+            error,
+            mutation_started: false,
+        }
+    }
     #[must_use]
     pub(crate) const fn mutation_started(&self) -> bool {
         self.mutation_started
@@ -1344,10 +1342,6 @@ fn delete_inventory(
 /// Connected targets use the selector returned by `GET_KEYS`, so inherited
 /// covering-owner entries are deleted with the exact kernel-returned selector.
 #[cfg(target_os = "linux")]
-#[allow(
-    dead_code,
-    reason = "transport deletion foundation is consumed by the later coordinator slice"
-)]
 pub(crate) fn preflight_tcp_ao_delete(
     socket: &impl AsRawFd,
     current: &[TcpAoMktOwner<'_>],
@@ -1477,10 +1471,6 @@ where
 /// Consume an exact deletion proof, revalidate Current/RNext immediately
 /// before every syscall, and require the exact survivor inventory afterward.
 #[cfg(target_os = "linux")]
-#[allow(
-    dead_code,
-    reason = "transport deletion foundation is consumed by the later coordinator slice"
-)]
 pub(crate) fn apply_tcp_ao_delete(
     socket: &impl AsRawFd,
     preflight: TcpAoDeletePreflight,

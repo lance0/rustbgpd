@@ -1257,16 +1257,27 @@ inventory; `add_only` is an in-progress successor install; and
 `add_only_failed` includes a secret-free actionable error. `selecting` means an
 installed successor is being assigned as local RNext; `awaiting_peer` means the
 one-shot observation did not yet see the peer use that successor; and
-`selection_failed` is a hard inventory/counter/commit failure. While awaiting,
+`selection_failed` is a hard inventory/counter/commit failure. `deleting`
+means an exact deprecated/unselected-MKT deletion generation is moving from the
+listener through queued accepted children and every protected primary/pending
+session; `delete_failed` retains that immutable generation and its secret-free
+error. An identical SIGHUP retry is safe before mutation, after successful
+exact-prior restoration, or when the listener already reached desired. Failed
+restoration leaves a non-resumable intermediate inventory and requires restart.
+While awaiting,
 `desired=N` and `applied=N-1`; a later SIGHUP must present the identical full
 desired config and retries that same N. Selection never sets Linux Current,
-deletes an MKT, or commits predecessor deprecation before every affected session shows a
+or commits predecessor deprecation before every affected session shows a
 generation-relative increase in the successor's verified-packet counter.
-If listener mutation may have started, affected protected passive accepts can
-reject until the same generation is retried or the daemon restarts; established
-sessions keep their prior selectable keys. A child queued before a successful
-listener flip is repaired only when it exactly matches the immediately previous
-inventory. Partial inventories and older queued generations remain rejected.
+Deletion removes only deprecated MKTs that are neither Current nor RNext and
+preserves owner identity, survivor order, key definitions, and the selected
+MKT. If listener mutation may have started, affected protected passive accepts
+can reject until the same generation is retried or the daemon restarts. If any
+changed session may have mutated, the complete changed cohort is discarded; an
+incomplete reset aborts every affected session task. A child queued before a
+successful listener deletion is repaired only when it exactly matches the
+complete immediately previous owner-union inventory. Partial inventories and
+older queued generations remain rejected.
 
 The optional per-key `vrf_ifindex` is Linux's VRF L3-master key selector, not
 an IPv6 link-local interface scope. rustbgpd currently installs VRF-unbound
@@ -1650,9 +1661,11 @@ static-neighbor or direct dynamic-prefix `tcp_ao` keyring will fail closed
 instead of falling back to unauthenticated sessions: listener failures abort
 startup, while active-open failures reject that connect attempt and retry
 later. SIGHUP can append non-preferred successor keys to unchanged static and
-dynamic owner keyrings without changing Current/RNext. Selection,
-deprecation, deletion, editing/reordering existing keys, and protected-owner
-CRUD remain restart-required.
+dynamic owner keyrings without changing Current/RNext. A later SIGHUP can
+select the successor and observation-gate predecessor deprecation; a
+still-later SIGHUP can delete deprecated MKTs that are neither Current nor
+RNext. Editing or reordering existing keys, deleting a selected/non-deprecated
+key, and protected-owner CRUD remain restart-required.
 
 `rbgp neighbor <address>` reads TCP-AO KeyIDs and verification counters from
 the live connected socket on every query. Inspection failure is reported as

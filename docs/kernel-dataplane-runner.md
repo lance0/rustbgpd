@@ -79,7 +79,9 @@ issue #187) so reviewers can distinguish real stability from flake masking.
 - M51: ADR-0067 single-hop BFD + RFC 5882 coupling against FRR `bfdd`.
 - M43: TCP-AO dynamic `/24` queued-child reconciliation and live successor
   rotation against BIRD 3.3.1 (conditional on the runner advertising
-  `CONFIG_TCP_AO=y`).
+  `CONFIG_TCP_AO=y`). The receipt currently proves the deletion socket/queue
+  foundation, not the full SIGHUP deletion coordinator; that extension remains
+  queued.
 - M60: ADR-0079 EVPN adoption sweep kill-and-restart against FRR.
 - M61: ADR-0079 EVPN L3 adoption sweep kill-and-restart against FRR.
 - M62: ADR-0079 blackhole adoption sweep kill-and-restart against FRR.

@@ -542,7 +542,7 @@ message NeighborState {
   uint64 tcp_ao_desired_generation = 32;
   uint64 tcp_ao_applied_generation = 33;
   // Stable values: idle, add_only, add_only_failed, selecting,
-  // awaiting_peer, selection_failed.
+  // awaiting_peer, selection_failed, deleting, delete_failed.
   string tcp_ao_rotation_phase = 34;
   // Secret-free actionable rotation failure. Empty when the phase is healthy.
   string tcp_ao_rotation_error = 35;

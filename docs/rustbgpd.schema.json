@@ -475,7 +475,7 @@
           "minimum": 0
         },
         "tcp_ao": {
-          "description": "TCP-AO keyring installed as prefix MKTs on the passive listener and\ninherited accepted sockets. Nonpreferred successor keys may be appended\nlive with SIGHUP. Dynamic ranges never inherit authentication from their\npeer group.",
+          "description": "TCP-AO keyring installed as prefix MKTs on the passive listener and\ninherited accepted sockets. Separate SIGHUP generations can append a\nnonpreferred successor, observation-gate its selection/deprecation,\nthen delete deprecated unselected keys. Dynamic ranges never inherit\nauthentication from their peer group.",
           "anyOf": [
             {
               "$ref": "#/$defs/TcpAoKeyringConfig"
@@ -2020,7 +2020,7 @@
           ]
         },
         "tcp_ao": {
-          "description": "Static-neighbor TCP-AO (RFC 5925) keyring. Installed on active-open\nsockets and the passive listener when configured. Nonpreferred\nsuccessor keys may be appended live with SIGHUP.",
+          "description": "Static-neighbor TCP-AO (RFC 5925) keyring. Installed on active-open\nsockets and the passive listener when configured. Separate SIGHUP\ngenerations can append a nonpreferred successor, observation-gate its\nselection/deprecation, then delete deprecated unselected keys.",
           "anyOf": [
             {
               "$ref": "#/$defs/TcpAoKeyringConfig"

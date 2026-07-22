@@ -74,7 +74,7 @@ impl ZeroizeOnDrop for TransportAuthSecret {}
 /// Monotonic identity for one immutable TCP-AO desired inventory.
 ///
 /// Generation one is the socket inventory installed at daemon startup. Live
-/// non-destructive rotation publishes later generations only after every
+/// ordered rotation publishes later generations only after every
 /// configured owner has passed preflight.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TcpAoRotationGeneration(u64);
@@ -106,7 +106,7 @@ impl TcpAoRotationGeneration {
     }
 }
 
-/// Operator-visible phase of the non-destructive TCP-AO rotation state.
+/// Operator-visible phase of the ordered TCP-AO rotation state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TcpAoRotationPhase {
     /// Desired and applied inventories are equal; no mutation is pending.
@@ -127,6 +127,15 @@ pub enum TcpAoRotationPhase {
     /// is attempted; kernel MKTs remain installed and the identical
     /// generation is retryable.
     SelectionFailed,
+    /// Deprecated, unselected MKTs are being removed from the listener and
+    /// every affected connected session.
+    Deleting,
+    /// Deletion stopped after the listener or a session may have mutated.
+    /// The identical generation is retryable unless the detailed error reports
+    /// failed exact-prior-inventory restoration; that condition requires
+    /// restart. Affected connected streams are discarded rather than reused
+    /// with an ambiguous inventory.
+    DeleteFailed,
 }
 
 /// Internal mutation shape for one immutable TCP-AO generation.
@@ -137,6 +146,8 @@ pub enum TcpAoRotationOperation {
     /// Select an already-installed successor, observe peer use, then commit
     /// declaration-only deprecation metadata.
     Selection,
+    /// Delete only deprecated, unselected MKTs after successor observation.
+    Delete,
 }
 
 impl TcpAoRotationPhase {
@@ -150,6 +161,8 @@ impl TcpAoRotationPhase {
             Self::Selecting => "selecting",
             Self::AwaitingPeer => "awaiting_peer",
             Self::SelectionFailed => "selection_failed",
+            Self::Deleting => "deleting",
+            Self::DeleteFailed => "delete_failed",
         }
     }
 }
@@ -184,7 +197,7 @@ pub struct TcpAoRotationOwner {
 }
 
 /// Immutable per-session projection of a global inventory generation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TcpAoSessionGeneration {
     /// Global immutable inventory identity.
     pub generation: TcpAoRotationGeneration,
@@ -194,6 +207,21 @@ pub struct TcpAoSessionGeneration {
     pub active_keyring: Option<TcpAoKeyring>,
     /// Full owned union used by protected accepted sockets.
     pub accepted_owners: Arc<[TcpAoRotationOwner]>,
+}
+
+/// Immutable current-to-survivor projection for one deletion generation.
+///
+/// Both inventories are required because removed key material is deliberately
+/// absent from long-lived redacted session metadata. The current inventory is
+/// retained only in the bounded command that proves and applies deletion.
+#[derive(Debug, Clone)]
+pub struct TcpAoSessionDeletion {
+    /// Global immutable survivor-inventory identity.
+    pub generation: TcpAoRotationGeneration,
+    /// Exact applied inventory before deletion.
+    pub current: TcpAoSessionGeneration,
+    /// Exact strict survivor inventory after deletion.
+    pub desired: TcpAoSessionGeneration,
 }
 
 /// Immutable per-session projection for successor selection and the later

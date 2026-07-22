@@ -77,9 +77,10 @@ full gate ladder.
 ## Transport and session features
 
 - TCP-AO supports ordered static-neighbor and direct dynamic-prefix keyrings on
-  Linux, plus add-only non-preferred successor installation on SIGHUP. Live
-  selection, deprecation, deletion, edits/reordering, and protected-owner CRUD
-  require a daemon restart.
+  Linux. SIGHUP can append a non-preferred successor, later select it and
+  observation-gate predecessor deprecation, and later delete deprecated MKTs
+  that are neither Current nor RNext. Key edits/reordering, selected or
+  non-deprecated-key deletion, and protected-owner CRUD require a daemon restart.
 - TCP MD5 and GTSM are supported.
 - BFD supports IPv4/IPv6 global-address single-hop asynchronous sessions for
   static neighbors. Multihop, echo, demand mode, authentication,

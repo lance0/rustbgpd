@@ -10,6 +10,7 @@ use tracing::{info, warn};
 
 use super::{
     ManagedPeer, PEER_LIFECYCLE_COMMAND_TIMEOUT, PEER_QUERY_TIMEOUT, PeerManager, PendingInbound,
+    TcpAoDesiredInventory,
 };
 
 fn accepted_selected_owner(
@@ -51,19 +52,31 @@ fn reconcile_selected_owner_metadata(
                     && state.algorithm == key.algorithm
             });
             let Some(state) = matches.next() else {
-                return Err("accepted socket is missing a selected-owner key");
+                return if key.deprecated {
+                    Ok(None)
+                } else {
+                    Err("accepted socket is missing a non-deprecated selected-owner key")
+                };
             };
             if matches.next().is_some() {
                 return Err("accepted socket has duplicate selected-owner keys");
             }
-            Ok((state.preferred, state.deprecated))
+            Ok(Some((state.preferred, state.deprecated)))
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    for (key, (preferred, deprecated)) in keyring.0.iter_mut().zip(metadata) {
+    let mut metadata = metadata.into_iter();
+    keyring.0.retain_mut(|key| {
+        let Some((preferred, deprecated)) = metadata
+            .next()
+            .expect("metadata was built from this exact keyring")
+        else {
+            return false;
+        };
         key.preferred = preferred;
         key.deprecated = deprecated;
-    }
+        true
+    });
     Ok(())
 }
 
@@ -77,7 +90,8 @@ fn tcp_ao_accept_generation_valid(
         (true, Some(generation)) => match rotation.phase {
             rustbgpd_transport::TcpAoRotationPhase::AddOnly
             | rustbgpd_transport::TcpAoRotationPhase::Selecting
-            | rustbgpd_transport::TcpAoRotationPhase::AwaitingPeer => {
+            | rustbgpd_transport::TcpAoRotationPhase::AwaitingPeer
+            | rustbgpd_transport::TcpAoRotationPhase::Deleting => {
                 (rotation.desired == rotation.applied && generation == rotation.applied)
                     || (rotation
                         .applied
@@ -87,11 +101,63 @@ fn tcp_ao_accept_generation_valid(
             }
             rustbgpd_transport::TcpAoRotationPhase::Idle
             | rustbgpd_transport::TcpAoRotationPhase::AddOnlyFailed
-            | rustbgpd_transport::TcpAoRotationPhase::SelectionFailed => {
+            | rustbgpd_transport::TcpAoRotationPhase::SelectionFailed
+            | rustbgpd_transport::TcpAoRotationPhase::DeleteFailed => {
                 generation == rotation.applied
             }
         },
         _ => false,
+    }
+}
+
+fn deletion_accept_keyring(
+    peer: &PeerKey,
+    is_dynamic: bool,
+    accepted_generation: TcpAoRotationGeneration,
+    rotation: &rustbgpd_transport::TcpAoRotationStatus,
+    retained: Option<&TcpAoDesiredInventory>,
+) -> Result<Option<rustbgpd_transport::TcpAoKeyring>, &'static str> {
+    if rotation.phase != rustbgpd_transport::TcpAoRotationPhase::Deleting
+        || accepted_generation != rotation.desired
+    {
+        return Ok(None);
+    }
+    let retained = retained.ok_or(
+        "desired-generation TCP-AO deletion accept lacks its retained immutable inventory",
+    )?;
+    if retained.generation != accepted_generation
+        || retained.operation != rustbgpd_transport::TcpAoRotationOperation::Delete
+    {
+        return Err(
+            "desired-generation TCP-AO deletion accept does not match the retained immutable inventory",
+        );
+    }
+    super::rotation::target_for_peer(
+        peer,
+        is_dynamic,
+        &retained.listener_keys,
+        &retained.static_keyrings,
+        accepted_generation,
+    )
+    .active_keyring
+    .map(Some)
+    .ok_or("desired-generation TCP-AO deletion accept lacks its selected-owner keyring")
+}
+
+impl PeerManager {
+    fn deletion_accept_keyring(
+        &self,
+        peer: &PeerKey,
+        is_dynamic: bool,
+        accepted_generation: TcpAoRotationGeneration,
+    ) -> Result<Option<rustbgpd_transport::TcpAoKeyring>, &'static str> {
+        deletion_accept_keyring(
+            peer,
+            is_dynamic,
+            accepted_generation,
+            &self.tcp_ao_rotation,
+            self.tcp_ao_desired_inventory.as_ref(),
+        )
     }
 }
 
@@ -128,13 +194,24 @@ impl PeerManager {
         let Some(managed) = self.peers.get(&peer_key) else {
             return false;
         };
-        let transport_config = managed.transport_config.clone();
+        let mut transport_config = managed.transport_config.clone();
+        let is_dynamic = managed.is_dynamic;
         let import_policy = managed.import_policy.clone();
         let export_policy = managed.export_policy.clone();
         let advertise_graceful_shutdown = managed.advertise_graceful_shutdown;
         let tcp_ao_selected_owner = tcp_ao_info
             .as_ref()
             .map(|_| accepted_selected_owner(managed));
+        if tcp_ao_info.is_some() {
+            match self.deletion_accept_keyring(&peer_key, is_dynamic, tcp_ao_generation) {
+                Ok(Some(keyring)) => transport_config.tcp_ao = Some(keyring),
+                Ok(None) => {}
+                Err(error) => {
+                    warn!(%peer_addr, error, "rejecting desired-generation TCP-AO collision candidate without an exact deletion projection");
+                    return false;
+                }
+            }
+        }
         let session_id = self.allocate_session_id();
         let handle = PeerHandle::spawn_inbound_at_tcp_ao_generation(
             transport_config,
@@ -292,6 +369,7 @@ impl PeerManager {
                 let peer_group_name = range.peer_group.clone();
                 let accepted_dynamic_range = range.accepted_attribution();
                 let mut accepted_tcp_ao_keyring = range.tcp_ao.clone();
+                let dynamic_peer_key = PeerKey::new(peer_ip, None);
 
                 // Resolve the dynamic neighbor config from the peer group
                 let resolved = match self.current_config.resolve_dynamic_neighbor(
@@ -327,6 +405,21 @@ impl PeerManager {
                         "dynamic inbound TCP-AO socket protection differs from its explicit selected-owner keyring, dropping"
                     );
                     return;
+                }
+                if tcp_ao_protected {
+                    match self.deletion_accept_keyring(&dynamic_peer_key, true, accepted_generation)
+                    {
+                        Ok(Some(keyring)) => accepted_tcp_ao_keyring = Some(keyring),
+                        Ok(None) => {}
+                        Err(error) => {
+                            warn!(
+                                %peer_ip,
+                                error,
+                                "rejecting desired-generation dynamic TCP-AO accept without an exact deletion projection"
+                            );
+                            return;
+                        }
+                    }
                 }
                 let tcp_ao_selected_owner =
                     tcp_ao_protected.then_some(rustbgpd_transport::listener::TcpAoSelectedOwner {
@@ -432,7 +525,7 @@ impl PeerManager {
                     pending_export_apply: false,
                     advertise_graceful_shutdown,
                 };
-                let peer_key = PeerKey::new(peer_ip, None);
+                let peer_key = dynamic_peer_key;
                 self.peers.insert(peer_key.clone(), managed);
                 self.register_session(session_id, &peer_key);
                 self.dynamic_peer_count += 1;
@@ -796,6 +889,21 @@ impl PeerManager {
     ) {
         let peer_addr = peer_key.address;
         let session_id = self.allocate_session_id();
+        let projected_keyring = if tcp_ao_info.is_some() {
+            let Some(is_dynamic) = self.peers.get(&peer_key).map(|managed| managed.is_dynamic)
+            else {
+                return;
+            };
+            match self.deletion_accept_keyring(&peer_key, is_dynamic, tcp_ao_generation) {
+                Ok(projected) => projected,
+                Err(error) => {
+                    warn!(%peer_addr, error, "rejecting desired-generation TCP-AO replacement without an exact deletion projection");
+                    return;
+                }
+            }
+        } else {
+            None
+        };
         let Some((old_handle, old_session_id)) = ({
             let Some(managed) = self.peers.get_mut(&peer_key) else {
                 return;
@@ -808,11 +916,15 @@ impl PeerManager {
             let tcp_ao_selected_owner = tcp_ao_info
                 .as_ref()
                 .map(|_| accepted_selected_owner(managed));
+            let mut transport_config = managed.transport_config.clone();
+            if let Some(keyring) = projected_keyring {
+                transport_config.tcp_ao = Some(keyring);
+            }
             let old_session_id = managed.session_id;
             let old_handle = std::mem::replace(
                 &mut managed.handle,
                 PeerHandle::spawn_inbound_at_tcp_ao_generation(
-                    managed.transport_config.clone(),
+                    transport_config,
                     self.metrics.clone(),
                     self.rib_tx.clone(),
                     managed.import_policy.clone(),
@@ -872,6 +984,153 @@ impl PeerManager {
 #[cfg(test)]
 mod generation_tests {
     use super::*;
+
+    fn ao_key(
+        secret: &str,
+        send_id: u8,
+        recv_id: u8,
+        preferred: bool,
+        deprecated: bool,
+    ) -> rustbgpd_transport::TcpAoConfig {
+        rustbgpd_transport::TcpAoConfig {
+            key: secret.into(),
+            send_id,
+            recv_id,
+            algorithm: rustbgpd_transport::TcpAoAlgorithm::HmacSha256,
+            preferred,
+            deprecated,
+        }
+    }
+
+    fn accepted_snapshot(
+        owner: rustbgpd_transport::listener::TcpAoSelectedOwner,
+        keyring: &rustbgpd_transport::TcpAoKeyring,
+    ) -> TcpAoInfoSnapshot {
+        let selected = keyring.selected().unwrap();
+        TcpAoInfoSnapshot {
+            has_current_key: true,
+            has_rnext_key: true,
+            ao_required: true,
+            accept_icmps: false,
+            current_key: selected.send_id,
+            rnext_key: selected.recv_id,
+            pkt_good: 1,
+            pkt_bad: 0,
+            pkt_key_not_found: 0,
+            pkt_ao_required: 0,
+            pkt_dropped_icmp: 0,
+            keys: keyring
+                .iter()
+                .map(|key| rustbgpd_transport::TcpAoKeyState {
+                    peer: owner.peer,
+                    prefix_len: owner.prefix_len,
+                    send_id: key.send_id,
+                    recv_id: key.recv_id,
+                    algorithm: key.algorithm,
+                    is_current: key.send_id == selected.send_id,
+                    is_rnext: key.recv_id == selected.recv_id,
+                    preferred: key.preferred,
+                    deprecated: key.deprecated,
+                    vrf_ifindex: None,
+                    pkt_good: 1,
+                    pkt_bad: 0,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn desired_generation_accept_projects_retained_deletion_inventory_before_peer_apply() {
+        let one = TcpAoRotationGeneration::STARTUP;
+        let two = TcpAoRotationGeneration::new(2).unwrap();
+        let peer = PeerKey::new("192.0.2.9".parse().unwrap(), None);
+        let survivor = ao_key("successor", 2, 12, true, false);
+        let desired = rustbgpd_transport::TcpAoKeyring(vec![survivor]);
+        let dynamic_owner = rustbgpd_transport::TcpAoListenerKey {
+            owner: rustbgpd_transport::TcpAoListenerOwnerKind::Dynamic,
+            peer: "192.0.2.0".parse().unwrap(),
+            prefix_len: 24,
+            config: desired.clone(),
+        };
+        let retained = TcpAoDesiredInventory {
+            generation: two,
+            operation: rustbgpd_transport::TcpAoRotationOperation::Delete,
+            listener_keys: vec![dynamic_owner],
+            static_keyrings: vec![(peer.clone(), desired.clone())],
+        };
+        let deleting = rustbgpd_transport::TcpAoRotationStatus {
+            desired: two,
+            applied: one,
+            phase: rustbgpd_transport::TcpAoRotationPhase::Deleting,
+            last_error: None,
+        };
+
+        let dynamic = deletion_accept_keyring(&peer, true, two, &deleting, Some(&retained))
+            .unwrap()
+            .unwrap();
+        let static_ring = deletion_accept_keyring(&peer, false, two, &deleting, Some(&retained))
+            .unwrap()
+            .unwrap();
+        assert_eq!(dynamic, desired);
+        assert_eq!(static_ring, desired);
+        assert!(
+            deletion_accept_keyring(&peer, true, one, &deleting, Some(&retained))
+                .unwrap()
+                .is_none()
+        );
+        assert!(deletion_accept_keyring(&peer, true, two, &deleting, None).is_err());
+    }
+
+    #[test]
+    fn post_apply_dynamic_accept_prunes_only_absent_deprecated_key_from_old_config() {
+        let two = TcpAoRotationGeneration::new(2).unwrap();
+        let peer = PeerKey::new("192.0.2.9".parse().unwrap(), None);
+        let owner = rustbgpd_transport::listener::TcpAoSelectedOwner {
+            owner: rustbgpd_transport::TcpAoListenerOwnerKind::Dynamic,
+            peer: "192.0.2.0".parse().unwrap(),
+            prefix_len: 24,
+        };
+        let retired = ao_key("retired", 1, 11, false, true);
+        let survivor = ao_key("successor", 2, 12, true, false);
+        let desired = rustbgpd_transport::TcpAoKeyring(vec![survivor.clone()]);
+        let accepted = accepted_snapshot(owner, &desired);
+        let idle = rustbgpd_transport::TcpAoRotationStatus {
+            desired: two,
+            applied: two,
+            phase: rustbgpd_transport::TcpAoRotationPhase::Idle,
+            last_error: None,
+        };
+        assert!(
+            deletion_accept_keyring(&peer, true, two, &idle, None)
+                .unwrap()
+                .is_none()
+        );
+
+        let mut stale_config = rustbgpd_transport::TcpAoKeyring(vec![retired.clone(), survivor]);
+        reconcile_selected_owner_metadata(&mut stale_config, owner, &accepted).unwrap();
+        assert_eq!(stale_config, desired);
+
+        let mut unsafe_config = rustbgpd_transport::TcpAoKeyring(vec![
+            rustbgpd_transport::TcpAoConfig {
+                deprecated: false,
+                ..retired
+            },
+            desired.0[0].clone(),
+        ]);
+        assert!(reconcile_selected_owner_metadata(&mut unsafe_config, owner, &accepted).is_err());
+        assert_eq!(unsafe_config.0.len(), 2);
+    }
+
+    #[test]
+    fn deletion_projection_is_wired_to_all_protected_inbound_spawn_paths() {
+        let source = include_str!("inbound.rs");
+        let needle = concat!("match self.", "deletion_accept_keyring");
+        assert_eq!(
+            source.matches(needle).count(),
+            3,
+            "pending collision, fresh dynamic, and replacement accepts must all project the retained deletion inventory"
+        );
+    }
 
     #[test]
     fn protected_accept_requires_exact_applied_generation() {
@@ -953,6 +1212,30 @@ mod generation_tests {
             true,
             Some(two),
             &selection_failed
+        ));
+
+        let deleting = rustbgpd_transport::TcpAoRotationStatus {
+            desired: two,
+            applied: one,
+            phase: rustbgpd_transport::TcpAoRotationPhase::Deleting,
+            last_error: None,
+        };
+        assert!(tcp_ao_accept_generation_valid(true, Some(one), &deleting));
+        assert!(tcp_ao_accept_generation_valid(true, Some(two), &deleting));
+        let delete_failed = rustbgpd_transport::TcpAoRotationStatus {
+            phase: rustbgpd_transport::TcpAoRotationPhase::DeleteFailed,
+            last_error: Some("deletion failed".to_string()),
+            ..deleting
+        };
+        assert!(tcp_ao_accept_generation_valid(
+            true,
+            Some(one),
+            &delete_failed
+        ));
+        assert!(!tcp_ao_accept_generation_valid(
+            true,
+            Some(two),
+            &delete_failed
         ));
     }
 }

@@ -942,9 +942,15 @@ pub enum PeerManagerCommand {
         /// Complete desired listener owner inventory. The peer manager derives
         /// exact active-open and covering accepted-socket projections from it.
         listener_keys: Vec<rustbgpd_transport::TcpAoListenerKey>,
+        /// Exact applied listener inventory before a deletion generation;
+        /// empty for add-only and selection operations.
+        current_listener_keys: Vec<rustbgpd_transport::TcpAoListenerKey>,
         /// Desired exact keyrings for static active-open peers, including
         /// families that do not share the process listener socket.
         static_keyrings: Vec<(PeerKey, TcpAoKeyring)>,
+        /// Exact applied static keyrings before deletion; empty for other
+        /// operations.
+        current_static_keyrings: Vec<(PeerKey, TcpAoKeyring)>,
         reply: oneshot::Sender<Result<(), String>>,
     },
     /// Validate every affected managed protected-session target before the
@@ -954,7 +960,9 @@ pub enum PeerManagerCommand {
         /// Internal mutation shape; this is actor plumbing, not an RPC field.
         operation: rustbgpd_transport::TcpAoRotationOperation,
         listener_keys: Vec<rustbgpd_transport::TcpAoListenerKey>,
+        current_listener_keys: Vec<rustbgpd_transport::TcpAoListenerKey>,
         static_keyrings: Vec<(PeerKey, TcpAoKeyring)>,
+        current_static_keyrings: Vec<(PeerKey, TcpAoKeyring)>,
         reply: oneshot::Sender<Result<(), String>>,
     },
     /// Publish a failed global rotation phase when listener application fails
