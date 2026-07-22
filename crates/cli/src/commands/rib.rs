@@ -709,12 +709,18 @@ impl Serialize for JsonRouteRef<'_> {
         if route.llgr_stale {
             len += 1;
         }
+        if route.local_pref_attr.is_some() {
+            len += 1;
+        }
 
         let mut map = serializer.serialize_map(Some(len))?;
         map.serialize_entry("prefix", &JsonRoutePrefix(route))?;
         map.serialize_entry("next_hop", &route.next_hop)?;
         map.serialize_entry("as_path", &route.as_path)?;
         map.serialize_entry("local_pref", &route.local_pref)?;
+        if let Some(local_pref) = route.local_pref_attr {
+            map.serialize_entry("local_pref_attr", &local_pref)?;
+        }
         match route.med_attr {
             Some(med) => map.serialize_entry("med", &med)?,
             None if self.med_attr_supported => map.serialize_entry("med", &None::<u32>)?,
@@ -2707,6 +2713,20 @@ mod tests {
             serde_json::to_value(JsonRoutes(&[with_med, zero_med])).unwrap();
         assert_eq!(value[0]["med"], 50);
         assert_eq!(value[1]["med"], 0);
+    }
+
+    #[test]
+    fn route_list_json_exposes_explicit_local_pref_presence() {
+        let mut explicit_zero = route_for_json(0, "");
+        explicit_zero.local_pref = 0;
+        explicit_zero.local_pref_attr = Some(0);
+        let mut absent = route_for_json(0, "");
+        absent.local_pref = 0;
+        let value: serde_json::Value =
+            serde_json::to_value(JsonRoutes(&[explicit_zero, absent])).unwrap();
+
+        assert_eq!(value[0]["local_pref_attr"], 0);
+        assert!(value[1].get("local_pref_attr").is_none());
     }
 
     /// GR stale flags serialize only when set, matching the VPN /

@@ -102,6 +102,7 @@ test as-set-is-rejected {
 
 Then ask the daemon *what would happen* — before you commit anything:
 
+<!-- rbgp-cli-conformance -->
 ```bash
 rbgp policy check hygiene.rpol      # offline: compile + run the in-language tests
 rbgp policy test hygiene.rpol --policy ixp-hygiene --direction import

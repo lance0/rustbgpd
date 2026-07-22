@@ -1970,14 +1970,14 @@ The community is attached on the wire by the per-peer transport layer
 initiator side — the RIB doesn't know about the toggle. The
 authoritative checks are:
 
+<!-- rbgp-cli-conformance -->
 ```bash
 # Receiver-side: routes from a draining peer that honor the community
 # show explicit local_pref_attr = 0 in the RIB (proves the implicit
 # chain-tail rule fired). EBGP-received routes have no LOCAL_PREF on
 # the wire, so look at local_pref_attr (explicit) rather than
 # local_pref (proto3 default).
-rbgp rib --neighbor <draining-peer> \
-    | jq '.routes[] | {prefix, localPrefAttr, communities}'
+rbgp --json rib received <draining-peer> | jq '.[] | {prefix, local_pref_attr, communities}'
 
 # Initiator-side: confirm the local desired advertisement state.
 rbgp neighbor <receiving-peer> | grep 'GShut Advertise Intent: enabled'

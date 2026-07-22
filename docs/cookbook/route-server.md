@@ -236,6 +236,7 @@ $ rbgp neighbor 198.51.100.3             # Distribution Mode: per-client-best
 
 Transparency and per-member views:
 
+<!-- rbgp-cli-conformance -->
 ```console
 $ rbgp rib recv 198.51.100.2             # what a member sent us
 $ rbgp rib sent 198.51.100.3             # what that member sees back

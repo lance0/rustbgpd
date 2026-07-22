@@ -11,6 +11,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **GShut receiver verification is executable from `rbgp`.** The runbook uses
+  the parse-valid received-RIB command, whose JSON now exposes optional
+  `local_pref_attr` so operators can distinguish an explicit demotion to zero.
+
 - **RFC-correct RT/RO policy action encoding.** TOML
   `set_community_add` / `set_community_remove` and `.rpol` `add` / `remove`
   actions now share the same typed encoder: numeric ASNs through 65535 use RFC

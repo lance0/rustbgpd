@@ -141,6 +141,7 @@ member-support workflow around this view is in the
 
 "Member AS64500 says their prefix isn't visible." In order:
 
+<!-- rbgp-cli-conformance -->
 ```bash
 # 1. Is the session even up, and are we retaining anything from them?
 rbgp summary

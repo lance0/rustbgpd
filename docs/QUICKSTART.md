@@ -81,6 +81,7 @@ rustbgpd config.toml
 The minimal example uses `/tmp/rustbgpd` as its runtime state directory, so point
 the CLI at that socket:
 
+<!-- rbgp-cli-conformance -->
 ```bash
 export RUSTBGPD_ADDR=unix:///tmp/rustbgpd/grpc.sock
 

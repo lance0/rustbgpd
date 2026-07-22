@@ -3012,6 +3012,107 @@ mod tests {
     use clap::Parser;
 
     #[test]
+    fn curated_documentation_commands_parse_with_the_real_cli() {
+        const MARKER: &str = "<!-- rbgp-cli-conformance -->";
+        const DOCUMENTS: &[(&str, usize)] = &[
+            ("README.md", 4),
+            ("docs/QUICKSTART.md", 5),
+            ("docs/cookbook/route-server.md", 3),
+            ("docs/explain.md", 5),
+            ("docs/OPERATIONS.md", 2),
+        ];
+
+        let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for (relative_path, expected_commands) in DOCUMENTS {
+            let contents = std::fs::read_to_string(repository.join(relative_path))
+                .unwrap_or_else(|error| panic!("failed to read {relative_path}: {error}"));
+            let lines: Vec<_> = contents.lines().collect();
+            let markers: Vec<_> = lines
+                .iter()
+                .enumerate()
+                .filter(|(_, line)| line.trim() == MARKER)
+                .map(|(index, _)| index)
+                .collect();
+            assert_eq!(
+                markers.len(),
+                1,
+                "{relative_path} must contain exactly one curated CLI block"
+            );
+            assert!(
+                lines
+                    .get(markers[0] + 1)
+                    .is_some_and(|line| line.trim().starts_with("```")),
+                "{relative_path} conformance marker must immediately precede its code fence"
+            );
+
+            let mut in_fence = false;
+            let mut parsed = 0;
+            for (offset, line) in lines[(markers[0] + 1)..].iter().enumerate() {
+                let trimmed = line.trim();
+                if trimmed.starts_with("```") {
+                    if in_fence {
+                        break;
+                    }
+                    in_fence = true;
+                    continue;
+                }
+                if !in_fence {
+                    continue;
+                }
+
+                let command = trimmed.strip_prefix("$ ").unwrap_or(trimmed);
+                if !command.starts_with("rbgp ") {
+                    continue;
+                }
+                assert!(
+                    !command.ends_with('\\'),
+                    "{relative_path}:{} curated rbgp command must stay on one line",
+                    markers[0] + offset + 2
+                );
+                let command = command
+                    .split_once(" #")
+                    .map_or(command, |(command, _)| command);
+                let piped_to_jq = command.contains(" | jq ");
+                // Shell comments and pipelines remain documentation; this gate
+                // parses only the rbgp argv and never executes either suffix.
+                let command = command
+                    .split_once(" |")
+                    .map_or(command, |(command, _)| command);
+                if piped_to_jq {
+                    assert!(
+                        command
+                            .split_whitespace()
+                            .any(|arg| arg == "--json" || arg == "-j"),
+                        "{relative_path}:{} pipes rbgp output to jq without selecting JSON",
+                        markers[0] + offset + 2
+                    );
+                }
+                let arguments: Vec<_> = command
+                    .split_whitespace()
+                    .map(|argument| match argument {
+                        "<draining-peer>" | "<receiving-peer>" => "192.0.2.1",
+                        _ if argument.starts_with('<') && argument.ends_with('>') => {
+                            panic!("{relative_path}: add an explicit normalization for {argument}")
+                        }
+                        _ => argument,
+                    })
+                    .collect();
+                Cli::try_parse_from(arguments).unwrap_or_else(|error| {
+                    panic!(
+                        "{relative_path}:{} does not parse as documented:\n{command}\n{error}",
+                        markers[0] + offset + 2
+                    )
+                });
+                parsed += 1;
+            }
+            assert_eq!(
+                parsed, *expected_commands,
+                "{relative_path} curated command set changed; review the block and update its count"
+            );
+        }
+    }
+
+    #[test]
     fn v1_stable_cli_command_inventory_matches_clap_tree() {
         let inventory_path = concat!(
             env!("CARGO_MANIFEST_DIR"),
