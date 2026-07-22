@@ -153,8 +153,7 @@ jobs:
 
       - name: Install grpcurl
         run: |
-          curl -sL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz \
-            | sudo tar -xz -C /usr/local/bin grpcurl
+          bash .github/scripts/install-grpcurl.sh
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -188,8 +187,7 @@ jobs:
 
       - name: Install grpcurl
         run: |
-          curl -sL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz \
-            | sudo tar -xz -C /usr/local/bin grpcurl
+          bash .github/scripts/install-grpcurl.sh
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -225,8 +223,7 @@ jobs:
         # jq drives the parity tuple comparisons (rustbgpd gRPC JSON
         # vs FRR vtysh JSON) and the policy test/stats assertions.
         run: |
-          curl -sL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz \
-            | sudo tar -xz -C /usr/local/bin grpcurl
+          bash .github/scripts/install-grpcurl.sh
           sudo apt-get update -y && sudo apt-get install -y jq
 
       - name: Set up Docker Buildx
@@ -261,8 +258,7 @@ jobs:
 
       - name: Install grpcurl
         run: |
-          curl -sL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz \
-            | sudo tar -xz -C /usr/local/bin grpcurl
+          bash .github/scripts/install-grpcurl.sh
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -296,8 +292,7 @@ jobs:
 
       - name: Install grpcurl
         run: |
-          curl -sL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz \
-            | sudo tar -xz -C /usr/local/bin grpcurl
+          bash .github/scripts/install-grpcurl.sh
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -331,8 +326,7 @@ jobs:
 
       - name: Install grpcurl
         run: |
-          curl -sL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz \
-            | sudo tar -xz -C /usr/local/bin grpcurl
+          bash .github/scripts/install-grpcurl.sh
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -366,8 +360,7 @@ jobs:
 
       - name: Install grpcurl + jq
         run: |
-          curl -sL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz \
-            | sudo tar -xz -C /usr/local/bin grpcurl
+          bash .github/scripts/install-grpcurl.sh
           sudo apt-get update -y && sudo apt-get install -y jq
 
       - name: Set up Docker Buildx
@@ -409,8 +402,7 @@ jobs:
 
       - name: Install grpcurl + jq
         run: |
-          curl -sL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz \
-            | sudo tar -xz -C /usr/local/bin grpcurl
+          bash .github/scripts/install-grpcurl.sh
           sudo apt-get update -y && sudo apt-get install -y jq
 
       - name: Set up Docker Buildx
@@ -458,8 +450,7 @@ jobs:
 
       - name: Install grpcurl + jq
         run: |
-          curl -sL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz \
-            | sudo tar -xz -C /usr/local/bin grpcurl
+          bash .github/scripts/install-grpcurl.sh
           sudo apt-get update -y && sudo apt-get install -y jq
 
       - name: Set up Docker Buildx
@@ -497,8 +488,7 @@ jobs:
 
       - name: Install grpcurl + jq
         run: |
-          curl -sL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz \
-            | sudo tar -xz -C /usr/local/bin grpcurl
+          bash .github/scripts/install-grpcurl.sh
           sudo apt-get update -y && sudo apt-get install -y jq
 
       - name: Set up Docker Buildx
@@ -536,8 +526,7 @@ jobs:
 
       - name: Install grpcurl + jq
         run: |
-          curl -sL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz \
-            | sudo tar -xz -C /usr/local/bin grpcurl
+          bash .github/scripts/install-grpcurl.sh
           sudo apt-get update -y && sudo apt-get install -y jq
 
       - name: Set up Docker Buildx
@@ -575,8 +564,7 @@ jobs:
 
       - name: Install grpcurl + jq
         run: |
-          curl -sL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz \
-            | sudo tar -xz -C /usr/local/bin grpcurl
+          bash .github/scripts/install-grpcurl.sh
           sudo apt-get update -y && sudo apt-get install -y jq
 
       - name: Set up Docker Buildx
@@ -614,8 +602,7 @@ jobs:
 
       - name: Install grpcurl + jq
         run: |
-          curl -sL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz \
-            | sudo tar -xz -C /usr/local/bin grpcurl
+          bash .github/scripts/install-grpcurl.sh
           sudo apt-get update -y && sudo apt-get install -y jq
 
       - name: Set up Docker Buildx
@@ -653,8 +640,7 @@ jobs:
 
       - name: Install grpcurl + jq
         run: |
-          curl -sL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz \
-            | sudo tar -xz -C /usr/local/bin grpcurl
+          bash .github/scripts/install-grpcurl.sh
           sudo apt-get update -y && sudo apt-get install -y jq
 
       - name: Set up Docker Buildx
@@ -695,8 +681,7 @@ jobs:
         # the direct convergence checks and `show bgp summary json`
         # for the per-step flap-detection assertion.
         run: |
-          curl -sL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz \
-            | sudo tar -xz -C /usr/local/bin grpcurl
+          bash .github/scripts/install-grpcurl.sh
           sudo apt-get update -y && sudo apt-get install -y jq
 
       - name: Set up Docker Buildx
@@ -731,8 +716,7 @@ jobs:
 
       - name: Install grpcurl
         run: |
-          curl -sL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz \
-            | sudo tar -xz -C /usr/local/bin grpcurl
+          bash .github/scripts/install-grpcurl.sh
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -767,8 +751,7 @@ jobs:
       - name: Install grpcurl + jq
         # jq drives the pmacct-msglog and gobmp-JSON oracle assertions.
         run: |
-          curl -sL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz \
-            | sudo tar -xz -C /usr/local/bin grpcurl
+          bash .github/scripts/install-grpcurl.sh
           sudo apt-get update -y && sudo apt-get install -y jq
 
       - name: Set up Docker Buildx
@@ -817,8 +800,7 @@ jobs:
 
       - name: Install grpcurl + jq
         run: |
-          curl -sL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz \
-            | sudo tar -xz -C /usr/local/bin grpcurl
+          bash .github/scripts/install-grpcurl.sh
           sudo apt-get update -y && sudo apt-get install -y jq
 
       - name: Set up Docker Buildx
@@ -861,8 +843,7 @@ jobs:
       - name: Install grpcurl + jq
         # jq drives the FRR vtysh / GoBGP JSON client-view assertions.
         run: |
-          curl -sL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz \
-            | sudo tar -xz -C /usr/local/bin grpcurl
+          bash .github/scripts/install-grpcurl.sh
           sudo apt-get update -y && sudo apt-get install -y jq
 
       - name: Set up Docker Buildx
@@ -906,8 +887,7 @@ jobs:
       - name: Install grpcurl + jq
         # jq drives the rbgp JSON client-view assertions.
         run: |
-          curl -sL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz \
-            | sudo tar -xz -C /usr/local/bin grpcurl
+          bash .github/scripts/install-grpcurl.sh
           sudo apt-get update -y && sudo apt-get install -y jq
 
       - name: Set up Docker Buildx
@@ -953,8 +933,7 @@ jobs:
       - name: Install grpcurl + jq
         # jq drives the bgpctl -j and rbgp JSON client-view assertions.
         run: |
-          curl -sL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz \
-            | sudo tar -xz -C /usr/local/bin grpcurl
+          bash .github/scripts/install-grpcurl.sh
           sudo apt-get update -y && sudo apt-get install -y jq
 
       - name: Set up Docker Buildx
@@ -996,8 +975,7 @@ jobs:
 
       - name: Install grpcurl
         run: |
-          curl -sL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz \
-            | sudo tar -xz -C /usr/local/bin grpcurl
+          bash .github/scripts/install-grpcurl.sh
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -1037,8 +1015,7 @@ jobs:
 
       - name: Install grpcurl
         run: |
-          curl -sL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz \
-            | sudo tar -xz -C /usr/local/bin grpcurl
+          bash .github/scripts/install-grpcurl.sh
 
       # Buildx cache cuts the docker build step from ~6 min to ~30 s on
       # cache hits. The cargo registry / target dir gets reused via the
@@ -1080,8 +1057,7 @@ jobs:
         # (scoped to the entry containing the test MAC); a substring
         # grep would let a malformed match slip past.
         run: |
-          curl -sL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz \
-            | sudo tar -xz -C /usr/local/bin grpcurl
+          bash .github/scripts/install-grpcurl.sh
           sudo apt-get update -y && sudo apt-get install -y jq
 
       - name: Set up Docker Buildx
@@ -1118,8 +1094,7 @@ jobs:
         # jq is required for the strict per-prefix counting + session
         # uptime epoch comparison in test-m34.
         run: |
-          curl -sL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz \
-            | sudo tar -xz -C /usr/local/bin grpcurl
+          bash .github/scripts/install-grpcurl.sh
           sudo apt-get update -y && sudo apt-get install -y jq
 
       - name: Set up Docker Buildx
@@ -1156,8 +1131,7 @@ jobs:
         # jq parses NeighborState.localPref + FRR's `show ip bgp` JSON
         # for the community-presence assertion.
         run: |
-          curl -sL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz \
-            | sudo tar -xz -C /usr/local/bin grpcurl
+          bash .github/scripts/install-grpcurl.sh
           sudo apt-get update -y && sudo apt-get install -y jq
 
       - name: Set up Docker Buildx
@@ -1194,8 +1168,7 @@ jobs:
         # jq parses FRR's `show bgp ipv4 flowspec json` output for
         # the community-presence assertion.
         run: |
-          curl -sL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz \
-            | sudo tar -xz -C /usr/local/bin grpcurl
+          bash .github/scripts/install-grpcurl.sh
           sudo apt-get update -y && sudo apt-get install -y jq
 
       - name: Set up Docker Buildx
@@ -1231,8 +1204,7 @@ jobs:
       - name: Install grpcurl + jq
         # jq pretty-prints EVPN diagnostics and parses grpcurl JSON.
         run: |
-          curl -sL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz \
-            | sudo tar -xz -C /usr/local/bin grpcurl
+          bash .github/scripts/install-grpcurl.sh
           sudo apt-get update -y && sudo apt-get install -y jq
 
       - name: Set up Docker Buildx
@@ -1270,8 +1242,7 @@ jobs:
         # community assertions (BLACKHOLE + implicit NO_ADVERTISE
         # on tagged /32, neither on untagged /32).
         run: |
-          curl -sL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz \
-            | sudo tar -xz -C /usr/local/bin grpcurl
+          bash .github/scripts/install-grpcurl.sh
           sudo apt-get update -y && sudo apt-get install -y jq
 
       - name: Set up Docker Buildx
@@ -1306,8 +1277,7 @@ jobs:
 
       - name: Install grpcurl
         run: |
-          curl -sL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz \
-            | sudo tar -xz -C /usr/local/bin grpcurl
+          bash .github/scripts/install-grpcurl.sh
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -1348,8 +1318,7 @@ jobs:
 
       - name: Install grpcurl and gnmic
         run: |
-          curl -sL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz \
-            | sudo tar -xz -C /usr/local/bin grpcurl
+          bash .github/scripts/install-grpcurl.sh
           curl -sL https://github.com/openconfig/gnmic/releases/download/v0.46.0/gnmic_0.46.0_Linux_x86_64.tar.gz \
             | sudo tar -xz -C /usr/local/bin gnmic
           sudo apt-get update -y && sudo apt-get install -y jq
@@ -1391,8 +1360,7 @@ jobs:
 
       - name: Install grpcurl and jq
         run: |
-          curl -sL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz \
-            | sudo tar -xz -C /usr/local/bin grpcurl
+          bash .github/scripts/install-grpcurl.sh
           sudo apt-get update -y && sudo apt-get install -y jq
 
       - name: Set up Docker Buildx
@@ -1427,8 +1395,7 @@ jobs:
 
       - name: Install grpcurl, gnmic, and jq
         run: |
-          curl -sL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz \
-            | sudo tar -xz -C /usr/local/bin grpcurl
+          bash .github/scripts/install-grpcurl.sh
           curl -sL https://github.com/openconfig/gnmic/releases/download/v0.46.0/gnmic_0.46.0_Linux_x86_64.tar.gz \
             | sudo tar -xz -C /usr/local/bin gnmic
           sudo apt-get update -y && sudo apt-get install -y jq
@@ -1469,8 +1436,7 @@ jobs:
 
       - name: Install grpcurl
         run: |
-          curl -sL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz \
-            | sudo tar -xz -C /usr/local/bin grpcurl
+          bash .github/scripts/install-grpcurl.sh
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -1506,8 +1472,7 @@ jobs:
         # grpcurl injects routes via InjectionService.AddPath; jq parses FRR's
         # `show bgp ipv4 unicast json` for the received-prefix-set assertions.
         run: |
-          curl -sL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz \
-            | sudo tar -xz -C /usr/local/bin grpcurl
+          bash .github/scripts/install-grpcurl.sh
           sudo apt-get update -y && sudo apt-get install -y jq
 
       - name: Set up Docker Buildx
@@ -1545,8 +1510,7 @@ jobs:
         # survival-window and never-drop assertions; the Prometheus
         # counters come over plain HTTP.
         run: |
-          curl -sL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz \
-            | sudo tar -xz -C /usr/local/bin grpcurl
+          bash .github/scripts/install-grpcurl.sh
           sudo apt-get update -y && sudo apt-get install -y jq
 
       - name: Set up Docker Buildx
@@ -1584,8 +1548,7 @@ jobs:
         # the no-IPv4-MP assertion; grpcurl injects the bidirectional
         # route-exchange prefixes and reads rustbgpd's RIB.
         run: |
-          curl -sL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz \
-            | sudo tar -xz -C /usr/local/bin grpcurl
+          bash .github/scripts/install-grpcurl.sh
           sudo apt-get update -y && sudo apt-get install -y jq
 
       - name: Set up Docker Buildx
