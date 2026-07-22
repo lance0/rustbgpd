@@ -299,7 +299,7 @@ jobs:
           script: tests/interop/scripts/test-m51-bfd-frr.sh
 
   m43:
-    name: M43 — TCP-AO queued-child and live successor rotation (BIRD 3.3.1)
+    name: M43 — TCP-AO queued-child and full live key rotation (BIRD 3.3.1)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:

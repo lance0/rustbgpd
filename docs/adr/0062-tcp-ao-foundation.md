@@ -178,9 +178,12 @@ verifies the exact post-delete inventory. The Linux 6.17 hosted M43 foundation
 receipt proves that an established child preserves and accepts its inherited
 `/24` selector for deletion; callers must not replace it with `/32`. The receipt
 also fixes the accept-race fact: a child queued before listener deletion retains
-the prior inventory, while a later child inherits only the survivors. M43 does
-not yet drive the full SIGHUP deletion coordinator against BIRD; extend that
-receipt before claiming independent-stack deletion interop.
+the prior inventory, while a later child inherits only the survivors. M43 also
+drives the full SIGHUP add/select/deprecate/delete coordinator against BIRD
+3.3.1. It requires the exact sole-survivor inventory, unchanged Established
+token and flap count, the route present at every sample from a 100 ms polling
+oracle, and an increased authenticated-packet count on the surviving MKT before
+running the existing mismatched-key fail-closed finale.
 
 ## Linux UAPI secrecy and normalization boundary
 

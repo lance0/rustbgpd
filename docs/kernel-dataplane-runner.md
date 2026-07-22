@@ -77,11 +77,11 @@ issue #187) so reviewers can distinguish real stability from flake masking.
 - M53: ADR-0069 BGP unnumbered / IPv6 link-local peering with scoped FIB ECMP
   against two FRR peers over unnumbered links.
 - M51: ADR-0067 single-hop BFD + RFC 5882 coupling against FRR `bfdd`.
-- M43: TCP-AO dynamic `/24` queued-child reconciliation and live successor
-  rotation against BIRD 3.3.1 (conditional on the runner advertising
-  `CONFIG_TCP_AO=y`). The receipt currently proves the deletion socket/queue
-  foundation, not the full SIGHUP deletion coordinator; that extension remains
-  queued.
+- M43: TCP-AO dynamic `/24` queued-child reconciliation plus full live
+  add/select/deprecate/delete rotation against BIRD 3.3.1 (conditional on the
+  runner advertising `CONFIG_TCP_AO=y`). The deletion phase proves the exact
+  sole-survivor inventory, unchanged session, the route present at every sample
+  from a 100 ms polling oracle, and authenticated post-delete traffic.
 - M60: ADR-0079 EVPN adoption sweep kill-and-restart against FRR.
 - M61: ADR-0079 EVPN L3 adoption sweep kill-and-restart against FRR.
 - M62: ADR-0079 blackhole adoption sweep kill-and-restart against FRR.
