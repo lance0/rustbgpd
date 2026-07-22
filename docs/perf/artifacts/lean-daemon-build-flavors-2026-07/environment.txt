@@ -1,0 +1,26 @@
+baseline_commit=86bff61fe5f3a033842335c72d54bb8fa1cac836
+prototype_patch_sha256=9322cf8d7965819a10e2657737ceff48c1331b4880adfaaabca7edf3816b93ae
+runner_sha256=8e59fdff8d050294990c889092c3f68083257dcbacdda5158661bdb89a3d2b13
+evaluator_sha256=3fdb2f3421fe257838c301278daf574127796b85f5a539a2fa0a5b1fd32f4820
+toolchain=1.95.0
+target=x86_64-unknown-linux-gnu
+profile=release
+allocator=jemalloc
+jobs=4
+incremental=0
+kernel=Linux 6.17.0-35-generic x86_64
+architecture=x86_64
+cpu_model=AMD Ryzen Threadripper 7970X 32-Cores
+logical_cpus=64
+memory_bytes=134532804608
+cargo 1.95.0 (f2d3ce0bd 2026-03-21)
+rustc 1.95.0 (59807616e 2026-04-14)
+binary: rustc
+commit-hash: 59807616e1fa2540724bfbac14d7976d7e4a3860
+commit-date: 2026-04-14
+host: <BENCH_HOST>
+release: 1.95.0
+LLVM version: 22.1.2
+linker=cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0
+strip=GNU strip (GNU Binutils for Ubuntu) 2.42
+gzip=gzip 1.12

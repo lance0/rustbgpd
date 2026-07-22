@@ -1,0 +1,607 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index af622fb9..52a543dc 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -45,8 +45,8 @@ rustbgpd-rpki = { path = "crates/rpki", version = "0.60.0" }
+ rustbgpd-bmp = { path = "crates/bmp", version = "0.60.0" }
+ rustbgpd-mrt = { path = "crates/mrt", version = "0.60.0" }
+ rustbgpd-evpn = { path = "crates/evpn", version = "0.60.0" }
+-rustbgpd-evpn-linux = { path = "crates/evpn-linux", version = "0.60.0" }
+-rustbgpd-event-history = { path = "crates/event-history", version = "0.60.0" }
++rustbgpd-evpn-linux = { path = "crates/evpn-linux", version = "0.60.0", default-features = false }
++rustbgpd-event-history = { path = "crates/event-history", version = "0.60.0", default-features = false }
+ 
+ # External dependencies — pinned across workspace
+ bytes = "1"
+@@ -134,10 +134,16 @@ categories.workspace = true
+ # the same build, and the jemalloc_* allocator gauges are always on
+ # /metrics. Build with --no-default-features for a stock-glibc binary
+ # (CI keeps that build compiling; it also re-arms deny(unsafe_code)).
+-default = ["jemalloc"]
++default = ["jemalloc", "event-history", "linux-dataplane"]
+ bench-internals = []
+ jemalloc = ["tikv-jemallocator", "rustbgpd-telemetry/jemalloc"]
+ dhat-heap = ["dhat"]
++event-history = ["rustbgpd-event-history/sqlite"]
++linux-dataplane = [
++    "rustbgpd-evpn-linux/linux-backend",
++    "dep:rtnetlink",
++    "dep:netlink-packet-route",
++]
+ 
+ [dependencies]
+ tikv-jemallocator = { workspace = true, optional = true }
+@@ -175,8 +181,8 @@ socket2.workspace = true
+ tokio-util = { version = "0.7", features = ["rt"] }
+ 
+ [target.'cfg(target_os = "linux")'.dependencies]
+-rtnetlink = "0.21"
+-netlink-packet-route = "0.30"
++rtnetlink = { version = "0.21", optional = true }
++netlink-packet-route = { version = "0.30", optional = true }
+ libc.workspace = true
+ nix = { workspace = true, features = ["fs", "time", "user"] }
+ futures = "0.3"
+diff --git a/crates/event-history/Cargo.toml b/crates/event-history/Cargo.toml
+index 20892706..3a88933c 100644
+--- a/crates/event-history/Cargo.toml
++++ b/crates/event-history/Cargo.toml
+@@ -11,8 +11,12 @@ categories.workspace = true
+ description = "Durable event history (local outbox) — ADR-0072"
+ readme = "README.md"
+ 
++[features]
++default = ["sqlite"]
++sqlite = ["dep:rusqlite"]
++
+ [dependencies]
+-rusqlite.workspace = true
++rusqlite = { workspace = true, optional = true }
+ rustbgpd-telemetry.workspace = true
+ tokio.workspace = true
+ tokio-stream.workspace = true
+diff --git a/crates/event-history/src/error.rs b/crates/event-history/src/error.rs
+index 7c7ceee8..22a5d2cb 100644
+--- a/crates/event-history/src/error.rs
++++ b/crates/event-history/src/error.rs
+@@ -9,6 +9,7 @@ use thiserror::Error;
+ #[derive(Debug, Error)]
+ pub enum EventHistoryError {
+     /// SQLite-level error wrapped without losing the original code.
++    #[cfg(feature = "sqlite")]
+     #[error("sqlite error: {0}")]
+     Sqlite(#[from] rusqlite::Error),
+ 
+diff --git a/crates/event-history/src/lib.rs b/crates/event-history/src/lib.rs
+index a5b043c3..c44dca51 100644
+--- a/crates/event-history/src/lib.rs
++++ b/crates/event-history/src/lib.rs
+@@ -52,9 +52,13 @@
+ 
+ mod cursor;
+ mod error;
++#[cfg(feature = "sqlite")]
+ mod migrations;
++#[cfg(feature = "sqlite")]
+ mod quarantine;
++#[cfg(feature = "sqlite")]
+ mod sequence;
++#[cfg_attr(not(feature = "sqlite"), path = "storage_disabled.rs")]
+ mod storage;
+ 
+ pub use cursor::{
+diff --git a/crates/event-history/src/storage_disabled.rs b/crates/event-history/src/storage_disabled.rs
+new file mode 100644
+index 00000000..5daa0140
+--- /dev/null
++++ b/crates/event-history/src/storage_disabled.rs
+@@ -0,0 +1,124 @@
++//! Compile-only storage facade for daemon builds without durable history.
++//!
++//! Production config validation refuses `[event_history].enabled = true`
++//! before this path can be constructed.
++
++use std::sync::Arc;
++
++use tokio::task::JoinHandle;
++
++use crate::{Category, EventEnvelope, EventHistoryError, Severity, SynchronousMode};
++
++#[derive(Debug)]
++pub(crate) struct AppendOutcome {
++    pub assigned_ids: Vec<u64>,
++    pub new_high_water: u64,
++    pub daemon_boot_id: Arc<str>,
++    pub db_size_bytes: u64,
++}
++
++#[derive(Debug)]
++pub(crate) struct QueryWithFloorOutcome {
++    pub rows: Vec<PersistedEvent>,
++    pub floor: Option<u64>,
++}
++
++#[derive(Debug, Default, Clone, Copy)]
++pub struct RetentionOutcome {
++    pub evicted_count_cap: usize,
++    pub evicted_byte_cap: usize,
++    pub db_size_bytes: u64,
++}
++
++#[derive(Debug, Default, Clone)]
++pub struct QueryFilter {
++    pub category: Option<Category>,
++    pub peer: Option<String>,
++    pub prefix: Option<String>,
++    pub rd: Option<String>,
++}
++
++#[derive(Debug, Clone)]
++pub struct PersistedEvent {
++    pub event_id: u64,
++    pub timestamp_ns: i64,
++    pub category: Category,
++    pub event_type: String,
++    pub peer: Option<String>,
++    pub previous_peer: Option<String>,
++    pub target_peer: Option<String>,
++    pub afi_safi: Option<String>,
++    pub prefix: Option<String>,
++    pub rd: Option<String>,
++    pub evpn_route_type: Option<i32>,
++    pub severity: Severity,
++    pub daemon_boot_id: String,
++    pub payload_codec: String,
++    pub payload: Vec<u8>,
++}
++
++#[derive(Debug, Clone)]
++pub(crate) struct StoreHandle;
++
++impl StoreHandle {
++    pub(crate) async fn append(
++        &self,
++        _envelopes: Vec<Arc<EventEnvelope>>,
++    ) -> Result<AppendOutcome, EventHistoryError> {
++        Err(EventHistoryError::PassThrough)
++    }
++
++    pub(crate) async fn query(
++        &self,
++        _from_event_id: u64,
++        _to_event_id: u64,
++        _limit: usize,
++        _filter: QueryFilter,
++    ) -> Result<Vec<PersistedEvent>, EventHistoryError> {
++        Err(EventHistoryError::PassThrough)
++    }
++
++    pub(crate) async fn query_with_floor(
++        &self,
++        _from_event_id: u64,
++        _to_event_id: u64,
++        _limit: usize,
++        _filter: QueryFilter,
++    ) -> Result<QueryWithFloorOutcome, EventHistoryError> {
++        Err(EventHistoryError::PassThrough)
++    }
++
++    pub(crate) async fn retain(
++        &self,
++        _max_events: u64,
++        _max_bytes: u64,
++    ) -> Result<RetentionOutcome, EventHistoryError> {
++        Err(EventHistoryError::PassThrough)
++    }
++
++    pub(crate) async fn flush_sidecar(&self) -> Result<u64, EventHistoryError> {
++        Err(EventHistoryError::PassThrough)
++    }
++
++    pub(crate) async fn oldest_event_id(&self) -> Result<Option<u64>, EventHistoryError> {
++        Err(EventHistoryError::PassThrough)
++    }
++
++    pub(crate) async fn shutdown(&self) {}
++}
++
++pub(crate) fn spawn_store(
++    _path: std::path::PathBuf,
++    _daemon_boot_id: Arc<str>,
++    _synchronous: SynchronousMode,
++    _capacity: usize,
++) -> Result<(StoreHandle, JoinHandle<()>, StorageInit), EventHistoryError> {
++    Err(EventHistoryError::PassThrough)
++}
++
++#[derive(Debug)]
++pub(crate) struct StorageInit {
++    pub had_quarantine: bool,
++    pub initial_allocator: u64,
++    pub recovered_via_fallback: bool,
++}
+diff --git a/crates/evpn-linux/Cargo.toml b/crates/evpn-linux/Cargo.toml
+index 5456d353..8652ef04 100644
+--- a/crates/evpn-linux/Cargo.toml
++++ b/crates/evpn-linux/Cargo.toml
+@@ -10,6 +10,18 @@ keywords.workspace = true
+ categories.workspace = true
+ description = "Linux netlink dataplane reconciler for EVPN VTEP — observes bridge/VXLAN topology and programs remote-MAC FDB entries (RFC 7432 / RFC 8365)"
+ 
++[features]
++default = ["linux-backend"]
++linux-backend = [
++    "dep:rtnetlink",
++    "dep:netlink-packet-route",
++    "dep:netlink-packet-core",
++    "dep:netlink-packet-utils",
++    "dep:netlink-sys",
++    "dep:futures",
++    "dep:libc",
++]
++
+ [dependencies]
+ rustbgpd-evpn.workspace = true
+ thiserror.workspace = true
+@@ -22,13 +34,13 @@ tracing.workspace = true
+ # released together; bump them as a set or transitive resolution
+ # pulls in two copies of `netlink-packet-utils`.
+ [target.'cfg(target_os = "linux")'.dependencies]
+-rtnetlink = "0.21"
+-netlink-packet-route = "0.30"
+-netlink-packet-core = "0.8"
+-netlink-packet-utils = "0.6"
+-netlink-sys = { version = "0.8", features = ["tokio_socket"] }
+-futures = "0.3"
+-libc.workspace = true
++rtnetlink = { version = "0.21", optional = true }
++netlink-packet-route = { version = "0.30", optional = true }
++netlink-packet-core = { version = "0.8", optional = true }
++netlink-packet-utils = { version = "0.6", optional = true }
++netlink-sys = { version = "0.8", features = ["tokio_socket"], optional = true }
++futures = { version = "0.3", optional = true }
++libc = { workspace = true, optional = true }
+ 
+ [dev-dependencies]
+ tokio = { workspace = true, features = ["full", "test-util"] }
+diff --git a/crates/evpn-linux/src/lib.rs b/crates/evpn-linux/src/lib.rs
+index 18bb5392..6e2e1074 100644
+--- a/crates/evpn-linux/src/lib.rs
++++ b/crates/evpn-linux/src/lib.rs
+@@ -89,16 +89,16 @@ pub mod nh_id_alloc;
+ pub mod reconcile;
+ pub mod snapshot;
+ 
+-#[cfg(target_os = "linux")]
++#[cfg(all(target_os = "linux", feature = "linux-backend"))]
+ pub mod linux;
+ 
+-#[cfg(target_os = "linux")]
++#[cfg(all(target_os = "linux", feature = "linux-backend"))]
+ pub use linux::LinuxDataplane;
+ 
+-#[cfg(target_os = "linux")]
++#[cfg(all(target_os = "linux", feature = "linux-backend"))]
+ pub use linux::link_carrier::{LinkCarrierHandle, LinkCarrierMap, spawn_link_carrier_monitor};
+ 
+-#[cfg(target_os = "linux")]
++#[cfg(all(target_os = "linux", feature = "linux-backend"))]
+ pub use linux::nexthop_raw::{
+     NexthopError, NexthopGroupMember, NexthopSocket, NexthopValidationError,
+ };
+diff --git a/src/blackhole_disabled.rs b/src/blackhole_disabled.rs
+new file mode 100644
+index 00000000..41e92173
+--- /dev/null
++++ b/src/blackhole_disabled.rs
+@@ -0,0 +1,49 @@
++//! Compile-only facade for builds without Linux dataplane writers.
++
++#![allow(dead_code)]
++
++use std::net::IpAddr;
++
++use rustbgpd_rib::RibUpdate;
++use rustbgpd_telemetry::BgpMetrics;
++use rustbgpd_wire::Prefix;
++use tokio::sync::{mpsc, watch};
++use tokio_util::sync::CancellationToken;
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub struct BlackholeConfig {
++    pub enabled: bool,
++    pub allow_broad_prefixes: bool,
++}
++
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct BlackholeStatus {
++    pub prefix: Prefix,
++    pub peer: IpAddr,
++    pub state: BlackholeState,
++    pub reason: String,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum BlackholeState {
++    Installed,
++    Rejected,
++    Failed,
++}
++
++pub struct BlackholeHandle;
++
++impl BlackholeHandle {
++    pub async fn shutdown(self) {}
++}
++
++#[must_use]
++pub fn spawn(
++    _config: BlackholeConfig,
++    _rib_tx: mpsc::Sender<RibUpdate>,
++    _metrics: BgpMetrics,
++    _status_tx: watch::Sender<Vec<BlackholeStatus>>,
++    _shutdown: CancellationToken,
++) -> Option<BlackholeHandle> {
++    None
++}
+diff --git a/src/evpn_dataplane.rs b/src/evpn_dataplane.rs
+index 654dbf48..90b309dd 100644
+--- a/src/evpn_dataplane.rs
++++ b/src/evpn_dataplane.rs
+@@ -410,7 +410,7 @@ pub async fn spawn_with_quarantine(
+         return None;
+     }
+ 
+-    #[cfg(target_os = "linux")]
++    #[cfg(all(target_os = "linux", feature = "linux-dataplane"))]
+     {
+         let observation_drop_metrics = metrics.clone();
+         match rustbgpd_evpn_linux::LinuxDataplane::connect_with_observation_drop_hook(
+@@ -447,7 +447,7 @@ pub async fn spawn_with_quarantine(
+         }
+     }
+ 
+-    #[cfg(not(target_os = "linux"))]
++    #[cfg(not(all(target_os = "linux", feature = "linux-dataplane")))]
+     {
+         let _ = (
+             config,
+diff --git a/src/evpn_es_link_drain.rs b/src/evpn_es_link_drain.rs
+index 07c5b82a..82d12ddf 100644
+--- a/src/evpn_es_link_drain.rs
++++ b/src/evpn_es_link_drain.rs
+@@ -234,7 +234,7 @@ fn watched_links(bindings: &EsLinkBindings) -> BTreeSet<String> {
+ /// the fallback channel stands in whenever no monitor runs.
+ struct FeedState {
+     injected: bool,
+-    #[cfg(target_os = "linux")]
++    #[cfg(all(target_os = "linux", feature = "linux-dataplane"))]
+     handle: Option<rustbgpd_evpn_linux::LinkCarrierHandle>,
+     carrier_rx: watch::Receiver<CarrierMap>,
+ }
+@@ -248,14 +248,14 @@ impl FeedState {
+         match feed {
+             CarrierFeed::Kernel => Self {
+                 injected: false,
+-                #[cfg(target_os = "linux")]
++                #[cfg(all(target_os = "linux", feature = "linux-dataplane"))]
+                 handle: None,
+                 carrier_rx: fallback_rx,
+             },
+             #[cfg(test)]
+             CarrierFeed::Injected(carrier_rx) => Self {
+                 injected: true,
+-                #[cfg(target_os = "linux")]
++                #[cfg(all(target_os = "linux", feature = "linux-dataplane"))]
+                 handle: None,
+                 carrier_rx,
+             },
+@@ -265,7 +265,7 @@ impl FeedState {
+     /// Point `carrier_rx` at the fallback channel with every watched
+     /// name down — the fail-closed projection.
+     fn fail_closed(&mut self, watched: BTreeSet<String>, fallback_tx: &watch::Sender<CarrierMap>) {
+-        #[cfg(target_os = "linux")]
++        #[cfg(all(target_os = "linux", feature = "linux-dataplane"))]
+         {
+             self.handle = None;
+         }
+@@ -284,7 +284,7 @@ impl FeedState {
+             return;
+         }
+         if watched.is_empty() {
+-            #[cfg(target_os = "linux")]
++            #[cfg(all(target_os = "linux", feature = "linux-dataplane"))]
+             {
+                 if self.handle.take().is_some() {
+                     info!(
+@@ -296,7 +296,7 @@ impl FeedState {
+             self.carrier_rx = fallback_tx.subscribe();
+             return;
+         }
+-        #[cfg(target_os = "linux")]
++        #[cfg(all(target_os = "linux", feature = "linux-dataplane"))]
+         {
+             if let Some(handle) = self.handle.as_ref() {
+                 if handle.replace_watched_links(watched.clone()).await {
+@@ -324,7 +324,7 @@ impl FeedState {
+                 }
+             }
+         }
+-        #[cfg(not(target_os = "linux"))]
++        #[cfg(not(all(target_os = "linux", feature = "linux-dataplane")))]
+         {
+             warn!(
+                 "Ethernet Segment interface bindings require Linux rtnetlink; bound \
+diff --git a/src/fib_runtime_disabled.rs b/src/fib_runtime_disabled.rs
+new file mode 100644
+index 00000000..c2886e5e
+--- /dev/null
++++ b/src/fib_runtime_disabled.rs
+@@ -0,0 +1,106 @@
++//! Compile-only facade for builds without Linux dataplane writers.
++
++#![allow(dead_code)]
++
++use std::net::IpAddr;
++use std::path::PathBuf;
++
++use rustbgpd_rib::RibUpdate;
++use rustbgpd_telemetry::BgpMetrics;
++use rustbgpd_wire::Prefix;
++use tokio::sync::{broadcast, mpsc, oneshot, watch};
++use tokio_util::sync::CancellationToken;
++
++use crate::config::FibTableConfig;
++
++#[derive(Debug, Clone, PartialEq)]
++pub struct FibRuntimeConfig {
++    pub tables: Vec<FibTableConfig>,
++    pub owned_state_path: Option<PathBuf>,
++    pub multipath_relax: bool,
++    pub link_bandwidth_weighted: bool,
++}
++
++pub enum FibRuntimeCommand {
++    ReplaceTables {
++        tables: Vec<FibTableConfig>,
++        reply: oneshot::Sender<Result<(), String>>,
++    },
++    GetTables {
++        reply: oneshot::Sender<Vec<FibTableConfig>>,
++    },
++}
++
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct FibRuntimeStatus {
++    pub table_name: String,
++    pub table_id: u32,
++    pub metric: u32,
++    pub prefix: Prefix,
++    pub next_hop: Option<IpAddr>,
++    pub next_hops: Vec<IpAddr>,
++    pub peer: Option<IpAddr>,
++    pub state: FibRuntimeState,
++    pub reason: String,
++    pub sampling: Option<FibRuntimeSampling>,
++}
++
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct FibRuntimeSampling {
++    pub sampled_rows: u64,
++    pub suppressed_rows: u64,
++    pub total_rows: u64,
++    pub max_routes: u32,
++    pub sample_limit: u32,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum FibRuntimeState {
++    Installed,
++    Rejected,
++    Failed,
++}
++
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct FibRuntimeEvent {
++    pub kind: FibRuntimeEventKind,
++    pub table_name: String,
++    pub table_id: u32,
++    pub metric: u32,
++    pub prefix: Prefix,
++    pub next_hop: Option<IpAddr>,
++    pub peer: Option<IpAddr>,
++    pub timestamp: String,
++    pub reason: String,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum FibRuntimeEventKind {
++    Installed,
++    Withdrawn,
++    Failed,
++}
++
++pub struct FibRuntimeHandle;
++
++impl FibRuntimeHandle {
++    #[must_use]
++    pub fn command_sender(&self) -> mpsc::Sender<FibRuntimeCommand> {
++        unreachable!("control-plane-only builds reject FIB configuration")
++    }
++
++    pub async fn shutdown(self) {}
++}
++
++#[must_use]
++pub fn spawn(
++    _config: FibRuntimeConfig,
++    _rib_tx: mpsc::Sender<RibUpdate>,
++    _rib_query_tx: mpsc::Sender<RibUpdate>,
++    _metrics: BgpMetrics,
++    _status_tx: watch::Sender<Vec<FibRuntimeStatus>>,
++    _event_tx: broadcast::Sender<FibRuntimeEvent>,
++    _shutdown: CancellationToken,
++) -> Option<FibRuntimeHandle> {
++    None
++}
+diff --git a/src/main.rs b/src/main.rs
+index e9e72113..bcf0f6b6 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -18,6 +18,7 @@ static ALLOC: dhat::Alloc = dhat::Alloc;
+ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+ 
+ mod bfd_runtime;
++#[cfg_attr(not(feature = "linux-dataplane"), path = "blackhole_disabled.rs")]
+ mod blackhole;
+ mod config;
+ mod config_history;
+@@ -37,9 +38,11 @@ mod evpn_segment;
+ mod evpn_svi;
+ mod fib;
+ mod fib_common;
++#[cfg_attr(not(feature = "linux-dataplane"), path = "fib_runtime_disabled.rs")]
+ mod fib_runtime;
+ mod fib_table_control;
+ mod gnmi_set_bridge;
++#[cfg(feature = "linux-dataplane")]
+ mod kernel_route_notify;
+ mod metrics_server;
+ mod peer_manager;
+@@ -2254,6 +2257,36 @@ fn main() {
+         }
+     };
+ 
++    #[cfg(not(feature = "event-history"))]
++    if config.event_history.enabled {
++        eprintln!(
++            "error: this rustbgpd build omits durable event history; set \
++             [event_history].enabled = false or install the full daemon build"
++        );
++        process::exit(1);
++    }
++
++    #[cfg(not(feature = "linux-dataplane"))]
++    if !config.fib_tables.is_empty()
++        || config.global.install_blackhole_discard
++        || !config.evpn_instances.is_empty()
++        || !config.ethernet_segments.is_empty()
++        || !config.evpn_ip_vrfs.is_empty()
++        || !config.managed_netdevs.bridges.is_empty()
++        || !config.managed_netdevs.vxlans.is_empty()
++        || !config.managed_netdevs.svd_vxlans.is_empty()
++        || !config.managed_netdevs.vrfs.is_empty()
++        || !config.managed_netdevs.l3vxlans.is_empty()
++        || !config.managed_netdevs.vlan_uppers.is_empty()
++    {
++        eprintln!(
++            "error: this rustbgpd build omits Linux dataplane writers; remove FIB, \
++             BLACKHOLE-install, EVPN VTEP/IRB, and managed-netdev configuration or \
++             install the full daemon build"
++        );
++        process::exit(1);
++    }
++
+     if check_only {
+         println!("config OK: {config_path}");
+         return;
