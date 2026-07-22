@@ -5847,7 +5847,9 @@ local_vtep_ip = "10.0.0.1"
         );
 
         let request = proto::ApplyEvpnRuntimeRequest {
-            candidate_toml: l2vni_runtime_candidate_toml().to_string(),
+            candidate_toml: crate::test_support::tier_authorized_uds_test_config(
+                l2vni_runtime_candidate_toml(),
+            ),
             validate_only: false,
         };
         let mut caller = Box::pin(reload_apply.apply_request(&request));
