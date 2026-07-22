@@ -19,6 +19,27 @@ fn split_scoped_address(address: &str) -> (String, String) {
     )
 }
 
+fn json_neighbor(n: &crate::proto::NeighborState) -> JsonNeighbor {
+    let cfg = n.config.as_ref();
+    JsonNeighbor {
+        address: cfg.map(|c| c.address.clone()).unwrap_or_default(),
+        interface: cfg.map(|c| c.interface.clone()).unwrap_or_default(),
+        remote_asn: cfg.map(|c| c.remote_asn).unwrap_or(0),
+        state: output::format_state_with_stale(n.state, n.stale).to_string(),
+        stale: n.stale,
+        slow_peer: n.slow_peer,
+        uptime_seconds: n.uptime_seconds,
+        prefixes_received: n.prefixes_received,
+        prefixes_sent: n.prefixes_sent,
+        messages_received: n.messages_received,
+        messages_sent: n.messages_sent,
+        flap_count: n.flap_count,
+        last_error: n.last_error.clone(),
+        route_reflector_client: n.route_reflector_client,
+        description: cfg.map(|c| c.description.clone()).unwrap_or_default(),
+    }
+}
+
 pub async fn list(connection: Connection, json: bool, wide: bool) -> Result<(), CliError> {
     let mut client =
         NeighborServiceClient::with_interceptor(connection.channel(), connection.interceptor());
@@ -28,30 +49,9 @@ pub async fn list(connection: Connection, json: bool, wide: bool) -> Result<(), 
         .into_inner();
 
     if json {
-        // `--wide` is display-only: JSON always carries every field.
-        let out: Vec<JsonNeighbor> = resp
-            .neighbors
-            .iter()
-            .map(|n| {
-                let cfg = n.config.as_ref();
-                JsonNeighbor {
-                    address: cfg.map(|c| c.address.clone()).unwrap_or_default(),
-                    interface: cfg.map(|c| c.interface.clone()).unwrap_or_default(),
-                    remote_asn: cfg.map(|c| c.remote_asn).unwrap_or(0),
-                    state: output::format_state_with_stale(n.state, n.stale).to_string(),
-                    stale: n.stale,
-                    uptime_seconds: n.uptime_seconds,
-                    prefixes_received: n.prefixes_received,
-                    prefixes_sent: n.prefixes_sent,
-                    messages_received: n.messages_received,
-                    messages_sent: n.messages_sent,
-                    flap_count: n.flap_count,
-                    last_error: n.last_error.clone(),
-                    route_reflector_client: n.route_reflector_client,
-                    description: cfg.map(|c| c.description.clone()).unwrap_or_default(),
-                }
-            })
-            .collect();
+        // `--wide` is display-only: JSON is unaffected by it and may omit
+        // optional false healthy-state fields.
+        let out: Vec<JsonNeighbor> = resp.neighbors.iter().map(json_neighbor).collect();
         output::print_json_pretty(&out)?;
     } else if resp.neighbors.is_empty() {
         println!("{EMPTY_NEIGHBOR_LIST}");
@@ -1300,6 +1300,29 @@ mod tests {
         let json = serde_json::to_string_pretty(&Vec::<crate::output::JsonNeighbor>::new())
             .expect("serialize");
         assert_eq!(json, "[]");
+    }
+
+    /// Load-bearing mutation proof: replacing `slow_peer: n.slow_peer` in
+    /// `json_neighbor` with `false` makes the first assertion red; removing
+    /// the false-value serde omission makes the second assertion red.
+    #[test]
+    fn neighbor_list_json_preserves_only_active_slow_peer_flags() {
+        let mut state = crate::proto::NeighborState {
+            config: Some(crate::proto::NeighborConfig {
+                address: "10.0.0.2".to_string(),
+                remote_asn: 65002,
+                ..Default::default()
+            }),
+            slow_peer: true,
+            ..Default::default()
+        };
+
+        let value = serde_json::to_value(json_neighbor(&state)).expect("serialize neighbor");
+        assert_eq!(value["slow_peer"], true);
+
+        state.slow_peer = false;
+        let value = serde_json::to_value(json_neighbor(&state)).expect("serialize neighbor");
+        assert!(value.get("slow_peer").is_none());
     }
 
     #[tokio::test]

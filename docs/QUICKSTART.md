@@ -86,7 +86,7 @@ the CLI at that socket:
 export RUSTBGPD_ADDR=unix:///tmp/rustbgpd/grpc.sock
 
 rbgp health
-rbgp summary    # alias for `rbgp neighbor` (--wide adds the classic MsgRcvd/MsgSent/State/PfxRcd columns)
+rbgp summary    # alias for `rbgp neighbor` (--wide adds MsgRcvd/MsgSent/Flaps/RRC/Slow/State/PfxRcd)
 rbgp rib
 rbgp bfd       # BFD sessions, if configured
 rbgp top       # live TUI dashboard

@@ -279,7 +279,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
-'()--wide[Append the classic summary columns to the list\: MsgRcvd, MsgSent, Flaps, RRC (route-reflector client), and State/PfxRcd (prefix count when Established). Display-only; -j already carries every field]' \
+'()--wide[Append summary columns to the list\: MsgRcvd, MsgSent, Flaps, RRC (route-reflector client), Slow (\`!\` marks a slow peer), and State/PfxRcd (prefix count when Established). Display-only; JSON is unaffected by --wide and may omit optional false healthy-state fields]' \
 '-j[Output in JSON format]' \
 '--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
@@ -425,7 +425,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
-'()--wide[Append the classic summary columns to the list\: MsgRcvd, MsgSent, Flaps, RRC (route-reflector client), and State/PfxRcd (prefix count when Established). Display-only; -j already carries every field]' \
+'()--wide[Append summary columns to the list\: MsgRcvd, MsgSent, Flaps, RRC (route-reflector client), Slow (\`!\` marks a slow peer), and State/PfxRcd (prefix count when Established). Display-only; JSON is unaffected by --wide and may omit optional false healthy-state fields]' \
 '-j[Output in JSON format]' \
 '--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \

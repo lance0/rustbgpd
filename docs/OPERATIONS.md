@@ -841,8 +841,9 @@ outbound backlog stays at or above `slow_peer_threshold_pct` (default
 50%) of the writer buffer for `slow_peer_duration` seconds (default
 30), the daemon
 
-- raises the `slow_peer` flag in `rbgp neighbor <ip>` (and the
-  `GetNeighborState`/`ListNeighbors` gRPC surface),
+- raises the `slow_peer` flag in `rbgp neighbor <ip>`, `rbgp neighbor
+  --json`, and the `GetNeighborState`/`ListNeighbors` gRPC surface; the
+  `rbgp neighbor --wide` fleet view marks it with `!` in the `Slow` column,
 - sets `bgp_peer_slow{peer}` to 1, and
 - logs a warn (`peer flagged slow: session alive but outbound queue
   persistently backlogged`).
@@ -1210,7 +1211,7 @@ addresses only, never copied into the bundle.
 rustbgpd-doctor-<ts>/
 ├── manifest.json            # versions, redaction note, per-section collected/unavailable, check results
 ├── config/effective.toml    # the daemon's GetEffectiveConfig dump (defaults materialized, secrets <redacted>)
-├── peers/neighbors.json     # per-peer state, counters, flap counts
+├── peers/neighbors.json     # per-peer state, counters, flap/slow-peer status
 ├── peers/events.json        # recent session + policy events (free text scrubbed)
 ├── logs/tail-1000.jsonl     # only with --log-file; see below
 ├── crashes/panic-*.toml     # panic reports swept from <runtime_state_dir>/crash/
@@ -1320,14 +1321,16 @@ for it.
 
 ```bash
 rbgp neighbor          # summary table (alias: rbgp summary)
-rbgp neighbor --wide   # adds MsgRcvd, MsgSent, Flaps, RRC, State/PfxRcd
+rbgp neighbor --wide   # adds MsgRcvd, MsgSent, Flaps, RRC, Slow, State/PfxRcd
 ```
 
 `--wide` appends the classic vendor summary columns: total messages
 received/sent (all types, daemon-lifetime — an Established session whose
 counters stop moving is wedged), flap count, an RR-client marker, and the
 overloaded `State/PfxRcd` column (a number means Established and shows the
-prefixes received). Display-only: `-j` output always carries every field.
+prefixes received). Its `Slow` column marks a slow-but-established peer with
+`!`. Display-only: JSON is unaffected by `--wide` and may omit optional false
+healthy-state fields.
 
 `rbgp neighbor <address>` reports actor-authoritative negotiation state only
 for the current Established session: negotiated hold time, remote router ID,

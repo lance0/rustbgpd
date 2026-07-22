@@ -205,6 +205,10 @@ pub struct JsonNeighbor {
     /// healthy-state output uncluttered.
     #[serde(skip_serializing_if = "is_false")]
     pub stale: bool,
+    /// True while an Established peer is persistently failing to drain its
+    /// outbound queue. Omitted when false to keep healthy fleet output terse.
+    #[serde(skip_serializing_if = "is_false")]
+    pub slow_peer: bool,
     pub uptime_seconds: u64,
     pub prefixes_received: u64,
     pub prefixes_sent: u64,
@@ -579,8 +583,9 @@ fn ansi_overhead(colored: &str, plain_len: usize) -> usize {
 
 /// Print neighbor table with dynamic column widths and colored state.
 /// `wide` appends the classic operator columns (MsgRcvd, MsgSent,
-/// Flaps, RRC) plus the overloaded `State/PfxRcd` — prefixes-received
-/// count when Established, state name otherwise — as the last column.
+/// Flaps, RRC), a compact slow-peer marker, and the overloaded
+/// `State/PfxRcd` — prefixes-received count when Established, state name
+/// otherwise — as the last column.
 pub fn print_neighbor_table(neighbors: &[proto::NeighborState], wide: bool) {
     print!("{}", render_neighbor_table(neighbors, wide));
 }
@@ -603,6 +608,7 @@ fn render_neighbor_table(neighbors: &[proto::NeighborState], wide: bool) -> Stri
         msg_sent: String,
         flaps: String,
         rrc: String,
+        slow: String,
         state_pfx: String,
     }
 
@@ -610,7 +616,7 @@ fn render_neighbor_table(neighbors: &[proto::NeighborState], wide: bool) -> Stri
         .iter()
         .map(|n| {
             let cfg = n.config.as_ref();
-            let (msg_rcvd, msg_sent, flaps, rrc, state_pfx) = if wide {
+            let (msg_rcvd, msg_sent, flaps, rrc, slow, state_pfx) = if wide {
                 // The classic overloaded summary column: a number means
                 // Established (prefixes received); anything else is the
                 // session state. Stale overrides — a placeholder Idle
@@ -625,6 +631,7 @@ fn render_neighbor_table(neighbors: &[proto::NeighborState], wide: bool) -> Stri
                     n.messages_sent.to_string(),
                     n.flap_count.to_string(),
                     if n.route_reflector_client { "*" } else { "" }.to_string(),
+                    if n.slow_peer { "!" } else { "" }.to_string(),
                     state_pfx,
                 )
             } else {
@@ -651,6 +658,7 @@ fn render_neighbor_table(neighbors: &[proto::NeighborState], wide: bool) -> Stri
                 msg_sent,
                 flaps,
                 rrc,
+                slow,
                 state_pfx,
             }
         })
@@ -713,7 +721,7 @@ fn render_neighbor_table(neighbors: &[proto::NeighborState], wide: bool) -> Stri
     let _ = writeln!(
         out,
         "{:<w_addr$} {:<w_asn$} {:<w_state$} {:<w_uptime$} {:>w_rx$} {:>w_tx$} \
-         {:<w_desc$} {:>w_mr$} {:>w_ms$} {:>w_fl$} {:<3} State/PfxRcd",
+         {:<w_desc$} {:>w_mr$} {:>w_ms$} {:>w_fl$} {:<3} {:<4} State/PfxRcd",
         "Neighbor",
         "AS",
         "State",
@@ -725,6 +733,7 @@ fn render_neighbor_table(neighbors: &[proto::NeighborState], wide: bool) -> Stri
         "MsgSent",
         "Flaps",
         "RRC",
+        "Slow",
     );
 
     for row in &rows {
@@ -733,7 +742,7 @@ fn render_neighbor_table(neighbors: &[proto::NeighborState], wide: bool) -> Stri
         let _ = writeln!(
             out,
             "{:<w_addr$} {:<w_asn$} {:<padded_state$} {:<w_uptime$} {:>w_rx$} {:>w_tx$} \
-             {:<w_desc$} {:>w_mr$} {:>w_ms$} {:>w_fl$} {:<3} {}",
+             {:<w_desc$} {:>w_mr$} {:>w_ms$} {:>w_fl$} {:<3} {:<4} {}",
             row.addr,
             row.asn,
             row.state_colored,
@@ -745,6 +754,7 @@ fn render_neighbor_table(neighbors: &[proto::NeighborState], wide: bool) -> Stri
             row.msg_sent,
             row.flaps,
             row.rrc,
+            row.slow,
             row.state_pfx,
         );
     }
@@ -1494,6 +1504,7 @@ mod tests {
                 messages_sent: 567,
                 flap_count: 2,
                 route_reflector_client: true,
+                slow_peer: true,
                 ..Default::default()
             },
             proto::NeighborState {
@@ -1546,15 +1557,17 @@ Neighbor    AS    State       Uptime   Rx Pfx Tx Pfx  Description
     }
 
     /// Golden wide table: default columns unchanged and in order, then
-    /// MsgRcvd/MsgSent/Flaps/RRC, with the overloaded State/PfxRcd last
-    /// (prefix count when Established, state name otherwise).
+    /// MsgRcvd/MsgSent/Flaps/RRC, a compact slow-peer marker, and the
+    /// overloaded State/PfxRcd last (prefix count when Established, state
+    /// name otherwise). Load-bearing: removing the `n.slow_peer` projection
+    /// drops the `!` from the first row and makes this golden red.
     #[test]
     fn neighbor_table_wide_golden() {
         owo_colors::set_override(false);
         let expected = "\
-Neighbor    AS    State       Uptime   Rx Pfx Tx Pfx Description    MsgRcvd MsgSent Flaps RRC State/PfxRcd
-10.0.0.1    64512 Established 01:01:40    100      5 core-rr-client    1234     567     2 *   100
-2001:db8::2 65001 Idle        00:00:00      0      0                      0       0     9     Idle\n";
+Neighbor    AS    State       Uptime   Rx Pfx Tx Pfx Description    MsgRcvd MsgSent Flaps RRC Slow State/PfxRcd
+10.0.0.1    64512 Established 01:01:40    100      5 core-rr-client    1234     567     2 *   !    100
+2001:db8::2 65001 Idle        00:00:00      0      0                      0       0     9          Idle\n";
         assert_eq!(render_neighbor_table(&table_fixture(), true), expected);
     }
 

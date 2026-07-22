@@ -413,12 +413,13 @@ fn nofile_check(pid: u32, soft: u64, hard: u64, run_context: &str) -> Check {
 }
 
 /// Pure per-peer session checks: state (with time-in-state derived from
-/// the most recent session event) and flap count.
+/// the most recent session event), slow-peer health, and flap count.
 #[expect(clippy::too_many_arguments, reason = "snapshot fields")]
 fn peer_checks(
     address: &str,
     state: &str,
     stale: bool,
+    slow_peer: bool,
     uptime_seconds: u64,
     flap_count: u64,
     last_transition_unix: Option<u64>,
@@ -468,6 +469,15 @@ fn peer_checks(
             name: format!("peer.{address}.session"),
             status,
             detail: format!("peer {address} in {state} {since}{cause}"),
+        });
+    }
+    if slow_peer {
+        checks.push(Check {
+            name: format!("peer.{address}.slow_peer"),
+            status: CheckStatus::Warn,
+            detail: format!(
+                "peer {address} is flagged slow: outbound queue persistently backlogged; inspect bgp_peer_outbound_queue_depth for this peer's socket and enable slow_peer_isolation for chronic single-peer lag"
+            ),
         });
     }
     if flap_count >= FLAP_FAIL_THRESHOLD {
@@ -1175,6 +1185,7 @@ pub(crate) async fn run(
                                 state: output::format_state_with_stale(n.state, n.stale)
                                     .to_string(),
                                 stale: n.stale,
+                                slow_peer: n.slow_peer,
                                 uptime_seconds: n.uptime_seconds,
                                 prefixes_received: n.prefixes_received,
                                 prefixes_sent: n.prefixes_sent,
@@ -1201,6 +1212,7 @@ pub(crate) async fn run(
                             &snapshot.address,
                             &snapshot.state,
                             snapshot.stale,
+                            snapshot.slow_peer,
                             snapshot.uptime_seconds,
                             snapshot.flap_count,
                             transitions.get(&snapshot.address).copied(),
@@ -1607,6 +1619,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             "10.0.0.2",
             "Established",
             false,
+            false,
             3600,
             0,
             None,
@@ -1625,6 +1638,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
         let checks = peer_checks(
             "10.0.0.2",
             "Connect",
+            false,
             false,
             0,
             0,
@@ -1648,6 +1662,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             "10.0.0.2",
             "Connect",
             false,
+            false,
             0,
             0,
             Some(now - STUCK_PEER_SECS + 1),
@@ -1659,7 +1674,9 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
 
     #[test]
     fn peer_in_connect_with_no_transition_event_is_red() {
-        let checks = peer_checks("10.0.0.2", "Connect", false, 0, 0, None, 1_000_000, "");
+        let checks = peer_checks(
+            "10.0.0.2", "Connect", false, false, 0, 0, None, 1_000_000, "",
+        );
         assert!(checks[0].status == CheckStatus::Fail);
         assert!(checks[0].detail.contains("no recent state transition"));
     }
@@ -1669,6 +1686,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
         let checks = peer_checks(
             "10.0.0.2",
             "Established",
+            false,
             false,
             60,
             FLAP_FAIL_THRESHOLD,
@@ -1683,9 +1701,42 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
 
     #[test]
     fn stale_peer_is_warn() {
-        let checks = peer_checks("10.0.0.2", "Stale", true, 0, 0, None, 1_000_000, "");
+        let checks = peer_checks("10.0.0.2", "Stale", true, false, 0, 0, None, 1_000_000, "");
         assert!(checks[0].status == CheckStatus::Warn);
         assert!(checks[0].detail.contains("stale"));
+    }
+
+    /// Load-bearing mutation proof: deleting the `if slow_peer` branch, or
+    /// changing the predicate to false, removes the named warning and makes
+    /// these assertions red while the ordinary Established check stays green.
+    #[test]
+    fn established_slow_peer_warns_with_queue_remediation() {
+        let checks = peer_checks(
+            "10.0.0.2",
+            "Established",
+            false,
+            true,
+            3600,
+            0,
+            None,
+            1_000_000,
+            "",
+        );
+
+        assert_eq!(checks.len(), 2);
+        assert!(checks[0].status == CheckStatus::Ok);
+        assert_eq!(checks[1].name, "peer.10.0.0.2.slow_peer");
+        assert!(checks[1].status == CheckStatus::Warn);
+        assert!(checks[1].detail.contains("bgp_peer_outbound_queue_depth"));
+        assert!(checks[1].detail.contains("for this peer's socket"));
+        assert!(checks[1].detail.contains("slow_peer_isolation"));
+        // The metric's `peer` label is a SocketAddr, so a bare-IP selector is
+        // misleading and may match nothing. Reintroducing it makes this red.
+        assert!(
+            !checks[1]
+                .detail
+                .contains(r#"bgp_peer_outbound_queue_depth{peer="10.0.0.2"}"#)
+        );
     }
 
     #[test]
@@ -1989,8 +2040,9 @@ paths = ["x"]
             "[global]\nasn = 65000\nrouter_id = \"192.0.2.1\"\nruntime_state_dir = \"{}\"\n",
             state_dir.path().display()
         ));
-        *server.state.list_neighbors_response.lock().await =
-            vec![neighbor("10.0.0.2", 6, 0, "core peer")];
+        let mut slow = neighbor("10.0.0.2", 6, 0, "core peer");
+        slow.slow_peer = true;
+        *server.state.list_neighbors_response.lock().await = vec![slow];
         let connection = connect(&server.addr, None).await;
         let dir = tempfile::tempdir().unwrap();
         let bundle_path = dir.path().join("bundle.tar.gz");
@@ -2058,7 +2110,21 @@ paths = ["x"]
 
         // The effective config is the daemon dump, verbatim.
         assert!(find(&files, "config/effective.toml").contains("asn = 65000"));
-        assert!(find(&files, "peers/neighbors.json").contains("10.0.0.2"));
+        let peers: serde_json::Value =
+            serde_json::from_str(find(&files, "peers/neighbors.json")).unwrap();
+        // Load-bearing mutation proof: dropping `slow_peer: n.slow_peer` from
+        // the support snapshot makes this projection assertion red.
+        assert_eq!(peers[0]["slow_peer"], true);
+        // Load-bearing mutation proof: deleting the slow-peer doctor predicate
+        // removes this warning from the manifest and makes the assertion red.
+        assert!(manifest["checks"].as_array().unwrap().iter().any(|check| {
+            let detail = check["detail"].as_str().unwrap();
+            check["name"] == "peer.10.0.0.2.slow_peer"
+                && check["status"] == "warn"
+                && detail.contains("bgp_peer_outbound_queue_depth")
+                && detail.contains("for this peer's socket")
+                && !detail.contains(r#"{peer="10.0.0.2"}"#)
+        }));
     }
 
     /// LAN-482: one full daemon-up run with every first-deploy probe
