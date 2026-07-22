@@ -55,6 +55,8 @@ pub mod message_type {
 pub mod param_type {
     /// Capabilities Optional Parameter (RFC 5492).
     pub const CAPABILITIES: u8 = 2;
+    /// RFC 9072 extended Optional Parameters Length marker.
+    pub const EXTENDED_LENGTH: u8 = 255;
 }
 
 /// Capability codes (IANA BGP Capability Codes registry).

@@ -66,6 +66,13 @@ pub enum DecodeError {
         detail: String,
     },
 
+    /// An OPEN carried an Optional Parameter type we do not support.
+    #[error("unsupported optional parameter type {param_type}")]
+    UnsupportedOptionalParameter {
+        /// The unrecognized Optional Parameter type code.
+        param_type: u8,
+    },
+
     /// UPDATE withdrawn/attribute/NLRI length fields are inconsistent.
     #[error("UPDATE length mismatch: {detail}")]
     UpdateLengthMismatch {
@@ -157,6 +164,11 @@ impl DecodeError {
             Self::MalformedField { message_type, .. } if *message_type == "UPDATE" => (
                 NotificationCode::UpdateMessage,
                 1, // Malformed Attribute List
+                Bytes::new(),
+            ),
+            Self::UnsupportedOptionalParameter { .. } => (
+                NotificationCode::OpenMessage,
+                4, // Unsupported Optional Parameter
                 Bytes::new(),
             ),
             Self::MalformedField { .. } | Self::MalformedOptionalParameter { .. } => {
@@ -275,5 +287,16 @@ mod tests {
         let (code, subcode, _) = err.to_notification();
         assert_eq!(code, NotificationCode::OpenMessage);
         assert_eq!(subcode, 0);
+    }
+
+    #[test]
+    fn unsupported_optional_parameter_maps_to_open_error_subcode_four() {
+        // Mutation-red: mapping this error through the generic OPEN branch
+        // changes the subcode from RFC 4271 Unsupported Optional Parameter (4).
+        let err = DecodeError::UnsupportedOptionalParameter { param_type: 99 };
+        let (code, subcode, data) = err.to_notification();
+        assert_eq!(code, NotificationCode::OpenMessage);
+        assert_eq!(subcode, 4);
+        assert!(data.is_empty());
     }
 }

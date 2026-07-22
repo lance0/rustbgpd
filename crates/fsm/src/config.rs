@@ -826,4 +826,61 @@ mod tests {
         assert_eq!(caps[0].safi, Safi::Unicast);
         assert_eq!(caps[0].send_receive, AddPathMode::Receive);
     }
+
+    #[test]
+    fn maximum_production_capability_set_uses_extended_open() {
+        use rustbgpd_wire::{
+            MAX_MESSAGE_LEN, Message, OpenMessage, decode_message, encode_message,
+        };
+
+        let mut cfg = test_config();
+        cfg.families = vec![
+            (Afi::Ipv4, Safi::Unicast),
+            (Afi::Ipv6, Safi::Unicast),
+            (Afi::Ipv4, Safi::FlowSpec),
+            (Afi::Ipv6, Safi::FlowSpec),
+            (Afi::L2Vpn, Safi::Evpn),
+            (Afi::BgpLs, Safi::BgpLs),
+            (Afi::BgpLs, Safi::BgpLsVpn),
+            (Afi::Ipv4, Safi::MplsVpn),
+            (Afi::Ipv6, Safi::MplsVpn),
+            (Afi::Ipv4, Safi::LabeledUnicast),
+            (Afi::Ipv6, Safi::LabeledUnicast),
+            (Afi::Ipv4, Safi::RtConstrain),
+        ];
+        cfg.graceful_restart = true;
+        cfg.llgr_stale_time = 3600;
+        cfg.add_path_receive = true;
+        cfg.add_path_send = true;
+        cfg.paths_limit_receive_max = 8;
+        cfg.prefix_orf_receive = true;
+        cfg.local_role = Some(BgpRole::RouteServer);
+
+        let capabilities = cfg.local_capabilities();
+        let capability_octets: usize = capabilities.iter().map(Capability::encoded_len).sum();
+        assert_eq!(capability_octets, 307);
+
+        let open = OpenMessage {
+            version: 4,
+            my_as: cfg.open_my_as(),
+            hold_time: cfg.hold_time,
+            bgp_identifier: cfg.local_router_id,
+            capabilities,
+        };
+        let encoded = encode_message(&Message::Open(open.clone())).unwrap();
+
+        // Mutation-red: reverting RFC 9072 framing makes the 307 capability
+        // octets fail the old u8 ceiling. Omitting any production capability
+        // changes the pinned 307/342-byte fleet fixture.
+        assert_eq!(encoded.len(), 342);
+        assert_eq!(open.encoded_len(), 342);
+        assert_eq!(encoded[28], 255); // Non-Ext OP Len
+        assert_eq!(encoded[29], 255); // Non-Ext OP Type marker
+        assert_eq!(&encoded[30..32], &310_u16.to_be_bytes());
+        assert_eq!(encoded[32], 2); // Capabilities Optional Parameter
+        assert_eq!(&encoded[33..35], &307_u16.to_be_bytes());
+
+        let decoded = decode_message(&mut encoded.freeze(), MAX_MESSAGE_LEN).unwrap();
+        assert_eq!(decoded, Message::Open(open));
+    }
 }

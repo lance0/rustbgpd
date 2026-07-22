@@ -842,29 +842,52 @@ impl Capability {
 /// # Errors
 ///
 /// Returns [`DecodeError::MalformedOptionalParameter`] if any parameter TLV
-/// is truncated or contains an invalid capability.
+/// is truncated or contains an invalid capability, or
+/// [`DecodeError::UnsupportedOptionalParameter`] for an unrecognized
+/// Optional Parameter type.
 pub fn decode_optional_parameters(
     buf: &mut impl Buf,
     opt_params_len: u8,
 ) -> Result<Vec<Capability>, DecodeError> {
+    decode_optional_parameters_inner(buf, usize::from(opt_params_len), false)
+}
+
+/// Decode RFC 9072 extended-width OPEN Optional Parameters.
+pub(crate) fn decode_extended_optional_parameters(
+    buf: &mut impl Buf,
+    opt_params_len: u16,
+) -> Result<Vec<Capability>, DecodeError> {
+    decode_optional_parameters_inner(buf, usize::from(opt_params_len), true)
+}
+
+fn decode_optional_parameters_inner(
+    buf: &mut impl Buf,
+    opt_params_len: usize,
+    extended: bool,
+) -> Result<Vec<Capability>, DecodeError> {
     let mut capabilities = Vec::new();
-    let mut remaining = usize::from(opt_params_len);
+    let mut remaining = opt_params_len;
+    let parameter_header_len = if extended { 3 } else { 2 };
 
     while remaining > 0 {
-        if buf.remaining() < 2 {
+        if remaining < parameter_header_len || buf.remaining() < parameter_header_len {
             return Err(DecodeError::MalformedOptionalParameter {
-                offset: usize::from(opt_params_len) - remaining,
+                offset: opt_params_len - remaining,
                 detail: "optional parameter TLV too short".into(),
             });
         }
 
         let param_type = buf.get_u8();
-        let param_len = buf.get_u8();
-        remaining = remaining.saturating_sub(2);
+        let param_len = if extended {
+            usize::from(buf.get_u16())
+        } else {
+            usize::from(buf.get_u8())
+        };
+        remaining -= parameter_header_len;
 
-        if usize::from(param_len) > remaining || buf.remaining() < usize::from(param_len) {
+        if param_len > remaining || buf.remaining() < param_len {
             return Err(DecodeError::MalformedOptionalParameter {
-                offset: usize::from(opt_params_len) - remaining,
+                offset: opt_params_len - remaining,
                 detail: format!(
                     "parameter type {param_type} claims length {param_len}, \
                      but only {remaining} bytes remain"
@@ -876,18 +899,17 @@ pub fn decode_optional_parameters(
             // Parse capabilities from a bounded sub-buffer so a malformed
             // capability length cannot consume into the next parameter or
             // beyond the OPEN body.
-            let param_bytes = buf.copy_to_bytes(usize::from(param_len));
+            let param_bytes = buf.copy_to_bytes(param_len);
             let mut cap_buf = param_bytes;
             while cap_buf.has_remaining() {
                 let cap = Capability::decode(&mut cap_buf)?;
                 capabilities.push(cap);
             }
         } else {
-            // Skip unknown parameter types
-            buf.advance(usize::from(param_len));
+            return Err(DecodeError::UnsupportedOptionalParameter { param_type });
         }
 
-        remaining = remaining.saturating_sub(usize::from(param_len));
+        remaining -= param_len;
     }
 
     Ok(capabilities)
@@ -931,6 +953,29 @@ pub fn encode_optional_parameters(
     )]
     buf.put_u8(cap_total as u8);
 
+    for cap in capabilities {
+        cap.encode(buf)?;
+    }
+    Ok(())
+}
+
+/// Encode capabilities in an RFC 9072 extended-width Optional Parameter.
+pub(crate) fn encode_extended_optional_parameters(
+    capabilities: &[Capability],
+    buf: &mut impl BufMut,
+) -> Result<(), EncodeError> {
+    if capabilities.is_empty() {
+        return Ok(());
+    }
+
+    let cap_total: usize = capabilities.iter().map(Capability::encoded_len).sum();
+    let cap_total = u16::try_from(cap_total).map_err(|_| EncodeError::ValueOutOfRange {
+        field: "capabilities_parameter_length",
+        value: cap_total.to_string(),
+    })?;
+
+    buf.put_u8(param_type::CAPABILITIES);
+    buf.put_u16(cap_total);
     for cap in capabilities {
         cap.encode(buf)?;
     }

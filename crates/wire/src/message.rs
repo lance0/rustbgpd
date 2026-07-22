@@ -59,7 +59,8 @@ impl std::fmt::Display for Message {
 /// to determine when a complete message is available.
 ///
 /// `max_message_len` is the negotiated maximum: 4096 normally, or 65535
-/// when Extended Messages (RFC 8654) has been negotiated.
+/// when Extended Messages (RFC 8654) has been negotiated. OPEN and KEEPALIVE
+/// are excluded from the extension and remain capped at 4096.
 ///
 /// Advances the buffer past the consumed bytes on success.
 ///
@@ -299,6 +300,27 @@ mod tests {
             }],
         });
         assert!(encode_message_with_limit(&msg, EXTENDED_MAX_MESSAGE_LEN).is_err());
+    }
+
+    #[test]
+    fn decode_rejects_4097_byte_open_under_extended_limit_as_header_error() {
+        let mut encoded = BytesMut::with_capacity(4097);
+        BgpHeader {
+            length: 4097,
+            message_type: MessageType::Open,
+        }
+        .encode(&mut encoded);
+        encoded.resize(4097, 0);
+
+        let err = decode_message(&mut encoded.freeze(), EXTENDED_MAX_MESSAGE_LEN).unwrap_err();
+
+        // Mutation-red: removing the header's per-type receive cap changes
+        // this from Bad Message Length to a later OPEN-body decode result.
+        assert_eq!(err, DecodeError::InvalidLength { length: 4097 });
+        let (code, subcode, data) = err.to_notification();
+        assert_eq!(code, NotificationCode::MessageHeader);
+        assert_eq!(subcode, 2);
+        assert_eq!(data.as_ref(), &4097_u16.to_be_bytes());
     }
 
     #[test]
