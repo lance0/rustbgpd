@@ -1014,12 +1014,12 @@ impl PeerManager {
                         PeerManagerCommand::AcceptInbound { stream, peer_addr, tcp_ao_info, tcp_ao_generation } => {
                             self.accept_inbound(stream, peer_addr, tcp_ao_info, tcp_ao_generation).await;
                         }
-                        PeerManagerCommand::ApplyTcpAoRotation { generation, operation, listener_keys, static_keyrings, reply } => {
-                            let result = self.apply_tcp_ao_rotation(generation, operation, &listener_keys, &static_keyrings).await;
+                        PeerManagerCommand::ApplyTcpAoRotation { generation, operation, listener_keys, current_listener_keys, static_keyrings, current_static_keyrings, reply } => {
+                            let result = self.apply_tcp_ao_rotation(generation, operation, &listener_keys, &current_listener_keys, &static_keyrings, &current_static_keyrings).await;
                             let _ = reply.send(result);
                         }
-                        PeerManagerCommand::PreflightTcpAoRotation { generation, operation, listener_keys, static_keyrings, reply } => {
-                            let result = self.preflight_tcp_ao_rotation(generation, operation, &listener_keys, &static_keyrings).await;
+                        PeerManagerCommand::PreflightTcpAoRotation { generation, operation, listener_keys, current_listener_keys, static_keyrings, current_static_keyrings, reply } => {
+                            let result = self.preflight_tcp_ao_rotation(generation, operation, &listener_keys, &current_listener_keys, &static_keyrings, &current_static_keyrings).await;
                             let _ = reply.send(result);
                         }
                         PeerManagerCommand::MarkTcpAoRotationFailed { generation, operation, error, reply } => {

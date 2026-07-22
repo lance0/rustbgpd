@@ -21,6 +21,16 @@ struct TcpAoSessionSelectionPlan {
     selection_changed: bool,
 }
 
+struct TcpAoSessionDeletePlan {
+    connected_peer: std::net::IpAddr,
+    current_owners: Vec<crate::TcpAoRotationOwner>,
+    desired_owners: Vec<crate::TcpAoRotationOwner>,
+    desired_active_keyring: Option<crate::TcpAoKeyring>,
+    desired_metadata: Vec<super::TcpAoKeyMetadata>,
+    already_applied: bool,
+    deletion_changed: bool,
+}
+
 fn tcp_ao_owner_views(
     owners: &[crate::TcpAoRotationOwner],
 ) -> Vec<crate::socket_opts::TcpAoMktOwner<'_>> {
@@ -108,6 +118,52 @@ fn metadata_for_owners(owners: &[crate::TcpAoRotationOwner]) -> Vec<super::TcpAo
             })
         })
         .collect()
+}
+
+fn tcp_ao_deletion_survivors(
+    current: &crate::TcpAoKeyring,
+    desired: &crate::TcpAoKeyring,
+) -> Result<Vec<usize>, PeerCommandError> {
+    if desired.0.is_empty() || desired.0.len() > current.0.len() {
+        return Err(PeerCommandError::CommandFailed(
+            "TCP-AO deletion requires a nonempty survivor keyring".to_string(),
+        ));
+    }
+    let mut survivors = Vec::with_capacity(desired.0.len());
+    let mut search_from = 0;
+    for desired_key in &desired.0 {
+        let matches = current
+            .0
+            .iter()
+            .enumerate()
+            .skip(search_from)
+            .filter(|(_, current_key)| *current_key == desired_key)
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        if matches.len() != 1 {
+            return Err(PeerCommandError::CommandFailed(
+                "TCP-AO deletion reorders, redefines, duplicates, or adds an MKT".to_string(),
+            ));
+        }
+        survivors.push(matches[0]);
+        search_from = matches[0] + 1;
+    }
+    if current.selected() != desired.selected() {
+        return Err(PeerCommandError::CommandFailed(
+            "TCP-AO deletion may not remove or change the selected MKT".to_string(),
+        ));
+    }
+    if current
+        .0
+        .iter()
+        .enumerate()
+        .any(|(index, key)| !survivors.contains(&index) && !key.deprecated)
+    {
+        return Err(PeerCommandError::CommandFailed(
+            "TCP-AO deletion may remove only deprecated MKTs".to_string(),
+        ));
+    }
+    Ok(survivors)
 }
 
 fn sorted_family_limits<T>(
@@ -463,6 +519,265 @@ impl PeerSession {
         self.tcp_ao_pending_selection = None;
         self.tcp_ao_successor_pkt_good_baseline = None;
         self.tcp_ao_selection_observed = false;
+        Ok(())
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "deletion validation keeps the exact generation, owner union, survivor, and selected-owner proof together"
+    )]
+    fn prepare_tcp_ao_delete(
+        &self,
+        deletion: &crate::TcpAoSessionDeletion,
+    ) -> Result<TcpAoSessionDeletePlan, PeerCommandError> {
+        if !self.tcp_ao_protected {
+            return Err(PeerCommandError::CommandFailed(
+                "refusing TCP-AO deletion on an unprotected session".to_string(),
+            ));
+        }
+        if self.connect_task.is_some() {
+            return Err(PeerCommandError::CommandFailed(
+                "TCP-AO deletion cannot advance while an older-inventory connect attempt is in flight; retry the identical generation"
+                    .to_string(),
+            ));
+        }
+        if self.tcp_ao_pending_selection.is_some() {
+            return Err(PeerCommandError::CommandFailed(
+                "TCP-AO deletion cannot overlap an uncommitted successor selection".to_string(),
+            ));
+        }
+        if deletion.current.generation.next() != Some(deletion.generation)
+            || deletion.desired.generation != deletion.generation
+            || (self.tcp_ao_generation != deletion.current.generation
+                && self.tcp_ao_generation != deletion.generation)
+        {
+            return Err(PeerCommandError::CommandFailed(
+                "TCP-AO deletion generation is not the immediate applied successor".to_string(),
+            ));
+        }
+
+        let connected_peer = self.config.remote_addr.ip();
+        let connected_prefix = if connected_peer.is_ipv4() { 32 } else { 128 };
+        let owner_for_active = |keyring: Option<&crate::TcpAoKeyring>| {
+            keyring
+                .cloned()
+                .map(|keyring| {
+                    vec![crate::TcpAoRotationOwner {
+                        owner: crate::TcpAoListenerOwnerKind::Static,
+                        peer: connected_peer,
+                        prefix_len: connected_prefix,
+                        keyring,
+                    }]
+                })
+                .unwrap_or_default()
+        };
+        let (current_owners, desired_owners) = if self.tcp_ao_stream_was_accepted {
+            (
+                deletion.current.accepted_owners.to_vec(),
+                deletion.desired.accepted_owners.to_vec(),
+            )
+        } else {
+            (
+                owner_for_active(deletion.current.active_keyring.as_ref()),
+                owner_for_active(deletion.desired.active_keyring.as_ref()),
+            )
+        };
+        if current_owners.len() != desired_owners.len() || current_owners.is_empty() {
+            return Err(PeerCommandError::CommandFailed(
+                "TCP-AO deletion may not add or remove a protected owner".to_string(),
+            ));
+        }
+        let mut removed = false;
+        for current_owner in &current_owners {
+            let matching = desired_owners
+                .iter()
+                .filter(|desired_owner| {
+                    desired_owner.owner == current_owner.owner
+                        && desired_owner.peer == current_owner.peer
+                        && desired_owner.prefix_len == current_owner.prefix_len
+                })
+                .collect::<Vec<_>>();
+            if matching.len() != 1 {
+                return Err(PeerCommandError::CommandFailed(
+                    "TCP-AO deletion changed or duplicated an owner identity".to_string(),
+                ));
+            }
+            let survivors =
+                tcp_ao_deletion_survivors(&current_owner.keyring, &matching[0].keyring)?;
+            removed |= survivors.len() != current_owner.keyring.0.len();
+        }
+        let current_metadata = metadata_for_owners(&current_owners);
+        let desired_metadata = metadata_for_owners(&desired_owners);
+        if desired_metadata.len() > crate::TCP_AO_MAX_INSPECT_KEYS {
+            return Err(PeerCommandError::CommandFailed(
+                "TCP-AO deletion survivor inventory exceeds inspection capacity".to_string(),
+            ));
+        }
+        let already_applied = self.tcp_ao_generation == deletion.generation;
+        if self.read_half.is_some()
+            && self.tcp_ao_key_metadata
+                != if already_applied {
+                    desired_metadata.clone()
+                } else {
+                    current_metadata
+                }
+        {
+            return Err(PeerCommandError::CommandFailed(
+                "TCP-AO session metadata does not equal the deletion generation inventory"
+                    .to_string(),
+            ));
+        }
+        if self.tcp_ao_stream_was_accepted {
+            let selected = self.tcp_ao_selected_owner.ok_or_else(|| {
+                PeerCommandError::CommandFailed(
+                    "accepted TCP-AO deletion lacks its selected-owner identity".to_string(),
+                )
+            })?;
+            if desired_owners
+                .iter()
+                .filter(|owner| {
+                    owner.owner == selected.owner
+                        && owner.peer == selected.peer
+                        && owner.prefix_len == selected.prefix_len
+                })
+                .count()
+                != 1
+            {
+                return Err(PeerCommandError::CommandFailed(
+                    "TCP-AO deletion changed the accepted socket's selected owner".to_string(),
+                ));
+            }
+        }
+
+        Ok(TcpAoSessionDeletePlan {
+            connected_peer,
+            current_owners,
+            desired_owners,
+            desired_active_keyring: deletion.desired.active_keyring.clone(),
+            desired_metadata,
+            already_applied,
+            deletion_changed: removed,
+        })
+    }
+
+    fn preflight_tcp_ao_delete(
+        &self,
+        deletion: &crate::TcpAoSessionDeletion,
+    ) -> Result<(), PeerCommandError> {
+        let plan = self.prepare_tcp_ao_delete(deletion)?;
+        let Some(stream) = self.read_half.as_ref() else {
+            return Ok(());
+        };
+        let desired = tcp_ao_owner_views(&plan.desired_owners);
+        if plan.already_applied || !plan.deletion_changed {
+            return crate::socket_opts::preflight_tcp_ao_add_only(
+                stream.as_ref(),
+                &desired,
+                &desired,
+                Some(plan.connected_peer),
+            )
+            .map(drop)
+            .map_err(|error| {
+                PeerCommandError::CommandFailed(format!(
+                    "failed to revalidate applied TCP-AO deletion inventory: {error}"
+                ))
+            });
+        }
+        let current = tcp_ao_owner_views(&plan.current_owners);
+        crate::socket_opts::preflight_tcp_ao_delete(
+            stream.as_ref(),
+            &current,
+            &desired,
+            Some(plan.connected_peer),
+        )
+        .map(drop)
+        .map_err(|error| {
+            PeerCommandError::CommandFailed(format!(
+                "failed to preflight exact TCP-AO deletion inventory: {error}"
+            ))
+        })
+    }
+
+    pub(super) fn apply_tcp_ao_delete(
+        &mut self,
+        deletion: &crate::TcpAoSessionDeletion,
+    ) -> Result<(), PeerCommandError> {
+        self.apply_tcp_ao_delete_with(deletion, |stream, current, desired, connected_peer| {
+            crate::socket_opts::preflight_tcp_ao_delete(
+                stream,
+                current,
+                desired,
+                Some(connected_peer),
+            )
+            .map_err(|error| {
+                PeerCommandError::CommandFailed(format!(
+                    "failed to preflight exact TCP-AO deletion inventory: {error}"
+                ))
+            })
+            .and_then(|preflight| {
+                crate::socket_opts::apply_tcp_ao_delete(stream, preflight, desired).map_err(
+                    |error| {
+                        let mutation_started = error.mutation_started();
+                        let message = format!(
+                            "failed to apply exact TCP-AO deletion inventory: {}",
+                            error.into_inner()
+                        );
+                        if mutation_started {
+                            PeerCommandError::TcpAoMutationFailed(message)
+                        } else {
+                            PeerCommandError::CommandFailed(message)
+                        }
+                    },
+                )
+            })
+        })
+    }
+
+    pub(super) fn apply_tcp_ao_delete_with<F>(
+        &mut self,
+        deletion: &crate::TcpAoSessionDeletion,
+        mutate_connected: F,
+    ) -> Result<(), PeerCommandError>
+    where
+        F: FnOnce(
+            &tokio::net::TcpStream,
+            &[crate::socket_opts::TcpAoMktOwner<'_>],
+            &[crate::socket_opts::TcpAoMktOwner<'_>],
+            std::net::IpAddr,
+        ) -> Result<Option<crate::TcpAoInfoSnapshot>, PeerCommandError>,
+    {
+        let plan = self.prepare_tcp_ao_delete(deletion)?;
+        if plan.already_applied {
+            return self.preflight_tcp_ao_delete(deletion);
+        }
+        if !plan.deletion_changed {
+            self.preflight_tcp_ao_delete(deletion)?;
+            self.config.tcp_ao = plan.desired_active_keyring;
+            self.tcp_ao_generation = deletion.generation;
+            return Ok(());
+        }
+        if let Some(stream) = self.read_half.as_ref() {
+            let current = tcp_ao_owner_views(&plan.current_owners);
+            let desired = tcp_ao_owner_views(&plan.desired_owners);
+            let result = mutate_connected(stream.as_ref(), &current, &desired, plan.connected_peer);
+            match result {
+                Ok(Some(snapshot)) => self.tcp_ao_info = Some(snapshot),
+                Ok(None) => {
+                    self.close_tcp();
+                    return Err(PeerCommandError::TcpAoMutationFailed(
+                        "connected TCP-AO deletion returned no socket snapshot".to_string(),
+                    ));
+                }
+                Err(error @ PeerCommandError::TcpAoMutationFailed(_)) => {
+                    self.close_tcp();
+                    return Err(error);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        self.tcp_ao_key_metadata = plan.desired_metadata;
+        self.config.tcp_ao = plan.desired_active_keyring;
+        self.tcp_ao_generation = deletion.generation;
         Ok(())
     }
 
@@ -1174,6 +1489,20 @@ impl PeerSession {
                 let result = self.commit_tcp_ao_selection(&desired);
                 if result.is_ok() {
                     info!(peer = %self.peer_label, generation, "committed TCP-AO selection metadata");
+                }
+                let _ = reply.send(result);
+                ControlFlow::Continue(())
+            }
+            PeerCommand::PreflightTcpAoDelete { desired, reply } => {
+                let result = self.preflight_tcp_ao_delete(&desired);
+                let _ = reply.send(result);
+                ControlFlow::Continue(())
+            }
+            PeerCommand::ApplyTcpAoDelete { desired, reply } => {
+                let generation = desired.generation.as_u64();
+                let result = self.apply_tcp_ao_delete(&desired);
+                if result.is_ok() {
+                    info!(peer = %self.peer_label, generation, "applied TCP-AO deletion generation");
                 }
                 let _ = reply.send(result);
                 ControlFlow::Continue(())

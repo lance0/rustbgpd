@@ -288,9 +288,10 @@ pub struct DynamicNeighborConfig {
     #[serde(default)]
     pub description: Option<String>,
     /// TCP-AO keyring installed as prefix MKTs on the passive listener and
-    /// inherited accepted sockets. Nonpreferred successor keys may be appended
-    /// live with SIGHUP. Dynamic ranges never inherit authentication from their
-    /// peer group.
+    /// inherited accepted sockets. Separate SIGHUP generations can append a
+    /// nonpreferred successor, observation-gate its selection/deprecation,
+    /// then delete deprecated unselected keys. Dynamic ranges never inherit
+    /// authentication from their peer group.
     #[serde(default)]
     pub tcp_ao: Option<TcpAoKeyringConfig>,
 }
@@ -808,8 +809,9 @@ pub struct Neighbor {
     /// TCP MD5 signature password (RFC 2385).
     pub md5_password: Option<String>,
     /// Static-neighbor TCP-AO (RFC 5925) keyring. Installed on active-open
-    /// sockets and the passive listener when configured. Nonpreferred
-    /// successor keys may be appended live with SIGHUP.
+    /// sockets and the passive listener when configured. Separate SIGHUP
+    /// generations can append a nonpreferred successor, observation-gate its
+    /// selection/deprecation, then delete deprecated unselected keys.
     pub tcp_ao: Option<TcpAoKeyringConfig>,
     /// Single-hop BFD (RFC 5880/5881) attachment, referencing a
     /// `[[bfd_profiles]]` entry. Presence enables BFD for this neighbor.

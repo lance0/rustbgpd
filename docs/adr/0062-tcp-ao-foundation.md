@@ -100,12 +100,23 @@ slices have now shipped static-neighbor and startup-only dynamic-range support:
   authentication counters. Only then does it commit predecessor deprecation
   metadata. `awaiting_peer` retains desired N over applied N-1; a later SIGHUP
   must present the identical full candidate and retries N without actor polling.
+- A still-later immutable SIGHUP generation can delete only deprecated MKTs
+  that are neither Current nor RNext on the listener, queued accepted children,
+  or any protected primary/pending session. Owner identity, survivor order,
+  key definitions, and the selected MKT remain exact. Listener deletion runs
+  first; queued children that inherited the complete adjacent old owner union
+  are reconciled before handoff; managed sessions apply concurrently. Any
+  changed-session success/ambiguous acknowledgement combined with a cohort
+  failure discards the whole changed cohort, and incomplete reset aborts every
+  affected task. Failed generations retry only the identical retained inventory
+  and only while the listener remains exact (before mutation, after exact-prior
+  restoration, or already at desired); failed restoration requires restart.
 - Accepted sockets preserve their complete covering-owner union for both
   selection and inspection; static exact ownership wins, otherwise dynamic
-  longest-prefix match selects the owner. Selection never deletes an MKT or
-  sets Linux Current.
-- Runtime deletion of a configured TCP-AO neighbor is rejected until listener
-  MKT deletion / live rotation support exists.
+  longest-prefix match selects the owner. The selection generation never
+  deletes an MKT or sets Linux Current.
+- Runtime deletion of a configured TCP-AO neighbor/owner remains rejected.
+  Live MKT deletion cannot remove or move its protected owner.
 - Protected active-open and accepted passive sockets are inspected with
   `getsockopt(TCP_AO_INFO)` plus a bounded `TCP_AO_GET_KEYS` dump after
   connection setup. Raw GET_KEYS records are non-formatting, non-cloning
@@ -153,24 +164,23 @@ every MKT is installed and reconciled. At most one key may be preferred, each
 direction's KeyIDs must be unique within the ring, and at least one key must be
 non-deprecated.
 
-Still deferred: live key deletion, key edits/reordering, protected-owner CRUD,
-and peer-group inheritance. API/CLI neighbor state exposes redacted live
+Still deferred: key edits/reordering, protected-owner CRUD, and peer-group
+inheritance. API/CLI neighbor state exposes redacted live
 inspection results (KeyIDs, validity flags, per-key inventory, and counters)
 and secret-free desired/applied generation, phase, and failure details for
 static and direct dynamic-prefix protected sessions.
 
-The transport layer contains a deletion foundation but no runtime caller yet.
-It binds Linux `TCP_AO_DEL_KEY` to opaque exact-current and exact-survivor
-receipts, refuses Current/RNext targets before the syscall, never requests a
-forced replacement, uses the exact kernel-returned accepted-child selector,
-and verifies the exact post-delete inventory. The Linux 6.17 hosted receipt
-proves that an established child preserves and accepts its inherited `/24`
-selector for deletion; callers must not replace it with `/32`. The receipt also
-fixes the accept-race fact: a child queued before listener deletion retains the
-prior inventory, while a later child inherits only the survivors. SIGHUP
-deletion, generation advancement, and protected-owner CRUD remain deferred
-until the coordinator can reconcile that adjacent-previous child without
-weakening the covering-owner union invariant.
+The SIGHUP coordinator now consumes the exact deletion foundation. It binds
+Linux `TCP_AO_DEL_KEY` to opaque exact-current and exact-survivor receipts,
+refuses Current/RNext targets before the syscall, never requests a forced
+replacement, uses the exact kernel-returned accepted-child selector, and
+verifies the exact post-delete inventory. The Linux 6.17 hosted M43 foundation
+receipt proves that an established child preserves and accepts its inherited
+`/24` selector for deletion; callers must not replace it with `/32`. The receipt
+also fixes the accept-race fact: a child queued before listener deletion retains
+the prior inventory, while a later child inherits only the survivors. M43 does
+not yet drive the full SIGHUP deletion coordinator against BIRD; extend that
+receipt before claiming independent-stack deletion interop.
 
 ## Linux UAPI secrecy and normalization boundary
 

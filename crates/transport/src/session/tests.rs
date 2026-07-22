@@ -1,5 +1,6 @@
 use super::export::{ExportCandidate, ExportWithdrawal};
 use super::*;
+use crate::PeerCommandError;
 use bytes::Bytes;
 use rustbgpd_fsm::PeerConfig;
 use rustbgpd_policy::{
@@ -38,6 +39,73 @@ fn make_test_session_with_peer_config(peer_config: PeerConfig) -> PeerSession {
     )
 }
 
+fn tcp_ao_deletion_test_fixture() -> (PeerSession, crate::TcpAoSessionDeletion) {
+    let retired = crate::TcpAoConfig {
+        key: "retired-secret".into(),
+        send_id: 1,
+        recv_id: 11,
+        algorithm: crate::TcpAoAlgorithm::HmacSha256,
+        preferred: false,
+        deprecated: true,
+    };
+    let successor = crate::TcpAoConfig {
+        key: "successor-secret".into(),
+        send_id: 2,
+        recv_id: 12,
+        algorithm: crate::TcpAoAlgorithm::HmacSha256,
+        preferred: true,
+        deprecated: false,
+    };
+    let current_keyring = crate::TcpAoKeyring(vec![retired, successor.clone()]);
+    let desired_keyring = crate::TcpAoKeyring(vec![successor]);
+    let mut peer_config = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
+    peer_config.families = vec![(Afi::Ipv4, Safi::Unicast)];
+    let mut config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
+    config.tcp_ao = Some(current_keyring.clone());
+    let (_cmd_tx, cmd_rx) = mpsc::channel(8);
+    let (rib_tx, _rib_rx) = mpsc::channel(8);
+    let generation = crate::TcpAoRotationGeneration::new(2).unwrap();
+    let session = PeerSession::new_at_tcp_ao_generation(
+        config,
+        BgpMetrics::new(),
+        cmd_rx,
+        rib_tx,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        false,
+        SessionIdentity::default(),
+        crate::TcpAoRotationGeneration::STARTUP,
+    );
+    let deletion = crate::TcpAoSessionDeletion {
+        generation,
+        current: crate::TcpAoSessionGeneration {
+            generation: crate::TcpAoRotationGeneration::STARTUP,
+            active_keyring: Some(current_keyring),
+            accepted_owners: Vec::new().into(),
+        },
+        desired: crate::TcpAoSessionGeneration {
+            generation,
+            active_keyring: Some(desired_keyring),
+            accepted_owners: Vec::new().into(),
+        },
+    };
+    (session, deletion)
+}
+
+async fn install_test_tcp_stream(session: &mut PeerSession) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let connect = TcpStream::connect(listener.local_addr().unwrap());
+    let accept = listener.accept();
+    let (client, accepted) = tokio::join!(connect, accept);
+    let (_server, _) = accepted.unwrap();
+    session.test_install_stream(client.unwrap());
+}
+
 #[test]
 fn recreated_active_session_starts_at_committed_tcp_ao_generation() {
     let peer_config = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
@@ -62,6 +130,86 @@ fn recreated_active_session_starts_at_committed_tcp_ao_generation() {
         generation,
     );
     assert_eq!(session.tcp_ao_generation, generation);
+}
+
+#[test]
+fn disconnected_tcp_ao_deletion_commits_exact_metadata_and_is_idempotent() {
+    let (mut session, deletion) = tcp_ao_deletion_test_fixture();
+    session.apply_tcp_ao_delete(&deletion).unwrap();
+    assert_eq!(session.tcp_ao_generation, deletion.generation);
+    assert_eq!(session.config.tcp_ao.as_ref().unwrap().0.len(), 1);
+    let expected_metadata = super::tcp_ao_key_metadata(&session.config, None, None);
+    assert!(session.tcp_ao_key_metadata == expected_metadata);
+
+    session.apply_tcp_ao_delete(&deletion).unwrap();
+    assert_eq!(session.tcp_ao_generation, deletion.generation);
+    assert_eq!(session.config.tcp_ao.as_ref().unwrap().0.len(), 1);
+    assert_eq!(session.tcp_ao_key_metadata.len(), 1);
+}
+
+#[tokio::test]
+async fn connected_tcp_ao_deletion_preserves_session_on_current_rnext_refusal() {
+    let (mut session, deletion) = tcp_ao_deletion_test_fixture();
+    install_test_tcp_stream(&mut session).await;
+    let original_metadata = session.tcp_ao_key_metadata.clone();
+    let result = session.apply_tcp_ao_delete_with(
+        &deletion,
+        |_stream, current, desired, _connected_peer| {
+            assert_eq!(current[0].keyring.0.len(), 2);
+            assert!(current[0].keyring.0[0].deprecated);
+            assert_eq!(desired[0].keyring.0.len(), 1);
+            Err(PeerCommandError::CommandFailed(
+                "refusing to delete a Current/RNext MKT".to_string(),
+            ))
+        },
+    );
+
+    assert!(matches!(result, Err(PeerCommandError::CommandFailed(_))));
+    assert!(session.read_half.is_some());
+    assert_eq!(
+        session.tcp_ao_generation,
+        crate::TcpAoRotationGeneration::STARTUP
+    );
+    assert_eq!(session.config.tcp_ao.as_ref().unwrap().0.len(), 2);
+    assert!(session.tcp_ao_key_metadata == original_metadata);
+}
+
+#[tokio::test]
+async fn mutation_started_tcp_ao_deletion_closes_and_reset_discards_replacement_stream() {
+    let (mut session, deletion) = tcp_ao_deletion_test_fixture();
+    install_test_tcp_stream(&mut session).await;
+    let result = session.apply_tcp_ao_delete_with(
+        &deletion,
+        |_stream, _current, _desired, _connected_peer| {
+            Err(PeerCommandError::TcpAoMutationFailed(
+                "DEL_KEY began before inventory verification failed".to_string(),
+            ))
+        },
+    );
+    assert!(matches!(
+        result,
+        Err(PeerCommandError::TcpAoMutationFailed(_))
+    ));
+    assert!(session.read_half.is_none());
+    assert_eq!(
+        session.tcp_ao_generation,
+        crate::TcpAoRotationGeneration::STARTUP
+    );
+    assert_eq!(session.config.tcp_ao.as_ref().unwrap().0.len(), 2);
+
+    install_test_tcp_stream(&mut session).await;
+    let (reply, applied) = oneshot::channel();
+    assert_eq!(
+        session
+            .handle_command(PeerCommand::ResetTcpAoAfterFailedMutation {
+                desired_generation: deletion.generation,
+                reply,
+            })
+            .await,
+        ControlFlow::Continue(())
+    );
+    applied.await.unwrap();
+    assert!(session.read_half.is_none());
 }
 
 #[test]

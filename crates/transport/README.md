@@ -21,8 +21,10 @@ events.
 - **TCP-AO** (RFC 5925) — ordered static-neighbor and direct dynamic-prefix
   keyrings are installed on active-open and accept sockets, with fail-closed
   inspection and `GlobalService.GetGlobal` / `rbgp global` capability status;
-  SIGHUP can append nonpreferred successor keys, while selection, deprecation,
-  deletion, and protected-owner changes remain restart-required
+  SIGHUP can append nonpreferred successor keys, later observation-gate
+  selection/deprecation, and later delete deprecated MKTs that are neither
+  Current nor RNext; key edits/reordering and protected-owner changes remain
+  restart-required
 - **Import/export policy** — policy chains evaluated inline during
   UPDATE processing
 - **Import-decision explain** (ADR-0073) — a bounded per-session LRU

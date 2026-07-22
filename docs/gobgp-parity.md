@@ -156,7 +156,7 @@ releases rather than carried forward from older measurements.
 | Feature | GoBGP | rustbgpd | Notes |
 |---------|:-----:|:--------:|-------|
 | TCP MD5 (RFC 2385) | Yes | Yes | |
-| TCP-AO (RFC 5925) | No | Partial live rotation | rustbgpd applies ordered static-neighbor and direct dynamic-prefix TCP-AO keyrings on Linux, appends non-preferred successor MKTs on SIGHUP, and can later select an installed successor with cohort-observed deprecation; deletion and protected-owner CRUD remain restart-required |
+| TCP-AO (RFC 5925) | No | Partial live rotation | rustbgpd applies ordered static-neighbor and direct dynamic-prefix TCP-AO keyrings on Linux, appends non-preferred successor MKTs on SIGHUP, can later select an installed successor with cohort-observed deprecation, and can then delete deprecated unselected MKTs; key edits/reordering and protected-owner CRUD remain restart-required |
 | GTSM / TTL Security (RFC 5082) | Yes | Yes | |
 | BFD (RFC 5880/5881/5882) | Yes | Yes | GoBGP now documents native single-hop async BFD for BGP neighbors with config-file and gRPC API support. rustbgpd ships single-hop async BFD with IPv4 + IPv6 global static neighbors, `[[bfd_profiles]]` / `[neighbors.bfd]`, `GetBfdSessions`, `rbgp bfd`, Prometheus/events, and RFC 5882 strict + non-strict BGP coupling. M51 validates non-strict failover/recovery against FRR `bfdd`. Deferred: multihop, echo/demand, auth, dynamic-neighbor BFD, and IPv6 link-local / unnumbered |
 | RPKI/RTR (RFC 6811/8210) | Yes | Yes | Persistent RTR session with `SerialNotify`, fallback serial polling, and enforced expiry |

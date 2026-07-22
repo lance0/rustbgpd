@@ -105,7 +105,9 @@ struct ReloadStepFailure {
 struct TcpAoRotationPlan {
     generation: TcpAoRotationGeneration,
     operation: TcpAoRotationOperation,
+    current_listener_keys: Vec<TcpAoListenerKey>,
     listener_keys: Vec<TcpAoListenerKey>,
+    current_static_keyrings: Vec<(rustbgpd_api::peer_types::PeerKey, TcpAoKeyring)>,
     static_keyrings: Vec<(rustbgpd_api::peer_types::PeerKey, TcpAoKeyring)>,
 }
 
@@ -180,6 +182,60 @@ fn config_keyring_is_selection(
         && desired_selected.is_some_and(|index| desired.0[index].preferred)
 }
 
+fn ordered_survivor_indices<T: PartialEq>(current: &[T], desired: &[T]) -> Option<Vec<usize>> {
+    if desired.is_empty() || desired.len() >= current.len() {
+        return None;
+    }
+    let mut survivors = Vec::with_capacity(desired.len());
+    let mut search_from = 0;
+    for desired_entry in desired {
+        let matches = current
+            .iter()
+            .enumerate()
+            .skip(search_from)
+            .filter(|(_, current_entry)| *current_entry == desired_entry)
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        if matches.len() != 1 {
+            return None;
+        }
+        survivors.push(matches[0]);
+        search_from = matches[0] + 1;
+    }
+    Some(survivors)
+}
+
+fn transport_keyring_is_deletion(current: &TcpAoKeyring, desired: &TcpAoKeyring) -> bool {
+    let Some(survivors) = ordered_survivor_indices(&current.0, &desired.0) else {
+        return false;
+    };
+    current.selected() == desired.selected()
+        && current
+            .0
+            .iter()
+            .enumerate()
+            .all(|(index, key)| survivors.contains(&index) || key.deprecated)
+}
+
+fn config_keyring_is_deletion(
+    current: &config::TcpAoKeyringConfig,
+    desired: &config::TcpAoKeyringConfig,
+) -> bool {
+    let Some(survivors) = ordered_survivor_indices(&current.0, &desired.0) else {
+        return false;
+    };
+    selected_config_key_index(current)
+        .zip(selected_config_key_index(desired))
+        .is_some_and(|(current_index, desired_index)| {
+            current.0[current_index] == desired.0[desired_index]
+        })
+        && current
+            .0
+            .iter()
+            .enumerate()
+            .all(|(index, key)| survivors.contains(&index) || key.deprecated)
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "the compiler must validate static and dynamic owner inventories together before issuing one immutable generation plan"
@@ -195,23 +251,23 @@ fn prepare_tcp_ao_rotation_plan(
     let desired_resolved = desired
         .resolved_neighbors()
         .map_err(|error| error.to_string())?;
-    let static_map = |neighbors: Vec<config::ResolvedNeighbor>| {
+    let static_map = |neighbors: &[config::ResolvedNeighbor]| {
         neighbors
-            .into_iter()
+            .iter()
             .filter_map(|neighbor| {
-                let keyring = neighbor.transport_config.tcp_ao?;
+                let keyring = neighbor.transport_config.tcp_ao.clone()?;
                 Some((
                     rustbgpd_api::peer_types::PeerKey::new(
                         neighbor.transport_config.remote_addr.ip(),
-                        neighbor.transport_config.peer_interface,
+                        neighbor.transport_config.peer_interface.clone(),
                     ),
                     keyring,
                 ))
             })
             .collect::<BTreeMap<_, _>>()
     };
-    let current_static = static_map(current_resolved);
-    let desired_static = static_map(desired_resolved.clone());
+    let current_static = static_map(&current_resolved);
+    let desired_static = static_map(&desired_resolved);
     if current_static.keys().collect::<Vec<_>>() != desired_static.keys().collect::<Vec<_>>() {
         return Ok(TcpAoReloadPlan::Unsupported(
             "live TCP-AO rotation may not add or remove a protected static owner".to_string(),
@@ -240,6 +296,7 @@ fn prepare_tcp_ao_rotation_plan(
 
     let mut saw_add_only = false;
     let mut saw_selection = false;
+    let mut saw_delete = false;
     for (peer, old) in &current_static {
         let new = &desired_static[peer];
         if old == new {
@@ -255,6 +312,8 @@ fn prepare_tcp_ao_rotation_plan(
             saw_add_only = true;
         } else if transport_keyring_is_selection(old, new) {
             saw_selection = true;
+        } else if transport_keyring_is_deletion(old, new) {
+            saw_delete = true;
         } else {
             return Ok(TcpAoReloadPlan::Unsupported(format!(
                 "protected static peer {peer} changes an existing key, order, removal, or unsupported metadata"
@@ -276,6 +335,8 @@ fn prepare_tcp_ao_rotation_plan(
             saw_add_only = true;
         } else if config_keyring_is_selection(old, new) {
             saw_selection = true;
+        } else if config_keyring_is_deletion(old, new) {
+            saw_delete = true;
         } else {
             return Ok(TcpAoReloadPlan::Unsupported(format!(
                 "protected dynamic owner {}/{} changes an existing key, order, removal, or unsupported metadata",
@@ -283,9 +344,9 @@ fn prepare_tcp_ao_rotation_plan(
             )));
         }
     }
-    if saw_add_only && saw_selection {
+    if usize::from(saw_add_only) + usize::from(saw_selection) + usize::from(saw_delete) > 1 {
         return Ok(TcpAoReloadPlan::Unsupported(
-            "one TCP-AO generation may not add an MKT and select a successor together".to_string(),
+            "one TCP-AO generation may perform only one of add, select, or delete".to_string(),
         ));
     }
     let recovering_operation = match listener_status.phase {
@@ -295,9 +356,14 @@ fn prepare_tcp_ao_rotation_plan(
         TcpAoRotationPhase::Selecting
         | TcpAoRotationPhase::AwaitingPeer
         | TcpAoRotationPhase::SelectionFailed => Some(TcpAoRotationOperation::Selection),
+        TcpAoRotationPhase::Deleting | TcpAoRotationPhase::DeleteFailed => {
+            Some(TcpAoRotationOperation::Delete)
+        }
         TcpAoRotationPhase::Idle => None,
     };
-    let operation = if saw_selection {
+    let operation = if saw_delete {
+        Some(TcpAoRotationOperation::Delete)
+    } else if saw_selection {
         Some(TcpAoRotationOperation::Selection)
     } else if saw_add_only {
         Some(TcpAoRotationOperation::AddOnly)
@@ -338,11 +404,29 @@ fn prepare_tcp_ao_rotation_plan(
         };
         (key.peer, key.prefix_len, owner)
     });
+    let mut current_listener_keys =
+        current_resolved
+            .iter()
+            .filter_map(|neighbor| crate::tcp_ao_listener_key_for_neighbor(listen_addr, neighbor))
+            .chain(current.dynamic_neighbors.iter().filter_map(|range| {
+                crate::tcp_ao_listener_key_for_dynamic_range(listen_addr, range)
+            }))
+            .collect::<Vec<_>>();
+    current_listener_keys.sort_by_key(|key| {
+        let owner = match key.owner {
+            TcpAoListenerOwnerKind::Static => 0_u8,
+            TcpAoListenerOwnerKind::Dynamic => 1_u8,
+        };
+        (key.peer, key.prefix_len, owner)
+    });
+    let current_static_keyrings = current_static.into_iter().collect();
     let static_keyrings = desired_static.into_iter().collect();
     Ok(TcpAoReloadPlan::Rotation(TcpAoRotationPlan {
         generation,
         operation,
+        current_listener_keys,
         listener_keys,
+        current_static_keyrings,
         static_keyrings,
     }))
 }
@@ -356,7 +440,9 @@ async fn send_tcp_ao_preflight(
             generation: plan.generation,
             operation: plan.operation,
             listener_keys: plan.listener_keys.clone(),
+            current_listener_keys: plan.current_listener_keys.clone(),
             static_keyrings: plan.static_keyrings.clone(),
+            current_static_keyrings: plan.current_static_keyrings.clone(),
             reply,
         }
     })
@@ -372,7 +458,9 @@ async fn send_tcp_ao_apply(
             generation: plan.generation,
             operation: plan.operation,
             listener_keys: plan.listener_keys.clone(),
+            current_listener_keys: plan.current_listener_keys.clone(),
             static_keyrings: plan.static_keyrings.clone(),
+            current_static_keyrings: plan.current_static_keyrings.clone(),
             reply,
         }
     })
@@ -974,17 +1062,19 @@ pub(crate) async fn reload_config_with_tcp_ao(
                     | TcpAoRotationPhase::Selecting
                     | TcpAoRotationPhase::AwaitingPeer
                     | TcpAoRotationPhase::SelectionFailed
+                    | TcpAoRotationPhase::Deleting
+                    | TcpAoRotationPhase::DeleteFailed
             )
         });
         if retained {
             error!(%reason, "TCP-AO reload changed a retained immutable generation; halting before unrelated reload work");
             return None;
         }
-        error!(%reason, "TCP-AO reload is outside the non-destructive live-rotation phases; retaining restart-pinned runtime inventory");
+        error!(%reason, "TCP-AO reload is outside the ordered live-rotation phases; retaining restart-pinned runtime inventory");
     }
     let tcp_ao_rotation_candidate = matches!(&tcp_ao_rotation_plan, TcpAoReloadPlan::Rotation(_));
 
-    // TCP-AO edits outside the successfully committed non-destructive rotation shapes remain
+    // TCP-AO edits outside the successfully committed ordered rotation shapes remain
     // pinned. Static and dynamic pinning run in separate passes, so their
     // combination can synthesize a new authentication-boundary conflict.
     // For example, a desired reload may remove a protected dynamic range and
@@ -999,9 +1089,9 @@ pub(crate) async fn reload_config_with_tcp_ao(
     if tcp_ao_pinned_neighbors > 0 {
         error!(
             neighbors = tcp_ao_pinned_neighbors,
-            "[[neighbors]].tcp_ao is outside the live non-destructive rotation shapes: \
-             restart rustbgpd to add/remove owners or remove/edit/reorder keys. \
-             Adding and selecting in one generation is also rejected. Peer-group and policy dependencies \
+            "[[neighbors]].tcp_ao is outside the live ordered rotation shapes: \
+             restart rustbgpd to add/remove owners or edit/reorder keys. Only deprecated, \
+             unselected keys can be deleted live, and add/select/delete cannot be combined. Peer-group and policy dependencies \
              referenced by pinned TCP-AO neighbors, plus restart-required global fields \
              that affect neighbor validation, are also kept at their live startup values \
              for this reload."
@@ -1016,10 +1106,11 @@ pub(crate) async fn reload_config_with_tcp_ao(
     if pinned_dynamic_tcp_ao > 0 {
         error!(
             ranges = pinned_dynamic_tcp_ao,
-            "[[dynamic_neighbors]].tcp_ao is outside the live non-destructive rotation shapes: \
+            "[[dynamic_neighbors]].tcp_ao is outside the live ordered rotation shapes: \
              protected range CRUD and overlapping replacements remain pinned to the live \
-             snapshot. Restart rustbgpd to add, remove, move, edit, reorder, or delete \
-             dynamic TCP-AO keys; adding and selecting together is rejected."
+             snapshot. Restart rustbgpd to add, remove, move, edit, or reorder \
+             dynamic TCP-AO keys; only deprecated, unselected keys can be deleted live, \
+             and add/select/delete cannot be combined."
         );
     }
 
@@ -1046,6 +1137,9 @@ pub(crate) async fn reload_config_with_tcp_ao(
             TcpAoRotationOperation::Selection => {
                 listener.preflight_selection(desired_listener.clone()).await
             }
+            TcpAoRotationOperation::Delete => {
+                listener.preflight_delete(desired_listener.clone()).await
+            }
         };
         if let Err(error) = listener_preflight {
             mark_tcp_ao_failed(
@@ -1065,6 +1159,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
         let listener_apply = match plan.operation {
             TcpAoRotationOperation::AddOnly => listener.apply_add_only(desired_listener).await,
             TcpAoRotationOperation::Selection => listener.begin_selection(desired_listener).await,
+            TcpAoRotationOperation::Delete => listener.apply_delete(desired_listener).await,
         };
         if let Err(error) = listener_apply {
             mark_tcp_ao_failed(
@@ -1074,7 +1169,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
                 error.to_string(),
             )
             .await;
-            error!(error = %error, "TCP-AO generation failed on listener; old usable MKTs remain installed and the generation is retryable");
+            error!(error = %error, "TCP-AO generation failed on listener; retry the identical generation unless the error reports failed exact prior-inventory restoration, in which case restart rustbgpd");
             return None;
         }
         if let Err(error) = send_tcp_ao_apply(peer_mgr_tx, plan).await {
@@ -5105,6 +5200,87 @@ tcp_ao = [
         assert_eq!(retry.generation, plan.generation);
         assert_eq!(retry.listener_keys, plan.listener_keys);
         assert_eq!(retry.static_keyrings, plan.static_keyrings);
+    }
+
+    #[test]
+    fn tcp_ao_plan_deletes_only_deprecated_unselected_keys_and_reuses_failure_generation() {
+        let current_toml = baseline_toml().replace(
+            "hold_time = 90",
+            r#"hold_time = 90
+tcp_ao = [
+  { key = "old", send_id = 1, recv_id = 11, algorithm = "hmac(sha256)", deprecated = true },
+  { key = "successor", send_id = 2, recv_id = 12, algorithm = "hmac(sha256)", preferred = true }
+]"#,
+        );
+        let desired_toml = baseline_toml().replace(
+            "hold_time = 90",
+            r#"hold_time = 90
+tcp_ao = [
+  { key = "successor", send_id = 2, recv_id = 12, algorithm = "hmac(sha256)", preferred = true }
+]"#,
+        );
+        let current = Config::load_toml_with_diagnostics(&current_toml, "current").unwrap();
+        let desired = Config::load_toml_with_diagnostics(&desired_toml, "desired").unwrap();
+        let TcpAoReloadPlan::Rotation(plan) =
+            prepare_tcp_ao_rotation_plan(&current, &desired, &TcpAoRotationStatus::default())
+                .unwrap()
+        else {
+            panic!("deprecated predecessor deletion should compile as a live generation");
+        };
+        assert_eq!(plan.operation, TcpAoRotationOperation::Delete);
+        assert_eq!(plan.current_static_keyrings[0].1.0.len(), 2);
+        assert_eq!(plan.static_keyrings[0].1.0.len(), 1);
+
+        let failed = TcpAoRotationStatus {
+            desired: plan.generation,
+            applied: TcpAoRotationGeneration::STARTUP,
+            phase: TcpAoRotationPhase::DeleteFailed,
+            last_error: Some("injected session failure".to_string()),
+        };
+        let TcpAoReloadPlan::Rotation(retry) =
+            prepare_tcp_ao_rotation_plan(&current, &desired, &failed).unwrap()
+        else {
+            panic!("failed deletion should retain its exact generation");
+        };
+        assert_eq!(retry.operation, TcpAoRotationOperation::Delete);
+        assert_eq!(retry.generation, plan.generation);
+        assert_eq!(retry.current_listener_keys, plan.current_listener_keys);
+        assert_eq!(retry.listener_keys, plan.listener_keys);
+
+        let unsafe_current = current_toml.replace("deprecated = true", "deprecated = false");
+        let unsafe_current =
+            Config::load_toml_with_diagnostics(&unsafe_current, "unsafe-current").unwrap();
+        assert!(matches!(
+            prepare_tcp_ao_rotation_plan(
+                &unsafe_current,
+                &desired,
+                &TcpAoRotationStatus::default()
+            )
+            .unwrap(),
+            TcpAoReloadPlan::Unsupported(_)
+        ));
+
+        let current_v6 = Config::load_toml_with_diagnostics(
+            &current_toml.replace("10.0.0.2", "2001:db8::2"),
+            "current-v6",
+        )
+        .unwrap();
+        let desired_v6 = Config::load_toml_with_diagnostics(
+            &desired_toml.replace("10.0.0.2", "2001:db8::2"),
+            "desired-v6",
+        )
+        .unwrap();
+        let TcpAoReloadPlan::Rotation(opposite_family) =
+            prepare_tcp_ao_rotation_plan(&current_v6, &desired_v6, &TcpAoRotationStatus::default())
+                .unwrap()
+        else {
+            panic!("opposite-family static deletion must still compile as a live generation");
+        };
+        assert_eq!(opposite_family.operation, TcpAoRotationOperation::Delete);
+        assert!(opposite_family.current_listener_keys.is_empty());
+        assert!(opposite_family.listener_keys.is_empty());
+        assert_eq!(opposite_family.current_static_keyrings[0].1.0.len(), 2);
+        assert_eq!(opposite_family.static_keyrings[0].1.0.len(), 1);
     }
 
     #[test]

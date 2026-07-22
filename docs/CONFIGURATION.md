@@ -728,17 +728,27 @@ the successor as both Current and RNext with `pkt_good` strictly above that
 baseline and all authentication error counters still zero. If a peer is not
 ready, status remains `awaiting_peer` with `desired=N`, `applied=N-1`; a later
 SIGHUP must carry the identical full desired config and retries the same N.
-There is no actor-side polling. Removing/editing/reordering a key or changing a
-protected owner remains restart-required and pinned. Runtime deletion of a
-configured TCP-AO neighbor also remains rejected.
+There is no actor-side polling. After that selection/deprecation generation
+commits, a later SIGHUP may remove one or more deprecated MKTs that are neither
+Current nor RNext on any affected listener, queued child, primary session, or
+pending session. The survivor keyring must be nonempty and preserve the exact
+owner set, declaration order, key definitions, and selected MKT. Editing,
+reordering, or moving a key, deleting a non-deprecated or selected key, or
+changing a protected owner remains restart-required and pinned.
 
-If a non-destructive generation fails, installed keys remain usable and the same
-desired generation is retryable with another SIGHUP. Some successor MKTs may
-already be present; retries accept them only when their kernel-normalized key
-material is identical. If listener mutation failed partway, affected protected
-passive accepts may reject until the same generation is retried or the daemon
-restarts; a fully installed but globally uncommitted generation also remains
-fenced. Established sessions retain their prior selectable keys. Inspect per-neighbor
+If a live TCP-AO generation fails before listener mutation, after an exact
+prior-inventory restoration, or after the listener already reached the desired
+inventory, the same immutable desired generation is retryable with another
+SIGHUP. Some successor MKTs may already be present; retries accept them only
+when their kernel-normalized key material is identical. If partial listener
+deletion cannot restore the exact prior inventory, restart is required; an
+intermediate kernel subset is not a resumable generation. Affected protected
+passive accepts may reject until an eligible retry or restart, and a fully
+installed but globally uncommitted generation remains fenced. A deletion that
+may have changed any protected session closes the whole
+changed session cohort before reporting failure; failure to reset every affected
+task aborts them all. Established sessions otherwise retain their prior
+selectable keys. Inspect per-neighbor
 `tcp_ao_desired_generation`, `tcp_ao_applied_generation`,
 `tcp_ao_rotation_phase`, and `tcp_ao_rotation_error` in JSON, or the equivalent
 `TCP-AO Rotation` rows in human output.

@@ -153,6 +153,14 @@ enum TcpAoListenerCommand {
         generation: TcpAoRotationGeneration,
         reply: oneshot::Sender<std::io::Result<TcpAoRotationStatus>>,
     },
+    PreflightDelete {
+        desired: TcpAoListenerGeneration,
+        reply: oneshot::Sender<std::io::Result<()>>,
+    },
+    ApplyDelete {
+        desired: TcpAoListenerGeneration,
+        reply: oneshot::Sender<std::io::Result<TcpAoRotationStatus>>,
+    },
     MarkAwaitingPeer {
         generation: TcpAoRotationGeneration,
         detail: String,
@@ -363,6 +371,80 @@ impl TcpAoListenerHandle {
             std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
                 "TCP-AO listener metadata commit timed out",
+            )
+        })?
+    }
+
+    /// Validate a strict current-to-survivor listener generation without
+    /// mutating the listener.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when owner identity changes, a survivor is reordered
+    /// or redefined, a non-deprecated/selected key would be removed, or the
+    /// exact kernel inventory cannot be proved before the control deadline.
+    pub async fn preflight_delete(&self, desired: TcpAoListenerGeneration) -> std::io::Result<()> {
+        tokio::time::timeout(TCP_AO_ROTATION_CONTROL_TIMEOUT, async {
+            let (reply, response) = oneshot::channel();
+            self.tx
+                .send(TcpAoListenerCommand::PreflightDelete { desired, reply })
+                .await
+                .map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::BrokenPipe,
+                        "TCP-AO listener rotation task exited",
+                    )
+                })?;
+            response.await.map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "TCP-AO listener deletion preflight reply dropped",
+                )
+            })?
+        })
+        .await
+        .map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "TCP-AO listener deletion preflight timed out",
+            )
+        })?
+    }
+
+    /// Remove one immutable set of deprecated, unselected listener MKTs and
+    /// retain the exact adjacent old inventory for queued-child repair.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when control fails or exact pre/post-delete kernel
+    /// inventory cannot be proved.
+    pub async fn apply_delete(
+        &self,
+        desired: TcpAoListenerGeneration,
+    ) -> std::io::Result<TcpAoRotationStatus> {
+        tokio::time::timeout(TCP_AO_ROTATION_CONTROL_TIMEOUT, async {
+            let (reply, response) = oneshot::channel();
+            self.tx
+                .send(TcpAoListenerCommand::ApplyDelete { desired, reply })
+                .await
+                .map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::BrokenPipe,
+                        "TCP-AO listener rotation task exited",
+                    )
+                })?;
+            response.await.map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "TCP-AO listener deletion reply dropped",
+                )
+            })?
+        })
+        .await
+        .map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "TCP-AO listener deletion control timed out",
             )
         })?
     }
@@ -751,98 +833,112 @@ impl BgpListener {
     pub async fn run(mut self) {
         loop {
             tokio::select! {
-            command = self.rotation_rx.recv() => {
-                let Some(command) = command else {
-                    // Every external handle was dropped. Accept service remains
-                    // valid at the last applied immutable generation.
-                    continue;
-                };
-                match command {
-                    TcpAoListenerCommand::PreflightAddOnly { desired, reply } => {
-                        let result = self.preflight_add_only_generation(&desired);
-                        let _ = reply.send(result);
-                    }
-                    TcpAoListenerCommand::ApplyAddOnly { desired, reply } => {
-                        let result = self.apply_add_only_generation(&desired);
-                        let _ = reply.send(result);
-                    }
-                    TcpAoListenerCommand::PreflightSelection { desired, reply } => {
-                        let result = self.preflight_selection_generation(&desired);
-                        let _ = reply.send(result);
-                    }
-                    TcpAoListenerCommand::BeginSelection { desired, reply } => {
-                        let result = self.begin_selection_generation(&desired);
-                        let _ = reply.send(result);
-                    }
-                    TcpAoListenerCommand::FinalizeSelection { generation, reply } => {
-                        let result = self.finalize_selection_generation(generation);
-                        let _ = reply.send(result);
-                    }
-                    TcpAoListenerCommand::MarkAwaitingPeer { generation, detail, reply } => {
-                        let result = self.mark_awaiting_peer_generation(generation, detail);
-                        let _ = reply.send(result);
-                    }
-                    TcpAoListenerCommand::MarkDependentFailure { generation, error, reply } => {
-                        let result = if generation == self.tcp_ao_generation
-                            && generation != self.tcp_ao_committed_generation
-                        {
-                            let mut status = self.rotation_status_tx.borrow().clone();
-                            status.desired = generation;
-                            status.applied = self.tcp_ao_committed_generation;
-                            status.phase = match status.phase {
-                                TcpAoRotationPhase::Selecting
-                                | TcpAoRotationPhase::AwaitingPeer
-                                | TcpAoRotationPhase::SelectionFailed => {
-                                    TcpAoRotationPhase::SelectionFailed
-                                }
-                                _ => TcpAoRotationPhase::AddOnlyFailed,
-                            };
-                            status.last_error = Some(error);
-                            self.rotation_status_tx.send_replace(status);
-                            Ok(())
-                        } else {
-                            Err(std::io::Error::new(
-                                std::io::ErrorKind::InvalidInput,
-                                "TCP-AO dependent-failure generation is not the installed uncommitted generation",
-                            ))
+                command = self.rotation_rx.recv() => {
+                    let Some(command) = command else {
+                        // Every external handle was dropped. Accept service
+                        // remains valid at the last applied generation.
+                        continue;
+                    };
+                    self.handle_rotation_command(command);
+                }
+                accepted = self.listener.accept() => match accepted {
+                    Ok((stream, peer_addr)) => {
+                        let peer_ip = peer_addr.ip();
+                        debug!(%peer_ip, "inbound TCP connection");
+                        let tcp_ao_info = match self.inspect_tcp_ao_accept(&stream, peer_ip) {
+                            Ok(info) => info,
+                            Err(err) => {
+                                warn!(peer = %peer_ip, error = %err, "rejecting TCP-AO-protected inbound connection");
+                                continue;
+                            }
                         };
-                        let _ = reply.send(result);
+                        let conn = AcceptedConnection {
+                            stream,
+                            peer_addr,
+                            tcp_ao_generation: tcp_ao_info.as_ref().map(|_| self.tcp_ao_generation),
+                            tcp_ao_info,
+                        };
+                        if self.accept_tx.send(conn).await.is_err() {
+                            warn!("accept channel closed, listener shutting down");
+                            return;
+                        }
                     }
-                    TcpAoListenerCommand::AcknowledgeGlobalCommit { generation, reply } => {
-                        let result = self.acknowledge_global_commit_generation(generation);
-                        let _ = reply.send(result);
-                    }
+                    Err(e) => error!(error = %e, "BGP listener accept error"),
                 }
             }
-            accepted = self.listener.accept() => match accepted {
-                Ok((stream, peer_addr)) => {
-                    let peer_ip = peer_addr.ip();
-                    debug!(%peer_ip, "inbound TCP connection");
-                    let tcp_ao_info = match self.inspect_tcp_ao_accept(&stream, peer_ip) {
-                        Ok(info) => info,
-                        Err(err) => {
-                            warn!(peer = %peer_ip, error = %err, "rejecting TCP-AO-protected inbound connection");
-                            continue;
-                        }
-                    };
-                    let conn = AcceptedConnection {
-                        stream,
-                        peer_addr,
-                        tcp_ao_generation: tcp_ao_info
-                            .as_ref()
-                            .map(|_| self.tcp_ao_generation),
-                        tcp_ao_info,
-                    };
-                    if self.accept_tx.send(conn).await.is_err() {
-                        warn!("accept channel closed, listener shutting down");
-                        return;
-                    }
-                }
-                Err(e) => {
-                    error!(error = %e, "BGP listener accept error");
-                }
-            }}
         }
+    }
+
+    fn handle_rotation_command(&mut self, command: TcpAoListenerCommand) {
+        match command {
+            TcpAoListenerCommand::PreflightAddOnly { desired, reply } => {
+                let _ = reply.send(self.preflight_add_only_generation(&desired));
+            }
+            TcpAoListenerCommand::ApplyAddOnly { desired, reply } => {
+                let _ = reply.send(self.apply_add_only_generation(&desired));
+            }
+            TcpAoListenerCommand::PreflightSelection { desired, reply } => {
+                let _ = reply.send(self.preflight_selection_generation(&desired));
+            }
+            TcpAoListenerCommand::BeginSelection { desired, reply } => {
+                let _ = reply.send(self.begin_selection_generation(&desired));
+            }
+            TcpAoListenerCommand::FinalizeSelection { generation, reply } => {
+                let _ = reply.send(self.finalize_selection_generation(generation));
+            }
+            TcpAoListenerCommand::PreflightDelete { desired, reply } => {
+                let _ = reply.send(self.preflight_delete_generation(&desired));
+            }
+            TcpAoListenerCommand::ApplyDelete { desired, reply } => {
+                let _ = reply.send(self.apply_delete_generation(&desired));
+            }
+            TcpAoListenerCommand::MarkAwaitingPeer {
+                generation,
+                detail,
+                reply,
+            } => {
+                let _ = reply.send(self.mark_awaiting_peer_generation(generation, detail));
+            }
+            TcpAoListenerCommand::MarkDependentFailure {
+                generation,
+                error,
+                reply,
+            } => {
+                let result = self.mark_dependent_failure_generation(generation, error);
+                let _ = reply.send(result);
+            }
+            TcpAoListenerCommand::AcknowledgeGlobalCommit { generation, reply } => {
+                let _ = reply.send(self.acknowledge_global_commit_generation(generation));
+            }
+        }
+    }
+
+    fn mark_dependent_failure_generation(
+        &mut self,
+        generation: TcpAoRotationGeneration,
+        error: String,
+    ) -> std::io::Result<()> {
+        if generation != self.tcp_ao_generation || generation == self.tcp_ao_committed_generation {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "TCP-AO dependent-failure generation is not the installed uncommitted generation",
+            ));
+        }
+        let mut status = self.rotation_status_tx.borrow().clone();
+        status.desired = generation;
+        status.applied = self.tcp_ao_committed_generation;
+        status.phase = match status.phase {
+            TcpAoRotationPhase::Selecting
+            | TcpAoRotationPhase::AwaitingPeer
+            | TcpAoRotationPhase::SelectionFailed => TcpAoRotationPhase::SelectionFailed,
+            TcpAoRotationPhase::Deleting | TcpAoRotationPhase::DeleteFailed => {
+                TcpAoRotationPhase::DeleteFailed
+            }
+            _ => TcpAoRotationPhase::AddOnlyFailed,
+        };
+        status.last_error = Some(error);
+        self.rotation_status_tx.send_replace(status);
+        Ok(())
     }
 
     fn preflight_selection_generation(
@@ -998,6 +1094,260 @@ impl BgpListener {
             last_error: Some(detail),
         });
         Ok(())
+    }
+
+    fn preflight_delete_generation(
+        &self,
+        desired: &TcpAoListenerGeneration,
+    ) -> std::io::Result<()> {
+        self.preflight_delete_generation_with(desired, verify_complete_listener_inventory)
+    }
+
+    fn preflight_delete_generation_with<F>(
+        &self,
+        desired: &TcpAoListenerGeneration,
+        verify_exact: F,
+    ) -> std::io::Result<()>
+    where
+        F: FnOnce(&TcpListener, &[crate::socket_opts::TcpAoMktOwner<'_>]) -> std::io::Result<()>,
+    {
+        if desired.generation == self.tcp_ao_generation
+            && desired.keys.as_ref() == self.tcp_ao_keys.keys.as_slice()
+        {
+            if self.pending_tcp_ao_generation.as_ref() != Some(desired) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "TCP-AO deletion retry lacks its retained listener generation",
+                ));
+            }
+            let owners = desired
+                .keys
+                .iter()
+                .map(|owner| crate::socket_opts::TcpAoMktOwner {
+                    owner: owner.owner,
+                    peer: owner.peer,
+                    prefix_len: owner.prefix_len,
+                    keyring: &owner.config,
+                })
+                .collect::<Vec<_>>();
+            return verify_exact(&self.listener, &owners);
+        }
+        if self.tcp_ao_generation.next() == Some(desired.generation)
+            && desired.keys.as_ref() == self.tcp_ao_keys.keys.as_slice()
+        {
+            if self
+                .pending_tcp_ao_generation
+                .as_ref()
+                .is_some_and(|retained| retained != desired)
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "TCP-AO deletion retry changed its immutable listener inventory",
+                ));
+            }
+            let owners = desired
+                .keys
+                .iter()
+                .map(|owner| crate::socket_opts::TcpAoMktOwner {
+                    owner: owner.owner,
+                    peer: owner.peer,
+                    prefix_len: owner.prefix_len,
+                    keyring: &owner.config,
+                })
+                .collect::<Vec<_>>();
+            return verify_exact(&self.listener, &owners);
+        }
+        if self
+            .pending_tcp_ao_generation
+            .as_ref()
+            .is_some_and(|retained| retained != desired)
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "TCP-AO deletion retry changed its immutable listener inventory",
+            ));
+        }
+        plan_delete_listener_generation(
+            &self.tcp_ao_keys.keys,
+            desired.keys.as_ref(),
+            self.tcp_ao_generation,
+            desired.generation,
+        )?;
+        let current = self
+            .tcp_ao_keys
+            .keys
+            .iter()
+            .map(|owner| crate::socket_opts::TcpAoMktOwner {
+                owner: owner.owner,
+                peer: owner.peer,
+                prefix_len: owner.prefix_len,
+                keyring: &owner.config,
+            })
+            .collect::<Vec<_>>();
+        let desired = desired
+            .keys
+            .iter()
+            .map(|owner| crate::socket_opts::TcpAoMktOwner {
+                owner: owner.owner,
+                peer: owner.peer,
+                prefix_len: owner.prefix_len,
+                keyring: &owner.config,
+            })
+            .collect::<Vec<_>>();
+        crate::socket_opts::preflight_tcp_ao_delete(&self.listener, &current, &desired, None)
+            .map(drop)
+    }
+
+    fn apply_delete_generation(
+        &mut self,
+        desired: &TcpAoListenerGeneration,
+    ) -> std::io::Result<TcpAoRotationStatus> {
+        self.apply_delete_generation_with(desired, verify_complete_listener_inventory)
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "listener deletion keeps exact apply, adjacent-generation retention, and prior-inventory restoration in one transaction boundary"
+    )]
+    fn apply_delete_generation_with<F>(
+        &mut self,
+        desired: &TcpAoListenerGeneration,
+        verify_exact: F,
+    ) -> std::io::Result<TcpAoRotationStatus>
+    where
+        F: FnOnce(&TcpListener, &[crate::socket_opts::TcpAoMktOwner<'_>]) -> std::io::Result<()>,
+    {
+        if desired.generation == self.tcp_ao_generation
+            && desired.keys.as_ref() == self.tcp_ao_keys.keys.as_slice()
+        {
+            self.preflight_delete_generation_with(desired, verify_exact)?;
+            let status = TcpAoRotationStatus {
+                desired: desired.generation,
+                applied: self.tcp_ao_committed_generation,
+                phase: TcpAoRotationPhase::Deleting,
+                last_error: None,
+            };
+            self.rotation_status_tx.send_replace(status.clone());
+            return Ok(status);
+        }
+        if self.tcp_ao_generation.next() == Some(desired.generation)
+            && desired.keys.as_ref() == self.tcp_ao_keys.keys.as_slice()
+        {
+            self.preflight_delete_generation_with(desired, verify_exact)?;
+            retain_pending_listener_generation(&mut self.pending_tcp_ao_generation, desired)?;
+            self.previous_tcp_ao_generation = None;
+            self.tcp_ao_generation = desired.generation;
+            let status = TcpAoRotationStatus {
+                desired: desired.generation,
+                applied: self.tcp_ao_committed_generation,
+                phase: TcpAoRotationPhase::Deleting,
+                last_error: None,
+            };
+            self.rotation_status_tx.send_replace(status.clone());
+            return Ok(status);
+        }
+
+        plan_delete_listener_generation(
+            &self.tcp_ao_keys.keys,
+            desired.keys.as_ref(),
+            self.tcp_ao_generation,
+            desired.generation,
+        )?;
+        retain_pending_listener_generation(&mut self.pending_tcp_ao_generation, desired)?;
+        let current = self
+            .tcp_ao_keys
+            .keys
+            .iter()
+            .map(|owner| crate::socket_opts::TcpAoMktOwner {
+                owner: owner.owner,
+                peer: owner.peer,
+                prefix_len: owner.prefix_len,
+                keyring: &owner.config,
+            })
+            .collect::<Vec<_>>();
+        let desired_owners = desired
+            .keys
+            .iter()
+            .map(|owner| crate::socket_opts::TcpAoMktOwner {
+                owner: owner.owner,
+                peer: owner.peer,
+                prefix_len: owner.prefix_len,
+                keyring: &owner.config,
+            })
+            .collect::<Vec<_>>();
+        let result = crate::socket_opts::preflight_tcp_ao_delete(
+            &self.listener,
+            &current,
+            &desired_owners,
+            None,
+        )
+        .map_err(crate::socket_opts::TcpAoDeleteApplyError::before_mutation)
+        .and_then(|preflight| {
+            crate::socket_opts::apply_tcp_ao_delete(&self.listener, preflight, &desired_owners)
+        });
+
+        match result {
+            Ok(None) => {
+                let previous_keys = std::mem::replace(
+                    &mut self.tcp_ao_keys,
+                    TcpAoListenerKeyIndex::new(desired.keys.to_vec()),
+                );
+                self.previous_tcp_ao_generation = Some(TcpAoPreviousListenerGeneration {
+                    generation: self.tcp_ao_generation,
+                    keys: previous_keys,
+                });
+                self.tcp_ao_generation = desired.generation;
+                let status = TcpAoRotationStatus {
+                    desired: desired.generation,
+                    applied: self.tcp_ao_committed_generation,
+                    phase: TcpAoRotationPhase::Deleting,
+                    last_error: None,
+                };
+                self.rotation_status_tx.send_replace(status.clone());
+                Ok(status)
+            }
+            Ok(Some(_)) => unreachable!("listener deletion cannot return a connected snapshot"),
+            Err(error) => {
+                let mutation_started = error.mutation_started();
+                let mut detail = error.into_inner().to_string();
+                if mutation_started {
+                    // Reconstitute the exact old listener inventory before
+                    // returning whenever possible. The removed MKTs were
+                    // already deprecated and unselected; restoring them keeps
+                    // the last committed generation usable and makes the
+                    // identical deletion retryable.
+                    let recovery = crate::socket_opts::preflight_tcp_ao_add_only(
+                        &self.listener,
+                        &[],
+                        &current,
+                        None,
+                    )
+                    .and_then(|preflight| {
+                        crate::socket_opts::apply_tcp_ao_add_only(
+                            &self.listener,
+                            preflight,
+                            &current,
+                            None,
+                        )
+                        .map(drop)
+                        .map_err(crate::socket_opts::TcpAoAddOnlyApplyError::into_inner)
+                    });
+                    if let Err(recovery) = recovery {
+                        detail = format!(
+                            "{detail}; failed to restore the exact prior listener inventory: {recovery}"
+                        );
+                    }
+                }
+                let status = TcpAoRotationStatus {
+                    desired: desired.generation,
+                    applied: self.tcp_ao_committed_generation,
+                    phase: TcpAoRotationPhase::DeleteFailed,
+                    last_error: Some(detail.clone()),
+                };
+                self.rotation_status_tx.send_replace(status);
+                Err(std::io::Error::other(detail))
+            }
+        }
     }
 
     fn apply_add_only_generation(
@@ -1173,10 +1523,7 @@ impl BgpListener {
                     keyring: &owner.config,
                 })
                 .collect::<Vec<_>>();
-            drop(crate::socket_opts::capture_tcp_ao_complete_owned_receipt(
-                listener, &owners,
-            )?);
-            Ok(())
+            verify_complete_listener_inventory(listener, &owners)
         })
     }
 
@@ -1236,6 +1583,11 @@ impl BgpListener {
         };
         let key = owner;
         let covering_owners = self.tcp_ao_keys.owned_union(peer_ip);
+        let previous_delete_owners = accepted_previous_delete_owners(
+            &covering_owners,
+            self.previous_tcp_ao_generation.as_ref(),
+            self.tcp_ao_generation,
+        );
         let previous_key_counts = accepted_previous_key_counts(
             &covering_owners,
             self.previous_tcp_ao_generation.as_ref(),
@@ -1260,11 +1612,14 @@ impl BgpListener {
             previous_key_counts.as_deref(),
         )?;
         let accepted =
-            crate::socket_opts::inspect_tcp_ao_accepted_generation(stream, &receipt, peer_ip)?;
-        let (initial, reconcile_previous) = match accepted {
-            crate::socket_opts::TcpAoAcceptedGeneration::Current(info) => (info, false),
-            crate::socket_opts::TcpAoAcceptedGeneration::Previous(info) => (info, true),
-        };
+            crate::socket_opts::inspect_tcp_ao_accepted_generation(stream, &receipt, peer_ip);
+        let (initial, reconcile_previous) = resolve_accepted_tcp_ao_generation(
+            accepted,
+            previous_delete_owners.as_deref(),
+            |previous| {
+                self.reconcile_queued_tcp_ao_deletion(stream, peer_ip, previous, &receipt_owners)
+            },
+        )?;
         // Validate the handshake-selected Current and initial RNext before
         // mutating either selection. Both must identify the resolved owner's
         // inherited MKT; a deprecated key remains valid when peer-selected.
@@ -1314,6 +1669,75 @@ impl BgpListener {
         );
         Ok(Some(info))
     }
+
+    fn reconcile_queued_tcp_ao_deletion(
+        &self,
+        stream: &TcpStream,
+        peer_ip: IpAddr,
+        previous: &[&TcpAoListenerKey],
+        desired: &[crate::socket_opts::TcpAoMktOwner<'_>],
+    ) -> std::io::Result<TcpAoInfoSnapshot> {
+        let previous_owners = previous
+            .iter()
+            .map(|owned| crate::socket_opts::TcpAoMktOwner {
+                owner: owned.owner,
+                peer: owned.peer,
+                prefix_len: owned.prefix_len,
+                keyring: &owned.config,
+            })
+            .collect::<Vec<_>>();
+        let preflight = crate::socket_opts::preflight_tcp_ao_delete(
+            stream,
+            &previous_owners,
+            desired,
+            Some(peer_ip),
+        )?;
+        let repaired = crate::socket_opts::apply_tcp_ao_delete(stream, preflight, desired)
+            .map_err(crate::socket_opts::TcpAoDeleteApplyError::into_inner)?
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "TCP-AO queued-child deletion returned no connected snapshot",
+                )
+            })?;
+        info!(
+            peer = %peer_ip,
+            generation = self.tcp_ao_generation.as_u64(),
+            "reconciled queued TCP-AO child through adjacent deletion generation"
+        );
+        Ok(repaired)
+    }
+}
+
+fn verify_complete_listener_inventory(
+    listener: &TcpListener,
+    owners: &[crate::socket_opts::TcpAoMktOwner<'_>],
+) -> std::io::Result<()> {
+    match crate::socket_opts::capture_tcp_ao_complete_owned_receipt(listener, owners) {
+        Ok(_) => Ok(()),
+        Err(error) if owners.is_empty() && error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn resolve_accepted_tcp_ao_generation<F>(
+    accepted: std::io::Result<crate::socket_opts::TcpAoAcceptedGeneration>,
+    previous_delete_owners: Option<&[&TcpAoListenerKey]>,
+    repair_deleted_child: F,
+) -> std::io::Result<(TcpAoInfoSnapshot, bool)>
+where
+    F: FnOnce(&[&TcpAoListenerKey]) -> std::io::Result<TcpAoInfoSnapshot>,
+{
+    match accepted {
+        Ok(crate::socket_opts::TcpAoAcceptedGeneration::Current(info)) => Ok((info, false)),
+        Ok(crate::socket_opts::TcpAoAcceptedGeneration::Previous(info)) => Ok((info, true)),
+        Err(current_error) => {
+            let Some(previous) = previous_delete_owners else {
+                return Err(current_error);
+            };
+            repair_deleted_child(previous).map(|repaired| (repaired, false))
+        }
+    }
 }
 
 fn accepted_previous_key_counts(
@@ -1341,6 +1765,44 @@ fn accepted_previous_key_counts(
             Some(prior.config.0.len())
         })
         .collect()
+}
+
+fn accepted_previous_delete_owners<'a>(
+    current: &[&TcpAoListenerKey],
+    previous: Option<&'a TcpAoPreviousListenerGeneration>,
+    current_generation: TcpAoRotationGeneration,
+) -> Option<Vec<&'a TcpAoListenerKey>> {
+    let previous = previous?;
+    if previous.generation.next() != Some(current_generation) {
+        return None;
+    }
+    let previous_covering = previous
+        .keys
+        .keys
+        .iter()
+        .filter(|owner| {
+            current.iter().any(|candidate| {
+                listener_owner_identity(candidate) == listener_owner_identity(owner)
+            })
+        })
+        .collect::<Vec<_>>();
+    if previous_covering.len() != current.len() {
+        return None;
+    }
+    let mut removed = false;
+    for current_owner in current {
+        let mut matches = previous_covering.iter().filter(|previous_owner| {
+            listener_owner_identity(previous_owner) == listener_owner_identity(current_owner)
+        });
+        let previous_owner = *matches.next()?;
+        if matches.next().is_some() {
+            return None;
+        }
+        let survivors =
+            deletion_survivor_indices(&previous_owner.config, &current_owner.config).ok()?;
+        removed |= survivors.len() != previous_owner.config.0.len();
+    }
+    removed.then_some(previous_covering)
 }
 
 fn listener_owner_identity(key: &TcpAoListenerKey) -> (TcpAoListenerOwnerKind, IpAddr, u8) {
@@ -1418,6 +1880,105 @@ fn validate_selection_progress(
                 "TCP-AO selection progress changed kernel MKT identity or successor preference",
             ));
         }
+    }
+    Ok(())
+}
+
+fn deletion_survivor_indices(
+    current: &TcpAoKeyring,
+    desired: &TcpAoKeyring,
+) -> std::io::Result<Vec<usize>> {
+    if desired.0.is_empty() || desired.0.len() > current.0.len() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "TCP-AO deletion requires a nonempty survivor keyring",
+        ));
+    }
+    let mut survivors = Vec::with_capacity(desired.0.len());
+    let mut search_from = 0;
+    for desired_key in &desired.0 {
+        let matches = current
+            .0
+            .iter()
+            .enumerate()
+            .skip(search_from)
+            .filter(|(_, current_key)| *current_key == desired_key)
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        if matches.len() != 1 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "TCP-AO deletion reorders, redefines, duplicates, or adds an MKT",
+            ));
+        }
+        survivors.push(matches[0]);
+        search_from = matches[0] + 1;
+    }
+    if current.selected() != desired.selected() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "TCP-AO deletion may not remove or change the selected MKT",
+        ));
+    }
+    if current
+        .0
+        .iter()
+        .enumerate()
+        .any(|(index, key)| !survivors.contains(&index) && !key.deprecated)
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "TCP-AO deletion may remove only deprecated MKTs",
+        ));
+    }
+    Ok(survivors)
+}
+
+fn plan_delete_listener_generation(
+    current: &[TcpAoListenerKey],
+    desired: &[TcpAoListenerKey],
+    applied_generation: TcpAoRotationGeneration,
+    desired_generation: TcpAoRotationGeneration,
+) -> std::io::Result<()> {
+    if applied_generation.next() != Some(desired_generation) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "TCP-AO deletion generation is not the immediate applied successor",
+        ));
+    }
+    let current_identities = current
+        .iter()
+        .map(listener_owner_identity)
+        .collect::<HashSet<_>>();
+    let desired_identities = desired
+        .iter()
+        .map(listener_owner_identity)
+        .collect::<HashSet<_>>();
+    if current_identities.len() != current.len()
+        || desired_identities.len() != desired.len()
+        || current_identities != desired_identities
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "TCP-AO deletion may not add, remove, move, or duplicate listener owners",
+        ));
+    }
+    let mut removed = false;
+    for current_owner in current {
+        let desired_owner = desired
+            .iter()
+            .find(|candidate| {
+                listener_owner_identity(candidate) == listener_owner_identity(current_owner)
+            })
+            .expect("owner identity sets were compared");
+        let survivors = deletion_survivor_indices(&current_owner.config, &desired_owner.config)?;
+        removed |= survivors.len() != current_owner.config.0.len();
+    }
+    if !removed {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "TCP-AO deletion generation does not remove an MKT",
+        ));
     }
     Ok(())
 }
@@ -1925,6 +2486,163 @@ mod tests {
     }
 
     #[test]
+    fn deletion_generation_keeps_owner_and_selection_and_removes_only_deprecated_keys() {
+        let mut current = tcp_ao_owner();
+        current.config.0[0].deprecated = true;
+        let mut successor = current.config.0[0].clone();
+        successor.key = "successor".into();
+        successor.send_id = 11;
+        successor.recv_id = 13;
+        successor.deprecated = false;
+        successor.preferred = true;
+        current.config.0.push(successor.clone());
+        let mut desired = current.clone();
+        desired.config.0.remove(0);
+
+        plan_delete_listener_generation(
+            std::slice::from_ref(&current),
+            std::slice::from_ref(&desired),
+            TcpAoRotationGeneration::STARTUP,
+            TcpAoRotationGeneration::new(2).unwrap(),
+        )
+        .unwrap();
+
+        let mut unsafe_current = current.clone();
+        unsafe_current.config.0[0].deprecated = false;
+        assert!(
+            plan_delete_listener_generation(
+                &[unsafe_current],
+                std::slice::from_ref(&desired),
+                TcpAoRotationGeneration::STARTUP,
+                TcpAoRotationGeneration::new(2).unwrap(),
+            )
+            .is_err()
+        );
+        let mut moved = desired;
+        moved.peer = "192.0.2.2".parse().unwrap();
+        assert!(
+            plan_delete_listener_generation(
+                &[current],
+                &[moved],
+                TcpAoRotationGeneration::STARTUP,
+                TcpAoRotationGeneration::new(2).unwrap(),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn accepted_deletion_fallback_retains_complete_overlapping_owner_superset() {
+        let accepted_peer: IpAddr = "192.0.2.9".parse().unwrap();
+        let mut covering = TcpAoListenerKey {
+            owner: TcpAoListenerOwnerKind::Dynamic,
+            peer: "192.0.2.0".parse().unwrap(),
+            prefix_len: 24,
+            config: tcp_ao_config(),
+        };
+        covering.config.0[0].deprecated = true;
+        let mut covering_successor = covering.config.0[0].clone();
+        covering_successor.key = "covering-successor".into();
+        covering_successor.send_id = 2;
+        covering_successor.recv_id = 2;
+        covering_successor.deprecated = false;
+        covering_successor.preferred = true;
+        covering.config.0.push(covering_successor);
+
+        let mut exact = tcp_ao_owner();
+        exact.peer = accepted_peer;
+        exact.config.0[0].send_id = 7;
+        exact.config.0[0].recv_id = 9;
+        let previous_keys = vec![covering.clone(), exact.clone()];
+        let mut desired_covering = covering;
+        desired_covering.config.0.remove(0);
+        let current_index = TcpAoListenerKeyIndex::new(vec![desired_covering, exact.clone()]);
+        let current_union = current_index.owned_union(accepted_peer);
+        assert_eq!(
+            current_union.len(),
+            2,
+            "the current receipt must be a union"
+        );
+        let previous = TcpAoPreviousListenerGeneration {
+            generation: TcpAoRotationGeneration::STARTUP,
+            keys: TcpAoListenerKeyIndex::new(previous_keys),
+        };
+        let fallback = accepted_previous_delete_owners(
+            &current_union,
+            Some(&previous),
+            TcpAoRotationGeneration::new(2).unwrap(),
+        )
+        .expect("the exact adjacent superset must remain repairable");
+        assert_eq!(fallback.len(), 2);
+        assert_eq!(
+            fallback
+                .iter()
+                .map(|owner| owner.config.0.len())
+                .sum::<usize>(),
+            3
+        );
+
+        let incomplete_previous = TcpAoPreviousListenerGeneration {
+            generation: TcpAoRotationGeneration::STARTUP,
+            keys: TcpAoListenerKeyIndex::new(vec![exact]),
+        };
+        assert!(
+            accepted_previous_delete_owners(
+                &current_union,
+                Some(&incomplete_previous),
+                TcpAoRotationGeneration::new(2).unwrap(),
+            )
+            .is_none(),
+            "dropping a covering owner must make the adjacent repair fail closed"
+        );
+    }
+
+    #[test]
+    fn accepted_child_bridge_invokes_exact_adjacent_deletion_repair() {
+        let covering = TcpAoListenerKey {
+            owner: TcpAoListenerOwnerKind::Dynamic,
+            peer: "192.0.2.0".parse().unwrap(),
+            prefix_len: 24,
+            config: tcp_ao_config(),
+        };
+        let exact = tcp_ao_owner();
+        let previous = vec![&covering, &exact];
+        let called = std::cell::Cell::new(false);
+        let expected = tcp_ao_info(2, 41);
+
+        let (repaired, reconcile_add_only) = resolve_accepted_tcp_ao_generation(
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "child is not the current deletion generation",
+            )),
+            Some(&previous),
+            |owners| {
+                called.set(true);
+                assert_eq!(
+                    owners.len(),
+                    2,
+                    "repair must receive the complete owner union"
+                );
+                Ok(expected.clone())
+            },
+        )
+        .unwrap();
+        assert!(called.get());
+        assert_eq!(repaired, expected);
+        assert!(!reconcile_add_only);
+
+        let without_adjacent = resolve_accepted_tcp_ao_generation(
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "child is not current",
+            )),
+            None,
+            |_| panic!("repair must not run without an exact adjacent inventory"),
+        );
+        assert!(without_adjacent.is_err());
+    }
+
+    #[test]
     fn add_only_generation_rejects_preferred_successor_and_owner_replacement() {
         let old = tcp_ao_owner();
         let mut preferred = old.clone();
@@ -2010,6 +2728,70 @@ mod tests {
         Arc::make_mut(&mut changed.keys)[0].config.0[1].key = "different-successor".into();
         assert!(retain_pending_listener_generation(&mut retained, &changed).is_err());
         assert_eq!(retained.as_ref(), Some(&desired));
+    }
+
+    #[tokio::test]
+    async fn deletion_generation_advances_when_only_opposite_family_static_socket_changes() {
+        let (accept_tx, _accept_rx) = mpsc::channel(1);
+        let mut listener = BgpListener::bind("127.0.0.1:0".parse().unwrap(), accept_tx)
+            .await
+            .unwrap();
+        let startup = TcpAoRotationGeneration::STARTUP;
+        let generation = TcpAoRotationGeneration::new(2).unwrap();
+        let desired = TcpAoListenerGeneration::new(generation, Vec::new());
+        let verification_calls = std::cell::Cell::new(0_u8);
+
+        listener
+            .preflight_delete_generation_with(&desired, |_socket, owners| {
+                verification_calls.set(verification_calls.get() + 1);
+                assert!(owners.is_empty());
+                Ok(())
+            })
+            .unwrap();
+        let staged = listener
+            .apply_delete_generation_with(&desired, |_socket, owners| {
+                verification_calls.set(verification_calls.get() + 1);
+                assert!(owners.is_empty());
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(verification_calls.get(), 2);
+        assert_eq!(listener.tcp_ao_generation, generation);
+        assert_eq!(listener.tcp_ao_committed_generation, startup);
+        assert_eq!(listener.pending_tcp_ao_generation.as_ref(), Some(&desired));
+        assert!(listener.previous_tcp_ao_generation.is_none());
+        assert_eq!(staged.desired, generation);
+        assert_eq!(staged.applied, startup);
+        assert_eq!(staged.phase, TcpAoRotationPhase::Deleting);
+
+        let committed = listener
+            .acknowledge_global_commit_generation_with(generation, |_socket, _desired| Ok(()))
+            .unwrap();
+        assert_eq!(committed.applied, generation);
+        assert_eq!(committed.phase, TcpAoRotationPhase::Idle);
+
+        let (accept_tx, _accept_rx) = mpsc::channel(1);
+        let mut rejected = BgpListener::bind("127.0.0.1:0".parse().unwrap(), accept_tx)
+            .await
+            .unwrap();
+        let injected = || std::io::Error::other("injected exact-inventory rejection");
+        assert!(
+            rejected
+                .preflight_delete_generation_with(&desired, |_socket, _owners| Err(injected()))
+                .is_err()
+        );
+        assert!(
+            rejected
+                .apply_delete_generation_with(&desired, |_socket, _owners| Err(injected()))
+                .is_err()
+        );
+        assert_eq!(rejected.tcp_ao_generation, startup);
+        assert_eq!(rejected.tcp_ao_committed_generation, startup);
+        assert!(rejected.pending_tcp_ao_generation.is_none());
+        assert_eq!(
+            rejected.rotation_status_tx.borrow().phase,
+            TcpAoRotationPhase::Idle
+        );
     }
 
     #[tokio::test]

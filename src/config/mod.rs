@@ -2071,7 +2071,7 @@ pub enum ConfigFieldImpact {
 ///   executor rebuild the session.
 /// - `tcp_ao`: the field-only transaction/diff classifier remains
 ///   `RestartRequired`. Only the SIGHUP coordinator can prove that a complete
-///   candidate is a supported non-destructive generation shape and apply it
+///   candidate is a supported ordered generation shape and apply it
 ///   across the listener plus every affected managed session.
 fn config_field_impact(field: &str) -> Option<(ConfigFieldImpact, &'static str)> {
     Some(match field {
@@ -2321,7 +2321,7 @@ pub fn neighbor_change_hot_applicable(old: &Neighbor, new: &Neighbor) -> bool {
 /// configuration are reported in `changed`. TCP-AO edits are deliberately
 /// excluded here because they require listener/session-wide coordination:
 /// `diff_config` reports them through `neighbor_tcp_ao_changed`, while the
-/// reload coordinator either commits a supported non-destructive generation or
+/// reload coordinator either commits a supported ordered generation or
 /// pins the unsupported edit rather than rebuilding one peer against stale
 /// listener MKTs.
 pub fn diff_neighbors(old: &[Neighbor], new: &[Neighbor]) -> NeighborDiff {

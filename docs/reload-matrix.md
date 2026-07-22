@@ -107,7 +107,7 @@ reload).
 | `max_prefixes` | live | Threshold re-evaluated on every received UPDATE. |
 | `max_prefix_restart_seconds` | live | Manager-owned hold-down policy. A successful value change hot-applies without touching the session and invalidates any countdown from an older incident; a rejected change preserves it. The field does not retroactively arm an indefinitely latched peer. |
 | `md5_password` | live (effective next session) | **TCP-MD5 keys are per-socket.** On SIGHUP the reconciler rebuilds the session immediately, so the new key is installed on the rebuilt socket right away. |
-| `tcp_ao` | live (non-destructive generations) / otherwise restart-required | SIGHUP can append non-preferred successor MKTs, then on a later SIGHUP select an already-installed successor as local RNext. Selection is one-shot observed across the affected protected-session cohort; predecessor deprecation metadata commits in that same immutable generation only after verified successor traffic increases beyond each affected socket's baseline. Adding and selecting together, setting Current, deletion, key edits/reordering, or owner changes are rejected/pinned. Runtime config transactions remain conservatively restart-required because they do not run the SIGHUP coordinator. |
+| `tcp_ao` | live (ordered rotation generations) / otherwise restart-required | SIGHUP can append non-preferred successor MKTs, then on a later SIGHUP select an already-installed successor as local RNext. Selection is one-shot observed across the affected protected-session cohort; predecessor deprecation metadata commits in that same immutable generation only after verified successor traffic increases beyond each affected socket's baseline. A later SIGHUP may delete only deprecated, unselected MKTs while preserving the exact owner set, survivor order, key definitions, and selected key. Adding and selecting together, setting Current, key edits/reordering, non-deprecated/selected-key deletion, or owner changes are rejected/pinned. Runtime config transactions remain conservatively restart-required because they do not run the SIGHUP coordinator. |
 | `bfd` | restart-required | Pinned by `pin_bfd_startup_only_runtime`. The ADR-0067 BFD actor resolves `[[bfd_profiles]]` plus per-neighbor/peer-group `bfd` once at startup. Logged at `ERROR` during reload. |
 | `ttl_security` | live (effective next session) | New value passed through reconcile; takes effect on next TCP connect (GTSM is a socket option). |
 | `families` | live (effective next session) | Address families to negotiate in OPEN. Negotiated capability set is fixed for the life of a session. |
@@ -195,9 +195,10 @@ pre-mutation TOML or the committed post-mutation TOML.
 The exception is direct `tcp_ao` on a dynamic range. SIGHUP can append a
 non-preferred successor to an unchanged protected prefix owner, then select
 that installed successor in a later observation-gated immutable generation.
-Adding and selecting together, removing, moving, editing, or reordering
-protected owners/keys remains restart-required and pinned. Disjoint
-unprotected range edits can still reload normally.
+Adding and selecting together, moving, editing, or reordering protected
+owners/keys remains restart-required and pinned. Deletion is live only for
+deprecated, unselected MKTs in an otherwise identical owner/key order.
+Disjoint unprotected range edits can still reload normally.
 
 | Field | Class | Notes |
 |---|---|---|
@@ -205,7 +206,7 @@ unprotected range edits can still reload normally.
 | `peer_group` | reload-applied | Inheritance resolves when a passive session promotes to a managed peer. |
 | `remote_asn` | reload-applied | Validated against the OPEN's `my_as` at promotion. |
 | `description` | reload-applied | Metadata. |
-| `tcp_ao` | live (non-destructive generations) / otherwise restart-required | Append-only non-preferred successors install on SIGHUP; a later SIGHUP may select an installed successor and observation-gate predecessor deprecation in the same generation. Protected owner/auth/deletion/key-order edits remain pinned. Runtime CRUD/transactions remain restart-required. |
+| `tcp_ao` | live (ordered rotation generations) / otherwise restart-required | Append-only non-preferred successors install on SIGHUP; a later SIGHUP may select an installed successor and observation-gate predecessor deprecation in the same generation; a still-later SIGHUP may delete deprecated, unselected MKTs without changing the owner or survivor order. Protected owner/auth/key-order edits and non-deprecated/selected-key deletion remain pinned. Runtime CRUD/transactions remain restart-required. |
 
 ## `[global]`
 

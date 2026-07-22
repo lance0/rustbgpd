@@ -317,7 +317,7 @@ struct TcpAoDeleteTarget {
 #[cfg(target_os = "linux")]
 #[allow(
     dead_code,
-    reason = "transport deletion foundation is consumed by the later coordinator slice"
+    reason = "opaque preflight proof is constructed and consumed only by live rotation"
 )]
 pub(crate) struct TcpAoDeletePreflight {
     current: TcpAoMktReceipt,
@@ -330,7 +330,7 @@ pub(crate) struct TcpAoDeletePreflight {
 #[cfg(not(target_os = "linux"))]
 #[allow(
     dead_code,
-    reason = "transport deletion foundation is consumed by the later coordinator slice"
+    reason = "non-Linux parity stub preserves the API; live deletion is Linux-only"
 )]
 pub(crate) struct TcpAoDeletePreflight;
 
@@ -380,23 +380,21 @@ pub(crate) struct TcpAoAddOnlyApplyError {
 }
 
 /// A live delete failure annotated with whether any `TCP_AO_DEL_KEY` syscall
-/// may already have succeeded. A later coordinator must discard a connected
-/// stream whenever mutation began rather than trust a partially shrunk MKT
+/// may already have succeeded. The coordinator discards a connected stream
+/// whenever mutation began rather than trusting a partially shrunk MKT
 /// inventory.
-#[allow(
-    dead_code,
-    reason = "transport deletion foundation is consumed by the later coordinator slice"
-)]
 pub(crate) struct TcpAoDeleteApplyError {
     error: io::Error,
     mutation_started: bool,
 }
 
-#[allow(
-    dead_code,
-    reason = "transport deletion foundation is consumed by the later coordinator slice"
-)]
 impl TcpAoDeleteApplyError {
+    pub(crate) fn before_mutation(error: io::Error) -> Self {
+        Self {
+            error,
+            mutation_started: false,
+        }
+    }
     #[must_use]
     pub(crate) const fn mutation_started(&self) -> bool {
         self.mutation_started
@@ -1344,10 +1342,6 @@ fn delete_inventory(
 /// Connected targets use the selector returned by `GET_KEYS`, so inherited
 /// covering-owner entries are deleted with the exact kernel-returned selector.
 #[cfg(target_os = "linux")]
-#[allow(
-    dead_code,
-    reason = "transport deletion foundation is consumed by the later coordinator slice"
-)]
 pub(crate) fn preflight_tcp_ao_delete(
     socket: &impl AsRawFd,
     current: &[TcpAoMktOwner<'_>],
@@ -1477,10 +1471,6 @@ where
 /// Consume an exact deletion proof, revalidate Current/RNext immediately
 /// before every syscall, and require the exact survivor inventory afterward.
 #[cfg(target_os = "linux")]
-#[allow(
-    dead_code,
-    reason = "transport deletion foundation is consumed by the later coordinator slice"
-)]
 pub(crate) fn apply_tcp_ao_delete(
     socket: &impl AsRawFd,
     preflight: TcpAoDeletePreflight,
@@ -2853,7 +2843,7 @@ pub(crate) fn preflight_tcp_ao_add_only<T>(
 #[cfg(not(target_os = "linux"))]
 #[allow(
     dead_code,
-    reason = "transport deletion foundation is consumed by the later coordinator slice"
+    reason = "non-Linux parity stub preserves the API; live deletion is Linux-only"
 )]
 pub(crate) fn preflight_tcp_ao_delete<T>(
     _socket: &T,
@@ -2892,7 +2882,7 @@ pub(crate) fn apply_tcp_ao_add_only<T>(
 #[cfg(not(target_os = "linux"))]
 #[allow(
     dead_code,
-    reason = "transport deletion foundation is consumed by the later coordinator slice"
+    reason = "non-Linux parity stub preserves the API; live deletion is Linux-only"
 )]
 pub(crate) fn apply_tcp_ao_delete<T>(
     _socket: &T,

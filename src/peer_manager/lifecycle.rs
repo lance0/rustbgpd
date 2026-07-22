@@ -1100,7 +1100,7 @@ impl PeerManager {
             .is_some_and(|current| next_tcp_ao != Some(current))
         {
             return Err(PeerLifecycleError::RestartRequired(format!(
-                "peer {address} uses TCP-AO; removing protected peers requires restart until listener MKT deletion is implemented"
+                "peer {address} uses TCP-AO; protected-owner removal requires restart (live MKT deletion cannot remove the owner)"
             )));
         }
 

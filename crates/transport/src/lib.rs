@@ -31,7 +31,8 @@ pub use config::{
     DEFAULT_SLOW_PEER_DURATION_SECS, DEFAULT_SLOW_PEER_THRESHOLD_PCT, RemovePrivateAs,
     TCP_AO_MAX_INSPECT_KEYS, TcpAoAlgorithm, TcpAoConfig, TcpAoKeyring, TcpAoRotationGeneration,
     TcpAoRotationOperation, TcpAoRotationOwner, TcpAoRotationPhase, TcpAoRotationStatus,
-    TcpAoSessionGeneration, TcpAoSessionSelection, TransportAuthSecret, TransportConfig,
+    TcpAoSessionDeletion, TcpAoSessionGeneration, TcpAoSessionSelection, TransportAuthSecret,
+    TransportConfig,
 };
 pub use error::TransportError;
 pub use event_sink::{

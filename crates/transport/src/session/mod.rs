@@ -432,7 +432,7 @@ struct MaxPrefixViolation {
     family: Option<(Afi, Safi)>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 struct TcpAoKeyMetadata {
     peer: IpAddr,
     prefix_len: u8,

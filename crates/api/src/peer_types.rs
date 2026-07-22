@@ -934,7 +934,7 @@ pub enum PeerManagerCommand {
         tcp_ao_generation: Option<rustbgpd_transport::TcpAoRotationGeneration>,
     },
     /// Apply the established-session portion of one globally preflighted
-    /// non-destructive TCP-AO rotation generation.
+    /// ordered TCP-AO rotation generation.
     ApplyTcpAoRotation {
         generation: rustbgpd_transport::TcpAoRotationGeneration,
         /// Internal mutation shape; this is actor plumbing, not an RPC field.
@@ -942,9 +942,15 @@ pub enum PeerManagerCommand {
         /// Complete desired listener owner inventory. The peer manager derives
         /// exact active-open and covering accepted-socket projections from it.
         listener_keys: Vec<rustbgpd_transport::TcpAoListenerKey>,
+        /// Exact applied listener inventory before a deletion generation;
+        /// empty for add-only and selection operations.
+        current_listener_keys: Vec<rustbgpd_transport::TcpAoListenerKey>,
         /// Desired exact keyrings for static active-open peers, including
         /// families that do not share the process listener socket.
         static_keyrings: Vec<(PeerKey, TcpAoKeyring)>,
+        /// Exact applied static keyrings before deletion; empty for other
+        /// operations.
+        current_static_keyrings: Vec<(PeerKey, TcpAoKeyring)>,
         reply: oneshot::Sender<Result<(), String>>,
     },
     /// Validate every affected managed protected-session target before the
@@ -954,7 +960,9 @@ pub enum PeerManagerCommand {
         /// Internal mutation shape; this is actor plumbing, not an RPC field.
         operation: rustbgpd_transport::TcpAoRotationOperation,
         listener_keys: Vec<rustbgpd_transport::TcpAoListenerKey>,
+        current_listener_keys: Vec<rustbgpd_transport::TcpAoListenerKey>,
         static_keyrings: Vec<(PeerKey, TcpAoKeyring)>,
+        current_static_keyrings: Vec<(PeerKey, TcpAoKeyring)>,
         reply: oneshot::Sender<Result<(), String>>,
     },
     /// Publish a failed global rotation phase when listener application fails
@@ -2034,7 +2042,7 @@ pub struct PeerInfo {
     /// including `KeyID` validity flags and cumulative verification counters.
     /// Health classification is derived at the protobuf/API boundary.
     pub tcp_ao_info: Option<TcpAoInfoSnapshot>,
-    /// Desired/applied non-destructive rotation generation and actionable failure.
+    /// Desired/applied ordered TCP-AO rotation generation and actionable failure.
     pub tcp_ao_rotation: rustbgpd_transport::TcpAoRotationStatus,
     /// True for peers auto-created from a `[[dynamic_neighbors]]` range.
     pub is_dynamic: bool,

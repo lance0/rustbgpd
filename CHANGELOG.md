@@ -69,6 +69,20 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Fail-closed live TCP-AO MKT deletion on SIGHUP.** After a successor has
+  been selected and its predecessor deprecated, a later immutable generation
+  can remove only deprecated MKTs that are neither Current nor RNext while
+  preserving the protected owner set, survivor order, key definitions, and
+  selected MKT. Listener deletion precedes queued-child and protected-session
+  reconciliation; ambiguous partial session mutation discards the whole
+  changed cohort. Failures retry only the identical generation when the
+  listener remained exact, restored its exact prior inventory, or already
+  reached desired; a failed prior-inventory restoration requires restart.
+  Key edits/reordering, selected or non-deprecated-key deletion, and
+  protected-owner CRUD remain restart-required. M43 proves the full live
+  add/select/deprecate/delete lifecycle against BIRD while preserving the
+  established session and received route.
+
 - **Exact per-candidate export explain for unicast Add-Path.**
   `ExplainAdvertisedRoute` and `rbgp rib advertised --explain` can select a
   presence-bearing Adj-RIB-In source peer/path ID (including ID 0) for a peer
