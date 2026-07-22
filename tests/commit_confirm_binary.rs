@@ -134,7 +134,10 @@ fn base_toml(runtime_dir: &Path, extra: &str) -> String {
     format!(
         r#"
 [security.grpc]
-enforcement = "legacy"
+enforcement = "tier"
+
+[security.grpc.roles]
+"rustbgpd://operator/commit-confirm-test" = "operator"
 
 [global]
 asn = 65001
@@ -144,6 +147,10 @@ runtime_state_dir = "{runtime_dir}"
 
 [global.telemetry]
 log_format = "json"
+
+[global.telemetry.grpc_uds]
+path = "{runtime_dir}/grpc.sock"
+principal = "rustbgpd://operator/commit-confirm-test"
 
 [peer_groups.ix-members]
 {extra}
@@ -164,7 +171,23 @@ fn lab(dir: &Path) -> Lab {
     let runtime_dir = dir.join("runtime");
     std::fs::create_dir_all(&runtime_dir).expect("failed to create runtime dir");
     let config_path = dir.join("rustbgpd.toml");
-    std::fs::write(&config_path, base_toml(&runtime_dir, "")).expect("failed to write config");
+    let base = base_toml(&runtime_dir, "");
+    let parsed: toml::Value = toml::from_str(&base).expect("base config must parse");
+    let principal = "rustbgpd://operator/commit-confirm-test";
+    assert_eq!(
+        parsed["security"]["grpc"]["enforcement"].as_str(),
+        Some("tier"),
+        "mutation proof: binary fixture must exercise Tier authorization"
+    );
+    assert_eq!(
+        parsed["global"]["telemetry"]["grpc_uds"]["principal"].as_str(),
+        Some(principal)
+    );
+    assert_eq!(
+        parsed["security"]["grpc"]["roles"][principal].as_str(),
+        Some("operator")
+    );
+    std::fs::write(&config_path, base).expect("failed to write config");
     let candidate_path = dir.join("candidate.toml");
     std::fs::write(
         &candidate_path,

@@ -95,6 +95,18 @@ fn roles(entries: &[(&str, PrincipalRole)]) -> Arc<BTreeMap<String, PrincipalRol
     )
 }
 
+fn tier_test_context(
+    listener: &str,
+    access_mode: &'static str,
+    max_tier: AuthTier,
+    authn: GrpcAuthnKind,
+    principal: &str,
+    role: PrincipalRole,
+) -> GrpcAuthAuditContext {
+    GrpcAuthAuditContext::new(listener, access_mode, max_tier, authn, principal)
+        .with_role_enforcement(AuthEnforcement::Tier, roles(&[(principal, role)]))
+}
+
 fn private_key(key: &KeyPair) -> PrivateKeyDer<'static> {
     PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.serialize_der()))
 }
@@ -252,12 +264,13 @@ fn audit_decision_treats_unknown_as_operator_only() {
 #[tokio::test]
 async fn audit_layer_records_metric_and_forwards_request() {
     let metrics = BgpMetrics::new();
-    let context = GrpcAuthAuditContext::new(
+    let context = tier_test_context(
         "tcp://127.0.0.1:50051",
         "read_write",
         AuthTier::OperatorOnly,
         GrpcAuthnKind::BearerToken,
         "bearer-token",
+        PrincipalRole::Operator,
     );
     let layer = GrpcAuthzLayer::new(context, metrics.clone());
     let mut service = layer.layer(EchoService);
@@ -280,12 +293,13 @@ async fn audit_layer_records_metric_and_forwards_request() {
 #[tokio::test]
 async fn audit_layer_records_handler_error_status() {
     let metrics = BgpMetrics::new();
-    let context = GrpcAuthAuditContext::new(
+    let context = tier_test_context(
         "tcp://127.0.0.1:50051",
         "read_write",
         AuthTier::OperatorOnly,
         GrpcAuthnKind::BearerToken,
         "bearer-token",
+        PrincipalRole::Operator,
     );
     let layer = GrpcAuthzLayer::new(context, metrics.clone());
     let mut service = layer.layer(InvalidArgumentService);
@@ -306,12 +320,13 @@ async fn audit_layer_records_handler_error_status() {
 #[tokio::test]
 async fn audit_layer_attaches_request_summary_handle() {
     let metrics = BgpMetrics::new();
-    let context = GrpcAuthAuditContext::new(
+    let context = tier_test_context(
         "tcp://127.0.0.1:50051",
         "read_write",
         AuthTier::OperatorOnly,
         GrpcAuthnKind::BearerToken,
         "bearer-token",
+        PrincipalRole::Operator,
     );
     let layer = GrpcAuthzLayer::new(context, metrics.clone());
     let mut service = layer.layer(SummaryService);
@@ -330,12 +345,13 @@ async fn audit_layer_attaches_request_summary_handle() {
 #[tokio::test]
 async fn audit_layer_denies_method_above_listener_cap() {
     let metrics = BgpMetrics::new();
-    let context = GrpcAuthAuditContext::new(
+    let context = tier_test_context(
         "tcp://127.0.0.1:50051",
         "read_write",
         AuthTier::SensitiveRead,
         GrpcAuthnKind::BearerToken,
         "bearer-token",
+        PrincipalRole::Operator,
     );
     let layer = GrpcAuthzLayer::new(context, metrics.clone());
     let mut service = layer.layer(EchoService);
@@ -356,12 +372,13 @@ async fn audit_layer_denies_method_above_listener_cap() {
 #[tokio::test]
 async fn audit_layer_denies_unknown_path_below_operator_cap() {
     let metrics = BgpMetrics::new();
-    let context = GrpcAuthAuditContext::new(
+    let context = tier_test_context(
         "tcp://127.0.0.1:50051",
         "read_write",
         AuthTier::Mutating,
         GrpcAuthnKind::BearerToken,
         "bearer-token",
+        PrincipalRole::Operator,
     );
     let layer = GrpcAuthzLayer::new(context, metrics);
     let mut service = layer.layer(EchoService);
@@ -378,12 +395,13 @@ async fn audit_layer_denies_unknown_path_below_operator_cap() {
 #[tokio::test]
 async fn audit_layer_authenticates_bearer_token_before_listener_cap() {
     let metrics = BgpMetrics::new();
-    let context = GrpcAuthAuditContext::new(
+    let context = tier_test_context(
         "tcp://127.0.0.1:50051",
         "read_write",
         AuthTier::SensitiveRead,
         GrpcAuthnKind::BearerToken,
         "bearer-token",
+        PrincipalRole::Operator,
     )
     .with_bearer_token(Some("secret"));
     let layer = GrpcAuthzLayer::new(context, metrics.clone());
@@ -405,12 +423,13 @@ async fn audit_layer_authenticates_bearer_token_before_listener_cap() {
 #[tokio::test]
 async fn audit_layer_denies_over_cap_request_after_valid_bearer_token() {
     let metrics = BgpMetrics::new();
-    let context = GrpcAuthAuditContext::new(
+    let context = tier_test_context(
         "tcp://127.0.0.1:50051",
         "read_write",
         AuthTier::SensitiveRead,
         GrpcAuthnKind::BearerToken,
         "bearer-token",
+        PrincipalRole::Operator,
     )
     .with_bearer_token(Some("secret"));
     let layer = GrpcAuthzLayer::new(context, metrics.clone());
@@ -460,19 +479,18 @@ async fn tier_enforcement_allows_observer_sensitive_read() {
     assert!(text.contains("result=\"handler_ok\""));
 }
 
+/// Mutation proof: removing Tier enforcement from `tier_test_context` lets
+/// the observer mutate and makes the `PermissionDenied` assertion red.
 #[tokio::test]
 async fn tier_enforcement_denies_mutating_for_observer() {
     let metrics = BgpMetrics::new();
-    let context = GrpcAuthAuditContext::new(
+    let context = tier_test_context(
         "tcp://127.0.0.1:50051",
         "read_write",
         AuthTier::OperatorOnly,
         GrpcAuthnKind::BearerToken,
         "observer.example",
-    )
-    .with_role_enforcement(
-        AuthEnforcement::Tier,
-        roles(&[("observer.example", PrincipalRole::Observer)]),
+        PrincipalRole::Observer,
     )
     .with_bearer_token(Some("secret"));
     let layer = GrpcAuthzLayer::new(context, metrics.clone());

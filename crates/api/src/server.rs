@@ -1652,15 +1652,26 @@ mod tests {
     use crate::proto::{EventCategory, WatchEventsRequest};
     use crate::test_support::{session_event, spawn_fake_peer_manager, spawn_fake_rib};
 
-    fn empty_roles() -> Arc<BTreeMap<String, PrincipalRole>> {
-        Arc::new(BTreeMap::new())
+    fn tier_authz(principal: &str) -> RuntimeAuthzConfig {
+        RuntimeAuthzConfig {
+            enforcement: AuthEnforcement::Tier,
+            roles: Arc::new(BTreeMap::from([(
+                principal.to_string(),
+                PrincipalRole::Operator,
+            )])),
+        }
     }
 
-    fn legacy_authz() -> RuntimeAuthzConfig {
-        RuntimeAuthzConfig {
-            enforcement: AuthEnforcement::Legacy,
-            roles: empty_roles(),
-        }
+    /// Mutation proof: restoring the old Legacy test builder or dropping its
+    /// principal mapping makes one of these exact assertions red.
+    #[test]
+    fn test_authz_builder_uses_tier_operator_role() {
+        let config = tier_authz("rustbgpd://operator/api-test");
+        assert_eq!(config.enforcement, AuthEnforcement::Tier);
+        assert_eq!(
+            config.roles.get("rustbgpd://operator/api-test"),
+            Some(&PrincipalRole::Operator)
+        );
     }
 
     #[test]
@@ -1796,7 +1807,7 @@ mod tests {
             addr,
             AccessMode::ReadOnly,
             AuthTier::SensitiveRead,
-            legacy_authz(),
+            tier_authz("test"),
             true,
             false,
             Some("test"),
@@ -1883,7 +1894,7 @@ mod tests {
             "127.0.0.1:50051".parse().unwrap(),
             AccessMode::ReadWrite,
             AuthTier::OperatorOnly,
-            legacy_authz(),
+            tier_authz("automation.example"),
             true,
             false,
             Some("automation.example"),
@@ -1905,7 +1916,7 @@ mod tests {
             "127.0.0.1:50051".parse().unwrap(),
             AccessMode::ReadWrite,
             AuthTier::OperatorOnly,
-            legacy_authz(),
+            tier_authz("rustbgpd://operator/ci"),
             true,
             false,
             Some("rustbgpd://operator/ci"),
@@ -1920,7 +1931,7 @@ mod tests {
             "127.0.0.1:50051".parse().unwrap(),
             AccessMode::ReadWrite,
             AuthTier::Mutating,
-            legacy_authz(),
+            tier_authz("mtls-unresolved"),
             true,
             true,
             Some("automation.example"),
@@ -1936,7 +1947,7 @@ mod tests {
             Path::new("/run/rustbgpd/grpc.sock"),
             AccessMode::ReadWrite,
             AuthTier::SensitiveRead,
-            legacy_authz(),
+            tier_authz("local-admin"),
             None,
             Some("local-admin"),
         );

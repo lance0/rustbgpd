@@ -24,19 +24,29 @@ container images; it builds with `--workspace` or an explicit
 ```sh
 cargo run --release -p birdwatcher-adapter -- \
     --grpc-addr http://127.0.0.1:50051 \
+    --grpc-token-file /run/secrets/rustbgpd-token \
     --listen 0.0.0.0:8080
 ```
 
 Flags (also settable via env):
 
-| Flag          | Env                             | Default          | Meaning                          |
-|---------------|---------------------------------|------------------|----------------------------------|
-| `--grpc-addr` | `BIRDWATCHER_ADAPTER_GRPC_ADDR` | (required)       | rustbgpd gRPC endpoint (TCP)     |
-| `--listen`    | `BIRDWATCHER_ADAPTER_LISTEN`    | `127.0.0.1:8080` | REST listen address              |
+| Flag                | Env                                   | Default          | Meaning                                      |
+|---------------------|---------------------------------------|------------------|----------------------------------------------|
+| `--grpc-addr`       | `BIRDWATCHER_ADAPTER_GRPC_ADDR`       | (required)       | rustbgpd gRPC endpoint (TCP)                 |
+| `--grpc-token-file` | `BIRDWATCHER_ADAPTER_GRPC_TOKEN_FILE` | (unset)          | Optional rustbgpd bearer-token file          |
+| `--listen`          | `BIRDWATCHER_ADAPTER_LISTEN`          | `127.0.0.1:8080` | REST listen address                          |
+
+The command-line token path takes precedence over the environment variable.
+The adapter reads it once at startup, trims trailing whitespace, and rejects
+empty token files or values that are not valid ASCII gRPC metadata without
+logging the token. Omitting it preserves unauthenticated compatibility for a
+daemon listener that permits it.
 
 The daemon needs a gRPC TCP listener the adapter can reach
 (`[global.telemetry.grpc_tcp]`); read-only access is sufficient —
-every RPC the adapter calls is a read.
+every RPC the adapter calls is a read. For a bearer-protected Tier listener,
+set its stable `principal` to an `observer` (or stronger) role and pass the
+matching token file to the adapter.
 
 ## Endpoint → gRPC mapping
 
