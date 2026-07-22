@@ -203,7 +203,8 @@ on for `route_server_client` sessions** (the standard IXP posture),
 off otherwise, inheritable from a peer group. On sessions explicitly
 set off, control communities reach that member verbatim (full
 pass-through). Suppression shows up in
-`rbgp neighbor <ip> explain <prefix>` as the `rs_control` gate rung.
+`rbgp rib --prefix <prefix> advertised <addr> --explain` as the
+`rs_control` gate rung.
 
 Cost note: the filter is route-granular at emit (ADR-0101 Decision 3).
 Enabled sessions stay in shared update-groups; a distribution pass
