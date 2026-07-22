@@ -432,12 +432,11 @@ impl Config {
     /// content instead of a filesystem path. The returned config does
     /// not expose a `file_path`.
     pub fn load_toml_with_diagnostics(content: &str, source_name: &str) -> Result<Self, String> {
-        let content = test_only_inject_legacy_grpc_security(content);
         // No config-file directory here: relative `rpol_files` paths
         // resolve against the process working directory. Initial load
         // rewrites them absolute, so snapshots / candidates derived
         // from a running config are unaffected.
-        Self::load_from_toml_source(content.as_ref(), source_name, None)
+        Self::load_from_toml_source(content, source_name, None)
     }
 
     /// Load config and, on failure, render a diagnostic with source context.
@@ -464,10 +463,9 @@ impl Config {
             Ok(c) => c,
             Err(e) => return Err(format!("error: failed to read {path}: {e}")),
         };
-        let content = test_only_inject_legacy_grpc_security(&content);
         let base_dir = std::path::Path::new(path).parent().map(PathBuf::from);
         let mut config = Self::load_from_toml_source_with_datasets(
-            content.as_ref(),
+            &content,
             path,
             base_dir.as_deref(),
             prior_datasets,
@@ -487,10 +485,9 @@ impl Config {
     ) -> Result<Self, String> {
         let content = std::fs::read_to_string(path)
             .map_err(|error| format!("error: failed to read {path}: {error}"))?;
-        let content = test_only_inject_legacy_grpc_security(&content);
         let base_dir = std::path::Path::new(path).parent().map(PathBuf::from);
         let mut config = Self::load_from_toml_source_with_datasets(
-            content.as_ref(),
+            &content,
             path,
             base_dir.as_deref(),
             Some(prior_datasets),
@@ -1979,41 +1976,6 @@ const TRANSACTION_POLICY_NEIGHBOR_SETS_SECTION: &str = "[policy] neighbor_sets";
 const TRANSACTION_POLICY_GLOBAL_CHAINS_SECTION: &str = "[policy] global chains";
 const TRANSACTION_POLICY_LIVE_IMPACT_SECTION: &str = "[policy] live impact";
 const TRANSACTION_SESSION_RESHAPE_SECTION: &str = "effective neighbor session reshape";
-
-/// Test-only auto-inject for the v0.24.0 `enforcement = "tier"`
-/// default flip. When compiled with `#[cfg(test)]` and the supplied
-/// TOML declares no `security.grpc` table or sub-table, appends an
-/// explicit `enforcement = "legacy"` so existing test fixtures
-/// continue to exercise pre-flip behavior without per-test churn.
-/// Production builds compile this as an identity passthrough —
-/// operators see the real default flip without any test-only
-/// divergence.
-#[cfg(test)]
-fn test_only_inject_legacy_grpc_security(content: &str) -> std::borrow::Cow<'_, str> {
-    // Skip the inject if the TOML declares ANY `security.grpc`
-    // configuration — the `[security.grpc]` table header or any
-    // sub-table such as `[security.grpc.roles]`. A fixture that
-    // configures roles but omits `enforcement` deliberately relies
-    // on the production default (Tier), so we must not override it
-    // with a legacy inject.
-    if content.contains("[security.grpc]") || content.contains("[security.grpc.") {
-        std::borrow::Cow::Borrowed(content)
-    } else {
-        // Append the injected table to the END of the content. A
-        // prepend would cause any subsequent bare-key (top-level)
-        // declarations in the test TOML to be parsed under the
-        // injected `[security.grpc]` table, producing
-        // "unknown field" errors.
-        std::borrow::Cow::Owned(format!(
-            "{content}\n[security.grpc]\nenforcement = \"legacy\"\n"
-        ))
-    }
-}
-
-#[cfg(not(test))]
-fn test_only_inject_legacy_grpc_security(content: &str) -> std::borrow::Cow<'_, str> {
-    std::borrow::Cow::Borrowed(content)
-}
 
 /// Detect removed config keys in a TOML document that failed typed
 /// deserialization and return a migration error naming the

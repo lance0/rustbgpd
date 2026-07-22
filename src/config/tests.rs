@@ -9,6 +9,8 @@ use rustbgpd_policy::RouteType;
 use rustbgpd_wire::{Afi, BgpRole, Safi};
 use tempfile::NamedTempFile;
 
+use crate::test_support::tier_authorized_uds_test_config;
+
 const TEST_ONLY_GRPC_OPERATOR_PRINCIPAL: &str = "rustbgpd://operator/test-only";
 const TEST_ONLY_GRPC_TOKEN_CONTAINER_PATH: &str = "/run/rustbgpd/grpc-test-only-operator.token";
 const TEST_ONLY_GRPC_TOKEN_REPO_PATH: &str = "tests/fixtures/grpc-test-only-operator.token";
@@ -27,14 +29,13 @@ fn materialize_shared_test_only_grpc_token(source: &str) -> String {
 }
 
 fn parse_with_shared_test_grpc_token(source: &str) -> Result<Config, ConfigError> {
-    parse(&materialize_shared_test_only_grpc_token(source))
+    parse_strict(&materialize_shared_test_only_grpc_token(source))
 }
 
 fn valid_toml() -> &'static str {
     // Shared test fixture used by hundreds of config tests below.
-    // Opts into `enforcement = "legacy"` explicitly so the fixture
-    // exercises pre-v0.24.0 gRPC authorization behavior; tier-mode
-    // semantics are covered by dedicated tests via `valid_toml_no_grpc_security`.
+    // `parse()` explicitly adds the canonical Tier-authorized UDS
+    // identity before exercising the production validator.
     r#"
 [global]
 asn = 65001
@@ -44,9 +45,6 @@ listen_port = 179
 [global.telemetry]
 prometheus_addr = "0.0.0.0:9179"
 log_format = "json"
-
-[security.grpc]
-enforcement = "legacy"
 
 [[neighbors]]
 address = "10.0.0.2"
@@ -89,22 +87,18 @@ fn parse_strict(toml_str: &str) -> Result<Config, ConfigError> {
     Ok(config)
 }
 
-/// Test entry used by most config tests. Auto-injects
-/// `[security.grpc] enforcement = "legacy"` when the input lacks a
-/// `[security.grpc]` block, so tests that do not exercise the gRPC
-/// authorization surface keep working after the v0.24.0 default flip
-/// without hundreds of one-line opt-in edits. Dedicated
-/// `grpc_security_*` tests use `parse_strict()` so they see the
-/// production behavior unchanged.
+/// Deserialize only, for tests of schema defaults and listener materialization
+/// whose intentionally incomplete authentication is rejected by validation.
+fn parse_schema_only(toml_str: &str) -> Result<Config, ConfigError> {
+    toml::from_str(toml_str).map_err(ConfigError::Parse)
+}
+
+/// Test entry used by config tests that do not exercise the gRPC
+/// authorization surface. The explicit helper keeps the fixture Tier-valid
+/// without changing production loader input.
 fn parse(toml_str: &str) -> Result<Config, ConfigError> {
-    let augmented;
-    let to_parse = if toml_str.contains("[security.grpc]") {
-        toml_str
-    } else {
-        augmented = format!("[security.grpc]\nenforcement = \"legacy\"\n{toml_str}");
-        augmented.as_str()
-    };
-    let config: Config = toml::from_str(to_parse).map_err(ConfigError::Parse)?;
+    let tier_authorized = tier_authorized_uds_test_config(toml_str);
+    let config: Config = toml::from_str(&tier_authorized).map_err(ConfigError::Parse)?;
     config.validate()?;
     Ok(config)
 }
@@ -141,10 +135,10 @@ fn config_examples_parse() {
         // the same fixture's host path so this production-path validation
         // proves the shipped config without weakening token-file checks.
         let source = materialize_shared_test_only_grpc_token(&source);
-        // Strict parse (not the legacy-injecting `parse`) so every shipped
-        // example is validated under the production v0.24.0
-        // `enforcement = "tier"` default. Injection would mask examples that
-        // cannot actually start under defaults — the gap that shipped all
+        // Strict parse keeps the shipped auth config intact, so every example
+        // is validated under the production Tier default. Test-helper fixture
+        // preparation would mask examples that cannot actually start — the gap
+        // that shipped all
         // examples unstartable until the v0.33.0 fixup. This guard fails
         // closed if a new example omits the gRPC authorization config.
         // Referenced .rpol files compile against the example's directory,
@@ -880,9 +874,6 @@ listen_port = 179
 [global.telemetry]
 log_format = "json"
 
-[security.grpc]
-enforcement = "legacy"
-
 [peer_groups.context]
 families = ["ipv6_unicast"]
 hold_time = 300
@@ -941,9 +932,6 @@ listen_port = 179
 [global.telemetry]
 log_format = "json"
 
-[security.grpc]
-enforcement = "legacy"
-
 [peer_groups.rr]
 route_reflector_client = true
 
@@ -979,14 +967,13 @@ fn v1_stable_effective_defaults_match_runtime_resolution() {
         };
     }
 
-    let config =
-        parse_strict(V1_EFFECTIVE_DEFAULTS_TOML).expect("contextual-default fixture must load");
+    let config = parse(V1_EFFECTIVE_DEFAULTS_TOML).expect("contextual-default fixture must load");
     let explicit_dynamic_limit_toml = V1_EFFECTIVE_DEFAULTS_TOML.replacen(
         "listen_port = 179",
         "listen_port = 179\ndynamic_neighbor_limit = 500",
         1,
     );
-    let explicit_dynamic_limit = parse_strict(&explicit_dynamic_limit_toml)
+    let explicit_dynamic_limit = parse(&explicit_dynamic_limit_toml)
         .expect("explicit dynamic-neighbor limit fixture must load");
     let bare = config
         .resolve_neighbor(&config.neighbors[0])
@@ -1089,14 +1076,12 @@ fn v1_stable_effective_defaults_match_runtime_resolution() {
         (45, 1000, true, 240, 300, 720, (60, 60), false)
     );
 
-    let rr =
-        parse_strict(V1_CLUSTER_ID_DEFAULTS_TOML).expect("inherited RR-client fixture must load");
+    let rr = parse(V1_CLUSTER_ID_DEFAULTS_TOML).expect("inherited RR-client fixture must load");
     let explicit_rr_toml = V1_CLUSTER_ID_DEFAULTS_TOML.replace(
         "listen_port = 179",
         "listen_port = 179\ncluster_id = \"10.0.0.9\"",
     );
-    let explicit_rr =
-        parse_strict(&explicit_rr_toml).expect("explicit cluster-id fixture must load");
+    let explicit_rr = parse(&explicit_rr_toml).expect("explicit cluster-id fixture must load");
 
     // Mutation-red: unconditional router-id fallback, ignoring inherited RR
     // status, or ignoring an explicit cluster_id changes this three-case tuple.
@@ -1512,7 +1497,7 @@ fn runtime_state_dir_override_is_used() {
 
 #[test]
 fn grpc_listeners_default_to_uds() {
-    let config = parse(valid_toml()).unwrap();
+    let config = parse_schema_only(valid_toml()).unwrap();
     assert_eq!(
         config.grpc_listeners(),
         vec![GrpcListener::Uds {
@@ -1532,7 +1517,7 @@ fn grpc_tcp_listener_parses_when_enabled() {
         "{}\n[global.telemetry.grpc_tcp]\naddress = \"127.0.0.1:50051\"\n",
         valid_toml()
     );
-    let config = parse(&toml_str).unwrap();
+    let config = parse_schema_only(&toml_str).unwrap();
     assert_eq!(
         config.grpc_listeners(),
         vec![GrpcListener::Tcp {
@@ -1552,7 +1537,7 @@ fn grpc_listener_access_mode_parses() {
         "{}\n[global.telemetry.grpc_tcp]\naddress = \"127.0.0.1:50051\"\naccess_mode = \"read_only\"\n",
         valid_toml()
     );
-    let config = parse(&toml_str).unwrap();
+    let config = parse_schema_only(&toml_str).unwrap();
     assert_eq!(
         config.grpc_listeners(),
         vec![GrpcListener::Tcp {
@@ -1572,7 +1557,7 @@ fn grpc_listener_max_tier_parses() {
         "{}\n[global.telemetry.grpc_tcp]\naddress = \"127.0.0.1:50051\"\nmax_tier = \"mutating\"\n",
         valid_toml()
     );
-    let config = parse(&toml_str).unwrap();
+    let config = parse_schema_only(&toml_str).unwrap();
     assert_eq!(
         config.grpc_listeners(),
         vec![GrpcListener::Tcp {
@@ -1592,7 +1577,7 @@ fn grpc_listener_access_mode_read_only_caps_max_tier() {
         "{}\n[global.telemetry.grpc_tcp]\naddress = \"127.0.0.1:50051\"\naccess_mode = \"read_only\"\nmax_tier = \"operator_only\"\n",
         valid_toml()
     );
-    let config = parse(&toml_str).unwrap();
+    let config = parse_schema_only(&toml_str).unwrap();
     assert_eq!(
         config.grpc_listeners(),
         vec![GrpcListener::Tcp {
@@ -1612,7 +1597,7 @@ fn grpc_listener_max_tier_can_be_stricter_than_access_mode() {
         "{}\n[global.telemetry.grpc_uds]\npath = \"/tmp/rustbgpd-test.sock\"\nmax_tier = \"read\"\n",
         valid_toml()
     );
-    let config = parse(&toml_str).unwrap();
+    let config = parse_schema_only(&toml_str).unwrap();
     assert_eq!(
         config.grpc_listeners(),
         vec![GrpcListener::Uds {
@@ -1627,7 +1612,7 @@ fn grpc_listener_max_tier_can_be_stricter_than_access_mode() {
 }
 
 #[test]
-fn grpc_security_roles_parse_with_explicit_legacy_enforcement() {
+fn explicit_legacy_grpc_enforcement_loads_roles_and_warns() {
     // After the v0.24.0 default flip, operators who want the prior
     // pre-enforcement posture must set `enforcement = "legacy"`
     // explicitly. This test pins that the explicit opt-out still
@@ -1637,7 +1622,7 @@ fn grpc_security_roles_parse_with_explicit_legacy_enforcement() {
         "{}\n[security.grpc]\nenforcement = \"legacy\"\n\n[security.grpc.roles]\n\"observer-readonly\" = \"observer\"\n\"automation.example\" = \"automation\"\n\"operator.example\" = \"operator\"\n",
         valid_toml_no_grpc_security()
     );
-    let config = parse(&toml_str).unwrap();
+    let config = Config::load_toml_with_diagnostics(&toml_str, "legacy compatibility").unwrap();
     assert_eq!(
         config.security.grpc.enforcement,
         GrpcEnforcementConfig::Legacy
@@ -1653,6 +1638,15 @@ fn grpc_security_roles_parse_with_explicit_legacy_enforcement() {
     assert_eq!(
         config.security.grpc.roles["operator.example"],
         GrpcRoleConfig::Operator
+    );
+    let output = capture_warnings(|| config.warn_if_legacy_grpc_enforcement());
+    assert!(
+        output.contains("WARN") && output.contains("legacy"),
+        "expected a warn-level legacy-enforcement log: {output}"
+    );
+    assert!(
+        output.contains("mandatory in a future release"),
+        "warning must name the sunset: {output}"
     );
 }
 
@@ -1687,8 +1681,8 @@ remote_asn = 65002
 description = "peer-1"
 hold_time = 90
 "#;
-    // parse_strict bypasses the test-only legacy auto-inject so we
-    // observe the actual schema default that production sees.
+    // Strict parsing observes the production schema default without adding
+    // the test helper's canonical Tier identity.
     let config = parse_strict(toml_str).unwrap();
     assert_eq!(
         config.security.grpc.enforcement,
@@ -1722,8 +1716,8 @@ remote_asn = 65002
 description = "peer-1"
 hold_time = 90
 "#;
-    // parse_strict bypasses the test-only legacy auto-inject so this
-    // test sees the v0.24.0 production-default tier validation path.
+    // Strict parsing leaves the raw config untouched so this test sees the
+    // v0.24.0 production-default Tier validation path.
     let result = parse_strict(toml_str);
     let err = result.expect_err("default-tier mode with no roles must fail validation");
     let msg = format!("{err}");
@@ -1743,7 +1737,7 @@ fn grpc_security_tier_enforcement_parses_with_explicit_uds_principal() {
         "{}\n[security.grpc]\nenforcement = \"tier\"\n\n[security.grpc.roles]\n\"local-admin\" = \"operator\"\n\n[global.telemetry.grpc_uds]\npath = \"/tmp/rustbgpd-test.sock\"\nprincipal = \"local-admin\"\n",
         valid_toml_no_grpc_security()
     );
-    let config = parse(&toml_str).unwrap();
+    let config = parse_strict(&toml_str).unwrap();
     assert_eq!(
         config.security.grpc.enforcement,
         GrpcEnforcementConfig::Tier
@@ -1760,7 +1754,7 @@ fn grpc_security_empty_role_principal_rejected() {
         "{}\n[security.grpc.roles]\n\"   \" = \"observer\"\n",
         valid_toml()
     );
-    let err = parse(&toml_str).unwrap_err();
+    let err = parse_strict(&toml_str).unwrap_err();
     let ConfigError::InvalidGrpcConfig { reason } = err else {
         panic!("expected InvalidGrpcConfig");
     };
@@ -1776,7 +1770,7 @@ fn grpc_security_reserved_unresolved_mtls_role_rejected() {
         "{}\n[security.grpc.roles]\n\"mtls-unresolved\" = \"operator\"\n",
         valid_toml()
     );
-    let err = parse(&toml_str).unwrap_err();
+    let err = parse_strict(&toml_str).unwrap_err();
     let ConfigError::InvalidGrpcConfig { reason } = err else {
         panic!("expected InvalidGrpcConfig");
     };
@@ -1792,7 +1786,7 @@ fn grpc_security_tier_requires_roles() {
         "{}\n[security.grpc]\nenforcement = \"tier\"\n\n[global.telemetry.grpc_uds]\npath = \"/tmp/rustbgpd-test.sock\"\nprincipal = \"local-admin\"\n",
         valid_toml_no_grpc_security()
     );
-    let err = parse(&toml_str).unwrap_err();
+    let err = parse_strict(&toml_str).unwrap_err();
     let ConfigError::InvalidGrpcConfig { reason } = err else {
         panic!("expected InvalidGrpcConfig");
     };
@@ -1808,7 +1802,7 @@ fn grpc_security_tier_rejects_implicit_uds_without_principal() {
         "{}\n[security.grpc]\nenforcement = \"tier\"\n\n[security.grpc.roles]\n\"local-admin\" = \"operator\"\n",
         valid_toml_no_grpc_security()
     );
-    let err = parse(&toml_str).unwrap_err();
+    let err = parse_strict(&toml_str).unwrap_err();
     let ConfigError::InvalidGrpcConfig { reason } = err else {
         panic!("expected InvalidGrpcConfig");
     };
@@ -1824,7 +1818,7 @@ fn grpc_security_tier_rejects_uds_without_principal() {
         "{}\n[security.grpc]\nenforcement = \"tier\"\n\n[security.grpc.roles]\n\"local-admin\" = \"operator\"\n\n[global.telemetry.grpc_uds]\npath = \"/tmp/rustbgpd-test.sock\"\n",
         valid_toml_no_grpc_security()
     );
-    let err = parse(&toml_str).unwrap_err();
+    let err = parse_strict(&toml_str).unwrap_err();
     let ConfigError::InvalidGrpcConfig { reason } = err else {
         panic!("expected InvalidGrpcConfig");
     };
@@ -1843,7 +1837,7 @@ fn grpc_security_tier_rejects_bearer_tcp_without_principal() {
         valid_toml_no_grpc_security(),
         token_file.path()
     );
-    let err = parse(&toml_str).unwrap_err();
+    let err = parse_strict(&toml_str).unwrap_err();
     let ConfigError::InvalidGrpcConfig { reason } = err else {
         panic!("expected InvalidGrpcConfig");
     };
@@ -1862,7 +1856,7 @@ fn grpc_security_tier_rejects_non_mtls_principal_absent_from_roles() {
         valid_toml_no_grpc_security(),
         token_file.path()
     );
-    let err = parse(&toml_str).unwrap_err();
+    let err = parse_strict(&toml_str).unwrap_err();
     let ConfigError::InvalidGrpcConfig { reason } = err else {
         panic!("expected InvalidGrpcConfig");
     };
@@ -1878,7 +1872,7 @@ fn grpc_security_tier_rejects_unauthenticated_tcp() {
         "{}\n[security.grpc]\nenforcement = \"tier\"\n\n[security.grpc.roles]\n\"automation.example\" = \"automation\"\n\n[global.telemetry.grpc_tcp]\naddress = \"127.0.0.1:50051\"\n",
         valid_toml_no_grpc_security()
     );
-    let err = parse(&toml_str).unwrap_err();
+    let err = parse_strict(&toml_str).unwrap_err();
     let ConfigError::InvalidGrpcConfig { reason } = err else {
         panic!("expected InvalidGrpcConfig");
     };
@@ -1900,7 +1894,7 @@ fn grpc_security_tier_accepts_native_mtls_without_configured_principal() {
         key.path(),
         ca.path()
     );
-    let config = parse(&toml_str).unwrap();
+    let config = parse_strict(&toml_str).unwrap();
     assert_eq!(
         config.security.grpc.enforcement,
         GrpcEnforcementConfig::Tier
@@ -1919,7 +1913,7 @@ fn grpc_tcp_principal_requires_bearer_token_without_mtls() {
         "{}\n[global.telemetry.grpc_tcp]\naddress = \"127.0.0.1:50051\"\nprincipal = \"automation.example\"\n",
         valid_toml()
     );
-    let err = parse(&toml_str).unwrap_err();
+    let err = parse_strict(&toml_str).unwrap_err();
     let ConfigError::InvalidGrpcConfig { reason } = err else {
         panic!("expected InvalidGrpcConfig");
     };
@@ -1938,7 +1932,7 @@ fn grpc_tcp_bearer_principal_parses() {
         valid_toml(),
         token_file.path()
     );
-    let config = parse(&toml_str).unwrap();
+    let config = parse_schema_only(&toml_str).unwrap();
     assert_eq!(
         config.grpc_listeners(),
         vec![GrpcListener::Tcp {
@@ -1961,7 +1955,7 @@ fn grpc_security_tier_accepts_bearer_tcp_with_principal_role() {
         valid_toml_no_grpc_security(),
         token_file.path()
     );
-    let config = parse(&toml_str).unwrap();
+    let config = parse_strict(&toml_str).unwrap();
     assert_eq!(
         config.security.grpc.enforcement,
         GrpcEnforcementConfig::Tier
@@ -1995,7 +1989,7 @@ fn grpc_tcp_principal_rejected_with_mtls() {
         key.path(),
         ca.path(),
     );
-    let err = parse(&toml_str).unwrap_err();
+    let err = parse_strict(&toml_str).unwrap_err();
     let ConfigError::InvalidGrpcConfig { reason } = err else {
         panic!("expected InvalidGrpcConfig");
     };
@@ -2011,7 +2005,7 @@ fn grpc_uds_principal_parses() {
         "{}\n[global.telemetry.grpc_uds]\npath = \"/tmp/rustbgpd-test.sock\"\nprincipal = \"local-admin\"\n",
         valid_toml()
     );
-    let config = parse(&toml_str).unwrap();
+    let config = parse_schema_only(&toml_str).unwrap();
     assert_eq!(
         config.grpc_listeners(),
         vec![GrpcListener::Uds {
@@ -2031,7 +2025,7 @@ fn grpc_uds_relative_path_rejected() {
         "{}\n[global.telemetry.grpc_uds]\npath = \"grpc.sock\"\n",
         valid_toml()
     );
-    let err = parse(&toml_str).unwrap_err();
+    let err = parse_strict(&toml_str).unwrap_err();
     assert!(matches!(err, ConfigError::InvalidGrpcConfig { .. }));
 }
 
@@ -2042,7 +2036,7 @@ fn grpc_tls_partial_config_rejected() {
         "{}\n[global.telemetry.grpc_tcp]\naddress = \"127.0.0.1:50051\"\ntls_cert_file = \"/tmp/cert.pem\"\n",
         valid_toml()
     );
-    let err = parse(&toml_str).unwrap_err();
+    let err = parse_strict(&toml_str).unwrap_err();
     assert!(matches!(err, ConfigError::InvalidGrpcConfig { .. }));
 
     // cert + key but no client CA — still partial.
@@ -2050,7 +2044,7 @@ fn grpc_tls_partial_config_rejected() {
         "{}\n[global.telemetry.grpc_tcp]\naddress = \"127.0.0.1:50051\"\ntls_cert_file = \"/tmp/cert.pem\"\ntls_key_file = \"/tmp/key.pem\"\n",
         valid_toml()
     );
-    let err = parse(&toml_str).unwrap_err();
+    let err = parse_strict(&toml_str).unwrap_err();
     assert!(matches!(err, ConfigError::InvalidGrpcConfig { .. }));
 }
 
@@ -2075,13 +2069,13 @@ fn grpc_tls_full_config_accepted() {
     let key = write_pem(STUB_KEY);
     let ca = write_pem(STUB_CERT);
     let toml_str = format!(
-        "{}\n[global.telemetry.grpc_tcp]\naddress = \"127.0.0.1:50051\"\ntls_cert_file = {:?}\ntls_key_file = {:?}\ntls_client_ca_file = {:?}\n",
+        "{}\n[security.grpc.roles]\n\"rustbgpd://operator/test-only\" = \"operator\"\n\n[global.telemetry.grpc_tcp]\naddress = \"127.0.0.1:50051\"\ntls_cert_file = {:?}\ntls_key_file = {:?}\ntls_client_ca_file = {:?}\n",
         valid_toml(),
         cert.path(),
         key.path(),
         ca.path(),
     );
-    let config = parse(&toml_str).unwrap();
+    let config = parse_strict(&toml_str).unwrap();
     let listeners = config.grpc_listeners();
     assert_eq!(listeners.len(), 1);
     let GrpcListener::Tcp { tls, .. } = &listeners[0] else {
@@ -2107,7 +2101,7 @@ fn grpc_tls_missing_file_rejected_at_load() {
         key.path(),
         ca.path(),
     );
-    let err = parse(&toml_str).unwrap_err();
+    let err = parse_strict(&toml_str).unwrap_err();
     let ConfigError::InvalidGrpcConfig { reason } = err else {
         panic!("expected InvalidGrpcConfig, got {err:?}");
     };
@@ -2129,7 +2123,7 @@ fn grpc_tls_empty_file_rejected_at_load() {
         key.path(),
         ca.path(),
     );
-    let err = parse(&toml_str).unwrap_err();
+    let err = parse_strict(&toml_str).unwrap_err();
     let ConfigError::InvalidGrpcConfig { reason } = err else {
         panic!("expected InvalidGrpcConfig");
     };
@@ -2148,7 +2142,7 @@ fn grpc_tls_non_pem_file_rejected_at_load() {
         key.path(),
         ca.path(),
     );
-    let err = parse(&toml_str).unwrap_err();
+    let err = parse_strict(&toml_str).unwrap_err();
     let ConfigError::InvalidGrpcConfig { reason } = err else {
         panic!("expected InvalidGrpcConfig");
     };
@@ -2174,7 +2168,7 @@ fn grpc_tls_wrong_kind_pem_rejected_at_load() {
         key.path(),
         ca.path(),
     );
-    let err = parse(&toml_str).unwrap_err();
+    let err = parse_strict(&toml_str).unwrap_err();
     let ConfigError::InvalidGrpcConfig { reason } = err else {
         panic!("expected InvalidGrpcConfig");
     };
@@ -2192,7 +2186,7 @@ fn grpc_token_file_must_be_non_empty() {
         valid_toml(),
         token_file.path()
     );
-    let err = parse(&toml_str).unwrap_err();
+    let err = parse_strict(&toml_str).unwrap_err();
     assert!(matches!(err, ConfigError::InvalidGrpcConfig { .. }));
 }
 
@@ -3613,7 +3607,7 @@ fn orr_vantage_neighbor_overrides_group() {
     // Persister-shaped round-trip: a Some(IpAddr) vantage survives TOML
     // serialize → re-parse (the config-persister write path).
     let rendered = toml::to_string_pretty(&config).unwrap();
-    let reparsed = parse(&rendered).unwrap();
+    let reparsed = parse_strict(&rendered).unwrap();
     assert_eq!(
         reparsed.neighbors[0].orr_vantage,
         Some("192.0.2.9".parse().unwrap())
@@ -11051,8 +11045,6 @@ listen_port = 179
 prometheus_addr = "0.0.0.0:9179"
 log_format = "json"
 
-[security.grpc]
-enforcement = "legacy"
 "#;
     let new_toml = format!(
         r#"
@@ -11180,9 +11172,6 @@ listen_port = 179
 prometheus_addr = "0.0.0.0:9179"
 log_format = "json"
 
-[security.grpc]
-enforcement = "legacy"
-
 [peer_groups.edge]
 hold_time = {hold}
 
@@ -11240,9 +11229,6 @@ listen_port = 179
 prometheus_addr = "0.0.0.0:9179"
 log_format = "json"
 
-[security.grpc]
-enforcement = "legacy"
-
 [peer_groups.edge]
 hold_time = 90
 
@@ -11293,9 +11279,6 @@ listen_port = 179
 [global.telemetry]
 prometheus_addr = "0.0.0.0:9179"
 log_format = "json"
-
-[security.grpc]
-enforcement = "legacy"
 
 [peer_groups.rebuild]
 hold_time = {hold}
@@ -11368,9 +11351,6 @@ listen_port = 179
 prometheus_addr = "0.0.0.0:9179"
 log_format = "json"
 
-[security.grpc]
-enforcement = "legacy"
-
 [peer_groups.ix]
 import_policy_chain = ["import-filter"]
 
@@ -11435,9 +11415,6 @@ listen_port = 179
 prometheus_addr = "0.0.0.0:9179"
 log_format = "json"
 
-[security.grpc]
-enforcement = "legacy"
-
 [peer_groups.ix]
 hold_time = {hold}
 
@@ -11489,8 +11466,6 @@ listen_port = 179
 [global.telemetry]
 prometheus_addr = "0.0.0.0:9179"
 log_format = "json"
-[security.grpc]
-enforcement = "legacy"
 [peer_groups.ix]
 families = ["ipv4_unicast", "ipv6_unicast"]
 required_families = [{required}]
@@ -11543,9 +11518,6 @@ listen_port = 179
 [global.telemetry]
 prometheus_addr = "0.0.0.0:9179"
 log_format = "json"
-
-[security.grpc]
-enforcement = "legacy"
 
 [peer_groups.ix]
 hold_time = {hold}
@@ -11612,9 +11584,6 @@ listen_port = 179
 [global.telemetry]
 prometheus_addr = "0.0.0.0:9179"
 log_format = "json"
-
-[security.grpc]
-enforcement = "legacy"
 
 [peer_groups.ix]
 hold_time = 90
@@ -14683,9 +14652,6 @@ listen_port = 179
 [global.telemetry]
 log_format = "json"
 
-[security.grpc]
-enforcement = "legacy"
-
 [policy]
 rpol_files = ["policies/core.rpol"]
 
@@ -14703,7 +14669,11 @@ remote_asn = 65003
 import_policy_chain = ["toml-pass"]
 "#,
     );
-    fs::write(dir.path().join("config.toml"), toml).expect("write config");
+    fs::write(
+        dir.path().join("config.toml"),
+        tier_authorized_uds_test_config(&toml),
+    )
+    .expect("write config");
     dir
 }
 
@@ -14812,15 +14782,16 @@ listen_port = 179
 [global.telemetry]
 log_format = "json"
 
-[security.grpc]
-enforcement = "legacy"
-
 [policy]
 rpol_files = ["policies/core.rpol"]
 rpol_roots = ["shared"]
 import_chain = ["edge-in"]
 "#;
-    fs::write(dir.path().join("config.toml"), toml).expect("write config");
+    fs::write(
+        dir.path().join("config.toml"),
+        tier_authorized_uds_test_config(toml),
+    )
+    .expect("write config");
     let config = load_dir(&dir).expect("config with rpol imports loads");
     // Roots rewritten absolute, like rpol_files.
     assert_eq!(config.policy.rpol_roots.len(), 1);
@@ -14887,9 +14858,6 @@ listen_port = 179
 [global.telemetry]
 log_format = "json"
 
-[security.grpc]
-enforcement = "legacy"
-
 [policy]
 rpol_files = ["policies/core.rpol"]
 
@@ -14900,7 +14868,11 @@ import_policy_chain = [{import_chain}]
 export_policy_chain = [{export_chain}]
 "#,
     );
-    fs::write(dir.path().join("config.toml"), toml).expect("write config");
+    fs::write(
+        dir.path().join("config.toml"),
+        tier_authorized_uds_test_config(&toml),
+    )
+    .expect("write config");
     dir
 }
 
@@ -14999,8 +14971,7 @@ fn prepend_as_peer_rejected_on_global_export_chain() {
     let dir = tempfile::tempdir().expect("tempdir");
     fs::create_dir(dir.path().join("policies")).expect("mkdir");
     fs::write(dir.path().join("policies/core.rpol"), PREPEND_OPERANDS_RPOL).expect("write rpol");
-    fs::write(
-        dir.path().join("config.toml"),
+    let toml = tier_authorized_uds_test_config(
         r#"
 [global]
 asn = 65001
@@ -15010,15 +14981,12 @@ listen_port = 179
 [global.telemetry]
 log_format = "json"
 
-[security.grpc]
-enforcement = "legacy"
-
 [policy]
 rpol_files = ["policies/core.rpol"]
 export_chain = ["peer-pad"]
 "#,
-    )
-    .expect("write config");
+    );
+    fs::write(dir.path().join("config.toml"), toml).expect("write config");
     let error = load_dir(&dir).expect_err("global export `prepend as peer` must fail");
     assert!(error.contains("prepend as peer"), "{error}");
     assert!(error.contains("import-only"), "{error}");
@@ -15362,7 +15330,11 @@ fn per_neighbor_inline_policy_still_loads() {
         "{}\nimport_policy = [{{ prefix = \"10.0.0.0/8\", ge = 8, le = 32, action = \"permit\" }}]\n",
         valid_toml()
     );
-    let config = Config::load_toml_with_diagnostics(&toml_str, "test.toml").unwrap();
+    let config = Config::load_toml_with_diagnostics(
+        &tier_authorized_uds_test_config(&toml_str),
+        "test.toml",
+    )
+    .unwrap();
     assert!(!config.neighbors[0].import_policy.is_empty());
 }
 
@@ -15392,30 +15364,81 @@ fn retired_looking_glass_fails_load_with_migration_error() {
 // ── Legacy gRPC enforcement sunset warning ───────────────────────────
 
 #[test]
-fn legacy_grpc_enforcement_warns_at_startup() {
-    // `parse()` injects `enforcement = "legacy"` for fixtures without
-    // an explicit [security.grpc] table.
-    let config = parse(valid_toml()).unwrap();
-    let output = capture_warnings(|| config.warn_if_legacy_grpc_enforcement());
-    assert!(
-        output.contains("WARN") && output.contains("legacy"),
-        "expected a warn-level legacy-enforcement log: {output}"
-    );
-    assert!(
-        output.contains("mandatory in a future release"),
-        "warning must name the sunset: {output}"
-    );
-}
-
-#[test]
 fn tier_grpc_enforcement_does_not_warn() {
     let toml_str = format!(
         "{}\n[security.grpc]\nenforcement = \"tier\"\n\n[security.grpc.roles]\n\"local-admin\" = \"operator\"\n\n[global.telemetry.grpc_uds]\npath = \"/tmp/rustbgpd-test.sock\"\nprincipal = \"local-admin\"\n",
         valid_toml_no_grpc_security()
     );
-    let config = parse(&toml_str).unwrap();
+    let config = parse_strict(&toml_str).unwrap();
     let output = capture_warnings(|| config.warn_if_legacy_grpc_enforcement());
     assert!(output.is_empty(), "no warning expected: {output}");
+}
+
+fn assert_raw_default_tier_rejected(error: &str) {
+    assert!(
+        error.contains("security.grpc.enforcement = \"tier\"")
+            && error.contains("[security.grpc.roles]"),
+        "raw config must reach production Tier validation: {error}"
+    );
+}
+
+#[test]
+fn production_text_loader_preserves_default_tier_validation() {
+    let error = Config::load_toml_with_diagnostics(valid_toml(), "raw-text.toml")
+        .expect_err("raw text without gRPC authorization must fail closed");
+    assert_raw_default_tier_rejected(&error);
+}
+
+fn raw_default_tier_config_file() -> NamedTempFile {
+    let file = NamedTempFile::new().expect("temp config");
+    fs::write(file.path(), valid_toml()).expect("write raw config");
+    file
+}
+
+#[test]
+fn production_file_dataset_loader_preserves_default_tier_validation() {
+    let file = raw_default_tier_config_file();
+    let error = Config::load_with_diagnostics_and_datasets(file.path().to_str().unwrap(), None)
+        .expect_err("raw file without gRPC authorization must fail closed");
+    assert_raw_default_tier_rejected(&error);
+}
+
+#[test]
+fn staged_dataset_loader_preserves_default_tier_validation() {
+    let file = raw_default_tier_config_file();
+    let error = Config::load_with_diagnostics_and_staged_datasets(
+        file.path().to_str().unwrap(),
+        &rustbgpd_policy::datasets::DatasetBindings::new(),
+    )
+    .expect_err("raw staged file without gRPC authorization must fail closed");
+    assert_raw_default_tier_rejected(&error);
+}
+
+#[test]
+fn config_loader_has_no_test_only_legacy_bypass() {
+    let source = include_str!("mod.rs");
+    let (_, parse_source) = include_str!("tests.rs")
+        .split_once("fn parse(toml_str")
+        .unwrap();
+    let (parse_source, _) = parse_source.split_once("#[test]").unwrap();
+    assert!(
+        parse_source.contains("tier_authorized_uds_test_config")
+            && !parse_source.contains("legacy")
+    );
+    assert!(
+        !source.contains("test_only_inject_legacy_grpc_security"),
+        "production loader source must not contain a test-only auth seam"
+    );
+    assert_eq!(
+        source.matches("GrpcEnforcementConfig::Legacy").count(),
+        1,
+        "only the startup-warning compatibility branch may select Legacy"
+    );
+    assert_eq!(
+        source.matches(r#"enforcement = \"legacy\""#).count(),
+        1,
+        "only the operator-facing compatibility warning may name a Legacy setting"
+    );
 }
 
 /// The committed JSON Schema must stay in sync with the config structs.
@@ -15466,9 +15489,6 @@ listen_port = 179
 [global.telemetry]
 log_format = "json"
 
-[security.grpc]
-enforcement = "legacy"
-
 [policy]
 rpol_files = ["policies/core.rpol"]
 
@@ -15480,7 +15500,11 @@ address = "192.0.2.1"
 remote_asn = 65002
 import_policy_chain = ["origin-guard"]
 "#;
-    fs::write(dir.path().join("config.toml"), toml).expect("write config");
+    fs::write(
+        dir.path().join("config.toml"),
+        tier_authorized_uds_test_config(toml),
+    )
+    .expect("write config");
     dir
 }
 
@@ -15740,7 +15764,9 @@ log_format = "json"
 address = "10.0.0.2"
 remote_asn = 65002
 "#;
-    let config = Config::load_toml_with_diagnostics(toml_str, "test.toml").unwrap();
+    let config =
+        Config::load_toml_with_diagnostics(&tier_authorized_uds_test_config(toml_str), "test.toml")
+            .unwrap();
     let rendered = config.effective_redacted_toml().unwrap();
 
     // Computed defaults appear as concrete values: DEFAULT_HOLD_TIME and
@@ -15789,7 +15815,9 @@ address = "10.0.0.3"
 remote_asn = 65001
 peer_group = "rr-clients"
 "#;
-    let config = Config::load_toml_with_diagnostics(toml_str, "test.toml").unwrap();
+    let config =
+        Config::load_toml_with_diagnostics(&tier_authorized_uds_test_config(toml_str), "test.toml")
+            .unwrap();
     let effective = config.effective_redacted();
     for (original, materialized) in config.neighbors.iter().zip(&effective.neighbors) {
         let resolved = config.resolve_neighbor(original).unwrap();
@@ -15862,7 +15890,9 @@ address = "10.0.0.4"
 remote_asn = 65001
 peer_group = "md5-group"
 "#;
-    let config = Config::load_toml_with_diagnostics(toml_str, "test.toml").unwrap();
+    let config =
+        Config::load_toml_with_diagnostics(&tier_authorized_uds_test_config(toml_str), "test.toml")
+            .unwrap();
     let rendered = config.effective_redacted_toml().unwrap();
     assert!(!rendered.contains("hunter2"), "{rendered}");
     assert!(rendered.contains(REDACTED_SECRET), "{rendered}");
@@ -15894,7 +15924,9 @@ peer_group = "alpha"
 address = "2001:db8::2"
 remote_asn = 65002
 "#;
-    let config = Config::load_toml_with_diagnostics(toml_str, "test.toml").unwrap();
+    let config =
+        Config::load_toml_with_diagnostics(&tier_authorized_uds_test_config(toml_str), "test.toml")
+            .unwrap();
     let first = config.effective_redacted_toml().unwrap();
     let second = config.effective_redacted_toml().unwrap();
     assert_eq!(first, second, "effective dump must be deterministic");
@@ -15964,7 +15996,9 @@ address = "10.0.0.2"
 remote_asn = 65002
 md5_password = "hunter2"
 "#;
-    let config = Config::load_toml_with_diagnostics(toml_str, "test.toml").unwrap();
+    let config =
+        Config::load_toml_with_diagnostics(&tier_authorized_uds_test_config(toml_str), "test.toml")
+            .unwrap();
     let rendered = config.effective_redacted_toml().unwrap();
     let err = Config::load_toml_with_diagnostics(&rendered, "effective.toml").unwrap_err();
     assert!(err.contains("md5_password"), "{err}");
