@@ -1,0 +1,31 @@
+PASS full-gnmi-on-change-history
+PASS full-fib
+PASS full-blackhole
+PASS full-local-evpn-vtep-bum
+PASS full-irb
+PASS full-managed-netdev
+PASS full-all-rr-families
+PASS no-history-route-server
+PASS no-history-evpn-rr
+PASS no-history-all-rr-families
+PASS no-history-controller-injection
+PASS no-history-explicit-disabled
+PASS no-history-fib
+PASS no-history-blackhole
+PASS no-history-local-evpn-vtep-bum
+PASS no-history-irb
+PASS no-history-managed-netdev
+PASS control-plane-route-server
+PASS control-plane-evpn-rr
+PASS control-plane-all-rr-families
+PASS control-plane-controller-injection
+PASS control-plane-honor-blackhole-no-install
+PASS control-plane-event-history-disabled
+PASS control-plane-gnmi-on-change-history
+PASS no-history: error: this rustbgpd build omits durable event history; set [event_history].enabled = false or install the full daemon build 
+PASS gnmi-on-change: error: this rustbgpd build omits durable event history; set [event_history].enabled = false or install the full daemon build 
+PASS fib: error: this rustbgpd build omits Linux dataplane writers; remove FIB, BLACKHOLE-install, EVPN VTEP<PATH> and managed-netdev configuration or install the full daemon build 
+PASS blackhole: error: this rustbgpd build omits Linux dataplane writers; remove FIB, BLACKHOLE-install, EVPN VTEP<PATH> and managed-netdev configuration or install the full daemon build 
+PASS local-evpn-vtep-bum: error: this rustbgpd build omits Linux dataplane writers; remove FIB, BLACKHOLE-install, EVPN VTEP<PATH> and managed-netdev configuration or install the full daemon build 
+PASS irb: error: this rustbgpd build omits Linux dataplane writers; remove FIB, BLACKHOLE-install, EVPN VTEP<PATH> and managed-netdev configuration or install the full daemon build 
+PASS managed-netdev: error: this rustbgpd build omits Linux dataplane writers; remove FIB, BLACKHOLE-install, EVPN VTEP<PATH> and managed-netdev configuration or install the full daemon build 

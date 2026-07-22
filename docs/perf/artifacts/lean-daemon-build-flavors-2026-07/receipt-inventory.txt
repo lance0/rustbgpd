@@ -1,0 +1,29 @@
+runner_sha256=8e59fdff8d050294990c889092c3f68083257dcbacdda5158661bdb89a3d2b13
+prototype_patch_sha256=9322cf8d7965819a10e2657737ceff48c1331b4880adfaaabca7edf3816b93ae
+evaluator_sha256=3fdb2f3421fe257838c301278daf574127796b85f5a539a2fa0a5b1fd32f4820
+selected_packages=rustbgpd,rustbgpctl,rs-config-render
+full=sqlite-present,netlink-present
+no-history=sqlite-absent,netlink-present
+control-plane=sqlite-present,netlink-absent
+combined=sqlite-absent,netlink-absent;timing-conditional
+no-history_removed_native_build_unit=libsqlite3-sys bundled SQLite C compilation
+control-plane_removed_compile_units=rtnetlink and netlink protocol crates
+native_toolchain_still_required=jemalloc and TLS build units remain
+artifacts:
+  prototype-features.patch
+  evaluate.py
+  environment.txt
+  dependency-graphs.txt.gz
+  config-smokes.txt
+  timings.csv
+  release-payloads.csv
+  full-workspace-vs-selected-aa.txt
+  warm-artifact-freshness.txt
+  public-contract-digests.txt
+  assertion-mutations.txt
+  result-summary.txt
+  receipt-inventory.txt
+  cargo-timing-full.html.gz
+  cargo-timing-no-history.html.gz
+  cargo-timing-control-plane.html.gz
+  SHA256SUMS
