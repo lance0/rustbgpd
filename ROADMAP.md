@@ -207,11 +207,12 @@ reachability, run-context detection, state-dir disk probes (LAN-482).
 unknown config keys~~ **Shipped (#993):** unknown-key config errors now carry
 a did-you-mean line inside the existing diagnostic frame, ranked by the same
 Levenshtein machinery as the `.rpol` suggestions (LAN-481);
-config version history + `rollback N`, completing the
-check/compare/confirm/rollback workflow no open-source daemon offers whole
-(LAN-483); a bounded BIRD/FRR/GoBGP config importer — structure only, with a
-fail-stop report of everything left for hand-translation, verified through
-the existing shadow-trial runbook (LAN-484).
+~~config version history + `rollback N`~~ **Shipped (#1016):** retained applied
+versions and rollback share the same transaction/validation path, completing
+the check/compare/confirm/rollback workflow (LAN-483); ~~a bounded
+BIRD/FRR/GoBGP config importer~~ **Shipped (#1015):** structure-only conversion
+with a fail-stop unsupported-directive report and shadow-trial workflow
+(LAN-484).
 
 Deliberately *not* here: a web UI, Terraform/Ansible providers (maintenance
 surface without demonstrated demand — revisit on operator pull), and
@@ -525,9 +526,9 @@ Details in the "Recently shipped" section below and ADR-0097.
   RFC, no open-source implementation found, drops onto the existing
   BGP-LS substrate; deepens the controller feed (TE controllers reading
   SR policy state over gRPC).
-- **ASPA/RTRv2 conformance refresh** against the latest drafts — cheap
-  insurance for a day-one-RFC-compliant claim while BIRD's ASPA sits in a
-  side branch and FRR has none.
+- ~~**ASPA/RTRv2 conformance refresh**~~ **Shipped (M84/#759, LAN-243):**
+  multi-cache RTR v1/v2 epoch, reconnect, replacement, withdrawal, and serial-
+  regression behavior is retained in the interop receipt.
 **The route-server (IXP) track** — the core is shipped; remaining work is
 adoption tooling. ADR-0101/M83 covers RFC 7947 transparency, Add-Path and
 `per_client_best` path-hiding mitigation, RFC 9234 OTC, ASPA/ROV hygiene, and
@@ -1289,10 +1290,9 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
   (`RouteAttrBundle` / `materialize_attrs`), cutting per-UPDATE attribute-clone
   churn. Cold-start BGP reconnect also retries the first TCP-level dial misses
   quickly before returning to the slower exponential guard, reducing boot-order
-  establishment delay when rustbgpd starts before passive peers. Remaining
-  backlog, in rough priority order. Near-term performance/polish targets are
-  the remaining FIB projection table-name ownership and high-volume CLI / JSON
-  serializer allocation cleanups.
+  establishment delay when rustbgpd starts before passive peers. The remaining
+  backlog follows in rough priority order. FIB projection table-name
+  ownership and lower-volume API/CLI serializer cleanup are measurement-gated.
   - FIB projection: shipped the configured-table policy precompile so
     `allowed_neighbors` is parsed once per projection pass and peer /
     peer-group membership checks reuse prebuilt sets. The new root
@@ -1300,14 +1300,13 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
     behind the `bench-internals` feature. Remaining possible cleanup:
     table-name ownership in projected status/drop rows, if a future profile
     shows those allocations matter enough to justify changing the data shape.
-  - API route listing: shipped the API-service cleanup that fuses family
+  - API/CLI route listing: shipped the API-service cleanup that fuses family
     filtering, route filters, pagination, and `route_to_proto` response
     construction into one pass over the RIB snapshot; canonical large-community
     filters now compare typed values instead of allocating a per-route
-    `Vec<String>`. Remaining: CLI route JSON still maps proto routes into a
-    second owned `JsonRoute` tree before serialization; replace that with
-    borrowed/streaming serializers if route-list JSON output shows up in
-    profiles.
+    `Vec<String>`. CLI route JSON uses borrowed serializers over the proto
+    routes (#518), preserving the public shape without building a second owned
+    `JsonRoute` tree. Further route-list work is measurement-gated.
   - RPKI validation: shipped the bucketed VRP lookup index and RFC 6811
     `maxLength` correctness fix, replacing the linear VRP scan with an
     ancestor-bucket lookup while preserving overlapping-VRP semantics. Cache
@@ -1405,10 +1404,10 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
     runtime serializers now return `CliError::Json` instead of panicking on
     `serde_json` failures. The high-volume CLI BGP event stream now uses
     borrowed `Serialize` wrappers for event envelopes and EVPN route payloads
-    instead of cloning proto fields into a second `serde_json::Value` tree.
-    Remaining allocation/data-shape cleanup: CLI route JSON still maps proto
-    routes into a second owned `JsonRoute` tree, and lower-volume API/CLI
-    snapshot/reporting paths should only be changed when a profile shows value.
+    instead of cloning proto fields into a second `serde_json::Value` tree, and
+    route-list JSON serializes borrowed proto routes directly (#518).
+    Lower-volume API/CLI snapshot/reporting paths should only be changed when a
+    profile shows value.
   - Benchmark infrastructure: automatic per-PR CI bench triggering on the pinned
     `[self-hosted, rustbgpd-bench]` runner (the manual `Criterion Bench Compare`
     workflow exists); a continuous churn bench (short criterion variant of the

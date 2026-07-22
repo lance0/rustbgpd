@@ -141,7 +141,7 @@ IPv4/IPv6 `Prefix` routes.
 | Feature | rustbgpd | FRR | BIRD | GoBGP | OpenBGPd |
 |---|:---:|:---:|:---:|:---:|:---:|
 | TCP MD5 (RFC 2385) | Yes | Yes | Yes | Yes | Yes |
-| TCP-AO (RFC 5925) | Static + dynamic-prefix keyrings; add-only successor reload | No | Yes | No | No |
+| TCP-AO (RFC 5925) | Static + dynamic-prefix keyrings; observation-gated live rotation; deletion restart-required | No | Yes | No | No |
 | GTSM / TTL Security | Yes | Yes | Yes | Yes | Yes |
 | RPKI origin validation | Yes | Yes | Yes | Yes | Yes |
 | ASPA path verification | Yes[^aspa] | No | Yes | No | Yes |
