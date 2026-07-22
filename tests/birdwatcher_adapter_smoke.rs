@@ -138,14 +138,63 @@ fn wait_for_tcp(port: u16, proc_: &mut Proc) {
     );
 }
 
-fn write_config(dir: &Path, grpc_port: u16, bgp_port: u16) -> PathBuf {
+/// Mutation proof: dropping Tier enforcement, the bearer credential, or the
+/// direct unauthenticated call makes this stop observing `Unauthenticated`.
+fn wait_for_unauthenticated_get_global(port: u16, proc_: &mut Proc) {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build gRPC probe runtime");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < deadline {
+        let result = runtime.block_on(async {
+            let endpoint = format!("http://127.0.0.1:{port}");
+            let mut client =
+                rustbgpd_api::proto::global_service_client::GlobalServiceClient::connect(endpoint)
+                    .await
+                    .ok()?;
+            Some(
+                client
+                    .get_global(rustbgpd_api::proto::GetGlobalRequest {})
+                    .await,
+            )
+        });
+        if matches!(
+            result,
+            // Canonical gRPC status 16 = UNAUTHENTICATED. The root package
+            // intentionally has no direct tonic dependency.
+            Some(Err(ref status)) if status.code() as i32 == 16
+        ) {
+            return;
+        }
+        if let Ok(Some(status)) = proc_.child.try_wait() {
+            panic!(
+                "{} exited before the unauthenticated gRPC probe: {status}\nstderr:\n{}",
+                proc_.name,
+                proc_.stderr()
+            );
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    panic!(
+        "unauthenticated GetGlobal was not rejected\ndaemon stderr:\n{}",
+        proc_.stderr()
+    );
+}
+
+fn write_config(dir: &Path, grpc_port: u16, bgp_port: u16) -> (PathBuf, PathBuf) {
     let runtime_dir = dir.join("runtime");
     std::fs::create_dir_all(&runtime_dir).expect("create runtime dir");
+    let token_path = dir.join("grpc-token");
+    std::fs::write(&token_path, "birdwatcher-smoke-token\n").expect("write test token");
     let config_path = dir.join("rustbgpd.toml");
     let config = format!(
         r#"
 [security.grpc]
-enforcement = "legacy"
+enforcement = "tier"
+
+[security.grpc.roles]
+"rustbgpd://observer/birdwatcher-test" = "observer"
 
 [global]
 asn = 65001
@@ -158,6 +207,8 @@ log_format = "json"
 
 [global.telemetry.grpc_tcp]
 address = "127.0.0.1:{grpc_port}"
+token_file = "{token_path}"
+principal = "rustbgpd://observer/birdwatcher-test"
 
 [[neighbors]]
 address = "192.0.2.10"
@@ -174,10 +225,26 @@ address = "127.0.0.2"
 remote_asn = 65030
 description = "receiver peer"
 "#,
-        runtime_dir = runtime_dir.display()
+        runtime_dir = runtime_dir.display(),
+        token_path = token_path.display()
+    );
+    let parsed: toml::Value = toml::from_str(&config).expect("test config must parse");
+    let principal = "rustbgpd://observer/birdwatcher-test";
+    assert_eq!(
+        parsed["security"]["grpc"]["enforcement"].as_str(),
+        Some("tier")
+    );
+    assert_eq!(
+        parsed["global"]["telemetry"]["grpc_tcp"]["principal"].as_str(),
+        Some(principal)
+    );
+    assert_eq!(
+        parsed["security"]["grpc"]["roles"][principal].as_str(),
+        Some("observer"),
+        "mutation proof: adapter smoke must pin the least-privilege observer role"
     );
     std::fs::write(&config_path, config).expect("write test config");
-    config_path
+    (config_path, token_path)
 }
 
 /// Minimal BGP speaker: connect to the daemon's listen port, complete
@@ -306,7 +373,7 @@ fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_
     let grpc_port = free_port();
     let adapter_port = free_port();
     let bgp_port = free_port();
-    let config_path = write_config(temp.path(), grpc_port, bgp_port);
+    let (config_path, token_path) = write_config(temp.path(), grpc_port, bgp_port);
 
     // Spawn the daemon (serves gRPC). Structured logs go to stdout,
     // the banner to stderr.
@@ -327,6 +394,7 @@ fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_
         stderr_path: daemon_stderr,
     };
     wait_for_tcp(grpc_port, &mut daemon);
+    wait_for_unauthenticated_get_global(grpc_port, &mut daemon);
 
     // Spawn the adapter against the daemon's gRPC endpoint. Built via
     // `cargo run` (same fallback pattern the rbgp test helper uses) —
@@ -338,6 +406,8 @@ fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_
             .args(["run", "--quiet", "-p", "birdwatcher-adapter", "--"])
             .arg("--grpc-addr")
             .arg(format!("http://127.0.0.1:{grpc_port}"))
+            .arg("--grpc-token-file")
+            .arg(&token_path)
             .arg("--listen")
             .arg(format!("127.0.0.1:{adapter_port}"))
             .stdout(Stdio::null())

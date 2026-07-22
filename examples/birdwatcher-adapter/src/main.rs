@@ -32,6 +32,7 @@
 
 use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
+use std::path::{Path as FsPath, PathBuf};
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -39,7 +40,10 @@ use axum::{Json, Router, routing::get};
 use clap::Parser;
 use rustbgpd_api::proto;
 use serde_json::Value;
+use tonic::metadata::AsciiMetadataValue;
+use tonic::service::{Interceptor, interceptor::InterceptedService};
 use tonic::transport::Channel;
+use tonic::{Request, Status};
 use tracing::{error, info};
 
 #[derive(Parser, Debug)]
@@ -52,6 +56,10 @@ struct Args {
     #[arg(long, env = "BIRDWATCHER_ADAPTER_GRPC_ADDR")]
     grpc_addr: String,
 
+    /// Optional bearer-token file for rustbgpd gRPC authentication.
+    #[arg(long, env = "BIRDWATCHER_ADAPTER_GRPC_TOKEN_FILE")]
+    grpc_token_file: Option<PathBuf>,
+
     /// HTTP listen address for the birdwatcher REST surface.
     #[arg(
         long,
@@ -61,11 +69,66 @@ struct Args {
     listen: SocketAddr,
 }
 
-/// Shared state: one multiplexed gRPC channel; per-request clients are
-/// cheap clones of it.
+#[derive(Clone, Debug, Default)]
+struct BearerInterceptor {
+    authorization: Option<AsciiMetadataValue>,
+}
+
+impl Interceptor for BearerInterceptor {
+    fn call(&mut self, mut request: Request<()>) -> Result<Request<()>, Status> {
+        if let Some(authorization) = self.authorization.clone() {
+            request
+                .metadata_mut()
+                .insert("authorization", authorization);
+        }
+        Ok(request)
+    }
+}
+
+fn load_bearer_authorization(
+    token_file: Option<&FsPath>,
+) -> Result<Option<AsciiMetadataValue>, std::io::Error> {
+    let Some(token_file) = token_file else {
+        return Ok(None);
+    };
+    let raw = std::fs::read_to_string(token_file)?;
+    let token = raw.trim_end();
+    if token.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("token file is empty: {}", token_file.display()),
+        ));
+    }
+    if !token.is_ascii() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "invalid token file {}: authorization value must be valid ASCII gRPC metadata",
+                token_file.display()
+            ),
+        ));
+    }
+    let mut authorization =
+        AsciiMetadataValue::try_from(format!("Bearer {token}")).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "invalid token file {}: authorization value must be valid ASCII gRPC metadata",
+                    token_file.display()
+                ),
+            )
+        })?;
+    authorization.set_sensitive(true);
+    Ok(Some(authorization))
+}
+
+type Upstream = InterceptedService<Channel, BearerInterceptor>;
+
+/// Shared state: one multiplexed, optionally authenticated gRPC service;
+/// per-request clients are cheap clones of it.
 #[derive(Clone)]
 struct AppState {
-    channel: Channel,
+    upstream: Upstream,
 }
 
 #[tokio::main]
@@ -84,7 +147,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `connect_lazy` so the adapter can start before/independently of
     // the daemon; requests fail with 502 until the daemon is reachable.
     let channel = Channel::from_shared(args.grpc_addr.clone())?.connect_lazy();
-    let state = AppState { channel };
+    let authorization = load_bearer_authorization(args.grpc_token_file.as_deref())?;
+    let upstream = InterceptedService::new(channel, BearerInterceptor { authorization });
+    let state = AppState { upstream };
 
     let app = Router::new()
         .route("/status", get(status))
@@ -126,7 +191,7 @@ fn api_block() -> Value {
 // ---------------------------------------------------------------------------
 
 async fn status(State(state): State<AppState>) -> Result<Json<Value>, StatusCode> {
-    let mut global = proto::global_service_client::GlobalServiceClient::new(state.channel.clone());
+    let mut global = proto::global_service_client::GlobalServiceClient::new(state.upstream.clone());
     let g = global
         .get_global(proto::GetGlobalRequest {})
         .await
@@ -134,7 +199,7 @@ async fn status(State(state): State<AppState>) -> Result<Json<Value>, StatusCode
         .into_inner();
 
     let mut control =
-        proto::control_service_client::ControlServiceClient::new(state.channel.clone());
+        proto::control_service_client::ControlServiceClient::new(state.upstream.clone());
     let h = control
         .get_health(proto::HealthRequest {})
         .await
@@ -162,7 +227,7 @@ async fn status(State(state): State<AppState>) -> Result<Json<Value>, StatusCode
 
 async fn protocols_bgp(State(state): State<AppState>) -> Result<Json<Value>, StatusCode> {
     let mut client =
-        proto::neighbor_service_client::NeighborServiceClient::new(state.channel.clone());
+        proto::neighbor_service_client::NeighborServiceClient::new(state.upstream.clone());
     let resp = client
         .list_neighbors(proto::ListNeighborsRequest {})
         .await
@@ -172,7 +237,7 @@ async fn protocols_bgp(State(state): State<AppState>) -> Result<Json<Value>, Sta
     // Birdwatcher returns protocols as a map keyed by protocol name.
     // Alice-LG iterates this map and reads fields like `neighbor_address`,
     // `neighbor_as`, `state`, `description`, `routes`, `state_changed`.
-    let mut policy = proto::policy_service_client::PolicyServiceClient::new(state.channel.clone());
+    let mut policy = proto::policy_service_client::PolicyServiceClient::new(state.upstream.clone());
     let mut protocols = serde_json::Map::new();
     for n in &resp.neighbors {
         let cfg = n.config.clone().unwrap_or_default();
@@ -244,7 +309,7 @@ async fn routes_peer(
 }
 
 async fn serve_routes_for_peer(state: &AppState, peer: IpAddr) -> Result<Json<Value>, StatusCode> {
-    let mut client = proto::rib_service_client::RibServiceClient::new(state.channel.clone());
+    let mut client = proto::rib_service_client::RibServiceClient::new(state.upstream.clone());
     let mut routes: Vec<Value> = Vec::new();
     let mut page_token = String::new();
     loop {
@@ -287,7 +352,7 @@ async fn routes_filtered(
     let addr_str = id.strip_prefix("bgp_").unwrap_or(&id).replace('_', ":");
     let peer_addr: IpAddr = addr_str.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
 
-    let mut client = proto::policy_service_client::PolicyServiceClient::new(state.channel.clone());
+    let mut client = proto::policy_service_client::PolicyServiceClient::new(state.upstream.clone());
     let resp = match client
         .list_rejected_routes(proto::ListRejectedRoutesRequest {
             peer_address: peer_addr.to_string(),
@@ -446,7 +511,7 @@ async fn routes_noexport(
     let addr_str = id.strip_prefix("bgp_").unwrap_or(&id).replace('_', ":");
     let peer_addr: IpAddr = addr_str.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
 
-    let mut rib = proto::rib_service_client::RibServiceClient::new(state.channel.clone());
+    let mut rib = proto::rib_service_client::RibServiceClient::new(state.upstream.clone());
 
     // Adj-RIB-Out prefix set. Prefix-granular on purpose: any advertised
     // path for a prefix means the prefix is exported (an Add-Path peer's
@@ -743,6 +808,102 @@ fn days_to_ymd(days: u64) -> (u64, u64, u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::CommandFactory;
+
+    fn token_file(name: &str, contents: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "rustbgpd-birdwatcher-{name}-{}",
+            std::process::id()
+        ));
+        std::fs::write(&path, contents).unwrap();
+        path
+    }
+
+    /// Mutation proof: removing token loading, trailing-whitespace trimming,
+    /// sensitivity marking, or interceptor insertion makes an assertion red.
+    #[test]
+    fn bearer_token_file_is_loaded_once_as_sensitive_authorization() {
+        let path = token_file("valid-token", "secret-token\n");
+        let authorization = load_bearer_authorization(Some(&path)).unwrap().unwrap();
+        let _ = std::fs::remove_file(path);
+        assert_eq!(authorization, "Bearer secret-token");
+        assert!(authorization.is_sensitive());
+
+        let mut interceptor = BearerInterceptor {
+            authorization: Some(authorization),
+        };
+        let request = interceptor.call(Request::new(())).unwrap();
+        let inserted = request.metadata().get("authorization").unwrap();
+        assert_eq!(inserted, "Bearer secret-token");
+        assert!(inserted.is_sensitive());
+    }
+
+    /// Mutation proof: making authentication mandatory when the flag is
+    /// absent inserts metadata and makes this compatibility assertion red.
+    #[test]
+    fn absent_token_file_preserves_unauthenticated_compatibility() {
+        assert!(load_bearer_authorization(None).unwrap().is_none());
+        let mut interceptor = BearerInterceptor::default();
+        let request = interceptor.call(Request::new(())).unwrap();
+        assert!(request.metadata().get("authorization").is_none());
+    }
+
+    /// Mutation proof: accepting empty, non-ASCII, or control-bearing token
+    /// contents makes the corresponding case succeed and this test red.
+    #[test]
+    fn bearer_token_file_rejects_invalid_values_without_disclosure() {
+        for (name, contents, expected) in [
+            ("empty-token", "\n", "token file is empty"),
+            (
+                "non-ascii-token",
+                "secret-\u{e9}",
+                "authorization value must be valid ASCII gRPC metadata",
+            ),
+            (
+                "control-token",
+                "secret\nother",
+                "authorization value must be valid ASCII gRPC metadata",
+            ),
+        ] {
+            let path = token_file(name, contents);
+            let error = load_bearer_authorization(Some(&path)).unwrap_err();
+            let _ = std::fs::remove_file(path);
+            let rendered = error.to_string();
+            assert!(rendered.contains(expected), "{rendered}");
+            let secret = contents.trim_end();
+            if !secret.is_empty() {
+                assert!(!rendered.contains(secret), "{rendered}");
+            }
+        }
+    }
+
+    /// Mutation proof: removing the CLI flag, changing its destination, or
+    /// changing its exact environment binding makes an assertion red.
+    #[test]
+    fn grpc_token_file_flag_parses() {
+        let args = Args::try_parse_from([
+            "birdwatcher-adapter",
+            "--grpc-addr",
+            "http://127.0.0.1:50051",
+            "--grpc-token-file",
+            "/run/secrets/rustbgpd-token",
+        ])
+        .unwrap();
+        assert_eq!(
+            args.grpc_token_file.as_deref(),
+            Some(FsPath::new("/run/secrets/rustbgpd-token"))
+        );
+
+        let command = Args::command();
+        let token_arg = command
+            .get_arguments()
+            .find(|arg| arg.get_id() == "grpc_token_file")
+            .expect("grpc_token_file argument must exist");
+        assert_eq!(
+            token_arg.get_env(),
+            Some(std::ffi::OsStr::new("BIRDWATCHER_ADAPTER_GRPC_TOKEN_FILE"))
+        );
+    }
 
     #[test]
     fn route_conversion_matches_birdwatcher_shape() {

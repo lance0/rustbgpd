@@ -131,7 +131,10 @@ fn write_config(dir: &Path) -> PathBuf {
     let config = format!(
         r#"
 [security.grpc]
-enforcement = "legacy"
+enforcement = "tier"
+
+[security.grpc.roles]
+"rustbgpd://operator/evpn-instances-test" = "operator"
 
 [global]
 asn = 65001
@@ -141,6 +144,10 @@ runtime_state_dir = "{runtime_dir}"
 
 [global.telemetry]
 log_format = "json"
+
+[global.telemetry.grpc_uds]
+path = "{runtime_dir}/grpc.sock"
+principal = "rustbgpd://operator/evpn-instances-test"
 
 [[evpn_instances]]
 vni = 200
@@ -158,6 +165,21 @@ route_targets = ["65000:100"]
 local_vtep_ip = "10.0.0.10"
 "#,
         runtime_dir = runtime_dir.display()
+    );
+    let parsed: toml::Value = toml::from_str(&config).expect("test config must parse");
+    let principal = "rustbgpd://operator/evpn-instances-test";
+    assert_eq!(
+        parsed["security"]["grpc"]["enforcement"].as_str(),
+        Some("tier"),
+        "mutation proof: binary fixture must exercise Tier authorization"
+    );
+    assert_eq!(
+        parsed["global"]["telemetry"]["grpc_uds"]["principal"].as_str(),
+        Some(principal)
+    );
+    assert_eq!(
+        parsed["security"]["grpc"]["roles"][principal].as_str(),
+        Some("operator")
     );
     std::fs::write(&config_path, config).expect("failed to write test config");
     config_path
