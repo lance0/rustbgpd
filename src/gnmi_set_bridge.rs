@@ -1022,8 +1022,12 @@ mod tests {
 
     use rustbgpd_api::gnmi::typed_value::Value as TypedValue;
 
+    use crate::test_support::{
+        assert_tier_authorized_test_config, tier_authorized_uds_test_config,
+    };
+
     fn base_config() -> Config {
-        toml::from_str(
+        let config = toml::from_str(&tier_authorized_uds_test_config(
             r#"
 [global]
 asn = 65001
@@ -1038,8 +1042,10 @@ address = "192.0.2.1"
 remote_asn = 65002
 description = "old"
 "#,
-        )
-        .unwrap()
+        ))
+        .unwrap();
+        assert_tier_authorized_test_config(&config);
+        config
     }
 
     fn bgp_prefix_elem() -> Vec<gnmi::PathElem> {
@@ -1332,7 +1338,7 @@ description = "old"
         // disabled). The ADR-0076 candidate validation then rejects the
         // transaction with the config-level unknown-mode diagnostic,
         // which the commit path surfaces as InvalidArgument.
-        let mut candidate = apply_transaction_to_config(
+        let candidate = apply_transaction_to_config(
             base_config(),
             &transaction(vec![peer_group_update(
                 "rs-clients",
@@ -1341,11 +1347,6 @@ description = "old"
             )]),
         )
         .unwrap();
-        // Keep the round-trip focused on the leaf under test: the bare
-        // test config has no gRPC roles, which tier enforcement (the
-        // serialized default) would reject before reaching the
-        // remove-private-as validation.
-        candidate.security.grpc.enforcement = crate::config::GrpcEnforcementConfig::Legacy;
         let group = candidate.peer_groups.get("rs-clients").unwrap();
         assert_eq!(
             group.remove_private_as.as_deref(),
@@ -1797,7 +1798,7 @@ description = "old"
         // parse accepts any u16; the native candidate validation owns the
         // 12-bit GR restart-time bound and the commit path surfaces its
         // diagnostic.
-        let mut candidate = apply_transaction_to_config(
+        let candidate = apply_transaction_to_config(
             base_config(),
             &transaction(vec![update_at(
                 "192.0.2.1",
@@ -1806,9 +1807,6 @@ description = "old"
             )]),
         )
         .unwrap();
-        // Same tier-enforcement carve-out as the remove-private-as
-        // round-trip test: keep validation focused on the leaf under test.
-        candidate.security.grpc.enforcement = crate::config::GrpcEnforcementConfig::Legacy;
         assert_eq!(candidate.neighbors[0].gr_restart_time, Some(4096));
 
         let candidate_toml = toml::to_string_pretty(&candidate).unwrap();

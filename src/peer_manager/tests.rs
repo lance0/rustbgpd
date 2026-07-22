@@ -22,6 +22,8 @@ use tokio::net::TcpListener;
 use tokio::net::TcpStream;
 use tokio::sync::{Notify, broadcast, mpsc, oneshot};
 
+use crate::test_support::{assert_tier_authorized_test_config, tier_authorized_uds_test_config};
+
 fn key(addr: IpAddr) -> PeerKey {
     PeerKey::new(addr, None)
 }
@@ -384,7 +386,7 @@ fn make_dynamic_manager_config() -> Config {
         },
     );
 
-    Config {
+    let config = Config {
         global: crate::config::Global {
             asn: 65001,
             router_id: "10.0.0.1".to_string(),
@@ -395,7 +397,15 @@ fn make_dynamic_manager_config() -> Config {
                 prometheus_addr: Some("127.0.0.1:9179".to_string()),
                 log_format: "json".to_string(),
                 grpc_tcp: None,
-                grpc_uds: None,
+                grpc_uds: Some(crate::config::GrpcUdsListenerConfig {
+                    enabled: true,
+                    path: Some("/tmp/rustbgpd-test.sock".to_string()),
+                    mode: 0o600,
+                    access_mode: None,
+                    max_tier: None,
+                    token_file: None,
+                    principal: Some("rustbgpd://operator/test-only".to_string()),
+                }),
             },
             dynamic_neighbor_limit: Some(100),
             worker_threads: None,
@@ -409,8 +419,11 @@ fn make_dynamic_manager_config() -> Config {
         },
         security: crate::config::SecurityConfig {
             grpc: crate::config::GrpcSecurityConfig {
-                enforcement: crate::config::GrpcEnforcementConfig::Legacy,
-                ..Default::default()
+                enforcement: crate::config::GrpcEnforcementConfig::Tier,
+                roles: HashMap::from([(
+                    "rustbgpd://operator/test-only".to_string(),
+                    crate::config::GrpcRoleConfig::Operator,
+                )]),
             },
         },
         neighbors: Vec::new(),
@@ -436,11 +449,14 @@ fn make_dynamic_manager_config() -> Config {
         bfd_profiles: Vec::new(),
         apply_bum_enforcement: false,
         event_history: crate::config::EventHistoryConfig::default(),
-    }
+    };
+    assert_tier_authorized_test_config(&config);
+    config
 }
 
 fn load_test_config(toml: &str) -> Config {
-    Config::load_toml_with_diagnostics(toml, "test config").unwrap()
+    Config::load_toml_with_diagnostics(&tier_authorized_uds_test_config(toml), "test config")
+        .unwrap()
 }
 
 fn dynamic_test_manager() -> PeerManager {
@@ -1038,9 +1054,8 @@ md5_password = "old-secret"
         current,
     );
 
-    let diff = mgr
-        .diff_runtime_config(
-            r#"
+    let candidate = tier_authorized_uds_test_config(
+        r#"
 [global]
 asn = 65001
 router_id = "10.0.0.1"
@@ -1054,8 +1069,8 @@ address = "10.0.0.2"
 remote_asn = 65002
 md5_password = "new-secret"
 "#,
-        )
-        .unwrap();
+    );
+    let diff = mgr.diff_runtime_config(&candidate).unwrap();
 
     assert!(diff.has_reload_applied_changes);
     assert!(diff.has_actionable_changes);
@@ -9237,7 +9252,7 @@ async fn apply_resolved_policy_snapshot_skips_non_live_targets() {
 #[tokio::test]
 async fn apply_policy_impact_snapshot_expands_dynamic_range_targets() {
     let mut mgr = live_policy_test_manager();
-    let candidate = crate::config::Config::load_toml_with_diagnostics(
+    let candidate_toml = tier_authorized_uds_test_config(
         r#"
 [global]
 asn = 65001
@@ -9247,9 +9262,6 @@ listen_port = 179
 [global.telemetry]
 prometheus_addr = "0.0.0.0:9179"
 log_format = "json"
-
-[security.grpc]
-enforcement = "legacy"
 
 [peer_groups.ix]
 import_policy_chain = ["deny-import"]
@@ -9262,6 +9274,9 @@ prefix = "10.30.0.0/16"
 peer_group = "ix"
 remote_asn = 65030
 "#,
+    );
+    let candidate = crate::config::Config::load_toml_with_diagnostics(
+        &candidate_toml,
         "dynamic policy candidate",
     )
     .expect("test config must parse");

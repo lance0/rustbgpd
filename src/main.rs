@@ -4905,6 +4905,9 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+    use crate::test_support::{
+        assert_tier_authorized_test_config, tier_authorized_uds_test_config,
+    };
 
     fn unique_temp_path(name: &str) -> PathBuf {
         let suffix = SystemTime::now()
@@ -5055,6 +5058,7 @@ mod tests {
         let path = unique_temp_path(name);
         std::fs::write(&path, toml).unwrap();
         let config = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        assert_tier_authorized_test_config(&config);
         std::fs::remove_file(&path).ok();
         config
     }
@@ -5159,7 +5163,7 @@ mod tests {
     }
 
     fn tcp_ao_neighbor_toml(address: &str) -> String {
-        format!(
+        tier_authorized_uds_test_config(&format!(
             r#"
 [global]
 asn = 65001
@@ -5174,7 +5178,7 @@ address = "{address}"
 remote_asn = 65002
 tcp_ao = {{ key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)" }}
 "#
-        )
+        ))
     }
 
     #[test]

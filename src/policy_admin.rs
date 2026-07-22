@@ -793,12 +793,11 @@ pub fn neighbor_policy_chains_from_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{
+        assert_tier_authorized_test_config, tier_authorized_uds_test_config,
+    };
 
     fn minimal_config() -> Config {
-        // Bypasses `Config::load_*_with_diagnostics` so the
-        // test-only legacy-grpc auto-inject doesn't fire; declare
-        // the legacy posture explicitly so post-mutation
-        // validation in `apply_config_event` accepts the config.
         let toml = r#"
 [global]
 asn = 65001
@@ -809,14 +808,13 @@ listen_port = 179
 prometheus_addr = "127.0.0.1:9179"
 log_format = "json"
 
-[security.grpc]
-enforcement = "legacy"
-
 [[neighbors]]
 address = "10.0.0.2"
 remote_asn = 65002
 "#;
-        toml::from_str(toml).unwrap()
+        let config = toml::from_str(&tier_authorized_uds_test_config(toml)).unwrap();
+        assert_tier_authorized_test_config(&config);
+        config
     }
 
     #[test]
