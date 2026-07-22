@@ -2772,6 +2772,9 @@ mod tests {
     use super::*;
     use crate::config::FibTableConfig;
     use crate::fib_runtime::FibRuntimeCommand;
+    use crate::test_support::{
+        assert_tier_authorized_test_config, tier_authorized_uds_test_config,
+    };
     use rustbgpd_api::peer_types::{
         FibTableSnapshot, RuntimeConfigDiff, RuntimeConfigTransactionPlan,
         RuntimeConfigTransactionPlanError,
@@ -2781,8 +2784,49 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
     use tokio::sync::Mutex;
 
+    fn tier_transaction_test_config(source: &str) -> String {
+        let prepared = tier_authorized_uds_test_config(source);
+        let config = Config::load_toml_with_diagnostics(&prepared, "transaction test config")
+            .expect("transaction test config must parse");
+        assert_tier_authorized_test_config(&config);
+        prepared
+    }
+
+    #[test]
+    fn root_fixture_test_surfaces_require_explicit_tier_preparation() {
+        let legacy_toml = concat!("enforcement = \"", "legacy\"");
+        let legacy_variant = concat!("GrpcEnforcementConfig::", "Legacy");
+        let helper = concat!("tier_authorized_uds", "_test_config");
+        let module_marker = "#[cfg(test)]\nmod tests {";
+        let module_sources = [
+            ("confirm_journal.rs", include_str!("confirm_journal.rs"), 2),
+            ("gnmi_set_bridge.rs", include_str!("gnmi_set_bridge.rs"), 2),
+            ("main.rs", include_str!("main.rs"), 2),
+            ("policy_admin.rs", include_str!("policy_admin.rs"), 2),
+        ];
+
+        for (path, source, helper_count) in module_sources {
+            let test_surface = source.rsplit_once(module_marker).unwrap().1;
+            assert!(!test_surface.contains(legacy_toml), "{path}");
+            assert!(!test_surface.contains(legacy_variant), "{path}");
+            assert_eq!(test_surface.matches(helper).count(), helper_count, "{path}");
+        }
+
+        let this_source = include_str!("config_transaction_control.rs");
+        let this_surface = this_source.rsplit_once(module_marker).unwrap().1;
+        let transaction_helper = concat!("tier_transaction", "_test_config");
+        assert!(!this_surface.contains(legacy_toml));
+        assert!(!this_surface.contains(legacy_variant));
+        assert_eq!(this_surface.matches(transaction_helper).count(), 12);
+
+        let peer_manager_tests = include_str!("peer_manager/tests.rs");
+        assert!(!peer_manager_tests.contains(legacy_toml));
+        assert!(!peer_manager_tests.contains(legacy_variant));
+        assert_eq!(peer_manager_tests.matches(helper).count(), 4);
+    }
+
     fn base_toml(extra: &str) -> String {
-        format!(
+        tier_transaction_test_config(&format!(
             r#"
 [global]
 asn = 65001
@@ -2793,16 +2837,13 @@ listen_port = 179
 prometheus_addr = "0.0.0.0:9179"
 log_format = "json"
 
-[security.grpc]
-enforcement = "legacy"
-
 [[neighbors]]
 address = "10.0.0.2"
 remote_asn = 65002
 
 {extra}
 "#
-        )
+        ))
     }
 
     fn config_transaction_lifecycle_metric(
@@ -3566,7 +3607,7 @@ peer_group = "edge"
     /// produces a pure static-neighbor policy-chain impact.
     /// Dynamic-range transaction tests use `dynamic_live_policy_toml`.
     fn live_policy_toml(action: &str) -> String {
-        format!(
+        tier_transaction_test_config(&format!(
             r#"
 [global]
 asn = 65001
@@ -3576,9 +3617,6 @@ listen_port = 179
 [global.telemetry]
 prometheus_addr = "0.0.0.0:9179"
 log_format = "json"
-
-[security.grpc]
-enforcement = "legacy"
 
 [policy.definitions.f]
 default_action = "{action}"
@@ -3588,11 +3626,11 @@ address = "10.0.0.2"
 remote_asn = 65002
 import_policy_chain = ["f"]
 "#
-        )
+        ))
     }
 
     fn dynamic_live_policy_toml(action: &str) -> String {
-        format!(
+        tier_transaction_test_config(&format!(
             r#"
 [global]
 asn = 65001
@@ -3602,9 +3640,6 @@ listen_port = 179
 [global.telemetry]
 prometheus_addr = "0.0.0.0:9179"
 log_format = "json"
-
-[security.grpc]
-enforcement = "legacy"
 
 [peer_groups.ix]
 import_policy_chain = ["f"]
@@ -3617,11 +3652,11 @@ prefix = "10.30.0.9/16"
 peer_group = "ix"
 remote_asn = 65030
 "#
-        )
+        ))
     }
 
     fn peer_group_reshape_toml(hold_time: u32) -> String {
-        format!(
+        tier_transaction_test_config(&format!(
             r#"
 [global]
 asn = 65001
@@ -3631,9 +3666,6 @@ listen_port = 179
 [global.telemetry]
 prometheus_addr = "0.0.0.0:9179"
 log_format = "json"
-
-[security.grpc]
-enforcement = "legacy"
 
 [peer_groups.edge]
 hold_time = {hold_time}
@@ -3643,14 +3675,14 @@ address = "10.0.0.2"
 remote_asn = 65002
 peer_group = "edge"
 "#
-        )
+        ))
     }
 
     /// Peer group referenced only by a `[[dynamic_neighbors]]` range: a
     /// hold-time edit is a dynamic-range session reshape with no static
     /// members.
     fn dynamic_peer_group_reshape_toml(hold_time: u32) -> String {
-        format!(
+        tier_transaction_test_config(&format!(
             r#"
 [global]
 asn = 65001
@@ -3661,9 +3693,6 @@ listen_port = 179
 prometheus_addr = "0.0.0.0:9179"
 log_format = "json"
 
-[security.grpc]
-enforcement = "legacy"
-
 [peer_groups.ix]
 hold_time = {hold_time}
 
@@ -3672,7 +3701,7 @@ prefix = "10.30.0.0/16"
 peer_group = "ix"
 remote_asn = 65030
 "#
-        )
+        ))
     }
 
     fn dynamic_required_families_toml(required: bool) -> String {
@@ -3681,7 +3710,7 @@ remote_asn = 65030
         } else {
             "required_families = []"
         };
-        format!(
+        tier_transaction_test_config(&format!(
             r#"
 [global]
 asn = 65001
@@ -3690,8 +3719,6 @@ listen_port = 179
 [global.telemetry]
 prometheus_addr = "0.0.0.0:9179"
 log_format = "json"
-[security.grpc]
-enforcement = "legacy"
 [peer_groups.ix]
 families = ["ipv4_unicast", "ipv6_unicast"]
 {required}
@@ -3700,14 +3727,14 @@ prefix = "10.30.0.0/16"
 peer_group = "ix"
 remote_asn = 65030
 "#
-        )
+        ))
     }
 
     /// Peer group with one static member and one `[[dynamic_neighbors]]`
     /// range: a hold-time edit reshapes the static member and resets the
     /// range's live dynamic sessions.
     fn mixed_peer_group_reshape_toml(hold_time: u32) -> String {
-        format!(
+        tier_transaction_test_config(&format!(
             r#"
 [global]
 asn = 65001
@@ -3717,9 +3744,6 @@ listen_port = 179
 [global.telemetry]
 prometheus_addr = "0.0.0.0:9179"
 log_format = "json"
-
-[security.grpc]
-enforcement = "legacy"
 
 [peer_groups.edge]
 hold_time = {hold_time}
@@ -3734,11 +3758,11 @@ prefix = "10.30.0.0/16"
 peer_group = "edge"
 remote_asn = 65030
 "#
-        )
+        ))
     }
 
     fn peer_group_reassignment_toml(group: &str) -> String {
-        format!(
+        tier_transaction_test_config(&format!(
             r#"
 [global]
 asn = 65001
@@ -3748,9 +3772,6 @@ listen_port = 179
 [global.telemetry]
 prometheus_addr = "0.0.0.0:9179"
 log_format = "json"
-
-[security.grpc]
-enforcement = "legacy"
 
 [peer_groups.edge]
 hold_time = 90
@@ -3763,7 +3784,7 @@ address = "10.0.0.2"
 remote_asn = 65002
 peer_group = "{group}"
 "#
-        )
+        ))
     }
 
     fn resolved_static_peer_configs(toml: &str) -> Vec<PeerManagerNeighborConfig> {
@@ -7363,7 +7384,7 @@ export_policy_chain = ["d-private"]
 export_policy_chain = ["stable"]
 "#
         };
-        format!(
+        tier_transaction_test_config(&format!(
             r#"
 [global]
 asn = 65001
@@ -7373,9 +7394,6 @@ listen_port = 179
 [global.telemetry]
 prometheus_addr = "0.0.0.0:9179"
 log_format = "json"
-
-[security.grpc]
-enforcement = "legacy"
 
 [policy.neighbor_sets.peer-context]
 addresses = ["10.0.0.12"]
@@ -7442,7 +7460,7 @@ remote_asn = 65001
 families = ["ipv4_unicast", "ipv6_unicast"]
 peer_group = "ge"
 "#
-        )
+        ))
     }
 
     async fn query_real_update_group_snapshot(
@@ -7839,7 +7857,6 @@ peer_group = "ge"
     }
 
     const HETEROGENEOUS_UPDATE_GROUP_TOML: &str = r#"
-global = { asn = 65001, router_id = "10.0.0.1", listen_port = 179, telemetry = { prometheus_addr = "0.0.0.0:9179", log_format = "json" } }
 policy = { definitions = { old-shared = { default_action = "permit" }, new-shared = { default_action = "permit", statements = [{ prefix = "198.51.100.0/24", action = "deny" }] } } }
 peer_groups = { changed = { export_policy_chain = ["CHANGED_POLICY"] } }
 neighbors = [
@@ -7849,6 +7866,13 @@ neighbors = [
   { address = "10.0.0.14", remote_asn = 65001, route_reflector_client = true, orr_vantage = "192.0.2.14" },
   { address = "10.0.0.15", remote_asn = 65003, add_path = { send = true, send_max = 4 } },
 ]
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
 "#;
 
     #[tokio::test]
@@ -7857,9 +7881,12 @@ neighbors = [
         use rustbgpd_rib::{PlannedGroupability, UpdateGroupImpactRollup};
         use rustbgpd_wire::{Afi, Safi};
 
-        let current_toml = HETEROGENEOUS_UPDATE_GROUP_TOML.replace("CHANGED_POLICY", "old-shared");
-        let candidate_toml =
-            HETEROGENEOUS_UPDATE_GROUP_TOML.replace("CHANGED_POLICY", "new-shared");
+        let current_toml = tier_transaction_test_config(
+            &HETEROGENEOUS_UPDATE_GROUP_TOML.replace("CHANGED_POLICY", "old-shared"),
+        );
+        let candidate_toml = tier_transaction_test_config(
+            &HETEROGENEOUS_UPDATE_GROUP_TOML.replace("CHANGED_POLICY", "new-shared"),
+        );
         let current = Config::load_toml_with_diagnostics(&current_toml, "heterogeneous current")
             .expect("heterogeneous current config must parse");
         let resolved = current

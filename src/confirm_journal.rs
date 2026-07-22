@@ -453,6 +453,9 @@ fn fsync_dir(dir: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{
+        assert_tier_authorized_test_config, tier_authorized_uds_test_config,
+    };
 
     const PREVIOUS_TOML: &str = r#"
 [global]
@@ -465,11 +468,19 @@ prometheus_addr = "0.0.0.0:9179"
 log_format = "json"
 "#;
 
+    fn previous_toml() -> String {
+        let prepared = tier_authorized_uds_test_config(PREVIOUS_TOML);
+        let config = Config::load_toml_with_diagnostics(&prepared, "confirm journal test config")
+            .expect("confirm journal test config must parse");
+        assert_tier_authorized_test_config(&config);
+        prepared
+    }
+
     fn journal() -> ConfirmJournal {
         ConfirmJournal {
             confirm_id: "deploy-1".to_string(),
             deadline_unix_seconds: 1234,
-            rollback_toml: PREVIOUS_TOML.to_string(),
+            rollback_toml: previous_toml(),
             rollback_failed: false,
         }
     }
@@ -524,7 +535,7 @@ log_format = "json"
         assert_eq!(revert.notice.confirm_id, "deploy-1");
         assert_eq!(revert.config.global.asn, 65001);
         // Config file restored to the journaled previous config.
-        assert_eq!(fs::read_to_string(&config_path).unwrap(), PREVIOUS_TOML);
+        assert_eq!(fs::read_to_string(&config_path).unwrap(), previous_toml());
         // Unconfirmed candidate saved aside verbatim.
         assert_eq!(
             fs::read_to_string(&revert.notice.backup_path).unwrap(),
@@ -609,7 +620,7 @@ log_format = "json"
         write(&path, &journal()).unwrap();
 
         let revert = boot_revert_check(&path, &config_path).unwrap().unwrap();
-        assert_eq!(fs::read_to_string(&config_path).unwrap(), PREVIOUS_TOML);
+        assert_eq!(fs::read_to_string(&config_path).unwrap(), previous_toml());
         // No candidate existed, so nothing was saved aside.
         assert!(!revert.notice.backup_path.exists());
     }
@@ -697,7 +708,7 @@ log_format = "json"
             &serde_json::to_string(&serde_json::json!({
                 "confirm_id": "deploy-1",
                 "deadline_unix_seconds": 1234,
-                "rollback_toml": PREVIOUS_TOML,
+                "rollback_toml": previous_toml(),
             }))
             .unwrap(),
         )
@@ -724,7 +735,7 @@ log_format = "json"
         assert!(revert.notice.rollback_failed);
         // The revert itself still applies — the journaled snapshot is the
         // proven pre-transaction config.
-        assert_eq!(fs::read_to_string(&config_path).unwrap(), PREVIOUS_TOML);
+        assert_eq!(fs::read_to_string(&config_path).unwrap(), previous_toml());
     }
 
     #[test]
@@ -751,8 +762,8 @@ log_format = "json"
                 .is_symlink(),
             "the config symlink must survive the revert"
         );
-        assert_eq!(fs::read_to_string(&real).unwrap(), PREVIOUS_TOML);
-        assert_eq!(fs::read_to_string(&link).unwrap(), PREVIOUS_TOML);
+        assert_eq!(fs::read_to_string(&real).unwrap(), previous_toml());
+        assert_eq!(fs::read_to_string(&link).unwrap(), previous_toml());
         // Candidate saved aside next to the REAL file.
         assert_eq!(
             revert.notice.backup_path,
@@ -848,7 +859,7 @@ log_format = "json"
         assert!(message.contains("refusing to boot"), "{message}");
         assert!(message.contains("WAS applied"), "{message}");
         // The revert WAS written despite the refusal.
-        assert_eq!(fs::read_to_string(&config_path).unwrap(), PREVIOUS_TOML);
+        assert_eq!(fs::read_to_string(&config_path).unwrap(), previous_toml());
         // The real candidate is preserved in the backup slot.
         let backup = unconfirmed_backup_path(&config_path);
         assert_eq!(
@@ -888,7 +899,7 @@ log_format = "json"
 
         let revert = boot_revert_check(&path, &config_path).unwrap().unwrap();
         // Revert still applied.
-        assert_eq!(fs::read_to_string(&config_path).unwrap(), PREVIOUS_TOML);
+        assert_eq!(fs::read_to_string(&config_path).unwrap(), previous_toml());
         // The pre-existing candidate is untouched — NOT overwritten with the
         // current on-disk config.
         assert_eq!(
@@ -939,7 +950,7 @@ log_format = "json"
         write(&path, &journal()).unwrap();
 
         let revert = boot_revert_check(&path, &config_path).unwrap().unwrap();
-        assert_eq!(fs::read_to_string(&config_path).unwrap(), PREVIOUS_TOML);
+        assert_eq!(fs::read_to_string(&config_path).unwrap(), previous_toml());
         assert_eq!(
             fs::read_to_string(&revert.notice.backup_path).unwrap(),
             "candidate from the crashed run",
