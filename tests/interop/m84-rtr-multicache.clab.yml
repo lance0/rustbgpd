@@ -51,12 +51,14 @@ topology:
       cmd: sleep infinity
       binds:
         - ./configs/rustbgpd-m84-multicache.toml:/etc/rustbgpd/config.toml:ro
+        - ../fixtures/grpc-test-only-operator.token:/run/rustbgpd/grpc-test-only-operator.token:ro
         - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
       exec:
         - ip addr add 10.84.0.1/24 dev eth1
         - ip link set eth1 up
       env:
         RUST_LOG: info
+        RUSTBGPD_TOKEN_FILE: /run/rustbgpd/grpc-test-only-operator.token
 
     frr:
       kind: linux

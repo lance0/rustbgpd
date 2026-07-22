@@ -24,6 +24,8 @@ set -euo pipefail
 
 TOPO="m72-evpn-esi-overlay-type5-all-active-gobgp"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+INTEROP_TEST_OPERATOR_AUTH=1
+export INTEROP_TEST_OPERATOR_AUTH
 
 VTEP="clab-${TOPO}-vtep"
 PE1="clab-${TOPO}-pe1"
@@ -124,7 +126,7 @@ vrf_route_installed_ecmp() {
 }
 
 vrf_installed_count() {
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         -d '{"name":"'"$TENANT_VRF"'"}' \
         "$GRPC_ADDR" rustbgpd.v1.EvpnService/GetIpVrf 2>/dev/null \
         | jq -r '.installedRoutesCount // 0' 2>/dev/null || echo 0

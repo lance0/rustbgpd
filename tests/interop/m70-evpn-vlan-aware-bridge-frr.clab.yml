@@ -23,6 +23,7 @@ topology:
       cmd: sleep infinity
       binds:
         - ./configs/rustbgpd-m70-vtep.toml:/etc/rustbgpd/config.toml:ro
+        - ../fixtures/grpc-test-only-operator.token:/run/rustbgpd/grpc-test-only-operator.token:ro
         - ./scripts/start-rustbgpd-m70-vtep.sh:/usr/local/bin/start-rustbgpd-m70-vtep.sh:ro
       exec:
         - ip addr add 10.0.0.1/24 dev eth1
@@ -30,6 +31,7 @@ topology:
         - /usr/local/bin/start-rustbgpd-m70-vtep.sh 10.0.0.1
       env:
         RUST_LOG: info,rustbgpd_evpn_linux=debug,rustbgpd::evpn_originator=debug
+        RUSTBGPD_TOKEN_FILE: /run/rustbgpd/grpc-test-only-operator.token
 
     frr:
       kind: linux

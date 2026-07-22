@@ -34,6 +34,8 @@
 
 TOPO="m85-rr-bird"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+INTEROP_TEST_OPERATOR_AUTH=1
+export INTEROP_TEST_OPERATOR_AUTH
 # shellcheck source=test-lib.sh
 source "$SCRIPT_DIR/test-lib.sh"
 BIRD1="clab-${TOPO}-bird1"
@@ -51,7 +53,7 @@ B2_V6="2001:db8:852::/48"
 # Helpers
 # ---------------------------------------------------------------------------
 
-# rbgp against the RR / the rustbgpd client (legacy enforcement, plaintext).
+# rbgp against the RR / the rustbgpd client with the shared test-only token.
 rr_ctl()     { docker exec "$RUSTBGPD" rbgp -s http://127.0.0.1:50051 "$@"; }
 client_ctl() { docker exec "$CLIENT" rbgp -s http://127.0.0.1:50051 "$@"; }
 
@@ -92,7 +94,7 @@ birdc_route_all() {
 }
 
 grpc_get_metrics() {
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         "$GRPC_ADDR" rustbgpd.v1.ControlService/GetMetrics 2>/dev/null
 }
 

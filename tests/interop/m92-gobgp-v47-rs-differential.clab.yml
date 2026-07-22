@@ -26,10 +26,13 @@ topology:
       cmd: sleep infinity
       binds:
         - ./configs/rustbgpd-m92-rs.toml:/config/rustbgpd.toml:ro
+        - ../fixtures/grpc-test-only-operator.token:/run/rustbgpd/grpc-test-only-operator.token:ro
       exec:
         - ip addr add 192.0.2.9/24 dev eth1
         - ip addr add 2001:db8:92::9/64 dev eth1
         - ip link set eth1 up
+      env:
+        RUSTBGPD_TOKEN_FILE: /run/rustbgpd/grpc-test-only-operator.token
 
     gobgp-rs:
       kind: linux

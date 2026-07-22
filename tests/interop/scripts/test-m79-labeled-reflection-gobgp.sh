@@ -57,6 +57,8 @@
 
 TOPO="m79-labeled-reflection-gobgp"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+INTEROP_TEST_OPERATOR_AUTH=1
+export INTEROP_TEST_OPERATOR_AUTH
 source "$SCRIPT_DIR/test-lib.sh"
 
 GOBGP_PE="clab-${TOPO}-gobgp-pe"

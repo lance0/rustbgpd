@@ -23,6 +23,8 @@
 
 TOPO="m74-vpnv4-reflection-gobgp"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+INTEROP_TEST_OPERATOR_AUTH=1
+export INTEROP_TEST_OPERATOR_AUTH
 source "$SCRIPT_DIR/test-lib.sh"
 
 GOBGP_SRC="clab-${TOPO}-gobgp-src"
