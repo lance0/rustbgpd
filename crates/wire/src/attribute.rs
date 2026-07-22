@@ -6442,24 +6442,38 @@ mod tests {
 
     /// Load-bearing RFC 7606 proof: skipping sidecar value validation makes
     /// these malformed types disappear silently; changing their disposition
-    /// away from `AttributeDiscard` fails the exact verdicts.
+    /// away from `AttributeDiscard` fails the exact verdicts, while dropping
+    /// the ordinary-path preservation loses the surviving canonical input.
     #[test]
     fn malformed_as4_compatibility_values_are_attribute_discard() {
-        let mut bytes = attr_bytes(
+        let mut malformed = attr_bytes(
             attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
             attr_type::AS4_PATH,
             &[2, 2, 0, 0, 0xFD, 0xE8],
         );
-        bytes.extend(attr_bytes(
+        malformed.extend(attr_bytes(
             attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
             attr_type::AS4_AGGREGATOR,
             &[0, 0, 0xFD, 0xE8, 10, 0, 0],
         ));
-        assert!(decode_path_attributes(&bytes, false, &[]).is_err());
+        let mut legacy = attr_bytes(
+            attr_flags::TRANSITIVE,
+            attr_type::AS_PATH,
+            &[2, 1, 0xFD, 0xE8],
+        );
+        legacy.extend_from_slice(&malformed);
+        assert!(decode_path_attributes(&legacy, false, &[]).is_err());
         for four_octet_as in [false, true] {
+            let ordinary = if four_octet_as {
+                &[2, 1, 0, 0, 0xFD, 0xE8][..]
+            } else {
+                &[2, 1, 0xFD, 0xE8][..]
+            };
+            let mut bytes = attr_bytes(attr_flags::TRANSITIVE, attr_type::AS_PATH, ordinary);
+            bytes.extend_from_slice(&malformed);
             let revised =
                 decode_path_attributes_revised(&bytes, four_octet_as, false, &[]).unwrap();
-            assert!(revised.attributes.is_empty());
+            assert_eq!(revised.attributes, vec![as_path(&[65_000])]);
             assert_eq!(revised.malformed.len(), 2);
             assert!(revised.malformed.iter().all(|malformed| {
                 matches!(
@@ -6507,7 +6521,8 @@ mod tests {
 
     /// Load-bearing strict-parser matrix: weakening any minimum/even/framing/
     /// count/type check makes the corresponding malformed `AS4_PATH` vanish
-    /// instead of producing `AttributeDiscard`.
+    /// instead of producing `AttributeDiscard`; discarding the complete
+    /// attribute set loses the valid ordinary path asserted in every row.
     #[test]
     fn malformed_as4_path_strict_framing_matrix() {
         let cases = [
@@ -6534,13 +6549,18 @@ mod tests {
             ),
         ];
         for (name, value, detail) in cases {
-            let bytes = attr_bytes(
+            let mut bytes = attr_bytes(
+                attr_flags::TRANSITIVE,
+                attr_type::AS_PATH,
+                &[2, 1, 0xFD, 0xE8],
+            );
+            bytes.extend(attr_bytes(
                 attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
                 attr_type::AS4_PATH,
                 value,
-            );
+            ));
             let revised = decode_path_attributes_revised(&bytes, false, false, &[]).unwrap();
-            assert!(revised.attributes.is_empty(), "{name}");
+            assert_eq!(revised.attributes, vec![as_path(&[65_000])], "{name}");
             assert_eq!(revised.malformed.len(), 1, "{name}");
             assert_eq!(
                 revised.malformed[0].disposition,

@@ -16574,6 +16574,67 @@ async fn rfc7606_attribute_discard_keeps_announcement_and_session() {
     assert_single_malformed_disposition(&session, "attribute_discard");
 }
 
+/// RFC 6793 / RFC 7606: a malformed `AS4_PATH` is discarded without losing
+/// reachable NLRI or the valid ordinary path on a legacy session.
+///
+/// Load-bearing proof: bypassing AS4 normalization leaves raw type 17 on the
+/// delivered route and skips the attribute-discard counter; escalating the
+/// parse failure removes the announcement or drops the Established session.
+#[tokio::test]
+async fn malformed_as4_path_discards_only_sidecar_and_keeps_reachable_nlri() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    rfc7606_drain(&mut rib_rx);
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.four_octet_as = false;
+    install_test_negotiated_session(&mut session, negotiated);
+
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 17), 32);
+    let attrs = [
+        &[0x40, 1, 1, 0][..],
+        &[0x40, 2, 4, 2, 1, 0xFD, 0xEA],
+        &[0x40, 3, 4, 10, 0, 0, 2],
+        // Optional+Transitive AS4_PATH with a value shorter than one segment.
+        &[0xC0, 17, 0],
+    ]
+    .concat();
+    session
+        .process_update(rfc7606_update(attrs, &[prefix]))
+        .await;
+
+    let RibUpdate::RoutesReceived {
+        announced,
+        withdrawn,
+        ..
+    } = rib_rx
+        .try_recv()
+        .expect("reachable NLRI must survive malformed AS4_PATH")
+    else {
+        panic!("expected RoutesReceived");
+    };
+    assert!(withdrawn.is_empty());
+    assert_eq!(announced.len(), 1);
+    assert_eq!(announced[0].prefix, Prefix::V4(prefix));
+    assert_eq!(
+        announced[0]
+            .as_path()
+            .expect("ordinary AS_PATH survives")
+            .asns()
+            .collect::<Vec<_>>(),
+        vec![65_002]
+    );
+    assert!(
+        announced[0].attributes.iter().all(|attribute| {
+            attribute.type_code() != rustbgpd_wire::constants::attr_type::AS4_PATH
+        }),
+        "malformed compatibility sidecar must not enter Adj-RIB-In"
+    );
+    assert_eq!(session.fsm.state(), SessionState::Established);
+    assert_single_malformed_disposition(&session, "attribute_discard");
+}
+
 /// RFC 9552 §8.2.2: malformed TLV framing discards the complete BGP-LS
 /// Attribute while preserving its BGP-LS NLRI and the session.
 ///
