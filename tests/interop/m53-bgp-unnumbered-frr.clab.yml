@@ -26,6 +26,7 @@ topology:
       cmd: sleep infinity
       binds:
         - ./configs/rustbgpd-m53-bgp-unnumbered.toml:/etc/rustbgpd/config.toml:ro
+        - ../fixtures/grpc-test-only-operator.token:/run/rustbgpd/grpc-test-only-operator.token:ro
         - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
       exec:
         - ip -4 addr flush dev eth1

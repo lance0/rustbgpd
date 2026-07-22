@@ -9,6 +9,8 @@ log_format = "json"
 
 [global.telemetry.grpc_tcp]
 address = "0.0.0.0:50051"
+token_file = "/run/rustbgpd/grpc-test-only-operator.token"
+principal = "rustbgpd://operator/test-only"
 
 # ADR-0067 single-hop BFD: a fast profile so the detection window (300 ms × 3 ≈
 # 900 ms) is comfortably under the BGP hold timer (90 s) — the whole point of
@@ -29,4 +31,7 @@ hold_time = 90
 bfd = { profile = "fast" }
 
 [security.grpc]
-enforcement = "legacy"
+enforcement = "tier"
+
+[security.grpc.roles]
+"rustbgpd://operator/test-only" = "operator"

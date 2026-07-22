@@ -15,6 +15,8 @@ set -euo pipefail
 
 TOPO="m50-fib-ecmp-frr"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+INTEROP_TEST_OPERATOR_AUTH=1
+export INTEROP_TEST_OPERATOR_AUTH
 source "$SCRIPT_DIR/test-lib.sh"
 FRR1="clab-${TOPO}-frr1"
 FRR2="clab-${TOPO}-frr2"
@@ -31,7 +33,7 @@ wait_frr_established "$FRR1" "10.0.0.1" "rustbgpd ↔ frr1"
 wait_frr_established "$FRR2" "10.0.1.1" "rustbgpd ↔ frr2"
 
 grpc_fib_routes() {
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         "$GRPC_ADDR" rustbgpd.v1.RibService/ListFibRoutes
 }
 

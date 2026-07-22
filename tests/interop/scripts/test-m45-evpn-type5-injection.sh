@@ -30,6 +30,8 @@
 
 TOPO="m45-evpn-type5-injection"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+INTEROP_TEST_OPERATOR_AUTH=1
+export INTEROP_TEST_OPERATOR_AUTH
 # shellcheck source=tests/interop/scripts/test-lib.sh
 source "$SCRIPT_DIR/test-lib.sh"
 
@@ -52,31 +54,31 @@ ROUTER_MAC="02:00:00:00:50:00"
 # `|| true` so a non-zero grpcurl exit (RPC error) doesn't trip the
 # `set -e` from test-lib.sh — the assertions inspect the captured text.
 grpc_add_type5() {
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         -d "{\"routeType\":5,\"rd\":\"$RD\",\"ethernetTag\":0,\"label\":$VNI,\"nextHop\":\"$RUSTBGPD_IP\",\"routeTargets\":[\"$RT\"],\"disableVxlanEncap\":false,\"prefix\":\"$PREFIX\",\"prefixLength\":$PREFIX_LEN,\"routerMac\":\"$ROUTER_MAC\"}" \
         "$GRPC_ADDR" rustbgpd.v1.InjectionService/AddEvpnRoute 2>&1 || true
 }
 
 grpc_add_type5_overlay_gateway() {
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         -d "{\"routeType\":5,\"rd\":\"$RD\",\"ethernetTag\":0,\"label\":$VNI,\"nextHop\":\"$RUSTBGPD_IP\",\"routeTargets\":[\"$RT\"],\"disableVxlanEncap\":false,\"prefix\":\"$OVERLAY_PREFIX\",\"prefixLength\":$OVERLAY_PREFIX_LEN,\"routerMac\":\"$ROUTER_MAC\",\"gateway\":\"$OVERLAY_GATEWAY\"}" \
         "$GRPC_ADDR" rustbgpd.v1.InjectionService/AddEvpnRoute 2>&1 || true
 }
 
 grpc_delete_type5() {
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         -d "{\"routeType\":5,\"rd\":\"$RD\",\"ethernetTag\":0,\"prefix\":\"$PREFIX\",\"prefixLength\":$PREFIX_LEN}" \
         "$GRPC_ADDR" rustbgpd.v1.InjectionService/DeleteEvpnRoute 2>&1 || true
 }
 
 grpc_delete_type5_overlay_gateway() {
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         -d "{\"routeType\":5,\"rd\":\"$RD\",\"ethernetTag\":0,\"prefix\":\"$OVERLAY_PREFIX\",\"prefixLength\":$OVERLAY_PREFIX_LEN}" \
         "$GRPC_ADDR" rustbgpd.v1.InjectionService/DeleteEvpnRoute 2>&1 || true
 }
 
 grpc_list_evpn() {
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         -d '{}' \
         "$GRPC_ADDR" rustbgpd.v1.RibService/ListEvpnRoutes 2>/dev/null || true
 }

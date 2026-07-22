@@ -20,6 +20,8 @@ set -euo pipefail
 
 TOPO="m57-orf-frr"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+INTEROP_TEST_OPERATOR_AUTH=1
+export INTEROP_TEST_OPERATOR_AUTH
 source "$SCRIPT_DIR/test-lib.sh"
 FRR="clab-${TOPO}-frr"
 
@@ -37,7 +39,7 @@ wait_frr_established "$FRR" "10.0.0.1" "rustbgpd ↔ FRR"
 # inbound ORF does not matter: the RFC 5291 §6 gate holds advertisement until
 # FRR's ORF arrives, then the filtered set is flooded.
 inject() {
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         -d "{\"prefix\":\"${1%/*}\",\"prefixLength\":${1#*/},\"nextHop\":\"10.0.0.1\",\"origin\":2,\"asPath\":[]}" \
         "$GRPC_ADDR" rustbgpd.v1.InjectionService/AddPath > /dev/null
 }

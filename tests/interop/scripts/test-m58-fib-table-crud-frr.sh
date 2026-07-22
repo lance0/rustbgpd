@@ -15,6 +15,8 @@ set -euo pipefail
 
 TOPO="m58-fib-table-crud-frr"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+INTEROP_TEST_OPERATOR_AUTH=1
+export INTEROP_TEST_OPERATOR_AUTH
 source "$SCRIPT_DIR/test-lib.sh"
 FRR="clab-${TOPO}-frr"
 
@@ -36,7 +38,7 @@ wait_frr_established "$FRR" "10.0.0.1" "rustbgpd ↔ FRR"
 # ---- gRPC helpers -----------------------------------------------------------
 
 grpc() {
-    grpcurl -plaintext -import-path . -proto "$PROTO" "$@"
+    grpcurl_call "$@"
 }
 
 list_fib_tables() {

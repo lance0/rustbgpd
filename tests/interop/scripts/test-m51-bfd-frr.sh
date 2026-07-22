@@ -20,6 +20,8 @@ set -euo pipefail
 
 TOPO="m51-bfd-frr"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+INTEROP_TEST_OPERATOR_AUTH=1
+export INTEROP_TEST_OPERATOR_AUTH
 source "$SCRIPT_DIR/test-lib.sh"
 FRR1="clab-${TOPO}-frr1"
 PEER="10.0.0.2"
@@ -34,7 +36,7 @@ wait_frr_established "$FRR1" "10.0.0.1" "rustbgpd ↔ frr1"
 grpc_bfd_state() {
     # State of the BFD session to $PEER as reported by rustbgpd, e.g.
     # "BFD_SESSION_STATE_UP". Empty if the session is absent.
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         -d "{\"peer_address\": \"$PEER\"}" \
         "$GRPC_ADDR" rustbgpd.v1.BfdService/GetBfdSessions 2>/dev/null \
         | jq -r '.sessions[0].state // ""'
@@ -42,7 +44,7 @@ grpc_bfd_state() {
 
 grpc_bgp_state() {
     # rustbgpd's own view of the BGP session FSM state to $PEER.
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         -d "{\"address\": \"$PEER\"}" \
         "$GRPC_ADDR" rustbgpd.v1.NeighborService/GetNeighborState 2>/dev/null \
         | jq -r '.state // ""'
@@ -55,11 +57,11 @@ frr_bfd_status() {
 
 dump_state_on_failure() {
     echo "===== rustbgpd GetBfdSessions (raw) =====" >&2
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         -d "{\"peer_address\": \"$PEER\"}" \
         "$GRPC_ADDR" rustbgpd.v1.BfdService/GetBfdSessions >&2 2>&1 || true
     echo "===== rustbgpd GetNeighborState (raw) =====" >&2
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         -d "{\"address\": \"$PEER\"}" \
         "$GRPC_ADDR" rustbgpd.v1.NeighborService/GetNeighborState >&2 2>&1 || true
     echo "===== frr1 vtysh: show bfd peers =====" >&2

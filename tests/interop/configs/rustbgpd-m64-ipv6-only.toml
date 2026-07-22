@@ -9,6 +9,8 @@ log_format = "json"
 
 [global.telemetry.grpc_tcp]
 address = "0.0.0.0:50051"
+token_file = "/run/rustbgpd/grpc-test-only-operator.token"
+principal = "rustbgpd://operator/test-only"
 
 # The IPv6-only session: never negotiate IPv4 unicast. Without
 # disable_ipv4_unicast the RFC 4760 §8 fallback would implicitly add
@@ -32,4 +34,7 @@ description = "frr-m64-v4-regression"
 hold_time = 90
 
 [security.grpc]
-enforcement = "legacy"
+enforcement = "tier"
+
+[security.grpc.roles]
+"rustbgpd://operator/test-only" = "operator"

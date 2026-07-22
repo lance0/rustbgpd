@@ -31,6 +31,9 @@ PE2="clab-${TOPO}-pe2"
 ESI="00:00:00:00:00:00:00:00:00:01"
 VNI="10"
 PROTO="proto/rustbgpd.proto"
+TEST_OPERATOR_TOKEN_FILE="tests/fixtures/grpc-test-only-operator.token"
+IFS= read -r TEST_OPERATOR_TOKEN < "$TEST_OPERATOR_TOKEN_FILE"
+GRPC_AUTH=(-H "authorization: Bearer $TEST_OPERATOR_TOKEN")
 
 resolve_ip() {
     docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$1" 2>/dev/null
@@ -84,6 +87,7 @@ grpc_list_evpn() {
     ip=$(resolve_ip "$container")
     [ -z "$ip" ] && return 1
     grpcurl -plaintext -import-path . -proto "$PROTO" \
+        "${GRPC_AUTH[@]}" \
         -d "{\"route_type_filter\": $route_type}" \
         "${ip}:50051" rustbgpd.v1.RibService/ListEvpnRoutes 2>/dev/null
 }

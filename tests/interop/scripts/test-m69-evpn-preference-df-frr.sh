@@ -22,6 +22,8 @@ VNI="200"
 FRR_DF_EXTCOMM="434036613111087304"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+INTEROP_TEST_OPERATOR_AUTH=1
+export INTEROP_TEST_OPERATOR_AUTH
 # shellcheck source=test-lib.sh
 source "$SCRIPT_DIR/test-lib.sh"
 
@@ -39,7 +41,7 @@ wait_grpc_ready() {
 }
 
 grpc_list_type4() {
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         -d '{"route_type_filter": 4}' \
         "$GRPC_ADDR" rustbgpd.v1.RibService/ListEvpnRoutes 2>/dev/null
 }

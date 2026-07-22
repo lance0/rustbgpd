@@ -26,6 +26,10 @@ fn materialize_shared_test_only_grpc_token(source: &str) -> String {
     source.replace(TEST_ONLY_GRPC_TOKEN_CONTAINER_PATH, host_path)
 }
 
+fn parse_with_shared_test_grpc_token(source: &str) -> Result<Config, ConfigError> {
+    parse(&materialize_shared_test_only_grpc_token(source))
+}
+
 fn valid_toml() -> &'static str {
     // Shared test fixture used by hundreds of config tests below.
     // Opts into `enforcement = "legacy"` explicitly so the fixture
@@ -12645,7 +12649,7 @@ fn m49_interop_configs_describe_preference_df_with_dont_preempt() {
     // Pin the M49 interop fixtures: PE1 (pref 100, revertive) and PE2 (pref
     // 200, non-revertive) both run highest-preference. Guards the smoke against
     // drift in the configs or the DF config surface.
-    let pe1 = parse(include_str!(
+    let pe1 = parse_with_shared_test_grpc_token(include_str!(
         "../../tests/interop/configs/rustbgpd-m49-pe1.toml"
     ))
     .unwrap();
@@ -12654,7 +12658,7 @@ fn m49_interop_configs_describe_preference_df_with_dont_preempt() {
     assert_eq!(s1[0].df_preference, 100);
     assert!(!s1[0].df_dont_preempt);
 
-    let pe2 = parse(include_str!(
+    let pe2 = parse_with_shared_test_grpc_token(include_str!(
         "../../tests/interop/configs/rustbgpd-m49-pe2.toml"
     ))
     .unwrap();
@@ -12670,7 +12674,7 @@ fn m51_interop_config_describes_non_strict_bfd_with_fast_profile() {
     // a "fast" 300/300/3 profile (detection ≈ 900 ms) and a 90 s BGP hold timer.
     // Guards the smoke against drift in the config or the BFD config surface —
     // the whole point of M51 is that a BFD-down failover beats the hold timer.
-    let config = parse(include_str!(
+    let config = parse_with_shared_test_grpc_token(include_str!(
         "../../tests/interop/configs/rustbgpd-m51-bfd.toml"
     ))
     .unwrap();
@@ -12698,7 +12702,7 @@ fn m52_interop_config_enables_multipath_relax_with_mixed_asns() {
     // neighbors in *different* ASes (65002 / 65003) — the whole point of the
     // smoke is that only multipath-relax co-installs the equal-length,
     // different-AS paths.
-    let config = parse(include_str!(
+    let config = parse_with_shared_test_grpc_token(include_str!(
         "../../tests/interop/configs/rustbgpd-m52-fib-ecmp-relax.toml"
     ))
     .unwrap();
@@ -12713,7 +12717,7 @@ fn m55_interop_config_pins_role_matrix_and_strict_neighbor() {
     // Pin the M55 interop fixture: it needs three compatible role pairs, one
     // incompatible Provider/Provider pair, one strict-role/no-remote-role peer,
     // and one raw Customer fixture for deliberate OTC leak injection.
-    let config = parse(include_str!(
+    let config = parse_with_shared_test_grpc_token(include_str!(
         "../../tests/interop/configs/rustbgpd-m55-bgp-roles-otc.toml"
     ))
     .unwrap();

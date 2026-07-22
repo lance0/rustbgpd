@@ -236,7 +236,7 @@ pe_ctl_observer() {
     docker exec "$pe" rbgp -s "$observer_sock" "$@"
 }
 
-# rbgp against the VTEP/RR (legacy enforcement, plaintext TCP).
+# rbgp against the VTEP/RR using any CLI credential configured in its environment.
 vtep_ctl() {
     docker exec "$VTEP" rbgp -s http://127.0.0.1:50051 "$@"
 }

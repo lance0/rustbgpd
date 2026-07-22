@@ -18,6 +18,8 @@ set -euo pipefail
 
 TOPO="m41-blackhole-frr"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+INTEROP_TEST_OPERATOR_AUTH=1
+export INTEROP_TEST_OPERATOR_AUTH
 source "$SCRIPT_DIR/test-lib.sh"
 FRR="clab-${TOPO}-frr"
 
@@ -31,7 +33,7 @@ BLACKHOLE_VALUE=$(( (65535 << 16) | 666 ))     # 4294902426 = 0xFFFF_029A
 NO_ADVERTISE_VALUE=$(( (65535 << 16) | 65282 )) # 4294967042 = 0xFFFF_FF02
 
 grpc_list_received() {
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         "$GRPC_ADDR" rustbgpd.v1.RibService/ListReceivedRoutes 2>/dev/null
 }
 
@@ -51,7 +53,7 @@ route_communities() {
 }
 
 grpc_blackholes() {
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         "$GRPC_ADDR" rustbgpd.v1.RibService/ListBlackholeDiscards 2>/dev/null
 }
 
@@ -99,7 +101,7 @@ dump_state_on_failure() {
     echo "===== rustbgpd container routes =====" >&2
     docker exec "$RUSTBGPD" ip route show >&2 || true
     echo "===== rustbgpd NeighborState 10.0.0.2 =====" >&2
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         -d '{"address":"10.0.0.2"}' \
         "$GRPC_ADDR" rustbgpd.v1.NeighborService/GetNeighborState 2>&1 \
         | head -60 >&2 || true

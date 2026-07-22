@@ -24,6 +24,8 @@
 
 TOPO="m43-tcp-ao-bird"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+INTEROP_TEST_OPERATOR_AUTH=1
+export INTEROP_TEST_OPERATOR_AUTH
 # shellcheck source=tests/interop/scripts/test-lib.sh
 source "$SCRIPT_DIR/test-lib.sh"
 BIRD="clab-${TOPO}-bird"
@@ -32,13 +34,13 @@ BAD_CONF="/etc/bird/bird-bad.conf"
 TEST_PREFIX="203.0.113.43"
 
 grpc_list_received() {
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         -d '{"neighbor_address": "10.0.43.2"}' \
         "$GRPC_ADDR" rustbgpd.v1.RibService/ListReceivedRoutes 2>/dev/null
 }
 
 grpc_neighbor_state() {
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         -d '{"address": "10.0.43.2"}' \
         "$GRPC_ADDR" rustbgpd.v1.NeighborService/GetNeighborState 2>/dev/null
 }
@@ -59,7 +61,7 @@ dump_diagnostics() {
     echo "--- BIRD protocol state ---" >&2
     docker exec "$BIRD" birdc show protocols all rustbgpd >&2 || true
     echo "--- rustbgpd TCP-AO support ---" >&2
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         "$GRPC_ADDR" rustbgpd.v1.GlobalService/GetGlobal >&2 || true
 }
 
