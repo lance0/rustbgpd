@@ -1,6 +1,6 @@
 # ADR-0111: Actor-owned authoritative export-policy replacement continuation
 
-**Status:** Proposed
+**Status:** Rejected (borrow-free Gate 1 NO-GO)
 **Date:** 2026-07-20
 
 ## Context
@@ -263,6 +263,43 @@ unbounded table-, peer-, or paths-per-prefix aggregation, retain, clone,
 commit, cleanup, or destructor in one poll, or expands into a scheduler or
 sharding rewrite.
 
+### Gate 1 result: NO-GO
+
+The 2026-07-22 Gate 1 audit stopped before production implementation. The
+all-family authoritative resync walks canonical route stores that do not expose
+a safe, borrow-free seek cursor. Unicast has partial ordered-index support, but
+the Loc-RIB index can still rebuild in O(table), and the FlowSpec, EVPN, BGP-LS,
+VPN, labeled-unicast, RTC, and residue stores remain hash-backed.
+
+The three bounded-storage candidates all violate a stop condition:
+
+- a concrete continuation field cannot own both a map and its borrowed
+  `HashMap::Iter`; a compiler-generated pinned future can retain an immutable
+  iterator across yields, but cannot perform the required same-source
+  Adj-RIB-Out or residue/overlay mutation while that iterator remains live;
+- `HashMap::into_iter` is borrow-free only after consuming the canonical map,
+  leaving lookups incomplete unless the RIB is rewritten around split storage;
+  and
+- restarting a hash walk from a scalar cursor performs an O(capacity) scan per
+  poll and becomes superlinear over the complete walk.
+
+Adding eager ordered indexes, consuming and rebuilding the route maps, or
+retaining a table-sized key inventory are exactly the storage rewrite, second
+O(table) inventory, and eager-hot-path-index mechanisms this ADR excludes.
+Incremental retirement of a detached raw map is possible with an owning
+iterator, but it does not solve canonical traversal and does not cover the
+route slab and prefix-trie members of a last-member `GroupRibOut`.
+
+The reproducible source audit and compiler probes are recorded in
+[`../perf/authoritative-policy-replacement-cursor-feasibility-2026-07.md`](../perf/authoritative-policy-replacement-cursor-feasibility-2026-07.md).
+Gate 2 was not started, and the seven-phase production continuation remains
+unauthorized. The immutable borrowed-future alternative is not a safe-Rust
+impossibility; it is outside this ADR's predeclared borrow-free gate and does
+not solve same-container post-send mutation. Reconsider this proposal only
+after a separately measured route-storage change supplies a maintained
+all-family seek cursor without regressing the convergence hot path, or a new
+design concretely proves that mutation boundary without table-sized deferral.
+
 ### Load-bearing validation plan
 
 A future implementation must dispatch a real `ReplacePeerExportPolicy` command
@@ -289,17 +326,18 @@ is added or modified.
 
 ## Consequences
 
-This ADR supplies a reviewable map for fixing the observed readiness gap
+This ADR supplies a reviewable map for the observed readiness gap
 without broadening the grouped transaction or treating sharding as the default
-answer. It makes the irreversible boundary and the existing post-commit repair
-semantics explicit before any code moves.
+answer. The Gate 1 result shows that the proposed continuation cannot satisfy
+its own storage and poll bounds on the current route representation. It makes
+the irreversible boundary and the existing post-commit repair semantics
+explicit without authorizing code movement.
 
-If both feasibility gates pass, ordinary authoritative replacement can be
-structured so readiness gets cooperation opportunities while general actor
-traffic remains intentionally fenced. The design is nevertheless invasive:
-it must externalize several nested walks, cache lifetimes, and cleanup tails.
-Implementation may remain blocked if that cannot be done without weakening
-correctness or complicating the normal hot path.
+Gate 2 and production implementation remain blocked. The observed readiness
+breach is not reclassified or waived; the synchronous authoritative path and
+its existing 200 ms readiness failure remain known limitations. The next work
+must be a separately justified storage decision or a different bounded design,
+not a partial or unicast-only continuation.
 
 No runtime behavior changes with this ADR. It makes no performance claim and
 does not authorize implementation.
