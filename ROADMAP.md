@@ -55,7 +55,7 @@ those.
 | gNMI / OpenConfig telemetry + Set subset | Partial | `Get` / `Subscribe`, BGP state subset; static numbered-neighbor `Set` + commit-confirmed; broader OpenConfig config/state deferred |
 | BMP trio (7854 + 8671 Adj-RIB-Out + 9069 Loc-RIB) + BMPv4/path-marking drafts, MRT dump (6396) | Shipped | Per-collector views + `version = 3\|4`; ADR-0097, M81 receipt |
 | FlowSpec (8955/8956, IPv4/IPv6) | Shipped | All 13 component types |
-| BGP-LS receive + reflection + API export (RFC 9552, SAFI 71/72) | Partial | Controller-feed / RR only; no local topology production (ADR-0077) |
+| BGP-LS receive + reflection + API export (RFC 9552, SAFI 71/72) | Partial | Controller-feed / RR only; no local topology production (ADR-0077); RFC 9857 type-5 NLRI passes opaquely, while typed SR Policy state remains demand-gated (ADR-0116) |
 
 For per-release feature deltas see [CHANGELOG.md](CHANGELOG.md); for the
 build-order history see [docs/milestones.md](docs/milestones.md).
@@ -522,10 +522,14 @@ Details in the "Recently shipped" section below and ADR-0097.
   surface). The [1,000-peer route-server receipt](docs/perf/route-server-1000-2026-07.md)
   now retains real-daemon 400k-route/reload/readiness evidence. Remaining
   demand-shaped work is a real shadow/canary receipt.
-- **RFC 9857 SR-Policy-state-in-BGP-LS** (receive/reflect/API) — published
-  RFC, no open-source implementation found, drops onto the existing
-  BGP-LS substrate; deepens the controller feed (TE controllers reading
-  SR policy state over gRPC).
+- **RFC 9857 SR Policy state in BGP-LS** (receive/reflect/API) — ADR-0116
+  records a bounded fit for the controller-feed / RR niche, but feature code is
+  a no-go until a named controller demand supplies a real producer, consumer,
+  and UPDATE capture. The type-5 NLRI and Attribute 29 bytes already pass opaquely;
+  generic RFC 9552 Attribute 29 framing/discard correctness and a consumer-
+  shaped API are prerequisites for typed SAFI-71 support. Origination, PCEP /
+  SRPM, TE computation, dataplane programming, Add-Path changes, and typed
+  SAFI-72 claims remain out of scope.
 - ~~**ASPA/RTRv2 conformance refresh**~~ **Shipped (M84/#759, LAN-243):**
   multi-cache RTR v1/v2 epoch, reconnect, replacement, withdrawal, and serial-
   regression behavior is retained in the interop receipt.
@@ -675,7 +679,8 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
   Constraints (RFC 4684), and BGP-LS (RFC 9552, which obsoletes RFC 7752), with
   BGP-LS *receive/API export plus reflection* and route-reflector-only VPN/MPLS
   families as the on-identity entry points (controller-feed / RR, not a
-  forwarding plane).
+  forwarding plane). RFC 9857 type-5 NLRI currently rides that opaque SAFI-71
+  path, but typed SR Policy state remains demand-gated by ADR-0116.
   **Done:** the BGP-LS wire/RIB/API tranche accepts `linkstate` /
   `linkstate_vpn`, decodes BGP-LS and BGP-LS VPN MP_REACH/MP_UNREACH, stores
   learned topology objects in typed Adj-RIB-In / Loc-RIB tables, and exposes
