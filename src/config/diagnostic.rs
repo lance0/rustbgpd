@@ -799,8 +799,7 @@ md5password = \"hunter2-typo-secret\"
     fn full_load_with_diagnostics_invalid_hold_time() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        std::fs::write(
-            &path,
+        let source = crate::test_support::tier_authorized_uds_test_config(
             "\
 [global]
 asn = 65000
@@ -815,8 +814,8 @@ address = \"10.0.0.1\"
 remote_asn = 65001
 hold_time = 2
 ",
-        )
-        .unwrap();
+        );
+        std::fs::write(&path, source).unwrap();
         let err = super::super::Config::load_with_diagnostics(path.to_str().unwrap()).unwrap_err();
         assert!(err.contains("hold_time = 2"), "got: {err}");
         assert!(err.contains("must be 0 or >= 3"), "got: {err}");
