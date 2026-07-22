@@ -12,6 +12,10 @@
 #     tears the BGP session down within the BFD detection window — far faster
 #     than the 90 s hold timer — proving the RFC 5882 coupling.
 #   * Recovery: watchfrr restarts bfdd and the session re-establishes.
+#   * Strict remote-AdminDown: after restarting rustbgpd with strict BFD, FRR
+#     administratively shuts down its BFD peer.  The remote AdminDown releases
+#     the withheld BGP session while rustbgpd truthfully reports local BFD Down;
+#     `no shutdown` restores BFD Up without bouncing BGP.
 #
 # Usage:
 #   docker build --target dev -t rustbgpd:dev .
@@ -29,6 +33,7 @@ topology:
       cmd: sleep infinity
       binds:
         - ./configs/rustbgpd-m51-bfd.toml:/etc/rustbgpd/config.toml:ro
+        - ./configs/rustbgpd-m51-bfd-strict.toml:/etc/rustbgpd/config-strict.toml:ro
         - ../fixtures/grpc-test-only-operator.token:/run/rustbgpd/grpc-test-only-operator.token:ro
         - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
       exec:
