@@ -920,6 +920,47 @@ jobs:
           topology: tests/interop/m93-required-families-bird.clab.yml
           script: tests/interop/scripts/test-m93-required-families-bird.sh
 
+  m94:
+    name: M94 — RFC 6793 AS4 migration against OLD speakers
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install containerlab
+        uses: ./.github/actions/install-containerlab
+
+      - name: Install grpcurl + jq
+        # jq drives the exact reconstructed-RIB and wire-receipt assertions.
+        run: |
+          bash .github/scripts/install-grpcurl.sh
+          sudo apt-get update -y && sudo apt-get install -y jq
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build rustbgpd:dev
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          tags: rustbgpd:dev
+          target: dev
+          cache-from: type=gha
+          cache-to: type=gha,mode=max,ignore-error=true
+
+      - name: Pull pinned ExaBGP 5.0.9 source
+        run: docker pull ghcr.io/exa-networks/exabgp@sha256:5554ac053766e66ca3b99eb6b66e83e32113913729a184dcbaf0cc4abd2f4244
+
+      - name: Run M94 (AS4 migration wire oracle)
+        # Load-bearing: the two independent OLD-speaker witnesses make this red
+        # if AS4_PATH reconstruction/projection or AS4_AGGREGATOR is removed.
+        uses: ./.github/actions/run-interop-test
+        with:
+          label: M94
+          topology: tests/interop/m94-as4-migration-exabgp.clab.yml
+          script: tests/interop/scripts/test-m94-as4-migration-exabgp.sh
+
   m86:
     name: M86 — RR core reflection + GR truth against OpenBGPD 9.1 clients
     runs-on: ubuntu-latest
