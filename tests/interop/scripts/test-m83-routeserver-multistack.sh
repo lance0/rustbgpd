@@ -486,7 +486,7 @@ flip_frr_per_client_best() {
 
 assert_per_client_best() {
     log "Assertions 29-33: per-client best-path (RFC 7947 §2.3.2, ADR-0101)"
-    if rs_ctl neighbor "$FRR_ADDR" | grep -q "per-client-best"; then
+    if rs_ctl neighbor "$FRR_ADDR" | grep "per-client-best" >/dev/null; then
         ok "rbgp neighbor shows Distribution Mode per-client-best"
     else
         fail "Distribution Mode per-client-best not reported"
