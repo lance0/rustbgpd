@@ -23,21 +23,19 @@ use crate::fib::FibRouteKey;
 
 const TEST_GRPC_OPERATOR_PRINCIPAL: &str = "rustbgpd://operator/test-only";
 
-/// Add the smallest production-valid Tier authorization surface to a
-/// unit-test config that does not exercise gRPC configuration itself.
+/// Add production-valid Tier authorization to a test config that does not exercise gRPC itself.
 ///
-/// Callers opt in explicitly so production config loaders always see
-/// exactly the text they were given. UDS filesystem permissions provide
-/// the authentication boundary; the stable principal supplies the Tier
-/// authorization identity.
+/// Callers opt in so production config loaders always see exactly the text they were given.
+/// UDS permissions authenticate; the stable principal supplies the Tier authorization identity.
 pub(crate) fn tier_authorized_uds_test_config(source: &str) -> String {
     assert!(
         !source.contains("[security.grpc"),
         "tier-authorized UDS test helper requires a config without security.grpc"
     );
     assert!(
-        !source.contains("[global.telemetry.grpc_uds]"),
-        "tier-authorized UDS test helper requires a config without grpc_uds"
+        !source.contains("[global.telemetry.grpc_uds]")
+            && !source.contains("[global.telemetry.grpc_tcp]"),
+        "tier-authorized UDS test helper requires a config without a gRPC listener"
     );
 
     format!(
@@ -45,13 +43,13 @@ pub(crate) fn tier_authorized_uds_test_config(source: &str) -> String {
 
 [global.telemetry.grpc_uds]
 path = "/tmp/rustbgpd-test.sock"
-principal = "rustbgpd://operator/test-only"
+principal = "{TEST_GRPC_OPERATOR_PRINCIPAL}"
 
 [security.grpc]
 enforcement = "tier"
 
 [security.grpc.roles]
-"rustbgpd://operator/test-only" = "operator"
+"{TEST_GRPC_OPERATOR_PRINCIPAL}" = "operator"
 "#
     )
 }
@@ -65,11 +63,15 @@ pub(crate) fn assert_tier_authorized_test_config(config: &Config) {
         config.security.grpc.roles.get(TEST_GRPC_OPERATOR_PRINCIPAL),
         Some(&GrpcRoleConfig::Operator)
     );
-    let principal = if let Some(uds) = config.global.telemetry.grpc_uds.as_ref() {
+    let telemetry = &config.global.telemetry;
+    let principal = if let Some(uds) = telemetry.grpc_uds.as_ref() {
         assert_eq!(uds.path.as_deref(), Some("/tmp/rustbgpd-test.sock"));
         uds.principal.as_deref()
     } else {
-        let tcp = config.global.telemetry.grpc_tcp.as_ref().unwrap();
+        let tcp = telemetry
+            .grpc_tcp
+            .as_ref()
+            .expect("missing test gRPC listener");
         assert!(tcp.token_file.is_some());
         tcp.principal.as_deref()
     };
@@ -95,15 +97,14 @@ mod tier_auth_tests {
     }
 
     #[test]
-    #[should_panic(expected = "requires a config without security.grpc")]
-    fn tier_auth_helper_rejects_preexisting_legacy_security() {
-        tier_authorized_uds_test_config("[security.grpc]\nenforcement = \"legacy\"\n");
-    }
-
-    #[test]
-    #[should_panic(expected = "requires a config without grpc_uds")]
-    fn tier_auth_helper_rejects_preexisting_uds_listener() {
-        tier_authorized_uds_test_config("[global.telemetry.grpc_uds]\npath = \"/tmp/x\"\n");
+    fn tier_auth_helper_rejects_preexisting_auth_or_listener() {
+        for source in [
+            "[security.grpc]\nenforcement = \"legacy\"\n",
+            "[global.telemetry.grpc_uds]\npath = \"/tmp/x\"\n",
+            "[global.telemetry.grpc_tcp]\naddress = \"127.0.0.1:50051\"\n",
+        ] {
+            assert!(std::panic::catch_unwind(|| tier_authorized_uds_test_config(source)).is_err());
+        }
     }
 }
 
