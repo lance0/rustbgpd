@@ -150,10 +150,11 @@ start_route_continuity_oracle() {
 
     ROUTE_CONTINUITY_FAILURE=$(mktemp -t m43-route-continuity.XXXXXX)
     (
-        local deadline=$((SECONDS + 30))
         local sample=0
         local observed
-        while [ "$SECONDS" -lt "$deadline" ]; do
+        # The explicit stop below and the EXIT trap own this process lifetime;
+        # the 30-minute hosted job timeout remains the outer wedge bound.
+        while :; do
             sample=$((sample + 1))
             if ! observed=$(grpc_list_received); then
                 printf 'RibService query failed at sample %s\n' "$sample" \
@@ -167,9 +168,6 @@ start_route_continuity_oracle() {
             fi
             sleep 0.1
         done
-        printf 'route-continuity oracle exceeded its 30s bound\n' \
-            >"$ROUTE_CONTINUITY_FAILURE"
-        exit 1
     ) &
     ROUTE_CONTINUITY_PID=$!
 }
@@ -180,7 +178,10 @@ stop_route_continuity_oracle() {
         return 1
     fi
 
-    kill "$ROUTE_CONTINUITY_PID" 2>/dev/null || true
+    local stopped=true
+    if ! kill "$ROUTE_CONTINUITY_PID" 2>/dev/null; then
+        stopped=false
+    fi
     wait "$ROUTE_CONTINUITY_PID" 2>/dev/null || true
     ROUTE_CONTINUITY_PID=""
 
@@ -190,6 +191,13 @@ stop_route_continuity_oracle() {
         rm -f "$ROUTE_CONTINUITY_FAILURE"
         ROUTE_CONTINUITY_FAILURE=""
         fail "route continuity failed: $reason"
+        return 1
+    fi
+
+    if [ "$stopped" != true ]; then
+        rm -f "$ROUTE_CONTINUITY_FAILURE"
+        ROUTE_CONTINUITY_FAILURE=""
+        fail "route-continuity oracle exited before its explicit stop"
         return 1
     fi
 
