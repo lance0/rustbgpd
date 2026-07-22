@@ -463,6 +463,12 @@ observational. On reconnect, the client sends a fresh Initiation message;
 the collector rebuilds state from subsequent Peer Up and Route Monitoring
 messages.
 
+During coordinated shutdown, the BMP manager first queues final Peer Down
+messages. Connected clients drain that queue, send BMP Termination, and flush.
+Disconnected clients stop their active connect or backoff wait, and every BMP
+client shares one aggregate two-second drain budget; a stalled collector cannot
+multiply daemon shutdown latency by the number of configured collectors.
+
 ### gNMI dial-out collector unreachable
 
 Each `[gnmi_dialout]` target dials its collector independently and
