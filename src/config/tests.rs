@@ -874,6 +874,13 @@ listen_port = 179
 [global.telemetry]
 log_format = "json"
 
+[global.telemetry.grpc_uds]
+path = "/tmp/rustbgpd-v1-effective.sock"
+principal = "local-admin"
+
+[security.grpc.roles]
+"local-admin" = "operator"
+
 [peer_groups.context]
 families = ["ipv6_unicast"]
 hold_time = 300
@@ -932,6 +939,13 @@ listen_port = 179
 [global.telemetry]
 log_format = "json"
 
+[global.telemetry.grpc_uds]
+path = "/tmp/rustbgpd-v1-cluster-id.sock"
+principal = "local-admin"
+
+[security.grpc.roles]
+"local-admin" = "operator"
+
 [peer_groups.rr]
 route_reflector_client = true
 
@@ -967,13 +981,14 @@ fn v1_stable_effective_defaults_match_runtime_resolution() {
         };
     }
 
-    let config = parse(V1_EFFECTIVE_DEFAULTS_TOML).expect("contextual-default fixture must load");
+    let config =
+        parse_strict(V1_EFFECTIVE_DEFAULTS_TOML).expect("contextual-default fixture must load");
     let explicit_dynamic_limit_toml = V1_EFFECTIVE_DEFAULTS_TOML.replacen(
         "listen_port = 179",
         "listen_port = 179\ndynamic_neighbor_limit = 500",
         1,
     );
-    let explicit_dynamic_limit = parse(&explicit_dynamic_limit_toml)
+    let explicit_dynamic_limit = parse_strict(&explicit_dynamic_limit_toml)
         .expect("explicit dynamic-neighbor limit fixture must load");
     let bare = config
         .resolve_neighbor(&config.neighbors[0])
@@ -1076,12 +1091,14 @@ fn v1_stable_effective_defaults_match_runtime_resolution() {
         (45, 1000, true, 240, 300, 720, (60, 60), false)
     );
 
-    let rr = parse(V1_CLUSTER_ID_DEFAULTS_TOML).expect("inherited RR-client fixture must load");
+    let rr =
+        parse_strict(V1_CLUSTER_ID_DEFAULTS_TOML).expect("inherited RR-client fixture must load");
     let explicit_rr_toml = V1_CLUSTER_ID_DEFAULTS_TOML.replace(
         "listen_port = 179",
         "listen_port = 179\ncluster_id = \"10.0.0.9\"",
     );
-    let explicit_rr = parse(&explicit_rr_toml).expect("explicit cluster-id fixture must load");
+    let explicit_rr =
+        parse_strict(&explicit_rr_toml).expect("explicit cluster-id fixture must load");
 
     // Mutation-red: unconditional router-id fallback, ignoring inherited RR
     // status, or ignoring an explicit cluster_id changes this three-case tuple.
