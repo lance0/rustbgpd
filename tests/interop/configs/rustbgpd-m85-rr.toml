@@ -23,6 +23,8 @@ log_format = "json"
 
 [global.telemetry.grpc_tcp]
 address = "0.0.0.0:50051"
+token_file = "/run/rustbgpd/grpc-test-only-operator.token"
+principal = "rustbgpd://operator/test-only"
 
 [[neighbors]]
 address = "10.85.1.2"
@@ -53,4 +55,7 @@ route_reflector_client = true
 families = ["ipv4_unicast", "ipv6_unicast"]
 
 [security.grpc]
-enforcement = "legacy"
+enforcement = "tier"
+
+[security.grpc.roles]
+"rustbgpd://operator/test-only" = "operator"

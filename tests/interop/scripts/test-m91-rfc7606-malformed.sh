@@ -8,6 +8,8 @@ set -euo pipefail
 
 TOPO="m91-rfc7606-malformed"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+INTEROP_TEST_OPERATOR_AUTH=1
+export INTEROP_TEST_OPERATOR_AUTH
 source "$SCRIPT_DIR/test-lib.sh"
 
 RAW_PEER="clab-${TOPO}-raw-peer"
@@ -25,12 +27,12 @@ RUST_IP=$(resolve_ip "$RUSTBGPD")
 start_rustbgpd "RUST_LOG=info,rustbgpd_transport=debug /usr/local/bin/start-rustbgpd.sh >${RUST_LOG_FILE} 2>&1"
 
 grpc_list_neighbors() {
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         "$GRPC_ADDR" rustbgpd.v1.NeighborService/ListNeighbors
 }
 
 grpc_list_received() {
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         "$GRPC_ADDR" rustbgpd.v1.RibService/ListReceivedRoutes
 }
 

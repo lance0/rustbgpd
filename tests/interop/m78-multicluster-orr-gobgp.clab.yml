@@ -33,6 +33,7 @@ topology:
       cmd: sleep infinity
       binds:
         - ./configs/rustbgpd-m78-rr1.toml:/etc/rustbgpd/config.toml:ro
+        - ../fixtures/grpc-test-only-operator.token:/run/rustbgpd/grpc-test-only-operator.token:ro
         - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
       exec:
         - ip addr add 10.0.0.1/24 dev eth1
@@ -45,6 +46,7 @@ topology:
         - ip link set eth4 up
       env:
         RUST_LOG: info
+        RUSTBGPD_TOKEN_FILE: /run/rustbgpd/grpc-test-only-operator.token
 
     rr2:
       kind: linux
@@ -52,6 +54,7 @@ topology:
       cmd: sleep infinity
       binds:
         - ./configs/rustbgpd-m78-rr2.toml:/etc/rustbgpd/config.toml:ro
+        - ../fixtures/grpc-test-only-operator.token:/run/rustbgpd/grpc-test-only-operator.token:ro
         - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
       exec:
         - ip addr add 10.0.5.1/24 dev eth1
@@ -64,6 +67,7 @@ topology:
         - ip link set eth4 up
       env:
         RUST_LOG: info
+        RUSTBGPD_TOKEN_FILE: /run/rustbgpd/grpc-test-only-operator.token
 
     gobgp-src:
       kind: linux

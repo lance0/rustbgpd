@@ -26,6 +26,8 @@
 
 TOPO="m87-exact-export-rejection"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+INTEROP_TEST_OPERATOR_AUTH=1
+export INTEROP_TEST_OPERATOR_AUTH
 # shellcheck source=/dev/null
 source "$SCRIPT_DIR/test-lib.sh"
 
@@ -82,7 +84,7 @@ wait_bird_established() {
 }
 
 neighbor_state() {
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         -d "{\"address\": \"${1:?}\"}" \
         "$GRPC_ADDR" rustbgpd.v1.NeighborService/GetNeighborState 2>/dev/null
 }
@@ -188,7 +190,7 @@ explain_advertises() {
 }
 
 metrics_text() {
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         "$GRPC_ADDR" rustbgpd.v1.ControlService/GetMetrics 2>/dev/null \
         | jq -r '.prometheusText // ""'
 }

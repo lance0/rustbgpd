@@ -48,6 +48,8 @@
 TOPO="m78-multicluster-orr-gobgp"
 RUSTBGPD="clab-${TOPO}-rr1"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+INTEROP_TEST_OPERATOR_AUTH=1
+export INTEROP_TEST_OPERATOR_AUTH
 source "$SCRIPT_DIR/test-lib.sh"
 
 RR1="clab-${TOPO}-rr1"

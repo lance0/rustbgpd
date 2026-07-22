@@ -48,6 +48,8 @@ set -euo pipefail
 
 TOPO="m80-rpol-policy-parity-frr"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+INTEROP_TEST_OPERATOR_AUTH=1
+export INTEROP_TEST_OPERATOR_AUTH
 source "$SCRIPT_DIR/test-lib.sh"
 SRC="clab-${TOPO}-src"
 PARITY="clab-${TOPO}-parity"
@@ -65,18 +67,18 @@ rbgp() {
 }
 
 grpc_list_best() {
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         "$GRPC_ADDR" rustbgpd.v1.RibService/ListBestRoutes 2>/dev/null
 }
 
 grpc_list_received_for_peer() {
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         -d "{\"neighbor_address\": \"$1\"}" \
         "$GRPC_ADDR" rustbgpd.v1.RibService/ListReceivedRoutes 2>/dev/null
 }
 
 neighbor_state() {
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         -d "{\"address\": \"$1\"}" \
         "$GRPC_ADDR" rustbgpd.v1.NeighborService/GetNeighborState 2>/dev/null
 }

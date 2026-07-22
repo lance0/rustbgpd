@@ -26,6 +26,7 @@ topology:
       cmd: sleep infinity
       binds:
         - ./configs/rustbgpd-m80-policy.toml:/etc/rustbgpd/config.toml:ro
+        - ../fixtures/grpc-test-only-operator.token:/run/rustbgpd/grpc-test-only-operator.token:ro
         # Both .rpol variants land at fixed read-only paths; the exec
         # below copies the initial one onto the working path the
         # config references, and the test script copies the lp150
@@ -44,6 +45,7 @@ topology:
         - cp /etc/rustbgpd/core.initial.rpol /etc/rustbgpd/policies/core.rpol
       env:
         RUST_LOG: info
+        RUSTBGPD_TOKEN_FILE: /run/rustbgpd/grpc-test-only-operator.token
 
     src:
       kind: linux

@@ -38,6 +38,8 @@ set -euo pipefail
 
 TOPO="m71-evpn-esi-overlay-type5-receive-gobgp"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+INTEROP_TEST_OPERATOR_AUTH=1
+export INTEROP_TEST_OPERATOR_AUTH
 
 VTEP="clab-${TOPO}-vtep"
 PE="clab-${TOPO}-pe"
@@ -156,7 +158,7 @@ vrf_route_absent() {
 # gRPC installed_routes_count for vrf1, used as a second assertion after
 # the kernel route is present.
 vrf_installed_count() {
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         -d '{"name":"'"$TENANT_VRF"'"}' \
         "$GRPC_ADDR" rustbgpd.v1.EvpnService/GetIpVrf 2>/dev/null \
         | jq -r '.installedRoutesCount // 0' 2>/dev/null || echo 0

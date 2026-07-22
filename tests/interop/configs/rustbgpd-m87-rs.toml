@@ -16,9 +16,14 @@ log_format = "json"
 
 [global.telemetry.grpc_tcp]
 address = "0.0.0.0:50051"
+token_file = "/run/rustbgpd/grpc-test-only-operator.token"
+principal = "rustbgpd://operator/test-only"
 
 [security.grpc]
-enforcement = "legacy"
+enforcement = "tier"
+
+[security.grpc.roles]
+"rustbgpd://operator/test-only" = "operator"
 
 [policy.definitions.m87-add-sink-marker]
 default_action = "permit"

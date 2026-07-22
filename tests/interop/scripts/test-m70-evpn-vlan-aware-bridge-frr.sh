@@ -11,6 +11,8 @@ set -euo pipefail
 
 TOPO="m70-evpn-vlan-aware-bridge-frr"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+INTEROP_TEST_OPERATOR_AUTH=1
+export INTEROP_TEST_OPERATOR_AUTH
 # shellcheck source=tests/interop/scripts/test-lib.sh
 source "$SCRIPT_DIR/test-lib.sh"
 

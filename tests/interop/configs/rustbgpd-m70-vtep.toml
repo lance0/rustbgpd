@@ -11,6 +11,8 @@ log_format = "json"
 
 [global.telemetry.grpc_tcp]
 address = "0.0.0.0:50051"
+token_file = "/run/rustbgpd/grpc-test-only-operator.token"
+principal = "rustbgpd://operator/test-only"
 
 # ADR-0089 v1 shape: one VLAN-aware bridge, one traditional VXLAN
 # device per VNI, and a local bridge_vlan binding. Ethernet Tag ID
@@ -41,4 +43,7 @@ hold_time = 30
 families = ["l2vpn_evpn"]
 
 [security.grpc]
-enforcement = "legacy"
+enforcement = "tier"
+
+[security.grpc.roles]
+"rustbgpd://operator/test-only" = "operator"

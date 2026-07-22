@@ -9,6 +9,8 @@ log_format = "json"
 
 [global.telemetry.grpc_tcp]
 address = "0.0.0.0:50051"
+token_file = "/run/rustbgpd/grpc-test-only-operator.token"
+principal = "rustbgpd://operator/test-only"
 
 # Raw fixture injects one malformed UPDATE per RFC 7606 disposition class.
 [[neighbors]]
@@ -18,4 +20,7 @@ description = "m91-raw-malformed"
 hold_time = 90
 
 [security.grpc]
-enforcement = "legacy"
+enforcement = "tier"
+
+[security.grpc.roles]
+"rustbgpd://operator/test-only" = "operator"

@@ -46,6 +46,8 @@ set -euo pipefail
 
 TOPO="m84-rtr-multicache"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+INTEROP_TEST_OPERATOR_AUTH=1
+export INTEROP_TEST_OPERATOR_AUTH
 # shellcheck source=tests/interop/scripts/test-lib.sh
 source "$SCRIPT_DIR/test-lib.sh"
 FRR="clab-${TOPO}-frr"
@@ -132,7 +134,7 @@ wait_log_count() {
 }
 
 grpc_list_received() {
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         -d '{"neighbor_address": "10.84.0.2"}' \
         "$GRPC_ADDR" rustbgpd.v1.RibService/ListReceivedRoutes 2>/dev/null
 }
