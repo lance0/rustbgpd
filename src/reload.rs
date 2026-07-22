@@ -805,6 +805,37 @@ pub(crate) async fn apply_reload_outcome(
 /// live listener state for the gRPC sections (so the next reload keeps
 /// comparing against what the listener actually serves).
 #[cfg(test)]
+fn explicit_tier_test_toml(source: &str) -> String {
+    if source.contains("[security.grpc") {
+        source.to_string()
+    } else {
+        crate::test_support::tier_authorized_uds_test_config(source)
+    }
+}
+
+#[cfg(test)]
+fn write_tier_test_config(path: &std::path::Path, source: &str) {
+    std::fs::write(path, explicit_tier_test_toml(source)).unwrap();
+}
+
+#[cfg(test)]
+fn load_tier_test_config(path: &std::path::Path) -> Config {
+    let source = std::fs::read_to_string(path).unwrap();
+    write_tier_test_config(path, &source);
+    let config = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+    crate::test_support::assert_tier_authorized_test_config(&config);
+    config
+}
+
+#[cfg(test)]
+fn load_tier_test_toml(source: &str, source_name: &str) -> Config {
+    let source = explicit_tier_test_toml(source);
+    let config = Config::load_toml_with_diagnostics(&source, source_name).unwrap();
+    crate::test_support::assert_tier_authorized_test_config(&config);
+    config
+}
+
+#[cfg(test)]
 pub(crate) async fn reload_config(
     config_path: &str,
     current: &Config,
@@ -814,8 +845,11 @@ pub(crate) async fn reload_config(
     fib_cmd_tx: Option<&mpsc::Sender<FibRuntimeCommand>>,
     evpn_runtime_apply: Option<&EvpnRuntimeReloadApply>,
 ) -> Option<ReloadedConfig> {
+    let config_path = std::path::Path::new(config_path);
+    let source = std::fs::read_to_string(config_path).unwrap();
+    write_tier_test_config(config_path, &source);
     reload_config_with_tcp_ao(
-        config_path,
+        config_path.to_str().unwrap(),
         current,
         live_grpc_tcp,
         live_grpc_uds,
@@ -2332,6 +2366,9 @@ mod tests {
     use super::*;
     use crate::config_persister::ConfigPersister;
     use crate::peer_manager::PeerManager;
+    use crate::test_support::{
+        assert_tier_authorized_test_config, tier_authorized_uds_test_config,
+    };
     use rustbgpd_telemetry::BgpMetrics;
 
     fn unique_temp_path(name: &str) -> PathBuf {
@@ -2350,6 +2387,31 @@ mod tests {
             .unwrap()
     }
 
+    #[test]
+    fn reload_fixtures_keep_every_explicit_tier_preparation_seam() {
+        let source = include_str!("reload.rs");
+        let legacy_toml = concat!("enforcement = \"", "legacy\"");
+        let legacy_variant = concat!("GrpcEnforcementConfig::", "Legacy");
+        let expected_seams = [
+            (concat!("explicit_tier", "_test_toml("), 3),
+            (concat!("write_tier", "_test_config("), 12),
+            (concat!("load_tier", "_test_config("), 29),
+            (concat!("load_tier", "_test_toml("), 6),
+            (concat!("tier_authorized_uds", "_test_config("), 2),
+            (concat!("assert_tier_authorized", "_test_config("), 18),
+        ];
+
+        assert!(!source.contains(legacy_toml));
+        assert!(!source.contains(legacy_variant));
+        for (seam, expected) in expected_seams {
+            assert_eq!(
+                source.matches(seam).count(),
+                expected,
+                "reload fixture preparation seam {seam} drifted"
+            );
+        }
+    }
+
     fn dataset_reload_dir(config_toml: &str, dataset: &str) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join("policies")).unwrap();
@@ -2366,7 +2428,10 @@ policy origin-guard {
         )
         .unwrap();
         std::fs::write(dir.path().join("datasets/customers.list"), dataset).unwrap();
-        std::fs::write(dir.path().join("config.toml"), config_toml).unwrap();
+        let config_path = dir.path().join("config.toml");
+        write_tier_test_config(&config_path, config_toml);
+        let config = Config::load_with_diagnostics(config_path.to_str().unwrap()).unwrap();
+        assert_tier_authorized_test_config(&config);
         dir
     }
 
@@ -2554,14 +2619,21 @@ local_vtep_ip = "10.0.0.1"
     /// reload), so the runtime snapshot has to keep pointing at the
     /// live state. Without this, future reloads compare against the
     /// already-mutated snapshot and the drift error stops firing.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one fixture proves plaintext bearer startup and later mTLS drift pinning"
+    )]
     #[tokio::test]
     async fn reload_pins_grpc_tcp_to_live_listener_snapshot() {
         let path = unique_temp_path("reload-grpc-tcp-pin");
+        let token = unique_temp_path("reload-grpc-token");
+        std::fs::write(&token, "test-bearer-token\n").unwrap();
 
         // Initial config: grpc_tcp present but plaintext (no TLS).
         std::fs::write(
             &path,
-            r#"
+            format!(
+                r#"
 [global]
 asn = 65001
 router_id = "10.0.0.1"
@@ -2572,22 +2644,34 @@ log_format = "json"
 
 [global.telemetry.grpc_tcp]
 address = "0.0.0.0:50051"
+token_file = {token:?}
+principal = "rustbgpd://operator/test-only"
+
+[security.grpc]
+enforcement = "tier"
+
+[security.grpc.roles]
+"rustbgpd://operator/test-only" = "operator"
 
 [[neighbors]]
 address = "10.0.0.2"
 remote_asn = 65002
 hold_time = 90
 "#,
+                token = token.to_str().unwrap(),
+            ),
         )
         .unwrap();
 
-        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        let initial = load_tier_test_config(&path);
+        assert_tier_authorized_test_config(&initial);
         let live_grpc_tcp = initial.global.telemetry.grpc_tcp.clone();
         let live_grpc_uds = initial.global.telemetry.grpc_uds.clone();
+        let live_tcp = live_grpc_tcp.as_ref().unwrap();
         assert!(
-            live_grpc_tcp
-                .as_ref()
-                .is_some_and(|cfg| cfg.tls_cert_file.is_none()),
+            live_tcp.tls_cert_file.is_none()
+                && live_tcp.tls_key_file.is_none()
+                && live_tcp.tls_client_ca_file.is_none(),
             "initial listener must be plaintext"
         );
 
@@ -2624,9 +2708,16 @@ log_format = "json"
 
 [global.telemetry.grpc_tcp]
 address = "0.0.0.0:50051"
+token_file = {token:?}
 tls_cert_file = {cert:?}
 tls_key_file = {key:?}
 tls_client_ca_file = {ca:?}
+
+[security.grpc]
+enforcement = "tier"
+
+[security.grpc.roles]
+"rustbgpd://operator/test-only" = "operator"
 
 [[neighbors]]
 address = "10.0.0.2"
@@ -2636,6 +2727,7 @@ hold_time = 90
             cert = cert.to_str().unwrap(),
             key = key.to_str().unwrap(),
             ca = ca.to_str().unwrap(),
+            token = token.to_str().unwrap(),
         );
         std::fs::write(&path, mtls_toml).unwrap();
 
@@ -2651,6 +2743,20 @@ hold_time = 90
         )
         .await
         .expect("reload should return a config even when grpc_tcp drifts");
+        assert_tier_authorized_test_config(&returned);
+        assert_eq!(
+            returned.desired.security.grpc.enforcement,
+            crate::config::GrpcEnforcementConfig::Tier
+        );
+        assert_eq!(
+            returned
+                .desired
+                .security
+                .grpc
+                .roles
+                .get("rustbgpd://operator/test-only"),
+            Some(&crate::config::GrpcRoleConfig::Operator)
+        );
 
         // The returned config's grpc_tcp MUST equal the live listener
         // snapshot, NOT the new declared mTLS config. Otherwise a
@@ -2674,6 +2780,7 @@ hold_time = 90
         std::fs::remove_file(&cert).ok();
         std::fs::remove_file(&key).ok();
         std::fs::remove_file(&ca).ok();
+        std::fs::remove_file(&token).ok();
     }
 
     /// Regression: `[[dynamic_neighbors]]` edits must be carried into the
@@ -2712,7 +2819,9 @@ remote_asn = 65002
             ),
         )
         .unwrap();
-        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        let initial = load_tier_test_config(&path);
+        let live_grpc_tcp = initial.global.telemetry.grpc_tcp.clone();
+        let live_grpc_uds = initial.global.telemetry.grpc_uds.clone();
         assert_eq!(initial.dynamic_neighbors.len(), 1);
 
         // Edit the existing range and add a second one.
@@ -2738,8 +2847,8 @@ remote_asn = 65003
         let returned = reload_config(
             path.to_str().unwrap(),
             &initial,
-            None,
-            None,
+            live_grpc_tcp.as_ref(),
+            live_grpc_uds.as_ref(),
             &peer_mgr_tx,
             None,
             None,
@@ -2759,8 +2868,8 @@ remote_asn = 65003
         let second = reload_config(
             path.to_str().unwrap(),
             &returned,
-            None,
-            None,
+            live_grpc_tcp.as_ref(),
+            live_grpc_uds.as_ref(),
             &peer_mgr_tx,
             None,
             None,
@@ -2806,7 +2915,7 @@ local_vtep_ip = "10.0.0.1"
         )
         .unwrap();
 
-        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        let initial = load_tier_test_config(&path);
         let live_grpc_tcp = initial.global.telemetry.grpc_tcp.clone();
         let live_grpc_uds = initial.global.telemetry.grpc_uds.clone();
         assert_eq!(initial.evpn_instances.len(), 1);
@@ -2899,7 +3008,7 @@ local_vtep_ip = "10.0.0.1"
 "#,
         )
         .unwrap();
-        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        let initial = load_tier_test_config(&path);
         let live_grpc_tcp = initial.global.telemetry.grpc_tcp.clone();
         let live_grpc_uds = initial.global.telemetry.grpc_uds.clone();
         let (apply, coordinator) = evpn_reload_apply(&initial, Ok(()));
@@ -3006,7 +3115,7 @@ originator_ip = "10.0.0.1"
 "#,
         )
         .unwrap();
-        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        let initial = load_tier_test_config(&path);
         let live_grpc_tcp = initial.global.telemetry.grpc_tcp.clone();
         let live_grpc_uds = initial.global.telemetry.grpc_uds.clone();
         let (apply, coordinator) = evpn_reload_apply(&initial, Ok(()));
@@ -3133,7 +3242,7 @@ originator_ip = "10.0.0.1"
 "#,
         )
         .unwrap();
-        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        let initial = load_tier_test_config(&path);
         let live_grpc_tcp = initial.global.telemetry.grpc_tcp.clone();
         let live_grpc_uds = initial.global.telemetry.grpc_uds.clone();
         let (apply, coordinator) = evpn_reload_apply_sequence(
@@ -3244,7 +3353,7 @@ local_vtep_ip = "10.0.0.1"
 "#,
         )
         .unwrap();
-        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        let initial = load_tier_test_config(&path);
         let live_grpc_tcp = initial.global.telemetry.grpc_tcp.clone();
         let live_grpc_uds = initial.global.telemetry.grpc_uds.clone();
         let (apply, coordinator) = evpn_reload_apply(&initial, Ok(()));
@@ -3347,7 +3456,7 @@ local_vtep_ip = "10.0.0.1"
 "#,
         )
         .unwrap();
-        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        let initial = load_tier_test_config(&path);
         let live_grpc_tcp = initial.global.telemetry.grpc_tcp.clone();
         let live_grpc_uds = initial.global.telemetry.grpc_uds.clone();
         let (apply, coordinator) = evpn_reload_apply(
@@ -3420,7 +3529,7 @@ local_vtep_ip = "10.0.0.1"
     async fn reload_compares_evpn_against_committed_runtime_baseline() {
         let path = unique_temp_path("reload-evpn-committed-baseline");
         std::fs::write(&path, EVPN_VNI_100_TOML).unwrap();
-        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        let initial = load_tier_test_config(&path);
         let live_grpc_tcp = initial.global.telemetry.grpc_tcp.clone();
         let live_grpc_uds = initial.global.telemetry.grpc_uds.clone();
         let (apply, coordinator) = evpn_reload_apply(&initial, Ok(()));
@@ -3466,7 +3575,7 @@ local_vtep_ip = "10.0.0.1"
     async fn reload_rejected_evpn_candidate_pins_to_committed_runtime_baseline() {
         let path = unique_temp_path("reload-evpn-reject-committed-baseline");
         std::fs::write(&path, EVPN_VNI_100_TOML).unwrap();
-        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        let initial = load_tier_test_config(&path);
         let live_grpc_tcp = initial.global.telemetry.grpc_tcp.clone();
         let live_grpc_uds = initial.global.telemetry.grpc_uds.clone();
         let (apply, coordinator) = evpn_reload_apply_sequence(
@@ -3565,7 +3674,7 @@ table_id = 5000
         )
         .unwrap();
 
-        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        let initial = load_tier_test_config(&path);
         let live_grpc_tcp = initial.global.telemetry.grpc_tcp.clone();
         let live_grpc_uds = initial.global.telemetry.grpc_uds.clone();
         assert_eq!(initial.evpn_ip_vrfs.len(), 1);
@@ -3674,7 +3783,7 @@ local_vtep_ip = "10.0.0.1"
         )
         .unwrap();
 
-        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        let initial = load_tier_test_config(&path);
         let live_grpc_tcp = initial.global.telemetry.grpc_tcp.clone();
         let live_grpc_uds = initial.global.telemetry.grpc_uds.clone();
         assert!(initial.ethernet_segments.is_empty());
@@ -3758,7 +3867,7 @@ hold_time = 90
 "#,
         )
         .unwrap();
-        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        let initial = load_tier_test_config(&path);
         let live_grpc_tcp = initial.global.telemetry.grpc_tcp.clone();
         let live_grpc_uds = initial.global.telemetry.grpc_uds.clone();
         assert!(!initial.global.honor_graceful_shutdown);
@@ -3843,7 +3952,7 @@ hold_time = 90
 "#,
         )
         .unwrap();
-        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        let initial = load_tier_test_config(&path);
         let live_grpc_tcp = initial.global.telemetry.grpc_tcp.clone();
         let live_grpc_uds = initial.global.telemetry.grpc_uds.clone();
         assert!(!initial.global.honor_blackhole);
@@ -3941,7 +4050,7 @@ metric = 200
     async fn reload_hot_applies_fib_tables_when_actor_present() {
         let path = unique_temp_path("reload-fib-tables-hot-apply");
         std::fs::write(&path, FIB_ONE_TABLE_TOML).unwrap();
-        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        let initial = load_tier_test_config(&path);
         let tcp = initial.global.telemetry.grpc_tcp.clone();
         let uds = initial.global.telemetry.grpc_uds.clone();
         assert_eq!(initial.fib_tables.len(), 1);
@@ -4033,7 +4142,7 @@ metric = 200
 "#;
         let path = unique_temp_path("reload-fib-before-pg-delete");
         std::fs::write(&path, initial_toml).unwrap();
-        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        let initial = load_tier_test_config(&path);
         let tcp = initial.global.telemetry.grpc_tcp.clone();
         let uds = initial.global.telemetry.grpc_uds.clone();
         std::fs::write(&path, next_toml).unwrap();
@@ -4105,7 +4214,7 @@ metric = 200
     async fn reload_does_not_advance_fib_tables_when_actor_unreachable() {
         let path = unique_temp_path("reload-fib-tables-actor-gone");
         std::fs::write(&path, FIB_ONE_TABLE_TOML).unwrap();
-        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        let initial = load_tier_test_config(&path);
         let tcp = initial.global.telemetry.grpc_tcp.clone();
         let uds = initial.global.telemetry.grpc_uds.clone();
         std::fs::write(&path, FIB_TWO_TABLES_TOML).unwrap();
@@ -4138,7 +4247,7 @@ metric = 200
     async fn reload_does_not_advance_fib_tables_when_runtime_absent() {
         let path = unique_temp_path("reload-fib-tables-absent");
         std::fs::write(&path, FIB_ONE_TABLE_TOML).unwrap();
-        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        let initial = load_tier_test_config(&path);
         let tcp = initial.global.telemetry.grpc_tcp.clone();
         let uds = initial.global.telemetry.grpc_uds.clone();
         std::fs::write(&path, FIB_TWO_TABLES_TOML).unwrap();
@@ -4183,7 +4292,7 @@ log_format = "json"
         // restart-required-to-start branch. The snapshot must not advance.
         let path = unique_temp_path("reload-fib-tables-from-empty");
         std::fs::write(&path, FIB_NO_TABLES_TOML).unwrap();
-        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        let initial = load_tier_test_config(&path);
         let tcp = initial.global.telemetry.grpc_tcp.clone();
         let uds = initial.global.telemetry.grpc_uds.clone();
         assert!(initial.fib_tables.is_empty());
@@ -4216,7 +4325,7 @@ log_format = "json"
         // pre-plan RIB/dump bail) → reload must NOT advance the snapshot.
         let path = unique_temp_path("reload-fib-tables-actor-err");
         std::fs::write(&path, FIB_ONE_TABLE_TOML).unwrap();
-        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        let initial = load_tier_test_config(&path);
         let tcp = initial.global.telemetry.grpc_tcp.clone();
         let uds = initial.global.telemetry.grpc_uds.clone();
         std::fs::write(&path, FIB_TWO_TABLES_TOML).unwrap();
@@ -4274,7 +4383,7 @@ hold_time = 90
 "#,
         )
         .unwrap();
-        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        let initial = load_tier_test_config(&path);
         let live_grpc_tcp = initial.global.telemetry.grpc_tcp.clone();
         let live_grpc_uds = initial.global.telemetry.grpc_uds.clone();
 
@@ -4343,7 +4452,7 @@ hold_time = 90
 "#,
         )
         .unwrap();
-        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        let initial = load_tier_test_config(&path);
         let live_grpc_tcp = initial.global.telemetry.grpc_tcp.clone();
         let live_grpc_uds = initial.global.telemetry.grpc_uds.clone();
         assert!(!initial.global.honor_graceful_shutdown);
@@ -4477,12 +4586,13 @@ hold_time = 90
         new_toml: &str,
     ) -> (Option<ReloadedConfig>, Vec<String>) {
         let path = unique_temp_path("reload-driver");
-        std::fs::write(&path, initial_toml).unwrap();
+        write_tier_test_config(&path, initial_toml);
         let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        assert_tier_authorized_test_config(&initial);
         let live_grpc_tcp = initial.global.telemetry.grpc_tcp.clone();
         let live_grpc_uds = initial.global.telemetry.grpc_uds.clone();
 
-        std::fs::write(&path, new_toml).unwrap();
+        write_tier_test_config(&path, new_toml);
 
         let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel::<PeerManagerCommand>(64);
         let mock = tokio::spawn(async move {
@@ -4532,6 +4642,10 @@ hold_time = 90
             None,
         )
         .await;
+        if let Some(config) = returned.as_ref() {
+            assert_tier_authorized_test_config(config);
+            assert_tier_authorized_test_config(&config.desired);
+        }
         drop(peer_mgr_tx);
         let tags = mock.await.unwrap();
         std::fs::remove_file(&path).ok();
@@ -4890,12 +5004,10 @@ hold_time = 90
     }
 
     fn baseline_toml() -> &'static str {
-        // Shared test fixture: opts into `enforcement = "legacy"`
-        // explicitly so reload tests exercise pre-v0.24.0 gRPC
-        // authorization behavior (matching the `parse()` test helper
-        // pattern in src/config/tests.rs). Reload-mode tier-mode
-        // semantics are not the focus here.
-        r#"
+        static BASELINE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        BASELINE.get_or_init(|| {
+            tier_authorized_uds_test_config(
+                r#"
 [global]
 asn = 65001
 router_id = "10.0.0.1"
@@ -4904,20 +5016,20 @@ listen_port = 179
 [global.telemetry]
 log_format = "json"
 
-[security.grpc]
-enforcement = "legacy"
-
 [[neighbors]]
 address = "10.0.0.2"
 remote_asn = 65002
 hold_time = 90
-"#
+"#,
+            )
+        })
     }
 
     fn load_config_from_toml(name: &str, toml: &str) -> Config {
         let path = unique_temp_path(name);
-        std::fs::write(&path, toml).unwrap();
+        write_tier_test_config(&path, toml);
         let config = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        assert_tier_authorized_test_config(&config);
         std::fs::remove_file(&path).ok();
         config
     }
@@ -5190,9 +5302,9 @@ tcp_ao = [
         // snapshot back to the startup authorization config — but keep
         // the operator's edit in the desired TOML for the next restart.
         let initial = baseline_toml();
-        let new_toml = format!(
-            "{}\n[security.grpc.roles]\n\"observer-readonly\" = \"observer\"\n",
-            baseline_toml()
+        let new_toml = baseline_toml().replace(
+            "\"rustbgpd://operator/test-only\" = \"operator\"",
+            "\"rustbgpd://operator/test-only\" = \"operator\"\n\"observer-readonly\" = \"observer\"",
         );
 
         let (returned, tags) = drive_reload(initial, &new_toml).await;
@@ -5203,12 +5315,12 @@ tcp_ao = [
             "security-only edits are restart-required and must not reconcile peers: {tags:?}"
         );
         assert!(
-            returned.security.grpc.roles.is_empty(),
+            returned.security.grpc.roles.len() == 1,
             "runtime snapshot must keep the startup gRPC authorization config"
         );
         assert_eq!(
             returned.desired.security.grpc.roles.len(),
-            1,
+            2,
             "desired TOML must preserve the operator's edit for restart"
         );
     }
@@ -5352,15 +5464,14 @@ tcp_ao = {{ key = "{key}", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)" 
 "#
             )
         };
-        let current = config::Config::load_toml_with_diagnostics(&base("old", ""), "old").unwrap();
-        let mut candidate = config::Config::load_toml_with_diagnostics(
+        let current = load_tier_test_toml(&base("old", ""), "old");
+        let mut candidate = load_tier_test_toml(
             &base(
                 "new",
                 "[[dynamic_neighbors]]\nprefix = \"192.0.2.0/24\"\npeer_group = \"dynamic\"",
             ),
             "new",
-        )
-        .unwrap();
+        );
 
         assert_eq!(
             config::pin_dynamic_tcp_ao_startup_only(&mut candidate, &current),
@@ -5407,9 +5518,8 @@ peer_group = "dynamic"
 "#
             )
         };
-        let current = config::Config::load_toml_with_diagnostics(&config("old"), "old").unwrap();
-        let mut candidate =
-            config::Config::load_toml_with_diagnostics(&config("new"), "new").unwrap();
+        let current = load_tier_test_toml(&config("old"), "old");
+        let mut candidate = load_tier_test_toml(&config("new"), "new");
 
         assert_eq!(
             config::pin_dynamic_tcp_ao_startup_only(&mut candidate, &current),
@@ -5427,8 +5537,6 @@ router_id = "10.0.0.1"
 listen_port = 179
 [global.telemetry]
 log_format = "json"
-[security.grpc]
-enforcement = "legacy"
 [peer_groups.dynamic]
 hold_time = 90
 [[dynamic_neighbors]]
@@ -5446,8 +5554,6 @@ router_id = "10.0.0.1"
 listen_port = 179
 [global.telemetry]
 log_format = "json"
-[security.grpc]
-enforcement = "legacy"
 [peer_groups.dynamic]
 hold_time = 90
 [[neighbors]]
@@ -5477,8 +5583,6 @@ router_id = "10.0.0.1"
 listen_port = 179
 [global.telemetry]
 log_format = "json"
-[security.grpc]
-enforcement = "legacy"
 [peer_groups.dynamic]
 hold_time = 90
 [[dynamic_neighbors]]
@@ -5493,8 +5597,6 @@ router_id = "10.0.0.1"
 listen_port = 179
 [global.telemetry]
 log_format = "json"
-[security.grpc]
-enforcement = "legacy"
 [peer_groups.dynamic]
 hold_time = 90
 [[neighbors]]
@@ -5525,8 +5627,6 @@ router_id = "10.0.0.1"
 listen_port = 179
 [global.telemetry]
 log_format = "json"
-[security.grpc]
-enforcement = "legacy"
 [peer_groups.dynamic]
 hold_time = 90
 [[dynamic_neighbors]]
@@ -5541,8 +5641,6 @@ router_id = "10.0.0.1"
 listen_port = 179
 [global.telemetry]
 log_format = "json"
-[security.grpc]
-enforcement = "legacy"
 [peer_groups.dynamic]
 hold_time = 90
 [[neighbors]]
@@ -5555,12 +5653,13 @@ route_targets = ["65000:100"]
 local_vtep_ip = "10.0.0.1"
 "#;
         let path = unique_temp_path("reload-ao-conflict-before-evpn");
-        std::fs::write(&path, initial_toml).unwrap();
+        write_tier_test_config(&path, initial_toml);
         let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        assert_tier_authorized_test_config(&initial);
         let live_grpc_tcp = initial.global.telemetry.grpc_tcp.clone();
         let live_grpc_uds = initial.global.telemetry.grpc_uds.clone();
         let (apply, coordinator) = evpn_reload_apply(&initial, Ok(()));
-        std::fs::write(&path, desired_toml).unwrap();
+        write_tier_test_config(&path, desired_toml);
         let (peer_mgr_tx, _peer_mgr_rx) = mpsc::channel(8);
 
         let returned = reload_config(
@@ -5592,8 +5691,6 @@ router_id = "10.0.0.1"
 listen_port = 179
 [global.telemetry]
 log_format = "json"
-[security.grpc]
-enforcement = "legacy"
 [policy]
 rpol_files = ["policies/core.rpol"]
 [policy.datasets.customers]
@@ -5636,6 +5733,8 @@ import_policy_chain = ["origin-guard"]
         )
         .await
         .expect("content-only dataset reload succeeds");
+        assert_tier_authorized_test_config(&returned);
+        assert_tier_authorized_test_config(&returned.desired);
         refresh.await.unwrap();
 
         assert_eq!(live.pin().generation, 2);
@@ -5655,8 +5754,6 @@ router_id = "10.0.0.1"
 listen_port = 179
 [global.telemetry]
 log_format = "json"
-[security.grpc]
-enforcement = "legacy"
 [policy]
 rpol_files = ["policies/core.rpol"]
 [policy.datasets.customers]
@@ -5671,11 +5768,10 @@ import_policy_chain = ["origin-guard"]
         let initial = Config::load_with_diagnostics(config_path.to_str().unwrap()).unwrap();
         let live = std::sync::Arc::clone(initial.policy.dataset_bindings.get("customers").unwrap());
         std::fs::write(dir.path().join("datasets/customers.list"), "64500\n64999\n").unwrap();
-        std::fs::write(
+        write_tier_test_config(
             &config_path,
-            format!("{config_toml}\n[policy.explain]\nenabled = false\n"),
-        )
-        .unwrap();
+            &format!("{config_toml}\n[policy.explain]\nenabled = false\n"),
+        );
         let (peer_mgr_tx, peer_mgr_rx) = mpsc::channel(1);
         drop(peer_mgr_rx);
 
@@ -5690,6 +5786,8 @@ import_policy_chain = ["origin-guard"]
         )
         .await
         .expect("explain-sync failure returns the honest partial snapshot");
+        assert_tier_authorized_test_config(&returned);
+        assert_tier_authorized_test_config(&returned.desired);
 
         assert_eq!(live.pin().generation, 1);
         assert_eq!(live.pin().data.records(), 1);
@@ -5710,8 +5808,6 @@ router_id = "10.0.0.1"
 listen_port = 179
 [global.telemetry]
 log_format = "json"
-[security.grpc]
-enforcement = "legacy"
 [policy]
 rpol_files = ["policies/core.rpol"]
 [policy.datasets.customers]
@@ -5737,7 +5833,7 @@ remote_asn = 65099
         let config_path = dir.path().join("config.toml");
         let initial = Config::load_with_diagnostics(config_path.to_str().unwrap()).unwrap();
         let live = std::sync::Arc::clone(initial.policy.dataset_bindings.get("customers").unwrap());
-        std::fs::write(&config_path, desired_toml).unwrap();
+        write_tier_test_config(&config_path, &desired_toml);
         let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(8);
         let mock = tokio::spawn(async move {
             while let Some(command) = peer_mgr_rx.recv().await {
@@ -5773,6 +5869,8 @@ remote_asn = 65099
         )
         .await
         .expect("failed neighbor reconcile returns a partial snapshot");
+        assert_tier_authorized_test_config(&returned);
+        assert_tier_authorized_test_config(&returned.desired);
         drop(peer_mgr_tx);
         mock.await.unwrap();
 
@@ -5799,8 +5897,6 @@ router_id = "10.0.0.1"
 listen_port = 179
 [global.telemetry]
 log_format = "json"
-[security.grpc]
-enforcement = "legacy"
 [policy]
 rpol_files = ["policies/core.rpol"]
 [policy.datasets.customers]
@@ -5819,8 +5915,6 @@ router_id = "10.0.0.1"
 listen_port = 179
 [global.telemetry]
 log_format = "json"
-[security.grpc]
-enforcement = "legacy"
 [policy]
 rpol_files = ["policies/core.rpol"]
 [policy.datasets.customers]
@@ -5836,7 +5930,7 @@ remote_asn = 65002
         let initial = Config::load_with_diagnostics(config_path.to_str().unwrap()).unwrap();
         let live = std::sync::Arc::clone(initial.policy.dataset_bindings.get("customers").unwrap());
         std::fs::write(dir.path().join("datasets/customers.list"), "64500\n64999\n").unwrap();
-        std::fs::write(&config_path, desired_toml).unwrap();
+        write_tier_test_config(&config_path, desired_toml);
         let (peer_mgr_tx, _peer_mgr_rx) = mpsc::channel(8);
 
         let returned = reload_config(
@@ -5871,9 +5965,7 @@ remote_asn = 65002
                 "[global]\nasn = 65001\nrouter_id = \"10.0.0.1\"\nlisten_port = 179\n[global.telemetry]\nlog_format = \"json\"\n[peer_groups.dynamic]\nhold_time = 90\n{ranges}"
             )
         };
-        let load = |ranges: &[(&str, &str)]| {
-            config::Config::load_toml_with_diagnostics(&config(ranges), "test").unwrap()
-        };
+        let load = |ranges: &[(&str, &str)]| load_tier_test_toml(&config(ranges), "test");
         let current = load(&[
             ("192.0.2.0/24", "one"),
             ("198.51.100.0/24", "two"),
@@ -7073,15 +7165,23 @@ remote_asn = 65002
             disk.policy.definitions.contains_key("after-reload"),
             "gRPC-style mutation after SIGHUP must persist on top of refreshed desired base"
         );
+        assert_tier_authorized_test_config(&runtime);
+        let mut normalized_disk = disk.clone();
+        normalized_disk
+            .global
+            .telemetry
+            .grpc_uds
+            .as_mut()
+            .unwrap()
+            .path = Some("/tmp/rustbgpd-test.sock".to_string());
+        assert_tier_authorized_test_config(&normalized_disk);
         (runtime, disk)
     }
 
     #[tokio::test]
     async fn reload_pin_grpc_uds_preserves_desired_toml_for_later_persistence() {
-        let new_toml = format!(
-            "{}\n[global.telemetry.grpc_uds]\npath = \"/tmp/rustbgpd-edited.sock\"\n",
-            baseline_toml()
-        );
+        let new_toml =
+            baseline_toml().replace("/tmp/rustbgpd-test.sock", "/tmp/rustbgpd-edited.sock");
         let (runtime, disk) = reload_then_persist_policy_after_desired_refresh(&new_toml).await;
 
         assert_ne!(
@@ -7203,8 +7303,8 @@ remote_asn = 65002
         let path_b = unique_temp_path("eff-impact-global-new");
         std::fs::write(&path_a, old_toml).unwrap();
         std::fs::write(&path_b, new_toml).unwrap();
-        let old = Config::load_with_diagnostics(path_a.to_str().unwrap()).unwrap();
-        let new = Config::load_with_diagnostics(path_b.to_str().unwrap()).unwrap();
+        let old = load_tier_test_config(&path_a);
+        let new = load_tier_test_config(&path_b);
         let diff = config::diff_config(&old, &new);
         let impacted: Vec<_> = diff
             .effective_neighbor_impact
@@ -7269,8 +7369,8 @@ peer_group = "ix"
         let path_b = unique_temp_path("eff-impact-pg-chain-new");
         std::fs::write(&path_a, old_toml).unwrap();
         std::fs::write(&path_b, new_toml).unwrap();
-        let old = Config::load_with_diagnostics(path_a.to_str().unwrap()).unwrap();
-        let new = Config::load_with_diagnostics(path_b.to_str().unwrap()).unwrap();
+        let old = load_tier_test_config(&path_a);
+        let new = load_tier_test_config(&path_b);
         let diff = config::diff_config(&old, &new);
         let impacted: Vec<_> = diff
             .effective_neighbor_impact
@@ -7338,8 +7438,8 @@ peer_group = "ix"
         let path_b = unique_temp_path("eff-impact-new");
         std::fs::write(&path_a, old_toml).unwrap();
         std::fs::write(&path_b, new_toml).unwrap();
-        let old = Config::load_with_diagnostics(path_a.to_str().unwrap()).unwrap();
-        let new = Config::load_with_diagnostics(path_b.to_str().unwrap()).unwrap();
+        let old = load_tier_test_config(&path_a);
+        let new = load_tier_test_config(&path_b);
         let diff = config::diff_config(&old, &new);
         let impacted: Vec<_> = diff
             .effective_neighbor_impact
