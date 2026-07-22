@@ -250,6 +250,11 @@ pub struct BfdStatus {
     pub diagnostic: rustbgpd_bfd::Diagnostic,
     /// Whether the session is configured strict (RFC 5882).
     pub strict: bool,
+    /// Whether the peer's most recently received control packet signaled
+    /// `AdminDown`. The local state remains [`rustbgpd_bfd::SessionState::Down`]
+    /// in that case, so this cause bit is required to explain why RFC 5882
+    /// permits BGP while BFD is locally Down.
+    pub remote_admin_down: bool,
 }
 
 /// A BFD session state transition, broadcast for the operator event stream
@@ -339,6 +344,21 @@ fn demux_target(
     }
 }
 
+/// Whether a received packet changed the operator-visible BFD snapshot.
+///
+/// Remote `AdminDown` assertion and clear can both be cause-only Down→Down
+/// changes, so comparing the local RFC 5880 state alone would leave the status
+/// watch stale even though the BGP coupling observed the new cause.
+#[cfg(any(test, target_os = "linux"))]
+fn operator_status_changed(
+    before_state: rustbgpd_bfd::SessionState,
+    before_remote_admin_down: bool,
+    after_state: rustbgpd_bfd::SessionState,
+    after_remote_admin_down: bool,
+) -> bool {
+    before_state != after_state || before_remote_admin_down != after_remote_admin_down
+}
+
 #[cfg(target_os = "linux")]
 mod linux {
     use std::cmp::Reverse;
@@ -364,7 +384,7 @@ mod linux {
 
     use super::{
         BfdRuntimeConfig, BfdRuntimeEvent, BfdSessionParams, BfdStateChange, BfdStateChangeSender,
-        BfdStatus, demux_target,
+        BfdStatus, demux_target, operator_status_changed,
     };
 
     /// BFD single-hop control port (RFC 5881 §4).
@@ -781,9 +801,15 @@ mod linux {
             let Some(entry) = self.sessions.get_mut(&peer) else {
                 return;
             };
-            let before = entry.session.state();
+            let before_state = entry.session.state();
+            let before_remote_admin_down = entry.session.remote_admin_down();
             let actions = entry.session.handle(Event::PacketReceived(pkt.clone()));
-            let changed = entry.session.state() != before;
+            let changed = operator_status_changed(
+                before_state,
+                before_remote_admin_down,
+                entry.session.state(),
+                entry.session.remote_admin_down(),
+            );
             self.apply(peer, actions, metrics).await;
             if changed {
                 self.publish_status(status_tx);
@@ -972,6 +998,7 @@ mod linux {
                     state: e.session.state(),
                     diagnostic: e.last_diagnostic,
                     strict: e.strict,
+                    remote_admin_down: e.session.remote_admin_down(),
                 })
                 .collect();
             let _ = status_tx.send(statuses);
@@ -1645,6 +1672,33 @@ remote_asn = 65002
         // address, and only matches when a session for that source exists.
         assert_eq!(demux_target(&by_disc, peer_a, 0, true), Some(peer_a));
         assert_eq!(demux_target(&by_disc, ip("198.51.100.1"), 0, false), None);
+    }
+
+    /// Load-bearing proof: removing the remote-cause comparison from
+    /// `operator_status_changed` makes both cause-only assertions red, while a
+    /// repeated unchanged cause stays quiet.
+    #[test]
+    fn cause_only_remote_admin_down_assert_and_clear_publish_status() {
+        use rustbgpd_bfd::SessionState;
+
+        assert!(super::operator_status_changed(
+            SessionState::Down,
+            false,
+            SessionState::Down,
+            true,
+        ));
+        assert!(super::operator_status_changed(
+            SessionState::Down,
+            true,
+            SessionState::Down,
+            false,
+        ));
+        assert!(!super::operator_status_changed(
+            SessionState::Down,
+            true,
+            SessionState::Down,
+            true,
+        ));
     }
 
     // --- Privileged netns integration test (Linux, gated) ---------------

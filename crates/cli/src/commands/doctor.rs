@@ -19,14 +19,16 @@ use crate::commands::watch::bgp_event_json_value;
 use crate::connection::Connection;
 use crate::error::CliError;
 use crate::output::{self, JsonNeighbor};
+use crate::proto::bfd_service_client::BfdServiceClient;
 use crate::proto::config_service_client::ConfigServiceClient;
 use crate::proto::control_service_client::ControlServiceClient;
 use crate::proto::event_service_client::EventServiceClient;
 use crate::proto::global_service_client::GlobalServiceClient;
 use crate::proto::neighbor_service_client::NeighborServiceClient;
 use crate::proto::{
-    GetEffectiveConfigRequest, GetGlobalRequest, HealthRequest, ListNeighborsRequest,
-    ListPolicyEventsRequest, ListSessionEventsRequest, MetricsRequest,
+    BfdSession, BfdSessionState, GetBfdSessionsRequest, GetEffectiveConfigRequest,
+    GetGlobalRequest, HealthRequest, ListNeighborsRequest, ListPolicyEventsRequest,
+    ListSessionEventsRequest, MetricsRequest,
 };
 
 /// Bounded recent slice pulled from each event history for triage. The
@@ -225,6 +227,29 @@ struct EventsSnapshot {
     policy: Vec<serde_json::Value>,
 }
 
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+struct BfdSnapshot {
+    peer_address: String,
+    state: String,
+    diagnostic: String,
+    strict: bool,
+    /// `None` is serialized as JSON null so a bundle from an older daemon does
+    /// not silently conflate unknown with a known non-AdminDown cause.
+    remote_administrative_down: Option<bool>,
+}
+
+impl From<&BfdSession> for BfdSnapshot {
+    fn from(session: &BfdSession) -> Self {
+        Self {
+            peer_address: session.peer_address.clone(),
+            state: bfd_state_label(session.state).to_string(),
+            diagnostic: session.diagnostic.clone(),
+            strict: session.strict,
+            remote_administrative_down: session.remote_administrative_down,
+        }
+    }
+}
+
 fn now_unix_seconds() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -238,6 +263,62 @@ fn tcp_ao_support_label(value: i32) -> &'static str {
         Ok(crate::proto::TcpAoSupport::Unsupported) => "unsupported",
         Ok(crate::proto::TcpAoSupport::ProbeFailed) => "probe_failed",
         Ok(crate::proto::TcpAoSupport::Unspecified) | Err(_) => "unknown",
+    }
+}
+
+fn bfd_state_label(value: i32) -> &'static str {
+    match BfdSessionState::try_from(value) {
+        Ok(BfdSessionState::AdminDown) => "admin-down",
+        Ok(BfdSessionState::Down) => "down",
+        Ok(BfdSessionState::Init) => "init",
+        Ok(BfdSessionState::Up) => "up",
+        Ok(BfdSessionState::Unspecified) | Err(_) => "unspecified",
+    }
+}
+
+fn bfd_check(session: &BfdSnapshot) -> Check {
+    let (status, verdict) = match session.state.as_str() {
+        "up" if session.remote_administrative_down != Some(true) => {
+            (CheckStatus::Ok, "BFD session is Up".to_string())
+        }
+        "up" => (
+            CheckStatus::Warn,
+            "BFD session is Up but the remote AdminDown cause is inconsistent or unknown"
+                .to_string(),
+        ),
+        "down" if session.remote_administrative_down == Some(true) => (
+            CheckStatus::Warn,
+            "peer administratively disabled BFD; BGP is permitted by RFC 5882 section 4.1"
+                .to_string(),
+        ),
+        "down" if session.remote_administrative_down.is_none() => (
+            CheckStatus::Fail,
+            format!(
+                "BFD session is Down ({}) and the remote AdminDown cause is unknown; serving daemon predates field 5",
+                session.diagnostic
+            ),
+        ),
+        "down" => (
+            CheckStatus::Fail,
+            format!("BFD session is Down ({})", session.diagnostic),
+        ),
+        "init" => (
+            CheckStatus::Warn,
+            "BFD session is still initializing".to_string(),
+        ),
+        "admin-down" => (
+            CheckStatus::Warn,
+            "local BFD session is administratively down".to_string(),
+        ),
+        _ => (
+            CheckStatus::Warn,
+            "BFD session state is unknown".to_string(),
+        ),
+    };
+    Check {
+        name: format!("peer.{}.bfd", session.peer_address),
+        status,
+        detail: format!("neighbor {}: {verdict}", session.peer_address),
     }
 }
 
@@ -1018,6 +1099,8 @@ pub(crate) async fn run(
                 connection.channel(),
                 connection.interceptor(),
             );
+            let mut bfd =
+                BfdServiceClient::with_interceptor(connection.channel(), connection.interceptor());
             let mut events = EventServiceClient::with_interceptor(
                 connection.channel(),
                 connection.interceptor(),
@@ -1135,6 +1218,36 @@ pub(crate) async fn run(
                 }
             }
 
+            // peers/bfd.json: presence-aware BFD cause snapshot plus per-peer
+            // red/yellow/green checks. The RPC is bounded by the same tonic
+            // request path as the other daemon snapshots; no packet probing is
+            // performed by doctor.
+            let bfd_collected = match bfd
+                .get_bfd_sessions(GetBfdSessionsRequest {
+                    peer_address: String::new(),
+                })
+                .await
+            {
+                Ok(resp) => {
+                    let snapshots: Vec<BfdSnapshot> = resp
+                        .into_inner()
+                        .sessions
+                        .iter()
+                        .map(BfdSnapshot::from)
+                        .collect();
+                    for snapshot in &snapshots {
+                        let check = bfd_check(snapshot);
+                        reporter.record(check.name, check.status, check.detail);
+                    }
+                    bundle.add_json("peers/bfd.json", &snapshots)?;
+                    true
+                }
+                Err(e) => {
+                    sections.insert("peers", format!("partial: BFD RPC failed: {e}"));
+                    false
+                }
+            };
+
             // peers/: neighbors + recent session/policy events, then the
             // per-peer red/green checks.
             let session_events = match events
@@ -1230,10 +1343,19 @@ pub(crate) async fn run(
                             policy: policy_events,
                         },
                     )?;
-                    sections.insert("peers", "collected".to_string());
+                    if bfd_collected {
+                        sections.insert("peers", "collected".to_string());
+                    }
                 }
                 Err(e) => {
-                    sections.insert("peers", format!("unavailable: neighbor RPC failed: {e}"));
+                    sections.insert(
+                        "peers",
+                        if bfd_collected {
+                            format!("partial: BFD collected; neighbor RPC failed: {e}")
+                        } else {
+                            format!("unavailable: BFD and neighbor RPCs failed: {e}")
+                        },
+                    );
                 }
             }
             sections
@@ -1485,6 +1607,55 @@ mod tests {
     use super::*;
     use crate::connection::connect;
     use crate::test_support::spawn_mock_server;
+
+    /// Load-bearing proof: removing the remote-AdminDown branch makes the
+    /// permitted warning red; defaulting absent presence to false makes the
+    /// older-daemon Down assertion red; requiring field presence while Up
+    /// makes the healthy rolling-upgrade assertion red.
+    #[test]
+    fn bfd_checks_distinguish_remote_admin_down_and_unknown_presence() {
+        assert_eq!(
+            bfd_state_label(BfdSessionState::AdminDown as i32),
+            "admin-down"
+        );
+        assert_eq!(
+            bfd_state_label(BfdSessionState::Unspecified as i32),
+            "unspecified"
+        );
+
+        let remote_disabled = BfdSnapshot {
+            peer_address: "192.0.2.1".to_string(),
+            state: "down".to_string(),
+            diagnostic: "none".to_string(),
+            strict: true,
+            remote_administrative_down: Some(true),
+        };
+        let check = bfd_check(&remote_disabled);
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(check.detail.contains("BGP is permitted"));
+
+        let old_daemon = BfdSnapshot {
+            remote_administrative_down: None,
+            ..remote_disabled
+        };
+        let check = bfd_check(&old_daemon);
+        assert_eq!(check.status, CheckStatus::Fail);
+        assert!(check.detail.contains("cause is unknown"));
+        assert!(check.detail.contains("predates field 5"));
+
+        let old_healthy = BfdSnapshot {
+            state: "up".to_string(),
+            diagnostic: "none".to_string(),
+            ..old_daemon
+        };
+        assert_eq!(bfd_check(&old_healthy).status, CheckStatus::Ok);
+
+        let impossible_healthy = BfdSnapshot {
+            remote_administrative_down: Some(true),
+            ..old_healthy
+        };
+        assert_eq!(bfd_check(&impossible_healthy).status, CheckStatus::Warn);
+    }
 
     fn json_type(value: &serde_json::Value) -> &'static str {
         match value {
@@ -2043,6 +2214,13 @@ paths = ["x"]
         let mut slow = neighbor("10.0.0.2", 6, 0, "core peer");
         slow.slow_peer = true;
         *server.state.list_neighbors_response.lock().await = vec![slow];
+        *server.state.bfd_sessions.lock().await = vec![rustbgpd_api::proto::BfdSession {
+            peer_address: "10.0.0.2".to_string(),
+            state: rustbgpd_api::proto::BfdSessionState::Down as i32,
+            diagnostic: "none".to_string(),
+            strict: true,
+            remote_administrative_down: Some(true),
+        }];
         let connection = connect(&server.addr, None).await;
         let dir = tempfile::tempdir().unwrap();
         let bundle_path = dir.path().join("bundle.tar.gz");
@@ -2068,6 +2246,7 @@ paths = ["x"]
         for expected in [
             "manifest.json",
             "config/effective.toml",
+            "peers/bfd.json",
             "peers/neighbors.json",
             "peers/events.json",
             "system/environment.json",
@@ -2115,6 +2294,18 @@ paths = ["x"]
         // Load-bearing mutation proof: dropping `slow_peer: n.slow_peer` from
         // the support snapshot makes this projection assertion red.
         assert_eq!(peers[0]["slow_peer"], true);
+        let bfd: serde_json::Value = serde_json::from_str(find(&files, "peers/bfd.json")).unwrap();
+        // Load-bearing mutation proof: dropping the field from the doctor
+        // projection or defaulting it false/null makes this primary cause
+        // assertion red.
+        assert_eq!(bfd[0]["remote_administrative_down"], true);
+        assert!(manifest["checks"].as_array().unwrap().iter().any(|check| {
+            check["name"] == "peer.10.0.0.2.bfd"
+                && check["status"] == "warn"
+                && check["detail"]
+                    .as_str()
+                    .is_some_and(|detail| detail.contains("BGP is permitted"))
+        }));
         // Load-bearing mutation proof: deleting the slow-peer doctor predicate
         // removes this warning from the manifest and makes the assertion red.
         assert!(manifest["checks"].as_array().unwrap().iter().any(|check| {

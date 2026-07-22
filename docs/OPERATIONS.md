@@ -1211,6 +1211,7 @@ addresses only, never copied into the bundle.
 rustbgpd-doctor-<ts>/
 ├── manifest.json            # versions, redaction note, per-section collected/unavailable, check results
 ├── config/effective.toml    # the daemon's GetEffectiveConfig dump (defaults materialized, secrets <redacted>)
+├── peers/bfd.json           # BFD state/diagnostic/strict plus remote-AdminDown bool or null when unknown
 ├── peers/neighbors.json     # per-peer state, counters, flap/slow-peer status
 ├── peers/events.json        # recent session + policy events (free text scrubbed)
 ├── logs/tail-1000.jsonl     # only with --log-file; see below
@@ -1633,7 +1634,7 @@ Use the narrowest surface for the question you are asking:
 | "Did FIB apply fail for this prefix?" | `rbgp events watch --category dataplane --type dataplane_route_failed --prefix 203.0.113.0/24` / `EventService.WatchEvents` | Live ADR-0061 route apply outcome; replayable through `SubscribeFromEvent` when `[event_history].enabled = true`. |
 | "What policy changed recently?" | `rbgp events policy` / `ListPolicyEvents` | Recent policy / neighbor-set / peer-group / chain mutation summaries from the bounded peer-manager ring. |
 | "What EVPN route changed recently?" | `rbgp events evpn --route-type 2 --rd 65000:100` / `ListEvpnEvents` | Recent EVPN route add / withdraw / best-change history from the bounded RIB ring. |
-| "Are BFD sessions up?" | `rbgp bfd`, `rbgp bfd show 10.0.0.2` / `BfdService.GetBfdSessions` | Snapshot of configured single-hop BFD sessions, strict flag, state, and diagnostic. |
+| "Are BFD sessions up?" | `rbgp bfd`, `rbgp bfd show 10.0.0.2` / `BfdService.GetBfdSessions` | Snapshot of configured single-hop BFD sessions, strict flag, state, diagnostic, and presence-aware remote-AdminDown cause. `Down` plus remote AdminDown means the peer disabled BFD and RFC 5882 permits BGP; an absent cause from an older daemon is shown as unknown. `rbgp doctor` records the same bool/null in `peers/bfd.json`. |
 | "Did BFD flap right now?" | `rbgp events watch --category bfd --type bfd_up,bfd_down,bfd_state_changed` / `EventService.WatchEvents` | Live BFD session events. No bounded BFD history API. |
 | "What routes does the general FIB runtime own or reject?" | `rbgp rib fib` / `ListFibRoutes` | Snapshot of ADR-0061 configured-table route ownership. |
 | "What BLACKHOLE discards are installed or rejected?" | `rbgp rib blackholes` / `ListBlackholeDiscards` | Snapshot of RFC 7999 discard programming. |

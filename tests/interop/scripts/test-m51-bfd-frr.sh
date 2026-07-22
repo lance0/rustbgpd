@@ -44,10 +44,29 @@ wait_frr_established "$FRR1" "10.0.0.1" "rustbgpd ↔ frr1"
 grpc_bfd_state() {
     # State of the BFD session to $PEER as reported by rustbgpd, e.g.
     # "BFD_SESSION_STATE_UP". Empty if the session is absent.
+    grpc_bfd_json \
+        | jq -r '.sessions[0].state // ""'
+}
+
+grpc_bfd_json() {
     grpcurl_call \
         -d "{\"peer_address\": \"$PEER\"}" \
-        "$GRPC_ADDR" rustbgpd.v1.BfdService/GetBfdSessions 2>/dev/null \
-        | jq -r '.sessions[0].state // ""'
+        "$GRPC_ADDR" rustbgpd.v1.BfdService/GetBfdSessions 2>/dev/null
+}
+
+grpc_bfd_remote_admin_down() {
+    # proto3 optional presence is part of the oracle: an older daemon omitting
+    # field 5 is unknown, never silently equivalent to false.
+    grpc_bfd_json | jq -er '
+        .sessions[0] as $session
+        | if ($session | type) != "object" then
+            error("BFD session is absent")
+          elif ($session | has("remoteAdministrativeDown")) then
+            ($session.remoteAdministrativeDown | tostring)
+          else
+            error("remoteAdministrativeDown is absent")
+          end
+    '
 }
 
 grpc_bgp_json() {
@@ -182,6 +201,20 @@ wait_grpc_bfd() {
     return 1
 }
 
+wait_grpc_bfd_remote_admin_down() {
+    local want=$1 label=$2 attempts=${3:-30} observed
+    for _ in $(seq 1 "$attempts"); do
+        if observed=$(grpc_bfd_remote_admin_down) && [ "$observed" = "$want" ]; then
+            ok "rustbgpd BFD remote AdminDown cause $label"
+            return 0
+        fi
+        sleep 1
+    done
+    fail "rustbgpd BFD remote AdminDown cause did not become $label (wanted=$want, last=${observed:-unknown})"
+    dump_state_on_failure
+    return 1
+}
+
 wait_grpc_bfd "BFD_SESSION_STATE_UP" "Up"
 
 for _ in $(seq 1 30); do
@@ -276,6 +309,7 @@ fi
 start_rustbgpd \
     "exec /usr/local/bin/rustbgpd $STRICT_CONFIG >$STRICT_LOG 2>&1"
 wait_grpc_bfd "BFD_SESSION_STATE_DOWN" "Down (strict startup)"
+wait_grpc_bfd_remote_admin_down "false" "explicitly false at strict startup"
 
 strict_leaked=0
 strict_observed=0
@@ -314,38 +348,10 @@ wait_frr_established "$FRR1" "$FRR_BFD_PEER" \
     "strict rustbgpd ↔ frr1 (remote AdminDown permits BGP)"
 wait_grpc_bgp_established "strict remote-AdminDown"
 wait_grpc_bfd "BFD_SESSION_STATE_DOWN" "Down while remote AdminDown permits BGP"
+wait_grpc_bfd_remote_admin_down "true" "asserted while BGP is permitted"
 
-# The operator snapshot deliberately reports the *local* RFC 5880 state, not
-# the coupling decision.  Pin all three pieces: local BFD stays Down, the actor
-# reports the cause-only Down→Down remote-AdminDown flip (not a local FSM
-# transition), and the coupling log identifies that reason as releasing BGP.
-for _ in $(seq 1 10); do
-    if docker exec "$RUSTBGPD" grep -q \
-        "BFD remote AdminDown flip without local transition" \
-        "$STRICT_LOG" 2>/dev/null \
-        && docker exec "$RUSTBGPD" grep -q \
-            "BFD remote AdminDown.*allowing BGP" "$STRICT_LOG" 2>/dev/null; then
-        break
-    fi
-    sleep 1
-done
-if docker exec "$RUSTBGPD" grep -q \
-    "BFD remote AdminDown flip without local transition" \
-    "$STRICT_LOG" 2>/dev/null; then
-    ok "rustbgpd observed the cause-only Down→Down remote-AdminDown flip"
-else
-    fail "rustbgpd did not observe remote AdminDown while its local BFD state remained Down"
-    dump_state_on_failure
-    docker exec "$RUSTBGPD" tail -100 "$STRICT_LOG" >&2 2>&1 || true
-fi
-if docker exec "$RUSTBGPD" grep -q \
-    "BFD remote AdminDown.*allowing BGP" "$STRICT_LOG" 2>/dev/null; then
-    ok "rustbgpd identified remote AdminDown and allowed strict BGP"
-else
-    fail "rustbgpd did not report the remote-AdminDown coupling release"
-    dump_state_on_failure
-    docker exec "$RUSTBGPD" tail -100 "$STRICT_LOG" >&2 2>&1 || true
-fi
+# The primary oracle is the public presence-aware field, not daemon logs: local
+# BFD stays Down while field 5 explains why RFC 5882 permits the BGP adjacency.
 
 # Capture independent continuity signals before FRR resumes BFD: rustbgpd's
 # per-session flap counter and FRR's lifetime Established count.  The baseline
@@ -373,6 +379,7 @@ frr_established_before=$(frr_bgp_connections_established)
 log "Re-enabling FRR BFD; BFD must recover without bouncing established BGP..."
 frr_bfd_peer_command "no shutdown"
 wait_grpc_bfd "BFD_SESSION_STATE_UP" "Up after FRR no shutdown" 60
+wait_grpc_bfd_remote_admin_down "false" "cleared after FRR no shutdown" 60
 sleep 2
 
 strict_after_valid=0

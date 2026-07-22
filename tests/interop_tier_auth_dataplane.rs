@@ -171,3 +171,29 @@ fn active_dataplane_interop_is_tier_authenticated_end_to_end() {
         "M66 vtep_ctl must inherit the shared token"
     );
 }
+
+/// Load-bearing proof: restoring either daemon-log grep oracle, removing the
+/// field-presence lookup, or dropping the assert/clear legs makes this gate red
+/// before the expensive M51 topology runs.
+#[test]
+fn m51_remote_admin_down_uses_the_public_field_as_primary_oracle() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let source = fs::read_to_string(root.join("tests/interop/scripts/test-m51-bfd-frr.sh"))
+        .expect("M51 driver must be readable");
+
+    assert!(source.contains("has(\"remoteAdministrativeDown\")"));
+    assert!(source.contains("($session | type) != \"object\""));
+    assert!(source.contains("error(\"BFD session is absent\")"));
+    assert!(
+        source.contains(
+            "wait_grpc_bfd_remote_admin_down \"true\" \"asserted while BGP is permitted\""
+        )
+    );
+    assert!(
+        source.contains(
+            "wait_grpc_bfd_remote_admin_down \"false\" \"cleared after FRR no shutdown\""
+        )
+    );
+    assert!(!source.contains("BFD remote AdminDown.*allowing BGP"));
+    assert!(!source.contains("BFD remote AdminDown flip without local transition"));
+}
