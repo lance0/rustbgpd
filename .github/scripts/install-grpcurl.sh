@@ -41,7 +41,7 @@ install_grpcurl() (
         sudo tar -xzf "$archive" -C "$install_dir" grpcurl
     fi
 
-    reported_version=$("$install_dir/grpcurl" -version)
+    reported_version=$("$install_dir/grpcurl" -version 2>&1)
     if [[ "$reported_version" != "grpcurl v${version}" ]]; then
         echo "unexpected grpcurl version: ${reported_version}" >&2
         return 1
@@ -68,7 +68,7 @@ self_test() (
     mkdir -p "$source_dir"
     cat >"$source_dir/grpcurl" <<'EOF'
 #!/usr/bin/env sh
-printf '%s\n' 'grpcurl v1.9.1'
+printf '%s\n' 'grpcurl v1.9.1' >&2
 EOF
     chmod +x "$source_dir/grpcurl"
     # A second empty gzip member makes the full fixture distinct while the
@@ -118,7 +118,7 @@ EOF
     mkdir "$fixture_dir/wrong-version-source" "$fixture_dir/wrong-version-install"
     cat >"$fixture_dir/wrong-version-source/grpcurl" <<'EOF'
 #!/usr/bin/env sh
-printf '%s\n' 'grpcurl v1.9.0'
+printf '%s\n' 'grpcurl v1.9.0' >&2
 EOF
     chmod +x "$fixture_dir/wrong-version-source/grpcurl"
     wrong_version_archive="$fixture_dir/grpcurl-wrong-version.tar.gz"
