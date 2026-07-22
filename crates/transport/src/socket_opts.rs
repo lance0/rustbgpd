@@ -317,7 +317,7 @@ struct TcpAoDeleteTarget {
 #[cfg(target_os = "linux")]
 #[allow(
     dead_code,
-    reason = "transport deletion foundation is consumed by the later coordinator slice"
+    reason = "opaque preflight proof is constructed and consumed only by live rotation"
 )]
 pub(crate) struct TcpAoDeletePreflight {
     current: TcpAoMktReceipt,
@@ -330,7 +330,7 @@ pub(crate) struct TcpAoDeletePreflight {
 #[cfg(not(target_os = "linux"))]
 #[allow(
     dead_code,
-    reason = "transport deletion foundation is consumed by the later coordinator slice"
+    reason = "non-Linux parity stub preserves the API; live deletion is Linux-only"
 )]
 pub(crate) struct TcpAoDeletePreflight;
 
@@ -380,8 +380,8 @@ pub(crate) struct TcpAoAddOnlyApplyError {
 }
 
 /// A live delete failure annotated with whether any `TCP_AO_DEL_KEY` syscall
-/// may already have succeeded. A later coordinator must discard a connected
-/// stream whenever mutation began rather than trust a partially shrunk MKT
+/// may already have succeeded. The coordinator discards a connected stream
+/// whenever mutation began rather than trusting a partially shrunk MKT
 /// inventory.
 pub(crate) struct TcpAoDeleteApplyError {
     error: io::Error,
@@ -2843,7 +2843,7 @@ pub(crate) fn preflight_tcp_ao_add_only<T>(
 #[cfg(not(target_os = "linux"))]
 #[allow(
     dead_code,
-    reason = "transport deletion foundation is consumed by the later coordinator slice"
+    reason = "non-Linux parity stub preserves the API; live deletion is Linux-only"
 )]
 pub(crate) fn preflight_tcp_ao_delete<T>(
     _socket: &T,
@@ -2882,7 +2882,7 @@ pub(crate) fn apply_tcp_ao_add_only<T>(
 #[cfg(not(target_os = "linux"))]
 #[allow(
     dead_code,
-    reason = "transport deletion foundation is consumed by the later coordinator slice"
+    reason = "non-Linux parity stub preserves the API; live deletion is Linux-only"
 )]
 pub(crate) fn apply_tcp_ao_delete<T>(
     _socket: &T,
