@@ -20,6 +20,8 @@
 
 TOPO="m29-evpn-rr-frr"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+INTEROP_TEST_OPERATOR_AUTH=1
+export INTEROP_TEST_OPERATOR_AUTH
 source "$SCRIPT_DIR/test-lib.sh"
 FRR="clab-${TOPO}-frr"
 
@@ -28,7 +30,7 @@ FRR="clab-${TOPO}-frr"
 # ---------------------------------------------------------------------------
 
 grpc_list_neighbors() {
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         "$GRPC_ADDR" rustbgpd.v1.NeighborService/ListNeighbors 2>/dev/null
 }
 
@@ -36,7 +38,7 @@ grpc_list_evpn() {
     # Capture stderr so a grpcurl failure can be distinguished from an
     # empty proto3 response in the test below. Stdout is the JSON body
     # (possibly empty); stderr is the diagnostic.
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         -d '{}' \
         "$GRPC_ADDR" rustbgpd.v1.RibService/ListEvpnRoutes
 }

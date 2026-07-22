@@ -11,6 +11,8 @@
 
 TOPO="m3-frr"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+INTEROP_TEST_OPERATOR_AUTH=1
+export INTEROP_TEST_OPERATOR_AUTH
 source "$SCRIPT_DIR/test-lib.sh"
 FRR_A="clab-${TOPO}-frr-a"
 FRR_B="clab-${TOPO}-frr-b"
@@ -19,17 +21,17 @@ FRR_B="clab-${TOPO}-frr-b"
 # Resolve rustbgpd container management IP for gRPC access
 
 grpc_list_received() {
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         "$GRPC_ADDR" rustbgpd.v1.RibService/ListReceivedRoutes 2>/dev/null
 }
 
 grpc_list_best() {
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         "$GRPC_ADDR" rustbgpd.v1.RibService/ListBestRoutes 2>/dev/null
 }
 
 grpc_list_advertised() {
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         -d "{\"neighbor_address\": \"$1\"}" \
         "$GRPC_ADDR" rustbgpd.v1.RibService/ListAdvertisedRoutes 2>/dev/null
 }
@@ -38,14 +40,14 @@ grpc_add_path() {
     local prefix=$1 prefix_len=$2 next_hop=$3
     shift 3
     local origin=${1:-0}
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         -d "{\"prefix\": \"$prefix\", \"prefix_length\": $prefix_len, \"next_hop\": \"$next_hop\", \"origin\": $origin}" \
         "$GRPC_ADDR" rustbgpd.v1.InjectionService/AddPath 2>/dev/null
 }
 
 grpc_delete_path() {
     local prefix=$1 prefix_len=$2
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         -d "{\"prefix\": \"$prefix\", \"prefix_length\": $prefix_len}" \
         "$GRPC_ADDR" rustbgpd.v1.InjectionService/DeletePath 2>/dev/null
 }

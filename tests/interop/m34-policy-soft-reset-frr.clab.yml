@@ -35,6 +35,7 @@ topology:
         - ./configs/rustbgpd-m34-policy-soft-reset.toml:/etc/rustbgpd/config.initial.toml:ro
         - ./configs/rustbgpd-m34-policy-soft-reset-deny.toml:/etc/rustbgpd/config.deny.toml:ro
         - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+        - ../fixtures/grpc-test-only-operator.token:/run/rustbgpd/grpc-test-only-operator.token:ro
       exec:
         - ip addr add 10.0.0.1/24 dev eth1
         - ip link set eth1 up

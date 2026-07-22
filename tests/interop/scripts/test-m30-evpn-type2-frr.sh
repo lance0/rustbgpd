@@ -25,6 +25,8 @@
 
 TOPO="m30-evpn-type2-frr"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+INTEROP_TEST_OPERATOR_AUTH=1
+export INTEROP_TEST_OPERATOR_AUTH
 # shellcheck source=test-lib.sh
 source "$SCRIPT_DIR/test-lib.sh"
 
@@ -41,12 +43,12 @@ TEST_MAC="aa:bb:cc:00:00:01"
 # ---------------------------------------------------------------------------
 
 grpc_list_neighbors() {
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         "$GRPC_ADDR" rustbgpd.v1.NeighborService/ListNeighbors 2>/dev/null
 }
 
 grpc_list_evpn() {
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         -d '{}' \
         "$GRPC_ADDR" rustbgpd.v1.RibService/ListEvpnRoutes 2>/dev/null
 }

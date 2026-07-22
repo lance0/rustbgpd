@@ -13,6 +13,8 @@ set -euo pipefail
 
 TOPO="m35b-graceful-shutdown-flowspec-frr"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+INTEROP_TEST_OPERATOR_AUTH=1
+export INTEROP_TEST_OPERATOR_AUTH
 source "$SCRIPT_DIR/test-lib.sh"
 FRR="clab-${TOPO}-frr"
 
@@ -30,14 +32,14 @@ RULE_ADD='{
 }'
 
 grpc_add_flowspec() {
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         -d "$RULE_ADD" \
         "$GRPC_ADDR" rustbgpd.v1.InjectionService/AddFlowSpec >/dev/null
 }
 
 grpc_set_gshut() {
     local enabled=${1:?}
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         -d "{\"address\":\"10.0.0.2\",\"enabled\":${enabled}}" \
         "$GRPC_ADDR" rustbgpd.v1.NeighborService/SetGracefulShutdown >/dev/null
 }
@@ -249,7 +251,7 @@ dump_state_on_failure() {
     echo "===== FRR FlowSpec text =====" >&2
     docker exec "$FRR" vtysh -c "show bgp ipv4 flowspec" >&2 || true
     echo "===== rustbgpd NeighborState 10.0.0.2 =====" >&2
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         -d '{"address":"10.0.0.2"}' \
         "$GRPC_ADDR" rustbgpd.v1.NeighborService/GetNeighborState 2>&1 \
         | head -80 >&2 || true

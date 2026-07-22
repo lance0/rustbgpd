@@ -266,6 +266,220 @@ fn shared_test_only_operator_auth_is_tier_valid_and_wired() {
     );
 }
 
+#[test]
+#[allow(clippy::too_many_lines)] // one frozen inventory keeps config/topology/driver wiring atomic
+fn early_interop_auth_inventory_is_tier_wired() {
+    // Load-bearing: reverting a config to legacy, dropping a token bind,
+    // downgrading the operator role, bypassing the helper, removing a driver
+    // opt-in, or removing an M0 UDS identity makes an assertion below red.
+    const TCP_SLICES: &[(&str, &str)] = &[
+        ("m3-frr.clab.yml", "test-m3-frr.sh"),
+        ("m4-frr.clab.yml", "test-m4-frr.sh"),
+        ("m10-frr-ipv6.clab.yml", "test-m10-frr-ipv6.sh"),
+        ("m11-gr-frr.clab.yml", "test-m11-gr-frr.sh"),
+        ("m12-ec-frr.clab.yml", "test-m12-ec-frr.sh"),
+        ("m13-policy-frr.clab.yml", "test-m13-policy-frr.sh"),
+        ("m14-rr-frr.clab.yml", "test-m14-rr-frr.sh"),
+        ("m15-rr-frr.clab.yml", "test-m15-rr-frr.sh"),
+        ("m16-llgr-frr.clab.yml", "test-m16-llgr-frr.sh"),
+        ("m17-addpath-frr.clab.yml", "test-m17-addpath-frr.sh"),
+        ("m18-extnexthop-frr.clab.yml", "test-m18-extnexthop-frr.sh"),
+        (
+            "m19-routeserver-frr.clab.yml",
+            "test-m19-routeserver-frr.sh",
+        ),
+        ("m20-privateas-frr.clab.yml", "test-m20-privateas-frr.sh"),
+        ("m21-rpki-frr.clab.yml", "test-m21-rpki-frr.sh"),
+        ("m22-flowspec-frr.clab.yml", "test-m22-flowspec-frr.sh"),
+        ("m23-gobgp.clab.yml", "test-m23-gobgp.sh"),
+        ("m24-bmp-frr.clab.yml", "test-m24-bmp-frr.sh"),
+        ("m25-md5-gtsm-frr.clab.yml", "test-m25-md5-gtsm-frr.sh"),
+        ("m26-cease-frr.clab.yml", "test-m26-cease-frr.sh"),
+        ("m27-aspa-rtr2.clab.yml", "test-m27-aspa-rtr2.sh"),
+        ("m28-dynamic-frr.clab.yml", "test-m28-dynamic-frr.sh"),
+        ("m29-evpn-rr-frr.clab.yml", "test-m29-evpn-rr-frr.sh"),
+        ("m30-evpn-type2-frr.clab.yml", "test-m30-evpn-type2-frr.sh"),
+        (
+            "m30b-evpn-type5-frr.clab.yml",
+            "test-m30b-evpn-type5-frr.sh",
+        ),
+        (
+            "m31-evpn-mac-mobility-frr.clab.yml",
+            "test-m31-evpn-mac-mobility-frr.sh",
+        ),
+        (
+            "m32-evpn-multihome-frr.clab.yml",
+            "test-m32-evpn-multihome-frr.sh",
+        ),
+        (
+            "m32b-evpn-ead-synthetic.clab.yml",
+            "test-m32b-evpn-ead-synthetic.sh",
+        ),
+        (
+            "m34-policy-soft-reset-frr.clab.yml",
+            "test-m34-policy-soft-reset-frr.sh",
+        ),
+        (
+            "m35-graceful-shutdown-frr.clab.yml",
+            "test-m35-graceful-shutdown-frr.sh",
+        ),
+        (
+            "m35b-graceful-shutdown-flowspec-frr.clab.yml",
+            "test-m35b-graceful-shutdown-flowspec-frr.sh",
+        ),
+        (
+            "m35c-graceful-shutdown-evpn-frr.clab.yml",
+            "test-m35c-graceful-shutdown-evpn-frr.sh",
+        ),
+    ];
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let interop = root.join("tests/interop");
+    let expected_bind = format!(
+        "../fixtures/grpc-test-only-operator.token:{TEST_ONLY_GRPC_TOKEN_CONTAINER_PATH}:ro"
+    );
+    let expected_token_path = root.join(TEST_ONLY_GRPC_TOKEN_REPO_PATH);
+    let mut config_count = 0;
+
+    for (topology_name, driver_name) in TCP_SLICES {
+        let topology_source = fs::read_to_string(interop.join(topology_name))
+            .unwrap_or_else(|err| panic!("failed to read {topology_name}: {err}"));
+        let topology: serde_yaml::Value = serde_yaml::from_str(&topology_source)
+            .unwrap_or_else(|err| panic!("failed to parse {topology_name}: {err}"));
+        let binds = topology["topology"]["nodes"]["rustbgpd"]["binds"]
+            .as_sequence()
+            .unwrap_or_else(|| panic!("{topology_name} rustbgpd binds must be a sequence"));
+        assert!(
+            binds
+                .iter()
+                .any(|bind| bind.as_str() == Some(expected_bind.as_str())),
+            "{topology_name} must mount the shared test-only token"
+        );
+
+        for bind in binds.iter().filter_map(serde_yaml::Value::as_str) {
+            let Some((host_path, _)) = bind.split_once(':') else {
+                continue;
+            };
+            if !host_path.starts_with("./configs/rustbgpd-")
+                || !Path::new(host_path)
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("toml"))
+            {
+                continue;
+            }
+            config_count += 1;
+            let config_source =
+                fs::read_to_string(interop.join(host_path.trim_start_matches("./")))
+                    .unwrap_or_else(|err| panic!("failed to read {host_path}: {err}"));
+            assert!(
+                config_source.contains(TEST_ONLY_GRPC_TOKEN_CONTAINER_PATH),
+                "{host_path} must use the shared test-only token path"
+            );
+            let materialized = materialize_shared_test_only_grpc_token(&config_source)
+                .replace("BMP_RECEIVER_ADDR", "127.0.0.1")
+                .replace("STAYRTR_ADDR", "127.0.0.1");
+            let config = parse_strict(&materialized).unwrap_or_else(|err| {
+                panic!("{host_path} must validate under tier enforcement: {err}")
+            });
+            assert_eq!(
+                config.security.grpc.enforcement,
+                GrpcEnforcementConfig::Tier,
+                "{host_path} must use tier enforcement"
+            );
+            let tcp = config
+                .global
+                .telemetry
+                .grpc_tcp
+                .as_ref()
+                .unwrap_or_else(|| panic!("{host_path} must configure gRPC TCP"));
+            assert_eq!(
+                tcp.token_file.as_deref(),
+                expected_token_path.to_str(),
+                "{host_path} must load the mounted test-only token"
+            );
+            assert_eq!(
+                tcp.principal.as_deref(),
+                Some(TEST_ONLY_GRPC_OPERATOR_PRINCIPAL),
+                "{host_path} must use the shared test-only principal"
+            );
+            assert_eq!(
+                config
+                    .security
+                    .grpc
+                    .roles
+                    .get(TEST_ONLY_GRPC_OPERATOR_PRINCIPAL),
+                Some(&GrpcRoleConfig::Operator),
+                "{host_path} test-only principal must be an operator"
+            );
+        }
+
+        let driver_source = fs::read_to_string(interop.join("scripts").join(driver_name))
+            .unwrap_or_else(|err| panic!("failed to read {driver_name}: {err}"));
+        assert_eq!(
+            driver_source
+                .lines()
+                .filter(|line| *line == "INTEROP_TEST_OPERATOR_AUTH=1")
+                .count(),
+            1,
+            "{driver_name} must opt into shared test-only grpcurl authentication"
+        );
+        assert!(
+            !driver_source.contains("grpcurl -plaintext"),
+            "{driver_name} must route direct grpcurl calls through grpcurl_call"
+        );
+    }
+    assert_eq!(
+        config_count, 32,
+        "the frozen M3-M32 and M34-M35c slice must cover 32 active configs"
+    );
+
+    for (label, config_name, topology_name) in [
+        ("M0 FRR", "rustbgpd-frr.toml", "m0-frr.clab.yml"),
+        ("M0 BIRD", "rustbgpd-bird.toml", "m0-bird.clab.yml"),
+    ] {
+        let source = fs::read_to_string(interop.join("configs").join(config_name))
+            .unwrap_or_else(|err| panic!("failed to read {config_name}: {err}"));
+        let config = parse_strict(&source)
+            .unwrap_or_else(|err| panic!("{label} must validate under tier enforcement: {err}"));
+        assert_eq!(
+            config.security.grpc.enforcement,
+            GrpcEnforcementConfig::Tier,
+            "{label} must use tier enforcement"
+        );
+        let uds = config
+            .global
+            .telemetry
+            .grpc_uds
+            .as_ref()
+            .unwrap_or_else(|| panic!("{label} must configure an explicit gRPC UDS"));
+        assert_eq!(
+            uds.principal.as_deref(),
+            Some(TEST_ONLY_GRPC_OPERATOR_PRINCIPAL),
+            "{label} must use the stable test-only principal"
+        );
+        assert_eq!(
+            config
+                .security
+                .grpc
+                .roles
+                .get(TEST_ONLY_GRPC_OPERATOR_PRINCIPAL),
+            Some(&GrpcRoleConfig::Operator),
+            "{label} test-only principal must be an operator"
+        );
+        assert!(
+            uds.token_file.is_none(),
+            "{label} UDS needs no bearer token"
+        );
+
+        let topology_source = fs::read_to_string(interop.join(topology_name))
+            .unwrap_or_else(|err| panic!("failed to read {topology_name}: {err}"));
+        assert!(
+            !topology_source.contains("grpc-test-only-operator.token"),
+            "{topology_name} must not mount a token for its UDS-only listener"
+        );
+    }
+}
+
 fn route_server_example_config() -> Config {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/route-server/config.toml");
     Config::load_with_diagnostics(path.to_str().expect("route-server example path is UTF-8"))

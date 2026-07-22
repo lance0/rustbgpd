@@ -24,6 +24,8 @@
 
 TOPO="m32b-evpn-ead-synthetic"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+INTEROP_TEST_OPERATOR_AUTH=1
+export INTEROP_TEST_OPERATOR_AUTH
 # shellcheck source=test-lib.sh
 source "$SCRIPT_DIR/test-lib.sh"
 
@@ -36,7 +38,7 @@ CONVERGE_TIMEOUT=60
 TESTER_LINGER=120
 
 grpc_list_evpn() {
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         -max-msg-sz 16777216 \
         -d '{}' \
         "$GRPC_ADDR" rustbgpd.v1.RibService/ListEvpnRoutes 2>/dev/null || true
@@ -132,7 +134,7 @@ else
 fi
 
 log "[check] tester peer stayed Established"
-neighbors_json=$(grpcurl -plaintext -import-path . -proto "$PROTO" \
+neighbors_json=$(grpcurl_call \
     "$GRPC_ADDR" rustbgpd.v1.NeighborService/ListNeighbors 2>/dev/null)
 if ! command -v jq >/dev/null 2>&1; then
     fail "jq is required for neighbor-state parsing (install with apt-get install jq)"

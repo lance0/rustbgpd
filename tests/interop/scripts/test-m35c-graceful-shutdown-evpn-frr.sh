@@ -13,6 +13,8 @@ set -euo pipefail
 
 TOPO="m35c-graceful-shutdown-evpn-frr"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+INTEROP_TEST_OPERATOR_AUTH=1
+export INTEROP_TEST_OPERATOR_AUTH
 source "$SCRIPT_DIR/test-lib.sh"
 FRR="clab-${TOPO}-frr"
 
@@ -29,14 +31,14 @@ EVPN_ADD='{
 }'
 
 grpc_add_evpn() {
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         -d "$EVPN_ADD" \
         "$GRPC_ADDR" rustbgpd.v1.InjectionService/AddEvpnRoute >/dev/null
 }
 
 grpc_set_gshut() {
     local enabled=${1:?}
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         -d "{\"address\":\"10.0.0.2\",\"enabled\":${enabled}}" \
         "$GRPC_ADDR" rustbgpd.v1.NeighborService/SetGracefulShutdown >/dev/null
 }
@@ -243,11 +245,11 @@ dump_state_on_failure() {
     echo "===== FRR EVPN Type 2 JSON =====" >&2
     frr_evpn_macip_json | jq . >&2 || true
     echo "===== rustbgpd ListEvpnRoutes =====" >&2
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         -d '{}' "$GRPC_ADDR" rustbgpd.v1.RibService/ListEvpnRoutes 2>&1 \
         | head -80 >&2 || true
     echo "===== rustbgpd NeighborState 10.0.0.2 =====" >&2
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         -d '{"address":"10.0.0.2"}' \
         "$GRPC_ADDR" rustbgpd.v1.NeighborService/GetNeighborState 2>&1 \
         | head -80 >&2 || true

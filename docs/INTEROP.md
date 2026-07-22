@@ -647,6 +647,13 @@ M3 FRR (3-node):
 FRR-A advertises: 192.168.1.0/24, 192.168.2.0/24, 10.10.0.0/16 via `network` statements.
 FRR-B receives only (no route advertisements).
 
+The topology uses the repository's public test-only operator token. Load it
+before running any of the manual gRPC commands below:
+
+```sh
+TOKEN=$(cat tests/fixtures/grpc-test-only-operator.token)
+```
+
 ### Test 1: Route Redistribution
 
 After sessions reach Established, FRR-A's routes should propagate through
@@ -675,6 +682,7 @@ Inject a route via gRPC and verify both peers receive it.
 
 ```sh
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -H "authorization: Bearer $TOKEN" \
   -d '{"prefix": "10.99.0.0", "prefix_length": 24, "next_hop": "10.0.0.1"}' \
   <rustbgpd-mgmt-ip>:50051 rustbgpd.v1.InjectionService/AddPath
 
@@ -701,6 +709,7 @@ Withdraw the injected route via gRPC.
 
 ```sh
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -H "authorization: Bearer $TOKEN" \
   -d '{"prefix": "10.99.0.0", "prefix_length": 24}' \
   <rustbgpd-mgmt-ip>:50051 rustbgpd.v1.InjectionService/DeletePath
 ```
@@ -754,6 +763,13 @@ FRR-09 and FRR-10 are present in the topology but added dynamically via gRPC.
 Each FRR peer advertises 2 prefixes (172.16.x0.0/24, 172.16.x1.0/24).
 FRR-01 has a per-peer export policy: deny 10.0.0.0/8 le 32.
 
+The topology uses the repository's public test-only operator token. Load it
+before running any of the manual gRPC commands below:
+
+```sh
+TOKEN=$(cat tests/fixtures/grpc-test-only-operator.token)
+```
+
 ### Test 1: All 8 Static Sessions Establish
 
 Wait for all 8 FRR peers to report `Established` via `show bgp neighbors`.
@@ -764,6 +780,7 @@ Wait for all 8 FRR peers to report `Established` via `show bgp neighbors`.
 
 ```sh
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -H "authorization: Bearer $TOKEN" \
   <rustbgpd-mgmt-ip>:50051 rustbgpd.v1.NeighborService/ListNeighbors
 ```
 
@@ -773,6 +790,7 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 
 ```sh
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -H "authorization: Bearer $TOKEN" \
   <rustbgpd-mgmt-ip>:50051 rustbgpd.v1.RibService/ListReceivedRoutes
 ```
 
@@ -786,6 +804,7 @@ export policy) should NOT see it. FRR-02 (no per-peer policy) should see it.
 
 ```sh
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -H "authorization: Bearer $TOKEN" \
   -d '{"prefix": "10.99.0.0", "prefix_length": 24, "next_hop": "10.0.10.1"}' \
   <rustbgpd-mgmt-ip>:50051 rustbgpd.v1.InjectionService/AddPath
 
@@ -802,6 +821,7 @@ returns 9.
 
 ```sh
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -H "authorization: Bearer $TOKEN" \
   -d '{"config": {"address": "10.0.18.2", "remote_asn": 65018, "description": "frr-09-dynamic"}}' \
   <rustbgpd-mgmt-ip>:50051 rustbgpd.v1.NeighborService/AddNeighbor
 ```
@@ -814,6 +834,7 @@ Delete FRR-09 via gRPC. Verify ListNeighbors returns 8 again.
 
 ```sh
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -H "authorization: Bearer $TOKEN" \
   -d '{"address": "10.0.18.2"}' \
   <rustbgpd-mgmt-ip>:50051 rustbgpd.v1.NeighborService/DeleteNeighbor
 ```
@@ -827,12 +848,14 @@ Disable FRR-01 via `DisableNeighbor`, verify session drops. Re-enable via
 
 ```sh
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -H "authorization: Bearer $TOKEN" \
   -d '{"address": "10.0.10.2", "reason": "test"}' \
   <rustbgpd-mgmt-ip>:50051 rustbgpd.v1.NeighborService/DisableNeighbor
 
 # Wait 5s, verify FRR-01 is not Established
 
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -H "authorization: Bearer $TOKEN" \
   -d '{"address": "10.0.10.2"}' \
   <rustbgpd-mgmt-ip>:50051 rustbgpd.v1.NeighborService/EnableNeighbor
 ```
