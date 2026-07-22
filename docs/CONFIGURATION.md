@@ -126,8 +126,8 @@ Required. Defines the local BGP speaker identity.
 
 | Field               | Type   | Required | Default              | Description                        |
 |---------------------|--------|----------|----------------------|------------------------------------|
-| `asn`               | u32    | yes      | --                   | Local autonomous system number     |
-| `router_id`         | string | yes      | --                   | BGP router ID (must be valid IPv4) |
+| `asn`               | u32    | yes      | --                   | Local autonomous system number; AS 0 is rejected at startup |
+| `router_id`         | string | yes      | --                   | Non-zero BGP Identifier in IPv4 dotted-quad form; `0.0.0.0` is rejected at startup |
 | `listen_port`       | u16    | yes      | --                   | TCP port to listen on (typically 179) |
 | `dynamic_neighbor_limit` | u32 | no     | `100`                | Maximum number of auto-accepted dynamic peers (1--5000) |
 | `worker_threads`    | usize  | no       | `min(cores, 8)`      | Tokio runtime worker threads. Unset caps to `min(CPU parallelism, 8)` to avoid over-provisioning the async runtime (one worker + stack reservation per core) on a high-core host for this I/O-bound daemon — reduces virtual-address reservation and scheduler footprint (RSS-neutral in benchmarks). `0` means unset. `RUSTBGPD_WORKER_THREADS` overrides. **Restart-required** (runtime built once at startup). |
@@ -140,6 +140,9 @@ Required. Defines the local BGP speaker identity.
 | `allow_blackhole_broad_prefixes` | bool | no | `false`           | Permit non-host BLACKHOLE discard installs when the FIB slice is enabled |
 | `multipath_relax`   | bool   | no       | `false`              | ADR-0066 multipath-relax: group unicast ECMP candidates by `AS_PATH` *length* instead of an exact `AS_PATH` match (FRR's `bgp bestpath as-path multipath-relax`). Best-path-wide; inert unless a `[[fib_tables]]` sets `maximum_paths`, `maximum_paths_ebgp`, or `maximum_paths_ibgp` above `1` |
 | `link_bandwidth_weighted` | bool | no   | `false`              | ADR-0068 weighted multipath: weight unicast ECMP next-hops by the lowest finite nonnegative RFC 10005 Link Bandwidth value when the whole equal-cost group carries a positive one; zero, missing, or unusable values fall back to equal cost. Best-path-wide; inert unless a `[[fib_tables]]` sets `maximum_paths`, `maximum_paths_ebgp`, or `maximum_paths_ibgp` above `1` |
+
+Startup validation rejects local AS 0 (RFC 7607 §2) and BGP Identifier zero
+(RFC 6286 §2.1) before any listener or peer session starts.
 
 ```toml
 [global]
@@ -3614,7 +3617,8 @@ starting:
 
 | Rule | Error |
 |------|-------|
-| `router_id` must be a valid IPv4 address | `invalid router_id` |
+| Local `asn` must not be AS 0 | `invalid local ASN` |
+| `router_id` must be a valid IPv4 dotted quad and must not be `0.0.0.0` | `invalid router_id` |
 | Each `address` in `[[neighbors]]` must be a valid IP address (IPv4 or IPv6) | `invalid neighbor address` |
 | IPv6 link-local `[[neighbors]]` must set `interface`; numbered neighbors must not | `invalid neighbor config` |
 | `[[neighbors]]` identity must be unique by address for numbered peers and by `(address, interface)` for IPv6 link-local peers | `duplicate neighbor address/interface` |

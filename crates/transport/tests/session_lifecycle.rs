@@ -745,10 +745,14 @@ async fn lifecycle_only_channel_receives_collision_adjacent_state_changes() {
 
 #[tokio::test]
 async fn open_confirm_sends_session_notification() {
+    // Mutation-red: narrowing the negotiated peer ASN to the OPEN's AS_TRANS
+    // value makes the identity assertion below observe 23456 instead.
     // Verify that reaching OpenConfirm sends SessionNotification::OpenReceived
-    // with the correct remote_router_id. This exercises the fix for the bug
-    // where self.negotiated (set at Established) was read instead of
-    // self.fsm.negotiated() (set at OpenConfirm).
+    // with the lossless four-octet peer identity. This exercises the fix for
+    // the bug where self.negotiated (set at Established) was read instead of
+    // self.fsm.negotiated() (set at OpenConfirm), and keeps collision handling
+    // from falling back to a configured dynamic-neighbor wildcard.
+    const FOUR_OCTET_REMOTE_ASN: u32 = 4_200_000_001;
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let metrics = BgpMetrics::new();
@@ -756,8 +760,10 @@ async fn open_confirm_sends_session_notification() {
     let (notify_tx, mut notify_rx) = mpsc::unbounded_channel::<SessionNotification>();
 
     let (rib_tx, _rib_rx) = mpsc::channel::<RibUpdate>(64);
+    let mut config = transport_config(addr);
+    config.peer.remote_asn = FOUR_OCTET_REMOTE_ASN;
     let handle = PeerHandle::spawn(
-        transport_config(addr),
+        config,
         metrics.clone(),
         rib_tx,
         None,
@@ -779,7 +785,12 @@ async fn open_confirm_sends_session_notification() {
 
     // Send our OPEN — this should cause rustbgpd to transition to OpenConfirm
     // and send a SessionNotification::OpenReceived
-    send_bgp_message(&mut peer_stream, &Message::Open(mock_open())).await;
+    let mut open = mock_open();
+    open.my_as = rustbgpd_wire::constants::AS_TRANS;
+    open.capabilities = vec![Capability::FourOctetAs {
+        asn: FOUR_OCTET_REMOTE_ASN,
+    }];
+    send_bgp_message(&mut peer_stream, &Message::Open(open)).await;
 
     // The OpenReceived notification should arrive before Established (no
     // KEEPALIVE sent yet). Ordinary StateChanged events use the bounded
@@ -797,12 +808,18 @@ async fn open_confirm_sends_session_notification() {
 
     match notification {
         SessionNotification::OpenReceived {
-            remote_router_id, ..
+            remote_router_id,
+            peer_asn,
+            ..
         } => {
             assert_eq!(
                 remote_router_id,
                 Ipv4Addr::new(10, 0, 0, 2),
                 "should have remote router-id from OPEN"
+            );
+            assert_eq!(
+                peer_asn, FOUR_OCTET_REMOTE_ASN,
+                "collision notification must carry the lossless negotiated ASN"
             );
         }
         other => panic!("expected OpenReceived, got {other:?}"),

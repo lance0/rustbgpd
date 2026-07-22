@@ -184,8 +184,12 @@ deviations; [docs/INTEROP.md](INTEROP.md) has the interop matrix,
   hold times. If the negotiated value is non-zero and less than 3 seconds,
   send NOTIFICATION (2, 6) — Unacceptable Hold Time. Zero means no
   keepalives (supported but discouraged in config docs).
-- **BGP Identifier:** Validated as a valid IPv4 address (non-zero,
-  non-multicast). Collision detection per §6.8.
+- **BGP Identifier:** RFC 6286 defines this as any non-zero unsigned 32-bit
+  integer rendered in dotted-quad form; multicast, loopback, and other
+  non-unicast-shaped values are valid. Zero and an iBGP peer using the local
+  identifier get Bad BGP Identifier. Equal identifiers are allowed for eBGP;
+  during a connection collision, the connection initiated by the speaker with
+  the larger AS number is preserved, including for four-octet ASNs (§2.3).
 - **Version:** Only BGP-4 (version 4). Any other version gets
   NOTIFICATION (2, 1) — Unsupported Version Number, with data field
   containing the supported version (4).
@@ -251,7 +255,10 @@ deviations; [docs/INTEROP.md](INTEROP.md) has the interop matrix,
 - If an OPEN is received from a peer with the same BGP Identifier as
   an existing session, the collision resolution procedure applies:
   compare local and remote BGP Identifiers as unsigned 32-bit integers.
-  The connection initiated by the higher ID is kept.
+  The connection initiated by the higher ID is kept. If the identifiers
+  are equal for an eBGP collision, RFC 6286 §2.3 keeps the connection
+  initiated by the speaker with the larger AS number, including a
+  four-octet AS number.
 
 ### §8 — Finite State Machine
 

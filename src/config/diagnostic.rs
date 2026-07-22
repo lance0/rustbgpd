@@ -33,8 +33,11 @@ fn error_span_and_label(source: &str, error: &ConfigError) -> Option<(Range<usiz
                 .unwrap_or_else(|| e.message().to_string());
             Some((span, label))
         }
-        ConfigError::InvalidRouterId { .. } => {
-            lookup_value_span(source, &["global", "router_id"], "not a valid IPv4 address")
+        ConfigError::InvalidLocalAsn { .. } => {
+            lookup_value_span(source, &["global", "asn"], "AS 0 is reserved")
+        }
+        ConfigError::InvalidRouterId { reason, .. } => {
+            lookup_value_span(source, &["global", "router_id"], reason)
         }
         ConfigError::InvalidNeighborAddress { value, reason } => {
             find_neighbor_field_span(source, value, "address", reason)
@@ -483,6 +486,50 @@ log_format = \"text\"
         };
         let rendered = render_diagnostic(source, "config.toml", &error).unwrap();
         assert!(rendered.contains("not-an-ip"), "got: {rendered}");
+        assert!(rendered.contains('^'), "got: {rendered}");
+    }
+
+    #[test]
+    fn render_local_as_zero_points_to_global_asn() {
+        // Mutation-red: removing the InvalidLocalAsn span mapping returns None.
+        let source = "\
+[global]
+asn = 0
+router_id = \"1.2.3.4\"
+listen_port = 179
+";
+        let error = ConfigError::InvalidLocalAsn { value: 0 };
+        let rendered = render_diagnostic(source, "config.toml", &error).unwrap();
+        assert!(rendered.contains("asn = 0"), "got: {rendered}");
+        assert!(rendered.contains("AS 0 is reserved"), "got: {rendered}");
+        assert!(rendered.contains('^'), "got: {rendered}");
+    }
+
+    #[test]
+    fn render_local_router_id_zero_explains_nonzero_requirement() {
+        // Mutation-red: restoring the generic IPv4 label hides the actual constraint.
+        let source = "\
+[global]
+asn = 65000
+router_id = \"0.0.0.0\"
+listen_port = 179
+";
+        let error = ConfigError::InvalidRouterId {
+            value: "0.0.0.0".to_string(),
+            reason: "must be non-zero (RFC 6286 section 2.1)".to_string(),
+        };
+        let rendered = render_diagnostic(source, "config.toml", &error).unwrap();
+        assert!(
+            rendered.contains("router_id = \"0.0.0.0\""),
+            "got: {rendered}"
+        );
+        assert!(
+            rendered
+                .lines()
+                .last()
+                .is_some_and(|line| line.ends_with("must be non-zero (RFC 6286 section 2.1)")),
+            "the source underline must carry the actual constraint: {rendered}"
+        );
         assert!(rendered.contains('^'), "got: {rendered}");
     }
 

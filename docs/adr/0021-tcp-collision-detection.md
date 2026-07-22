@@ -9,7 +9,9 @@ RFC 4271 §6.8 requires that when both sides of a BGP session initiate TCP
 connections simultaneously, the collision must be resolved by comparing BGP
 Identifiers (router-ids). The side with the higher identifier keeps its
 initiated connection; the other side closes its connection with a Cease/7
-(Connection Collision Resolution) NOTIFICATION.
+(Connection Collision Resolution) NOTIFICATION. RFC 6286 §2.3 adds the eBGP
+tie-break for equal identifiers: preserve the connection initiated by the
+speaker with the larger AS number.
 
 The existing code dropped all inbound connections when the outbound was
 active, without comparing router-ids and without sending Cease/7. This
@@ -47,21 +49,23 @@ Cease subcode 7 (`CONNECTION_COLLISION_RESOLUTION`) added to
 ### Transport
 
 `SessionNotification` enum sent from peer sessions to PeerManager:
-- `OpenReceived { peer_addr, session_id, role, remote_router_id }` —
-  session entered OpenConfirm, remote router-id now available.
+- `OpenReceived { peer_addr, session_id, role, remote_router_id, peer_asn }` —
+  session entered OpenConfirm with the lossless negotiated router-id and peer
+  ASN available, including a four-octet ASN learned from the capability.
 - `BackToIdle { peer_addr, session_id, role }` — session fell back to
   Idle (connection failed or was torn down).
 
 `CollisionDump` command added to `PeerCommand` — sends Cease/7
 NOTIFICATION, cleans up RIB if Established, closes TCP.
 
-`remote_router_id: Option<Ipv4Addr>` added to `PeerSessionState` for
-queries during OpenConfirm state.
+`remote_router_id: Option<Ipv4Addr>` and `peer_asn: Option<u32>` in
+`PeerSessionState` carry the negotiated identity for queries during
+OpenConfirm state.
 
 Both `PeerHandle::spawn()` and `PeerHandle::spawn_inbound()` accept an
-optional `mpsc::Sender<SessionNotification>` parameter plus a
+optional `mpsc::UnboundedSender<SessionNotification>` parameter plus a
 monotonically allocated session id and role (`Primary` or
-`PendingInbound`).
+`InboundCandidate`).
 
 ### PeerManager
 
@@ -71,7 +75,11 @@ This supersedes the original parked-`TcpStream` sketch: holding an
 unstarted stream can deadlock simultaneous active-open because the
 candidate never progresses far enough to reveal the remote BGP Identifier.
 
-`session_notify_tx/rx` channel (capacity 64) created in `PeerManager::new()`.
+`session_notify_tx/rx` is created with `mpsc::unbounded_channel()` in
+`PeerManager::new()`. This collision-coordination lane is intentionally
+unbounded so its lossless notifications neither drop under backpressure nor
+block a session task and deadlock with `QueryState`; its event rate is bounded
+by session state transitions, not route volume.
 
 `run()` uses `tokio::select!` on both the command channel and the
 notification channel.
@@ -82,9 +90,9 @@ Inbound connection handling by existing session state:
 - **Connect/Active/OpenSent** → spawn a live `pending_inbound`
   candidate session, wait for an `OpenReceived` notification from either
   the current primary or the candidate.
-- **OpenConfirm** → resolve immediately (router-id available from
-  the current primary's state, or once the candidate reports its
-  OpenConfirm).
+- **OpenConfirm** → resolve immediately (negotiated router-id and peer ASN
+  available from the current primary's state, or once the candidate reports
+  its OpenConfirm).
 
 `resolve_collision()` compares `u32::from(local_router_id)` vs
 `u32::from(remote_router_id)`:
@@ -92,7 +100,11 @@ Inbound connection handling by existing session state:
   the current primary).
 - Local < remote → send `CollisionDump` to the current primary, promote
   the inbound candidate atomically.
-- Equal → drop inbound (degenerate case).
+- Equal identifiers on eBGP → compare the local and negotiated peer ASNs;
+  preserve the connection initiated by the larger-AS speaker per RFC 6286
+  §2.3.
+- Equal identifiers and ASNs → drop inbound defensively. Equal identifiers
+  on iBGP are rejected during OPEN negotiation before collision resolution.
 
 `BackToIdle` notification from the current primary with a pending inbound
 candidate → promote the pending candidate. `BackToIdle` or `OpenReceived`
@@ -108,7 +120,8 @@ No changes. Collision detection is a transport/PeerManager concern.
 ## Consequences
 
 **Positive:**
-- RFC 4271 §6.8 compliance — simultaneous-open scenarios resolve correctly.
+- RFC 4271 §6.8 and RFC 6286 §2.3 compliance — simultaneous-open scenarios,
+  including equal-identifier eBGP peers, resolve correctly.
 - Cease/7 NOTIFICATION sent per spec — remote peer knows why connection
   was closed.
 - FSM stays pure — no collision-aware logic added.
@@ -122,5 +135,5 @@ No changes. Collision detection is a transport/PeerManager concern.
 - PeerManager `run()` now has two select branches — slightly more complex.
 - `pending_inbound` live session held until resolution — bounded by the
   number of configured peers and drained on peer disable / shutdown.
-- Notification channel adds a small per-session overhead (one try_send per
-  state change to OpenConfirm or Idle).
+- The unbounded notification lane adds a small per-session overhead and relies
+  on the session-transition-bounded event rate described above.

@@ -62,9 +62,18 @@ pub fn validate_open(
             Bytes::new(),
         ));
     }
-
-    // Determine peer's true ASN: prefer 4-octet capability, fall back to my_as
+    // Determine peer's true ASN: prefer 4-octet capability, fall back to my_as.
     let peer_asn = open.four_byte_as();
+
+    // RFC 7607 section 2: AS 0 is never a valid peer identity. Check both
+    // OPEN representations before the dynamic-neighbor wildcard below.
+    if open.my_as == 0 || peer_asn == 0 {
+        return Err(NotificationMessage::new(
+            NotificationCode::OpenMessage,
+            open_subcode::BAD_PEER_AS,
+            Bytes::new(),
+        ));
+    }
 
     // Verify peer ASN matches our configuration.
     // remote_asn == 0 is the dynamic-neighbor sentinel: accept any ASN from OPEN.
@@ -72,6 +81,15 @@ pub fn validate_open(
         return Err(NotificationMessage::new(
             NotificationCode::OpenMessage,
             open_subcode::BAD_PEER_AS,
+            Bytes::new(),
+        ));
+    }
+
+    // RFC 6286 section 2.2: equal identifiers are invalid only for iBGP.
+    if peer_asn == config.local_asn && open.bgp_identifier == config.local_router_id {
+        return Err(NotificationMessage::new(
+            NotificationCode::OpenMessage,
+            open_subcode::BAD_BGP_IDENTIFIER,
             Bytes::new(),
         ));
     }
@@ -650,6 +668,30 @@ mod tests {
     }
 
     #[test]
+    fn reject_zero_peer_asn_before_dynamic_neighbor_wildcard() {
+        // Mutation-red: removing the AS 0 guard lets every case negotiate.
+        let mut cfg = test_config();
+        cfg.remote_asn = 0;
+
+        let mut legacy = peer_open();
+        legacy.my_as = 0;
+        legacy.capabilities.clear();
+
+        let mut four_octet = peer_open();
+        four_octet.my_as = rustbgpd_wire::constants::AS_TRANS;
+        four_octet.capabilities = vec![Capability::FourOctetAs { asn: 0 }];
+
+        let mut inconsistent = peer_open();
+        inconsistent.my_as = 0;
+
+        for open in [legacy, four_octet, inconsistent] {
+            let err = validate_open(&open, &cfg).unwrap_err();
+            assert_eq!(err.code, NotificationCode::OpenMessage);
+            assert_eq!(err.subcode, open_subcode::BAD_PEER_AS);
+        }
+    }
+
+    #[test]
     fn remote_asn_zero_accepts_any_peer_asn() {
         let mut cfg = test_config();
         cfg.remote_asn = 0; // dynamic-neighbor sentinel
@@ -658,6 +700,49 @@ mod tests {
         open.capabilities = vec![Capability::FourOctetAs { asn: 65099 }];
         let neg = validate_open(&open, &cfg).unwrap();
         assert_eq!(neg.peer_asn, 65099);
+    }
+
+    #[test]
+    fn reject_ibgp_peer_with_local_bgp_identifier() {
+        // Mutation-red: removing the iBGP duplicate-ID guard negotiates this OPEN.
+        let mut cfg = test_config();
+        cfg.remote_asn = cfg.local_asn;
+        let mut open = peer_open();
+        open.my_as = u16::try_from(cfg.local_asn).unwrap();
+        open.capabilities = vec![Capability::FourOctetAs { asn: cfg.local_asn }];
+        open.bgp_identifier = cfg.local_router_id;
+
+        let err = validate_open(&open, &cfg).unwrap_err();
+        assert_eq!(err.code, NotificationCode::OpenMessage);
+        assert_eq!(err.subcode, open_subcode::BAD_BGP_IDENTIFIER);
+    }
+
+    #[test]
+    fn ebgp_peer_may_share_local_bgp_identifier() {
+        // Mutation-red: making the duplicate-ID guard unconditional rejects this OPEN.
+        let cfg = test_config();
+        let mut open = peer_open();
+        open.bgp_identifier = cfg.local_router_id;
+
+        let negotiated = validate_open(&open, &cfg).unwrap();
+        assert_eq!(negotiated.peer_router_id, cfg.local_router_id);
+    }
+
+    #[test]
+    fn unusual_nonzero_bgp_identifiers_are_accepted() {
+        // Mutation-red: imposing IPv4 address-shape rules rejects at least one value.
+        let cfg = test_config();
+        for identifier in [
+            Ipv4Addr::new(0, 0, 0, 1),
+            Ipv4Addr::LOCALHOST,
+            Ipv4Addr::new(224, 0, 0, 1),
+            Ipv4Addr::BROADCAST,
+        ] {
+            let mut open = peer_open();
+            open.bgp_identifier = identifier;
+            let negotiated = validate_open(&open, &cfg).unwrap();
+            assert_eq!(negotiated.peer_router_id, identifier);
+        }
     }
 
     #[test]

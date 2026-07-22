@@ -67,14 +67,25 @@ pub(crate) fn effective_prefix_str(prefix: &str) -> Option<(IpAddr, u8)> {
 impl Config {
     #[expect(clippy::too_many_lines)]
     pub(crate) fn validate(&self) -> Result<(), ConfigError> {
-        // Validate router_id is a valid IPv4
-        self.global
-            .router_id
-            .parse::<Ipv4Addr>()
-            .map_err(|e| ConfigError::InvalidRouterId {
+        if self.global.asn == 0 {
+            return Err(ConfigError::InvalidLocalAsn {
+                value: self.global.asn,
+            });
+        }
+
+        // RFC 6286 section 2.1: the router ID is any non-zero u32.
+        let router_id = self.global.router_id.parse::<Ipv4Addr>().map_err(|e| {
+            ConfigError::InvalidRouterId {
                 value: self.global.router_id.clone(),
                 reason: e.to_string(),
-            })?;
+            }
+        })?;
+        if router_id.is_unspecified() {
+            return Err(ConfigError::InvalidRouterId {
+                value: self.global.router_id.clone(),
+                reason: "must be non-zero (RFC 6286 section 2.1)".to_string(),
+            });
+        }
 
         // Validate cluster_id if present
         if let Some(ref cid) = self.global.cluster_id {

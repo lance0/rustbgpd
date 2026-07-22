@@ -1147,6 +1147,23 @@ fn invalid_router_id_rejected() {
 }
 
 #[test]
+fn local_as_zero_is_rejected() {
+    // Mutation-red: removing the global ASN predicate makes this fixture parse.
+    let toml_str = valid_toml().replace("asn = 65001", "asn = 0");
+    let err = parse(&toml_str).unwrap_err();
+    assert!(matches!(err, ConfigError::InvalidLocalAsn { value: 0 }));
+}
+
+#[test]
+fn local_router_id_zero_is_rejected() {
+    // Mutation-red: removing the non-zero router-ID predicate makes this fixture parse.
+    let toml_str = valid_toml().replace("router_id = \"10.0.0.1\"", "router_id = \"0.0.0.0\"");
+    let err = parse(&toml_str).unwrap_err();
+    assert!(matches!(err, ConfigError::InvalidRouterId { .. }));
+    assert!(err.to_string().contains("must be non-zero"));
+}
+
+#[test]
 fn invalid_neighbor_address_rejected() {
     let toml_str = valid_toml().replace("10.0.0.2", "bad-addr");
     let err = parse(&toml_str).unwrap_err();
