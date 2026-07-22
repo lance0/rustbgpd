@@ -3742,7 +3742,8 @@ async fn run<T>(
     // Spawn the BFD actor (single-hop async, ADR-0067). Runs the sessions in the
     // PeerManager-owned desired set, publishes their state, and emits state
     // changes that PeerManager couples to BGP (non-strict RFC 5882 teardown).
-    // No-op when no neighbor has BFD configured (or off Linux).
+    // No-op when no neighbor has BFD configured; configured BFD fails closed
+    // off Linux.
     let (bfd_status_tx, bfd_status_rx) =
         tokio::sync::watch::channel(Vec::<bfd_runtime::BfdStatus>::new());
     // Actor state-change events (ADR-0067 step 3b): the actor broadcasts
@@ -3751,7 +3752,7 @@ async fn run<T>(
     // (held in ServeConfig) is the long-lived sink, so the WatchEvents BFD
     // stream stays open even when no sessions are configured. The actor event
     // channel (`bfd_event_tx`) is dropped if the actor doesn't start (no
-    // sessions / off Linux), which simply ends the bridge task.
+    // sessions), which simply ends the bridge task.
     let (bfd_event_tx, bfd_event_rx) =
         tokio::sync::broadcast::channel::<bfd_runtime::BfdRuntimeEvent>(1024);
     let (bfd_bgp_event_tx, _) =
@@ -3772,7 +3773,13 @@ async fn run<T>(
         bfd_event_tx,
         bfd_state_change_tx,
         bfd_runtime_shutdown.clone(),
-    );
+    )
+    .unwrap_or_else(|error| {
+        fatal_startup_error(
+            "failed to start configured BFD runtime; refusing to serve BFD-configured peers",
+            error,
+        );
+    });
 
     // Spawn gRPC API server (keep JoinHandle for supervision)
     let grpc_rib_tx = rib_tx.clone();
