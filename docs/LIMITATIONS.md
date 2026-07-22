@@ -30,10 +30,12 @@ surfaces; it does not promote the rest of the project out of alpha.
   best-path selection. This is inherent to the RFC 9107 union model — the
   MT/Flex isolation above scopes topology inputs, not speakers.
 - Confederations are not implemented.
-- Transparent route-server export preserves the accepted route's next hop but
-  does not yet verify that the advertising client owns the wire next hop. See
-  the proposed, opt-in design in
-  [ADR-0107](adr/0107-route-server-next-hop-ownership.md).
+- Transparent route-server export preserves the accepted route's next hop.
+  Operators can opt into fail-closed pre-policy ownership validation with
+  `next_hop_ownership = "strict_peer"`, which accepts unicast announcements
+  only when the complete wire next-hop identity is the advertising session's
+  own address. Same-AS alternate next hops and explicit authorization remain
+  deferred; see [ADR-0107](adr/0107-route-server-next-hop-ownership.md).
 
 ## EVPN
 

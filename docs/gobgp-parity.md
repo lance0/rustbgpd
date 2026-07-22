@@ -108,7 +108,7 @@ releases rather than carried forward from older measurements.
 | Policy chaining | Yes | Yes | GoBGP-style: permit=continue, deny=stop, implicit permit |
 | Scriptable policy language | No | Yes | `.rpol` (ADR-0096): typed + compiled, named prefix/community sets as indexed matchers, parameterized policies, `apply()` composition, in-language unit tests via `rbgp policy check`; route-for-route parity vs FRR route-maps proven in M80 |
 | Policy dry-run against the live RIB | No | Yes | `rbgp policy test` / `TestPolicy` RPC — a candidate `.rpol` policy evaluated read-only over an Adj-RIB-In / Loc-RIB snapshot: counts, per-term hits, before/after diffs |
-| Live per-term policy hit counters | No | Yes | `rbgp policy stats` / `GetPolicyStats` — since-chain-install counters on the installed export chains (import read surface is a follow-up) |
+| Live per-term policy hit counters | No | Yes | `rbgp policy stats --direction import\|export\|both` / `GetPolicyStats` — since-chain-install counters on installed import and export chains; import rows also carry the session-local policy generation |
 
 ## gRPC API
 
