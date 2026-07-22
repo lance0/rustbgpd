@@ -60,7 +60,7 @@ bird_state() {
 }
 
 bird_state_strict() {
-    docker exec "$BIRD" birdc show protocols rustbgpd 2>/dev/null
+    timeout 3 docker exec "$BIRD" birdc show protocols rustbgpd 2>/dev/null
 }
 
 bird_since() {
@@ -516,6 +516,21 @@ rust_pid() {
     '
 }
 
+rust_pid_gone_or_zombie() {
+    local pid=${1:?}
+    docker exec "$RUSTBGPD" sh -lc '
+        pid=$1
+        [ ! -d "/proc/$pid" ] && exit 0
+        while read -r name state _; do
+            if [ "$name" = "State:" ]; then
+                [ "$state" = "Z" ]
+                exit
+            fi
+        done < "/proc/$pid/status"
+        exit 1
+    ' sh "$pid"
+}
+
 crash_rustbgpd_and_prove_disconnect() {
     local proof=${1:?}
     local pid
@@ -533,7 +548,7 @@ crash_rustbgpd_and_prove_disconnect() {
 
     local process_gone=false
     for _ in $(seq 1 20); do
-        if ! docker exec "$RUSTBGPD" test -d "/proc/$pid"; then
+        if rust_pid_gone_or_zombie "$pid"; then
             process_gone=true
             break
         fi
