@@ -10,9 +10,6 @@ inputs:
   containerlab-version:
     required: false
     default: "0.74.3"
-  grpcurl-version:
-    required: false
-    default: "1.9.1"
   build-image:
     description: "Build rustbgpd:dev (set 'false' for jobs that build their own)."
     required: false
@@ -37,8 +34,6 @@ runs:
 
     - name: Install grpcurl + jq
       shell: bash
-      env:
-        GRPCURL_VERSION: ${{ inputs.grpcurl-version }}
       run: |
         set -euo pipefail
         # jq is normally preinstalled on hosted runners; only touch apt when it
@@ -50,10 +45,7 @@ runs:
             echo "::warning::apt-get update reported repo errors; installing jq from cache"
           sudo apt-get install -y jq
         fi
-        curl -fsSL --retry 3 --retry-delay 3 \
-          "https://github.com/fullstorydev/grpcurl/releases/download/v${GRPCURL_VERSION}/grpcurl_${GRPCURL_VERSION}_linux_x86_64.tar.gz" \
-          | sudo tar -xz -C /usr/local/bin grpcurl
-        grpcurl -version
+        bash .github/scripts/install-grpcurl.sh
 
     - name: Load kernel dataplane modules (vrf / vxlan / bridge / bonding)
       id: dataplane-modules

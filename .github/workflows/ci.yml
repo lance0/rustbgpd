@@ -41,6 +41,12 @@ jobs:
             echo "CI triggers must keep main-only pushes, all PRs, and Markdown ignores" >&2
             exit 1
           fi
+      - name: Check pinned grpcurl installer contract
+        shell: bash
+        run: |
+          bash -n .github/scripts/install-grpcurl.sh
+          shellcheck .github/scripts/install-grpcurl.sh
+          bash .github/scripts/install-grpcurl.sh --self-test
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
