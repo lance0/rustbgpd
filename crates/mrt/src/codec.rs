@@ -4,6 +4,8 @@ use rustbgpd_rib::update::MrtPeerEntry;
 use rustbgpd_wire::attribute::encode_path_attributes;
 use rustbgpd_wire::error::EncodeError as WireEncodeError;
 use rustbgpd_wire::{Afi, MpReachNlri, PathAttribute, Prefix, Safi, encode_evpn_nlri};
+#[cfg(any(test, feature = "snapshot-allocation-diagnostics"))]
+use std::cell::Cell;
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr};
@@ -44,6 +46,21 @@ pub struct MrtAddPathReceiveProfile {
     pub afi: Afi,
     /// Subsequent address family.
     pub safi: Safi,
+}
+
+/// Per-invocation counters from the ordinary snapshot allocation probe.
+///
+/// This surface is intentionally available only to the manual allocation
+/// harness. It is not part of daemon telemetry or warm-checkpoint behavior.
+#[cfg(any(test, feature = "snapshot-allocation-diagnostics"))]
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SnapshotAllocationDiagnostics {
+    /// Capacity misses that reached the top-level unbounded output allocator.
+    ///
+    /// Attribute child buffers and every buffer carrying a warm-snapshot
+    /// budget are excluded.
+    pub ordinary_output_growth_reservations: u64,
 }
 
 /// Shared hard bound and cooperative cancellation contract for warm encoding.
@@ -195,6 +212,10 @@ struct EncodeBuffer<'a> {
     bytes: &'a mut Vec<u8>,
     budget: Option<&'a WarmSnapshotBudget>,
     accounted_prefix: usize,
+    #[cfg(any(test, feature = "snapshot-allocation-diagnostics"))]
+    top_level: bool,
+    #[cfg(any(test, feature = "snapshot-allocation-diagnostics"))]
+    snapshot_allocation_probe: Option<&'a Cell<u64>>,
 }
 
 impl<'a> EncodeBuffer<'a> {
@@ -203,6 +224,10 @@ impl<'a> EncodeBuffer<'a> {
             bytes,
             budget,
             accounted_prefix: 0,
+            #[cfg(any(test, feature = "snapshot-allocation-diagnostics"))]
+            top_level: true,
+            #[cfg(any(test, feature = "snapshot-allocation-diagnostics"))]
+            snapshot_allocation_probe: None,
         }
     }
 
@@ -215,7 +240,17 @@ impl<'a> EncodeBuffer<'a> {
             bytes,
             budget,
             accounted_prefix,
+            #[cfg(any(test, feature = "snapshot-allocation-diagnostics"))]
+            top_level: false,
+            #[cfg(any(test, feature = "snapshot-allocation-diagnostics"))]
+            snapshot_allocation_probe: None,
         }
+    }
+
+    #[cfg(any(test, feature = "snapshot-allocation-diagnostics"))]
+    fn with_snapshot_allocation_probe(mut self, probe: &'a Cell<u64>) -> Self {
+        self.snapshot_allocation_probe = Some(probe);
+        self
     }
 
     fn check(&self) -> Result<(), EncodeError> {
@@ -238,6 +273,14 @@ impl<'a> EncodeBuffer<'a> {
         };
         if local_attempted <= self.bytes.capacity() {
             return Ok(attempted);
+        }
+
+        #[cfg(any(test, feature = "snapshot-allocation-diagnostics"))]
+        if self.top_level
+            && self.budget.is_none()
+            && let Some(probe) = self.snapshot_allocation_probe
+        {
+            probe.set(probe.get().saturating_add(1));
         }
 
         let target_capacity = if let Some(budget) = self.budget {
@@ -946,7 +989,7 @@ fn route_uses_add_path(
     clippy::too_many_arguments,
     reason = "borrowed route records need explicit MRT identity, selection, and timing inputs"
 )]
-fn encode_route_entries_profile(
+fn encode_route_entries_profile<const FIX_ORIGINATED_TIME: bool>(
     buf: &mut EncodeBuffer<'_>,
     timestamp: u32,
     seq_num: u32,
@@ -958,6 +1001,7 @@ fn encode_route_entries_profile(
     entry_count: u16,
     add_path: bool,
     now_secs: u64,
+    fixed_originated_time: u32,
 ) -> Result<(), EncodeError> {
     let subtype = match (prefix, add_path) {
         (Prefix::V4(_), false) => RIB_IPV4_UNICAST,
@@ -988,6 +1032,11 @@ fn encode_route_entries_profile(
                 .expect("effective peer inventory includes every route origin");
             let age = route.received_at.elapsed().as_secs();
             let originated = u32::try_from(now_secs.saturating_sub(age)).unwrap_or(u32::MAX);
+            let originated = if FIX_ORIGINATED_TIME {
+                fixed_originated_time
+            } else {
+                originated
+            };
             encode_route_rib_entry(buf, route, peer_index, originated, add_path)?;
             encoded_count = encoded_count
                 .checked_add(1)
@@ -1041,7 +1090,7 @@ pub fn encode_snapshot_with_view(
     evpn_routes: &[EvpnRibRoute],
     timestamp: u32,
 ) -> Result<Vec<u8>, EncodeError> {
-    encode_snapshot_inner(
+    encode_snapshot_inner::<false>(
         collector_bgp_id,
         view_name,
         peers,
@@ -1050,7 +1099,52 @@ pub fn encode_snapshot_with_view(
         timestamp,
         None,
         None,
+        0,
+        #[cfg(any(test, feature = "snapshot-allocation-diagnostics"))]
+        None,
     )
+}
+
+/// Encode an ordinary snapshot through the real encoder while collecting its
+/// top-level unbounded output-growth count.
+///
+/// This uses the same internal encoder as [`encode_snapshot`], then substitutes
+/// the final `originated_time` value at the unicast and EVPN write sites so
+/// repeated diagnostic runs are byte deterministic. Diagnostic runs are never
+/// timing evidence; the default build and public encoder provide that evidence.
+///
+/// # Errors
+///
+/// Returns the same errors as [`encode_snapshot`].
+#[cfg(any(test, feature = "snapshot-allocation-diagnostics"))]
+#[doc(hidden)]
+pub fn encode_snapshot_with_allocation_diagnostics(
+    collector_bgp_id: Ipv4Addr,
+    peers: &[MrtPeerEntry],
+    routes: &[Route],
+    evpn_routes: &[EvpnRibRoute],
+    timestamp: u32,
+    fixed_originated_time: u32,
+) -> Result<(Vec<u8>, SnapshotAllocationDiagnostics), EncodeError> {
+    let ordinary_output_growth_reservations = Cell::new(0);
+    let snapshot = encode_snapshot_inner::<true>(
+        collector_bgp_id,
+        "",
+        peers,
+        routes,
+        evpn_routes,
+        timestamp,
+        None,
+        None,
+        fixed_originated_time,
+        Some(&ordinary_output_growth_reservations),
+    )?;
+    Ok((
+        snapshot,
+        SnapshotAllocationDiagnostics {
+            ordinary_output_growth_reservations: ordinary_output_growth_reservations.get(),
+        },
+    ))
 }
 
 /// Encode a warm snapshot with an exact per-peer Add-Path receive profile.
@@ -1207,7 +1301,7 @@ fn encode_warm_snapshot_inner(
             });
         }
     }
-    encode_snapshot_inner(
+    encode_snapshot_inner::<false>(
         collector_bgp_id,
         view_name,
         peers,
@@ -1216,6 +1310,9 @@ fn encode_warm_snapshot_inner(
         timestamp,
         Some(&unique),
         budget,
+        0,
+        #[cfg(any(test, feature = "snapshot-allocation-diagnostics"))]
+        None,
     )
 }
 
@@ -1231,7 +1328,7 @@ fn is_ipv6_link_local(address: IpAddr) -> bool {
     clippy::too_many_arguments,
     reason = "snapshot identity, route families, Add-Path profile, and work budget are independent inputs"
 )]
-fn encode_snapshot_inner(
+fn encode_snapshot_inner<const FIX_ORIGINATED_TIME: bool>(
     collector_bgp_id: Ipv4Addr,
     view_name: &str,
     peers: &[MrtPeerEntry],
@@ -1240,9 +1337,16 @@ fn encode_snapshot_inner(
     timestamp: u32,
     add_path_receive: Option<&HashSet<MrtAddPathReceiveProfile>>,
     budget: Option<&WarmSnapshotBudget>,
+    fixed_originated_time: u32,
+    #[cfg(any(test, feature = "snapshot-allocation-diagnostics"))]
+    snapshot_allocation_probe: Option<&Cell<u64>>,
 ) -> Result<Vec<u8>, EncodeError> {
     let mut buf = Vec::new();
     let mut output = EncodeBuffer::new(&mut buf, budget);
+    #[cfg(any(test, feature = "snapshot-allocation-diagnostics"))]
+    if let Some(probe) = snapshot_allocation_probe {
+        output = output.with_snapshot_allocation_probe(probe);
+    }
     output.check()?;
     // 1. Build effective peer list from explicit peers + any route-origin peers.
     if peers.len() > usize::from(u16::MAX) {
@@ -1411,7 +1515,7 @@ fn encode_snapshot_inner(
                     value: prefix_routes.len(),
                 })?;
             let add_path = prefix_routes.iter().any(|route| route.path_id != 0);
-            encode_route_entries_profile(
+            encode_route_entries_profile::<FIX_ORIGINATED_TIME>(
                 &mut output,
                 timestamp,
                 seq_num,
@@ -1423,6 +1527,7 @@ fn encode_snapshot_inner(
                 count,
                 add_path,
                 now_secs,
+                fixed_originated_time,
             )?;
             seq_num = seq_num.wrapping_add(1);
             group_start = group_end;
@@ -1451,7 +1556,7 @@ fn encode_snapshot_inner(
                 field: "RIB entry count",
                 value: legacy_count,
             })?;
-            encode_route_entries_profile(
+            encode_route_entries_profile::<FIX_ORIGINATED_TIME>(
                 &mut output,
                 timestamp,
                 seq_num,
@@ -1463,6 +1568,7 @@ fn encode_snapshot_inner(
                 count,
                 false,
                 now_secs,
+                fixed_originated_time,
             )?;
             seq_num = seq_num.wrapping_add(1);
         }
@@ -1471,7 +1577,7 @@ fn encode_snapshot_inner(
                 field: "RIB entry count",
                 value: add_path_count,
             })?;
-            encode_route_entries_profile(
+            encode_route_entries_profile::<FIX_ORIGINATED_TIME>(
                 &mut output,
                 timestamp,
                 seq_num,
@@ -1483,6 +1589,7 @@ fn encode_snapshot_inner(
                 count,
                 true,
                 now_secs,
+                fixed_originated_time,
             )?;
             seq_num = seq_num.wrapping_add(1);
         }
@@ -1511,6 +1618,11 @@ fn encode_snapshot_inner(
         let age = route.received_at.elapsed().as_secs();
         let originated_u64 = now_secs.saturating_sub(age);
         let originated = u32::try_from(originated_u64).unwrap_or(u32::MAX);
+        let originated = if FIX_ORIGINATED_TIME {
+            fixed_originated_time
+        } else {
+            originated
+        };
         encode_evpn_rib_generic(&mut output, timestamp, seq_num, route, idx, originated)?;
         seq_num = seq_num.wrapping_add(1);
     }
@@ -1563,6 +1675,39 @@ mod tests {
             aspa_state: rustbgpd_wire::AspaValidation::Unknown,
             aspa_context: rustbgpd_wire::AspaValidationContext::default(),
         }
+    }
+
+    /// Load-bearing proof: removing the capacity-miss increment makes the
+    /// ordinary assertion fail; counting child or bounded growth makes the
+    /// corresponding isolation assertion fail.
+    #[test]
+    fn snapshot_allocation_probe_counts_only_unbounded_top_level_growth() {
+        let probe = Cell::new(0_u64);
+
+        let mut ordinary_bytes = Vec::with_capacity(1);
+        let mut ordinary =
+            EncodeBuffer::new(&mut ordinary_bytes, None).with_snapshot_allocation_probe(&probe);
+        ordinary.push(1).unwrap();
+        assert_eq!(probe.get(), 0, "writes within capacity are not growth");
+        ordinary.push(2).unwrap();
+        assert_eq!(probe.get(), 1, "top-level ordinary growth is counted");
+
+        let mut child_bytes = Vec::new();
+        let mut child =
+            EncodeBuffer::child(&mut child_bytes, None, 0).with_snapshot_allocation_probe(&probe);
+        child.push(1).unwrap();
+        assert_eq!(probe.get(), 1, "child-buffer growth is excluded");
+
+        let budget = WarmSnapshotBudget::new(
+            Instant::now() + Duration::from_mins(1),
+            Arc::new(AtomicBool::new(false)),
+            128,
+        );
+        let mut bounded_bytes = Vec::new();
+        let mut bounded = EncodeBuffer::new(&mut bounded_bytes, Some(&budget))
+            .with_snapshot_allocation_probe(&probe);
+        bounded.push(1).unwrap();
+        assert_eq!(probe.get(), 1, "bounded top-level growth is excluded");
     }
 
     #[test]
@@ -2111,6 +2256,60 @@ mod tests {
             is_llgr_stale: false,
         }
     }
+
+    /// Load-bearing proof: removing the final originated-time replacement from
+    /// either the unicast or EVPN write site makes that family's assertion fail.
+    #[test]
+    fn snapshot_allocation_diagnostics_fix_both_family_originated_times() {
+        use crate::reader::{SnapshotNlri, SnapshotReader};
+
+        const FIXED_ORIGINATED_TIME: u32 = 0x0102_0304;
+        let peer_addr = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 9));
+        let peer = make_peer(peer_addr, 64_509);
+        let route = make_route(
+            Prefix::V4(Ipv4Prefix {
+                addr: Ipv4Addr::new(198, 51, 100, 0),
+                len: 24,
+            }),
+            peer_addr,
+            peer_addr,
+        );
+        let evpn = make_evpn_macip(peer_addr, peer_addr);
+        let (data, diagnostics) = encode_snapshot_with_allocation_diagnostics(
+            Ipv4Addr::new(192, 0, 2, 1),
+            &[peer],
+            &[route],
+            &[evpn],
+            1_700_000_000,
+            FIXED_ORIGINATED_TIME,
+        )
+        .unwrap();
+        assert!(diagnostics.ordinary_output_growth_reservations > 0);
+
+        let mut reader = SnapshotReader::new(&data).unwrap();
+        let mut saw_unicast = false;
+        let mut saw_evpn = false;
+        let mut count = 0_u64;
+        for decoded in &mut reader {
+            let entry = decoded.unwrap();
+            assert_eq!(entry.originated_time, FIXED_ORIGINATED_TIME);
+            match entry.nlri {
+                SnapshotNlri::Unicast(_) => saw_unicast = true,
+                SnapshotNlri::Generic {
+                    afi: 25, safi: 70, ..
+                } => saw_evpn = true,
+                other @ SnapshotNlri::Generic { .. } => {
+                    panic!("unexpected snapshot family: {other:?}")
+                }
+            }
+            count += 1;
+        }
+        assert_eq!(count, 2);
+        assert!(saw_unicast, "unicast timestamp path must be exercised");
+        assert!(saw_evpn, "EVPN timestamp path must be exercised");
+        assert_eq!(reader.skipped_records(), 0);
+    }
+
     /// Locate an `RIB_GENERIC` (subtype 6) record in `data` after the
     /// `PEER_INDEX_TABLE`. Returns the offset of its MRT header.
     fn find_rib_generic(data: &[u8]) -> Option<usize> {

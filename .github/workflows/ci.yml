@@ -86,6 +86,14 @@ jobs:
       - run: cargo check -p rustbgpd-transport --features bench-internals --benches
       # API owns the feature-gated event-history producer bench.
       - run: cargo check -p rustbgpd-api --features bench-internals --benches
+      # LAN-572 keeps the real MRT snapshot encoder benchmark usable in both
+      # deliberately incompatible builds: bare-jemalloc timing, and opt-in
+      # allocation/growth diagnostics.  `--smoke` bounds both executions for
+      # the PR critical path while retaining the harness's path assertions.
+      - name: Smoke MRT snapshot allocation benchmark modes
+        run: |
+          cargo test -p rustbgpd-mrt --bench snapshot_allocation -- timing --smoke
+          cargo test -p rustbgpd-mrt --features snapshot-allocation-diagnostics --bench snapshot_allocation -- diagnostic --smoke
       # Same class of gap for the root crate: `bench-internals` exposes
       # `pub mod config` (and its EVPN reload-diff dependencies) in the
       # lib, a surface the default `--all-targets` clippy never compiles.
