@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 
@@ -40,6 +40,32 @@ fn assert_counter_value(metrics: &BgpMetrics, name: &str, expected: f64) {
         (actual - expected).abs() < f64::EPSILON,
         "expected {name}={expected}, got {actual}"
     );
+}
+
+fn counter_values_by_label(
+    metrics: &BgpMetrics,
+    name: &str,
+    label_name: &str,
+) -> HashMap<String, f64> {
+    metrics
+        .registry()
+        .gather()
+        .into_iter()
+        .find(|family| family.name() == name)
+        .map_or_else(HashMap::new, |family| {
+            family
+                .get_metric()
+                .iter()
+                .map(|metric| {
+                    let label = metric
+                        .get_label()
+                        .iter()
+                        .find(|label| label.name() == label_name)
+                        .unwrap_or_else(|| panic!("{name} sample lacks {label_name}"));
+                    (label.value().to_string(), metric.get_counter().value())
+                })
+                .collect()
+        })
 }
 
 fn peer(octet: u8) -> IpAddr {
@@ -160,6 +186,46 @@ fn config(timeout: Duration, peers: &[IpAddr]) -> SelectionDeferralConfig {
             })
             .collect(),
     }
+}
+
+/// Load-bearing proof: deleting the failure-series initialization from
+/// `SelectionDeferral::new` leaves both maps empty in this fresh registry.
+#[test]
+fn selection_deferral_construction_materializes_failure_counter_children() {
+    let metrics = BgpMetrics::new();
+    let (_tx, rx) = mpsc::channel(8);
+    let selection_config = SelectionDeferralConfig {
+        timeout: Duration::from_mins(1),
+        waiters: vec![SelectionDeferralWaiterConfig {
+            peer: peer(1),
+            families: vec![FAMILY, READY_FAMILY],
+        }],
+    };
+
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone())
+        .with_selection_deferral(selection_config);
+    assert!(manager.selection_deferral.is_some());
+
+    let expected = HashMap::from([
+        ("ipv4_unicast".to_string(), 0.0),
+        ("ipv6_unicast".to_string(), 0.0),
+    ]);
+    assert_eq!(
+        counter_values_by_label(
+            &metrics,
+            "bgp_selection_deferral_timeouts_total",
+            "afi_safi"
+        ),
+        expected
+    );
+    assert_eq!(
+        counter_values_by_label(
+            &metrics,
+            "bgp_selection_deferral_ledger_overflows_total",
+            "afi_safi"
+        ),
+        expected
+    );
 }
 
 fn commit_control_markers(

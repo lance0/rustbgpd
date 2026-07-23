@@ -5,8 +5,9 @@ A ready-to-import overview dashboard lives at
 (uid `rustbgpd-overview`). It covers session health (including graceful
 restart and slow-peer queues), RIB scale, update-group membership,
 policy-transition actor occupancy, accepted-policy age, policy decisions and
-engine errors, BMP/event-outbox health, RPKI/ASPA state, and core operations.
-Every panel references metrics the daemon actually exports from
+engine errors, route-safety rejections and selection-deferral state,
+BMP/event-outbox health, RPKI/ASPA state, and core operations. Every panel
+references metrics the daemon actually exports from
 `crates/telemetry/src/metrics.rs` — no speculative series.
 
 ## Enable the metrics endpoint
@@ -63,7 +64,9 @@ the next scrape.
 A ready-to-load Prometheus alert-rule pack (session down/flapping,
 empty Adj-RIB-In, max-prefix near-limit and breach, empty RPKI VRP table, event-outbox
 degradation, update-group residue growth, stalled policy transition, a slow
-peer endpoint, actor polls above 200ms, and daemon down) ships at
+peer endpoint, actor polls above 200ms, exact-export rejection, malformed
+UPDATE disposition, selection-deferral timeout and ledger overflow, and daemon
+down) ships at
 [`examples/prometheus/rustbgpd-alerts.yml`](../examples/prometheus/rustbgpd-alerts.yml),
 with per-rule unit tests in
 [`rustbgpd-alerts_test.yml`](../examples/prometheus/rustbgpd-alerts_test.yml)
@@ -74,6 +77,20 @@ with per-rule unit tests in
 
 - Counters are plotted with `rate(...[$__rate_interval])`; gauges are
   plotted raw. Single-stats use last-not-null.
+- Exact-export rejection and malformed-UPDATE disposition rates preserve the
+  metrics' two native peer identities:
+  `bgp_exact_export_rejections_total` uses the bare configured neighbor and
+  therefore `$neighbor`, while `bgp_update_malformed_total` uses the transport
+  endpoint and therefore `$peer`. The selection-deferral state panel renders
+  the raw `active` and `waiters` gauges as steps because their discrete changes
+  are normal convergence activity. Only timeout and bounded-ledger-overflow
+  counter increases alert; ordinary release reasons do not. Event-rate panels
+  filter out zero-valued seeded series so the legend remains actionable on
+  large peer fleets.
+- rustbgpd materializes the bounded route-safety counter label sets when a
+  session or selection-deferral family is created, before its producer actor
+  runs. Prometheus still has to scrape that zero value to establish a sampled
+  baseline, as with any pull-based counter.
 - Max-prefix capacity panels use the session endpoint label and the bounded
   `aggregate`, `ipv4_unicast`, and `ipv6_unicast` scopes. Limit/headroom series
   are intentionally absent for unlimited scopes, and every capacity series is
@@ -123,14 +140,32 @@ promtool check rules examples/prometheus/rustbgpd-alerts.yml
 
 The dashboard checker parses JSON, rejects duplicate panel IDs, validates the
 multi/All selector definitions, compares the required PromQL targets after
-whitespace normalization, and checks both workflow path filters plus the real
-checker step. Its mutation proof makes each of these changes red: malformed
-JSON, a non-integer or duplicate ID, deletion of any required target, removal
-of the `instance` selector, swapping endpoint/bare-address selectors, removing
-`$neighbor`, or replacing the executable workflow step with only a comment.
+whitespace normalization, pins the expanded full-width Route safety row, its
+three 8-by-8 panels, and discrete selection-state rendering, and checks both
+workflow path filters plus the real checker step. Its mutation proof makes
+each of these changes red: malformed JSON, a non-integer or duplicate ID,
+renaming, collapsing, resizing, or moving the required row; changing its type;
+moving or changing the type of a required panel; renaming any of the six
+route-safety metrics; swapping endpoint/bare-address selectors; changing
+either raw selection gauge to a rate; removing step rendering or `$neighbor`;
+dropping `instance` from a route-safety aggregation; weakening any of the six
+label-rich legends; dropping any seeded-series `> 0` filter; or replacing the
+executable workflow step with only a comment.
 
 The slow-peer fixture is red if its `== 1` predicate or five-minute hold is
 changed. The actor fixture is red if `ignoring(le)` is removed, `le="0.2"` is
 moved to `0.5`, `> 0` becomes `>= 0`, raw counters replace `increase`, or
 `job`/`poll_kind` are aggregated away. Its firing observation is in
 `(0.2, 0.5]`; exact-boundary and historical-flat controls remain healthy.
+Each route-safety counter fixture is red if its alert is deleted, its window is
+shortened from 15 to 5 minutes, `increase` becomes a raw counter, or `> 0`
+becomes `> 1`. Malformed UPDATE fixtures cover all three bounded RFC 7606
+dispositions and go red when the rule is restricted to one; exact-export keeps
+its bare-neighbor label, fires all four canonical rejection reasons, and spans
+unicast plus EVPN, so the demonstrated `reason="message_too_long"` and
+`family="ipv4_unicast"` restrictions fail. Timeout and overflow fixtures each
+fire across multiple supported AFI/SAFI values, so their demonstrated
+single-family restrictions and timeout/overflow swaps fail independently.
+Selection-deferral fixtures also inject normal active/waiter transitions and
+an `all_eor` release so substituting any of those normal signals false-alerts
+and fails.

@@ -1012,6 +1012,24 @@ instance owned. If the persisted file has an unsupported version or stale table
 signature, rustbgpd renames it to `fib-owned.json.stale` and starts with empty
 owned-state.
 
+### Route-safety alerts
+
+The shipped Prometheus rule pack alerts only on actionable route-safety event
+counters, using a 15-minute increase window:
+
+- `BgpExactExportRejected` means a post-policy announcement was withheld before
+  Adj-RIB-Out commit. Its `peer` label is the bare configured neighbor address;
+  correlate `family` and `reason` with the daemon warning and
+  `rbgp rib --prefix <prefix> advertised <peer> --explain`.
+- `BgpMalformedUpdate` reports one or more malformed UPDATEs by their strongest
+  RFC 7606 `disposition`. Its `peer` label is the transport endpoint
+  (`addr:port` or `[IPv6]:port`).
+- `BgpSelectionDeferralTimedOut` means a family gate used its configured timer
+  fallback before every planned-restart convergence signal arrived.
+- `BgpSelectionDeferralLedgerOverflow` means the bounded identity ledger fell
+  back to a complete release sweep. Safety is preserved, but table scale and
+  retained-key pressure merit investigation.
+
 ### Graceful Restart
 
 | Metric | What it tells you |
@@ -1046,6 +1064,11 @@ responses stay held until a post-failback BoRR is followed by the matching peer
 EoRR. Ordinary EoR, stray EoRR, and the local refresh timeout do not satisfy the
 waiter. Full or closed survivor outbound channels can lose the request, so the
 original selection-deferral deadline remains the bounded fallback.
+
+The `active` and `waiters` gauges, plus ordinary `all_eor`,
+`collision_refresh`, and `all_excluded` releases, are dashboard context rather
+than alert conditions. This avoids paging on normal planned-restart progress;
+use `rbgp neighbor <address>` to correlate the live per-family waiter state.
 
 ### BFD
 

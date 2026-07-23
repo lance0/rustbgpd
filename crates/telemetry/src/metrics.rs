@@ -2810,7 +2810,15 @@ impl BgpMetrics {
         family: &str,
         reason: crate::reason_labels::ExactExportReason,
     ) {
-        let family = match family {
+        let family = Self::exact_export_family_label(family);
+        let reason = reason.as_str();
+        self.exact_export_rejections
+            .with_label_values(&[peer, family, reason])
+            .inc();
+    }
+
+    fn exact_export_family_label(family: &str) -> &str {
+        match family {
             "ipv4_unicast"
             | "ipv6_unicast"
             | "ipv4_flowspec"
@@ -2824,11 +2832,28 @@ impl BgpMetrics {
             | "ipv6_labeled_unicast"
             | "rtc" => family,
             _ => "unknown",
-        };
-        let reason = reason.as_str();
-        self.exact_export_rejections
-            .with_label_values(&[peer, family, reason])
-            .inc();
+        }
+    }
+
+    /// Materialize zero-valued exact-export rejection children for one peer's
+    /// configured, supported families.
+    ///
+    /// Prometheus range functions need a pre-event sample to observe the first
+    /// increment. Families and reasons remain bounded by the same canonical
+    /// vocabularies used by [`Self::record_exact_export_rejection`].
+    pub fn initialize_exact_export_rejection_series<'a>(
+        &self,
+        peer: &str,
+        families: impl IntoIterator<Item = &'a str>,
+    ) {
+        for family in families {
+            let family = Self::exact_export_family_label(family);
+            for reason in crate::reason_labels::ExactExportReason::ALL {
+                self.exact_export_rejections
+                    .with_label_values(&[peer, family, reason.as_str()])
+                    .inc_by(0);
+            }
+        }
     }
 
     /// Record a `PeerUp` that replaced a still-registered outbound sender
@@ -3039,6 +3064,16 @@ impl BgpMetrics {
             .inc();
     }
 
+    /// Materialize zero-valued malformed-UPDATE children for every canonical
+    /// RFC 7606 disposition at one transport endpoint.
+    pub fn initialize_update_malformed_series(&self, peer: &str) {
+        for disposition in crate::reason_labels::MalformedUpdateDisposition::ALL {
+            self.update_malformed
+                .with_label_values(&[peer, disposition.as_str()])
+                .inc_by(0);
+        }
+    }
+
     /// Record RFC 9234 OTC route-leak blocking. The `reason` label
     /// value is the canonical
     /// [`crate::reason_labels::OtcBlockReason`] string — typed here
@@ -3184,6 +3219,17 @@ impl BgpMetrics {
         self.selection_deferral_ledger_overflows
             .with_label_values(&[afi_safi])
             .inc();
+    }
+
+    /// Materialize zero-valued timeout and ledger-overflow children for one
+    /// active selection-deferral family.
+    pub fn initialize_selection_deferral_failure_series(&self, afi_safi: &str) {
+        self.selection_deferral_timeouts
+            .with_label_values(&[afi_safi])
+            .inc_by(0);
+        self.selection_deferral_ledger_overflows
+            .with_label_values(&[afi_safi])
+            .inc_by(0);
     }
 
     /// Set RPKI VRP count by address family.

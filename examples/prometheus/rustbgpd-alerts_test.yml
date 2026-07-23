@@ -421,3 +421,271 @@ tests:
                 kind="arithmetic"} on edge1:9179 increased by 2 in the
                 last 15 minutes. Routes hitting the failing statement
                 are being denied.
+
+  # ── BgpExactExportRejected ───────────────────────────────
+  # Load-bearing: the event is inside 15m but outside 5m at evaluation time;
+  # the non-zero historical counter is flat. Deleting this rule, shortening
+  # 15m to 5m, changing > 0 to > 1, or replacing increase with the raw counter
+  # makes an exact case red. All four canonical reasons fire across unicast
+  # and non-unicast families, so the demonstrated single-reason and
+  # single-family restrictions make the exact expected set red. Peers are
+  # bare configured neighbor addresses, not transport endpoints.
+  - interval: 1m
+    input_series:
+      - series: 'bgp_exact_export_rejections_total{peer="192.0.2.10", family="ipv4_unicast", reason="message_too_long", instance="edge1:9179"}'
+        values: "0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1"
+      - series: 'bgp_exact_export_rejections_total{peer="2001:db8::10", family="ipv6_unicast", reason="missing_ipv6_next_hop", instance="edge1:9179"}'
+        values: "0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1"
+      - series: 'bgp_exact_export_rejections_total{peer="192.0.2.12", family="ipv4_unicast", reason="ipv4_requires_extended_next_hop", instance="edge2:9179"}'
+        values: "0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1"
+      - series: 'bgp_exact_export_rejections_total{peer="192.0.2.13", family="l2vpn_evpn", reason="encoding", instance="edge2:9179"}'
+        values: "0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1"
+      # Historical non-zero control: a raw-counter query would false-alert.
+      - series: 'bgp_exact_export_rejections_total{peer="192.0.2.11", family="ipv6_unicast", reason="encoding", instance="edge2:9179"}'
+        values: "7x17"
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: BgpExactExportRejected
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: BgpExactExportRejected
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              peer: 192.0.2.10
+              family: ipv4_unicast
+              reason: message_too_long
+              instance: edge1:9179
+            exp_annotations:
+              summary: >-
+                Exact export rejected for 192.0.2.10 (ipv4_unicast)
+              description: >-
+                bgp_exact_export_rejections_total for neighbor 192.0.2.10 on
+                edge1:9179 increased by 1 in the last 15 minutes
+                (family=ipv4_unicast, reason=message_too_long). The rejected
+                announcement was not committed to Adj-RIB-Out; inspect the
+                corresponding daemon warning and advertised-route explain
+                output.
+          - exp_labels:
+              severity: warning
+              peer: "2001:db8::10"
+              family: ipv6_unicast
+              reason: missing_ipv6_next_hop
+              instance: edge1:9179
+            exp_annotations:
+              summary: >-
+                Exact export rejected for 2001:db8::10 (ipv6_unicast)
+              description: >-
+                bgp_exact_export_rejections_total for neighbor 2001:db8::10 on
+                edge1:9179 increased by 1 in the last 15 minutes
+                (family=ipv6_unicast, reason=missing_ipv6_next_hop). The
+                rejected announcement was not committed to Adj-RIB-Out;
+                inspect the corresponding daemon warning and advertised-route
+                explain output.
+          - exp_labels:
+              severity: warning
+              peer: 192.0.2.12
+              family: ipv4_unicast
+              reason: ipv4_requires_extended_next_hop
+              instance: edge2:9179
+            exp_annotations:
+              summary: >-
+                Exact export rejected for 192.0.2.12 (ipv4_unicast)
+              description: >-
+                bgp_exact_export_rejections_total for neighbor 192.0.2.12 on
+                edge2:9179 increased by 1 in the last 15 minutes
+                (family=ipv4_unicast,
+                reason=ipv4_requires_extended_next_hop). The rejected
+                announcement was not committed to Adj-RIB-Out; inspect the
+                corresponding daemon warning and advertised-route explain
+                output.
+          - exp_labels:
+              severity: warning
+              peer: 192.0.2.13
+              family: l2vpn_evpn
+              reason: encoding
+              instance: edge2:9179
+            exp_annotations:
+              summary: >-
+                Exact export rejected for 192.0.2.13 (l2vpn_evpn)
+              description: >-
+                bgp_exact_export_rejections_total for neighbor 192.0.2.13 on
+                edge2:9179 increased by 1 in the last 15 minutes
+                (family=l2vpn_evpn, reason=encoding). The rejected announcement
+                was not committed to Adj-RIB-Out; inspect the corresponding
+                daemon warning and advertised-route explain output.
+
+  # ── BgpMalformedUpdate ───────────────────────────────────
+  # Load-bearing: the same old-event and flat-counter controls pin increase,
+  # shortening 15m to 5m, and the single-event > 0 boundary. Deleting the rule
+  # or restricting it to one disposition also fails. All three bounded RFC
+  # 7606 dispositions fire independently with transport-endpoint labels.
+  - interval: 1m
+    input_series:
+      - series: 'bgp_update_malformed_total{peer="192.0.2.20:179", disposition="treat_as_withdraw", instance="edge1:9179"}'
+        values: "0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1"
+      - series: 'bgp_update_malformed_total{peer="[2001:db8::20]:179", disposition="attribute_discard", instance="edge1:9179"}'
+        values: "0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1"
+      - series: 'bgp_update_malformed_total{peer="192.0.2.21:179", disposition="session_reset", instance="edge1:9179"}'
+        values: "0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1"
+      - series: 'bgp_update_malformed_total{peer="[2001:db8::22]:179", disposition="session_reset", instance="edge2:9179"}'
+        values: "9x17"
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: BgpMalformedUpdate
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: BgpMalformedUpdate
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              peer: 192.0.2.20:179
+              disposition: treat_as_withdraw
+              instance: edge1:9179
+            exp_annotations:
+              summary: >-
+                Malformed UPDATE from 192.0.2.20:179 (treat_as_withdraw)
+              description: >-
+                bgp_update_malformed_total for session endpoint
+                192.0.2.20:179 on edge1:9179 increased by 1 in the last 15
+                minutes. The strongest RFC 7606 disposition was
+                treat_as_withdraw; inspect the peer and the daemon's
+                malformed-UPDATE diagnostics.
+          - exp_labels:
+              severity: warning
+              peer: "[2001:db8::20]:179"
+              disposition: attribute_discard
+              instance: edge1:9179
+            exp_annotations:
+              summary: >-
+                Malformed UPDATE from [2001:db8::20]:179 (attribute_discard)
+              description: >-
+                bgp_update_malformed_total for session endpoint
+                [2001:db8::20]:179 on edge1:9179 increased by 1 in the last
+                15 minutes. The strongest RFC 7606 disposition was
+                attribute_discard; inspect the peer and the daemon's
+                malformed-UPDATE diagnostics.
+          - exp_labels:
+              severity: warning
+              peer: 192.0.2.21:179
+              disposition: session_reset
+              instance: edge1:9179
+            exp_annotations:
+              summary: >-
+                Malformed UPDATE from 192.0.2.21:179 (session_reset)
+              description: >-
+                bgp_update_malformed_total for session endpoint
+                192.0.2.21:179 on edge1:9179 increased by 1 in the last 15
+                minutes. The strongest RFC 7606 disposition was
+                session_reset; inspect the peer and the daemon's
+                malformed-UPDATE diagnostics.
+
+  # ── BgpSelectionDeferralTimedOut ────────────────────────
+  # Load-bearing: the firing event is older than 5m but newer than 15m, while
+  # a non-zero flat family counter must remain healthy. Deleting the alert,
+  # shortening 15m to 5m, changing > 0 to > 1, using the raw or overflow
+  # counter, restricting the query to one AFI/SAFI, or substituting
+  # active/waiter/all-EoR state makes this test red.
+  - interval: 1m
+    input_series:
+      - series: 'bgp_selection_deferral_timeouts_total{afi_safi="ipv4_unicast", instance="edge1:9179"}'
+        values: "0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1"
+      - series: 'bgp_selection_deferral_timeouts_total{afi_safi="ipv6_flowspec", instance="edge2:9179"}'
+        values: "0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1"
+      - series: 'bgp_selection_deferral_timeouts_total{afi_safi="ipv6_unicast", instance="edge2:9179"}'
+        values: "4x17"
+      # Normal state transitions and an ordinary all-EoR release are controls,
+      # not alert inputs. They make metric-substitution mutations fail red.
+      - series: 'bgp_selection_deferral_active{afi_safi="ipv4_unicast", instance="edge3:9179"}'
+        values: "0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1"
+      - series: 'bgp_selection_deferral_waiters{afi_safi="ipv4_unicast", instance="edge3:9179"}'
+        values: "0 0 0 0 0 2 2 2 2 2 2 2 2 2 2 2 2"
+      - series: 'bgp_selection_deferral_releases_total{afi_safi="ipv4_unicast", reason="all_eor", instance="edge3:9179"}'
+        values: "0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1"
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: BgpSelectionDeferralTimedOut
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: BgpSelectionDeferralTimedOut
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              afi_safi: ipv4_unicast
+              instance: edge1:9179
+            exp_annotations:
+              summary: >-
+                Selection deferral timed out for ipv4_unicast
+              description: >-
+                bgp_selection_deferral_timeouts_total for ipv4_unicast on
+                edge1:9179 increased by 1 in the last 15 minutes. The family
+                gate used its bounded timer fallback before all
+                planned-restart convergence signals arrived.
+          - exp_labels:
+              severity: warning
+              afi_safi: ipv6_flowspec
+              instance: edge2:9179
+            exp_annotations:
+              summary: >-
+                Selection deferral timed out for ipv6_flowspec
+              description: >-
+                bgp_selection_deferral_timeouts_total for ipv6_flowspec on
+                edge2:9179 increased by 1 in the last 15 minutes. The family
+                gate used its bounded timer fallback before all
+                planned-restart convergence signals arrived.
+
+  # ── BgpSelectionDeferralLedgerOverflow ────────────────────
+  # Load-bearing: the fixture independently pins the overflow metric,
+  # increase, 15m-versus-5m range, and single-event > 0 boundary. Deleting the
+  # alert, restricting the query to one AFI/SAFI, or substituting timeout,
+  # active, waiter, or all-EoR state makes it red; the flat historical counter
+  # catches the raw-counter query.
+  - interval: 1m
+    input_series:
+      - series: 'bgp_selection_deferral_ledger_overflows_total{afi_safi="ipv6_unicast", instance="edge1:9179"}'
+        values: "0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1"
+      - series: 'bgp_selection_deferral_ledger_overflows_total{afi_safi="l2vpn_evpn", instance="edge2:9179"}'
+        values: "0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1"
+      - series: 'bgp_selection_deferral_ledger_overflows_total{afi_safi="ipv4_unicast", instance="edge2:9179"}'
+        values: "3x17"
+      # Normal state transitions and an ordinary all-EoR release are controls,
+      # not alert inputs. They make metric-substitution mutations fail red.
+      - series: 'bgp_selection_deferral_active{afi_safi="ipv6_unicast", instance="edge3:9179"}'
+        values: "0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1"
+      - series: 'bgp_selection_deferral_waiters{afi_safi="ipv6_unicast", instance="edge3:9179"}'
+        values: "0 0 0 0 0 3 3 3 3 3 3 3 3 3 3 3 3"
+      - series: 'bgp_selection_deferral_releases_total{afi_safi="ipv6_unicast", reason="all_eor", instance="edge3:9179"}'
+        values: "0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1"
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: BgpSelectionDeferralLedgerOverflow
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: BgpSelectionDeferralLedgerOverflow
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              afi_safi: ipv6_unicast
+              instance: edge1:9179
+            exp_annotations:
+              summary: >-
+                Selection-deferral ledger overflow for ipv6_unicast
+              description: >-
+                bgp_selection_deferral_ledger_overflows_total for
+                ipv6_unicast on edge1:9179 increased by 1 in the last 15
+                minutes. The family exceeded the bounded identity ledger and
+                used a complete release sweep; inspect table scale and
+                retained-key pressure.
+          - exp_labels:
+              severity: warning
+              afi_safi: l2vpn_evpn
+              instance: edge2:9179
+            exp_annotations:
+              summary: >-
+                Selection-deferral ledger overflow for l2vpn_evpn
+              description: >-
+                bgp_selection_deferral_ledger_overflows_total for
+                l2vpn_evpn on edge2:9179 increased by 1 in the last 15
+                minutes. The family exceeded the bounded identity ledger and
+                used a complete release sweep; inspect table scale and
+                retained-key pressure.
