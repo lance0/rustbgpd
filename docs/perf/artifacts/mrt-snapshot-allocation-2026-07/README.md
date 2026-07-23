@@ -1,12 +1,29 @@
 # MRT snapshot allocation control artifacts
 
-Status: **schema reserved; no measurement output retained yet**.
+Status: **standalone control retained and checksummed**.
 
-This directory will hold the sanitized, exact-revision harness control for
+This directory holds the sanitized, exact-revision harness control for
 [`../../mrt-snapshot-allocation-2026-07.md`](../../mrt-snapshot-allocation-2026-07.md).
-Do not add `control.jsonl` or `SHA256SUMS` until a real quiet-host run completes
-the full two-shape protocol and passes its path, reader, deterministic-byte,
-noise, matrix, and privacy gates.
+The quiet-host run at `d2872d0cf9648ffe0be764eab712f5d8933d021e`
+completed the full two-shape protocol and passed its path, semantic-reader,
+deterministic-byte, noise, matrix, allocator-equation, and privacy gates.
+
+## Retained result
+
+| Shape | Timing median | CV | Output bytes | Allocation calls | Requested bytes | Growth misses | Peak overhead bytes |
+|-------|--------------:|---:|-------------:|-----------------:|----------------:|--------------:|--------------------:|
+| `ixp-700` | 458,231,764 ns | 0.359% | 33,642,720 | 12,815,613 | 114,530,702,750,252 | 6,809,607 | 3,262,777 |
+| `dual-full-feed` | 749,038,496 ns | 0.367% | 58,058,046 | 22,422,420 | 302,204,009,708,208 | 10,410,415 | 6,406,665 |
+
+The exact timing ranges are 457,056,262..462,023,035 ns and
+747,046,999..754,241,036 ns. CV is population standard deviation divided by
+the mean. `validation.txt` retains the timing and diagnostic UTC preflights,
+load, governor, affinity, no-competing-work result, closed-matrix validation,
+and seven isolated mutation-red results. Requested bytes is a cumulative
+allocator request sum, not RSS or simultaneous live memory. The control
+demonstrates enough allocation churn to justify a separately measured
+bounded-growth candidate; it does not claim that candidate's speedup in
+advance.
 
 ## `control.jsonl` record contract
 
@@ -60,8 +77,8 @@ revert-red proof before results are committed.
 
 ## Integrity and privacy
 
-`SHA256SUMS`, when created, covers the final sanitized `control.jsonl` and any
-retained validator output using relative paths. Verify it from this directory:
+`SHA256SUMS` covers the final sanitized `control.jsonl` and `validation.txt`
+using relative paths. Verify it from this directory:
 
 ```bash
 sha256sum -c SHA256SUMS
@@ -73,8 +90,10 @@ or environment dumps. Record tool and executable versions, CPU model/count,
 kernel, memory, governor, affinity, load, and safe process basenames only.
 
 The interpretation and predeclared GO/HOLD thresholds live in the parent
-receipt. This README intentionally contains no result, revision, hash, timing,
-or allocation value until measurement exists.
+receipt. Validation rejected seven isolated in-memory mutations: a missing
+matrix row, extra schema field, fleet-count drift, broken allocator peak delta,
+missing growth signal, timing CV above 5%, and an injected hostname. The final
+unmutated artifact then passed and was checksummed.
 
 This standalone control is feasibility evidence, not a future candidate's
 timing comparator. A candidate campaign must rerun its immediate-parent control

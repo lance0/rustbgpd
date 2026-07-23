@@ -2,11 +2,10 @@
 
 ## Status and decision boundary
 
-Status: **measurement harness and control protocol only; no retained result is
-claimed yet**. The ordinary MRT snapshot encoder keeps its current unbounded
-output growth strategy, and bounded warm-checkpoint encoding is unchanged.
-`control.jsonl` and its checksum manifest are deliberately absent until a real,
-quiet-host control run passes every validity gate below.
+Status: **standalone control retained; a bounded growth candidate experiment is
+warranted but remains a separate held tranche**. The ordinary MRT snapshot
+encoder keeps its current unbounded output growth strategy, and bounded
+warm-checkpoint encoding is unchanged.
 
 This receipt asks one narrow question: does ordinary MRT snapshot output growth
 allocate enough that a later, bounded preallocation experiment is worth doing?
@@ -17,6 +16,39 @@ redesign.
 Any later optimization is held unless **both** fleet shapes clear every
 predeclared GO threshold. A failure or an inconclusive/noisy result is a HOLD;
 it is still useful evidence and must not be rewritten into a win.
+
+## Standalone control result
+
+The quiet-host control at
+`d2872d0cf9648ffe0be764eab712f5d8933d021e` passed the complete 16-row matrix,
+schema, semantic-reader, allocator-equation, deterministic-diagnostic-byte,
+privacy, and 5% CV gates. Both phase preflights held the shared host lock, found
+no competing work, observed the `performance` governor, and recorded one-minute
+loads of 0.97 at 2026-07-23T02:57:22Z before timing and 0.97 at
+2026-07-23T02:57:38Z before diagnostics. CPU affinity was fixed to logical CPU
+0. The reported CV is population standard deviation divided by the mean.
+
+| Shape | Timing median | CV | Output bytes | Allocation calls | Requested bytes | Output growth misses | Peak overhead bytes |
+|-------|--------------:|---:|-------------:|-----------------:|----------------:|---------------------:|--------------------:|
+| IXP many-source | 458,231,764 ns | 0.359% | 33,642,720 | 12,815,613 | 114,530,702,750,252 | 6,809,607 | 3,262,777 |
+| Two full feeds | 749,038,496 ns | 0.367% | 58,058,046 | 22,422,420 | 302,204,009,708,208 | 10,410,415 | 6,406,665 |
+
+`Allocation calls` is `alloc + alloc_zeroed + realloc`. `Requested bytes` is
+the cumulative size submitted across those calls, not resident memory or bytes
+simultaneously live; the very large totals expose repeated realloc requests.
+The timing ranges were 457,056,262..462,023,035 ns and
+747,046,999..754,241,036 ns respectively.
+
+Decision: **GO to measure a bounded preallocation candidate in a new PR**, using
+the immediate-parent A/B protocol below. Millions of output-growth misses and
+allocator calls on both representative shapes make that experiment worth
+running. This control alone is not a speedup claim and cannot serve as the
+future candidate's timing comparator.
+
+The control host used Linux 6.17.0-35-generic, rustc 1.97.0, Cargo 1.97.0,
+an AMD Ryzen Threadripper 7970X with 32 physical/64 logical CPUs, and
+134,532,804,608 bytes of memory. No hostname, username, path, PID, or command
+line is retained in the artifact.
 
 ## Real path and fleet shapes
 
@@ -254,13 +286,16 @@ defines the concrete field inventory. `SHA256SUMS` is created only after the
 final sanitized JSONL passes its schema, matrix, privacy, and control-validity
 gates.
 
-The future artifact location is
+The retained artifact location is
 [`artifacts/mrt-snapshot-allocation-2026-07/`](artifacts/mrt-snapshot-allocation-2026-07/).
-Until real output exists, that directory contains only its schema/retention
-README; absence of `control.jsonl` and `SHA256SUMS` is intentional.
+It contains the 16-row `control.jsonl`, its closed schema and result summary,
+the sanitized `validation.txt` preflight and mutation receipt, and a
+relative-path `SHA256SUMS` manifest covering both retained files.
 
 Documentation statements in this protocol are not executable gates (mutation
-proof N/A). The GO/HOLD and noise rules are predeclared acceptance rules while
-the artifact is pending; they are not claimed as enforced by a retained
-validator yet. The two CI smoke commands and the benchmark's internal
-assertions are executable and require isolated revert-red proof before merge.
+proof N/A). The retained control was checked against the schema, matrix,
+semantic, allocator, growth, CV, and privacy rules before checksumming. Seven
+isolated validation mutations—missing row, extra field, fleet drift, broken
+peak delta, absent growth signal, noisy timing, and a hostname injection—each
+made that validation red. The two CI smoke commands and the benchmark's
+internal assertions carry their own isolated revert-red proofs.
