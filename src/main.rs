@@ -729,7 +729,12 @@ async fn await_bmp_client_shutdown(mut client_handles: Vec<JoinHandle<()>>, time
     for index in 0..client_handles.len() {
         match tokio::time::timeout_at(deadline, &mut client_handles[index]).await {
             Ok(Ok(())) => {}
-            Ok(Err(e)) => warn!(error = %e, "BMP client task panicked during shutdown"),
+            Ok(Err(e)) => warn!(
+                error = %e,
+                cancelled = e.is_cancelled(),
+                panicked = e.is_panic(),
+                "BMP client task failed during shutdown"
+            ),
             Err(_) => {
                 warn!(
                     remaining = client_handles.len() - index,
