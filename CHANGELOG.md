@@ -9,6 +9,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Live edits of `max_prefix_restart_seconds` reschedule the pending
+  automatic restart instead of cancelling it.** While a max-prefix hold-down
+  countdown is armed, changing the duration re-arms the single pending attempt
+  to now + the new value (the superseded deadline never fires); previously the
+  edit silently converted timed recovery into an indefinite latch requiring
+  manual enable. Removing the duration still cancels the countdown, adding one
+  to an already-latched peer still does not retroactively restart it, and
+  peer-group edits inherited by dynamic peers follow the same rules.
+
 ### Fixed
 
 - **RFC 6793 legacy-AS migration is lossless end to end.** Sessions without

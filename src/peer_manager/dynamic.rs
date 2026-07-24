@@ -360,21 +360,46 @@ impl PeerManager {
         })
     }
 
-    pub(super) fn invalidate_stale_dynamic_max_prefix_restarts(&mut self) {
-        let stale: Vec<PeerKey> = self
-            .max_prefix_latches
-            .iter()
-            .filter(|(_, latch)| latch.deadline.is_some())
-            .filter_map(|(peer, _)| {
-                let managed = self.peers.get(peer)?;
-                (managed.is_dynamic
-                    && (!self.dynamic_peer_still_allowed_by_current_ranges(managed)
-                        || !self.dynamic_restart_policy_still_current(managed)))
-                .then_some(peer.clone())
-            })
-            .collect();
-        for peer in stale {
+    pub(super) fn reconcile_stale_dynamic_max_prefix_restarts(&mut self) {
+        let mut unmatched: Vec<PeerKey> = Vec::new();
+        let mut policy_changed: Vec<PeerKey> = Vec::new();
+        for (peer, latch) in &self.max_prefix_latches {
+            if latch.deadline.is_none() {
+                continue;
+            }
+            let Some(managed) = self.peers.get(peer) else {
+                continue;
+            };
+            if !managed.is_dynamic {
+                continue;
+            }
+            if !self.dynamic_peer_still_allowed_by_current_ranges(managed) {
+                unmatched.push(peer.clone());
+            } else if !self.dynamic_restart_policy_still_current(managed) {
+                policy_changed.push(peer.clone());
+            }
+        }
+        // A peer no longer matched by any current range loses its countdown
+        // outright — the accepting policy it would restart under is gone.
+        for peer in unmatched {
             self.invalidate_max_prefix_restart(&peer);
+        }
+        // A still-matched peer whose group edited the duration follows the
+        // same contract as a static hot edit: an armed countdown reschedules
+        // to now + new (or cancels when the duration was removed), and the
+        // managed copy syncs so the due-time policy check passes.
+        for peer in policy_changed {
+            let restart_seconds = self
+                .peers
+                .get(&peer)
+                .and_then(|managed| managed.accepted_dynamic_range.as_ref())
+                .and_then(|accepted| self.current_config.peer_groups.get(&accepted.peer_group))
+                .and_then(|group| group.max_prefix_restart_seconds)
+                .map(std::num::NonZeroU32::get);
+            self.rearm_max_prefix_restart(&peer, restart_seconds);
+            if let Some(managed) = self.peers.get_mut(&peer) {
+                managed.max_prefix_restart_seconds = restart_seconds;
+            }
         }
     }
 

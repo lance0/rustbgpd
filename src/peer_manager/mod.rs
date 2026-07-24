@@ -886,7 +886,7 @@ impl PeerManager {
                                 self.current_config = candidate;
                                 self.dynamic_ranges =
                                     Self::parse_dynamic_ranges(&self.current_config);
-                                self.invalidate_stale_dynamic_max_prefix_restarts();
+                                self.reconcile_stale_dynamic_max_prefix_restarts();
                                 self.config_snapshot_staged = true;
                                 // ADR-0110 freshness: the staged config
                                 // transaction is live from this point.
@@ -913,7 +913,7 @@ impl PeerManager {
                                     self.current_config = candidate;
                                     self.dynamic_ranges =
                                         Self::parse_dynamic_ranges(&self.current_config);
-                                    self.invalidate_stale_dynamic_max_prefix_restarts();
+                                    self.reconcile_stale_dynamic_max_prefix_restarts();
                                     self.config_snapshot_staged = false;
                                     // ADR-0110 freshness: rollback re-applies
                                     // the previous (accepted) config.
@@ -980,7 +980,7 @@ impl PeerManager {
                             let result = apply_config_event(&mut self.current_config, &event)
                                 .map_err(|error| error.to_string());
                             if result.is_ok() {
-                                self.invalidate_stale_dynamic_max_prefix_restarts();
+                                self.reconcile_stale_dynamic_max_prefix_restarts();
                             }
                             let _ = reply.send(result);
                         }
@@ -1430,7 +1430,7 @@ impl PeerManager {
                         // reflects any accepted runtime CRUD, so a plain re-parse is
                         // correct — no merge/provenance needed.
                         self.dynamic_ranges = Self::parse_dynamic_ranges(&self.current_config);
-                        self.invalidate_stale_dynamic_max_prefix_restarts();
+                        self.reconcile_stale_dynamic_max_prefix_restarts();
                         // ADR-0110 freshness: every successful reload flows
                         // through this snapshot replacement — stamp the
                         // generation even when policy content is unchanged
