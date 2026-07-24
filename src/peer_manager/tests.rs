@@ -6227,19 +6227,18 @@ fn peer_metric_series_count(metrics: &BgpMetrics, peer: &str) -> usize {
         .count()
 }
 
-/// Seed per-peer series under both label forms used at runtime: the
-/// transport sessions label `peer` with the remote `SocketAddr`, the
-/// RIB manager and BFD runtime with the bare address.
-fn seed_peer_metric_series(metrics: &BgpMetrics, transport_label: &str, bare_label: &str) {
-    metrics.record_state_transition(transport_label, "open_confirm", "established");
-    metrics.record_message_sent(transport_label, "keepalive");
-    metrics.set_rib_prefixes(bare_label, "ipv4_unicast", 42);
-    metrics.record_bfd_state(bare_label, true, false);
+/// Seed per-peer series across the emitters that own them — session,
+/// RIB, BFD — all under the one canonical bare-address `peer` label.
+fn seed_peer_metric_series(metrics: &BgpMetrics, peer_label: &str) {
+    metrics.record_state_transition(peer_label, "open_confirm", "established");
+    metrics.record_message_sent(peer_label, "keepalive");
+    metrics.set_rib_prefixes(peer_label, "ipv4_unicast", 42);
+    metrics.record_bfd_state(peer_label, true, false);
     // ADR-0112: peer creation materializes both directional gauges so a
     // healthy peer has a 0 series to alert on rather than an absent one. The
     // direct-insert test helpers bypass that path, so seed them here to keep
     // the reap accounting comparable to production.
-    metrics.set_rfc8212_missing_policy(bare_label, false, false);
+    metrics.set_rfc8212_missing_policy(peer_label, false, false);
 }
 
 #[tokio::test]
@@ -6267,22 +6266,13 @@ async fn delete_peer_reaps_metric_series() {
         fake_peer_handle(peer_addr, SessionState::Established, None, counters.clone()),
         false,
     );
-    let transport_label = mgr
-        .peers
-        .get(&key(peer_addr))
-        .unwrap()
-        .transport_config
-        .remote_addr
-        .to_string();
-    seed_peer_metric_series(&metrics_view, &transport_label, "10.0.0.2");
+    seed_peer_metric_series(&metrics_view, "10.0.0.2");
     metrics_view.record_fib_route_installed(); // process-global counter
-    assert!(peer_metric_series_count(&metrics_view, &transport_label) > 0);
     assert!(peer_metric_series_count(&metrics_view, "10.0.0.2") > 0);
 
     mgr.delete_peer(key(peer_addr), false).await.unwrap();
 
-    // Both label forms are gone; process-global counters are untouched.
-    assert_eq!(peer_metric_series_count(&metrics_view, &transport_label), 0);
+    // One reap clears every emitter; process-global counters are untouched.
     assert_eq!(peer_metric_series_count(&metrics_view, "10.0.0.2"), 0);
     let fib_installed = metrics_view
         .registry()
@@ -6321,17 +6311,9 @@ async fn session_flap_does_not_reap_metric_series() {
         fake_peer_handle(peer_addr, SessionState::Idle, None, counters.clone()),
         false,
     );
-    let transport_label = mgr
-        .peers
-        .get(&key(peer_addr))
-        .unwrap()
-        .transport_config
-        .remote_addr
-        .to_string();
-    seed_peer_metric_series(&metrics_view, &transport_label, "10.0.0.2");
-    metrics_view.record_state_transition(&transport_label, "established", "idle");
-    let before_transport = peer_metric_series_count(&metrics_view, &transport_label);
-    let before_bare = peer_metric_series_count(&metrics_view, "10.0.0.2");
+    seed_peer_metric_series(&metrics_view, "10.0.0.2");
+    metrics_view.record_state_transition("10.0.0.2", "established", "idle");
+    let before = peer_metric_series_count(&metrics_view, "10.0.0.2");
 
     // A static peer's session flap (BackToIdle) must keep its history.
     mgr.handle_session_notification(SessionNotification::BackToIdle {
@@ -6342,14 +6324,7 @@ async fn session_flap_does_not_reap_metric_series() {
     .await;
 
     assert!(mgr.peers.contains_key(&key(peer_addr)));
-    assert_eq!(
-        peer_metric_series_count(&metrics_view, &transport_label),
-        before_transport
-    );
-    assert_eq!(
-        peer_metric_series_count(&metrics_view, "10.0.0.2"),
-        before_bare
-    );
+    assert_eq!(peer_metric_series_count(&metrics_view, "10.0.0.2"), before);
     assert!(rib_rx.try_recv().is_err(), "no PeerDeleted on a flap");
 }
 
@@ -6378,16 +6353,8 @@ async fn reconfigure_peer_does_not_reap_metric_series() {
         fake_peer_handle(peer_addr, SessionState::Established, None, counters.clone()),
         false,
     );
-    let transport_label = mgr
-        .peers
-        .get(&key(peer_addr))
-        .unwrap()
-        .transport_config
-        .remote_addr
-        .to_string();
-    seed_peer_metric_series(&metrics_view, &transport_label, "10.0.0.2");
-    let before_transport = peer_metric_series_count(&metrics_view, &transport_label);
-    let before_bare = peer_metric_series_count(&metrics_view, "10.0.0.2");
+    seed_peer_metric_series(&metrics_view, "10.0.0.2");
+    let before = peer_metric_series_count(&metrics_view, "10.0.0.2");
 
     // Reconfigure routes through the same delete primitive, but the
     // peer continues to exist — its series and history must survive.
@@ -6396,14 +6363,7 @@ async fn reconfigure_peer_does_not_reap_metric_series() {
     mgr.reconfigure_peer(new_config).await.unwrap();
 
     assert!(mgr.peers.contains_key(&key(peer_addr)));
-    assert_eq!(
-        peer_metric_series_count(&metrics_view, &transport_label),
-        before_transport
-    );
-    assert_eq!(
-        peer_metric_series_count(&metrics_view, "10.0.0.2"),
-        before_bare
-    );
+    assert_eq!(peer_metric_series_count(&metrics_view, "10.0.0.2"), before);
     assert!(
         rib_rx.try_recv().is_err(),
         "no PeerDeleted on a reconfigure"
@@ -6437,14 +6397,7 @@ async fn dynamic_peer_auto_removal_reaps_metric_series() {
     );
     mgr.peers.get_mut(&key(peer_addr)).unwrap().is_dynamic = true;
     mgr.dynamic_peer_count = 1;
-    let transport_label = mgr
-        .peers
-        .get(&key(peer_addr))
-        .unwrap()
-        .transport_config
-        .remote_addr
-        .to_string();
-    seed_peer_metric_series(&metrics_view, &transport_label, "10.0.0.2");
+    seed_peer_metric_series(&metrics_view, "10.0.0.2");
 
     // Auto-removal on idle is a full deletion for a dynamic peer.
     mgr.handle_session_notification(SessionNotification::BackToIdle {
@@ -6455,7 +6408,6 @@ async fn dynamic_peer_auto_removal_reaps_metric_series() {
     .await;
 
     assert!(mgr.peers.is_empty());
-    assert_eq!(peer_metric_series_count(&metrics_view, &transport_label), 0);
     assert_eq!(peer_metric_series_count(&metrics_view, "10.0.0.2"), 0);
     let update = rib_rx.try_recv().expect("PeerDeleted queued for the RIB");
     assert!(matches!(update, RibUpdate::PeerDeleted { peer } if peer == peer_addr));

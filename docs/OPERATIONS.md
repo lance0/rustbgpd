@@ -577,6 +577,16 @@ configured peers, zero Established peers, or zero routes can still be ready.
 Event-history, EVPN, FIB, and peer-count health are surfaced through their own
 metrics and status commands rather than as v1 readiness gates.
 
+### The `peer` label
+
+Every `peer`-labeled series — session, RIB, policy, max-prefix, BFD, BMP —
+identifies the peer the same way: by its bare neighbor address, `192.0.2.1`
+or `2001:db8::1`, never the transport endpoint's `addr:port`. `sum by (peer)`
+therefore returns one series per peer, and a `by (peer)` join across any two
+families matches. Neighbor identity is unique by address (config validation
+rejects the same IPv6 link-local address on two interfaces), so no peer needs
+the port to be told apart.
+
 ### Per-peer series lifecycle
 
 All `peer`-labeled series are removed when the peer is **deleted** — a static
@@ -1065,12 +1075,10 @@ The shipped Prometheus rule pack alerts only on actionable route-safety event
 counters, using a 15-minute increase window:
 
 - `BgpExactExportRejected` means a post-policy announcement was withheld before
-  Adj-RIB-Out commit. Its `peer` label is the bare configured neighbor address;
-  correlate `family` and `reason` with the daemon warning and
-  `rbgp rib --prefix <prefix> advertised <peer> --explain`.
+  Adj-RIB-Out commit; correlate `family` and `reason` with the daemon warning
+  and `rbgp rib --prefix <prefix> advertised <peer> --explain`.
 - `BgpMalformedUpdate` reports one or more malformed UPDATEs by their strongest
-  RFC 7606 `disposition`. Its `peer` label is the transport endpoint
-  (`addr:port` or `[IPv6]:port`).
+  RFC 7606 `disposition`.
 - `BgpSelectionDeferralTimedOut` means a family gate used its configured timer
   fallback before every planned-restart convergence signal arrived.
 - `BgpSelectionDeferralLedgerOverflow` means the bounded identity ledger fell

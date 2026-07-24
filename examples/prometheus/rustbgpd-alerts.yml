@@ -15,8 +15,9 @@
 # `bgp_session_established_total` / `bgp_session_flaps_total`
 # (entering Established increments the former, leaving it increments
 # the latter, so an Established peer always reads established = flaps + 1).
-# Session-level metrics label peers as "<addr>:<port>" (the transport
-# remote address); RIB metrics use the bare configured neighbor address.
+# Every `peer` label is the bare neighbor address ("192.0.2.1",
+# "2001:db8::1") in every metric family, so `by (peer)` aggregations and
+# joins across families work without rewriting the label.
 #
 # Unit tests: rustbgpd-alerts_test.yml (`promtool test rules`).
 
@@ -65,17 +66,14 @@ groups:
             {{ $value | printf "%.0f" }} times in the last 15 minutes.
 
       - alert: BgpPeerSlow
-        # Session metrics label `peer` as the transport endpoint
-        # (IPv4 addr:port or bracketed-IPv6 addr:port), not the bare
-        # configured neighbor address used by RIB metrics.
         expr: bgp_peer_slow == 1
         for: 5m
         labels:
           severity: warning
         annotations:
-          summary: "BGP peer endpoint {{ $labels.peer }} is slow"
+          summary: "BGP peer {{ $labels.peer }} is slow"
           description: >-
-            The Established session endpoint {{ $labels.peer }} on
+            The Established session to {{ $labels.peer }} on
             {{ $labels.instance }} has remained slow for 5 minutes because
             its outbound coalesced-frame queue is not draining. Updates are
             still buffered; inspect bgp_peer_outbound_queue_depth and the
@@ -84,18 +82,13 @@ groups:
       - alert: BgpPeerAdjRibInEmpty
         # Established (established > flaps) but zero prefixes in
         # Adj-RIB-In across all families (afi_safi="all" is the
-        # aggregate series). Session metrics label peers as
-        # "<addr>:<port>" while RIB metrics use the bare neighbor
-        # address, so label_replace strips the transport port before
-        # the join. Expected for send-only peers — silence or drop
-        # this rule for those.
+        # aggregate series). Session and RIB metrics share one `peer`
+        # label format, so the join needs no label rewrite. Expected
+        # for send-only peers — silence or drop this rule for those.
         expr: >-
           bgp_rib_prefixes{afi_safi="all"} == 0
           and on (instance, peer)
-          label_replace(
-            bgp_session_established_total > bgp_session_flaps_total,
-            "peer", "$1", "peer", `\[?([^\]]+?)\]?:[0-9]+$`
-          )
+          (bgp_session_established_total > bgp_session_flaps_total)
         for: 10m
         labels:
           severity: warning
@@ -252,9 +245,8 @@ groups:
             denied.
 
       - alert: BgpExactExportRejected
-        # The counter is labeled with the bare configured neighbor address,
-        # not the transport endpoint used by session metrics. Every increment
-        # means an announcement was withheld before Adj-RIB-Out commit.
+        # Every increment means an announcement was withheld before
+        # Adj-RIB-Out commit.
         expr: increase(bgp_exact_export_rejections_total[15m]) > 0
         for: 0m
         labels:
@@ -272,9 +264,8 @@ groups:
             explain output.
 
       - alert: BgpMalformedUpdate
-        # The counter keeps the transport/session peer label (addr:port or
-        # [IPv6]:port). Every increment is one malformed UPDATE after its
-        # strongest RFC 7606 disposition has been selected.
+        # Every increment is one malformed UPDATE after its strongest
+        # RFC 7606 disposition has been selected.
         expr: increase(bgp_update_malformed_total[15m]) > 0
         for: 0m
         labels:
@@ -284,8 +275,8 @@ groups:
             Malformed UPDATE from {{ $labels.peer }}
             ({{ $labels.disposition }})
           description: >-
-            bgp_update_malformed_total for session endpoint
-            {{ $labels.peer }} on {{ $labels.instance }} increased by
+            bgp_update_malformed_total for peer {{ $labels.peer }}
+            on {{ $labels.instance }} increased by
             {{ $value | printf "%.0f" }} in the last 15 minutes. The
             strongest RFC 7606 disposition was {{ $labels.disposition }};
             inspect the peer and the daemon's malformed-UPDATE diagnostics.

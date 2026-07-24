@@ -16,18 +16,17 @@ WORKFLOW = ROOT / ".github/workflows/alert-rules.yml"
 
 VARIABLES = {
     "peer": 'label_values(bgp_session_state_transitions_total{instance=~"$instance"}, peer)',
-    "neighbor": 'label_values(bgp_peer_update_group{instance=~"$instance"}, peer)',
 }
 
 TARGETS = {
-    ("Outbound queue by peer endpoint", "A"): (
+    ("Outbound queue by peer", "A"): (
         'bgp_peer_outbound_queue_depth{instance=~"$instance",peer=~"$peer"}'
     ),
-    ("Slow peer endpoints", "A"): (
+    ("Slow peers", "A"): (
         'bgp_peer_slow{instance=~"$instance",peer=~"$peer"}'
     ),
-    ("Update group by neighbor address", "A"): (
-        'bgp_peer_update_group{instance=~"$instance",peer=~"$neighbor"}'
+    ("Update group by peer", "A"): (
+        'bgp_peer_update_group{instance=~"$instance",peer=~"$peer"}'
     ),
     ("Policy transition in progress", "A"): (
         'bgp_rib_policy_transition_in_progress{instance=~"$instance"}'
@@ -62,7 +61,7 @@ TARGETS = {
     ("Export rejections / malformed UPDATEs", "A"): (
         "sum by (instance, peer, family, reason) "
         "(rate(bgp_exact_export_rejections_total"
-        '{instance=~"$instance",peer=~"$neighbor"}[$__rate_interval])) > 0'
+        '{instance=~"$instance",peer=~"$peer"}[$__rate_interval])) > 0'
     ),
     ("Export rejections / malformed UPDATEs", "B"): (
         "sum by (instance, peer, disposition) (rate(bgp_update_malformed_total"
@@ -189,6 +188,19 @@ def main() -> None:
         if variable.get("allValue") != ".*":
             fail(f"${name} All value must be the regex .* ")
 
+    # The `peer` label has one canonical format (the bare neighbor
+    # address), so the dashboard must expose exactly one selector for
+    # it. A second one reintroduces the split identity that made
+    # `by (peer)` joins across metric families silently return empty.
+    peer_selectors = sorted(
+        name
+        for name, variable in variables.items()
+        if variable.get("type") == "query"
+        and str(variable.get("query", "")).rstrip().endswith(", peer)")
+    )
+    if peer_selectors != ["peer"]:
+        fail(f"exactly one peer selector expected, found {peer_selectors}")
+
     targets: dict[tuple[str, str], list[str]] = {}
     legends: dict[tuple[str, str], list[str | None]] = {}
     for panel in panels:
@@ -210,7 +222,7 @@ def main() -> None:
             fail(f"target {key[0]!r}/{key[1]} must use legend {expected!r}; got {actual!r}")
 
     update_group_panel = next(
-        panel for panel in panels if panel.get("title") == "Update group by neighbor address"
+        panel for panel in panels if panel.get("title") == "Update group by peer"
     )
     update_group_target = update_group_panel["targets"][0]
     if update_group_panel.get("type") != "table":
@@ -220,7 +232,7 @@ def main() -> None:
     if update_group_target.get("format") != "table" or update_group_target.get("instant") is not True:
         fail("update-group target must be an instant table query")
 
-    slow_panel = next(panel for panel in panels if panel.get("title") == "Slow peer endpoints")
+    slow_panel = next(panel for panel in panels if panel.get("title") == "Slow peers")
     slow_defaults = slow_panel.get("fieldConfig", {}).get("defaults", {})
     if slow_defaults.get("min") != 0 or slow_defaults.get("max") != 1:
         fail("slow-peer state must be pinned to the discrete 0..1 range")

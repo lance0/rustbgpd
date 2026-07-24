@@ -159,6 +159,11 @@ pub(crate) struct PeerSession {
     metrics: BgpMetrics,
     commands: mpsc::Receiver<PeerCommand>,
     rib_tx: mpsc::Sender<RibUpdate>,
+    /// Canonical `peer` metric/log label — the bare neighbor address
+    /// from [`rustbgpd_telemetry::peer_label`], never the transport
+    /// endpoint's `addr:port`. It must equal what the RIB manager and
+    /// the BFD runtime emit for the same peer, or `by (peer)` queries
+    /// split. Diagnostics only; nothing dials or compares against it.
     peer_label: String,
     peer_ip: IpAddr,
     /// Cached scope for IPv6 link-local next-hop recursion on static
@@ -544,18 +549,17 @@ fn configured_exact_export_family_label((afi, safi): (Afi, Safi)) -> Option<&'st
 fn initialize_route_safety_metric_series(
     config: &TransportConfig,
     metrics: &BgpMetrics,
-    neighbor_label: &str,
-    endpoint_label: &str,
+    peer_label: &str,
 ) {
     let families = config.peer.effective_families();
     metrics.initialize_exact_export_rejection_series(
-        neighbor_label,
+        peer_label,
         families
             .iter()
             .copied()
             .filter_map(configured_exact_export_family_label),
     );
-    metrics.initialize_update_malformed_series(endpoint_label);
+    metrics.initialize_update_malformed_series(peer_label);
 }
 
 /// Resolve next-hop for import policy modifications.
@@ -1001,9 +1005,9 @@ impl PeerSession {
         session_identity: SessionIdentity,
         tcp_ao_generation: crate::TcpAoRotationGeneration,
     ) -> Self {
-        let peer_label = config.remote_addr.to_string();
         let peer_ip = config.remote_addr.ip();
-        initialize_route_safety_metric_series(&config, &metrics, &peer_ip.to_string(), &peer_label);
+        let peer_label = rustbgpd_telemetry::peer_label(peer_ip);
+        initialize_route_safety_metric_series(&config, &metrics, &peer_label);
         let link_local_next_hop_scope = Self::link_local_next_hop_scope_from_config(&config);
         let fsm = Session::new(config.peer.clone());
         let explain_enabled = config.explain_enabled;
@@ -1147,9 +1151,9 @@ impl PeerSession {
         tcp_ao_selected_owner: Option<crate::listener::TcpAoSelectedOwner>,
         tcp_ao_generation: crate::TcpAoRotationGeneration,
     ) -> Self {
-        let peer_label = config.remote_addr.to_string();
         let peer_ip = config.remote_addr.ip();
-        initialize_route_safety_metric_series(&config, &metrics, &peer_ip.to_string(), &peer_label);
+        let peer_label = rustbgpd_telemetry::peer_label(peer_ip);
+        initialize_route_safety_metric_series(&config, &metrics, &peer_label);
         let link_local_next_hop_scope = Self::link_local_next_hop_scope_from_config(&config);
         let fsm = Session::new(config.peer.clone());
         let explain_enabled = config.explain_enabled;

@@ -129,6 +129,62 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   not ask for, the import report states that it was added, why, what it does to
   the sessions below, and that it is startup-only; the emitted config carries
   the same explanation as a comment, and deleting the line restores permit-all.
+- **BREAKING (metrics): the `peer` label is now the bare neighbor address on
+  every metric family.** Metric labels are a public API, and this one had two
+  incompatible formats — sometimes within a single family. Session-owned
+  series labelled `peer` with the transport endpoint (`192.0.2.1:179`,
+  `[2001:db8::1]:179`) while RIB-, policy-, BFD-, and BMP-owned series used the
+  bare configured address (`192.0.2.1`, `2001:db8::1`). `bgp_policy_routes_total`
+  carried both: its `direction="import"` series came from the session and its
+  `direction="export"` series from the RIB. The consequence was silent, because
+  Prometheus reports no error for a query that matches nothing:
+  `sum by (peer) (bgp_policy_routes_total)` returned two series per peer, and
+  any `by (peer)` join across the two groups returned empty — so an alert built
+  that way never fired.
+
+  Every emission site now uses the bare address, produced by one helper
+  (`rustbgpd_telemetry::peer_label`). The port carried nothing joinable: it was
+  the *configured* endpoint, not the observed source port, and neighbor
+  identity is already unique by address (configuration validation rejects the
+  same IPv6 link-local address on two interfaces), so no peer needed it to be
+  told apart. The structured-log `peer` field on session events follows the
+  same change, and now matches the rest of the daemon's logs.
+
+  **Series that changed format** — all previously `addr:port`, now bare
+  address: `bgp_session_state_transitions_total`, `bgp_session_flaps_total`,
+  `bgp_session_established_total`, `bgp_fsm_stale_timer_events_total`,
+  `bgp_messages_sent_total`, `bgp_messages_received_total`,
+  `bgp_notifications_sent_total`, `bgp_notifications_received_total`,
+  `bgp_peer_outbound_queue_depth`, `bgp_peer_slow`,
+  `bgp_rejected_routes_retained`, `bgp_max_prefix_usage`,
+  `bgp_max_prefix_limit`, `bgp_max_prefix_headroom`,
+  `bgp_max_prefix_exceeded_total`, `bgp_update_malformed_total`,
+  `bgp_otc_routes_blocked_total`, `bgp_role_mismatch_total`,
+  `bgp_as_path_loop_detected_total`, `bgp_bgpls_nlri_discarded_total`,
+  `bgp_rr_loop_detected_total`,
+  `bgp_inbound_rib_backpressure_total`,
+  `bgp_hold_timer_rearmed_pending_input_total`,
+  `bgp_send_hold_expirations_total`, `bmp_source_drops_total`, and the
+  `direction="import"` half of `bgp_policy_routes_total`. Every other
+  `peer`-labelled family already used the bare address and is unchanged.
+
+  **What operator PromQL needs:** drop any port-stripping `label_replace` from
+  cross-family joins, and rewrite selectors that pinned an endpoint —
+  `bgp_peer_slow{peer="192.0.2.1:179"}` becomes
+  `bgp_peer_slow{peer="192.0.2.1"}`, and `peer=~"192\\.0\\.2\\.1:.*"` becomes an
+  exact match. Recording rules and dashboards keyed on the old values see the
+  old series go stale and new ones appear; counters restart from zero, which
+  `rate()` and `increase()` handle as an ordinary reset. The shipped dashboard
+  and alert pack are updated: the dashboard's two peer selectors
+  (`$peer` endpoint / `$neighbor` address) collapse into one `$peer`, which
+  also fixes the RIB, GR, and BFD panels that returned no data whenever a
+  specific peer was selected, and `BgpPeerAdjRibInEmpty` joins directly instead
+  of rewriting the label. `rbgp doctor`'s slow-peer remediation now prints a
+  selector that resolves. No transitional dual-emit is provided: emitting both
+  formats would double the per-peer series count of 26 families for the whole
+  transition window, and it would preserve the exact failure being fixed —
+  `sum by (peer)` would still return two series per peer, so a dashboard that
+  looked correct during the overlap would break at removal instead of now.
 
 - **Unknown FlowSpec component types keep their hard rejection, now with a
   conformance-citing diagnostic.** *No decode-acceptance change: input that

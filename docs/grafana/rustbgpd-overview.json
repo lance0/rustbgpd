@@ -45,29 +45,13 @@
       },
       {
         "name": "peer",
-        "label": "Peer endpoint",
+        "label": "Peer",
         "type": "query",
         "datasource": {
           "type": "prometheus",
           "uid": "${datasource}"
         },
         "query": "label_values(bgp_session_state_transitions_total{instance=~\"$instance\"}, peer)",
-        "current": {},
-        "includeAll": true,
-        "multi": true,
-        "allValue": ".*",
-        "refresh": 2,
-        "sort": 1
-      },
-      {
-        "name": "neighbor",
-        "label": "Neighbor address",
-        "type": "query",
-        "datasource": {
-          "type": "prometheus",
-          "uid": "${datasource}"
-        },
-        "query": "label_values(bgp_peer_update_group{instance=~\"$instance\"}, peer)",
         "current": {},
         "includeAll": true,
         "multi": true,
@@ -2377,8 +2361,8 @@
     {
       "id": 47,
       "type": "timeseries",
-      "title": "Outbound queue by peer endpoint",
-      "description": "Absolute coalesced UPDATE frames buffered for each transport endpoint. A sustained backlog is stronger evidence than a short convergence burst.",
+      "title": "Outbound queue by peer",
+      "description": "Absolute coalesced UPDATE frames buffered for each peer. A sustained backlog is stronger evidence than a short convergence burst.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "gridPos": { "h": 8, "w": 8, "x": 0, "y": 124 },
       "fieldConfig": { "defaults": { "unit": "short", "decimals": 0 }, "overrides": [] },
@@ -2395,8 +2379,8 @@
     {
       "id": 48,
       "type": "timeseries",
-      "title": "Slow peer endpoints",
-      "description": "1 while an Established transport endpoint has persistently failed to drain its outbound queue; 0 after recovery or teardown.",
+      "title": "Slow peers",
+      "description": "1 while an Established peer has persistently failed to drain its outbound queue; 0 after recovery or teardown.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "gridPos": { "h": 8, "w": 8, "x": 8, "y": 124 },
       "fieldConfig": { "defaults": { "unit": "short", "min": 0, "max": 1, "custom": { "lineInterpolation": "stepAfter" } }, "overrides": [] },
@@ -2413,8 +2397,8 @@
     {
       "id": 49,
       "type": "table",
-      "title": "Update group by neighbor address",
-      "description": "Current stable update-group ID for each bare configured neighbor address. -1 is a legitimate value: that neighbor uses the per-peer fallback path.",
+      "title": "Update group by peer",
+      "description": "Current stable update-group ID for each peer. -1 is a legitimate value: that peer uses the per-peer fallback path.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "gridPos": { "h": 8, "w": 8, "x": 16, "y": 124 },
       "fieldConfig": { "defaults": { "unit": "short", "decimals": 0 }, "overrides": [] },
@@ -2422,7 +2406,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "bgp_peer_update_group{instance=~\"$instance\",peer=~\"$neighbor\"}",
+          "expr": "bgp_peer_update_group{instance=~\"$instance\",peer=~\"$peer\"}",
           "format": "table",
           "instant": true,
           "refId": "A"
@@ -2544,7 +2528,7 @@
       "id": 56,
       "type": "timeseries",
       "title": "Max-prefix remaining headroom",
-      "description": "Saturating finite-limit headroom by live session endpoint and scope. No data means unlimited or disconnected, not zero headroom.",
+      "description": "Saturating finite-limit headroom by live peer and scope. No data means unlimited or disconnected, not zero headroom.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 144 },
       "fieldConfig": { "defaults": { "unit": "short", "decimals": 0, "min": 0 }, "overrides": [] },
@@ -2570,7 +2554,7 @@
       "id": 58,
       "type": "timeseries",
       "title": "Export rejections / malformed UPDATEs",
-      "description": "Exact-export rejections use the bare configured neighbor address; malformed UPDATEs use the transport endpoint. Both are exceptional route-safety events, partitioned by their bounded reason labels.",
+      "description": "Exact-export rejections and malformed UPDATEs are both exceptional route-safety events, partitioned by their bounded reason labels.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "gridPos": { "h": 8, "w": 8, "x": 0, "y": 153 },
       "fieldConfig": { "defaults": { "unit": "ops", "min": 0 }, "overrides": [] },
@@ -2578,7 +2562,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "sum by (instance, peer, family, reason) (rate(bgp_exact_export_rejections_total{instance=~\"$instance\",peer=~\"$neighbor\"}[$__rate_interval])) > 0",
+          "expr": "sum by (instance, peer, family, reason) (rate(bgp_exact_export_rejections_total{instance=~\"$instance\",peer=~\"$peer\"}[$__rate_interval])) > 0",
           "legendFormat": "exact {{instance}} {{peer}} {{family}} {{reason}}",
           "refId": "A"
         },
