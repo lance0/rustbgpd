@@ -538,6 +538,22 @@ impl PeerSession {
                         })
                         .await;
 
+                    // Stage the peer-group policy context before `PeerUp` for
+                    // the same reason as the contexts above: `PeerUp` builds
+                    // the initial Adj-RIB-Out synchronously, and every export
+                    // evaluation in that dump must already see the group a
+                    // group-scoped export rule matches on. Sent after `PeerUp`
+                    // this dump escaped the filter that every later update
+                    // honored.
+                    let _ = self
+                        .rib_tx
+                        .send(RibUpdate::SetPeerPolicyContext {
+                            peer: self.peer_ip,
+                            session_id: self.session_identity.id,
+                            peer_group: self.config.peer_group.clone(),
+                        })
+                        .await;
+
                     // Register with RIB manager for outbound updates
                     let _ = self
                         .rib_tx
@@ -583,14 +599,6 @@ impl PeerSession {
                             peer: self.peer_ip,
                             session_id: self.session_identity.id,
                             limits: add_path_send_limits,
-                        })
-                        .await;
-                    let _ = self
-                        .rib_tx
-                        .send(RibUpdate::SetPeerPolicyContext {
-                            peer: self.peer_ip,
-                            session_id: self.session_identity.id,
-                            peer_group: self.config.peer_group.clone(),
                         })
                         .await;
                 }

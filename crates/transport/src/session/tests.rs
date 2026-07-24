@@ -4,8 +4,8 @@ use crate::PeerCommandError;
 use bytes::Bytes;
 use rustbgpd_fsm::PeerConfig;
 use rustbgpd_policy::{
-    AsPathRegex, CommunityMatch, Policy, PolicyAction, PolicyChain, PolicyStatement,
-    RouteModifications,
+    AsPathRegex, CommunityMatch, NeighborSetMatch, Policy, PolicyAction, PolicyChain,
+    PolicyStatement, RouteModifications,
 };
 use rustbgpd_wire::{
     AddressPrefixOrf, AsPath, AsPathSegment, FlowSpecComponent, FlowSpecPrefix, FlowSpecRule,
@@ -1824,7 +1824,148 @@ async fn recv_peer_up_after_export_context(rib_rx: &mut mpsc::Receiver<RibUpdate
         rib_rx.recv().await.unwrap(),
         RibUpdate::SetPeerGracefulRestartContext { .. }
     ));
+    // Staged before `PeerUp` alongside the other export contexts: the
+    // initial Adj-RIB-Out is built synchronously by `PeerUp`, so a
+    // group-scoped export rule must already have the peer's group.
+    assert!(matches!(
+        rib_rx.recv().await.unwrap(),
+        RibUpdate::SetPeerPolicyContext { .. }
+    ));
     rib_rx.recv().await.unwrap()
+}
+
+/// Export chain that denies every route advertised to a member of
+/// `group`, and permits everything else.
+fn deny_export_to_peer_group(group: &str) -> PolicyChain {
+    PolicyChain::new(vec![Policy {
+        entries: vec![PolicyStatement {
+            prefix: None,
+            ge: None,
+            le: None,
+            action: PolicyAction::Deny,
+            match_community: vec![],
+            match_as_path: None,
+            match_neighbor_set: Some(NeighborSetMatch {
+                addresses: vec![],
+                remote_asns: vec![],
+                peer_groups: vec![group.to_string()],
+            }),
+            match_route_type: None,
+            match_evpn_route_type: None,
+            match_rpki_validation: None,
+            match_aspa_validation: None,
+            match_as_path_length_ge: None,
+            match_as_path_length_le: None,
+            match_local_pref_ge: None,
+            match_local_pref_le: None,
+            match_med_ge: None,
+            match_med_le: None,
+            match_next_hop: None,
+            modifications: RouteModifications::default(),
+        }],
+        default_action: PolicyAction::Permit,
+    }])
+}
+
+/// Bring one peer to Established against a REAL `RibManager` that already
+/// holds one route, and return the prefixes its initial full-table dump
+/// announced. The peer's export chain denies everything advertised to
+/// peer-group `rs-members`.
+async fn initial_dump_announcements(peer_group: Option<&str>) -> Vec<Prefix> {
+    let (rib_tx, rib_rx) = mpsc::channel(64);
+    let (_query_tx, query_rx) = mpsc::channel(8);
+    let manager = tokio::spawn(
+        rustbgpd_rib::RibManager::new(rib_rx, query_rx, None, None, BgpMetrics::new()).run(),
+    );
+
+    // One route from an unrelated peer, so the dump has something to carry.
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9));
+    let mut route = make_route(100);
+    route.prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24));
+    route.peer = source;
+    route.next_hop = source;
+    route.attributes = Arc::new(vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002])],
+        }),
+        PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 9)),
+    ]);
+    rib_tx
+        .send(RibUpdate::RoutesReceived {
+            peer: source,
+            session_id: 0,
+            announced: vec![route],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+
+    let mut peer_config = PeerConfig::new(65001, 65010, Ipv4Addr::new(10, 0, 0, 1));
+    peer_config.connect_retry_secs = 30;
+    peer_config.families = vec![(Afi::Ipv4, Safi::Unicast)];
+    let mut config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
+    config.peer_group = peer_group.map(str::to_string);
+    let (_cmd_tx, cmd_rx) = mpsc::channel(8);
+    let mut session = PeerSession::new(
+        config,
+        BgpMetrics::new(),
+        cmd_rx,
+        rib_tx,
+        None,
+        Some(deny_export_to_peer_group("rs-members")),
+        None,
+        None,
+        None,
+        false,
+    );
+    let (client, _peer_end) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65010).await;
+
+    // Collect the dump through its End-of-RIB — the marker the RIB always
+    // emits for a negotiated family, so an empty result is observed, not
+    // assumed from a timeout.
+    let mut announced = Vec::new();
+    loop {
+        let update = tokio::time::timeout(Duration::from_secs(10), session.outbound_rx.recv())
+            .await
+            .expect("initial table dump must reach the peer's outbound channel")
+            .expect("outbound channel must stay open");
+        announced.extend(update.announce.iter().map(|route| route.prefix));
+        if !update.end_of_rib.is_empty() {
+            break;
+        }
+    }
+    manager.abort();
+    announced
+}
+
+/// `PeerUp` builds the initial Adj-RIB-Out synchronously, so the RIB must
+/// already know the peer's group when it evaluates export policy for that
+/// first full-table dump. With the context sent afterwards the dump
+/// escaped a group-scoped deny that every later update honored — on a
+/// route server with group-scoped export filtering, a leak at session
+/// establishment.
+#[tokio::test]
+async fn initial_table_dump_applies_peer_group_export_policy() {
+    assert!(
+        initial_dump_announcements(Some("rs-members"))
+            .await
+            .is_empty(),
+        "initial dump to an rs-members peer must be filtered by the \
+         group-scoped export deny, not just later updates"
+    );
+    // Control: the dump is not empty for some unrelated reason.
+    assert_eq!(
+        initial_dump_announcements(Some("transit")).await.len(),
+        1,
+        "a peer outside the denied group must still receive the initial dump"
+    );
 }
 /// All-empty `OutboundRouteUpdate` for the rib-out BMP tap tests.
 fn empty_outbound_update() -> OutboundRouteUpdate {
