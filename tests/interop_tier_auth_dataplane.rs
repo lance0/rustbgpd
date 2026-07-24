@@ -10,10 +10,31 @@ const TOKEN: &str = "/run/rustbgpd/grpc-test-only-operator.token";
 const PRINCIPAL: &str = "rustbgpd://operator/test-only";
 const TOKEN_BIND: &str =
     "../fixtures/grpc-test-only-operator.token:/run/rustbgpd/grpc-test-only-operator.token:ro";
-const EXCLUDED: &[&str] = &[
+const CI_PRINCIPAL: &str = "rustbgpd://operator/ci";
+
+// In-range configs pinned to `enforcement = "legacy"`. Each records its reason
+// at its own `[security.grpc]` block, and the equality allowlist in
+// interop_tier_auth_rr.rs owns the legacy inventory. Excluded here because the
+// identity assertions below describe a listener that enforces tier ceilings,
+// which these deliberately do not:
+//   m37-originator — asserted via FRR's RIB, kernel bridge fdb, and Prometheus
+//   m39-pe1 — plaintext grpcurl driver; the Gate 9 soak reuses the config
+//   m67-vtep — M67 mounts its operator token on pe1/pe2 only
+const LEGACY_EXCEPTIONS: &[&str] = &[
     "rustbgpd-m37-originator.toml",
     "rustbgpd-m39-pe1.toml",
     "rustbgpd-m67-vtep.toml",
+];
+
+// In-range configs that DO enforce tier, but authenticate with a lab-owned
+// credential rather than the shared test-only operator identity, so the
+// `token_file`/`principal` assertions below cannot apply to them. Both shapes
+// are intrinsic to what the lab proves:
+//   m44/m54/m56 — native mTLS listeners; principals arrive as client-cert URI
+//     SANs, so there is no bearer token to mount
+//   m66/m67 pe1+pe2 — a bearer-token operator listener plus a UDS observer
+//     listener, so the driver can compose an operator drain with a link reason
+const LAB_CREDENTIAL_EXCEPTIONS: &[&str] = &[
     "rustbgpd-m44-tier-authz.toml",
     "rustbgpd-m54-gnmi.toml",
     "rustbgpd-m56-gnmi-onchange.toml",
@@ -30,7 +51,8 @@ fn in_scope(name: &str) -> bool {
     let digits: String = suffix.chars().take_while(char::is_ascii_digit).collect();
     name.ends_with(".toml")
         && digits.parse::<u8>().is_ok_and(|n| (36..=69).contains(&n))
-        && !EXCLUDED.contains(&name)
+        && !LEGACY_EXCEPTIONS.contains(&name)
+        && !LAB_CREDENTIAL_EXCEPTIONS.contains(&name)
 }
 
 /// Reverting tier, removing a mount/opt-in/M66 token, bypassing the helper, or
@@ -170,6 +192,55 @@ fn active_dataplane_interop_is_tier_authenticated_end_to_end() {
         Some(TOKEN),
         "M66 vtep_ctl must inherit the shared token"
     );
+}
+
+/// Both exception lists are proven, not merely trusted: a stale entry naming a
+/// renamed or deleted config, a legacy pin that silently moved to tier, or a
+/// lab config that adopted the shared identity and should rejoin the scoped
+/// assertions each make this red.
+#[test]
+fn auth_exceptions_still_match_their_declared_category() {
+    let config_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/interop/configs");
+    let read = |name: &str| {
+        fs::read_to_string(config_dir.join(name))
+            .unwrap_or_else(|error| panic!("{name} is listed but unreadable: {error}"))
+    };
+    let enforcement = |name: &str, source: &str| {
+        let value: toml::Value =
+            toml::from_str(source).unwrap_or_else(|error| panic!("{name}: {error}"));
+        value["security"]["grpc"]
+            .get("enforcement")
+            .and_then(toml::Value::as_str)
+            .map(str::to_owned)
+    };
+
+    for name in LEGACY_EXCEPTIONS {
+        let source = read(name);
+        assert_eq!(
+            enforcement(name, &source).as_deref(),
+            Some("legacy"),
+            "{name} is listed as a legacy exception but no longer pins legacy"
+        );
+    }
+
+    for name in LAB_CREDENTIAL_EXCEPTIONS {
+        let source = read(name);
+        assert_ne!(
+            enforcement(name, &source).as_deref(),
+            Some("legacy"),
+            "{name} is listed as a tier-enforcing exception but pins legacy"
+        );
+        let value: toml::Value = toml::from_str(&source).unwrap();
+        assert_eq!(
+            value["security"]["grpc"]["roles"][CI_PRINCIPAL].as_str(),
+            Some("operator"),
+            "{name} must map the lab-owned CI operator principal"
+        );
+        assert!(
+            !source.contains(PRINCIPAL),
+            "{name} uses the shared identity and belongs in the scoped assertions"
+        );
+    }
 }
 
 /// Load-bearing proof: restoring either daemon-log grep oracle, removing the
