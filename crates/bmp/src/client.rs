@@ -10,7 +10,7 @@ use bytes::Bytes;
 use rustbgpd_telemetry::BgpMetrics;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tracing::{debug, info, warn};
 
 use crate::codec;
@@ -31,6 +31,7 @@ pub struct BmpClient {
     sys_descr: String,
     control_tx: Option<mpsc::Sender<BmpControlEvent>>,
     metrics: BgpMetrics,
+    reconnect_shutdown: Option<watch::Receiver<bool>>,
 }
 
 impl BmpClient {
@@ -78,7 +79,19 @@ impl BmpClient {
             sys_descr,
             control_tx,
             metrics,
+            reconnect_shutdown: None,
         }
+    }
+
+    /// Stop retrying a disconnected collector when daemon shutdown begins.
+    ///
+    /// The signal is intentionally observed only while connecting or waiting
+    /// to reconnect. Once Initiation has been sent, the client drains the
+    /// manager queue before sending Termination.
+    #[must_use]
+    pub fn with_reconnect_shutdown(mut self, shutdown: watch::Receiver<bool>) -> Self {
+        self.reconnect_shutdown = Some(shutdown);
+        self
     }
 
     /// Run the client loop. Connects, sends Initiation, streams messages.
@@ -88,22 +101,26 @@ impl BmpClient {
         let id = self.config.collector_id;
         let max_backoff = Duration::from_secs(self.config.reconnect_interval.max(1));
 
-        loop {
-            let mut backoff = Duration::from_secs(1);
+        // Keep the fallback sender alive for callers that do not install a
+        // daemon shutdown signal. A closed watch channel is treated as a stop
+        // request by the reconnect loop.
+        let (_fallback_shutdown_tx, fallback_shutdown_rx) = watch::channel(false);
+        let mut reconnect_shutdown = self
+            .reconnect_shutdown
+            .take()
+            .unwrap_or(fallback_shutdown_rx);
 
-            // Connect with backoff
-            let mut stream = loop {
-                match TcpStream::connect(addr).await {
-                    Ok(stream) => {
-                        info!(collector = %addr, "connected to BMP collector");
-                        break stream;
-                    }
-                    Err(e) => {
-                        debug!(collector = %addr, error = %e, backoff_secs = backoff.as_secs(), "BMP connect failed");
-                        tokio::time::sleep(backoff).await;
-                        backoff = (backoff * 2).min(max_backoff);
-                    }
-                }
+        loop {
+            let Some(mut stream) = connect_with_reconnect_shutdown(
+                addr,
+                max_backoff,
+                &mut reconnect_shutdown,
+                TcpStream::connect,
+            )
+            .await
+            else {
+                info!(collector = %addr, "BMP reconnect loop shutting down");
+                return;
             };
 
             // Send Initiation message (framed at this collector's
@@ -207,12 +224,204 @@ impl BmpClient {
     }
 }
 
+fn reconnect_shutdown_requested(shutdown: &watch::Receiver<bool>) -> bool {
+    *shutdown.borrow() || shutdown.has_changed().is_err()
+}
+
+async fn connect_with_reconnect_shutdown<F, Fut>(
+    addr: std::net::SocketAddr,
+    max_backoff: Duration,
+    shutdown: &mut watch::Receiver<bool>,
+    mut connect: F,
+) -> Option<TcpStream>
+where
+    F: FnMut(std::net::SocketAddr) -> Fut,
+    Fut: std::future::Future<Output = std::io::Result<TcpStream>>,
+{
+    let mut backoff = Duration::from_secs(1);
+
+    loop {
+        if reconnect_shutdown_requested(shutdown) {
+            return None;
+        }
+
+        let connect_result = tokio::select! {
+            biased;
+            changed = shutdown.changed() => {
+                if changed.is_err() || reconnect_shutdown_requested(shutdown) {
+                    return None;
+                }
+                continue;
+            }
+            result = connect(addr) => result,
+        };
+
+        match connect_result {
+            Ok(stream) => {
+                info!(collector = %addr, "connected to BMP collector");
+                return Some(stream);
+            }
+            Err(e) => {
+                debug!(collector = %addr, error = %e, backoff_secs = backoff.as_secs(), "BMP connect failed");
+            }
+        }
+
+        if reconnect_shutdown_requested(shutdown) {
+            return None;
+        }
+        tokio::select! {
+            biased;
+            changed = shutdown.changed() => {
+                if changed.is_err() || reconnect_shutdown_requested(shutdown) {
+                    return None;
+                }
+            }
+            () = tokio::time::sleep(backoff) => {}
+        }
+        backoff = (backoff * 2).min(max_backoff);
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
     use crate::types::BmpVersion;
     use tokio::io::AsyncReadExt;
     use tokio::net::TcpListener;
+
+    /// Load-bearing proof: replacing the connect select with a plain await
+    /// trips the pending-connect assertion; replacing the backoff select with
+    /// a plain sleep trips the reconnect-sleep assertion; deleting only the
+    /// pre-connect state check leaves a receiver subscribed after shutdown in
+    /// its pending connector and trips the already-signaled assertion.
+    #[tokio::test(start_paused = true)]
+    async fn reconnect_shutdown_interrupts_connect_and_backoff() {
+        let addr = "127.0.0.1:9".parse().unwrap();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
+        let mut connect_shutdown = shutdown_rx.clone();
+        let connect_task = tokio::spawn(async move {
+            connect_with_reconnect_shutdown(
+                addr,
+                Duration::from_secs(30),
+                &mut connect_shutdown,
+                |_| std::future::pending::<std::io::Result<TcpStream>>(),
+            )
+            .await
+        });
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let backoff_attempts = Arc::clone(&attempts);
+        let mut backoff_shutdown = shutdown_rx.clone();
+        let backoff_task = tokio::spawn(async move {
+            connect_with_reconnect_shutdown(
+                addr,
+                Duration::from_secs(30),
+                &mut backoff_shutdown,
+                move |_| {
+                    backoff_attempts.fetch_add(1, Ordering::SeqCst);
+                    std::future::ready(Err(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionRefused,
+                        "test refusal",
+                    )))
+                },
+            )
+            .await
+        });
+
+        while attempts.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+
+        shutdown_tx.send(true).unwrap();
+        tokio::task::yield_now().await;
+        assert!(
+            connect_task.is_finished(),
+            "pending connect ignored shutdown"
+        );
+        assert!(
+            backoff_task.is_finished(),
+            "reconnect sleep ignored shutdown"
+        );
+        assert!(connect_task.await.unwrap().is_none());
+        assert!(backoff_task.await.unwrap().is_none());
+
+        let mut already_signaled = shutdown_tx.subscribe();
+        let already_signaled_task = tokio::spawn(async move {
+            connect_with_reconnect_shutdown(
+                addr,
+                Duration::from_secs(30),
+                &mut already_signaled,
+                |_| std::future::pending::<std::io::Result<TcpStream>>(),
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            already_signaled_task.is_finished(),
+            "receiver subscribed after shutdown attempted a connection"
+        );
+        assert!(already_signaled_task.await.unwrap().is_none());
+    }
+
+    /// Load-bearing proof: adding an eager post-Initiation shutdown select
+    /// drops the queued payload and Termination; deleting only the
+    /// channel-close Termination encode, write, and flush retains the payload
+    /// but makes the exact Termination suffix assertion red.
+    #[tokio::test]
+    async fn connected_shutdown_drains_payload_then_sends_exact_termination() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (msg_tx, msg_rx) = mpsc::channel(8);
+        let (control_tx, mut control_rx) = mpsc::channel(8);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let payload = Bytes::from_static(b"queued-before-shutdown");
+
+        let client = BmpClient::new(
+            BmpClientConfig {
+                collector_id: 7,
+                collector_addr: addr,
+                reconnect_interval: 1,
+                version: BmpVersion::V3,
+            },
+            msg_rx,
+            "rustbgpd".to_string(),
+            "test".to_string(),
+            Some(control_tx),
+            BgpMetrics::new(),
+        )
+        .with_reconnect_shutdown(shutdown_rx);
+        let handle = tokio::spawn(client.run());
+
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let initiation = codec::encode_initiation("rustbgpd", "test", BmpVersion::V3);
+        let mut observed_initiation = vec![0; initiation.len()];
+        stream.read_exact(&mut observed_initiation).await.unwrap();
+        assert_eq!(observed_initiation, initiation);
+        assert!(matches!(
+            control_rx.recv().await,
+            Some(BmpControlEvent::CollectorConnected { .. })
+        ));
+
+        msg_tx.send(payload.clone()).await.unwrap();
+        shutdown_tx.send(true).unwrap();
+        drop(msg_tx);
+
+        let termination = codec::encode_termination(0, "daemon shutting down", BmpVersion::V3);
+        let mut tail = Vec::new();
+        tokio::time::timeout(Duration::from_secs(2), stream.read_to_end(&mut tail))
+            .await
+            .unwrap()
+            .unwrap();
+        let mut expected = payload.to_vec();
+        expected.extend_from_slice(&termination);
+        assert_eq!(tail, expected);
+        handle.await.unwrap();
+    }
 
     #[tokio::test]
     async fn emits_collector_connected_after_initiation() {

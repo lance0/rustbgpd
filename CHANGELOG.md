@@ -24,6 +24,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   reconstructed loop rejection, exact path/aggregator wire pairs, withdrawal,
   and session continuity.
 
+- **Bounded BMP collector shutdown.** Disconnected collectors now stop connect
+  and backoff waits promptly after the BMP manager queues its final Peer Down
+  messages. Connected collectors still drain that queue, send Termination, and
+  flush; all collector clients share one two-second shutdown budget instead of
+  consuming two seconds per collector.
+
 - **RFC 9552 BGP-LS Attribute fault isolation.** Attribute 29 now enforces its
   optional non-transitive flags and contained TLV framing. Malformed contained
   framing discards only the complete attribute while preserving the BGP-LS
