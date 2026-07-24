@@ -758,6 +758,15 @@ requested maximum. Reduce the export policy or withdraw routes first; the knob
 is not a pruning tool. Commit-confirmed transactions may only tighten, because
 their automatic undo can only loosen.
 
+A maximum edited on a `[[neighbors]]` row applies in place: the session task,
+its TCP connection, and the FSM are untouched. Editing one on a
+`[peer_groups.*]` table keeps that property, because a maximum is a
+reload-matrix `live` field and a group edit whose every changed field is `live`
+is applied in place to each inheriting member, static and dynamic. A group edit
+that also moves a session-reset field still reshapes the group's static members
+(ADR-0081); set the maximum on the member's neighbor row if such an edit has to
+be made without rebuilding its sessions.
+
 IPv6 link-local neighbors (`fe80::/10`) must set `interface`, because a
 link-local address is not globally unique (RFC 4007). Numbered IPv4 / IPv6
 neighbors must not set `interface`. Duplicate numbered peers are rejected by

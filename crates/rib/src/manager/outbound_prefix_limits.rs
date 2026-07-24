@@ -87,6 +87,14 @@ impl OutboundPrefixLimits {
         }
     }
 
+    /// Whether a grouped member's advertised projection includes `prefix`.
+    /// A limited family shows exactly what took a slot; an unlimited one
+    /// shows the whole group projection.
+    pub(in crate::manager) fn admits_grouped(&self, prefix: &Prefix) -> bool {
+        self.family(prefix_family(prefix).0)
+            .is_none_or(|family| family.limit.is_none() || family.grouped_admitted.contains(prefix))
+    }
+
     /// Mutable sibling of [`Self::family`].
     pub(in crate::manager) fn family_mut(&mut self, afi: Afi) -> Option<&mut FamilyAdmission> {
         match afi {
@@ -391,7 +399,10 @@ impl RibManager {
                 None => {}
             }
         }
-        self.refresh_outbound_limit_gauges(peer);
+        // The gauges are NOT refreshed here: this seam runs before the
+        // Adj-RIB-Out commit, so an ungrouped peer's usage would still read
+        // the pre-batch count. The commit path refreshes them from the same
+        // admitted truth the API reports, once that truth exists.
     }
 
     /// Distinct admitted prefixes for one limited family.
@@ -527,6 +538,16 @@ impl RibManager {
                     .is_some_and(|families| families.contains(afi))
             })
             .collect()
+    }
+
+    /// Whether any family-scoped capacity recovery is still owed.
+    ///
+    /// The resync timer that drains it is otherwise armed only by
+    /// `dirty_peers`, and a limit edit deliberately marks no peer dirty, so
+    /// this is what keeps a scheduled recovery from parking forever on an
+    /// otherwise quiescent daemon.
+    pub(in crate::manager) fn outbound_limit_recovery_pending(&self) -> bool {
+        !self.outbound_limit_control.recovery.is_empty()
     }
 
     /// Coalesce one family-scoped capacity-recovery resync.

@@ -642,6 +642,285 @@ fn removing_a_maximum_reports_unlimited_without_inventing_a_number() {
     );
 }
 
+/// One peer/family capacity gauge, or `None` when the series is absent.
+fn capacity_gauge(metrics: &BgpMetrics, name: &str, peer: IpAddr, family: &str) -> Option<f64> {
+    let peer = peer.to_string();
+    let gathered = metrics.registry().gather();
+    let gauge = gathered.iter().find(|group| group.name() == name)?;
+    gauge
+        .metric
+        .iter()
+        .find(|metric| {
+            metric
+                .get_label()
+                .iter()
+                .any(|label| label.name() == "peer" && label.value() == peer)
+                && metric
+                    .get_label()
+                    .iter()
+                    .any(|label| label.name() == "family" && label.value() == family)
+        })
+        .map(|metric| metric.get_gauge().value())
+}
+
+/// A blocking family's gauges must agree with the admitted truth the API
+/// reports, in the same snapshot.
+///
+/// Load-bearing break: publishing them at the enforcement seam — which runs
+/// before the Adj-RIB-Out commit — exports a scrape that contradicts itself,
+/// `usage 0` and `headroom 2` on a family that is withholding prefixes.
+#[test]
+fn a_blocking_family_publishes_the_committed_usage_not_the_pre_batch_one() {
+    let metrics = BgpMetrics::new();
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    manager.test_force_ungrouped = true;
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 113, 0, 1));
+    let mut outbound_rx = register_peer(&mut manager, peer);
+    set_ipv4_limit(&mut manager, peer, 2);
+
+    let source = Ipv4Addr::new(192, 0, 2, 113);
+    announce(
+        &mut manager,
+        IpAddr::V4(source),
+        source_routes(source, &[1, 2, 3]),
+    );
+    assert_eq!(wire_prefixes(&mut outbound_rx).len(), 2);
+
+    let row = ipv4_row(&manager, peer);
+    assert_eq!((row.usage, row.headroom, row.blocking), (2, Some(0), true));
+    for (name, want) in [
+        ("bgp_outbound_prefix_usage", 2.0),
+        ("bgp_outbound_prefix_headroom", 0.0),
+        ("bgp_outbound_prefix_blocking", 1.0),
+    ] {
+        assert_eq!(
+            capacity_gauge(&metrics, name, peer, "ipv4_unicast"),
+            Some(want),
+            "{name} must report the same admitted truth as the neighbor API"
+        );
+    }
+}
+
+/// A limited grouped member advertises its admitted projection, and its
+/// unlimited sibling keeps reporting the whole group table.
+///
+/// Load-bearing break: leaving the grouped advertised projection as raw
+/// group intent makes `rbgp rib advertised` list prefixes the limiter
+/// withheld, contradicting the peer's own usage row in the same snapshot.
+#[test]
+fn a_limited_grouped_member_reports_only_what_it_advertised() {
+    let metrics = BgpMetrics::new();
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    let member = IpAddr::V4(Ipv4Addr::new(10, 113, 0, 1));
+    let sibling = IpAddr::V4(Ipv4Addr::new(10, 113, 0, 2));
+    let mut member_rx = register_peer(&mut manager, member);
+    let mut sibling_rx = register_peer(&mut manager, sibling);
+    install(
+        &mut manager,
+        1,
+        limit_config(&[(member, Some(2), None)], &[]),
+    );
+
+    let source = Ipv4Addr::new(192, 0, 2, 113);
+    announce(
+        &mut manager,
+        IpAddr::V4(source),
+        source_routes(source, &[1, 2, 3]),
+    );
+    let advertised = wire_prefixes(&mut member_rx);
+    assert_eq!(advertised.len(), 2);
+    assert_eq!(wire_prefixes(&mut sibling_rx).len(), 3);
+    assert!(manager.grouped_member_of(member).is_some());
+
+    let projected: HashSet<Prefix> = manager
+        .grouped_advertised_routes(member)
+        .expect("a grouped member synthesizes its advertised view")
+        .into_iter()
+        .map(|route| route.prefix)
+        .collect();
+    assert_eq!(
+        projected, advertised,
+        "the advertised projection must not list withheld prefixes"
+    );
+    assert_eq!(manager.grouped_advertised_count(member), Some(2));
+    assert_eq!(
+        manager.grouped_advertised_count(sibling),
+        Some(3),
+        "one member's cap must not shrink an unlimited sibling's projection"
+    );
+    assert_eq!(
+        capacity_gauge(
+            &metrics,
+            "bgp_outbound_prefix_usage",
+            sibling,
+            "ipv4_unicast"
+        ),
+        Some(3.0),
+        "an unlimited family still publishes live usage"
+    );
+
+    // Raising the member's maximum recovers the withheld prefix over the
+    // shared fanout without touching the sibling. The integration receipt
+    // cannot observe this path — a peer-group edit reshapes its static
+    // members before the recovery can be seen — so it is pinned here.
+    let withheld = *[v4(1), v4(2), v4(3)]
+        .iter()
+        .find(|prefix| !advertised.contains(prefix))
+        .expect("one prefix is over the cap");
+    install(
+        &mut manager,
+        2,
+        limit_config(&[(member, Some(3), None)], &[]),
+    );
+    while manager.resync_dirty_peers_bounded() {}
+    let recovered = wire_prefixes(&mut member_rx);
+    assert!(
+        recovered.contains(&withheld),
+        "a grouped member's raise must deliver the withheld prefix"
+    );
+    assert_eq!(manager.grouped_advertised_count(member), Some(3));
+    assert_eq!(
+        wire_prefixes(&mut sibling_rx),
+        HashSet::new(),
+        "the recovery resync must not churn the shared group's other members"
+    );
+}
+
+/// Install a candidate through the running actor's own message channel,
+/// the way the reload and transaction paths do.
+async fn install_over_channel(
+    tx: &mpsc::Sender<RibUpdate>,
+    txn: u64,
+    config: OutboundPrefixLimitConfig,
+) {
+    let (reply, prepared) = tokio::sync::oneshot::channel();
+    tx.send(RibUpdate::PrepareOutboundPrefixLimits { txn, config, reply })
+        .await
+        .expect("the manager is running");
+    prepared
+        .await
+        .expect("prepare replies")
+        .expect("preflight passes");
+    let (reply, applied) = tokio::sync::oneshot::channel();
+    tx.send(RibUpdate::ApplyOutboundPrefixLimits {
+        txn,
+        activate: true,
+        reply,
+    })
+    .await
+    .expect("the manager is running");
+    applied
+        .await
+        .expect("apply replies")
+        .expect("activation passes");
+}
+
+/// Accumulate the peer's advertised prefixes until `want` of them are on the
+/// wire.
+async fn wire_prefixes_until(
+    outbound_rx: &mut mpsc::Receiver<OutboundRouteUpdate>,
+    want: usize,
+) -> HashSet<Prefix> {
+    let mut advertised = HashSet::new();
+    while advertised.len() < want {
+        let update = outbound_rx.recv().await.expect("the session stays up");
+        for route in update.announce.iter() {
+            advertised.insert(route.prefix);
+        }
+        for (prefix, _) in &update.withdraw {
+            advertised.remove(prefix);
+        }
+    }
+    advertised
+}
+
+/// A raise must put the withheld prefixes on the wire under the manager's
+/// own event loop, with nothing else happening on the daemon. Every other
+/// test here drains the recovery by calling `resync_dirty_peers_bounded`
+/// itself, which is precisely the drive a real quiescent daemon does not
+/// supply.
+///
+/// Load-bearing break: scheduling the recovery without arming its own drive
+/// parks the intent forever, because the resync timer that drains it is
+/// armed only by unrelated dirty-peer state — the peer stays at the old cap
+/// while the gauges and logs report the new one.
+#[tokio::test]
+async fn a_raise_delivers_the_withheld_prefixes_on_a_quiescent_daemon() {
+    tokio::time::pause();
+    let (tx, rx) = mpsc::channel(64);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    manager.test_force_ungrouped = true;
+    let handle = tokio::spawn(manager.run());
+
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 113, 0, 1));
+    install_over_channel(&tx, 1, limit_config(&[(peer, Some(2), None)], &[])).await;
+
+    let (outbound_tx, mut outbound_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        peer,
+        session_id: 0,
+        peer_asn: 65_000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx,
+        export_policy: None,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: false,
+        route_reflector_client: false,
+        orr_vantage: None,
+        per_client_best: false,
+        interpret_rfc1997: true,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: vec![],
+        negotiated_llgr_families: vec![],
+    })
+    .await
+    .expect("the manager is running");
+
+    let source = Ipv4Addr::new(192, 0, 2, 113);
+    tx.send(RibUpdate::RoutesReceived {
+        peer: IpAddr::V4(source),
+        session_id: 0,
+        announced: source_routes(source, &[1, 2, 3]),
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .expect("the manager is running");
+
+    let admitted = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        wire_prefixes_until(&mut outbound_rx, 2),
+    )
+    .await
+    .expect("the cap admits two prefixes");
+    let withheld = *[v4(1), v4(2), v4(3)]
+        .iter()
+        .find(|prefix| !admitted.contains(prefix))
+        .expect("one prefix is over the cap");
+
+    install_over_channel(&tx, 2, limit_config(&[(peer, Some(3), None)], &[])).await;
+
+    let recovered = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        wire_prefixes_until(&mut outbound_rx, 3),
+    )
+    .await;
+    assert!(
+        recovered.is_ok_and(|advertised| advertised.contains(&withheld)),
+        "a raise must deliver the withheld prefix without any unrelated peer \
+         happening to be dirty"
+    );
+
+    drop(tx);
+    handle.await.expect("the manager shuts down cleanly");
+}
+
 /// A formerly unlimited grouped member materializes its advertised
 /// projection as the bounded admitted set, and a regroup carries that
 /// ownership rather than resetting it.

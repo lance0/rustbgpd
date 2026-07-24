@@ -14121,6 +14121,46 @@ fn reload_matrix_pins_load_bearing_field_classes() {
          members in place: {}",
         cap_rows[1]
     );
+
+    // ADR-0113: the outbound maxima are hot-applied at field level, so a
+    // maxima-only peer-group edit is an all-`live` change set and must not
+    // be documented as a session reset on either row.
+    for field in ["max_prefixes_out_ipv4", "max_prefixes_out_ipv6"] {
+        let rows = reload_matrix_rows_for(&matrix, field);
+        assert_eq!(
+            rows.len(),
+            2,
+            "`{field}` must have neighbor and peer-group rows"
+        );
+        for row in rows {
+            assert!(
+                row.contains("| live |"),
+                "an outbound maximum hot-applies in place on both the \
+                 neighbor and the peer-group path: {row}"
+            );
+        }
+        assert_eq!(
+            config_field_impact(field).map(|(impact, _)| impact),
+            Some(ConfigFieldImpact::HotApplied),
+            "`{field}` must classify as hot-applied, or the maxima-only \
+             peer-group edit falls back to the ADR-0081 reshape"
+        );
+    }
+
+    // The predicate the peer-group apply path consults, driven directly:
+    // a maxima-only group edit must take the in-place cohort path.
+    let old_group = PeerGroupConfig {
+        max_prefixes_out_ipv4: std::num::NonZeroU32::new(8),
+        ..Default::default()
+    };
+    let new_group = PeerGroupConfig {
+        max_prefixes_out_ipv4: std::num::NonZeroU32::new(64),
+        ..old_group.clone()
+    };
+    assert!(
+        peer_group_change_hot_applicable(&old_group, &new_group),
+        "a peer-group outbound-maximum edit must hot-apply in place"
+    );
 }
 
 #[test]

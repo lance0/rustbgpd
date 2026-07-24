@@ -144,6 +144,10 @@ edit alone never changes group membership.
 ### Reload and transaction semantics
 
 Limit edits are live, local RIB-manager changes. They do not reset the session.
+This holds on the inheritance path too: a maximum is reload-matrix `live`, so a
+peer-group edit that changes only maxima is applied in place to every
+inheriting member, static and dynamic. Only a change set that also moves a
+session-reset field falls back to the ADR-0081 reshape.
 Before mutating running configuration, resolve inheritance and preflight every
 affected live static or dynamic peer as one transaction.
 

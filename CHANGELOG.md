@@ -26,6 +26,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   requested maximum rather than pruning an existing view; a valid raise or
   removal schedules one coalesced, family-scoped resync. Commit-confirmed
   transactions may only tighten, because their automatic undo can only loosen.
+  A maximum is a reload-matrix `live` field, so both a `[[neighbors]]` edit and
+  a maxima-only `[peer_groups.*]` edit apply in place without touching a
+  session.
   `rbgp neighbor <addr>` (human and JSON) and the neighbor API report one row
   per unicast family — usage, optional maximum, optional headroom, blocking
   state, and the stable reason `outbound_prefix_limit_reached` — and

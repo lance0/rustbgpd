@@ -39,7 +39,8 @@ waiting for a natural flap. The matrix calls this out per row as
 fields "session reset".
 
 Static-neighbor edits whose **every** changed field is hot-applied
-(`description`, `max_prefixes`, `max_prefix_restart_seconds`,
+(`description`, `max_prefixes`, `max_prefixes_out_ipv4`,
+`max_prefixes_out_ipv6`, `max_prefix_restart_seconds`,
 `gr_peer_restart_time_max`, `gr_stale_routes_time`,
 `local_ipv6_nexthop`, `remove_private_as`, `log_level`, and the
 import/export policy and chain fields) are applied **in place**: the
@@ -157,7 +158,7 @@ configure their keyring directly.
 | `slow_peer_duration` | live (effective next session) | Same as neighbor. |
 | `slow_peer_isolation` | live (effective next session) | Same as neighbor. |
 | `max_prefixes` | live | Same as neighbor. |
-| `max_prefixes_out_ipv4` | live | Same as neighbor, evaluated by effective value: one over-limit member — static or accepted dynamic — rejects a group-wide lowering before any sibling changes. Down children inherit the committed value when they reconnect. |
+| `max_prefixes_out_ipv4` | live | Same maxima semantics as neighbor, evaluated by effective value: one over-limit member — static or accepted dynamic — rejects a group-wide lowering before any sibling changes. An all-`live` group edit swaps the maximum in place on every inheriting member, static and dynamic, without touching a session; a change set that also moves a session-reset field reshapes static members as before. Down children inherit the committed value when they reconnect. |
 | `max_prefixes_out_ipv6` | live | IPv6-unicast sibling of `max_prefixes_out_ipv4`. |
 | `max_prefix_restart_seconds` | live | Inherited by group members. An all-`live` group edit applies in place to static and dynamic members without bouncing them; a mixed change set reshapes static members and manager-syncs dynamic ones. Committed config transactions also bounce enabled dynamic sessions; disabled dynamic peers retain admin state and adopt the new duration. An armed countdown reschedules to now + the new duration; removing the duration cancels it. |
 | `md5_password` | live (effective next session) | Same as neighbor — pinned by group, applied to the inheriting peer's next socket. |

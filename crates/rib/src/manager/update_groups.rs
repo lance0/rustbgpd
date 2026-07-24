@@ -872,6 +872,10 @@ pub(in crate::manager) struct GroupRibOut {
     /// (v4-unicast, v6-unicast, vpnv4, vpnv6) for the BMP stat-17
     /// family counts.
     source_counts: FxHashMap<IpAddr, [usize; 4]>,
+    /// Running column sums of `source_counts`, so a per-family count stays
+    /// O(1) instead of walking every source. Maintained at the only two
+    /// sites that move a slot.
+    family_totals: [usize; 4],
     /// Keys withdrawn from the table since the first member went dirty;
     /// empty (and unmaintained) while no member is dirty. A dirty
     /// member's resync withdraws `tombstones ∖ still-staged` — spurious
@@ -949,6 +953,7 @@ impl GroupRibOut {
             nh_overrides: FxHashMap::default(),
             source_attrs: FxHashMap::default(),
             source_counts: FxHashMap::default(),
+            family_totals: [0; 4],
             tombstones: HashSet::new(),
             vpn_tombstones: HashSet::new(),
             members: HashSet::new(),
@@ -1028,16 +1033,25 @@ impl GroupRibOut {
     }
 
     fn dec_source_slot(&mut self, peer: IpAddr, slot: usize) {
-        if let Some(counts) = self.source_counts.get_mut(&peer) {
-            counts[slot] = counts[slot].saturating_sub(1);
-            if counts.iter().all(|&n| n == 0) {
-                self.source_counts.remove(&peer);
-            }
+        let Some(counts) = self.source_counts.get_mut(&peer) else {
+            return;
+        };
+        let decremented = counts[slot] > 0;
+        if decremented {
+            counts[slot] -= 1;
+        }
+        let empty = counts.iter().all(|&n| n == 0);
+        if decremented {
+            self.family_totals[slot] -= 1;
+        }
+        if empty {
+            self.source_counts.remove(&peer);
         }
     }
 
     fn inc_source_slot(&mut self, peer: IpAddr, slot: usize) {
         self.source_counts.entry(peer).or_default()[slot] += 1;
+        self.family_totals[slot] += 1;
     }
 
     fn dec_source(&mut self, peer: IpAddr, prefix: &Prefix) {
@@ -1252,12 +1266,7 @@ impl GroupRibOut {
             (Afi::Ipv4, Safi::MplsVpn),
             (Afi::Ipv6, Safi::MplsVpn),
         ];
-        let mut totals = [0usize; 4];
-        for counts in self.source_counts.values() {
-            for (total, n) in totals.iter_mut().zip(counts) {
-                *total += n;
-            }
-        }
+        let totals = self.family_totals;
         let own = self.source_counts.get(&member).copied().unwrap_or_default();
         // RTC group: the VPN slots come from the maintained per-member
         // counters (Φ-filtered), not the table synthesis.
@@ -2417,19 +2426,22 @@ impl RibManager {
     }
 
     /// Borrowed synthesized advertised-route view for a grouped peer (group
-    /// table minus own-sourced and this member's exact-export rejections);
-    /// `None` for ungrouped peers.
+    /// table minus own-sourced, minus this member's exact-export rejections,
+    /// intersected with what its outbound maxima admitted); `None` for
+    /// ungrouped peers.
     pub(in crate::manager) fn grouped_advertised_routes_iter(
         &self,
         peer: IpAddr,
     ) -> Option<impl Iterator<Item = &Route>> {
         let group = self.group_ribs.get(&self.grouped_member_of(peer)?)?;
         let rejected = self.peer_unexportable.get(&peer);
+        let limits = self.outbound_prefix_limits.get(&peer);
         Some(group.table.iter().filter(move |route| {
             route.peer != peer
                 && !rejected.is_some_and(|keys| {
                     keys.contains(&ExactExportKey::Unicast(route.prefix, route.path_id))
                 })
+                && limits.is_none_or(|limits| limits.admits_grouped(&route.prefix))
         }))
     }
 
@@ -2445,11 +2457,13 @@ impl RibManager {
     ) -> Option<impl Iterator<Item = &Route>> {
         let group = self.group_ribs.get(&self.grouped_member_of(peer)?)?;
         let rejected = self.peer_unexportable.get(&peer);
+        let limits = self.outbound_prefix_limits.get(&peer);
         Some(group.table.iter_ordered_from(after).filter(move |route| {
             route.peer != peer
                 && !rejected.is_some_and(|keys| {
                     keys.contains(&ExactExportKey::Unicast(route.prefix, route.path_id))
                 })
+                && limits.is_none_or(|limits| limits.admits_grouped(&route.prefix))
         }))
     }
 
@@ -2464,6 +2478,17 @@ impl RibManager {
     /// for ungrouped peers.
     pub(in crate::manager) fn grouped_advertised_count(&self, peer: IpAddr) -> Option<usize> {
         let group = self.group_ribs.get(&self.grouped_member_of(peer)?)?;
+        if self.outbound_prefix_limits.contains_key(&peer) {
+            // A limited member advertises its admitted projection, and that
+            // is decided per family — so reuse the single definition of
+            // usage rather than deriving the same quantity a second way.
+            return Some(
+                super::outbound_prefix_limits::LIMITED_FAMILIES
+                    .into_iter()
+                    .map(|afi| self.outbound_family_usage(peer, afi, true))
+                    .sum(),
+            );
+        }
         let rejected = self.peer_unexportable.get(&peer).map_or(0, |keys| {
             keys.iter()
                 .filter(|key| match key {

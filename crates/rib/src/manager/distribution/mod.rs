@@ -2472,6 +2472,7 @@ impl RibManager {
         // has already run, so a route another gate rejected consumes no
         // capacity, and a prefix blocked here never reaches Adj-RIB-Out, the
         // grouped admitted set, or the wire. Withdrawals are untouched.
+        let limited = self.outbound_prefix_limits.contains_key(&peer);
         self.enforce_outbound_prefix_limits(
             peer,
             grouped_unicast_count.is_some(),
@@ -2479,6 +2480,13 @@ impl RibManager {
             &mut next_hop_override,
             &withdraw,
         );
+        // A limited grouped member's advertised count is its admitted
+        // projection, which enforcement above just moved.
+        let grouped_unicast_count = if limited {
+            self.grouped_advertised_count(peer)
+        } else {
+            grouped_unicast_count
+        };
 
         // Derive metric work from the final post-OTC, post-exact-export
         // vectors: a rejected announce can disappear or synthesize a
@@ -2625,6 +2633,16 @@ impl RibManager {
                     gauge_val(rib_out.rtc_len()),
                 );
             }
+        }
+
+        // ADR-0113 capacity gauges publish the committed admitted truth, so
+        // they refresh here rather than at the enforcement seam above, which
+        // runs before this commit. A limited peer republishes on every
+        // envelope — an entirely blocked batch commits nothing and still
+        // opens its episode — while an unlimited one pays only when its
+        // unicast state actually moved.
+        if unicast_changed || limited {
+            self.refresh_outbound_limit_gauges(peer);
         }
 
         if let Some(pending) = self.pending_otc_blocked.get_mut(&peer) {
