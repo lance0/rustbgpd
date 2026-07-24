@@ -138,7 +138,7 @@ Required. Defines the local BGP speaker identity.
 | `honor_blackhole`   | bool   | no       | `false`              | Enable RFC 7999 receiver scoping on EBGP imports — see below |
 | `install_blackhole_discard` | bool | no | `false`              | Install kernel blackhole routes for accepted RFC 7999 host routes — see below |
 | `allow_blackhole_broad_prefixes` | bool | no | `false`           | Permit non-host BLACKHOLE discard installs when the FIB slice is enabled |
-| `ebgp_requires_policy` | bool | no       | `false`              | RFC 8212: require explicit operator import/export policy on eBGP sessions. **Restart-required** and **not yet enforced** — see below |
+| `ebgp_requires_policy` | bool | no       | `false`              | RFC 8212: require explicit operator import/export policy on eBGP sessions; a direction without one runs a reserved internal deny. **Restart-required** — see below |
 | `multipath_relax`   | bool   | no       | `false`              | ADR-0066 multipath-relax: group unicast ECMP candidates by `AS_PATH` *length* instead of an exact `AS_PATH` match (FRR's `bgp bestpath as-path multipath-relax`). Best-path-wide; inert unless a `[[fib_tables]]` sets `maximum_paths`, `maximum_paths_ebgp`, or `maximum_paths_ibgp` above `1` |
 | `link_bandwidth_weighted` | bool | no   | `false`              | ADR-0068 weighted multipath: weight unicast ECMP next-hops by the lowest finite nonnegative RFC 10005 Link Bandwidth value when the whole equal-cost group carries a positive one; zero, missing, or unusable values fall back to equal cost. Best-path-wide; inert unless a `[[fib_tables]]` sets `maximum_paths`, `maximum_paths_ebgp`, or `maximum_paths_ibgp` above `1` |
 
@@ -384,11 +384,39 @@ session resolves no policy chain, so the RFC 8212 boundary is an opt-in knob:
 ebgp_requires_policy = true
 ```
 
-**Enforcement is not implemented yet.** ADR-0112 sequences the work, and this
-release only lands the configuration boundary: the field parses, classifies as
-restart-required, and is pinned across SIGHUP. Setting it `true` logs a startup
-warning and changes no import or export behavior. Do not rely on it for
-route-leak protection until the enforcement path ships.
+When it is on, an eBGP session that resolves no explicit operator policy in a
+direction runs a reserved internal deny-all chain in that direction instead of
+the permit-all default. A missing import policy makes received routes
+ineligible; a missing export policy keeps routes out of that peer's
+Adj-RIB-Out. The session stays Established and keeps exchanging keepalives and
+withdrawals, so the gap is repairable without transport churn.
+
+The two directions are independent — a peer with an import policy and no export
+policy denies only on egress. Any of these counts as explicit policy, and a
+chain whose configured result is permit-all counts just as much as a filtering
+one:
+
+- a non-empty neighbor `import_policy_chain` / `export_policy_chain`;
+- a non-empty neighbor inline `import_policy` / `export_policy`;
+- an inherited non-empty peer-group named chain or inline policy; or
+- a non-empty `[policy] import_chain` / `export_chain`.
+
+The implicit RFC 8326 `GRACEFUL_SHUTDOWN` and RFC 7999 `BLACKHOLE` import
+tails never count: they are daemon-supplied receiver behavior, not an operator
+import relationship, so enabling `honor_graceful_shutdown` or `honor_blackhole`
+does not satisfy the requirement.
+
+Because rustbgpd's policy model is neighbor-wide, one directional verdict covers
+every configured and negotiated family on that peer. iBGP sessions are not
+affected. A `[[dynamic_neighbors]]` range with `remote_asn = 0` is accept-any,
+not AS 0: its accepted children are treated as external for their whole session,
+including after the OPEN reveals a peer ASN. Configure an explicit
+`remote_asn` on the range or a static neighbor if you need iBGP treatment.
+
+**Not exposed yet:** the directional policy-presence status in neighbor detail
+and JSON, metrics/explain attribution for the reserved deny, and the `rbgp
+doctor` check. Until those land, verify enforcement from the resolved
+configuration rather than from live neighbor output.
 
 The knob is deliberately restart-required rather than hot-applied. Enabling it
 flips both directions on every eBGP session at once, and recovering a peer's

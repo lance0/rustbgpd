@@ -2032,6 +2032,7 @@ mod tests {
                 export_policy: None,
                 pending_inbound: None,
                 is_dynamic: false,
+                rfc8212_external: false,
                 tcp_ao_protected: true,
                 tcp_ao_rotation: TcpAoRotationStatus::default(),
                 accepted_dynamic_range: None,

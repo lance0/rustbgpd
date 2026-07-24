@@ -1458,6 +1458,7 @@ peer_group = "clients"
             "dynamic",
             group,
             "clients",
+            false,
         )
         .unwrap();
     assert_eq!(dynamic.transport_config.peer.min_hold_time, Some(30));
@@ -16308,4 +16309,338 @@ md5_password = "hunter2"
     let rendered = config.effective_redacted_toml().unwrap();
     let err = Config::load_toml_with_diagnostics(&rendered, "effective.toml").unwrap_err();
     assert!(err.contains("md5_password"), "{err}");
+}
+
+// ── ADR-0112: RFC 8212 explicit policy on EBGP ──────────────────────
+//
+// Steps 1 and 2 of the ADR: directional explicit-policy provenance decided
+// before the implicit tails, the reserved internal deny substitution, and the
+// accept-any dynamic classification. The directional operator surface (status
+// enum, metrics/explain attribution, doctor) is a later step and is not
+// asserted here.
+
+/// Build an ADR-0112 fixture from `[global]` extras, a policy block, the
+/// neighbor's `remote_asn`, and neighbor-level extras.
+fn rfc8212_toml(
+    global_extra: &str,
+    policy_block: &str,
+    remote_asn: u32,
+    neighbor_extra: &str,
+) -> String {
+    format!(
+        r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+{global_extra}
+
+[global.telemetry]
+log_format = "json"
+{policy_block}
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = {remote_asn}
+hold_time = 90
+{neighbor_extra}
+"#
+    )
+}
+
+fn rfc8212_resolve(toml_str: &str) -> super::EffectivePolicyChains {
+    let cfg = parse(toml_str).expect("ADR-0112 fixture parses");
+    cfg.effective_policy_for_neighbor(&cfg.neighbors[0], false)
+        .expect("ADR-0112 fixture resolves")
+}
+
+/// The reserved internal deny is a single daemon-owned member carrying the
+/// documented attribution name and no operator content.
+fn assert_reserved_deny(chain: Option<&PolicyChain>, expected_name: &str) {
+    let chain = chain.expect("the reserved deny must be installed, not left permit-all");
+    assert_eq!(
+        chain
+            .policies
+            .iter()
+            .map(|member| member.name.as_deref())
+            .collect::<Vec<_>>(),
+        vec![Some(expected_name)],
+        "the reserved deny replaces the direction outright"
+    );
+    assert!(chain.policies[0].entries.is_empty());
+    assert_eq!(chain.policies[0].default_action, PolicyAction::Deny);
+}
+
+fn assert_not_reserved_deny(chain: Option<&PolicyChain>) {
+    if let Some(chain) = chain {
+        assert!(
+            !chain.policies.iter().any(|member| {
+                matches!(
+                    member.name.as_deref(),
+                    Some(
+                        super::RFC8212_MISSING_IMPORT_POLICY | super::RFC8212_MISSING_EXPORT_POLICY
+                    )
+                )
+            }),
+            "no reserved deny may appear in this direction"
+        );
+    }
+}
+
+/// Disabled compatibility. With the knob off, an EBGP peer with no operator
+/// policy still resolves permit-all in both directions — including when the
+/// implicit RFC 8326 / RFC 7999 tails are the only thing in the chain.
+/// Dropping the `ebgp_requires_policy` gate on the substitution makes this red.
+#[test]
+fn rfc8212_disabled_keeps_unconfigured_ebgp_permit_all() {
+    let bare = rfc8212_resolve(&rfc8212_toml("", "", 65002, ""));
+    assert!(
+        bare.import.is_none() && bare.export.is_none(),
+        "knob off must leave both directions at the permit-all default"
+    );
+    assert!(!bare.import_explicit && !bare.export_explicit);
+    assert!(bare.external, "classification is independent of the knob");
+
+    let with_tails = rfc8212_resolve(&rfc8212_toml(
+        "honor_graceful_shutdown = true\nhonor_blackhole = true",
+        "",
+        65002,
+        "",
+    ));
+    let import = with_tails
+        .import
+        .as_ref()
+        .expect("the honor knobs still build their implicit chain");
+    assert_eq!(
+        import.policies.len(),
+        2,
+        "knob off must leave the GShut + BLACKHOLE tails exactly as they were"
+    );
+    assert!(import.policies.iter().all(|member| member.name.is_none()));
+    assert!(with_tails.export.is_none());
+}
+
+/// Directional fail-closed: the two directions are independent, and only the
+/// one without explicit operator policy gets the reserved deny. Substituting
+/// `None` for the reserved chain makes the matching assertion red.
+#[test]
+fn rfc8212_denies_only_the_direction_without_explicit_policy() {
+    let policy_block = "\n[policy.definitions.permit-all]\ndefault_action = \"permit\"\n";
+
+    let export_only = rfc8212_resolve(&rfc8212_toml(
+        "ebgp_requires_policy = true",
+        policy_block,
+        65002,
+        "export_policy_chain = [\"permit-all\"]",
+    ));
+    assert!(!export_only.import_explicit && export_only.export_explicit);
+    assert_reserved_deny(
+        export_only.import.as_ref(),
+        super::RFC8212_MISSING_IMPORT_POLICY,
+    );
+    assert_eq!(
+        export_only
+            .export
+            .as_ref()
+            .expect("explicit export chain survives untouched")
+            .policies
+            .iter()
+            .map(|member| member.name.as_deref())
+            .collect::<Vec<_>>(),
+        vec![Some("permit-all")]
+    );
+
+    let import_only = rfc8212_resolve(&rfc8212_toml(
+        "ebgp_requires_policy = true",
+        policy_block,
+        65002,
+        "import_policy_chain = [\"permit-all\"]",
+    ));
+    assert!(import_only.import_explicit && !import_only.export_explicit);
+    assert_not_reserved_deny(import_only.import.as_ref());
+    assert_reserved_deny(
+        import_only.export.as_ref(),
+        super::RFC8212_MISSING_EXPORT_POLICY,
+    );
+}
+
+/// The reserved deny actually denies, through the ordinary compiled chain
+/// path — so `evaluate_chain(None, ..)` permit-all semantics stay untouched
+/// for every session the knob does not govern.
+#[test]
+fn rfc8212_reserved_deny_denies_every_route() {
+    let resolved = rfc8212_resolve(&rfc8212_toml("ebgp_requires_policy = true", "", 65002, ""));
+    let ctx = route_server_test_context(
+        route_server_test_prefix("192.0.2.0/24"),
+        rustbgpd_wire::RpkiValidation::NotFound,
+        rustbgpd_wire::AspaValidation::Unknown,
+    );
+    for chain in [resolved.import.as_ref(), resolved.export.as_ref()] {
+        assert_eq!(
+            rustbgpd_policy::evaluate_chain(chain, &ctx).action,
+            PolicyAction::Deny,
+            "a governed direction with no operator policy must deny"
+        );
+    }
+    assert_eq!(
+        rustbgpd_policy::evaluate_chain(None, &ctx).action,
+        PolicyAction::Permit,
+        "the process-wide `None` contract must not move"
+    );
+}
+
+/// Provenance is decided before the implicit tails. Enabling the honor knobs
+/// with no operator import policy leaves the import direction unsatisfied and
+/// installs the reserved deny in place of the tails; counting an appended tail
+/// as operator provenance makes this red.
+#[test]
+fn rfc8212_implicit_tails_are_not_explicit_policy() {
+    let resolved = rfc8212_resolve(&rfc8212_toml(
+        "ebgp_requires_policy = true\nhonor_graceful_shutdown = true\nhonor_blackhole = true",
+        "",
+        65002,
+        "",
+    ));
+    assert!(
+        !resolved.import_explicit,
+        "a daemon-owned tail is not an operator import relationship"
+    );
+    assert_reserved_deny(
+        resolved.import.as_ref(),
+        super::RFC8212_MISSING_IMPORT_POLICY,
+    );
+}
+
+/// Every inheritance level the ADR counts as explicit satisfies the
+/// requirement, including chains whose configured result is permit-all.
+#[test]
+fn rfc8212_counts_each_explicit_provenance_source() {
+    let named = "\n[policy.definitions.permit-all]\ndefault_action = \"permit\"\n";
+    let cases: [(&str, String, &str); 5] = [
+        (
+            "global named",
+            format!(
+                "{named}\n[policy]\nimport_chain = [\"permit-all\"]\nexport_chain = [\"permit-all\"]\n"
+            ),
+            "",
+        ),
+        (
+            "peer-group named",
+            format!(
+                "{named}\n[peer_groups.edge]\nimport_policy_chain = [\"permit-all\"]\nexport_policy_chain = [\"permit-all\"]\n"
+            ),
+            "peer_group = \"edge\"",
+        ),
+        (
+            "peer-group inline",
+            "\n[[peer_groups.edge.import_policy]]\naction = \"permit\"\nprefix = \"0.0.0.0/0\"\nle = 32\n\n[[peer_groups.edge.export_policy]]\naction = \"permit\"\nprefix = \"0.0.0.0/0\"\nle = 32\n".to_string(),
+            "peer_group = \"edge\"",
+        ),
+        (
+            "neighbor named",
+            named.to_string(),
+            "import_policy_chain = [\"permit-all\"]\nexport_policy_chain = [\"permit-all\"]",
+        ),
+        (
+            "neighbor inline",
+            String::new(),
+            "import_policy = [{ action = \"permit\", prefix = \"0.0.0.0/0\", le = 32 }]\nexport_policy = [{ action = \"permit\", prefix = \"0.0.0.0/0\", le = 32 }]",
+        ),
+    ];
+    for (label, policy_block, neighbor_extra) in cases {
+        let resolved = rfc8212_resolve(&rfc8212_toml(
+            "ebgp_requires_policy = true",
+            &policy_block,
+            65002,
+            neighbor_extra,
+        ));
+        assert!(
+            resolved.import_explicit && resolved.export_explicit,
+            "{label} policy must satisfy RFC 8212 in both directions"
+        );
+        assert_not_reserved_deny(resolved.import.as_ref());
+        assert_not_reserved_deny(resolved.export.as_ref());
+    }
+}
+
+/// An iBGP session is not applicable and keeps its current behavior.
+#[test]
+fn rfc8212_leaves_ibgp_untouched() {
+    let resolved = rfc8212_resolve(&rfc8212_toml("ebgp_requires_policy = true", "", 65001, ""));
+    assert!(!resolved.external, "remote_asn == global.asn is iBGP");
+    assert!(
+        resolved.import.is_none() && resolved.export.is_none(),
+        "an iBGP session keeps permit-all"
+    );
+}
+
+/// Accept-any dynamic range. It is external for the whole accepted session:
+/// before OPEN, where the sentinel is still the record's ASN, and after, where
+/// the pin is the only thing keeping the classification from following a
+/// learned ASN that happens to equal the local one. Reading the sentinel as an
+/// ordinary ASN, or dropping the pin, makes this red.
+#[test]
+fn rfc8212_classifies_accept_any_dynamic_range_as_external() {
+    let toml_str = rfc8212_toml(
+        "ebgp_requires_policy = true",
+        "\n[peer_groups.ix]\nfamilies = [\"ipv4_unicast\"]\n\n[[dynamic_neighbors]]\nprefix = \"192.0.2.0/24\"\npeer_group = \"ix\"\nremote_asn = 0\n",
+        65002,
+        "",
+    );
+    let cfg = parse(&toml_str).expect("dynamic fixture parses");
+    let group = &cfg.peer_groups["ix"];
+    let addr: IpAddr = "192.0.2.7".parse().unwrap();
+
+    // Accept time: the range's own sentinel is the classification input.
+    let accepted = cfg
+        .resolve_dynamic_neighbor(addr, 0, "ix-auto", group, "ix", false)
+        .expect("accept-time resolution");
+    assert!(accepted.rfc8212_external);
+    assert_reserved_deny(
+        accepted.import_policy.as_ref(),
+        super::RFC8212_MISSING_IMPORT_POLICY,
+    );
+    assert_reserved_deny(
+        accepted.export_policy.as_ref(),
+        super::RFC8212_MISSING_EXPORT_POLICY,
+    );
+
+    // After OPEN the peer manager replaces the sentinel with the learned ASN.
+    // Worst case that ASN is the local one, and only the pin keeps enforcement.
+    let relearned = cfg
+        .resolve_dynamic_neighbor(addr, 65001, "ix-auto", group, "ix", true)
+        .expect("pinned re-resolution");
+    assert!(relearned.rfc8212_external);
+    assert_reserved_deny(
+        relearned.import_policy.as_ref(),
+        super::RFC8212_MISSING_IMPORT_POLICY,
+    );
+
+    // Control: without the pin the same input classifies as iBGP, which is
+    // exactly the fail-open the pin exists to prevent.
+    let unpinned = cfg
+        .resolve_dynamic_neighbor(addr, 65001, "ix-auto", group, "ix", false)
+        .expect("unpinned re-resolution");
+    assert!(!unpinned.rfc8212_external);
+    assert!(unpinned.import_policy.is_none());
+}
+
+/// A governed static neighbor carries the reserved deny out of
+/// `resolved_neighbors()` — the roster the daemon hands to `AddPeer` before
+/// any session starts — so registration ordering cannot expose a permit-all
+/// window on a governed peer.
+#[test]
+fn rfc8212_resolved_neighbors_carry_the_deny_before_peers_start() {
+    let cfg = parse(&rfc8212_toml("ebgp_requires_policy = true", "", 65002, "")).unwrap();
+    let resolved = cfg.resolved_neighbors().expect("startup roster resolves");
+    let peer = resolved.first().expect("one neighbor");
+    assert!(peer.rfc8212_external);
+    assert_reserved_deny(
+        peer.import_policy.as_ref(),
+        super::RFC8212_MISSING_IMPORT_POLICY,
+    );
+    assert_reserved_deny(
+        peer.export_policy.as_ref(),
+        super::RFC8212_MISSING_EXPORT_POLICY,
+    );
 }

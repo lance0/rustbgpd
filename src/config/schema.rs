@@ -588,10 +588,17 @@ pub struct Global {
     /// fleet-wide, two-direction import/export transition cannot hide inside a
     /// hot reload.
     ///
-    /// ADR-0112 sequences enforcement behind this knob. This release accepts,
-    /// classifies, and pins the setting but does not yet install the reserved
-    /// internal deny, so `true` logs a startup warning and changes no routing
-    /// behavior until the enforcement path lands.
+    /// When on, an EBGP session with no explicit operator policy in a
+    /// direction runs a reserved internal deny-all chain there: a missing
+    /// import policy makes received routes ineligible, a missing export policy
+    /// keeps routes out of that peer's Adj-RIB-Out. The session stays
+    /// Established. The verdict is directional and independent, is decided
+    /// before the implicit RFC 8326 / RFC 7999 import tails (which never count
+    /// as operator policy), and covers every negotiated family because
+    /// rustbgpd's policy model is neighbor-wide.
+    ///
+    /// The directional policy-presence status in neighbor detail, JSON,
+    /// metrics/explain attribution and `rbgp doctor` is not exposed yet.
     #[serde(default)]
     pub ebgp_requires_policy: bool,
     /// Publish one durable, daemon-private MRT warm-cache checkpoint during
