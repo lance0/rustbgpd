@@ -6,7 +6,7 @@ use rustbgpd_api::peer_types::{
 };
 use rustbgpd_rib::RibUpdate;
 use rustbgpd_transport::{PeerCommand, PeerCommandError};
-use rustbgpd_transport::{PeerHandle, SessionIdentity, TcpAoKeyring, TransportConfig};
+use rustbgpd_transport::{PeerHandle, SessionIdentity, TcpAoKeyring};
 use rustbgpd_wire::{Afi, Safi};
 use tokio::sync::oneshot;
 use tracing::{debug, error, info, warn};
@@ -1242,8 +1242,7 @@ impl PeerManager {
         // task records its final transitions before the shutdown join
         // above, so this runs after the last transport-side emission).
         if reap_metric_series && shutdown.joined() {
-            self.reap_deleted_peer_metric_series(address, &managed.transport_config)
-                .await;
+            self.reap_deleted_peer_metric_series(address).await;
         } else if reap_metric_series {
             warn!(
                 %address,
@@ -1255,25 +1254,17 @@ impl PeerManager {
 
     /// Remove a deleted peer's per-peer metric series.
     ///
-    /// Transport sessions label `peer` with the remote `SocketAddr`
-    /// (`"10.0.0.2:179"`, `"[fe80::2%3]:179"`), while the RIB manager
-    /// and BFD runtime label it with the bare address — reap both
-    /// exact forms. Call only after the peer has been removed from
-    /// `self.peers` and its session task joined.
-    pub(super) async fn reap_deleted_peer_metric_series(
-        &self,
-        address: std::net::IpAddr,
-        transport_config: &TransportConfig,
-    ) {
-        // The SocketAddr form is unique to this peer (same-address
-        // link-local peers differ in scope id), so it is always safe.
-        self.metrics
-            .reap_peer_series(&transport_config.remote_addr.to_string());
-        // The bare-address form can be shared with a surviving peer
-        // (the same link-local address on another interface) — leave
-        // it alone unless this peer was the last user of the address.
+    /// Every emission site — transport session, RIB manager, BFD
+    /// runtime — labels `peer` with the canonical bare address, so one
+    /// reap covers them all. Call only after the peer has been removed
+    /// from `self.peers` and its session task joined.
+    pub(super) async fn reap_deleted_peer_metric_series(&self, address: std::net::IpAddr) {
+        // The label can be shared with a surviving peer (the same
+        // link-local address on another interface) — leave it alone
+        // unless this peer was the last user of the address.
         if self.peer_keys_for_address(address).is_empty() {
-            self.metrics.reap_peer_series(&address.to_string());
+            self.metrics
+                .reap_peer_series(&rustbgpd_telemetry::peer_label(address));
             // The RIB manager emits bare-address series from its own
             // task; this marker is queued behind the session's final
             // `PeerDown`, so the RIB manager reaps again *after* its

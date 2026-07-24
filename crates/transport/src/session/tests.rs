@@ -149,7 +149,7 @@ fn outbound_constructor_materializes_route_safety_counter_children() {
     for disposition in ["attribute_discard", "treat_as_withdraw", "session_reset"] {
         assert_zero_counter_sample(
             &malformed,
-            &[("peer", "192.0.2.10:1179"), ("disposition", disposition)],
+            &[("peer", "192.0.2.10"), ("disposition", disposition)],
         );
     }
 }
@@ -213,7 +213,7 @@ async fn inbound_constructor_materializes_route_safety_counter_children() {
     for disposition in ["attribute_discard", "treat_as_withdraw", "session_reset"] {
         assert_zero_counter_sample(
             &malformed,
-            &[("peer", "192.0.2.20:2179"), ("disposition", disposition)],
+            &[("peer", "192.0.2.20"), ("disposition", disposition)],
         );
     }
 }
@@ -234,6 +234,46 @@ fn make_test_session_with_peer_config(peer_config: PeerConfig) -> PeerSession {
     PeerSession::new(
         config, metrics, cmd_rx, rib_tx, None, None, None, None, None, false,
     )
+}
+
+/// The `peer` metric/log label is the bare neighbor address, never the
+/// transport endpoint's `addr:port`.
+///
+/// Sessions are the only emitter that holds a `SocketAddr`, so this is
+/// where the split used to be introduced: session-owned families said
+/// `10.0.0.2:179` while RIB-owned families said `10.0.0.2`, and every
+/// `by (peer)` join across the two returned empty. A non-179 port here
+/// proves the port is dropped rather than merely absent.
+#[test]
+fn session_peer_label_is_the_bare_neighbor_address() {
+    let mut peer_config = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
+    peer_config.families = vec![(Afi::Ipv4, Safi::Unicast)];
+    let config = TransportConfig::new(peer_config, "10.0.0.2:29179".parse().unwrap());
+    let metrics = BgpMetrics::new();
+    let (_cmd_tx, cmd_rx) = mpsc::channel(8);
+    let (rib_tx, _rib_rx) = mpsc::channel(8);
+    let session = PeerSession::new(
+        config,
+        metrics.clone(),
+        cmd_rx,
+        rib_tx,
+        None,
+        None,
+        None,
+        None,
+        None,
+        false,
+    );
+
+    assert_eq!(session.peer_label, "10.0.0.2");
+
+    // Construction alone seeds the route-safety series; drive a
+    // session-owned counter too, then check the whole registry.
+    metrics.record_message_sent(&session.peer_label, "update");
+    assert_eq!(
+        rustbgpd_telemetry::non_canonical_peer_labels(metrics.registry()),
+        Vec::<(String, String)>::new()
+    );
 }
 
 fn tcp_ao_deletion_test_fixture() -> (PeerSession, crate::TcpAoSessionDeletion) {
@@ -17700,7 +17740,7 @@ async fn reject_retention_records_policy_deny_and_clears_on_withdraw() {
     assert_eq!(entry.reason, ImportRejectReason::PolicyReject);
     assert_eq!(entry.next_hop, Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))));
     assert_eq!(entry.as_path, "65002");
-    assert_eq!(metrics.rejected_routes_retained("10.0.0.2:179"), 1);
+    assert_eq!(metrics.rejected_routes_retained("10.0.0.2"), 1);
 
     // Explicit withdrawal clears the retained reject — the question
     // "why isn't my route accepted?" is moot once the peer stops
@@ -17712,7 +17752,7 @@ async fn reject_retention_records_policy_deny_and_clears_on_withdraw() {
         session.rejected_routes.is_empty(),
         "withdrawal clears the retained reject"
     );
-    assert_eq!(metrics.rejected_routes_retained("10.0.0.2:179"), 0);
+    assert_eq!(metrics.rejected_routes_retained("10.0.0.2"), 0);
 }
 
 /// LAN-472 pin: when a previously rejected identity is later accepted
@@ -17764,7 +17804,7 @@ async fn reject_retention_clears_when_route_is_later_accepted() {
         session.rejected_routes.is_empty(),
         "acceptance clears the stale reject entry"
     );
-    assert_eq!(metrics.rejected_routes_retained("10.0.0.2:179"), 0);
+    assert_eq!(metrics.rejected_routes_retained("10.0.0.2"), 0);
 }
 
 /// A hostile UPDATE with maximal attributes — a long `AS_PATH` and
@@ -17880,7 +17920,7 @@ async fn reject_retention_cap_evicts_oldest_reject() {
         !keys.contains(&retention_key(first)),
         "oldest reject evicted under the cap"
     );
-    assert_eq!(metrics.rejected_routes_retained("10.0.0.2:179"), 2);
+    assert_eq!(metrics.rejected_routes_retained("10.0.0.2"), 2);
 }
 
 /// LAN-472 pin: `[policy.reject_retention] enabled = false` records
@@ -17903,7 +17943,7 @@ async fn reject_retention_disabled_records_nothing_and_reports_disabled() {
     assert_eq!(session.import_policy_routes_denied, 1);
     assert_eq!(rejected_route_prototype_builds(&session), 0);
     assert!(session.rejected_routes.is_empty());
-    assert_eq!(metrics.rejected_routes_retained("10.0.0.2:179"), 0);
+    assert_eq!(metrics.rejected_routes_retained("10.0.0.2"), 0);
 
     let (reply_tx, reply_rx) = oneshot::channel();
     let flow = session
@@ -17948,7 +17988,7 @@ async fn reject_retention_records_as_path_loop_reason() {
     assert_eq!(entries[0].0, retention_key(looped));
     assert_eq!(entries[0].1.reason, ImportRejectReason::AsPathLoop);
     assert_eq!(entries[0].1.as_path, "65002 65001");
-    assert_eq!(metrics.rejected_routes_retained("10.0.0.2:179"), 1);
+    assert_eq!(metrics.rejected_routes_retained("10.0.0.2"), 1);
 }
 
 /// LAN-472 pin: an RFC 9234 OTC ingress drop (a pre-policy hygiene
@@ -18001,7 +18041,7 @@ async fn reject_retention_records_otc_ingress_drop_with_detail() {
             "the canonical OTC sub-reason token rides in the detail field"
         );
     }
-    assert_eq!(metrics.rejected_routes_retained("10.0.0.2:179"), 2);
+    assert_eq!(metrics.rejected_routes_retained("10.0.0.2"), 2);
 }
 
 /// LAN-472 pin: the retention store is per-session diagnostic state —
@@ -18019,7 +18059,7 @@ async fn session_down_flushes_reject_retention_and_gauge() {
         .process_update(retention_update(&[denied], &[]))
         .await;
     assert_eq!(session.rejected_routes.len(), 1);
-    assert_eq!(metrics.rejected_routes_retained("10.0.0.2:179"), 1);
+    assert_eq!(metrics.rejected_routes_retained("10.0.0.2"), 1);
 
     session.execute_actions(vec![Action::SessionDown]).await;
     assert!(
@@ -18027,7 +18067,7 @@ async fn session_down_flushes_reject_retention_and_gauge() {
         "reject retention must be flushed on SessionDown"
     );
     assert_eq!(
-        metrics.rejected_routes_retained("10.0.0.2:179"),
+        metrics.rejected_routes_retained("10.0.0.2"),
         0,
         "the gauge follows the flush"
     );

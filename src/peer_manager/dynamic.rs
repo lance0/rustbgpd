@@ -443,8 +443,7 @@ impl PeerManager {
                 )
                 .await;
             if shutdown.joined() {
-                self.reap_deleted_peer_metric_series(peer_key.address, &managed.transport_config)
-                    .await;
+                self.reap_deleted_peer_metric_series(peer_key.address).await;
             } else {
                 warn!(
                     peer = %peer_key,

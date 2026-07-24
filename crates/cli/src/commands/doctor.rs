@@ -624,7 +624,7 @@ fn peer_checks(
             name: format!("peer.{address}.slow_peer"),
             status: CheckStatus::Warn,
             detail: format!(
-                "peer {address} is flagged slow: outbound queue persistently backlogged; inspect bgp_peer_outbound_queue_depth for this peer's socket and enable slow_peer_isolation for chronic single-peer lag"
+                "peer {address} is flagged slow: outbound queue persistently backlogged; inspect bgp_peer_outbound_queue_depth{{peer=\"{address}\"}} and enable slow_peer_isolation for chronic single-peer lag"
             ),
         });
     }
@@ -2036,13 +2036,12 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
         assert!(checks[0].status == CheckStatus::Ok);
         assert_eq!(checks[1].name, "peer.10.0.0.2.slow_peer");
         assert!(checks[1].status == CheckStatus::Warn);
-        assert!(checks[1].detail.contains("bgp_peer_outbound_queue_depth"));
-        assert!(checks[1].detail.contains("for this peer's socket"));
         assert!(checks[1].detail.contains("slow_peer_isolation"));
-        // The metric's `peer` label is a SocketAddr, so a bare-IP selector is
-        // misleading and may match nothing. Reintroducing it makes this red.
+        // The `peer` label is the bare neighbor address across every
+        // family, so the remediation can hand over a selector that
+        // actually resolves. Dropping the label makes this red.
         assert!(
-            !checks[1]
+            checks[1]
                 .detail
                 .contains(r#"bgp_peer_outbound_queue_depth{peer="10.0.0.2"}"#)
         );
@@ -2476,9 +2475,7 @@ paths = ["x"]
             let detail = check["detail"].as_str().unwrap();
             check["name"] == "peer.10.0.0.2.slow_peer"
                 && check["status"] == "warn"
-                && detail.contains("bgp_peer_outbound_queue_depth")
-                && detail.contains("for this peer's socket")
-                && !detail.contains(r#"{peer="10.0.0.2"}"#)
+                && detail.contains(r#"bgp_peer_outbound_queue_depth{peer="10.0.0.2"}"#)
         }));
     }
 

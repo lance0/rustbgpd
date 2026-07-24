@@ -249,11 +249,7 @@ impl PeerManager {
                             // breach was discovered during the join barrier.
                             self.dynamic_peer_count = self.dynamic_peer_count.saturating_sub(1);
                             if shutdown.joined() {
-                                self.reap_deleted_peer_metric_series(
-                                    peer_addr,
-                                    &managed.transport_config,
-                                )
-                                .await;
+                                self.reap_deleted_peer_metric_series(peer_addr).await;
                             } else {
                                 info!(
                                     %peer_addr,

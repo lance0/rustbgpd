@@ -1,12 +1,59 @@
 //! Prometheus metrics for session, RIB, policy, EVPN, GR, and RPKI counters/gauges.
 
 use std::cell::RefCell;
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use prometheus::{
     HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry,
 };
+
+/// Canonical `peer` label value: the neighbor's bare IP address.
+///
+/// **Every** `peer`-labeled series exported by this crate uses this one
+/// form — `"192.0.2.1"`, `"2001:db8::1"` — so that `by (peer)`
+/// aggregations return one series per peer and joins across metric
+/// families (session ⇄ RIB ⇄ policy) match. Producing the label any
+/// other way, in particular stringifying a `SocketAddr` and picking up
+/// the `:179` endpoint port, splits every such query silently:
+/// Prometheus reports no error for a join that matches nothing.
+///
+/// Route this through here rather than calling `to_string()` at the
+/// emission site, so there is one place to grep and one place to
+/// change. [`non_canonical_peer_labels`] enforces the invariant over a
+/// live registry.
+#[must_use]
+pub fn peer_label(addr: IpAddr) -> String {
+    addr.to_string()
+}
+
+/// Every `peer` label value in `registry` that is not the canonical
+/// [`peer_label`] form, as `(family_name, peer_value)` pairs.
+///
+/// An empty result means the invariant holds. Exposed (not test-only)
+/// so crates that drive real sessions can assert it against the
+/// registry those sessions actually wrote to.
+#[must_use]
+pub fn non_canonical_peer_labels(registry: &Registry) -> Vec<(String, String)> {
+    let mut offenders = Vec::new();
+    for family in registry.gather() {
+        for metric in family.get_metric() {
+            for label in metric.get_label() {
+                if label.name() != "peer" {
+                    continue;
+                }
+                let value = label.value();
+                if value.parse::<IpAddr>().is_err() {
+                    offenders.push((family.name().to_owned(), value.to_owned()));
+                }
+            }
+        }
+    }
+    offenders.sort_unstable();
+    offenders.dedup();
+    offenders
+}
 
 /// Monotonic id distinguishing `BgpMetrics` instances (tests create
 /// several on one thread). Clones share the id — they share the
@@ -75,6 +122,11 @@ thread_local! {
 /// Label values are plain strings — this crate has no dependency on
 /// `rustbgpd-fsm` or `rustbgpd-wire`.  Callers pass `state.as_str()`,
 /// `"keepalive"`, etc.
+///
+/// The `peer` label is the one exception: it has a single canonical
+/// form, produced by [`peer_label`] and enforced by
+/// [`non_canonical_peer_labels`]. Never stringify a `SocketAddr` into
+/// it.
 ///
 /// **Adding a `peer`-labeled Vec metric?** Add it to the reap list in
 /// [`Self::reap_peer_series`] too, so the series are removed when the
@@ -2319,9 +2371,9 @@ impl BgpMetrics {
     /// re-added, its counters restart from zero, which `rate()` /
     /// `increase()` handle as an ordinary counter reset.
     ///
-    /// Matching is exact on the label string. Callers that emit the
-    /// peer under more than one formatting (e.g. bare address vs
-    /// address:port) must call this once per form.
+    /// Matching is exact on the label string, so `peer` must be the
+    /// canonical [`peer_label`] form — the same one every emission site
+    /// uses. One call reaps the peer everywhere.
     ///
     /// Reaping a peer with no live series is a no-op.
     ///
@@ -3272,7 +3324,7 @@ impl BgpMetrics {
     }
 
     /// Materialize zero-valued malformed-UPDATE children for every canonical
-    /// RFC 7606 disposition at one transport endpoint.
+    /// RFC 7606 disposition for one peer.
     pub fn initialize_update_malformed_series(&self, peer: &str) {
         for disposition in crate::reason_labels::MalformedUpdateDisposition::ALL {
             self.update_malformed
@@ -4191,6 +4243,8 @@ mod jemalloc_stats {
 
 #[cfg(test)]
 mod tests {
+    use std::net::Ipv4Addr;
+
     use prometheus::Encoder;
 
     use super::*;
@@ -5633,38 +5687,24 @@ mod tests {
     #[test]
     fn max_prefix_capacity_keeps_unlimited_distinct_from_zero() {
         let m = BgpMetrics::new();
-        let peer = "10.0.0.1:179";
+        let peer = "10.0.0.1";
 
         m.set_max_prefix_capacity(peer, "aggregate", 80, Some(100));
         m.set_max_prefix_capacity(peer, "ipv4_unicast", 12, None);
 
         let text = gather_text(&m);
-        assert!(text.contains(r#"bgp_max_prefix_usage{peer="10.0.0.1:179",scope="aggregate"} 80"#));
-        assert!(
-            text.contains(r#"bgp_max_prefix_limit{peer="10.0.0.1:179",scope="aggregate"} 100"#)
-        );
-        assert!(
-            text.contains(r#"bgp_max_prefix_headroom{peer="10.0.0.1:179",scope="aggregate"} 20"#)
-        );
-        assert!(
-            text.contains(r#"bgp_max_prefix_usage{peer="10.0.0.1:179",scope="ipv4_unicast"} 12"#)
-        );
-        assert!(
-            !text.contains(r#"bgp_max_prefix_limit{peer="10.0.0.1:179",scope="ipv4_unicast"}"#)
-        );
-        assert!(
-            !text.contains(r#"bgp_max_prefix_headroom{peer="10.0.0.1:179",scope="ipv4_unicast"}"#)
-        );
+        assert!(text.contains(r#"bgp_max_prefix_usage{peer="10.0.0.1",scope="aggregate"} 80"#));
+        assert!(text.contains(r#"bgp_max_prefix_limit{peer="10.0.0.1",scope="aggregate"} 100"#));
+        assert!(text.contains(r#"bgp_max_prefix_headroom{peer="10.0.0.1",scope="aggregate"} 20"#));
+        assert!(text.contains(r#"bgp_max_prefix_usage{peer="10.0.0.1",scope="ipv4_unicast"} 12"#));
+        assert!(!text.contains(r#"bgp_max_prefix_limit{peer="10.0.0.1",scope="ipv4_unicast"}"#));
+        assert!(!text.contains(r#"bgp_max_prefix_headroom{peer="10.0.0.1",scope="ipv4_unicast"}"#));
 
         m.set_max_prefix_capacity(peer, "aggregate", 101, None);
         let text = gather_text(&m);
-        assert!(
-            text.contains(r#"bgp_max_prefix_usage{peer="10.0.0.1:179",scope="aggregate"} 101"#)
-        );
-        assert!(!text.contains(r#"bgp_max_prefix_limit{peer="10.0.0.1:179",scope="aggregate"}"#));
-        assert!(
-            !text.contains(r#"bgp_max_prefix_headroom{peer="10.0.0.1:179",scope="aggregate"}"#)
-        );
+        assert!(text.contains(r#"bgp_max_prefix_usage{peer="10.0.0.1",scope="aggregate"} 101"#));
+        assert!(!text.contains(r#"bgp_max_prefix_limit{peer="10.0.0.1",scope="aggregate"}"#));
+        assert!(!text.contains(r#"bgp_max_prefix_headroom{peer="10.0.0.1",scope="aggregate"}"#));
     }
 
     /// Load-bearing session-reap proof: replacing the narrow reap with a zero
@@ -5673,7 +5713,7 @@ mod tests {
     #[test]
     fn max_prefix_capacity_reap_spares_peer_history() {
         let m = BgpMetrics::new();
-        let peer = "10.0.0.1:179";
+        let peer = "10.0.0.1";
         m.set_max_prefix_capacity(peer, "aggregate", 80, Some(100));
         m.record_max_prefix_exceeded(peer);
 
@@ -5683,7 +5723,7 @@ mod tests {
         assert!(!text.contains("bgp_max_prefix_usage"));
         assert!(!text.contains("bgp_max_prefix_limit"));
         assert!(!text.contains("bgp_max_prefix_headroom"));
-        assert!(text.contains(r#"bgp_max_prefix_exceeded_total{peer="10.0.0.1:179"} 1"#));
+        assert!(text.contains(r#"bgp_max_prefix_exceeded_total{peer="10.0.0.1"} 1"#));
     }
 
     /// ADR-0113: a family that becomes unlimited must DROP its numeric
@@ -5840,5 +5880,152 @@ mod tests {
         ] {
             assert!(text.contains(name), "{name} missing from scrape:\n{text}");
         }
+    }
+
+    // ── `peer` label-format invariant ──────────────────────────────
+    //
+    // Metric labels are a public API. A `peer` label emitted in two
+    // formats splits `sum by (peer)` into two series per peer and makes
+    // every `by (peer)` join across the two groups return empty —
+    // silently, because Prometheus raises no error for a join that
+    // matches nothing. These tests pin the one canonical format across
+    // the whole peer-labeled surface rather than spot-checking it.
+
+    /// Names of every gathered family carrying at least one `peer`
+    /// label, sorted and deduplicated.
+    fn peer_labeled_families(m: &BgpMetrics) -> Vec<String> {
+        let mut names: Vec<String> = m
+            .registry()
+            .gather()
+            .into_iter()
+            .filter(|family| {
+                family
+                    .get_metric()
+                    .iter()
+                    .any(|metric| metric.get_label().iter().any(|l| l.name() == "peer"))
+            })
+            .map(|family| family.name().to_owned())
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    /// The complete `peer`-labeled surface, as emitted by
+    /// `populate_all_peer_families`.
+    ///
+    /// Adding a `peer`-labeled family means adding it here, to
+    /// `populate_all_peer_families`, and to
+    /// [`BgpMetrics::reap_peer_series`] — the three are cross-checked
+    /// by the tests below.
+    // ponytail: a family declared but never recorded is invisible to
+    // `gather()`, so no runtime check can catch one that is added and
+    // left unpopulated; this list plus the struct doc comment is the
+    // practical ceiling.
+    const PEER_LABELED_FAMILIES: [&str; 49] = [
+        "bfd_session_flaps_total",
+        "bfd_session_up",
+        "bgp_as_path_loop_detected_total",
+        "bgp_bgpls_nlri_discarded_total",
+        "bgp_exact_export_rejections_total",
+        "bgp_fsm_stale_timer_events_total",
+        "bgp_gr_active_peers",
+        "bgp_gr_stale_routes",
+        "bgp_gr_timer_expired_total",
+        "bgp_hold_timer_rearmed_pending_input_total",
+        "bgp_inbound_rib_backpressure_total",
+        "bgp_max_prefix_exceeded_total",
+        "bgp_max_prefix_headroom",
+        "bgp_max_prefix_limit",
+        "bgp_max_prefix_usage",
+        "bgp_messages_received_total",
+        "bgp_messages_sent_total",
+        "bgp_notifications_received_total",
+        "bgp_notifications_sent_total",
+        "bgp_otc_routes_blocked_total",
+        "bgp_outbound_prefix_blocked_total",
+        "bgp_outbound_prefix_blocking",
+        "bgp_outbound_prefix_headroom",
+        "bgp_outbound_prefix_limit",
+        "bgp_outbound_prefix_usage",
+        "bgp_outbound_route_drops_total",
+        "bgp_peer_outbound_queue_depth",
+        "bgp_peer_slow",
+        "bgp_peer_update_group",
+        "bgp_policy_routes_total",
+        "bgp_rejected_routes_retained",
+        "bgp_rfc8212_missing_export_policy",
+        "bgp_rfc8212_missing_import_policy",
+        "bgp_rib_adj_out_prefixes",
+        "bgp_rib_outbound_registration_failover_total",
+        "bgp_rib_outbound_registration_replaced_total",
+        "bgp_rib_prefixes",
+        "bgp_rib_stale_peer_down_ignored_total",
+        "bgp_rib_stale_session_message_ignored_total",
+        "bgp_role_mismatch_total",
+        "bgp_route_refresh_in_progress",
+        "bgp_route_refresh_stale_entries",
+        "bgp_rr_loop_detected_total",
+        "bgp_send_hold_expirations_total",
+        "bgp_session_established_total",
+        "bgp_session_flaps_total",
+        "bgp_session_state_transitions_total",
+        "bgp_update_malformed_total",
+        "bmp_source_drops_total",
+    ];
+
+    #[test]
+    fn peer_labeled_family_surface_matches_the_pinned_list() {
+        let m = BgpMetrics::with_registry(Registry::new());
+        populate_all_peer_families(&m, &peer_label(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1))));
+
+        // Names, not just a count: the format assertion below is only
+        // as good as the set of families it walks, so pin that set.
+        assert_eq!(
+            peer_labeled_families(&m),
+            PEER_LABELED_FAMILIES,
+            "peer-labeled family surface drifted from the pinned list"
+        );
+    }
+
+    #[test]
+    fn every_peer_labeled_series_uses_the_canonical_bare_address() {
+        let m = BgpMetrics::with_registry(Registry::new());
+        for addr in [
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+            IpAddr::V6("2001:db8::1".parse().unwrap()),
+        ] {
+            populate_all_peer_families(&m, &peer_label(addr));
+        }
+
+        assert_eq!(
+            non_canonical_peer_labels(m.registry()),
+            Vec::<(String, String)>::new(),
+            "every peer label must be the bare address form built by peer_label()"
+        );
+    }
+
+    #[test]
+    fn non_canonical_peer_labels_rejects_the_transport_endpoint_form() {
+        // Negative control: the checker is worth nothing unless it
+        // fails on the `addr:port` format this normalization retired.
+        let m = BgpMetrics::with_registry(Registry::new());
+        m.record_message_sent("192.0.2.1:179", "update");
+        m.set_rib_prefixes("[2001:db8::1]:179", "all", 1);
+        m.set_rib_prefixes("192.0.2.1", "all", 1);
+
+        assert_eq!(
+            non_canonical_peer_labels(m.registry()),
+            vec![
+                (
+                    "bgp_messages_sent_total".to_owned(),
+                    "192.0.2.1:179".to_owned()
+                ),
+                (
+                    "bgp_rib_prefixes".to_owned(),
+                    "[2001:db8::1]:179".to_owned()
+                ),
+            ]
+        );
     }
 }
