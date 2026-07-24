@@ -848,6 +848,81 @@ async fn policy_deny_gate_reports_the_deciding_chain_member() {
     handle.await.unwrap();
 }
 
+/// ADR-0112: a rejection by the reserved internal deny is attributed under its
+/// own gate code, not as `policy_denied`.
+///
+/// The distinction is the whole point of the explain surface here — an
+/// operator staring at "export policy denied this route" goes looking for the
+/// policy they wrote, and there isn't one. Config validation refuses both
+/// reserved names to operator policies, so the name test cannot be fooled.
+/// Emitting `policy_denied` for the reserved chain makes this red.
+#[tokio::test]
+async fn reserved_rfc8212_export_deny_is_attributed_separately() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    // The chain the daemon installs on an eBGP export direction with no
+    // explicit operator policy.
+    let reserved = PolicyChain::from_named(vec![rustbgpd_policy::NamedPolicy {
+        name: Some(rustbgpd_policy::RFC8212_MISSING_EXPORT_POLICY.to_string()),
+        policy: Policy {
+            entries: Vec::new(),
+            default_action: PolicyAction::Deny,
+        },
+        rpol: None,
+    }]);
+    let _rx_s = explain_peer_up(
+        &tx,
+        source,
+        ipv4_sendable(),
+        true,
+        false,
+        None,
+        vec![],
+        vec![],
+    )
+    .await;
+    let _rx_t = explain_peer_up(
+        &tx,
+        target,
+        ipv4_sendable(),
+        true,
+        false,
+        Some(reserved),
+        vec![],
+        vec![],
+    )
+    .await;
+
+    feed_routes(
+        &tx,
+        source,
+        vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
+    )
+    .await;
+
+    let explain = query_explain_advertised_route(&tx, target, Prefix::V4(prefix)).await;
+    assert_eq!(explain.decision, crate::update::ExplainDecision::Deny);
+    let stop = stopped_gate(&explain).expect("ladder must stop");
+    assert_eq!(
+        (stop.gate, stop.code),
+        ("export_policy", "rfc8212_missing_export_policy")
+    );
+    assert!(
+        stop.detail.contains("RFC 8212") && stop.detail.contains("no explicit export policy"),
+        "the detail must say the policy is absent, not that a policy rejected: {:?}",
+        stop.detail
+    );
+    assert_eq!(explain.reasons[0].code, "rfc8212_missing_export_policy");
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
 #[tokio::test]
 async fn advertised_route_reports_in_sync_and_staged_modifications() {
     let (tx, rx) = mpsc::channel(64);

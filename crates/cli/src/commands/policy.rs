@@ -1302,6 +1302,14 @@ fn statement_line(s: &proto::ImportExplainStatementStep) -> String {
     let mut line = format!("[{}] policy {policy}", s.policy_index);
     if s.default_action {
         line.push_str(&format!(" default-action {}", s.action));
+        // ADR-0112: the reserved deny is daemon-supplied, and config
+        // validation refuses both names to operator policies, so seeing one
+        // here is proof rather than a guess. Say what it means — an operator
+        // reading a bare `rfc8212_missing_import_policy` has no way to know
+        // the chain is not theirs.
+        if rustbgpd_policy::is_rfc8212_reserved_policy_name(&s.policy_name) {
+            line.push_str("  (RFC 8212: no explicit import policy configured for this eBGP peer)");
+        }
     } else if !s.term.is_empty() {
         // rpol member: the deciding term has a name.
         line.push_str(&format!(" term {} {}", s.term, s.action));

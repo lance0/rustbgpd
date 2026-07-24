@@ -330,6 +330,11 @@ pub struct JsonNeighborDetail {
     pub update_group: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub selection_deferral: Vec<JsonSelectionDeferralFamily>,
+    /// ADR-0112 RFC 8212 explicit-policy status, reported per direction and
+    /// never collapsed: `not_required`, `present`, `missing`, or `unknown`
+    /// (an older daemon, or a value this client does not recognize).
+    pub rfc8212_import_policy: String,
+    pub rfc8212_export_policy: String,
 }
 
 #[derive(Serialize)]
@@ -1360,6 +1365,8 @@ mod tests {
                 remaining_millis: 1_500,
                 release_reason: "all_eor".to_string(),
             }],
+            rfc8212_import_policy: "missing".to_string(),
+            rfc8212_export_policy: "present".to_string(),
         };
 
         let value: Value =
@@ -1372,6 +1379,10 @@ mod tests {
         assert_inventory_json_contract(&value, "neighbor-detail-v1");
 
         assert_eq!(value["peer_group"], "rs-clients");
+        // ADR-0112: the two directions are independent JSON fields. Collapsing
+        // them into one "policy present" value drops the half that is denied.
+        assert_eq!(value["rfc8212_import_policy"], "missing");
+        assert_eq!(value["rfc8212_export_policy"], "present");
         assert_eq!(value["min_hold_time"], 30);
         assert_eq!(value["route_server_client"], true);
         assert_eq!(value["role"], "rs");

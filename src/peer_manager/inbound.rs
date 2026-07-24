@@ -535,6 +535,9 @@ impl PeerManager {
                 self.peers.insert(peer_key.clone(), managed);
                 self.register_session(session_id, &peer_key);
                 self.dynamic_peer_count += 1;
+                // ADR-0112: the accepted child carries the range's pinned
+                // external classification and its resolved chains.
+                self.refresh_rfc8212_policy_metrics(&peer_key);
 
                 // Restore any dead-lettered hot-apply / Route Refresh
                 // intent left behind by a prior dynamic-peer auto-

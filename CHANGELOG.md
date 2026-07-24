@@ -37,12 +37,43 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   for the whole session, including after OPEN replaces the sentinel with a
   learned ASN. With the knob off (the default) resolution is unchanged, and
   `evaluate_chain(None, ...)` keeps its process-wide permit-all contract in
-  every case. Still to come: the directional policy-presence status in neighbor
-  detail, JSON, metrics/explain attribution and `rbgp doctor`, and the Route
-  Refresh qualification and rollback contract for live policy-presence edits —
-  a live edit that adds or removes the last explicit import policy is applied
-  through the ordinary policy path, which does not reject an Established peer
-  that never negotiated Route Refresh.
+  every case. Still to come: the Route Refresh qualification and rollback
+  contract for live policy-presence edits — a live edit that adds or removes
+  the last explicit import policy is applied through the ordinary policy path,
+  which does not reject an Established peer that never negotiated Route
+  Refresh.
+
+- **Directional RFC 8212 policy status on every operator surface (ADR-0112).**
+  Neighbor detail reports import and export separately — a one-sided
+  configuration is never collapsed into a single "policy present" answer:
+
+  - `NeighborState.rfc8212_import_policy` / `.rfc8212_export_policy` carry the
+    new `Rfc8212PolicyStatus` enum (`UNSPECIFIED`, `UNKNOWN`, `NOT_REQUIRED`,
+    `PRESENT`, `MISSING`) as appended fields 51 and 52. A daemon that predates
+    them leaves `UNSPECIFIED`; `rbgp` renders that and any unrecognized future
+    value as `unknown` rather than as "no requirement", so a new client
+    against an old daemon and an old client against a new one are both safe.
+  - `rbgp neighbor <addr>` prints an `RFC 8212 Policy` block and `--json`
+    gains `rfc8212_import_policy` / `rfc8212_export_policy`.
+  - `bgp_rfc8212_missing_import_policy{peer}` and
+    `bgp_rfc8212_missing_export_policy{peer}` are 0/1 per direction.
+  - `rbgp rib advertised <peer> --explain` attributes a rejection by the
+    reserved chain under the `rfc8212_missing_export_policy` gate code instead
+    of `policy_denied`, and `rbgp policy explain` labels the import side.
+  - `rbgp doctor` adds `peer.<addr>.rfc8212_policy`: green for
+    `not_required` (the compatibility default) and `present`, red for a
+    `missing` direction, yellow against a daemon that does not expose the
+    status. `/readyz` is deliberately untouched — a peer without operator
+    policy is a configuration state to repair, not a daemon that cannot serve
+    traffic.
+
+  The status is read from the chain the peer currently has installed, not
+  re-resolved from the running configuration, so it cannot report `present`
+  over a live deny. `rfc8212_missing_import_policy` and
+  `rfc8212_missing_export_policy` are now reserved policy names: a
+  `[policy.definitions]` entry or `.rpol` policy using either is rejected at
+  load, which is what makes both the status comparison and the explain
+  attribution unambiguous.
 
 ### Changed
 

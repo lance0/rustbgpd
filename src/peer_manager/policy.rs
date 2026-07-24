@@ -1617,8 +1617,37 @@ impl PeerManager {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
+    /// Apply one peer's resolved chains, then re-read the ADR-0112 gauges off
+    /// whatever ended up installed.
+    ///
+    /// The refresh runs on *every* exit, success and bail alike, because a
+    /// bail can legitimately leave one direction advanced and the other still
+    /// on its prior chain (the cross-side carry case). Reading the installed
+    /// chains afterwards reports that mixed state correctly; deriving the
+    /// gauge from the candidate chains the caller passed in would not.
     async fn update_runtime_policies_for_peer_key(
+        &mut self,
+        peer_key: PeerKey,
+        import_policy: Option<PolicyChain>,
+        export_policy: Option<PolicyChain>,
+        refresh_failure: RefreshFailureHandling,
+        rollback_plan: Option<&mut Option<PolicyRollbackPeerPlan>>,
+    ) -> Result<(), String> {
+        let result = self
+            .apply_runtime_policies_for_peer_key(
+                peer_key.clone(),
+                import_policy,
+                export_policy,
+                refresh_failure,
+                rollback_plan,
+            )
+            .await;
+        self.refresh_rfc8212_policy_metrics(&peer_key);
+        result
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn apply_runtime_policies_for_peer_key(
         &mut self,
         peer_key: PeerKey,
         import_policy: Option<PolicyChain>,

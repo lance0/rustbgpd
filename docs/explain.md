@@ -81,6 +81,15 @@ RT-Constrain membership gate; `--labeled` explains the RFC 8277
 labeled-unicast ladder. Rung-by-rung semantics:
 [OPERATIONS.md](OPERATIONS.md#explain-an-export-decision-why-diddidnt-route-x-go-to-peer-y).
 
+When RFC 8212 enforcement (`[global] ebgp_requires_policy`) is on and this
+eBGP peer has no explicit operator export policy, the ladder stops at
+`export_policy` with the `rfc8212_missing_export_policy` code rather than
+`policy_denied`: the route was not rejected by a policy, there is no policy.
+The import side is labelled the same way — `rbgp policy explain` annotates the
+reserved chain's default-action line. Neither name can belong to an operator
+policy; both are refused at config load. See
+[CONFIGURATION.md](CONFIGURATION.md#ebgp_requires_policy--rfc-8212-explicit-policy-on-ebgp).
+
 For a negotiated unicast Add-Path send peer, add the paired
 `--source-peer <addr> --source-path-id <id>` flags to answer the same question
 for one exact Adj-RIB-In candidate (including inbound ID 0). The source

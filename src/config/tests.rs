@@ -16512,6 +16512,72 @@ fn rfc8212_implicit_tails_are_not_explicit_policy() {
     );
 }
 
+/// ADR-0112 requires the reserved deny to be a chain no configured name can
+/// reference or shadow. Enforcement never depended on that — the chain is
+/// built directly — but the *reporting* surfaces do: neighbor status compares
+/// the installed chain against the reserved deny, and import/export explain
+/// attribute a rejection by the deciding member's name. Allowing an operator
+/// policy to take either name would make both ambiguous, so both are refused
+/// at load in the one namespace TOML and `.rpol` policies share.
+#[test]
+fn rfc8212_reserved_chain_names_are_refused_to_operator_policies() {
+    for reserved in [
+        super::RFC8212_MISSING_IMPORT_POLICY,
+        super::RFC8212_MISSING_EXPORT_POLICY,
+    ] {
+        let err = parse(&rfc8212_toml(
+            "",
+            &format!("\n[policy.definitions.{reserved}]\ndefault_action = \"permit\"\n"),
+            65002,
+            "",
+        ))
+        .expect_err("a reserved RFC 8212 chain name must not load");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains(reserved) && rendered.contains("reserved"),
+            "the error must name the offending policy: {rendered}"
+        );
+    }
+}
+
+/// The identity test behind the status surface: only the chain the daemon
+/// builds compares equal to it. An operator deny-all is deliberate policy and
+/// must not read as the reserved deny, and neither direction's reserved chain
+/// answers for the other. Comparing on shape (empty entries plus a deny
+/// default) instead of the whole chain makes the deny-all case red.
+#[test]
+fn rfc8212_reserved_deny_identity_matches_only_the_reserved_chain() {
+    use rustbgpd_policy::{Policy, PolicyAction, PolicyChain};
+
+    let import = super::reserved_rfc8212_deny_chain(super::RFC8212_MISSING_IMPORT_POLICY);
+    let export = super::reserved_rfc8212_deny_chain(super::RFC8212_MISSING_EXPORT_POLICY);
+    let operator_deny_all = PolicyChain::new(vec![Policy {
+        entries: Vec::new(),
+        default_action: PolicyAction::Deny,
+    }]);
+
+    assert!(super::is_reserved_rfc8212_deny(
+        Some(&import),
+        super::RFC8212_MISSING_IMPORT_POLICY
+    ));
+    assert!(super::is_reserved_rfc8212_deny(
+        Some(&export),
+        super::RFC8212_MISSING_EXPORT_POLICY
+    ));
+    assert!(!super::is_reserved_rfc8212_deny(
+        Some(&export),
+        super::RFC8212_MISSING_IMPORT_POLICY
+    ));
+    assert!(!super::is_reserved_rfc8212_deny(
+        Some(&operator_deny_all),
+        super::RFC8212_MISSING_IMPORT_POLICY
+    ));
+    assert!(!super::is_reserved_rfc8212_deny(
+        None,
+        super::RFC8212_MISSING_IMPORT_POLICY
+    ));
+}
+
 /// Every inheritance level the ADR counts as explicit satisfies the
 /// requirement, including chains whose configured result is permit-all.
 #[test]

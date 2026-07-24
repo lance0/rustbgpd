@@ -1,11 +1,16 @@
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
 
-use rustbgpd_api::peer_types::{PeerInfo, PeerKey, WarmCheckpointCapture, WarmCheckpointSession};
+use rustbgpd_api::peer_types::{
+    PeerInfo, PeerKey, Rfc8212PolicyStatus, WarmCheckpointCapture, WarmCheckpointSession,
+};
 use rustbgpd_bmp::{BmpEvent, BmpPeerInfo, BmpPeerType};
 use rustbgpd_fsm::SessionState;
+use rustbgpd_policy::PolicyChain;
 use rustbgpd_transport::{PeerHandle, PeerSessionState};
 use tracing::warn;
+
+use crate::config::{RFC8212_MISSING_EXPORT_POLICY, RFC8212_MISSING_IMPORT_POLICY};
 
 use super::{ManagedPeer, PEER_QUERY_TIMEOUT, PeerManager};
 
@@ -18,9 +23,12 @@ pub(super) fn build_peer_info(
     peer: &PeerKey,
     managed: &ManagedPeer,
     session_state: Option<&PeerSessionState>,
+    ebgp_requires_policy: bool,
 ) -> PeerInfo {
     let stale = session_state.is_none();
     let remote_asn = effective_remote_asn(managed, session_state);
+    let (rfc8212_import_policy, rfc8212_export_policy) =
+        rfc8212_statuses(managed, ebgp_requires_policy);
     PeerInfo {
         address: peer.address,
         interface: peer.interface.clone(),
@@ -109,6 +117,66 @@ pub(super) fn build_peer_info(
         is_dynamic: managed.is_dynamic,
         stale,
         slow_peer: session_state.is_some_and(|s| s.slow_peer),
+        rfc8212_import_policy,
+        rfc8212_export_policy,
+    }
+}
+
+/// ADR-0112 directional status for both of one peer's directions.
+///
+/// The single funnel for every consumer — neighbor detail, JSON, and the
+/// per-peer gauges all go through here, so none of them can report a verdict
+/// the others do not.
+pub(super) fn rfc8212_statuses(
+    managed: &ManagedPeer,
+    ebgp_requires_policy: bool,
+) -> (Rfc8212PolicyStatus, Rfc8212PolicyStatus) {
+    let enforced = ebgp_requires_policy && managed.rfc8212_external;
+    (
+        rfc8212_status(
+            enforced,
+            managed.import_policy.as_ref(),
+            RFC8212_MISSING_IMPORT_POLICY,
+        ),
+        rfc8212_status(
+            enforced,
+            managed.export_policy.as_ref(),
+            RFC8212_MISSING_EXPORT_POLICY,
+        ),
+    )
+}
+
+/// ADR-0112 directional status for one direction of one peer.
+///
+/// `chain` must be the chain this peer currently has *installed* —
+/// `ManagedPeer::import_policy` / `::export_policy`, which only advance after
+/// the session task acknowledges the swap and stay at the prior value through
+/// every bail and rollback. Everything the surface reports is read from there,
+/// so it agrees with what the session is evaluating by construction rather
+/// than by a second bookkeeping path staying in step.
+///
+/// The reserved-deny test runs first and unconditionally. If the two inputs
+/// ever disagreed — a deny installed on a peer no longer believed enforced —
+/// the honest answer is the one the routes obey.
+pub(super) fn rfc8212_status(
+    enforced: bool,
+    chain: Option<&PolicyChain>,
+    reserved_name: &str,
+) -> Rfc8212PolicyStatus {
+    if crate::config::is_reserved_rfc8212_deny(chain, reserved_name) {
+        Rfc8212PolicyStatus::Missing
+    } else if !enforced {
+        Rfc8212PolicyStatus::NotRequired
+    } else if chain.is_some() {
+        Rfc8212PolicyStatus::Present
+    } else {
+        // A governed direction resolves to either an explicit operator chain
+        // or the reserved deny, so a governed direction with no chain at all
+        // is an unreachable state. Report it as unknown rather than calling
+        // `evaluate_chain(None, ..)` permit-all "present": a false green here
+        // would say the requirement is met on a direction with no policy at
+        // all, which is the failure this feature exists to prevent.
+        Rfc8212PolicyStatus::Unknown
     }
 }
 
@@ -155,6 +223,30 @@ async fn collect_session_states(
 }
 
 impl PeerManager {
+    /// Refresh both ADR-0112 gauges for one peer from the chains it currently
+    /// has installed.
+    ///
+    /// Call this wherever a peer's import/export chain is installed or
+    /// replaced: peer creation, dynamic accept, and the end of a runtime
+    /// policy update. It shares [`rfc8212_statuses`] with the neighbor-detail
+    /// surface, so the gauge and the reported verdict cannot disagree — both
+    /// are one read of `ManagedPeer`'s installed chains.
+    ///
+    /// A peer that has gone away is skipped; its series are dropped by
+    /// `reap_peer_series` on removal.
+    pub(super) fn refresh_rfc8212_policy_metrics(&self, peer: &PeerKey) {
+        let Some(managed) = self.peers.get(peer) else {
+            return;
+        };
+        let (import, export) =
+            rfc8212_statuses(managed, self.current_config.global.ebgp_requires_policy);
+        self.metrics.set_rfc8212_missing_policy(
+            &peer.address.to_string(),
+            import == Rfc8212PolicyStatus::Missing,
+            export == Rfc8212PolicyStatus::Missing,
+        );
+    }
+
     /// Capture negotiated truth for every V1 checkpoint candidate.
     ///
     /// Static, enabled, numbered, unambiguous peers are queried concurrently.
@@ -297,7 +389,12 @@ impl PeerManager {
     pub(super) async fn get_peer_info(&self, peer: &PeerKey) -> Option<PeerInfo> {
         let managed = self.peers.get(peer)?;
         let session_state = managed.handle.query_state_timeout(PEER_QUERY_TIMEOUT).await;
-        let mut info = build_peer_info(peer, managed, session_state.as_ref());
+        let mut info = build_peer_info(
+            peer,
+            managed,
+            session_state.as_ref(),
+            self.current_config.global.ebgp_requires_policy,
+        );
         if let Some(latch) = self.max_prefix_latches.get(peer) {
             info.last_error.clone_from(&latch.error);
             info.max_prefix_action = if latch.deadline.is_some() {
@@ -330,7 +427,12 @@ impl PeerManager {
         let mut infos = Vec::with_capacity(self.peers.len());
         for (peer, managed) in &self.peers {
             let session_state = states.get(peer).and_then(Option::as_ref);
-            let mut info = build_peer_info(peer, managed, session_state);
+            let mut info = build_peer_info(
+                peer,
+                managed,
+                session_state,
+                self.current_config.global.ebgp_requires_policy,
+            );
             if let Some(latch) = self.max_prefix_latches.get(peer) {
                 info.last_error.clone_from(&latch.error);
                 info.max_prefix_action = if latch.deadline.is_some() {

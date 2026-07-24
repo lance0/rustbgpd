@@ -151,7 +151,7 @@ impl PeerManager {
                 export_policy: resolved.export_policy,
                 pending_inbound: None,
                 is_dynamic: false,
-                rfc8212_external: false,
+                rfc8212_external: resolved.rfc8212_external,
                 tcp_ao_protected,
                 tcp_ao_rotation: rustbgpd_transport::TcpAoRotationStatus::default(),
                 accepted_dynamic_range: None,

@@ -428,6 +428,15 @@ gRPC consumer gains from the recent proto additions
   unsupported", not as `shared` and not as permission to compare `group:N`
   strings. The in-tree `rbgp` client reports this case as
   `update-group comparison is not supported by this daemon`.
+- **RFC 8212 directional policy status (ADR-0112)** —
+  `NeighborState.rfc8212_import_policy` and `.rfc8212_export_policy` carry
+  `Rfc8212PolicyStatus` per direction: `NOT_REQUIRED` (enforcement off, or
+  iBGP), `PRESENT`, or `MISSING` (the reserved internal deny is installed and
+  no route crosses that direction). A daemon that predates the fields leaves
+  them at `UNSPECIFIED = 0`; treat that and any unrecognized future value as
+  "unknown", never as `NOT_REQUIRED`, or a rolling upgrade will report a peer
+  as unconstrained while its deny is live. Do not collapse the two into one
+  boolean — a peer with an import policy and no export policy is a real state.
 - **`send_hold_time` (RFC 9687)** — settable in `AddNeighbor`'s
   `NeighborConfig` and in `PeerGroupDefinition`, with the same
   validation as the config path; `ListNeighbors` reports the

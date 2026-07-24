@@ -8,6 +8,33 @@ use super::{
     should_suppress_ibgp_inner, unicast_route_family, validate_route_aspa, validate_route_rpki,
 };
 
+/// Gate code and message for an export-policy deny.
+///
+/// ADR-0112: a rejection by the reserved internal deny is a *missing* operator
+/// policy, not an operator policy that rejected. It gets its own code so a
+/// machine consumer never has to parse the message, and so an operator staring
+/// at the ladder is not sent looking for a policy they never wrote. Config
+/// validation refuses the reserved names to operator policies, so the deciding
+/// member's name is proof rather than a heuristic.
+fn export_deny_attribution(
+    matched_policy: Option<&str>,
+    policy_label: &str,
+) -> (&'static str, String) {
+    if matched_policy.is_some_and(rustbgpd_policy::is_rfc8212_reserved_policy_name) {
+        (
+            "rfc8212_missing_export_policy",
+            "RFC 8212: no explicit export policy is configured for this eBGP peer, so the \
+             reserved internal deny is installed and nothing enters its Adj-RIB-Out"
+                .to_string(),
+        )
+    } else {
+        (
+            "policy_denied",
+            format!("export policy {policy_label:?} denied this route"),
+        )
+    }
+}
+
 /// Candidate paths for `prefix` visible to `target_peer` under RFC 9107
 /// ORR: every Adj-RIB-In entry that survives split horizon and the
 /// iBGP / RFC 4456 reflection rules. Shared by the ORR distribution and
@@ -850,18 +877,16 @@ impl RibManager {
             super::policy_label_with_term(export_pol, &ctx, evaluation.matched_policy.as_deref());
         if result.action != PolicyAction::Permit {
             explain.decision = ExplainDecision::Deny;
-            let message = format!("export policy {policy_label:?} denied this route");
+            let (code, message) =
+                export_deny_attribution(evaluation.matched_policy.as_deref(), &policy_label);
             gate(
                 &mut explain.gates,
                 "export_policy",
-                "policy_denied",
+                code,
                 Stop,
                 message.clone(),
             );
-            explain.reasons.push(ExplainReason {
-                code: "policy_denied",
-                message,
-            });
+            explain.reasons.push(ExplainReason { code, message });
             return explain;
         }
         if export_pol.is_some() {
@@ -1876,11 +1901,13 @@ impl RibManager {
         if result.action != PolicyAction::Permit {
             if let Some(trace) = target.trace() {
                 let label = trace.policy_label.clone().unwrap_or_default();
+                let (code, message) =
+                    export_deny_attribution(evaluation.matched_policy.as_deref(), &label);
                 trace.push(
                     "export_policy",
-                    "policy_denied",
+                    code,
                     crate::update::ExportGateVerdict::Stop,
-                    format!("export policy {label:?} denied this route"),
+                    message,
                 );
             }
             policy_filtered.push(PolicyFilteredRouteKey {

@@ -2064,6 +2064,31 @@ pub struct PeerInfo {
     /// configured duration. Clears when the queue drains and on session
     /// teardown.
     pub slow_peer: bool,
+    /// ADR-0112 RFC 8212 explicit-policy status for the import direction,
+    /// read from the chain installed on this peer.
+    pub rfc8212_import_policy: Rfc8212PolicyStatus,
+    /// ADR-0112 RFC 8212 explicit-policy status for the export direction.
+    pub rfc8212_export_policy: Rfc8212PolicyStatus,
+}
+
+/// RFC 8212 explicit-policy status for one direction of one session
+/// (ADR-0112).
+///
+/// The wire enum additionally carries `UNSPECIFIED`, which is not producible
+/// here: it means "an older daemon left this field empty", and this daemon
+/// always answers for a peer it manages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Rfc8212PolicyStatus {
+    /// The verdict cannot be determined. Reserved for the unreachable state
+    /// where enforcement governs a direction that has no chain installed at
+    /// all — reported rather than rounded to `Present`.
+    Unknown,
+    /// Enforcement is disabled process-wide, or this session is iBGP.
+    NotRequired,
+    /// Enforcement applies and explicit operator policy is installed.
+    Present,
+    /// Enforcement applies and the reserved internal deny is installed.
+    Missing,
 }
 
 /// One `QueryPolicyDatasets` reply row (LAN-305): the policy crate's

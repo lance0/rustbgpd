@@ -584,6 +584,30 @@ message NeighborState {
   // Actor-authoritative values from the current Established session. Absent
   // while down, during OpenConfirm, or when the actor query is stale.
   NegotiatedSessionState negotiated_session = 50;
+  // ADR-0112 RFC 8212 explicit-policy status, one value per direction. A
+  // one-sided configuration is never collapsed into a single "policy
+  // present" answer. MISSING means the reserved internal deny is installed
+  // on that direction of this peer and no route crosses it, in any
+  // negotiated family.
+  Rfc8212PolicyStatus rfc8212_import_policy = 51;
+  Rfc8212PolicyStatus rfc8212_export_policy = 52;
+}
+
+// RFC 8212 explicit-policy status for one direction of one session
+// (ADR-0112). Rolling-compatible: a daemon that predates the field leaves it
+// at UNSPECIFIED, and clients must render UNSPECIFIED and any unrecognized
+// future value as "unknown" rather than assuming NOT_REQUIRED.
+enum Rfc8212PolicyStatus {
+  // Field absent or defaulted across a version boundary.
+  RFC8212_POLICY_STATUS_UNSPECIFIED = 0;
+  // The current daemon or client cannot determine the verdict.
+  RFC8212_POLICY_STATUS_UNKNOWN = 1;
+  // Enforcement is disabled process-wide, or this session is iBGP.
+  RFC8212_POLICY_STATUS_NOT_REQUIRED = 2;
+  // Enforcement applies and explicit operator policy is installed.
+  RFC8212_POLICY_STATUS_PRESENT = 3;
+  // Enforcement applies and the reserved internal deny is installed.
+  RFC8212_POLICY_STATUS_MISSING = 4;
 }
 
 message NegotiatedSessionState {

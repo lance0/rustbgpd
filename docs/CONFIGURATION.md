@@ -413,10 +413,30 @@ not AS 0: its accepted children are treated as external for their whole session,
 including after the OPEN reveals a peer ASN. Configure an explicit
 `remote_asn` on the range or a static neighbor if you need iBGP treatment.
 
-**Not exposed yet:** the directional policy-presence status in neighbor detail
-and JSON, metrics/explain attribution for the reserved deny, and the `rbgp
-doctor` check. Until those land, verify enforcement from the resolved
-configuration rather than from live neighbor output.
+`rfc8212_missing_import_policy` and `rfc8212_missing_export_policy` are
+reserved policy names. A `[policy.definitions]` entry or `.rpol` policy using
+either is rejected at load, so the reserved chain can never be shadowed and
+neighbor status and explain output can attribute it unambiguously.
+
+**Observing it.** Each direction is reported independently — `not_required`
+(enforcement off, or iBGP), `present`, `missing`, or `unknown`:
+
+- `rbgp neighbor <addr>` prints an `RFC 8212 Policy` block; `--json` carries
+  `rfc8212_import_policy` and `rfc8212_export_policy`.
+- `bgp_rfc8212_missing_import_policy{peer}` /
+  `bgp_rfc8212_missing_export_policy{peer}` are 0/1 per direction.
+- `rbgp doctor` fails `peer.<addr>.rfc8212_policy` for a missing direction.
+- `rbgp rib advertised <peer> --explain` reports the reserved export deny as
+  the `rfc8212_missing_export_policy` gate, not as `policy_denied`.
+
+`/readyz` stays green: a peer without operator policy is a configuration state
+for `doctor` to fail, not evidence the daemon cannot serve traffic.
+
+**Not exposed yet:** live policy-presence edits still take the ordinary policy
+path. An edit that adds or removes the last explicit import policy does not
+yet reject an Established peer that never negotiated Route Refresh, so after
+such an edit confirm convergence before trusting the routes already in
+Adj-RIB-In.
 
 The knob is deliberately restart-required rather than hot-applied. Enabling it
 flips both directions on every eBGP session at once, and recovering a peer's

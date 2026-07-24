@@ -803,6 +803,8 @@ impl rustbgpd_api::proto::neighbor_service_server::NeighborService for MockNeigh
             tcp_ao_rotation_phase: "idle".to_string(),
             tcp_ao_rotation_error: String::new(),
             slow_peer: false,
+            rfc8212_import_policy: crate::proto::Rfc8212PolicyStatus::NotRequired.into(),
+            rfc8212_export_policy: crate::proto::Rfc8212PolicyStatus::NotRequired.into(),
             graceful_shutdown_advertise_intent: Some(true),
             max_prefix_action: "shutdown".to_string(),
             max_prefix_restart_remaining_millis: None,

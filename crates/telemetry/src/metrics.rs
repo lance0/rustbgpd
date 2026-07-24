@@ -112,6 +112,8 @@ pub struct BgpMetrics {
     peer_outbound_queue_depth: IntGaugeVec,
     peer_slow: IntGaugeVec,
     rejected_routes_retained: IntGaugeVec,
+    rfc8212_missing_import_policy: IntGaugeVec,
+    rfc8212_missing_export_policy: IntGaugeVec,
 
     // ── RIB ──────────────────────────────────────────────────────
     rib_prefixes: IntGaugeVec,
@@ -465,6 +467,36 @@ impl BgpMetrics {
                  looking-glass filtered-route surface (LAN-472), per peer. \
                  Bounded by [policy.reject_retention] capacity; refreshed on \
                  every retention mutation and reset on session reset.",
+            ),
+            &["peer"],
+        )
+        .expect("valid metric definition");
+
+        let rfc8212_missing_import_policy = IntGaugeVec::new(
+            Opts::new(
+                "bgp_rfc8212_missing_import_policy",
+                "1 when [global] ebgp_requires_policy is on, this session is \
+                 external, and no explicit operator import policy is \
+                 configured, so the ADR-0112 reserved internal deny chain is \
+                 installed and no received route from this peer becomes \
+                 eligible in any negotiated family. 0 otherwise, including \
+                 for iBGP and while enforcement is off. Read from the chain \
+                 installed on the peer and refreshed wherever that chain is \
+                 installed or replaced.",
+            ),
+            &["peer"],
+        )
+        .expect("valid metric definition");
+
+        let rfc8212_missing_export_policy = IntGaugeVec::new(
+            Opts::new(
+                "bgp_rfc8212_missing_export_policy",
+                "1 when [global] ebgp_requires_policy is on, this session is \
+                 external, and no explicit operator export policy is \
+                 configured, so the ADR-0112 reserved internal deny chain is \
+                 installed and nothing enters this peer's Adj-RIB-Out in any \
+                 negotiated family. 0 otherwise, including for iBGP and while \
+                 enforcement is off.",
             ),
             &["peer"],
         )
@@ -1648,6 +1680,12 @@ impl BgpMetrics {
             .register(Box::new(rejected_routes_retained.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(rfc8212_missing_import_policy.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(rfc8212_missing_export_policy.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(rib_attr_intern_global_size.clone()))
             .expect("metric not already registered");
         registry
@@ -2055,6 +2093,8 @@ impl BgpMetrics {
             peer_outbound_queue_depth,
             peer_slow,
             rejected_routes_retained,
+            rfc8212_missing_import_policy,
+            rfc8212_missing_export_policy,
             rib_prefixes,
             rib_adj_out_prefixes,
             rib_loc_prefixes,
@@ -2228,6 +2268,8 @@ impl BgpMetrics {
         Self::reap_peer_series_from_vec(&self.peer_outbound_queue_depth, peer);
         Self::reap_peer_series_from_vec(&self.peer_slow, peer);
         Self::reap_peer_series_from_vec(&self.rejected_routes_retained, peer);
+        Self::reap_peer_series_from_vec(&self.rfc8212_missing_import_policy, peer);
+        Self::reap_peer_series_from_vec(&self.rfc8212_missing_export_policy, peer);
         Self::reap_peer_series_from_vec(&self.peer_update_group, peer);
         Self::reap_peer_series_from_vec(&self.rib_prefixes, peer);
         Self::reap_peer_series_from_vec(&self.rib_adj_out_prefixes, peer);
@@ -2497,6 +2539,37 @@ impl BgpMetrics {
     #[must_use]
     pub fn rejected_routes_retained(&self, peer: &str) -> i64 {
         self.rejected_routes_retained
+            .with_label_values(&[peer])
+            .get()
+    }
+
+    /// Set both ADR-0112 RFC 8212 directional gauges for one peer.
+    ///
+    /// Written as one call because the caller derives both verdicts from the
+    /// same installed chains in the same place: splitting it invites a path
+    /// that refreshes one direction and leaves the other latched at a stale
+    /// value.
+    pub fn set_rfc8212_missing_policy(&self, peer: &str, import: bool, export: bool) {
+        self.rfc8212_missing_import_policy
+            .with_label_values(&[peer])
+            .set(i64::from(import));
+        self.rfc8212_missing_export_policy
+            .with_label_values(&[peer])
+            .set(i64::from(export));
+    }
+
+    /// Read a peer's RFC 8212 missing-import gauge. Test/diagnostic helper.
+    #[must_use]
+    pub fn rfc8212_missing_import_policy(&self, peer: &str) -> i64 {
+        self.rfc8212_missing_import_policy
+            .with_label_values(&[peer])
+            .get()
+    }
+
+    /// Read a peer's RFC 8212 missing-export gauge. Test/diagnostic helper.
+    #[must_use]
+    pub fn rfc8212_missing_export_policy(&self, peer: &str) -> i64 {
+        self.rfc8212_missing_export_policy
             .with_label_values(&[peer])
             .get()
     }
@@ -5337,6 +5410,7 @@ mod tests {
         m.set_peer_outbound_queue_depth(peer, 3);
         m.set_peer_slow(peer, true);
         m.set_rejected_routes_retained(peer, 4);
+        m.set_rfc8212_missing_policy(peer, true, true);
         m.set_peer_update_group(peer, 1);
         m.set_max_prefix_capacity(peer, "aggregate", 80, Some(100));
         m.record_max_prefix_exceeded(peer);
@@ -5403,8 +5477,8 @@ mod tests {
         let m = BgpMetrics::new();
         populate_all_peer_families(&m, "10.0.0.1");
         populate_all_peer_families(&m, "10.0.0.2");
-        // 43 peer-labeled families; state transitions hold two series.
-        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 43);
+        // 45 peer-labeled families; state transitions hold two series.
+        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 45);
 
         m.reap_peer_series("10.0.0.1");
 
@@ -5414,7 +5488,7 @@ mod tests {
             "peer-labeled families not reaped: {leftovers:?}"
         );
         // The other peer's series are untouched.
-        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 43);
+        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 45);
     }
 
     /// Load-bearing finite/unlimited proof: removing either finite gauge

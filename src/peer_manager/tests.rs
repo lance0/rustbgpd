@@ -2039,7 +2039,7 @@ async fn unavailable_session_authentication_uses_durable_managed_protection() {
         managed.tcp_ao_protected = true;
         managed.transport_config.peer.min_hold_time = Some(30);
         assert!(managed.transport_config.tcp_ao.is_none());
-        let info = super::snapshot::build_peer_info(&peer_key, managed, None);
+        let info = super::snapshot::build_peer_info(&peer_key, managed, None, false);
         assert_eq!(info.authentication, "tcp_ao");
         assert_eq!(info.min_hold_time, Some(30));
         assert!(info.tcp_ao_info.is_none());
@@ -2048,19 +2048,19 @@ async fn unavailable_session_authentication_uses_durable_managed_protection() {
         managed.is_dynamic = false;
         managed.tcp_ao_protected = true;
         assert_eq!(
-            super::snapshot::build_peer_info(&peer_key, managed, None).authentication,
+            super::snapshot::build_peer_info(&peer_key, managed, None, false).authentication,
             "tcp_ao"
         );
 
         managed.tcp_ao_protected = false;
         assert_eq!(
-            super::snapshot::build_peer_info(&peer_key, managed, None).authentication,
+            super::snapshot::build_peer_info(&peer_key, managed, None, false).authentication,
             "plaintext"
         );
 
         managed.transport_config.md5_password = Some("test-password".into());
         assert_eq!(
-            super::snapshot::build_peer_info(&peer_key, managed, None).authentication,
+            super::snapshot::build_peer_info(&peer_key, managed, None, false).authentication,
             "md5"
         );
     }
@@ -2086,7 +2086,7 @@ async fn unavailable_session_preserves_graceful_shutdown_advertise_intent() {
     let managed = mgr.peers.get_mut(&peer_key).unwrap();
     managed.advertise_graceful_shutdown = true;
 
-    let info = super::snapshot::build_peer_info(&peer_key, managed, None);
+    let info = super::snapshot::build_peer_info(&peer_key, managed, None, false);
     assert!(info.graceful_shutdown_advertise_intent);
     assert!(info.stale);
 
@@ -2123,7 +2123,7 @@ async fn max_prefix_snapshot_uses_live_accounting_and_withholds_stale_headroom()
     state.max_prefix.headroom = Some(14);
     state.max_prefix.headroom_ipv4 = Some(8);
 
-    let live = super::snapshot::build_peer_info(&peer_key, managed, Some(&state));
+    let live = super::snapshot::build_peer_info(&peer_key, managed, Some(&state), false);
     assert_eq!(
         (
             live.prefix_count,
@@ -2139,7 +2139,7 @@ async fn max_prefix_snapshot_uses_live_accounting_and_withholds_stale_headroom()
     assert_eq!(live.max_prefix_headroom_ipv4, Some(8));
     assert_eq!(live.max_prefix_headroom_ipv6, None);
 
-    let stale_info = super::snapshot::build_peer_info(&peer_key, managed, None);
+    let stale_info = super::snapshot::build_peer_info(&peer_key, managed, None, false);
     assert_eq!(stale_info.max_prefixes_effective, Some(30));
     assert_eq!(stale_info.max_prefixes_ipv4_effective, Some(20));
     assert_eq!(stale_info.max_prefixes_ipv6_effective, Some(10));
@@ -2186,16 +2186,16 @@ async fn negotiated_snapshot_uses_only_fresh_established_actor_state() {
         graceful_restart: None,
     });
 
-    let live = super::snapshot::build_peer_info(&peer_key, managed, Some(&state));
+    let live = super::snapshot::build_peer_info(&peer_key, managed, Some(&state), false);
     assert_eq!(live.negotiated_session, state.negotiated_session);
 
-    let stale_info = super::snapshot::build_peer_info(&peer_key, managed, None);
+    let stale_info = super::snapshot::build_peer_info(&peer_key, managed, None, false);
     assert!(stale_info.stale);
     assert!(stale_info.negotiated_session.is_none());
 
     state.fsm_state = SessionState::Idle;
     state.negotiated_session = None;
-    let fresh_down = super::snapshot::build_peer_info(&peer_key, managed, Some(&state));
+    let fresh_down = super::snapshot::build_peer_info(&peer_key, managed, Some(&state), false);
     assert!(!fresh_down.stale);
     assert!(fresh_down.negotiated_session.is_none());
 
@@ -6233,6 +6233,11 @@ fn seed_peer_metric_series(metrics: &BgpMetrics, transport_label: &str, bare_lab
     metrics.record_message_sent(transport_label, "keepalive");
     metrics.set_rib_prefixes(bare_label, "ipv4_unicast", 42);
     metrics.record_bfd_state(bare_label, true, false);
+    // ADR-0112: peer creation materializes both directional gauges so a
+    // healthy peer has a 0 series to alert on rather than an absent one. The
+    // direct-insert test helpers bypass that path, so seed them here to keep
+    // the reap accounting comparable to production.
+    metrics.set_rfc8212_missing_policy(bare_label, false, false);
 }
 
 #[tokio::test]
@@ -18119,4 +18124,253 @@ async fn rfc8212_pinned_dynamic_child_keeps_deny_across_chain_reresolution() {
 
     drop(mgr);
     rib_drainer.await.unwrap();
+}
+
+/// ADR-0112 step 5 helper: a manager whose peers are governed by RFC 8212
+/// enforcement, with the running config additionally claiming a global
+/// explicit policy chain in both directions.
+fn rfc8212_status_manager() -> (PeerManager, mpsc::Receiver<RibUpdate>) {
+    let (_tx, rx) = mpsc::channel(16);
+    let (rib_tx, rib_rx) = mpsc::channel(64);
+    let mut mgr = PeerManager::new(
+        rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    let mut config = make_dynamic_manager_config();
+    config.global.ebgp_requires_policy = true;
+    // The running config says every neighbor inherits an explicit operator
+    // chain. Nothing in the status derivation may consult it.
+    config.policy.import_chain = vec!["operator-import".to_string()];
+    config.policy.export_chain = vec!["operator-export".to_string()];
+    mgr.current_config = config;
+    (mgr, rib_rx)
+}
+
+/// ADR-0112 step 5: the directional status is a read of the chain the peer has
+/// **installed**, never a re-resolution of the running config.
+///
+/// The state under test is the one a failed or not-yet-applied live edit
+/// leaves behind: `current_config` already names explicit operator chains in
+/// both directions while the peer still runs the reserved deny on import. A
+/// surface that answered from `Config` would report `present` over a live
+/// deny — the one answer ADR-0112 must never produce. Deriving the verdict
+/// from anything other than `ManagedPeer`'s installed chains makes the import
+/// assertion red.
+#[tokio::test]
+async fn rfc8212_status_reads_the_installed_chain_not_the_running_config() {
+    let (mut mgr, _rib_rx) = rfc8212_status_manager();
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5));
+    let counters = Arc::new(FakePeerCounters::default());
+    let handle = acking_counted_policy_handle(addr, counters);
+    insert_test_managed_peer(&mut mgr, addr, handle, false);
+
+    {
+        let managed = mgr.peers.get_mut(&key(addr)).unwrap();
+        managed.rfc8212_external = true;
+        managed.import_policy = Some(crate::config::reserved_rfc8212_deny_chain(
+            crate::config::RFC8212_MISSING_IMPORT_POLICY,
+        ));
+        // An ordinary operator chain that happens to deny everything: the
+        // export direction has deliberate policy, so it is PRESENT.
+        managed.export_policy = Some(deny_policy_chain());
+    }
+
+    let managed = mgr.peers.get(&key(addr)).unwrap();
+    let info = super::snapshot::build_peer_info(&key(addr), managed, None, true);
+    assert_eq!(
+        info.rfc8212_import_policy,
+        rustbgpd_api::peer_types::Rfc8212PolicyStatus::Missing,
+        "the reserved deny is installed on import; the running config's explicit \
+         chain is not evidence about this peer"
+    );
+    assert_eq!(
+        info.rfc8212_export_policy,
+        rustbgpd_api::peer_types::Rfc8212PolicyStatus::Present,
+        "an operator deny-all is deliberate policy — RFC 8212 wants a decision, \
+         not a particular filtering strategy"
+    );
+
+    // The gauges share the derivation, so they cannot disagree with the row.
+    mgr.refresh_rfc8212_policy_metrics(&key(addr));
+    assert_eq!(
+        mgr.metrics.rfc8212_missing_import_policy(&addr.to_string()),
+        1
+    );
+    assert_eq!(
+        mgr.metrics.rfc8212_missing_export_policy(&addr.to_string()),
+        0
+    );
+}
+
+/// ADR-0112 step 5: enforcement off, or an internal session, reports
+/// `NOT_REQUIRED` — never `PRESENT`, which would claim a requirement was met
+/// that was never applied. Treating `enforced` as unconditionally true makes
+/// both halves red.
+#[tokio::test]
+async fn rfc8212_status_is_not_required_when_disabled_or_internal() {
+    let (mut mgr, _rib_rx) = rfc8212_status_manager();
+    let external = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5));
+    let internal = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 6));
+    for addr in [external, internal] {
+        let counters = Arc::new(FakePeerCounters::default());
+        let handle = acking_counted_policy_handle(addr, counters);
+        insert_test_managed_peer(&mut mgr, addr, handle, false);
+        let managed = mgr.peers.get_mut(&key(addr)).unwrap();
+        managed.import_policy = None;
+        managed.export_policy = None;
+    }
+    mgr.peers.get_mut(&key(external)).unwrap().rfc8212_external = true;
+    mgr.peers.get_mut(&key(internal)).unwrap().rfc8212_external = false;
+
+    // Enforcement disabled process-wide: the external peer is exempt too.
+    let managed = mgr.peers.get(&key(external)).unwrap();
+    let info = super::snapshot::build_peer_info(&key(external), managed, None, false);
+    assert_eq!(
+        info.rfc8212_import_policy,
+        rustbgpd_api::peer_types::Rfc8212PolicyStatus::NotRequired
+    );
+    assert_eq!(
+        info.rfc8212_export_policy,
+        rustbgpd_api::peer_types::Rfc8212PolicyStatus::NotRequired
+    );
+
+    // Enforcement on, but the session is iBGP.
+    let managed = mgr.peers.get(&key(internal)).unwrap();
+    let info = super::snapshot::build_peer_info(&key(internal), managed, None, true);
+    assert_eq!(
+        info.rfc8212_import_policy,
+        rustbgpd_api::peer_types::Rfc8212PolicyStatus::NotRequired
+    );
+    assert_eq!(
+        info.rfc8212_export_policy,
+        rustbgpd_api::peer_types::Rfc8212PolicyStatus::NotRequired
+    );
+
+    mgr.refresh_rfc8212_policy_metrics(&key(external));
+    mgr.refresh_rfc8212_policy_metrics(&key(internal));
+    for addr in [external, internal] {
+        assert_eq!(
+            mgr.metrics.rfc8212_missing_import_policy(&addr.to_string()),
+            0
+        );
+        assert_eq!(
+            mgr.metrics.rfc8212_missing_export_policy(&addr.to_string()),
+            0
+        );
+    }
+}
+
+/// ADR-0112 step 5: a live policy edit moves the gauges with the chains it
+/// installs, one direction at a time. Refreshing only at peer creation, or
+/// only on the direction the caller changed, leaves a latched gauge and makes
+/// this red.
+#[tokio::test]
+async fn rfc8212_gauges_track_a_live_policy_edit_in_both_directions() {
+    let (mut mgr, mut rib_rx) = rfc8212_status_manager();
+    let rib_drainer = tokio::spawn(async move {
+        while let Some(update) = rib_rx.recv().await {
+            if let RibUpdate::ReplacePeerExportPolicy { reply, .. } = update {
+                let _ = reply.send(Ok(()));
+            }
+        }
+    });
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5));
+    let counters = Arc::new(FakePeerCounters::default());
+    let handle = acking_counted_policy_handle(addr, counters);
+    insert_test_managed_peer(&mut mgr, addr, handle, false);
+    {
+        let managed = mgr.peers.get_mut(&key(addr)).unwrap();
+        managed.rfc8212_external = true;
+        managed.import_policy = Some(crate::config::reserved_rfc8212_deny_chain(
+            crate::config::RFC8212_MISSING_IMPORT_POLICY,
+        ));
+        managed.export_policy = Some(crate::config::reserved_rfc8212_deny_chain(
+            crate::config::RFC8212_MISSING_EXPORT_POLICY,
+        ));
+    }
+    mgr.refresh_rfc8212_policy_metrics(&key(addr));
+    assert_eq!(
+        mgr.metrics.rfc8212_missing_import_policy(&addr.to_string()),
+        1
+    );
+    assert_eq!(
+        mgr.metrics.rfc8212_missing_export_policy(&addr.to_string()),
+        1
+    );
+
+    // Operator adds an explicit import policy; export keeps the reserved deny,
+    // exactly as resolution would hand both chains to this call.
+    mgr.update_runtime_policies(
+        addr,
+        Some(deny_policy_chain()),
+        Some(crate::config::reserved_rfc8212_deny_chain(
+            crate::config::RFC8212_MISSING_EXPORT_POLICY,
+        )),
+    )
+    .await
+    .expect("live import edit applies");
+
+    assert_eq!(
+        mgr.metrics.rfc8212_missing_import_policy(&addr.to_string()),
+        0,
+        "the import gauge must follow the chain the session acknowledged"
+    );
+    assert_eq!(
+        mgr.metrics.rfc8212_missing_export_policy(&addr.to_string()),
+        1,
+        "the untouched export direction stays denied"
+    );
+    let managed = mgr.peers.get(&key(addr)).unwrap();
+    let info = super::snapshot::build_peer_info(&key(addr), managed, None, true);
+    assert_eq!(
+        info.rfc8212_import_policy,
+        rustbgpd_api::peer_types::Rfc8212PolicyStatus::Present
+    );
+    assert_eq!(
+        info.rfc8212_export_policy,
+        rustbgpd_api::peer_types::Rfc8212PolicyStatus::Missing
+    );
+
+    drop(mgr);
+    rib_drainer.await.unwrap();
+}
+
+/// ADR-0112 step 5: a governed direction with no chain at all is unreachable
+/// through resolution, and must never be rounded up to PRESENT.
+///
+/// `evaluate_chain(None, ..)` is permit-all, so reporting "explicit policy
+/// present" for an absent chain would state the requirement was met on the
+/// one shape that lets every route through unfiltered. Answering PRESENT for
+/// any enforced direction — rather than only for one that actually carries a
+/// chain — makes this red.
+#[tokio::test]
+async fn rfc8212_status_never_calls_a_governed_absent_chain_present() {
+    let (mut mgr, _rib_rx) = rfc8212_status_manager();
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5));
+    let counters = Arc::new(FakePeerCounters::default());
+    let handle = acking_counted_policy_handle(addr, counters);
+    insert_test_managed_peer(&mut mgr, addr, handle, false);
+    {
+        let managed = mgr.peers.get_mut(&key(addr)).unwrap();
+        managed.rfc8212_external = true;
+        managed.import_policy = None;
+        managed.export_policy = None;
+    }
+
+    let managed = mgr.peers.get(&key(addr)).unwrap();
+    let info = super::snapshot::build_peer_info(&key(addr), managed, None, true);
+    assert_eq!(
+        info.rfc8212_import_policy,
+        rustbgpd_api::peer_types::Rfc8212PolicyStatus::Unknown
+    );
+    assert_eq!(
+        info.rfc8212_export_policy,
+        rustbgpd_api::peer_types::Rfc8212PolicyStatus::Unknown
+    );
 }
