@@ -736,6 +736,37 @@ impl Config {
         remote_asn == 0 || remote_asn != self.global.asn
     }
 
+    /// Every eBGP neighbor that resolves no explicit operator policy in at
+    /// least one direction, with the direction(s) named.
+    ///
+    /// Both outcomes are reportable, and which one applies is
+    /// `[global] ebgp_requires_policy`: off, the direction is permit-all and
+    /// the session accepts and re-advertises everything; on, the direction
+    /// runs the RFC 8212 reserved deny and carries nothing. Neither is an
+    /// error — a permit-all route server is a legitimate configuration and a
+    /// fail-closed one is the documented effect of the knob — but a config
+    /// gate that says nothing about either lets both ship unnoticed.
+    ///
+    /// Neighbors whose chains fail to resolve are skipped: validation already
+    /// rejects those, so this is only reachable on an already-valid config.
+    #[must_use]
+    pub fn unpoliced_ebgp_neighbors(&self) -> Vec<UnpolicedEbgpNeighbor> {
+        self.neighbors
+            .iter()
+            .filter_map(|neighbor| {
+                let resolved = self.effective_policy_for_neighbor(neighbor, false).ok()?;
+                (resolved.external && !(resolved.import_explicit && resolved.export_explicit)).then(
+                    || UnpolicedEbgpNeighbor {
+                        address: neighbor.address.clone(),
+                        remote_asn: neighbor.remote_asn,
+                        import_missing: !resolved.import_explicit,
+                        export_missing: !resolved.export_explicit,
+                    },
+                )
+            })
+            .collect()
+    }
+
     /// Emit the startup notice for `[global] ebgp_requires_policy = true`
     /// while the last ADR-0112 step lands.
     ///
@@ -2203,6 +2234,31 @@ pub(crate) fn reserved_rfc8212_deny_chain(name: &str) -> PolicyChain {
 #[must_use]
 pub fn is_reserved_rfc8212_deny(chain: Option<&PolicyChain>, name: &str) -> bool {
     chain.is_some_and(|chain| *chain == reserved_rfc8212_deny_chain(name))
+}
+
+/// One eBGP neighbor with no explicit operator policy in at least one
+/// direction. Produced by [`Config::unpoliced_ebgp_neighbors`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnpolicedEbgpNeighbor {
+    pub address: String,
+    pub remote_asn: u32,
+    pub import_missing: bool,
+    pub export_missing: bool,
+}
+
+impl UnpolicedEbgpNeighbor {
+    /// The missing direction(s) as a report phrase.
+    #[must_use]
+    pub fn missing_phrase(&self) -> &'static str {
+        match (self.import_missing, self.export_missing) {
+            (true, true) => "no import policy and no export policy",
+            (true, false) => "no import policy",
+            (false, true) => "no export policy",
+            // Not constructed: the resolver only yields a record when at
+            // least one direction is missing.
+            (false, false) => "",
+        }
+    }
 }
 
 /// Resolved policy chains for one neighbor plus the ADR-0112 directional

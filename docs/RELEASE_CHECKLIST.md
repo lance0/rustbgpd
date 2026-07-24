@@ -189,7 +189,10 @@ kill $DAEMON_PID
 # Each built-in profile emits a starter config that loads cleanly.
 for p in lab edge; do
   ./target/release/rustbgpd --init-config "$p" --stdout > "/tmp/init-$p.toml"
-  ./target/release/rustbgpd --check "/tmp/init-$p.toml"   # expect: config OK
+  # Expect exit 0. Both profiles ship a permit-all eBGP neighbor, so both
+  # summarize as `config VALID, 1 WARNING — NOT a clean check` with the
+  # unpoliced-neighbor warning framed on stderr.
+  ./target/release/rustbgpd --check "/tmp/init-$p.toml"
 done
 
 # Guards must exit non-zero:

@@ -18,7 +18,9 @@ rbgp config import bird.conf --out config.toml
 
 # 2. Hand-translate the reported policy stanzas to .rpol
 #    (docs/rpol-language.md), wire them into import/export chains, then
-#    validate — --check also compiles every referenced .rpol file.
+#    validate — --check also compiles every referenced .rpol file, and
+#    warns (exit stays 0) for every eBGP neighbor still resolving no
+#    explicit policy, by name and direction.
 rustbgpd --check config.toml
 
 # 3. Shadow trial (docs/cookbook/route-server.md), then compare the
@@ -33,6 +35,22 @@ filters, FRR route-maps/prefix-lists, and GoBGP policy-definitions are
 deliberately not translated — a wrong mechanical policy translation would
 be worse than the honest list; the sections below are the hand-translation
 map for exactly those stanzas.
+
+Because no policy is translated, the emitted `[global]` sets
+`ebgp_requires_policy = true` (ADR-0112) — a knob the source config did not
+ask for, so the import report says so and why. Every eBGP direction that
+resolves no explicit policy runs the RFC 8212 reserved deny until you
+configure one: the session establishes and carries nothing in that direction,
+rather than silently passing everything. Each direction starts carrying
+traffic as its chain lands. Delete the line from the emitted config to run
+permit-all instead; it is startup-only, so changing it later needs a restart
+rather than a reload.
+
+Either way, `rustbgpd --check` names every eBGP neighbor that still resolves
+no explicit policy and the directions it is missing, and summarizes as
+`config VALID, <n> WARNINGS — NOT a clean check` rather than `config OK`. It
+does not fail: a permit-all route server is a legitimate configuration, and
+so is a deliberately empty one mid-migration.
 
 The importer deliberately reads one BIRD source file and does not resolve files
 named by standalone `include` statements. Flatten every referenced file into

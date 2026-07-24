@@ -240,6 +240,110 @@ fn gobgp_report_lists_skipped_stanzas_with_lines() {
     assert_eq!(report.exit_code, 2);
 }
 
+/// The two BIRD spellings that reuse block/statement punctuation inside an
+/// expression. Before the scanner tracked bracket and paren depth, the
+/// prefix-set ranges split one `define` into one entry per member plus a
+/// trailing bare `]`, and the `;`-separated declaration lists split each
+/// header into fragments and left the following `{` reported with an empty
+/// stanza. Both shapes come straight from ARouteServer-generated output.
+const BIRD_EXPRESSION_PUNCTUATION: &str = "\
+router id 192.0.2.2;
+
+define bogons = [
+\t0.0.0.0/8{8,32},\t# RFC 1122
+\t10.0.0.0/8{8,32}\t# RFC 1918
+];
+
+function prefix_len_is_valid (int pref_len_min; int pref_len_max)
+int set bogon_asns;
+{
+\treturn true;
+}
+
+filter channel_export_ipv4
+int i;
+{
+\taccept;
+}
+
+protocol bgp member_alpha {
+  local as 999;
+  neighbor 192.0.2.11 as 64501;
+}
+";
+
+#[test]
+fn bird_expression_punctuation_reports_one_entry_per_construct() {
+    let report = import_source(SourceFormat::Bird, "ars.conf", BIRD_EXPRESSION_PUNCTUATION)
+        .expect("translates")
+        .report;
+
+    assert!(
+        report.skipped.iter().all(|s| !s.stanza.trim().is_empty()),
+        "no report entry may have a blank stanza: {:?}",
+        skip_lines(&report)
+    );
+    assert_eq!(
+        skip_lines(&report),
+        vec![
+            (
+                Some(3),
+                "define bogons = [ 0.0.0.0/8{8,32}, 10.0.0.0/8{8,32} ]".to_owned()
+            ),
+            (
+                Some(8),
+                "function prefix_len_is_valid (int pref_len_min; int pref_len_max) int set \
+                 bogon_asns"
+                    .to_owned()
+            ),
+            (Some(14), "filter channel_export_ipv4 int i".to_owned()),
+        ],
+    );
+    // A filter/function header that arrived through the statement path is
+    // still a filter to hand-translate, not an unknown structural stanza.
+    assert!(
+        report
+            .skipped
+            .iter()
+            .filter(|s| s.stanza.starts_with("filter") || s.stanza.starts_with("function"))
+            .all(|s| s.guidance.contains(".rpol")),
+    );
+    // The neighbor after all of it still translates: the depth counters must
+    // not have swallowed the rest of the file.
+    assert_eq!(report.neighbor_count, 1);
+}
+
+// ---------------------------------------------------------------------------
+// RFC 8212 fail-closed knob in the emitted config
+// ---------------------------------------------------------------------------
+
+#[test]
+fn emitted_global_fails_closed_and_the_report_says_so() {
+    let imported = import_source(SourceFormat::Bird, "bird.conf", BIRD).expect("translates");
+    // Inside `[global]`: before the first following section header.
+    let global = imported
+        .config_toml
+        .split("\n[global.telemetry]")
+        .next()
+        .expect("global section");
+    assert!(
+        global.contains("\nebgp_requires_policy = true\n"),
+        "generated [global] must fail closed: {global}"
+    );
+
+    assert!(imported.report.ebgp_requires_policy);
+    let text = imported.report.render_text();
+    assert!(text.contains("ebgp_requires_policy = true"));
+    assert!(
+        text.contains("the source config did not ask for"),
+        "the report must own the decision, not just mention the knob: {text}"
+    );
+    assert!(
+        text.contains("restart"),
+        "the report must say the knob is restart-required: {text}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Exit-code ladder
 // ---------------------------------------------------------------------------

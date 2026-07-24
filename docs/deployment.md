@@ -370,6 +370,16 @@ scaling out.
    `config OK` on success. Run this **every time** before swapping the
    live config.
 
+   A check that finds nothing to flag prints `config OK`. A check that
+   flags something still exits 0, but the summary reads
+   `config VALID, <n> WARNINGS — NOT a clean check` and the warnings are
+   framed on stderr above it. The one warning today is an eBGP neighbor
+   that resolves no explicit policy in a direction: unfiltered when
+   `[global] ebgp_requires_policy` is off, and carrying no routes in that
+   direction when it is on. Neither is rejected — a permit-all route
+   server is a legitimate configuration — but neither should reach
+   production unnoticed.
+
 4. **First start.**
 
    ```sh
@@ -428,7 +438,7 @@ Four flags cover the config lifecycle, from bootstrap to reload:
 | Command | What it does |
 |---|---|
 | `rustbgpd --init-config <lab\|edge> --stdout` | Print a curated, commented starter TOML to stdout and exit (file output is not yet supported). `lab` is a minimal single-box profile; `edge` is an eBGP edge skeleton with a default-route-dropping import chain. Both use a mode-`0600` local UDS whose filesystem permissions authenticate access and whose stable `operator` principal is tier-authorized. Cannot be combined with `--check` / `--diff`. |
-| `rustbgpd --check <file>` | Parse + validate; print `config OK` or rustc-style diagnostic. Does not start the daemon. |
+| `rustbgpd --check <file>` | Parse + validate; print `config OK`, `config VALID, <n> WARNINGS — NOT a clean check` (warnings framed on stderr; still exit 0), or a rustc-style diagnostic. Does not start the daemon. |
 | `rustbgpd --diff <file>` | Compute the diff against the running daemon's view; print per-section change list with expected reload class. |
 | `systemctl reload rustbgpd` (or `kill -HUP $(pidof rustbgpd)`) | Apply the diff. Live fields hot-apply; restart-required fields are pinned and logged at `ERROR` (the live values are kept). |
 

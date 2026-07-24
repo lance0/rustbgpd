@@ -29,6 +29,23 @@ enum Event {
 
 /// Split the input into statement/brace events. Tracks `"` strings,
 /// `#` / `//` line comments, and `/* */` block comments.
+///
+/// Two BIRD spellings reuse the block/statement punctuation inside an
+/// expression and must not be read as structure:
+///
+/// - prefix-set range suffixes — `[ 0.0.0.0/8{8,32}, 10.0.0.0/8{8,32} ]` —
+///   where `{`/`}` are part of the set literal, not a block. Splitting there
+///   reported one `define` as one entry per member plus a trailing bare `]`.
+/// - `;`-separated declaration lists — `function f (int a; int b)` and the
+///   `filter f\nint i;\n{` local-variable form — where `;` separates
+///   declarations instead of terminating a statement. Splitting there
+///   reported the header in fragments and left the following `{` with an
+///   empty header.
+///
+/// Both are handled with depth counters rather than a real expression parser.
+/// A statement terminator and a block boundary each reset the counters, so a
+/// stray bracket or paren in unexpected input can never swallow more than the
+/// construct it appears in.
 fn scan(input: &str) -> Vec<Event> {
     let mut events = Vec::new();
     let mut buf = String::new();
@@ -36,6 +53,8 @@ fn scan(input: &str) -> Vec<Event> {
     let mut line = 1;
     let mut chars = input.chars().peekable();
     let mut in_string = false;
+    let mut bracket_depth = 0_u32;
+    let mut paren_depth = 0_u32;
     while let Some(c) = chars.next() {
         if c == '\n' {
             line += 1;
@@ -82,19 +101,48 @@ fn scan(input: &str) -> Vec<Event> {
                     prev = n;
                 }
             }
+            '[' => {
+                if buf.trim().is_empty() {
+                    buf_line = line;
+                }
+                bracket_depth += 1;
+                buf.push(c);
+            }
+            ']' => {
+                bracket_depth = bracket_depth.saturating_sub(1);
+                buf.push(c);
+            }
+            '(' => {
+                if buf.trim().is_empty() {
+                    buf_line = line;
+                }
+                paren_depth += 1;
+                buf.push(c);
+            }
+            ')' => {
+                paren_depth = paren_depth.saturating_sub(1);
+                buf.push(c);
+            }
+            // Inside a set literal these are a prefix-range suffix.
+            '{' | '}' if bracket_depth > 0 => buf.push(c),
             '{' => {
                 events.push(Event::Open {
                     line: buf_line,
                     header: buf.trim().to_owned(),
                 });
                 buf.clear();
+                paren_depth = 0;
             }
             '}' => {
                 // BIRD requires `};` after blocks; there is no pending
                 // statement text at a close brace in valid input.
                 buf.clear();
+                paren_depth = 0;
                 events.push(Event::Close);
             }
+            // Inside a parameter or declaration list this separates
+            // declarations rather than terminating a statement.
+            ';' if paren_depth > 0 => buf.push(c),
             ';' => {
                 let text = buf.trim();
                 if !text.is_empty() {
@@ -104,6 +152,7 @@ fn scan(input: &str) -> Vec<Event> {
                     });
                 }
                 buf.clear();
+                bracket_depth = 0;
             }
             other => {
                 if buf.trim().is_empty() && !other.is_whitespace() {
@@ -167,6 +216,14 @@ pub fn parse(input: &str) -> Model {
 
     for event in scan(input) {
         match event {
+            // A block whose header is empty carries no information to
+            // report: it is the body of a construct whose header BIRD
+            // already ended with a `;` (`filter f` / `function f(...)`
+            // followed by a local-declaration list). That header was
+            // reported as its own entry at its own line; an entry with a
+            // blank stanza here would be pure noise. Still framed, so
+            // brace balance is unaffected.
+            Event::Open { header, .. } if header.is_empty() => stack.push(Frame::Ignore),
             Event::Open { line, header } => {
                 let frame = match ctx(&stack) {
                     Ctx::Top => top_open(&mut model, line, &header),
@@ -219,6 +276,10 @@ pub fn parse(input: &str) -> Model {
 }
 
 fn skip(model: &mut Model, line: usize, stanza: String, guidance: impl Into<String>) {
+    // Report text only: a stanza folded out of a multi-line source keeps
+    // that source's indentation runs, which read as ragged gaps on one
+    // line. The parse itself never sees this.
+    let stanza = stanza.split_whitespace().collect::<Vec<_>>().join(" ");
     model.skips.push(Skip {
         line: Some(line),
         stanza,
@@ -278,6 +339,11 @@ fn top_stmt(model: &mut Model, line: usize, text: &str) {
     let first = text.split_whitespace().next().unwrap_or("");
     match first {
         "log" | "debug" | "watchdog" | "timeformat" => {}
+        // A `filter`/`function` header that reached the statement path
+        // (rather than the block path) declared local variables after its
+        // name; it is still the filter to hand-translate, not an unknown
+        // structural stanza.
+        "filter" | "function" => skip(model, line, text.to_owned(), RPOL_GUIDANCE),
         "define" => skip(
             model,
             line,
