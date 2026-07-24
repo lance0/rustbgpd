@@ -16765,3 +16765,54 @@ fn rfc8212_resolved_neighbors_carry_the_deny_before_peers_start() {
         super::RFC8212_MISSING_EXPORT_POLICY,
     );
 }
+
+/// What `rustbgpd --check` warns on. The query is independent of
+/// `ebgp_requires_policy`: the knob decides whether an unpoliced direction is
+/// permit-all or reserved-deny, not whether it is worth reporting.
+#[test]
+fn unpoliced_ebgp_neighbors_names_the_missing_directions() {
+    let unpoliced = |toml_str: &str| {
+        parse(toml_str)
+            .expect("fixture parses")
+            .unpoliced_ebgp_neighbors()
+    };
+    let permit_all = "\n[policy.definitions.permit-all]\ndefault_action = \"permit\"\n";
+
+    let both = unpoliced(&rfc8212_toml("", "", 65002, ""));
+    assert_eq!(both.len(), 1);
+    assert_eq!(both[0].address, "10.0.0.2");
+    assert_eq!(both[0].remote_asn, 65002);
+    assert_eq!(
+        both[0].missing_phrase(),
+        "no import policy and no export policy"
+    );
+
+    // Enforcement on changes the consequence, not the finding.
+    assert_eq!(
+        unpoliced(&rfc8212_toml("ebgp_requires_policy = true", "", 65002, "")),
+        both
+    );
+
+    // One direction covered: only the other is reported.
+    let import_only = unpoliced(&rfc8212_toml(
+        "",
+        permit_all,
+        65002,
+        "import_policy_chain = [\"permit-all\"]",
+    ));
+    assert_eq!(import_only.len(), 1);
+    assert!(!import_only[0].import_missing);
+    assert_eq!(import_only[0].missing_phrase(), "no export policy");
+
+    // Fully policed eBGP, and iBGP at any policy state, are silent.
+    assert!(
+        unpoliced(&rfc8212_toml(
+            "",
+            permit_all,
+            65002,
+            "import_policy_chain = [\"permit-all\"]\nexport_policy_chain = [\"permit-all\"]",
+        ))
+        .is_empty()
+    );
+    assert!(unpoliced(&rfc8212_toml("", "", 65001, "")).is_empty());
+}

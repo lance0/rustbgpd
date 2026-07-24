@@ -104,6 +104,32 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **`rustbgpd --check` warns about eBGP neighbors that resolve no policy, and
+  no longer summarizes a flagged config as `config OK`.** `--check` is the last
+  gate before a config reaches a production box, and it previously said nothing
+  about policy — so a config whose eBGP sessions were wide open in both
+  directions passed as cleanly as one that was fully filtered. It now names
+  each such neighbor and the direction(s) it is missing, framed on stderr, and
+  says which consequence applies: unfiltered in that direction with
+  `[global] ebgp_requires_policy` off, or carrying no routes in that direction
+  with it on. The exit code stays 0 — a permit-all route server is a legitimate
+  configuration and rejecting it would break deployments that mean it — but a
+  check with warnings now summarizes as
+  `config VALID, <n> WARNINGS — NOT a clean check: <path>` so the summary line
+  alone cannot read as a clean result. A check with nothing to flag still
+  prints `config OK: <path>`. Both built-in `--init-config` profiles carry a
+  permit-all eBGP neighbor and are flagged accordingly.
+
+- **`rbgp config import` generates configs that fail closed.** The importer
+  never translates policy, so every config it emitted came up permit-all on
+  every eBGP session it declared. The generated `[global]` now sets
+  `ebgp_requires_policy = true`, which makes each eBGP direction with no
+  explicit policy carry no routes until one is configured, instead of silently
+  passing everything. Because this is a runtime behavior the source config did
+  not ask for, the import report states that it was added, why, what it does to
+  the sessions below, and that it is startup-only; the emitted config carries
+  the same explanation as a comment, and deleting the line restores permit-all.
+
 - **Unknown FlowSpec component types keep their hard rejection, now with a
   conformance-citing diagnostic.** *No decode-acceptance change: input that
   errored before still errors, and input that parsed before still parses.*
@@ -129,6 +155,20 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   peer-group edits inherited by dynamic peers follow the same rules.
 
 ### Fixed
+
+- **`rbgp config import` no longer splits BIRD constructs that reuse block or
+  statement punctuation inside an expression.** Prefix-set range suffixes
+  (`[ 0.0.0.0/8{8,32}, ... ]`) were read as block braces, so one `define` was
+  reported as one entry per member plus a trailing bare `]`;
+  `;`-separated declaration lists (`function f (int a; int b)`, and the
+  `filter f` / local-variable form) were read as statement terminators, so each
+  header came back in fragments and left the following `{` reported with an
+  empty stanza and a stale line number. Both shapes are ordinary
+  ARouteServer-generated output, and both now produce exactly one report entry
+  at the construct's own line. A `filter`/`function` header that arrives
+  through the statement path is also pointed at `.rpol` rather than labelled an
+  unknown structural stanza, and report entries folded out of a multi-line
+  source no longer carry that source's indentation runs.
 
 - **`rbgp doctor` no longer fails in the container image.** The image runs as
   a nonroot user with a working directory it cannot write, and doctor

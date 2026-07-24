@@ -1837,6 +1837,68 @@ fn tcp_ao_listener_key_for_dynamic_range(
     })
 }
 
+/// Print the `--check` warning for eBGP neighbors that resolve no explicit
+/// policy, and return how many there are.
+///
+/// `--check` is the last gate before an operator copies a config to
+/// production, so a wide-open (or, under `ebgp_requires_policy`, a fully
+/// denied) eBGP edge has to be visible here. It stays a warning: a permit-all
+/// route server is a legitimate configuration and refusing it would break
+/// deployments that mean it. It goes to stderr, framed, so that the exit-0
+/// summary on stdout cannot be the only thing an operator reads.
+fn warn_unpoliced_ebgp(config: &Config) -> usize {
+    use owo_colors::{OwoColorize, Stream::Stderr};
+
+    let unpoliced = config.unpoliced_ebgp_neighbors();
+    if unpoliced.is_empty() {
+        return 0;
+    }
+    let rule = "=".repeat(74);
+    eprintln!(
+        "\n{}",
+        rule.if_supports_color(Stderr, owo_colors::OwoColorize::yellow)
+    );
+    eprintln!(
+        "{}: {} eBGP neighbor{} resolve{} no explicit policy.",
+        "WARNING".if_supports_color(Stderr, owo_colors::OwoColorize::yellow),
+        unpoliced.len(),
+        if unpoliced.len() == 1 { "" } else { "s" },
+        if unpoliced.len() == 1 { "s" } else { "" },
+    );
+    eprintln!();
+    for neighbor in &unpoliced {
+        eprintln!(
+            "  {} (AS {}): {}",
+            neighbor.address,
+            neighbor.remote_asn,
+            neighbor.missing_phrase()
+        );
+    }
+    eprintln!();
+    if config.global.ebgp_requires_policy {
+        eprintln!(
+            "[global] ebgp_requires_policy = true, so every direction listed above runs the\n\
+             RFC 8212 reserved deny: the session establishes and then carries no routes in\n\
+             that direction, in any negotiated family. Configure an import_policy_chain /\n\
+             export_policy_chain there to start passing traffic."
+        );
+    } else {
+        eprintln!(
+            "Every direction listed above is unfiltered. An unfiltered import direction\n\
+             accepts every route the peer sends; an unfiltered export direction re-advertises\n\
+             every route selected for that peer, as received. If that is what you meant, this\n\
+             is the expected result for a permit-all route server. If it is not, configure an\n\
+             import_policy_chain / export_policy_chain there, or set\n\
+             [global] ebgp_requires_policy = true to fail closed until you do."
+        );
+    }
+    eprintln!(
+        "{}\n",
+        rule.if_supports_color(Stderr, owo_colors::OwoColorize::yellow)
+    );
+    unpoliced.len()
+}
+
 fn print_config_diff(diff: &config::ConfigDiff) {
     use owo_colors::OwoColorize;
 
@@ -2297,7 +2359,20 @@ fn main() {
     };
 
     if check_only {
-        println!("config OK: {config_path}");
+        // The summary line is the only thing some operators read. When
+        // anything was flagged it must not be able to pass for a clean
+        // result, so `OK` is spent only on a check with nothing to report
+        // and otherwise gives way to the count. The exit code stays 0
+        // either way — these are warnings, not failures.
+        let warnings = warn_unpoliced_ebgp(&config);
+        if warnings == 0 {
+            println!("config OK: {config_path}");
+        } else {
+            println!(
+                "config VALID, {warnings} WARNING{} — NOT a clean check: {config_path}",
+                if warnings == 1 { "" } else { "S" }
+            );
+        }
         return;
     }
 
