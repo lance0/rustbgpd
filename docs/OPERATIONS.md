@@ -1054,6 +1054,17 @@ counters, using a 15-minute increase window:
 | `bgp_selection_deferral_timeouts_total{afi_safi}` | Family gates released by the selection-deferral timer |
 | `bgp_selection_deferral_ledger_overflows_total{afi_safi}` | Gated families whose next identity would exceed the process-wide one-million-identity or 64 MiB logical retained-key-data ledger and therefore use a complete release sweep |
 
+Retention during the hold window is an Adj-RIB-**In** property, and the
+routing metrics say so. `bgp_rib_prefixes` keeps counting the peer's retained
+(stale) received routes, alongside `bgp_gr_active_peers` and
+`bgp_gr_stale_routes`. `bgp_rib_adj_out_prefixes` drops to zero for that peer
+instead: entering GR tears down the session's outbound registration and its
+Adj-RIB-Out with it (`bgp_rib_outbound_registered_peers` decrements for the
+same reason), so there is nothing left to advertise until the peer returns and
+the table is rebuilt. A zero advertised-count for a peer whose received-count
+is still high is the expected shape of a restart in progress, not a lost
+table.
+
 For active gates, `rbgp neighbor <address>` and
 `NeighborService.GetNeighborState` also show the peer's waiter state, stamped
 session, blocking-waiter count, and remaining time. A released row retains its

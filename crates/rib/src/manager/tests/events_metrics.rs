@@ -1167,6 +1167,81 @@ fn peer_down_zeroes_all_adj_rib_out_family_gauges() {
     }
 }
 
+/// Graceful-restart entry empties the peer's Adj-RIB-Out exactly as a
+/// `PeerDown` does (`clear_outbound_peer_state` removes the table on both
+/// paths), so the gauge must read zero for the whole hold window. RFC 4724
+/// retention is an Adj-RIB-*In* property: `bgp_rib_prefixes`,
+/// `bgp_gr_active_peers` and `bgp_gr_stale_routes` are the series that stay
+/// nonzero for a peer expected back. Pinning the zero here keeps this path
+/// from drifting away from the `PeerDown` reset again.
+#[test]
+fn graceful_restart_zeroes_all_adj_rib_out_family_gauges() {
+    let metrics = BgpMetrics::new();
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let peer_label = peer.to_string();
+    let families = ADJ_RIB_OUT_FAMILIES;
+
+    for (index, family) in families.iter().enumerate() {
+        metrics.set_adj_rib_out_prefixes(
+            &peer_label,
+            family,
+            i64::try_from(index + 1).expect("fixture count fits i64"),
+        );
+    }
+
+    manager.handle_update(RibUpdate::PeerGracefulRestart {
+        peer,
+        session_id: 0,
+        restart_time: 120,
+        stale_routes_time: 360,
+        gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_llgr_capable: false,
+        peer_llgr_families: Vec::new(),
+        llgr_stale_time: 0,
+    });
+
+    // The assertions below only describe the hold window if the peer is
+    // actually in it — a GR entry that fell through to a full teardown
+    // would zero the gauges for the wrong reason.
+    assert!(
+        manager.gr_peers.contains_key(&peer),
+        "fixture must leave the peer inside the GR hold window"
+    );
+
+    // Load-bearing proof: dropping the zero-all loop from
+    // `clear_outbound_peer_state` (or moving it back to the `PeerDown` call
+    // site) leaves every seeded sentinel behind and fails here.
+    let gathered = metrics.registry().gather();
+    let gauge = gathered
+        .iter()
+        .find(|family| family.name() == "bgp_rib_adj_out_prefixes")
+        .expect("Adj-RIB-Out gauge family remains registered");
+    for family in families {
+        let observed = gauge
+            .metric
+            .iter()
+            .find(|metric| {
+                metric
+                    .get_label()
+                    .iter()
+                    .any(|label| label.name() == "peer" && label.value() == peer_label)
+                    && metric
+                        .get_label()
+                        .iter()
+                        .any(|label| label.name() == "afi_safi" && label.value() == family)
+            })
+            .unwrap_or_else(|| panic!("graceful restart removed the {family} Adj-RIB-Out series"))
+            .get_gauge()
+            .value();
+        assert!(
+            observed.abs() < f64::EPSILON,
+            "graceful restart left the {family} Adj-RIB-Out gauge at {observed}"
+        );
+    }
+}
+
 #[tokio::test]
 #[expect(
     clippy::cast_possible_truncation,
