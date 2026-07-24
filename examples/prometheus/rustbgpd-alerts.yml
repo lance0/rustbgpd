@@ -250,3 +250,76 @@ groups:
             increased by {{ $value | printf "%.0f" }} in the last 15
             minutes. Routes hitting the failing statement are being
             denied.
+
+      - alert: BgpExactExportRejected
+        # The counter is labeled with the bare configured neighbor address,
+        # not the transport endpoint used by session metrics. Every increment
+        # means an announcement was withheld before Adj-RIB-Out commit.
+        expr: increase(bgp_exact_export_rejections_total[15m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: >-
+            Exact export rejected for {{ $labels.peer }} ({{ $labels.family }})
+          description: >-
+            bgp_exact_export_rejections_total for neighbor {{ $labels.peer }}
+            on {{ $labels.instance }} increased by
+            {{ $value | printf "%.0f" }} in the last 15 minutes
+            (family={{ $labels.family }}, reason={{ $labels.reason }}).
+            The rejected announcement was not committed to Adj-RIB-Out;
+            inspect the corresponding daemon warning and advertised-route
+            explain output.
+
+      - alert: BgpMalformedUpdate
+        # The counter keeps the transport/session peer label (addr:port or
+        # [IPv6]:port). Every increment is one malformed UPDATE after its
+        # strongest RFC 7606 disposition has been selected.
+        expr: increase(bgp_update_malformed_total[15m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: >-
+            Malformed UPDATE from {{ $labels.peer }}
+            ({{ $labels.disposition }})
+          description: >-
+            bgp_update_malformed_total for session endpoint
+            {{ $labels.peer }} on {{ $labels.instance }} increased by
+            {{ $value | printf "%.0f" }} in the last 15 minutes. The
+            strongest RFC 7606 disposition was {{ $labels.disposition }};
+            inspect the peer and the daemon's malformed-UPDATE diagnostics.
+
+      - alert: BgpSelectionDeferralTimedOut
+        # Normal active/waiter/release state is intentionally not alertable.
+        # A timer release is an exceptional convergence fallback.
+        expr: increase(bgp_selection_deferral_timeouts_total[15m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: >-
+            Selection deferral timed out for {{ $labels.afi_safi }}
+          description: >-
+            bgp_selection_deferral_timeouts_total for
+            {{ $labels.afi_safi }} on {{ $labels.instance }} increased by
+            {{ $value | printf "%.0f" }} in the last 15 minutes. The family
+            gate used its bounded timer fallback before all planned-restart
+            convergence signals arrived.
+      - alert: BgpSelectionDeferralLedgerOverflow
+        # Overflow remains safe because release falls back to a complete
+        # family sweep, but it signals that the bounded identity ledger was
+        # exhausted and merits operator investigation.
+        expr: increase(bgp_selection_deferral_ledger_overflows_total[15m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: >-
+            Selection-deferral ledger overflow for {{ $labels.afi_safi }}
+          description: >-
+            bgp_selection_deferral_ledger_overflows_total for
+            {{ $labels.afi_safi }} on {{ $labels.instance }} increased by
+            {{ $value | printf "%.0f" }} in the last 15 minutes. The family
+            exceeded the bounded identity ledger and used a complete release
+            sweep; inspect table scale and retained-key pressure.
