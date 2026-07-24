@@ -72,6 +72,21 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`bgp_rib_adj_out_prefixes` no longer reads stale-nonzero through a
+  graceful-restart hold window.** Entering GR tears down the peer's outbound
+  registration and its Adj-RIB-Out along with it, but only the `PeerDown`
+  teardown zeroed the seven per-family gauge series; the GR down path left
+  them advertising the departed session's counts for the whole restart timer.
+  The reset moved into the shared outbound-teardown helper, so both paths —
+  plus collision failback and replacement-`PeerUp`, which empty the same table
+  — now zero it where the table is actually removed. RFC 4724 retention is an
+  Adj-RIB-In property: `bgp_rib_prefixes`, `bgp_gr_active_peers`, and
+  `bgp_gr_stale_routes` remain the series that stay nonzero for a peer
+  expected back, and `bgp_rib_outbound_registered_peers` already decremented at
+  GR entry. **Operator-visible for dashboards and alerts:** an advertised-count
+  panel or rule that read the old nonzero plateau during a restart now sees
+  zero until the peer returns and its table is rebuilt.
+
 - **The initial table dump now evaluates export policy with the peer's
   peer-group.** The session staged its peer-group policy context *after* the
   `PeerUp` registration, but `PeerUp` builds the initial Adj-RIB-Out

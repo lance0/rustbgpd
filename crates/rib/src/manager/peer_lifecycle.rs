@@ -321,11 +321,6 @@ impl RibManager {
 
         self.clear_peer_adj_rib_in(peer);
 
-        let peer_label = peer.to_string();
-        for family in ["all", "flowspec", "evpn", "bgpls", "vpn", "labeled", "rtc"] {
-            self.metrics
-                .set_adj_rib_out_prefixes(&peer_label, family, 0);
-        }
         self.clear_outbound_peer_state(peer);
         self.peer_asn.remove(&peer);
         self.peer_group.remove(&peer);
@@ -458,6 +453,20 @@ impl RibManager {
             i64::try_from(self.outbound_peers.len()).unwrap_or(i64::MAX),
         );
         self.adj_ribs_out.remove(&peer);
+        // The gauge reports the size of the table removed on the line
+        // above, so it is zeroed here rather than at the `PeerDown` call
+        // site: the graceful-restart down path empties the same table and
+        // must not leave the series advertising prefixes for an
+        // Adj-RIB-Out that no longer exists. RFC 4724 retention is an
+        // Adj-RIB-*In* property — `bgp_rib_prefixes`, `bgp_gr_active_peers`
+        // and `bgp_gr_stale_routes` carry the "expected back" signal for
+        // the hold window; this series carries what we would actually
+        // re-advertise, which is nothing until the peer returns.
+        let peer_label = peer.to_string();
+        for family in ["all", "flowspec", "evpn", "bgpls", "vpn", "labeled", "rtc"] {
+            self.metrics
+                .set_adj_rib_out_prefixes(&peer_label, family, 0);
+        }
         // Outbound prefix admission is per-registration (ADR-0113): the
         // admitted set and its blocking latch describe what the departing
         // session was advertising. A reconnect starts empty and admits its
