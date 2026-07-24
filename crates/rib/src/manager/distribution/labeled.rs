@@ -648,7 +648,8 @@ impl RibManager {
                     "adj_rib_out",
                     "already_advertised",
                     crate::update::ExportGateVerdict::Pass,
-                    "identical route already advertised — peer is in sync, no re-announcement"
+                    "identical route already advertised — Adj-RIB-Out in sync, no \
+                     re-announcement; remote acceptance is not observable"
                         .to_string(),
                 );
             }

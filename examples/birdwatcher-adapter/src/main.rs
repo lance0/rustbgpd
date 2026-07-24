@@ -271,10 +271,17 @@ async fn protocols_bgp(State(state): State<AppState>) -> Result<Json<Value>, Sta
                 "routes": {
                     // Same sources the in-daemon server used: current
                     // Adj-RIB-In count and current advertised count.
+                    //
+                    // `preferred` is deliberately absent, not zero: the
+                    // gRPC surface has no per-peer Loc-RIB best count, and
+                    // deriving one means paging the whole Loc-RIB
+                    // (`ListBestRoutes`, tallying `Route.peer_address`) on
+                    // every poll of this endpoint — a full-table walk per
+                    // refresh at IXP scale. Serve it here once the daemon
+                    // exposes the count on `NeighborState`.
                     "imported": n.prefixes_received,
                     "filtered": filtered,
-                    "exported": n.prefixes_sent,
-                    "preferred": 0
+                    "exported": n.prefixes_sent
                 }
             }),
         );

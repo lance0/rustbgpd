@@ -286,7 +286,9 @@ enum Command {
         1  error (could not produce a bundle)\n  \
         2  bundle written but one or more checks are red")]
     Doctor {
-        /// Output tarball path. Defaults to `rustbgpd-doctor-<unix-seconds>.tar.gz`.
+        /// Output tarball path. Defaults to `rustbgpd-doctor-<unix-seconds>.tar.gz`
+        /// in the first writable of: the working directory, the daemon's
+        /// runtime state dir, the temp dir.
         #[arg(long, value_name = "FILE")]
         output: Option<PathBuf>,
 

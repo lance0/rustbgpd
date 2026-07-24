@@ -105,9 +105,22 @@ max_prefixes = 50000
 
 Notes:
 
-- FRR peers receiving transparent route-server paths usually need
-  `no enforce-first-as` on the member side because the member AS is not first in
-  reflected AS_PATHs.
+- FRR peers receiving transparent route-server paths need first-AS
+  enforcement relaxed on the member side, because the route server's AS is not
+  first in the AS_PATHs it forwards. The working form is **per-neighbor**:
+
+  ```frr
+  ! in the member's own FRR config, once per route-server neighbor
+  no neighbor 198.51.100.1 enforce-first-as
+  ```
+
+  The global `no bgp enforce-first-as` alone is **insufficient** in FRR 10.3.1.
+  Getting this wrong fails silently: FRR treats the offending updates as
+  withdrawn (RFC 7606) instead of resetting, so the session stays Established,
+  the member holds zero routes, and neither side logs an error. `rbgp rib
+  advertised` on the route server still shows the routes sent — it reports
+  local send-side state, not what the member accepted. Check `PfxRcd` on the
+  member.
 - FRR route-maps map naturally to TOML policy definitions for simple match/set
   chains, or to `.rpol` for reusable hygiene logic. The M80 receipt proves
   route-for-route parity between `.rpol` and FRR route-maps for the core

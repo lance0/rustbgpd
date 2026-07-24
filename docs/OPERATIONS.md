@@ -1301,6 +1301,12 @@ more checks are red. A doctor run against a down daemon still produces a
 bundle (system facts + crash reports) and the manifest records which
 sections are missing.
 
+Without `--output` the bundle is written to the first writable of: the
+working directory, `runtime_state_dir`, the temp directory — so the
+container image, whose working directory is not writable by its nonroot
+user, still produces one. The final path is printed on the last line
+(`bundle` in `--json`). `--output <FILE>` overrides the choice.
+
 For live inspection, `rbgp neighbor <address>` reports the effective protected
 transport and an explicit TCP-AO health state. Direct dynamic-prefix sessions
 derive TCP-AO identity from their validated accepted socket rather than a
@@ -1913,7 +1919,11 @@ client/cluster rules) -> `family` (peer negotiated the AFI/SAFI) ->
 RFC 5291 filter) -> `export_policy` (per-chain verdict, labeled
 `policy:term` for `.rpol` members) -> `adj_rib_out` (diff against the
 advertised state: `staged_announce` = would send, `already_advertised`
-= identical route already advertised, peer in sync). The VPN ladder
+= identical route already advertised, Adj-RIB-Out in sync). Every
+`adj_rib_out` verdict describes local send-side state only: BGP has no
+acceptance signal, so an `already_advertised` pass never means the peer
+holds the route — a peer that treats the updates as withdrawn (RFC 7606)
+stays Established with none of them. The VPN ladder
 follows the live VPN staging order and adds `rt_membership`
 (RFC 4684); the labeled-unicast ladder follows the live labeled staging
 order (`family` first, no `rt_membership`/`orf`). A family still held by

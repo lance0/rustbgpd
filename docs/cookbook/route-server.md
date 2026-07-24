@@ -387,8 +387,22 @@ Transparency broke. Confirm `route_server_client = true` on the member —
 without it, the route server prepends its own ASN and rewrites NEXT_HOP
 like an ordinary eBGP speaker. Some stacks also reject the transparent
 first-AS (the neighbor AS isn't first in the path); disable first-AS
-enforcement on the *member* side (FRR `no enforce-first-as`, BIRD
-`enforce first as off`).
+enforcement on the *member* side. On FRR this must be **per-neighbor**,
+once per route-server neighbor in the member's own config —
+`no neighbor 198.51.100.1 enforce-first-as`. The global
+`no bgp enforce-first-as` alone is **insufficient** in FRR 10.3.1. BIRD
+uses `enforce first as off`.
+
+**A member is Established but receives nothing, and the route server
+says it sent the routes.** This is the silent form of the first-AS
+rejection above: FRR treats each offending update as withdrawn
+(RFC 7606) rather than resetting the session, so the session stays up,
+the member's `PfxRcd` stays 0, and neither side logs an error. `rbgp rib
+advertised` and the `already_advertised` explain gate report local
+send-side state — BGP carries no acceptance signal, so neither can see
+the member discarding them. Confirm the per-neighbor
+`no neighbor <route-server> enforce-first-as` is present on the member
+and re-check its received count.
 
 **A member leaks transit routes back into the fabric.** The RFC 9234
 role guards this: with `role = "route_server"` the route server attaches

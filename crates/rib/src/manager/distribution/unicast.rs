@@ -1123,7 +1123,8 @@ impl RibManager {
                     "adj_rib_out",
                     "already_advertised",
                     Pass,
-                    "identical source path already occupies this outbound rank — peer is in sync"
+                    "identical source path already occupies this outbound rank — Adj-RIB-Out in \
+                     sync; remote acceptance is not observable"
                         .to_string(),
                 );
             } else if existing.is_some() {
@@ -1172,7 +1173,8 @@ impl RibManager {
                     "adj_rib_out",
                     "already_advertised",
                     Pass,
-                    "identical route already advertised — peer is in sync, no re-announcement"
+                    "identical route already advertised — Adj-RIB-Out in sync, no \
+                     re-announcement; remote acceptance is not observable"
                         .to_string(),
                 );
             } else if existing.is_some() {
@@ -2065,7 +2067,8 @@ impl RibManager {
                     "adj_rib_out",
                     "already_advertised",
                     crate::update::ExportGateVerdict::Pass,
-                    "identical route already advertised — peer is in sync, no re-announcement"
+                    "identical route already advertised — Adj-RIB-Out in sync, no \
+                     re-announcement; remote acceptance is not observable"
                         .to_string(),
                 );
             }

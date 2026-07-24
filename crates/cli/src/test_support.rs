@@ -1299,8 +1299,8 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
                         gate: "adj_rib_out".to_string(),
                         code: "already_advertised".to_string(),
                         verdict: server_proto::ExportGateVerdict::Pass as i32,
-                        detail: "identical route already advertised - peer is in sync, no \
-                                 re-announcement"
+                        detail: "identical route already advertised — Adj-RIB-Out in sync, no \
+                                 re-announcement; remote acceptance is not observable"
                             .to_string(),
                     },
                 ],
