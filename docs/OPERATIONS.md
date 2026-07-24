@@ -609,6 +609,11 @@ authenticated sensitive-read surface.
 | `bgp_max_prefix_usage{peer,scope}` | Live session-actor max-prefix enforcement count for `aggregate`, `ipv4_unicast`, or `ipv6_unicast`; series are absent while the session is down |
 | `bgp_max_prefix_limit{peer,scope}` | Effective finite bound for the same scope; absent means unlimited, never zero |
 | `bgp_max_prefix_headroom{peer,scope}` | Saturating `limit - usage` for a finite scope; absent when unlimited or disconnected |
+| `bgp_outbound_prefix_usage{peer,family}` | Distinct prefixes admitted into a peer's ADVERTISED unicast state (ADR-0113), `family` = `ipv4_unicast` or `ipv6_unicast`. Post-policy, post-OTC, post-exact-export — the same truth the neighbor API reports, never the shared update-group table's count. Series reaped on session teardown |
+| `bgp_outbound_prefix_limit{peer,family}` | Effective finite `max_prefixes_out_*` for the same family; absent means unlimited, never zero. A family that becomes unlimited drops this series rather than keeping a stale value |
+| `bgp_outbound_prefix_headroom{peer,family}` | Saturating `limit - usage`; absent while the family is unlimited |
+| `bgp_outbound_prefix_blocking{peer,family}` | 1 while a blocking episode is open — the peer's advertised view is intentionally diverging from group intent until capacity recovers |
+| `bgp_outbound_prefix_blocked_total{peer,family}` | Net-new prefixes dropped from this peer's outbound vector by its configured maximum. Deliberately carries no prefix label: the blocked set is exactly the unbounded quantity the limit exists to contain — use `rbgp neighbor <addr> advertised-routes` against the export policy to find what is missing |
 | `bgp_rib_attr_intern_global_size` | Unique attribute sets in the daemon-wide cross-peer intern table (attribute-memory dedup across ALL peers). Tracks reclaim sweeps and growth under churn; a monotonic slope under steady-state churn indicates an intern leak. Replaces the per-peer `bgp_rib_attr_intern_size{peer}` gauge |
 | `bgp_messages_received_total` | Inbound BGP messages by type |
 | `bgp_messages_sent_total` | Outbound BGP messages by type |

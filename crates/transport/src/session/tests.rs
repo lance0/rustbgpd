@@ -1824,9 +1824,10 @@ async fn recv_peer_up_after_export_context(rib_rx: &mut mpsc::Receiver<RibUpdate
         rib_rx.recv().await.unwrap(),
         RibUpdate::SetPeerGracefulRestartContext { .. }
     ));
-    // Staged before `PeerUp` alongside the other export contexts: the
-    // initial Adj-RIB-Out is built synchronously by `PeerUp`, so a
-    // group-scoped export rule must already have the peer's group.
+    // Load-bearing ordering: the peer group must reach the RIB BEFORE
+    // `PeerUp` builds the initial Adj-RIB-Out. Otherwise a group-scoped
+    // export rule misses that dump, and (ADR-0113) a group-inheriting peer
+    // floods its initial feed with no outbound prefix maximum resolved.
     assert!(matches!(
         rib_rx.recv().await.unwrap(),
         RibUpdate::SetPeerPolicyContext { .. }

@@ -371,6 +371,23 @@ impl ConfigTransactionController {
             ))
         })?;
 
+        // ADR-0113: a confirmed transaction may TIGHTEN an outbound prefix
+        // maximum, because its automatic undo only loosens and a loosening is
+        // always valid. A raise or removal is refused here — its undo is a
+        // lowering that the capacity it just opened may already have
+        // invalidated, and an undo that cannot apply is not an undo. Nothing
+        // has committed yet, and the same edit is available as an ordinary
+        // committed transaction.
+        if confirmed_apply_loosens_outbound_limits(&rollback_config, &request.candidate_toml) {
+            return Err(ConfigTransactionApplyError::FailedPrecondition(
+                "confirmed transactions may only tighten max_prefixes_out_ipv4 / \
+                 max_prefixes_out_ipv6: raising or removing one leaves an automatic undo \
+                 that could become an invalid lowering. Apply the loosening change as an \
+                 ordinary committed transaction instead"
+                    .to_string(),
+            ));
+        }
+
         let timeout = Duration::from_secs(u64::from(confirmed.timeout_seconds));
         let deadline_unix_seconds = SystemTime::now()
             .checked_add(timeout)
@@ -1423,6 +1440,106 @@ async fn apply_config_transaction_locked(
     reason = "the transaction executor carries candidate, receipt, and commit-token state"
 )]
 async fn commit_apply_family(
+    deps: &FibTableControlDeps,
+    config_tx: &mpsc::Sender<ConfigEvent>,
+    family: ApplyFamily,
+    candidate_toml: String,
+    candidate: Config,
+    supported_sections: Vec<String>,
+    post_commit_runtime_snapshot_token: String,
+    update_group_impact: proto::UpdateGroupImpactPlan,
+) -> Result<proto::ConfigTransactionApplyResponse, ApplyFailure> {
+    // ADR-0113 deliberately INVERTS ADR-0076's apply-live-before-persist
+    // order for outbound prefix maxima. Applying a raise or removal first
+    // would admit routes above the old maximum, and a later persistence
+    // failure could not roll that back: the undo is a lowering whose
+    // precondition (usage at or below the maximum) the newly admitted routes
+    // may already have invalidated. So the candidate is preflighted into an
+    // inactive prepared transaction here, the family commit below persists,
+    // and activation follows the acknowledgement.
+    let prepared = prepare_outbound_prefix_limit_transaction(deps, &candidate).await?;
+    // Boxed: the family commit owns the whole candidate `Config` across its
+    // awaits, and inlining it here would widen every enclosing transaction
+    // future by that snapshot.
+    let committed = Box::pin(commit_apply_family_inner(
+        deps,
+        config_tx,
+        family,
+        candidate_toml,
+        candidate,
+        supported_sections,
+        post_commit_runtime_snapshot_token,
+        update_group_impact,
+    ))
+    .await;
+    finish_outbound_prefix_limit_transaction(deps, prepared, &committed).await?;
+    committed
+}
+
+/// Whether a confirmed transaction's candidate would raise or remove an
+/// outbound prefix maximum (ADR-0113). Kept out of the async body so the
+/// parsed candidate never sits in the transaction future.
+fn confirmed_apply_loosens_outbound_limits(rollback: &Config, candidate_toml: &str) -> bool {
+    toml::from_str::<Config>(candidate_toml)
+        .is_ok_and(|candidate| crate::config::outbound_prefix_limits_loosen(rollback, &candidate))
+}
+
+/// Preflight the candidate's outbound prefix maxima and hold them inactive.
+///
+/// `Ok(None)` when the RIB channel is absent (unit-test deps) or nothing is
+/// prepared; the returned identity is what activation and discard address.
+async fn prepare_outbound_prefix_limit_transaction(
+    deps: &FibTableControlDeps,
+    candidate: &Config,
+) -> Result<Option<u64>, ApplyFailure> {
+    let Some(rib_tx) = deps.rib_tx.as_ref() else {
+        return Ok(None);
+    };
+    let txn = crate::reload::next_outbound_prefix_limit_txn();
+    crate::reload::prepare_outbound_prefix_limits(rib_tx, txn, candidate)
+        .await
+        .map_err(|error| {
+            ApplyFailure::from(ConfigTransactionApplyError::FailedPrecondition(error))
+        })?;
+    Ok(Some(txn))
+}
+
+/// Activate a prepared outbound prefix-limit transaction after the candidate
+/// is durable, or discard it when the commit failed.
+///
+/// A post-persist activation failure is an ambiguous outcome, not a clean
+/// no-commit failure: the candidate is on disk, so the confirm journal and
+/// the config-mutation fence must be retained and the existing restart
+/// boot-repair path takes over. There is deliberately no best-effort live
+/// rollback whose lowering precondition may no longer hold.
+async fn finish_outbound_prefix_limit_transaction(
+    deps: &FibTableControlDeps,
+    prepared: Option<u64>,
+    committed: &Result<proto::ConfigTransactionApplyResponse, ApplyFailure>,
+) -> Result<(), ApplyFailure> {
+    let (Some(rib_tx), Some(txn)) = (deps.rib_tx.as_ref(), prepared) else {
+        return Ok(());
+    };
+    let activate = committed.as_ref().is_ok_and(|response| {
+        response.status == i32::from(proto::ConfigTransactionPlanStatus::Committable)
+    });
+    let outcome = crate::reload::finish_outbound_prefix_limits(rib_tx, txn, activate).await;
+    match outcome {
+        Err(error) if activate => Err(ApplyFailure::ambiguous(
+            ConfigTransactionApplyError::Internal(format!(
+                "persisted configuration was committed but its outbound prefix maxima could not be activated: {error}"
+            )),
+        )),
+        // A discard cannot fail meaningfully: nothing was applied.
+        Ok(()) | Err(_) => Ok(()),
+    }
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "family dispatch mirrors commit_apply_family's parameters verbatim"
+)]
+async fn commit_apply_family_inner(
     deps: &FibTableControlDeps,
     config_tx: &mpsc::Sender<ConfigEvent>,
     family: ApplyFamily,
@@ -3917,6 +4034,7 @@ peer_group = "{group}"
         FibTableControlDeps {
             fib_cmd_tx,
             peer_mgr_tx,
+            rib_tx: None,
             config_tx,
             lock: Arc::new(Mutex::new(())),
             config_mutation_gate: None,

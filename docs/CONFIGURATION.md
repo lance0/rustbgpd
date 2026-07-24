@@ -690,6 +690,8 @@ dynamic-only deployment where peers are added at runtime via gRPC.
 | `max_prefixes`         | u32      | no       | --      | Maximum prefixes accepted before the peer is torn down and, by default, latched off until explicit enable |
 | `max_prefixes_ipv4`    | u32      | no       | --      | Maximum unique IPv4-unicast prefixes accepted before latched teardown. Without Notification GR, Cease/1 carries RFC 4486 AFI/SAFI/bound data; with the N-bit, RFC 8538 Cease/9 encapsulates that complete Cease/1. Enforced independently of `max_prefixes` — each configured bound applies to its own count, the aggregate stays a global backstop (ADR-0108) |
 | `max_prefixes_ipv6`    | u32      | no       | --      | IPv6-unicast sibling of `max_prefixes_ipv4` (ADR-0108) |
+| `max_prefixes_out_ipv4` | non-zero u32 | no | -- | Maximum distinct IPv4-unicast prefixes advertised **to** this peer (ADR-0113). Excess net-new prefixes are withheld while the session stays Established; nothing already advertised is withdrawn and no NOTIFICATION is sent. Counts prefixes, not paths: every Add-Path identity for one NLRI shares a slot |
+| `max_prefixes_out_ipv6` | non-zero u32 | no | -- | IPv6-unicast sibling of `max_prefixes_out_ipv4` (ADR-0113) |
 | `max_prefix_restart_seconds` | non-zero u32 | no | -- | Opt in to one timed restart attempt after max-prefix teardown. Omit to retain the fail-closed latch until explicit enable; a failed timed attempt stays latched off |
 | `md5_password`         | string   | no       | --      | TCP MD5 authentication password (RFC 2385, Linux only) |
 | `tcp_ao`               | table or array | no | -- | Ordered TCP-AO keyring for static neighbors (RFC 5925; Linux; append a non-preferred successor, then select it in a later observation-gated SIGHUP generation) |
@@ -727,6 +729,43 @@ counts are unicast-only. Human output
 prints `unlimited` when a limit is absent, while JSON and gRPC preserve that
 state as field absence rather than a synthetic zero. A stale neighbor snapshot
 withholds headroom because its zero count is only a placeholder.
+
+`max_prefixes_out_ipv4` / `max_prefixes_out_ipv6` are the outbound mirror:
+they bound what a bad export policy can grow one client's advertised table
+to. Only IPv4- and IPv6-unicast are in scope; VPN, labeled unicast, FlowSpec,
+EVPN, BGP-LS, and RT-Constrain are neither counted nor gated. There is one
+action — withhold excess net-new prefixes — and no warning-only, restart, or
+disable mode.
+
+The same `rbgp neighbor <addr>` output reports one row per unicast family with
+its admitted prefix count, effective maximum, remaining headroom, and whether
+a blocking episode is open (stable reason `outbound_prefix_limit_reached`).
+Usage is the post-policy, post-OTC, post-exact-export admitted count and
+agrees with `rbgp neighbor <addr> advertised-routes`. Prometheus exposes the
+same truth as `bgp_outbound_prefix_usage`, `bgp_outbound_prefix_limit`,
+`bgp_outbound_prefix_headroom`, and `bgp_outbound_prefix_blocking`, plus the
+`bgp_outbound_prefix_blocked_total` attempt counter — all labelled by peer and
+family only. An episode logs once when it opens and once when a recovery
+resync proves nothing is still withheld, never per prefix.
+
+Edits are live and never reset the session, but they are transactional:
+raising or removing a maximum schedules one coalesced resync of just that peer
+and family, while adding or lowering one is accepted only when every affected
+live peer — static or accepted dynamic, evaluated by effective value after
+peer-group inheritance — is already at or below the candidate. An over-limit
+family rejects the whole edit and names the peer, family, current usage, and
+requested maximum. Reduce the export policy or withdraw routes first; the knob
+is not a pruning tool. Commit-confirmed transactions may only tighten, because
+their automatic undo can only loosen.
+
+A maximum edited on a `[[neighbors]]` row applies in place: the session task,
+its TCP connection, and the FSM are untouched. Editing one on a
+`[peer_groups.*]` table keeps that property, because a maximum is a
+reload-matrix `live` field and a group edit whose every changed field is `live`
+is applied in place to each inheriting member, static and dynamic. A group edit
+that also moves a session-reset field still reshapes the group's static members
+(ADR-0081); set the maximum on the member's neighbor row if such an edit has to
+be made without rebuilding its sessions.
 
 IPv6 link-local neighbors (`fe80::/10`) must set `interface`, because a
 link-local address is not globally unique (RFC 4007). Numbered IPv4 / IPv6
@@ -1094,7 +1133,8 @@ hold_time = 45  # neighbor override beats peer-group default
 ```
 
 Peer-group fields mirror inheritable neighbor settings: timers, families,
-prefix limits (`max_prefixes`, `max_prefixes_ipv4`, `max_prefixes_ipv6`) and
+prefix limits (`max_prefixes`, `max_prefixes_ipv4`, `max_prefixes_ipv6`,
+`max_prefixes_out_ipv4`, `max_prefixes_out_ipv6`) and
 `max_prefix_restart_seconds`,
 GR/LLGR, Add-Path, route-server / RR flags, BGP Role / strict-role defaults,
 receive-side Prefix ORF, private-AS handling, MD5/GTSM,

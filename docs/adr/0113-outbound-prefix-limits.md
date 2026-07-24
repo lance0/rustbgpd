@@ -144,6 +144,10 @@ edit alone never changes group membership.
 ### Reload and transaction semantics
 
 Limit edits are live, local RIB-manager changes. They do not reset the session.
+This holds on the inheritance path too: a maximum is reload-matrix `live`, so a
+peer-group edit that changes only maxima is applied in place to every
+inheriting member, static and dynamic. Only a change set that also moves a
+session-reset field falls back to the ADR-0081 reshape.
 Before mutating running configuration, resolve inheritance and preflight every
 affected live static or dynamic peer as one transaction.
 
@@ -349,3 +353,34 @@ lines or more than two implementation PRs, or if correctness appears to
 require a transport dependency, `GroupKey` split, non-unicast/action modes, a
 new durable event type, or state not bounded by the admitted cap. Those are
 design changes, not implementation details of this ADR.
+
+## Re-judge outcome: line budget exceeded, implementation accepted
+
+The line trigger above fired and was re-judged rather than treated as a
+prohibition. Implementation landed in the planned two PRs at 2,662 added
+lines total — 760 for the inert RIB-side accounting, 1,902 for the
+configured knob and its observability — against the estimated 1,800-2,000.
+
+The overrun is in surface completeness, not in feature scope. Every item is
+one this ADR already required: resolved and inherited configuration, the
+prepared-inactive transaction executor with its activation recheck, the
+all-peer lowering preflight, the family-scoped recovery resync, the neighbor
+API/CLI/JSON rows, the bounded metric series, and the operator
+documentation. Nothing outside the ADR was added, and no other re-judge
+trigger was approached: no transport dependency in the enforcement path, no
+`GroupKey` split, no non-unicast or alternative action modes, no new durable
+event type, and no state unbounded by the admitted cap.
+
+Trimming to the estimate was considered and rejected. The only remaining
+compressible surface was observability, and shipping an enforcing knob whose
+usage, headroom, and blocking state an operator cannot see would violate the
+stronger requirement stated above — that a limit doing its most important
+work must be visible while it does it. A rough line estimate does not
+outrank that.
+
+One ordering correction was extracted and landed separately rather than
+carried here: the session staged its peer-group policy context after
+`PeerUp`, so group-inherited limits could never resolve before the initial
+Adj-RIB-Out was built. That defect predates this ADR and independently
+affected group-scoped export policy on every initial dump, so it belongs to
+its own change with its own regression coverage.

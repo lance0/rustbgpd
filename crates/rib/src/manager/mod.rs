@@ -195,6 +195,9 @@ pub struct RibManager {
     /// today — with no operator-facing knob — this map stays empty and the
     /// export path keeps its unlimited state shape and per-route cost.
     outbound_prefix_limits: HashMap<IpAddr, outbound_prefix_limits::OutboundPrefixLimits>,
+    /// Resolver tables, prepared-transaction slot, admission epoch, and
+    /// coalesced family-scoped recovery intent for those limits (ADR-0113).
+    outbound_limit_control: outbound_prefix_limits::OutboundLimitControl,
     outbound_peers: HashMap<IpAddr, mpsc::Sender<OutboundRouteUpdate>>,
     /// Transport session identity recorded at `PeerUp` registration,
     /// keyed like `outbound_peers`. `handle_peer_down` /
@@ -1200,6 +1203,7 @@ impl RibManager {
             loc_rib: LocRib::new(),
             adj_ribs_out: HashMap::new(),
             outbound_prefix_limits: HashMap::new(),
+            outbound_limit_control: outbound_prefix_limits::OutboundLimitControl::default(),
             outbound_peers: HashMap::new(),
             flush_poll_budget: FLUSH_POLL_BUDGET,
             outbound_session_ids: HashMap::new(),
@@ -1527,6 +1531,7 @@ impl RibManager {
             | RibUpdate::SetPeerPolicyContext { .. }
             | RibUpdate::ReplacePeerExportPolicy { .. }
             | RibUpdate::ReplacePeerExportPolicies { .. }
+            | RibUpdate::ApplyOutboundPrefixLimits { .. }
             | RibUpdate::RefreshPeerOutbound { .. }
             | RibUpdate::RouteRefreshRequest { .. } => self.advance_advertised_pages(),
             RibUpdate::PeerUp { .. }
@@ -1614,7 +1619,19 @@ impl RibManager {
     /// Safe to run partially: per-peer resync is idempotent — Adj-RIB-Out
     /// state and the dirty flag are committed/cleared only after a
     /// successful send, and withheld peers are not touched at all.
+    /// Whether the resync timer still has work: failed outbound sends, or an
+    /// ADR-0113 capacity recovery that [`Self::resync_dirty_peers_bounded`]
+    /// drains. Both arming and disarming go through this, so scheduling a
+    /// recovery guarantees it runs regardless of dirty-peer state.
+    fn resync_tick_pending(&self) -> bool {
+        !self.dirty_peers.is_empty() || self.outbound_limit_recovery_pending()
+    }
+
     fn resync_dirty_peers_bounded(&mut self) -> bool {
+        // ADR-0113 capacity recovery is family-scoped and already coalesced,
+        // so it runs to completion here rather than sharing the peer ring:
+        // at most one bounded re-derive per peer and limited family.
+        let recovered = self.drain_outbound_limit_recovery();
         // Peers whose outbound channel is gone can never resync: drop them
         // before selecting the slice, so a backlog of dead sessions (e.g.
         // after shutdown tore the TCP sessions down) quiesces in one cheap
@@ -1659,7 +1676,7 @@ impl RibManager {
             let Some(&last) = ring.last() else {
                 // Nothing unattempted remains: any peers still dirty failed
                 // their send this tick and wait for the ordinary retry.
-                return false;
+                return recovered;
             };
             self.dirty_resync_cursor = Some(last);
             attempted.extend(ring.iter().copied());
@@ -1673,7 +1690,7 @@ impl RibManager {
                 .iter()
                 .any(|peer| !attempted.contains(peer));
             if !unattempted_remain {
-                return false;
+                return recovered;
             }
             if poll_start.elapsed() >= self.flush_poll_budget {
                 return true;
@@ -2262,6 +2279,14 @@ impl RibManager {
             RibUpdate::QueryExportPolicyTermHits { peer, reply } => {
                 self.handle_query_export_policy_term_hits(peer, reply);
             }
+            RibUpdate::PrepareOutboundPrefixLimits { txn, config, reply } => {
+                self.handle_prepare_outbound_prefix_limits(txn, config, reply);
+            }
+            RibUpdate::ApplyOutboundPrefixLimits {
+                txn,
+                activate,
+                reply,
+            } => self.handle_apply_outbound_prefix_limits(txn, activate, reply),
             RibUpdate::ReplacePeerExportPolicy {
                 peer,
                 export_policy,
@@ -5035,8 +5060,8 @@ impl RibManager {
                 continue;
             }
 
-            // Arm the resync timer when dirty_peers transitions empty → non-empty.
-            if !self.dirty_peers.is_empty() && !resync_armed {
+            // Arm the resync timer when resync work transitions none → some.
+            if self.resync_tick_pending() && !resync_armed {
                 resync_sleep
                     .as_mut()
                     .reset(tokio::time::Instant::now() + DIRTY_RESYNC_INTERVAL);
@@ -5091,10 +5116,7 @@ impl RibManager {
                     "resync timer fired for dirty peers"
                 );
                 let backlog = self.resync_dirty_peers_bounded();
-                if self.dirty_peers.is_empty() {
-                    self.metrics.record_rib_dirty_resync("cleared");
-                    resync_armed = false;
-                } else {
+                if self.resync_tick_pending() {
                     self.metrics.record_rib_dirty_resync("still_dirty");
                     let interval = if backlog {
                         DIRTY_RESYNC_BACKLOG_INTERVAL
@@ -5104,6 +5126,9 @@ impl RibManager {
                     resync_sleep
                         .as_mut()
                         .reset(tokio::time::Instant::now() + interval);
+                } else {
+                    self.metrics.record_rib_dirty_resync("cleared");
+                    resync_armed = false;
                 }
                 continue;
             }
@@ -5216,11 +5241,8 @@ impl RibManager {
                         );
                         let backlog = self.resync_dirty_peers_bounded();
 
-                        // Reset for next tick if still dirty, otherwise disarm.
-                        if self.dirty_peers.is_empty() {
-                            self.metrics.record_rib_dirty_resync("cleared");
-                            resync_armed = false;
-                        } else {
+                        // Reset for next tick if work remains, otherwise disarm.
+                        if self.resync_tick_pending() {
                             self.metrics.record_rib_dirty_resync("still_dirty");
                             let interval = if backlog {
                                 DIRTY_RESYNC_BACKLOG_INTERVAL
@@ -5230,6 +5252,9 @@ impl RibManager {
                             resync_sleep.as_mut().reset(
                                 tokio::time::Instant::now() + interval,
                             );
+                        } else {
+                            self.metrics.record_rib_dirty_resync("cleared");
+                            resync_armed = false;
                         }
                     }
                     () = gr_sleep.as_mut(), if has_gr_timers => {
@@ -5295,8 +5320,8 @@ impl RibManager {
                 }
             }
 
-            // Disarm if dirty_peers was cleared by a message handler (e.g. PeerDown).
-            if self.dirty_peers.is_empty() {
+            // Disarm if a message handler cleared the work (e.g. PeerDown).
+            if !self.resync_tick_pending() {
                 resync_armed = false;
             }
         }

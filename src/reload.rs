@@ -30,6 +30,89 @@ use crate::fib_runtime::FibRuntimeCommand;
 use crate::peer_manager::InternalCommand;
 use crate::policy_admin::{self, apply_config_event};
 
+/// Monotonic identity for one outbound prefix-limit transaction. Activation
+/// is idempotent by it, so a retry cannot apply two recovery transitions.
+pub(crate) fn next_outbound_prefix_limit_txn() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Preflight `config`'s outbound prefix maxima across every live peer and
+/// hold them as an inactive prepared transaction (ADR-0113).
+///
+/// Nothing is applied: the running maxima, admission state, Adj-RIB-Out, and
+/// wire state are untouched whether this succeeds or not. Failure names every
+/// peer, family, current usage, and requested maximum that blocks the edit.
+pub(crate) async fn prepare_outbound_prefix_limits(
+    rib_tx: &mpsc::Sender<rustbgpd_rib::RibUpdate>,
+    txn: u64,
+    config: &Config,
+) -> Result<(), String> {
+    let (reply, rx) = oneshot::channel();
+    rib_tx
+        .send(rustbgpd_rib::RibUpdate::PrepareOutboundPrefixLimits {
+            txn,
+            config: config.outbound_prefix_limits(),
+            reply,
+        })
+        .await
+        .map_err(|_| "RIB manager unavailable".to_string())?;
+    match rx.await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(violations)) => Err(format!(
+            "outbound prefix limit rejected: {}",
+            violations
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("; ")
+        )),
+        Err(_) => Err("RIB manager dropped the outbound prefix-limit preflight".to_string()),
+    }
+}
+
+/// Activate (or discard) a prepared outbound prefix-limit transaction.
+pub(crate) async fn finish_outbound_prefix_limits(
+    rib_tx: &mpsc::Sender<rustbgpd_rib::RibUpdate>,
+    txn: u64,
+    activate: bool,
+) -> Result<(), String> {
+    let (reply, rx) = oneshot::channel();
+    rib_tx
+        .send(rustbgpd_rib::RibUpdate::ApplyOutboundPrefixLimits {
+            txn,
+            activate,
+            reply,
+        })
+        .await
+        .map_err(|_| "RIB manager unavailable".to_string())?;
+    rx.await
+        .map_err(|_| "RIB manager dropped the outbound prefix-limit activation".to_string())?
+}
+
+/// Preflight and activate `config`'s outbound prefix maxima as one
+/// transaction.
+///
+/// Startup and SIGHUP take this path: the operator's file is already the
+/// desired state, so there is no persistence acknowledgement to wait for
+/// between the two phases. The persisted v1 transaction path drives the same
+/// pair around its own acknowledgement instead.
+pub(crate) async fn apply_outbound_prefix_limits(
+    rib_tx: &mpsc::Sender<rustbgpd_rib::RibUpdate>,
+    config: &Config,
+) -> Result<(), String> {
+    let txn = next_outbound_prefix_limit_txn();
+    match prepare_outbound_prefix_limits(rib_tx, txn, config).await {
+        Ok(()) => finish_outbound_prefix_limits(rib_tx, txn, true).await,
+        Err(error) => {
+            let _ = finish_outbound_prefix_limits(rib_tx, txn, false).await;
+            Err(error)
+        }
+    }
+}
+
 /// Build a `PeerManagerNeighborConfig` from transport config components.
 pub(crate) fn build_peer_mgr_config(
     tc: &rustbgpd_transport::TransportConfig,

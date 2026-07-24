@@ -1,6 +1,7 @@
 use std::any::Any;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
+use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
@@ -1209,6 +1210,91 @@ pub struct PeerOutboundState {
     pub effective_distribution_mode: EffectiveDistributionMode,
     /// Process-start RFC 4724 selection-deferral state, one row per family.
     pub selection_deferral: Vec<SelectionDeferralPeerFamilyState>,
+    /// ADR-0113 outbound unicast capacity, one row per limited family.
+    pub outbound_prefix_limits: Vec<OutboundPrefixLimitFamilyState>,
+}
+
+/// Neighbor-facing ADR-0113 outbound capacity for one unicast family.
+///
+/// `usage` is the post-policy, post-OTC, post-exact-export admitted
+/// unique-prefix count — the same truth advertised-route queries report,
+/// never the shared update-group table's count.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutboundPrefixLimitFamilyState {
+    /// `ipv4_unicast` or `ipv6_unicast`.
+    pub family: String,
+    /// Distinct prefixes currently admitted for this family.
+    pub usage: u64,
+    /// Configured maximum; `None` is unlimited, never a synthesized zero.
+    pub limit: Option<u32>,
+    /// Saturating `limit - usage`; `None` while unlimited.
+    pub headroom: Option<u32>,
+    /// Whether a blocking episode is open for this family.
+    pub blocking: bool,
+}
+
+/// Stable reason reported while a family's outbound limit is blocking.
+pub const OUTBOUND_PREFIX_LIMIT_REACHED: &str = "outbound_prefix_limit_reached";
+
+/// One configuration level's outbound unicast maxima (ADR-0113).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct OutboundPrefixLimitPair {
+    /// IPv4-unicast maximum (`None` = unlimited).
+    pub ipv4: Option<NonZeroU32>,
+    /// IPv6-unicast maximum (`None` = unlimited).
+    pub ipv6: Option<NonZeroU32>,
+}
+
+impl OutboundPrefixLimitPair {
+    /// This level's value for one family, or `None` outside unicast.
+    #[must_use]
+    pub fn family(self, afi: Afi) -> Option<NonZeroU32> {
+        match afi {
+            Afi::Ipv4 => self.ipv4,
+            Afi::Ipv6 => self.ipv6,
+            _ => None,
+        }
+    }
+}
+
+/// The resolver tables an outbound prefix-limit edit installs.
+///
+/// The RIB manager resolves each live peer itself — a neighbor entry
+/// overrides its peer group, an absent neighbor entry inherits, and an
+/// absent effective value is unlimited — so an accepted dynamic child
+/// inherits the same effective values as a static member of its group
+/// without the caller enumerating live sessions.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OutboundPrefixLimitConfig {
+    /// Per-neighbor overrides, keyed by neighbor address.
+    pub neighbors: HashMap<IpAddr, OutboundPrefixLimitPair>,
+    /// Peer-group defaults, keyed by group name.
+    pub groups: HashMap<String, OutboundPrefixLimitPair>,
+}
+
+/// One family that cannot accept its candidate limit because the peer
+/// already advertises more than it (ADR-0113: lowering is not an implicit
+/// pruning policy).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutboundPrefixLimitViolation {
+    /// The peer whose advertised state blocks the edit.
+    pub peer: IpAddr,
+    /// `ipv4_unicast` or `ipv6_unicast`.
+    pub family: String,
+    /// Distinct prefixes currently advertised.
+    pub usage: u64,
+    /// The candidate the operator asked for.
+    pub requested: u32,
+}
+
+impl std::fmt::Display for OutboundPrefixLimitViolation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} {} advertises {} prefixes, above the requested maximum {}",
+            self.peer, self.family, self.usage, self.requested
+        )
+    }
 }
 
 /// Neighbor-facing RFC 4724 selection-deferral state for one family.
@@ -1798,6 +1884,35 @@ pub enum RibUpdate {
         peer: Option<IpAddr>,
         /// Response channel.
         reply: oneshot::Sender<Vec<ExportPolicyTermHits>>,
+    },
+    /// Preflight an outbound prefix-limit edit across every affected live
+    /// peer and hold it as an inactive prepared transaction (ADR-0113).
+    ///
+    /// Nothing observable changes: the running limits, admission state,
+    /// Adj-RIB-Out, and wire state stay as they are until
+    /// [`RibUpdate::ApplyOutboundPrefixLimits`] activates the same
+    /// transaction identity.
+    PrepareOutboundPrefixLimits {
+        /// Caller transaction identity; activation is idempotent by it.
+        txn: u64,
+        /// Candidate resolver tables for the whole running configuration.
+        config: OutboundPrefixLimitConfig,
+        /// Every family that is already above its candidate, or `Ok`.
+        reply: oneshot::Sender<Result<(), Vec<OutboundPrefixLimitViolation>>>,
+    },
+    /// Activate or discard a prepared outbound prefix-limit transaction.
+    ///
+    /// Activation atomically rechecks the prepared target set, each peer's
+    /// session generation, the admission epoch, and the lowering
+    /// preconditions; drift rejects the whole activation rather than
+    /// applying part of it.
+    ApplyOutboundPrefixLimits {
+        /// Transaction identity from the matching prepare.
+        txn: u64,
+        /// `true` activates, `false` discards the preparation.
+        activate: bool,
+        /// Response channel; `Err` describes the drift that rejected it.
+        reply: oneshot::Sender<Result<(), String>>,
     },
     /// Replace the effective export policy for a peer and resync outbound state.
     ReplacePeerExportPolicy {

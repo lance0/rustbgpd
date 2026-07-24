@@ -3973,6 +3973,7 @@ async fn run<T>(
             fib_table_control::FibTableControlDeps {
                 fib_cmd_tx: fib_cmd_tx.clone(),
                 peer_mgr_tx: peer_mgr_tx.clone(),
+                rib_tx: Some(rib_tx.clone()),
                 config_tx: config_event_tx.clone(),
                 lock: runtime_config_lock.clone(),
                 config_mutation_gate: None,
@@ -4175,6 +4176,7 @@ async fn run<T>(
             fib_table_control::FibTableControlDeps {
                 fib_cmd_tx: fib_cmd_tx.clone(),
                 peer_mgr_tx: peer_mgr_tx.clone(),
+                rib_tx: Some(rib_tx.clone()),
                 config_tx: config_event_tx.clone(),
                 lock: runtime_config_lock.clone(),
                 config_mutation_gate: Some(config_mutation_gate.clone()),
@@ -4289,6 +4291,14 @@ async fn run<T>(
             );
             daemon_gate.mark_not_ready("BGP listener failed to bind");
         }
+    }
+
+    // ADR-0113: install the configured outbound prefix maxima before the
+    // first session can register, so a limited peer admits its initial feed
+    // up to the cap instead of flooding and only then discovering it is over
+    // one. No peer is registered yet, so the preflight cannot fail.
+    if let Err(error) = reload::apply_outbound_prefix_limits(&rib_tx, &config).await {
+        error!(error = %error, "failed to install configured outbound prefix maxima");
     }
 
     // Add initial peers from config via PeerManager
@@ -4481,6 +4491,7 @@ async fn run<T>(
                 let grpc_credentials = grpc_credentials.clone();
                 let reload_metrics = metrics.clone();
                 let tcp_ao_listener = tcp_ao_listener_handle.clone();
+                let limits_rib_tx = rib_tx.clone();
                 reload_in_flight = Some(tokio::spawn(async move {
                     let _runtime_config_guard = runtime_config_lock.lock().await;
                     if let Err(error) = config_transaction_controller
@@ -4515,6 +4526,22 @@ async fn run<T>(
                             return None;
                         }
                     };
+                    // ADR-0113: preflight every live peer's outbound prefix
+                    // maxima before any reload bucket applies, so a lowering
+                    // below current advertised usage rejects the reload as a
+                    // whole. Lowering is not an implicit pruning policy: the
+                    // running maxima, admission state, Adj-RIB-Out, and wire
+                    // state must survive a rejected candidate intact, even
+                    // though the operator's file still holds it. A candidate
+                    // that will not parse is left for the reload itself to
+                    // report.
+                    if let Ok(candidate) = config::Config::load_with_diagnostics(&path)
+                        && let Err(error) =
+                            reload::apply_outbound_prefix_limits(&limits_rib_tx, &candidate).await
+                    {
+                        error!(error = %error, "SIGHUP reload rejected");
+                        return None;
+                    }
                     let reloaded = reload_config_with_tcp_ao(
                         &path,
                         &snapshot,
@@ -6390,6 +6417,8 @@ tcp_ao = {{ key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)"
                     max_prefixes: None,
                     max_prefixes_ipv4: None,
                     max_prefixes_ipv6: None,
+                    max_prefixes_out_ipv4: None,
+                    max_prefixes_out_ipv6: None,
                     max_prefix_restart_seconds: None,
                     md5_password: None,
                     tcp_ao: None,
@@ -6437,6 +6466,8 @@ tcp_ao = {{ key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)"
                     max_prefixes: None,
                     max_prefixes_ipv4: None,
                     max_prefixes_ipv6: None,
+                    max_prefixes_out_ipv4: None,
+                    max_prefixes_out_ipv6: None,
                     max_prefix_restart_seconds: None,
                     md5_password: None,
                     tcp_ao: None,
@@ -6484,6 +6515,8 @@ tcp_ao = {{ key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)"
                     max_prefixes: None,
                     max_prefixes_ipv4: None,
                     max_prefixes_ipv6: None,
+                    max_prefixes_out_ipv4: None,
+                    max_prefixes_out_ipv6: None,
                     max_prefix_restart_seconds: None,
                     md5_password: None,
                     tcp_ao: None,

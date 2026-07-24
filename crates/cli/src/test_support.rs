@@ -829,6 +829,24 @@ impl rustbgpd_api::proto::neighbor_service_server::NeighborService for MockNeigh
                     effective_retention_time_seconds: Some(300),
                 }),
             }),
+            outbound_prefix_limits: vec![
+                server_proto::OutboundPrefixLimitState {
+                    family: "ipv4_unicast".to_string(),
+                    usage: 2,
+                    limit: Some(4),
+                    headroom: Some(2),
+                    blocking: false,
+                    reason: None,
+                },
+                server_proto::OutboundPrefixLimitState {
+                    family: "ipv6_unicast".to_string(),
+                    usage: 0,
+                    limit: None,
+                    headroom: None,
+                    blocking: false,
+                    reason: None,
+                },
+            ],
         };
         response.update_group_comparison = self.state.neighbor_comparison.lock().await.clone();
         Ok(Response::new(response))

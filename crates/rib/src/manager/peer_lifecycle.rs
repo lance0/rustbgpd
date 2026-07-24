@@ -473,6 +473,9 @@ impl RibManager {
         // initial feed up to the cap, so stale accounting can neither
         // consume a new generation's capacity nor clear its episode.
         self.outbound_prefix_limits.remove(&peer);
+        self.outbound_limit_control.reap_peer(peer);
+        self.metrics
+            .reap_outbound_prefix_capacity(&peer.to_string());
         self.peer_export_policies.remove(&peer);
         self.peer_sendable_families.remove(&peer);
         self.peer_advertised_llgr_families.remove(&peer);
@@ -991,6 +994,12 @@ impl RibManager {
         // every fingerprint input map above is populated; distribution
         // (including the initial dump below) does not read it.
         self.recompute_update_group(peer);
+        // ADR-0113: resolve this generation's effective outbound maxima
+        // before the initial dump, so a reconnecting limited peer admits its
+        // feed up to the cap rather than flooding and only then discovering
+        // it is over one. `recompute_update_group` above decided whether the
+        // bounded member set or the private prefix index is authoritative.
+        self.install_registration_outbound_limits(peer);
         self.send_initial_table(peer);
     }
 

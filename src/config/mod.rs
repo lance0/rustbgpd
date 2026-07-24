@@ -1494,6 +1494,8 @@ impl Config {
             max_prefixes: None,
             max_prefixes_ipv4: None,
             max_prefixes_ipv6: None,
+            max_prefixes_out_ipv4: None,
+            max_prefixes_out_ipv6: None,
             max_prefix_restart_seconds: None,
             md5_password: None,
             tcp_ao: None,
@@ -2036,6 +2038,114 @@ impl Config {
         }
         directives
     }
+
+    /// Resolver tables for the ADR-0113 outbound unicast prefix maxima.
+    ///
+    /// The RIB manager owns the inheritance walk so an accepted dynamic
+    /// child — which has no `[[neighbors]]` row — resolves the same
+    /// effective values as a static member of the same group. These tables
+    /// carry the configuration as written; absence at both levels is
+    /// unlimited.
+    #[must_use]
+    pub fn outbound_prefix_limits(&self) -> rustbgpd_rib::OutboundPrefixLimitConfig {
+        use rustbgpd_rib::{OutboundPrefixLimitConfig, OutboundPrefixLimitPair};
+
+        let pair = |ipv4, ipv6| OutboundPrefixLimitPair { ipv4, ipv6 };
+        OutboundPrefixLimitConfig {
+            neighbors: self
+                .neighbors
+                .iter()
+                .filter(|neighbor| {
+                    neighbor.max_prefixes_out_ipv4.is_some()
+                        || neighbor.max_prefixes_out_ipv6.is_some()
+                })
+                .filter_map(|neighbor| {
+                    Some((
+                        neighbor.address.parse().ok()?,
+                        pair(
+                            neighbor.max_prefixes_out_ipv4,
+                            neighbor.max_prefixes_out_ipv6,
+                        ),
+                    ))
+                })
+                .collect(),
+            groups: self
+                .peer_groups
+                .iter()
+                .filter(|(_, group)| {
+                    group.max_prefixes_out_ipv4.is_some() || group.max_prefixes_out_ipv6.is_some()
+                })
+                .map(|(name, group)| {
+                    (
+                        name.clone(),
+                        pair(group.max_prefixes_out_ipv4, group.max_prefixes_out_ipv6),
+                    )
+                })
+                .collect(),
+        }
+    }
+}
+
+/// Whether reverting from `candidate` to `rollback` would have to LOWER an
+/// outbound prefix maximum (ADR-0113).
+///
+/// A commit-confirmed transaction may tighten a maximum at or above current
+/// usage, because its automatic undo only ever loosens. It must reject a
+/// raise or removal, whose undo could become an invalid lowering once the
+/// new capacity has admitted routes; an operator makes that change through
+/// an ordinary committed transaction instead.
+#[must_use]
+pub fn outbound_prefix_limits_loosen(rollback: &Config, candidate: &Config) -> bool {
+    fn looser(from: Option<std::num::NonZeroU32>, to: Option<std::num::NonZeroU32>) -> bool {
+        match (from, to) {
+            (Some(_), None) => true,
+            (Some(from), Some(to)) => to > from,
+            (None, _) => false,
+        }
+    }
+    fn effective(
+        config: &Config,
+        neighbor: &Neighbor,
+    ) -> (Option<std::num::NonZeroU32>, Option<std::num::NonZeroU32>) {
+        let group = neighbor
+            .peer_group
+            .as_deref()
+            .and_then(|name| config.peer_groups.get(name));
+        (
+            neighbor
+                .max_prefixes_out_ipv4
+                .or_else(|| group.and_then(|group| group.max_prefixes_out_ipv4)),
+            neighbor
+                .max_prefixes_out_ipv6
+                .or_else(|| group.and_then(|group| group.max_prefixes_out_ipv6)),
+        )
+    }
+
+    // Dynamic children have no `[[neighbors]]` row, so group defaults are
+    // compared directly as well as through each static member.
+    let groups_loosen = candidate.peer_groups.iter().any(|(name, group)| {
+        let prior = rollback.peer_groups.get(name);
+        looser(
+            prior.and_then(|prior| prior.max_prefixes_out_ipv4),
+            group.max_prefixes_out_ipv4,
+        ) || looser(
+            prior.and_then(|prior| prior.max_prefixes_out_ipv6),
+            group.max_prefixes_out_ipv6,
+        )
+    });
+    groups_loosen
+        || candidate.neighbors.iter().any(|neighbor| {
+            let Some(prior) = rollback
+                .neighbors
+                .iter()
+                .find(|prior| prior.address == neighbor.address)
+            else {
+                return false;
+            };
+            let (prior_v4, prior_v6) = effective(rollback, prior);
+            let (v4, v6) = effective(candidate, neighbor);
+            looser(prior_v4, v4) || looser(prior_v6, v6)
+        })
 }
 
 #[derive(Clone)]
@@ -2288,6 +2398,8 @@ fn config_field_impact(field: &str) -> Option<(ConfigFieldImpact, &'static str)>
         | "max_prefixes"
         | "max_prefixes_ipv4"
         | "max_prefixes_ipv6"
+        | "max_prefixes_out_ipv4"
+        | "max_prefixes_out_ipv6"
         | "max_prefix_restart_seconds"
         | "gr_peer_restart_time_max"
         | "gr_stale_routes_time"
@@ -2460,6 +2572,8 @@ pub fn describe_neighbor_changes(old: &Neighbor, new: &Neighbor) -> Vec<FieldCha
     cmp_field!(max_prefixes);
     cmp_field!(max_prefixes_ipv4);
     cmp_field!(max_prefixes_ipv6);
+    cmp_field!(max_prefixes_out_ipv4);
+    cmp_field!(max_prefixes_out_ipv6);
     cmp_field!(max_prefix_restart_seconds);
     cmp_field!(ttl_security);
     cmp_field!(families);
@@ -2584,6 +2698,8 @@ fn neighbor_runtime_equal(old: &Neighbor, new: &Neighbor) -> bool {
         && old.max_prefixes == new.max_prefixes
         && old.max_prefixes_ipv4 == new.max_prefixes_ipv4
         && old.max_prefixes_ipv6 == new.max_prefixes_ipv6
+        && old.max_prefixes_out_ipv4 == new.max_prefixes_out_ipv4
+        && old.max_prefixes_out_ipv6 == new.max_prefixes_out_ipv6
         && old.max_prefix_restart_seconds == new.max_prefix_restart_seconds
         && old.md5_password == new.md5_password
         && old.ttl_security == new.ttl_security
@@ -3291,6 +3407,12 @@ impl Config {
             neighbor.max_prefixes_ipv6 = neighbor
                 .max_prefixes_ipv6
                 .or_else(|| group.and_then(|g| g.max_prefixes_ipv6));
+            neighbor.max_prefixes_out_ipv4 = neighbor
+                .max_prefixes_out_ipv4
+                .or_else(|| group.and_then(|g| g.max_prefixes_out_ipv4));
+            neighbor.max_prefixes_out_ipv6 = neighbor
+                .max_prefixes_out_ipv6
+                .or_else(|| group.and_then(|g| g.max_prefixes_out_ipv6));
             neighbor.max_prefix_restart_seconds = neighbor
                 .max_prefix_restart_seconds
                 .or_else(|| group.and_then(|g| g.max_prefix_restart_seconds));
@@ -5752,6 +5874,8 @@ pub fn describe_peer_group_changes(
     cmp_field!(max_prefixes);
     cmp_field!(max_prefixes_ipv4);
     cmp_field!(max_prefixes_ipv6);
+    cmp_field!(max_prefixes_out_ipv4);
+    cmp_field!(max_prefixes_out_ipv6);
     cmp_field!(max_prefix_restart_seconds);
     cmp_field!(ttl_security);
     cmp_field!(families);

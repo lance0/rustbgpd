@@ -538,13 +538,17 @@ impl PeerSession {
                         })
                         .await;
 
-                    // Stage the peer-group policy context before `PeerUp` for
-                    // the same reason as the contexts above: `PeerUp` builds
-                    // the initial Adj-RIB-Out synchronously, and every export
-                    // evaluation in that dump must already see the group a
-                    // group-scoped export rule matches on. Sent after `PeerUp`
-                    // this dump escaped the filter that every later update
-                    // honored.
+                    // Stage the peer-group policy context before `PeerUp`
+                    // for the same reason as the contexts above: `PeerUp`
+                    // builds the initial Adj-RIB-Out synchronously. Every
+                    // export evaluation in that dump must already see the
+                    // group a group-scoped export rule matches on — sent
+                    // afterwards, this dump escaped the filter that every
+                    // later update honored. The RIB manager also resolves
+                    // this session's inherited outbound prefix maxima from
+                    // it (ADR-0113); arriving late would leave a
+                    // group-inheriting peer — every accepted dynamic child —
+                    // flooding its initial feed unbounded.
                     let _ = self
                         .rib_tx
                         .send(RibUpdate::SetPeerPolicyContext {

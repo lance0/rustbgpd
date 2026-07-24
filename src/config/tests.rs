@@ -6189,6 +6189,8 @@ fn test_neighbor(addr: &str, asn: u32) -> Neighbor {
         max_prefixes: None,
         max_prefixes_ipv4: None,
         max_prefixes_ipv6: None,
+        max_prefixes_out_ipv4: None,
+        max_prefixes_out_ipv6: None,
         max_prefix_restart_seconds: None,
         md5_password: None,
         tcp_ao: None,
@@ -7019,6 +7021,8 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
             max_prefixes: None,
             max_prefixes_ipv4: None,
             max_prefixes_ipv6: None,
+            max_prefixes_out_ipv4: None,
+            max_prefixes_out_ipv6: None,
             max_prefix_restart_seconds: None,
             md5_password: None,
             ttl_security: None,
@@ -7066,6 +7070,8 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
         max_prefixes: None,
         max_prefixes_ipv4: None,
         max_prefixes_ipv6: None,
+        max_prefixes_out_ipv4: None,
+        max_prefixes_out_ipv6: None,
         max_prefix_restart_seconds: None,
         md5_password: None,
         bfd: None,
@@ -7123,6 +7129,8 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
         max_prefixes: None,
         max_prefixes_ipv4: None,
         max_prefixes_ipv6: None,
+        max_prefixes_out_ipv4: None,
+        max_prefixes_out_ipv6: None,
         max_prefix_restart_seconds: None,
         md5_password: None,
         tcp_ao: None,
@@ -7189,6 +7197,8 @@ fn diff_config_does_not_mark_tcp_ao_neighbor_add_as_reload_applied() {
         max_prefixes: None,
         max_prefixes_ipv4: None,
         max_prefixes_ipv6: None,
+        max_prefixes_out_ipv4: None,
+        max_prefixes_out_ipv6: None,
         max_prefix_restart_seconds: None,
         md5_password: None,
         bfd: None,
@@ -13910,6 +13920,8 @@ const RELOAD_MATRIX_NEIGHBOR_FIELDS: &[&str] = &[
     "slow_peer_duration",
     "slow_peer_isolation",
     "max_prefixes",
+    "max_prefixes_out_ipv4",
+    "max_prefixes_out_ipv6",
     "md5_password",
     "tcp_ao",
     "bfd",
@@ -13947,6 +13959,8 @@ const RELOAD_MATRIX_PEER_GROUP_FIELDS: &[&str] = &[
     "slow_peer_duration",
     "slow_peer_isolation",
     "max_prefixes",
+    "max_prefixes_out_ipv4",
+    "max_prefixes_out_ipv6",
     "md5_password",
     "bfd",
     "ttl_security",
@@ -14106,6 +14120,46 @@ fn reload_matrix_pins_load_bearing_field_classes() {
         "an all-hot peer-group cap edit hot-applies to static and dynamic \
          members in place: {}",
         cap_rows[1]
+    );
+
+    // ADR-0113: the outbound maxima are hot-applied at field level, so a
+    // maxima-only peer-group edit is an all-`live` change set and must not
+    // be documented as a session reset on either row.
+    for field in ["max_prefixes_out_ipv4", "max_prefixes_out_ipv6"] {
+        let rows = reload_matrix_rows_for(&matrix, field);
+        assert_eq!(
+            rows.len(),
+            2,
+            "`{field}` must have neighbor and peer-group rows"
+        );
+        for row in rows {
+            assert!(
+                row.contains("| live |"),
+                "an outbound maximum hot-applies in place on both the \
+                 neighbor and the peer-group path: {row}"
+            );
+        }
+        assert_eq!(
+            config_field_impact(field).map(|(impact, _)| impact),
+            Some(ConfigFieldImpact::HotApplied),
+            "`{field}` must classify as hot-applied, or the maxima-only \
+             peer-group edit falls back to the ADR-0081 reshape"
+        );
+    }
+
+    // The predicate the peer-group apply path consults, driven directly:
+    // a maxima-only group edit must take the in-place cohort path.
+    let old_group = PeerGroupConfig {
+        max_prefixes_out_ipv4: std::num::NonZeroU32::new(8),
+        ..Default::default()
+    };
+    let new_group = PeerGroupConfig {
+        max_prefixes_out_ipv4: std::num::NonZeroU32::new(64),
+        ..old_group.clone()
+    };
+    assert!(
+        peer_group_change_hot_applicable(&old_group, &new_group),
+        "a peer-group outbound-maximum edit must hot-apply in place"
     );
 }
 
