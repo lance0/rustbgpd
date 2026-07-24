@@ -2557,6 +2557,86 @@
           "refId": "A"
         }
       ]
+    },
+    {
+      "id": 57,
+      "type": "row",
+      "title": "Route safety",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 152 },
+      "panels": []
+    },
+    {
+      "id": 58,
+      "type": "timeseries",
+      "title": "Export rejections / malformed UPDATEs",
+      "description": "Exact-export rejections use the bare configured neighbor address; malformed UPDATEs use the transport endpoint. Both are exceptional route-safety events, partitioned by their bounded reason labels.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 153 },
+      "fieldConfig": { "defaults": { "unit": "ops", "min": 0 }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "sum by (instance, peer, family, reason) (rate(bgp_exact_export_rejections_total{instance=~\"$instance\",peer=~\"$neighbor\"}[$__rate_interval])) > 0",
+          "legendFormat": "exact {{instance}} {{peer}} {{family}} {{reason}}",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "sum by (instance, peer, disposition) (rate(bgp_update_malformed_total{instance=~\"$instance\",peer=~\"$peer\"}[$__rate_interval])) > 0",
+          "legendFormat": "malformed {{instance}} {{peer}} {{disposition}}",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 59,
+      "type": "timeseries",
+      "title": "Selection-deferral state",
+      "description": "Raw per-family gate state and frozen-roster waiter count. These are normal convergence state, not alert conditions; step rendering preserves discrete transitions.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 153 },
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 0, "min": 0, "custom": { "lineInterpolation": "stepAfter" } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "bgp_selection_deferral_active{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} {{afi_safi}} active",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "bgp_selection_deferral_waiters{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} {{afi_safi}} waiters",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 60,
+      "type": "timeseries",
+      "title": "Selection-deferral exceptional events",
+      "description": "Per-family rates for timer fallback and bounded-ledger overflow. Ordinary all-EoR, collision-refresh, and all-excluded releases are intentionally omitted.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 153 },
+      "fieldConfig": { "defaults": { "unit": "ops", "min": 0 }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "sum by (instance, afi_safi) (rate(bgp_selection_deferral_timeouts_total{instance=~\"$instance\"}[$__rate_interval])) > 0",
+          "legendFormat": "{{instance}} {{afi_safi}} timeout",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "sum by (instance, afi_safi) (rate(bgp_selection_deferral_ledger_overflows_total{instance=~\"$instance\"}[$__rate_interval])) > 0",
+          "legendFormat": "{{instance}} {{afi_safi}} ledger overflow",
+          "refId": "B"
+        }
+      ]
     }
   ]
 }

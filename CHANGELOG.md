@@ -74,6 +74,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Route-safety dashboard and actionable alerts.** The shipped Grafana
+  overview adds exact-export rejection and malformed-UPDATE disposition rates, raw
+  step-rendered selection-deferral state, and timeout/ledger-overflow rates
+  while preserving each metric's native labels. Four warning rules alert only on
+  increases in those failure counters; exhaustive Prometheus fixtures and the
+  structural dashboard checker pin the queries, discrete rendering, and the
+  exclusion of normal deferral activity. The daemon materializes the bounded
+  counter label sets when sessions and selection-deferral families are created
+  so ordinary scrape history can establish a zero baseline before producers
+  emit failures.
+
 - **Minimum accepted BGP hold time.** Per-neighbor and peer-group
   `min_hold_time` controls cause the daemon to reject peer OPEN proposals
   below the configured floor (including zero) with OPEN Error 2/6. Unset

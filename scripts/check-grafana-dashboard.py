@@ -59,6 +59,51 @@ TARGETS = {
     ("Max-prefix remaining headroom", "A"): (
         'bgp_max_prefix_headroom{instance=~"$instance",peer=~"$peer"}'
     ),
+    ("Export rejections / malformed UPDATEs", "A"): (
+        "sum by (instance, peer, family, reason) "
+        "(rate(bgp_exact_export_rejections_total"
+        '{instance=~"$instance",peer=~"$neighbor"}[$__rate_interval])) > 0'
+    ),
+    ("Export rejections / malformed UPDATEs", "B"): (
+        "sum by (instance, peer, disposition) (rate(bgp_update_malformed_total"
+        '{instance=~"$instance",peer=~"$peer"}[$__rate_interval])) > 0'
+    ),
+    ("Selection-deferral state", "A"): (
+        'bgp_selection_deferral_active{instance=~"$instance"}'
+    ),
+    ("Selection-deferral state", "B"): (
+        'bgp_selection_deferral_waiters{instance=~"$instance"}'
+    ),
+    ("Selection-deferral exceptional events", "A"): (
+        "sum by (instance, afi_safi) (rate(bgp_selection_deferral_timeouts_total"
+        '{instance=~"$instance"}[$__rate_interval])) > 0'
+    ),
+    ("Selection-deferral exceptional events", "B"): (
+        "sum by (instance, afi_safi) "
+        "(rate(bgp_selection_deferral_ledger_overflows_total"
+        '{instance=~"$instance"}[$__rate_interval])) > 0'
+    ),
+}
+
+ROUTE_SAFETY_LEGENDS = {
+    ("Export rejections / malformed UPDATEs", "A"): (
+        "exact {{instance}} {{peer}} {{family}} {{reason}}"
+    ),
+    ("Export rejections / malformed UPDATEs", "B"): (
+        "malformed {{instance}} {{peer}} {{disposition}}"
+    ),
+    ("Selection-deferral state", "A"): "{{instance}} {{afi_safi}} active",
+    ("Selection-deferral state", "B"): "{{instance}} {{afi_safi}} waiters",
+    ("Selection-deferral exceptional events", "A"): "{{instance}} {{afi_safi}} timeout",
+    ("Selection-deferral exceptional events", "B"): (
+        "{{instance}} {{afi_safi}} ledger overflow"
+    ),
+}
+
+ROUTE_SAFETY_PANELS = {
+    "Export rejections / malformed UPDATEs": 0,
+    "Selection-deferral state": 8,
+    "Selection-deferral exceptional events": 16,
 }
 
 WORKFLOW_PATHS = {
@@ -145,17 +190,24 @@ def main() -> None:
             fail(f"${name} All value must be the regex .* ")
 
     targets: dict[tuple[str, str], list[str]] = {}
+    legends: dict[tuple[str, str], list[str | None]] = {}
     for panel in panels:
         title = panel.get("title")
         for target in panel.get("targets", []):
             key = (title, target.get("refId"))
             targets.setdefault(key, []).append(normalized(target.get("expr", "")))
+            legends.setdefault(key, []).append(target.get("legendFormat"))
 
     for key, expression in TARGETS.items():
         actual = targets.get(key, [])
         expected = [normalized(expression)]
         if actual != expected:
             fail(f"target {key[0]!r}/{key[1]} must equal {expected[0]!r}; got {actual!r}")
+
+    for key, expected in ROUTE_SAFETY_LEGENDS.items():
+        actual = legends.get(key, [])
+        if actual != [expected]:
+            fail(f"target {key[0]!r}/{key[1]} must use legend {expected!r}; got {actual!r}")
 
     update_group_panel = next(
         panel for panel in panels if panel.get("title") == "Update group by neighbor address"
@@ -174,6 +226,35 @@ def main() -> None:
         fail("slow-peer state must be pinned to the discrete 0..1 range")
     if slow_defaults.get("custom", {}).get("lineInterpolation") != "stepAfter":
         fail("slow-peer state must use step interpolation")
+
+    route_safety_row = next(
+        (panel for panel in panels if panel.get("title") == "Route safety"), None
+    )
+    if route_safety_row is None or route_safety_row.get("type") != "row":
+        fail("Route safety must exist as a dashboard row")
+    if route_safety_row.get("collapsed") is not False:
+        fail("Route safety row must be expanded by default")
+    row_position = route_safety_row.get("gridPos", {})
+    expected_row_position = {"h": 1, "w": 24, "x": 0, "y": 152}
+    if row_position != expected_row_position:
+        fail(f"Route safety row must use grid position {expected_row_position}")
+    for title, expected_x in ROUTE_SAFETY_PANELS.items():
+        panel = next((item for item in panels if item.get("title") == title), None)
+        if panel is None or panel.get("type") != "timeseries":
+            fail(f"{title} must exist as a timeseries panel")
+        position = panel.get("gridPos", {})
+        expected_position = {"h": 8, "w": 8, "x": expected_x, "y": 153}
+        if position != expected_position:
+            fail(f"{title} must use route-safety grid position {expected_position}")
+
+    selection_panel = next(
+        panel for panel in panels if panel.get("title") == "Selection-deferral state"
+    )
+    selection_defaults = selection_panel.get("fieldConfig", {}).get("defaults", {})
+    if selection_defaults.get("decimals") != 0 or selection_defaults.get("min") != 0:
+        fail("selection-deferral state must render as nonnegative whole values")
+    if selection_defaults.get("custom", {}).get("lineInterpolation") != "stepAfter":
+        fail("selection-deferral state must use step interpolation")
 
     try:
         workflow_text = WORKFLOW.read_text(encoding="utf-8")
