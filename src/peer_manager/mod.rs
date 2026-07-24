@@ -364,6 +364,11 @@ pub struct PeerManager {
     /// before any peer is touched.
     #[cfg(test)]
     inject_reconfigure_failures: std::collections::BTreeMap<PeerKey, u32>,
+    /// The same deterministic fault injection for the in-place applier
+    /// (`hot_update_peer_in_place`), so the peer-group hot path's
+    /// mid-cohort failure and rollback contract can be exercised.
+    #[cfg(test)]
+    inject_hot_update_failures: std::collections::BTreeMap<PeerKey, u32>,
 }
 
 impl PeerManager {
@@ -599,6 +604,8 @@ impl PeerManager {
             snapshot_key: crate::config::RuntimeSnapshotKey::random(),
             #[cfg(test)]
             inject_reconfigure_failures: std::collections::BTreeMap::new(),
+            #[cfg(test)]
+            inject_hot_update_failures: std::collections::BTreeMap::new(),
         }
     }
 

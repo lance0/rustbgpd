@@ -5773,6 +5773,25 @@ pub fn describe_peer_group_changes(
     changes
 }
 
+/// True when every field that differs between two versions of one peer
+/// group is reload-matrix `live` (hot-applied), so the group edit can be
+/// applied in place to every inheriting member instead of reshaping
+/// (delete + re-add) their sessions.
+///
+/// The peer-group sibling of [`neighbor_change_hot_applicable`], and
+/// conservative on exactly the same edges: an empty change list (a
+/// runtime-relevant field `describe_peer_group_changes` doesn't cover,
+/// e.g. the `slow_peer_*` trio) and any field whose impact class is
+/// unknown or non-`HotApplied` both return `false`, keeping the reshape
+/// path as the fallback.
+pub fn peer_group_change_hot_applicable(old: &PeerGroupConfig, new: &PeerGroupConfig) -> bool {
+    let changes = describe_peer_group_changes(old, new);
+    !changes.is_empty()
+        && changes
+            .iter()
+            .all(|change| change.impact == Some(ConfigFieldImpact::HotApplied))
+}
+
 /// Compare two policy configurations.
 pub fn diff_policy(old: &PolicyConfig, new: &PolicyConfig) -> PolicyDiff {
     let definitions_added: Vec<String> = new

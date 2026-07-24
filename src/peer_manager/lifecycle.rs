@@ -356,7 +356,10 @@ impl PeerManager {
         }
     }
 
-    fn removed_peer_config(peer: &PeerKey, managed: &ManagedPeer) -> PeerManagerNeighborConfig {
+    pub(super) fn removed_peer_config(
+        peer: &PeerKey,
+        managed: &ManagedPeer,
+    ) -> PeerManagerNeighborConfig {
         let tc = &managed.transport_config;
         PeerManagerNeighborConfig {
             address: peer.address,
@@ -717,25 +720,55 @@ impl PeerManager {
     /// socket-scoped fields are copied from `config` into the stored
     /// transport config by the next rebuild path, which resolves from the
     /// config snapshot anyway).
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one linear pass: change detection, policy seam, knob apply, export refresh, bookkeeping"
-    )]
     pub(super) async fn hot_update_peer(
         &mut self,
         config: PeerManagerNeighborConfig,
     ) -> Result<(), PeerLifecycleError> {
         let peer = PeerKey::new(config.address, config.interface.clone());
+        if self
+            .peers
+            .get(&peer)
+            .ok_or_else(|| PeerLifecycleError::NotFound(peer.clone()))?
+            .is_dynamic
+        {
+            return Err(PeerLifecycleError::Invalid(format!(
+                "hot update target {peer} is a dynamic peer; reload reconciles static neighbors only"
+            )));
+        }
+        self.hot_update_peer_in_place(config).await
+    }
+
+    /// The applier half of [`Self::hot_update_peer`], without the
+    /// static-only guard.
+    ///
+    /// Everything it touches is per-session runtime state that an accepted
+    /// dynamic peer holds exactly like a static one, so the peer-group hot
+    /// path reaches dynamic inheritors through here. The guard above stays
+    /// on the reload entry point, where a dynamic target means the static
+    /// neighbor reconcile and the managed-peer set disagree.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one linear pass: change detection, policy seam, knob apply, export refresh, bookkeeping"
+    )]
+    pub(super) async fn hot_update_peer_in_place(
+        &mut self,
+        config: PeerManagerNeighborConfig,
+    ) -> Result<(), PeerLifecycleError> {
+        let peer = PeerKey::new(config.address, config.interface.clone());
+        #[cfg(test)]
+        if let Some(remaining) = self.inject_hot_update_failures.get_mut(&peer) {
+            if *remaining == 0 {
+                return Err(PeerLifecycleError::Internal(format!(
+                    "injected hot update failure for {peer}"
+                )));
+            }
+            *remaining -= 1;
+        }
         let (knobs_changed, export_knobs_changed, policies_changed, restart_policy_changed) = {
             let managed = self
                 .peers
                 .get(&peer)
                 .ok_or_else(|| PeerLifecycleError::NotFound(peer.clone()))?;
-            if managed.is_dynamic {
-                return Err(PeerLifecycleError::Invalid(format!(
-                    "hot update target {peer} is a dynamic peer; reload reconciles static neighbors only"
-                )));
-            }
             let tc = &managed.transport_config;
             // The export-affecting subset: `local_ipv6_nexthop` decides the
             // exact-export preflight's `MissingIpv6NextHop` suppression and

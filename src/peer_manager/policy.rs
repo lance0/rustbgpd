@@ -2547,6 +2547,24 @@ impl PeerManager {
             return Ok(());
         }
 
+        // Partition the group edit's changed fields by `ConfigFieldImpact`
+        // the way `diff_neighbors` already does for neighbor edits: when
+        // every changed field is reload-matrix `live`, the members'
+        // effective values are applied in place instead of bouncing every
+        // inheriting session. A mixed set (any field that is session-reset,
+        // restart-required, unclassified, or not described at all) keeps
+        // the reshape path below.
+        if let ConfigEvent::SetPeerGroup { name, .. } = &event
+            && let Some(old_group) = self.current_config.peer_groups.get(name)
+            && let Some(new_group) = next_config.peer_groups.get(name)
+            && crate::config::peer_group_change_hot_applicable(old_group, new_group)
+        {
+            let name = name.clone();
+            return self
+                .apply_peer_group_hot_change(event, next_config, &name, affected_peers)
+                .await;
+        }
+
         // ADR-0081: resolve every affected member's next config BEFORE
         // touching any peer, then commit the whole set through the
         // captured-prior reshape primitive. A resolution failure rejects with
@@ -2607,6 +2625,175 @@ impl PeerManager {
         self.reconcile_stale_dynamic_max_prefix_restarts();
         self.publish_policy_config_event(&event, priors.len());
         Ok(())
+    }
+
+    /// The all-hot half of [`Self::apply_peer_group_change`]: apply the
+    /// group's new effective values to every inheriting member in place,
+    /// under the same ADR-0081 contract the reshape path honors.
+    ///
+    /// Phase 1 resolves each member's next config and captures its live
+    /// prior before any peer is touched, so a resolution failure rejects
+    /// with zero peers touched. Phase 2 applies the cohort one member at a
+    /// time; a mid-cohort failure replays the captured priors in reverse
+    /// order (best-effort, so one stuck member cannot strand the rest) and
+    /// surfaces a compound error naming the members left advanced.
+    /// `current_config` — and with it the stored group definition —
+    /// advances only after the whole cohort succeeded.
+    ///
+    /// Unlike a reshape, dynamic inheritors are part of the cohort:
+    /// ADR-0081 decision 4 defers *reshaping* an accepted dynamic peer
+    /// because delete/re-add is wrong for an ephemeral session, but a hot
+    /// knob swap is as correct for it as for a static member, so it picks
+    /// the new effective values up without waiting for a reconnect.
+    async fn apply_peer_group_hot_change(
+        &mut self,
+        event: ConfigEvent,
+        next_config: Config,
+        group: &str,
+        affected_peers: Vec<IpAddr>,
+    ) -> Result<(), CatalogMutationError> {
+        let cohort = self.peer_group_hot_cohort(&next_config, group, &affected_peers)?;
+        let members = cohort.len();
+        let mut applied: Vec<PeerManagerNeighborConfig> = Vec::new();
+        for (next, prior) in cohort {
+            let peer = PeerKey::new(next.address, next.interface.clone());
+            let Err(error) = self.hot_update_peer_in_place(next).await else {
+                applied.push(prior);
+                continue;
+            };
+            let total = applied.len();
+            let mut failures = Vec::new();
+            for prior in applied.into_iter().rev() {
+                let restored = PeerKey::new(prior.address, prior.interface.clone());
+                if let Err(restore_error) = self.hot_update_peer_in_place(prior).await {
+                    failures.push(format!("{restored}: {restore_error}"));
+                }
+            }
+            return Err(CatalogMutationError::internal(if failures.is_empty() {
+                format!(
+                    "failed to hot-apply the peer-group change to {peer}: {error}; \
+                     prior peers restored"
+                )
+            } else {
+                format!(
+                    "failed to hot-apply the peer-group change to {peer}: {error}; \
+                     peer-group hot-apply rollback failed for {} of {total} prior peers \
+                     (unnamed priors were restored; each named member's state is described \
+                     by its error): {}",
+                    failures.len(),
+                    failures.join("; ")
+                )
+            }));
+        }
+
+        self.current_config = next_config;
+        self.sync_dynamic_max_prefix_restart_for_group(group);
+        self.reconcile_stale_dynamic_max_prefix_restarts();
+        self.publish_policy_config_event(&event, members);
+        info!(
+            group,
+            members, "hot-applied peer-group change in place (no session reshape)"
+        );
+        Ok(())
+    }
+
+    /// Phase 1 of [`Self::apply_peer_group_hot_change`]: every inheriting
+    /// member's next config paired with its captured live prior, in apply
+    /// order. Takes `&self` so it cannot touch a peer — a resolution
+    /// failure rejects the whole edit with zero peers mutated.
+    fn peer_group_hot_cohort(
+        &self,
+        next_config: &Config,
+        group: &str,
+        affected_peers: &[IpAddr],
+    ) -> Result<Vec<(PeerManagerNeighborConfig, PeerManagerNeighborConfig)>, CatalogMutationError>
+    {
+        // (next config, captured live prior) per member, in apply order.
+        let mut cohort: Vec<(PeerManagerNeighborConfig, PeerManagerNeighborConfig)> = Vec::new();
+        let mut seen = BTreeSet::new();
+
+        for peer_key in affected_peers
+            .iter()
+            .flat_map(|address| self.peer_keys_for_address(*address))
+        {
+            if seen.contains(&peer_key) {
+                continue;
+            }
+            let Some(managed) = self.peers.get(&peer_key) else {
+                continue;
+            };
+            // Dynamic peers at an affected address are swept below off their
+            // accepted range instead — the caller derived this address list
+            // from the static `[[neighbors]]` records.
+            if managed.is_dynamic {
+                continue;
+            }
+            seen.insert(peer_key.clone());
+            let prior = Self::removed_peer_config(&peer_key, managed);
+            let address = peer_key.address;
+            let Some(neighbor) = next_config.neighbors.iter().find(|neighbor| {
+                neighbor.address == address.to_string() && neighbor.interface == peer_key.interface
+            }) else {
+                return Err(CatalogMutationError::internal(format!(
+                    "static peer {peer_key} affected by the peer-group change has no neighbor \
+                     record in the updated config; refusing to hot-apply against an inconsistent \
+                     snapshot"
+                )));
+            };
+            let resolved = next_config
+                .resolve_neighbor(neighbor)
+                .map_err(catalog_config_error)?;
+            cohort.push((
+                Self::peer_manager_config_from_resolved(resolved, false),
+                prior,
+            ));
+        }
+
+        let Some(group_config) = next_config.peer_groups.get(group) else {
+            return Err(CatalogMutationError::internal(format!(
+                "peer group {group} vanished from the updated config while hot-applying it"
+            )));
+        };
+        let mut dynamic_members: Vec<PeerKey> = self
+            .peers
+            .iter()
+            .filter(|(peer_key, managed)| {
+                managed.is_dynamic
+                    && managed
+                        .accepted_dynamic_range
+                        .as_ref()
+                        .is_some_and(|accepted| accepted.peer_group == group)
+                    && !seen.contains(*peer_key)
+            })
+            .map(|(peer_key, _)| peer_key.clone())
+            .collect();
+        dynamic_members.sort();
+        for peer_key in dynamic_members {
+            let Some(managed) = self.peers.get(&peer_key) else {
+                continue;
+            };
+            let prior = Self::removed_peer_config(&peer_key, managed);
+            let resolved = next_config
+                .resolve_dynamic_neighbor(
+                    peer_key.address,
+                    managed.remote_asn,
+                    &managed.description,
+                    group_config,
+                    group,
+                    // ADR-0112: `remote_asn` is the ASN learned from OPEN,
+                    // which may have replaced an accept-any range's sentinel,
+                    // so re-resolution takes the pinned classification.
+                    managed.rfc8212_external,
+                )
+                .map_err(catalog_config_error)?;
+            let mut next = Self::peer_manager_config_from_resolved(resolved, false);
+            // The synthetic dynamic neighbor carries no interface; key the
+            // apply on the live peer.
+            next.interface.clone_from(&peer_key.interface);
+            cohort.push((next, prior));
+        }
+
+        Ok(cohort)
     }
 }
 
