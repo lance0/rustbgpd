@@ -21,6 +21,203 @@ use std::time::{Duration, Instant};
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
+
+fn counter_samples(metrics: &BgpMetrics, name: &str) -> Vec<(HashMap<String, String>, f64)> {
+    metrics
+        .registry()
+        .gather()
+        .into_iter()
+        .find(|family| family.name() == name)
+        .map_or_else(Vec::new, |family| {
+            family
+                .get_metric()
+                .iter()
+                .map(|metric| {
+                    let labels = metric
+                        .get_label()
+                        .iter()
+                        .map(|label| (label.name().to_string(), label.value().to_string()))
+                        .collect();
+                    (labels, metric.get_counter().value())
+                })
+                .collect()
+        })
+}
+
+fn assert_zero_counter_sample(
+    samples: &[(HashMap<String, String>, f64)],
+    expected_labels: &[(&str, &str)],
+) {
+    let matching: Vec<_> = samples
+        .iter()
+        .filter(|(labels, _)| {
+            expected_labels
+                .iter()
+                .all(|(name, value)| labels.get(*name).is_some_and(|actual| actual == value))
+        })
+        .collect();
+    assert_eq!(
+        matching.len(),
+        1,
+        "expected one counter sample with labels {expected_labels:?}, got {matching:?}"
+    );
+    assert!(
+        matching[0].1.abs() < f64::EPSILON,
+        "new counter child must start at zero"
+    );
+}
+
+fn exact_export_families() -> [((Afi, Safi), &'static str); 12] {
+    [
+        ((Afi::Ipv4, Safi::Unicast), "ipv4_unicast"),
+        ((Afi::Ipv6, Safi::Unicast), "ipv6_unicast"),
+        ((Afi::Ipv4, Safi::FlowSpec), "ipv4_flowspec"),
+        ((Afi::Ipv6, Safi::FlowSpec), "ipv6_flowspec"),
+        ((Afi::L2Vpn, Safi::Evpn), "l2vpn_evpn"),
+        ((Afi::BgpLs, Safi::BgpLs), "bgpls"),
+        ((Afi::BgpLs, Safi::BgpLsVpn), "bgpls_vpn"),
+        ((Afi::Ipv4, Safi::MplsVpn), "l3vpn_ipv4_unicast"),
+        ((Afi::Ipv6, Safi::MplsVpn), "l3vpn_ipv6_unicast"),
+        ((Afi::Ipv4, Safi::LabeledUnicast), "ipv4_labeled_unicast"),
+        ((Afi::Ipv6, Safi::LabeledUnicast), "ipv6_labeled_unicast"),
+        ((Afi::Ipv4, Safi::RtConstrain), "rtc"),
+    ]
+}
+
+/// Load-bearing proof: mapping any of these unsupported AFI/SAFI pairs to a
+/// metric family makes its exact `None` assertion fail.
+#[test]
+fn exact_export_metric_family_mapping_rejects_unsupported_pairs() {
+    for family in [
+        (Afi::Ipv4, Safi::Multicast),
+        (Afi::Ipv6, Safi::Multicast),
+        (Afi::Ipv6, Safi::RtConstrain),
+    ] {
+        assert_eq!(configured_exact_export_family_label(family), None);
+    }
+}
+
+/// Load-bearing proof: deleting the outbound-constructor initialization call,
+/// or any supported-family mapping arm, removes at least one asserted zero
+/// child from this fresh registry and makes the test fail.
+#[test]
+fn outbound_constructor_materializes_route_safety_counter_children() {
+    let mut peer_config = PeerConfig::new(65_001, 65_002, Ipv4Addr::new(10, 0, 0, 1));
+    peer_config.families = exact_export_families()
+        .into_iter()
+        .map(|(family, _)| family)
+        .collect();
+    let config = TransportConfig::new(peer_config, "192.0.2.10:1179".parse().unwrap());
+    let metrics = BgpMetrics::new();
+    let (_cmd_tx, cmd_rx) = mpsc::channel(8);
+    let (rib_tx, _rib_rx) = mpsc::channel(8);
+
+    let _session = PeerSession::new(
+        config,
+        metrics.clone(),
+        cmd_rx,
+        rib_tx,
+        None,
+        None,
+        None,
+        None,
+        None,
+        false,
+    );
+
+    let exact = counter_samples(&metrics, "bgp_exact_export_rejections_total");
+    assert_eq!(exact.len(), exact_export_families().len() * 4);
+    for (_, family) in exact_export_families() {
+        for reason in [
+            "encoding",
+            "missing_ipv6_next_hop",
+            "ipv4_requires_extended_next_hop",
+            "message_too_long",
+        ] {
+            assert_zero_counter_sample(
+                &exact,
+                &[
+                    ("peer", "192.0.2.10"),
+                    ("family", family),
+                    ("reason", reason),
+                ],
+            );
+        }
+    }
+    let malformed = counter_samples(&metrics, "bgp_update_malformed_total");
+    assert_eq!(malformed.len(), 3);
+    for disposition in ["attribute_discard", "treat_as_withdraw", "session_reset"] {
+        assert_zero_counter_sample(
+            &malformed,
+            &[("peer", "192.0.2.10:1179"), ("disposition", disposition)],
+        );
+    }
+}
+
+/// Load-bearing proof: deleting the accepted-session constructor's
+/// initialization call leaves this independent fresh registry empty.
+#[tokio::test]
+async fn inbound_constructor_materializes_route_safety_counter_children() {
+    let mut peer_config = PeerConfig::new(65_001, 65_002, Ipv4Addr::new(10, 0, 0, 1));
+    peer_config.families = vec![(Afi::Ipv6, Safi::Unicast)];
+    let config = TransportConfig::new(peer_config, "192.0.2.20:2179".parse().unwrap());
+    let metrics = BgpMetrics::new();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let connect = TcpStream::connect(listener.local_addr().unwrap());
+    let accept = listener.accept();
+    let (client, accepted) = tokio::join!(connect, accept);
+    let (_server, _) = accepted.unwrap();
+    let (_cmd_tx, cmd_rx) = mpsc::channel(8);
+    let (rib_tx, _rib_rx) = mpsc::channel(8);
+
+    let _session = PeerSession::new_inbound_with_identity_and_lifecycle(
+        config,
+        metrics.clone(),
+        cmd_rx,
+        rib_tx,
+        None,
+        None,
+        client.unwrap(),
+        None,
+        None,
+        None,
+        None,
+        None,
+        false,
+        SessionIdentity::default(),
+        None,
+        None,
+        crate::TcpAoRotationGeneration::STARTUP,
+    );
+
+    let exact = counter_samples(&metrics, "bgp_exact_export_rejections_total");
+    assert_eq!(exact.len(), 4);
+    for reason in [
+        "encoding",
+        "missing_ipv6_next_hop",
+        "ipv4_requires_extended_next_hop",
+        "message_too_long",
+    ] {
+        assert_zero_counter_sample(
+            &exact,
+            &[
+                ("peer", "192.0.2.20"),
+                ("family", "ipv6_unicast"),
+                ("reason", reason),
+            ],
+        );
+    }
+
+    let malformed = counter_samples(&metrics, "bgp_update_malformed_total");
+    assert_eq!(malformed.len(), 3);
+    for disposition in ["attribute_discard", "treat_as_withdraw", "session_reset"] {
+        assert_zero_counter_sample(
+            &malformed,
+            &[("peer", "192.0.2.20:2179"), ("disposition", disposition)],
+        );
+    }
+}
+
 fn make_test_session(local_asn: u32, remote_asn: u32) -> PeerSession {
     let mut peer_config = PeerConfig::new(local_asn, remote_asn, Ipv4Addr::new(10, 0, 0, 1));
     peer_config.connect_retry_secs = 30;
