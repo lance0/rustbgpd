@@ -102,6 +102,43 @@ impl PeerManager {
         })
     }
 
+    /// Reconcile a peer's hold-down with an edited restart duration.
+    ///
+    /// An armed countdown is rescheduled to `now + new` under a fresh latch
+    /// generation, so the superseded deadline can never fire. Removing the
+    /// duration cancels the countdown and leaves the peer latched until an
+    /// explicit enable. A latch without a countdown — an indefinite shutdown,
+    /// or one whose single automatic attempt was already consumed — never
+    /// gains a countdown from a config edit.
+    pub(super) fn rearm_max_prefix_restart(
+        &mut self,
+        peer: &PeerKey,
+        restart_seconds: Option<u32>,
+    ) {
+        let Some(seconds) = restart_seconds else {
+            self.invalidate_max_prefix_restart(peer);
+            return;
+        };
+        let generation = self.allocate_max_prefix_latch_generation();
+        let rearmed = self.max_prefix_latches.get_mut(peer).is_some_and(|latch| {
+            if latch.deadline.is_some() {
+                latch.generation = generation;
+                latch.deadline = Some(
+                    tokio::time::Instant::now() + std::time::Duration::from_secs(seconds.into()),
+                );
+                true
+            } else {
+                false
+            }
+        });
+        if rearmed {
+            // The rescheduled deadline may be later than the cached minimum it
+            // replaces, so a full recompute is required (the cheap min-update
+            // in `install_max_prefix_latch` would keep a stale earlier wake).
+            self.recompute_next_max_prefix_restart_deadline();
+        }
+    }
+
     pub(super) fn remove_max_prefix_latch(&mut self, peer: &PeerKey) {
         if self.max_prefix_latches.remove(peer).is_some() {
             self.recompute_next_max_prefix_restart_deadline();
@@ -144,7 +181,7 @@ impl PeerManager {
             .map(|(peer, _)| peer.clone())
             .collect();
         for peer in dynamic_members {
-            self.invalidate_max_prefix_restart(&peer);
+            self.rearm_max_prefix_restart(&peer, restart_seconds);
             if let Some(managed) = self.peers.get_mut(&peer) {
                 managed.max_prefix_restart_seconds = restart_seconds;
             }
@@ -807,12 +844,14 @@ impl PeerManager {
         }
 
         // The actor runs this method serially, so a deadline cannot fire while
-        // the awaited updates above are in flight. Cancel the old incident's
+        // the awaited updates above are in flight. Reconcile the incident's
         // countdown only after every fallible apply step succeeds: an accepted
-        // restart-duration change never inherits it, while a rejected change
-        // or an unrelated hot edit keeps the prior recovery policy intact.
+        // duration change reschedules an armed countdown to now + new (the
+        // superseded deadline is generation-fenced and can never fire),
+        // removing the duration cancels it, and a rejected change or an
+        // unrelated hot edit keeps the prior recovery timing intact.
         if restart_policy_changed {
-            self.invalidate_max_prefix_restart(&peer);
+            self.rearm_max_prefix_restart(&peer, config.max_prefix_restart_seconds);
         }
 
         // Manager-side bookkeeping so `rbgp neighbor list` and any later

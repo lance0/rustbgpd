@@ -2203,7 +2203,7 @@ impl PeerManager {
         }
         self.metrics.record_policy_generation_loaded();
         self.current_config = next_config;
-        self.invalidate_stale_dynamic_max_prefix_restarts();
+        self.reconcile_stale_dynamic_max_prefix_restarts();
         Ok(applied.len())
     }
 
@@ -2349,7 +2349,7 @@ impl PeerManager {
         // leaves successfully-updated peers running ahead of the
         // snapshot, which is the worse drift.
         self.current_config = next_config;
-        self.invalidate_stale_dynamic_max_prefix_restarts();
+        self.reconcile_stale_dynamic_max_prefix_restarts();
 
         if failures.is_empty() {
             info!(
@@ -2428,7 +2428,7 @@ impl PeerManager {
         }
 
         self.current_config = next_config;
-        self.invalidate_stale_dynamic_max_prefix_restarts();
+        self.reconcile_stale_dynamic_max_prefix_restarts();
 
         if failures.is_empty() {
             info!(
@@ -2584,7 +2584,7 @@ impl PeerManager {
         if let ConfigEvent::SetPeerGroup { name, .. } = &event {
             self.sync_dynamic_max_prefix_restart_for_group(name);
         }
-        self.invalidate_stale_dynamic_max_prefix_restarts();
+        self.reconcile_stale_dynamic_max_prefix_restarts();
         self.publish_policy_config_event(&event, priors.len());
         Ok(())
     }

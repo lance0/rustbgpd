@@ -505,9 +505,14 @@ Peers whose hold-downs expire together share one 500 ms command-delivery window,
 so a stalled session cannot multiply the restart delay across the due set.
 Delivery failure replaces `last_error` with the cause and the exact
 `rbgp neighbor <addr> enable` recovery action.
-A restart-duration change, session-generation replacement, explicit disable,
-neighbor removal, or dynamic-range replacement invalidates an existing
-countdown rather than carrying it into new policy.
+A live edit of `max_prefix_restart_seconds` while a countdown is armed
+reschedules the single pending attempt to now + the new duration; the
+superseded deadline never fires. Removing the duration cancels the countdown,
+and adding one to an already-latched peer does not retroactively restart it —
+explicit enable remains the recovery path in both cases. Peer-group edits
+inherited by dynamic peers follow the same rules. Session-generation
+replacement, explicit disable, neighbor removal, and dynamic-range replacement
+cancel an existing countdown rather than carrying it into new policy.
 
 `rbgp neighbor <addr>` reports the effective current action (`shutdown` or
 `restart`), configured restart duration, live hold-down milliseconds, and the
