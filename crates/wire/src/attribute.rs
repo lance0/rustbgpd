@@ -4994,6 +4994,34 @@ mod tests {
             other => panic!("expected MalformedField, got {other:?}"),
         }
     }
+    /// RFC 8955 §4.2 makes a `FlowSpec` NLRI carrying an unknown component
+    /// type malformed, and §10 defers to RFC 7606. Because the offending
+    /// component has no length, the remaining NLRI cannot be located — the
+    /// exact condition RFC 7606 §7.11 reserves session-reset for. Pin that
+    /// the error surfaces as `Err` from the revised decoder rather than as a
+    /// recoverable `malformed` entry.
+    #[test]
+    fn mp_reach_flowspec_unknown_component_is_session_reset() {
+        let value: &[u8] = &[
+            0x00, 0x01, // AFI = IPv4
+            0x85, // SAFI = 133 (FlowSpec)
+            0x00, // NH-Len = 0 (required for FlowSpec)
+            0x00, // Reserved
+            // FlowSpec NLRI: rule length 3, component type 14 (unallocated)
+            0x03, 14, 0x81, 0x06,
+        ];
+        let mut attr = vec![0x80, 14, u8::try_from(value.len()).unwrap()];
+        attr.extend_from_slice(value);
+        let err = decode_path_attributes_revised(&attr, true, false, &[]).unwrap_err();
+        match err {
+            DecodeError::MalformedField { detail, .. } => assert!(
+                detail.contains("unknown FlowSpec component type 14"),
+                "expected unknown-component rejection, got: {detail}"
+            ),
+            other => panic!("expected MalformedField, got {other:?}"),
+        }
+    }
+
     #[test]
     fn originator_id_roundtrip() {
         let attr = PathAttribute::OriginatorId(Ipv4Addr::new(10, 0, 0, 1));

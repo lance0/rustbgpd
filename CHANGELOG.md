@@ -26,6 +26,21 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Unknown FlowSpec component types keep their hard rejection, now with a
+  conformance-citing diagnostic.** *No decode-acceptance change: input that
+  errored before still errors, and input that parsed before still parses.*
+  `rustbgpd-wire` embedders tracking the 0.16.0 acceptance changes can ignore
+  this entry — only the `DecodeError::MalformedField` detail string and the
+  documentation changed. Component types outside 1–13 remain a malformed
+  NLRI per RFC 8955 §4.2, dispositioned per RFC 7606 §7.11. Skip-unknown was
+  re-examined and is not implementable for this encoding: only the rule is
+  length-prefixed, each component's value grammar is selected by its type
+  code, so an unrecognized component cannot be measured or stepped over
+  without misparsing the remainder of the rule — and silently dropping one
+  would widen the rule's match set past what the sender specified.
+  `KNOWN_ISSUES.md` previously described the rejection as a forward-
+  compatibility defect to be fixed; it now records it as required behavior.
+
 - **Live edits of `max_prefix_restart_seconds` reschedule the pending
   automatic restart instead of cancelling it.** While a max-prefix hold-down
   countdown is armed, changing the duration re-arms the single pending attempt
