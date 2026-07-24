@@ -11,6 +11,12 @@ categories.workspace = true
 description = "MRT dump export — RFC 6396 TABLE_DUMP_V2"
 readme = "README.md"
 
+[features]
+# Enables allocation counters and deterministic originated-time injection for
+# the snapshot allocation diagnostic binary. The timed benchmark deliberately
+# compiles without this feature so its encoder has no probe atomics.
+snapshot-allocation-diagnostics = []
+
 [dependencies]
 bytes.workspace = true
 nix = { workspace = true, features = ["dir", "fs", "user"] }
@@ -27,5 +33,10 @@ flate2.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [dev-dependencies]
+tikv-jemallocator.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 tempfile.workspace = true
+
+[[bench]]
+name = "snapshot_allocation"
+harness = false
