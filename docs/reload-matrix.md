@@ -67,9 +67,12 @@ rebuilt; the transaction executor captures prior static peer configs and
 restores them if apply or persistence fails, and after a successful persist it
 gracefully resets the live dynamic sessions accepted by an affected range so
 they re-accept under the committed config (ADR-0086). SIGHUP and targeted
-peer-group RPCs hot-apply policy-only peer-group edits to live dynamic
-sessions, but no-preview session-shaping peer-group edits on those paths leave
-dynamic sessions on their running config until reconnect. Dynamic-range
+peer-group RPCs partition a group edit's changed fields by impact class: an
+all-`live` change set is applied in place to every inheriting member, static
+and dynamic, with no session reset, while a set mixing in any session-reset,
+restart-required, or unclassified field reshapes as before. Session-shaping
+peer-group edits on those paths still leave dynamic sessions on their running
+config until reconnect. Dynamic-range
 peer-group reassignments and mixed policy/session effective-impact candidates
 remain rejected even though SIGHUP can hot-reconcile some of those shapes
 best-effort.
@@ -152,7 +155,7 @@ configure their keyring directly.
 | `slow_peer_duration` | live (effective next session) | Same as neighbor. |
 | `slow_peer_isolation` | live (effective next session) | Same as neighbor. |
 | `max_prefixes` | live | Same as neighbor. |
-| `max_prefix_restart_seconds` | live (static session reset; transaction dynamic bounce) | Inherited by group members. Direct group edits reshape static members and manager-sync all dynamic members without bouncing them. Committed config transactions also bounce enabled dynamic sessions; disabled dynamic peers retain admin state and adopt the new duration. An armed countdown reschedules to now + the new duration; removing the duration cancels it. |
+| `max_prefix_restart_seconds` | live | Inherited by group members. An all-`live` group edit applies in place to static and dynamic members without bouncing them; a mixed change set reshapes static members and manager-syncs dynamic ones. Committed config transactions also bounce enabled dynamic sessions; disabled dynamic peers retain admin state and adopt the new duration. An armed countdown reschedules to now + the new duration; removing the duration cancels it. |
 | `md5_password` | live (effective next session) | Same as neighbor — pinned by group, applied to the inheriting peer's next socket. |
 | `bfd` | restart-required | Pinned. |
 | `ttl_security` | live (effective next session) | |
@@ -160,7 +163,7 @@ configure their keyring directly.
 | `required_families` | live (static session reset; dynamic next reconnect) | Non-empty neighbor value overrides; empty/absent inherits. A committed config transaction classifies the effective change as `SessionReshape` and bounces affected enabled dynamic ranges after persistence. |
 | `graceful_restart` | live (effective next session) | |
 | `gr_restart_time` | live (effective next session) | |
-| `gr_peer_restart_time_max` | live (static session reset; dynamic next reconnect) | Inherited local helper cap. Peer-group edits rebuild static members; already accepted dynamic members keep their running cap until reconnect. A committed config transaction follows the transaction-overlay behavior above and bounces enabled dynamic members. |
+| `gr_peer_restart_time_max` | live | Inherited local helper cap. An all-`live` group edit swaps the cap in place on static and dynamic members alike; a change set that also moves a session-reset field rebuilds static members and leaves accepted dynamic members on their running cap until reconnect. A committed config transaction follows the transaction-overlay behavior above and bounces enabled dynamic members. |
 | `gr_stale_routes_time` | live | |
 | `llgr_stale_time` | live (effective next session) | |
 | `local_ipv6_nexthop` | live | |

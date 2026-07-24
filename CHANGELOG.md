@@ -86,6 +86,24 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   GR entry. **Operator-visible for dashboards and alerts:** an advertised-count
   panel or rule that read the old nonzero plateau during a restart now sees
   zero until the peer returns and its table is rebuilt.
+- **Hot-applicable peer-group edits no longer tear down every inheriting
+  session.** `apply_peer_group_change` reshaped (delete + re-add) the group's
+  static members for *any* change, so raising a group-level maximum bounced
+  every client that inherits from it — while the identical neighbor-level edit
+  hot-applied in place. A peer-group change's changed fields are now
+  partitioned by reload-matrix impact class the way neighbor changes already
+  were: a change set whose every field is `live` is applied to each member in
+  place, with no session reset, and a set that mixes in any session-reset,
+  restart-required, or unclassified field keeps the ADR-0081 reshape path. The
+  in-place path carries the same atomicity contract — every member's next
+  config is resolved and its live prior captured before any peer is touched, a
+  mid-cohort failure restores the earlier members in reverse order and reports
+  a compound error naming any it could not, and the stored group definition
+  advances only after the whole cohort succeeded. Dynamic inheritors are part
+  of that cohort and pick the new values up without waiting for a reconnect.
+  For a route server, where clients inherit from a group, a group-level limit
+  raise is now flap-free during exactly the incident the limit exists to
+  contain.
 
 - **The initial table dump now evaluates export policy with the peer's
   peer-group.** The session staged its peer-group policy context *after* the

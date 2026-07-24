@@ -14102,8 +14102,9 @@ fn reload_matrix_pins_load_bearing_field_classes() {
         cap_rows[0]
     );
     assert!(
-        cap_rows[1].contains("| live (static session reset; dynamic next reconnect) |"),
-        "peer-group cap edits do not selectively hot-fanout: {}",
+        cap_rows[1].contains("| live |"),
+        "an all-hot peer-group cap edit hot-applies to static and dynamic \
+         members in place: {}",
         cap_rows[1]
     );
 }

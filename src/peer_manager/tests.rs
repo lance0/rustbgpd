@@ -4626,6 +4626,227 @@ async fn peer_group_reshape_skips_dynamic_peers_without_bouncing() {
     );
 }
 
+// ── peer-group edits partitioned by `ConfigFieldImpact` ───────────────
+
+fn edge_group_max_prefixes_event(
+    hold_time: u16,
+    max_prefixes: u32,
+) -> rustbgpd_api::peer_types::ConfigEvent {
+    let mut definition = edge_group_definition(Some(hold_time));
+    definition.max_prefixes = Some(max_prefixes);
+    rustbgpd_api::peer_types::ConfigEvent::SetPeerGroup {
+        name: "edge".to_string(),
+        definition,
+        ack: None,
+    }
+}
+
+async fn edge_group_manager_with_members() -> PeerManager {
+    let config = load_test_config(EDGE_GROUP_TOML);
+    let mut mgr = peer_group_reshape_manager(config.clone());
+    for resolved in config.resolved_neighbors().unwrap() {
+        mgr.add_peer(
+            PeerManager::peer_manager_config_from_resolved(resolved, false),
+            false,
+        )
+        .await
+        .unwrap();
+    }
+    mgr
+}
+
+/// Load-bearing: a peer-group edit whose every changed field is
+/// reload-matrix `live` must apply to the inheriting members in place.
+/// Both halves fail without the impact partition — before it,
+/// `apply_peer_group_change` reshaped for *any* group change, so every
+/// member's session id changed (a `peer deleted` + re-add on the wire)
+/// even though the identical neighbor-level edit hot-applies.
+#[tokio::test]
+async fn peer_group_hot_field_edit_applies_in_place_without_session_reset() {
+    let mut mgr = edge_group_manager_with_members().await;
+    let addresses = [
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3)),
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4)),
+    ];
+    let before: Vec<_> = addresses
+        .iter()
+        .map(|addr| {
+            let managed = mgr.peers.get(&key(*addr)).expect("managed peer");
+            assert_eq!(managed.transport_config.max_prefixes, None);
+            (*addr, managed.session_id)
+        })
+        .collect();
+
+    mgr.apply_peer_group_change(edge_group_max_prefixes_event(90, 5_000), addresses.to_vec())
+        .await
+        .unwrap();
+
+    for (addr, session_id) in before {
+        let managed = mgr.peers.get(&key(addr)).expect("hot-applied member");
+        assert_eq!(
+            managed.session_id, session_id,
+            "a pure-hot peer-group edit must not tear down {addr}'s session"
+        );
+        // Skipping the reshape is only correct if the member's *effective*
+        // state actually moved; a path that updated the stored group
+        // definition alone would leave both of these stale.
+        assert_eq!(
+            managed.max_prefixes,
+            Some(5_000),
+            "{addr} must inherit the new group maximum"
+        );
+        assert_eq!(managed.transport_config.max_prefixes, Some(5_000));
+    }
+    assert_eq!(
+        mgr.current_config
+            .peer_groups
+            .get("edge")
+            .expect("group definition")
+            .max_prefixes,
+        Some(5_000)
+    );
+}
+
+/// The other half of the partition: a change set that mixes a hot field
+/// with a session-reset one keeps the ADR-0081 reshape path, because the
+/// session-reset field can only take effect on a renegotiated session.
+#[tokio::test]
+async fn peer_group_mixed_impact_edit_still_reshapes_members() {
+    let mut mgr = edge_group_manager_with_members().await;
+    let addresses = [
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3)),
+    ];
+    let before: Vec<_> = addresses
+        .iter()
+        .map(|addr| (*addr, mgr.peers.get(&key(*addr)).expect("peer").session_id))
+        .collect();
+
+    // `hold_time` is OPEN-negotiated (session reset) and `max_prefixes` is
+    // hot; a mixed set must not take the in-place path.
+    mgr.apply_peer_group_change(edge_group_max_prefixes_event(45, 5_000), addresses.to_vec())
+        .await
+        .unwrap();
+
+    for (addr, session_id) in before {
+        let managed = mgr.peers.get(&key(addr)).expect("reshaped member");
+        assert_ne!(
+            managed.session_id, session_id,
+            "a mixed-impact peer-group edit must still reshape {addr}"
+        );
+        assert_eq!(managed.hold_time, Some(45));
+        assert_eq!(managed.max_prefixes, Some(5_000));
+    }
+}
+
+/// ADR-0081 for the in-place path: a mid-cohort failure restores the
+/// members applied before it from their captured live priors, and
+/// `current_config` — so also the stored group definition — never
+/// advances.
+#[tokio::test]
+async fn peer_group_hot_apply_mid_cohort_failure_restores_prior_members() {
+    let mut mgr = edge_group_manager_with_members().await;
+    let a1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let a2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3)); // its hot apply fails
+    let a3 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4));
+    mgr.inject_hot_update_failures.insert(key(a2), 0);
+    let sessions: Vec<_> = [a1, a2, a3]
+        .into_iter()
+        .map(|addr| (addr, mgr.peers.get(&key(addr)).expect("peer").session_id))
+        .collect();
+
+    let Err(error) = mgr
+        .apply_peer_group_change(edge_group_max_prefixes_event(90, 5_000), vec![a1, a2, a3])
+        .await
+    else {
+        panic!("mid-cohort hot-apply failure must surface as Err");
+    };
+    assert!(
+        matches!(error, CatalogMutationError::Internal(_)),
+        "{error:?}"
+    );
+    let message = error.to_string();
+    assert!(message.contains("prior peers restored"), "{message}");
+    assert!(message.contains("10.0.0.3"), "{message}");
+
+    for (addr, session_id) in sessions {
+        let managed = mgr.peers.get(&key(addr)).expect("member");
+        assert_eq!(
+            managed.max_prefixes, None,
+            "{addr} must be back on (or never moved off) its prior value"
+        );
+        assert_eq!(managed.transport_config.max_prefixes, None);
+        assert_eq!(
+            managed.session_id, session_id,
+            "rollback of an in-place apply must not bounce {addr} either"
+        );
+    }
+    assert!(
+        mgr.current_config
+            .peer_groups
+            .get("edge")
+            .expect("group definition")
+            .max_prefixes
+            .is_none(),
+        "a failed hot apply must leave the group definition unchanged"
+    );
+}
+
+/// Dynamic inheritors are part of the hot cohort: ADR-0081 decision 4
+/// defers *reshaping* an accepted dynamic peer, but a hot knob swap needs
+/// no reconnect, so the new inherited value reaches the live session
+/// without a bounce.
+#[tokio::test]
+async fn peer_group_hot_field_edit_reaches_live_dynamic_members() {
+    let mut mgr = dynamic_test_manager();
+    let addr = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 91));
+    let (handle, mut applied_caps) = recording_runtime_config_handle();
+    insert_test_dynamic_managed_peer(
+        &mut mgr,
+        addr,
+        91,
+        handle,
+        true,
+        IpAddr::V4(Ipv4Addr::new(127, 0, 0, 0)),
+        8,
+        "ix-members",
+    );
+    let session_id = mgr.peers[&key(addr)].session_id;
+    let cap_before = mgr.peers[&key(addr)]
+        .transport_config
+        .gr_peer_restart_time_max;
+    assert_ne!(cap_before, 1_800);
+
+    let mut definition = crate::policy_admin::config_peer_group_to_api(
+        &mgr.current_config.peer_groups["ix-members"],
+    );
+    definition.gr_peer_restart_time_max = Some(1_800);
+    mgr.apply_peer_group_change(
+        rustbgpd_api::peer_types::ConfigEvent::SetPeerGroup {
+            name: "ix-members".to_string(),
+            definition,
+            ack: None,
+        },
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        applied_caps.try_recv(),
+        Ok(1_800),
+        "the live dynamic session must receive the new inherited cap"
+    );
+    let managed = &mgr.peers[&key(addr)];
+    assert_eq!(managed.transport_config.gr_peer_restart_time_max, 1_800);
+    assert_eq!(
+        managed.session_id, session_id,
+        "a hot peer-group edit must not bounce the dynamic member"
+    );
+    assert!(managed.is_dynamic);
+}
+
 #[tokio::test]
 async fn required_family_group_reconcile_waits_for_dynamic_reconnect() {
     // Load-bearing: this shared SIGHUP/targeted-group reconcile primitive must
