@@ -2376,7 +2376,13 @@ fn main() {
         .enable_all()
         .build()
         .unwrap_or_else(|e| fatal_startup_error("failed to create tokio runtime", e));
-    rt.block_on(run(config, boot_revert_notice, profiler));
+    let grpc_server_failed = rt.block_on(run(config, boot_revert_notice, profiler));
+    if grpc_server_failed {
+        // The coordinated teardown already ran (NOTIFICATIONs, GR marker,
+        // checkpoints); the non-zero code tells supervisors (e.g. systemd
+        // Restart=on-failure) this was a component failure, not a clean stop.
+        process::exit(1);
+    }
 }
 
 /// Number of panic reports retained in `<runtime_state_dir>/crash/`;
@@ -2574,11 +2580,14 @@ fn resolve_rib_channel_capacity_from(env: Option<&str>) -> usize {
 }
 
 #[expect(clippy::too_many_lines)]
+/// Returns `true` when shutdown was caused by the gRPC server exiting
+/// unexpectedly (a component failure — the process must exit non-zero),
+/// `false` for operator-initiated shutdowns (signals, Shutdown RPC).
 async fn run<T>(
     mut config: Config,
     boot_revert_notice: Option<confirm_journal::BootRevertNotice>,
     profiler: Option<T>,
-) {
+) -> bool {
     // Snapshot the gRPC listener config as it was at process start.
     // The live TCP/UDS listeners bind once and are not rebuilt on
     // SIGHUP; this snapshot is what they're actually serving. Reload
@@ -4420,6 +4429,7 @@ async fn run<T>(
     let mut reload_in_flight: Option<
         tokio::task::JoinHandle<Option<Result<Config, &'static str>>>,
     > = None;
+    let mut grpc_server_failed = false;
     loop {
         tokio::select! {
             result = tokio::signal::ctrl_c() => {
@@ -4443,6 +4453,7 @@ async fn run<T>(
             result = &mut grpc_handle => {
                 error!(?result, "gRPC server exited unexpectedly");
                 info!("initiating shutdown due to gRPC server failure");
+                grpc_server_failed = true;
                 break;
             }
             _ = sighup.recv() => {
@@ -4937,6 +4948,7 @@ async fn run<T>(
     }
 
     info!("rustbgpd exiting");
+    grpc_server_failed
 }
 
 #[cfg(test)]

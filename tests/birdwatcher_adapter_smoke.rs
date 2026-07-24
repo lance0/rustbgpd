@@ -116,18 +116,17 @@ fn wait_for_http(port: u16, path: &str, proc_: &mut Proc) {
 }
 
 /// Wait until `port` accepts a TCP connection (daemon gRPC readiness).
-fn wait_for_tcp(port: u16, proc_: &mut Proc) {
+/// `Err` carries the exit status when the process died before listening
+/// (the caller may retry — see `spawn_daemon_listening`); a still-running
+/// process that never listens within the timeout panics.
+fn wait_for_tcp(port: u16, proc_: &mut Proc) -> Result<(), std::process::ExitStatus> {
     let deadline = Instant::now() + Duration::from_secs(120);
     while Instant::now() < deadline {
         if TcpStream::connect(("127.0.0.1", port)).is_ok() {
-            return;
+            return Ok(());
         }
         if let Ok(Some(status)) = proc_.child.try_wait() {
-            panic!(
-                "{} exited before listening on {port}: {status}\nstderr:\n{}",
-                proc_.name,
-                proc_.stderr()
-            );
+            return Err(status);
         }
         thread::sleep(Duration::from_millis(100));
     }
@@ -136,6 +135,50 @@ fn wait_for_tcp(port: u16, proc_: &mut Proc) {
         proc_.name,
         proc_.stderr()
     );
+}
+
+/// Spawn the daemon and wait for its gRPC TCP listener. `free_port()` is
+/// bind-then-release, so a parallel workspace test can steal the port
+/// before the daemon binds it; the daemon treats the lost gRPC bind as a
+/// component failure and exits non-zero. Retry the whole spawn with
+/// fresh ports (bounded) instead of failing the test on that race.
+/// Returns the daemon plus the ports and token path the rest of the test
+/// needs.
+fn spawn_daemon_listening(dir: &Path) -> (Proc, u16, u16, PathBuf) {
+    const ATTEMPTS: u32 = 3;
+    for attempt in 1..=ATTEMPTS {
+        let grpc_port = free_port();
+        let bgp_port = free_port();
+        let (config_path, token_path) = write_config(dir, grpc_port, bgp_port);
+        let daemon_stdout = dir.join("rustbgpd.stdout.log");
+        let daemon_stderr = dir.join("rustbgpd.stderr.log");
+        let mut daemon = Proc {
+            child: Command::new(env!("CARGO_BIN_EXE_rustbgpd"))
+                .arg(&config_path)
+                .stdout(Stdio::from(
+                    std::fs::File::create(&daemon_stdout).expect("daemon stdout log"),
+                ))
+                .stderr(Stdio::from(
+                    std::fs::File::create(&daemon_stderr).expect("daemon stderr log"),
+                ))
+                .spawn()
+                .expect("spawn rustbgpd"),
+            name: "rustbgpd",
+            stderr_path: daemon_stderr,
+        };
+        match wait_for_tcp(grpc_port, &mut daemon) {
+            Ok(()) => return (daemon, grpc_port, bgp_port, token_path),
+            Err(status) if attempt < ATTEMPTS => eprintln!(
+                "rustbgpd exited before listening on {grpc_port} (attempt {attempt}): \
+                 {status}; retrying with fresh ports"
+            ),
+            Err(status) => panic!(
+                "rustbgpd exited before listening on {grpc_port}: {status}\nstderr:\n{}",
+                daemon.stderr()
+            ),
+        }
+    }
+    unreachable!("spawn retry loop returns or panics");
 }
 
 /// Mutation proof: dropping Tier enforcement, the bearer credential, or the
@@ -370,30 +413,11 @@ fn epoch_from_timestamp(s: &str) -> u64 {
 #[test]
 fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_subset() {
     let temp = tempfile::tempdir().expect("create temp dir");
-    let grpc_port = free_port();
     let adapter_port = free_port();
-    let bgp_port = free_port();
-    let (config_path, token_path) = write_config(temp.path(), grpc_port, bgp_port);
 
     // Spawn the daemon (serves gRPC). Structured logs go to stdout,
     // the banner to stderr.
-    let daemon_stdout = temp.path().join("rustbgpd.stdout.log");
-    let daemon_stderr = temp.path().join("rustbgpd.stderr.log");
-    let mut daemon = Proc {
-        child: Command::new(env!("CARGO_BIN_EXE_rustbgpd"))
-            .arg(&config_path)
-            .stdout(Stdio::from(
-                std::fs::File::create(&daemon_stdout).expect("daemon stdout log"),
-            ))
-            .stderr(Stdio::from(
-                std::fs::File::create(&daemon_stderr).expect("daemon stderr log"),
-            ))
-            .spawn()
-            .expect("spawn rustbgpd"),
-        name: "rustbgpd",
-        stderr_path: daemon_stderr,
-    };
-    wait_for_tcp(grpc_port, &mut daemon);
+    let (mut daemon, grpc_port, bgp_port, token_path) = spawn_daemon_listening(temp.path());
     wait_for_unauthenticated_get_global(grpc_port, &mut daemon);
 
     // Spawn the adapter against the daemon's gRPC endpoint. Built via

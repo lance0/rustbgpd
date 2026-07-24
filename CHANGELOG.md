@@ -11,6 +11,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Daemon exits non-zero when shutdown is caused by unexpected gRPC server
+  termination.** The coordinated teardown (NOTIFICATIONs, GR marker,
+  checkpoints) still runs, but the process now exits 1 so supervisors with
+  `Restart=on-failure` restart the daemon instead of treating the component
+  failure as a clean stop. Operator-initiated shutdowns (SIGINT/SIGTERM,
+  Shutdown RPC) still exit 0.
+
 - **RFC 6793 legacy-AS migration is lossless end to end.** Sessions without
   capability 65 now normalize received type 2/17 paths and type 7/18
   aggregators before loop detection, policy, and RIB processing, then derive
