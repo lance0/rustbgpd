@@ -105,6 +105,8 @@ const WARM_BUNDLE_DIRECTORY: &str = "warm-bundle-v1";
 const MAX_GR_RESTART_MARKER_BYTES: u64 = 4096;
 const MAX_CHECKPOINT_GENERATION_BYTES: usize = 128;
 const WARM_CHECKPOINT_DEADLINE: Duration = Duration::from_secs(30);
+/// Aggregate bound for every BMP collector client to drain and terminate.
+const BMP_CLIENT_SHUTDOWN_DEADLINE: Duration = Duration::from_secs(2);
 /// Terminal bound for shutdown GR restart marker publication and removal.
 /// The marker is tiny next to the 30-second warm-checkpoint budget, but its
 /// open/write/sync/rename sequence hits the same filesystem: a hung mount
@@ -717,8 +719,35 @@ where
 
 struct BmpRuntime {
     control_tx: mpsc::Sender<rustbgpd_bmp::BmpControlEvent>,
+    reconnect_shutdown_tx: watch::Sender<bool>,
     manager_handle: JoinHandle<()>,
     client_handles: Vec<JoinHandle<()>>,
+}
+
+async fn await_bmp_client_shutdown(mut client_handles: Vec<JoinHandle<()>>, timeout: Duration) {
+    let deadline = tokio::time::Instant::now() + timeout;
+    for index in 0..client_handles.len() {
+        match tokio::time::timeout_at(deadline, &mut client_handles[index]).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => warn!(
+                error = %e,
+                cancelled = e.is_cancelled(),
+                panicked = e.is_panic(),
+                "BMP client task failed during shutdown"
+            ),
+            Err(_) => {
+                warn!(
+                    remaining = client_handles.len() - index,
+                    timeout_ms = timeout.as_millis(),
+                    "BMP clients did not drain before the aggregate deadline; aborting remaining tasks"
+                );
+                for handle in &client_handles[index..] {
+                    handle.abort();
+                }
+                return;
+            }
+        }
+    }
 }
 
 impl From<GrpcAccessMode> for GrpcServerAccessMode {
@@ -2864,6 +2893,7 @@ async fn run<T>(
     {
         let (bmp_event_tx, bmp_event_rx) = mpsc::channel(4096);
         let (bmp_control_tx, bmp_control_rx) = mpsc::channel(256);
+        let (bmp_reconnect_shutdown_tx, bmp_reconnect_shutdown_rx) = watch::channel(false);
         let sys_name = bmp_config.sys_name.clone();
         let sys_descr = if bmp_config.sys_descr.is_empty() {
             format!("rustbgpd {}", env!("CARGO_PKG_VERSION"))
@@ -2920,7 +2950,8 @@ async fn run<T>(
                 sys_descr.clone(),
                 Some(bmp_control_tx.clone()),
                 metrics.clone(),
-            );
+            )
+            .with_reconnect_shutdown(bmp_reconnect_shutdown_rx.clone());
             info!(collector = %addr, "spawning BMP client");
             client_handles.push(tokio::spawn(client.run()));
         }
@@ -2967,6 +2998,7 @@ async fn run<T>(
         let manager_handle = tokio::spawn(mgr.run());
         bmp_runtime = Some(BmpRuntime {
             control_tx: bmp_control_tx,
+            reconnect_shutdown_tx: bmp_reconnect_shutdown_tx,
             manager_handle,
             client_handles,
         });
@@ -4875,16 +4907,12 @@ async fn run<T>(
             }
         }
 
-        for mut handle in bmp_runtime.client_handles {
-            match tokio::time::timeout(Duration::from_secs(2), &mut handle).await {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => warn!(error = %e, "BMP client task panicked during shutdown"),
-                Err(_) => {
-                    warn!("BMP client did not exit within 2s; aborting task");
-                    handle.abort();
-                }
-            }
-        }
+        // The manager exits first so its final PeerDown messages are queued
+        // before its collector senders close. Reconnecting clients can then
+        // stop immediately; connected clients deliberately ignore this signal
+        // and drain that queue before sending Termination.
+        let _ = bmp_runtime.reconnect_shutdown_tx.send(true);
+        await_bmp_client_shutdown(bmp_runtime.client_handles, BMP_CLIENT_SHUTDOWN_DEADLINE).await;
     }
 
     // 4. Stop the gRPC server
@@ -4919,6 +4947,56 @@ mod tests {
     use crate::test_support::{
         assert_tier_authorized_test_config, tier_authorized_uds_test_config,
     };
+
+    /// Load-bearing proof: restoring the per-handle relative timeout-and-abort
+    /// loop leaves this helper pending after two seconds, before the second and
+    /// third clients have timed out.
+    #[tokio::test(start_paused = true)]
+    async fn bmp_client_shutdown_uses_one_aggregate_deadline() {
+        struct AbortWitness(Arc<std::sync::atomic::AtomicUsize>);
+
+        impl Drop for AbortWitness {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let cancelled = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut handles = Vec::new();
+        for _ in 0..3 {
+            let cancelled = Arc::clone(&cancelled);
+            handles.push(tokio::spawn(async move {
+                let _witness = AbortWitness(cancelled);
+                std::future::pending::<()>().await;
+            }));
+        }
+        tokio::task::yield_now().await;
+
+        let started = tokio::time::Instant::now();
+        let shutdown = tokio::spawn(await_bmp_client_shutdown(
+            handles,
+            BMP_CLIENT_SHUTDOWN_DEADLINE,
+        ));
+        tokio::task::yield_now().await;
+        tokio::time::advance(BMP_CLIENT_SHUTDOWN_DEADLINE).await;
+        tokio::task::yield_now().await;
+
+        assert!(
+            shutdown.is_finished(),
+            "three clients exceeded one aggregate shutdown budget"
+        );
+        shutdown.await.unwrap();
+        tokio::task::yield_now().await;
+        assert_eq!(
+            cancelled.load(Ordering::SeqCst),
+            3,
+            "every client still pending at the aggregate deadline must be aborted"
+        );
+        assert_eq!(
+            tokio::time::Instant::now().duration_since(started),
+            BMP_CLIENT_SHUTDOWN_DEADLINE
+        );
+    }
 
     /// Load-bearing proof: deleting the field-5 projection (or defaulting it
     /// absent) makes both explicit-presence assertions red.

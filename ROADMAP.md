@@ -1635,12 +1635,10 @@ an ADR "Deferred" section that points back here. Tightened, not dropped.
   API-visible peer-manager / RIB boundaries still return opaque `String`
   errors; large-community duplicate normalization on receipt/encode (stored and
   re-advertised unchanged today); MRT snapshot encode allocation pressure on
-  very large dumps; BMP periodic-stats scalability (serial `query_state().await`
-  per peer) and BMP client connect-loop shutdown. FlowSpec unknown component
-  pass-through was investigated and rejected: RFC 8955 treats unknown component
-  types as malformed NLRI. Inbound BoRR/EoRR channel-full retry was also
-  investigated and rejected: the receive path already backpressures with
-  `send().await`.
+  very large dumps. FlowSpec unknown component pass-through was investigated and
+  rejected: RFC 8955 treats unknown component types as malformed NLRI. Inbound
+  BoRR/EoRR channel-full retry was also investigated and rejected: the receive
+  path already backpressures with `send().await`.
   observation; SIGHUP reconcile rollback semantics (reports structured per-peer
   failures and keeps the prior snapshot, but does not roll back already-applied
   runtime peer changes); dynamic-neighbor `handle_inbound` split for readability;

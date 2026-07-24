@@ -1,0 +1,68 @@
+# M94 — RFC 6793 AS4 migration against an OLD ExaBGP source and an
+# independent OLD-speaker wire oracle.
+
+name: m94-as4-migration-exabgp
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m94-as4.toml:/etc/rustbgpd/config.toml:ro
+        - ../fixtures/grpc-test-only-operator.token:/run/rustbgpd/grpc-test-only-operator.token:ro
+      exec:
+        - ip addr add 10.94.0.1/24 dev eth1
+        - ip addr add 10.94.1.1/24 dev eth2
+        - ip link set eth1 up
+        - ip link set eth2 up
+      env:
+        RUST_LOG: info
+        RUSTBGPD_TOKEN_FILE: /run/rustbgpd/grpc-test-only-operator.token
+
+    exa-source:
+      kind: linux
+      image: ghcr.io/exa-networks/exabgp@sha256:5554ac053766e66ca3b99eb6b66e83e32113913729a184dcbaf0cc4abd2f4244
+      entrypoint: sleep
+      cmd: infinity
+      binds:
+        - ./configs/exabgp-m94.conf:/fixtures/exabgp.conf:ro
+        - ./scripts/m94_capture.py:/usr/local/bin/m94_capture.py:ro
+        - ./scripts/m94_as4_oracle.py:/usr/local/bin/m94_as4_oracle.py:ro
+      exec:
+        - ip addr add 10.94.2.2/24 dev eth1
+        - ip link set eth1 up
+
+    old-proxy:
+      kind: linux
+      # This node runs only the independent bounded relay below; the image is
+      # reused for its pinned Python runtime and iproute2 installation.
+      image: ghcr.io/exa-networks/exabgp@sha256:5554ac053766e66ca3b99eb6b66e83e32113913729a184dcbaf0cc4abd2f4244
+      entrypoint: sleep
+      cmd: infinity
+      binds:
+        - ./scripts/m94_as4_oracle.py:/usr/local/bin/m94_as4_oracle.py:ro
+      exec:
+        - ip addr add 10.94.0.2/24 dev eth1
+        - ip addr add 10.94.2.1/24 dev eth2
+        - ip link set eth1 up
+        - ip link set eth2 up
+
+    old-sink:
+      kind: linux
+      # Reuse the pinned Python runtime image, but not ExaBGP's BGP stack: the
+      # receiving speaker and decoder are the independent script bound below.
+      image: ghcr.io/exa-networks/exabgp@sha256:5554ac053766e66ca3b99eb6b66e83e32113913729a184dcbaf0cc4abd2f4244
+      entrypoint: sleep
+      cmd: infinity
+      binds:
+        - ./scripts/m94_as4_oracle.py:/usr/local/bin/m94_as4_oracle.py:ro
+      exec:
+        - ip addr add 10.94.1.3/24 dev eth1
+        - ip link set eth1 up
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "old-proxy:eth1"]
+    - endpoints: ["exa-source:eth1", "old-proxy:eth2"]
+    - endpoints: ["rustbgpd:eth2", "old-sink:eth1"]

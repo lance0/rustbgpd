@@ -11,6 +11,25 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **RFC 6793 legacy-AS migration is lossless end to end.** Sessions without
+  capability 65 now normalize received type 2/17 paths and type 7/18
+  aggregators before loop detection, policy, and RIB processing, then derive
+  the required compatibility attributes in the shared classic/MP export
+  encoder. Modern peers never receive stale migration shadows; exact-export
+  sizing includes generated AS4 bytes; malformed compatibility attributes
+  retain RFC 7606 fault isolation. MRT, Loc-RIB BMP, and from-BMP ribsnap
+  serialization preserve the canonical aggregator, while the pre-policy BMP
+  tap remains byte-identical. Hosted M94 proves the legacy IPv4 session against
+  a pinned ExaBGP 5.0.9 source and an independent OLD-speaker sink, including
+  reconstructed loop rejection, exact path/aggregator wire pairs, withdrawal,
+  and session continuity.
+
+- **Bounded BMP collector shutdown.** Disconnected collectors now stop connect
+  and backoff waits promptly after the BMP manager queues its final Peer Down
+  messages. Connected collectors still drain that queue, send Termination, and
+  flush; all collector clients share one two-second shutdown budget instead of
+  consuming two seconds per collector.
+
 - **RFC 9552 BGP-LS Attribute fault isolation.** Attribute 29 now enforces its
   optional non-transitive flags and contained TLV framing. Malformed contained
   framing discards only the complete attribute while preserving the BGP-LS
@@ -73,6 +92,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   construction stays type `0x40`.
 
 ### Added
+
+- **Route-safety dashboard and actionable alerts.** The shipped Grafana
+  overview adds exact-export rejection and malformed-UPDATE disposition rates, raw
+  step-rendered selection-deferral state, and timeout/ledger-overflow rates
+  while preserving each metric's native labels. Four warning rules alert only on
+  increases in those failure counters; exhaustive Prometheus fixtures and the
+  structural dashboard checker pin the queries, discrete rendering, and the
+  exclusion of normal deferral activity. The daemon materializes the bounded
+  counter label sets when sessions and selection-deferral families are created
+  so ordinary scrape history can establish a zero baseline before producers
+  emit failures.
 
 - **Minimum accepted BGP hold time.** Per-neighbor and peer-group
   `min_hold_time` controls cause the daemon to reject peer OPEN proposals

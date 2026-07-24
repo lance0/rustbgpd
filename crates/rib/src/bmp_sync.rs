@@ -388,8 +388,8 @@ mod tests {
     use std::time::Instant;
 
     use rustbgpd_wire::{
-        AsPath, AsPathSegment, BgpHeader, Ipv4Prefix, Ipv6Prefix, MplsLabelEntry, Origin,
-        RouteDistinguisher, VpnPrefix,
+        Aggregator, AsPath, AsPathSegment, BgpHeader, Ipv4Prefix, Ipv6Prefix, MplsLabelEntry,
+        Origin, RouteDistinguisher, VpnPrefix,
     };
 
     use super::*;
@@ -485,6 +485,31 @@ mod tests {
                 AsPathSegment::AsSequence(asns) if asns.contains(&4_200_000_001)
             )
         )));
+    }
+
+    /// Load-bearing Loc-RIB mirror proof: deleting AGGREGATOR encoding or
+    /// clearing its Partial bit removes or changes the exact typed value after
+    /// the synthesized BMP UPDATE is decoded.
+    #[test]
+    fn unicast_v4_announce_preserves_typed_aggregator() {
+        let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 1, 0, 0), 16));
+        let mut route = unicast_route(prefix, IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)));
+        let aggregator = Aggregator {
+            asn: 4_200_000_001,
+            router_id: Ipv4Addr::new(192, 0, 2, 9),
+            partial: true,
+        };
+        let mut attrs = base_attrs();
+        attrs.push(PathAttribute::Aggregator(aggregator));
+        route.attributes = Arc::new(attrs);
+
+        let parsed = decode_pdu(&synthesize_unicast_announce(&route).unwrap());
+        assert!(
+            parsed
+                .attributes
+                .contains(&PathAttribute::Aggregator(aggregator)),
+            "Loc-RIB BMP must preserve canonical ASN, router ID, and Partial"
+        );
     }
 
     #[test]
@@ -585,7 +610,10 @@ mod tests {
             PathAttribute::AsPath(AsPath {
                 segments: vec![
                     AsPathSegment::AsSequence(vec![65001, 4_200_000_001]),
-                    AsPathSegment::AsSet(vec![65010, 65011]),
+                    // Keep multi-segment coverage without RFC 9774-prohibited
+                    // AS_SET; `legacy_encoder_rejects_as_set_before_as4_path_generation`
+                    // owns the load-bearing wire rejection proof.
+                    AsPathSegment::AsSequence(vec![65010, 65011]),
                 ],
             }),
             PathAttribute::Med(50),

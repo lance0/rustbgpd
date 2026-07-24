@@ -320,23 +320,33 @@ deviations; [docs/INTEROP.md](INTEROP.md) has the interop matrix,
 
 ### AS_TRANS Handling
 
-- When encoding for a 2-byte-only peer: replace any ASN > 65535 with
-  AS_TRANS in AS_PATH. Emitting a compensating AS4_PATH is not implemented;
-  ADR-0114 proposes the complete ingress and egress migration contract.
-- AS4_PATH and AS4_AGGREGATOR remain opaque attributes; inbound AS4_PATH is
-  not reconstructed into AS_PATH per RFC 6793 §4.2.3. See
-  [ADR-0114](adr/0114-as4-path-migration.md); its status is Proposed and this
-  note continues to describe shipped behavior.
+- On a session without capability 65, inbound `AS_PATH` / `AS4_PATH` and
+  `AGGREGATOR` / `AS4_AGGREGATOR` pairs are normalized to one four-octet
+  logical path and one typed aggregator before loop detection, policy, and
+  RIB consumers run. The compatibility attributes do not enter long-lived
+  route state.
+- When encoding for a 2-byte-only peer, every non-mappable ASN becomes
+  `AS_TRANS` in `AS_PATH` and a compensating `AS4_PATH` carries the complete
+  final logical path. A non-mappable aggregator is projected as six-octet
+  `AGGREGATOR` with `AS_TRANS` plus an eight-octet `AS4_AGGREGATOR`; mappable
+  paths and aggregators gain no redundant compatibility attribute.
+- A four-octet-capable peer receives ordinary four-octet `AS_PATH` and
+  eight-octet `AGGREGATOR` only. Received types 17/18 are discarded after
+  the raw RFC 9774 inspection and cannot be propagated onward.
+- Live sending and exact-export sizing share this target-specific encoder, so
+  generated AS4 bytes count against the negotiated message ceiling before
+  Adj-RIB-Out advances. See [ADR-0114](adr/0114-as4-path-migration.md).
 
 ## RFC 9774 — AS_SET / AS_CONFED_SET Deprecation
 
-- The revised inbound attribute decoder inspects raw AS_PATH and opaque
-  AS4_PATH segment framing for AS_SET and AS_CONFED_SET before duplicate
+- The revised inbound attribute decoder inspects raw AS_PATH and AS4_PATH
+  segment framing for AS_SET and AS_CONFED_SET before duplicate
   discard, and assigns RFC 7606 treat-as-withdraw on every session and family.
   When the UPDATE carries no reachable NLRI, the existing RFC 7606 §5.2
   composition escalates that disposition to a session reset.
-- This targeted inspection does not add general AS4_PATH parsing or RFC 6793
-  path reconstruction.
+- Surviving `AS4_PATH` values are then parsed for RFC 6793 reconstruction.
+  An `AS_CONFED_SEQUENCE` is removed from type 17 and processing continues;
+  this narrow rule does not add confederation segments to the route model.
 
 ---
 
@@ -447,9 +457,11 @@ Interpretation decisions:
   when DEBUG is disabled. `bgp_update_malformed_total{peer,disposition}` counts
   each malformed UPDATE once under the strongest applied disposition:
   `attribute_discard`, `treat_as_withdraw`, or `session_reset`.
-- AS4_PATH / AS4_AGGREGATOR are not decoded as typed attributes (they pass
-  through opaquely). The RFC 9774 set-segment inspection above is the narrow
-  exception; other AS4_PATH malformations are not detected.
+- AS4_PATH / AS4_AGGREGATOR are parsed as short-lived compatibility inputs and
+  normalized into the typed path / aggregator model. Malformed type 17/18
+  values are attribute-discard; conflicting Optional/Transitive flags remain
+  the stronger treat-as-withdraw action. Raw types 17/18 never survive in the
+  canonical route.
 
 ## Milestone 1 — RFC 4271 Sections
 

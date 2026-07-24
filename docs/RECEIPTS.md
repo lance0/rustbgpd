@@ -3,8 +3,8 @@
 rustbgpd's development rule is simple: **every wire-behavior claim has a lab
 that proves it, and every performance claim has a measured receipt.** A
 feature is not "done" when the code merges — it is done when a containerlab
-topology against a real peer implementation (FRR, BIRD, GoBGP), a real kernel
-dataplane, or a documented same-host measurement demonstrates the claimed
+topology against a real peer implementation (FRR, BIRD, GoBGP, ExaBGP), a real
+kernel dataplane, or a documented same-host measurement demonstrates the claimed
 behavior, and that evidence is checked in. This page is the single index of
 those receipts: the M-series interop labs, the performance and scale
 measurements, the archived long-running soaks, and the CI schedules that keep
@@ -75,6 +75,8 @@ id matches the milestone. Full procedures: [`INTEROP.md`](INTEROP.md).
 | M81 | BMP trio (rib-in, rib-out, loc-rib) + BMPv4 against three independent decoders | GoBGP ×2 + pmacct + gobmp + tshark |
 | M82 | ADR-0092 EVPN VLAN-Aware Bundle (non-zero Ethernet Tag) reflection: tag as route identity, same MAC under two tags uncollapsed, tag-verbatim NLRIs, tag-scoped withdraw — synthetic leg in CI plus the **first vendor-NOS receipt** (local lab) | GoBGP 3.37.0 ×2 (CI) + Nokia SR Linux 25.10.1 (local) |
 | M83 | RFC 7947 route-server profile, multi-stack: byte-level transparency, OTC, per-member views, ROV explain, and the §2.3 path-hiding contrast (single-best / per-client-best / Add-Path, ADR-0101) | BIRD 2.0.12 + GoBGP 3.37.0 + FRR 10.3.1 + StayRTR |
+| M93 | Exact required-family OPEN 2/7 rejection, dual-stack recovery, and empty-requirement partial-negotiation compatibility | BIRD 2.0.12 |
+| M94 | RFC 6793 legacy ingress reconstruction, semantic loop rejection, exact type 2/17 + type 7/18 egress, withdrawal, and session continuity | ExaBGP 5.0.9 source + independent Python OLD-speaker sink |
 
 ## Interop labs — kernel dataplane, PR + nightly (`kernel-dataplane.yml`)
 
@@ -138,7 +140,6 @@ covered by later CI receipts). Procedures and results:
 | M84 | Multi-cache RTR/ASPA epoch conformance (LAN-243): per-cache load at validated EoD, v2→v1 fallback, restart retention + session rotation, ASPA replace / empty-provider withdrawal, serial-regression resync | FRR + Routinator 0.15.2 + StayRTR + RTR v2 mock |
 | M90 | ADR-0110 filtering differential: one arouteserver site produces BIRD and rustbgpd policy, with exact verdict/explain parity over 11 announcements and a red-producing policy mutation | BIRD 2.0.12 + GoBGP 3.37.0 ×3 + arouteserver 1.23.2 |
 | M92 | Dual-stack route-server differential: exact inventories, wire EoR completeness, and baseline/mutant/restore semantic diff | GoBGP 4.7.0 ×3 + BIRD 2.0.12 |
-| M93 | Exact required-family OPEN 2/7 rejection, dual-stack recovery, and empty-requirement partial-negotiation compatibility | BIRD 2.0.12 |
 
 ## Performance and scale receipts
 
@@ -151,6 +152,7 @@ covered by later CI receipts). Procedures and results:
 | IXP route-server receipt matrix | rustbgpd vs BIRD 3.3.1 vs OpenBGPD 9.1 at 700 clients × 400,400 routes through the same harness on the same host: reload stall + completion (two independent runs), flapstorm withdraw/re-announce (rustbgpd fastest on both: re-announce p50 0.46–0.49 s vs BIRD's 2.8–4.2 s and OpenBGPD's 21–22 s), convergence, and process-tree RSS, each incumbent at its documented strongest configuration, losses published alongside wins (OpenBGPD's smaller stall, BIRD's lower RSS) — including a post-publication note where the receipt's own S3 tables exposed a re-announce plateau that was root-caused, fixed, and rerun (9.5–9.8 s → 0.46–0.49 s) | [`perf/ixp-matrix-2026-07.md`](perf/ixp-matrix-2026-07.md) |
 | Mixed policy-reload cohort campaign | 700 sessions and 400,400 routes with 600 changed / 100 stable peers: completion p50 / maximum improve 116.185x / 149.261x, while full-fleet delivery-gap p50 / maximum regress 2.070x / 2.899x; every row retains 700/700 sessions, 100/100 fresh stable markers, and zero parse errors | [`perf/artifacts/policy-reload-cohort-partition-2026-07/README.md`](perf/artifacts/policy-reload-cohort-partition-2026-07/README.md), [`REPRODUCE.md`](perf/artifacts/policy-reload-cohort-partition-2026-07/REPRODUCE.md) |
 | RIB operations (Criterion) | Ingest, best-path, distribution microbenchmarks with pinned A/B compare methodology | [`BENCHMARKS.md`](BENCHMARKS.md#rib-operations) |
+| MRT snapshot allocation control (LAN-572) | Pinned two-shape production-encoder control: population timing CV 0.359%/0.367%, 6.81M/10.41M output-growth misses, 12.82M/22.42M allocator calls, exact semantic/allocator/privacy gates, and checksummed rows plus preflight/mutation receipt. The control authorizes a separately measured bounded-growth candidate, not a speedup claim; any candidate must rerun immediate-parent control in the predeclared four-block ABBA protocol | [`perf/mrt-snapshot-allocation-2026-07.md`](perf/mrt-snapshot-allocation-2026-07.md), [`artifacts`](perf/artifacts/mrt-snapshot-allocation-2026-07/README.md) |
 | Exact-export fanout optimization (Criterion + rrharness) | Three pinned campaigns: ordered prepared-attribute memo (18%..32% faster), bounded wire-equivalent update-group probe reuse (58%..64% faster at 256 peers vs pre-cache), then lazy grouped exact-precommit bookkeeping (32%..36% faster at 64/256 peers and +197%..+649% across the manager flood/churn matrix), with fail-closed sealed artifacts, confidence gates, and correctness fences | [`perf/exact-export-fanout-2026-07.md`](perf/exact-export-fanout-2026-07.md) |
 | Adj-RIB-Out family-gauge fanout | Pinned real-encoder A/B over one homogeneous route-server update group with 64 changed routes: touched-family refresh improves the measured actor/probe/commit/enqueue interval by 11.69% at 256 peers and 14.98% at 1,000 peers; the receipt discloses the all-family worst case and untimed `PeerUp` cardinality cost | [`perf/adj-rib-out-family-gauge-2026-07.md`](perf/adj-rib-out-family-gauge-2026-07.md) |
 | Per-peer policy-fallback handoff | 65,536-route fallback decision plus one authoritative apply: 104.25 ms mean and 110.011 ms largest retained per-iteration sample; a structural 64-peer RIB-loop reference demonstrates why returning to the actor loop between applies protects availability. No total-work gain is claimed | [`perf/policy-fallback-per-peer-handoff-2026-07.md`](perf/policy-fallback-per-peer-handoff-2026-07.md) |
@@ -181,7 +183,7 @@ artifacts under [`artifacts/soak/`](artifacts/soak/). Harnesses live in
 
 | Workflow | Trigger | What it re-proves |
 |----------|---------|-------------------|
-| [`ci.yml`](../.github/workflows/ci.yml) | every PR / push | fmt, clippy (warnings denied), workspace tests, rustdoc, kernel-primitive gate, and the exact fail-closed 17-target fuzz inventory |
+| [`ci.yml`](../.github/workflows/ci.yml) | every PR / push | fmt, clippy (warnings denied), workspace tests, rustdoc, kernel-primitive gate, the exact fail-closed 17-target fuzz inventory, and bounded timing/diagnostic MRT snapshot-allocation bench smokes |
 | [`interop.yml`](../.github/workflows/interop.yml) | every PR / push | The PR-gated M-series table above, one containerlab job per milestone |
 | [`kernel-dataplane.yml`](../.github/workflows/kernel-dataplane.yml) | PR, push, nightly 07:00 UTC | Privileged EVPN/FIB/BFD/TCP-AO dataplane receipts + netns selectors |
 | [`fuzz.yml`](../.github/workflows/fuzz.yml) | nightly 04:00 UTC + manual dispatch | The sole scheduled fuzz campaign: libFuzzer wire, policy, EVPN route-target, MRT snapshot, and warm-bundle manifest harnesses |

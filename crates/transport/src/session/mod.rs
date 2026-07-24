@@ -521,6 +521,43 @@ fn send_hold_duration(config: &TransportConfig) -> Option<Duration> {
         .then(|| Duration::from_secs(u64::from(config.peer.send_hold_time)))
 }
 
+/// Bounded family vocabulary shared with exact-export rejection telemetry.
+/// Multicast and invalid AFI/SAFI pairs have no exact-export candidate type.
+fn configured_exact_export_family_label((afi, safi): (Afi, Safi)) -> Option<&'static str> {
+    match (afi, safi) {
+        (Afi::Ipv4, Safi::Unicast) => Some("ipv4_unicast"),
+        (Afi::Ipv6, Safi::Unicast) => Some("ipv6_unicast"),
+        (Afi::Ipv4, Safi::FlowSpec) => Some("ipv4_flowspec"),
+        (Afi::Ipv6, Safi::FlowSpec) => Some("ipv6_flowspec"),
+        (Afi::L2Vpn, Safi::Evpn) => Some("l2vpn_evpn"),
+        (Afi::BgpLs, Safi::BgpLs) => Some("bgpls"),
+        (Afi::BgpLs, Safi::BgpLsVpn) => Some("bgpls_vpn"),
+        (Afi::Ipv4, Safi::MplsVpn) => Some("l3vpn_ipv4_unicast"),
+        (Afi::Ipv6, Safi::MplsVpn) => Some("l3vpn_ipv6_unicast"),
+        (Afi::Ipv4, Safi::LabeledUnicast) => Some("ipv4_labeled_unicast"),
+        (Afi::Ipv6, Safi::LabeledUnicast) => Some("ipv6_labeled_unicast"),
+        (Afi::Ipv4, Safi::RtConstrain) => Some("rtc"),
+        _ => None,
+    }
+}
+
+fn initialize_route_safety_metric_series(
+    config: &TransportConfig,
+    metrics: &BgpMetrics,
+    neighbor_label: &str,
+    endpoint_label: &str,
+) {
+    let families = config.peer.effective_families();
+    metrics.initialize_exact_export_rejection_series(
+        neighbor_label,
+        families
+            .iter()
+            .copied()
+            .filter_map(configured_exact_export_family_label),
+    );
+    metrics.initialize_update_malformed_series(endpoint_label);
+}
+
 /// Resolve next-hop for import policy modifications.
 ///
 /// `NextHopAction::Self_` uses the local TCP address (or router-id as fallback).
@@ -966,6 +1003,7 @@ impl PeerSession {
     ) -> Self {
         let peer_label = config.remote_addr.to_string();
         let peer_ip = config.remote_addr.ip();
+        initialize_route_safety_metric_series(&config, &metrics, &peer_ip.to_string(), &peer_label);
         let link_local_next_hop_scope = Self::link_local_next_hop_scope_from_config(&config);
         let fsm = Session::new(config.peer.clone());
         let explain_enabled = config.explain_enabled;
@@ -1111,6 +1149,7 @@ impl PeerSession {
     ) -> Self {
         let peer_label = config.remote_addr.to_string();
         let peer_ip = config.remote_addr.ip();
+        initialize_route_safety_metric_series(&config, &metrics, &peer_ip.to_string(), &peer_label);
         let link_local_next_hop_scope = Self::link_local_next_hop_scope_from_config(&config);
         let fsm = Session::new(config.peer.clone());
         let explain_enabled = config.explain_enabled;

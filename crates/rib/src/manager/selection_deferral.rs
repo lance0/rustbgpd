@@ -401,6 +401,7 @@ impl SelectionDeferral {
         }
         for (&(afi, safi), gate) in &active {
             let label = afi_safi_label(afi, safi);
+            metrics.initialize_selection_deferral_failure_series(label);
             metrics.set_selection_deferral_active(label, true);
             metrics.set_selection_deferral_waiters(label, gauge_val(Self::blocking_waiters(gate)));
         }
