@@ -72,6 +72,21 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The initial table dump now evaluates export policy with the peer's
+  peer-group.** The session staged its peer-group policy context *after* the
+  `PeerUp` registration, but `PeerUp` builds the initial Adj-RIB-Out
+  synchronously — so the first full-table dump to a newly established peer was
+  evaluated with no peer-group, and any export rule matching on peer-group
+  began applying only from the next update. On a route server with
+  group-scoped export filtering this advertised routes the operator's policy
+  intends to deny, at every session establishment and every re-establishment.
+  The context is now staged before `PeerUp`, alongside the RFC 9234 role, RFC
+  7947 control-community, exact-encoder, and RFC 4724 contexts. **This is a
+  wire-visible change to the initial dump:** an upgraded daemon's first dump to
+  a group-scoped peer may now be correctly filtered, or otherwise transformed
+  by group-matched policy actions, where it previously was not. Peers whose
+  export policy does not match on peer-group are unaffected.
+
 - **Daemon exits non-zero when shutdown is caused by unexpected gRPC server
   termination.** The coordinated teardown (NOTIFICATIONs, GR marker,
   checkpoints) still runs, but the process now exits 1 so supervisors with
