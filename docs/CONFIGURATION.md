@@ -138,6 +138,7 @@ Required. Defines the local BGP speaker identity.
 | `honor_blackhole`   | bool   | no       | `false`              | Enable RFC 7999 receiver scoping on EBGP imports — see below |
 | `install_blackhole_discard` | bool | no | `false`              | Install kernel blackhole routes for accepted RFC 7999 host routes — see below |
 | `allow_blackhole_broad_prefixes` | bool | no | `false`           | Permit non-host BLACKHOLE discard installs when the FIB slice is enabled |
+| `ebgp_requires_policy` | bool | no       | `false`              | RFC 8212: require explicit operator import/export policy on eBGP sessions. **Restart-required** and **not yet enforced** — see below |
 | `multipath_relax`   | bool   | no       | `false`              | ADR-0066 multipath-relax: group unicast ECMP candidates by `AS_PATH` *length* instead of an exact `AS_PATH` match (FRR's `bgp bestpath as-path multipath-relax`). Best-path-wide; inert unless a `[[fib_tables]]` sets `maximum_paths`, `maximum_paths_ebgp`, or `maximum_paths_ibgp` above `1` |
 | `link_bandwidth_weighted` | bool | no   | `false`              | ADR-0068 weighted multipath: weight unicast ECMP next-hops by the lowest finite nonnegative RFC 10005 Link Bandwidth value when the whole equal-cost group carries a positive one; zero, missing, or unusable values fall back to equal cost. Best-path-wide; inert unless a `[[fib_tables]]` sets `maximum_paths`, `maximum_paths_ebgp`, or `maximum_paths_ibgp` above `1` |
 
@@ -370,6 +371,34 @@ configured, `honor_blackhole` remains hot-applied through the peer manager.
 The `"BLACKHOLE"` alias is accepted everywhere `match_community`,
 `set_community_add`, and `set_community_remove` parse community values, so
 policies can refer to it by name without repeating `65535:666`.
+
+### `ebgp_requires_policy` — RFC 8212 explicit policy on eBGP
+
+RFC 8212 makes an eBGP route without an explicit import policy ineligible for
+the decision process, and keeps a route without an explicit export policy out
+of that peer's Adj-RIB-Out. rustbgpd's historical behavior is permit-all when a
+session resolves no policy chain, so the RFC 8212 boundary is an opt-in knob:
+
+```toml
+[global]
+ebgp_requires_policy = true
+```
+
+**Enforcement is not implemented yet.** ADR-0112 sequences the work, and this
+release only lands the configuration boundary: the field parses, classifies as
+restart-required, and is pinned across SIGHUP. Setting it `true` logs a startup
+warning and changes no import or export behavior. Do not rely on it for
+route-leak protection until the enforcement path ships.
+
+The knob is deliberately restart-required rather than hot-applied. Enabling it
+flips both directions on every eBGP session at once, and recovering a peer's
+Adj-RIB-In afterwards depends on negotiated Route Refresh, so a fleet-wide
+transition must not hide inside a SIGHUP. A reload that changes the field logs
+an `ERROR`, keeps the running value at the startup value, and reports the
+candidate as restart-required; `rustbgpd --diff` and the v1 runtime
+configuration transaction both name `[global].ebgp_requires_policy` rather than
+only the `[global]` section. The v1 transaction rejects such a candidate outright
+instead of persisting or partly adopting it.
 
 ---
 

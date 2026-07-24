@@ -722,6 +722,24 @@ impl Config {
             .unwrap_or(DEFAULT_DYNAMIC_NEIGHBOR_LIMIT)
     }
 
+    /// Emit the startup warning for `[global] ebgp_requires_policy = true`
+    /// while ADR-0112 enforcement is still landing. The knob is accepted,
+    /// classified restart-required, and pinned across SIGHUP, but no reserved
+    /// internal deny is installed yet, so an operator who enables it must not
+    /// believe EBGP sessions are already fail-closed. Removed when the
+    /// enforcement path ships.
+    pub fn warn_if_ebgp_requires_policy_unenforced(&self) {
+        if self.global.ebgp_requires_policy {
+            tracing::warn!(
+                "[global] ebgp_requires_policy = true is recorded but NOT yet enforced: \
+                 EBGP sessions without explicit import/export policy still use the \
+                 permit-all default. Do not rely on this setting for RFC 8212 route-leak \
+                 protection until enforcement ships; see \
+                 docs/adr/0112-rfc-8212-ebgp-requires-policy.md."
+            );
+        }
+    }
+
     /// Emit the startup warning for the pre-ADR-0064 legacy gRPC
     /// authorization mode, if active. Tier enforcement becomes
     /// mandatory in a future release.
@@ -2475,6 +2493,12 @@ pub struct ConfigDiff {
     /// gate.
     pub honor_blackhole_changed: bool,
     pub global_changed: bool,
+    /// `[global] ebgp_requires_policy` changed. Already covered by the coarse
+    /// `global_changed` restart bucket; tracked separately so receipts can name
+    /// the field instead of only the section. ADR-0112 requires the RFC 8212
+    /// enforcement mode to be named explicitly, because the running mode stays
+    /// at its startup value while the on-disk candidate reads differently.
+    pub ebgp_requires_policy_changed: bool,
     pub rpki_changed: bool,
     pub bmp_changed: bool,
     /// `[gnmi_dialout]` changed. Reload-applied: the dial-out manager
@@ -3339,6 +3363,14 @@ pub fn classify_config_transaction_v1(diff: &ConfigDiff) -> ConfigTransactionSec
     if diff.global_changed {
         class.restart_required_sections.push("[global]".to_string());
     }
+    if diff.ebgp_requires_policy_changed {
+        // ADR-0112: name the RFC 8212 enforcement mode, not just `[global]`.
+        // The candidate is rejected outright rather than partly adopted, so the
+        // running enforcement mode stays at its startup value.
+        class
+            .restart_required_sections
+            .push("[global].ebgp_requires_policy".to_string());
+    }
     if diff.rpki_changed {
         class.restart_required_sections.push("[rpki]".to_string());
     }
@@ -3540,6 +3572,7 @@ pub fn config_diff_json_value(diff: &ConfigDiff) -> serde_json::Value {
         },
         "restart_required": {
             "global_changed": diff.global_changed,
+            "ebgp_requires_policy_changed": diff.ebgp_requires_policy_changed,
             "rpki_changed": diff.rpki_changed,
             "bmp_changed": diff.bmp_changed,
             "mrt_changed": diff.mrt_changed,
@@ -3775,6 +3808,10 @@ pub fn format_config_diff_with_style(diff: &ConfigDiff, style: &ConfigDiffTextSt
     if diff.global_changed {
         restart_sections.push("[global]");
     }
+    if diff.ebgp_requires_policy_changed {
+        restart_sections
+            .push("[global].ebgp_requires_policy (RFC 8212 enforcement mode; running value stays at the startup value)");
+    }
     if diff.rpki_changed {
         restart_sections.push("[rpki]");
     }
@@ -3935,6 +3972,8 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
         honor_blackhole_changed: old.global.honor_blackhole != new.global.honor_blackhole
             && !blackhole_fib_discard_changed,
         global_changed: global_restart_required_changed(old, new),
+        ebgp_requires_policy_changed: old.global.ebgp_requires_policy
+            != new.global.ebgp_requires_policy,
         rpki_changed: old.rpki != new.rpki,
         bmp_changed: old.bmp != new.bmp,
         gnmi_dialout_changed: old.gnmi_dialout != new.gnmi_dialout,
@@ -4674,6 +4713,24 @@ pub(crate) fn pin_bfd_startup_only_runtime(new_config: &mut Config, current: &Co
             neighbor.bfd = pinned_bfd;
         }
     }
+    true
+}
+
+/// Pin `[global] ebgp_requires_policy` to the live snapshot. ADR-0112 makes the
+/// RFC 8212 enforcement mode restart-required: policy resolution consults it
+/// every time a peer's effective import/export chains are recomputed, so an
+/// unpinned SIGHUP would flip both directions on every EBGP session at once. A
+/// reload still *reports* the on-disk candidate through `ConfigDiff`; the
+/// running snapshot keeps the startup value until the daemon restarts. Returns
+/// whether anything was pinned.
+pub(crate) fn pin_ebgp_requires_policy_startup_only(
+    new_config: &mut Config,
+    current: &Config,
+) -> bool {
+    if new_config.global.ebgp_requires_policy == current.global.ebgp_requires_policy {
+        return false;
+    }
+    new_config.global.ebgp_requires_policy = current.global.ebgp_requires_policy;
     true
 }
 

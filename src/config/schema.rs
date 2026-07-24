@@ -578,6 +578,22 @@ pub struct Global {
     /// `install_blackhole_discard = true`.
     #[serde(default)]
     pub allow_blackhole_broad_prefixes: bool,
+    /// Require explicit operator import/export policy on EBGP sessions
+    /// (RFC 8212). Off by default, which preserves the historical treatment of
+    /// an EBGP session with no resolved policy chain as permit-all.
+    ///
+    /// **Restart-required.** The enforcement mode is read once at startup and
+    /// pinned across SIGHUP: a reload reports a changed value as
+    /// restart-required and keeps the running daemon on its startup value, so a
+    /// fleet-wide, two-direction import/export transition cannot hide inside a
+    /// hot reload.
+    ///
+    /// ADR-0112 sequences enforcement behind this knob. This release accepts,
+    /// classifies, and pins the setting but does not yet install the reserved
+    /// internal deny, so `true` logs a startup warning and changes no routing
+    /// behavior until the enforcement path lands.
+    #[serde(default)]
+    pub ebgp_requires_policy: bool,
     /// Publish one durable, daemon-private MRT warm-cache checkpoint during
     /// coordinated shutdown. Off by default. This tranche only publishes the
     /// checkpoint and a generation-bound restart marker; boot never loads or

@@ -2774,6 +2774,7 @@ async fn run<T>(
         "starting rustbgpd"
     );
     config.warn_if_legacy_grpc_enforcement();
+    config.warn_if_ebgp_requires_policy_unenforced();
 
     let metrics = BgpMetrics::new();
     let grpc_listeners = resolve_grpc_listeners(&config).unwrap_or_else(|e| {
@@ -6369,6 +6370,7 @@ tcp_ao = {{ key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)"
                 link_bandwidth_weighted: false,
                 install_blackhole_discard: false,
                 allow_blackhole_broad_prefixes: false,
+                ebgp_requires_policy: false,
                 warm_cache_checkpoint_on_shutdown: false,
             },
             security: crate::config::SecurityConfig::default(),

@@ -989,6 +989,11 @@
           "default": null,
           "minimum": 0
         },
+        "ebgp_requires_policy": {
+          "description": "Require explicit operator import/export policy on EBGP sessions\n(RFC 8212). Off by default, which preserves the historical treatment of\nan EBGP session with no resolved policy chain as permit-all.\n\n**Restart-required.** The enforcement mode is read once at startup and\npinned across SIGHUP: a reload reports a changed value as\nrestart-required and keeps the running daemon on its startup value, so a\nfleet-wide, two-direction import/export transition cannot hide inside a\nhot reload.\n\nADR-0112 sequences enforcement behind this knob. This release accepts,\nclassifies, and pins the setting but does not yet install the reserved\ninternal deny, so `true` logs a startup warning and changes no routing\nbehavior until the enforcement path lands.",
+          "type": "boolean",
+          "default": false
+        },
         "honor_blackhole": {
           "description": "Honor RFC 7999 `BLACKHOLE` community on inbound EBGP routes by\nappending an implicit chain-tail rule that preserves the `BLACKHOLE`\nmarker and adds `NO_ADVERTISE` to keep the request local. Off by\ndefault; RFC 7999 §4 says receivers should not discard traffic without\nan explicit operator directive. This knob scopes the control-plane\nroute; kernel discard/null-route installation requires the separate\n`install_blackhole_discard` opt-in.\n\nSIGHUP hot-applies through the peer manager, matching\n`honor_graceful_shutdown`.",
           "type": "boolean",

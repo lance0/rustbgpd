@@ -6548,6 +6548,94 @@ fn diff_config_flags_event_history_as_restart_required() {
     );
 }
 
+/// ADR-0112: the RFC 8212 enforcement mode is opt-in and off by default, so an
+/// existing deployment keeps permit-all EBGP behavior without editing anything.
+#[test]
+fn ebgp_requires_policy_defaults_off_and_parses() {
+    let default = parse(valid_toml()).unwrap();
+    assert!(
+        !default.global.ebgp_requires_policy,
+        "RFC 8212 enforcement must be opt-in"
+    );
+
+    let enabled = parse(&ebgp_requires_policy_toml()).unwrap();
+    assert!(enabled.global.ebgp_requires_policy);
+}
+
+/// `valid_toml()` with `ebgp_requires_policy = true` inside `[global]`.
+fn ebgp_requires_policy_toml() -> String {
+    valid_toml().replace(
+        "listen_port = 179",
+        "listen_port = 179\nebgp_requires_policy = true",
+    )
+}
+
+/// ADR-0112 restart pinning. Changing only `[global] ebgp_requires_policy` must
+/// classify as restart-required, name the *field* (not just `[global]`) in the
+/// human diff and in the v1 transaction rejection, and leave the running
+/// snapshot on its startup value after a SIGHUP-time pin. Hot-applying it would
+/// flip import and export on every EBGP session inside a reload.
+#[test]
+fn ebgp_requires_policy_diff_is_restart_required_named_and_pinned() {
+    let old = parse(valid_toml()).unwrap();
+    let new = parse(&ebgp_requires_policy_toml()).unwrap();
+
+    let diff = super::diff_config(&old, &new);
+    assert!(diff.ebgp_requires_policy_changed);
+    assert!(diff.global_changed);
+    assert!(diff.has_restart_required_changes());
+    assert!(
+        !diff.has_reload_applied_changes(),
+        "an enforcement-mode-only edit must not hot-apply"
+    );
+
+    let json = super::config_diff_json_value(&diff);
+    assert_eq!(
+        json["restart_required"]["ebgp_requires_policy_changed"],
+        true
+    );
+
+    let text = super::format_config_diff_with_style(&diff, &super::ConfigDiffTextStyle::default());
+    assert!(text.contains("[global].ebgp_requires_policy"), "{text}");
+
+    let class = super::classify_config_transaction_v1(&diff);
+    assert!(!class.is_committable());
+    assert!(
+        class
+            .restart_required_sections
+            .contains(&"[global].ebgp_requires_policy".to_string()),
+        "the v1 transaction receipt must name the enforcement mode: {class:?}"
+    );
+
+    // SIGHUP pins the running value back to the live snapshot.
+    let mut runtime = new.clone();
+    assert!(super::pin_ebgp_requires_policy_startup_only(
+        &mut runtime,
+        &old
+    ));
+    assert!(
+        !runtime.global.ebgp_requires_policy,
+        "the running enforcement mode stays at the startup value until restart"
+    );
+    let repinned = super::diff_config(&old, &runtime);
+    assert!(!repinned.ebgp_requires_policy_changed);
+    assert!(!repinned.global_changed);
+
+    // Idempotent: nothing to pin once the candidate already matches.
+    assert!(!super::pin_ebgp_requires_policy_startup_only(
+        &mut runtime,
+        &old
+    ));
+
+    // Disabling an enabled mode is pinned the same way.
+    let mut downgrade = old.clone();
+    assert!(super::pin_ebgp_requires_policy_startup_only(
+        &mut downgrade,
+        &new
+    ));
+    assert!(downgrade.global.ebgp_requires_policy);
+}
+
 #[test]
 fn diff_config_pins_entire_neighbor_when_tcp_ao_changes() {
     let mut old = parse(valid_toml()).unwrap();
@@ -13971,7 +14059,9 @@ fn reload_matrix_rows_for<'a>(matrix: &'a str, field: &str) -> Vec<&'a str> {
 /// deprecated unselected keys are live, while key edits and selected or
 /// nondeprecated-key deletion remain restart-required. `bfd` pins the
 /// unconditional restart-required side so a blanket "mark everything live"
-/// edit also fails.
+/// edit also fails. `ebgp_requires_policy` pins the ADR-0112 RFC 8212
+/// enforcement mode: re-marking it live would tell operators a SIGHUP can flip
+/// import and export on every EBGP session, which the reload path refuses.
 #[test]
 fn reload_matrix_pins_load_bearing_field_classes() {
     let matrix = load_reload_matrix();
@@ -13982,6 +14072,7 @@ fn reload_matrix_pins_load_bearing_field_classes() {
             "| live (ordered rotation generations) / otherwise restart-required |",
         ),
         ("bfd", "| restart-required |"),
+        ("ebgp_requires_policy", "| restart-required |"),
     ] {
         let rows = reload_matrix_rows_for(&matrix, field);
         assert!(

@@ -402,6 +402,7 @@ impl PeerManager {
                     link_bandwidth_weighted: false,
                     install_blackhole_discard: false,
                     allow_blackhole_broad_prefixes: false,
+                    ebgp_requires_policy: false,
                     warm_cache_checkpoint_on_shutdown: false,
                 },
                 // PeerManager::new constructs an in-memory baseline

@@ -1333,6 +1333,14 @@ pub(crate) async fn reload_config_with_tcp_ao(
         new_config.global.honor_blackhole = current.global.honor_blackhole;
         honor_blackhole_changed = false;
     }
+    if config::pin_ebgp_requires_policy_startup_only(&mut new_config, current) {
+        error!(
+            "[global].ebgp_requires_policy differs from the live config: the ADR-0112 \
+             RFC 8212 enforcement mode is read once at startup. Restart rustbgpd to \
+             change it. The running import/export treatment of every EBGP session is \
+             kept at its startup value for this reload."
+        );
+    }
     if config::pin_bfd_startup_only_runtime(&mut new_config, current) {
         error!(
             "BFD config differs from the live session set: the ADR-0067 BFD actor \
@@ -7433,6 +7441,29 @@ remote_asn = 65002
         assert!(!runtime.global.install_blackhole_discard);
         assert!(disk.global.honor_blackhole);
         assert!(disk.global.install_blackhole_discard);
+    }
+
+    /// ADR-0112: the RFC 8212 enforcement mode is restart-required. A SIGHUP
+    /// must keep the running snapshot on the startup value while the desired /
+    /// on-disk snapshot carries the operator's edit forward for persistence.
+    /// Hot-applying it would flip import and export on every EBGP session at
+    /// once, inside a reload.
+    #[tokio::test]
+    async fn reload_pin_ebgp_requires_policy_preserves_desired_toml_for_later_persistence() {
+        let new_toml = baseline_toml().replace(
+            "listen_port = 179",
+            "listen_port = 179\nebgp_requires_policy = true",
+        );
+        let (runtime, disk) = reload_then_persist_policy_after_desired_refresh(&new_toml).await;
+
+        assert!(
+            !runtime.global.ebgp_requires_policy,
+            "runtime must stay pinned to the live startup value"
+        );
+        assert!(
+            disk.global.ebgp_requires_policy,
+            "desired/disk snapshot must reflect the operator's opt-in"
+        );
     }
 
     // SoftResetIn-on-import-policy-change coverage is now PM-side:
