@@ -392,6 +392,37 @@ mod tests {
         assert_eq!(snapshot.total_routes, 17);
     }
 
+    /// ADR-0112: a peer running the reserved internal deny in both directions
+    /// is a configuration state for `rbgp doctor` to fail, not a daemon that
+    /// cannot serve traffic. Readiness stays green.
+    ///
+    /// Depooling a healthy route reflector because one peer lacks policy
+    /// widens the blast radius of a local mistake to the whole node. Adding
+    /// any RFC 8212 gate to this probe makes the test red.
+    #[tokio::test]
+    async fn readiness_stays_green_for_a_peer_under_the_reserved_deny() {
+        use crate::peer_types::Rfc8212PolicyStatus;
+
+        let (peer_tx, mut peer_rx) = mpsc::channel(1);
+        let (rib_tx, mut rib_rx) = mpsc::channel(1);
+        let probe = CoreReadinessProbe::new(peer_tx, rib_tx);
+
+        let mut peer = crate::test_support::peer_info("10.0.0.2".parse().unwrap());
+        peer.rfc8212_import_policy = Rfc8212PolicyStatus::Missing;
+        peer.rfc8212_export_policy = Rfc8212PolicyStatus::Missing;
+
+        let result = tokio::join!(
+            probe.check(),
+            reply_to_core_probe(&mut peer_rx, vec![peer], &mut rib_rx, 0)
+        )
+        .0;
+
+        assert!(
+            result.is_ok(),
+            "missing operator policy must not fail readiness: {result:?}"
+        );
+    }
+
     #[tokio::test]
     async fn snapshot_uses_dedicated_peer_manager_readiness_lane_when_installed() {
         let (peer_tx, mut peer_rx) = mpsc::channel(1);

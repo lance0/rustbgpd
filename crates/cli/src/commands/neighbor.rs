@@ -299,6 +299,8 @@ pub async fn show(
                     release_reason: row.release_reason.clone(),
                 })
                 .collect(),
+            rfc8212_import_policy: rfc8212_policy_status_label(n.rfc8212_import_policy).to_string(),
+            rfc8212_export_policy: rfc8212_policy_status_label(n.rfc8212_export_policy).to_string(),
         };
         output::print_json_pretty(&out)?;
     } else {
@@ -539,6 +541,18 @@ pub async fn show(
             }
         }
         println!("OTC Routes Blocked:    {}", n.otc_routes_blocked);
+        // ADR-0112: two rows, never one. A peer with an import policy and no
+        // export policy is a real and common half-configured state, and
+        // collapsing it would hide the denied half.
+        println!("RFC 8212 Policy:");
+        println!(
+            "  Import: {}",
+            rfc8212_policy_status_label(n.rfc8212_import_policy)
+        );
+        println!(
+            "  Export: {}",
+            rfc8212_policy_status_label(n.rfc8212_export_policy)
+        );
         println!("Policy Stats:");
         println!(
             "  Import — permitted: {} denied: {}",
@@ -732,6 +746,26 @@ fn tcp_ao_health_label(value: i32) -> &'static str {
         Ok(crate::proto::TcpAoHealth::Healthy) => "healthy",
         Ok(crate::proto::TcpAoHealth::Degraded) => "degraded",
         Ok(crate::proto::TcpAoHealth::Unspecified) | Err(_) => "unknown",
+    }
+}
+
+/// ADR-0112 directional status label.
+///
+/// `UNSPECIFIED` is what an older daemon leaves behind, and an unrecognized
+/// value is what a newer one may send; both render `unknown` rather than being
+/// folded into `not_required`. Treating either as "no requirement" would make
+/// a rolling upgrade quietly report a peer as fine while its reserved deny is
+/// live on the other side.
+pub(crate) fn rfc8212_policy_status_label(value: i32) -> &'static str {
+    match crate::proto::Rfc8212PolicyStatus::try_from(value) {
+        Ok(crate::proto::Rfc8212PolicyStatus::NotRequired) => "not_required",
+        Ok(crate::proto::Rfc8212PolicyStatus::Present) => "present",
+        Ok(crate::proto::Rfc8212PolicyStatus::Missing) => "missing",
+        Ok(
+            crate::proto::Rfc8212PolicyStatus::Unspecified
+            | crate::proto::Rfc8212PolicyStatus::Unknown,
+        )
+        | Err(_) => "unknown",
     }
 }
 
@@ -982,6 +1016,33 @@ mod tests {
     use super::*;
     use crate::connection::connect;
     use crate::test_support::spawn_mock_server;
+
+    /// ADR-0112 rolling-version contract. Zero is what an older daemon leaves
+    /// behind and a future variant is what a newer one may send; both must
+    /// render `unknown`. Mapping either onto `not_required` would tell an
+    /// operator mid-upgrade that a peer has no requirement while its reserved
+    /// deny is live on the other side, so both halves are load-bearing.
+    #[test]
+    fn rfc8212_policy_status_renders_absent_and_future_values_as_unknown() {
+        assert_eq!(rfc8212_policy_status_label(0), "unknown");
+        assert_eq!(rfc8212_policy_status_label(i32::MAX), "unknown");
+        assert_eq!(
+            rfc8212_policy_status_label(crate::proto::Rfc8212PolicyStatus::Unknown as i32),
+            "unknown"
+        );
+        assert_eq!(
+            rfc8212_policy_status_label(crate::proto::Rfc8212PolicyStatus::NotRequired as i32),
+            "not_required"
+        );
+        assert_eq!(
+            rfc8212_policy_status_label(crate::proto::Rfc8212PolicyStatus::Present as i32),
+            "present"
+        );
+        assert_eq!(
+            rfc8212_policy_status_label(crate::proto::Rfc8212PolicyStatus::Missing as i32),
+            "missing"
+        );
+    }
 
     #[test]
     fn effective_distribution_mode_is_live_and_backward_compatible() {

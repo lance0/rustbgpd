@@ -590,6 +590,9 @@ impl PeerManager {
         if let Some(next_config) = next_config {
             self.current_config = next_config;
         }
+        // ADR-0112: the peer is registered with its resolved chains, so the
+        // directional gauges have something to read.
+        self.refresh_rfc8212_policy_metrics(&peer_key);
 
         if enabled {
             // ADR-0067 step 4: (re-)arm this peer's BFD session. Critically

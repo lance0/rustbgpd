@@ -276,6 +276,66 @@ fn bfd_state_label(value: i32) -> &'static str {
     }
 }
 
+/// ADR-0112 policy-requirement check for one neighbor, both directions.
+///
+/// - `not_required` passes silently: enforcement off, or an iBGP session. The
+///   compatibility default is off, so warning here would turn every current
+///   deployment yellow for using the default.
+/// - `missing` fails and names the direction. The reserved internal deny is
+///   installed there; the session is up and exchanging keepalives while no
+///   route crosses that direction, in any negotiated family.
+/// - `unknown` warns rather than passes. A daemon that predates the field
+///   sends nothing, and "no evidence" must not read as "no problem".
+///
+/// Deliberately not wired to readiness. A peer missing operator policy is a
+/// configuration state to repair; `/readyz` answers whether this process can
+/// serve traffic, and depooling a healthy route reflector over one peer's
+/// config widens the blast radius instead of narrowing it.
+fn rfc8212_policy_check(address: &str, import: i32, export: i32) -> Check {
+    use crate::commands::neighbor::rfc8212_policy_status_label as label;
+
+    let (import, export) = (label(import), label(export));
+    let missing: Vec<&str> = [("import", import), ("export", export)]
+        .into_iter()
+        .filter_map(|(direction, status)| (status == "missing").then_some(direction))
+        .collect();
+    let (status, verdict) = if missing.is_empty() {
+        if import == "unknown" || export == "unknown" {
+            (
+                CheckStatus::Warn,
+                "RFC 8212 policy status is unknown; the serving daemon does not expose it"
+                    .to_string(),
+            )
+        } else if import == "not_required" && export == "not_required" {
+            (
+                CheckStatus::Ok,
+                "RFC 8212 explicit policy is not required (enforcement disabled, or iBGP)"
+                    .to_string(),
+            )
+        } else {
+            (
+                CheckStatus::Ok,
+                format!("RFC 8212 explicit policy present (import: {import}, export: {export})"),
+            )
+        }
+    } else {
+        (
+            CheckStatus::Fail,
+            format!(
+                "RFC 8212 explicit policy missing on {}; the reserved internal deny is installed \
+                 and no route crosses that direction — configure an explicit policy or disable \
+                 [global] ebgp_requires_policy",
+                missing.join(" and ")
+            ),
+        )
+    };
+    Check {
+        name: format!("peer.{address}.rfc8212_policy"),
+        status,
+        detail: format!("neighbor {address}: {verdict}"),
+    }
+}
+
 fn bfd_check(session: &BfdSnapshot) -> Check {
     let (status, verdict) = match session.state.as_str() {
         "up" if session.remote_administrative_down != Some(true) => {
@@ -1320,6 +1380,19 @@ pub(crate) async fn run(
                             "no neighbors configured",
                         );
                     }
+                    for n in &neighbors.neighbors {
+                        let address = n
+                            .config
+                            .as_ref()
+                            .map(|c| c.address.clone())
+                            .unwrap_or_default();
+                        let check = rfc8212_policy_check(
+                            &address,
+                            n.rfc8212_import_policy,
+                            n.rfc8212_export_policy,
+                        );
+                        reporter.record(check.name, check.status, check.detail);
+                    }
                     for snapshot in &snapshots {
                         for check in peer_checks(
                             &snapshot.address,
@@ -1800,6 +1873,45 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
         assert_eq!(checks.len(), 1);
         assert!(checks[0].status == CheckStatus::Ok);
         assert!(checks[0].detail.contains("Established"));
+    }
+
+    /// ADR-0112 doctor contract, all four dispositions in one place.
+    ///
+    /// Load-bearing three ways: warning on the compatibility default would
+    /// turn every current deployment yellow; passing an enabled missing
+    /// direction would hide the exact configuration error this feature
+    /// exists to surface; and passing `unknown` would report "no problem"
+    /// from a daemon that reported nothing at all.
+    #[test]
+    fn rfc8212_policy_check_separates_default_missing_and_unknown() {
+        use crate::proto::Rfc8212PolicyStatus as S;
+
+        let not_required =
+            rfc8212_policy_check("10.0.0.1", S::NotRequired as i32, S::NotRequired as i32);
+        assert_eq!(not_required.name, "peer.10.0.0.1.rfc8212_policy");
+        assert_eq!(not_required.status, CheckStatus::Ok);
+        assert!(not_required.detail.contains("not required"));
+
+        let present = rfc8212_policy_check("10.0.0.1", S::Present as i32, S::Present as i32);
+        assert_eq!(present.status, CheckStatus::Ok);
+
+        let missing_export = rfc8212_policy_check("10.0.0.2", S::Present as i32, S::Missing as i32);
+        assert_eq!(missing_export.status, CheckStatus::Fail);
+        assert!(
+            missing_export.detail.contains("export")
+                && !missing_export.detail.contains("import and export"),
+            "the failing direction must be named: {}",
+            missing_export.detail
+        );
+
+        let missing_both = rfc8212_policy_check("10.0.0.3", S::Missing as i32, S::Missing as i32);
+        assert_eq!(missing_both.status, CheckStatus::Fail);
+        assert!(missing_both.detail.contains("import and export"));
+
+        // Zero is what a daemon that predates the field sends.
+        let unknown = rfc8212_policy_check("10.0.0.4", 0, 0);
+        assert_eq!(unknown.status, CheckStatus::Warn);
+        assert!(unknown.detail.contains("unknown"));
     }
 
     #[test]

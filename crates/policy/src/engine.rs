@@ -1292,6 +1292,27 @@ impl fmt::Debug for PolicyChain {
     }
 }
 
+/// Attribution name of the reserved internal chain installed on an RFC 8212
+/// eBGP import direction with no explicit operator policy (ADR-0112).
+pub const RFC8212_MISSING_IMPORT_POLICY: &str = "rfc8212_missing_import_policy";
+/// Attribution name of the reserved internal chain installed on an RFC 8212
+/// eBGP export direction with no explicit operator policy (ADR-0112).
+pub const RFC8212_MISSING_EXPORT_POLICY: &str = "rfc8212_missing_export_policy";
+
+/// True for either ADR-0112 reserved chain name.
+///
+/// The names live here, next to [`NamedPolicy::name`], rather than in the
+/// daemon's config module: every consumer that reads a chain member's name
+/// back out — export explain in the RIB, import explain in the CLI, the
+/// neighbor status surface — needs the same identity test, and a duplicated
+/// literal in any one of them would be a silent attribution drift. Config
+/// validation refuses these two names for operator policies, so a chain
+/// member carrying one is always the daemon-supplied reserved deny.
+#[must_use]
+pub fn is_rfc8212_reserved_policy_name(name: &str) -> bool {
+    name == RFC8212_MISSING_IMPORT_POLICY || name == RFC8212_MISSING_EXPORT_POLICY
+}
+
 impl PolicyChain {
     /// Stable origin label for update-group planning diagnostics.
     #[must_use]

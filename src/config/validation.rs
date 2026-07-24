@@ -102,6 +102,7 @@ impl Config {
             });
         }
 
+        validate_reserved_policy_names(self)?;
         validate_event_history(&self.event_history)?;
         validate_grpc_security(&self.security)?;
         self.validate_no_redacted_secrets()?;
@@ -1249,6 +1250,34 @@ impl Config {
         }
         Ok(())
     }
+}
+
+/// Refuse the two ADR-0112 reserved chain names to operator policies.
+///
+/// The reserved deny is built directly rather than resolved from the catalog,
+/// so enforcement never depended on this. The *reporting* surfaces do: neighbor
+/// status identifies a denied direction by comparing the installed chain
+/// against the reserved deny, and import/export explain attribute a rejection
+/// by the deciding chain member's name. Both are only unambiguous while no
+/// operator policy can carry either name — which is what ADR-0112 means by a
+/// chain that "cannot be referenced or shadowed by a configured name".
+///
+/// `.rpol` policies share one namespace with `[policy.definitions]`, so the
+/// compiled registry is checked too.
+fn validate_reserved_policy_names(config: &Config) -> Result<(), ConfigError> {
+    let toml_names = config.policy.definitions.keys();
+    let rpol_names = config.policy.rpol.policies.keys();
+    for name in toml_names.chain(rpol_names) {
+        if rustbgpd_policy::is_rfc8212_reserved_policy_name(name) {
+            return Err(ConfigError::InvalidPolicyEntry {
+                reason: format!(
+                    "policy name {name:?} is reserved for the RFC 8212 internal deny chain \
+                     (ADR-0112) and cannot be defined by an operator policy; rename it"
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn validate_managed_netdevs(config: &Config) -> Result<(), ConfigError> {

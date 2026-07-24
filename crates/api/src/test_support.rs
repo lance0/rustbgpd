@@ -13,7 +13,7 @@ use rustbgpd_wire::{
 use tokio::sync::{broadcast, mpsc};
 
 use crate::peer_types::{
-    POLICY_EVENT_HISTORY_CAPACITY, PeerInfo, PeerManagerCommand, PolicyEvent,
+    POLICY_EVENT_HISTORY_CAPACITY, PeerInfo, PeerManagerCommand, PolicyEvent, Rfc8212PolicyStatus,
     SESSION_EVENT_HISTORY_CAPACITY, SessionEvent, SessionLifecycleEvent, SessionLifecycleEventType,
     SessionNotificationEvent, SessionNotificationEventType,
 };
@@ -90,6 +90,8 @@ pub(crate) fn peer_info(address: IpAddr) -> PeerInfo {
         is_dynamic: false,
         stale: false,
         slow_peer: false,
+        rfc8212_import_policy: Rfc8212PolicyStatus::NotRequired,
+        rfc8212_export_policy: Rfc8212PolicyStatus::NotRequired,
     }
 }
 

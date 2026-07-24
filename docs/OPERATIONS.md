@@ -681,6 +681,28 @@ being rejected. The full-apply timestamp has no such caveat — it is
 stamped on every successful SIGHUP — so it is the primary "pipeline
 stuck or daemon rejecting everything" pager.
 
+### RFC 8212 explicit-policy enforcement
+
+Present only when `[global] ebgp_requires_policy = true` (ADR-0112). Both
+gauges are 0/1 and read from the chain each peer currently has installed, so
+they cannot disagree with the `RFC 8212 Policy` block in `rbgp neighbor <addr>`
+or with the `rbgp doctor` verdict. Series are reaped when the peer is removed.
+
+| Metric | What it tells you |
+|--------|-------------------|
+| `bgp_rfc8212_missing_import_policy{peer}` | 1 when this external session has no explicit operator import policy, so the reserved internal deny is installed and no route it announces becomes eligible, in any negotiated family. 0 for iBGP and while enforcement is off |
+| `bgp_rfc8212_missing_export_policy{peer}` | 1 when this external session has no explicit operator export policy, so nothing enters its Adj-RIB-Out in any negotiated family |
+
+```promql
+# Any eBGP peer fail-closed on a missing operator policy.
+max by (peer) (
+  bgp_rfc8212_missing_import_policy or bgp_rfc8212_missing_export_policy
+) > 0
+```
+
+Alert on this rather than on readiness: `/readyz` stays green for a healthy
+daemon whose reserved deny is doing exactly what it was configured to do.
+
 ### Ingress rejection / route-leak detection
 
 Mechanisms that block routes for protocol-correctness reasons: most
@@ -1231,9 +1253,19 @@ rustbgpd uses structured JSON logging. Key messages to watch for:
 
 `rbgp doctor` runs red/green triage checks live (daemon reachable and
 healthy, peers stuck outside Established with time-in-state, flap loops,
-TCP-AO configuration against the daemon's kernel capability probe, daemon
-`nofile` rlimits, recent panic reports) plus first-deploy environment
-probes, and writes one redacted `rustbgpd-doctor-<ts>.tar.gz`:
+TCP-AO configuration against the daemon's kernel capability probe, RFC 8212
+directional policy presence, daemon `nofile` rlimits, recent panic reports)
+plus first-deploy environment probes, and writes one redacted
+`rustbgpd-doctor-<ts>.tar.gz`:
+
+`peer.<addr>.rfc8212_policy` is the ADR-0112 check. It is green for
+`not_required` — the compatibility default, so it never turns an existing
+deployment yellow — and for `present`. It is **red** when a direction reports
+`missing`, naming import, export, or both: the reserved internal deny is
+installed there and no route crosses it. It is yellow against a daemon that
+does not expose the status, because "no evidence" is not "no problem". A red
+verdict here never affects `/readyz`: missing operator policy is a
+configuration state to repair, not a daemon that cannot serve traffic.
 
 First-deploy probes (each bounded to a 2s timeout, read-only):
 

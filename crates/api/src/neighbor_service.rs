@@ -11,7 +11,7 @@ use tonic::{Request, Response, Status};
 
 use crate::peer_types::{
     ConfigEvent, DynamicRangeError, PeerInfo, PeerKey, PeerLifecycleError, PeerManagerCommand,
-    PeerManagerNeighborConfig, RemovedDynamicRange,
+    PeerManagerNeighborConfig, RemovedDynamicRange, Rfc8212PolicyStatus,
 };
 use crate::proto;
 use crate::server::{
@@ -734,6 +734,20 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
         max_prefix_headroom_ipv6: info.max_prefix_headroom_ipv6,
         negotiation_available: Some(negotiated_session.is_some()),
         negotiated_session,
+        rfc8212_import_policy: rfc8212_status_to_proto(info.rfc8212_import_policy).into(),
+        rfc8212_export_policy: rfc8212_status_to_proto(info.rfc8212_export_policy).into(),
+    }
+}
+
+/// ADR-0112 directional status onto the wire enum. `UNSPECIFIED` is never
+/// emitted: it is reserved for the field an older daemon does not send, so a
+/// client that sees it may conclude the daemon predates the feature.
+fn rfc8212_status_to_proto(status: Rfc8212PolicyStatus) -> proto::Rfc8212PolicyStatus {
+    match status {
+        Rfc8212PolicyStatus::Unknown => proto::Rfc8212PolicyStatus::Unknown,
+        Rfc8212PolicyStatus::NotRequired => proto::Rfc8212PolicyStatus::NotRequired,
+        Rfc8212PolicyStatus::Present => proto::Rfc8212PolicyStatus::Present,
+        Rfc8212PolicyStatus::Missing => proto::Rfc8212PolicyStatus::Missing,
     }
 }
 
@@ -1583,6 +1597,54 @@ mod tests {
         assert!(source.contains("optional uint32 max_prefix_headroom = 46;"));
         assert!(source.contains("optional uint32 max_prefix_headroom_ipv4 = 47;"));
         assert!(source.contains("optional uint32 max_prefix_headroom_ipv6 = 48;"));
+        assert!(source.contains("Rfc8212PolicyStatus rfc8212_import_policy = 51;"));
+        assert!(source.contains("Rfc8212PolicyStatus rfc8212_export_policy = 52;"));
+    }
+
+    /// Load-bearing proof for the ADR-0112 rolling-version contract:
+    /// renumbering `UNSPECIFIED` off zero, or reordering the directional
+    /// verdicts, silently reinterprets an older daemon's absent field as a
+    /// real state. Both make this red before generated clients drift.
+    #[test]
+    fn rfc8212_policy_status_enum_reserves_zero_for_absent() {
+        let source = include_str!("../../../proto/rustbgpd.proto");
+        assert!(source.contains("RFC8212_POLICY_STATUS_UNSPECIFIED = 0;"));
+        assert!(source.contains("RFC8212_POLICY_STATUS_UNKNOWN = 1;"));
+        assert!(source.contains("RFC8212_POLICY_STATUS_NOT_REQUIRED = 2;"));
+        assert!(source.contains("RFC8212_POLICY_STATUS_PRESENT = 3;"));
+        assert!(source.contains("RFC8212_POLICY_STATUS_MISSING = 4;"));
+        assert_eq!(proto::Rfc8212PolicyStatus::Unspecified as i32, 0);
+    }
+
+    /// A current daemon must never emit `UNSPECIFIED`: a client that sees it
+    /// is entitled to conclude the serving daemon predates the field. Folding
+    /// any determinate verdict onto zero makes this red.
+    #[test]
+    fn rfc8212_status_to_proto_never_emits_unspecified() {
+        for status in [
+            Rfc8212PolicyStatus::Unknown,
+            Rfc8212PolicyStatus::NotRequired,
+            Rfc8212PolicyStatus::Present,
+            Rfc8212PolicyStatus::Missing,
+        ] {
+            let wire = rfc8212_status_to_proto(status);
+            assert!(
+                !matches!(wire, proto::Rfc8212PolicyStatus::Unspecified),
+                "{status:?} mapped to {wire:?}"
+            );
+        }
+        assert_eq!(
+            rfc8212_status_to_proto(Rfc8212PolicyStatus::Missing),
+            proto::Rfc8212PolicyStatus::Missing
+        );
+        assert_eq!(
+            rfc8212_status_to_proto(Rfc8212PolicyStatus::Present),
+            proto::Rfc8212PolicyStatus::Present
+        );
+        assert_eq!(
+            rfc8212_status_to_proto(Rfc8212PolicyStatus::NotRequired),
+            proto::Rfc8212PolicyStatus::NotRequired
+        );
     }
 
     fn test_static_peer_config() -> PeerManagerNeighborConfig {

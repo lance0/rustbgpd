@@ -19,6 +19,9 @@ use rustbgpd_policy::{
     CommunityMatch, NamedPolicy, NextHopAction, Policy, PolicyAction, PolicyChain, PolicyStatement,
     RouteModifications, parse_community_match,
 };
+// ADR-0112 reserved chain names live in the policy crate so the daemon, the
+// RIB's export explain, and the CLI all test the same identity.
+pub use rustbgpd_policy::{RFC8212_MISSING_EXPORT_POLICY, RFC8212_MISSING_IMPORT_POLICY};
 use rustbgpd_transport::{
     RemovePrivateAs, TcpAoAlgorithm, TcpAoConfig as TransportTcpAoConfig, TcpAoKeyring,
     TransportConfig,
@@ -734,26 +737,25 @@ impl Config {
     }
 
     /// Emit the startup notice for `[global] ebgp_requires_policy = true`
-    /// while the remaining ADR-0112 steps land.
+    /// while the last ADR-0112 step lands.
     ///
-    /// Policy resolution is now fail-closed: an external session with no
-    /// explicit operator policy in a direction runs the reserved internal deny
-    /// there. What is still missing is the *operator surface* — neighbor
-    /// detail, JSON, metrics/explain attribution and `rbgp doctor` do not yet
-    /// report the directional verdict — and the Route Refresh qualification
-    /// for live policy-presence edits. Removed when those ship.
+    /// Enforcement and the directional operator surface both ship: an external
+    /// session with no explicit operator policy in a direction runs the
+    /// reserved internal deny there, and neighbor detail, JSON,
+    /// metrics/explain attribution and `rbgp doctor` all report it per
+    /// direction. What remains is ADR-0112 step 4 — the Route Refresh
+    /// qualification and rollback contract for live policy-presence edits.
+    /// Removed when that ships.
     pub fn warn_if_ebgp_requires_policy_partial(&self) {
         if self.global.ebgp_requires_policy {
             tracing::warn!(
-                "[global] ebgp_requires_policy = true is enforced on resolved policy: an \
-                 EBGP session with no explicit import or export policy runs a reserved \
-                 internal deny in that direction. Not yet available: the directional \
-                 policy-presence status in neighbor detail, JSON, metrics/explain \
-                 attribution and rbgp doctor, and the Route Refresh qualification and \
-                 rollback contract for live policy-presence edits — a live edit that \
-                 removes or adds the last explicit import policy is applied through the \
-                 ordinary policy path, which does not reject an Established peer that \
-                 never negotiated Route Refresh. See \
+                "[global] ebgp_requires_policy = true is enforced on resolved policy and \
+                 reported per direction in neighbor detail, JSON, metrics/explain \
+                 attribution and rbgp doctor. Not yet available: the Route Refresh \
+                 qualification and rollback contract for live policy-presence edits — a \
+                 live edit that removes or adds the last explicit import policy is \
+                 applied through the ordinary policy path, which does not reject an \
+                 Established peer that never negotiated Route Refresh. See \
                  docs/adr/0112-rfc-8212-ebgp-requires-policy.md."
             );
         }
@@ -2051,13 +2053,6 @@ pub struct ResolvedNeighbor {
     pub rfc8212_external: bool,
 }
 
-/// Attribution name of the reserved internal chain installed on an RFC 8212
-/// eBGP import direction with no explicit operator policy (ADR-0112).
-pub const RFC8212_MISSING_IMPORT_POLICY: &str = "rfc8212_missing_import_policy";
-/// Attribution name of the reserved internal chain installed on an RFC 8212
-/// eBGP export direction with no explicit operator policy (ADR-0112).
-pub const RFC8212_MISSING_EXPORT_POLICY: &str = "rfc8212_missing_export_policy";
-
 /// Build the ADR-0112 reserved internal deny-all chain for one direction.
 ///
 /// Constructed directly rather than looked up in `[policy] definitions`, so no
@@ -2065,7 +2060,7 @@ pub const RFC8212_MISSING_EXPORT_POLICY: &str = "rfc8212_missing_export_policy";
 /// with no statements: `evaluate_chain(Some(..))` still runs, which is what
 /// keeps `evaluate_chain(None, ..)` permit-all semantics untouched for every
 /// session RFC 8212 enforcement does not govern.
-fn reserved_rfc8212_deny_chain(name: &str) -> PolicyChain {
+pub(crate) fn reserved_rfc8212_deny_chain(name: &str) -> PolicyChain {
     PolicyChain::from_named(vec![NamedPolicy {
         name: Some(name.to_string()),
         policy: Policy {
@@ -2074,6 +2069,30 @@ fn reserved_rfc8212_deny_chain(name: &str) -> PolicyChain {
         },
         rpol: None,
     }])
+}
+
+/// True when `chain` is exactly the reserved RFC 8212 deny for `name`
+/// (ADR-0112).
+///
+/// This is the whole directional status derivation: the operator surface asks
+/// the *installed* chain what is installed instead of storing a second verdict
+/// beside it. That is deliberate. A stored `present` bool has to be threaded
+/// through every resolution, live-apply, and rollback path in lockstep with
+/// the chain it describes, and the moment one path advances without it the
+/// surface reports `present` while the deny is live — which is worse than no
+/// surface at all in a fail-closed feature. Reading the chain cannot drift
+/// from the chain.
+///
+/// This does not reconstruct the *provenance* verdict ADR-0112 forbids
+/// rebuilding from compiled content, and it could not: the reserved deny
+/// replaces the whole direction, so there is no operator policy or implicit
+/// tail left to tell apart. It is an identity test against the one chain
+/// [`reserved_rfc8212_deny_chain`] builds, and [`Config::validate`] refuses
+/// both reserved names to operator policies, so nothing configurable compares
+/// equal to it.
+#[must_use]
+pub fn is_reserved_rfc8212_deny(chain: Option<&PolicyChain>, name: &str) -> bool {
+    chain.is_some_and(|chain| *chain == reserved_rfc8212_deny_chain(name))
 }
 
 /// Resolved policy chains for one neighbor plus the ADR-0112 directional
