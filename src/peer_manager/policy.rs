@@ -1099,6 +1099,11 @@ impl PeerManager {
                     &managed.description,
                     group,
                     &target_range.peer_group,
+                    // `managed.remote_asn` is the ASN learned from OPEN, which
+                    // may have replaced an accept-any range's sentinel. Feed
+                    // the pinned classification back in so a range-targeted
+                    // edit cannot re-resolve a governed session as iBGP.
+                    managed.rfc8212_external,
                 )
                 .map_err(|error| {
                     format!(
@@ -2143,7 +2148,12 @@ impl PeerManager {
                 }
                 None => continue,
             };
-            let chains = next_config.effective_policy_chains_for_neighbor(&neighbor);
+            // ADR-0112: feed this peer's pinned RFC 8212 classification back in
+            // so a re-resolution cannot drop enforcement on a wildcard-accepted
+            // session whose sentinel ASN was replaced at OPEN.
+            let chains = next_config
+                .effective_policy_for_neighbor(&neighbor, managed.rfc8212_external)
+                .map(|resolved| (resolved.import, resolved.export));
             let (import_policy, export_policy) = match chains {
                 Ok(chains) => chains,
                 // An orphaned dynamic peer (accepted range deleted, then its
@@ -2310,7 +2320,12 @@ impl PeerManager {
                 continue;
             };
             let neighbor = Self::policy_resolution_neighbor(&next_config, address, managed);
-            let chains = next_config.effective_policy_chains_for_neighbor(&neighbor);
+            // ADR-0112: feed this peer's pinned RFC 8212 classification back in
+            // so a re-resolution cannot drop enforcement on a wildcard-accepted
+            // session whose sentinel ASN was replaced at OPEN.
+            let chains = next_config
+                .effective_policy_for_neighbor(&neighbor, managed.rfc8212_external)
+                .map(|resolved| (resolved.import, resolved.export));
             let (import_policy, export_policy) = match chains {
                 Ok(c) => c,
                 Err(e) => {
@@ -2394,7 +2409,12 @@ impl PeerManager {
                 continue;
             };
             let neighbor = Self::policy_resolution_neighbor(&next_config, address, managed);
-            let chains = next_config.effective_policy_chains_for_neighbor(&neighbor);
+            // ADR-0112: feed this peer's pinned RFC 8212 classification back in
+            // so a re-resolution cannot drop enforcement on a wildcard-accepted
+            // session whose sentinel ASN was replaced at OPEN.
+            let chains = next_config
+                .effective_policy_for_neighbor(&neighbor, managed.rfc8212_external)
+                .map(|resolved| (resolved.import, resolved.export));
             let (import_policy, export_policy) = match chains {
                 Ok(c) => c,
                 Err(e) => {

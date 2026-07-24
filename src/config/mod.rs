@@ -16,7 +16,7 @@ use rustbgpd_evpn::{
 };
 use rustbgpd_fsm::PeerConfig;
 use rustbgpd_policy::{
-    CommunityMatch, NextHopAction, Policy, PolicyAction, PolicyChain, PolicyStatement,
+    CommunityMatch, NamedPolicy, NextHopAction, Policy, PolicyAction, PolicyChain, PolicyStatement,
     RouteModifications, parse_community_match,
 };
 use rustbgpd_transport::{
@@ -722,19 +722,38 @@ impl Config {
             .unwrap_or(DEFAULT_DYNAMIC_NEIGHBOR_LIMIT)
     }
 
-    /// Emit the startup warning for `[global] ebgp_requires_policy = true`
-    /// while ADR-0112 enforcement is still landing. The knob is accepted,
-    /// classified restart-required, and pinned across SIGHUP, but no reserved
-    /// internal deny is installed yet, so an operator who enables it must not
-    /// believe EBGP sessions are already fail-closed. Removed when the
-    /// enforcement path ships.
-    pub fn warn_if_ebgp_requires_policy_unenforced(&self) {
+    /// ADR-0112 RFC 8212 external classification for a configured remote ASN.
+    ///
+    /// `0` is the accept-any dynamic sentinel, not AS 0 and never an iBGP
+    /// match, so it always classifies external. This is deliberately separate
+    /// from the RFC 8326 / RFC 7999 implicit-tail `is_ebgp` gate, which keeps
+    /// its plain `remote_asn != global.asn` comparison.
+    #[must_use]
+    pub fn rfc8212_external_asn(&self, remote_asn: u32) -> bool {
+        remote_asn == 0 || remote_asn != self.global.asn
+    }
+
+    /// Emit the startup notice for `[global] ebgp_requires_policy = true`
+    /// while the remaining ADR-0112 steps land.
+    ///
+    /// Policy resolution is now fail-closed: an external session with no
+    /// explicit operator policy in a direction runs the reserved internal deny
+    /// there. What is still missing is the *operator surface* — neighbor
+    /// detail, JSON, metrics/explain attribution and `rbgp doctor` do not yet
+    /// report the directional verdict — and the Route Refresh qualification
+    /// for live policy-presence edits. Removed when those ship.
+    pub fn warn_if_ebgp_requires_policy_partial(&self) {
         if self.global.ebgp_requires_policy {
             tracing::warn!(
-                "[global] ebgp_requires_policy = true is recorded but NOT yet enforced: \
-                 EBGP sessions without explicit import/export policy still use the \
-                 permit-all default. Do not rely on this setting for RFC 8212 route-leak \
-                 protection until enforcement ships; see \
+                "[global] ebgp_requires_policy = true is enforced on resolved policy: an \
+                 EBGP session with no explicit import or export policy runs a reserved \
+                 internal deny in that direction. Not yet available: the directional \
+                 policy-presence status in neighbor detail, JSON, metrics/explain \
+                 attribution and rbgp doctor, and the Route Refresh qualification and \
+                 rollback contract for live policy-presence edits — a live edit that \
+                 removes or adds the last explicit import policy is applied through the \
+                 ordinary policy path, which does not reject an Established peer that \
+                 never negotiated Route Refresh. See \
                  docs/adr/0112-rfc-8212-ebgp-requires-policy.md."
             );
         }
@@ -883,10 +902,32 @@ impl Config {
         }
     }
 
-    /// Resolve the effective import/export policy chains for one neighbor.
+    /// Resolve the effective import/export policy chains for one neighbor,
+    /// discarding the ADR-0112 provenance metadata.
+    ///
+    /// Test-only: every production resolution site either needs the RFC 8212
+    /// verdict or resolves a peer whose external classification is pinned
+    /// rather than derived from the record's `remote_asn`, so they all call
+    /// [`Self::effective_policy_for_neighbor`] directly.
+    ///
+    /// # Errors
+    /// Propagates any [`ConfigError`] from
+    /// [`Self::effective_policy_for_neighbor`].
+    #[cfg(test)]
+    pub fn effective_policy_chains_for_neighbor(
+        &self,
+        neighbor: &Neighbor,
+    ) -> Result<(Option<PolicyChain>, Option<PolicyChain>), ConfigError> {
+        let resolved = self.effective_policy_for_neighbor(neighbor, false)?;
+        Ok((resolved.import, resolved.export))
+    }
+
+    /// Resolve the effective import/export policy chains for one neighbor,
+    /// together with the ADR-0112 directional explicit-policy provenance.
     ///
     /// Per-neighbor named chain overrides per-neighbor inline policy, which
-    /// overrides the corresponding global named chain.
+    /// overrides the corresponding peer-group source, which overrides the
+    /// corresponding global named chain.
     ///
     /// When `[global] honor_graceful_shutdown = true` and/or
     /// `[global] honor_blackhole = true` AND the neighbor is EBGP, the
@@ -894,14 +935,27 @@ impl Config {
     /// receiver rule. iBGP is intentionally exempt — these are EBGP-edge
     /// receiver behaviors, and re-applying them per iBGP hop would overwrite
     /// values or scoping set legitimately upstream at the EBGP edge.
+    ///
+    /// `external_pinned` forces the RFC 8212 external classification on. It
+    /// exists for one case: a child accepted by an accept-any (`remote_asn =
+    /// 0`) dynamic range. The peer manager replaces that sentinel with the ASN
+    /// learned from OPEN, so a later re-resolution would otherwise be able to
+    /// reclassify a live session as iBGP and drop its enforcement. The flag
+    /// deliberately does **not** feed the RFC 8326 / RFC 7999 implicit-tail
+    /// gate, which keeps reading the record's `remote_asn`.
+    ///
+    /// # Errors
+    /// Returns [`ConfigError`] when the neighbor references an undefined peer
+    /// group, or when any referenced policy/chain fails to resolve or parse.
     #[expect(
         clippy::too_many_lines,
         reason = "one linear inheritance resolution (global, group, neighbor, implicit tails); splitting would hide the precedence order"
     )]
-    pub fn effective_policy_chains_for_neighbor(
+    pub fn effective_policy_for_neighbor(
         &self,
         neighbor: &Neighbor,
-    ) -> Result<(Option<PolicyChain>, Option<PolicyChain>), ConfigError> {
+        external_pinned: bool,
+    ) -> Result<EffectivePolicyChains, ConfigError> {
         let group = self.peer_group_for_neighbor(neighbor)?;
         let global_import = self.import_chain()?;
         let global_export = self.export_chain()?;
@@ -1002,6 +1056,18 @@ impl Config {
         }
         .or_else(|| global_export.clone());
 
+        // ADR-0112 explicit-policy provenance, decided HERE — before the
+        // implicit tails below can manufacture a chain. Every source that
+        // counts as operator provenance (neighbor named, neighbor inline,
+        // group named, group inline, global named) is the only thing that can
+        // have produced a `Some` at this point: `parse_policy` returns `None`
+        // for an empty inline policy and `resolve_chain` returns `None` for an
+        // empty name list, so an empty field that fell through to the next
+        // level never counts. A permit-all chain still counts — RFC 8212 wants
+        // a deliberate policy, not a particular filtering strategy.
+        let import_explicit = import.is_some();
+        let export_explicit = export.is_some();
+
         // RFC 8326 §4 / RFC 7999 receiver behavior: append implicit rules to
         // the end of the EBGP import chain when the corresponding honor knob
         // is on. Running LAST guarantees the implicit modification wins over
@@ -1032,7 +1098,35 @@ impl Config {
                 import
             };
 
-        Ok((import, export))
+        // ADR-0112 RFC 8212 external classification. `remote_asn = 0` is the
+        // accept-any dynamic sentinel, never AS 0 and never a real iBGP match,
+        // so it is always external; `external_pinned` keeps a session that was
+        // accepted through such a range external after OPEN overwrote the
+        // sentinel with a learned ASN.
+        let external = external_pinned || self.rfc8212_external_asn(neighbor.remote_asn);
+        let enforced = self.global.ebgp_requires_policy && external;
+        // Substituting the whole direction (rather than prepending) keeps the
+        // reserved deny unambiguous: nothing an operator can name or configure
+        // is left in a denied direction, and the implicit GSHUT/BLACKHOLE
+        // import tails cannot make a missing import policy look satisfied.
+        let import = if enforced && !import_explicit {
+            Some(reserved_rfc8212_deny_chain(RFC8212_MISSING_IMPORT_POLICY))
+        } else {
+            import
+        };
+        let export = if enforced && !export_explicit {
+            Some(reserved_rfc8212_deny_chain(RFC8212_MISSING_EXPORT_POLICY))
+        } else {
+            export
+        };
+
+        Ok(EffectivePolicyChains {
+            import,
+            export,
+            import_explicit,
+            export_explicit,
+            external,
+        })
     }
 
     fn peer_group_for_neighbor(
@@ -1124,13 +1218,24 @@ impl Config {
             .map(BgpRoleConfig::to_wire)
     }
 
+    pub(crate) fn resolve_neighbor(
+        &self,
+        neighbor: &Neighbor,
+    ) -> Result<ResolvedNeighbor, ConfigError> {
+        self.resolve_neighbor_pinned(neighbor, false)
+    }
+
+    /// [`Self::resolve_neighbor`] with the ADR-0112 external classification
+    /// pinned on — see [`Self::effective_policy_for_neighbor`] for when that
+    /// is required.
     #[expect(
         clippy::too_many_lines,
         reason = "neighbor resolution centralizes inheritance, validation, and transport projection"
     )]
-    pub(crate) fn resolve_neighbor(
+    pub(crate) fn resolve_neighbor_pinned(
         &self,
         neighbor: &Neighbor,
+        external_pinned: bool,
     ) -> Result<ResolvedNeighbor, ConfigError> {
         let router_id: Ipv4Addr = self
             .global
@@ -1333,7 +1438,7 @@ impl Config {
         transport.reject_retention_enabled = self.policy.reject_retention.enabled;
         transport.reject_retention_capacity = self.policy.reject_retention.capacity;
 
-        let (import_policy, export_policy) = self.effective_policy_chains_for_neighbor(neighbor)?;
+        let policy = self.effective_policy_for_neighbor(neighbor, external_pinned)?;
 
         Ok(ResolvedNeighbor {
             transport_config: transport,
@@ -1345,14 +1450,22 @@ impl Config {
                 .description
                 .clone()
                 .unwrap_or_else(|| neighbor.address.clone()),
-            import_policy,
-            export_policy,
+            import_policy: policy.import,
+            export_policy: policy.export,
             peer_group: neighbor.peer_group.clone(),
+            rfc8212_external: policy.external,
         })
     }
 
     /// Resolve a dynamic neighbor config from a peer group.
     /// Builds a synthetic `Neighbor` inheriting all settings from the group.
+    ///
+    /// `remote_asn` is the accepting range's configured value at accept time —
+    /// including the `0` accept-any sentinel, which classifies the child as
+    /// external per ADR-0112. A caller that instead passes the ASN learned from
+    /// OPEN must set `external_pinned` from the session's pinned
+    /// classification, or a wildcard-accepted child could be re-resolved as
+    /// iBGP mid-session.
     pub(crate) fn resolve_dynamic_neighbor(
         &self,
         addr: IpAddr,
@@ -1360,6 +1473,7 @@ impl Config {
         description: &str,
         _group: &PeerGroupConfig,
         peer_group_name: &str,
+        external_pinned: bool,
     ) -> Result<ResolvedNeighbor, ConfigError> {
         // Build a synthetic Neighbor that references the peer group.
         // All fields come from the group via the normal resolution path.
@@ -1410,7 +1524,7 @@ impl Config {
             import_policy_chain: Vec::new(),
             export_policy_chain: Vec::new(),
         };
-        self.resolve_neighbor(&neighbor)
+        self.resolve_neighbor_pinned(&neighbor, external_pinned)
     }
 
     pub fn resolved_neighbors(&self) -> Result<Vec<ResolvedNeighbor>, ConfigError> {
@@ -1930,6 +2044,60 @@ pub struct ResolvedNeighbor {
     pub import_policy: Option<PolicyChain>,
     pub export_policy: Option<PolicyChain>,
     pub peer_group: Option<String>,
+    /// ADR-0112 RFC 8212 external classification, decided from the neighbor
+    /// record that produced this resolution (accept-any dynamic ranges
+    /// included). The peer manager pins it for the session's lifetime because
+    /// the record's `remote_asn` is overwritten with the ASN learned from OPEN.
+    pub rfc8212_external: bool,
+}
+
+/// Attribution name of the reserved internal chain installed on an RFC 8212
+/// eBGP import direction with no explicit operator policy (ADR-0112).
+pub const RFC8212_MISSING_IMPORT_POLICY: &str = "rfc8212_missing_import_policy";
+/// Attribution name of the reserved internal chain installed on an RFC 8212
+/// eBGP export direction with no explicit operator policy (ADR-0112).
+pub const RFC8212_MISSING_EXPORT_POLICY: &str = "rfc8212_missing_export_policy";
+
+/// Build the ADR-0112 reserved internal deny-all chain for one direction.
+///
+/// Constructed directly rather than looked up in `[policy] definitions`, so no
+/// configured name can reference or replace it. It denies by `default_action`
+/// with no statements: `evaluate_chain(Some(..))` still runs, which is what
+/// keeps `evaluate_chain(None, ..)` permit-all semantics untouched for every
+/// session RFC 8212 enforcement does not govern.
+fn reserved_rfc8212_deny_chain(name: &str) -> PolicyChain {
+    PolicyChain::from_named(vec![NamedPolicy {
+        name: Some(name.to_string()),
+        policy: Policy {
+            entries: Vec::new(),
+            default_action: PolicyAction::Deny,
+        },
+        rpol: None,
+    }])
+}
+
+/// Resolved policy chains for one neighbor plus the ADR-0112 directional
+/// explicit-policy provenance they were resolved with.
+///
+/// The provenance verdict is attached to the direction at resolution time. It
+/// is never reconstructed by inspecting a compiled [`PolicyChain`]: compiled
+/// content cannot tell an operator policy apart from a daemon-owned implicit
+/// tail or from the reserved deny.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EffectivePolicyChains {
+    /// Effective import chain, including any implicit RFC 8326 / RFC 7999
+    /// tails and any RFC 8212 reserved deny substitution.
+    pub import: Option<PolicyChain>,
+    /// Effective export chain, including any RFC 8212 reserved deny
+    /// substitution.
+    pub export: Option<PolicyChain>,
+    /// Explicit operator import policy resolved, decided before the implicit
+    /// tails were appended and before any reserved deny substitution.
+    pub import_explicit: bool,
+    /// Explicit operator export policy resolved.
+    pub export_explicit: bool,
+    /// RFC 8212 external (eBGP) classification for this resolution.
+    pub external: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -5434,12 +5602,16 @@ fn dynamic_range_effective_impact(
         let Some(new_group) = new.peer_groups.get(&new_range.peer_group) else {
             continue;
         };
+        // Both sides pass the range's own configured `remote_asn`, so the
+        // accept-any sentinel already classifies the range as external and
+        // nothing needs pinning here.
         let Ok(old_resolved) = old.resolve_dynamic_neighbor(
             addr,
             old_range.remote_asn,
             old_range.description.as_deref().unwrap_or_default(),
             old_group,
             &old_range.peer_group,
+            false,
         ) else {
             continue;
         };
@@ -5449,6 +5621,7 @@ fn dynamic_range_effective_impact(
             new_range.description.as_deref().unwrap_or_default(),
             new_group,
             &new_range.peer_group,
+            false,
         ) else {
             continue;
         };

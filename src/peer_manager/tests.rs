@@ -1223,6 +1223,7 @@ fn insert_test_managed_peer_with_asn(
             export_policy: None,
             pending_inbound: None,
             is_dynamic: false,
+            rfc8212_external: false,
             tcp_ao_protected: false,
             accepted_dynamic_range: None,
             pending_refresh,
@@ -1537,6 +1538,7 @@ fn insert_test_scoped_managed_peer(
             export_policy: None,
             pending_inbound: None,
             is_dynamic: false,
+            rfc8212_external: false,
             tcp_ao_protected: false,
             accepted_dynamic_range: None,
             pending_refresh: false,
@@ -3619,6 +3621,7 @@ fn insert_test_dynamic_managed_peer(
             export_policy: None,
             pending_inbound: None,
             is_dynamic: true,
+            rfc8212_external: false,
             tcp_ao_protected: false,
             accepted_dynamic_range: Some(AcceptedDynamicRange {
                 addr: range_addr,
@@ -4678,6 +4681,7 @@ async fn required_family_group_reconcile_waits_for_dynamic_reconnect() {
             "reconnect",
             &mgr.current_config.peer_groups["edge"],
             "edge",
+            false,
         )
         .unwrap();
     assert_eq!(
@@ -8367,6 +8371,7 @@ async fn pending_refresh_re_arms_when_peer_still_not_established() {
             export_policy: None,
             pending_inbound: None,
             is_dynamic: false,
+            rfc8212_external: false,
             tcp_ao_protected: false,
             accepted_dynamic_range: None,
             pending_refresh: true,
@@ -13875,6 +13880,7 @@ async fn import_apply_failure_on_established_peer_bails_without_refresh() {
             export_policy: None,
             pending_inbound: None,
             is_dynamic: false,
+            rfc8212_external: false,
             tcp_ao_protected: false,
             accepted_dynamic_range: None,
             pending_refresh: false,
@@ -14053,6 +14059,7 @@ async fn import_apply_failure_on_idle_peer_bails_and_sets_pending_refresh() {
             export_policy: None,
             pending_inbound: None,
             is_dynamic: false,
+            rfc8212_external: false,
             tcp_ao_protected: false,
             accepted_dynamic_range: None,
             pending_refresh: false,
@@ -14241,6 +14248,7 @@ async fn export_apply_failure_bails_without_advancing_bookkeeping() {
             export_policy: None,
             pending_inbound: None,
             is_dynamic: false,
+            rfc8212_external: false,
             tcp_ao_protected: false,
             accepted_dynamic_range: None,
             pending_refresh: false,
@@ -14448,6 +14456,7 @@ async fn import_succeeds_export_fails_then_retry_fires_refresh() {
             export_policy: None,
             pending_inbound: None,
             is_dynamic: false,
+            rfc8212_external: false,
             tcp_ao_protected: false,
             accepted_dynamic_range: None,
             pending_refresh: false,
@@ -14685,6 +14694,7 @@ async fn rib_failure_preserves_pending_refresh_for_retry() {
             export_policy: None,
             pending_inbound: None,
             is_dynamic: false,
+            rfc8212_external: false,
             tcp_ao_protected: false,
             accepted_dynamic_range: None,
             pending_refresh: false,
@@ -14865,6 +14875,7 @@ async fn stale_query_state_re_arms_pending_refresh() {
             export_policy: None,
             pending_inbound: None,
             is_dynamic: false,
+            rfc8212_external: false,
             tcp_ao_protected: false,
             accepted_dynamic_range: None,
             pending_refresh: false,
@@ -17804,4 +17815,87 @@ async fn periodic_bmp_stats_carry_adj_rib_out_counts() {
         }
         other => panic!("expected StatsReport, got {other:?}"),
     }
+}
+
+/// ADR-0112: a child accepted by an accept-any (`remote_asn = 0`) dynamic
+/// range keeps its reserved deny when live chains are re-resolved — even in
+/// the worst case, where OPEN replaced the sentinel with the local ASN.
+///
+/// `sync_rpol_policies` changes no policy content here, so the reserved deny
+/// is the only chain that can arrive. Resolving this peer from
+/// `managed.remote_asn` instead of its pinned classification reads it as iBGP,
+/// leaves both directions permit-all, and makes this red.
+#[tokio::test]
+async fn rfc8212_pinned_dynamic_child_keeps_deny_across_chain_reresolution() {
+    use rustbgpd_policy::rpol::RpolPolicySet;
+
+    let (_tx, rx) = mpsc::channel(16);
+    let (rib_tx, mut rib_rx) = mpsc::channel(64);
+    let rib_drainer = tokio::spawn(async move {
+        while let Some(update) = rib_rx.recv().await {
+            if let RibUpdate::ReplacePeerExportPolicy { reply, .. } = update {
+                let _ = reply.send(Ok(()));
+            }
+        }
+    });
+    let mut mgr = PeerManager::new(
+        rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    let mut config = make_dynamic_manager_config();
+    config.global.ebgp_requires_policy = true;
+    mgr.current_config = config;
+
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5));
+    let counters = Arc::new(FakePeerCounters::default());
+    let handle = acking_counted_policy_handle(addr, counters.clone());
+    insert_test_managed_peer(&mut mgr, addr, handle, false);
+    let managed = mgr.peers.get_mut(&key(addr)).unwrap();
+    managed.is_dynamic = true;
+    managed.peer_group = Some("ix-members".to_string());
+    // What the accept path produced: `remote_asn = 0` classified external.
+    managed.rfc8212_external = true;
+    // What OPEN then did to `remote_asn` — worst case, the local ASN.
+    managed.remote_asn = 65001;
+    managed.import_policy = None;
+    managed.export_policy = None;
+
+    mgr.sync_rpol_policies(
+        Vec::new(),
+        RpolPolicySet::default(),
+        rustbgpd_policy::datasets::DatasetBindings::default(),
+    )
+    .await
+    .expect("registry sync succeeds");
+
+    let managed = mgr.peers.get(&key(addr)).expect("peer still present");
+    for (direction, chain) in [
+        (
+            crate::config::RFC8212_MISSING_IMPORT_POLICY,
+            managed.import_policy.as_ref(),
+        ),
+        (
+            crate::config::RFC8212_MISSING_EXPORT_POLICY,
+            managed.export_policy.as_ref(),
+        ),
+    ] {
+        let chain = chain.unwrap_or_else(|| panic!("{direction} must be installed"));
+        assert_eq!(
+            chain
+                .policies
+                .iter()
+                .map(|member| member.name.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some(direction)]
+        );
+    }
+
+    drop(mgr);
+    rib_drainer.await.unwrap();
 }

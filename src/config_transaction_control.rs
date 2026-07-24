@@ -5554,6 +5554,7 @@ default_action = "permit"
                 "dynamic:ix",
                 group,
                 &range.peer_group,
+                false,
             )
             .expect("dynamic policy must resolve");
         ResolvedPeerPolicy {

@@ -19,10 +19,30 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   disk. `rustbgpd --diff` and the v1 runtime configuration transaction name
   `[global].ebgp_requires_policy` explicitly instead of only the `[global]`
   section, and the transaction rejects such a candidate rather than persisting
-  or partly adopting it. Enforcement itself — the reserved internal deny,
-  directional policy-presence status, and `rbgp doctor` integration — is not
-  implemented yet; setting the field `true` logs a startup warning and changes
-  no routing behavior.
+  or partly adopting it.
+
+- **`[global] ebgp_requires_policy` enforcement in policy resolution
+  (ADR-0112, RFC 8212).** With the knob on, an eBGP direction that resolves no
+  explicit operator policy now runs a reserved internal deny-all chain instead
+  of the permit-all default: a missing import policy makes received routes
+  ineligible, a missing export policy keeps routes out of that peer's
+  Adj-RIB-Out, the session stays Established, and the two directions are
+  independent. The verdict is decided before the implicit RFC 8326
+  `GRACEFUL_SHUTDOWN` and RFC 7999 `BLACKHOLE` import tails are appended, so
+  enabling `honor_graceful_shutdown` or `honor_blackhole` cannot satisfy the
+  requirement; a chain whose configured result is permit-all does satisfy it.
+  Every negotiated family is covered, because policy is neighbor-wide. iBGP is
+  untouched. A `[[dynamic_neighbors]]` range with `remote_asn = 0` is
+  accept-any rather than AS 0, so its accepted children are classified external
+  for the whole session, including after OPEN replaces the sentinel with a
+  learned ASN. With the knob off (the default) resolution is unchanged, and
+  `evaluate_chain(None, ...)` keeps its process-wide permit-all contract in
+  every case. Still to come: the directional policy-presence status in neighbor
+  detail, JSON, metrics/explain attribution and `rbgp doctor`, and the Route
+  Refresh qualification and rollback contract for live policy-presence edits —
+  a live edit that adds or removes the last explicit import policy is applied
+  through the ordinary policy path, which does not reject an Established peer
+  that never negotiated Route Refresh.
 
 ### Changed
 

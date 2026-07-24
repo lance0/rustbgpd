@@ -372,12 +372,16 @@ impl PeerManager {
                 let dynamic_peer_key = PeerKey::new(peer_ip, None);
 
                 // Resolve the dynamic neighbor config from the peer group
+                // `remote_asn` here is the range's configured value, so an
+                // accept-any range still carries its `0` sentinel and
+                // classifies external without a pin (ADR-0112).
                 let resolved = match self.current_config.resolve_dynamic_neighbor(
                     peer_ip,
                     remote_asn,
                     &description,
                     group,
                     &peer_group_name,
+                    false,
                 ) {
                     Ok(r) => r,
                     Err(e) => {
@@ -390,6 +394,7 @@ impl PeerManager {
                     }
                 };
 
+                let rfc8212_external = resolved.rfc8212_external;
                 let cfg = Self::peer_manager_config_from_resolved(resolved, false);
                 let mut transport = self.build_transport_config(&cfg);
                 let import_policy = cfg.import_policy.clone();
@@ -509,6 +514,7 @@ impl PeerManager {
                     export_policy,
                     pending_inbound: None,
                     is_dynamic: true,
+                    rfc8212_external,
                     tcp_ao_protected,
                     tcp_ao_rotation: if tcp_ao_protected {
                         self.tcp_ao_rotation.clone()

@@ -565,6 +565,10 @@ impl PeerManager {
                 export_policy,
                 pending_inbound: None,
                 is_dynamic: false,
+                // ADR-0112: static neighbors only — this path never accepts a
+                // dynamic range's child, so the configured `remote_asn` is
+                // still the authoritative classification input.
+                rfc8212_external: self.current_config.rfc8212_external_asn(remote_asn),
                 tcp_ao_protected,
                 tcp_ao_rotation: rustbgpd_transport::TcpAoRotationStatus {
                     desired: self.tcp_ao_generation,

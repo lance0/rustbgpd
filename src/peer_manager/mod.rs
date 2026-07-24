@@ -134,6 +134,16 @@ struct ManagedPeer {
     /// True for peers auto-created from a `[[dynamic_neighbors]]` range.
     /// Dynamic peers are ephemeral: removed when session falls to Idle.
     is_dynamic: bool,
+    /// ADR-0112 RFC 8212 external classification, pinned at the resolution
+    /// that created this peer and never recomputed.
+    ///
+    /// It is the one piece of policy provenance the running config cannot
+    /// reproduce later: an accept-any (`remote_asn = 0`) range's child has its
+    /// sentinel overwritten by the ASN learned from OPEN, so a re-resolution
+    /// keyed on `remote_asn` alone could reclassify a live external session as
+    /// iBGP and silently drop its reserved deny. Every later chain
+    /// re-resolution for this peer feeds it back in as `external_pinned`.
+    rfc8212_external: bool,
     /// Durable, non-secret TCP-AO protection identity used when the bounded
     /// session-state query times out or the task has exited.
     tcp_ao_protected: bool,
