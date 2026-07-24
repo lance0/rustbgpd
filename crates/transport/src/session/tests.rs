@@ -1555,6 +1555,119 @@ async fn inbound_update_emits_bmp_route_monitoring() {
     }
 }
 
+/// Load-bearing RFC 6793 ingress proof: deleting legacy `AS4_PATH`
+/// reconstruction hides the high local ASN behind `AS_TRANS` and leaves the
+/// seeded route installed. Re-encoding the BMP payload canonicalizes the
+/// deliberately extended-length type 17 and breaks byte equality; escalating
+/// the loop to a reset breaks the Established-state assertion.
+#[tokio::test]
+async fn legacy_as4_suffix_reaches_loop_detection_after_raw_bmp_tap() {
+    const LOCAL_ASN: u32 = 4_200_000_001;
+    let (mut session, mut rib_rx, mut bmp_rx) =
+        make_test_session_with_rib_and_bmp(LOCAL_ASN, 65002);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    while rib_rx.try_recv().is_ok() {}
+    while bmp_rx.try_recv().is_ok() {}
+
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.four_octet_as = false;
+    install_test_negotiated_session(&mut session, negotiated);
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+
+    let seed = UpdateMessage::try_build(
+        &[Ipv4NlriEntry { path_id: 0, prefix }],
+        &[],
+        &[
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65002, 65003])],
+            }),
+            PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+        ],
+        false,
+        false,
+        Ipv4UnicastMode::Body,
+    )
+    .unwrap();
+    let seed = rustbgpd_wire::encode_message(&Message::Update(seed)).unwrap();
+    session.read_buf.buf.extend_from_slice(&seed);
+    session.process_read_buffer().await;
+    let RibUpdate::RoutesReceived {
+        announced,
+        withdrawn,
+        ..
+    } = rib_rx.try_recv().expect("seed route reaches the RIB")
+    else {
+        panic!("expected seed RoutesReceived");
+    };
+    assert_eq!(announced.len(), 1);
+    assert!(withdrawn.is_empty());
+    assert!(matches!(
+        bmp_rx.try_recv(),
+        Ok(BmpEvent::RouteMonitoring { .. })
+    ));
+
+    let mut attrs = vec![0x40, 1, 1, 0, 0x40, 2, 6, 2, 2];
+    attrs.extend_from_slice(&65002u16.to_be_bytes());
+    attrs.extend_from_slice(&23456u16.to_be_bytes());
+    // Valid but deliberately non-canonical: a 10-byte AS4_PATH value uses
+    // the two-octet Extended Length field, so decode + re-encode changes it.
+    attrs.extend_from_slice(&[0xD0, 17, 0, 10, 2, 2]);
+    attrs.extend_from_slice(&65002u32.to_be_bytes());
+    attrs.extend_from_slice(&LOCAL_ASN.to_be_bytes());
+    attrs.extend_from_slice(&[0x40, 3, 4, 10, 0, 0, 2]);
+    let mut nlri = Vec::new();
+    rustbgpd_wire::nlri::encode_nlri(&[prefix], &mut nlri);
+    let update = UpdateMessage {
+        withdrawn_routes: Bytes::new(),
+        path_attributes: Bytes::from(attrs),
+        nlri: Bytes::from(nlri),
+    };
+    let encoded = rustbgpd_wire::encode_message(&Message::Update(update)).unwrap();
+    assert!(
+        encoded.windows(4).any(|bytes| bytes == [0xD0, 17, 0, 10]),
+        "fixture must carry non-canonical extended-length type 17"
+    );
+    session.read_buf.buf.extend_from_slice(&encoded);
+    session.process_read_buffer().await;
+
+    let RibUpdate::RoutesReceived {
+        announced,
+        withdrawn,
+        ..
+    } = rib_rx
+        .try_recv()
+        .expect("loop replacement must withdraw the installed route")
+    else {
+        panic!("expected loop-withdraw RoutesReceived");
+    };
+    assert!(announced.is_empty());
+    assert_eq!(
+        withdrawn,
+        vec![(Prefix::V4(prefix), 0)],
+        "the reconstructed local ASN must withdraw the exact installed route"
+    );
+    match bmp_rx.recv().await.unwrap() {
+        BmpEvent::RouteMonitoring { update_pdu, .. } => {
+            assert_eq!(
+                update_pdu.as_ref(),
+                encoded.as_ref(),
+                "pre-policy BMP must retain the untouched legacy wire UPDATE"
+            );
+            assert!(
+                update_pdu
+                    .windows(4)
+                    .any(|bytes| bytes == [0xD0, 17, 0, 10]),
+                "BMP must retain the deliberately non-canonical type-17 header"
+            );
+        }
+        other => panic!("expected BMP RouteMonitoring, got {other:?}"),
+    }
+    assert_eq!(session.fsm.state(), SessionState::Established);
+}
+
 /// RFC 4271 §5.1.5 requires a received eBGP `LOCAL_PREF` to be ignored,
 /// while RFC 7854 pre-policy BMP reports the unprocessed wire UPDATE. Pin
 /// both sides of that boundary together: the RIB route loses the attribute,
@@ -16654,6 +16767,67 @@ async fn rfc7606_attribute_discard_keeps_announcement_and_session() {
     };
     assert_eq!(announced.len(), 1);
     assert_eq!(announced[0].prefix, Prefix::V4(prefix));
+    assert_eq!(session.fsm.state(), SessionState::Established);
+    assert_single_malformed_disposition(&session, "attribute_discard");
+}
+
+/// RFC 6793 / RFC 7606: a malformed `AS4_PATH` is discarded without losing
+/// reachable NLRI or the valid ordinary path on a legacy session.
+///
+/// Load-bearing proof: bypassing AS4 normalization leaves raw type 17 on the
+/// delivered route and skips the attribute-discard counter; escalating the
+/// parse failure removes the announcement or drops the Established session.
+#[tokio::test]
+async fn malformed_as4_path_discards_only_sidecar_and_keeps_reachable_nlri() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    rfc7606_drain(&mut rib_rx);
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.four_octet_as = false;
+    install_test_negotiated_session(&mut session, negotiated);
+
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 17), 32);
+    let attrs = [
+        &[0x40, 1, 1, 0][..],
+        &[0x40, 2, 4, 2, 1, 0xFD, 0xEA],
+        &[0x40, 3, 4, 10, 0, 0, 2],
+        // Optional+Transitive AS4_PATH with a value shorter than one segment.
+        &[0xC0, 17, 0],
+    ]
+    .concat();
+    session
+        .process_update(rfc7606_update(attrs, &[prefix]))
+        .await;
+
+    let RibUpdate::RoutesReceived {
+        announced,
+        withdrawn,
+        ..
+    } = rib_rx
+        .try_recv()
+        .expect("reachable NLRI must survive malformed AS4_PATH")
+    else {
+        panic!("expected RoutesReceived");
+    };
+    assert!(withdrawn.is_empty());
+    assert_eq!(announced.len(), 1);
+    assert_eq!(announced[0].prefix, Prefix::V4(prefix));
+    assert_eq!(
+        announced[0]
+            .as_path()
+            .expect("ordinary AS_PATH survives")
+            .asns()
+            .collect::<Vec<_>>(),
+        vec![65_002]
+    );
+    assert!(
+        announced[0].attributes.iter().all(|attribute| {
+            attribute.type_code() != rustbgpd_wire::constants::attr_type::AS4_PATH
+        }),
+        "malformed compatibility sidecar must not enter Adj-RIB-In"
+    );
     assert_eq!(session.fsm.state(), SessionState::Established);
     assert_single_malformed_disposition(&session, "attribute_discard");
 }

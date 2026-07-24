@@ -8,9 +8,6 @@ use bytes::Bytes;
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-/// `AS4_PATH` path-attribute type code (RFC 6793).
-const AS4_PATH_TYPE_CODE: u8 = 17;
-
 /// Origin attribute values per RFC 4271 §5.1.1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(u8)]
@@ -56,6 +53,16 @@ pub enum AsPathSegment {
 pub struct AsPath {
     /// Ordered list of path segments.
     pub segments: Vec<AsPathSegment>,
+}
+/// RFC 4271 / RFC 6793 `AGGREGATOR` attribute in canonical 4-octet form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Aggregator {
+    /// AS number of the speaker that formed the aggregate.
+    pub asn: u32,
+    /// BGP identifier of the speaker that formed the aggregate.
+    pub router_id: Ipv4Addr,
+    /// Whether the received compatibility attribute carried the Partial bit.
+    pub partial: bool,
 }
 impl AsPath {
     /// Count the total number of ASNs in the path for best-path comparison.
@@ -678,6 +685,8 @@ pub enum PathAttribute {
     Origin(Origin),
     /// `AS_PATH` attribute (type 2).
     AsPath(AsPath),
+    /// `AGGREGATOR` attribute (type 7), normalized to a 4-octet ASN.
+    Aggregator(Aggregator),
     /// `NEXT_HOP` attribute (type 3).
     NextHop(Ipv4Addr),
     /// `LOCAL_PREF` attribute (type 5).
@@ -715,6 +724,7 @@ impl PathAttribute {
         match self {
             Self::Origin(_) => attr_type::ORIGIN,
             Self::AsPath(_) => attr_type::AS_PATH,
+            Self::Aggregator(_) => attr_type::AGGREGATOR,
             Self::NextHop(_) => attr_type::NEXT_HOP,
             Self::LocalPref(_) => attr_type::LOCAL_PREF,
             Self::Med(_) => attr_type::MULTI_EXIT_DISC,
@@ -742,6 +752,15 @@ impl PathAttribute {
             | Self::ClusterList(_)
             | Self::MpReachNlri(_)
             | Self::MpUnreachNlri(_) => attr_flags::OPTIONAL,
+            Self::Aggregator(aggregator) => {
+                attr_flags::OPTIONAL
+                    | attr_flags::TRANSITIVE
+                    | if aggregator.partial {
+                        attr_flags::PARTIAL
+                    } else {
+                        0
+                    }
+            }
             Self::Communities(_)
             | Self::ExtendedCommunities(_)
             | Self::LargeCommunities(_)
@@ -808,6 +827,12 @@ pub fn decode_path_attributes_counted(
             &mut bgpls_discarded,
         )?;
         attrs.push(attr);
+    }
+    if let Some(malformed) = normalize_as4_attributes(&mut attrs, four_octet_as, false)
+        .into_iter()
+        .next()
+    {
+        return Err(malformed.error);
     }
     Ok((attrs, bgpls_discarded))
 }
@@ -904,7 +929,8 @@ pub struct RevisedAttributeDecode {
 ///   and attribute parsing stops.
 /// - §7.6/§7.7: `ATOMIC_AGGREGATE` with a non-zero length and `AGGREGATOR`
 ///   with a length other than 6/8 (by the 4-octet-AS negotiation) are
-///   attribute-discard. The legacy decoder passes both through opaquely.
+///   attribute-discard. The legacy decoder still preserves `ATOMIC_AGGREGATE`
+///   opaquely, but now decodes and length-validates typed `AGGREGATOR`.
 /// - RFC 9552 §8.2.2: malformed TLV framing inside Attribute 29 is
 ///   attribute-discard; the attribute is omitted while the NLRI remains
 ///   available to the caller.
@@ -954,7 +980,7 @@ pub fn decode_path_attributes_revised(
         // treat-as-withdraw rather than being reduced to attribute-discard.
         let prohibited_segment = match type_code {
             attr_type::AS_PATH => prohibited_as_set(value, if four_octet_as { 4 } else { 2 }),
-            AS4_PATH_TYPE_CODE => prohibited_as_set(value, 4),
+            attr_type::AS4_PATH => prohibited_as_set(value, 4),
             _ => None,
         };
         if let Some(segment_type) = prohibited_segment {
@@ -1056,11 +1082,273 @@ pub fn decode_path_attributes_revised(
             }
         }
     }
+    malformed.extend(normalize_as4_attributes(&mut attrs, four_octet_as, true));
     Ok(RevisedAttributeDecode {
         attributes: attrs,
         bgpls_nlri_discarded: bgpls_discarded,
         malformed,
     })
+}
+
+/// Consume RFC 6793 compatibility attributes and leave one canonical path and
+/// aggregator representation. Both decode entry points call this function so
+/// BMP/MRT readers and live RFC 7606 processing see identical route semantics.
+fn normalize_as4_attributes(
+    attrs: &mut Vec<PathAttribute>,
+    four_octet_as: bool,
+    observe_new_to_new_discard: bool,
+) -> Vec<MalformedAttribute> {
+    let mut as4_path = None;
+    let mut as4_aggregator = None;
+    let mut malformed = Vec::new();
+
+    attrs.retain(|attr| {
+        let PathAttribute::Unknown(raw) = attr else {
+            return true;
+        };
+        let slot = match raw.type_code {
+            attr_type::AS4_PATH => &mut as4_path,
+            attr_type::AS4_AGGREGATOR => &mut as4_aggregator,
+            _ => return true,
+        };
+        if slot.is_some() {
+            malformed.push(MalformedAttribute {
+                type_code: raw.type_code,
+                disposition: ErrorDisposition::AttributeDiscard,
+                error: DecodeError::UpdateAttributeError {
+                    subcode: update_subcode::MALFORMED_ATTRIBUTE_LIST,
+                    data: vec![],
+                    detail: format!("duplicate attribute type {}", raw.type_code),
+                },
+            });
+        } else {
+            *slot = Some(raw.clone());
+        }
+        false
+    });
+
+    let decoded_as4_path = as4_path.and_then(|raw| match decode_as4_path(&raw) {
+        Ok((path, confed_sequence_removed)) => {
+            if confed_sequence_removed && observe_new_to_new_discard {
+                malformed.push(as4_confed_sequence_removed(&raw));
+            }
+            if four_octet_as && observe_new_to_new_discard {
+                malformed.push(new_to_new_discard(&raw));
+            }
+            Some(path)
+        }
+        Err(error) => {
+            malformed.push(MalformedAttribute {
+                type_code: attr_type::AS4_PATH,
+                disposition: ErrorDisposition::AttributeDiscard,
+                error,
+            });
+            None
+        }
+    });
+    let decoded_as4_aggregator = as4_aggregator.and_then(|raw| match decode_as4_aggregator(&raw) {
+        Ok(aggregator) => {
+            if four_octet_as && observe_new_to_new_discard {
+                malformed.push(new_to_new_discard(&raw));
+            }
+            Some(aggregator)
+        }
+        Err(error) => {
+            malformed.push(MalformedAttribute {
+                type_code: attr_type::AS4_AGGREGATOR,
+                disposition: ErrorDisposition::AttributeDiscard,
+                error,
+            });
+            None
+        }
+    });
+
+    if !four_octet_as {
+        let ordinary_non_trans_aggregator = attrs.iter().any(|attr| {
+            matches!(
+                attr,
+                PathAttribute::Aggregator(aggregator)
+                    if aggregator.asn != u32::from(crate::constants::AS_TRANS)
+            )
+        });
+        // RFC 6793 section 4.2.3: when valid AGGREGATOR and AS4_AGGREGATOR
+        // are both present but the ordinary ASN is not AS_TRANS, both AS4
+        // compatibility attributes are ignored as an inconsistent pair.
+        let ignore_as4_pair = ordinary_non_trans_aggregator && decoded_as4_aggregator.is_some();
+        if !ignore_as4_pair {
+            if let Some(path) = decoded_as4_path {
+                reconstruct_as_path(attrs, &path);
+            }
+            if let Some(aggregator) = decoded_as4_aggregator {
+                reconstruct_aggregator(attrs, aggregator);
+            }
+        }
+    }
+    malformed
+}
+
+fn new_to_new_discard(raw: &RawAttribute) -> MalformedAttribute {
+    MalformedAttribute {
+        type_code: raw.type_code,
+        disposition: ErrorDisposition::AttributeDiscard,
+        error: DecodeError::UpdateAttributeError {
+            subcode: update_subcode::OPTIONAL_ATTRIBUTE_ERROR,
+            data: attr_error_data(raw.flags, raw.type_code, &raw.data),
+            detail: format!(
+                "attribute type {} received from a four-octet-AS peer and discarded per RFC 6793",
+                raw.type_code
+            ),
+        },
+    }
+}
+
+fn as4_confed_sequence_removed(raw: &RawAttribute) -> MalformedAttribute {
+    MalformedAttribute {
+        type_code: attr_type::AS4_PATH,
+        disposition: ErrorDisposition::AttributeDiscard,
+        error: DecodeError::UpdateAttributeError {
+            subcode: update_subcode::OPTIONAL_ATTRIBUTE_ERROR,
+            data: attr_error_data(raw.flags, raw.type_code, &raw.data),
+            detail: "AS_CONFED_SEQUENCE removed from AS4_PATH per RFC 6793".to_string(),
+        },
+    }
+}
+
+fn decode_as4_path(raw: &RawAttribute) -> Result<(AsPath, bool), DecodeError> {
+    let malformed = |detail: String| DecodeError::UpdateAttributeError {
+        subcode: update_subcode::MALFORMED_AS_PATH,
+        data: attr_error_data(raw.flags, raw.type_code, &raw.data),
+        detail,
+    };
+    if raw.data.len() < 6 || !raw.data.len().is_multiple_of(2) {
+        return Err(malformed(format!(
+            "AS4_PATH length {} (expected an even value of at least 6)",
+            raw.data.len()
+        )));
+    }
+    let mut value = raw.data.as_ref();
+    let mut segments = Vec::new();
+    let mut confed_sequence_removed = false;
+    while !value.is_empty() {
+        if value.len() < 2 {
+            return Err(malformed("truncated AS4_PATH segment header".to_string()));
+        }
+        let segment_type = value[0];
+        let count = usize::from(value[1]);
+        value = &value[2..];
+        if count == 0 {
+            return Err(malformed("zero-length AS4_PATH segment".to_string()));
+        }
+        if !matches!(segment_type, 1..=4) {
+            return Err(malformed(format!(
+                "unknown AS4_PATH segment type {segment_type}"
+            )));
+        }
+        let needed = count
+            .checked_mul(4)
+            .ok_or_else(|| malformed("AS4_PATH segment length overflow".to_string()))?;
+        if value.len() < needed {
+            return Err(malformed(format!(
+                "AS4_PATH segment truncated: need {needed} bytes, have {}",
+                value.len()
+            )));
+        }
+        let asns = value[..needed]
+            .chunks_exact(4)
+            .map(|asn| u32::from_be_bytes([asn[0], asn[1], asn[2], asn[3]]))
+            .collect();
+        value = &value[needed..];
+        match segment_type {
+            1 | 4 => {
+                return Err(malformed(format!(
+                    "RFC 9774 prohibits AS4_PATH segment type {segment_type}"
+                )));
+            }
+            2 => segments.push(AsPathSegment::AsSequence(asns)),
+            // RFC 6793 requires AS_CONFED_SEQUENCE to be removed from the
+            // compatibility path before reconstruction.
+            3 => confed_sequence_removed = true,
+            _ => unreachable!("segment type checked above"),
+        }
+    }
+    Ok((AsPath { segments }, confed_sequence_removed))
+}
+
+fn decode_as4_aggregator(raw: &RawAttribute) -> Result<Aggregator, DecodeError> {
+    if raw.data.len() != 8 {
+        return Err(DecodeError::UpdateAttributeError {
+            subcode: update_subcode::ATTRIBUTE_LENGTH_ERROR,
+            data: attr_error_data(raw.flags, raw.type_code, &raw.data),
+            detail: format!("AS4_AGGREGATOR length {} (expected 8)", raw.data.len()),
+        });
+    }
+    Ok(Aggregator {
+        asn: u32::from_be_bytes([raw.data[0], raw.data[1], raw.data[2], raw.data[3]]),
+        router_id: Ipv4Addr::new(raw.data[4], raw.data[5], raw.data[6], raw.data[7]),
+        partial: raw.flags & attr_flags::PARTIAL != 0,
+    })
+}
+
+fn reconstruct_as_path(attrs: &mut [PathAttribute], as4_path: &AsPath) {
+    let Some(PathAttribute::AsPath(as_path)) = attrs
+        .iter_mut()
+        .find(|attr| matches!(attr, PathAttribute::AsPath(_)))
+    else {
+        return;
+    };
+    let old_count = as_path.len();
+    let as4_count = as4_path.len();
+    if old_count < as4_count {
+        return;
+    }
+
+    let mut keep = old_count - as4_count;
+    let mut reconstructed = Vec::new();
+    for segment in &as_path.segments {
+        if keep == 0 {
+            break;
+        }
+        match segment {
+            AsPathSegment::AsSet(asns) => {
+                // RFC 4271 path length counts an AS_SET as one regardless of
+                // member count. Retaining that one position retains the
+                // complete unordered set.
+                reconstructed.push(AsPathSegment::AsSet(asns.clone()));
+                keep -= 1;
+            }
+            AsPathSegment::AsSequence(asns) => {
+                let take = keep.min(asns.len());
+                if take != 0 {
+                    reconstructed.push(AsPathSegment::AsSequence(asns[..take].to_vec()));
+                }
+                keep -= take;
+            }
+        }
+    }
+    for segment in &as4_path.segments {
+        match (reconstructed.last_mut(), segment) {
+            (Some(AsPathSegment::AsSequence(previous)), AsPathSegment::AsSequence(asns)) => {
+                previous.extend(asns);
+            }
+            _ => reconstructed.push(segment.clone()),
+        }
+    }
+    as_path.segments = reconstructed;
+}
+
+fn reconstruct_aggregator(attrs: &mut Vec<PathAttribute>, as4_aggregator: Aggregator) {
+    let aggregator = attrs
+        .iter_mut()
+        .find(|attr| matches!(attr, PathAttribute::Aggregator(_)));
+    match aggregator {
+        Some(PathAttribute::Aggregator(current))
+            if current.asn == u32::from(crate::constants::AS_TRANS) =>
+        {
+            *current = as4_aggregator;
+        }
+        Some(_) => {}
+        None => attrs.push(PathAttribute::Aggregator(as4_aggregator)),
+    }
 }
 
 /// Return the first RFC 9774-prohibited set segment in a raw AS path.
@@ -1146,6 +1434,35 @@ fn decode_attribute_value(
                 }
             })?;
             Ok(PathAttribute::AsPath(AsPath { segments }))
+        }
+        attr_type::AGGREGATOR => {
+            let expected_len = if four_octet_as { 8 } else { 6 };
+            if value.len() != expected_len {
+                return Err(DecodeError::UpdateAttributeError {
+                    subcode: update_subcode::ATTRIBUTE_LENGTH_ERROR,
+                    data: attr_error_data(flags, type_code, value),
+                    detail: format!(
+                        "AGGREGATOR length {} (expected {expected_len})",
+                        value.len()
+                    ),
+                });
+            }
+            let (asn, router_id) = if four_octet_as {
+                (
+                    u32::from_be_bytes([value[0], value[1], value[2], value[3]]),
+                    Ipv4Addr::new(value[4], value[5], value[6], value[7]),
+                )
+            } else {
+                (
+                    u32::from(u16::from_be_bytes([value[0], value[1]])),
+                    Ipv4Addr::new(value[2], value[3], value[4], value[5]),
+                )
+            };
+            Ok(PathAttribute::Aggregator(Aggregator {
+                asn,
+                router_id,
+                partial: flags & attr_flags::PARTIAL != 0,
+            }))
         }
         attr_type::NEXT_HOP => {
             if value.len() != 4 {
@@ -1332,7 +1649,9 @@ fn decode_attribute_value(
             let asn = u32::from_be_bytes([value[0], value[1], value[2], value[3]]);
             Ok(PathAttribute::OnlyToCustomer(asn))
         }
-        // ATOMIC_AGGREGATE, AGGREGATOR, and any unknown type → RawAttribute
+        // ATOMIC_AGGREGATE and any unknown type -> RawAttribute. AS4_PATH and
+        // AS4_AGGREGATOR are kept raw only until the shared post-decode RFC
+        // 6793 normalizer consumes them.
         _ => Ok(PathAttribute::Unknown(RawAttribute {
             flags,
             type_code,
@@ -2019,6 +2338,8 @@ fn expected_flags(type_code: u8) -> Option<u8> {
         | attr_type::BGP_LS => Some(attr_flags::OPTIONAL),
         // Optional transitive
         attr_type::AGGREGATOR
+        | attr_type::AS4_PATH
+        | attr_type::AS4_AGGREGATOR
         | attr_type::COMMUNITIES
         | attr_type::EXTENDED_COMMUNITIES
         | attr_type::LARGE_COMMUNITIES
@@ -2212,7 +2533,17 @@ pub fn encode_path_attributes(
     add_path_mp: bool,
 ) -> Result<(), EncodeError> {
     for attr in attrs {
+        if matches!(
+            attr,
+            PathAttribute::Unknown(raw)
+                if matches!(raw.type_code, attr_type::AS4_PATH | attr_type::AS4_AGGREGATOR)
+        ) {
+            // Compatibility sidecars are derived from canonical attributes;
+            // never reflect stale received copies.
+            continue;
+        }
         let mut value = Vec::new();
+        let mut compatibility = None;
         let flags;
         let type_code;
         match attr {
@@ -2222,9 +2553,51 @@ pub fn encode_path_attributes(
                 value.push(*origin as u8);
             }
             PathAttribute::AsPath(as_path) => {
+                if as_path
+                    .segments
+                    .iter()
+                    .any(|segment| matches!(segment, AsPathSegment::AsSet(_)))
+                {
+                    return Err(EncodeError::ValueOutOfRange {
+                        field: "AS_PATH",
+                        value: "AS_SET cannot be projected under RFC 9774".to_string(),
+                    });
+                }
                 flags = attr_flags::TRANSITIVE;
                 type_code = attr_type::AS_PATH;
                 encode_as_path(as_path, &mut value, four_octet_as);
+                if !four_octet_as && as_path.asns().any(|asn| asn > u32::from(u16::MAX)) {
+                    let mut as4_path = Vec::new();
+                    encode_as_path(as_path, &mut as4_path, true);
+                    compatibility = Some((
+                        attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
+                        attr_type::AS4_PATH,
+                        as4_path,
+                    ));
+                }
+            }
+            PathAttribute::Aggregator(aggregator) => {
+                flags = attr_flags::OPTIONAL
+                    | attr_flags::TRANSITIVE
+                    | if aggregator.partial {
+                        attr_flags::PARTIAL
+                    } else {
+                        0
+                    };
+                type_code = attr_type::AGGREGATOR;
+                if four_octet_as {
+                    value.extend_from_slice(&aggregator.asn.to_be_bytes());
+                } else {
+                    let asn = u16::try_from(aggregator.asn).unwrap_or(crate::constants::AS_TRANS);
+                    value.extend_from_slice(&asn.to_be_bytes());
+                    if aggregator.asn > u32::from(u16::MAX) {
+                        let mut as4_aggregator = Vec::with_capacity(8);
+                        as4_aggregator.extend_from_slice(&aggregator.asn.to_be_bytes());
+                        as4_aggregator.extend_from_slice(&aggregator.router_id.octets());
+                        compatibility = Some((flags, attr_type::AS4_AGGREGATOR, as4_aggregator));
+                    }
+                }
+                value.extend_from_slice(&aggregator.router_id.octets());
             }
             PathAttribute::NextHop(addr) => {
                 flags = attr_flags::TRANSITIVE;
@@ -2321,31 +2694,38 @@ pub fn encode_path_attributes(
                 value.extend_from_slice(&raw.data);
             }
         }
-        // Preserve an explicitly received Extended Length encoding on opaque
-        // attributes even when the value would fit in one octet. Otherwise
-        // Unknown reflection would retain the flag but emit a one-octet
-        // length, corrupting the attribute boundary.
-        if value.len() > 255 || (flags & attr_flags::EXTENDED_LENGTH) != 0 {
-            buf.push(flags | attr_flags::EXTENDED_LENGTH);
-            buf.push(type_code);
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "codec bounds or masks the value before narrowing to the protocol field width"
-            )]
-            let len = value.len() as u16;
-            buf.extend_from_slice(&len.to_be_bytes());
-        } else {
-            buf.push(flags);
-            buf.push(type_code);
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "codec bounds or masks the value before narrowing to the protocol field width"
-            )]
-            buf.push(value.len() as u8);
+        encode_attribute_triplet(flags, type_code, &value, buf);
+        if let Some((compat_flags, compat_type, compat_value)) = compatibility {
+            encode_attribute_triplet(compat_flags, compat_type, &compat_value, buf);
         }
-        buf.extend_from_slice(&value);
     }
     Ok(())
+}
+
+fn encode_attribute_triplet(flags: u8, type_code: u8, value: &[u8], buf: &mut Vec<u8>) {
+    // Preserve an explicitly received Extended Length encoding on opaque
+    // attributes even when the value would fit in one octet. Otherwise
+    // Unknown reflection would retain the flag but emit a one-octet length,
+    // corrupting the attribute boundary.
+    if value.len() > 255 || (flags & attr_flags::EXTENDED_LENGTH) != 0 {
+        buf.push(flags | attr_flags::EXTENDED_LENGTH);
+        buf.push(type_code);
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "codec bounds or masks the value before narrowing to the protocol field width"
+        )]
+        let len = value.len() as u16;
+        buf.extend_from_slice(&len.to_be_bytes());
+    } else {
+        buf.push(flags);
+        buf.push(type_code);
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "codec bounds or masks the value before narrowing to the protocol field width"
+        )]
+        buf.push(value.len() as u8);
+    }
+    buf.extend_from_slice(value);
 }
 /// Encode `MP_REACH_NLRI` value bytes.
 ///
@@ -3806,19 +4186,31 @@ mod tests {
         }
     }
 
+    /// Load-bearing RFC 9774 ingress proof: removing the raw prohibited-set
+    /// scan makes the revised result clean; making the ordinary decoder reject
+    /// sets prevents BMP/MRT observation of the received path.
     #[test]
-    fn as_path_with_set_and_sequence() {
-        // AS_SEQUENCE [65001], AS_SET [65002, 65003]
-        let attrs = vec![PathAttribute::AsPath(AsPath {
+    fn as_path_set_decodes_for_observation_but_revised_treats_as_withdraw() {
+        let expected = vec![PathAttribute::AsPath(AsPath {
             segments: vec![
-                AsPathSegment::AsSequence(vec![65001]),
-                AsPathSegment::AsSet(vec![65002, 65003]),
+                AsPathSegment::AsSequence(vec![65_001]),
+                AsPathSegment::AsSet(vec![65_002, 65_003]),
             ],
         })];
-        let mut buf = Vec::new();
-        encode_path_attributes(&attrs, &mut buf, true, false).unwrap();
-        let decoded = decode_path_attributes(&buf, true, &[]).unwrap();
-        assert_eq!(decoded, attrs);
+        let bytes = attr_bytes(
+            attr_flags::TRANSITIVE,
+            attr_type::AS_PATH,
+            &[
+                2, 1, 0, 0, 0xFD, 0xE9, 1, 2, 0, 0, 0xFD, 0xEA, 0, 0, 0xFD, 0xEB,
+            ],
+        );
+        assert_eq!(decode_path_attributes(&bytes, true, &[]).unwrap(), expected);
+        let revised = decode_path_attributes_revised(&bytes, true, false, &[]).unwrap();
+        assert_eq!(revised.attributes, expected);
+        assert!(revised.malformed.iter().any(|malformed| {
+            malformed.type_code == attr_type::AS_PATH
+                && malformed.disposition == ErrorDisposition::TreatAsWithdraw
+        }));
     }
     #[test]
     fn decode_communities_single() {
@@ -5544,7 +5936,7 @@ mod tests {
             ),
             (
                 "AS4_PATH AS_SET",
-                AS4_PATH_TYPE_CODE,
+                attr_type::AS4_PATH,
                 1,
                 1,
                 false,
@@ -5552,7 +5944,7 @@ mod tests {
             ),
             (
                 "AS4_PATH AS_CONFED_SET",
-                AS4_PATH_TYPE_CODE,
+                attr_type::AS4_PATH,
                 4,
                 2,
                 false,
@@ -5590,7 +5982,7 @@ mod tests {
 
         let has_rfc9774_taw = |decoded: &RevisedAttributeDecode| {
             decoded.malformed.iter().any(|malformed| {
-                malformed.type_code == AS4_PATH_TYPE_CODE
+                malformed.type_code == attr_type::AS4_PATH
                     && malformed.disposition == ErrorDisposition::TreatAsWithdraw
             })
         };
@@ -5601,7 +5993,7 @@ mod tests {
         ] {
             let bytes = attr_bytes(
                 attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
-                AS4_PATH_TYPE_CODE,
+                attr_type::AS4_PATH,
                 value,
             );
             let decoded = decode_path_attributes_revised(&bytes, false, false, &[]).unwrap();
@@ -5869,5 +6261,590 @@ mod tests {
             decoded.attributes,
             decode_path_attributes(&buf, true, &[]).unwrap()
         );
+    }
+
+    fn as_path(sequence: &[u32]) -> PathAttribute {
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(sequence.to_vec())],
+        })
+    }
+
+    fn encoded_attributes(mut bytes: &[u8]) -> Vec<(u8, u8, Vec<u8>)> {
+        let mut attributes = Vec::new();
+        while !bytes.is_empty() {
+            let (flags, type_code, value) = split_next_attribute(&mut bytes).unwrap();
+            attributes.push((flags, type_code, value.to_vec()));
+        }
+        attributes
+    }
+
+    /// Load-bearing shared-normalizer proof: deleting the normalizer call
+    /// from either decoder leaves `AS_TRANS` or raw type 17 in that result and
+    /// fails the equality/no-sidecar assertions.
+    #[test]
+    fn legacy_as4_path_reconstructs_in_both_decoders() {
+        let mut bytes = attr_bytes(
+            attr_flags::TRANSITIVE,
+            attr_type::AS_PATH,
+            &[2, 3, 0xFB, 0xF4, 0xFD, 0xE8, 0x5B, 0xA0],
+        );
+        bytes.extend(attr_bytes(
+            attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
+            attr_type::AS4_PATH,
+            &[2, 2, 0, 0, 0xFD, 0xE8, 0xFA, 0x56, 0xEA, 0x01],
+        ));
+        let expected = vec![as_path(&[64_500, 65_000, 4_200_000_001])];
+
+        assert_eq!(
+            decode_path_attributes(&bytes, false, &[]).unwrap(),
+            expected
+        );
+        let revised = decode_path_attributes_revised(&bytes, false, false, &[]).unwrap();
+        assert_eq!(revised.attributes, expected);
+        assert!(revised.malformed.is_empty());
+        assert!(
+            revised
+                .attributes
+                .iter()
+                .all(|attribute| !matches!(attribute, PathAttribute::Unknown(raw) if matches!(raw.type_code, attr_type::AS4_PATH | attr_type::AS4_AGGREGATOR)))
+        );
+    }
+
+    /// Load-bearing RFC count proof: changing `AS_SET` from one path position
+    /// to member-counted/truncated drops the second set member below.
+    #[test]
+    fn legacy_as4_reconstruction_retains_complete_leading_as_set() {
+        let mut bytes = attr_bytes(
+            attr_flags::TRANSITIVE,
+            attr_type::AS_PATH,
+            &[1, 2, 0xFD, 0xE9, 0xFD, 0xEA, 2, 1, 0x5B, 0xA0],
+        );
+        bytes.extend(attr_bytes(
+            attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
+            attr_type::AS4_PATH,
+            &[2, 1, 0xFA, 0x56, 0xEA, 0x01],
+        ));
+        assert_eq!(
+            decode_path_attributes(&bytes, false, &[]).unwrap(),
+            vec![PathAttribute::AsPath(AsPath {
+                segments: vec![
+                    AsPathSegment::AsSet(vec![65_001, 65_002]),
+                    AsPathSegment::AsSequence(vec![4_200_000_001]),
+                ],
+            })]
+        );
+    }
+
+    /// Load-bearing segment-boundary proof: replacing whole segments instead
+    /// of splitting at the RFC count boundary loses ASN 64501; flattening the
+    /// result hides the two-segment invariant asserted here.
+    #[test]
+    fn legacy_as4_reconstruction_splits_sequence_at_count_boundary() {
+        let mut bytes = attr_bytes(
+            attr_flags::TRANSITIVE,
+            attr_type::AS_PATH,
+            &[2, 1, 0xFB, 0xF4, 2, 3, 0xFB, 0xF5, 0xFD, 0xE8, 0x5B, 0xA0],
+        );
+        bytes.extend(attr_bytes(
+            attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
+            attr_type::AS4_PATH,
+            &[2, 2, 0, 0, 0xFD, 0xE8, 0xFA, 0x56, 0xEA, 0x01],
+        ));
+        assert_eq!(
+            decode_path_attributes(&bytes, false, &[]).unwrap(),
+            vec![PathAttribute::AsPath(AsPath {
+                segments: vec![
+                    AsPathSegment::AsSequence(vec![64_500]),
+                    AsPathSegment::AsSequence(vec![64_501, 65_000, 4_200_000_001]),
+                ],
+            })]
+        );
+    }
+
+    /// Load-bearing RFC count guard: deleting `old_count < as4_count` makes
+    /// the first row accept a longer compatibility path; changing `<` to `<=`
+    /// makes the equal-count row retain `AS_TRANS` instead of replacing it.
+    #[test]
+    fn legacy_as4_reconstruction_count_guard_matrix() {
+        let cases = [
+            (
+                "shorter ordinary path ignores AS4_PATH",
+                &[2, 1, 0x5B, 0xA0][..],
+                &[2, 2, 0, 0, 0xFD, 0xE8, 0xFA, 0x56, 0xEA, 0x01][..],
+                vec![u32::from(crate::constants::AS_TRANS)],
+            ),
+            (
+                "equal counts replace ordinary path",
+                &[2, 2, 0xFD, 0xE8, 0x5B, 0xA0][..],
+                &[2, 2, 0, 0, 0xFD, 0xE8, 0xFA, 0x56, 0xEA, 0x01][..],
+                vec![65_000, 4_200_000_001],
+            ),
+        ];
+        for (name, ordinary, as4, expected) in cases {
+            let mut bytes = attr_bytes(attr_flags::TRANSITIVE, attr_type::AS_PATH, ordinary);
+            bytes.extend(attr_bytes(
+                attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
+                attr_type::AS4_PATH,
+                as4,
+            ));
+            assert_eq!(
+                decode_path_attributes(&bytes, false, &[]).unwrap(),
+                vec![as_path(&expected)],
+                "{name}"
+            );
+        }
+    }
+
+    /// Load-bearing NEW-to-NEW proof: retaining compatibility sidecars adds
+    /// types 17/18 or overwrites the canonical attributes and fails this
+    /// exact two-attribute result.
+    #[test]
+    fn four_octet_peer_discards_as4_compatibility_attributes() {
+        let mut bytes = attr_bytes(
+            attr_flags::TRANSITIVE,
+            attr_type::AS_PATH,
+            &[2, 1, 0xFA, 0x56, 0xEA, 0x01],
+        );
+        bytes.extend(attr_bytes(
+            attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
+            attr_type::AS4_PATH,
+            &[2, 1, 0, 0, 0xFD, 0xE8],
+        ));
+        bytes.extend(attr_bytes(
+            attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
+            attr_type::AGGREGATOR,
+            &[0, 0, 0xFD, 0xE8, 10, 0, 0, 1],
+        ));
+        bytes.extend(attr_bytes(
+            attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
+            attr_type::AS4_AGGREGATOR,
+            &[0xFA, 0x56, 0xEA, 0x01, 10, 0, 0, 2],
+        ));
+        let expected = vec![
+            as_path(&[4_200_000_001]),
+            PathAttribute::Aggregator(Aggregator {
+                asn: 65_000,
+                router_id: Ipv4Addr::new(10, 0, 0, 1),
+                partial: false,
+            }),
+        ];
+        assert_eq!(decode_path_attributes(&bytes, true, &[]).unwrap(), expected);
+        let revised = decode_path_attributes_revised(&bytes, true, false, &[]).unwrap();
+        assert_eq!(revised.attributes, expected);
+        assert_eq!(revised.malformed.len(), 2);
+        assert!(revised.malformed.iter().all(|malformed| {
+            matches!(
+                malformed.type_code,
+                attr_type::AS4_PATH | attr_type::AS4_AGGREGATOR
+            ) && malformed.disposition == ErrorDisposition::AttributeDiscard
+        }));
+    }
+
+    /// Load-bearing RFC 7606 proof: skipping sidecar value validation makes
+    /// these malformed types disappear silently; changing their disposition
+    /// away from `AttributeDiscard` fails the exact verdicts, while dropping
+    /// the ordinary-path preservation loses the surviving canonical input.
+    #[test]
+    fn malformed_as4_compatibility_values_are_attribute_discard() {
+        let mut malformed = attr_bytes(
+            attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
+            attr_type::AS4_PATH,
+            &[2, 2, 0, 0, 0xFD, 0xE8],
+        );
+        malformed.extend(attr_bytes(
+            attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
+            attr_type::AS4_AGGREGATOR,
+            &[0, 0, 0xFD, 0xE8, 10, 0, 0],
+        ));
+        let mut legacy = attr_bytes(
+            attr_flags::TRANSITIVE,
+            attr_type::AS_PATH,
+            &[2, 1, 0xFD, 0xE8],
+        );
+        legacy.extend_from_slice(&malformed);
+        assert!(decode_path_attributes(&legacy, false, &[]).is_err());
+        for four_octet_as in [false, true] {
+            let ordinary = if four_octet_as {
+                &[2, 1, 0, 0, 0xFD, 0xE8][..]
+            } else {
+                &[2, 1, 0xFD, 0xE8][..]
+            };
+            let mut bytes = attr_bytes(attr_flags::TRANSITIVE, attr_type::AS_PATH, ordinary);
+            bytes.extend_from_slice(&malformed);
+            let revised =
+                decode_path_attributes_revised(&bytes, four_octet_as, false, &[]).unwrap();
+            assert_eq!(revised.attributes, vec![as_path(&[65_000])]);
+            assert_eq!(revised.malformed.len(), 2);
+            assert!(revised.malformed.iter().all(|malformed| {
+                matches!(
+                    malformed.type_code,
+                    attr_type::AS4_PATH | attr_type::AS4_AGGREGATOR
+                ) && malformed.disposition == ErrorDisposition::AttributeDiscard
+            }));
+        }
+    }
+
+    /// Load-bearing flags proof: deleting types 17/18 from `expected_flags`
+    /// makes these compatibility attributes clean; deleting the flag-error
+    /// `max(TreatAsWithdraw)` downgrade leaves only `AttributeDiscard`.
+    #[test]
+    fn as4_compatibility_flag_conflicts_are_treat_as_withdraw() {
+        let cases = [
+            (
+                attr_type::AS4_PATH,
+                attr_flags::TRANSITIVE,
+                &[2, 1, 0, 0, 0xFD, 0xE8][..],
+            ),
+            (
+                attr_type::AS4_AGGREGATOR,
+                attr_flags::OPTIONAL,
+                &[0, 0, 0xFD, 0xE8, 10, 0, 0, 1][..],
+            ),
+        ];
+        for (type_code, flags, value) in cases {
+            let decoded = decode_path_attributes_revised(
+                &attr_bytes(flags, type_code, value),
+                false,
+                false,
+                &[],
+            )
+            .unwrap();
+            assert!(decoded.attributes.is_empty());
+            assert_eq!(decoded.malformed.len(), 1);
+            assert_eq!(decoded.malformed[0].type_code, type_code);
+            assert_eq!(
+                decoded.malformed[0].disposition,
+                ErrorDisposition::TreatAsWithdraw
+            );
+        }
+    }
+
+    /// Load-bearing strict-parser matrix: weakening any minimum/even/framing/
+    /// count/type check makes the corresponding malformed `AS4_PATH` vanish
+    /// instead of producing `AttributeDiscard`; discarding the complete
+    /// attribute set loses the valid ordinary path asserted in every row.
+    #[test]
+    fn malformed_as4_path_strict_framing_matrix() {
+        let cases = [
+            ("short", &[][..], "expected an even value of at least 6"),
+            (
+                "odd",
+                &[2, 1, 0, 0, 0, 1, 0][..],
+                "expected an even value of at least 6",
+            ),
+            (
+                "zero count",
+                &[2, 0, 0, 0, 0, 0][..],
+                "zero-length AS4_PATH segment",
+            ),
+            (
+                "unknown type",
+                &[5, 1, 0, 0, 0, 1][..],
+                "unknown AS4_PATH segment type",
+            ),
+            (
+                "truncated",
+                &[2, 2, 0, 0, 0, 1][..],
+                "AS4_PATH segment truncated",
+            ),
+        ];
+        for (name, value, detail) in cases {
+            let mut bytes = attr_bytes(
+                attr_flags::TRANSITIVE,
+                attr_type::AS_PATH,
+                &[2, 1, 0xFD, 0xE8],
+            );
+            bytes.extend(attr_bytes(
+                attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
+                attr_type::AS4_PATH,
+                value,
+            ));
+            let revised = decode_path_attributes_revised(&bytes, false, false, &[]).unwrap();
+            assert_eq!(revised.attributes, vec![as_path(&[65_000])], "{name}");
+            assert_eq!(revised.malformed.len(), 1, "{name}");
+            assert_eq!(
+                revised.malformed[0].disposition,
+                ErrorDisposition::AttributeDiscard,
+                "{name}"
+            );
+            assert!(
+                revised.malformed[0].error.to_string().contains(detail),
+                "{name}"
+            );
+        }
+    }
+
+    /// Load-bearing confederation sanitation proof: retaining type 3 puts its
+    /// ASN into the canonical path; dropping the diagnostic makes the revised
+    /// malformed assertion empty; discarding the whole `AS4_PATH` loses 4-byte
+    /// ASN 4200000001.
+    #[test]
+    fn as4_path_confed_sequence_is_removed_and_observed() {
+        let mut bytes = attr_bytes(
+            attr_flags::TRANSITIVE,
+            attr_type::AS_PATH,
+            &[2, 2, 0xFD, 0xE8, 0x5B, 0xA0],
+        );
+        bytes.extend(attr_bytes(
+            attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
+            attr_type::AS4_PATH,
+            &[3, 1, 0, 0, 0xFD, 0xEA, 2, 1, 0xFA, 0x56, 0xEA, 0x01],
+        ));
+        let expected = vec![as_path(&[65_000, 4_200_000_001])];
+        assert_eq!(
+            decode_path_attributes(&bytes, false, &[]).unwrap(),
+            expected
+        );
+        let revised = decode_path_attributes_revised(&bytes, false, false, &[]).unwrap();
+        assert_eq!(revised.attributes, expected);
+        assert_eq!(revised.malformed.len(), 1);
+        assert_eq!(
+            revised.malformed[0].disposition,
+            ErrorDisposition::AttributeDiscard
+        );
+        assert!(
+            revised.malformed[0]
+                .error
+                .to_string()
+                .contains("AS_CONFED_SEQUENCE")
+        );
+    }
+
+    /// Load-bearing legacy projection proof: removing type 17 emission makes
+    /// the round-trip retain `AS_TRANS`; changing the legacy placeholder or
+    /// leaking type 17 to a modern peer fails the exact wire assertions;
+    /// emitting it for an all-mappable path fails the final inventory check.
+    #[test]
+    fn legacy_encoder_emits_as4_path_only_when_needed() {
+        let canonical = as_path(&[65_000, 4_200_000_001]);
+        let mut encoded = Vec::new();
+        encode_path_attributes(std::slice::from_ref(&canonical), &mut encoded, false, false)
+            .unwrap();
+        let wire = encoded_attributes(&encoded);
+        assert_eq!(
+            wire.iter()
+                .map(|(_, type_code, _)| *type_code)
+                .collect::<Vec<_>>(),
+            vec![attr_type::AS_PATH, attr_type::AS4_PATH]
+        );
+        assert_eq!(wire[0].2, vec![2, 2, 0xFD, 0xE8, 0x5B, 0xA0]);
+        assert_eq!(
+            wire[1].2,
+            vec![2, 2, 0, 0, 0xFD, 0xE8, 0xFA, 0x56, 0xEA, 0x01]
+        );
+        assert_eq!(
+            decode_path_attributes(&encoded, false, &[]).unwrap(),
+            vec![canonical.clone()]
+        );
+
+        let mut modern = Vec::new();
+        encode_path_attributes(std::slice::from_ref(&canonical), &mut modern, true, false).unwrap();
+        let modern_wire = encoded_attributes(&modern);
+        assert_eq!(modern_wire.len(), 1);
+        assert_eq!(modern_wire[0].1, attr_type::AS_PATH);
+        assert_eq!(
+            modern_wire[0].2,
+            vec![2, 2, 0, 0, 0xFD, 0xE8, 0xFA, 0x56, 0xEA, 0x01]
+        );
+        assert_eq!(
+            decode_path_attributes(&modern, true, &[]).unwrap(),
+            vec![canonical]
+        );
+
+        let mut mapped = Vec::new();
+        encode_path_attributes(&[as_path(&[64_500, 65_000])], &mut mapped, false, false).unwrap();
+        assert_eq!(
+            encoded_attributes(&mapped)
+                .iter()
+                .map(|(_, type_code, _)| *type_code)
+                .collect::<Vec<_>>(),
+            vec![attr_type::AS_PATH]
+        );
+    }
+
+    /// Load-bearing AGGREGATOR projection proof: removing `AS_TRANS`/type18
+    /// projection, losing Partial, leaking type18 for a mappable ASN, or
+    /// corrupting the modern payload fails an exact canonical/wire assertion.
+    #[test]
+    fn aggregator_projection_preserves_partial() {
+        let canonical = PathAttribute::Aggregator(Aggregator {
+            asn: 4_200_000_001,
+            router_id: Ipv4Addr::new(10, 0, 0, 1),
+            partial: true,
+        });
+        assert_eq!(
+            canonical.flags(),
+            attr_flags::OPTIONAL | attr_flags::TRANSITIVE | attr_flags::PARTIAL
+        );
+        let mut legacy = Vec::new();
+        encode_path_attributes(std::slice::from_ref(&canonical), &mut legacy, false, false)
+            .unwrap();
+        let wire = encoded_attributes(&legacy);
+        assert_eq!(wire.len(), 2);
+        assert_eq!(wire[0].1, attr_type::AGGREGATOR);
+        assert_eq!(&wire[0].2[..2], &crate::constants::AS_TRANS.to_be_bytes());
+        assert_eq!(wire[1].1, attr_type::AS4_AGGREGATOR);
+        assert!(
+            wire.iter()
+                .all(|(flags, _, _)| flags & attr_flags::PARTIAL != 0)
+        );
+        assert_eq!(
+            decode_path_attributes(&legacy, false, &[]).unwrap(),
+            vec![canonical.clone()]
+        );
+
+        let mut new_wire = Vec::new();
+        encode_path_attributes(std::slice::from_ref(&canonical), &mut new_wire, true, false)
+            .unwrap();
+        let encoded_new = encoded_attributes(&new_wire);
+        assert_eq!(encoded_new.len(), 1);
+        assert_eq!(encoded_new[0].1, attr_type::AGGREGATOR);
+        assert_eq!(encoded_new[0].2, vec![0xFA, 0x56, 0xEA, 0x01, 10, 0, 0, 1]);
+        assert_eq!(
+            decode_path_attributes(&new_wire, true, &[]).unwrap(),
+            vec![canonical]
+        );
+
+        let mapped = PathAttribute::Aggregator(Aggregator {
+            asn: 65_000,
+            router_id: Ipv4Addr::new(10, 0, 0, 2),
+            partial: false,
+        });
+        let mut mapped_legacy = Vec::new();
+        encode_path_attributes(
+            std::slice::from_ref(&mapped),
+            &mut mapped_legacy,
+            false,
+            false,
+        )
+        .unwrap();
+        let mapped_wire = encoded_attributes(&mapped_legacy);
+        assert_eq!(mapped_wire.len(), 1);
+        assert_eq!(mapped_wire[0].1, attr_type::AGGREGATOR);
+        assert_eq!(mapped_wire[0].2, vec![0xFD, 0xE8, 10, 0, 0, 2]);
+        assert_eq!(
+            decode_path_attributes(&mapped_legacy, false, &[]).unwrap(),
+            vec![mapped]
+        );
+    }
+
+    /// Load-bearing `AGGREGATOR` ingress matrix proof: allowing type18 to
+    /// replace a non-`AS_TRANS` type7, ignoring a type18-only attribute, or
+    /// coupling type17 to an ordinary-only type7 fails an exact row below.
+    #[test]
+    fn aggregator_ingress_compatibility_matrix() {
+        let mut non_trans = attr_bytes(
+            attr_flags::TRANSITIVE,
+            attr_type::AS_PATH,
+            &[2, 1, 0x5B, 0xA0],
+        );
+        non_trans.extend(attr_bytes(
+            attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
+            attr_type::AGGREGATOR,
+            &[0xFD, 0xE8, 10, 0, 0, 2],
+        ));
+        non_trans.extend(attr_bytes(
+            attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
+            attr_type::AS4_PATH,
+            &[2, 1, 0xFA, 0x56, 0xEA, 0x01],
+        ));
+        non_trans.extend(attr_bytes(
+            attr_flags::OPTIONAL | attr_flags::TRANSITIVE | attr_flags::PARTIAL,
+            attr_type::AS4_AGGREGATOR,
+            &[0xFA, 0x56, 0xEA, 0x01, 10, 0, 0, 3],
+        ));
+        assert_eq!(
+            decode_path_attributes(&non_trans, false, &[]).unwrap(),
+            vec![
+                as_path(&[u32::from(crate::constants::AS_TRANS)]),
+                PathAttribute::Aggregator(Aggregator {
+                    asn: 65_000,
+                    router_id: Ipv4Addr::new(10, 0, 0, 2),
+                    partial: false,
+                }),
+            ]
+        );
+
+        let only_as4 = attr_bytes(
+            attr_flags::OPTIONAL | attr_flags::TRANSITIVE | attr_flags::PARTIAL,
+            attr_type::AS4_AGGREGATOR,
+            &[0xFA, 0x56, 0xEA, 0x01, 10, 0, 0, 3],
+        );
+        assert_eq!(
+            decode_path_attributes(&only_as4, false, &[]).unwrap(),
+            vec![PathAttribute::Aggregator(Aggregator {
+                asn: 4_200_000_001,
+                router_id: Ipv4Addr::new(10, 0, 0, 3),
+                partial: true,
+            })]
+        );
+
+        let mut ordinary_only = attr_bytes(
+            attr_flags::TRANSITIVE,
+            attr_type::AS_PATH,
+            &[2, 1, 0x5B, 0xA0],
+        );
+        ordinary_only.extend(attr_bytes(
+            attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
+            attr_type::AGGREGATOR,
+            &[0xFD, 0xE8, 10, 0, 0, 4],
+        ));
+        ordinary_only.extend(attr_bytes(
+            attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
+            attr_type::AS4_PATH,
+            &[2, 1, 0xFA, 0x56, 0xEA, 0x01],
+        ));
+        assert_eq!(
+            decode_path_attributes(&ordinary_only, false, &[]).unwrap(),
+            vec![
+                as_path(&[4_200_000_001]),
+                PathAttribute::Aggregator(Aggregator {
+                    asn: 65_000,
+                    router_id: Ipv4Addr::new(10, 0, 0, 4),
+                    partial: false,
+                }),
+            ]
+        );
+    }
+
+    /// Load-bearing RFC 9774 egress proof: deleting the guard permits a
+    /// generated `AS4_PATH` containing `AS_SET` and makes this encode succeed.
+    #[test]
+    fn legacy_encoder_rejects_as_set_before_as4_path_generation() {
+        for (asn, four_octet_as) in [(4_200_000_001, false), (65_000, false), (65_000, true)] {
+            let attribute = PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSet(vec![asn])],
+            });
+            let error = encode_path_attributes(&[attribute], &mut Vec::new(), four_octet_as, false)
+                .unwrap_err();
+            assert!(matches!(
+                error,
+                EncodeError::ValueOutOfRange {
+                    field: "AS_PATH",
+                    ..
+                }
+            ));
+        }
+    }
+
+    /// Load-bearing stale-sidecar proof: removing the suppression branch
+    /// emits both raw compatibility attributes and fails the empty result.
+    #[test]
+    fn encoder_suppresses_stale_raw_as4_sidecars() {
+        let attributes = vec![
+            PathAttribute::Unknown(RawAttribute {
+                flags: attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
+                type_code: attr_type::AS4_PATH,
+                data: Bytes::from_static(&[2, 1, 0, 0, 0xFD, 0xE8]),
+            }),
+            PathAttribute::Unknown(RawAttribute {
+                flags: attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
+                type_code: attr_type::AS4_AGGREGATOR,
+                data: Bytes::from_static(&[0, 0, 0xFD, 0xE8, 10, 0, 0, 1]),
+            }),
+        ];
+        let mut encoded = Vec::new();
+        encode_path_attributes(&attributes, &mut encoded, false, false).unwrap();
+        assert!(encoded.is_empty());
     }
 }

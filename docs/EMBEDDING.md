@@ -63,9 +63,9 @@ Public surface (re-exported at crate root — `crates/wire/src/lib.rs`):
   GR/LLGR, ORF, BGP Roles, Extended Messages, ...).
 - **`UpdateMessage`** — raw wire framing + `parse()` → `ParsedUpdate`
   (decoded NLRI + `Vec<PathAttribute>`).
-- **`PathAttribute`** — 14 typed variants + `Unknown` pass-through (`AsPath`,
-  `NextHop`, `Communities`, `MpReachNlri`, `LargeCommunities`, `PmsiTunnel`,
-  `OnlyToCustomer`, ...).
+- **`PathAttribute`** — typed variants + `Unknown` pass-through (`AsPath`,
+  `Aggregator`, `NextHop`, `Communities`, `MpReachNlri`, `LargeCommunities`,
+  `PmsiTunnel`, `OnlyToCustomer`, ...).
 - **`Prefix`** (`V4(Ipv4Prefix)` / `V6(Ipv6Prefix)`), `NlriEntry`, Add-Path IDs.
 - **`Afi` / `Safi`** — IANA address-family identifiers.
 - **EVPN** (`EvpnRoute`/`EvpnRouteKey`, Types 1–5; route keys implement `Ord`),

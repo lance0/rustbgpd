@@ -1634,7 +1634,7 @@ mod tests {
     use super::*;
     use rustbgpd_rib::route::{Route, RouteOrigin};
     use rustbgpd_wire::{
-        AsPath, Ipv4Prefix, Ipv6Prefix, Origin, PathAttribute, Prefix, RpkiValidation,
+        Aggregator, AsPath, Ipv4Prefix, Ipv6Prefix, Origin, PathAttribute, Prefix, RpkiValidation,
     };
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
     use std::sync::Arc;
@@ -2173,6 +2173,50 @@ mod tests {
         assert_eq!(
             u16::from_be_bytes([data[second_offset + 6], data[second_offset + 7]]),
             2
+        );
+    }
+
+    /// Load-bearing snapshot proof: deleting AGGREGATOR encoding, decoding it
+    /// as an untyped compatibility attribute, or clearing Partial makes the
+    /// exact typed round-trip assertion fail.
+    #[test]
+    fn snapshot_round_trip_preserves_typed_aggregator() {
+        let peer = make_peer(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 65001);
+        let mut route = make_route(
+            Prefix::V4(Ipv4Prefix {
+                addr: Ipv4Addr::new(192, 168, 0, 0),
+                len: 16,
+            }),
+            peer.peer_addr,
+            peer.peer_addr,
+        );
+        let aggregator = Aggregator {
+            asn: 4_200_000_001,
+            router_id: Ipv4Addr::new(192, 0, 2, 9),
+            partial: true,
+        };
+        let mut attrs = route.attributes.as_ref().clone();
+        attrs.push(PathAttribute::Aggregator(aggregator));
+        route.attributes = Arc::new(attrs);
+
+        let snapshot = encode_snapshot(
+            Ipv4Addr::new(1, 2, 3, 4),
+            &[peer],
+            &[route],
+            &[],
+            1_700_000_000,
+        )
+        .unwrap();
+        let entries: Vec<_> = crate::reader::SnapshotReader::new(&snapshot)
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(entries.len(), 1);
+        assert!(
+            entries[0]
+                .attributes
+                .contains(&PathAttribute::Aggregator(aggregator)),
+            "MRT snapshot must preserve canonical ASN, router ID, and Partial"
         );
     }
     #[test]

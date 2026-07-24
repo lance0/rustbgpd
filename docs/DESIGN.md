@@ -319,7 +319,7 @@ UPDATE processing is where most BGP implementations accumulate subtle bugs. rust
 | Attribute ordering (well-known before optional) | RFC 4271 §4.3 | Accept out-of-order but log; strict mode configurable |
 | AS_PATH segment type valid (AS_SET, AS_SEQUENCE) | RFC 4271 §4.3 | NOTIFICATION (3, 11) — Malformed AS_PATH |
 | AS_PATH length consistent with segment encoding | RFC 4271 §4.3 | NOTIFICATION (3, 11) — Malformed AS_PATH |
-| 4-byte ASN handling (AS_TRANS mapping) | RFC 6793 | Map AS_TRANS correctly; reject inconsistent mappings |
+| 4-byte ASN handling (AS_TRANS mapping) | RFC 6793 | Reconstruct valid AS4 compatibility attributes; discard or ignore inconsistent sidecars per RFC 6793 |
 | NEXT_HOP is valid IP, not 0.0.0.0, not multicast | RFC 4271 §5.1.3 | NOTIFICATION (3, 8) — Invalid NEXT_HOP Attribute |
 | ORIGIN value is valid (IGP, EGP, INCOMPLETE) | RFC 4271 §4.3 | NOTIFICATION (3, 6) — Invalid ORIGIN Attribute |
 | Attribute length does not exceed UPDATE length | RFC 4271 §4.3 | NOTIFICATION (3, 1) — Malformed Attribute List |

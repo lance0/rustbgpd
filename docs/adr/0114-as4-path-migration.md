@@ -1,6 +1,6 @@
 # ADR-0114: RFC 6793 AS4 path migration across legacy peers
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-07-21
 
 ## Context
@@ -23,7 +23,7 @@ select a different route, and propagate a path whose four-octet identity has
 been lost. Transparent third-party path preservation is core RR/IX behavior,
 not forwarding-plane or PE scope.
 
-rustbgpd already implements part of the transition:
+Before this decision, rustbgpd implemented only part of the transition:
 
 - OPEN advertises capability 65 and uses `AS_TRANS` in the two-octet My AS
   field when the configured local ASN is not mappable;
@@ -34,7 +34,7 @@ rustbgpd already implements part of the transition:
 - outbound encoding toward a legacy peer replaces each non-mappable ASN with
   `AS_TRANS`.
 
-The remaining behavior is internally inconsistent:
+At decision time, the remaining behavior was internally inconsistent:
 
 - outbound encoding does not generate the compensating `AS4_PATH`;
 - `AS4_PATH` and `AS4_AGGREGATOR` decode as opaque `RawAttribute` values;
@@ -57,9 +57,9 @@ place: ordinary malformed `AS4_PATH` and `AS4_AGGREGATOR` use attribute
 discard, while a conflicting Optional/Transitive flag combination remains
 the stronger treat-as-withdraw action under RFC 7606.
 
-Four-octet-AS capability support is ubiquitous, so this is not a high-volume
-feature request. However, the daemon currently negotiates legacy sessions and
-then silently offers incomplete semantics. The choices are to complete the
+Four-octet-AS capability support is ubiquitous, so this was not a high-volume
+feature request. However, the daemon negotiated legacy sessions and then
+silently offered incomplete semantics. The choices were to complete the
 vertical slice, reject legacy negotiation, or keep a correctness trap.
 
 ## Options
@@ -106,11 +106,9 @@ not completely understand.
 
 ## Decision
 
-Choose **Option A** as one indivisible implementation tranche. This ADR is a
-design approval, not feature code. The implementation is a GO when it includes
-the complete ingress, egress, exact-export, error-handling, and real-session
-proof below. If that slice cannot remain bounded, the fallback is Option C;
-Option B must not merge independently.
+Choose **Option A** as one indivisible implementation tranche. It landed with
+the complete ingress, egress, exact-export, error-handling, snapshot, and
+real-session proof below. Option B was not merged independently.
 
 This work is worthwhile as correctness hardening for an already-negotiated
 mode, but it is not a release blocker and does not justify unrelated protocol
@@ -223,13 +221,13 @@ substitution is not the RFC algorithm.
 `AGGREGATOR` becomes a typed canonical attribute rather than remaining opaque.
 Migration handling covers type 18 in the same tranche as type 17:
 
-| Received from legacy peer | Canonical result | AS4 path handling |
+| Received from legacy peer | Canonical aggregator result | Independent AS4 path handling |
 |---|---|---|
-| `AGGREGATOR` only | Its two-octet ASN and router ID | Reconstruct if type 17 exists |
+| `AGGREGATOR` only | Its two-octet ASN and router ID | Reconstruct type 17 if present |
 | Both, ordinary ASN is not `AS_TRANS` | Ordinary aggregator | Ignore type 18 and type 17 |
-| Both, ordinary ASN is `AS_TRANS` | Type 18 ASN and router ID | Reconstruct from type 17 |
-| `AS4_AGGREGATOR` only | Type 18 ASN and router ID, logged as an unpaired compatibility case | Reconstruct if type 17 exists |
-| Neither | No aggregator | Reconstruct if type 17 exists |
+| Both, ordinary ASN is `AS_TRANS` | Type 18 ASN and router ID | Reconstruct type 17 if present |
+| `AS4_AGGREGATOR` only | Type 18 ASN and router ID | Reconstruct type 17 if present |
+| Neither | No aggregator | Reconstruct type 17 if present |
 
 The both-present rows are normative RFC 6793 behavior. The lone type 18 row is
 an explicit interoperability decision for an underspecified input: retain its
@@ -328,8 +326,7 @@ this protocol tranche.
 
 ### Implementation sequence and stop conditions
 
-The future implementation should be reviewable in this order, but it merges
-as one capability:
+The implementation was reviewed in this order and merged as one capability:
 
 1. add internal parsers and canonical aggregator representation with the
    RFC 7606/9774 disposition matrix;
@@ -349,13 +346,14 @@ Stop and return to design rather than merge if any of these occurs:
 - the real-session fixture cannot demonstrate both wire preservation and a
   semantic inbound effect.
 
-## Load-bearing validation plan
+## Load-bearing validation
 
-This ADR-only tranche adds no executable test or gate, so mutation-red proof
-is **N/A** for this change. The implementation is incomplete until every new
-test records the production break that makes it red. At minimum:
+The implementation's unit, integration, serializer, and M94 interop checks
+are organized around these production breaks. Each executable test names the
+deletion or mutation that must make it red; the implementation receipt records
+the corresponding mutation runs.
 
-| Future proof | Required assertion | Revert or mutation that must make it red |
+| Proof | Required assertion | Revert or mutation that must make it red |
 |---|---|---|
 | Legacy outbound exact wire | A final logical path containing `4200000001` decodes from two-octet `AS_PATH` plus `AS4_PATH` to the exact original sequence | Remove generated type 17; the decoded path contains only `AS_TRANS` |
 | Mappable-only output | A legacy target receives ordinary `AS_PATH` and no type 17 | Emit AS4_PATH unconditionally; the attribute inventory assertion fails |
@@ -370,21 +368,24 @@ test records the production break that makes it red. At minimum:
 | Exact-export ceiling | A route whose compensating type 17 crosses the peer maximum is rejected before Adj-RIB-Out commit | Measure only the two-octet AS_PATH or add AS4_PATH after the probe |
 | Common-family encoder | IPv4-unicast and one MP_REACH family both preserve the same non-mappable logical path | Add AS4 projection only to the IPv4-body builder |
 
-Pure codec vectors are necessary but not sufficient. The acceptance interop
-target is a real **ExaBGP 5.0.9** process configured with its documented
-`asn4 disable;` capability, run beside rustbgpd in a pinned containerlab/Docker
-fixture. ExaBGP is feasible because it deliberately supports capability-65
-suppression rather than requiring an obsolete binary. The receipt must:
+Pure codec vectors are necessary but not sufficient. M94 runs a digest-pinned
+real **ExaBGP 5.0.9** process with `asn4 disable;` as the OLD source. A bounded,
+byte-transparent Python relay independently decodes the ExaBGP-to-rustbgpd
+wire while forwarding it unchanged; a separate independent Python OLD speaker
+receives and decodes rustbgpd's egress. ExaBGP is deliberately not used as the
+receiving oracle because version 5.0.9 rejects its own valid legacy AS4 output.
 
-1. establish a session whose negotiated four-octet capability is false;
-2. advertise a route containing a non-mappable ASN in each direction;
-3. capture or independently decode the received attributes and prove exact
-   logical path preservation, not merely session establishment; and
-4. prove on the rustbgpd ingress direction that the reconstructed path reaches
-   a semantic consumer such as loop rejection or origin-AS policy.
-
-Pin the ExaBGP release and image digest in the future harness. A hand-built
-packet fed only to the wire crate does not satisfy this gate.
+The 13/13 live receipt proves both rustbgpd sessions negotiate without ASN4.
+ExaBGP sends type 2 `[65010, 23456]`, type 17
+`[65010, 4200000194]`, type 7 `23456:10.94.0.2`, and type 18
+`4200000294:10.94.0.2`; the accepted route becomes the canonical path
+`[65010, 4200000194]`. A second route's type 2 `[65010, 23456]` and type 17
+`[65010, 4200000094]` reconstruct the high local ASN and trigger AS-path-loop
+rejection. rustbgpd emits the same exact accepted-route path and aggregator
+pairs to the independent OLD sink. The source withdrawal reaches the sink and
+removes the received route while both sessions remain Established. The image
+digest, relay bounds, and decoder live in the checked-in containerlab fixture;
+a hand-built wire-crate packet alone would not satisfy this gate.
 
 ## Consequences
 
@@ -397,11 +398,8 @@ packet fed only to the wire crate does not satisfy this gate.
   not originate aggregates. That cost is required to avoid an incomplete RFC
   6793 slice, but it does not authorize route-aggregation behavior.
 - A route learned through a legacy peer may change policy, validation, or best
-  path after implementation because the daemon will finally see its real ASNs.
-  That is a correctness fix and should be called out in release notes when the
-  feature ships.
-- Until implementation lands, current documentation must continue to state
-  that AS4 preservation and reconstruction are not implemented.
+  path because the daemon now sees its real ASNs. That shipped correctness
+  change is called out in the release notes.
 
 ## References
 

@@ -305,9 +305,14 @@ completeness never requires them.
 
 Scope and bounds: BMP version 3 streams; global-instance peers
 (RD/local-instance peers are skipped with a note); IPv4/IPv6 unicast
-NLRI (other families are skipped with a note). ORIGINATOR_ID,
-CLUSTER_LIST, OTC, and any attribute the decoder does not type are
-preserved byte-exact as `unknown_attrs` — compare with
+NLRI (other families are skipped with a note). The per-peer-header A flag
+selects the ordinary AS width. On an A=0 legacy stream, type 2/17 and type
+7/18 pairs normalize to one four-octet logical path and one canonical
+eight-byte type 7 record in `unknown_attrs`; compatibility types 17/18 are
+not re-emitted. ORIGINATOR_ID, CLUSTER_LIST, OTC, and other attributes the
+decoder leaves untyped retain their value bytes and semantic flags in
+`unknown_attrs`; the Extended Length bit is cleared because it is an encoding
+artifact. Compare with
 `--ignore-attribute unknown` if accepting that gRPC cannot verify them.
 Hard limits (not flags) bound input bytes (1 GiB), per-message length
 (1 MiB), peers (4096), routes (4M), and paths per NLRI (64); exceeding

@@ -49,9 +49,11 @@ impl ErrorDisposition {
 pub fn malformed_attr_disposition(type_code: u8, is_ibgp: bool) -> ErrorDisposition {
     match type_code {
         attr_type::MP_REACH_NLRI | attr_type::MP_UNREACH_NLRI => ErrorDisposition::SessionReset,
-        attr_type::ATOMIC_AGGREGATE | attr_type::AGGREGATOR | attr_type::BGP_LS => {
-            ErrorDisposition::AttributeDiscard
-        }
+        attr_type::ATOMIC_AGGREGATE
+        | attr_type::AGGREGATOR
+        | attr_type::AS4_PATH
+        | attr_type::AS4_AGGREGATOR
+        | attr_type::BGP_LS => ErrorDisposition::AttributeDiscard,
         attr_type::LOCAL_PREF | attr_type::ORIGINATOR_ID | attr_type::CLUSTER_LIST if !is_ibgp => {
             ErrorDisposition::AttributeDiscard
         }
@@ -829,6 +831,9 @@ mod tests {
     }
 
     // --- RFC 7606 dispositions ---
+    /// Load-bearing RFC 6793 disposition proof: removing either type 17/18
+    /// mapping below changes its exact result from attribute-discard to the
+    /// default treat-as-withdraw verdict.
     #[test]
     fn dispositions_follow_rfc7606_section7() {
         use ErrorDisposition::{AttributeDiscard, SessionReset, TreatAsWithdraw};
@@ -848,6 +853,16 @@ mod tests {
         );
         assert_eq!(
             malformed_attr_disposition(attr_type::ATOMIC_AGGREGATE, false),
+            AttributeDiscard
+        );
+        // RFC 6793 §6 retains attribute-discard for malformed migration
+        // compatibility attributes.
+        assert_eq!(
+            malformed_attr_disposition(attr_type::AS4_PATH, false),
+            AttributeDiscard
+        );
+        assert_eq!(
+            malformed_attr_disposition(attr_type::AS4_AGGREGATOR, true),
             AttributeDiscard
         );
         // §7.5 / §7.9 / §7.10: discard from external, withdraw from internal.
