@@ -6,6 +6,7 @@ readonly GRPCURL_VERSION="1.9.1"
 readonly GRPCURL_SHA256="588c9c429476d9ed66cd3b2ae32283a6da36e0cfbb7e446f5d6a1b68dc770214"
 readonly GRPCURL_ASSET="grpcurl_${GRPCURL_VERSION}_linux_x86_64.tar.gz"
 readonly GRPCURL_URL="https://github.com/fullstorydev/grpcurl/releases/download/v${GRPCURL_VERSION}/${GRPCURL_ASSET}"
+readonly GRPCURL_ATTEMPTS=3
 
 install_grpcurl() (
     local version=${1:?version}
@@ -18,13 +19,13 @@ install_grpcurl() (
     trap 'rm -rf -- "$work_dir"' EXIT
     archive="$work_dir/grpcurl.tar.gz"
 
-    # Download to a file rather than streaming into tar: curl can discard a
-    # partial response before retrying, and extraction cannot see unverified
-    # bytes. --retry alone does not cover truncated transfers.
+    # Download to a file rather than streaming into tar, so extraction cannot
+    # see unverified bytes. Single retry mechanism: the caller's loop owns
+    # retry and backoff, because only the checksum below catches a truncated
+    # or corrupted 200-OK body that `curl --retry` treats as success. Nesting
+    # `curl --retry` inside that loop would multiply the worst case past the
+    # interop job timeout.
     curl -fsSL \
-        --retry 3 \
-        --retry-all-errors \
-        --retry-delay 3 \
         --connect-timeout 10 \
         --max-time 120 \
         --output "$archive" \
@@ -49,6 +50,30 @@ install_grpcurl() (
     printf '%s\n' "$reported_version"
 )
 
+# The hosted release download is the only external fetch every Interop job
+# shares, so one CDN hiccup reds a ~38-job run. Retry download *and*
+# verification as a unit: a truncated or corrupted archive is re-fetched
+# rather than accepted, because each attempt re-runs the checksum and version
+# checks and a rejected archive is never installed. Persistent failure still
+# fails closed after the bounded attempts, naming the URL.
+install_grpcurl_with_retry() {
+    local url=${3:?url}
+    local attempt
+
+    for ((attempt = 1; attempt <= GRPCURL_ATTEMPTS; attempt++)); do
+        if install_grpcurl "$@"; then
+            return 0
+        fi
+        if ((attempt < GRPCURL_ATTEMPTS)); then
+            echo "::warning::grpcurl download/verify attempt ${attempt}/${GRPCURL_ATTEMPTS} failed; retrying" >&2
+            sleep $((attempt * 5))
+        fi
+    done
+
+    echo "::error::grpcurl download/verification failed after ${GRPCURL_ATTEMPTS} attempts: ${url}" >&2
+    return 1
+}
+
 fail_self_test() {
     echo "grpcurl installer self-test failed: $*" >&2
     return 1
@@ -56,7 +81,7 @@ fail_self_test() {
 
 self_test() (
     local repo_root fixture_dir source_dir base_archive archive checksum truncated_size
-    local wrong_version_archive wrong_version_checksum
+    local wrong_version_archive wrong_version_checksum retry_counter
     local named_steps workflow_calls setup_calls
 
     repo_root=$(git rev-parse --show-toplevel)
@@ -133,6 +158,39 @@ EOF
         fail_self_test "wrong grpcurl version was accepted"
     fi
 
+    # Retry cases stub the installer and `sleep` so the loop is exercised
+    # without network access or real backoff waits.
+    retry_counter="$fixture_dir/retry-attempts"
+    printf '0' >"$retry_counter"
+    (
+        sleep() { :; }
+        install_grpcurl() {
+            local count
+            count=$(($(cat "$retry_counter") + 1))
+            printf '%s' "$count" >"$retry_counter"
+            [[ "$count" -ge 2 ]]
+        }
+        install_grpcurl_with_retry \
+            "$GRPCURL_VERSION" "$GRPCURL_SHA256" "$GRPCURL_URL" /usr/local/bin
+    ) 2>/dev/null || fail_self_test "retry did not recover from a transient failure"
+    [[ "$(cat "$retry_counter")" -eq 2 ]] \
+        || fail_self_test "retry did not stop on the first success"
+
+    printf '0' >"$retry_counter"
+    if (
+        sleep() { :; }
+        install_grpcurl() {
+            printf '%s' "$(($(cat "$retry_counter") + 1))" >"$retry_counter"
+            return 1
+        }
+        install_grpcurl_with_retry \
+            "$GRPCURL_VERSION" "$GRPCURL_SHA256" "$GRPCURL_URL" /usr/local/bin
+    ) 2>/dev/null; then
+        fail_self_test "persistent download failure was not surfaced"
+    fi
+    [[ "$(cat "$retry_counter")" -eq "$GRPCURL_ATTEMPTS" ]] \
+        || fail_self_test "retry did not stop after ${GRPCURL_ATTEMPTS} attempts"
+
     named_steps=$(grep -cE '^[[:space:]]+- name: Install grpcurl' \
         "$repo_root/.github/workflows/interop.yml")
     workflow_calls=$(grep -cF 'bash .github/scripts/install-grpcurl.sh' \
@@ -158,7 +216,7 @@ EOF
 
 case ${1:-} in
     "")
-        install_grpcurl \
+        install_grpcurl_with_retry \
             "$GRPCURL_VERSION" \
             "$GRPCURL_SHA256" \
             "$GRPCURL_URL" \
