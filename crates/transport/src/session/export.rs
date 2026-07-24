@@ -2165,7 +2165,7 @@ mod tests {
     use crate::config::{TcpAoAlgorithm, TcpAoConfig};
     use rustbgpd_fsm::{NegotiatedSession, PeerConfig};
     use rustbgpd_telemetry::BgpMetrics;
-    use rustbgpd_wire::{Ipv4Prefix, encode_message};
+    use rustbgpd_wire::{Ipv4Prefix, Ipv6Prefix, encode_message};
     use tokio::sync::mpsc;
 
     fn config_with_auth_secret(secret: &str) -> TransportConfig {
@@ -2749,6 +2749,161 @@ mod tests {
         let mut other = profile.clone();
         other.generation = profile.generation + 1;
         other.prepared_unicast_attributes_cached(&mut cache, &route, other.local_ipv4(), None);
+    }
+
+    fn as4_projection_snapshot(four_octet_as: bool) -> Arc<SessionExportProfile> {
+        let peer = PeerConfig::new(65_001, 65_002, Ipv4Addr::new(10, 0, 0, 1));
+        let mut config = TransportConfig::new(peer, "10.0.0.2:179".parse().unwrap());
+        config.route_server_client = true;
+        let mut profile = SessionExportProfile::initial(&config, None, false);
+        profile.four_octet_as = four_octet_as;
+        SessionExportEncoder::new(profile).snapshot()
+    }
+
+    fn as4_projection_route(prefix: Prefix, next_hop: IpAddr) -> Route {
+        let mut attributes = vec![
+            PathAttribute::Origin(rustbgpd_wire::Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65_000, 4_200_000_001])],
+            }),
+        ];
+        if let IpAddr::V4(next_hop) = next_hop {
+            attributes.push(PathAttribute::NextHop(next_hop));
+        }
+        Route {
+            prefix,
+            next_hop,
+            link_local_next_hop: None,
+            next_hop_scope: None,
+            peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2)),
+            attributes: Arc::new(attributes),
+            received_at: std::time::Instant::now(),
+            origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
+            peer_router_id: Ipv4Addr::new(192, 0, 2, 2),
+            is_stale: false,
+            is_llgr_stale: false,
+            path_id: 0,
+            validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+            aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+            aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+        }
+    }
+
+    fn raw_attribute_types(message: &UpdateMessage) -> Vec<u8> {
+        let mut remaining = message.path_attributes.as_ref();
+        let mut types = Vec::new();
+        while !remaining.is_empty() {
+            let flags = remaining[0];
+            let type_code = remaining[1];
+            let extended = flags & rustbgpd_wire::constants::attr_flags::EXTENDED_LENGTH != 0;
+            let header_len = if extended { 4 } else { 3 };
+            let value_len = if extended {
+                usize::from(u16::from_be_bytes([remaining[2], remaining[3]]))
+            } else {
+                usize::from(remaining[2])
+            };
+            assert!(remaining.len() >= header_len + value_len);
+            types.push(type_code);
+            remaining = &remaining[header_len + value_len..];
+        }
+        types
+    }
+
+    fn assert_reconstructed_as_path(message: &UpdateMessage, four_octet_as: bool) {
+        let parsed = message.parse(four_octet_as, false, &[]).unwrap();
+        assert!(parsed.attributes.iter().any(|attribute| matches!(
+            attribute,
+            PathAttribute::AsPath(AsPath { segments })
+                if segments == &vec![AsPathSegment::AsSequence(vec![65_000, 4_200_000_001])]
+        )));
+    }
+
+    /// Load-bearing RFC 6793 profile proof: bypassing legacy projection drops
+    /// raw type 17 (and leaves `AS_TRANS` after legacy decoding); generating type
+    /// 17 for an AS4-capable peer makes the modern exact type list fail.
+    #[test]
+    fn exact_encoder_projects_classic_ipv4_for_legacy_and_modern_peers() {
+        let route = as4_projection_route(
+            Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24)),
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+        );
+        for (four_octet_as, expected_types) in [(false, vec![1, 2, 17, 3]), (true, vec![1, 2, 3])] {
+            let snapshot = as4_projection_snapshot(four_octet_as);
+            let probe = snapshot
+                .probe_announcement(ExportCandidate::Unicast {
+                    route: &route,
+                    next_hop_override: None,
+                })
+                .unwrap();
+            assert_eq!(raw_attribute_types(&probe.message), expected_types);
+            assert_reconstructed_as_path(&probe.message, four_octet_as);
+            assert_eq!(probe.encoded_len, probe.message.encoded_len());
+            assert_eq!(probe.max_len, usize::from(rustbgpd_wire::MAX_MESSAGE_LEN));
+        }
+    }
+
+    /// Load-bearing MP sibling of the classic test: removing the shared AS4
+    /// projection loses type 17 only on the legacy `MP_REACH` wire form, while
+    /// accidentally projecting modern peers adds a forbidden compatibility
+    /// attribute and fails the exact type inventory.
+    #[test]
+    fn exact_encoder_projects_mp_reach_for_legacy_and_modern_peers() {
+        let route = as4_projection_route(
+            Prefix::V6(Ipv6Prefix::new("2001:db8:40::".parse().unwrap(), 48)),
+            IpAddr::V6("2001:db8::1".parse().unwrap()),
+        );
+        for (four_octet_as, expected_types) in [(false, vec![1, 2, 17, 14]), (true, vec![1, 2, 14])]
+        {
+            let snapshot = as4_projection_snapshot(four_octet_as);
+            let probe = snapshot
+                .probe_announcement(ExportCandidate::Unicast {
+                    route: &route,
+                    next_hop_override: None,
+                })
+                .unwrap();
+            assert_eq!(raw_attribute_types(&probe.message), expected_types);
+            assert_reconstructed_as_path(&probe.message, four_octet_as);
+            assert_eq!(probe.encoded_len, probe.message.encoded_len());
+        }
+    }
+
+    /// Load-bearing exact-ceiling proof: deleting generated type 17 shrinks the
+    /// legacy candidate below 4096 and makes this rejection falsely succeed;
+    /// counting it against modern peers makes the accepted control fail.
+    #[test]
+    fn generated_as4_path_crosses_the_exact_legacy_message_ceiling() {
+        let mut route = as4_projection_route(
+            Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 1), 32)),
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+        );
+        let mut attrs = route.attributes.as_ref().clone();
+        attrs.push(PathAttribute::Unknown(rustbgpd_wire::RawAttribute {
+            flags: rustbgpd_wire::constants::attr_flags::OPTIONAL,
+            type_code: 99,
+            data: bytes::Bytes::from(vec![0; 4_040]),
+        }));
+        route.attributes = Arc::new(attrs);
+        let candidate = ExactExportCandidate::Unicast {
+            route: &route,
+            next_hop_override: None,
+        };
+
+        let modern_snapshot = as4_projection_snapshot(true);
+        let modern = <SessionExportProfile as ExactExportSnapshot>::probe_announcement(
+            modern_snapshot.as_ref(),
+            candidate,
+        )
+        .expect("modern projection fits the standard ceiling");
+        assert_eq!(modern.encoded_len, 4_096);
+        let legacy_snapshot = as4_projection_snapshot(false);
+        let Err(error) = <SessionExportProfile as ExactExportSnapshot>::probe_announcement(
+            legacy_snapshot.as_ref(),
+            candidate,
+        ) else {
+            panic!("generated type 17 must tip the legacy wire form over 4096");
+        };
+        assert_eq!(error.code(), ExactExportErrorCode::MessageTooLong);
+        assert!(error.detail().contains("4105"), "{}", error.detail());
     }
 
     fn encoded(message: UpdateMessage) -> Vec<u8> {

@@ -146,6 +146,10 @@ pub mod attr_type {
     pub const CLUSTER_LIST: u8 = 10;
     /// RFC 4360: Extended Communities.
     pub const EXTENDED_COMMUNITIES: u8 = 16;
+    /// RFC 6793: `AS4_PATH` compatibility attribute.
+    pub const AS4_PATH: u8 = 17;
+    /// RFC 6793: `AS4_AGGREGATOR` compatibility attribute.
+    pub const AS4_AGGREGATOR: u8 = 18;
     /// RFC 8092: Large Communities.
     pub const LARGE_COMMUNITIES: u8 = 32;
     /// RFC 4760: `MP_REACH_NLRI`.

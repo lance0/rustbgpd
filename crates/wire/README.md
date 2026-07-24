@@ -35,7 +35,7 @@ analyzers, test harnesses, MRT readers, etc.
 | 5492 | BGP capabilities |
 | 5512 | Tunnel Encapsulation extended-community layout (4-byte reserved + 2-byte value) used by the EVPN VXLAN encap sub-type |
 | 6514 §5 | PMSI Tunnel attribute (path attribute type 22): all 8 tunnel types from the IANA registry, with the EVPN-VXLAN ingress-replication form encoding the label field as the raw 24-bit VNI per RFC 8365 §5.1.3 |
-| 6793 | 4-octet AS numbers |
+| 6793 | 4-octet AS numbers, including canonical type 2/17 and type 7/18 ingress normalization plus capability-specific egress projection |
 | 6811 | RPKI prefix-origin validation state — the `RpkiValidation` routing-domain enum (no extended-community codec) |
 | 7313 | Enhanced Route Refresh (BoRR / EoRR markers) |
 | 7385 | PMSI Tunnel Type IANA registry — `PmsiTunnelType` preserves unknown values via an `Other(u8)` variant |
@@ -133,7 +133,7 @@ let bytes = encode_message(&Message::Open(open)).expect("encode OPEN");
 
 - **`Message`** — top-level enum: `Open`, `Update`, `Keepalive`, `Notification`, `RouteRefresh`
 - **`UpdateMessage`** / **`ParsedUpdate`** — raw wire form and parsed routes + attributes
-- **`PathAttribute`** — 14 typed variants plus `Unknown` pass-through, including `AsPath`, `NextHop`, `Communities`, `MpReachNlri`, `LargeCommunities`, `PmsiTunnel` (RFC 6514), and `OnlyToCustomer` (RFC 9234)
+- **`PathAttribute`** — typed variants plus `Unknown` pass-through, including `AsPath`, `Aggregator`, `NextHop`, `Communities`, `MpReachNlri`, `LargeCommunities`, `PmsiTunnel` (RFC 6514), and `OnlyToCustomer` (RFC 9234)
 - **`Prefix`** — `V4(Ipv4Prefix)` / `V6(Ipv6Prefix)` enum
 - **`RpkiValidation` / `AspaValidation` / `AspaValidationContext`** — shared
   routing-domain validation state and ASPA session context used by rustbgpd's

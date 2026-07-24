@@ -41,8 +41,11 @@
 //! Fail-closed: any framing error, embedded-UPDATE decode error,
 //! truncation, out-of-protocol sequence, or exceeded hard bound exits 2
 //! with nothing on stdout — a half-converted snapshot with a valid
-//! trailer cannot exist. Unknown and untyped path attributes are
-//! preserved byte-exact in `unknown_attrs`, never dropped.
+//! trailer cannot exist. RFC 6793 AS_PATH/AS4_PATH (types 2/17) and
+//! AGGREGATOR/AS4_AGGREGATOR (types 7/18) pairs normalize to one canonical
+//! path and 8-byte type-7 aggregator. Other unknown and untyped attributes
+//! preserve their value bytes and semantic flags in `unknown_attrs`, never
+//! silently dropped.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -908,12 +911,13 @@ fn mp_unreach_nlri_count(mp: &MpUnreachNlri) -> usize {
 
 /// Fold one decoded path attribute into the shared `SnapRoute` template.
 ///
-/// Attributes with typed snapshot fields map directly; attributes the
-/// snapshot does not type (ORIGINATOR_ID, CLUSTER_LIST, OTC, and
-/// anything the wire decoder itself does not type) are preserved
-/// byte-exact in `unknown_attrs` with their canonical wire encoding —
-/// never dropped. The EXTENDED_LENGTH bit is cleared from preserved
-/// flags: it is an encoding artifact, not attribute semantics.
+/// Attributes with typed snapshot fields map directly. The wire decoder has
+/// already combined RFC 6793 types 2/17 and 7/18; this converter stores the
+/// canonical AS path and emits the canonical 8-byte type-7 aggregator.
+/// Attributes the snapshot does not type (ORIGINATOR_ID, CLUSTER_LIST, OTC,
+/// and anything the wire decoder itself leaves untyped) retain their value
+/// bytes and semantic flags in `unknown_attrs`. The EXTENDED_LENGTH bit is
+/// cleared because it is an encoding artifact, not attribute semantics.
 fn convert_attribute<'a>(
     attribute: &'a PathAttribute,
     base: &mut SnapRoute,
@@ -951,6 +955,19 @@ fn convert_attribute<'a>(
             attr_type::ONLY_TO_CUSTOMER,
             asn.to_be_bytes().to_vec(),
         )),
+        PathAttribute::Aggregator(aggregator) => {
+            let flags = attr_flags::OPTIONAL
+                | attr_flags::TRANSITIVE
+                | if aggregator.partial {
+                    attr_flags::PARTIAL
+                } else {
+                    0
+                };
+            let mut value = aggregator.asn.to_be_bytes().to_vec();
+            value.extend_from_slice(&aggregator.router_id.octets());
+            base.unknown_attrs
+                .push((flags, attr_type::AGGREGATOR, value));
+        }
         PathAttribute::MpReachNlri(mp) => *mp_reach = Some(mp),
         PathAttribute::MpUnreachNlri(mp) => *mp_unreach = Some(mp),
         PathAttribute::PmsiTunnel(_) => {
@@ -1084,7 +1101,10 @@ pub(crate) mod test_fixture {
             attr_type::COMMUNITIES
             | attr_type::EXTENDED_COMMUNITIES
             | attr_type::LARGE_COMMUNITIES
-            | attr_type::ONLY_TO_CUSTOMER => OPTIONAL | TRANSITIVE,
+            | attr_type::ONLY_TO_CUSTOMER
+            | attr_type::AGGREGATOR
+            | attr_type::AS4_PATH
+            | attr_type::AS4_AGGREGATOR => OPTIONAL | TRANSITIVE,
             _ => TRANSITIVE,
         };
         let mut buf = vec![flags, type_code, u8::try_from(value.len()).unwrap()];
@@ -1756,6 +1776,68 @@ mod tests {
         capture.extend(route_monitoring(&info, &eor_v4()));
         let (snapshot, _) = run_capture(&capture).unwrap();
         assert!(snapshot.contains("\"as_path\":[65500,64999]"), "{snapshot}");
+    }
+
+    /// Load-bearing RFC 6793 adapter proof: removing legacy AS4 reconstruction
+    /// leaves `AS_TRANS` in `as_path`, and dropping the typed AGGREGATOR arm
+    /// either refuses conversion or loses the canonical type-7 record. Keeping
+    /// compatibility types 17/18 also fails the exact unknown-attribute list.
+    #[test]
+    fn legacy_as4_path_and_aggregator_reconstruct_to_canonical_snapshot() {
+        let mut info = rib_out_info("192.0.2.1", 65001);
+        info.is_as4 = false;
+        let open = open_pdu(65500, vec![mp(Afi::Ipv4, Safi::Unicast)]);
+        let peer_open = open_pdu(65001, vec![mp(Afi::Ipv4, Safi::Unicast)]);
+        let mut capture = initiation();
+        capture.extend(peer_up(&info, &open, &peer_open));
+
+        let mut attrs = attr(attr_type::ORIGIN, &[0]);
+        let mut legacy_path = vec![2, 2];
+        legacy_path.extend(65000u16.to_be_bytes());
+        legacy_path.extend(23456u16.to_be_bytes());
+        attrs.extend(attr(attr_type::AS_PATH, &legacy_path));
+        let mut as4_path = vec![2, 2];
+        as4_path.extend(65000u32.to_be_bytes());
+        as4_path.extend(4_200_000_001u32.to_be_bytes());
+        attrs.extend(attr(attr_type::AS4_PATH, &as4_path));
+        attrs.extend(attr(attr_type::NEXT_HOP, &[192, 0, 2, 254]));
+
+        let router_id = Ipv4Addr::new(192, 0, 2, 9);
+        let mut legacy_aggregator = 23456u16.to_be_bytes().to_vec();
+        legacy_aggregator.extend_from_slice(&router_id.octets());
+        attrs.extend(attr(attr_type::AGGREGATOR, &legacy_aggregator));
+        let mut as4_aggregator = 4_200_000_001u32.to_be_bytes().to_vec();
+        as4_aggregator.extend_from_slice(&router_id.octets());
+        let mut encoded_as4_aggregator = attr(attr_type::AS4_AGGREGATOR, &as4_aggregator);
+        encoded_as4_aggregator[0] |= rustbgpd_wire::constants::attr_flags::PARTIAL;
+        attrs.extend(encoded_as4_aggregator);
+
+        capture.extend(route_monitoring(
+            &info,
+            &update_pdu(&[], &attrs, &v4_nlri([10, 0, 0, 0], 24, None)),
+        ));
+        capture.extend(route_monitoring(&info, &eor_v4()));
+
+        let (snapshot, _) = run_capture(&capture).unwrap();
+        let route: serde_json::Value = serde_json::from_str(
+            snapshot
+                .lines()
+                .find(|line| line.contains("\"record\":\"route\""))
+                .expect("one route record"),
+        )
+        .unwrap();
+        assert_eq!(
+            route["as_path"],
+            serde_json::json!([65000, 4_200_000_001u32])
+        );
+        assert_eq!(
+            route["unknown_attrs"],
+            serde_json::json!([{
+                "flags": 224,
+                "type_code": attr_type::AGGREGATOR,
+                "value": "fa56ea01c0000209"
+            }])
+        );
     }
 
     #[test]
