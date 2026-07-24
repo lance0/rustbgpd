@@ -166,6 +166,13 @@ impl AdjRibOut {
             })
     }
 
+    /// Return the number of DISTINCT unicast prefixes advertised in one
+    /// address family, independent of how many Add-Path identities carry
+    /// each prefix. [`Self::len`] counts route identities instead.
+    pub(crate) fn unicast_prefix_count(&self, afi: Afi) -> usize {
+        self.prefix_path_ids.family_len(afi)
+    }
+
     /// Return all path IDs currently advertised for a given prefix.
     #[must_use]
     pub fn path_ids_for_prefix(&self, prefix: &Prefix) -> SmallVec<[u32; 1]> {

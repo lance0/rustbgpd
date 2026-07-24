@@ -2467,6 +2467,19 @@ impl RibManager {
         let grouped_unicast_count = self.grouped_advertised_count(peer);
         let grouped_vpn_count = self.grouped_vpn_advertised_count(peer);
 
+        // Local outbound capacity policy (ADR-0113) is the LAST gate before
+        // the commit: every earlier reason this peer must not receive a route
+        // has already run, so a route another gate rejected consumes no
+        // capacity, and a prefix blocked here never reaches Adj-RIB-Out, the
+        // grouped admitted set, or the wire. Withdrawals are untouched.
+        self.enforce_outbound_prefix_limits(
+            peer,
+            grouped_unicast_count.is_some(),
+            &mut announce,
+            &mut next_hop_override,
+            &withdraw,
+        );
+
         // Derive metric work from the final post-OTC, post-exact-export
         // vectors: a rejected announce can disappear or synthesize a
         // withdrawal, and the resulting committed family is the only safe

@@ -5,6 +5,7 @@ pub use bench_support::{AdjRibOutFanoutBenchReceipt, PolicyTransitionBenchReceip
 mod distribution;
 mod graceful_restart;
 mod helpers;
+mod outbound_prefix_limits;
 mod peer_lifecycle;
 mod route_refresh;
 mod selection_deferral;
@@ -189,6 +190,11 @@ pub struct RibManager {
     unicast_prefix_peers: UnicastPrefixPeers,
     loc_rib: LocRib,
     adj_ribs_out: HashMap<IpAddr, AdjRibOut>,
+    /// Per-peer outbound unicast prefix admission state (ADR-0113). An entry
+    /// exists only for a peer with at least one configured family limit, so
+    /// today — with no operator-facing knob — this map stays empty and the
+    /// export path keeps its unlimited state shape and per-route cost.
+    outbound_prefix_limits: HashMap<IpAddr, outbound_prefix_limits::OutboundPrefixLimits>,
     outbound_peers: HashMap<IpAddr, mpsc::Sender<OutboundRouteUpdate>>,
     /// Transport session identity recorded at `PeerUp` registration,
     /// keyed like `outbound_peers`. `handle_peer_down` /
@@ -1193,6 +1199,7 @@ impl RibManager {
             unicast_prefix_peers: UnicastPrefixPeers::default(),
             loc_rib: LocRib::new(),
             adj_ribs_out: HashMap::new(),
+            outbound_prefix_limits: HashMap::new(),
             outbound_peers: HashMap::new(),
             flush_poll_budget: FLUSH_POLL_BUDGET,
             outbound_session_ids: HashMap::new(),

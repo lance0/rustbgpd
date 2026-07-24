@@ -1049,6 +1049,7 @@ mod multipath_fib;
 mod no_export;
 mod orf;
 mod orr;
+mod outbound_prefix_limits;
 mod paged_query;
 mod per_client_best;
 mod policy;

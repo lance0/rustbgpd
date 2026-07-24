@@ -458,6 +458,12 @@ impl RibManager {
             i64::try_from(self.outbound_peers.len()).unwrap_or(i64::MAX),
         );
         self.adj_ribs_out.remove(&peer);
+        // Outbound prefix admission is per-registration (ADR-0113): the
+        // admitted set and its blocking latch describe what the departing
+        // session was advertising. A reconnect starts empty and admits its
+        // initial feed up to the cap, so stale accounting can neither
+        // consume a new generation's capacity nor clear its episode.
+        self.outbound_prefix_limits.remove(&peer);
         self.peer_export_policies.remove(&peer);
         self.peer_sendable_families.remove(&peer);
         self.peer_advertised_llgr_families.remove(&peer);
