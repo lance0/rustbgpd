@@ -15,7 +15,7 @@
 
 use ipnet::{Ipv4Net, Ipv6Net};
 use prefix_trie::PrefixMap;
-use rustbgpd_wire::{Ipv4Prefix, Ipv6Prefix, Prefix};
+use rustbgpd_wire::{Afi, Ipv4Prefix, Ipv6Prefix, Prefix};
 
 /// A `Prefix`-keyed map backed by per-family prefix tries.
 #[derive(Debug)]
@@ -68,6 +68,16 @@ impl<V> FamilyPrefixMap<V> {
     #[cfg(feature = "bench-internals")]
     pub(crate) fn mem_size(&self) -> usize {
         self.v4.mem_size() + self.v6.mem_size()
+    }
+
+    /// Number of stored prefixes in one address family. Zero for an AFI this
+    /// map never keys.
+    pub(crate) fn family_len(&self, afi: Afi) -> usize {
+        match afi {
+            Afi::Ipv4 => self.v4.len(),
+            Afi::Ipv6 => self.v6.len(),
+            _ => 0,
+        }
     }
 
     pub(crate) fn get(&self, prefix: &Prefix) -> Option<&V> {
