@@ -1913,7 +1913,7 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (doctor)
 _arguments "${_arguments_options[@]}" : \
-'--output=[Output tarball path. Defaults to \`rustbgpd-doctor-<unix-seconds>.tar.gz\`]:FILE:_files' \
+'--output=[Output tarball path. Defaults to \`rustbgpd-doctor-<unix-seconds>.tar.gz\` in the first writable of\: the working directory, the daemon'\''s runtime state dir, the temp dir]:FILE:_files' \
 '--log-file=[Daemon log file to tail (last 1000 lines) into the bundle. Without it the manifest records that the daemon logs to stdout/journald]:FILE:_files' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \

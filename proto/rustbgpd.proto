@@ -1906,7 +1906,10 @@ message ExplainAdvertisedRouteResponse {
   optional uint64 update_group_id = 14;
   // True when the decision is ADVERTISE but an identical route already
   // sits in the advertised state (Adj-RIB-Out / group table), so the
-  // live path suppresses re-announcement (peer is in sync).
+  // live path suppresses re-announcement. This is local send-side state
+  // only: BGP carries no acceptance signal, so it never means the peer
+  // holds the route (a peer treating updates as withdrawn per RFC 7606
+  // stays Established with none of them).
   bool already_advertised = 15;
   // Route Distinguisher echoed back for a VPN explain; empty for
   // unicast.

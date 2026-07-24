@@ -103,6 +103,40 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`rbgp doctor` no longer fails in the container image.** The image runs as
+  a nonroot user with a working directory it cannot write, and doctor
+  defaulted its bundle to `./rustbgpd-doctor-<ts>.tar.gz` — so the tool the
+  README names for bug reports exited 1 with a bare `Permission denied` at the
+  moment someone was trying to file one. Without `--output` the bundle now
+  goes to the first writable of: the working directory (unchanged where it
+  works), the daemon's `runtime_state_dir`, the temp directory. Independently,
+  a bundle that still cannot be written now names the target path and points
+  at `--output`, and a missing or unreadable `--token-file` names the path
+  instead of surfacing a bare errno.
+- **The `already_advertised` export-explain gate no longer claims the peer
+  holds the route.** `identical route already advertised — peer is in sync`
+  overstated what BGP can tell a sender: there is no acceptance signal, so a
+  peer that treats every UPDATE as withdrawn (RFC 7606) stays Established with
+  zero routes while that line reads "in sync". The unicast, VPN, and
+  labeled-unicast rungs, the `rbgp rib advertised --explain` summary line, and
+  the `already_advertised` field documentation now scope the claim to local
+  Adj-RIB-Out state and say that remote acceptance is not observable.
+- **Route-server cookbooks give the FRR first-AS relaxation in the form that
+  works.** Both `docs/cookbook/route-server.md` and
+  `docs/cookbook/route-server-migration.md` told operators to disable
+  `enforce-first-as` on the member without saying the fix must be
+  per-neighbor; the global `no bgp enforce-first-as` alone is insufficient in
+  FRR 10.3.1, as `docs/INTEROP.md` already recorded. Both pages now give
+  `no neighbor <route-server> enforce-first-as` and describe the failure mode,
+  which is silent: the member treats the updates as withdrawn (RFC 7606),
+  stays Established, holds zero routes, and neither side logs an error.
+- **Alice-LG adapter no longer serves a fabricated preferred-route count.**
+  `examples/birdwatcher-adapter` emitted a hardcoded `"preferred": 0` on
+  `/protocols/bgp`, so a looking glass showed every member with zero preferred
+  routes regardless of the Loc-RIB. The gRPC surface exposes no per-peer best
+  count and deriving one means paging the whole Loc-RIB on every poll, so the
+  field is omitted rather than served wrong; the README records the omission.
+  `imported`, `filtered`, and `exported` are unchanged.
 - **`bgp_rib_adj_out_prefixes` no longer reads stale-nonzero through a
   graceful-restart hold window.** Entering GR tears down the peer's outbound
   registration and its Adj-RIB-Out along with it, but only the `PeerDown`

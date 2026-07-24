@@ -506,7 +506,8 @@ pub struct JsonExplainAdvertisedRoute {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub update_group_id: Option<u64>,
     /// True on an advertise decision when the identical route already
-    /// sits in the advertised state (peer in sync, nothing re-sent).
+    /// sits in the advertised state (Adj-RIB-Out in sync, nothing
+    /// re-sent). Local state only — remote acceptance is not observable.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub already_advertised: bool,
     /// Route Distinguisher for a VPN explain; absent for unicast.

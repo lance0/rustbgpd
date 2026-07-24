@@ -81,7 +81,8 @@ const STATE_DIR_DISK_WARN_BYTES: u64 = 1024 * 1024 * 1024;
 const STATE_DIR_DISK_FAIL_BYTES: u64 = 100 * 1024 * 1024;
 
 pub(crate) struct DoctorOptions<'a> {
-    /// Bundle output path. Defaults to `rustbgpd-doctor-<unix-seconds>.tar.gz`.
+    /// Bundle output path. Defaults to `rustbgpd-doctor-<unix-seconds>.tar.gz`
+    /// under [`default_bundle_dir`].
     pub output: Option<&'a Path>,
     /// Daemon log file to tail into the bundle (the daemon itself logs to
     /// stdout/journald; only an operator-named file is ever read).
@@ -156,7 +157,13 @@ impl Bundle {
     }
 
     fn write_tar_gz(&self, path: &Path, root: &str) -> Result<(), CliError> {
-        let file = fs::File::create(path)?;
+        let file = fs::File::create(path).map_err(|error| {
+            CliError::Argument(format!(
+                "cannot write support bundle to {}: {error}\n  \
+                 hint: pass --output <FILE> to write it somewhere writable",
+                path.display()
+            ))
+        })?;
         let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
         let mut tar = tar::Builder::new(encoder);
         let mtime = now_unix_seconds();
@@ -921,6 +928,22 @@ fn dir_writable(path: &Path) -> bool {
     nix::unistd::access(path, nix::unistd::AccessFlags::W_OK).is_ok()
 }
 
+/// Directory a defaulted (no `--output`) bundle lands in: the working
+/// directory when it is writable — the historical behavior — else the
+/// daemon's runtime state dir, else the temp dir. The container image
+/// runs as a nonroot user with `/` as its working directory, so an
+/// unqualified `rbgp doctor` must not fail on an unwritable cwd right
+/// when someone is trying to file a report.
+fn default_bundle_dir(cwd: &Path, state_dir: Option<&str>) -> PathBuf {
+    [
+        cwd.to_path_buf(),
+        PathBuf::from(state_dir.unwrap_or(DEFAULT_STATE_DIR)),
+    ]
+    .into_iter()
+    .find(|dir| dir_writable(dir))
+    .unwrap_or_else(std::env::temp_dir)
+}
+
 fn human_bytes(bytes: u64) -> String {
     #[allow(
         clippy::cast_precision_loss,
@@ -1114,19 +1137,6 @@ pub(crate) async fn run(
     opts: &DoctorOptions<'_>,
 ) -> Result<i32, CliError> {
     let now = now_unix_seconds();
-    let bundle_path = opts
-        .output
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(format!("rustbgpd-doctor-{now}.tar.gz")));
-    // Root directory inside the tar: the bundle file name without
-    // extensions, so `tar xzf` yields exactly one directory.
-    let root = bundle_path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .map(|n| n.trim_end_matches(".tar.gz").trim_end_matches(".tgz"))
-        .filter(|n| !n.is_empty())
-        .map_or_else(|| format!("rustbgpd-doctor-{now}"), str::to_string);
-
     let mut reporter = Reporter {
         json: opts.json,
         checks: Vec::new(),
@@ -1657,6 +1667,22 @@ pub(crate) async fn run(
                    attach its report if appropriate.",
         },
     )?;
+    // Defaulted after the state dir is known, so the fallback can use it.
+    let bundle_path = opts.output.map_or_else(
+        || {
+            default_bundle_dir(Path::new("."), state_dir.as_deref())
+                .join(format!("rustbgpd-doctor-{now}.tar.gz"))
+        },
+        PathBuf::from,
+    );
+    // Root directory inside the tar: the bundle file name without
+    // extensions, so `tar xzf` yields exactly one directory.
+    let root = bundle_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| n.trim_end_matches(".tar.gz").trim_end_matches(".tgz"))
+        .filter(|n| !n.is_empty())
+        .map_or_else(|| format!("rustbgpd-doctor-{now}"), str::to_string);
     bundle.write_tar_gz(&bundle_path, &root)?;
 
     let failed = reporter.any_fail();
@@ -2207,6 +2233,32 @@ paths = ["x"]
             assert_eq!(unwritable[0].status, CheckStatus::Fail);
             assert!(unwritable[0].detail.contains("not writable"));
             fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
+    #[test]
+    fn default_bundle_dir_falls_back_past_an_unwritable_working_directory() {
+        let cwd = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        assert_eq!(
+            default_bundle_dir(cwd.path(), Some(&state.path().display().to_string())),
+            cwd.path()
+        );
+
+        // access(W_OK) always succeeds for root, so the fallback rungs
+        // are only observable as an unprivileged user.
+        if !nix::unistd::geteuid().is_root() {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(cwd.path(), fs::Permissions::from_mode(0o555)).unwrap();
+            assert_eq!(
+                default_bundle_dir(cwd.path(), Some(&state.path().display().to_string())),
+                state.path()
+            );
+            assert_eq!(
+                default_bundle_dir(cwd.path(), Some("/nonexistent-state-dir")),
+                std::env::temp_dir()
+            );
+            fs::set_permissions(cwd.path(), fs::Permissions::from_mode(0o755)).unwrap();
         }
     }
 

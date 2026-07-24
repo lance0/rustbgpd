@@ -246,9 +246,19 @@ async fn add_path_source_explain_separates_inbound_identity_from_outbound_rank_a
     assert_eq!(explain.route_peer, Some(IpAddr::V4(source_b)));
     assert_eq!(explain.path_id, 2, "outbound rank is not the inbound ID");
     assert!(explain.already_advertised);
+    let terminal = explain.gates.last().expect("terminal adj_rib_out gate");
     assert_eq!(
-        explain.gates.last().map(|step| (step.gate, step.code)),
-        Some(("adj_rib_out", "already_advertised"))
+        (terminal.gate, terminal.code),
+        ("adj_rib_out", "already_advertised")
+    );
+    // The pass describes send-side state only: it must not claim the
+    // remote holds the route (BGP carries no acceptance signal).
+    assert!(
+        terminal
+            .detail
+            .contains("remote acceptance is not observable"),
+        "already_advertised detail overclaims remote state: {}",
+        terminal.detail
     );
 
     let legacy = query_explain_advertised_route(&tx, target, Prefix::V4(prefix)).await;

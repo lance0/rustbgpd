@@ -197,7 +197,7 @@ load_on_demand = true
 | Field | Adapter value | Limitation |
 |---|---|---|
 | status `last_reconfig` | `""` | Reconfiguration time is not tracked. |
-| protocol `routes.preferred` | `0` | Sentinel only; preferred-route count is not exposed. |
+| protocol `routes.preferred` | omitted | No per-peer Loc-RIB best count exists on the gRPC surface; deriving one would page the whole Loc-RIB on every poll. The field is left out rather than served as a wrong `0` — a client that defaults absent fields still reads zero, but nothing here asserts it. |
 | route `interface` | `""` | Interface identity is not exposed for these routes. |
 | route `metric` | `0` | Sentinel only; this is not an IGP metric. |
 | route `primary` | `false` | Sentinel only; primary-route status is not exposed. |

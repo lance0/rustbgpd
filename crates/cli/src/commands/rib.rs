@@ -1214,7 +1214,10 @@ fn print_explain_advertised(
         }
     }
     if explain.already_advertised {
-        println!("In sync: identical route already advertised - nothing would be re-sent");
+        println!(
+            "Adj-RIB-Out in sync: identical route already advertised - nothing would be \
+             re-sent; remote acceptance is not observable"
+        );
     }
     if !explain.reasons.is_empty() {
         println!("Reasons:");

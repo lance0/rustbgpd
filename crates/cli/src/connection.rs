@@ -141,7 +141,8 @@ fn load_bearer_token(token_file: Option<&str>) -> Result<Option<AsciiMetadataVal
         return Ok(None);
     };
 
-    let raw = fs::read_to_string(token_file)?;
+    let raw = fs::read_to_string(token_file)
+        .map_err(|e| CliError::Argument(format!("failed to read token file {token_file}: {e}")))?;
     let token = raw.trim_end();
     if token.is_empty() {
         return Err(CliError::Argument(format!(

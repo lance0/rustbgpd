@@ -760,7 +760,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand health" -l token-file -d 'Bear
 complete -c rbgp -n "__fish_rbgp_using_subcommand health" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand health" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand health" -s h -l help -d 'Print help (see more with \'--help\')'
-complete -c rbgp -n "__fish_rbgp_using_subcommand doctor" -l output -d 'Output tarball path. Defaults to `rustbgpd-doctor-<unix-seconds>.tar.gz`' -r -F
+complete -c rbgp -n "__fish_rbgp_using_subcommand doctor" -l output -d 'Output tarball path. Defaults to `rustbgpd-doctor-<unix-seconds>.tar.gz` in the first writable of: the working directory, the daemon\'s runtime state dir, the temp dir' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand doctor" -l log-file -d 'Daemon log file to tail (last 1000 lines) into the bundle. Without it the manifest records that the daemon logs to stdout/journald' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand doctor" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand doctor" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r

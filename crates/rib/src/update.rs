@@ -971,6 +971,7 @@ pub struct ExplainAdvertisedRoute {
     /// already sits in the advertised state (Adj-RIB-Out / group
     /// table), so the live path suppresses re-announcement. `false` on
     /// `Advertise` means the staged route differs and would be sent.
+    /// Local send-side state only — remote acceptance is not observable.
     pub already_advertised: bool,
     /// Route Distinguisher for a VPN explain; `None` for unicast.
     pub rd: Option<rustbgpd_wire::RouteDistinguisher>,
