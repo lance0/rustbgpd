@@ -63,16 +63,18 @@ analyzers, test harnesses, MRT readers, etc.
 | 9494 | Long-lived graceful restart capability |
 | 9552 | BGP-LS and BGP-LS-VPN NLRI/TLV codec with opaque preservation of unknown NLRI types and TLVs. Attribute 29 enforces optional non-transitive flags and structural TLV framing; malformed contained framing uses RFC 9552 whole-attribute discard while retaining the NLRI. The daemon consumes the codec for the ADR-0077 receive/API tranche. Typed topology read accessors live in `bgpls_topo`; local topology production remains outside the wire crate |
 | 9687 | Send Hold Timer: NOTIFICATION code 8 (`NotificationCode::SendHoldTimerExpired`, subcode always 0 per §6). Codec only — the timer itself lives in the daemon |
+| 9774 | AS_SET / AS_CONFED_SET deprecation: prohibited segment types in `AS_PATH` / `AS4_PATH` are rejected on decode with RFC 7606 treat-as-withdraw disposition, and an `AS_PATH` containing an AS_SET refuses to encode (`EncodeError::ValueOutOfRange`) |
 | 9785 §3 | DF Election preference algorithms + Don't-Preempt bit, extending the RFC 8584 DF Election Extended Community |
 | draft-abraitis-idr-addpath-paths-limit-04 | Experimental Paths-Limit capability (`PathsLimitFamily`, IANA-assigned capability code 76). The draft is expired and archived; interoperability and behavior remain experimental |
 | 10005 | Link Bandwidth Extended Community receiver subset: decode exact transitive/non-transitive types 0x00/0x40, subtype 0x04, as raw AS + IEEE-754 bytes/second; the constructor remains non-transitive type 0x40 |
 
 ### 0.15.0 compatibility note
 
-`Capability` is exhaustive, so adding `Capability::PathsLimit` makes 0.15.0 a
-breaking release for downstream exhaustive matches. Code 76 now decodes to
-typed `PathsLimitFamily` entries and is available as
-`constants::capability_code::PATHS_LIMIT`.
+0.15.0 added `Capability::PathsLimit`: code 76 now decodes to typed
+`PathsLimitFamily` entries and is available as
+`constants::capability_code::PATHS_LIMIT`. `Capability` is
+`#[non_exhaustive]` (see [Enum exhaustiveness](#enum-exhaustiveness)), so
+later registry additions land without a breaking release.
 
 ## Usage
 
