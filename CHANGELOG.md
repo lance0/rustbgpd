@@ -9,6 +9,21 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`[global] ebgp_requires_policy` configuration boundary (ADR-0112,
+  RFC 8212).** The opt-in enforcement mode now parses, defaults to `false`,
+  classifies as restart-required, and is pinned to the startup value across
+  SIGHUP: a reload logs an `ERROR`, keeps the running import/export treatment
+  of every eBGP session unchanged, and carries the operator's edit forward on
+  disk. `rustbgpd --diff` and the v1 runtime configuration transaction name
+  `[global].ebgp_requires_policy` explicitly instead of only the `[global]`
+  section, and the transaction rejects such a candidate rather than persisting
+  or partly adopting it. Enforcement itself — the reserved internal deny,
+  directional policy-presence status, and `rbgp doctor` integration — is not
+  implemented yet; setting the field `true` logs a startup warning and changes
+  no routing behavior.
+
 ### Changed
 
 - **Live edits of `max_prefix_restart_seconds` reschedule the pending
