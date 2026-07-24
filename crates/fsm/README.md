@@ -40,6 +40,13 @@ matchable: the six RFC 4271 §8 states are fixed by the protocol.
 - **`PeerConfig::paths_limit_receive_max`** — the preferred per-family receive
   limit, defaulting to `0` (disabled); `paths_limit_capabilities()` advertises
   it only when Add-Path receive is enabled
+- **`PeerConfig::min_hold_time`** — minimum hold time accepted from the peer
+  (`Option<u16>`, default `None`); when configured, an OPEN proposing a lower
+  or zero hold time is rejected with Unacceptable Hold Time
+- **`PeerConfig::required_families`** — configured families whose negotiation
+  is mandatory (`Vec<(Afi, Safi)>`, default empty); an OPEN missing any of
+  them is rejected with Unsupported Capability, and an empty list preserves
+  RFC 4760 partial-intersection behavior
 - **`graceful_restart_preserves_family`** — rustbgpd's implementation-support
   allowlist for families whose FSM/RIB lifecycle can retain GR/LLGR-stale routes
 
