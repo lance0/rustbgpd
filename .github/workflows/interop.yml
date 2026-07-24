@@ -224,7 +224,7 @@ jobs:
         # vs FRR vtysh JSON) and the policy test/stats assertions.
         run: |
           bash .github/scripts/install-grpcurl.sh
-          sudo apt-get update -y && sudo apt-get install -y jq
+          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -361,7 +361,7 @@ jobs:
       - name: Install grpcurl + jq
         run: |
           bash .github/scripts/install-grpcurl.sh
-          sudo apt-get update -y && sudo apt-get install -y jq
+          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -403,7 +403,7 @@ jobs:
       - name: Install grpcurl + jq
         run: |
           bash .github/scripts/install-grpcurl.sh
-          sudo apt-get update -y && sudo apt-get install -y jq
+          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -451,7 +451,7 @@ jobs:
       - name: Install grpcurl + jq
         run: |
           bash .github/scripts/install-grpcurl.sh
-          sudo apt-get update -y && sudo apt-get install -y jq
+          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -489,7 +489,7 @@ jobs:
       - name: Install grpcurl + jq
         run: |
           bash .github/scripts/install-grpcurl.sh
-          sudo apt-get update -y && sudo apt-get install -y jq
+          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -527,7 +527,7 @@ jobs:
       - name: Install grpcurl + jq
         run: |
           bash .github/scripts/install-grpcurl.sh
-          sudo apt-get update -y && sudo apt-get install -y jq
+          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -565,7 +565,7 @@ jobs:
       - name: Install grpcurl + jq
         run: |
           bash .github/scripts/install-grpcurl.sh
-          sudo apt-get update -y && sudo apt-get install -y jq
+          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -603,7 +603,7 @@ jobs:
       - name: Install grpcurl + jq
         run: |
           bash .github/scripts/install-grpcurl.sh
-          sudo apt-get update -y && sudo apt-get install -y jq
+          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -641,7 +641,7 @@ jobs:
       - name: Install grpcurl + jq
         run: |
           bash .github/scripts/install-grpcurl.sh
-          sudo apt-get update -y && sudo apt-get install -y jq
+          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -682,7 +682,7 @@ jobs:
         # for the per-step flap-detection assertion.
         run: |
           bash .github/scripts/install-grpcurl.sh
-          sudo apt-get update -y && sudo apt-get install -y jq
+          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -752,7 +752,7 @@ jobs:
         # jq drives the pmacct-msglog and gobmp-JSON oracle assertions.
         run: |
           bash .github/scripts/install-grpcurl.sh
-          sudo apt-get update -y && sudo apt-get install -y jq
+          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -801,7 +801,7 @@ jobs:
       - name: Install grpcurl + jq
         run: |
           bash .github/scripts/install-grpcurl.sh
-          sudo apt-get update -y && sudo apt-get install -y jq
+          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -844,7 +844,7 @@ jobs:
         # jq drives the FRR vtysh / GoBGP JSON client-view assertions.
         run: |
           bash .github/scripts/install-grpcurl.sh
-          sudo apt-get update -y && sudo apt-get install -y jq
+          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -888,7 +888,7 @@ jobs:
         # jq drives the rbgp JSON client-view assertions.
         run: |
           bash .github/scripts/install-grpcurl.sh
-          sudo apt-get update -y && sudo apt-get install -y jq
+          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -934,7 +934,7 @@ jobs:
         # jq drives the exact reconstructed-RIB and wire-receipt assertions.
         run: |
           bash .github/scripts/install-grpcurl.sh
-          sudo apt-get update -y && sudo apt-get install -y jq
+          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -975,7 +975,7 @@ jobs:
         # jq drives the bgpctl -j and rbgp JSON client-view assertions.
         run: |
           bash .github/scripts/install-grpcurl.sh
-          sudo apt-get update -y && sudo apt-get install -y jq
+          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -1099,7 +1099,7 @@ jobs:
         # grep would let a malformed match slip past.
         run: |
           bash .github/scripts/install-grpcurl.sh
-          sudo apt-get update -y && sudo apt-get install -y jq
+          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -1136,7 +1136,7 @@ jobs:
         # uptime epoch comparison in test-m34.
         run: |
           bash .github/scripts/install-grpcurl.sh
-          sudo apt-get update -y && sudo apt-get install -y jq
+          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -1173,7 +1173,7 @@ jobs:
         # for the community-presence assertion.
         run: |
           bash .github/scripts/install-grpcurl.sh
-          sudo apt-get update -y && sudo apt-get install -y jq
+          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -1210,7 +1210,7 @@ jobs:
         # the community-presence assertion.
         run: |
           bash .github/scripts/install-grpcurl.sh
-          sudo apt-get update -y && sudo apt-get install -y jq
+          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -1246,7 +1246,7 @@ jobs:
         # jq pretty-prints EVPN diagnostics and parses grpcurl JSON.
         run: |
           bash .github/scripts/install-grpcurl.sh
-          sudo apt-get update -y && sudo apt-get install -y jq
+          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -1284,7 +1284,7 @@ jobs:
         # on tagged /32, neither on untagged /32).
         run: |
           bash .github/scripts/install-grpcurl.sh
-          sudo apt-get update -y && sudo apt-get install -y jq
+          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -1362,7 +1362,7 @@ jobs:
           bash .github/scripts/install-grpcurl.sh
           curl -sL https://github.com/openconfig/gnmic/releases/download/v0.46.0/gnmic_0.46.0_Linux_x86_64.tar.gz \
             | sudo tar -xz -C /usr/local/bin gnmic
-          sudo apt-get update -y && sudo apt-get install -y jq
+          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -1402,7 +1402,7 @@ jobs:
       - name: Install grpcurl and jq
         run: |
           bash .github/scripts/install-grpcurl.sh
-          sudo apt-get update -y && sudo apt-get install -y jq
+          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -1439,7 +1439,7 @@ jobs:
           bash .github/scripts/install-grpcurl.sh
           curl -sL https://github.com/openconfig/gnmic/releases/download/v0.46.0/gnmic_0.46.0_Linux_x86_64.tar.gz \
             | sudo tar -xz -C /usr/local/bin gnmic
-          sudo apt-get update -y && sudo apt-get install -y jq
+          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -1514,7 +1514,7 @@ jobs:
         # `show bgp ipv4 unicast json` for the received-prefix-set assertions.
         run: |
           bash .github/scripts/install-grpcurl.sh
-          sudo apt-get update -y && sudo apt-get install -y jq
+          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -1552,7 +1552,7 @@ jobs:
         # counters come over plain HTTP.
         run: |
           bash .github/scripts/install-grpcurl.sh
-          sudo apt-get update -y && sudo apt-get install -y jq
+          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -1590,7 +1590,7 @@ jobs:
         # route-exchange prefixes and reads rustbgpd's RIB.
         run: |
           bash .github/scripts/install-grpcurl.sh
-          sudo apt-get update -y && sudo apt-get install -y jq
+          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
