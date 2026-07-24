@@ -4,8 +4,9 @@
 //! require raw socket options that are only available on Linux. TCP-AO
 //! (RFC 5925) uses the same boundary for `setsockopt` and `getsockopt`.
 //!
-//! These are the only `unsafe` blocks in the project — they exist because
-//! there is no safe Rust API for `TCP_MD5SIG`, `IP_MINTTL`, or TCP-AO.
+//! These are the only `unsafe` blocks in any library crate — they exist
+//! because there is no safe Rust API for `TCP_MD5SIG`, `IP_MINTTL`, or
+//! TCP-AO. See SECURITY.md for the full unsafe-code posture.
 
 use std::io;
 #[cfg(target_os = "linux")]

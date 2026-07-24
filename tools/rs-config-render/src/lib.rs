@@ -35,6 +35,8 @@
 //! enforcement must never be reachable by a path that still carries an
 //! AS_SET — the hygiene ordering guarantees it is not.
 
+#![deny(unsafe_code)]
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 

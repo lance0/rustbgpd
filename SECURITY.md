@@ -47,11 +47,25 @@ input from the network. It runs under continuous fuzzing in CI.
 - **No unbounded allocations.** All channels are bounded. Per-peer
   prefix limits enforced at insertion. UPDATE attribute sizes enforced
   at decode time.
-- **No `unsafe` code, with one scoped exception.** Every crate enforces
-  `#![deny(unsafe_code)]`. The sole exception is `crates/transport`'s
-  `socket_opts` module, which carries a documented `#[allow(unsafe_code)]` for
-  socket-option FFI (`TCP_MD5SIG`, `IP_MINTTL`, TCP-AO) that has no safe Rust
-  API; those are the only `unsafe` blocks in the tree.
+- **No `unsafe` code in shipped paths, with two scoped exceptions.** Every
+  workspace crate root carries `#![deny(unsafe_code)]`, so `unsafe` cannot enter
+  a crate without a visible, reviewed opt-out. There are two:
+  - `crates/transport`'s `socket_opts` module carries a documented
+    `#[allow(unsafe_code)]` for socket-option FFI (`TCP_MD5SIG`, `IP_MINTTL`,
+    TCP-AO) that has no safe Rust API. This is the only `unsafe` in any library
+    crate.
+  - The daemon binary's deny is `cfg_attr`-gated off when the `jemalloc` (the
+    default) or `dhat-heap` feature is on, because registering a
+    `#[global_allocator]` is itself an `unsafe` construct. Building with
+    `--no-default-features` re-arms the deny; the daemon writes no `unsafe`
+    blocks of its own under either configuration.
+
+  Test and benchmark targets are separate compilation units and are not covered
+  by a crate root's deny. Several carry justified `unsafe`: allocation-tracking
+  `GlobalAlloc` wrappers used by the memory-profile receipts (`crates/mrt`
+  benches, `crates/rib` tests, the standalone `bench/scale` harnesses) and
+  `libc` socket/netns helpers in the privileged `crates/evpn-linux` tests. None
+  of that code ships in the daemon or in any published library crate.
 - **Structured errors, not strings.** Every failure produces a
   machine-parseable event for forensic analysis.
 

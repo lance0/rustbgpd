@@ -1962,35 +1962,32 @@ branch is between features.
   neither has a test-module discount available. Keep splitting only where it
   reduces real conflict or review cost.
 - [ ] **Doc-precision + lint-policy consistency sweep (v0.41.0 review).** A
-  whole-codebase review found no correctness or security defects; the actionable
-  residue is documentation/policy drift, all low-risk:
-  - Status (2026-07-17): the ARCHITECTURE.md channel-enumeration,
-    ownership-table EVPN exception, and SECURITY.md unsafe-code-wording
-    sub-items below landed across the v0.41–v0.51 doc passes, and
-    `#![deny(unsafe_code)]` is on the event-history and cli crates. The one
-    live residue is the thiserror 1.x/2.x duplicate — upstream-blocked
-    (thiserror 1.x is pulled only by `protobuf` via `prometheus`, not by any
-    first-party crate), so it is periodic hygiene, not actionable until
-    upstream moves off it.
-  - ARCHITECTURE.md design-invariant #3 understates the intentional
-    unbounded-channel set — it names only the collision-notification channel, but
-    `bfd_runtime` (state-change fan-out), `peer_manager` (internal + session-notify),
-    `main` / `reload.rs` (config + internal-command coordinator), and
-    `transport::session::writer` (priority) all carry justified unbounded channels.
-    Re-enumerate the intentional set so the invariant stays a usable review gate.
-  - ARCHITECTURE.md ownership table: note that the EVPN originator subsystem
-    (`evpn_originator`, `evpn_l3_originator`) uses `Arc<RwLock>` generation counters
-    by design — the "no shared mutable routing state" invariant is narrowly about
-    the RIB hot path, not lower-frequency kernel-observation daemon glue.
-  - `#![deny(unsafe_code)]` is missing on `crates/event-history` (lib) and
-    `crates/cli` (bin) although CONTRIBUTING.md says "every crate"; both are
-    unsafe-free today — add for consistency + future-proofing.
-  - SECURITY.md "No unsafe code. Every crate enforces `#![deny(unsafe_code)]`"
-    overstates: `crates/transport` carries a scoped `#[allow(unsafe_code)]` on
-    `socket_opts` (TCP_MD5SIG / IP_MINTTL / TCP-AO FFI — the only unsafe in the
-    tree). Reword to acknowledge the documented exception.
-  - Optional periodic hygiene: trim the `thiserror` 1.x duplicate (1.0.69 + 2.0.18
-    both resolved) at the next dependency refresh.
+  whole-codebase review found no correctness or security defects; the residue was
+  documentation/policy drift, all low-risk. The documentation and lint-policy
+  sub-items are now closed:
+  - ARCHITECTURE.md design-invariant #3 re-enumerates the intentional
+    unbounded-channel set (collision notifications, `peer_manager` internals,
+    the `reload.rs` coordinator, the transport writer's priority channel, BFD
+    state-change fan-out), so the invariant reads as a usable review gate.
+  - The ARCHITECTURE.md ownership table is trued up against the actors at HEAD:
+    the BLACKHOLE reconciler, EVPN runtime converger, EVPN dataplane supervisor,
+    BMP manager, and event-history manager have rows; the FIB runtime's scope is
+    stated as the configured `[[fib_tables]]` rather than all netlink route
+    programming; and the EVPN originator's by-design `Arc<RwLock>` generation
+    counters are noted as outside the RIB hot-path "no locks" invariant.
+  - `#![deny(unsafe_code)]` is on every workspace crate root — the last four
+    (`examples/event-bridge`, `examples/birdwatcher-adapter`, and both
+    `tools/rs-config-render` roots) landed with this item, so CONTRIBUTING.md's
+    "every crate" is now literally true.
+  - SECURITY.md states the actual posture: the `crates/transport` `socket_opts`
+    FFI allow, the daemon binary's `cfg_attr` gate under the `jemalloc` /
+    `dhat-heap` allocator features, and the test/bench targets that carry
+    justified `unsafe` outside any shipped path.
+
+  The one live residue is the `thiserror` 1.x/2.x duplicate (1.0.69 + 2.0.18 both
+  resolved) — upstream-blocked, since 1.x is pulled only by `protobuf` via
+  `prometheus` and by no first-party crate. Periodic hygiene at a dependency
+  refresh, not actionable until upstream moves off it.
 - [x] **Retire `rustbgpctl` in favor of `rbgp` (single CLI name).** The CLI
   crate now ships only the `rbgp` binary. The old `include!` alias/shim and
   long-form binary are removed; supported docs, package artifacts, generated

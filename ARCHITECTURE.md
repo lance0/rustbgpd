@@ -115,14 +115,19 @@ Each component is the single source of truth for its domain. No overlapping auth
 
 | Component | Owns | Authoritative for |
 |-----------|------|-------------------|
-| **PeerManager** | Neighbor lifecycle, config intent | Which peers should exist and their parameters |
-| **FSM** | Protocol state transitions | What state each peer session is actually in |
-| **RIB** | Routing state | What routes exist, which is best, what to advertise |
-| **Transport** | Socket I/O, wire framing | TCP connections, message encode/decode, session runtime |
-| **FIB runtime** | Kernel forwarding state (`src/fib_runtime.rs`) | Which unicast routes are installed in Linux and their owned-state across restart; the sole owner of netlink route programming |
+| **PeerManager** | Neighbor lifecycle, config intent (`src/peer_manager`) | Which peers should exist and their parameters |
+| **FSM** | Protocol state transitions (`crates/fsm`) | What state each peer session is actually in |
+| **RibManager** | Routing state (`crates/rib`) | What routes exist, which is best, what to advertise |
+| **Transport** | Socket I/O, wire framing (`crates/transport`) | TCP connections, message encode/decode, session runtime |
+| **FIB runtime** | Kernel forwarding state (`src/fib_runtime.rs`) | Which unicast routes are installed into the configured `[[fib_tables]]` and their owned-state across restart. Owns netlink route programming for that table set only — the BLACKHOLE reconciler and the EVPN Linux dataplane own their own, disjoint kernel domains |
+| **BLACKHOLE reconciler** | RFC 7999 kernel discard routes (`src/blackhole.rs`) | Which `RTN_BLACKHOLE` rows in the main table are daemon-owned (installed this lifetime or adopted by marker at startup per ADR-0079). Deliberately separate from the FIB runtime: RTBH is a unicast/RIB feature, not part of the `[[fib_tables]]` projection |
 | **BFD actor** | BFD session liveness (`src/bfd_runtime.rs`) | Whether each BFD-tracked peer's forwarding path is up; the sole owner of BFD sockets, timers, and discriminators (drives RFC 5882 coupling) |
-| **Config transaction controller** | Transaction execution, confirmed-commit state, rollback orchestration | Which candidate TOML changes can commit atomically and when runtime config mutations are fenced |
-| **API** | Request/response adaptation | Nothing — it translates gRPC into commands and queries |
+| **EVPN runtime converger** | Live EVPN runtime model (`src/evpn_runtime_converger.rs`) | Which validated candidate EVPN runtime mutations converge, in what order, and how far the rollback ladder unwinds a failed apply (ADR-0063) |
+| **EVPN dataplane supervisor** | EVPN kernel intent (`src/evpn_dataplane.rs` → `crates/evpn-linux`) | The `DataplaneIntent` projected from EVPN best paths, and the FDB / neighbor / nexthop-group / IP-VRF state the reconcile actor owns in the kernel. The supervisor is daemon-owned glue precisely because ADR-0054 forbids `evpn-linux` from depending on `rib` or `transport` |
+| **Config transaction controller** | Transaction execution, confirmed-commit state, rollback orchestration (`src/config_transaction_control.rs`, `src/confirm_journal.rs`) | Which candidate TOML changes can commit atomically and when runtime config mutations are fenced |
+| **BMP manager** | Collector connections and monitoring feed (`crates/bmp`) | What each collector has been told: per-peer up/down, pre- and post-policy PDUs, and Loc-RIB instance state (RFC 7854 / 8671 / 9069). Unidirectional — never a routing input |
+| **Event history manager** | Durable event outbox (`crates/event-history`) | `event_id` assignment and cursor durability; producer payload bytes pass through unchanged (ADR-0072) |
+| **API** | Request/response adaptation (`crates/api`) | Nothing — it translates gRPC into commands and queries |
 | **EVPN originator** | MAC / IP-VRF route generation counters (`src/evpn_originator`, `src/evpn_l3_originator.rs`) | EVPN origination generation/sequence numbers; uses `Arc<RwLock>` by design — lower-frequency kernel-observation glue, outside the RIB hot-path "no shared mutable routing state / no locks" invariant |
 
 The API layer is explicitly *not* a source of truth. It is an adapter between gRPC callers and the authoritative components.

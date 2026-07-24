@@ -1,6 +1,8 @@
 //! CLI wrapper around the renderer library. See `README.md` for the
 //! refresh loop (`render → rustbgpd --check → swap → SIGHUP`).
 
+#![deny(unsafe_code)]
+
 use std::path::PathBuf;
 use std::process::ExitCode;
 
