@@ -132,8 +132,13 @@ impl TrackingAllocator {
 }
 
 #[cfg(feature = "snapshot-allocation-diagnostics")]
+// SAFETY: every allocation operation is forwarded to the same `Jemalloc`
+// instance without altering its pointer/layout contract. The wrapper adds only
+// allocation-free atomic bookkeeping after successful operations.
 unsafe impl GlobalAlloc for TrackingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        // SAFETY: the caller supplies a valid layout under `GlobalAlloc::alloc`;
+        // it is forwarded unchanged to the wrapped allocator.
         let pointer = unsafe { self.inner.alloc(layout) };
         if !pointer.is_null() {
             self.add_live(layout.size());
@@ -143,6 +148,8 @@ unsafe impl GlobalAlloc for TrackingAllocator {
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        // SAFETY: the caller supplies a valid layout under
+        // `GlobalAlloc::alloc_zeroed`; it is forwarded unchanged.
         let pointer = unsafe { self.inner.alloc_zeroed(layout) };
         if !pointer.is_null() {
             self.add_live(layout.size());
@@ -152,6 +159,10 @@ unsafe impl GlobalAlloc for TrackingAllocator {
     }
 
     unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        // SAFETY: the caller guarantees that `pointer` was allocated by this
+        // wrapper with `layout`. All successful allocations come from
+        // `self.inner`, so the original pointer/layout pair and new size can be
+        // forwarded to that same allocator.
         let resized = unsafe { self.inner.realloc(pointer, layout, new_size) };
         if !resized.is_null() {
             if new_size >= layout.size() {
@@ -165,6 +176,9 @@ unsafe impl GlobalAlloc for TrackingAllocator {
     }
 
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+        // SAFETY: the caller guarantees that `pointer` was allocated by this
+        // wrapper with `layout`; this wrapper delegates all allocations to
+        // `self.inner`, so the pair belongs to that allocator.
         unsafe { self.inner.dealloc(pointer, layout) };
         self.subtract_live(layout.size());
         if self.enabled.load(Ordering::Relaxed) {
@@ -879,33 +893,52 @@ fn prove_tracker_contract() {
     let shrink_layout = Layout::from_size_align(64, 8).expect("valid tracker test layout");
     let before = ALLOCATOR.live_requested_bytes.load(Ordering::Relaxed);
     let baseline = ALLOCATOR.begin_measurement();
+    // SAFETY: `layout` is non-zero and valid, and the result is checked before
+    // it is dereferenced or passed back to the same allocator.
     let pointer = unsafe { GlobalAlloc::alloc(&ALLOCATOR, layout) };
     assert!(!pointer.is_null());
+    // SAFETY: `pointer` is non-null and valid for all `layout.size()` bytes.
     unsafe { pointer.write_bytes(0x5a, layout.size()) };
+    // SAFETY: `zeroed_layout` is non-zero and valid, and the result is checked
+    // before it is read or passed back to the same allocator.
     let zeroed = unsafe { GlobalAlloc::alloc_zeroed(&ALLOCATOR, zeroed_layout) };
     assert!(!zeroed.is_null());
+    // SAFETY: `zeroed` is non-null and valid for `zeroed_layout.size()` bytes.
     let zeroed_is_clear = unsafe {
         std::slice::from_raw_parts(zeroed.cast_const(), zeroed_layout.size())
             .iter()
             .all(|byte| *byte == 0)
     };
+    // SAFETY: `pointer` came from `ALLOCATOR` with `layout`; the new size is
+    // non-zero. The result is checked before use.
     let resized = unsafe { GlobalAlloc::realloc(&ALLOCATOR, pointer, layout, 32) };
     assert!(!resized.is_null());
+    // SAFETY: successful realloc returned storage valid for 32 bytes, which
+    // includes the `layout.size()` preserved bytes read here.
     let realloc_preserved = unsafe {
         std::slice::from_raw_parts(resized.cast_const(), layout.size())
             .iter()
             .all(|byte| *byte == 0x5a)
     };
+    // SAFETY: `shrink_layout` is non-zero and valid, and the result is checked
+    // before it is dereferenced or passed back to the same allocator.
     let shrink_pointer = unsafe { GlobalAlloc::alloc(&ALLOCATOR, shrink_layout) };
     assert!(!shrink_pointer.is_null());
+    // SAFETY: `shrink_pointer` is non-null and valid for all
+    // `shrink_layout.size()` bytes.
     unsafe { shrink_pointer.write_bytes(0xa5, shrink_layout.size()) };
+    // SAFETY: `shrink_pointer` came from `ALLOCATOR` with `shrink_layout`; the
+    // new size is non-zero. The result is checked before use.
     let shrunk = unsafe { GlobalAlloc::realloc(&ALLOCATOR, shrink_pointer, shrink_layout, 16) };
     assert!(!shrunk.is_null());
+    // SAFETY: successful realloc returned storage valid for the 16 bytes read.
     let shrink_preserved = unsafe {
         std::slice::from_raw_parts(shrunk.cast_const(), 16)
             .iter()
             .all(|byte| *byte == 0xa5)
     };
+    // SAFETY: all three pointers came from `ALLOCATOR`, remain live, and are
+    // paired with the exact layouts of their current allocations.
     unsafe {
         GlobalAlloc::dealloc(
             &ALLOCATOR,
