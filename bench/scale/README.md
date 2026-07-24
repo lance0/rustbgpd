@@ -12,12 +12,14 @@ a receipt harness broken on `main`.
 | [`rrharness/`](rrharness/) | RibManager flood/churn CPU + memory profiling (manager task in isolation, folded-stack output) | `docs/perf/rebaseline-2026-07.md`, LAN-348 re-profile |
 | [`reloadstall/`](reloadstall/) | Policy-reload UPDATE-stall at route-server scale (real BGP stub clients vs a running daemon) | `docs/perf/reload-stall-2026-07.md` (LAN-333) |
 | [`route-server-1000/`](route-server-1000/) | Fixed-shape 1,000-peer rustbgpd route-server retained receipt driver | LAN-508 ([retained receipt](../../docs/perf/route-server-1000-2026-07.md)) |
+| [`outbound-prefix-limits/`](outbound-prefix-limits/) | ADR-0113 outbound unicast prefix maxima end to end: four real stub sessions against a real daemon, wire-side prefix counts under a cap, and the operator surfaces | [receipt](../../docs/perf/outbound-prefix-limits-2026-07.md) |
 
 Build (from repo root):
 
 ```text
-cd bench/scale/rrharness   && cargo build --release
-cd bench/scale/reloadstall && cargo build --release
+cd bench/scale/rrharness              && cargo build --release
+cd bench/scale/reloadstall            && cargo build --release
+cd bench/scale/outbound-prefix-limits && cargo build --release
 ```
 
 See each harness's `README.md` for its arg contract and run shapes.
