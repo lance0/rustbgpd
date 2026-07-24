@@ -591,6 +591,10 @@ message NeighborState {
   // negotiated family.
   Rfc8212PolicyStatus rfc8212_import_policy = 51;
   Rfc8212PolicyStatus rfc8212_export_policy = 52;
+  // ADR-0113 outbound unicast capacity, one row per limited family. Empty
+  // from a daemon that does not expose it and from a peer with no outbound
+  // registration; a registered peer always reports both unicast families.
+  repeated OutboundPrefixLimitState outbound_prefix_limits = 53;
 }
 
 // RFC 8212 explicit-policy status for one direction of one session
@@ -608,6 +612,25 @@ enum Rfc8212PolicyStatus {
   RFC8212_POLICY_STATUS_PRESENT = 3;
   // Enforcement applies and the reserved internal deny is installed.
   RFC8212_POLICY_STATUS_MISSING = 4;
+}
+
+// One unicast family's outbound prefix capacity for a neighbor (ADR-0113).
+message OutboundPrefixLimitState {
+  // "ipv4_unicast" or "ipv6_unicast".
+  string family = 1;
+  // Distinct prefixes currently admitted into this peer's advertised state,
+  // post-policy, post-OTC, and post-exact-export. Agrees with advertised-route
+  // queries; never the shared update-group table's count.
+  uint64 usage = 2;
+  // Configured maximum. Absence means unlimited, never zero.
+  optional uint32 limit = 3;
+  // Saturating limit - usage. Absent while the family is unlimited.
+  optional uint32 headroom = 4;
+  // Whether a blocking episode is currently open for this family.
+  bool blocking = 5;
+  // Stable reason while blocking: "outbound_prefix_limit_reached". Absent
+  // otherwise.
+  optional string reason = 6;
 }
 
 message NegotiatedSessionState {

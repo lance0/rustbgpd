@@ -831,6 +831,13 @@ pub struct Neighbor {
     /// before the session is torn down with Cease/1. Enforced
     /// independently of `max_prefixes` (ADR-0108). Unset = unlimited.
     pub max_prefixes_ipv6: Option<u32>,
+    /// Maximum distinct IPv4-unicast prefixes advertised TO this peer
+    /// (ADR-0113). Excess net-new prefixes are withheld while the session
+    /// stays established; nothing already advertised is withdrawn. Unset =
+    /// unlimited.
+    pub max_prefixes_out_ipv4: Option<NonZeroU32>,
+    /// IPv6-unicast sibling of `max_prefixes_out_ipv4` (ADR-0113).
+    pub max_prefixes_out_ipv6: Option<NonZeroU32>,
     /// Optional hold-down before one automatic restart attempt after any
     /// max-prefix shutdown. Unset preserves the fail-closed operator latch.
     pub max_prefix_restart_seconds: Option<NonZeroU32>,
@@ -987,6 +994,8 @@ impl fmt::Debug for Neighbor {
             .field("max_prefixes", &self.max_prefixes)
             .field("max_prefixes_ipv4", &self.max_prefixes_ipv4)
             .field("max_prefixes_ipv6", &self.max_prefixes_ipv6)
+            .field("max_prefixes_out_ipv4", &self.max_prefixes_out_ipv4)
+            .field("max_prefixes_out_ipv6", &self.max_prefixes_out_ipv6)
             .field(
                 "max_prefix_restart_seconds",
                 &self.max_prefix_restart_seconds,
@@ -1180,6 +1189,12 @@ pub struct PeerGroupConfig {
     /// IPv6-unicast prefix limit inherited by neighbors in this group.
     /// See the neighbor-level `max_prefixes_ipv6`.
     pub max_prefixes_ipv6: Option<u32>,
+    /// Outbound IPv4-unicast prefix maximum inherited by neighbors in this
+    /// group. See the neighbor-level `max_prefixes_out_ipv4`.
+    pub max_prefixes_out_ipv4: Option<NonZeroU32>,
+    /// Outbound IPv6-unicast prefix maximum inherited by neighbors in this
+    /// group. See the neighbor-level `max_prefixes_out_ipv6`.
+    pub max_prefixes_out_ipv6: Option<NonZeroU32>,
     /// Max-prefix restart hold-down inherited by neighbors in this group.
     /// See the neighbor-level `max_prefix_restart_seconds`.
     pub max_prefix_restart_seconds: Option<NonZeroU32>,
@@ -1281,6 +1296,8 @@ impl fmt::Debug for PeerGroupConfig {
             .field("max_prefixes", &self.max_prefixes)
             .field("max_prefixes_ipv4", &self.max_prefixes_ipv4)
             .field("max_prefixes_ipv6", &self.max_prefixes_ipv6)
+            .field("max_prefixes_out_ipv4", &self.max_prefixes_out_ipv4)
+            .field("max_prefixes_out_ipv6", &self.max_prefixes_out_ipv6)
             .field(
                 "max_prefix_restart_seconds",
                 &self.max_prefix_restart_seconds,

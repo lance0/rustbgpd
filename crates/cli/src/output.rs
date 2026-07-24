@@ -335,6 +335,26 @@ pub struct JsonNeighborDetail {
     /// (an older daemon, or a value this client does not recognize).
     pub rfc8212_import_policy: String,
     pub rfc8212_export_policy: String,
+    /// ADR-0113 outbound unicast capacity, one row per limited family.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub outbound_prefix_limits: Vec<JsonOutboundPrefixLimit>,
+}
+
+/// One unicast family's outbound prefix capacity. `limit`/`headroom` are
+/// absent while the family is unlimited rather than a synthetic zero, and
+/// `reason` carries the stable `outbound_prefix_limit_reached` only while
+/// the family is blocking.
+#[derive(Serialize)]
+pub struct JsonOutboundPrefixLimit {
+    pub family: String,
+    pub usage: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub headroom: Option<u32>,
+    pub blocking: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -1059,6 +1079,11 @@ mod tests {
                         assert_json_shape(row, nested, contract_id);
                     }
                 }
+                "outbound_prefix_limits[]" => {
+                    for row in value["outbound_prefix_limits"].as_array().unwrap() {
+                        assert_json_shape(row, nested, contract_id);
+                    }
+                }
                 "tcp_ao" => assert_json_shape(&value["tcp_ao"], nested, contract_id),
                 "tcp_ao.keys[]" => {
                     for key in value["tcp_ao"]["keys"].as_array().unwrap() {
@@ -1368,6 +1393,24 @@ mod tests {
             }],
             rfc8212_import_policy: "missing".to_string(),
             rfc8212_export_policy: "present".to_string(),
+            outbound_prefix_limits: vec![
+                JsonOutboundPrefixLimit {
+                    family: "ipv4_unicast".to_string(),
+                    usage: 5,
+                    limit: Some(8),
+                    headroom: Some(3),
+                    blocking: false,
+                    reason: None,
+                },
+                JsonOutboundPrefixLimit {
+                    family: "ipv6_unicast".to_string(),
+                    usage: 2,
+                    limit: None,
+                    headroom: None,
+                    blocking: false,
+                    reason: None,
+                },
+            ],
         };
 
         let value: Value =
@@ -1407,6 +1450,13 @@ mod tests {
         assert_eq!(value["max_prefix_headroom"], 9);
         assert_eq!(value["max_prefix_headroom_ipv4"], 3);
         assert!(value.get("max_prefix_headroom_ipv6").is_none());
+        // ADR-0113: an unlimited outbound family reports usage without
+        // inventing a numeric limit or headroom.
+        assert_eq!(value["outbound_prefix_limits"][0]["limit"], 8);
+        assert_eq!(value["outbound_prefix_limits"][0]["headroom"], 3);
+        assert_eq!(value["outbound_prefix_limits"][1]["usage"], 2);
+        assert!(value["outbound_prefix_limits"][1].get("limit").is_none());
+        assert!(value["outbound_prefix_limits"][1].get("headroom").is_none());
         assert_eq!(value["tcp_ao"]["keys"][0]["algorithm"], "hmac(sha256)");
         // Load-bearing: additive fields at either redacted TCP-AO boundary
         // must be reviewed rather than silently expanding secret exposure.

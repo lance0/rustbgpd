@@ -51,6 +51,10 @@ pub struct FibTableControlDeps {
     pub fib_cmd_tx: Option<mpsc::Sender<FibRuntimeCommand>>,
     /// Peer-manager channel — the live-config validation authority.
     pub peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
+    /// RIB-manager channel, the owner of ADR-0113 outbound prefix-limit
+    /// admission. `None` disables the prepared limit transaction (unit tests
+    /// and non-transaction consumers of these deps).
+    pub rib_tx: Option<mpsc::Sender<rustbgpd_rib::RibUpdate>>,
     /// Config-persistence channel. `None` when the daemon was started without
     /// `--config` (nothing to persist to).
     pub config_tx: Option<mpsc::Sender<ConfigEvent>>,
@@ -615,6 +619,7 @@ mod tests {
         let deps = Arc::new(FibTableControlDeps {
             fib_cmd_tx: Some(fib_tx),
             peer_mgr_tx: peer_tx,
+            rib_tx: None,
             config_tx: Some(config_tx),
             lock: Arc::new(Mutex::new(())),
             config_mutation_gate: None,
@@ -685,6 +690,7 @@ mod tests {
         let deps = Arc::new(FibTableControlDeps {
             fib_cmd_tx: Some(fib_tx),
             peer_mgr_tx: peer_tx,
+            rib_tx: None,
             config_tx: Some(config_tx),
             lock: Arc::new(Mutex::new(())),
             config_mutation_gate: None,

@@ -736,6 +736,9 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
         negotiated_session,
         rfc8212_import_policy: rfc8212_status_to_proto(info.rfc8212_import_policy).into(),
         rfc8212_export_policy: rfc8212_status_to_proto(info.rfc8212_export_policy).into(),
+        // RIB-owned (ADR-0113); the outbound query fills it in for callers
+        // that issue one.
+        outbound_prefix_limits: Vec::new(),
     }
 }
 
@@ -761,6 +764,23 @@ fn effective_distribution_mode_to_proto(
         EffectiveDistributionMode::Orr => proto::EffectiveDistributionMode::Orr,
         EffectiveDistributionMode::PerClientBest => proto::EffectiveDistributionMode::PerClientBest,
     }
+}
+
+fn outbound_prefix_limits_to_proto(
+    rows: Vec<rustbgpd_rib::OutboundPrefixLimitFamilyState>,
+) -> Vec<proto::OutboundPrefixLimitState> {
+    rows.into_iter()
+        .map(|row| proto::OutboundPrefixLimitState {
+            family: row.family,
+            usage: row.usage,
+            limit: row.limit,
+            headroom: row.headroom,
+            blocking: row.blocking,
+            reason: row
+                .blocking
+                .then(|| rustbgpd_rib::OUTBOUND_PREFIX_LIMIT_REACHED.to_string()),
+        })
+        .collect()
 }
 
 fn selection_deferral_to_proto(
@@ -1148,6 +1168,8 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             state.effective_distribution_mode =
                 effective_distribution_mode_to_proto(outbound.effective_distribution_mode).into();
             state.selection_deferral = selection_deferral_to_proto(outbound.selection_deferral);
+            state.outbound_prefix_limits =
+                outbound_prefix_limits_to_proto(outbound.outbound_prefix_limits);
             neighbors.push(state);
         }
 
@@ -1222,6 +1244,8 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         state.effective_distribution_mode =
             effective_distribution_mode_to_proto(outbound.effective_distribution_mode).into();
         state.selection_deferral = selection_deferral_to_proto(outbound.selection_deferral);
+        state.outbound_prefix_limits =
+            outbound_prefix_limits_to_proto(outbound.outbound_prefix_limits);
         Ok(Response::new(state))
     }
 
@@ -2433,6 +2457,15 @@ mod tests {
                                     blocking_waiters: 2,
                                     remaining_millis: 1_500,
                                     release_reason: String::new(),
+                                },
+                            ],
+                            outbound_prefix_limits: vec![
+                                rustbgpd_rib::OutboundPrefixLimitFamilyState {
+                                    family: "ipv4_unicast".to_string(),
+                                    usage: 3,
+                                    limit: Some(4),
+                                    headroom: Some(1),
+                                    blocking: false,
                                 },
                             ],
                         });

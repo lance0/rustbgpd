@@ -142,6 +142,11 @@ pub struct BgpMetrics {
     max_prefix_limit: IntGaugeVec,
     max_prefix_headroom: IntGaugeVec,
     max_prefix_exceeded: IntCounterVec,
+    outbound_prefix_usage: IntGaugeVec,
+    outbound_prefix_limit: IntGaugeVec,
+    outbound_prefix_headroom: IntGaugeVec,
+    outbound_prefix_blocking: IntGaugeVec,
+    outbound_prefix_blocked: IntCounterVec,
 
     // ── RIB drops ───────────────────────────────────────────────
     outbound_route_drops: IntCounterVec,
@@ -635,6 +640,54 @@ impl BgpMetrics {
                 "Remaining accepted NLRI identities before the finite max-prefix limit; absent when unlimited.",
             ),
             &["peer", "scope"],
+        )
+        .expect("valid metric definition");
+
+        // ADR-0113 outbound unicast capacity. Bounded to peer × the two
+        // limited unicast families; a per-prefix label would reproduce the
+        // unbounded state the limit exists to contain.
+        let outbound_prefix_usage = IntGaugeVec::new(
+            Opts::new(
+                "bgp_outbound_prefix_usage",
+                "Distinct prefixes admitted into this peer's advertised unicast state.",
+            ),
+            &["peer", "family"],
+        )
+        .expect("valid metric definition");
+
+        let outbound_prefix_limit = IntGaugeVec::new(
+            Opts::new(
+                "bgp_outbound_prefix_limit",
+                "Finite configured outbound prefix maximum; absent when unlimited.",
+            ),
+            &["peer", "family"],
+        )
+        .expect("valid metric definition");
+
+        let outbound_prefix_headroom = IntGaugeVec::new(
+            Opts::new(
+                "bgp_outbound_prefix_headroom",
+                "Remaining admissible prefixes before the finite outbound maximum; absent when unlimited.",
+            ),
+            &["peer", "family"],
+        )
+        .expect("valid metric definition");
+
+        let outbound_prefix_blocking = IntGaugeVec::new(
+            Opts::new(
+                "bgp_outbound_prefix_blocking",
+                "1 while an outbound prefix-limit blocking episode is open for this peer and family.",
+            ),
+            &["peer", "family"],
+        )
+        .expect("valid metric definition");
+
+        let outbound_prefix_blocked = IntCounterVec::new(
+            Opts::new(
+                "bgp_outbound_prefix_blocked_total",
+                "Net-new prefixes dropped from a peer's outbound vector by its configured maximum.",
+            ),
+            &["peer", "family"],
         )
         .expect("valid metric definition");
 
@@ -1737,6 +1790,21 @@ impl BgpMetrics {
             .register(Box::new(max_prefix_exceeded.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(outbound_prefix_usage.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(outbound_prefix_limit.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(outbound_prefix_headroom.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(outbound_prefix_blocking.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(outbound_prefix_blocked.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(outbound_route_drops.clone()))
             .expect("metric not already registered");
         registry
@@ -2115,6 +2183,11 @@ impl BgpMetrics {
             max_prefix_limit,
             max_prefix_headroom,
             max_prefix_exceeded,
+            outbound_prefix_usage,
+            outbound_prefix_limit,
+            outbound_prefix_headroom,
+            outbound_prefix_blocking,
+            outbound_prefix_blocked,
             outbound_route_drops,
             inbound_rib_backpressure,
             hold_timer_rearmed_pending_input,
@@ -2277,6 +2350,11 @@ impl BgpMetrics {
         Self::reap_peer_series_from_vec(&self.max_prefix_limit, peer);
         Self::reap_peer_series_from_vec(&self.max_prefix_headroom, peer);
         Self::reap_peer_series_from_vec(&self.max_prefix_exceeded, peer);
+        Self::reap_peer_series_from_vec(&self.outbound_prefix_usage, peer);
+        Self::reap_peer_series_from_vec(&self.outbound_prefix_limit, peer);
+        Self::reap_peer_series_from_vec(&self.outbound_prefix_headroom, peer);
+        Self::reap_peer_series_from_vec(&self.outbound_prefix_blocking, peer);
+        Self::reap_peer_series_from_vec(&self.outbound_prefix_blocked, peer);
         Self::reap_peer_series_from_vec(&self.outbound_route_drops, peer);
         Self::reap_peer_series_from_vec(&self.rib_outbound_registration_replaced, peer);
         Self::reap_peer_series_from_vec(&self.rib_stale_peer_down_ignored, peer);
@@ -2769,6 +2847,62 @@ impl BgpMetrics {
         Self::reap_peer_series_from_vec(&self.max_prefix_usage, peer);
         Self::reap_peer_series_from_vec(&self.max_prefix_limit, peer);
         Self::reap_peer_series_from_vec(&self.max_prefix_headroom, peer);
+    }
+
+    /// Publish one peer's outbound unicast capacity for one family
+    /// (ADR-0113). Mirrors [`Self::set_max_prefix_capacity`]: an unlimited
+    /// family keeps usage and blocking but removes limit and headroom
+    /// rather than exporting a stale finite value.
+    pub fn set_outbound_prefix_capacity(
+        &self,
+        peer: &str,
+        family: &str,
+        usage: usize,
+        limit: Option<u32>,
+        blocking: bool,
+    ) {
+        debug_assert!(matches!(family, "ipv4_unicast" | "ipv6_unicast"));
+        let labels = [peer, family];
+        let usage = i64::try_from(usage).unwrap_or(i64::MAX);
+        self.outbound_prefix_usage
+            .with_label_values(&labels)
+            .set(usage);
+        self.outbound_prefix_blocking
+            .with_label_values(&labels)
+            .set(i64::from(blocking));
+        if let Some(limit) = limit {
+            self.outbound_prefix_limit
+                .with_label_values(&labels)
+                .set(i64::from(limit));
+            self.outbound_prefix_headroom
+                .with_label_values(&labels)
+                .set(i64::from(
+                    limit.saturating_sub(u32::try_from(usage).unwrap_or(u32::MAX)),
+                ));
+        } else {
+            let _ = self.outbound_prefix_limit.remove_label_values(&labels);
+            let _ = self.outbound_prefix_headroom.remove_label_values(&labels);
+        }
+    }
+
+    /// Count net-new prefixes one batch dropped for a peer and family.
+    /// Deliberately carries no prefix label: the blocked set is exactly the
+    /// unbounded quantity ADR-0113 refuses to inventory.
+    pub fn record_outbound_prefix_blocked(&self, peer: &str, family: &str, blocked: u64) {
+        debug_assert!(matches!(family, "ipv4_unicast" | "ipv6_unicast"));
+        self.outbound_prefix_blocked
+            .with_label_values(&[peer, family])
+            .inc_by(blocked);
+    }
+
+    /// Remove every outbound capacity gauge owned by one live session.
+    /// The blocked-attempt counter is durable peer history and survives, as
+    /// `max_prefix_exceeded` does across an inbound teardown.
+    pub fn reap_outbound_prefix_capacity(&self, peer: &str) {
+        Self::reap_peer_series_from_vec(&self.outbound_prefix_usage, peer);
+        Self::reap_peer_series_from_vec(&self.outbound_prefix_limit, peer);
+        Self::reap_peer_series_from_vec(&self.outbound_prefix_headroom, peer);
+        Self::reap_peer_series_from_vec(&self.outbound_prefix_blocking, peer);
     }
 
     /// Record an outbound route update drop for a peer.
@@ -5413,6 +5547,8 @@ mod tests {
         m.set_rfc8212_missing_policy(peer, true, true);
         m.set_peer_update_group(peer, 1);
         m.set_max_prefix_capacity(peer, "aggregate", 80, Some(100));
+        m.set_outbound_prefix_capacity(peer, "ipv4_unicast", 5, Some(8), true);
+        m.record_outbound_prefix_blocked(peer, "ipv4_unicast", 2);
         m.record_max_prefix_exceeded(peer);
         m.record_outbound_route_drop(peer);
         m.record_inbound_rib_backpressure(peer);
@@ -5477,8 +5613,8 @@ mod tests {
         let m = BgpMetrics::new();
         populate_all_peer_families(&m, "10.0.0.1");
         populate_all_peer_families(&m, "10.0.0.2");
-        // 45 peer-labeled families; state transitions hold two series.
-        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 45);
+        // 50 peer-labeled families; state transitions hold two series.
+        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 50);
 
         m.reap_peer_series("10.0.0.1");
 
@@ -5488,7 +5624,7 @@ mod tests {
             "peer-labeled families not reaped: {leftovers:?}"
         );
         // The other peer's series are untouched.
-        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 45);
+        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 50);
     }
 
     /// Load-bearing finite/unlimited proof: removing either finite gauge
@@ -5548,6 +5684,50 @@ mod tests {
         assert!(!text.contains("bgp_max_prefix_limit"));
         assert!(!text.contains("bgp_max_prefix_headroom"));
         assert!(text.contains(r#"bgp_max_prefix_exceeded_total{peer="10.0.0.1:179"} 1"#));
+    }
+
+    /// ADR-0113: a family that becomes unlimited must DROP its numeric
+    /// series, and teardown must reap the gauges while the blocked-attempt
+    /// counter survives as peer history.
+    ///
+    /// Load-bearing break: writing 0 instead of removing leaves a finite
+    /// maximum of zero in the exposition, which reads as "advertise nothing".
+    #[test]
+    fn outbound_prefix_capacity_drops_numeric_series_when_a_family_goes_unlimited() {
+        let m = BgpMetrics::new();
+        let peer = "10.0.0.1";
+        m.set_outbound_prefix_capacity(peer, "ipv4_unicast", 5, Some(8), true);
+        m.record_outbound_prefix_blocked(peer, "ipv4_unicast", 3);
+        let text = gather_text(&m);
+        assert!(
+            text.contains(r#"bgp_outbound_prefix_limit{family="ipv4_unicast",peer="10.0.0.1"} 8"#)
+        );
+        assert!(
+            text.contains(
+                r#"bgp_outbound_prefix_headroom{family="ipv4_unicast",peer="10.0.0.1"} 3"#
+            )
+        );
+        assert!(
+            text.contains(
+                r#"bgp_outbound_prefix_blocking{family="ipv4_unicast",peer="10.0.0.1"} 1"#
+            )
+        );
+
+        m.set_outbound_prefix_capacity(peer, "ipv4_unicast", 9, None, false);
+        let text = gather_text(&m);
+        assert!(!text.contains("bgp_outbound_prefix_limit{"));
+        assert!(!text.contains("bgp_outbound_prefix_headroom{"));
+        assert!(
+            text.contains(r#"bgp_outbound_prefix_usage{family="ipv4_unicast",peer="10.0.0.1"} 9"#)
+        );
+
+        m.reap_outbound_prefix_capacity(peer);
+        let text = gather_text(&m);
+        assert!(!text.contains("bgp_outbound_prefix_usage{"));
+        assert!(!text.contains("bgp_outbound_prefix_blocking{"));
+        assert!(text.contains(
+            r#"bgp_outbound_prefix_blocked_total{family="ipv4_unicast",peer="10.0.0.1"} 3"#
+        ));
     }
 
     #[test]

@@ -11,6 +11,30 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Per-peer outbound unicast prefix limits (ADR-0113).** New
+  `max_prefixes_out_ipv4` / `max_prefixes_out_ipv6` on `[[neighbors]]` and peer
+  groups bound how much of the table one client's export policy can grow its
+  advertised state to. A neighbor value overrides its group, an absent value
+  inherits, and accepted dynamic children inherit their configured group's
+  effective values. Excess net-new prefixes are withheld while the session
+  stays Established — nothing already advertised is withdrawn, no NOTIFICATION
+  is sent, and slots count distinct prefixes, so every Add-Path identity for
+  one NLRI shares one. Only IPv4- and IPv6-unicast are in scope. Edits are live
+  and transactional: adding or lowering a maximum is accepted only when every
+  affected live peer is already at or below the candidate, and an over-limit
+  family rejects the whole edit with the peer, family, current usage, and
+  requested maximum rather than pruning an existing view; a valid raise or
+  removal schedules one coalesced, family-scoped resync. Commit-confirmed
+  transactions may only tighten, because their automatic undo can only loosen.
+  `rbgp neighbor <addr>` (human and JSON) and the neighbor API report one row
+  per unicast family — usage, optional maximum, optional headroom, blocking
+  state, and the stable reason `outbound_prefix_limit_reached` — and
+  Prometheus exposes `bgp_outbound_prefix_usage`, `bgp_outbound_prefix_limit`,
+  `bgp_outbound_prefix_headroom`, `bgp_outbound_prefix_blocking`, and
+  `bgp_outbound_prefix_blocked_total`, labelled by peer and family only. An
+  episode logs once when it opens and once when recovery proves nothing is
+  still withheld, never per prefix.
+
 - **`[global] ebgp_requires_policy` configuration boundary (ADR-0112,
   RFC 8212).** The opt-in enforcement mode now parses, defaults to `false`,
   classifies as restart-required, and is pinned to the startup value across

@@ -195,6 +195,9 @@ pub struct RibManager {
     /// today — with no operator-facing knob — this map stays empty and the
     /// export path keeps its unlimited state shape and per-route cost.
     outbound_prefix_limits: HashMap<IpAddr, outbound_prefix_limits::OutboundPrefixLimits>,
+    /// Resolver tables, prepared-transaction slot, admission epoch, and
+    /// coalesced family-scoped recovery intent for those limits (ADR-0113).
+    outbound_limit_control: outbound_prefix_limits::OutboundLimitControl,
     outbound_peers: HashMap<IpAddr, mpsc::Sender<OutboundRouteUpdate>>,
     /// Transport session identity recorded at `PeerUp` registration,
     /// keyed like `outbound_peers`. `handle_peer_down` /
@@ -1200,6 +1203,7 @@ impl RibManager {
             loc_rib: LocRib::new(),
             adj_ribs_out: HashMap::new(),
             outbound_prefix_limits: HashMap::new(),
+            outbound_limit_control: outbound_prefix_limits::OutboundLimitControl::default(),
             outbound_peers: HashMap::new(),
             flush_poll_budget: FLUSH_POLL_BUDGET,
             outbound_session_ids: HashMap::new(),
@@ -1527,6 +1531,7 @@ impl RibManager {
             | RibUpdate::SetPeerPolicyContext { .. }
             | RibUpdate::ReplacePeerExportPolicy { .. }
             | RibUpdate::ReplacePeerExportPolicies { .. }
+            | RibUpdate::ApplyOutboundPrefixLimits { .. }
             | RibUpdate::RefreshPeerOutbound { .. }
             | RibUpdate::RouteRefreshRequest { .. } => self.advance_advertised_pages(),
             RibUpdate::PeerUp { .. }
@@ -1615,6 +1620,10 @@ impl RibManager {
     /// state and the dirty flag are committed/cleared only after a
     /// successful send, and withheld peers are not touched at all.
     fn resync_dirty_peers_bounded(&mut self) -> bool {
+        // ADR-0113 capacity recovery is family-scoped and already coalesced,
+        // so it runs to completion here rather than sharing the peer ring:
+        // at most one bounded re-derive per peer and limited family.
+        let recovered = self.drain_outbound_limit_recovery();
         // Peers whose outbound channel is gone can never resync: drop them
         // before selecting the slice, so a backlog of dead sessions (e.g.
         // after shutdown tore the TCP sessions down) quiesces in one cheap
@@ -1659,7 +1668,7 @@ impl RibManager {
             let Some(&last) = ring.last() else {
                 // Nothing unattempted remains: any peers still dirty failed
                 // their send this tick and wait for the ordinary retry.
-                return false;
+                return recovered;
             };
             self.dirty_resync_cursor = Some(last);
             attempted.extend(ring.iter().copied());
@@ -1673,7 +1682,7 @@ impl RibManager {
                 .iter()
                 .any(|peer| !attempted.contains(peer));
             if !unattempted_remain {
-                return false;
+                return recovered;
             }
             if poll_start.elapsed() >= self.flush_poll_budget {
                 return true;
@@ -2262,6 +2271,14 @@ impl RibManager {
             RibUpdate::QueryExportPolicyTermHits { peer, reply } => {
                 self.handle_query_export_policy_term_hits(peer, reply);
             }
+            RibUpdate::PrepareOutboundPrefixLimits { txn, config, reply } => {
+                self.handle_prepare_outbound_prefix_limits(txn, config, reply);
+            }
+            RibUpdate::ApplyOutboundPrefixLimits {
+                txn,
+                activate,
+                reply,
+            } => self.handle_apply_outbound_prefix_limits(txn, activate, reply),
             RibUpdate::ReplacePeerExportPolicy {
                 peer,
                 export_policy,

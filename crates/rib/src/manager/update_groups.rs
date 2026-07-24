@@ -2659,12 +2659,22 @@ impl RibManager {
                 // VPN-groupable peer, VPN) advertised state becomes
                 // group-owned (captured in the baseline); other families
                 // stay per-peer.
+                // ADR-0113: the private prefix index is a limited peer's
+                // admitted set, and it is about to be cleared — transfer that
+                // ownership into the bounded member set first.
+                self.carry_outbound_admitted_across_regroup(peer, true);
                 if let Some(rib_out) = self.adj_ribs_out.get_mut(&peer) {
                     rib_out.clear_unicast();
                     if vpn_groupable {
                         rib_out.clear_vpn();
                     }
                 }
+            }
+            if prev_gid.is_some() && new_gid.is_none() {
+                // Leaving for the per-peer path: the private Adj-RIB-Out is
+                // re-seeded below and becomes authoritative again, so the
+                // bounded member set is released rather than double-counted.
+                self.carry_outbound_admitted_across_regroup(peer, false);
             }
             if let Some(gid) = new_gid {
                 self.join_group(gid, peer);
@@ -3362,6 +3372,7 @@ impl RibManager {
             self.peer_per_client_best.contains(&peer),
             orr_resolved,
         );
+        let outbound_prefix_limits = self.outbound_prefix_limit_rows(peer);
         let _ = reply.send(PeerOutboundState {
             update_group,
             effective_distribution_mode,
@@ -3369,6 +3380,7 @@ impl RibManager {
                 .selection_deferral
                 .as_ref()
                 .map_or_else(Vec::new, |selection| selection.peer_snapshot(peer)),
+            outbound_prefix_limits,
         });
     }
 }

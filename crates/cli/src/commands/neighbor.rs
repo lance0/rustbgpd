@@ -2,8 +2,8 @@ use crate::connection::Connection;
 use crate::error::CliError;
 use crate::output::{
     self, JsonNegotiatedGracefulRestart, JsonNegotiatedSession, JsonNeighbor, JsonNeighborDetail,
-    JsonPathsLimit, JsonSelectionDeferralFamily, JsonTcpAoKeyState, JsonTcpAoState,
-    JsonUpdateGroupComparison,
+    JsonOutboundPrefixLimit, JsonPathsLimit, JsonSelectionDeferralFamily, JsonTcpAoKeyState,
+    JsonTcpAoState, JsonUpdateGroupComparison,
 };
 use crate::proto::neighbor_service_client::NeighborServiceClient;
 use crate::proto::{
@@ -301,6 +301,18 @@ pub async fn show(
                 .collect(),
             rfc8212_import_policy: rfc8212_policy_status_label(n.rfc8212_import_policy).to_string(),
             rfc8212_export_policy: rfc8212_policy_status_label(n.rfc8212_export_policy).to_string(),
+            outbound_prefix_limits: n
+                .outbound_prefix_limits
+                .iter()
+                .map(|row| JsonOutboundPrefixLimit {
+                    family: row.family.clone(),
+                    usage: row.usage,
+                    limit: row.limit,
+                    headroom: row.headroom,
+                    blocking: row.blocking,
+                    reason: row.reason.clone(),
+                })
+                .collect(),
         };
         output::print_json_pretty(&out)?;
     } else {
@@ -587,6 +599,27 @@ pub async fn show(
                     )
                 };
                 println!("  AFI {}/SAFI {} — {state}", row.afi, row.safi);
+            }
+        }
+        if !n.outbound_prefix_limits.is_empty() {
+            println!("Outbound Prefix Limits:");
+            for row in &n.outbound_prefix_limits {
+                // Unlimited prints as `unlimited`, never a synthetic 0, and a
+                // blocking family names the stable reason it is withholding.
+                let capacity = match (row.limit, row.headroom) {
+                    (Some(limit), Some(headroom)) => {
+                        format!("limit={limit}; headroom={headroom}")
+                    }
+                    _ => "limit=unlimited".to_string(),
+                };
+                let blocking = row
+                    .reason
+                    .as_deref()
+                    .map_or_else(String::new, |reason| format!("; blocking={reason}"));
+                println!(
+                    "  {:<14} usage={}; {capacity}{blocking}",
+                    row.family, row.usage
+                );
             }
         }
         println!("Flap Count:            {}", n.flap_count);

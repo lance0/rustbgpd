@@ -1882,6 +1882,24 @@
           "format": "uint32",
           "minimum": 0
         },
+        "max_prefixes_out_ipv4": {
+          "description": "Maximum distinct IPv4-unicast prefixes advertised TO this peer\n(ADR-0113). Excess net-new prefixes are withheld while the session\nstays established; nothing already advertised is withdrawn. Unset =\nunlimited.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 1
+        },
+        "max_prefixes_out_ipv6": {
+          "description": "IPv6-unicast sibling of `max_prefixes_out_ipv4` (ADR-0113).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 1
+        },
         "md5_password": {
           "description": "TCP MD5 signature password (RFC 2385).",
           "type": [
@@ -2305,6 +2323,24 @@
           ],
           "format": "uint32",
           "minimum": 0
+        },
+        "max_prefixes_out_ipv4": {
+          "description": "Outbound IPv4-unicast prefix maximum inherited by neighbors in this\ngroup. See the neighbor-level `max_prefixes_out_ipv4`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 1
+        },
+        "max_prefixes_out_ipv6": {
+          "description": "Outbound IPv6-unicast prefix maximum inherited by neighbors in this\ngroup. See the neighbor-level `max_prefixes_out_ipv6`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 1
         },
         "md5_password": {
           "description": "TCP MD5 signature password (RFC 2385) inherited by neighbors in\nthis group.",
