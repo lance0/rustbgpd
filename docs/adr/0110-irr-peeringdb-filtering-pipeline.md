@@ -164,9 +164,9 @@ never merged.
 ### Capability checklist: arouteserver features → rustbgpd primitives
 
 What the generated configuration needs from the daemon, axis by axis from
-arouteserver's supported-speakers matrix. "In flight" rows assume the
-control-community and next-hop-ownership work currently being implemented
-lands (ADR-0107 and the community-based announcement-control track).
+arouteserver's supported-speakers matrix. Status reflects current daemon and
+renderer truth separately where the daemon primitive ships but the renderer
+still refuses an untranslated mode.
 
 | arouteserver feature | rustbgpd primitive | Status |
 |---|---|---|
@@ -177,19 +177,19 @@ lands (ADR-0107 and the community-based announcement-control track).
 | RPKI ROA validation via RTR (RFC 6811/8097) | `[rpki.cache_servers]`, `route.rpki == valid\|invalid\|not-found`, `OV_*` ext-community tagging | Shipped |
 | RPKI ROAs merged as route objects | generator-side (arouteserver does the merge) | N/A to daemon |
 | Max-prefix, per client per family | `max_prefixes_ipv4`/`_ipv6` (+aggregate), Cease/1 with RFC 4486 data | Shipped (ADR-0108), including ARouteServer's OpenBGPD-style timed `restart` action with checked minute-to-second conversion |
-| NEXT_HOP enforcement, `strict` | pre-policy ownership gate | In flight (ADR-0107 strict pilot) |
+| NEXT_HOP enforcement, `strict` | pre-policy ownership gate | Shipped (`next_hop_ownership = "strict_peer"`; ADR-0107) |
 | NEXT_HOP enforcement, `same-as` | fleet inventory mode | **Gap:** explicitly deferred by ADR-0107 until the inventory exists; renderer must reject `next_hop.policy: same-as` until then |
 | Max AS_PATH length | `match_as_path_length_le` / `route.as-path.len` | Shipped |
 | Invalid/private/bogon ASNs, transit-free ASNs, never-via-RS ASNs (PeeringDB) | generated `asn-set` + `route.as-path contains` terms | Shipped substrate; sets are generated content |
 | Bogon prefixes | generated `prefix-set` (hygiene example already ships one) | Shipped substrate |
 | Reject-AS_SET segments | `route.as-path matches "\\{"` hygiene term | Shipped |
-| Control communities: announce/do-not-announce/prepend to any/peer; NO_EXPORT/NO_ADVERTISE add | community-based announcement control | In flight (parallel track); scalable form is the emit-time filter sketched in ADR-0101 Decision 3 |
+| Control communities: announce/do-not-announce/prepend to any/peer; NO_EXPORT/NO_ADVERTISE add | community-based announcement control | Shipped: standard and large announce/suppress/override forms, large-community prepend, egress scrub, and route-granular grouped sharing; policy can add the well-known communities |
 | RTT-based communities | none — no RTT source in the daemon | **Permanent reject** (recorded in ADR-0101); renderer errors if the site config uses them |
 | Informational communities (IRRDB pass/fail tags, custom) | rpol `add community`/`large-community`/`ext-community` | Shipped |
 | Reject policy `reject` | default-reject term tail | Shipped |
-| Reject policy `tag` (keep, low pref, reason community) | `set local-pref` + `add community`, no reject | Expressible today |
-| Reject policy `tag_and_reject` (BIRD-only; feeds Alice-LG) | reject-reason retention for the looking-glass surface | **Gap:** tracked on the route-server adoption track (explain ladder already computes the reasons); renderer supports `reject` and `tag` meanwhile |
-| BLACKHOLE handling (RFC 7999) + propagation control | `honor_blackhole`, policy next-hop rewrite; per-client propagation via control communities | Shipped core; propagation control rides the in-flight community track. ADR-0107 makes BLACKHOLE explicitly not an ownership bypass |
+| Reject policy `tag` (keep, low pref, reason community) | `set local-pref` + `add community`, no reject | Expressible in daemon policy; renderer still refuses this mode until its tag translation semantics are defined |
+| Reject policy `tag_and_reject` (BIRD-only; feeds Alice-LG) | native reject-reason retention plus renderer reason-community translation | Native bounded retention, `PolicyService.ListRejectedRoutes`, CLI, and the Birdwatcher filtered view are shipped; the separate noexport view is backed by export-explain truth; renderer still refuses `tag` and `tag_and_reject` until the community translation semantics exist |
+| BLACKHOLE handling (RFC 7999) + propagation control | `honor_blackhole`, policy next-hop rewrite; per-client propagation via control communities | Shipped, including control-community propagation. ADR-0107 makes BLACKHOLE explicitly not an ownership bypass |
 | GRACEFUL_SHUTDOWN recv (RFC 8326) | `honor_graceful_shutdown` | Shipped |
 | `--perform-graceful-shutdown` of the RS itself | generator emits a temporary config; daemon needs nothing new | N/A to daemon |
 | ADD_PATH (RFC 7911) | `add_path` per neighbor/group | Shipped |
@@ -199,10 +199,11 @@ lands (ADR-0107 and the community-based announcement-control track).
 | Client blacklists | omit neighbor from generated TOML | Trivial |
 | Operator local-customization hooks (`.local` files) | rpol `import` + `rpol_roots` for policy; **TOML has no include** — the renderer owns the whole TOML and must provide merge-in points itself | Design point for the renderer, not a daemon gap |
 
-Summary: after the two in-flight tracks land, every load-bearing axis is
-covered by shipped primitives except two bounded items — NEXT_HOP same-AS
-(ADR-0107 deferral, renderer-rejected until then), and looking-glass reject-reason
-retention (separate adoption-track item). Neither blocks a pilot; active ceilings remain accepted-route-only.
+Summary: the daemon primitives needed for a pilot are shipped except the
+explicitly deferred NEXT_HOP same-AS inventory mode. The renderer remains
+fail-closed on `tag` and `tag_and_reject` because their translation semantics
+are not implemented. The external IXP pilot and optional upstream contribution
+are still pending; active ceilings remain accepted-route-only.
 
 ### Delivery plan
 
@@ -212,11 +213,11 @@ retention (separate adoption-track item). Neither blocks a pilot; active ceiling
    template-context` output, emit `config.toml` + per-client `.rpol`
    (basic filters, IRR prefix/origin sets, max-prefix, RPKI knobs,
    `reject`/`tag` policies), refuse unsupported knobs loudly
-   (RTT communities, `same-as`, `tag_and_reject`), fingerprint the
+   (RTT communities, `same-as`, `tag`, `tag_and_reject`), fingerprint the
    consumed context shape, abort on empty/implausible sets, write the
    refresh receipt. *Delivered: `tools/rs-config-render/` (reject
-   policy only; `tag` is refused pending the reject-reason wiring
-   below).*
+   policy only; `tag` and `tag_and_reject` are refused pending renderer
+   translation semantics).*
 2. Refresh-loop cookbook: cron cadence, `--check` gate, SIGHUP,
    fail-stale semantics, staleness alerting; extends the existing
    route-server example. *Delivered:
@@ -227,7 +228,9 @@ retention (separate adoption-track item). Neither blocks a pilot; active ceiling
    drives both a BIRD instance (via arouteserver proper) and rustbgpd
    (via the renderer); a canned announcement set must produce identical
    accept/reject verdicts across both, with the daemon's explain output
-   naming the generated term for every rejection.
+   naming the generated term for every rejection. *Delivered: M90 proves
+   11/11 verdict parity, exact generated policy/term attribution, and a
+   red-producing policy mutation.*
 4. Overlay/dataset freshness observability: expose generation timestamp
    and age for reloaded policy artifacts, so "pipeline stuck" is a
    metric, not a surprise. *Delivered:*
@@ -238,9 +241,9 @@ retention (separate adoption-track item). Neither blocks a pilot; active ceiling
    alert expressions in `OPERATIONS.md` ("Policy artifact
    freshness").
 
-**Phase 2 — parity and upstream (after a pilot transcript exists):**
-reject-reason retention wiring for the
-looking-glass surface; offer the template package + builder upstream.
+**Phase 2 — external proof and upstream:** run the still-pending IXP pilot,
+retain its transcript, then optionally offer the proven template package and
+builder upstream.
 
 **Phase 3 — demand-gated:** bgpq4-JSON→rpol native converter; PeeringDB
 max-prefix autofetch; NEXT_HOP same-AS once the ADR-0107 inventory
@@ -266,10 +269,10 @@ exists.
 - The project takes a generate-time dependency on arouteserver/bgpq4 —
   the same dependency every incumbent deployment already carries — and a
   fingerprint check absorbs `template-context` shape drift.
-- The four named gaps get an explicit home instead of hiding: one in
-  phase 1 (origin accessor), two riding existing ADR deferral registers
-  (ADR-0107 same-AS, ADR-0108 restart action), one on the adoption track
-  (reject-reason retention).
+- The residual gaps stay explicit: ADR-0107 same-AS remains deferred;
+  renderer `tag` and `tag_and_reject` translation remains fail-closed;
+  external pilot/upstream work remains pending; native ingestion remains
+  demand-gated.
 - Security boundary is explicit: external registry data enters only as
   generated sets behind a validating renderer and the daemon's
   parse-then-swap gate; a compromised or empty upstream answer can
@@ -292,5 +295,5 @@ exists.
 - [ADR-0101](0101-route-server-profile.md) — route-server profile,
   arouteserver-target deferral and RTT-community reject
 - [ADR-0107](0107-route-server-next-hop-ownership.md) — NEXT_HOP
-  ownership (strict pilot in flight; same-AS deferred)
+  ownership (`strict_peer` shipped; same-AS deferred)
 - [ADR-0108](0108-per-family-max-prefix-limits.md) — per-family max-prefix and timed restart
