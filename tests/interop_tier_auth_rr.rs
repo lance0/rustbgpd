@@ -62,16 +62,29 @@ const TOPOLOGIES: &[&str] = &[
     "m92-gobgp-v47-rs-differential",
     "m93-required-families-bird",
 ];
+// Configs deliberately held on `enforcement = "legacy"`. Each states its own
+// reason at its `[security.grpc]` block; the tags below are the short form.
+// Adding an entry means recording the reason in the config too.
 const LEGACY_ALLOWLIST: &[&str] = &[
+    // no gRPC listener to govern
     "tests/interop/configs/rustbgpd-frr-badopen.toml",
+    // driver and soak call grpcurl directly, uncredentialed
     "tests/interop/configs/rustbgpd-m33-scale.toml",
+    // asserted through FRR, bridge fdb, and Prometheus
     "tests/interop/configs/rustbgpd-m37-originator.toml",
+    // plaintext grpcurl driver; shared with the Gate 9 soak
     "tests/interop/configs/rustbgpd-m39-pe1.toml",
+    // operator token on pe1/pe2 only; vtep read over plain rbgp
     "tests/interop/configs/rustbgpd-m67-vtep.toml",
+    // soak observes via Prometheus and FRR, no gRPC client
     "tests/interop/configs/rustbgpd-soak-gr-restart.toml",
+    // soak's generated candidates pin the same legacy block
     "tests/interop/configs/rustbgpd-soak-hot-reload.toml",
+    // soak drives rbgp rib add/delete without a token
     "tests/interop/configs/rustbgpd-soak-inject-churn.toml",
+    // Gate 8b soaks observe via Prometheus only
     "tests/soak/configs/rustbgpd-soak-gate8b-pe1.toml",
+    // Gate 8b soaks observe via Prometheus only
     "tests/soak/configs/rustbgpd-soak-gate8b-pe2.toml",
 ];
 

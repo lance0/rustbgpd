@@ -30,5 +30,6 @@ description = "consumer-frr"
 hold_time = 30
 families = ["l2vpn_evpn"]
 
+# Legacy: M37 asserts via FRR's RIB, kernel bridge fdb, and Prometheus — never this gRPC listener.
 [security.grpc]
 enforcement = "legacy"

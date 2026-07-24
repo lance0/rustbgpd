@@ -21,5 +21,6 @@ remote_asn = 65002
 description = "frr-soak-hot-reload-cycle-0"
 hold_time = 90
 
+# Legacy: the soak's generated candidates pin this same block, and its rbgp calls carry no token.
 [security.grpc]
 enforcement = "legacy"
