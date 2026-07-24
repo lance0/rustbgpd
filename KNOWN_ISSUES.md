@@ -353,10 +353,22 @@ resolved.
   was not negotiated, the wire format is ambiguous — the 4-byte path ID
   can be misparsed as normal NLRI prefix encoding. Compliant peers will
   never do this. Fixing it would require a deeper parser redesign.
-- **Unknown FlowSpec component types are rejected.** Component types >13
-  (or any future RFC extension) cause a hard decode error rather than
-  being preserved or skipped. This breaks forward compatibility if a
-  future RFC defines type 14+. Should switch to skip-unknown behavior.
+- **Unknown FlowSpec component types are rejected — and must be.**
+  A component type outside 1–13 makes the whole NLRI a decode error.
+  This is RFC 8955 §4.2 conformance, not a gap: "an NLRI that contains
+  an unknown component type[] is considered malformed". Skip-unknown is
+  not implementable for this encoding — only the *rule* is
+  length-prefixed, and each component's value grammar is selected by its
+  type code (types 1–2 are `<length, prefix>`, with an extra offset
+  octet under RFC 8956; types 3–13 are numeric- or bitmask-operator
+  lists whose width comes from the operator octet). A decoder cannot
+  measure a component it does not recognize, so it cannot resynchronize
+  on the next one, and dropping a component would widen the rule's match
+  set beyond what the sender asked for. Consequently a future type 14+
+  requires a rustbgpd upgrade to interoperate — as it does for every
+  RFC 8955 implementation. Disposition follows RFC 7606 §7.11
+  (session reset for malformed `MP_REACH_NLRI`), since the remaining
+  NLRI cannot be located.
 - **FlowSpec NLRI rule-length cap is enforced at encode time.** Rules
   exceeding the on-wire 12-bit limit (`MAX_FLOWSPEC_NLRI_RULE_LEN = 4095`)
   return `EncodeError::ValueOutOfRange` from

@@ -6,6 +6,26 @@
 //!
 //! The wire format uses a length-prefixed TLV structure with operator bytes
 //! that encode comparison semantics and value sizes.
+//!
+//! # Unknown component types are not skippable
+//!
+//! Only the *rule* carries an explicit length; a component does not. Each
+//! component's value grammar is chosen by its type code (RFC 8955 §4.2.2):
+//! types 1 and 2 are `<length, prefix>` (RFC 8956 §3.1 inserts a further
+//! offset octet for IPv6), and types 3-13 are operator lists delimited by the
+//! `end_of_list` bit, with per-term value widths taken from the operator
+//! octet's `len` field — and the operator octet itself is read as either a
+//! numeric or a bitmask operator depending, again, on the type code.
+//!
+//! A decoder therefore cannot compute the length of a component whose type it
+//! does not know, so it cannot resynchronize on the next component. RFC 8956
+//! is the precedent: it both allocated a new type (13) and changed the value
+//! grammar of existing types 1 and 2. Skipping an unknown type would
+//! misparse the remainder of the rule rather than preserve it.
+//!
+//! RFC 8955 §4.2 states the matching requirement directly: an NLRI containing
+//! an unknown component type "is considered malformed", handled per §10
+//! (RFC 7606). `decode_component` implements exactly that.
 
 use std::fmt;
 use std::net::Ipv4Addr;
@@ -609,9 +629,19 @@ fn decode_component(buf: &[u8], afi: Afi) -> Result<(FlowSpecComponent, usize), 
             let (ops, consumed) = decode_numeric_ops(rest)?;
             Ok((FlowSpecComponent::FlowLabel(ops), 1 + consumed))
         }
+        // RFC 8955 §4.2: an NLRI containing an unknown component type is
+        // malformed. This is not a forward-compatibility gap that
+        // skip-unknown would close — a component carries no length of its
+        // own, so an unrecognized type cannot be measured or stepped over
+        // (see the module docs). Rejecting the whole NLRI is both what the
+        // RFC requires and the only disposition that cannot silently widen
+        // a rule's match set by dropping a constraint the sender asked for.
         _ => Err(DecodeError::MalformedField {
             message_type: "UPDATE",
-            detail: format!("unknown FlowSpec component type {type_code}"),
+            detail: format!(
+                "unknown FlowSpec component type {type_code}: not skippable \
+                 (components carry no length), malformed NLRI per RFC 8955 §4.2"
+            ),
         }),
     }
 }
@@ -1228,6 +1258,85 @@ mod tests {
     fn empty_rule_rejected() {
         let rule = FlowSpecRule { components: vec![] };
         assert!(rule.validate().is_err());
+    }
+
+    /// The value bytes an unknown component type could carry are genuinely
+    /// ambiguous, which is why skip-unknown cannot be implemented: nothing
+    /// on the wire says which grammar to measure them with. Read as a
+    /// prefix, `10 C0 A8 81 06` is 192.168.0.0/16 and the component ends
+    /// after 3 octets. Read as a numeric-operator list, it is a two-term
+    /// list (`len=1` 2-octet term, then an `end_of_list` 1-octet term) and
+    /// the component ends after 5. Both readings are self-consistent and
+    /// disagree about where the next component starts — so a decoder that
+    /// guessed would resynchronize on garbage.
+    #[test]
+    fn unknown_component_value_length_is_ambiguous() {
+        let value: &[u8] = &[0x10, 0xC0, 0xA8, 0x81, 0x06];
+        let (_, as_prefix) = decode_prefix_component(value, Afi::Ipv4).unwrap();
+        let (_, as_ops) = decode_numeric_ops(value).unwrap();
+        assert_eq!(as_prefix, 3);
+        assert_eq!(as_ops, 5);
+    }
+
+    /// RFC 8955 §4.2: an NLRI containing an unknown component type is
+    /// malformed. Rejecting the whole NLRI is the only disposition that
+    /// neither misparses the remainder (see
+    /// `unknown_component_value_length_is_ambiguous`) nor widens the rule's
+    /// match set by dropping a constraint the sender specified.
+    #[test]
+    fn unknown_component_type_rejects_whole_nlri() {
+        // Rule = <len=6> <type 14> <the ambiguous value above>.
+        let buf: &[u8] = &[0x06, 14, 0x10, 0xC0, 0xA8, 0x81, 0x06];
+        let err = decode_flowspec_nlri(buf, Afi::Ipv4).unwrap_err();
+        let DecodeError::MalformedField { detail, .. } = &err else {
+            panic!("expected MalformedField, got {err:?}");
+        };
+        assert!(
+            detail.contains("unknown FlowSpec component type 14"),
+            "diagnostic must name the offending type, got: {detail}"
+        );
+        assert!(
+            detail.contains("RFC 8955"),
+            "diagnostic must cite the conformance requirement, got: {detail}"
+        );
+    }
+
+    /// The rejection covers the whole NLRI, not just the trailing rule: a
+    /// well-formed rule preceding one with an unknown component must not be
+    /// returned as if the update were partially usable.
+    #[test]
+    fn unknown_component_type_rejects_preceding_valid_rule_too() {
+        let good = FlowSpecRule {
+            components: vec![FlowSpecComponent::IpProtocol(vec![NumericMatch {
+                end_of_list: true,
+                and_bit: false,
+                lt: false,
+                gt: false,
+                eq: true,
+                value: 6,
+            }])],
+        };
+        let mut buf = Vec::new();
+        try_encode_flowspec_nlri(std::slice::from_ref(&good), &mut buf, Afi::Ipv4).unwrap();
+        // Sanity: on its own the first rule decodes.
+        assert_eq!(decode_flowspec_nlri(&buf, Afi::Ipv4).unwrap(), vec![good]);
+        // Append <len=2> <type 200> <0x81>.
+        buf.extend_from_slice(&[0x02, 200, 0x81]);
+        assert!(decode_flowspec_nlri(&buf, Afi::Ipv4).is_err());
+    }
+
+    /// Unknown-type rejection must not disturb the disposition for input
+    /// that is malformed in the ordinary way: a truncated prefix component
+    /// still fails, and still fails as `MalformedField`.
+    #[test]
+    fn truncated_prefix_component_still_malformed() {
+        // <len=3> <type 1> <prefix-len 24> <only one of three prefix octets>
+        let buf: &[u8] = &[0x03, 1, 24, 192];
+        let err = decode_flowspec_nlri(buf, Afi::Ipv4).unwrap_err();
+        assert!(
+            matches!(err, DecodeError::MalformedField { .. }),
+            "expected MalformedField, got {err:?}"
+        );
     }
 
     #[test]
