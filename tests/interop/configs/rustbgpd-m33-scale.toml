@@ -38,5 +38,6 @@ hold_time = 180
 families = ["l2vpn_evpn"]
 route_reflector_client = true
 
+# Legacy: the M33 driver and soak read the RIB over plaintext grpcurl, presenting no credential.
 [security.grpc]
 enforcement = "legacy"

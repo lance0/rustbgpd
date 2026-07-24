@@ -24,5 +24,6 @@ gr_restart_time = 15
 gr_stale_routes_time = 20
 llgr_stale_time = 60
 
+# Legacy: the GR-restart soak observes via Prometheus and FRR only, with no gRPC client or token.
 [security.grpc]
 enforcement = "legacy"

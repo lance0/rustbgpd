@@ -45,5 +45,6 @@ hold_time = 30
 families = ["l2vpn_evpn"]
 route_reflector_client = true
 
+# Legacy: M67 mounts its operator token on pe1/pe2 only; driver and soak read this vtep via plain rbgp.
 [security.grpc]
 enforcement = "legacy"

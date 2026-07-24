@@ -42,5 +42,6 @@ description = "pe1"
 hold_time = 30
 families = ["l2vpn_evpn"]
 
+# Legacy: the Gate 8b soaks observe via Prometheus only; no gRPC client or operator token is wired.
 [security.grpc]
 enforcement = "legacy"

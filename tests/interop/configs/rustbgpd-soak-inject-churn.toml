@@ -19,5 +19,6 @@ remote_asn = 65002
 description = "frr-soak-inject"
 hold_time = 90
 
+# Legacy: the churn soak drives rbgp rib add/delete over the plaintext listener with no token.
 [security.grpc]
 enforcement = "legacy"
