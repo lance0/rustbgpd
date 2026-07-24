@@ -24,6 +24,8 @@
 //! categories should use `timestamp` from each event, not
 //! `event_id`. See ADR-0072.
 
+#![deny(unsafe_code)]
+
 use std::io::Write;
 
 use clap::Parser;

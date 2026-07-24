@@ -30,6 +30,8 @@
 //! subset without adapter code. Fields that have no rustbgpd equivalent are
 //! present but empty/zero.
 
+#![deny(unsafe_code)]
+
 use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path as FsPath, PathBuf};
