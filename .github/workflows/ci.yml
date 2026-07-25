@@ -56,6 +56,13 @@ jobs:
         run: |
           python3 -m unittest -v scripts/test_check_fuzz_target_inventory.py
           python3 scripts/check_fuzz_target_inventory.py
+      # A reintroduced floating toolchain stays invisible until an upstream
+      # compiler break takes the scheduled campaign down, and the failure then
+      # reads as if it came from this repository.
+      - name: Prove every fuzz-toolchain consumer reads the reviewed pin
+        run: |
+          python3 -m unittest -v scripts/test_check_fuzz_toolchain_pin.py
+          python3 scripts/check_fuzz_toolchain_pin.py
       - name: Install receipt-tool dependencies
         run: |
           sudo apt-get update
