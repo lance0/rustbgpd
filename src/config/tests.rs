@@ -1804,14 +1804,31 @@ fn explicit_legacy_grpc_enforcement_loads_roles_and_warns() {
         config.security.grpc.roles["operator.example"],
         GrpcRoleConfig::Operator
     );
-    let output = capture_warnings(|| config.warn_if_legacy_grpc_enforcement());
+    let advisory = config
+        .advisories()
+        .into_iter()
+        .find(|a| a.headline.contains("security.grpc.enforcement"))
+        .expect("legacy enforcement must raise an advisory");
+    let text = advisory.one_line();
     assert!(
-        output.contains("WARN") && output.contains("legacy"),
-        "expected a warn-level legacy-enforcement log: {output}"
+        text.contains("mandatory in a future release"),
+        "advisory must name the sunset: {text}"
+    );
+    // Condition, consequence, action — an advisory that only restates the
+    // setting leaves the operator with nothing to do about it.
+    assert!(
+        text.contains("max_tier cap"),
+        "advisory must name the consequence: {text}"
     );
     assert!(
-        output.contains("mandatory in a future release"),
-        "warning must name the sunset: {output}"
+        text.contains("enforcement = \"tier\"")
+            && text.contains("[security.grpc.roles]")
+            && text.contains("principal"),
+        "advisory must give the migration action: {text}"
+    );
+    assert!(
+        text.contains("docs/adr/0064-grpc-authorization.md"),
+        "advisory must cite the migration reference: {text}"
     );
 }
 
@@ -3899,6 +3916,44 @@ fn orr_vantage_warns_without_linkstate_family() {
     // No vantage anywhere → no warning regardless of families.
     let config = parse(&orr_toml("", "")).unwrap();
     assert!(!config.orr_vantage_without_linkstate());
+}
+
+#[test]
+fn orr_vantage_without_linkstate_raises_an_advisory() {
+    let toml = orr_toml(
+        "orr_vantage = \"192.0.2.7\"\nroute_reflector_client = true",
+        "",
+    );
+    let config = parse(&toml).unwrap();
+    let advisory = config
+        .advisories()
+        .into_iter()
+        .find(|a| a.headline.contains("orr_vantage"))
+        .expect("an unresolvable vantage must raise an advisory");
+    let text = advisory.one_line();
+    // Condition, consequence, action.
+    assert!(
+        text.contains("linkstate"),
+        "advisory must name the missing family: {text}"
+    );
+    assert!(
+        text.contains("stays unresolved") && text.contains("no effect"),
+        "advisory must name the consequence: {text}"
+    );
+    assert!(
+        text.contains("Add \"linkstate\" to the families"),
+        "advisory must give the action: {text}"
+    );
+    // One line, so a log record stays one record.
+    assert!(!text.contains('\n'), "one_line kept a newline: {text}");
+
+    // Cleared once a neighbor carries the feed.
+    let toml = orr_toml(
+        "orr_vantage = \"192.0.2.7\"\nroute_reflector_client = true\nfamilies = [\"ipv4_unicast\", \"linkstate\"]",
+        "",
+    );
+    let config = parse(&toml).unwrap();
+    assert!(config.advisories().is_empty(), "{:?}", config.advisories());
 }
 
 #[test]
@@ -15629,38 +15684,6 @@ fn send_hold_time_change_is_a_runtime_neighbor_change() {
 
 // ── Retired config keys (LAN-194 removal wave) ──────
 
-/// `MakeWriter` capturing tracing output into a shared buffer so the
-/// deprecation-warning tests can assert on emitted (or absent) warns.
-#[derive(Clone, Default)]
-struct CaptureWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
-
-impl std::io::Write for CaptureWriter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(buf);
-        Ok(buf.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
-    type Writer = CaptureWriter;
-    fn make_writer(&'a self) -> Self::Writer {
-        self.clone()
-    }
-}
-
-fn capture_warnings(f: impl FnOnce()) -> String {
-    let writer = CaptureWriter::default();
-    let subscriber = tracing_subscriber::fmt()
-        .with_writer(writer.clone())
-        .finish();
-    tracing::subscriber::with_default(subscriber, f);
-    let bytes = writer.0.lock().unwrap().clone();
-    String::from_utf8(bytes).unwrap()
-}
-
 #[test]
 fn retired_global_inline_policy_fails_load_with_migration_error() {
     let toml_str = format!(
@@ -15730,8 +15753,11 @@ fn tier_grpc_enforcement_does_not_warn() {
         valid_toml_no_grpc_security()
     );
     let config = parse_strict(&toml_str).unwrap();
-    let output = capture_warnings(|| config.warn_if_legacy_grpc_enforcement());
-    assert!(output.is_empty(), "no warning expected: {output}");
+    assert!(
+        config.advisories().is_empty(),
+        "no advisory expected: {:?}",
+        config.advisories()
+    );
 }
 
 fn assert_raw_default_tier_rejected(error: &str) {
@@ -15789,15 +15815,24 @@ fn config_loader_has_no_test_only_legacy_bypass() {
         !source.contains("test_only_inject_legacy_grpc_security"),
         "production loader source must not contain a test-only auth seam"
     );
+    // The loader itself never branches on Legacy: the only production code
+    // that selects it is the operator-facing advisory in `validation.rs`.
     assert_eq!(
         source.matches("GrpcEnforcementConfig::Legacy").count(),
-        1,
-        "only the startup-warning compatibility branch may select Legacy"
+        0,
+        "the config loader must not select Legacy"
     );
     assert_eq!(
         source.matches(r#"enforcement = \"legacy\""#).count(),
+        0,
+        "the config loader must not name a Legacy setting"
+    );
+    assert_eq!(
+        include_str!("validation.rs")
+            .matches("GrpcEnforcementConfig::Legacy")
+            .count(),
         1,
-        "only the operator-facing compatibility warning may name a Legacy setting"
+        "only the compatibility advisory may select Legacy"
     );
 }
 
