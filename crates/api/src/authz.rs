@@ -3,8 +3,8 @@
 //! ADR-0064 uses this table as the code-level source of truth for
 //! method risk tiers. Runtime authorization enforces listener-level
 //! `AccessMode` checks in `server.rs`, per-listener `max_tier`
-//! ceilings in `authz_runtime.rs`, and opt-in per-principal role
-//! ceilings when ADR-0064 `enforcement = "tier"` is enabled.
+//! ceilings in `authz_runtime`, and per-principal role ceilings under
+//! ADR-0064 `enforcement = "tier"`, the default since v0.24.0.
 
 /// Authorization tier assigned to one gRPC method.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -751,7 +751,7 @@ pub fn method_count_by_tier(tier: AuthTier) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use super::{AuthTier, METHODS, method_authz, method_count_by_tier};
     use serde_json::json;
@@ -760,6 +760,7 @@ mod tests {
     const GNMI_PROTO: &str =
         include_str!("../../../proto/github.com/openconfig/gnmi/proto/gnmi/gnmi.proto");
     const INVENTORY_JSON: &str = include_str!("../../../docs/grpc-method-inventory.json");
+    const INVENTORY_MD: &str = include_str!("../../../docs/grpc-method-inventory.md");
     const AUTHZ_SOURCE_PATH: &str = "crates/api/src/authz.rs";
     const PRIMARY_PROTO_PATH: &str = "proto/rustbgpd.proto";
     const ADDITIONAL_PROTO_PATHS: &[&str] =
@@ -845,6 +846,89 @@ mod tests {
         })
     }
 
+    /// Strip markdown code ticks and emphasis from one table cell.
+    fn cell_text(cell: &str) -> String {
+        cell.replace(['`', '*'], "").trim().to_owned()
+    }
+
+    /// One documented row: `(method path, tier)`.
+    type InventoryRow = (String, String);
+    /// One `### Service (N RPCs)` heading: `(service, claimed, listed)`.
+    type ServiceHeading = (String, usize, usize);
+
+    /// Per-service table rows of `docs/grpc-method-inventory.md`, plus the
+    /// claimed and listed RPC count of every per-service heading.
+    fn markdown_inventory() -> (BTreeSet<InventoryRow>, Vec<ServiceHeading>) {
+        let mut rows = BTreeSet::new();
+        let mut headings = Vec::new();
+        let mut section: Option<ServiceHeading> = None;
+        for line in INVENTORY_MD.lines() {
+            if let Some(rest) = line.strip_prefix("### ") {
+                headings.extend(section.take());
+                let (name, claimed) = rest
+                    .split_once(" (")
+                    .expect("per-service heading states its RPC count");
+                let claimed = claimed
+                    .split_whitespace()
+                    .next()
+                    .and_then(|count| count.parse().ok())
+                    .expect("per-service heading states its RPC count");
+                let service = if name.contains('.') {
+                    name.to_owned()
+                } else {
+                    format!("rustbgpd.v1.{name}")
+                };
+                section = Some((service, claimed, 0));
+                continue;
+            }
+            if line.starts_with("## ") {
+                headings.extend(section.take());
+                continue;
+            }
+            let Some((service, _, listed)) = section.as_mut() else {
+                continue;
+            };
+            if !line.starts_with("| `") {
+                continue;
+            }
+            let mut cells = line.split('|').skip(1).map(cell_text);
+            let method = cells.next().expect("inventory row has a method cell");
+            let method = method.strip_suffix(" (stream)").unwrap_or(&method);
+            let tier = cells.next().expect("inventory row has a tier cell");
+            *listed += 1;
+            assert!(
+                rows.insert((format!("/{service}/{method}"), tier)),
+                "duplicate inventory row for {service}/{method}"
+            );
+        }
+        headings.extend(section);
+        (rows, headings)
+    }
+
+    /// The `## Totals` table of `docs/grpc-method-inventory.md`, keyed by tier
+    /// label plus the `Total` row.
+    fn markdown_totals() -> BTreeMap<String, usize> {
+        let mut totals = BTreeMap::new();
+        let mut in_totals = false;
+        for line in INVENTORY_MD.lines() {
+            if line.starts_with("## ") {
+                in_totals = line == "## Totals";
+                continue;
+            }
+            if !in_totals || !line.starts_with('|') {
+                continue;
+            }
+            let mut cells = line.split('|').skip(1).map(cell_text);
+            let (Some(label), Some(count)) = (cells.next(), cells.next()) else {
+                continue;
+            };
+            if let Ok(count) = count.parse() {
+                totals.insert(label, count);
+            }
+        }
+        totals
+    }
+
     fn brace_delta(line: &str) -> i32 {
         let opens = i32::try_from(line.chars().filter(|ch| *ch == '{').count())
             .expect("proto line has more than i32::MAX opening braces");
@@ -913,6 +997,66 @@ mod tests {
         let actual = serde_json::from_str::<serde_json::Value>(INVENTORY_JSON)
             .expect("docs/grpc-method-inventory.json must be valid JSON");
         assert_eq!(actual, expected_inventory_json());
+    }
+
+    /// `docs/grpc-method-inventory.md` is external-review evidence, so it is
+    /// fenced to the generated export by set equality in both directions: an
+    /// RPC missing from the prose and a stale row surviving in it both fail
+    /// here, as does a per-service heading or totals count that stops matching
+    /// the rows underneath it.
+    #[test]
+    fn markdown_inventory_matches_machine_readable_export() {
+        let export = serde_json::from_str::<serde_json::Value>(INVENTORY_JSON)
+            .expect("docs/grpc-method-inventory.json must be valid JSON");
+        let exported = export["methods"]
+            .as_array()
+            .expect("export lists methods")
+            .iter()
+            .map(|method| {
+                (
+                    method["path"].as_str().expect("method path").to_owned(),
+                    method["tier"].as_str().expect("method tier").to_owned(),
+                )
+            })
+            .collect::<BTreeSet<_>>();
+        let method_count = usize::try_from(
+            export["method_count"]
+                .as_u64()
+                .expect("export method_count"),
+        )
+        .expect("method count fits usize");
+
+        let (documented, headings) = markdown_inventory();
+        let missing = exported.difference(&documented).collect::<Vec<_>>();
+        assert!(
+            missing.is_empty(),
+            "RPCs absent from the tables: {missing:?}"
+        );
+        let stale = documented.difference(&exported).collect::<Vec<_>>();
+        assert!(stale.is_empty(), "rows absent from the export: {stale:?}");
+        assert_eq!(documented.len(), method_count);
+
+        for (service, claimed, listed) in headings {
+            assert_eq!(
+                claimed, listed,
+                "{service} heading claims {claimed} RPCs but lists {listed} rows"
+            );
+        }
+
+        let mut expected_totals = export["tier_counts"]
+            .as_object()
+            .expect("export tier_counts")
+            .iter()
+            .map(|(tier, count)| {
+                (
+                    tier.clone(),
+                    usize::try_from(count.as_u64().expect("tier count"))
+                        .expect("tier count fits usize"),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        expected_totals.insert("Total".to_owned(), method_count);
+        assert_eq!(markdown_totals(), expected_totals);
     }
 
     #[test]

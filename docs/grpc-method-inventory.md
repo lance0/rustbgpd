@@ -11,20 +11,42 @@ assignment.
 
 ## Purpose
 
-Today, gRPC authorization is listener-level. A configured
-`access_mode = "read_only"` listener rejects mutating handlers, while
-`access_mode = "read_write"` exposes the full service surface to any
-client accepted by that listener's transport authentication (UDS
-permissions, bearer token, and/or mTLS). ROADMAP P0 ("gRPC security
-audit + authorization split") needs a method-level risk boundary, and
-the v1.0 external security review needs a documented per-method
-classification to audit.
+gRPC authorization is per-method. The runtime authorization layer
+(`crates/api/src/authz_runtime/`) resolves the tier of every call from
+this inventory before the handler runs, and applies two checks in order:
 
-This document is the inventory the ADR-0064 enforcement model maps
-against. It does not pick the enforcement mechanism (RBAC vs.
-capability tokens vs. proto-annotation tags vs. listener-tier split)
-— that is the ADR's job. It only fixes the classification of each
-RPC so the model has something concrete to assign roles to.
+1. **Listener ceiling.** A listener's `max_tier` is a hard cap on the
+   tiers it serves at all, regardless of who is calling; a call above the
+   cap is rejected `PERMISSION_DENIED` with the bounded audit result
+   `listener_tier_denied`. `access_mode = "read_only"` translates to a
+   `sensitive_read` ceiling and the stricter of the two wins, so the
+   binary access mode is a compatibility ceiling layered over the tier
+   model rather than the mechanism behind it.
+2. **Principal role.** With `[security.grpc].enforcement = "tier"` — the
+   default since v0.24.0 — the call's authenticated principal is looked
+   up in `[security.grpc.roles]` and the role's ceiling must reach the
+   method's tier: `observer` reaches `sensitive_read`, `automation`
+   reaches `mutating`, `operator` reaches `operator_only`. A principal
+   with no role entry is denied (`principal_unmapped`); a principal whose
+   role sits below the method tier is denied (`role_tier_denied`).
+   `enforcement = "legacy"` remains a supported opt-out in which roles
+   are audit context only and the listener ceiling is the sole tier
+   check.
+
+Principals come from the listener's authenticated identity: native mTLS
+listeners derive them from the validated client certificate (`rustbgpd:`
+URI SAN, then email SAN, then Subject CN), while bearer-token and UDS
+listeners carry an explicit configured `principal` label. Under tier
+enforcement, startup validation rejects a listener that offers neither
+rather than falling back open.
+
+The tier assigned to each RPC below is therefore load-bearing: it is the
+floor a caller's role must reach and the value a listener cap is compared
+against. A method path that is missing from the matrix fails closed as
+`operator_only`. This document is the human-auditable form of that
+assignment; `crates/api/src/authz.rs` is the source of truth the daemon
+reads, and `docs/grpc-method-inventory.json` is the machine-readable
+export.
 
 For external review, read this inventory together with
 `docs/adr/0064-grpc-authorization.md` and
@@ -33,7 +55,8 @@ management-plane assets, trust boundaries, abuse paths, current controls,
 and residual enforcement gaps behind the tier assignments.
 Auditors and generated-client authors can consume the same classification from
 `docs/grpc-method-inventory.json`; CI checks that JSON artifact against the
-Rust source-of-truth table.
+Rust source-of-truth table, and checks the per-service tables below against
+the JSON artifact.
 
 ## Classification scheme
 
@@ -247,12 +270,12 @@ specific method if the model warrants it.
    (including `SetFibTable` / `DeleteFibTable`). The 4-tier scheme allows
    richer enforcement (e.g., per-method capability tokens) but the
    per-service split is the cheapest first step.
-2. **`operator_only` is small enough to gate by principal role.** 22
+2. **`operator_only` is small enough to gate by principal role.** 23
    methods total; carving these out into a separate listener or
    requiring a distinct principal role (`operator` vs. `automation`) has
    low operational cost and high blast-radius reduction.
 3. **InjectionService is uniformly `operator_only`.** Six of the
-   twenty-two `operator_only` methods live here. The simplest model is
+   twenty-three `operator_only` methods live here. The simplest model is
    to make the whole service gated behind an `inject` capability or a
    dedicated listener — operators rarely use it for automation, and
    when they do it should be a deliberate channel.
@@ -291,7 +314,7 @@ specific method if the model warrants it.
    `handler_invalid_argument`. mTLS listeners derive the audit principal from
    the client certificate (URI SAN → email SAN → Subject CN); non-mTLS
    listeners still emit operator-controlled principal labels.
-   In opt-in tier mode, `principal_unmapped` and `role_tier_denied`
+   In tier mode, `principal_unmapped` and `role_tier_denied`
    distinguish role-map denials from listener caps. `DiffRuntimeConfig`,
    `PlanConfigTransaction`, `ApplyConfigTransaction`, and `SetPeerGroup`
    request summaries mask credential-bearing fields, including candidate TOML
@@ -306,13 +329,16 @@ as a static Rust table. `docs/grpc-method-inventory.json` is the
 machine-readable export for auditors, tooling, and generated clients. The
 `authz` tests parse `proto/rustbgpd.proto` and fail if a new RPC is added
 without a tier assignment; they also parse the JSON export and fail if it drifts
-from `crates/api/src/authz.rs`.
+from `crates/api/src/authz.rs`, and parse the per-service tables above and fail
+if this document's rows, per-service heading counts, or totals drift from the
+JSON export.
 
 ## Maintenance
 
 When adding a new RPC:
 
-1. Add the row to the appropriate per-service table.
+1. Add the row to the appropriate per-service table, bump that
+   service's heading count, and bump the `## Totals` table.
 2. Pick the tier defensively (higher when in doubt; the ADR will
    negotiate down if warranted).
 3. Add the corresponding row to `docs/grpc-method-inventory.json` and bump
