@@ -171,11 +171,23 @@ produces the same lean runtime image locally.
 
 ```bash
 docker run -d --name rustbgpd \
-  -v "$(pwd)/config.toml":/etc/rustbgpd/config.toml:ro \
+  -v "$(pwd)/config.toml":/etc/rustbgpd/config.template.toml:ro \
   -v rustbgpd-state:/var/lib/rustbgpd \
   -p 179:179 -p 9179:9179 \
-  rustbgpd
+  rustbgpd \
+  /bin/sh -c 'cp -n /etc/rustbgpd/config.template.toml /var/lib/rustbgpd/config.toml && exec rustbgpd /var/lib/rustbgpd/config.toml'
 ```
+
+The config is seeded from a read-only template into the writable state volume
+rather than bind-mounted in place. Config persistence rewrites the file with a
+temp-file + rename, so the config's **directory** must be writable by the
+daemon user: mount the file read-only and every mutating command
+(`rbgp neighbor add`, policy edits, gNMI `Set`, `rbgp config apply`) is
+rejected. Mount it read-write and the write still fails, because the image's
+`/etc/rustbgpd` is root-owned and the daemon runs unprivileged.
+
+Deployments that manage the config exclusively from the outside — SIGHUP after
+an external edit, no runtime mutation — can mount it read-only and skip this.
 
 Or use systemd with
 [`examples/systemd/rustbgpd.service`](../examples/systemd/rustbgpd.service).

@@ -1308,37 +1308,6 @@ impl PeerManager {
                             };
                             let _ = reply.send(result);
                         }
-                        PeerManagerCommand::SetPeerGroupPreserveMd5 { name, mut definition, reply } => {
-                            let result = match named_peer_group_from_config(&self.current_config, &name) {
-                                Some(existing) => {
-                                    definition.md5_password = existing.md5_password;
-                                    let applied_definition = definition.clone();
-                                    let event = ConfigEvent::SetPeerGroup {
-                                        name: name.clone(),
-                                        definition: definition.clone(),
-                                        ack: None,
-                                    };
-                                    if self.peer_group_policy_only_update(&name, &definition) {
-                                        self.apply_policy_change(event, None).await
-                                    } else {
-                                        let affected: Vec<IpAddr> = self.current_config
-                                            .neighbors
-                                            .iter()
-                                            .filter(|neighbor| {
-                                                neighbor.peer_group.as_deref() == Some(name.as_str())
-                                            })
-                                            .filter_map(|neighbor| neighbor.address.parse().ok())
-                                            .collect();
-                                        self.apply_peer_group_change(event, affected).await
-                                    }
-                                    .map(|()| applied_definition)
-                                }
-                                None => Err(rustbgpd_api::peer_types::CatalogMutationError::not_found(
-                                    format!("peer group {name} not found"),
-                                )),
-                            };
-                            let _ = reply.send(result);
-                        }
                         PeerManagerCommand::DeletePeerGroup { name, reply } => {
                             let result = self.apply_peer_group_change(
                                 ConfigEvent::DeletePeerGroup { name, ack: None },

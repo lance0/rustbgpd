@@ -10,8 +10,8 @@ use std::net::IpAddr;
 use std::ops::Deref;
 
 use rustbgpd_api::peer_types::{
-    CatalogMutationError, ConfigEvent, FibTableSnapshot, PeerManagerCommand,
-    PeerManagerNeighborConfig,
+    CatalogMutationError, ConfigEvent, ConfigPersistAck, ConfigPersistError, FibTableSnapshot,
+    PeerManagerCommand, PeerManagerNeighborConfig,
 };
 use rustbgpd_policy::PolicyChain;
 use tokio::sync::{mpsc, oneshot};
@@ -28,7 +28,7 @@ use crate::config_persister::ConfigMutation;
 use crate::evpn_runtime_converger::EvpnRuntimeReloadApply;
 use crate::fib_runtime::FibRuntimeCommand;
 use crate::peer_manager::InternalCommand;
-use crate::policy_admin::{self, apply_config_event};
+use crate::policy_admin::{self, apply_config_event, catalog_config_error};
 
 /// Monotonic identity for one outbound prefix-limit transaction. Activation
 /// is idempotent by it, so a retry cannot apply two recovery transitions.
@@ -705,7 +705,7 @@ fn fib_table_snapshots(tables: &[config::FibTableConfig]) -> Vec<FibTableSnapsho
         .collect()
 }
 
-fn take_config_event_ack(event: &mut ConfigEvent) -> Option<oneshot::Sender<Result<(), String>>> {
+fn take_config_event_ack(event: &mut ConfigEvent) -> Option<ConfigPersistAck> {
     match event {
         ConfigEvent::FibTablesReplaced { ack, .. }
         | ConfigEvent::NeighborAdded { ack, .. }
@@ -747,6 +747,111 @@ async fn set_pm_fib_tables_snapshot(
     reply_rx
         .await
         .map_err(|e| format!("peer manager dropped reply: {e}"))
+}
+
+/// What the bridge should do with its held snapshot after an acknowledged
+/// config event.
+enum AckedPersistOutcome {
+    /// The candidate is on disk; adopt it as the bridge snapshot.
+    Applied,
+    /// Nothing was written; keep the previous snapshot.
+    Rejected,
+    /// The persister is gone; the bridge has nothing left to do.
+    PersisterLost,
+}
+
+async fn persister_round_trip(rx: oneshot::Receiver<Result<(), String>>) -> Result<(), String> {
+    rx.await
+        .map_err(|_| "config persister dropped persistence acknowledgement".to_string())
+        .and_then(|result| result)
+}
+
+/// Drive one acknowledged config event through the persister.
+///
+/// The two-phase form is the contract that makes a rejected mutation
+/// invisible: the candidate is durably staged and acknowledged *before* the
+/// caller touches runtime state, so a persistence failure is reported while
+/// the live sessions, their counters, and their metric series are still
+/// untouched. The caller then either returns its commit channel — publishing
+/// the staged write — or drops it, discarding the stage.
+async fn persist_acknowledged(
+    mutation_tx: &mpsc::Sender<ConfigMutation>,
+    candidate: Config,
+    ack: ConfigPersistAck,
+) -> AckedPersistOutcome {
+    let ConfigPersistAck { staged, commit } = ack;
+    let Some(commit) = commit else {
+        // Single-phase: the caller owns its own apply/rollback executor and
+        // asked for one durable write with one acknowledgement.
+        let (persist_ack_tx, persist_ack_rx) = oneshot::channel();
+        if mutation_tx
+            .send(ConfigMutation::ReplaceConfigAck(
+                Box::new(candidate),
+                persist_ack_tx,
+            ))
+            .await
+            .is_err()
+        {
+            let _ = staged.send(Err(ConfigPersistError::Write(
+                "config persister unavailable".to_string(),
+            )));
+            return AckedPersistOutcome::PersisterLost;
+        }
+        let result = persister_round_trip(persist_ack_rx).await;
+        let applied = result.is_ok();
+        let _ = staged.send(result.map_err(ConfigPersistError::Write));
+        return if applied {
+            AckedPersistOutcome::Applied
+        } else {
+            AckedPersistOutcome::Rejected
+        };
+    };
+
+    let (stage_ack_tx, stage_ack_rx) = oneshot::channel();
+    if mutation_tx
+        .send(ConfigMutation::StageConfigAck(
+            Box::new(candidate),
+            stage_ack_tx,
+        ))
+        .await
+        .is_err()
+    {
+        let _ = staged.send(Err(ConfigPersistError::Write(
+            "config persister unavailable".to_string(),
+        )));
+        return AckedPersistOutcome::PersisterLost;
+    }
+    let stage_result = persister_round_trip(stage_ack_rx).await;
+    let stage_ok = stage_result.is_ok();
+    let _ = staged.send(stage_result.map_err(ConfigPersistError::Write));
+    if !stage_ok {
+        return AckedPersistOutcome::Rejected;
+    }
+
+    // The caller is applying its runtime change. A dropped commit channel
+    // means that apply failed, or the caller is gone: either way the staged
+    // write must not land.
+    let Ok(commit_reply) = commit.await else {
+        let _ = mutation_tx.send(ConfigMutation::DiscardStagedConfig).await;
+        return AckedPersistOutcome::Rejected;
+    };
+    let (commit_ack_tx, commit_ack_rx) = oneshot::channel();
+    if mutation_tx
+        .send(ConfigMutation::CommitStagedConfig(commit_ack_tx))
+        .await
+        .is_err()
+    {
+        let _ = commit_reply.send(Err("config persister unavailable".to_string()));
+        return AckedPersistOutcome::PersisterLost;
+    }
+    let result = persister_round_trip(commit_ack_rx).await;
+    let applied = result.is_ok();
+    let _ = commit_reply.send(result);
+    if applied {
+        AckedPersistOutcome::Applied
+    } else {
+        AckedPersistOutcome::Rejected
+    }
 }
 
 /// Bridge between gRPC config events, SIGHUP-driven snapshot
@@ -825,44 +930,37 @@ pub(crate) async fn run_config_bridge(
                                 candidate_toml,
                                 "committed config transaction",
                             )
-                            .map_err(|error| error.clone())
+                            .map_err(|error| CatalogMutationError::invalid(error.clone()))
                         } else {
                             let mut candidate = current_config.clone();
                             match apply_config_event(&mut candidate, &event) {
                                 Ok(()) => Ok(candidate),
-                                Err(error) => Err(error.to_string()),
+                                // Staging now runs before the caller's runtime
+                                // change, so this is where a bad request is
+                                // caught. Carry the same typed error the
+                                // runtime apply would have produced so the
+                                // caller keeps its NOT_FOUND / INVALID_ARGUMENT
+                                // answer instead of reporting a persistence
+                                // fault for a request that was simply wrong.
+                                Err(error) => Err(catalog_config_error(error)),
                             }
                         };
                         let candidate = match candidate_result {
                             Ok(candidate) => candidate,
                             Err(error) => {
-                            error!(error = %error, "failed to apply config event before persistence");
+                            error!(error = %error, "rejected config event before persistence");
                             if let Some(ack) = event_ack {
-                                let _ = ack.send(Err(error.clone()));
+                                let _ = ack.staged.send(Err(ConfigPersistError::Rejected(error)));
                             }
                             continue;
                             }
                         };
                         if let Some(ack) = event_ack {
-                            let (persist_ack_tx, persist_ack_rx) = oneshot::channel();
-                            if mutation_tx
-                                .send(ConfigMutation::ReplaceConfigAck(
-                                    Box::new(candidate.clone()),
-                                    persist_ack_tx,
-                                ))
-                                .await
-                                .is_err()
-                            {
-                                let _ = ack.send(Err("config persister unavailable".to_string()));
-                                break;
+                            match persist_acknowledged(&mutation_tx, candidate.clone(), ack).await {
+                                AckedPersistOutcome::Applied => current_config = candidate,
+                                AckedPersistOutcome::Rejected => {}
+                                AckedPersistOutcome::PersisterLost => break,
                             }
-                            let result = persist_ack_rx.await.map_err(|_| {
-                                "config persister dropped persistence acknowledgement".to_string()
-                            }).and_then(|result| result);
-                            if result.is_ok() {
-                                current_config = candidate;
-                            }
-                            let _ = ack.send(result);
                         } else {
                             current_config = candidate;
                             if mutation_tx
@@ -6870,7 +6968,7 @@ peer_group = "secure"
                     maximum_paths_ebgp: None,
                     maximum_paths_ibgp: None,
                 }],
-                ack: Some(ack_tx),
+                ack: Some(ConfigPersistAck::immediate(ack_tx)),
             })
             .await
             .unwrap();
@@ -6887,13 +6985,13 @@ peer_group = "secure"
             matches!(ack_rx.try_recv(), Err(TryRecvError::Empty),),
             "bridge must not acknowledge the FIB event before the persister replies"
         );
-        persist_ack.send(Ok(())).unwrap();
-        assert_eq!(
+        let _ = persist_ack.send(Ok(()));
+        assert!(
             timeout(Duration::from_secs(1), ack_rx)
                 .await
                 .unwrap()
-                .unwrap(),
-            Ok(()),
+                .unwrap()
+                .is_ok(),
             "FIB event ack should reflect the persister result"
         );
 
@@ -6939,7 +7037,7 @@ remote_asn = 65002
         event_tx
             .send(ConfigEvent::ConfigTransactionCommitted {
                 candidate_toml,
-                ack: Some(ack_tx),
+                ack: Some(ConfigPersistAck::immediate(ack_tx)),
             })
             .await
             .unwrap();
@@ -6957,13 +7055,13 @@ remote_asn = 65002
             matches!(ack_rx.try_recv(), Err(TryRecvError::Empty),),
             "bridge must not acknowledge the config transaction before the persister replies"
         );
-        persist_ack.send(Ok(())).unwrap();
-        assert_eq!(
+        let _ = persist_ack.send(Ok(()));
+        assert!(
             timeout(Duration::from_secs(1), ack_rx)
                 .await
                 .unwrap()
-                .unwrap(),
-            Ok(()),
+                .unwrap()
+                .is_ok(),
             "config transaction ack should reflect the persister result"
         );
 
@@ -7044,7 +7142,7 @@ remote_asn = 65002
                     import_policy: None,
                     export_policy: None,
                 },
-                ack: Some(ack_tx),
+                ack: Some(ConfigPersistAck::immediate(ack_tx)),
             })
             .await
             .unwrap();
@@ -7066,13 +7164,13 @@ remote_asn = 65002
             matches!(ack_rx.try_recv(), Err(TryRecvError::Empty),),
             "bridge must not acknowledge the static-neighbor event before the persister replies"
         );
-        persist_ack.send(Ok(())).unwrap();
-        assert_eq!(
+        let _ = persist_ack.send(Ok(()));
+        assert!(
             timeout(Duration::from_secs(1), ack_rx)
                 .await
                 .unwrap()
-                .unwrap(),
-            Ok(()),
+                .unwrap()
+                .is_ok(),
             "static-neighbor event ack should reflect the persister result"
         );
 
@@ -7153,7 +7251,7 @@ remote_asn = 65002
                     import_policy: None,
                     export_policy: None,
                 },
-                ack: Some(ack_tx),
+                ack: Some(ConfigPersistAck::immediate(ack_tx)),
             })
             .await
             .unwrap();
@@ -7170,13 +7268,15 @@ remote_asn = 65002
                 .iter()
                 .any(|neighbor| neighbor.address == "10.0.0.9")
         );
-        persist_ack.send(Err("disk full".to_string())).unwrap();
+        let _ = persist_ack.send(Err("disk full".to_string()));
         assert_eq!(
             timeout(Duration::from_secs(1), ack_rx)
                 .await
                 .unwrap()
-                .unwrap(),
-            Err("disk full".to_string())
+                .unwrap()
+                .unwrap_err()
+                .to_string(),
+            "disk full"
         );
 
         event_tx
@@ -7243,7 +7343,7 @@ remote_asn = 65002
                 peer_group: "fabric".to_string(),
                 remote_asn: 65002,
                 description: Some("lab range".to_string()),
-                ack: Some(ack_tx),
+                ack: Some(ConfigPersistAck::immediate(ack_tx)),
             })
             .await
             .unwrap();
@@ -7260,13 +7360,13 @@ remote_asn = 65002
             matches!(ack_rx.try_recv(), Err(TryRecvError::Empty),),
             "bridge must not acknowledge the dynamic-neighbor event before the persister replies"
         );
-        persist_ack.send(Ok(())).unwrap();
-        assert_eq!(
+        let _ = persist_ack.send(Ok(()));
+        assert!(
             timeout(Duration::from_secs(1), ack_rx)
                 .await
                 .unwrap()
-                .unwrap(),
-            Ok(()),
+                .unwrap()
+                .is_ok(),
             "dynamic-neighbor event ack should reflect the persister result"
         );
 
@@ -7308,7 +7408,7 @@ remote_asn = 65002
                 peer_group: "fabric".to_string(),
                 remote_asn: 65002,
                 description: None,
-                ack: Some(ack_tx),
+                ack: Some(ConfigPersistAck::immediate(ack_tx)),
             })
             .await
             .unwrap();
@@ -7320,13 +7420,15 @@ remote_asn = 65002
             panic!("acked event must request acknowledged persist");
         };
         assert_eq!(first_candidate.dynamic_neighbors.len(), 1);
-        persist_ack.send(Err("disk full".to_string())).unwrap();
+        let _ = persist_ack.send(Err("disk full".to_string()));
         assert_eq!(
             timeout(Duration::from_secs(1), ack_rx)
                 .await
                 .unwrap()
-                .unwrap(),
-            Err("disk full".to_string())
+                .unwrap()
+                .unwrap_err()
+                .to_string(),
+            "disk full"
         );
 
         event_tx

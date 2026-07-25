@@ -8,9 +8,13 @@
 #
 # The config is mounted read-only as a template and copied to a
 # container-local writable path so the gNMI Set / ADR-0076 atomic
-# config persist (write `.config.toml.tmp` + rename over `config.toml`)
-# succeeds — renaming over a single read-only bind-mounted file fails
-# with EBUSY.
+# config persist (write `config.toml.tmp` alongside the config, then
+# rename it over `config.toml`) succeeds. Both halves need a writable
+# config *directory*: renaming over a read-only bind-mounted file fails
+# with EBUSY, and creating the temp file in a directory the daemon user
+# cannot write fails with EACCES first. Either way the mutation is
+# rejected with FAILED_PRECONDITION and nothing changes, so the lab
+# would see no Set take effect rather than a partial one.
 #
 # Usage:
 #   docker build --target dev -t rustbgpd:dev .
@@ -33,8 +37,8 @@ topology:
         - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
       exec:
         # Copy the read-only template to a writable container-local path so the
-        # gNMI Set / ADR-0076 atomic config persist (temp + rename) works; see
-        # the header note.
+        # gNMI Set / ADR-0076 atomic config persist (temp file + rename in the
+        # config's own directory) works; see the header note.
         - cp /etc/rustbgpd/config.template.toml /etc/rustbgpd/config.toml
       env:
         RUST_LOG: info,rustbgpd_api=debug

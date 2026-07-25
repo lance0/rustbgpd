@@ -283,7 +283,7 @@ For your own deployment:
   ```sh
   docker run --rm -d \
     --name rustbgpd \
-    -v /etc/rustbgpd:/etc/rustbgpd:ro \
+    -v /etc/rustbgpd:/etc/rustbgpd \
     -v /var/lib/rustbgpd:/var/lib/rustbgpd \
     -p 179:179 \
     -p 9179:9179 \
@@ -291,6 +291,15 @@ For your own deployment:
     --cap-add=NET_ADMIN \
     ghcr.io/lance0/rustbgpd:0.45
   ```
+
+- **Writable config directory**: mount `/etc/rustbgpd` read-write and
+  make it owned by the daemon user (`chown` the host directory to the
+  container's `rustbgpd` uid) if you use runtime mutation — `rbgp
+  neighbor add`, policy edits, gNMI `Set`, `rbgp config apply`. Config
+  persistence rewrites the file with a temp-file + rename, so the
+  *directory*, not just the file, has to be writable, and every mutating
+  RPC is rejected without it. Mount it `:ro` only when the config is
+  managed entirely from outside and reloaded with SIGHUP.
 
 - **Logs**: structured JSON when `[global.telemetry] log_format =
   "json"` is set; pipe to your log aggregator.

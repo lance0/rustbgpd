@@ -3,9 +3,9 @@
 use std::net::IpAddr;
 
 use rustbgpd_api::peer_types::{
-    AddPathDefinition, ConfigEvent, FibTableSnapshot, NamedNeighborSetSnapshot,
-    NamedPeerGroupSnapshot, NamedPolicyDefinition, NamedPolicySnapshot, NeighborSetDefinition,
-    PeerGroupDefinition, PolicyAsPathPrependConfig, PolicyChainAssignment,
+    AddPathDefinition, CatalogMutationError, ConfigEvent, FibTableSnapshot,
+    NamedNeighborSetSnapshot, NamedPeerGroupSnapshot, NamedPolicyDefinition, NamedPolicySnapshot,
+    NeighborSetDefinition, PeerGroupDefinition, PolicyAsPathPrependConfig, PolicyChainAssignment,
     PolicyStatementDefinition,
 };
 
@@ -413,6 +413,28 @@ pub(crate) fn fib_table_snapshot_to_config(snapshot: &FibTableSnapshot) -> FibTa
         maximum_paths: snapshot.maximum_paths,
         maximum_paths_ebgp: snapshot.maximum_paths_ebgp,
         maximum_paths_ibgp: snapshot.maximum_paths_ibgp,
+    }
+}
+
+/// Map a config validation failure onto the typed catalog error surface.
+///
+/// Shared by the runtime catalog mutators and the config bridge: both fold an
+/// event onto a candidate config and validate it, and both must answer with
+/// the same gRPC code for the same bad request.
+pub(crate) fn catalog_config_error(error: ConfigError) -> CatalogMutationError {
+    match error {
+        ConfigError::InvalidNeighborAddress { value, reason }
+            if reason == NEIGHBOR_NOT_FOUND_REASON =>
+        {
+            CatalogMutationError::not_found(format!("neighbor {value} not found"))
+        }
+        ConfigError::UndefinedPolicy { name } => {
+            CatalogMutationError::not_found(format!("policy {name} not found"))
+        }
+        ConfigError::UndefinedPeerGroup { name } => {
+            CatalogMutationError::not_found(format!("peer group {name} not found"))
+        }
+        other => CatalogMutationError::invalid(other.to_string()),
     }
 }
 

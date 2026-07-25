@@ -17,8 +17,7 @@ use crate::policy_helpers::{proto_statement_to_input, validate_policy_action};
 use crate::proto;
 use crate::server::{
     AccessMode, ConfigMutationGateFn, apply_catalog_mutation, catalog_mutation_error_to_status,
-    peer_manager_request, persist_rollback_error, persist_runtime_config_event,
-    read_only_rejection, run_shielded_catalog_mutation,
+    peer_manager_request, persist_then_apply, read_only_rejection, run_shielded_catalog_mutation,
 };
 use std::sync::Arc;
 
@@ -355,23 +354,6 @@ impl PolicyService {
     }
 }
 
-async fn get_policy_definition(
-    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
-    name: String,
-) -> Result<Option<NamedPolicyDefinition>, Status> {
-    let (reply_tx, reply_rx) = oneshot::channel();
-    peer_mgr_tx
-        .send(PeerManagerCommand::GetPolicy {
-            name,
-            reply: reply_tx,
-        })
-        .await
-        .map_err(|_| Status::internal("peer manager unavailable"))?;
-    reply_rx
-        .await
-        .map_err(|_| Status::internal("peer manager dropped reply"))
-}
-
 async fn set_policy_definition(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
     name: String,
@@ -410,97 +392,22 @@ async fn delete_policy_definition(
         .map_err(|error| catalog_mutation_error_to_status(&error))
 }
 
-/// Restore a prior global import chain. An empty prior chain and a
-/// cleared chain are the same config state (`policy.import_chain`), so
-/// an empty restore issues the clear command.
-async fn restore_global_import_chain(
-    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
-    prior: Vec<String>,
-) -> Result<(), Status> {
-    if prior.is_empty() {
-        apply_catalog_mutation(peer_mgr_tx, |reply| {
-            PeerManagerCommand::ClearGlobalImportChain { reply }
-        })
-        .await
-    } else {
-        apply_catalog_mutation(peer_mgr_tx, |reply| {
-            PeerManagerCommand::SetGlobalImportChain {
-                policy_names: prior,
-                reply,
-            }
-        })
-        .await
-    }
-}
-
-/// Restore a prior global export chain (see `restore_global_import_chain`
-/// for the empty-chain equivalence).
-async fn restore_global_export_chain(
-    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
-    prior: Vec<String>,
-) -> Result<(), Status> {
-    if prior.is_empty() {
-        apply_catalog_mutation(peer_mgr_tx, |reply| {
-            PeerManagerCommand::ClearGlobalExportChain { reply }
-        })
-        .await
-    } else {
-        apply_catalog_mutation(peer_mgr_tx, |reply| {
-            PeerManagerCommand::SetGlobalExportChain {
-                policy_names: prior,
-                reply,
-            }
-        })
-        .await
-    }
-}
-
-/// Restore a prior per-neighbor import chain (see
-/// `restore_global_import_chain` for the empty-chain equivalence).
-async fn restore_neighbor_import_chain(
+/// Reject a chain mutation for a neighbor that is not configured, without
+/// mutating anything.
+///
+/// The mutators used to discover this from the runtime apply. Staging now
+/// runs first, so the check has to run before it — a request naming an
+/// unknown neighbor is `NOT_FOUND`, not a persistence failure.
+async fn require_configured_neighbor(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
     address: IpAddr,
-    prior: Vec<String>,
 ) -> Result<(), Status> {
-    if prior.is_empty() {
-        apply_catalog_mutation(peer_mgr_tx, |reply| {
-            PeerManagerCommand::ClearNeighborImportChain { address, reply }
-        })
-        .await
-    } else {
-        apply_catalog_mutation(peer_mgr_tx, |reply| {
-            PeerManagerCommand::SetNeighborImportChain {
-                address,
-                policy_names: prior,
-                reply,
-            }
-        })
-        .await
-    }
-}
-
-/// Restore a prior per-neighbor export chain (see
-/// `restore_global_import_chain` for the empty-chain equivalence).
-async fn restore_neighbor_export_chain(
-    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
-    address: IpAddr,
-    prior: Vec<String>,
-) -> Result<(), Status> {
-    if prior.is_empty() {
-        apply_catalog_mutation(peer_mgr_tx, |reply| {
-            PeerManagerCommand::ClearNeighborExportChain { address, reply }
-        })
-        .await
-    } else {
-        apply_catalog_mutation(peer_mgr_tx, |reply| {
-            PeerManagerCommand::SetNeighborExportChain {
-                address,
-                policy_names: prior,
-                reply,
-            }
-        })
-        .await
-    }
+    peer_manager_request(peer_mgr_tx, |reply| {
+        PeerManagerCommand::GetNeighborPolicyChains { address, reply }
+    })
+    .await?
+    .ok_or_else(|| Status::not_found(format!("neighbor {address} not found")))
+    .map(|_| ())
 }
 
 #[tonic::async_trait]
@@ -574,28 +481,20 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         let peer_mgr_tx = self.peer_mgr_tx.clone();
         let name = req.name;
         self.run_mutation("PolicyService.SetPolicy", move || async move {
-            // Prior state is read inside the runtime-config lock, so it
-            // cannot race another catalog writer (all of them take this
-            // lock); it becomes the rollback target if persistence fails.
-            let prior = get_policy_definition(&peer_mgr_tx, name.clone()).await?;
-            set_policy_definition(&peer_mgr_tx, name.clone(), definition.clone()).await?;
-
-            if let Some(permit) = persist_permit
-                && let Err(error) =
-                    persist_runtime_config_event(permit, |ack| ConfigEvent::SetPolicy {
-                        name: name.clone(),
-                        definition: definition.clone(),
-                        ack: Some(ack),
-                    })
-                    .await
-            {
-                let rollback = match prior {
-                    Some(prior) => set_policy_definition(&peer_mgr_tx, name.clone(), prior).await,
-                    None => delete_policy_definition(&peer_mgr_tx, name.clone()).await,
-                };
-                return Err(persist_rollback_error("policy set", error, rollback));
-            }
-            Ok(())
+            // A policy edit re-evaluates live sessions: it rewrites
+            // Adj-RIB-Out and drives a Route Refresh. Stage the write first
+            // so a persistence failure does not put that churn on the wire
+            // and then a second round of it as "rollback".
+            persist_then_apply(
+                persist_permit,
+                |ack| ConfigEvent::SetPolicy {
+                    name: name.clone(),
+                    definition: definition.clone(),
+                    ack: Some(ack),
+                },
+                || set_policy_definition(&peer_mgr_tx, name.clone(), definition.clone()),
+            )
+            .await
         })
         .await?;
 
@@ -618,26 +517,15 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         let peer_mgr_tx = self.peer_mgr_tx.clone();
         let name = req.name;
         self.run_mutation("PolicyService.DeletePolicy", move || async move {
-            let prior = get_policy_definition(&peer_mgr_tx, name.clone()).await?;
-            delete_policy_definition(&peer_mgr_tx, name.clone()).await?;
-
-            if let Some(permit) = persist_permit
-                && let Err(error) =
-                    persist_runtime_config_event(permit, |ack| ConfigEvent::DeletePolicy {
-                        name: name.clone(),
-                        ack: Some(ack),
-                    })
-                    .await
-            {
-                let rollback = match prior {
-                    Some(prior) => set_policy_definition(&peer_mgr_tx, name.clone(), prior).await,
-                    // Deletes are idempotent (a missing policy is not an
-                    // error), so a `None` prior leaves nothing to restore.
-                    None => Ok(()),
-                };
-                return Err(persist_rollback_error("policy delete", error, rollback));
-            }
-            Ok(())
+            persist_then_apply(
+                persist_permit,
+                |ack| ConfigEvent::DeletePolicy {
+                    name: name.clone(),
+                    ack: Some(ack),
+                },
+                || delete_policy_definition(&peer_mgr_tx, name.clone()),
+            )
+            .await
         })
         .await?;
 
@@ -725,52 +613,24 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         let peer_mgr_tx = self.peer_mgr_tx.clone();
         let name = req.name;
         self.run_mutation("PolicyService.SetNeighborSet", move || async move {
-            let prior =
-                peer_manager_request(&peer_mgr_tx, |reply| PeerManagerCommand::GetNeighborSet {
+            persist_then_apply(
+                persist_permit,
+                |ack| ConfigEvent::SetNeighborSet {
                     name: name.clone(),
-                    reply,
-                })
-                .await?;
-            apply_catalog_mutation(&peer_mgr_tx, |reply| PeerManagerCommand::SetNeighborSet {
-                name: name.clone(),
-                definition: definition.clone(),
-                reply,
-            })
-            .await?;
-
-            if let Some(permit) = persist_permit
-                && let Err(error) =
-                    persist_runtime_config_event(permit, |ack| ConfigEvent::SetNeighborSet {
-                        name: name.clone(),
-                        definition: definition.clone(),
-                        ack: Some(ack),
+                    definition: definition.clone(),
+                    ack: Some(ack),
+                },
+                || {
+                    apply_catalog_mutation(&peer_mgr_tx, |reply| {
+                        PeerManagerCommand::SetNeighborSet {
+                            name: name.clone(),
+                            definition: definition.clone(),
+                            reply,
+                        }
                     })
-                    .await
-            {
-                let rollback = match prior {
-                    Some(prior) => {
-                        apply_catalog_mutation(&peer_mgr_tx, |reply| {
-                            PeerManagerCommand::SetNeighborSet {
-                                name: name.clone(),
-                                definition: prior,
-                                reply,
-                            }
-                        })
-                        .await
-                    }
-                    None => {
-                        apply_catalog_mutation(&peer_mgr_tx, |reply| {
-                            PeerManagerCommand::DeleteNeighborSet {
-                                name: name.clone(),
-                                reply,
-                            }
-                        })
-                        .await
-                    }
-                };
-                return Err(persist_rollback_error("neighbor-set set", error, rollback));
-            }
-            Ok(())
+                },
+            )
+            .await
         })
         .await?;
 
@@ -793,50 +653,22 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         let peer_mgr_tx = self.peer_mgr_tx.clone();
         let name = req.name;
         self.run_mutation("PolicyService.DeleteNeighborSet", move || async move {
-            let prior =
-                peer_manager_request(&peer_mgr_tx, |reply| PeerManagerCommand::GetNeighborSet {
+            persist_then_apply(
+                persist_permit,
+                |ack| ConfigEvent::DeleteNeighborSet {
                     name: name.clone(),
-                    reply,
-                })
-                .await?;
-            apply_catalog_mutation(&peer_mgr_tx, |reply| {
-                PeerManagerCommand::DeleteNeighborSet {
-                    name: name.clone(),
-                    reply,
-                }
-            })
-            .await?;
-
-            if let Some(permit) = persist_permit
-                && let Err(error) =
-                    persist_runtime_config_event(permit, |ack| ConfigEvent::DeleteNeighborSet {
-                        name: name.clone(),
-                        ack: Some(ack),
+                    ack: Some(ack),
+                },
+                || {
+                    apply_catalog_mutation(&peer_mgr_tx, |reply| {
+                        PeerManagerCommand::DeleteNeighborSet {
+                            name: name.clone(),
+                            reply,
+                        }
                     })
-                    .await
-            {
-                let rollback = match prior {
-                    Some(prior) => {
-                        apply_catalog_mutation(&peer_mgr_tx, |reply| {
-                            PeerManagerCommand::SetNeighborSet {
-                                name: name.clone(),
-                                definition: prior,
-                                reply,
-                            }
-                        })
-                        .await
-                    }
-                    // Deletes are idempotent (a missing set is not an
-                    // error), so a `None` prior leaves nothing to restore.
-                    None => Ok(()),
-                };
-                return Err(persist_rollback_error(
-                    "neighbor-set delete",
-                    error,
-                    rollback,
-                ));
-            }
-            Ok(())
+                },
+            )
+            .await
         })
         .await?;
 
@@ -873,35 +705,22 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         let peer_mgr_tx = self.peer_mgr_tx.clone();
         let policy_names = req.policy_names;
         self.run_mutation("PolicyService.SetGlobalImportChain", move || async move {
-            let prior = peer_manager_request(&peer_mgr_tx, |reply| {
-                PeerManagerCommand::GetGlobalPolicyChains { reply }
-            })
-            .await?;
-            apply_catalog_mutation(&peer_mgr_tx, |reply| {
-                PeerManagerCommand::SetGlobalImportChain {
+            persist_then_apply(
+                persist_permit,
+                |ack| ConfigEvent::SetGlobalImportChain {
                     policy_names: policy_names.clone(),
-                    reply,
-                }
-            })
-            .await?;
-
-            if let Some(permit) = persist_permit
-                && let Err(error) =
-                    persist_runtime_config_event(permit, |ack| ConfigEvent::SetGlobalImportChain {
-                        policy_names: policy_names.clone(),
-                        ack: Some(ack),
+                    ack: Some(ack),
+                },
+                || {
+                    apply_catalog_mutation(&peer_mgr_tx, |reply| {
+                        PeerManagerCommand::SetGlobalImportChain {
+                            policy_names: policy_names.clone(),
+                            reply,
+                        }
                     })
-                    .await
-            {
-                let rollback =
-                    restore_global_import_chain(&peer_mgr_tx, prior.import_policy_names).await;
-                return Err(persist_rollback_error(
-                    "global import-chain set",
-                    error,
-                    rollback,
-                ));
-            }
-            Ok(())
+                },
+            )
+            .await
         })
         .await?;
 
@@ -920,35 +739,22 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         let peer_mgr_tx = self.peer_mgr_tx.clone();
         let policy_names = req.policy_names;
         self.run_mutation("PolicyService.SetGlobalExportChain", move || async move {
-            let prior = peer_manager_request(&peer_mgr_tx, |reply| {
-                PeerManagerCommand::GetGlobalPolicyChains { reply }
-            })
-            .await?;
-            apply_catalog_mutation(&peer_mgr_tx, |reply| {
-                PeerManagerCommand::SetGlobalExportChain {
+            persist_then_apply(
+                persist_permit,
+                |ack| ConfigEvent::SetGlobalExportChain {
                     policy_names: policy_names.clone(),
-                    reply,
-                }
-            })
-            .await?;
-
-            if let Some(permit) = persist_permit
-                && let Err(error) =
-                    persist_runtime_config_event(permit, |ack| ConfigEvent::SetGlobalExportChain {
-                        policy_names: policy_names.clone(),
-                        ack: Some(ack),
+                    ack: Some(ack),
+                },
+                || {
+                    apply_catalog_mutation(&peer_mgr_tx, |reply| {
+                        PeerManagerCommand::SetGlobalExportChain {
+                            policy_names: policy_names.clone(),
+                            reply,
+                        }
                     })
-                    .await
-            {
-                let rollback =
-                    restore_global_export_chain(&peer_mgr_tx, prior.export_policy_names).await;
-                return Err(persist_rollback_error(
-                    "global export-chain set",
-                    error,
-                    rollback,
-                ));
-            }
-            Ok(())
+                },
+            )
+            .await
         })
         .await?;
 
@@ -965,30 +771,16 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
         let peer_mgr_tx = self.peer_mgr_tx.clone();
         self.run_mutation("PolicyService.ClearGlobalImportChain", move || async move {
-            let prior = peer_manager_request(&peer_mgr_tx, |reply| {
-                PeerManagerCommand::GetGlobalPolicyChains { reply }
-            })
-            .await?;
-            apply_catalog_mutation(&peer_mgr_tx, |reply| {
-                PeerManagerCommand::ClearGlobalImportChain { reply }
-            })
-            .await?;
-
-            if let Some(permit) = persist_permit
-                && let Err(error) = persist_runtime_config_event(permit, |ack| {
-                    ConfigEvent::ClearGlobalImportChain { ack: Some(ack) }
-                })
-                .await
-            {
-                let rollback =
-                    restore_global_import_chain(&peer_mgr_tx, prior.import_policy_names).await;
-                return Err(persist_rollback_error(
-                    "global import-chain clear",
-                    error,
-                    rollback,
-                ));
-            }
-            Ok(())
+            persist_then_apply(
+                persist_permit,
+                |ack| ConfigEvent::ClearGlobalImportChain { ack: Some(ack) },
+                || {
+                    apply_catalog_mutation(&peer_mgr_tx, |reply| {
+                        PeerManagerCommand::ClearGlobalImportChain { reply }
+                    })
+                },
+            )
+            .await
         })
         .await?;
 
@@ -1005,30 +797,16 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
         let peer_mgr_tx = self.peer_mgr_tx.clone();
         self.run_mutation("PolicyService.ClearGlobalExportChain", move || async move {
-            let prior = peer_manager_request(&peer_mgr_tx, |reply| {
-                PeerManagerCommand::GetGlobalPolicyChains { reply }
-            })
-            .await?;
-            apply_catalog_mutation(&peer_mgr_tx, |reply| {
-                PeerManagerCommand::ClearGlobalExportChain { reply }
-            })
-            .await?;
-
-            if let Some(permit) = persist_permit
-                && let Err(error) = persist_runtime_config_event(permit, |ack| {
-                    ConfigEvent::ClearGlobalExportChain { ack: Some(ack) }
-                })
-                .await
-            {
-                let rollback =
-                    restore_global_export_chain(&peer_mgr_tx, prior.export_policy_names).await;
-                return Err(persist_rollback_error(
-                    "global export-chain clear",
-                    error,
-                    rollback,
-                ));
-            }
-            Ok(())
+            persist_then_apply(
+                persist_permit,
+                |ack| ConfigEvent::ClearGlobalExportChain { ack: Some(ack) },
+                || {
+                    apply_catalog_mutation(&peer_mgr_tx, |reply| {
+                        PeerManagerCommand::ClearGlobalExportChain { reply }
+                    })
+                },
+            )
+            .await
         })
         .await?;
 
@@ -1079,50 +857,25 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         let peer_mgr_tx = self.peer_mgr_tx.clone();
         let policy_names = req.policy_names;
         self.run_mutation("PolicyService.SetNeighborImportChain", move || async move {
-            let prior = peer_manager_request(&peer_mgr_tx, |reply| {
-                PeerManagerCommand::GetNeighborPolicyChains { address, reply }
-            })
-            .await?;
-            apply_catalog_mutation(&peer_mgr_tx, |reply| {
-                PeerManagerCommand::SetNeighborImportChain {
+            require_configured_neighbor(&peer_mgr_tx, address).await?;
+            persist_then_apply(
+                persist_permit,
+                |ack| ConfigEvent::SetNeighborImportChain {
                     address,
                     policy_names: policy_names.clone(),
-                    reply,
-                }
-            })
-            .await?;
-
-            if let Some(permit) = persist_permit
-                && let Err(error) = persist_runtime_config_event(permit, |ack| {
-                    ConfigEvent::SetNeighborImportChain {
-                        address,
-                        policy_names: policy_names.clone(),
-                        ack: Some(ack),
-                    }
-                })
-                .await
-            {
-                let rollback = match prior {
-                    Some(prior) => {
-                        restore_neighbor_import_chain(
-                            &peer_mgr_tx,
+                    ack: Some(ack),
+                },
+                || {
+                    apply_catalog_mutation(&peer_mgr_tx, |reply| {
+                        PeerManagerCommand::SetNeighborImportChain {
                             address,
-                            prior.import_policy_names,
-                        )
-                        .await
-                    }
-                    // The mutation succeeded, so the neighbor was
-                    // configured; an unexpectedly missing prior leaves
-                    // nothing to restore.
-                    None => Ok(()),
-                };
-                return Err(persist_rollback_error(
-                    "neighbor import-chain set",
-                    error,
-                    rollback,
-                ));
-            }
-            Ok(())
+                            policy_names: policy_names.clone(),
+                            reply,
+                        }
+                    })
+                },
+            )
+            .await
         })
         .await?;
 
@@ -1145,47 +898,25 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         let peer_mgr_tx = self.peer_mgr_tx.clone();
         let policy_names = req.policy_names;
         self.run_mutation("PolicyService.SetNeighborExportChain", move || async move {
-            let prior = peer_manager_request(&peer_mgr_tx, |reply| {
-                PeerManagerCommand::GetNeighborPolicyChains { address, reply }
-            })
-            .await?;
-            apply_catalog_mutation(&peer_mgr_tx, |reply| {
-                PeerManagerCommand::SetNeighborExportChain {
+            require_configured_neighbor(&peer_mgr_tx, address).await?;
+            persist_then_apply(
+                persist_permit,
+                |ack| ConfigEvent::SetNeighborExportChain {
                     address,
                     policy_names: policy_names.clone(),
-                    reply,
-                }
-            })
-            .await?;
-
-            if let Some(permit) = persist_permit
-                && let Err(error) = persist_runtime_config_event(permit, |ack| {
-                    ConfigEvent::SetNeighborExportChain {
-                        address,
-                        policy_names: policy_names.clone(),
-                        ack: Some(ack),
-                    }
-                })
-                .await
-            {
-                let rollback = match prior {
-                    Some(prior) => {
-                        restore_neighbor_export_chain(
-                            &peer_mgr_tx,
+                    ack: Some(ack),
+                },
+                || {
+                    apply_catalog_mutation(&peer_mgr_tx, |reply| {
+                        PeerManagerCommand::SetNeighborExportChain {
                             address,
-                            prior.export_policy_names,
-                        )
-                        .await
-                    }
-                    None => Ok(()),
-                };
-                return Err(persist_rollback_error(
-                    "neighbor export-chain set",
-                    error,
-                    rollback,
-                ));
-            }
-            Ok(())
+                            policy_names: policy_names.clone(),
+                            reply,
+                        }
+                    })
+                },
+            )
+            .await
         })
         .await?;
 
@@ -1209,42 +940,20 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         self.run_mutation(
             "PolicyService.ClearNeighborImportChain",
             move || async move {
-                let prior = peer_manager_request(&peer_mgr_tx, |reply| {
-                    PeerManagerCommand::GetNeighborPolicyChains { address, reply }
-                })
-                .await?;
-                apply_catalog_mutation(&peer_mgr_tx, |reply| {
-                    PeerManagerCommand::ClearNeighborImportChain { address, reply }
-                })
-                .await?;
-
-                if let Some(permit) = persist_permit
-                    && let Err(error) = persist_runtime_config_event(permit, |ack| {
-                        ConfigEvent::ClearNeighborImportChain {
-                            address,
-                            ack: Some(ack),
-                        }
-                    })
-                    .await
-                {
-                    let rollback = match prior {
-                        Some(prior) => {
-                            restore_neighbor_import_chain(
-                                &peer_mgr_tx,
-                                address,
-                                prior.import_policy_names,
-                            )
-                            .await
-                        }
-                        None => Ok(()),
-                    };
-                    return Err(persist_rollback_error(
-                        "neighbor import-chain clear",
-                        error,
-                        rollback,
-                    ));
-                }
-                Ok(())
+                require_configured_neighbor(&peer_mgr_tx, address).await?;
+                persist_then_apply(
+                    persist_permit,
+                    |ack| ConfigEvent::ClearNeighborImportChain {
+                        address,
+                        ack: Some(ack),
+                    },
+                    || {
+                        apply_catalog_mutation(&peer_mgr_tx, |reply| {
+                            PeerManagerCommand::ClearNeighborImportChain { address, reply }
+                        })
+                    },
+                )
+                .await
             },
         )
         .await?;
@@ -1269,42 +978,20 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         self.run_mutation(
             "PolicyService.ClearNeighborExportChain",
             move || async move {
-                let prior = peer_manager_request(&peer_mgr_tx, |reply| {
-                    PeerManagerCommand::GetNeighborPolicyChains { address, reply }
-                })
-                .await?;
-                apply_catalog_mutation(&peer_mgr_tx, |reply| {
-                    PeerManagerCommand::ClearNeighborExportChain { address, reply }
-                })
-                .await?;
-
-                if let Some(permit) = persist_permit
-                    && let Err(error) = persist_runtime_config_event(permit, |ack| {
-                        ConfigEvent::ClearNeighborExportChain {
-                            address,
-                            ack: Some(ack),
-                        }
-                    })
-                    .await
-                {
-                    let rollback = match prior {
-                        Some(prior) => {
-                            restore_neighbor_export_chain(
-                                &peer_mgr_tx,
-                                address,
-                                prior.export_policy_names,
-                            )
-                            .await
-                        }
-                        None => Ok(()),
-                    };
-                    return Err(persist_rollback_error(
-                        "neighbor export-chain clear",
-                        error,
-                        rollback,
-                    ));
-                }
-                Ok(())
+                require_configured_neighbor(&peer_mgr_tx, address).await?;
+                persist_then_apply(
+                    persist_permit,
+                    |ack| ConfigEvent::ClearNeighborExportChain {
+                        address,
+                        ack: Some(ack),
+                    },
+                    || {
+                        apply_catalog_mutation(&peer_mgr_tx, |reply| {
+                            PeerManagerCommand::ClearNeighborExportChain { address, reply }
+                        })
+                    },
+                )
+                .await
             },
         )
         .await?;
@@ -2279,8 +1966,8 @@ mod tests {
                 assert_eq!(definition.default_action, "permit");
                 assert_eq!(definition.statements.len(), 1);
                 ack.expect("persisted mutation must carry an ack")
-                    .send(Ok(()))
-                    .expect("service should await the persistence ack");
+                    .accept()
+                    .await;
             }
             Some(_) => panic!("unexpected config event"),
             None => panic!("missing config event"),
@@ -2294,7 +1981,7 @@ mod tests {
     /// back to the captured prior definition, so the RPC failure means
     /// "nothing changed" instead of leaving runtime ahead of disk.
     #[tokio::test]
-    async fn set_policy_rolls_back_runtime_when_persist_fails() {
+    async fn set_policy_persist_failure_leaves_the_catalog_alone() {
         let (peer_tx, mut peer_rx) = mpsc::channel(8);
         let (config_tx, mut config_rx) = mpsc::channel(4);
         let svc = PolicyService::new(AccessMode::ReadWrite, peer_tx, Some(config_tx), None);
@@ -2337,8 +2024,7 @@ mod tests {
         match config_rx.recv().await {
             Some(ConfigEvent::SetPolicy { ack, .. }) => {
                 ack.expect("persisted mutation must carry an ack")
-                    .send(Err("disk full".to_string()))
-                    .expect("service should await the persistence ack");
+                    .fail_write("disk full");
             }
             Some(_) => panic!("unexpected config event"),
             None => panic!("missing config event"),
@@ -2351,12 +2037,13 @@ mod tests {
         assert_eq!(error.code(), tonic::Code::FailedPrecondition);
         assert!(error.message().contains("config persistence failed"));
 
-        let sets = set_definitions.lock().await;
-        assert_eq!(sets.len(), 2, "mutation then rollback");
-        assert_eq!(sets[0].default_action, "permit");
-        assert_eq!(
-            sets[1].default_action, "deny",
-            "rollback must restore the captured prior definition"
+        // The old ordering applied the policy — re-evaluating live sessions
+        // and driving a Route Refresh — and then applied the prior definition
+        // as "rollback", so peers saw two rounds of churn for a request that
+        // was rejected. The candidate is never applied now.
+        assert!(
+            set_definitions.lock().await.is_empty(),
+            "a rejected policy set must not reach any live session"
         );
     }
 
@@ -2548,8 +2235,21 @@ mod tests {
             }
         });
 
-        // The runtime mutation fails before persistence, so the RPC
-        // returns directly without an ack handshake.
+        // The write is staged first, so this also proves the other half of
+        // the handshake: a runtime mutation the peer manager refuses discards
+        // the staged write instead of publishing it.
+        let staged = tokio::spawn(async move {
+            match config_rx.recv().await {
+                Some(ConfigEvent::DeletePolicy { ack, .. }) => {
+                    ack.expect("persisted mutation must carry an ack")
+                        .accept()
+                        .await
+                }
+                Some(_) => panic!("unexpected config event"),
+                None => panic!("missing config event"),
+            }
+        });
+
         let error = PolicyServiceRpc::delete_policy(
             &svc,
             Request::new(proto::DeletePolicyRequest {
@@ -2559,11 +2259,14 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(error.code(), tonic::Code::FailedPrecondition);
-        assert!(matches!(config_rx.try_recv(), Err(TryRecvError::Empty)));
+        assert!(
+            !staged.await.expect("config task must not panic"),
+            "a refused runtime delete must discard the staged write"
+        );
     }
 
     #[tokio::test]
-    async fn delete_policy_rolls_back_runtime_when_persist_fails() {
+    async fn delete_policy_persist_failure_leaves_the_catalog_alone() {
         let (peer_tx, mut peer_rx) = mpsc::channel(8);
         let (config_tx, mut config_rx) = mpsc::channel(4);
         let svc = PolicyService::new(AccessMode::ReadWrite, peer_tx, Some(config_tx), None);
@@ -2608,8 +2311,7 @@ mod tests {
         match config_rx.recv().await {
             Some(ConfigEvent::DeletePolicy { ack, .. }) => {
                 ack.expect("persisted mutation must carry an ack")
-                    .send(Err("disk full".to_string()))
-                    .expect("service should await the persistence ack");
+                    .fail_write("disk full");
             }
             Some(_) => panic!("unexpected config event"),
             None => panic!("missing config event"),
@@ -2621,16 +2323,16 @@ mod tests {
             .expect_err("delete_policy must fail when persistence fails");
         assert_eq!(error.code(), tonic::Code::FailedPrecondition);
 
-        let sets = set_definitions.lock().await;
-        assert_eq!(
-            sets.as_slice(),
-            &[prior],
-            "rollback must re-create the deleted policy"
+        assert!(
+            set_definitions.lock().await.is_empty(),
+            "a rejected policy delete must not re-create anything, because it \
+             never deleted anything"
         );
+        drop(prior);
     }
 
     #[tokio::test]
-    async fn set_global_import_chain_rolls_back_to_prior_chain_when_persist_fails() {
+    async fn set_global_import_chain_persist_failure_leaves_the_chain_alone() {
         let (peer_tx, mut peer_rx) = mpsc::channel(8);
         let (config_tx, mut config_rx) = mpsc::channel(4);
         let svc = PolicyService::new(AccessMode::ReadWrite, peer_tx, Some(config_tx), None);
@@ -2672,8 +2374,7 @@ mod tests {
             Some(ConfigEvent::SetGlobalImportChain { policy_names, ack }) => {
                 assert_eq!(policy_names, vec!["tag-internal".to_string()]);
                 ack.expect("persisted mutation must carry an ack")
-                    .send(Err("disk full".to_string()))
-                    .expect("service should await the persistence ack");
+                    .fail_write("disk full");
             }
             Some(_) => panic!("unexpected config event"),
             None => panic!("missing config event"),
@@ -2685,22 +2386,16 @@ mod tests {
             .expect_err("set_global_import_chain must fail when persistence fails");
         assert_eq!(error.code(), tonic::Code::FailedPrecondition);
 
-        let sets = set_chains.lock().await;
-        assert_eq!(
-            sets.as_slice(),
-            &[
-                vec!["tag-internal".to_string()],
-                vec!["prior-import".to_string()]
-            ],
-            "rollback must re-set the prior chain"
+        assert!(
+            set_chains.lock().await.is_empty(),
+            "a rejected chain set must not reach any live session"
         );
     }
 
-    /// An empty prior chain and a cleared chain are the same config
-    /// state, so rolling back from an empty prior issues the clear
-    /// command rather than an empty set.
+    /// The staged write is discarded rather than compensated, so an empty
+    /// prior chain needs no clear command to restore it.
     #[tokio::test]
-    async fn set_global_import_chain_rolls_back_via_clear_when_prior_empty() {
+    async fn set_global_import_chain_persist_failure_issues_no_clear() {
         let (peer_tx, mut peer_rx) = mpsc::channel(8);
         let (config_tx, mut config_rx) = mpsc::channel(4);
         let svc = PolicyService::new(AccessMode::ReadWrite, peer_tx, Some(config_tx), None);
@@ -2738,8 +2433,7 @@ mod tests {
         match config_rx.recv().await {
             Some(ConfigEvent::SetGlobalImportChain { ack, .. }) => {
                 ack.expect("persisted mutation must carry an ack")
-                    .send(Err("disk full".to_string()))
-                    .expect("service should await the persistence ack");
+                    .fail_write("disk full");
             }
             Some(_) => panic!("unexpected config event"),
             None => panic!("missing config event"),
@@ -2750,11 +2444,15 @@ mod tests {
             .expect("call task must not panic")
             .expect_err("set_global_import_chain must fail when persistence fails");
         assert_eq!(error.code(), tonic::Code::FailedPrecondition);
-        assert_eq!(*cleared.lock().await, 1, "rollback must clear the chain");
+        assert_eq!(
+            *cleared.lock().await,
+            0,
+            "nothing was applied, so nothing needs clearing"
+        );
     }
 
     #[tokio::test]
-    async fn set_neighbor_import_chain_rolls_back_runtime_when_persist_fails() {
+    async fn set_neighbor_import_chain_persist_failure_leaves_the_chain_alone() {
         let (peer_tx, mut peer_rx) = mpsc::channel(8);
         let (config_tx, mut config_rx) = mpsc::channel(4);
         let svc = PolicyService::new(AccessMode::ReadWrite, peer_tx, Some(config_tx), None);
@@ -2804,8 +2502,7 @@ mod tests {
                 assert_eq!(address.to_string(), "10.0.0.2");
                 assert_eq!(policy_names, vec!["tag-internal".to_string()]);
                 ack.expect("persisted mutation must carry an ack")
-                    .send(Err("disk full".to_string()))
-                    .expect("service should await the persistence ack");
+                    .fail_write("disk full");
             }
             Some(_) => panic!("unexpected config event"),
             None => panic!("missing config event"),
@@ -2817,14 +2514,9 @@ mod tests {
             .expect_err("set_neighbor_import_chain must fail when persistence fails");
         assert_eq!(error.code(), tonic::Code::FailedPrecondition);
 
-        let sets = set_chains.lock().await;
-        assert_eq!(
-            sets.as_slice(),
-            &[
-                vec!["tag-internal".to_string()],
-                vec!["prior-import".to_string()]
-            ],
-            "rollback must re-set the prior per-neighbor chain"
+        assert!(
+            set_chains.lock().await.is_empty(),
+            "a rejected per-neighbor chain set must not reach the session"
         );
     }
 

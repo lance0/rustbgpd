@@ -18,30 +18,13 @@ use rustbgpd_telemetry::BgpMetrics;
 use tokio::sync::oneshot;
 use tracing::{info, warn};
 
-use crate::config::{Config, ConfigError};
+use crate::config::Config;
 use crate::policy_admin::{
-    NEIGHBOR_NOT_FOUND_REASON, api_peer_group_to_config, apply_config_event,
-    neighbor_set_references, peer_group_references, policy_references,
+    api_peer_group_to_config, apply_config_event, catalog_config_error, neighbor_set_references,
+    peer_group_references, policy_references,
 };
 
 use super::{ManagedPeer, PEER_POLICY_UPDATE_TIMEOUT, PEER_QUERY_TIMEOUT, PeerManager};
-
-fn catalog_config_error(error: ConfigError) -> CatalogMutationError {
-    match error {
-        ConfigError::InvalidNeighborAddress { value, reason }
-            if reason == NEIGHBOR_NOT_FOUND_REASON =>
-        {
-            CatalogMutationError::not_found(format!("neighbor {value} not found"))
-        }
-        ConfigError::UndefinedPolicy { name } => {
-            CatalogMutationError::not_found(format!("policy {name} not found"))
-        }
-        ConfigError::UndefinedPeerGroup { name } => {
-            CatalogMutationError::not_found(format!("peer group {name} not found"))
-        }
-        other => CatalogMutationError::invalid(other.to_string()),
-    }
-}
 
 /// How `update_runtime_policies_for_peer_key` reacts when the Route Refresh
 /// send fails after the session already acked the new policy.

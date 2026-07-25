@@ -24,6 +24,18 @@ pub enum ConfigMutation {
     /// Replace the entire config snapshot, persist it to disk, then acknowledge
     /// the result to a caller that must not proceed until the write has settled.
     ReplaceConfigAck(Box<Config>, oneshot::Sender<Result<(), String>>),
+    /// Durably stage a replacement snapshot without publishing it, then
+    /// acknowledge whether the write can land. Every persistence failure an
+    /// operator actually hits (unwritable directory, read-only mount, full
+    /// filesystem) surfaces here, before the caller mutates any runtime state.
+    ///
+    /// Exactly one stage may be outstanding; a second replaces the first.
+    StageConfigAck(Box<Config>, oneshot::Sender<Result<(), String>>),
+    /// Publish the staged snapshot: rename it into place and adopt it.
+    CommitStagedConfig(oneshot::Sender<Result<(), String>>),
+    /// Drop the staged snapshot. The caller's runtime change did not land, so
+    /// neither may the write.
+    DiscardStagedConfig,
     /// Refresh the persister's base snapshot without writing to disk.
     ///
     /// SIGHUP reload uses this for operator-authored TOML that
@@ -42,6 +54,8 @@ pub struct ConfigPersister {
     /// Applied-config history directory (`config_history` module). `None`
     /// disables recording (unit tests, embedders without a state dir).
     history_dir: Option<PathBuf>,
+    /// Durably written but unpublished snapshot, awaiting commit or discard.
+    staged: Option<(crate::confirm_journal::StagedWrite, Config, String)>,
 }
 
 impl ConfigPersister {
@@ -56,6 +70,7 @@ impl ConfigPersister {
             config_path,
             current,
             history_dir,
+            staged: None,
         }
     }
 
@@ -68,23 +83,42 @@ impl ConfigPersister {
         // edits the file between startup validation and this task starting.
         self.record_current_history();
         while let Some(mutation) = self.rx.recv().await {
-            if let ConfigMutation::ReplaceConfigAck(new_config, ack) = mutation {
-                let previous = self.current.clone();
-                info!("replacing persister config snapshot and persisting it");
-                self.current = *new_config;
-                let result = self.persist().map_err(|e| e.to_string());
-                if let Err(e) = &result {
-                    self.current = previous;
-                    error!(
-                        path = %self.config_path.display(),
-                        error = %e,
-                        "failed to persist config — persister snapshot rolled back to previous state"
-                    );
+            match mutation {
+                ConfigMutation::ReplaceConfigAck(new_config, ack) => {
+                    self.discard_staged();
+                    let previous = self.current.clone();
+                    info!("replacing persister config snapshot and persisting it");
+                    self.current = *new_config;
+                    let result = self.persist().map_err(|e| e.to_string());
+                    if let Err(e) = &result {
+                        self.current = previous;
+                        error!(
+                            path = %self.config_path.display(),
+                            error = %e,
+                            "failed to persist config — persister snapshot rolled back to previous state"
+                        );
+                    }
+                    let _ = ack.send(result);
+                    continue;
                 }
-                let _ = ack.send(result);
-                continue;
+                ConfigMutation::StageConfigAck(new_config, ack) => {
+                    let _ = ack.send(self.stage(*new_config).map_err(|e| e.to_string()));
+                    continue;
+                }
+                ConfigMutation::CommitStagedConfig(ack) => {
+                    let _ = ack.send(self.commit_staged());
+                    continue;
+                }
+                ConfigMutation::DiscardStagedConfig => {
+                    self.discard_staged();
+                    continue;
+                }
+                _ => {}
             }
 
+            // Any other durable write reuses the same temp path, so a stage
+            // that is still outstanding here can no longer be published.
+            self.discard_staged();
             let should_persist = self.apply(mutation);
             if should_persist && let Err(e) = self.persist() {
                 error!(
@@ -96,8 +130,59 @@ impl ConfigPersister {
         }
     }
 
+    /// Durably write a candidate next to the config file without publishing
+    /// it. A failure here is the whole point of the two-phase handshake: the
+    /// caller learns the write cannot land while its runtime state is still
+    /// untouched.
+    fn stage(&mut self, new_config: Config) -> std::io::Result<()> {
+        // A superseded stage is discarded, never published: its caller either
+        // failed its apply or is gone.
+        self.discard_staged();
+        let toml_str = toml::to_string_pretty(&new_config).map_err(std::io::Error::other)?;
+        let staged = crate::confirm_journal::stage_atomic(&self.config_path, toml_str.as_bytes())?;
+        info!(
+            path = %self.config_path.display(),
+            "staged config write, awaiting commit"
+        );
+        self.staged = Some((staged, new_config, toml_str));
+        Ok(())
+    }
+
+    /// Publish the staged candidate and adopt it as the persister snapshot.
+    fn commit_staged(&mut self) -> Result<(), String> {
+        let Some((staged, config, toml_str)) = self.staged.take() else {
+            return Err("no staged config write to commit".to_string());
+        };
+        if let Err(error) = staged.commit() {
+            error!(
+                path = %self.config_path.display(),
+                error = %error,
+                "failed to publish the staged config write"
+            );
+            return Err(error.to_string());
+        }
+        self.current = config;
+        self.record_history(&toml_str);
+        Ok(())
+    }
+
+    fn discard_staged(&mut self) {
+        if let Some((staged, ..)) = self.staged.take() {
+            info!(
+                path = %self.config_path.display(),
+                "discarding the staged config write"
+            );
+            staged.discard();
+        }
+    }
+
     fn apply(&mut self, mutation: ConfigMutation) -> bool {
         match mutation {
+            // Handled directly in `run`; a staging mutation never reaches the
+            // single-phase applier.
+            ConfigMutation::StageConfigAck(..)
+            | ConfigMutation::CommitStagedConfig(_)
+            | ConfigMutation::DiscardStagedConfig => false,
             ConfigMutation::AddNeighbor(neighbor) => {
                 if self
                     .current

@@ -29,7 +29,9 @@ use std::time::Duration;
 
 use tokio::sync::{Mutex, mpsc, oneshot};
 
-use rustbgpd_api::peer_types::{ConfigEvent, FibTableSnapshot, PeerManagerCommand};
+use rustbgpd_api::peer_types::{
+    ConfigEvent, ConfigPersistAck, FibTableSnapshot, PeerManagerCommand,
+};
 use rustbgpd_api::proto;
 use rustbgpd_api::rib_service::{
     FibTableControlError, FibTableControlFn, FibTableControlFuture, FibTableControlRequest,
@@ -260,9 +262,12 @@ pub(crate) async fn commit_fib_tables_locked(
     // an immediate SIGHUP can reload stale disk and overwrite the accepted
     // runtime snapshot.
     let (persist_ack_tx, persist_ack_rx) = oneshot::channel();
+    // Single-phase on purpose: FIB-table CRUD owns a rollback that restores
+    // the exact prior table set and already reports an ambiguous outcome when
+    // it cannot.
     permit.send(ConfigEvent::FibTablesReplaced {
         tables: snapshots,
-        ack: Some(persist_ack_tx),
+        ack: Some(ConfigPersistAck::immediate(persist_ack_tx)),
     });
     // LAN-277 window (b): a lost acknowledgement means the on-disk outcome of
     // the persistence attempt is unknowable from here.
@@ -280,7 +285,7 @@ pub(crate) async fn commit_fib_tables_locked(
             peer_mgr_tx,
             previous_tables,
             previous_snapshots,
-            FibTableControlError::FailedPrecondition(error).into(),
+            FibTableControlError::FailedPrecondition(error.to_string()).into(),
         )
         .await);
     }
@@ -612,7 +617,7 @@ mod tests {
             if let Some(ConfigEvent::FibTablesReplaced { ack: Some(ack), .. }) =
                 config_rx.recv().await
             {
-                let _ = ack.send(Err("desired config validation failed".to_string()));
+                ack.fail_write("desired config validation failed");
             }
         });
 
@@ -683,7 +688,7 @@ mod tests {
             if let Some(ConfigEvent::FibTablesReplaced { ack: Some(ack), .. }) =
                 config_rx.recv().await
             {
-                let _ = ack.send(Err("desired config validation failed".to_string()));
+                ack.fail_write("desired config validation failed");
             }
         });
 

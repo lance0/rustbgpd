@@ -39,6 +39,7 @@ mod test_support;
 
 pub use config_service::update_group_impact_to_proto;
 pub use evpn_service::EvpnService;
+pub use neighbor_service::NeighborService;
 
 /// Public-facing alias for the proto-encoding helpers used by the
 /// binary's peer-manager + BFD bridge to construct

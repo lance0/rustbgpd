@@ -11,8 +11,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, mpsc, oneshot};
 
 use rustbgpd_api::peer_types::{
-    ConfigEvent, DynamicPeerBounceOutcome, DynamicRangeTarget, PeerKey, PeerLifecycleError,
-    PeerManagerCommand, PeerManagerNeighborConfig, ResolvedPeerPolicy,
+    ConfigEvent, ConfigPersistAck, DynamicPeerBounceOutcome, DynamicRangeTarget, PeerKey,
+    PeerLifecycleError, PeerManagerCommand, PeerManagerNeighborConfig, ResolvedPeerPolicy,
     RuntimeConfigTransactionPlanError, RuntimeConfigTransactionStatus, StageConfigSnapshotError,
 };
 use rustbgpd_api::proto;
@@ -2547,15 +2547,20 @@ async fn persist_candidate_config(
     candidate_toml: String,
 ) -> Result<(), ApplyFailure> {
     let (ack_tx, ack_rx) = oneshot::channel();
+    // Single-phase on purpose: the ADR-0076 executor owns its own
+    // apply/rollback and ambiguous-outcome reporting, and ADR-0113 already
+    // inverted the one family whose apply is not undoable.
     permit.send(ConfigEvent::ConfigTransactionCommitted {
         candidate_toml,
-        ack: Some(ack_tx),
+        ack: Some(ConfigPersistAck::immediate(ack_tx)),
     });
     match ack_rx.await {
         Ok(Ok(())) => Ok(()),
         // The persister reported failure: the atomic write did not replace the
         // config file, so disk provably still holds the previous config.
-        Ok(Err(message)) => Err(ConfigTransactionApplyError::FailedPrecondition(message).into()),
+        Ok(Err(error)) => {
+            Err(ConfigTransactionApplyError::FailedPrecondition(error.to_string()).into())
+        }
         // LAN-277 window (b): the acknowledgement was lost. The persister may
         // or may not have written the candidate — the on-disk outcome is
         // unknowable from here.
@@ -2939,7 +2944,7 @@ mod tests {
         let peer_manager_tests = include_str!("peer_manager/tests.rs");
         assert!(!peer_manager_tests.contains(legacy_toml));
         assert!(!peer_manager_tests.contains(legacy_variant));
-        assert_eq!(peer_manager_tests.matches(helper).count(), 4);
+        assert_eq!(peer_manager_tests.matches(helper).count(), 5);
     }
 
     fn base_toml(extra: &str) -> String {
@@ -4160,7 +4165,7 @@ remote_asn = 65010
             }) = config_rx.recv().await
             {
                 assert!(candidate_toml.contains("[[dynamic_neighbors]]"));
-                let _ = ack.send(Ok(()));
+                ack.accept().await;
             }
         });
 
@@ -4190,7 +4195,7 @@ remote_asn = 65010
         while let Some(ConfigEvent::ConfigTransactionCommitted { ack, .. }) = config_rx.recv().await
         {
             if let Some(ack) = ack {
-                let _ = ack.send(Ok(()));
+                ack.accept().await;
             }
         }
     }
@@ -4201,7 +4206,7 @@ remote_asn = 65010
         while let Some(ConfigEvent::ConfigTransactionCommitted { ack, .. }) = config_rx.recv().await
         {
             if let Some(ack) = ack {
-                let _ = ack.send(Err("persist rejected by test".to_string()));
+                ack.fail_write("persist rejected by test");
             }
         }
     }
@@ -5587,7 +5592,7 @@ default_action = "permit"
             {
                 assert!(candidate_toml.contains("[policy.definitions.prep-only]"));
                 assert!(candidate_toml.contains("[peer_groups.prep-only]"));
-                let _ = ack.send(Ok(()));
+                ack.accept().await;
             }
         });
 
@@ -5710,7 +5715,7 @@ default_action = "permit"
             if let Some(ConfigEvent::ConfigTransactionCommitted { ack: Some(ack), .. }) =
                 config_rx.recv().await
             {
-                let _ = ack.send(Ok(()));
+                ack.accept().await;
             }
         });
 
@@ -5788,7 +5793,7 @@ default_action = "permit"
             if let Some(ConfigEvent::ConfigTransactionCommitted { ack: Some(ack), .. }) =
                 config_rx.recv().await
             {
-                let _ = ack.send(Ok(()));
+                ack.accept().await;
             }
         });
 
@@ -5852,7 +5857,7 @@ default_action = "permit"
             }) = config_rx.recv().await
             {
                 assert!(candidate_toml.contains("hold_time = 45"));
-                let _ = ack.send(Ok(()));
+                ack.accept().await;
             }
         });
 
@@ -5916,7 +5921,7 @@ default_action = "permit"
             }) = config_rx.recv().await
             {
                 assert!(candidate_toml.contains("peer_group = \"core\""));
-                let _ = ack.send(Ok(()));
+                ack.accept().await;
             }
         });
 
@@ -5972,7 +5977,7 @@ default_action = "permit"
             }) = config_rx.recv().await
             {
                 assert!(candidate_toml.contains("hold_time = 45"));
-                let _ = ack.send(Ok(()));
+                ack.accept().await;
             }
         });
 
@@ -6038,7 +6043,7 @@ default_action = "permit"
             }) = config_rx.recv().await
             {
                 assert!(candidate_toml.contains("required_families = [\"ipv6_unicast\"]"));
-                let _ = ack.send(Ok(()));
+                ack.accept().await;
             }
         });
 
@@ -6092,7 +6097,7 @@ default_action = "permit"
             }) = config_rx.recv().await
             {
                 assert!(candidate_toml.contains("hold_time = 45"));
-                let _ = ack.send(Ok(()));
+                ack.accept().await;
             }
         });
 
@@ -6160,7 +6165,7 @@ default_action = "permit"
             if let Some(ConfigEvent::ConfigTransactionCommitted { ack: Some(ack), .. }) =
                 config_rx.recv().await
             {
-                let _ = ack.send(Err("persist failed".to_string()));
+                ack.fail_write("persist failed");
             }
         });
 
@@ -6208,7 +6213,7 @@ default_action = "permit"
             if let Some(ConfigEvent::ConfigTransactionCommitted { ack: Some(ack), .. }) =
                 config_rx.recv().await
             {
-                let _ = ack.send(Err("persist failed".to_string()));
+                ack.fail_write("persist failed");
             }
         });
 
@@ -6264,7 +6269,7 @@ default_action = "permit"
             if let Some(ConfigEvent::ConfigTransactionCommitted { ack: Some(ack), .. }) =
                 config_rx.recv().await
             {
-                let _ = ack.send(Err("persist failed".to_string()));
+                ack.fail_write("persist failed");
             }
         });
 
@@ -6390,7 +6395,7 @@ default_action = "permit"
             if let Some(ConfigEvent::ConfigTransactionCommitted { ack: Some(ack), .. }) =
                 config_rx.recv().await
             {
-                let _ = ack.send(Err("persist failed".to_string()));
+                ack.fail_write("persist failed");
             }
         });
 
@@ -6443,7 +6448,7 @@ default_action = "permit"
             if let Some(ConfigEvent::ConfigTransactionCommitted { ack: Some(ack), .. }) =
                 config_rx.recv().await
             {
-                let _ = ack.send(Err("persist failed".to_string()));
+                ack.fail_write("persist failed");
             }
         });
 
@@ -6497,7 +6502,7 @@ peer_group = "ix-members"
             if let Some(ConfigEvent::ConfigTransactionCommitted { ack: Some(ack), .. }) =
                 config_rx.recv().await
             {
-                let _ = ack.send(Err("persist failed".to_string()));
+                ack.fail_write("persist failed");
             }
         });
 
@@ -6558,7 +6563,7 @@ peer_group = "ix-members"
             if let Some(ConfigEvent::ConfigTransactionCommitted { ack: Some(ack), .. }) =
                 config_rx.recv().await
             {
-                let _ = ack.send(Err("persist failed".to_string()));
+                ack.fail_write("persist failed");
             }
         });
 
@@ -6615,7 +6620,7 @@ remote_asn = 65003
             }) = config_rx.recv().await
             {
                 assert!(candidate_toml.contains("10.0.0.3"));
-                let _ = ack.send(Ok(()));
+                ack.accept().await;
             }
         });
 
@@ -6668,7 +6673,7 @@ remote_asn = 65003
             }) = config_rx.recv().await
             {
                 *persisted_task.lock().await = candidate_toml;
-                let _ = ack.send(Ok(()));
+                ack.accept().await;
             }
         });
         let controller = ConfigTransactionController::new(
@@ -6715,7 +6720,7 @@ remote_asn = 65003
             }) = config_rx.recv().await
             {
                 *persisted_task.lock().await = candidate_toml;
-                let _ = ack.send(Ok(()));
+                ack.accept().await;
             }
         });
         let controller = ConfigTransactionController::new(
@@ -6763,7 +6768,7 @@ remote_asn = 65003
             }) = config_rx.recv().await
             {
                 *persisted_task.lock().await = candidate_toml;
-                let _ = ack.send(Ok(()));
+                ack.accept().await;
             }
         });
         let controller = ConfigTransactionController::new(
@@ -6804,7 +6809,7 @@ remote_asn = 65003
             while let Some(ConfigEvent::ConfigTransactionCommitted { ack: Some(ack), .. }) =
                 config_rx.recv().await
             {
-                let _ = ack.send(Ok(()));
+                ack.accept().await;
             }
         });
         let controller = ConfigTransactionController::new(
@@ -6854,7 +6859,7 @@ remote_asn = 65003
             while let Some(ConfigEvent::ConfigTransactionCommitted { ack: Some(ack), .. }) =
                 config_rx.recv().await
             {
-                let _ = ack.send(Ok(()));
+                ack.accept().await;
             }
         });
         let controller = ConfigTransactionController::new(
@@ -6907,7 +6912,7 @@ remote_asn = 65003
             while let Some(ConfigEvent::ConfigTransactionCommitted { ack: Some(ack), .. }) =
                 config_rx.recv().await
             {
-                let _ = ack.send(Ok(()));
+                ack.accept().await;
             }
         });
         let controller = ConfigTransactionController::new(
@@ -7075,7 +7080,7 @@ remote_asn = 65010
             while let Some(ConfigEvent::ConfigTransactionCommitted { ack: Some(ack), .. }) =
                 config_rx.recv().await
             {
-                let _ = ack.send(Ok(()));
+                ack.accept().await;
             }
         });
         let controller = ConfigTransactionController::new(
@@ -7133,7 +7138,7 @@ remote_asn = 65003
             if let Some(ConfigEvent::ConfigTransactionCommitted { ack: Some(ack), .. }) =
                 config_rx.recv().await
             {
-                let _ = ack.send(Ok(()));
+                ack.accept().await;
             }
         });
 
@@ -7186,7 +7191,7 @@ remote_asn = 65003
             }) = config_rx.recv().await
             {
                 assert!(candidate_toml.contains("hold_time = 45"));
-                let _ = ack.send(Ok(()));
+                ack.accept().await;
             }
         });
 
@@ -7239,7 +7244,7 @@ remote_asn = 65003
             if let Some(ConfigEvent::ConfigTransactionCommitted { ack: Some(ack), .. }) =
                 config_rx.recv().await
             {
-                let _ = ack.send(Err("persist failed".to_string()));
+                ack.fail_write("persist failed");
             }
         });
 
@@ -7351,7 +7356,7 @@ remote_asn = 65004
             {
                 assert_eq!(tables.len(), 1);
                 assert_eq!(tables[0].name, "core");
-                let _ = ack.send(Ok(()));
+                ack.accept().await;
             }
         });
 
@@ -7411,7 +7416,7 @@ families = ["ipv4_unicast"]
                 ..
             }) = config_rx.recv().await
             {
-                let _ = ack.send(Err("persist failed".to_string()));
+                ack.fail_write("persist failed");
             }
         });
 
@@ -7817,7 +7822,7 @@ peer_group = "ge"
                 panic!("expected persisted config transaction event");
             };
             *persisted_task.lock().await = Some(candidate_toml);
-            let _ = ack.send(Ok(()));
+            ack.accept().await;
         });
 
         let expected_apply_impact =
