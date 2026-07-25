@@ -166,9 +166,9 @@ default). The implicit default UDS listener is safe for local access under
 legacy mode, but tier mode requires an explicit
 `[global.telemetry.grpc_uds]` block with `principal` so requests can be mapped
 to a role.
-`docs/adr/0064-threat-model.md` is the external-review packet for this surface:
-it maps trust boundaries, abuse paths, residual risks, and the evidence an
-auditor should collect.
+[`docs/SECURITY.md`](SECURITY.md) covers deployment hardening for this surface,
+and [ADR-0064](adr/0064-grpc-authorization.md) records the tier model itself and
+which of its slices remain open.
 Operational collection, retention, query examples, and resource-abuse guardrails
 for `grpc_authz` logs and the related Prometheus metrics live in
 [`docs/OPERATIONS.md`](OPERATIONS.md#grpc-authorization-audit-and-resource-guardrails).

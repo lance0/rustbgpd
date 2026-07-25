@@ -58,9 +58,8 @@ Preferred posture:
   `crates/api/src/authz.rs`. The runtime emits `grpc_authz` decision logs and
   `bgp_grpc_authz_decisions_total`; listener `max_tier` caps are enforced, and
   `security.grpc.enforcement = "tier"` (the default since v0.24.0) enforces
-  per-principal role ceilings. The external-review packet in
-  `docs/adr/0064-threat-model.md` summarizes the trust boundaries, abuse paths,
-  evidence checklist, and residual risks for that surface.
+  per-principal role ceilings. `docs/adr/0064-grpc-authorization.md` records the
+  tier model and which of its slices remain open.
 - `[security.grpc.roles]` and listener `principal` labels can be staged now so
   audit records use stable operator-controlled identities on bearer-token TCP
   and UDS listeners. Native mTLS listeners derive audit principals from the

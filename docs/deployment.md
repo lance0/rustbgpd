@@ -11,7 +11,7 @@ For deeper references:
 - [`CONFIGURATION.md`](CONFIGURATION.md) — every config field, with examples.
 - [`reload-matrix.md`](reload-matrix.md) — which fields hot-apply vs. need a restart.
 - [`OPERATIONS.md`](OPERATIONS.md) — debugging, log filtering, failure modes.
-- [`SECURITY.md`](SECURITY.md) — firewalling, gRPC mTLS, threat model.
+- [`SECURITY.md`](SECURITY.md) — firewalling, gRPC mTLS, authorization tiers.
 
 ## Status & expectations
 

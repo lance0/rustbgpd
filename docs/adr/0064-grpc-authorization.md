@@ -347,10 +347,12 @@ review/rollback unit.
    `[(rustbgpd.v1.credential) = true]` field extension and per-tier log-level
    configuration in follow-up slices if the credential field set expands or
    operators need configurable sampling.
-7. **External-review prep.** Threat-model doc
-   (`docs/adr/0064-threat-model.md`), per-slice security
+7. **External-review prep.** Threat-model doc, per-slice security
    sign-off, external auditor packet (inventory + ADR + threat model
-   + audit-log sample).
+   + audit-log sample). The draft written against the pre-v0.24.0
+   audit-only posture is withdrawn — `docs/adr/0064-threat-model.md` is
+   a stub recording that and pointing at the surfaces that are current —
+   so this slice starts from the enforced model.
 
 Slices 1–5 are the v1.0 blocker; slice 6 is hardening that should
 land in the same release window; slice 7 is the gate the external
