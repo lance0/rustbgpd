@@ -158,8 +158,16 @@ impl AdjRibIn {
     /// manager). A first-time insert orphans nothing, so the initial-load
     /// flood skips the GC.
     pub fn insert(&mut self, route: Route) -> bool {
-        self.llgr_stale_local_tags
-            .remove(&(route.prefix, route.path_id));
+        // The tag set is populated only by `promote_to_llgr_stale`, i.e. only
+        // while a down peer sits in its LLGR window, so it is empty for
+        // essentially every insert. `remove` hashes the key before it touches
+        // the table and has no empty fast path, so on the daemon's hottest
+        // loop that is a per-route hash plus group probe for nothing. Every
+        // family below guards the same way.
+        if !self.llgr_stale_local_tags.is_empty() {
+            self.llgr_stale_local_tags
+                .remove(&(route.prefix, route.path_id));
+        }
 
         let path_id = route.path_id;
         let ids = self.prefix_index.entry_or_default(route.prefix);
@@ -175,7 +183,9 @@ impl AdjRibIn {
 
     /// Withdraw a route by prefix and path ID. Returns `true` if it existed.
     pub fn withdraw(&mut self, prefix: &Prefix, path_id: u32) -> bool {
-        self.llgr_stale_local_tags.remove(&(*prefix, path_id));
+        if !self.llgr_stale_local_tags.is_empty() {
+            self.llgr_stale_local_tags.remove(&(*prefix, path_id));
+        }
         self.remove_route_entry(prefix, path_id).is_some()
     }
 
@@ -536,13 +546,17 @@ impl AdjRibIn {
 
     /// Insert or replace a `FlowSpec` route.
     pub fn insert_flowspec(&mut self, route: FlowSpecRoute) {
-        self.flowspec_llgr_stale_local_tags.remove(&route.key());
+        if !self.flowspec_llgr_stale_local_tags.is_empty() {
+            self.flowspec_llgr_stale_local_tags.remove(&route.key());
+        }
         self.flowspec_routes.insert(route.key(), route);
     }
 
     /// Withdraw a `FlowSpec` route by family-complete key.
     pub fn withdraw_flowspec(&mut self, key: &FlowSpecRouteKey) -> bool {
-        self.flowspec_llgr_stale_local_tags.remove(key);
+        if !self.flowspec_llgr_stale_local_tags.is_empty() {
+            self.flowspec_llgr_stale_local_tags.remove(key);
+        }
         self.flowspec_routes.remove(key).is_some()
     }
 
@@ -576,7 +590,9 @@ impl AdjRibIn {
         // and FlowSpec `insert_flowspec` clear their stale tags. Without this,
         // a later EoR (`clear_llgr_stale_evpn`) would treat this fresh route as
         // locally tagged and strip a peer-originated LLGR_STALE off it.
-        self.evpn_llgr_stale_local_tags.remove(&key);
+        if !self.evpn_llgr_stale_local_tags.is_empty() {
+            self.evpn_llgr_stale_local_tags.remove(&key);
+        }
         self.evpn_routes.insert(key, route).is_some()
     }
 
@@ -584,7 +600,9 @@ impl AdjRibIn {
     pub fn withdraw_evpn(&mut self, key: &EvpnRouteKey) -> bool {
         // Mirror unicast `withdraw` / FlowSpec `withdraw_flowspec`: a withdrawn
         // key can no longer carry a locally-injected LLGR_STALE tag.
-        self.evpn_llgr_stale_local_tags.remove(key);
+        if !self.evpn_llgr_stale_local_tags.is_empty() {
+            self.evpn_llgr_stale_local_tags.remove(key);
+        }
         self.evpn_routes.remove(key).is_some()
     }
 
@@ -798,14 +816,18 @@ impl AdjRibIn {
         // Mirror unicast `insert` / `insert_evpn`: a re-advertised key drops
         // any record that *we* locally injected LLGR_STALE on its prior
         // version, so a later EoR never strips a peer-originated community.
-        self.bgpls_llgr_stale_local_tags.remove(&key);
+        if !self.bgpls_llgr_stale_local_tags.is_empty() {
+            self.bgpls_llgr_stale_local_tags.remove(&key);
+        }
         self.bgpls_routes.insert(key, route).is_some()
     }
 
     /// Withdraw a BGP-LS route. Returns `true` if it existed.
     pub fn withdraw_bgpls(&mut self, key: &BgpLsRouteKey) -> bool {
         // A withdrawn key can no longer carry a locally-injected LLGR_STALE tag.
-        self.bgpls_llgr_stale_local_tags.remove(key);
+        if !self.bgpls_llgr_stale_local_tags.is_empty() {
+            self.bgpls_llgr_stale_local_tags.remove(key);
+        }
         self.bgpls_routes.remove(key).is_some()
     }
 
@@ -1073,7 +1095,9 @@ impl AdjRibIn {
         // Mirror unicast `insert` / `insert_evpn`: a re-advertised key drops
         // any record that *we* locally injected LLGR_STALE on its prior
         // version, so a later EoR never strips a peer-originated community.
-        self.vpn_llgr_stale_local_tags.remove(&key);
+        if !self.vpn_llgr_stale_local_tags.is_empty() {
+            self.vpn_llgr_stale_local_tags.remove(&key);
+        }
         let ids = self.vpn_key_index.entry(key.nlri_key).or_default();
         if !ids.contains(&key.path_id) {
             ids.push(key.path_id);
@@ -1092,7 +1116,9 @@ impl AdjRibIn {
     /// index never dangles.
     fn remove_vpn_entry(&mut self, key: &VpnRibRouteKey) -> bool {
         // A removed key can no longer carry a locally-injected LLGR_STALE tag.
-        self.vpn_llgr_stale_local_tags.remove(key);
+        if !self.vpn_llgr_stale_local_tags.is_empty() {
+            self.vpn_llgr_stale_local_tags.remove(key);
+        }
         let removed = self.vpn_routes.remove(key).is_some();
         if removed && let Some(ids) = self.vpn_key_index.get_mut(&key.nlri_key) {
             ids.retain(|id| *id != key.path_id);
@@ -1382,7 +1408,9 @@ impl AdjRibIn {
         // Mirror unicast `insert` / `insert_vpn`: a re-advertised key drops
         // any record that *we* locally injected LLGR_STALE on its prior
         // version, so a later EoR never strips a peer-originated community.
-        self.labeled_llgr_stale_local_tags.remove(&key);
+        if !self.labeled_llgr_stale_local_tags.is_empty() {
+            self.labeled_llgr_stale_local_tags.remove(&key);
+        }
         let ids = self.labeled_key_index.entry(key.prefix).or_default();
         if !ids.contains(&key.path_id) {
             ids.push(key.path_id);
@@ -1401,7 +1429,9 @@ impl AdjRibIn {
     /// the secondary index never dangles.
     fn remove_labeled_entry(&mut self, key: &LabeledRibRouteKey) -> bool {
         // A removed key can no longer carry a locally-injected LLGR_STALE tag.
-        self.labeled_llgr_stale_local_tags.remove(key);
+        if !self.labeled_llgr_stale_local_tags.is_empty() {
+            self.labeled_llgr_stale_local_tags.remove(key);
+        }
         let removed = self.labeled_routes.remove(key).is_some();
         if removed && let Some(ids) = self.labeled_key_index.get_mut(&key.prefix) {
             ids.retain(|id| *id != key.path_id);
@@ -1683,14 +1713,18 @@ impl AdjRibIn {
         // Mirror unicast `insert` / `insert_evpn`: a re-advertised key drops
         // any record that *we* locally injected LLGR_STALE on its prior
         // version, so a later EoR never strips a peer-originated community.
-        self.rtc_llgr_stale_local_tags.remove(&key);
+        if !self.rtc_llgr_stale_local_tags.is_empty() {
+            self.rtc_llgr_stale_local_tags.remove(&key);
+        }
         self.rtc_routes.insert(key, route).is_some()
     }
 
     /// Withdraw an RTC route. Returns `true` if it existed.
     pub fn withdraw_rtc(&mut self, key: &RtcRibRouteKey) -> bool {
         // A withdrawn key can no longer carry a locally-injected LLGR_STALE tag.
-        self.rtc_llgr_stale_local_tags.remove(key);
+        if !self.rtc_llgr_stale_local_tags.is_empty() {
+            self.rtc_llgr_stale_local_tags.remove(key);
+        }
         self.rtc_routes.remove(key).is_some()
     }
 
