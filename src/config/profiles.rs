@@ -28,7 +28,9 @@ pub fn profile_toml(name: &str) -> Option<&'static str> {
 /// `lab` — a minimal single-box setup for experimenting locally: one
 /// eBGP neighbor, gRPC over a local Unix socket, runtime state under
 /// `/tmp`. Local gRPC access is authenticated by Unix-socket filesystem
-/// permissions and authorized through a stable operator principal.
+/// permissions and authorized through a stable operator principal. Its
+/// permit-all policy is written out and labeled rather than left to
+/// omission, so `--check --strict` is clean and the posture is a choice.
 const LAB: &str = r#"# rustbgpd "lab" profile — a minimal local setup for experimenting on
 # one machine. Edit the ASNs and addresses for your topology, then:
 #   rustbgpd config-lab.toml          # (after saving this output)
@@ -41,6 +43,12 @@ listen_port = 179
 # Runtime state (gRPC socket, GR markers, event DB) lives here. /tmp is
 # fine for a throwaway lab; use a persistent path in any real deployment.
 runtime_state_dir = "/tmp/rustbgpd"
+# RFC 8212: an eBGP neighbor with no explicit policy carries nothing in
+# that direction. The chains below are what make this session pass
+# traffic, so deleting one stops the session instead of quietly falling
+# back to permit-all. Startup-only — SIGHUP keeps the running value, so
+# changing it takes a daemon restart.
+ebgp_requires_policy = true
 
 [global.telemetry]
 prometheus_addr = "127.0.0.1:9179"
@@ -64,6 +72,30 @@ enforcement = "tier"
 [security.grpc.roles]
 operator = "operator"
 
+# ==========================================================================
+# DELIBERATE LAB POSTURE: PERMIT ALL, BOTH DIRECTIONS. NOT FOR PRODUCTION.
+# ==========================================================================
+# These two chains accept every route the peer sends and re-advertise every
+# route selected for it, unchanged. That is the point of a lab — see traffic,
+# filter nothing — and it is exactly what must not reach a production edge.
+# Replace both with real prefix / AS_PATH / community rules before this
+# config peers with anything you do not own.
+#
+# They are spelled out rather than omitted on purpose: omitting them is the
+# same permit-all, and nothing downstream can then tell an operator who meant
+# it from one who forgot. Written out, `rustbgpd --check --strict` is clean
+# and this comment is the record of the choice.
+[policy.definitions.lab-permit-all-import]
+default_action = "permit"
+
+[policy.definitions.lab-permit-all-export]
+default_action = "permit"
+
+# Apply the named chains globally (every neighbor without an override).
+[policy]
+import_chain = ["lab-permit-all-import"]
+export_chain = ["lab-permit-all-export"]
+
 # One eBGP neighbor to bring a session up against.
 [[neighbors]]
 address = "10.0.0.2"
@@ -73,18 +105,26 @@ hold_time = 90
 "#;
 
 /// `edge` — an eBGP edge skeleton: one upstream neighbor with a named
-/// import-policy chain that drops the default route. Fill in your ASN,
-/// neighbor, and prefix filters.
+/// import-policy chain that drops the default route and a default-deny
+/// export chain the operator fills in. Fill in your ASN, neighbor, and
+/// prefix filters.
 const EDGE: &str = r#"# rustbgpd "edge" profile — an eBGP edge skeleton: one upstream
-# transit/peer neighbor with a named import-policy chain. Replace the
-# ASN, neighbor address, and extend the filter with your own
-# prefix / AS_PATH / community rules.
+# transit/peer neighbor with a named import-policy chain and a
+# default-deny export chain to fill in. Replace the ASN, neighbor
+# address, and extend the filters with your own prefix / AS_PATH /
+# community rules.
 
 [global]
 asn = 65100
 router_id = "203.0.113.1"
 listen_port = 179
 runtime_state_dir = "/var/lib/rustbgpd"
+# RFC 8212: an eBGP neighbor with no explicit policy carries nothing in
+# that direction. Deleting either chain below therefore fails closed
+# rather than quietly reverting to permit-all — on an edge that is the
+# difference between an outage and a route leak. Startup-only — SIGHUP
+# keeps the running value, so changing it takes a daemon restart.
+ebgp_requires_policy = true
 
 [global.telemetry]
 prometheus_addr = "0.0.0.0:9179"
@@ -118,9 +158,24 @@ default_action = "permit"
 action = "deny"
 prefix = "0.0.0.0/0"
 
-# Apply the named chain globally (every neighbor without an override).
+# Named export policy: deny by default, and empty on purpose. Add one
+# permit statement per prefix this AS originates, for example:
+#
+#   [[policy.definitions.to-upstream.statements]]
+#   action = "permit"
+#   prefix = "203.0.113.0/24"
+#
+# Bare `prefix` is an exact match; add `ge`/`le` only where you mean to
+# announce more-specifics. Until a statement is added the upstream is
+# advertised nothing, which is the direction a skeleton should fail in —
+# an export chain filled in by guesswork is how a leak ships.
+[policy.definitions.to-upstream]
+default_action = "deny"
+
+# Apply the named chains globally (every neighbor without an override).
 [policy]
 import_chain = ["from-upstream"]
+export_chain = ["to-upstream"]
 
 [[neighbors]]
 address = "203.0.113.2"

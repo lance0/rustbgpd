@@ -6,6 +6,14 @@
 asn = 65001
 router_id = "10.99.0.10"
 listen_port = 179
+# RFC 8212: an eBGP neighbor with no explicit policy carries nothing in
+# that direction. Deleting a chain below therefore leaves the FRR session
+# established and empty — a visible failure — rather than silently
+# permit-all. Startup-only: SIGHUP keeps the running value, so changing it
+# needs `docker compose restart rustbgpd`. Note this file is a template;
+# the running config is the copy in the state volume (see the compose
+# file), so edit it there or recreate the volume.
+ebgp_requires_policy = true
 
 [global.telemetry]
 prometheus_addr = "0.0.0.0:9179"
@@ -25,6 +33,24 @@ enforcement = "tier"
 
 [security.grpc.roles]
 "rustbgpd://operator/test-only" = "operator"
+
+# ==========================================================================
+# DELIBERATE QUICK-START POSTURE: PERMIT ALL, BOTH DIRECTIONS.
+# NOT FOR PRODUCTION.
+# ==========================================================================
+# The whole point of this lab is to watch FRR's sample prefixes arrive and
+# come back, so nothing is filtered in either direction. Written out rather
+# than left off: omitting the chains gives the same behavior by accident,
+# and this file is where someone copying a "working config" starts.
+[policy.definitions.lab-permit-all-import]
+default_action = "permit"
+
+[policy.definitions.lab-permit-all-export]
+default_action = "permit"
+
+[policy]
+import_chain = ["lab-permit-all-import"]
+export_chain = ["lab-permit-all-export"]
 
 [[neighbors]]
 address = "10.99.0.20"

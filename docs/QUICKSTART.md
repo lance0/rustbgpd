@@ -50,8 +50,11 @@ $EDITOR config.toml
 ```
 
 Set at least the local ASN, router ID, and peer address. The `edge` profile is
-an eBGP edge skeleton with a default-route-dropping import chain. Each profile
-is validated through the real config loader before it is printed.
+an eBGP edge skeleton with a default-route-dropping import chain and a
+default-deny export chain to fill in. Each profile is validated through the
+real config loader before it is printed, and each passes
+`rustbgpd --check --strict` as emitted: `lab` is permit-all in both
+directions, but says so in an explicit chain rather than by omission.
 
 Prefer a checked-in starter file?
 

@@ -3,6 +3,11 @@
 # This is the smallest working config for a single eBGP peer.
 # gRPC defaults to a Unix domain socket at <runtime_state_dir>/grpc.sock.
 #
+# "Minimal" includes policy. An eBGP session with no policy is not a
+# smaller config, it is an unfiltered one, and leaving it out here would
+# only teach the shape that `rustbgpd --check` exists to flag. The two
+# chains below are the minimum: explicit, permit-all, and labeled.
+#
 # For local development, runtime_state_dir points to /tmp/rustbgpd so no
 # root access is needed. For production, use /var/lib/rustbgpd with the
 # systemd unit (examples/systemd/) which creates and owns that directory.
@@ -12,6 +17,11 @@ asn = 65001
 router_id = "10.0.0.1"
 listen_port = 179
 runtime_state_dir = "/tmp/rustbgpd"
+# RFC 8212: an eBGP neighbor with no explicit policy carries nothing in
+# that direction, so deleting a chain below fails closed instead of
+# silently reverting to permit-all. Startup-only — SIGHUP keeps the
+# running value, so changing it takes a daemon restart.
+ebgp_requires_policy = true
 
 [global.telemetry]
 prometheus_addr = "127.0.0.1:9179"
@@ -30,6 +40,25 @@ enforcement = "tier"
 
 [security.grpc.roles]
 operator = "operator"
+
+# ==========================================================================
+# DELIBERATE DEVELOPMENT POSTURE: PERMIT ALL, BOTH DIRECTIONS.
+# NOT A PRODUCTION EDGE POLICY.
+# ==========================================================================
+# Accept every route the peer sends, re-advertise every route selected for
+# it, unchanged. Fine for a single peer on a dev box; wrong the moment this
+# config faces a network you do not own. Replace both chains with real
+# prefix / AS_PATH / community rules before then — see
+# `rustbgpd --init-config edge --stdout` for a filtered starting point.
+[policy.definitions.permit-all-import]
+default_action = "permit"
+
+[policy.definitions.permit-all-export]
+default_action = "permit"
+
+[policy]
+import_chain = ["permit-all-import"]
+export_chain = ["permit-all-export"]
 
 [[neighbors]]
 address = "10.0.0.2"

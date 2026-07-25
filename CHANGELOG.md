@@ -149,8 +149,34 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   check with warnings now summarizes as
   `config VALID, <n> WARNINGS — NOT a clean check: <path>` so the summary line
   alone cannot read as a clean result. A check with nothing to flag still
-  prints `config OK: <path>`. Both built-in `--init-config` profiles carry a
-  permit-all eBGP neighbor and are flagged accordingly.
+  prints `config OK: <path>`.
+
+- **Every shipped starter config is policy-complete and passes
+  `rustbgpd --check --strict`.** The warning above immediately found that our
+  own starters were the unpoliced shape it describes: eight of eleven failed a
+  strict check, including both `--init-config` profiles, `examples/minimal`,
+  the Docker Compose quick-start, and the IXP route server. A starter that
+  trips our own safety warning on a first run teaches the operator running it
+  that the warning is noise, so each one now resolves an explicit import and
+  export chain for every eBGP neighbor. Permit-all postures stay permit-all —
+  the `lab` profile, `examples/minimal`, the compose quick-start, the route
+  server's transparent export (RFC 7947), the collector's import, and the
+  mitigation injector's export are all unfiltered by design — but each is now
+  written as a named chain whose comment states that it was chosen and what it
+  is wrong for, rather than being permit-all by omission, which is
+  indistinguishable from having forgotten. The `edge` profile and
+  `examples/linux-edge-fib` gain a default-deny export chain to fill in; the
+  latter attaches both directions to its `transit` peer group, so a new
+  session inherits them. Each of these also sets
+  `[global] ebgp_requires_policy = true`, so deleting a shipped chain fails
+  closed instead of reverting to permit-all; it is startup-only, which each
+  config's comment says where an operator would look. The iBGP-only starters
+  (`hosting-provider`, `rr-evpn-fabric`, `evpn-vtep-leaf`) are unchanged —
+  RFC 8212 scopes the requirement to eBGP. A new workspace test enumerates the
+  profiles from the daemon's own profile list and the examples from the
+  `examples/` tree, then asserts a clean `--check --strict` for each, so a
+  starter added later is covered without editing the test. The release
+  checklist now requires that command instead of documenting the warnings.
 
 - **`rbgp config import` generates configs that fail closed.** The importer
   never translates policy, so every config it emitted came up permit-all on

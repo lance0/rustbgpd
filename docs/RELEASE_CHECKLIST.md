@@ -185,15 +185,30 @@ kill $DAEMON_PID
 
 ### Config-init smoke
 
+Every shipped starter — both `--init-config` profiles and every config
+under `examples/` — must pass `rustbgpd --check --strict`, exit 0, summary
+`config OK`. Shipping a starter that trips our own unpoliced-eBGP warning
+teaches the operator who runs it first that the warning is noise. Permit-all
+starters stay permit-all; they say so in an explicit chain instead of by
+omission.
+
 ```bash
-# Each built-in profile emits a starter config that loads cleanly.
+# Each built-in profile emits a starter config that passes the strict gate.
 for p in lab edge; do
   ./target/release/rustbgpd --init-config "$p" --stdout > "/tmp/init-$p.toml"
-  # Expect exit 0. Both profiles ship a permit-all eBGP neighbor, so both
-  # summarize as `config VALID, 1 WARNING — NOT a clean check` with the
-  # unpoliced-neighbor warning framed on stderr.
-  ./target/release/rustbgpd --check "/tmp/init-$p.toml"
+  ./target/release/rustbgpd --check --strict "/tmp/init-$p.toml"  # expect: config OK
 done
+
+# Every example config, checked in place so relative `rpol_files` resolve.
+for c in examples/*/config.toml; do
+  ./target/release/rustbgpd --check --strict "$c"                 # expect: config OK
+done
+
+# The compose starter (examples/docker-compose/rustbgpd.toml) names a token
+# path that only exists inside the container; repoint it to check it here.
+sed "s#/run/rustbgpd/grpc-test-only-operator.token#$PWD/tests/fixtures/grpc-test-only-operator.token#" \
+  examples/docker-compose/rustbgpd.toml > /tmp/compose-check.toml
+./target/release/rustbgpd --check --strict /tmp/compose-check.toml # expect: config OK
 
 # Guards must exit non-zero:
 ./target/release/rustbgpd --stdout                              # --stdout without --init-config

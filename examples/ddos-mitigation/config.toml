@@ -23,6 +23,13 @@ listen_port = 179
 # set install_blackhole_discard = true; broad prefixes remain rejected unless
 # allow_blackhole_broad_prefixes is also enabled.
 honor_blackhole = true
+# RFC 8212: an eBGP neighbor with no explicit policy carries nothing in
+# that direction. Deleting either chain below stops mitigation rules
+# reaching the edge routers — visibly — instead of silently reverting to
+# permit-all on a config whose whole job is controlled distribution.
+# Startup-only — SIGHUP keeps the running value, so changing it takes a
+# daemon restart.
+ebgp_requires_policy = true
 
 [global.telemetry]
 prometheus_addr = "127.0.0.1:9179"
@@ -95,8 +102,21 @@ le = 127
 match_community = ["BLACKHOLE"]
 action = "deny"
 
+# --- Export policy: permit-all, on purpose ---
+# This daemon exists to push FlowSpec rules and RTBH routes to the edge
+# routers below, so the export direction is deliberately unfiltered: what
+# the mitigation platform injects is what the edge enforces. The scoping
+# that keeps it inside the mitigation domain is on the routes themselves —
+# `honor_blackhole` above adds NO_ADVERTISE to accepted BLACKHOLE routes,
+# and the import chain rejects broad BLACKHOLE prefixes before they ever
+# reach this direction. Stated rather than omitted so the unfiltered
+# egress of a blackhole injector reads as a decision, not an oversight.
+[policy.definitions.distribute-mitigation]
+default_action = "permit"
+
 [policy]
 import_chain = ["blackhole-host-routes"]
+export_chain = ["distribute-mitigation"]
 
 # --- Edge routers ---
 # These enforce FlowSpec rules in hardware. Use short hold times so

@@ -13,6 +13,13 @@ asn = 65010
 router_id = "192.0.2.10"
 listen_port = 179
 runtime_state_dir = "/var/lib/rustbgpd"
+# RFC 8212: an eBGP neighbor with no explicit policy carries nothing in
+# that direction. On a box that programs the kernel FIB, deleting the
+# import chain must not quietly mean "install whatever arrives" and
+# deleting the export chain must not quietly mean "announce transit to
+# transit" — with this on, both fail closed. Startup-only — SIGHUP keeps
+# the running value, so changing it takes a daemon restart.
+ebgp_requires_policy = true
 
 [global.telemetry]
 prometheus_addr = "127.0.0.1:9179"
@@ -35,13 +42,45 @@ enforcement = "tier"
 [security.grpc.roles]
 operator = "operator"
 
+# --- Policy for transit peers ---
+#
+# Import: accept what transit sends minus the default route. A box that
+# installs best routes into the kernel has no business taking 0.0.0.0/0 or
+# ::/0 from a transit session by accident; add RPKI, AS_PATH, and bogon
+# rules here as your filtering matures.
+[policy.definitions.from-transit]
+default_action = "permit"
+
+[[policy.definitions.from-transit.statements]]
+action = "deny"
+prefix = "0.0.0.0/0"
+
+[[policy.definitions.from-transit.statements]]
+action = "deny"
+prefix = "::/0"
+
+# Export: deny by default, and empty on purpose. This is an edge box, not
+# a transit provider — re-advertising one transit's table to the other is
+# the classic leak, and an empty deny-all chain cannot do it. Add one
+# permit statement per prefix this AS originates:
+#
+#   [[policy.definitions.to-transit.statements]]
+#   action = "permit"
+#   prefix = "192.0.2.0/24"
+[policy.definitions.to-transit]
+default_action = "deny"
+
 # Shared transport / policy defaults for transit peers. The FIB table below
 # also uses this name as an allow-list, so only best routes learned from this
 # peer group are eligible for kernel install. Keep a peer import cap alongside
 # the FIB max_routes guardrail so route leaks are bounded before kernel export.
+# The chains attach here rather than per neighbor so a new transit session
+# inherits both directions by joining the group.
 [peer_groups.transit]
 hold_time = 90
 max_prefixes = 100000
+import_policy_chain = ["from-transit"]
+export_policy_chain = ["to-transit"]
 
 [[neighbors]]
 address = "198.51.100.1"
