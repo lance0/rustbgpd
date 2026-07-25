@@ -19,9 +19,9 @@ pub const CORE_READINESS_DEADLINE: Duration = Duration::from_millis(200);
 /// Two one-way transitions, both set from `main.rs` and observed by the
 /// readiness surface:
 ///
-/// - **not-ready**: a fatal availability fault (BGP listener failed to
-///   bind, coordinated shutdown started). `/readyz` reports 503 with the
-///   first recorded reason until the process restarts.
+/// - **not-ready**: a fatal availability fault (coordinated shutdown
+///   started). `/readyz` reports 503 with the first recorded reason until
+///   the process restarts.
 /// - **shutting-down**: coordinated shutdown has begun; admission paths
 ///   (inbound BGP connections, persisted config mutations) reject new
 ///   work instead of racing the teardown.
@@ -574,15 +574,15 @@ mod tests {
 
     #[tokio::test]
     async fn gated_probe_fails_without_touching_core_actors() {
-        // BGP-listener bind failure: readiness must go red even though
-        // both core actors would answer (nothing replies here and the
-        // probe must not need them to).
+        // A recorded availability fault must turn readiness red even
+        // though both core actors would answer (nothing replies here and
+        // the probe must not need them to).
         let (peer_tx, _peer_rx) = mpsc::channel(1);
         let (rib_tx, _rib_rx) = mpsc::channel(1);
         let gate = DaemonGate::new();
         let probe = CoreReadinessProbe::new(peer_tx, rib_tx).with_gate(gate.clone());
 
-        gate.mark_not_ready("BGP listener failed to bind");
+        gate.mark_not_ready("fatal availability fault");
 
         let err = probe
             .check()
@@ -590,12 +590,12 @@ mod tests {
             .expect_err("tripped gate must fail readiness");
         assert_eq!(
             err,
-            CoreReadinessError::DaemonUnavailable("BGP listener failed to bind")
+            CoreReadinessError::DaemonUnavailable("fatal availability fault")
         );
-        assert_eq!(err.to_string(), "BGP listener failed to bind");
+        assert_eq!(err.to_string(), "fatal availability fault");
         assert!(
             !gate.is_shutting_down(),
-            "a bind fault must not flip the shutdown admission gate"
+            "a non-shutdown fault must not flip the shutdown admission gate"
         );
     }
 
@@ -621,11 +621,11 @@ mod tests {
     #[test]
     fn first_not_ready_reason_wins() {
         let gate = DaemonGate::new();
-        gate.mark_not_ready("BGP listener failed to bind");
+        gate.mark_not_ready("fatal availability fault");
         gate.begin_shutdown();
         assert_eq!(
             gate.not_ready_reason(),
-            Some("BGP listener failed to bind"),
+            Some("fatal availability fault"),
             "the root-cause fault must stay visible across later transitions"
         );
     }

@@ -1,11 +1,11 @@
 //! Exit-code contract for daemon shutdown causes.
 //!
-//! Operator-initiated shutdown (SIGTERM) exits 0; shutdown caused by the
-//! gRPC server exiting unexpectedly (here: the TCP listener losing its
-//! bind because the port is already taken) runs the same coordinated
-//! teardown but exits non-zero, so supervisors like systemd with
-//! `Restart=on-failure` restart the daemon instead of treating the
-//! component failure as a clean stop.
+//! Operator-initiated shutdown (SIGTERM) exits 0; a component failure
+//! exits non-zero, so supervisors like systemd with `Restart=on-failure`
+//! restart the daemon instead of treating it as a clean stop. Two
+//! component failures are covered, both provoked by holding the port the
+//! daemon needs: the gRPC server exiting unexpectedly, and the BGP
+//! listener failing to bind.
 
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -135,6 +135,31 @@ fn grpc_bind_failure_exits_nonzero() {
         Some(1),
         "gRPC server failure must exit 1, got {status}\n{}",
         daemon.logs()
+    );
+}
+
+#[test]
+fn bgp_listener_bind_failure_exits_nonzero() {
+    let temp = tempfile::tempdir().expect("create temp dir");
+    // Hold the BGP listen port with a live listener. SO_REUSEADDR lets a
+    // new generation rebind over a closed-but-lingering endpoint, never
+    // over an active LISTEN, so this bind genuinely fails — and a daemon
+    // that cannot accept inbound sessions must exit rather than run deaf.
+    let occupied = TcpListener::bind("0.0.0.0:0").expect("bind occupied port");
+    let bgp_port = occupied.local_addr().unwrap().port();
+    let config_path = write_config(temp.path(), free_port(), bgp_port);
+
+    let mut daemon = spawn_daemon(temp.path(), &config_path);
+    let status = daemon.wait_within(Duration::from_secs(120));
+    let logs = daemon.logs();
+    assert!(
+        logs.contains("failed to bind BGP listener"),
+        "the daemon must exit for the BGP listener, not some other cause\n{logs}"
+    );
+    assert_eq!(
+        status.code(),
+        Some(1),
+        "BGP listener bind failure must exit 1, got {status}\n{logs}"
     );
 }
 

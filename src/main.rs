@@ -2211,7 +2211,12 @@ The config was rejected, or
 .B \-\-check \-\-strict
 reported at least one warning. For
 .BR \-\-diff ,
-1 means the diff carries actionable changes.
+1 means the diff carries actionable changes. A running daemon also exits
+1 when a component failure ends it (the BGP listener failed to bind, or
+the gRPC server exited unexpectedly), so that a supervisor configured
+with
+.B Restart=on\-failure
+restarts it. An operator\-initiated shutdown exits 0.
 .TP
 .B 2
 Invalid invocation: an unusable flag combination or a missing
@@ -2278,7 +2283,9 @@ fn main() {
              Exit status:\n  \
                0  Success. For --check: the config is valid; without --strict this\n     \
                   includes a valid config that was warned about\n  \
-               1  The config was rejected, or --check --strict found warnings\n  \
+               1  The config was rejected, or --check --strict found warnings.\n     \
+                  A running daemon exits 1 on a component failure that ends it\n     \
+                  (BGP listener bind, unexpected gRPC server exit)\n  \
                2  Invalid invocation (unknown flag combination, missing argument)\n  \
                70 Internal error",
             env!("CARGO_PKG_VERSION")
@@ -4394,61 +4401,58 @@ async fn run<T>(
             .collect(),
     };
 
-    let tcp_ao_listener_required = !listener_options.tcp_ao_keys.is_empty();
     let (accept_tx, mut accept_rx) = mpsc::channel::<rustbgpd_transport::AcceptedConnection>(64);
-    let mut tcp_ao_listener_handle = None;
-    match BgpListener::bind_with_options(listen_addr, accept_tx, listener_options).await {
-        Ok(listener) => {
-            tcp_ao_listener_handle = Some(listener.tcp_ao_rotation_handle());
-            let listener_peer_mgr_tx = peer_mgr_tx.clone();
-            let listener_gate = daemon_gate.clone();
-            tokio::spawn(async move {
-                while let Some(conn) = accept_rx.recv().await {
-                    // Coordinated shutdown has begun: drop (close) the
-                    // socket instead of admitting a session into teardown.
-                    if listener_gate.is_shutting_down() {
-                        info!(
-                            peer = %conn.peer_addr,
-                            "rejecting inbound BGP connection: daemon is shutting down"
-                        );
-                        continue;
-                    }
-                    if let Err(e) = listener_peer_mgr_tx
-                        .send(PeerManagerCommand::AcceptInbound {
-                            stream: conn.stream,
-                            peer_addr: conn.peer_addr,
-                            tcp_ao_info: conn.tcp_ao_info,
-                            tcp_ao_generation: conn.tcp_ao_generation,
-                        })
-                        .await
-                    {
-                        warn!(error = %e, "failed to forward inbound connection to peer manager");
-                    }
-                }
-            });
-            tokio::spawn(listener.run());
-        }
-        Err(e) => {
-            if tcp_ao_listener_required {
+    let listener =
+        match BgpListener::bind_with_options(listen_addr, accept_tx, listener_options).await {
+            Ok(listener) => listener,
+            Err(e) => {
+                // Fatal. `listen_port` is mandatory, the listener is never
+                // rebound without a restart, and outbound-only operation
+                // silently drops every passive peer, every dynamic-neighbor
+                // range, and every peer that wins the connect race. Staying up
+                // in that state offered no recovery the operator could reach,
+                // and `/readyz` — the only surface that reported it — exists
+                // only when `prometheus_addr` is configured. Exit 1 (the same
+                // code as an unexpected gRPC server exit) so supervisors with
+                // Restart=on-failure retry, which also clears a transient bind
+                // failure without an operator. On the down daemon `rbgp doctor`
+                // names the cause (port in use, missing CAP_NET_BIND_SERVICE).
                 error!(
                     %listen_addr,
                     error = %e,
-                    "failed to start BGP listener with TCP-AO-protected peers configured; refusing to run partially protected"
+                    "failed to bind BGP listener; inbound BGP sessions cannot be accepted — exiting"
                 );
                 process::exit(1);
             }
-            // The daemon can still open outbound sessions, but it is
-            // unreachable for inbound peers — surface that on /readyz
-            // instead of running silently unreachable.
-            error!(
-                %listen_addr,
-                error = %e,
-                "failed to bind BGP listener; inbound BGP sessions cannot be accepted — \
-                 readiness reports not-ready until the daemon is restarted"
-            );
-            daemon_gate.mark_not_ready("BGP listener failed to bind");
+        };
+    let tcp_ao_listener_handle = Some(listener.tcp_ao_rotation_handle());
+    let listener_peer_mgr_tx = peer_mgr_tx.clone();
+    let listener_gate = daemon_gate.clone();
+    tokio::spawn(async move {
+        while let Some(conn) = accept_rx.recv().await {
+            // Coordinated shutdown has begun: drop (close) the socket
+            // instead of admitting a session into teardown.
+            if listener_gate.is_shutting_down() {
+                info!(
+                    peer = %conn.peer_addr,
+                    "rejecting inbound BGP connection: daemon is shutting down"
+                );
+                continue;
+            }
+            if let Err(e) = listener_peer_mgr_tx
+                .send(PeerManagerCommand::AcceptInbound {
+                    stream: conn.stream,
+                    peer_addr: conn.peer_addr,
+                    tcp_ao_info: conn.tcp_ao_info,
+                    tcp_ao_generation: conn.tcp_ao_generation,
+                })
+                .await
+            {
+                warn!(error = %e, "failed to forward inbound connection to peer manager");
+            }
         }
-    }
+    });
+    tokio::spawn(listener.run());
 
     // ADR-0113: install the configured outbound prefix maxima before the
     // first session can register, so a limited peer admits its initial feed

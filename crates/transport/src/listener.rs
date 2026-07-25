@@ -2277,6 +2277,17 @@ where
         Domain::IPV6
     };
     let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
+    // Must precede bind(). The daemon is normally the active closer at
+    // shutdown, so on an ordinary restart-under-traffic a connection the
+    // previous generation accepted still holds the listen port in
+    // FIN_WAIT/TIME_WAIT and the bind fails EADDRINUSE. `socket2` builds a
+    // raw socket, so it does not get the SO_REUSEADDR that `std`/`mio`
+    // apply for us on the gRPC and metrics listeners.
+    //
+    // SO_REUSEADDR only, never SO_REUSEPORT: SO_REUSEPORT permits
+    // concurrent binds, which would let two daemon generations serve the
+    // listen port at once and split inbound sessions between them.
+    socket.set_reuse_address(true)?;
     socket.bind(&SockAddr::from(addr))?;
     for key in &options.tcp_ao_keys {
         // This installs a peer-specific MKT, not the socket-wide
@@ -3631,6 +3642,31 @@ mod tests {
         assert!(listener.local_addr().unwrap().port() > 0);
         assert_eq!(installed.into_inner(), vec![1, 2]);
         tokio::task::yield_now().await;
+    }
+
+    /// Restart-under-traffic: the daemon is the active closer at shutdown,
+    /// so a connection it accepted on the listen port lingers in
+    /// `FIN_WAIT`/`TIME_WAIT` while the next generation binds. Without
+    /// `SO_REUSEADDR` on both generations that bind fails `EADDRINUSE`.
+    #[tokio::test]
+    async fn bind_socket2_listener_rebinds_over_a_lingering_accepted_connection() {
+        let options = ListenerSocketOptions::default();
+        let listener = bind_socket2_listener("127.0.0.1:0".parse().unwrap(), &options)
+            .expect("first generation binds");
+        let addr = listener.local_addr().expect("listener local addr");
+
+        let client = std::net::TcpStream::connect(addr).expect("inbound connection");
+        let (accepted, _) = listener.accept().await.expect("accept the connection");
+
+        // Close the accepted socket first (daemon-as-active-closer), then
+        // the peer, then the listener: the accepted endpoint is left
+        // holding `addr` in a post-close state.
+        drop(accepted);
+        drop(client);
+        drop(listener);
+
+        bind_socket2_listener(addr, &options)
+            .expect("second generation rebinds over the lingering connection");
     }
 
     #[tokio::test]
