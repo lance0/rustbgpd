@@ -6793,11 +6793,10 @@ peer_group = "secure"
         );
     }
 
-    /// Bridge-disabled mode (no `file_path`, so no persister and no
-    /// bridge) must succeed: the helper takes `Option<&Sender>`, and a
-    /// `None` bridge is the runtime configuration when rustbgpd starts
-    /// without a `--config` file (gRPC mutations are non-persistent in
-    /// that mode by design).
+    /// Bridge-disabled mode (no persister, so no bridge) must succeed: the
+    /// helper takes `Option<&Sender>`, and a `None` bridge is the shape an
+    /// embedder or a unit test wires when nothing persists gRPC mutations.
+    /// The daemon itself always has a bridge.
     #[tokio::test]
     async fn apply_reload_outcome_succeeds_without_bridge() {
         let (peer_mgr_internal_tx, mut peer_mgr_internal_rx) =

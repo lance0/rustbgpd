@@ -1102,27 +1102,58 @@ fn mtime_unix(path: &Path) -> Option<u64> {
         .map(|d| d.as_secs())
 }
 
-/// Pure freshness verdict: the config file was modified after the daemon
-/// started, so on-disk edits are pending until a reload.
+/// File the daemon writes under `runtime_state_dir` holding the config file's
+/// mtime as of its own last read or write of that file. Written by the
+/// daemon's `config_persister` — keep the name in step with it.
+const LAST_PERSIST_FILE: &str = "config-last-persist";
+
+/// The daemon's own record of the config file as it last read or wrote it.
+fn last_persist_unix(state_dir: &Path) -> Option<u64> {
+    fs::read_to_string(state_dir.join(LAST_PERSIST_FILE))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// The timestamp a config-file mtime is judged against.
+///
+/// Process start is the wrong reference: the daemon rewrites its own config
+/// file on every runtime mutation (`rbgp neighbor add`, a config transaction,
+/// gNMI Set), and a container entrypoint may seed the file after the process
+/// has started. Both leave an mtime past process start with nothing pending,
+/// so the check warned permanently on every deployment that used the
+/// documented runtime-mutation workflow.
+///
+/// The daemon's own last-persist marker is the honest reference — it advances
+/// exactly when the daemon reads or writes the file, and not when an operator
+/// edits it. Process start remains the fallback for a daemon that wrote no
+/// marker (no writable state dir, or an older build).
+fn config_freshness_reference(state_dir: &Path, pid: u32) -> Option<u64> {
+    last_persist_unix(state_dir).or_else(|| proc_start_unix(pid))
+}
+
+/// Pure freshness verdict: the config file was modified after the daemon last
+/// read or wrote it, so on-disk edits are pending until a reload.
 fn config_freshness_check(
     pid: u32,
     config_path: &str,
     config_mtime_unix: u64,
-    daemon_start_unix: u64,
+    daemon_sync_unix: u64,
 ) -> Check {
-    let (status, detail) = if config_mtime_unix > daemon_start_unix {
+    let (status, detail) = if config_mtime_unix > daemon_sync_unix {
         (
             CheckStatus::Warn,
             format!(
-                "config {config_path} was modified after daemon pid {pid} started — on-disk \
-                 changes are not applied; validate with `rustbgpd --check {config_path}` and \
-                 reload with SIGHUP (systemctl reload rustbgpd)"
+                "config {config_path} was modified after daemon pid {pid} last applied it — \
+                 on-disk changes are not applied; validate with `rustbgpd --check \
+                 {config_path}` and reload with SIGHUP (systemctl reload rustbgpd)"
             ),
         )
     } else {
         (
             CheckStatus::Ok,
-            format!("config {config_path} unchanged since daemon pid {pid} started"),
+            format!("config {config_path} matches what daemon pid {pid} last applied"),
         )
     };
     Check {
@@ -1564,14 +1595,19 @@ pub(crate) async fn run(
     }
 
     // ---- config freshness (local daemon processes only) ---------------
+    let freshness_state_dir = PathBuf::from(state_dir.as_deref().unwrap_or(DEFAULT_STATE_DIR));
     for (pid, _) in &daemon_limits {
         let Some(config_path) = proc_cmdline_config_path(*pid) else {
             continue;
         };
-        let (Some(mtime), Some(start)) = (mtime_unix(&config_path), proc_start_unix(*pid)) else {
+        let (Some(mtime), Some(reference)) = (
+            mtime_unix(&config_path),
+            config_freshness_reference(&freshness_state_dir, *pid),
+        ) else {
             continue;
         };
-        let check = config_freshness_check(*pid, &config_path.display().to_string(), mtime, start);
+        let check =
+            config_freshness_check(*pid, &config_path.display().to_string(), mtime, reference);
         reporter.record(check.name, check.status, check.detail);
     }
 
@@ -2314,6 +2350,61 @@ paths = ["x"]
         assert!(stale.detail.contains("--check"), "{}", stale.detail);
         let fresh = config_freshness_check(7, "/etc/rustbgpd/config.toml", 1_000, 1_000);
         assert_eq!(fresh.status, CheckStatus::Ok);
+    }
+
+    /// The regression: the daemon rewrites its own config file on every
+    /// runtime mutation, so a mtime past process start is not evidence of an
+    /// operator edit. The check must judge against the daemon's own
+    /// last-persist marker — and must still warn when the file really did
+    /// move past it.
+    #[test]
+    fn freshness_reference_prefers_the_daemon_last_persist_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(LAST_PERSIST_FILE), "2000\n").unwrap();
+
+        // The marker wins over process start: an unusable pid cannot
+        // contribute a fallback, so the reference can only be the marker.
+        assert_eq!(
+            config_freshness_reference(dir.path(), u32::MAX),
+            Some(2_000)
+        );
+
+        // A daemon-authored write leaves the config mtime AT the marker.
+        let after_daemon_write =
+            config_freshness_check(1, "/var/lib/rustbgpd/config.toml", 2_000, 2_000);
+        assert_eq!(
+            after_daemon_write.status,
+            CheckStatus::Ok,
+            "{}",
+            after_daemon_write.detail
+        );
+
+        // A genuine external edit lands past it and must still be yellow.
+        let after_external_edit =
+            config_freshness_check(1, "/var/lib/rustbgpd/config.toml", 2_001, 2_000);
+        assert_eq!(
+            after_external_edit.status,
+            CheckStatus::Warn,
+            "{}",
+            after_external_edit.detail
+        );
+        assert!(
+            after_external_edit.detail.contains("SIGHUP"),
+            "{}",
+            after_external_edit.detail
+        );
+    }
+
+    /// No marker (no writable state dir, or an older daemon) degrades to the
+    /// previous behaviour rather than skipping the check.
+    #[test]
+    fn freshness_reference_falls_back_to_process_start_without_a_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(last_persist_unix(dir.path()), None);
+        assert_eq!(
+            config_freshness_reference(dir.path(), std::process::id()),
+            proc_start_unix(std::process::id())
+        );
     }
 
     // ---- bundle integration ------------------------------------------

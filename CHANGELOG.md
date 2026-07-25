@@ -724,6 +724,53 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A config file the daemon has rewritten now says so.** The first
+  runtime mutation — `rbgp neighbor add`, a config transaction, a gNMI
+  `Set` — rewrites the config file in canonical form, and always has:
+  comments and key order from the previous file are gone and defaulted
+  fields are written out explicitly. Nothing on disk said that had
+  happened, so an annotated starter config could come back with its
+  comments silently dropped, including the `DELIBERATE DEVELOPMENT
+  POSTURE: PERMIT ALL, BOTH DIRECTIONS` banner the lab starter carries.
+  Every file the daemon writes now opens with a short header stating
+  that it is maintained by rustbgpd, that the previous file's comments
+  and formatting are not preserved, and that an annotated copy belongs
+  in version control. The header carries no version and no timestamp, so
+  it does not churn the file or add noise to config-history diffs, and
+  rewriting the file repeatedly leaves exactly one of them. Nothing else
+  about the write changed — same canonicalization, same crash-safe
+  atomic write, same `0600` mode.
+
+- **The daemon now states its eBGP policy posture in the log at
+  startup.** `rustbgpd --check` framed this before deployment, but an
+  operator whose banner was flattened by a runtime rewrite had nowhere
+  left to see it. When any eBGP neighbor resolves no explicit policy,
+  startup logs one line naming how many, and whether those directions
+  are unfiltered or are carrying no routes under `ebgp_requires_policy`.
+
+- **`rbgp doctor` no longer reports the daemon's own config write as an
+  unapplied external edit.** The config-freshness check compared the
+  file's mtime against daemon process start, so any deployment following
+  the documented runtime-mutation workflow warned permanently —
+  `config … was modified after daemon pid 1 started — on-disk changes are
+  not applied` — about a change the daemon itself had made and applied.
+  Container deployments whose entrypoint seeds a config template after
+  the process starts hit the same false warning. A permanent yellow
+  trains operators to ignore yellow, which is the whole value of the
+  check. The daemon now records the config file's timestamp whenever it
+  reads or writes that file, and doctor judges against that record: a
+  daemon-authored write and a post-start template seed both read clean,
+  a genuine external edit still warns with the same validate-and-SIGHUP
+  advice, and a daemon that recorded nothing falls back to the previous
+  process-start comparison.
+
+- **Three gRPC errors no longer tell operators to pass a `--config` flag
+  that does not exist.** `config history`, config transactions, and
+  FIB-table CRUD each answered their unavailable case with "start
+  rustbgpd with `--config`"; the daemon takes its config path as a
+  positional argument and rejects that flag. Each now states the real
+  condition instead.
+
 - **A rejected runtime mutation no longer causes any externally visible
   change.** When config persistence failed — an unwritable config
   directory, a read-only mount, a full filesystem — every persisted
