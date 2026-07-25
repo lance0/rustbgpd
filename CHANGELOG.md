@@ -469,7 +469,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   | Figure | Kind |
   |---|---|
   | ~610 B per retained entry; ~2.5 MB per saturated session | **measured** — DHAT capture at 2 sessions × 100k prefixes each, `docs/perf/rib-rebaseline-2026-07-13.md` |
-  | ~155 KiB resident per session before a single UPDATE | **measured** (structural) — the LRU index is allocated at capacity |
+  | ~155 KiB allocated per session before a single UPDATE | **computed** from the allocator's own sizing — the LRU index and the eviction ring are both reserved at capacity up front. Most of it is never written, so it is address space and allocator bookkeeping rather than measured RSS |
   | ~355 MiB retained heap on the 1000×400 route-server receipt | **modeled** from the two measured values above, equivalent to **35–40% of that run's recorded RSS**. It is a model of retained heap, *not* an observed RSS saving |
   | ~2.5 GB saturation ceiling | **modeled**, and only at one fleet shape: roughly **1000 ingress peers each announcing at least 4096 distinct routes**. It is not the cost of one full-table member |
 
