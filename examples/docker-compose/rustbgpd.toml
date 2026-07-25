@@ -52,6 +52,13 @@ default_action = "permit"
 import_chain = ["lab-permit-all-import"]
 export_chain = ["lab-permit-all-export"]
 
+# Import-decision explain, on — this is a two-node quick-start whose whole
+# job is to be poked at, and `rbgp policy explain` is one of the things
+# worth poking. It is opt-in daemon-wide because the cache is per session,
+# so the bill scales with peer count; one FRR peer is a few MiB.
+[policy.explain]
+enabled = true
+
 [[neighbors]]
 address = "10.99.0.20"
 remote_asn = 65002

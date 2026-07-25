@@ -1475,7 +1475,8 @@ pub struct PolicyConfig {
     /// Global export policy chain (references named definitions).
     #[serde(default)]
     pub export_chain: Vec<String>,
-    /// Import-decision explain cache tuning (ADR-0073). Diagnostic
+    /// Import-decision explain cache tuning (ADR-0073). **Opt-in** —
+    /// omitting this section leaves import explain disabled. Diagnostic
     /// retention only — does not affect which routes are accepted.
     #[serde(default)]
     pub explain: PolicyExplainConfig,
@@ -1571,7 +1572,7 @@ impl Eq for DatasetLoadEvents {}
 
 /// Tuning for the per-session import-decision cache that backs
 /// `rbgp policy explain` / `PolicyService.ExplainImportPolicy`
-/// (ADR-0073).
+/// (ADR-0073). **Opt-in** — the cache is off unless `enabled = true`.
 ///
 /// This is **diagnostic retention**, not policy evaluation behaviour:
 /// shrinking or disabling the cache changes only what the explain
@@ -1580,14 +1581,19 @@ impl Eq for DatasetLoadEvents {}
 #[serde(deny_unknown_fields)]
 pub struct PolicyExplainConfig {
     /// Whether the per-session import-decision cache is populated.
-    /// Default `true`. This is the performance control: when `false`
-    /// the inbound UPDATE path skips building and storing any decision
-    /// snapshot — a single boolean check, no per-NLRI attribute /
-    /// modification clone. Turn it off on hot full-table peers where
-    /// the explain surface isn't worth the write-path cost.
+    /// **Default `false` — import explainability is opt-in.** When
+    /// `false` the inbound UPDATE path skips building and storing any
+    /// decision snapshot (a single boolean check, no per-NLRI attribute
+    /// / modification clone) and the session allocates no cache at all;
+    /// explain queries answer `cache_disabled`.
+    ///
+    /// The setting is **global** — it applies to every session, and
+    /// there is no per-peer or per-group override. Turning it on buys
+    /// diagnostic retention at a cost that multiplies by session count:
+    /// see `cache_size` for the budget.
     #[serde(default = "default_explain_enabled")]
     pub enabled: bool,
-    /// Per-peer cache capacity (entries). Each entry is one
+    /// Cache capacity **per session** (entries). Each entry is one
     /// `(AFI, SAFI, prefix, path_id)` import decision. Default 4096 —
     /// a fabric / partial-table starter size (hundreds–low-thousands
     /// of prefixes fully observable). It is **not** sized for internet
@@ -1596,12 +1602,16 @@ pub struct PolicyExplainConfig {
     /// answer. Operators who want reliable full-table explain raise
     /// this toward their expected retained-prefix count for the peer
     /// and own the memory cost.
+    ///
+    /// Budget roughly `peers × min(cache_size, prefixes per peer) ×
+    /// ~600 B`, plus a ~155 KiB fixed floor per session once explain is
+    /// enabled (the LRU index is allocated at capacity).
     #[serde(default = "default_explain_cache_size")]
     pub cache_size: usize,
 }
 
 fn default_explain_enabled() -> bool {
-    true
+    false
 }
 
 fn default_explain_cache_size() -> usize {

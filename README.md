@@ -13,9 +13,10 @@ automation-heavy control planes. gRPC is the primary interface for all peer
 lifecycle, routing, and policy operations — the config file bootstraps initial
 state, then gRPC owns the truth. No restarts to add peers, change policy, or
 inject routes. And every route decision can explain itself from the live RIB:
-per-peer received / best / advertised views, policy and export-gate explain,
-retained rejected routes with reasons, BMP/MRT/metrics — with receipt-backed
-interop behind each claimed behavior.
+per-peer received / best / advertised views, best-path and export-gate
+explain, opt-in import-decision explain, retained rejected routes with
+reasons, BMP/MRT/metrics — with receipt-backed interop behind each claimed
+behavior.
 
 **Measured, not marketed** — every number below links to its published,
 reproducible receipt:
@@ -127,7 +128,10 @@ config from their existing `general.yml`/`clients.yml`:
   streaming events, all without restarts
 - **Native route explainability** — "why is this route (not) here?" answered
   from the live RIB in one command, where incumbents need an external
-  looking-glass stack for less ([docs/explain.md](docs/explain.md))
+  looking-glass stack for less. Best-path, export-gate, and filtered-route
+  views are always on; the **import**-decision surface is opt-in
+  (`[policy.explain] enabled = true`), because it retains a decision cache
+  per session ([docs/explain.md](docs/explain.md))
 - **Update-group fanout** — peers with provably identical staged output share
   one staging pass: ~28x faster 100k-route convergence at 256 uniform RR
   clients (15.1 s to 0.54 s); v2 extends sharing to VPNv4/v6 with per-member

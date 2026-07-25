@@ -70,6 +70,15 @@ prefix = "::/0"
 [policy.definitions.to-transit]
 default_action = "deny"
 
+# Import-decision explain, off. The transit peers below are capped at
+# 100,000 prefixes each; the per-session cache defaults to 4096 entries,
+# so an enabled cache would stay saturated and answer most queries with an
+# evicted result while still being billed per session. Turn it on with
+# `cache_size` raised toward the peer's retained-prefix count when you are
+# actually debugging an import decision.
+[policy.explain]
+enabled = false
+
 # Shared transport / policy defaults for transit peers. The FIB table below
 # also uses this name as an allow-list, so only best routes learned from this
 # peer group are eligible for kernel install. Keep a peer import cap alongside

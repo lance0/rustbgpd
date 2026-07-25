@@ -30,8 +30,11 @@ events.
 - **Import-decision explain** (ADR-0073) — a bounded per-session LRU
   cache of import-policy decisions (permit and deny) backing
   `PolicyService.ExplainImportPolicy` / `rbgp policy explain`;
-  diagnostic state only, resets on session reset / restart, gated by
-  `[policy.explain].enabled`
+  diagnostic state only, resets on session reset / restart. **Opt-in:**
+  `TransportConfig::explain_enabled` defaults to `false` (daemon knob
+  `[policy.explain] enabled`), because the cache is per session and its
+  cost multiplies by session count. Embedders that want the surface set
+  the field explicitly after `TransportConfig::new`.
 - **Private AS removal** — strip/replace private ASNs before eBGP export
 - **Route server transparency** — preserve original NEXT_HOP and skip
   local ASN prepend for route-server clients

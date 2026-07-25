@@ -200,7 +200,9 @@ soft-reset auto-fire). Peers on unchanged chains are untouched.
 ```console
 # Import: why was this prefix permitted/denied from this peer?
 # Per-term trace for .rpol members; backed by the per-session
-# decision cache ([policy.explain], on by default — ADR-0073).
+# decision cache, which is OPT-IN (ADR-0073) — set
+# `[policy.explain] enabled = true`, reload, and let the session
+# re-establish, or this answers `cache_disabled`.
 $ rbgp policy explain --neighbor 192.0.2.10 --prefix 203.0.113.0/26
 
 # Export: the full gate ladder toward a peer; the export_policy rung

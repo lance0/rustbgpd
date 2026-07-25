@@ -370,6 +370,15 @@ $ rbgp rib received 198.51.100.2 --rejected
 $ rbgp policy explain --neighbor 198.51.100.2 --prefix 203.0.113.0/24
 ```
 
+The first command works on a stock route server. The second needs
+`[policy.explain] enabled = true` — import explain is opt-in and the
+route-server starter turns it off explicitly, because the decision cache
+is per session and its cost multiplies by member count
+([CONFIGURATION.md](../CONFIGURATION.md#import-decision-explain-policyexplain)).
+Enable it, reload, and let the member's session re-establish when you
+need the statement-level trace; the rejected-route view above needs no
+such switch.
+
 The explain names the deciding term — typically `reject-rpki-invalid`
 (fix the member's ROA or your RTR feed) or an `ixp-hygiene` rule
 (AS_SET or ASPA-invalid in the announcement).

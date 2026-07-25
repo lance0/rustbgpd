@@ -199,6 +199,11 @@ rbgp policy stats                     # hygiene/client terms firing
 rbgp policy explain --neighbor 198.51.100.2 --prefix 203.0.113.0/24
 ```
 
+The last one needs `[policy.explain] enabled = true` — import explain is
+opt-in, since the decision cache is per session and its cost multiplies
+by member count. Without it the query answers `cache_disabled` and names
+the lines to add.
+
 ## 5. Member support: the filtered-route view
 
 The daemon retains each member's rejected routes with canonical

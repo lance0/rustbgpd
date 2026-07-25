@@ -6445,6 +6445,52 @@ fn diff_config_flags_tcp_ao_changes_as_restart_required() {
     assert!(!text.contains("new-secret"));
 }
 
+/// ADR-0073 reversal: import explainability is opt-in. A config that
+/// never mentions `[policy.explain]` must resolve to a disabled cache,
+/// and an explicit `enabled = true` must behave exactly as before.
+///
+/// Pinned on the schema/serde default specifically — this is the path a
+/// config file takes, and it is distinct from `TransportConfig::new`
+/// (pinned in `crates/transport/src/config.rs`), which embedders reach
+/// without ever loading a config file. Either default flipping back on
+/// its own leaves the other construction path uncovered, so each gets
+/// its own test.
+#[test]
+fn omitted_policy_explain_block_resolves_to_disabled() {
+    let config = parse(valid_toml()).unwrap();
+    assert!(
+        !config.policy.explain.enabled,
+        "an omitted [policy.explain] block must leave import explain off"
+    );
+    assert!(
+        !config
+            .resolve_neighbor(&config.neighbors[0])
+            .unwrap()
+            .transport_config
+            .explain_enabled,
+        "the disabled schema default must reach the per-session transport config"
+    );
+
+    // Opting in explicitly is unchanged: the cache is populated and
+    // `cache_size` still defaults to the same 4096 entries per session.
+    let opted_in = parse(&format!(
+        "{}\n[policy.explain]\nenabled = true\n",
+        valid_toml()
+    ))
+    .unwrap();
+    assert!(opted_in.policy.explain.enabled);
+    assert_eq!(opted_in.policy.explain.cache_size, 4096);
+    let resolved = opted_in
+        .resolve_neighbor(&opted_in.neighbors[0])
+        .unwrap()
+        .transport_config;
+    assert!(
+        resolved.explain_enabled,
+        "explicit enabled = true must still enable the cache"
+    );
+    assert_eq!(resolved.explain_cache_size, 4096);
+}
+
 #[test]
 fn resolve_neighbor_threads_policy_explain_settings() {
     // ADR-0073: the resolved-neighbor transport path (used by

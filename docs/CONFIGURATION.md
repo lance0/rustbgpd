@@ -2198,11 +2198,15 @@ path = "/var/lib/rustbgpd/datasets/customers.list"
 
 ### Import-decision explain (`[policy.explain]`)
 
-Optional. Controls the per-session import-decision cache that backs
+**Opt-in.** Controls the per-session import-decision cache that backs
 `PolicyService.ExplainImportPolicy` and `rbgp policy explain`
 (ADR-0073). Every import evaluation — permit **and** deny — is recorded
 at the transport eval site keyed by `(AFI, SAFI, prefix, path_id)`, so a
 prefix that was denied and never reached the RIB stays explainable.
+
+Omitting the section leaves import explain **disabled**: the inbound
+path stores nothing, no cache is allocated, and explain queries answer
+`cache_disabled`.
 
 ```toml
 [policy.explain]
@@ -2212,15 +2216,39 @@ cache_size = 4096
 
 | Field        | Type    | Required | Default | Description |
 |--------------|---------|----------|---------|-------------|
-| `enabled`    | bool    | no       | `true`  | Gates the cache write-path. When `false`, the inbound UPDATE path skips the compact decision/context snapshot entirely (one boolean check, nothing stored) and explain queries answer `cache_disabled` (distinct from `not_seen`; the CLI renders it as an error with a hint). Set `false` on perf-sensitive full-table peers. |
-| `cache_size` | integer | no       | `4096`  | Per-peer LRU capacity, one entry per `(AFI, SAFI, prefix, path_id)`. The 4096 default suits fabric / partial-table peers; raise it for full-table peers. |
+| `enabled`    | bool    | no       | `false` | Gates the cache write-path. When `false` (the default), the inbound UPDATE path skips the compact decision/context snapshot entirely (one boolean check, nothing stored), the session allocates no cache, and explain queries answer `cache_disabled` (distinct from `not_seen`; the CLI renders it as an error naming the config lines to add). |
+| `cache_size` | integer | no       | `4096`  | LRU capacity **per session**, one entry per `(AFI, SAFI, prefix, path_id)`. The 4096 default suits fabric / partial-table peers; a full-table peer keeps it saturated, so raise it toward that peer's retained-prefix count if you need reliable full-table explain. |
+
+**Both settings are global.** There is no per-peer or per-group
+override: `enabled` is on or off for the whole daemon, and `cache_size`
+is one number applied to every session. "Enable it, but not on the hot
+full-table peers" is not a posture this knob offers — it is the whole
+daemon, or nothing.
+
+**Sizing the choice.** Retention at the default size is
+**partial-table**, not complete. Budget roughly:
+
+```
+peers × min(cache_size, distinct prefixes per peer) × ~610 B
+  + peers × ~155 KiB   (the LRU index is allocated at capacity, so this
+                        floor is resident before a single UPDATE)
+```
+
+The ~610 B per entry is **measured**
+([`perf/rib-rebaseline-2026-07-13.md`](perf/rib-rebaseline-2026-07-13.md),
+DHAT, saturated caches). Worked examples, **modeled** from it: 10 peers
+× 4096 entries ≈ 26 MiB; 1000 peers × 400 retained prefixes ≈ 355 MiB;
+1000 peers each announcing at least 4096 distinct routes ≈ 2.5 GB, the
+saturation ceiling for that fleet shape.
 
 This is **diagnostic state only** — it never affects which routes are
 accepted. Scope is IPv4 / IPv6 unicast. The cache resets on peer session
 reset and is **not durable across restart** (for durable history use the
 event-history outbox, ADR-0072). Both fields are **restart-required
-per-peer** on reload; see [`reload-matrix.md`](reload-matrix.md) and the
-"Explain an import decision" runbook in [`OPERATIONS.md`](OPERATIONS.md).
+per-peer** on reload — a session already established keeps its current
+behaviour until it re-establishes; see
+[`reload-matrix.md`](reload-matrix.md) and the "Explain an import
+decision" runbook in [`OPERATIONS.md`](OPERATIONS.md).
 
 ### Rejected-route retention (`[policy.reject_retention]`)
 

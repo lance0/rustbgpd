@@ -126,7 +126,7 @@ releases rather than carried forward from older measurements.
 | Table statistics | Yes | Partial | Health endpoint |
 | VRF management | Yes | No | |
 | Policy CRUD via API | Yes | Yes | Named policy definition CRUD plus global/per-neighbor chain assignment |
-| Import-policy explain | No | Yes | `ExplainImportPolicy` RPC + `rbgp policy explain` — per-prefix PERMIT/DENY/WITHDRAWN/EVICTED/STALE/NOT_SEEN decision trace at the transport eval site, IPv4/IPv6 unicast (ADR-0073) |
+| Import-policy explain | No | Yes (opt-in) | `ExplainImportPolicy` RPC + `rbgp policy explain` — per-prefix PERMIT/DENY/WITHDRAWN/EVICTED/STALE/NOT_SEEN decision trace at the transport eval site, IPv4/IPv6 unicast (ADR-0073). Off unless `[policy.explain] enabled = true`; the decision cache is per session |
 | RPKI management | Yes | Partial | VRP/cache status via metrics; no gRPC RPKI CRUD |
 | BMP management | Yes | Partial | Config-file only; no runtime gRPC add/remove |
 | MRT control | Yes | Yes | `TriggerMrtDump` RPC |
@@ -258,7 +258,7 @@ Competing head-to-head with GoBGP for all use cases:
   no ASPA support
 - **Unicast FIB ECMP beyond Add-Path** — rustbgpd installs kernel `RTA_MULTIPATH` routes with `maximum_paths`, per-class eBGP/iBGP caps, `multipath_relax`, and Link Bandwidth weighted multipath
 - **gNMI / OpenConfig telemetry + Set subset** — rustbgpd exposes a native `gnmi.gNMI` service for OpenConfig BGP operational state (`Capabilities`, `Get`, `Subscribe` SAMPLE/POLL/ONCE, plus STREAM ON_CHANGE v1 for neighbor `session-state`) and a transaction-backed static-neighbor `Set` subset, verified with `gnmic`; GoBGP exposes its own gRPC API but not an OpenConfig/gNMI target
-- **Import-policy explain** — `ExplainImportPolicy` RPC + `rbgp policy explain` answer "why didn't this prefix come in?" from a per-session import-decision cache that records both permits and denies at the transport eval site (ADR-0073); GoBGP has no per-prefix import-decision diagnostic
+- **Import-policy explain** — `ExplainImportPolicy` RPC + `rbgp policy explain` answer "why didn't this prefix come in?" from a per-session import-decision cache that records both permits and denies at the transport eval site (ADR-0073), opt-in via `[policy.explain] enabled = true` since the cache is retained per session; GoBGP has no per-prefix import-decision diagnostic
 - **Config persistence** — gRPC mutations atomically persisted to TOML; GoBGP doesn't persist runtime changes
 - **Operator packaging** — systemd unit, example configs, operations guide, release checklist, container image CI out of the box
 - **Secure-by-default gRPC** — UDS default listener, optional token auth per listener, read-only/read-write split; GoBGP defaults to open TCP

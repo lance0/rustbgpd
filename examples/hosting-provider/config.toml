@@ -63,6 +63,15 @@ operator = "operator"
 [[rpki.cache_servers]]
 address = "127.0.0.1:3323"
 
+# Import-decision explain, on. The edge routers below are iBGP peers that
+# send back only what this AS originates, so the per-session cache stays
+# small and "why did the provisioning system's prefix not come back?" is
+# answerable per prefix. Explain is opt-in daemon-wide because the cache is
+# per session and multiplies by peer count; at this peer count and table
+# size it is a few MiB.
+[policy.explain]
+enabled = true
+
 # BMP export for audit trail
 [bmp]
 sys_name = "rustbgpd-hosting"
