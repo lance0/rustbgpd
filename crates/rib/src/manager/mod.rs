@@ -2212,6 +2212,9 @@ impl RibManager {
             RibUpdate::QueryAdvertisedCount { peer, reply } => {
                 self.handle_query_advertised_count(peer, reply);
             }
+            RibUpdate::QueryPeerRetainedStale { peer, reply } => {
+                self.handle_query_peer_retained_stale(peer, reply);
+            }
             RibUpdate::QueryNeighborPolicyStats { peer, reply } => {
                 self.handle_query_neighbor_policy_stats(peer, reply);
             }
@@ -4061,6 +4064,49 @@ impl RibManager {
             .grouped_advertised_count(peer)
             .unwrap_or_else(|| self.adj_ribs_out.get(&peer).map_or(0, AdjRibOut::len));
         let _ = reply.send(count);
+    }
+
+    /// ADR-0112: routes this peer's Adj-RIB-In still retains as GR or LLGR
+    /// stale. Counted over every family the RIB stores, because one directional
+    /// RFC 8212 verdict governs all of a neighbor's families — a retained
+    /// EVPN or VPN route is as much prior-policy state as a retained unicast
+    /// one.
+    fn handle_query_peer_retained_stale(
+        &mut self,
+        peer: IpAddr,
+        reply: tokio::sync::oneshot::Sender<usize>,
+    ) {
+        let retained = self.ribs.get(&peer).map_or(0, |rib| {
+            let stale = |stale: bool, llgr_stale: bool| stale || llgr_stale;
+            rib.iter()
+                .filter(|r| stale(r.is_stale, r.is_llgr_stale))
+                .count()
+                + rib
+                    .iter_flowspec()
+                    .filter(|r| stale(r.is_stale, r.is_llgr_stale))
+                    .count()
+                + rib
+                    .iter_evpn()
+                    .filter(|r| stale(r.is_stale, r.is_llgr_stale))
+                    .count()
+                + rib
+                    .iter_vpn()
+                    .filter(|r| stale(r.is_stale, r.is_llgr_stale))
+                    .count()
+                + rib
+                    .iter_labeled()
+                    .filter(|r| stale(r.is_stale, r.is_llgr_stale))
+                    .count()
+                + rib
+                    .iter_bgpls()
+                    .filter(|r| stale(r.is_stale, r.is_llgr_stale))
+                    .count()
+                + rib
+                    .iter_rtc()
+                    .filter(|r| stale(r.is_stale, r.is_llgr_stale))
+                    .count()
+        });
+        let _ = reply.send(retained);
     }
 
     fn handle_query_adj_rib_out_counts(

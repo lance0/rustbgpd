@@ -18,7 +18,7 @@ use rustbgpd_telemetry::BgpMetrics;
 use tokio::sync::oneshot;
 use tracing::{info, warn};
 
-use crate::config::Config;
+use crate::config::{Config, RFC8212_MISSING_IMPORT_POLICY, is_reserved_rfc8212_deny};
 use crate::policy_admin::{
     api_peer_group_to_config, apply_config_event, catalog_config_error, neighbor_set_references,
     peer_group_references, policy_references,
@@ -30,20 +30,21 @@ use super::{ManagedPeer, PEER_POLICY_UPDATE_TIMEOUT, PEER_QUERY_TIMEOUT, PeerMan
 /// send fails after the session already acked the new policy.
 ///
 /// The three variants exist to keep rollback correct on a compound failure.
-/// The choice between them turns entirely on whether the peer's `AdjRibIn` was
-/// actually moved off the prior policy — see `CapturedResolvedPolicy::forward_completed`.
+/// The choice between them turns entirely on whether the peer's `AdjRibIn` may
+/// have moved off the prior policy — see
+/// `CapturedResolvedPolicy::adj_rib_in_may_have_moved`.
 #[derive(Clone, Copy)]
 enum RefreshFailureHandling {
     /// Forward apply path: surface the failure to the caller and arm
     /// `pending_refresh` so the next call retries.
     Fatal,
-    /// Rollback of a peer whose forward apply *completed* (`AdjRibIn` was moved to
-    /// the new policy): the rollback must refresh back to the prior policy, so a
-    /// failed rollback refresh re-arms `pending_refresh = true` to retry.
+    /// Rollback of a peer whose `AdjRibIn` may already sit on the candidate
+    /// policy: the rollback must refresh back to the prior policy, so a failed
+    /// rollback refresh re-arms `pending_refresh = true` to retry.
     BestEffortRearm,
-    /// Rollback of a peer whose forward apply did *not* complete (`AdjRibIn` never
-    /// left the prior policy): no refresh is actually needed, so restore the
-    /// captured prior `pending_refresh` rather than arming a spurious retry.
+    /// Rollback of a peer whose `AdjRibIn` provably never left the prior policy:
+    /// no refresh is actually needed, so restore the captured prior
+    /// `pending_refresh` rather than arming a spurious retry.
     BestEffortRestorePrior { pending_refresh: bool },
 }
 
@@ -53,18 +54,61 @@ struct CapturedResolvedPolicy {
     policy: ResolvedPeerPolicy,
     pending_refresh: bool,
     pending_export_apply: bool,
-    /// Whether this peer's forward apply fully succeeded. This is the load-
-    /// bearing flag for rollback correctness: it is really a proxy for *"did
-    /// this peer's `AdjRibIn` actually move off the prior policy?"*. A completed
-    /// forward ran a successful Route Refresh, so its `AdjRibIn` is at the new
-    /// policy and rollback must refresh it back (`RefreshFailureHandling::BestEffortRearm`).
-    /// An incomplete forward (session never acked, or the forward refresh
-    /// failed) left `AdjRibIn` on the prior policy, so rollback needs no refresh
-    /// and only restores the captured prior pending state
-    /// (`RefreshFailureHandling::BestEffortRestorePrior`). Do not collapse the
-    /// two branches: the asymmetry is what keeps a compound (rollback-time)
-    /// refresh failure from either leaving routes stale or arming a spurious retry.
-    forward_completed: bool,
+    /// Whether this peer's `AdjRibIn` may already sit on the candidate import
+    /// policy. This is the load-bearing flag for rollback correctness, and it
+    /// is deliberately a *may*, not a *did*.
+    ///
+    /// It is true when the forward apply completed (a successful Route Refresh
+    /// moved `AdjRibIn` to the new policy) and also when the forward apply
+    /// failed at the Route Refresh step itself. The second case is the subtle
+    /// one: `soft_reset_in` queues families sequentially, so IPv4's request can
+    /// be accepted before IPv6's send fails, and a reply timeout is ambiguous
+    /// in both directions. Either way we cannot prove no family converged, so
+    /// rollback must refresh back and a failed rollback refresh must leave
+    /// `pending_refresh` armed (`RefreshFailureHandling::BestEffortRearm`) —
+    /// that is unfinished convergence debt, not a rejected desired change.
+    ///
+    /// It is false only when the forward failed *before* any refresh was
+    /// attempted (session hot-apply bail, RIB failure, a peer that stopped
+    /// reporting Established). `AdjRibIn` provably never left the prior policy
+    /// there, so rollback restores the captured prior pending state
+    /// (`RefreshFailureHandling::BestEffortRestorePrior`). After such an exact,
+    /// fully-unwound rollback, retry intent is structural: the caller's
+    /// configuration never advanced, so the next reload re-derives the same
+    /// delta. Arming `pending_refresh` would instead make some unrelated later
+    /// edit refresh the restored policy.
+    ///
+    /// Do not collapse the two branches: the asymmetry is what keeps a
+    /// compound (rollback-time) refresh failure from either dropping real
+    /// convergence debt or arming a spurious retry.
+    adj_rib_in_may_have_moved: bool,
+}
+
+/// Why a forward policy apply failed, plus the one fact the rollback cannot
+/// reconstruct afterwards: whether the failure happened at the Route Refresh
+/// step, and therefore whether any family's request may already have reached
+/// the peer.
+struct PolicyApplyFailure {
+    message: String,
+    /// True only for a failure raised at the Route Refresh step. Every earlier
+    /// bail returns before `soft_reset_in` is called at all, which is what
+    /// makes this a provable "no delivery" rather than an assumption.
+    refresh_delivery_began: bool,
+}
+
+impl From<String> for PolicyApplyFailure {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            refresh_delivery_began: false,
+        }
+    }
+}
+
+impl std::fmt::Display for PolicyApplyFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
 }
 
 #[derive(Default)]
@@ -147,6 +191,196 @@ fn record_import_validation_refresh_metrics(
 }
 
 impl PeerManager {
+    /// ADR-0112: would installing `candidate_import` flip this peer's RFC 8212
+    /// import-presence verdict?
+    ///
+    /// The reserved deny replaces the whole direction, so its presence on the
+    /// installed chain *is* the running verdict — the same identity test the
+    /// operator status surface uses, for the same reason: a second stored bool
+    /// can drift from the chain it describes, and an identity test cannot.
+    /// With `[global] ebgp_requires_policy` off the reserved deny is never
+    /// installed and never resolved, so this is false on both sides and every
+    /// caller below behaves exactly as it did before the knob existed.
+    fn rfc8212_import_presence_transition(
+        &self,
+        peer_key: &PeerKey,
+        candidate_import: Option<&PolicyChain>,
+    ) -> bool {
+        self.peers.get(peer_key).is_some_and(|managed| {
+            is_reserved_rfc8212_deny(
+                managed.import_policy.as_ref(),
+                RFC8212_MISSING_IMPORT_POLICY,
+            ) != is_reserved_rfc8212_deny(candidate_import, RFC8212_MISSING_IMPORT_POLICY)
+        })
+    }
+
+    /// ADR-0112: may this peer take a live RFC 8212 import-presence edit right
+    /// now? Read-only — it mutates nothing, so a rejection leaves the peer
+    /// exactly where it was.
+    ///
+    /// An import-presence transition is only convergent through Route Refresh:
+    /// removing the last explicit import policy has to re-evaluate the routes
+    /// the prior chain already accepted into `AdjRibIn`, and adding one has to
+    /// ask for the routes the reserved deny refused to retain. Neither is
+    /// something an export re-emit or session bookkeeping can recover, so a
+    /// peer that cannot be asked is rejected here rather than half-applied and
+    /// reported as converged.
+    ///
+    /// Three cases, all fail-closed:
+    ///
+    /// - Established: require the negotiated RFC 2918 capability. Without it
+    ///   the operator must clear/reconnect the session, which relearns
+    ///   everything under the new chain.
+    /// - Not Established: the session actor may have cleared its own route set
+    ///   while the RIB still serves what GR or LLGR retained under the prior
+    ///   policy. Ask the RIB, not the session, and defer while anything is
+    ///   retained so those routes stay paired with the verdict they were
+    ///   accepted under.
+    /// - No answer: an ambiguous state query cannot prove either, and a
+    ///   back-pressured Established session is one of the readings it covers.
+    ///
+    /// Returns whether the transition owes a Route Refresh. Only the
+    /// Established case does; a peer that is down with nothing retained has no
+    /// `AdjRibIn` to re-evaluate and converges naturally when it comes up under
+    /// the new chain. The caller needs the distinction because an undelivered
+    /// refresh is fatal for the first case and vacuous for the second.
+    async fn qualify_rfc8212_import_transition(
+        &mut self,
+        peer_key: &PeerKey,
+    ) -> Result<bool, String> {
+        let Some(managed) = self.peers.get(peer_key) else {
+            return Ok(false);
+        };
+        let commands = managed.handle.commands_sender();
+        let state = self
+            .await_with_readiness(rustbgpd_transport::PeerHandle::query_state_with(
+                commands,
+                PEER_QUERY_TIMEOUT,
+            ))
+            .await;
+        self.drain_readiness_queries().await;
+
+        let Some(state) = state else {
+            return Err(format!(
+                "{peer_key}: cannot apply an RFC 8212 import policy-presence change — the \
+                 session did not report its state within {PEER_QUERY_TIMEOUT:?}, so neither \
+                 its Route Refresh capability nor its retained routes can be confirmed; \
+                 retry the edit"
+            ));
+        };
+        if state.fsm_state == SessionState::Established {
+            if state
+                .negotiated_session
+                .is_some_and(|negotiated| negotiated.peer_route_refresh)
+            {
+                return Ok(true);
+            }
+            return Err(format!(
+                "{peer_key}: cannot apply an RFC 8212 import policy-presence change — the \
+                 Established session did not negotiate Route Refresh (RFC 2918), so already \
+                 accepted routes cannot be re-evaluated against the new verdict; clear the \
+                 session (rbgp neighbor clear) or let it reconnect, then reapply"
+            ));
+        }
+
+        let retained = self.query_peer_retained_stale(peer_key.address).await?;
+        if retained > 0 {
+            return Err(format!(
+                "{peer_key}: cannot apply an RFC 8212 import policy-presence change — the \
+                 session is {:?} and the RIB still retains {retained} graceful-restart or \
+                 long-lived-graceful-restart stale route(s) accepted under the current \
+                 verdict; retry once retention expires, or purge them by clearing the peer",
+                state.fsm_state
+            ));
+        }
+        Ok(false)
+    }
+
+    /// One read-only RIB round trip for [`Self::qualify_rfc8212_import_transition`],
+    /// bounded by the same reply deadline the export replacement uses and
+    /// servicing the dedicated readiness lane throughout.
+    async fn query_peer_retained_stale(&mut self, peer: IpAddr) -> Result<usize, String> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let rib_tx = self.rib_tx.clone();
+        if self
+            .await_with_readiness(rib_tx.send(RibUpdate::QueryPeerRetainedStale {
+                peer,
+                reply: reply_tx,
+            }))
+            .await
+            .is_err()
+        {
+            return Err(format!(
+                "{peer}: cannot apply an RFC 8212 import policy-presence change — the RIB \
+                 manager is unavailable, so its retained stale routes cannot be confirmed"
+            ));
+        }
+        match tokio::time::timeout(
+            super::RIB_REPLY_TIMEOUT,
+            self.await_with_readiness(reply_rx),
+        )
+        .await
+        {
+            Err(_) => Err(format!(
+                "{peer}: cannot apply an RFC 8212 import policy-presence change — the RIB \
+                 manager did not report retained stale routes within {:?}",
+                super::RIB_REPLY_TIMEOUT
+            )),
+            Ok(Err(_)) => Err(format!(
+                "{peer}: cannot apply an RFC 8212 import policy-presence change — the RIB \
+                 manager dropped the retained-stale reply"
+            )),
+            Ok(Ok(retained)) => Ok(retained),
+        }
+    }
+
+    /// ADR-0112: qualify every target whose RFC 8212 import verdict would move,
+    /// before the snapshot mutates any peer.
+    ///
+    /// A multi-peer edit is all-or-nothing on this rule: one unqualified peer
+    /// rejects the whole set with zero peers touched, rather than letting the
+    /// qualified peers commit and leaving the caller to reason about a partial
+    /// fleet. Every unqualified peer is named, so one round trip tells the
+    /// operator the full remediation list.
+    async fn preflight_rfc8212_import_transitions(
+        &mut self,
+        targets: &[ResolvedPeerPolicy],
+    ) -> Result<(), String> {
+        let transitioning: Vec<PeerKey> = targets
+            .iter()
+            .map(|target| PeerKey::new(target.address, target.interface.clone()))
+            .zip(targets)
+            .filter(|(peer_key, target)| {
+                self.rfc8212_import_presence_transition(peer_key, target.import_policy.as_ref())
+            })
+            .map(|(peer_key, _)| peer_key)
+            .collect();
+        if transitioning.is_empty() {
+            return Ok(());
+        }
+
+        let mut rejections = Vec::new();
+        for peer_key in &transitioning {
+            if let Err(error) = self.qualify_rfc8212_import_transition(peer_key).await {
+                rejections.push(error);
+            }
+        }
+        if rejections.is_empty() {
+            info!(
+                peers = transitioning.len(),
+                "qualified RFC 8212 import policy-presence transitions for live apply"
+            );
+            return Ok(());
+        }
+        Err(format!(
+            "rejected {} of {} RFC 8212 import policy-presence transition(s); no peer was \
+             modified: {}",
+            rejections.len(),
+            transitioning.len(),
+            rejections.join("; ")
+        ))
+    }
+
     pub(super) fn peer_group_policy_only_update(
         &self,
         name: &str,
@@ -209,6 +443,7 @@ impl PeerManager {
             None,
         )
         .await
+        .map_err(|failure| failure.message)
     }
 
     /// Apply resolved import/export chains to a set of live peers, capturing each
@@ -225,6 +460,10 @@ impl PeerManager {
         &mut self,
         targets: Vec<ResolvedPeerPolicy>,
     ) -> Result<Vec<ResolvedPeerPolicy>, String> {
+        // ADR-0112: qualify RFC 8212 import-presence transitions before
+        // anything below can touch a peer, so one incapable peer rejects the
+        // whole edit rather than being discovered mid-fanout and unwound.
+        self.preflight_rfc8212_import_transitions(&targets).await?;
         let mut rollback_rib_budget = PolicyRollbackRibBudget::default();
         let total_targets = targets.len();
         let mut seen = BTreeSet::new();
@@ -419,11 +658,21 @@ impl PeerManager {
     /// commit, so an import+export reload no longer disqualifies the fleet.
     /// The returned pair stays export-only because only the export move keys
     /// cohort identity — the RIB batch touches nothing else.
+    ///
+    /// ADR-0112: a member whose RFC 8212 import verdict would move is
+    /// disqualified outright. The cohort hot-applies import chains during setup
+    /// and defers their Route Refresh past the batched RIB commit, which is a
+    /// window a presence transition must not have — its refresh is the whole
+    /// convergence, not an optimisation. Sending presence transitions down the
+    /// authoritative per-peer path keeps that contract in one place.
     fn local_export_only_policy_pair<'a>(
         &'a self,
         target: &'a ResolvedPeerPolicy,
     ) -> Option<(&'a Option<PolicyChain>, &'a Option<PolicyChain>)> {
         let peer_key = PeerKey::new(target.address, target.interface.clone());
+        if self.rfc8212_import_presence_transition(&peer_key, target.import_policy.as_ref()) {
+            return None;
+        }
         let managed = self.peers.get(&peer_key)?;
         (managed.export_policy != target.export_policy
             && !managed.pending_refresh
@@ -457,7 +706,7 @@ impl PeerManager {
                     },
                     pending_refresh: managed.pending_refresh,
                     pending_export_apply: managed.pending_export_apply,
-                    forward_completed: false,
+                    adj_rib_in_may_have_moved: false,
                 }
             };
             applied.push(prior);
@@ -472,6 +721,11 @@ impl PeerManager {
                 )
                 .await
             {
+                // A failure at the Route Refresh step may have left one family
+                // already re-requested under the candidate chain, so this
+                // peer's rollback owes a refresh back even though its forward
+                // apply did not complete.
+                applied[applied_idx].adj_rib_in_may_have_moved = apply_error.refresh_delivery_began;
                 let restored = std::mem::take(&mut applied);
                 return Err(
                     match self
@@ -491,7 +745,7 @@ impl PeerManager {
                     },
                 );
             }
-            applied[applied_idx].forward_completed = true;
+            applied[applied_idx].adj_rib_in_may_have_moved = true;
         }
         Ok(applied)
     }
@@ -582,7 +836,7 @@ impl PeerManager {
                     },
                     pending_refresh: false,
                     pending_export_apply: false,
-                    forward_completed: false,
+                    adj_rib_in_may_have_moved: false,
                 }
             };
             // LAN-462: hot-apply a changed import chain through the same
@@ -859,7 +1113,7 @@ impl PeerManager {
         // unchanged get no refresh at all, exactly as today.
         for (index, (target, peer_key)) in targets.iter().zip(&peer_keys).enumerate() {
             if !import_deltas[index] {
-                captured[index].forward_completed = true;
+                captured[index].adj_rib_in_may_have_moved = true;
                 continue;
             }
             let commands = self
@@ -877,22 +1131,26 @@ impl PeerManager {
                 .is_some_and(|state| state.fsm_state == SessionState::Established);
             self.drain_readiness_queries().await;
             if established {
-                if let Err(error) = self.soft_reset_in(peer_key.clone(), Vec::new()).await {
+                if let Err(failure) = self
+                    .soft_reset_in_reporting_delivery(peer_key.clone(), Vec::new())
+                    .await
+                {
+                    let error = failure.error;
                     // Mirror the authoritative path's fatal refresh handling:
-                    // arm `pending_refresh` for the retry pipeline, then
-                    // unwind the snapshot. `forward_completed` stays false for
-                    // this member and the ones after it — their sessions have
+                    // arm `pending_refresh` for the retry pipeline, then unwind
+                    // the snapshot. This member's own refresh failed at the
+                    // refresh step, so — exactly as on the authoritative path —
+                    // an earlier family may already have been requested under
+                    // the candidate chain and its rollback owes a refresh back.
+                    // Later members keep the flag false: their sessions have
                     // been running the new import chain since the setup
-                    // hot-apply, and the restore fires their refresh-back
-                    // through the ordinary `import_changed` path when it
-                    // reasserts the prior chain; the false flag only selects
-                    // the failure-handling restore variant
-                    // (`RefreshFailureHandling::BestEffortRestorePrior` plus
-                    // the prior pending-flag restore) over the
-                    // committed-forward `BestEffortRearm` one.
+                    // hot-apply, but no refresh was ever fired for them, so the
+                    // restore's ordinary `import_changed` reassert plus the
+                    // prior pending-flag restore is exact.
                     if let Some(managed) = self.peers.get_mut(peer_key) {
                         managed.pending_refresh = true;
                     }
+                    captured[index].adj_rib_in_may_have_moved = failure.delivery_began;
                     let rollback = self
                         .restore_resolved_policies(captured, rollback_rib_budget)
                         .await;
@@ -916,7 +1174,7 @@ impl PeerManager {
                     managed.pending_refresh = true;
                 }
             }
-            captured[index].forward_completed = true;
+            captured[index].adj_rib_in_may_have_moved = true;
         }
         Some(Ok(captured))
     }
@@ -1280,7 +1538,7 @@ impl PeerManager {
             if !self.peers.contains_key(&peer_key) {
                 continue;
             }
-            let refresh_failure = if prior.forward_completed {
+            let refresh_failure = if prior.adj_rib_in_may_have_moved {
                 RefreshFailureHandling::BestEffortRearm
             } else {
                 RefreshFailureHandling::BestEffortRestorePrior {
@@ -1301,7 +1559,7 @@ impl PeerManager {
                 Err(error) => errors.push(format!("{address}: {error}")),
                 Ok(()) => {
                     if let Some(mut plan) = plan {
-                        if !prior.forward_completed {
+                        if !prior.adj_rib_in_may_have_moved {
                             plan.restore_prior_pending =
                                 Some((prior.pending_refresh, prior.pending_export_apply));
                         }
@@ -1615,7 +1873,7 @@ impl PeerManager {
         export_policy: Option<PolicyChain>,
         refresh_failure: RefreshFailureHandling,
         rollback_plan: Option<&mut Option<PolicyRollbackPeerPlan>>,
-    ) -> Result<(), String> {
+    ) -> Result<(), PolicyApplyFailure> {
         let result = self
             .apply_runtime_policies_for_peer_key(
                 peer_key.clone(),
@@ -1637,9 +1895,31 @@ impl PeerManager {
         export_policy: Option<PolicyChain>,
         refresh_failure: RefreshFailureHandling,
         rollback_plan: Option<&mut Option<PolicyRollbackPeerPlan>>,
-    ) -> Result<(), String> {
+    ) -> Result<(), PolicyApplyFailure> {
         use std::fmt::Write as _;
         let address = peer_key.address;
+
+        // ADR-0112: the last gate before this peer is touched. Every live chain
+        // apply funnels through here — the snapshot transaction, `hot_update_peer`
+        // for a neighbor or peer-group field edit, and the honor-knob fan-outs —
+        // so qualifying an import-presence transition here covers all of them,
+        // and re-running it after the multi-peer preflight is what catches a peer
+        // that flapped in between. Rollback applies are exempt: restoring a prior
+        // chain is best-effort by contract and must never be blocked by the state
+        // that made the forward apply fail.
+        let rfc8212_fatal_transition = matches!(refresh_failure, RefreshFailureHandling::Fatal)
+            && self.rfc8212_import_presence_transition(&peer_key, import_policy.as_ref());
+        // True only for the Established case: that peer's `AdjRibIn` holds
+        // routes the prior verdict accepted, so its refresh is the transition's
+        // whole convergence and an undelivered one is fatal. A down peer with
+        // nothing retained owes no refresh, so the guard below must not fire
+        // for it.
+        let rfc8212_refresh_required = if rfc8212_fatal_transition {
+            self.qualify_rfc8212_import_transition(&peer_key).await?
+        } else {
+            false
+        };
+
         let Some(managed) = self.peers.get_mut(&peer_key) else {
             return Ok(());
         };
@@ -1848,10 +2128,13 @@ impl PeerManager {
                     .unwrap_or_default();
                 let _ = write!(detail, "export: {export_err}");
             }
+            // Bailed before `soft_reset_in` was ever called: no family was
+            // requested, so `AdjRibIn` provably never left the prior policy.
             return Err(format!(
                 "policy hot-apply to peer {address} failed; retry deferred to next \
                  update_runtime_policies call: {detail}"
-            ));
+            )
+            .into());
         }
 
         let is_rollback = !matches!(refresh_failure, RefreshFailureHandling::Fatal);
@@ -1928,7 +2211,8 @@ impl PeerManager {
                             managed.pending_refresh = true;
                         }
                     }
-                    return Err(error.to_string());
+                    // RIB step, which runs before any refresh.
+                    return Err(error.to_string().into());
                 }
             }
         } else if had_pending_export_apply || (needs_export_apply && !is_known_non_established) {
@@ -1974,13 +2258,24 @@ impl PeerManager {
         // routes already in AdjRibIn keep flowing under the prior
         // policy until the operator reissues a SetPolicy.
         if needs_refresh && is_established {
-            if let Err(error) = self.soft_reset_in(peer_key.clone(), Vec::new()).await {
+            if let Err(failure) = self
+                .soft_reset_in_reporting_delivery(peer_key.clone(), Vec::new())
+                .await
+            {
+                let error = failure.error;
                 match refresh_failure {
                     RefreshFailureHandling::Fatal => {
                         if let Some(managed) = self.peers.get_mut(&peer_key) {
                             managed.pending_refresh = true;
                         }
-                        return Err(error.to_string());
+                        // The only failure raised at the refresh step. Whether
+                        // it left convergence debt is not something the
+                        // rollback can reconstruct afterwards, so carry the
+                        // session's own answer up to it.
+                        return Err(PolicyApplyFailure {
+                            message: error.to_string(),
+                            refresh_delivery_began: failure.delivery_began,
+                        });
                     }
                     RefreshFailureHandling::BestEffortRearm => {
                         if let Some(managed) = self.peers.get_mut(&peer_key) {
@@ -2030,6 +2325,20 @@ impl PeerManager {
                     }
                     RefreshFailureHandling::Fatal | RefreshFailureHandling::BestEffortRearm => true,
                 };
+            }
+            // ADR-0112: for an import-presence transition the deferred refresh
+            // is not an optimisation that can wait for the next edit — it is
+            // the entire convergence. The peer qualified moments ago and has
+            // since flapped or stopped answering, so the desired verdict must
+            // not commit: fail and let the caller roll the chains back, leaving
+            // whatever routes are retained paired with the prior verdict.
+            if rfc8212_refresh_required {
+                return Err(PolicyApplyFailure::from(format!(
+                    "policy hot-apply to peer {address} failed: the RFC 8212 import \
+                     policy-presence change could not deliver its Route Refresh because the \
+                     session is no longer reportably Established; the prior chain remains \
+                     authoritative and the edit must be reapplied once the session settles"
+                )));
             }
         }
 

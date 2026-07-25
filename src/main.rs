@@ -2938,7 +2938,6 @@ async fn run<T>(
         "starting rustbgpd"
     );
     config.warn_if_legacy_grpc_enforcement();
-    config.warn_if_ebgp_requires_policy_partial();
 
     let metrics = BgpMetrics::new();
     let grpc_listeners = resolve_grpc_listeners(&config).unwrap_or_else(|e| {

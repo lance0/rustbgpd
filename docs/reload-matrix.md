@@ -136,9 +136,9 @@ reload).
 | `remove_private_as` | live | Applied to every outbound advertisement; the next distribution pass picks up the new value. |
 | `add_path` | live (effective next session) | RFC 7911 Add-Path send/receive modes are negotiated in OPEN. Mid-session changes are no-ops until renegotiation. |
 | `log_level` | live | Per-peer tracing filter, re-applied on SIGHUP via the tracing [`reload`](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/reload/index.html) handle: the reload rebuilds the full `EnvFilter` (the `RUST_LOG` base level plus every per-peer directive) and swaps it into the running subscriber, so a level edit takes effect without a restart. The global base level stays restart-required (read once from `RUST_LOG`). |
-| `import_policy` | live | Inline import statements; re-evaluated against all received routes on reconcile. |
+| `import_policy` | live | Inline import statements; re-evaluated against all received routes on reconcile. When `[global] ebgp_requires_policy` is on, an edit that moves this direction between explicit policy and the ADR-0112 reserved deny is a *policy-presence transition*: every affected peer is qualified for Route Refresh before any peer is modified, and one Established peer without the capability — or one down peer whose GR/LLGR stale routes the RIB still holds — rejects the whole edit with nothing mutated. |
 | `export_policy` | live | Inline export statements; re-evaluated against the Adj-RIB-Out on next distribution. |
-| `import_policy_chain` | live | Named-chain reference; same re-evaluation behavior. |
+| `import_policy_chain` | live | Named-chain reference; same re-evaluation behavior, including the policy-presence qualification above. |
 | `export_policy_chain` | live | Named-chain reference; same re-evaluation behavior. |
 
 ## `[peer_groups.<name>]`
@@ -185,7 +185,7 @@ configure their keyring directly.
 | `log_level` | live | Same as neighbor — inherited per-peer tracing filter, re-applied on SIGHUP via the tracing reload handle. |
 | `import_policy` | live | Inline import statements inherited by peers that do not set their own import policy / chain. |
 | `export_policy` | live | Inline export statements inherited by peers that do not set their own export policy / chain. |
-| `import_policy_chain` | live | Named-chain reference inherited by peers that do not set their own import policy / chain. |
+| `import_policy_chain` | live | Named-chain reference inherited by peers that do not set their own import policy / chain; inheriting peers take the same ADR-0112 policy-presence qualification. |
 | `export_policy_chain` | live | Named-chain reference inherited by peers that do not set their own export policy / chain. |
 
 ## `[[dynamic_neighbors]]`
@@ -275,7 +275,7 @@ chains all add/change/remove cleanly via reload.
 |---|---|---|
 | `definitions` (named) | live | Add/remove/edit named policy definitions; re-evaluated on the next distribution pass. |
 | `neighbor_sets` (named) | live | Add/remove/edit named neighbor sets; the resolved set drives per-peer chain bindings. |
-| `import_chain` (named) | live | Reorder, add, or remove named imports. |
+| `import_chain` (named) | live | Reorder, add, or remove named imports. Removing the last entry while eBGP peers inherit it is a fleet-wide ADR-0112 policy-presence transition: it is qualified for Route Refresh across every affected peer first, and rejected whole if any peer cannot converge it. |
 | `export_chain` (named) | live | Reorder, add, or remove named exports. |
 | `[policy.explain] enabled` (ADR-0073) | restart-required (per peer) | Read by `build_transport_config` when a session is constructed, so the new value is adopted into the config snapshot (sessions established *after* the reload honour it) but live sessions keep their current import-explain write behaviour until they re-establish. Logged as `WARN` during reload when changed. Diagnostic retention only — never affects which routes are accepted. |
 | `[policy.explain] cache_size` (ADR-0073) | restart-required (per peer) | Same — the per-session LRU is sized at session construction. A live session's cache is not resized in place; the new capacity applies on its next establishment. |

@@ -454,11 +454,36 @@ since it never translates policy; its report says so.
 `/readyz` stays green: a peer without operator policy is a configuration state
 for `doctor` to fail, not evidence the daemon cannot serve traffic.
 
-**Not exposed yet:** live policy-presence edits still take the ordinary policy
-path. An edit that adds or removes the last explicit import policy does not
-yet reject an Established peer that never negotiated Route Refresh, so after
-such an edit confirm convergence before trusting the routes already in
-Adj-RIB-In.
+**Editing policy while enforcement is on.** Ordinary policy edits stay live.
+An edit that moves a direction *between* explicit policy and the reserved deny
+— a policy-presence transition — is qualified first, because it is only
+convergent through a Route Refresh: removing the last explicit import policy
+has to re-evaluate routes already accepted into Adj-RIB-In, and adding one has
+to ask for the routes the deny refused to retain.
+
+Every affected peer is checked before any peer is modified, and one
+unqualified peer rejects the whole edit:
+
+- an Established peer that never negotiated RFC 2918 Route Refresh is
+  rejected. Clear the session (`rbgp neighbor clear <addr>`) or let it
+  reconnect — it relearns everything under the new chain — then reapply.
+- a peer that is down while the RIB still holds its graceful-restart or
+  long-lived-graceful-restart stale routes is deferred, so those routes stay
+  paired with the verdict they were accepted under. Retry once retention
+  expires, or clear the peer to purge them.
+- a peer whose session cannot report its state in time is rejected rather than
+  guessed at; retry the edit.
+
+A rejection changes nothing: chains, verdicts, routes, and sessions are all
+left as they were, and a SIGHUP that hits one halts with the reason and the
+target named. If a qualified peer flaps before its Route Refresh is delivered,
+the edit fails and its prior chains are restored rather than committing a
+verdict nothing converged to.
+
+Export-side presence transitions need no capability: they use the same
+actor-fenced export replacement as any other export edit, so removing the last
+explicit export policy withdraws what was advertised before the edit reports
+success.
 
 The knob is deliberately restart-required rather than hot-applied. Enabling it
 flips both directions on every eBGP session at once, and recovering a peer's

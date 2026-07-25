@@ -2572,6 +2572,7 @@ mod tests {
             remote_router_id: "192.0.2.7".parse().unwrap(),
             four_octet_as: false,
             families: vec![(Afi::Ipv6, Safi::Unicast)],
+            peer_route_refresh: false,
             graceful_restart: Some(rustbgpd_transport::NegotiatedGracefulRestartState {
                 peer_families: vec![(Afi::Ipv6, Safi::Unicast)],
                 peer_restart_time: 0,

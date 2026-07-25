@@ -767,31 +767,6 @@ impl Config {
             .collect()
     }
 
-    /// Emit the startup notice for `[global] ebgp_requires_policy = true`
-    /// while the last ADR-0112 step lands.
-    ///
-    /// Enforcement and the directional operator surface both ship: an external
-    /// session with no explicit operator policy in a direction runs the
-    /// reserved internal deny there, and neighbor detail, JSON,
-    /// metrics/explain attribution and `rbgp doctor` all report it per
-    /// direction. What remains is ADR-0112 step 4 — the Route Refresh
-    /// qualification and rollback contract for live policy-presence edits.
-    /// Removed when that ships.
-    pub fn warn_if_ebgp_requires_policy_partial(&self) {
-        if self.global.ebgp_requires_policy {
-            tracing::warn!(
-                "[global] ebgp_requires_policy = true is enforced on resolved policy and \
-                 reported per direction in neighbor detail, JSON, metrics/explain \
-                 attribution and rbgp doctor. Not yet available: the Route Refresh \
-                 qualification and rollback contract for live policy-presence edits — a \
-                 live edit that removes or adds the last explicit import policy is \
-                 applied through the ordinary policy path, which does not reject an \
-                 Established peer that never negotiated Route Refresh. See \
-                 docs/adr/0112-rfc-8212-ebgp-requires-policy.md."
-            );
-        }
-    }
-
     /// Emit the startup warning for the pre-ADR-0064 legacy gRPC
     /// authorization mode, if active. Tier enforcement becomes
     /// mandatory in a future release.

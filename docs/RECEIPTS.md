@@ -77,6 +77,7 @@ id matches the milestone. Full procedures: [`INTEROP.md`](INTEROP.md).
 | M83 | RFC 7947 route-server profile, multi-stack: byte-level transparency, OTC, per-member views, ROV explain, and the §2.3 path-hiding contrast (single-best / per-client-best / Add-Path, ADR-0101) | BIRD 2.0.12 + GoBGP 3.37.0 + FRR 10.3.1 + StayRTR |
 | M93 | Exact required-family OPEN 2/7 rejection, dual-stack recovery, and empty-requirement partial-negotiation compatibility | BIRD 2.0.12 |
 | M94 | RFC 6793 legacy ingress reconstruction, semantic loop rejection, exact type 2/17 + type 7/18 egress, withdrawal, and session continuity | ExaBGP 5.0.9 source + independent Python OLD-speaker sink |
+| M95 | ADR-0112 live RFC 8212 policy-presence transitions: Route Refresh qualification, whole-edit rejection with nothing mutated, real refresh convergence in both directions, and GR-stale deferral | FRR 10.3.1 + BIRD 2.0.12 (Route Refresh disabled) |
 
 ## Interop labs — kernel dataplane, PR + nightly (`kernel-dataplane.yml`)
 

@@ -1,6 +1,11 @@
 # ADR-0112: Opt-in RFC 8212 explicit-policy enforcement for eBGP
 
-**Status:** Proposed
+**Status:** Accepted — fully shipped. All five implementation-sequence steps
+landed: the restart-required knob (step 3), directional provenance and the
+reserved deny (steps 1-2), the directional gRPC/CLI/metrics/doctor surface
+(step 5), and the live policy-presence transaction contract (step 4). The
+integration receipt required below is the M95 interop lab
+(`tests/interop/m95-rfc8212-presence-frr-bird.clab.yml`).
 **Date:** 2026-07-21
 
 ## Context

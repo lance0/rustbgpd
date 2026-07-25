@@ -1176,6 +1176,7 @@ impl PeerSession {
                             remote_router_id: negotiated.peer_router_id,
                             four_octet_as: negotiated.four_octet_as,
                             families,
+                            peer_route_refresh: negotiated.peer_route_refresh,
                             graceful_restart,
                         })
                     })

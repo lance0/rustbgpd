@@ -78,11 +78,30 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   for the whole session, including after OPEN replaces the sentinel with a
   learned ASN. With the knob off (the default) resolution is unchanged, and
   `evaluate_chain(None, ...)` keeps its process-wide permit-all contract in
-  every case. Still to come: the Route Refresh qualification and rollback
-  contract for live policy-presence edits — a live edit that adds or removes
-  the last explicit import policy is applied through the ordinary policy path,
-  which does not reject an Established peer that never negotiated Route
-  Refresh.
+  every case.
+
+- **Qualified live RFC 8212 policy-presence transitions (ADR-0112).** An edit
+  that moves a direction between explicit operator policy and the reserved deny
+  is only convergent through a Route Refresh — removing the last explicit
+  import policy has to re-evaluate what the prior chain already accepted into
+  Adj-RIB-In, and adding one has to ask for the routes the deny refused to
+  retain — so every affected peer is now qualified before any peer is
+  modified, and one unqualified peer rejects the whole edit with nothing
+  mutated. An Established peer that never negotiated RFC 2918 Route Refresh is
+  rejected with clear/reconnect guidance; a peer that is down while the RIB
+  still retains its graceful-restart or long-lived-graceful-restart stale
+  routes is deferred, so those routes stay paired with the verdict they were
+  accepted under; a session that cannot report its state in time is rejected
+  rather than guessed at. A peer that qualifies and then flaps before its
+  refresh is delivered fails the edit and has its prior chains restored
+  through the existing rollback path, instead of committing a verdict nothing
+  converged to. Presence transitions are excluded from the batched export
+  cohort, whose deferred refresh is the wrong shape for them, and the export
+  side keeps using the existing actor-fenced replacement unchanged. Nothing
+  changes with the knob off: the reserved deny is never installed, so no edit
+  is ever classified as a presence transition. Proven on real sessions by the
+  new M95 interop lab (FRR with Route Refresh, BIRD 2 with
+  `enable route refresh off`).
 
 - **Directional RFC 8212 policy status on every operator surface (ADR-0112).**
   Neighbor detail reports import and export separately — a one-sided
@@ -253,6 +272,29 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   permanent one repeats the bind error in the journal. `rbgp doctor` reports
   the cause (port in use, missing `CAP_NET_BIND_SERVICE`) against the down
   daemon through its existing `bgp.listener` check.
+- **A policy rollback no longer drops retry intent when the forward Route
+  Refresh was partially delivered.** Families are requested sequentially, so a
+  forward refresh can have IPv4 accepted before IPv6 fails, and a reply timeout
+  or dropped reply is ambiguous in both directions — Adj-RIB-In may already sit
+  on the candidate policy. The rollback treated any incomplete forward as
+  "nothing moved" and restored the prior `pending_refresh`, so if its own
+  refresh back also failed the peer was left with real unfinished convergence
+  and no armed retry. The forward now reports whether delivery began, and the
+  rollback re-arms in that case. A forward that failed *before* any refresh was
+  attempted still restores the prior state exactly: after a fully unwound
+  rollback the retry is structural, because the configuration never advanced,
+  and arming the flag would make an unrelated later edit refresh the restored
+  policy.
+
+- **A whole-peer Route Refresh now asks only for the families the session
+  negotiated.** Requesting "everything" iterated the peer's *configured*
+  families, so on any session that negotiated fewer than were configured — a
+  neighbor offering IPv4 and IPv6 to a peer that accepted only IPv4, say — the
+  unnegotiated family's request was rejected and failed the whole refresh.
+  Policy edits, RPKI/ASPA cache refreshes, dataset swaps, and `SoftResetIn`
+  with no explicit family list are all affected. The negotiated set is read
+  from the session; a session that cannot report one keeps the previous
+  behavior, which is where the per-family error was already the honest answer.
 
 - **`rbgp config import` no longer splits BIRD constructs that reuse block or
   statement punctuation inside an expression.** Prefix-set range suffixes
