@@ -6134,9 +6134,12 @@ import_policy_chain = ["origin-guard"]
         let initial = Config::load_with_diagnostics(config_path.to_str().unwrap()).unwrap();
         let live = std::sync::Arc::clone(initial.policy.dataset_bindings.get("customers").unwrap());
         std::fs::write(dir.path().join("datasets/customers.list"), "64500\n64999\n").unwrap();
+        // Explain is opt-in, so `enabled = true` is the value that
+        // differs from the live snapshot and forces the explain-sync
+        // step this test halts at.
         write_tier_test_config(
             &config_path,
-            &format!("{config_toml}\n[policy.explain]\nenabled = false\n"),
+            &format!("{config_toml}\n[policy.explain]\nenabled = true\n"),
         );
         let (peer_mgr_tx, peer_mgr_rx) = mpsc::channel(1);
         drop(peer_mgr_rx);
@@ -6550,9 +6553,10 @@ peer_group = "secure"
     #[tokio::test]
     async fn reload_syncs_explain_before_peer_reconcile() {
         // Change the neighbor (hold_time) → ReconcilePeers(changed); and
-        // flip [policy.explain] in the same reload.
+        // flip [policy.explain] in the same reload. Explain is opt-in,
+        // so the flip that differs from the baseline is off → on.
         let new_toml = format!(
-            "{}\n[policy.explain]\nenabled = false\n",
+            "{}\n[policy.explain]\nenabled = true\n",
             baseline_toml().replace("hold_time = 90", "hold_time = 120")
         );
         let (returned, tags) = drive_reload(baseline_toml(), &new_toml).await;
@@ -6571,7 +6575,7 @@ peer_group = "secure"
             "explain snapshot must sync before peer reconcile — saw {tags:?}"
         );
         assert!(
-            tags[sync_idx].contains("enabled=false"),
+            tags[sync_idx].contains("enabled=true"),
             "sync must carry the new explain value — saw {tags:?}"
         );
     }

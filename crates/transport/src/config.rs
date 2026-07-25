@@ -482,13 +482,16 @@ pub struct TransportConfig {
     /// route reflector; used for `CLUSTER_LIST` prepend and loop detection.
     pub cluster_id: Option<Ipv4Addr>,
     /// Whether the per-session import-decision cache is populated
-    /// (ADR-0073). When `false`, the inbound UPDATE path skips building
-    /// and storing any decision snapshot — the write-path cost control.
+    /// (ADR-0073). **Defaults to `false`** — import explainability is
+    /// opt-in, because its retention cost multiplies by session count.
+    /// When `false`, the inbound UPDATE path skips building and storing
+    /// any decision snapshot and the session allocates no cache.
     /// Operator knob: `[policy.explain] enabled`.
     pub explain_enabled: bool,
-    /// Per-session import-decision cache capacity (ADR-0073). Bounds the
-    /// number of `(AFI, SAFI, prefix, path_id)` import decisions retained
-    /// for `PolicyService.ExplainImportPolicy`. Operator knob:
+    /// Import-decision cache capacity **per session** (ADR-0073). Bounds
+    /// the number of `(AFI, SAFI, prefix, path_id)` import decisions
+    /// retained for `PolicyService.ExplainImportPolicy`. Only allocated
+    /// when `explain_enabled`. Operator knob:
     /// `[policy.explain] cache_size`.
     pub explain_cache_size: usize,
     /// Whether rejected inbound routes are retained with their reject
@@ -565,7 +568,7 @@ impl TransportConfig {
             rs_control_communities: false,
             remove_private_as: RemovePrivateAs::Disabled,
             cluster_id: None,
-            explain_enabled: true,
+            explain_enabled: false,
             explain_cache_size: crate::session::import_decision_cache::DEFAULT_EXPLAIN_CACHE_SIZE,
             reject_retention_enabled: true,
             reject_retention_capacity:
@@ -606,6 +609,23 @@ mod tests {
         assert_ne!(a, TransportAuthSecret::from("secret-longer"));
         assert_ne!(a, TransportAuthSecret::from(""));
         assert_eq!(TransportAuthSecret::from(""), TransportAuthSecret::from(""));
+    }
+
+    /// ADR-0073: import explain is opt-in, and `TransportConfig::new`
+    /// is the construction path embedders use directly — it never sees
+    /// the daemon's `[policy.explain]` resolution, so its own default
+    /// has to carry the decision. Pinned separately from the config
+    /// schema default for exactly that reason: one flipping back
+    /// without the other silently diverges embedders from the daemon.
+    #[test]
+    fn transport_config_new_leaves_import_explain_disabled() {
+        let peer = PeerConfig::new(65_001, 65_002, Ipv4Addr::new(10, 0, 0, 1));
+        let config = TransportConfig::new(peer, "10.0.0.2:179".parse().unwrap());
+
+        assert!(
+            !config.explain_enabled,
+            "TransportConfig::new must default import explain off"
+        );
     }
 
     #[test]

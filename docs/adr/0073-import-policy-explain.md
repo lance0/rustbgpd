@@ -1,6 +1,7 @@
 # ADR-0073: Import policy explain via per-session decision cache
 
-**Status:** Accepted
+**Status:** Accepted — retention default **reversed to opt-in**; see
+[Reversal: retention is opt-in](#reversal-retention-is-opt-in)
 **Date:** 2026-05-28
 
 ## Context
@@ -103,18 +104,24 @@ flag on this one.
   - peer down / reconnect → flush the per-session table
   - new policy generation → lazy invalidation on read (stamp
     `STALE`); no eager scan
-- **Enable flag:** `[policy.explain].enabled` (default `true`).
+- **Enable flag:** `[policy.explain].enabled`, **default `false`**
+  (see [Reversal](#reversal-retention-is-opt-in); it shipped `true`).
   This is the load-bearing performance control: the feature's cost
   is on the **write** side (every inbound UPDATE would otherwise
   clone the pre-policy policy-context fields and modifications per NLRI, even
   for denies, even when no operator will ever query). Gating the
-  decision-build behind this flag means a perf-sensitive deployment
-  sets `enabled = false` and the inbound UPDATE path pays a single
-  boolean check and clones nothing. Default-on is justified *only*
-  because the stored payload and cap are conservative (below); an
-  operator who finds the write cost unacceptable on a hot full-table
-  peer turns it off rather than living with it.
-- **Bound:** per-peer cap, **4096 entries**, configurable via
+  decision-build behind this flag means the default deployment pays a
+  single boolean check per UPDATE, clones nothing, and allocates no
+  cache; an operator who wants the surface turns it on.
+
+  The flag is **global**. There is no per-peer or per-group override,
+  so "leave it on but disable it for the hot full-table peers" is not
+  a posture this design offers: the choice is on or off for the whole
+  daemon, and `cache_size` is likewise one number applied to every
+  session. That is what makes the cost multiply by session count, and
+  it is the reason the default is off.
+- **Bound:** a cap of **4096 entries per session** — one number
+  applied to every session, not settable per peer — configurable via
   `[policy.explain] cache_size` (nested under the existing
   `[policy]` section per the convention already established by
   `[policy.definitions.filter]`). The bucket reads as *diagnostic
@@ -134,8 +141,9 @@ flag on this one.
   coin-flip between a real answer and `EVICTED`. This is not a bug —
   it is the bounded-state tradeoff — but it means **operators who
   want reliable full-table explain must raise `cache_size` to near
-  their expected retained-prefix count for that peer and own the
-  memory cost** (each live entry holds a cloned policy-context snapshot). The
+  their expected retained-prefix count and own the memory cost on
+  every session, since the value is global** (each live entry holds a
+  cloned policy-context snapshot). The
   earlier "mirrors the 4096-entry event ring" framing was a weak
   justification: event rings bound event volume over time, this
   bounds prefixes per peer — a different axis. 4096 is a deliberate
@@ -227,8 +235,8 @@ discrimination) and need their own ADRs.
 
 ### Positive
 
-- The operator question "why didn't this route come in?" gets a
-  honest, on-by-default answer.
+- The operator question "why didn't this route come in?" gets an
+  honest answer, for operators who turn the surface on.
 - Symmetric with the existing export-explain surface: both questions
   are first-class.
 - Generation stamping closes a footgun present even in the export
@@ -240,11 +248,13 @@ discrimination) and need their own ADRs.
 
 ### Negative
 
-- New persistent state surface in transport. Memory cost scales
-  with peer count × cache size, roughly `peers × 4096 × ~256 B ≈
-  100 MB` at the proposed defaults with 100 peers. Acceptable on
-  the typical deployment shape but not free; the per-peer cap is
-  the operator's lever.
+- New persistent state surface in transport, **off unless enabled**.
+  When it is enabled the memory cost scales with session count ×
+  cache size. The plan-stage estimate here was `peers × 4096 × ~256 B`;
+  the measured entry cost came in at roughly **610 B** (see the
+  Reversal below), so the real bill is about 2.4× the estimate, and it
+  is the multiplication by session count — not the per-entry size —
+  that decides the outcome at route-server scale.
 - A new contract operators will rely on. Future changes to the
   surface (outcome enum, field set, key shape) carry compatibility
   cost.
@@ -261,6 +271,77 @@ discrimination) and need their own ADRs.
   alongside the durable event outbox (ADR-0072), not in place of
   it.
 
+## Reversal: retention is opt-in
+
+**2026-07-25.** `[policy.explain] enabled` now defaults to **`false`**.
+Both construction paths flipped together — the schema/serde default
+that applies when a config file omits `[policy.explain]`, and
+`TransportConfig::new`, which embedders reach without loading a config
+file at all. Nothing else about the surface changed: an explicit
+`enabled = true` behaves exactly as it did.
+
+### Why
+
+- **Explain is diagnostic state, not routing correctness.** Turning it
+  off changes what the daemon can *tell* you, never what it *does*.
+  Nothing in the import chain, best-path selection, or export path
+  depends on it.
+- **Its cost multiplies by peer count** — the defining scale dimension
+  for an IXP route server, which is the deployment this project aims
+  at. `cache_size` is per session, and the flag is global, so the bill
+  is `sessions × retained entries`, not a fixed daemon overhead.
+- **A 4096-entry cache cannot honestly promise full-table
+  explainability anyway.** The original Bound section already said so.
+  Default-on therefore bought a substantial standing memory cost while
+  delivering only *partial* retention — a query against a full-table
+  peer was already a coin-flip against `EVICTED`. Paying in full for a
+  partial answer is the wrong default.
+- **Operators who need it can make an informed
+  memory-versus-observability choice.** The knob, the `CACHE_DISABLED`
+  outcome, and the CLI's config hint were all already built, so the
+  off state is a first-class, self-explaining state rather than a
+  silent hole.
+
+### Measured economics
+
+Label at the point of use — these are three different kinds of number.
+
+| Figure | Kind | Source |
+|---|---|---|
+| ~610 B per retained entry; ~2.5 MB per saturated session | **measured** | DHAT capture at 2 sessions × 100k prefixes each (both caches saturated at 4096), [`rib-rebaseline-2026-07-13.md`](../perf/rib-rebaseline-2026-07-13.md) — "Transport import-decision cache", 5,002,096 B live at process heap maximum |
+| ~155 KiB resident per session before a single UPDATE | **measured** (structural) | `LruCache::new(4096)` allocates its index at capacity, plus the 512-entry eviction ring |
+| ~355 MiB retained heap at 1000 sessions × 400 routes each | **modeled** | `1000 × (155 KiB floor + 400 × ~536 B)`, against the ~890–926 MiB steady RSS recorded on the 1000×400 route-server receipt — i.e. **35–40% of recorded RSS, not an observed RSS saving** |
+| ~2.5 GB saturation ceiling | **modeled** | `1000 × 2.5 MB`, and only at that fleet shape: roughly 1000 ingress peers **each announcing at least 4096 distinct routes**. It is not the cost of one full-table member |
+
+The RSS actually recovered by this default change is established by a
+separate before/after measurement — re-running
+`bench/scale/route-server-1000/run-receipt.sh` on both defaults and
+diffing the retained RSS sampler stream. **That measurement has not run
+yet**, so no observed-saving figure is claimed here or in the release
+notes.
+
+### Rejected alternative: a smaller default-on cache
+
+Keeping the feature on with a much smaller `cache_size` reduces the
+bill, but it makes eviction more aggressive and the feature *less*
+trustworthy — more queries returning `EVICTED` for prefixes the peer is
+actively announcing. A diagnostic surface that is usually wrong when
+consulted is worse than one an operator knowingly enabled.
+
+### What would reopen this
+
+Default-on becomes defensible again once the cost stops multiplying by
+session count without bound. Any of:
+
+- a **global memory budget** for the cache, with eviction across
+  sessions rather than a fixed per-session cap;
+- **per-peer or per-group selection**, so retention is spent only on
+  the sessions an operator is actually diagnosing;
+- another design that bounds total retained explain state independently
+  of how many sessions are established.
+
+Absent one of those, the default stays off.
+
 ## Decisions baked in
 
 The plan-stage research surfaced six knobs; a post-implementation
@@ -269,12 +350,12 @@ review added the enable flag (7). They are pinned here, not deferred:
 | # | Question | Decision |
 |---|---|---|
 | 1 | Default per-peer cache size | **4096 entries**, a deliberate **fabric / partial-table** starter default (hundreds–low-thousands of prefixes fully observable). **Not** sized for internet full-table retention: a 100k-prefix peer keeps the cache saturated, so explain is a coin-flip vs `EVICTED`. Operators wanting reliable full-table explain raise `cache_size` toward their expected retained-prefix count for that peer and own the memory (each live entry holds a cloned policy-context snapshot). See the Bound section — the old "mirrors the event ring" justification is retracted (different axis). |
-| 2 | Default-on retention | **Yes — but contingent on the conservative payload + cap in (1) and gated by the enable flag in (7).** Explain works out of the box; a deployment that finds the write cost unacceptable on a hot full-table peer sets `enabled = false` rather than living with it. |
+| 2 | Default-on retention | **Reversed — retention is opt-in.** Originally yes, contingent on the conservative payload + cap in (1). The contingency did not hold at the scale this project targets: the cost multiplies by session count and 4096 entries cannot honestly promise full-table explainability. See [Reversal](#reversal-retention-is-opt-in). |
 | 3 | EVICTED tracker | **Yes**, kept compact: lossy recent-eviction key set / bloom-ish ring, false-positive-only. A wrong `EVICTED` is operationally better than a wrong `NOT_SEEN`. |
 | 4 | Withdraw semantics | **`WITHDRAWN`**, retained as a **lighter** tombstone (attrs + mods dropped; outcome + matched policy + timestamp + generation kept) until evicted / stale / session reset. Preserves the "never seen" vs "seen and removed" distinction without letting a churny peer crowd live decisions out of the LRU with full-payload dead entries. |
 | 5 | Add-Path | Include `path_id` in the cache key and the response. CLI accepts optional `--path-id`. Without it, return all matching entries for the prefix (a clear multi-path response), never an arbitrary first hit. |
 | 6 | Statement-level trace | **Shipped.** Originally deferred ("No in v1," terminal `matched_policy` only); the per-statement trace later landed as `repeated ImportExplainStatementStep statements = 13` on the explain response (rendered by the CLI). It is **re-derived at query time** from the cached pre-policy context, **not** stored inside `PolicyEvaluation` — so the live import path records no extra statement-trace state and the out-of-scope item below (storage *inside* `PolicyEvaluation`) still holds. |
-| 7 | Enable flag (added post-review) | **`[policy.explain].enabled`, default `true`.** The load-bearing perf control: the cost is on the write path (per-NLRI policy-context/modification clone on every UPDATE, denies included). The decision-build is gated on this flag, checked *before* any clone, so `enabled = false` costs one boolean per UPDATE and stores nothing. Default-on is only defensible *because* this off-switch exists alongside the conservative cap. |
+| 7 | Enable flag (added post-review) | **`[policy.explain].enabled`, default `false`.** The load-bearing perf control: the cost is on the write path (per-NLRI policy-context/modification clone on every UPDATE, denies included). The decision-build is gated on this flag, checked *before* any clone, so the default costs one boolean per UPDATE, stores nothing, and allocates no cache. The flag is **global** — no per-peer or per-group granularity. Shipped `true`; see [Reversal](#reversal-retention-is-opt-in). |
 
 ## Out of scope
 

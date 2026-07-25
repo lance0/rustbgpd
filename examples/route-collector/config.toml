@@ -96,6 +96,17 @@ action = "deny"
 prefix = "::/0"
 le = 128
 
+# Import-decision explain, off. A collector's job is full tables, and the
+# per-session cache defaults to 4096 entries — orders of magnitude short
+# of one, so an explain query here would mostly report an evicted answer
+# while the retention is billed per session anyway. Sizing it honestly for
+# this shape means `cache_size` near the table size, times every upstream:
+# an explicit choice, not a default. MRT dumps and BMP below are the
+# collector-scale record; explain is the point query you switch on for a
+# session while you are debugging one.
+[policy.explain]
+enabled = false
+
 # --- Upstream peers ---
 # Accept full tables. Adjust max_prefixes to your expected table size.
 

@@ -96,6 +96,15 @@ default_action = "permit"
 import_chain = ["lab-permit-all-import"]
 export_chain = ["lab-permit-all-export"]
 
+# Import-decision explain, on. `rbgp policy explain --neighbor 10.0.0.2
+# --prefix <cidr>` then says what import policy did to a route, including
+# routes it denied — which is most of what a lab is for. Explain is
+# opt-in daemon-wide because the cache is per session and its cost
+# multiplies by peer count; one peer is a few MiB. Spelled out so the
+# posture is visible here rather than inherited.
+[policy.explain]
+enabled = true
+
 # One eBGP neighbor to bring a session up against.
 [[neighbors]]
 address = "10.0.0.2"
@@ -176,6 +185,16 @@ default_action = "deny"
 [policy]
 import_chain = ["from-upstream"]
 export_chain = ["to-upstream"]
+
+# Import-decision explain, off. An upstream transit sends a full table;
+# the per-session cache defaults to 4096 entries, so an enabled cache
+# stays saturated and answers most queries with an evicted result while
+# still costing per session. Turn it on with `cache_size` raised toward
+# the peer's retained-prefix count while you are debugging a specific
+# import decision, and own the memory. Stated rather than inherited so
+# the choice is visible on the page.
+[policy.explain]
+enabled = false
 
 [[neighbors]]
 address = "203.0.113.2"

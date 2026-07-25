@@ -60,6 +60,16 @@ default_action = "permit"
 import_chain = ["permit-all-import"]
 export_chain = ["permit-all-export"]
 
+# Import-decision explain, on. `rbgp policy explain --neighbor 10.0.0.2
+# --prefix <cidr>` then answers "what did import policy do to this route?"
+# — including for routes it denied, which never reach the RIB. It is
+# opt-in daemon-wide because the cache is per session and its cost
+# multiplies by peer count; with one peer that is a few MiB, so a
+# single-peer starter takes it. Written out rather than left to the
+# default so the posture is legible either way.
+[policy.explain]
+enabled = true
+
 [[neighbors]]
 address = "10.0.0.2"
 remote_asn = 65002

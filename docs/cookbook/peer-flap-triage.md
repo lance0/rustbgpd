@@ -73,6 +73,8 @@ a flap:
 ```bash
 rbgp events --limit 50                                  # recent route events
 rbgp policy explain --neighbor 10.0.0.2 --prefix 203.0.113.0/24
+                                                        # opt-in: needs
+                                                        # [policy.explain]
 rbgp rib --prefix 203.0.113.0/24 --explain              # why this best path
 ```
 

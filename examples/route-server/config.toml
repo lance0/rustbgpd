@@ -122,6 +122,24 @@ import_chain = [
 ]
 export_chain = ["rs-transparent-export"]
 
+# Import-decision explain, off — stated rather than inherited, because on
+# a route server it is the memory decision that matters most. The cache is
+# per session, so its cost is multiplied by member count, and 4096 entries
+# cannot retain a member's full table anyway: a query for an arbitrary
+# prefix would be a coin-flip against an evicted answer. On a 1000-member
+# fleet whose members each announce more than 4096 prefixes, an enabled
+# cache at the default size saturates in the low gigabytes.
+#
+# For the member-facing "why is my route filtered?" question, prefer
+# `[policy.reject_retention]` (on by default) and
+# `rbgp rib received <member> --rejected` — it enumerates rejections with
+# reasons and does not need the prefix known in advance.
+#
+# Turn this on deliberately, with `cache_size` raised toward the member's
+# retained-prefix count, while you are diagnosing — not as a standing cost.
+[policy.explain]
+enabled = false
+
 # --- IXP member peers ---
 
 # Add-Path-capable member: sees all candidate paths (preferred

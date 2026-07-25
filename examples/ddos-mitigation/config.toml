@@ -118,6 +118,16 @@ default_action = "permit"
 import_chain = ["blackhole-host-routes"]
 export_chain = ["distribute-mitigation"]
 
+# Import-decision explain, on. The import chain above rejects blackhole
+# announcements for being too broad or for the wrong next-hop, and "why
+# was my blackhole dropped?" is the question this deployment gets asked
+# during an incident. Explain is opt-in daemon-wide because the cache is
+# per session; a handful of edge routers announcing host routes is a
+# small bill. Raise `cache_size` only if a peer sends more than 4096
+# distinct prefixes.
+[policy.explain]
+enabled = true
+
 # --- Edge routers ---
 # These enforce FlowSpec rules in hardware. Use short hold times so
 # rustbgpd can detect and react to router failures quickly.

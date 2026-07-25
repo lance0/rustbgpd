@@ -19,11 +19,13 @@ map: [`crates/cli/README.md`](../crates/cli/README.md).
 ## Native route explainability
 
 Answers "why is this route (not) here?" from the live RIB in one
-command: import explain, best-path explain with decisive-comparison
-attribution, export explain that dry-runs the real per-peer gate
-ladder, and a retained rejected-route view with machine-readable
-reasons — where incumbents need an external looking-glass stack for
-less. Catalog of every explain surface: [explain.md](explain.md).
+command: best-path explain with decisive-comparison attribution, export
+explain that dry-runs the real per-peer gate ladder, a retained
+rejected-route view with machine-readable reasons, and opt-in
+import-decision explain (`[policy.explain] enabled = true`, which
+retains a decision cache per session) — where incumbents need an
+external looking-glass stack for less. Catalog of every explain
+surface: [explain.md](explain.md).
 
 ## Dual-stack and modern protocol support
 

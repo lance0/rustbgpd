@@ -15,7 +15,7 @@ backends.
 |----------|---------|
 | Why was this path selected as best? | `rbgp rib --prefix <cidr> --explain` |
 | Why did/didn't this prefix go to that peer? | `rbgp rib --prefix <cidr> advertised <peer> --explain` |
-| What did import policy decide for this prefix from that peer? | `rbgp policy explain --neighbor <peer> --prefix <cidr>` |
+| What did import policy decide for this prefix from that peer? (opt-in: `[policy.explain] enabled = true`) | `rbgp policy explain --neighbor <peer> --prefix <cidr>` |
 | Which of a member's routes were filtered, and why? | `rbgp rib received <peer> --rejected` |
 | What would this candidate policy do to the live RIB? | `rbgp policy test <file> --policy <name> --direction import` |
 | Which policy terms are actually firing? | `rbgp policy stats` |
@@ -103,8 +103,17 @@ for the legacy winner-oriented explanation.
 
 What did import policy decide when this prefix arrived from this
 peer — including paths that were denied and are therefore *not in the
-RIB anymore*? Requires `[policy.explain] enabled = true` on the
-daemon (a bounded per-session decision cache):
+RIB anymore*?
+
+This one is **opt-in**. It is backed by a bounded decision cache held
+**per session**, so its memory cost multiplies by peer count, and a
+stock daemon does not pay it. Add to the config, reload, and let the
+session re-establish:
+
+```toml
+[policy.explain]
+enabled = true
+```
 
 ```console
 $ rbgp policy explain --neighbor 10.0.0.2 --prefix 10.10.1.0/24
@@ -119,8 +128,21 @@ import policy explain — peer 10.0.0.2 prefix 10.10.1.0/24 (policy generation 3
 
 Outcomes are `permit` / `deny` / `withdrawn` / `not_seen` / `evicted`
 / `stale`; a disabled cache or missing session errors distinctly
-instead of pretending `not_seen`. `--path-id` narrows to one Add-Path
-identity. Details:
+instead of pretending `not_seen` — against a daemon that has not
+enabled the cache, `rbgp policy explain` names the two config lines
+above and exits nonzero. `--path-id` narrows to one Add-Path identity.
+
+`cache_size` (default 4096) is **per session**, and both settings are
+global — there is no per-peer or per-group override. At the default
+size retention is **partial-table**: a peer announcing more than 4096
+distinct prefixes keeps the cache saturated, so a query for an
+arbitrary prefix of theirs answers `evicted` rather than a decision.
+Budget roughly `peers × min(cache_size, prefixes per peer) × ~610 B`,
+plus ~155 KiB per session once enabled, and raise `cache_size` toward
+a peer's retained-prefix count when you need full-table answers.
+Details:
+[CONFIGURATION.md](CONFIGURATION.md#import-decision-explain-policyexplain)
+and
 [OPERATIONS.md](OPERATIONS.md#explain-an-import-decision-adr-0073).
 
 ## The filtered-route view — rejected routes, retained with reasons

@@ -1144,8 +1144,11 @@ fn outcome_label(outcome: i32) -> &'static str {
 fn unanswerable_error(outcome: i32, neighbor: &str) -> Option<CliError> {
     match proto::ImportExplainOutcome::try_from(outcome) {
         Ok(proto::ImportExplainOutcome::CacheDisabled) => Some(CliError::Rpc(
-            "import-decision cache is disabled on this daemon\n  \
-             hint: set [policy.explain] enabled = true and reload (memory cost is per cached route)"
+            "import-decision cache is disabled on this daemon (the default)\n  \
+             hint: add `[policy.explain]` with `enabled = true`, reload, and let the \
+             session re-establish\n  \
+             cost: per session, up to `cache_size` (default 4096) entries of retained \
+             decisions"
                 .to_string(),
         )),
         Ok(proto::ImportExplainOutcome::NoSession) => {
@@ -2006,9 +2009,11 @@ mod tests {
             .unwrap();
     }
 
-    /// LAN-320 pin: `cache_disabled` is an error with the config hint
-    /// (nonzero exit via `Err`), in both text and JSON modes — never a
-    /// `not_seen` lookalike.
+    /// `cache_disabled` is an error with the config hint (nonzero exit
+    /// via `Err`), in both text and JSON modes — never a `not_seen`
+    /// lookalike. Import explain is opt-in, so this is the response an
+    /// operator meets on a stock daemon: it has to name the exact
+    /// config lines to add, not just report an empty result.
     #[tokio::test]
     async fn explain_cache_disabled_errors_with_hint() {
         let server = spawn_mock_server(None).await;
@@ -2019,10 +2024,18 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, CliError::Rpc(_)));
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("[policy.explain]") && rendered.contains("enabled = true"),
+            "the disabled response must name the exact config lines to add:\n{rendered}"
+        );
         assert_eq!(
-            err.to_string(),
-            "import-decision cache is disabled on this daemon\n  \
-             hint: set [policy.explain] enabled = true and reload (memory cost is per cached route)"
+            rendered,
+            "import-decision cache is disabled on this daemon (the default)\n  \
+             hint: add `[policy.explain]` with `enabled = true`, reload, and let the \
+             session re-establish\n  \
+             cost: per session, up to `cache_size` (default 4096) entries of retained \
+             decisions"
         );
         // JSON mode prints the body (distinct outcome value) but still
         // returns the error so the exit code stays nonzero.

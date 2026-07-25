@@ -53,6 +53,20 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   or deployment gate can refuse it. Every shipped starter config —
   including both `--init-config` profiles, whose output changed
   accordingly — was rewritten to pass that strict check.
+- **Default change: import-decision explain is now opt-in.**
+  `[policy.explain] enabled` defaults to `false`. A daemon whose config
+  never named that section stops recording import decisions on upgrade:
+  `rbgp policy explain` answers `cache_disabled` and exits nonzero,
+  naming the exact lines to add. **No routing behaviour changes** — the
+  cache is diagnostic retention only, and best-path explain, export
+  explain, and the retained rejected-route view are untouched. To keep
+  the surface, add `[policy.explain] enabled = true`, reload, and let
+  sessions re-establish; an explicit `enabled = true` behaves exactly as
+  before. The reason is that the cache is held **per session**, so its
+  cost multiplies by peer count, and 4096 entries cannot promise
+  full-table explainability anyway — full price for a partial answer.
+  Sizing guidance, labelled figures, and the conditions that would
+  reopen the decision are under *Changed* and in ADR-0073.
 - **`rustbgpd-wire` 0.16.0 changes decode acceptance in six places**
   while keeping an additive API. Embedders should read the *Library
   crates* entry under *Changed* before bumping.
@@ -428,6 +442,54 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   storage, and coverage are not part of this integration.
 
 ### Changed
+
+- **Import-decision explain (`[policy.explain] enabled`) now defaults to
+  `false`.** Both construction paths moved together: the schema default
+  applied when a config file omits `[policy.explain]`, and
+  `TransportConfig::new`, which embedders of `rustbgpd-transport` reach
+  without loading a config file. An explicit `enabled = true` is
+  unchanged in every respect.
+
+  Explain is diagnostic state, never routing correctness — disabling it
+  changes what the daemon can *tell* you, not what it *does*. Its cost,
+  though, is retained **per session**: `cache_size` is one global number
+  applied to every session, and there is no per-peer or per-group
+  override, so the bill multiplies by the defining scale dimension of a
+  route server. And at the default 4096 entries, retention is
+  **partial-table** by construction: a peer announcing more prefixes
+  than that keeps the cache saturated, so a query for an arbitrary
+  prefix of theirs returns `evicted` rather than a decision. Default-on
+  therefore charged in full for a partial answer. Off by default, the
+  choice becomes an informed memory-versus-observability trade the
+  operator makes.
+
+  **The figures, each labelled — none of them is an observed RSS
+  saving.**
+
+  | Figure | Kind |
+  |---|---|
+  | ~610 B per retained entry; ~2.5 MB per saturated session | **measured** — DHAT capture at 2 sessions × 100k prefixes each, `docs/perf/rib-rebaseline-2026-07-13.md` |
+  | ~155 KiB allocated per session before a single UPDATE | **computed** from the allocator's own sizing — the LRU index and the eviction ring are both reserved at capacity up front. Most of it is never written, so it is address space and allocator bookkeeping rather than measured RSS |
+  | ~355 MiB retained heap on the 1000×400 route-server receipt | **modeled** from the two measured values above, equivalent to **35–40% of that run's recorded RSS**. It is a model of retained heap, *not* an observed RSS saving |
+  | ~2.5 GB saturation ceiling | **modeled**, and only at one fleet shape: roughly **1000 ingress peers each announcing at least 4096 distinct routes**. It is not the cost of one full-table member |
+
+  **The RSS actually recovered by this change has not been measured
+  yet.** Establishing it needs a separate before/after run of
+  `bench/scale/route-server-1000/run-receipt.sh` on both defaults with
+  the retained RSS sampler streams diffed; that campaign follows this
+  release note, and no saving is claimed here until it does.
+
+  Every shipped starter config and both `--init-config` profiles now
+  state the choice explicitly rather than inheriting it: the lab,
+  minimal, Docker Compose, DDoS-mitigation, and hosting-provider
+  starters set `enabled = true` with the reason on the page; the
+  route-server, route-collector, edge, Linux-edge-FIB, and the two EVPN
+  starters set `enabled = false` with the reason on the page. All of
+  them still pass `rustbgpd --check --strict` with a clean summary.
+  Rationale, measured economics, the rejected smaller-default-cache
+  alternative, and the conditions that would reopen default-on (a global
+  memory budget, per-peer selection, or another bound independent of
+  session count) are in ADR-0073.
 
 - **BREAKING (metrics): the `peer` label is now the bare neighbor address
   on every metric family.** Metric labels are a public API, and this one

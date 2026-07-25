@@ -149,7 +149,7 @@
         "definitions": {},
         "explain": {
           "cache_size": 4096,
-          "enabled": true
+          "enabled": false
         },
         "export_chain": [],
         "import_chain": [],
@@ -2512,11 +2512,11 @@
           "default": {}
         },
         "explain": {
-          "description": "Import-decision explain cache tuning (ADR-0073). Diagnostic\nretention only — does not affect which routes are accepted.",
+          "description": "Import-decision explain cache tuning (ADR-0073). **Opt-in** —\nomitting this section leaves import explain disabled. Diagnostic\nretention only — does not affect which routes are accepted.",
           "$ref": "#/$defs/PolicyExplainConfig",
           "default": {
             "cache_size": 4096,
-            "enabled": true
+            "enabled": false
           }
         },
         "export_chain": {
@@ -2571,20 +2571,20 @@
       "additionalProperties": false
     },
     "PolicyExplainConfig": {
-      "description": "Tuning for the per-session import-decision cache that backs\n`rbgp policy explain` / `PolicyService.ExplainImportPolicy`\n(ADR-0073).\n\nThis is **diagnostic retention**, not policy evaluation behaviour:\nshrinking or disabling the cache changes only what the explain\nsurface can answer, never which routes the import chain admits.",
+      "description": "Tuning for the per-session import-decision cache that backs\n`rbgp policy explain` / `PolicyService.ExplainImportPolicy`\n(ADR-0073). **Opt-in** — the cache is off unless `enabled = true`.\n\nThis is **diagnostic retention**, not policy evaluation behaviour:\nshrinking or disabling the cache changes only what the explain\nsurface can answer, never which routes the import chain admits.",
       "type": "object",
       "properties": {
         "cache_size": {
-          "description": "Per-peer cache capacity (entries). Each entry is one\n`(AFI, SAFI, prefix, path_id)` import decision. Default 4096 —\na fabric / partial-table starter size (hundreds–low-thousands\nof prefixes fully observable). It is **not** sized for internet\nfull-table retention: a 100k-prefix peer keeps the cache\nsaturated, so explain becomes a coin-flip versus an evicted\nanswer. Operators who want reliable full-table explain raise\nthis toward their expected retained-prefix count for the peer\nand own the memory cost.",
+          "description": "Cache capacity **per session** (entries). Each entry is one\n`(AFI, SAFI, prefix, path_id)` import decision. Default 4096 —\na fabric / partial-table starter size (hundreds–low-thousands\nof prefixes fully observable). It is **not** sized for internet\nfull-table retention: a 100k-prefix peer keeps the cache\nsaturated, so explain becomes a coin-flip versus an evicted\nanswer. Operators who want reliable full-table explain raise\nthis toward their expected retained-prefix count for the peer\nand own the memory cost.\n\nBudget roughly `peers × min(cache_size, prefixes per peer) ×\n~600 B`, plus a ~155 KiB fixed floor per session once explain is\nenabled (the LRU index is allocated at capacity).",
           "type": "integer",
           "format": "uint",
           "default": 4096,
           "minimum": 0
         },
         "enabled": {
-          "description": "Whether the per-session import-decision cache is populated.\nDefault `true`. This is the performance control: when `false`\nthe inbound UPDATE path skips building and storing any decision\nsnapshot — a single boolean check, no per-NLRI attribute /\nmodification clone. Turn it off on hot full-table peers where\nthe explain surface isn't worth the write-path cost.",
+          "description": "Whether the per-session import-decision cache is populated.\n**Default `false` — import explainability is opt-in.** When\n`false` the inbound UPDATE path skips building and storing any\ndecision snapshot (a single boolean check, no per-NLRI attribute\n/ modification clone) and the session allocates no cache at all;\nexplain queries answer `cache_disabled`.\n\nThe setting is **global** — it applies to every session, and\nthere is no per-peer or per-group override. Turning it on buys\ndiagnostic retention at a cost that multiplies by session count:\nsee `cache_size` for the budget.",
           "type": "boolean",
-          "default": true
+          "default": false
         }
       },
       "additionalProperties": false

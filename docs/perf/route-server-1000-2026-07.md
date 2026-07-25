@@ -11,6 +11,15 @@ describe this disclosed fleet rather than a universal deployment forecast.
 
 **Measured commit:** `cb2c924f117fe264991f12b24ea44c2b15b132e2`
 
+> **Default drift since this run.** The scenario config declares a bare
+> `[policy]` with no `[policy.explain]` override, so this campaign ran
+> with the import-decision explain cache **enabled** — the default at the
+> time. That default is now `false` (ADR-0073), which means the RSS
+> figures below include retention a current daemon does not pay for by
+> default. How much they would drop is a separate before/after
+> measurement that has not been run; do not read a saving out of this
+> receipt.
+
 ## Result
 
 | Precommitted check | Result |

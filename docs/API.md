@@ -756,8 +756,9 @@ Policy statements support the same match surface as TOML config:
 Answer "why didn't this prefix come in?" (or "what did the chain do to it?")
 from the per-session import-decision cache (ADR-0073). Side-effect-free —
 no RIB touch, no counter movement. Omit `path_id` to return every matching
-path. Requires `[policy.explain].enabled` on the daemon (otherwise the
-outcome is `NOT_SEEN`).
+path. The cache is **opt-in**: without `[policy.explain] enabled = true`
+on the daemon the outcome is `CACHE_DISABLED`, which is deliberately
+distinct from `NOT_SEEN`.
 
 ```bash
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \

@@ -1605,14 +1605,20 @@ policy counter. The cache is **diagnostic session state**, not durable
 history — it resets on peer flap and daemon restart.
 
 Tuning (`[policy.explain]` in the config, diagnostic retention only —
-never affects which routes are accepted):
+never affects which routes are accepted). Both settings are **global**:
+there is no per-peer or per-group override.
 
-- `enabled` (default `true`) — set `false` on hot full-table peers to
-  skip the write-path cost entirely (the daemon then answers
-  `cache_disabled`, and the CLI errors with a hint).
-- `cache_size` (default `4096`) — a fabric / partial-table size. For
-  reliable full-table explain, raise it toward the peer's
-  expected retained-prefix count and budget the memory.
+- `enabled` (default `false`) — **import explain is opt-in.** On a
+  stock daemon the surface answers `cache_disabled` and the CLI errors
+  with the config lines to add. Turn it on, reload, and let the session
+  re-establish; the value is read when a session is built.
+- `cache_size` (default `4096`) — capacity **per session**, a fabric /
+  partial-table size. For reliable full-table explain, raise it toward
+  the peer's expected retained-prefix count and budget the memory: the
+  number applies to every session, so the bill is
+  `peers × min(cache_size, prefixes per peer) × ~610 B` plus a
+  ~155 KiB per-session floor. See
+  [`CONFIGURATION.md`](CONFIGURATION.md#import-decision-explain-policyexplain).
 
 ### Answer a member's "why is my route filtered?" (LAN-472)
 

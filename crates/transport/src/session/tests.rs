@@ -8546,6 +8546,9 @@ async fn ebgp_import_policy_sees_default_local_pref_and_can_set_it() {
     use super::import_decision_cache::{ImportDecisionKey, LookupResult};
 
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    // Import explain is opt-in (ADR-0073); this test exercises the
+    // populated cache, so turn it on explicitly.
+    session.import_explain_enabled = true;
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
     session.install_import_policy(Some(PolicyChain::new(vec![Policy {
         entries: vec![
@@ -10382,7 +10385,10 @@ async fn import_decision_cache_records_deny_and_permit_for_explain() {
     peer_config.connect_retry_secs = 30;
     peer_config.families = vec![(Afi::Ipv4, Safi::Unicast)];
     peer_config.gr_restart_time = 120;
-    let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
+    let mut config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
+    // Import explain is opt-in (ADR-0073); this test exercises the
+    // populated cache, so turn it on explicitly.
+    config.explain_enabled = true;
     let metrics = BgpMetrics::new();
     let (_cmd_tx, cmd_rx) = mpsc::channel(8);
     let (rib_tx, _rib_rx) = mpsc::channel(64);
@@ -10524,7 +10530,10 @@ async fn session_down_flushes_import_decision_cache() {
     peer_config.connect_retry_secs = 30;
     peer_config.families = vec![(Afi::Ipv4, Safi::Unicast)];
     peer_config.gr_restart_time = 120;
-    let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
+    let mut config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
+    // Import explain is opt-in (ADR-0073); this test exercises the
+    // populated cache, so turn it on explicitly.
+    config.explain_enabled = true;
     let metrics = BgpMetrics::new();
     let (_cmd_tx, cmd_rx) = mpsc::channel(8);
     let (rib_tx, _rib_rx) = mpsc::channel(64);
@@ -10620,6 +10629,9 @@ async fn session_down_flushes_import_decision_cache() {
 async fn explain_import_policy_command_does_not_touch_counters() {
     use super::import_decision_cache::{LookupResult, ResolvedMatch};
     let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    // Import explain is opt-in (ADR-0073); this test exercises the
+    // populated cache, so turn it on explicitly.
+    session.import_explain_enabled = true;
     let mut negotiated = negotiated_session(65002, false);
     negotiated.peer_enhanced_route_refresh = true;
     session
@@ -10843,7 +10855,10 @@ async fn explain_statement_trace_attributes_hit_and_skips_stale() {
     peer_config.connect_retry_secs = 30;
     peer_config.families = vec![(Afi::Ipv4, Safi::Unicast)];
     peer_config.gr_restart_time = 120;
-    let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
+    let mut config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
+    // Import explain is opt-in (ADR-0073); this test exercises the
+    // populated cache, so turn it on explicitly.
+    config.explain_enabled = true;
     let metrics = BgpMetrics::new();
     let (_cmd_tx, cmd_rx) = mpsc::channel(8);
     let (rib_tx, _rib_rx) = mpsc::channel(64);
@@ -11022,6 +11037,9 @@ fn fresh_session_import_decision_cache_is_empty() {
 async fn import_decision_cache_records_ipv6_mp_reach() {
     use super::import_decision_cache::{CachedOutcome, ImportDecisionKey, LookupResult};
     let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    // Import explain is opt-in (ADR-0073); this test exercises the
+    // populated cache, so turn it on explicitly.
+    session.import_explain_enabled = true;
     let mut negotiated = negotiated_session(65002, false);
     negotiated.negotiated_families = vec![(Afi::Ipv6, Safi::Unicast)];
     session
@@ -11157,7 +11175,10 @@ async fn explain_trace_renders_as_path_from_the_cached_typed_value() {
     peer_config.connect_retry_secs = 30;
     peer_config.families = vec![(Afi::Ipv4, Safi::Unicast)];
     peer_config.gr_restart_time = 120;
-    let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
+    let mut config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
+    // Import explain is opt-in (ADR-0073); this test exercises the
+    // populated cache, so turn it on explicitly.
+    config.explain_enabled = true;
     let metrics = BgpMetrics::new();
     let (_cmd_tx, cmd_rx) = mpsc::channel(8);
     let (rib_tx, _rib_rx) = mpsc::channel(64);
@@ -11530,6 +11551,9 @@ async fn denied_mp_add_path_replacements_preserve_sibling_and_deduplicate_overla
     use rustbgpd_wire::{MpReachNlri, MpUnreachNlri, NlriEntry};
 
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    // Import explain is opt-in (ADR-0073); this test exercises the
+    // populated cache, so turn it on explicitly.
+    session.import_explain_enabled = true;
     let mut negotiated = negotiated_session(65002, false);
     negotiated.negotiated_families = vec![(Afi::Ipv6, Safi::Unicast)];
     negotiated

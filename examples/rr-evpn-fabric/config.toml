@@ -38,6 +38,15 @@ enforcement = "tier"
 [security.grpc.roles]
 operator = "operator"
 
+# Import-decision explain, off. Stated rather than inherited so the
+# reason is on the page: the cache covers IPv4 / IPv6 unicast only
+# (ADR-0073), and every session here carries `l2vpn_evpn`, so enabling it
+# would buy a per-session allocation on every VTEP and answer nothing
+# about this fabric's routes. Use `rbgp rib received <vtep>` and the EVPN
+# views instead.
+[policy.explain]
+enabled = false
+
 # --- VTEP peers (all RR clients, all iBGP in AS 65000) ---
 
 [[neighbors]]

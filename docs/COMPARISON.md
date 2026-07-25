@@ -129,7 +129,7 @@ IPv4/IPv6 `Prefix` routes.
 | Neighbor/peer matching | Yes | Yes | Yes | Yes | Yes |
 | Named policy definitions | Yes | Yes | Yes | Yes | Yes |
 | Policy chaining | Yes | Yes | Yes | Yes | Yes |
-| Import-policy explain (per-prefix decision trace) | Yes | No | No | No | No |
+| Import-policy explain (per-prefix decision trace) | Yes (opt-in) | No | No | No | No |
 | Custom filter language | Yes | No | Yes | No | Yes |
 | Parameterized policies (templates) | Yes | No | Yes | No | Partial |
 | In-language policy unit tests | Yes | No | No | No | No |
