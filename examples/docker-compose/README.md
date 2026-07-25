@@ -35,7 +35,7 @@ restart:
 
 ```bash
 docker compose exec rustbgpd rbgp -s http://127.0.0.1:50051 \
-  neighbor 10.99.0.30 add --remote-as 65003
+  neighbor 10.99.0.30 add --remote-asn 65003
 docker compose exec rustbgpd cat /var/lib/rustbgpd/config.toml
 ```
 

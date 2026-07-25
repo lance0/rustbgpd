@@ -173,18 +173,59 @@ An Envoy proxy front-end is also supported for multi-host fan-out; see
 
 ## Docker standalone
 
-Release images are published to GHCR with versioned tags
-(e.g. `ghcr.io/lance0/rustbgpd:0.51.0`); `docker build -t rustbgpd .`
-produces the same lean runtime image locally.
+Release images are published to GHCR; `:latest` tracks the newest release and
+`:X.Y` pins a minor series (see
+[deployment.md](deployment.md#container-image) for the full tag table).
+`docker build -t rustbgpd .` produces the same lean runtime image locally.
+
+First adapt the `lab` config from step 2 for a container. Two of its values
+are host defaults that do not work under Docker: state under `/tmp` is not on
+the volume, and a `127.0.0.1` metrics bind is unreachable from a published
+port.
+
+```bash
+sed -i \
+  -e 's#/tmp/rustbgpd#/var/lib/rustbgpd#g' \
+  -e 's#^prometheus_addr = .*#prometheus_addr = "0.0.0.0:9179"#' \
+  config.toml
+```
+
+The `edge` profile already ships both values in their container form, so
+starting from `--init-config edge` needs no such edit.
 
 ```bash
 docker run -d --name rustbgpd \
   -v "$(pwd)/config.toml":/etc/rustbgpd/config.template.toml:ro \
   -v rustbgpd-state:/var/lib/rustbgpd \
   -p 179:179 -p 9179:9179 \
+  --ulimit nofile=65536:524288 \
   rustbgpd \
   /bin/sh -c 'cp -n /etc/rustbgpd/config.template.toml /var/lib/rustbgpd/config.toml && exec rustbgpd /var/lib/rustbgpd/config.toml'
 ```
+
+`--ulimit` is required, not tuning: the Docker default soft `nofile` is 1024,
+which `rbgp doctor` fails outright because peers exhaust file descriptors at
+scale.
+
+Verify from the host over the published metrics port, and drive `rbgp` with
+`docker exec` — the gRPC socket is a Unix socket inside the container, and the
+runtime image is the only place an `rbgp` binary exists:
+
+```bash
+curl -fsS http://127.0.0.1:9179/livez    # ok
+curl -fsS http://127.0.0.1:9179/readyz   # ready
+
+docker exec rustbgpd rbgp health
+docker exec rustbgpd rbgp summary
+docker exec rustbgpd rbgp doctor
+```
+
+No `RUSTBGPD_ADDR` is needed: after the `sed`, the socket is at the CLI's
+default `unix:///var/lib/rustbgpd/grpc.sock`.
+
+Because the state directory now *is* the mounted volume, a `docker restart`
+keeps the gRPC socket path, `config-history/`, the graceful-restart marker,
+crash reports, and the event DB — not just the copied `config.toml`.
 
 The config is seeded from a read-only template into the writable state volume
 rather than bind-mounted in place. Config persistence rewrites the file with a
