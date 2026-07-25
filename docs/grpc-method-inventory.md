@@ -48,11 +48,9 @@ assignment; `crates/api/src/authz.rs` is the source of truth the daemon
 reads, and `docs/grpc-method-inventory.json` is the machine-readable
 export.
 
-For external review, read this inventory together with
-`docs/adr/0064-grpc-authorization.md` and
-`docs/adr/0064-threat-model.md`. The threat model explains the
-management-plane assets, trust boundaries, abuse paths, current controls,
-and residual enforcement gaps behind the tier assignments.
+Read this inventory together with `docs/adr/0064-grpc-authorization.md`,
+which records the tier model behind these assignments and which of its
+slices remain open.
 Auditors and generated-client authors can consume the same classification from
 `docs/grpc-method-inventory.json`; CI checks that JSON artifact against the
 Rust source-of-truth table, and checks the per-service tables below against
