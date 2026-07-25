@@ -1,5 +1,5 @@
 //! CLI wrapper around the renderer library. See `README.md` for the
-//! refresh loop (`render → rustbgpd --check → swap → SIGHUP`).
+//! refresh loop (`render → rustbgpd --check --strict → swap → SIGHUP`).
 
 #![deny(unsafe_code)]
 
@@ -90,7 +90,7 @@ fn main() -> ExitCode {
         return ExitCode::from(1);
     }
     println!(
-        "rendered {} file(s) + receipt into {} — gate with `rustbgpd --check {}` before swapping",
+        "rendered {} file(s) + receipt into {} — gate with `rustbgpd --check --strict {}` before swapping",
         rendered.files.len(),
         cli.out_dir.display(),
         cli.out_dir.join("config.toml").display()

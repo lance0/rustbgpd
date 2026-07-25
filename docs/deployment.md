@@ -63,7 +63,7 @@ TARBALL=rustbgpd-${SUFFIX}.tar.gz
 curl -fL -o "$TARBALL" \
   "https://github.com/lance0/rustbgpd/releases/latest/download/${TARBALL}"
 tar -xzf "$TARBALL"
-sudo install -m 0755 rustbgpd rbgp /usr/local/bin/
+sudo install -m 0755 rustbgpd rbgp rs-config-render /usr/local/bin/
 sudo install -m 0644 share/man/man1/rbgp.1 /usr/local/share/man/man1/
 sudo install -m 0644 share/man/man8/rustbgpd.8 /usr/local/share/man/man8/
 sudo install -m 0644 share/completions/rbgp.bash \
@@ -85,7 +85,14 @@ Verify:
 ```sh
 rustbgpd --version
 rbgp --version
+rs-config-render --version
 ```
+
+`rs-config-render` matters only if you run an IXP route server — it turns
+`arouteserver template-context` output into rustbgpd configuration
+([`tools/rs-config-render/`](../tools/rs-config-render/README.md)). It is
+in the archive either way, so install it now rather than discovering it is
+missing from a cron refresh later.
 
 ### From source
 
@@ -94,11 +101,12 @@ rbgp --version
 sudo apt-get install -y protobuf-compiler   # Debian/Ubuntu
 git clone https://github.com/lance0/rustbgpd
 cd rustbgpd
-# Builds exactly what a deployment ships: the daemon + the rbgp CLI.
-# (`--workspace` would also build dev/bench helpers you don't need.)
-cargo build --release -p rustbgpd -p rustbgpctl
+# Builds exactly what a deployment ships: the daemon, the rbgp CLI, and
+# the route-server config renderer. (`--workspace` would also build
+# dev/bench helpers you don't need.)
+cargo build --release -p rustbgpd -p rustbgpctl -p rs-config-render
 sudo install -m 0755 \
-  target/release/rustbgpd target/release/rbgp \
+  target/release/rustbgpd target/release/rbgp target/release/rs-config-render \
   /usr/local/bin/
 ```
 
@@ -124,7 +132,12 @@ docker pull ghcr.io/lance0/rustbgpd:0.45
 
 The published image is the Dockerfile's default `runtime` target:
 lean, daemon + `rbgp` only, running as a nonroot `rustbgpd` user. No
-dev/test/bench helpers are included. If you'd rather build it locally:
+dev/test/bench helpers are included. `rs-config-render` is deliberately
+left out too: the IXP refresh loop is a host-side cron job that runs
+`arouteserver` and the renderer next to each other and hands the daemon a
+finished config directory, so the renderer belongs on the host, not in the
+daemon's image. Install it from the tarball. If you'd rather build the
+image locally:
 
 ```sh
 docker build -t rustbgpd:latest .

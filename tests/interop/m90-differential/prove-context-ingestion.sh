@@ -9,7 +9,8 @@
 #      bgpq4 stub — the site's AS-SETs are documentation objects);
 #   2. `rs-config-render` directly on that dump (the sectioned report
 #      arouteserver 1.23.2 emits);
-#   3. `rustbgpd --check` + `rbgp policy check` on the rendered output;
+#   3. `rustbgpd --check --strict` + `rbgp policy check` on the rendered
+#      output;
 #
 # and asserts:
 #   - the fresh dump matches the checked-in context-sectioned.yml
@@ -104,9 +105,9 @@ ok "receipts and configs carry identical exact per-client limits"
 
 step "pipeline gates on the real-dump render"
 cargo run -q -p rustbgpd --manifest-path "$REPO_DIR/Cargo.toml" -- \
-    --check "$WORK/render-real/config.toml" \
-    || die "rendered config fails rustbgpd --check"
-ok "rustbgpd --check passes"
+    --check --strict "$WORK/render-real/config.toml" \
+    || die "rendered config fails rustbgpd --check --strict"
+ok "rustbgpd --check --strict passes"
 for rpol in "$WORK"/render-real/policy/*.rpol; do
     cargo run -q -p rustbgpctl --bin rbgp --manifest-path "$REPO_DIR/Cargo.toml" -- \
         policy check "$rpol" \
@@ -116,5 +117,6 @@ done
 
 echo
 echo "PROOF PASS: $pass checks — the advertised pipeline (arouteserver"
-echo "template-context -> rs-config-render -> rustbgpd --check) runs end to"
-echo "end on the real pinned image, and both input forms render identically."
+echo "template-context -> rs-config-render -> rustbgpd --check --strict) runs"
+echo "end to end on the real pinned image, and both input forms render"
+echo "identically."

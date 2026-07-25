@@ -576,6 +576,24 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   startup-only; the emitted config carries the same explanation as a
   comment, and deleting the line restores permit-all.
 
+- **`rs-config-render` output passes `rustbgpd --check --strict`.** The
+  renderer is the IXP adoption path — an operator runs it in a cron refresh
+  loop and gates the result before every swap — and every config it
+  produced raised the unpoliced-eBGP warning once per member, because
+  members got an import chain and no export chain at all. The first thing
+  the new gate told an IXP was that the tool we hand them fails it.
+  Rendered configs now carry a declared transparent export chain
+  (permit-all, the RFC 7947 posture, stated rather than inherited) and
+  `[global] ebgp_requires_policy = true`, the same shape and wording as
+  `examples/route-server`, so deleting the chain later stops members
+  receiving routes loudly instead of silently reverting to permit-all. The
+  documented refresh loop, the renderer's own "gate with" hint, and the M90
+  differential gates all run the strict form now, and the workspace test
+  over the emitted config asserts both the strict exit code and the
+  `config OK` summary line — it previously ran a plain `--check` and passed
+  with three warnings, so it had been asserting that output was acceptable
+  while the strict gate correctly rejected it.
+
 - **RFC 6793 legacy-AS migration is lossless end to end.** Sessions
   without capability 65 now normalize received type 2/17 paths and
   type 7/18 aggregators before loop detection, policy, and RIB
@@ -981,6 +999,19 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `rustbgpd-<arch>.tar.gz` — v0.60.0 tarballs contain only `rustbgpd` and
   `rbgp`. The binary is now packed alongside them, and the tarball content
   assertion checks all three binaries for presence and non-emptiness.
+
+- **The documented install paths install `rs-config-render`.** Every
+  tarball snippet in the README, the quickstart, and `docs/deployment.md`
+  extracted an archive containing three binaries and then installed two of
+  them — `docs/deployment.md` contradicted its own contents listing four
+  lines earlier — so an operator who followed the documented install and
+  then the IXP cookbook hit `rs-config-render: command not found`. Every
+  tarball and from-source path names it now, and the cookbook says the
+  renderer is in the tarball rather than implying a checkout is required.
+  The published container image still omits it deliberately: the refresh
+  loop is a host-side cron job that runs `arouteserver` and the renderer
+  next to each other and hands the daemon a finished config directory, and
+  the deployment guide now says so instead of leaving the gap unexplained.
 
 ## [0.60.0] — 2026-07-18
 

@@ -311,7 +311,7 @@ arouteserver `general.yml`/`clients.yml` and render rustbgpd
 configuration from its resolved data model with
 [`tools/rs-config-render/`](../../tools/rs-config-render/README.md)
 (`arouteserver template-context` → `rs-config-render` →
-`rustbgpd --check` → swap → SIGHUP, fail-stale at every step). The
+`rustbgpd --check --strict` → swap → SIGHUP, fail-stale at every step). The
 end-to-end walkthrough — including the Alice-LG looking glass — is
 [ixp-filter-pipeline.md](ixp-filter-pipeline.md). Design and failure
 policy:

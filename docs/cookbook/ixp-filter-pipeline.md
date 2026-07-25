@@ -18,7 +18,7 @@ context.yml
         │  rs-config-render                  (fail-stale rendering)
         ▼
 config.toml + policy/*.rpol + render-receipt.json
-        │  rustbgpd --check                  (full config validation)
+        │  rustbgpd --check --strict         (full config validation)
         ▼
 swap + SIGHUP                                (parse-then-swap reload)
         │
@@ -92,9 +92,10 @@ bogons, transit-free, path-length cap, RPKI origin validation),
 `policy/client-<id>.rpol` (the client's IRR-derived prefix/origin
 sets), and `render-receipt.json` (fingerprint, cardinalities,
 warnings). `--rtr-cache` is required whenever the context enables
-RPKI origin validation — the context carries no cache address. Build
-the renderer from this repo with `cargo build --release -p
-rs-config-render`.
+RPKI origin validation — the context carries no cache address. The
+renderer ships in the release tarball alongside `rustbgpd` and `rbgp`
+([install](../deployment.md#install)); from a checkout, build it with
+`cargo build --release -p rs-config-render`.
 
 The renderer is deliberately fail-stale, never fail-open: a refused
 knob (exit 2), an implausibly empty IRR set (exit 3), or context-shape
@@ -141,7 +142,9 @@ configuration stays live:
 arouteserver template-context --output "$STATE/context.yml"
 rs-config-render --context "$STATE/context.yml" \
     --out-dir "$STATE/candidate" --rtr-cache 127.0.0.1:3323
-rustbgpd --check "$STATE/candidate/config.toml"
+# --strict: warnings fail the gate, so a refresh never swaps in a config
+# the daemon had something to say about. Rendered output is clean.
+rustbgpd --check --strict "$STATE/candidate/config.toml"
 rsync -a --delete "$STATE/candidate/" /etc/rustbgpd/
 systemctl reload rustbgpd        # SIGHUP: parse-then-swap
 ```

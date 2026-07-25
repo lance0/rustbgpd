@@ -16,8 +16,13 @@ adds exactly one render step:
 $ arouteserver template-context --output /var/lib/rs/context.yml
 $ rs-config-render --context /var/lib/rs/context.yml \
     --out-dir /var/lib/rs/candidate --rtr-cache 127.0.0.1:3323
-$ rustbgpd --check /var/lib/rs/candidate/config.toml
+$ rustbgpd --check --strict /var/lib/rs/candidate/config.toml
 ```
+
+Rendered output passes `--strict` — every member session carries an
+explicit import chain and the declared transparent export chain (RFC 7947
+permit-all, plus `ebgp_requires_policy` so deleting it fails closed) — so
+the refresh loop can gate on warnings, not just on rejection.
 
 [arouteserver]: https://github.com/pierky/arouteserver
 
@@ -56,7 +61,7 @@ and against a live run of the pinned arouteserver image by
 
 | File | Contents |
 |---|---|
-| `config.toml` | RS globals, RPKI cache servers, one `[[neighbors]]` per client: transparent `route_server_client` session, `role = "route_server"`, strict next-hop ownership, per-family max-prefix ceilings and OpenBGPD-style timed restart, per-client import policy chain, `per_client_best` (or Add-Path when the context enables it) |
+| `config.toml` | RS globals, RPKI cache servers, one `[[neighbors]]` per client: transparent `route_server_client` session, `role = "route_server"`, strict next-hop ownership, per-family max-prefix ceilings and OpenBGPD-style timed restart, per-client import policy chain, `per_client_best` (or Add-Path when the context enables it); plus `ebgp_requires_policy = true` and a declared transparent (permit-all) export chain, the RFC 7947 posture stated rather than inherited |
 | `policy/rs-hygiene.rpol` | Shared import hygiene: reject AS_SET segments (always the first term), invalid/private/reserved ASNs in the path, transit-free and never-via-route-servers ASNs, AS_PATH length cap, bogon and black-list prefixes, prefix-length windows, RPKI origin validation with RFC 8097 tagging |
 | `policy/client-<id>.rpol` | The client's IRR-derived `prefix-set` and origin `asn-set`, one accept term (`route.origin-as in … && route.prefix in …`), and an unconditional reject tail |
 | `render-receipt.json` | Render timestamp, context fingerprint, per-client set cardinalities, max-prefix ceilings and restart seconds, warnings |
@@ -81,13 +86,14 @@ transfers verbatim:
 arouteserver template-context --output "$STATE/context.yml"
 rs-config-render --context "$STATE/context.yml" \
     --out-dir "$STATE/candidate" --rtr-cache 127.0.0.1:3323
-rustbgpd --check "$STATE/candidate/config.toml"
+rustbgpd --check --strict "$STATE/candidate/config.toml"
 rsync -a --delete "$STATE/candidate/" /etc/rustbgpd/
 systemctl reload rustbgpd        # SIGHUP: parse-then-swap
 ```
 
-Any step failing (arouteserver exit, render refusal/abort, `--check`
-rejection) leaves the previous configuration running untouched; the
+Any step failing (arouteserver exit, render refusal/abort, `--check
+--strict` rejection or warning) leaves the previous configuration
+running untouched; the
 daemon's own reload seam guarantees a bad swap can never evict working
 policy either. Alert on the age of `render-receipt.json` — a pipeline
 stuck for more than a couple of refresh intervals should page, not rot.

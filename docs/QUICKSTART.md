@@ -16,12 +16,16 @@ curl -fLO "https://github.com/lance0/rustbgpd/releases/latest/download/rustbgpd-
 curl -fLO "https://github.com/lance0/rustbgpd/releases/latest/download/checksums-${SUFFIX}.txt"
 sha256sum -c "checksums-${SUFFIX}.txt"
 tar -xzf "rustbgpd-${SUFFIX}.tar.gz"
-sudo install -m 0755 rustbgpd rbgp /usr/local/bin/
+sudo install -m 0755 rustbgpd rbgp rs-config-render /usr/local/bin/
 
 rustbgpd --version && rbgp --version
 ```
 
-The tarball also ships man pages and shell completions under `share/`;
+The third binary, `rs-config-render`, is the
+[IXP route-server config renderer](../tools/rs-config-render/README.md);
+nothing below uses it, but it is in the same archive, so install it here
+rather than hunting for it the day you stand up a route server. The
+tarball also ships man pages and shell completions under `share/`;
 [deployment.md](deployment.md#install) covers installing those and
 pinning a specific version instead of `latest`.
 
@@ -31,6 +35,7 @@ pinning a specific version instead of `latest`.
 # Debian/Ubuntu build dependency for tonic/prost codegen.
 sudo apt-get install -y protobuf-compiler
 
+# Add -p rs-config-render for the route-server renderer.
 cargo build --release -p rustbgpd -p rustbgpctl
 ```
 

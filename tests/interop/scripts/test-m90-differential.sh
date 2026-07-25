@@ -32,7 +32,7 @@
 #     makes the attribution deterministic).
 #
 # Also asserted along the way: the rendered rustbgpd config passes
-# `rustbgpd --check`, every generated .rpol file passes its own
+# `rustbgpd --check --strict`, every generated .rpol file passes its own
 # in-language tests under `rbgp policy check`, and the render receipt
 # lists all three members.
 #
@@ -209,11 +209,11 @@ render_rustbgpd_config() {
 
     # The pipeline's own gate (cookbook step 3): the rendered config
     # must pass full validation before it may serve members.
-    if docker exec "$RUSTBGPD" /usr/local/bin/rustbgpd --check /etc/rustbgpd/config.toml >/dev/null 2>&1; then
-        ok "rendered config passes rustbgpd --check"
+    if docker exec "$RUSTBGPD" /usr/local/bin/rustbgpd --check --strict /etc/rustbgpd/config.toml >/dev/null 2>&1; then
+        ok "rendered config passes rustbgpd --check --strict"
     else
-        fail "rendered config FAILS rustbgpd --check"
-        docker exec "$RUSTBGPD" /usr/local/bin/rustbgpd --check /etc/rustbgpd/config.toml >&2 || true
+        fail "rendered config FAILS rustbgpd --check --strict"
+        docker exec "$RUSTBGPD" /usr/local/bin/rustbgpd --check --strict /etc/rustbgpd/config.toml >&2 || true
         exit 1
     fi
 
