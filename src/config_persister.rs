@@ -766,4 +766,48 @@ log_format = "json"
              or doctor reads the daemon's own write as an external edit"
         );
     }
+
+    /// The marker filename is agreed on across two crates by name alone: the
+    /// daemon writes it, `rbgp doctor` reads it, and `crates/cli` cannot share
+    /// a constant with the daemon without an unnatural dependency.
+    ///
+    /// Nothing else holds the halves together. If either side is renamed,
+    /// doctor's read misses, the check falls back to comparing against process
+    /// start, and the permanent-warn defect returns — with both crates' own
+    /// tests still green, because each exercises only its own literal. So the
+    /// agreement is fenced here, the way the gRPC authz inventory fences its
+    /// own cross-artifact agreement.
+    #[test]
+    fn doctor_reads_the_marker_filename_the_persister_writes() {
+        const DOCTOR_SOURCE: &str = include_str!("../crates/cli/src/commands/doctor.rs");
+
+        // Extract the literal doctor actually assigns — never search the
+        // source for the current value. A containment check would still pass
+        // after the daemon's constant alone changed, which is precisely the
+        // drift that breaks the agreement.
+        let declared = DOCTOR_SOURCE
+            .lines()
+            .find_map(|line| {
+                line.trim_start()
+                    .strip_prefix("const LAST_PERSIST_FILE: &str = ")
+            })
+            .and_then(|rest| rest.trim_end().strip_suffix(';'))
+            .and_then(|literal| literal.strip_prefix('"'))
+            .and_then(|literal| literal.strip_suffix('"'));
+
+        // Its own step: a reformatted declaration must fail loudly here rather
+        // than leave the comparison below matching against nothing.
+        let declared = declared.expect(
+            "could not find `const LAST_PERSIST_FILE: &str = \"…\";` in \
+             crates/cli/src/commands/doctor.rs — if the declaration was \
+             reformatted, update this extraction; do not delete the check",
+        );
+
+        assert_eq!(
+            declared, LAST_PERSIST_FILE,
+            "`rbgp doctor` reads a different marker filename than the persister \
+             writes — the config-freshness check will silently fall back to \
+             process start and warn forever after the first runtime mutation"
+        );
+    }
 }
