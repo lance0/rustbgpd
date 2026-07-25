@@ -7,8 +7,7 @@ consumable by Rust projects — monitors, analyzers, test harnesses, MRT readers
 k8s sidecars, SDN controllers — without linking the daemon.
 
 This document is the contract for embedders: which crate to depend on, what the
-`pub use` boundary is, and what a minimal consumer looks like. It is the
-reference for the publish-and-adoption plan (see the companion strategy memo).
+`pub use` boundary is, and what a minimal consumer looks like.
 
 ---
 
@@ -16,30 +15,32 @@ reference for the publish-and-adoption plan (see the companion strategy memo).
 
 | Crate                    | Published? | Depends on (internal)              | Deps (external)            | Stability target | Role for embedders |
 |--------------------------|-----------|-----------------------------------|----------------------------|------------------|--------------------|
-| `rustbgpd-wire`          | **Yes** (crates.io `0.14.1`; repository prepared as `0.15.0`, not yet published) | none (internal)            | `bytes`, `thiserror`      | **Stable codec** | The one to link. Pure encode/decode. |
-| `rustbgpd-fsm`           | **Yes** (crates.io `0.2.0`; repository prepared as `0.3.0`, not yet published) | `rustbgpd-wire`            | `thiserror`, `bytes`      | Pure FSM API     | Pure RFC 4271 FSM; no I/O. |
+| `rustbgpd-wire`          | **Yes** — crates.io `0.15.0` | none (internal)            | `bytes`, `thiserror`      | **Stable codec** | The one to link. Pure encode/decode. |
+| `rustbgpd-fsm`           | **Yes** — crates.io `0.3.0` | `rustbgpd-wire`            | `thiserror`, `bytes`      | Pure FSM API     | Pure RFC 4271 FSM; no I/O. |
 | `rustbgpd-rpki`          | No (`publish = false`) | `rustbgpd-wire`            | `tokio`, `tracing`, `smallvec` | Publish next     | VRP table + RTR client. |
-| `rustbgpd-rib`           | No           | wire, policy, telemetry, rpki     | `prefix-trie`, `ipnet`, ... | Later            | Adj/Loc-RIB; heavier. |
-| `rustbgpd-policy`        | No           | wire                              | —                          | Later            | Import/export policy. |
-| `rustbgpd-transport`     | No           | wire, fsm, rib, rpki, policy, telemetry, bmp | `tokio`, `socket2`, ... | Later (daemon-tier) | Async session runtime. |
-| `rustbgpd-api`           | No           | (codegen)                         | `tonic`, `prost`           | Never as a lib   | gRPC server types. |
-| `rustbgpd-bmp`           | No           | telemetry                         | `tokio`                    | After rib        | RFC 7854 BMP export. |
-| `rustbgpd-mrt`           | No           | wire, rib                         | `flate2`, `chrono`         | After rib        | RFC 6396 dump export. |
-| `rustbgpd-evpn`          | No           | (internal)                        | —                          | Daemon-tier      | EVPN origination. |
-| `rustbgpd-evpn-linux`    | No           | (internal)                        | `rtnetlink`, `nix`         | Never (Linux-specific) | Kernel dataplane. |
+| `rustbgpd-rib`           | No (`publish = false`) | wire, policy, telemetry, rpki     | `prefix-trie`, `ipnet`, ... | Later            | Adj/Loc-RIB; heavier. |
+| `rustbgpd-policy`        | No (`publish = false`) | wire                    | `arc-swap`, `ariadne`, `logos`, `regex`, `sha2`, ... | Later | Import/export policy. |
+| `rustbgpd-transport`     | No (`publish = false`) | wire, fsm, rib, rpki, policy, telemetry, bmp | `tokio`, `socket2`, ... | Later (daemon-tier) | Async session runtime. |
+| `rustbgpd-api`           | No (`publish = false`) | (codegen)                | `tonic`, `prost`           | Never as a lib   | gRPC server types. External clients generate from the proto instead — see §3.4. |
+| `rustbgpd-bmp`           | No (`publish = false`) | telemetry                | `tokio`                    | After rib        | RFC 7854 BMP export. |
+| `rustbgpd-mrt`           | No (`publish = false`) | wire, rib                | `flate2`, `chrono`         | After rib        | RFC 6396 dump export. |
+| `rustbgpd-evpn`          | No (`publish = false`) | wire                     | `thiserror`, `tracing`     | Daemon-tier      | EVPN origination. |
+| `rustbgpd-evpn-linux`    | No (`publish = false`) | (internal)                | `rtnetlink`, `nix`         | Never (Linux-specific) | Kernel dataplane. |
 | `rustbgpd` (daemon bin)  | No (`publish = false`) | all                            | —                          | N/A              | The daemon. Not a library. |
 
-**Publish order and why:** `wire` and `fsm` are published; the repository has
-prepared their next versions, but the versions shown in the dependency
-examples below remain the versions available from crates.io. `rpki` is the
-next natural candidate. The dependency DAG drives the order: `fsm` depends
+Only `rustbgpd-wire` and `rustbgpd-fsm` are on crates.io. Every other crate in
+the workspace carries `publish = false` and cannot be named as a dependency by
+a project outside this repository — including `rustbgpd-api`. A consumer that
+needs the daemon's gRPC surface generates a client from the proto (§3.4).
+
+**Publish order and why:** the dependency DAG drives the order: `fsm` depends
 only on `wire`; `rpki` depends only on `wire`; `rib` depends on
 `wire + policy + telemetry + rpki`. Publishing in this order means each
 published crate has only *already-published* (or external) dependencies, which
 is a hard crates.io requirement. `fsm` shipped before `rpki` because it is the
 smaller, purer, and more broadly useful building block — a test harness or a
-minimal speaker needs the fsm but not the RPKI table. See §4 for the full
-rationale.
+minimal speaker needs the fsm but not the RPKI table. `rpki` is the next
+candidate. See §4 for the full rationale.
 
 ---
 
@@ -54,9 +55,10 @@ no async runtime, no sockets. Two external dependencies only: `bytes` and
 
 Public surface (re-exported at crate root — `crates/wire/src/lib.rs`):
 
-- **Entry points:** `decode_message(&mut Bytes, max_len: u16) -> Result<Message, DecodeError>`,
+- **Entry points:** `decode_message(&mut Bytes, max_message_len: u16) -> Result<Message, DecodeError>`,
   `encode_message(&Message) -> Result<BytesMut, EncodeError>`,
-  `peek_message_length(&Bytes) -> Option<usize>` (transport framing).
+  `peek_message_length(&[u8], max_message_len: u16) -> Result<Option<u16>, DecodeError>`
+  (transport framing: `Ok(None)` means "header not yet buffered").
 - **`Message`** enum: `Open`, `Update`, `Keepalive`, `Notification`, `RouteRefresh`.
 - **`OpenMessage`** — capabilities negotiation; `Capability` enum (MP-BGP,
   4-octet AS, Add-Path, experimental Paths-Limit via `PathsLimitFamily`,
@@ -104,18 +106,21 @@ policy (`docs/RELEASE_CHECKLIST.md` §"Wire crate semver"):
 - **Minor**: new message types, attributes, helper methods, additive API changes.
 - **Major**: breaking API changes, changed method signatures, enum shape changes.
 
-**The prepared 0.15.0 change:** `Capability` is exhaustive, so adding
-`Capability::PathsLimit` is breaking for downstream exhaustive matches even
-though the new `PathsLimitFamily` codec is otherwise additive. The repository
-therefore prepares `0.15.0`, not a `0.14.x` patch. It also adds the additive
-`Ord` implementation on `EvpnRouteKey`. The published crates.io release remains
-`0.14.1` until the separate publish step completes.
+**Registry growth is no longer breaking.** As of the published `0.15.0`, every
+enum that tracks an IANA/RFC registry — `Capability`, `PathAttribute`,
+`Afi`/`Safi`, `Message`/`MessageType`, `NotificationCode`, and the EVPN,
+FlowSpec, ORF, PMSI, and error enums — is `#[non_exhaustive]`. Match them with
+a wildcard arm and a new capability code, path attribute, or AFI/SAFI arrives
+in a minor release without a semver-major break. Closed-by-construction sets
+(`Origin`, `AsPathSegment`, `Prefix`, `AddPathMode`, `ErrorDisposition`,
+`RpkiValidation`) stay exhaustively matchable on purpose. `crates/wire/README.md`
+carries the full split under "Enum exhaustiveness".
 
-The same rule applies to adding `#[non_exhaustive]` to an existing exhaustive
-enum: forcing downstream matches to add a wildcard arm is itself breaking.
-Future forward-compatibility work on `Afi`, `Safi`, `Capability`, and other
-wire enums therefore belongs in a later breaking release, not this packaging
-change.
+**The prepared 0.16.0 change** is additive at the API level, but **decode
+acceptance changed in six places** — bytes that decoded under 0.15.0 may now be
+rejected or typed differently. `crates/wire/README.md` carries the itemized
+list under "0.16.0 compatibility note"; diff exactly that list before you
+upgrade a consumer that asserts on decode outcomes.
 
 ---
 
@@ -129,7 +134,7 @@ This is the "MRT reader / monitor / analyzer" consumer. Links only
 ```toml
 # Cargo.toml
 [dependencies]
-rustbgpd-wire = "0.14.1"
+rustbgpd-wire = "0.15.0"
 bytes = "1"
 ```
 
@@ -189,41 +194,47 @@ intentional split (ADR-0002: inherent methods, no I/O in the FSM).
 ```toml
 # Cargo.toml
 [dependencies]
-rustbgpd-wire = "0.14.1"
-rustbgpd-fsm = "0.2.0"
+rustbgpd-wire = "0.15.0"
+rustbgpd-fsm = "0.3.0"
 bytes = "1"
 tokio = { version = "1", features = ["net", "io-util", "time", "rt"] }
 ```
 
 ```rust
 use std::net::Ipv4Addr;
-use rustbgpd_wire::{Afi, Safi, encode_message, Message};
-use rustbgpd_fsm::{PeerConfig, Session, Event, Action, SessionState};
 
-// 1. Configure the peer (4-byte AS, IPv4 unicast, hold 90s).
-let mut cfg = PeerConfig::new(65000, 65001, Ipv4Addr::new(10, 0, 0, 1));
-cfg.families = vec![(Afi::Ipv4, Safi::Unicast)];
+use rustbgpd_fsm::{Action, Event, PeerConfig, Session, SessionState};
+use rustbgpd_wire::{Afi, Message, Safi, encode_message};
 
-// 2. Create the FSM. Starts in Idle.
-let mut sm = Session::new(cfg);
+fn start_session() -> Result<Session, Box<dyn std::error::Error>> {
+    // 1. Configure the peer. `PeerConfig` is `#[non_exhaustive]`, so build it
+    //    with the constructor and set optional fields in place.
+    let mut cfg = PeerConfig::new(65000, 65001, Ipv4Addr::new(10, 0, 0, 1));
+    cfg.families = vec![(Afi::Ipv4, Safi::Unicast)];
 
-// 3. Drive it: operator starts the session -> FSM says "connect + start timers".
-for action in sm.handle_event(Event::ManualStart) {
-    match action {
-        Action::InitiateTcpConnection => { /* embedder opens a TCP socket */ }
-        Action::StartTimer(t, secs) => { /* embedder arms a tokio timer */ }
-        Action::SendOpen(open) => {
-            let bytes = encode_message(&Message::Open(open))?;
-            // embedder writes bytes to the TCP stream
+    // 2. Create the FSM. Starts in Idle.
+    let mut sm = Session::new(cfg);
+
+    // 3. Drive it: operator starts the session -> FSM says "connect + start timers".
+    for action in sm.handle_event(Event::ManualStart) {
+        match action {
+            Action::InitiateTcpConnection => { /* embedder opens a TCP socket */ }
+            Action::StartTimer(_timer, _secs) => { /* embedder arms a tokio timer */ }
+            Action::SendOpen(open) => {
+                let _bytes = encode_message(&Message::Open(open))?;
+                // embedder writes the bytes to the TCP stream
+            }
+            // `Action` is `#[non_exhaustive]`: ignore what you do not drive.
+            _ => {}
         }
-        _ => {}
     }
-}
 
-// 4. On peer OPEN received: feed BgpOpen(msg) -> FSM validates, emits SendKeepalive.
-//    On KEEPALIVE received in OpenConfirm: -> Established.
-//    The embedder maps Action::SendKeepalive to encode_message(&Message::Keepalive).
-assert_eq!(sm.state(), SessionState::Connect); // until TCP confirms
+    // 4. On peer OPEN received: feed Event::BgpOpen -> the FSM validates and
+    //    emits SendKeepalive. On KEEPALIVE in OpenConfirm: -> Established.
+    //    The embedder maps Action::SendKeepalive to Message::Keepalive.
+    assert_eq!(sm.state(), SessionState::Connect); // until TCP confirms
+    Ok(sm)
+}
 ```
 
 The FSM does not touch the network. It is `(State, Event) -> (State, Vec<Action>)`.
@@ -235,13 +246,37 @@ This makes it trivially testable and lets a sidecar plug in any transport
 A route-injection controller (the rustbgpd beachhead — an automation controller
 that originates and withdraws prefixes) has two viable shapes:
 
-**Shape A — link the daemon's gRPC API (no codec).** The controller is a
-separate process that talks to `rustbgpd` over gRPC (`RibService.AddRoutes`,
-`DeleteRoutes`, `WatchEvents`). This is what `examples/event-bridge/` already
-demonstrates — it links only `rustbgpd-api` (the generated gRPC client types)
-and streams events out as JSON. This is the *recommended* shape for production:
-the daemon owns the sessions and the RIB; the controller owns the intent.
-Links: `rustbgpd-api` + `tonic` + `tokio`. No codec, no FSM.
+**Shape A — drive the daemon over gRPC (no codec).** The controller is a
+separate process that talks to `rustbgpd` over gRPC. This is the *recommended*
+shape for production: the daemon owns the sessions and the RIB; the controller
+owns the intent. No codec, no FSM.
+
+External consumers do **not** link `rustbgpd-api`. That crate is `publish =
+false` — it is the daemon's own generated server types and is not resolvable
+from outside this repository. The supported path is to generate a client from
+[`proto/rustbgpd.proto`](../proto/rustbgpd.proto), which is self-contained: it
+declares package `rustbgpd.v1` and imports nothing, so no well-known-type
+include path is required.
+
+- **Rust** — `tonic-prost-build` in a `build.rs` (`compile_protos`), the same
+  codegen the daemon itself uses; `tonic` + `tokio` at runtime.
+- **Go** — `protoc-gen-go` + `protoc-gen-go-grpc`.
+- **Python** — `grpcio-tools` (`python -m grpc_tools.protoc`).
+
+The three services that matter for a route-injection controller:
+
+| Service | Methods you will actually call |
+|---------|-------------------------------|
+| `InjectionService` | `AddPath` / `DeletePath` (unicast prefixes), `AddFlowSpec` / `DeleteFlowSpec`, `AddEvpnRoute` / `DeleteEvpnRoute` |
+| `RibService` | `ListReceivedRoutes`, `ListBestRoutes`, `ListAdvertisedRoutes`, `ExplainBestPath`, `ExplainAdvertisedRoute`, `WatchRoutes`, `WatchRouteEvents` |
+| `EventService` | `WatchEvents` (live stream), `SubscribeFromEvent` (durable cursor replay, §8) |
+
+Route origination is `InjectionService`, not `RibService` — `RibService` is the
+read and explain surface. [`docs/grpc-method-inventory.md`](grpc-method-inventory.md)
+lists every method with its authorization tier, and its machine-readable twin
+[`grpc-method-inventory.json`](grpc-method-inventory.json) is checked in CI
+against the Rust source-of-truth table, so it is the authority on which methods
+exist. The proto itself remains the definitive schema.
 
 **Shape B — link the codec + FSM and speak BGP directly.** A sidecar that does
 not want a full daemon in the loop (e.g. a minimal speaker in a constrained
@@ -258,18 +293,19 @@ once that crate is published.
 **Status: `wire` → `fsm` are published; `rpki` is next; `rib`, `bmp`, `mrt`,
 and `policy` are later.**
 
-1. **`rustbgpd-wire` (published as `0.14.1`; `0.15.0` prepared).** The prepared
-   breaking bump adds the exhaustive `Capability::PathsLimit` variant and its
-   `PathsLimitFamily` entry type (experimental capability code 76), plus an
-   additive `Ord` implementation for `EvpnRouteKey`. This is the foundation —
-   dependent crate versions cannot publish before their wire dependency exists
-   on crates.io.
+1. **`rustbgpd-wire` (published as `0.15.0`; `0.16.0` prepared).** This is the
+   foundation — dependent crate versions cannot publish before their wire
+   dependency exists on crates.io. `0.15.0` brought `Capability::PathsLimit`
+   with its `PathsLimitFamily` entry type (experimental capability code 76),
+   the `Ord` implementation on `EvpnRouteKey`, and `#[non_exhaustive]` across
+   the registry-tracking enums. The prepared `0.16.0` is additive at the API
+   level with six decode-acceptance changes (§2.3).
 
-2. **`rustbgpd-fsm` (published as `0.2.0`; `0.3.0` prepared).** Its own new
-   fields are additive behind `#[non_exhaustive]`, but its public API exposes
-   wire types and the dependency moves from `^0.14` to incompatible `^0.15`.
-   The prepared FSM release therefore also needs a breaking 0.x bump. Why the
-   FSM was the second published crate:
+2. **`rustbgpd-fsm` (published as `0.3.0`; `0.3.1` prepared).** The prepared
+   `0.3.1` is purely additive: `PeerConfig` gains `min_hold_time` and
+   `required_families`, and `PeerConfig` is `#[non_exhaustive]`, so external
+   construction through `PeerConfig::new` is unaffected. Why the FSM was the
+   second published crate:
    - It depends *only* on `rustbgpd-wire` + `thiserror` + `bytes`. Zero
      daemon-tier coupling.
    - It is the smallest, purest building block a second consumer needs. A test
@@ -328,31 +364,25 @@ can link without dragging in the daemon stack.
 
 To be the de facto Rust BGP codec, the concrete gaps:
 
-1. **Finish the wire-enum forward-compatibility audit.** `Event` and `Action`
-   are already `#[non_exhaustive]`; wire enums such as `Afi`, `Safi`,
-   `PathAttribute`, `Capability`, `Message`, and `NotificationCode` still need
-   an intentional breaking-release plan. Every new variant on an exhaustive
-   enum is a breaking change — the exact reason Paths-Limit requires wire
-   `0.15.0`.
-2. **Ship an in-tree embedder as proof.** Add `examples/peer-loop/`: a ~150-line
+1. **Ship an in-tree embedder as proof.** Add `examples/peer-loop/`: a ~150-line
    binary that links `wire + fsm`, opens one TCP session to a configured peer,
    drives the FSM, and prints every received UPDATE. This is the "it works"
    receipt for consumers #1 and #3. The `event-bridge` example already proves the
    gRPC-client shape; this proves the library-embedding shape.
-3. **Add a `tokio_util::codec::Decoder/Encoder` impl.** ADR-0002 notes the
+2. **Add a `tokio_util::codec::Decoder/Encoder` impl.** ADR-0002 notes the
    transport layer integrates via `decode_message`/`encode_message` inside a
    `tokio_util::codec::Decoder`. Publish that `Decoder`/`Encoder` *in the wire
    crate* (gated on a `tokio-codec` feature that pulls `bytes` only — no full
    tokio) so any async consumer gets framed decode for free. This is the
    "battery-included" ergonomic that bgp-rs/zettabgp lack.
-4. **Run `cargo-semver-checks` in CI** against the published wire crate so
+3. **Run `cargo-semver-checks` in CI** against the published wire crate so
    accidental breaking changes are caught before publish. Add to
    `.github/workflows/ci.yml` on the wire crate path.
-5. **docs.rs is the storefront.** Ensure `cargo doc` is warning-clean (already
+4. **docs.rs is the storefront.** Ensure `cargo doc` is warning-clean (already
    a release gate) and that the README's supported-RFC table stays the landing
    page. Add per-type examples in doc-comments for `decode_message`,
    `encode_message`, `UpdateMessage::parse`, `UpdateMessage::try_build`.
-6. **Be honest about what the codec is *not*.** It is not a session runtime,
+5. **Be honest about what the codec is *not*.** It is not a session runtime,
    not a RIB, not a router. The embedder that needs a full in-process router
    (Cilium) cannot get it from rustbgpd as a library today. The embedder that
    needs a *codec* or a *pure FSM* — monitors, analyzers, test harnesses,
@@ -363,18 +393,24 @@ To be the de facto Rust BGP codec, the concrete gaps:
 
 ## 7. Published-crate release boundary
 
-- [x] Repository manifests prepare `rustbgpd-wire 0.15.0` and
-      `rustbgpd-fsm 0.3.0`; both retain their package metadata and README.
-- [x] The workspace dependency floors match the prepared versions.
-- [ ] Publish `rustbgpd-wire 0.15.0`, then verify it is registry-visible.
-- [ ] Only after that wire publish, run the fully verified package/dry-run gate
-      for `rustbgpd-fsm 0.3.0` and publish it. Cargo normalizes the FSM's path
-      dependency to `rustbgpd-wire = "^0.15.0"`, so a full FSM package verify
-      cannot resolve before wire is present in the registry.
-- [ ] Keep the dependency examples in §3 pinned to the versions actually
-      available from crates.io until the corresponding publish succeeds.
-- [ ] Treat the remaining wire-enum `#[non_exhaustive]` audit and any new
-      published crate as separate, demand-gated work.
+`rustbgpd-wire 0.15.0` and `rustbgpd-fsm 0.3.0` are published and are the
+versions the §3 dependency examples name. The next cut prepares
+`rustbgpd-wire 0.16.0` and `rustbgpd-fsm 0.3.1`; the ordering rules that govern
+it, and every publish after it, are:
+
+- Publish `rustbgpd-wire` first, then verify it is registry-visible. Only then
+  run the fully verified package/dry-run gate for `rustbgpd-fsm`. Cargo
+  normalizes the FSM's path dependency to a caret requirement on the wire
+  version, so a full FSM package verify cannot resolve before that wire release
+  is present in the registry.
+- Keep the dependency examples in §3 pinned to the versions actually available
+  from crates.io — never to a version prepared in-repo but not yet published.
+- Both crates keep their package metadata and README; the README is the rendered
+  docs.rs landing page and carries the per-version compatibility notes.
+- Treat any additional crate publish as separate, demand-gated work.
+
+`docs/RELEASE_CHECKLIST.md` holds the executable form of this, including the
+per-crate semver bump rules.
 
 ---
 
@@ -467,11 +503,13 @@ from the public gRPC API, including per-route `age` from
 `PolicyService.ListRejectedRoutes` with structured reject reasons, and
 `GET /routes/noexport/{id}` served from the `ListBestRoutes` −
 `ListAdvertisedRoutes` diff with each suppression explained by
-`RibService.ExplainAdvertisedRoute`). The adapter
-is the honest template: if
-the public API is missing a field an external tool needs, the fix is an
-additive proto field, not a daemon-internal shortcut — that is how
-`received_at_epoch_seconds` landed.
+`RibService.ExplainAdvertisedRoute`). Both live in this workspace, so they take
+`rustbgpd-api` as a path dependency; read them for the call shapes and the RPC
+sequencing, but generate your own client from the proto (§3.4) rather than
+copying that dependency line. The adapter is the honest template: if the public
+API is missing a field an external tool needs, the fix is an additive proto
+field, not a daemon-internal shortcut — that is how `received_at_epoch_seconds`
+landed.
 
 **Stability posture:** the daemon is alpha and the proto is versioned
 by convention, not frozen — but the working convention is additive

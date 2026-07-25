@@ -68,6 +68,33 @@ analyzers, test harnesses, MRT readers, etc.
 | draft-abraitis-idr-addpath-paths-limit-04 | Experimental Paths-Limit capability (`PathsLimitFamily`, IANA-assigned capability code 76). The draft is expired and archived; interoperability and behavior remain experimental |
 | 10005 | Link Bandwidth Extended Community receiver subset: decode exact transitive/non-transitive types 0x00/0x40, subtype 0x04, as raw AS + IEEE-754 bytes/second; the constructor remains non-transitive type 0x40 |
 
+### 0.16.0 compatibility note
+
+The 0.16.0 API surface is additive, but **decode acceptance changed in six
+places**. Bytes that decoded under 0.15.0 may now be rejected or typed
+differently, so diff exactly this list before upgrading a consumer that asserts
+on decode outcomes:
+
+- **Unsupported OPEN Optional Parameter types now error** with OPEN Message
+  Error / Unsupported Optional Parameter (2/4) instead of being skipped.
+  Unknown capabilities *inside* the Capabilities parameter remain accepted.
+- **BGP-LS attribute 29 enforces its optional non-transitive flags and
+  contained TLV framing.** Malformed contained framing discards the complete
+  attribute (RFC 9552 whole-attribute discard) while preserving the BGP-LS NLRI
+  and the session; valid unknown TLVs remain byte-stable for reflection.
+- **AGGREGATOR decodes as a typed `PathAttribute::Aggregator` value** instead
+  of falling through to `PathAttribute::Unknown`. Code matching on `Unknown`
+  for type code 7 no longer sees it.
+- **OPEN and KEEPALIVE over 4096 bytes are rejected** at header peek, before a
+  framing caller buffers the declared body, regardless of a negotiated RFC 8654
+  extended message length.
+- **AS_SET and AS_CONFED_SET are rejected in a received `AS_PATH` or
+  `AS4_PATH`** per RFC 9774, with the RFC 7606 treat-as-withdraw disposition.
+  Paths that decoded before now withdraw their routes.
+- **`ExtendedCommunity::as_link_bandwidth()` matches exact types only.**
+  Communities it previously accepted by a looser match no longer resolve as
+  link bandwidth.
+
 ### 0.15.0 compatibility note
 
 0.15.0 added `Capability::PathsLimit`: code 76 now decodes to typed
@@ -189,8 +216,9 @@ let bytes = encode_message(&Message::Open(open)).expect("encode OPEN");
   `MP_UNREACH_NLRI` attribute encoding is now fallible (0.13.0)
 - **`Afi`** / **`Safi`** — IANA address-family identifiers; the BGP-LS codec
   adds `Afi::BgpLs` (16388) plus `Safi::BgpLs` (71) and `Safi::BgpLsVpn` (72)
-  (0.13.0). These enums are not `#[non_exhaustive]`, so exhaustive downstream
-  matches must add arms for the new variants
+  (0.13.0). Both are `#[non_exhaustive]` as of 0.15.0 (see [Enum
+  exhaustiveness](#enum-exhaustiveness)), so downstream matches need a wildcard
+  arm and later registry additions are not breaking
 - **Well-known community constants** — `u32` values for matching and setting
   standard communities: `COMMUNITY_NO_EXPORT` / `COMMUNITY_NO_ADVERTISE` /
   `COMMUNITY_NO_EXPORT_SUBCONFED` (RFC 1997), `COMMUNITY_BLACKHOLE` (RFC 7999),
