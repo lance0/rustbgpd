@@ -18873,6 +18873,115 @@ async fn soft_reset_in_skips_configured_families_the_peer_never_negotiated() {
     managed.handle.shutdown().await.unwrap().unwrap();
 }
 
+/// A forward apply that fails *at the Route Refresh step* may already have
+/// delivered one family's request: `soft_reset_in` queues families
+/// sequentially, so IPv4 can be accepted before IPv6 fails, and a timeout is
+/// ambiguous either way. Adj-RIB-In may therefore already sit on the candidate
+/// policy. When the rollback's own refresh then fails, that is real unfinished
+/// convergence debt and `pending_refresh` must stay armed.
+///
+/// Load-bearing: this is the case `forward_completed = false` used to swallow.
+/// With the pre-fix `BestEffortRestorePrior { pending_refresh: false }`
+/// selection, the rollback clears the flag and the final assertion fails.
+///
+/// Its discriminator is
+/// `rfc8212_import_presence_edit_fails_when_the_peer_flaps_after_preflight`,
+/// which asserts the opposite for a forward that never reached the refresh
+/// step at all. Neither test means anything without the other.
+#[tokio::test]
+async fn rollback_arms_retry_when_a_partially_delivered_refresh_cannot_be_undone() {
+    use rustbgpd_transport::{PeerCommand, PeerCommandError};
+
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 11));
+    let ipv4_refreshes = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&ipv4_refreshes);
+    let (session_tx, mut session_rx) = mpsc::channel::<PeerCommand>(8);
+    let task = tokio::spawn(async move {
+        while let Some(cmd) = session_rx.recv().await {
+            match cmd {
+                PeerCommand::QueryState { reply } => {
+                    let mut state = policy_test_peer_state(addr, SessionState::Established);
+                    state.negotiated_session = Some(test_negotiated_session(true));
+                    let _ = reply.send(state);
+                }
+                // Both families negotiated. IPv4's request is accepted and
+                // queued; IPv6's send fails. Deliberately NOT
+                // `FamilyNotNegotiated`, which a whole-peer refresh skips.
+                PeerCommand::SendRouteRefresh { afi, safi, reply } => {
+                    if (afi, safi) == (Afi::Ipv4, Safi::Unicast) {
+                        counted.fetch_add(1, Ordering::SeqCst);
+                        let _ = reply.send(Ok(()));
+                    } else {
+                        let _ = reply
+                            .send(Err(PeerCommandError::SendFailed("link wedged".to_string())));
+                    }
+                }
+                PeerCommand::UpdateImportPolicy { reply, .. }
+                | PeerCommand::UpdateExportPolicy { reply, .. } => {
+                    let _ = reply.send(Ok(()));
+                }
+                PeerCommand::Shutdown | PeerCommand::Stop { .. } => break,
+                _ => {}
+            }
+        }
+        Ok(())
+    });
+
+    let (mut mgr, rib_rx) = rfc8212_status_manager();
+    let rib = spawn_rfc8212_rib_stub(rib_rx, 0);
+    insert_test_managed_peer(
+        &mut mgr,
+        addr,
+        PeerHandle::from_parts(session_tx, task),
+        false,
+    );
+    {
+        let managed = mgr.peers.get_mut(&key(addr)).unwrap();
+        managed.transport_config.peer.families =
+            vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
+        managed.import_policy = Some(deny_policy_chain());
+        managed.export_policy = Some(distinct_deny_policy_chain(3));
+    }
+
+    // Export is unchanged, so no RIB replacement runs and the rollback is
+    // purely the import chain plus its refresh.
+    let error = mgr
+        .apply_resolved_policy_snapshot(vec![rustbgpd_api::peer_types::ResolvedPeerPolicy {
+            address: addr,
+            interface: None,
+            import_policy: Some(distinct_deny_policy_chain(5)),
+            export_policy: Some(distinct_deny_policy_chain(3)),
+        }])
+        .await
+        .expect_err("a failed Route Refresh fails the forward apply");
+    assert!(
+        error.contains("already-applied peers restored"),
+        "the forward failure must have rolled back: {error}"
+    );
+    assert!(
+        ipv4_refreshes.load(Ordering::SeqCst) >= 1,
+        "the IPv4 request must have been accepted before IPv6 failed — otherwise \
+         this test proves nothing about a partially delivered refresh"
+    );
+
+    let managed = mgr.peers.get(&key(addr)).unwrap();
+    assert_eq!(
+        managed.import_policy,
+        Some(deny_policy_chain()),
+        "rollback must restore the prior import chain"
+    );
+    assert!(
+        managed.pending_refresh,
+        "a partially delivered forward refresh whose rollback refresh also failed \
+         leaves real convergence debt; retry intent must stay armed"
+    );
+
+    let managed = mgr.peers.remove(&key(addr)).unwrap();
+    managed.handle.shutdown().await.unwrap().unwrap();
+    drop(mgr);
+    rib.await.unwrap();
+}
+
 // ---------------------------------------------------------------------------
 // ADR-0112 step 4 — live policy-presence transitions
 // ---------------------------------------------------------------------------
@@ -19204,11 +19313,18 @@ async fn rfc8212_import_presence_edit_fails_when_the_peer_flaps_after_preflight(
         "rollback must restore the prior chain"
     );
     // Retry intent for a fully unwound forward is the captured prior, not an
-    // armed flag: the rollback reasserted the prior import chain, so there is
-    // no unfired refresh owed and arming one would fire a spurious Route
-    // Refresh on the next unrelated edit. The operator's intent survives
-    // because `current_config` never advanced — the next reload re-derives the
-    // same delta and requalifies the peer.
+    // armed flag. This forward bailed *before* any Route Refresh was attempted
+    // — the peer stopped reporting Established — so `AdjRibIn` provably never
+    // left the prior policy and the rollback is exact. `pending_refresh` means
+    // unfinished convergence debt, not a rejected desired change; arming it
+    // here would make an unrelated later edit refresh the restored policy. The
+    // operator's intent survives structurally because `current_config` never
+    // advanced: the next reload re-derives the same delta and requalifies.
+    //
+    // Discriminator: `rollback_arms_retry_when_a_partially_delivered_refresh_cannot_be_undone`
+    // asserts the opposite for a forward that failed *at* the refresh step,
+    // where one family may already have converged. Neither assertion means
+    // anything without the other.
     assert!(
         !managed.pending_refresh && !managed.pending_export_apply,
         "a fully restored peer must not carry a spurious retry"

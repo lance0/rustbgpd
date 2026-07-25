@@ -272,6 +272,20 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   permanent one repeats the bind error in the journal. `rbgp doctor` reports
   the cause (port in use, missing `CAP_NET_BIND_SERVICE`) against the down
   daemon through its existing `bgp.listener` check.
+- **A policy rollback no longer drops retry intent when the forward Route
+  Refresh was partially delivered.** Families are requested sequentially, so a
+  forward refresh can have IPv4 accepted before IPv6 fails, and a reply timeout
+  or dropped reply is ambiguous in both directions — Adj-RIB-In may already sit
+  on the candidate policy. The rollback treated any incomplete forward as
+  "nothing moved" and restored the prior `pending_refresh`, so if its own
+  refresh back also failed the peer was left with real unfinished convergence
+  and no armed retry. The forward now reports whether delivery began, and the
+  rollback re-arms in that case. A forward that failed *before* any refresh was
+  attempted still restores the prior state exactly: after a fully unwound
+  rollback the retry is structural, because the configuration never advanced,
+  and arming the flag would make an unrelated later edit refresh the restored
+  policy.
+
 - **A whole-peer Route Refresh now asks only for the families the session
   negotiated.** Requesting "everything" iterated the peer's *configured*
   families, so on any session that negotiated fewer than were configured — a
