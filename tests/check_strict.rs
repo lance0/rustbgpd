@@ -76,6 +76,90 @@ import_policy_chain = ["from-peer"]
 export_policy_chain = ["to-peer"]
 "#;
 
+/// A validation-origin warning: an iBGP route-reflector client with an ORR
+/// vantage and no neighbor feeding BGP-LS. The condition is detected inside
+/// `Config::validate`, which runs before logging is initialized — so before
+/// this was routed through the collected warning set, `--check` reported
+/// nothing and `--strict` had nothing to fail on. iBGP throughout, so the
+/// unpoliced-eBGP warning cannot contribute to the count.
+const ORR_WARNS: &str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+runtime_state_dir = "/tmp/rustbgpd-check-strict"
+
+[global.telemetry]
+log_format = "json"
+
+[global.telemetry.grpc_uds]
+enabled = true
+path = "/tmp/rustbgpd-check-strict/grpc.sock"
+mode = 0o600
+principal = "operator"
+
+[security.grpc]
+enforcement = "tier"
+
+[security.grpc.roles]
+operator = "operator"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65001
+route_reflector_client = true
+orr_vantage = "192.0.2.7"
+"#;
+
+/// The pre-ADR-0064 gRPC authorization mode. A genuine risk in the
+/// operator's own config, so `--check` reports it and `--strict` fails on
+/// it; iBGP and no ORR vantage, so it is the only warning.
+const LEGACY_GRPC_WARNS: &str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+runtime_state_dir = "/tmp/rustbgpd-check-strict"
+
+[global.telemetry]
+log_format = "json"
+
+[security.grpc]
+enforcement = "legacy"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65001
+"#;
+
+/// Three distinct warning kinds at once: an unpoliced eBGP neighbor, an
+/// unresolvable ORR vantage, and legacy gRPC enforcement. The count is what
+/// `--strict` gates on, so a fix that surfaced each warning without summing
+/// them into one total would still report the wrong number here.
+const THREE_KINDS: &str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+runtime_state_dir = "/tmp/rustbgpd-check-strict"
+
+[global.telemetry]
+log_format = "json"
+
+[security.grpc]
+enforcement = "legacy"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+
+[[neighbors]]
+address = "10.0.0.3"
+remote_asn = 65001
+route_reflector_client = true
+orr_vantage = "192.0.2.7"
+"#;
+
 /// Run the daemon binary with `args` plus a config file holding
 /// `config_toml`; returns `(exit_code, stdout, stderr)`.
 fn run(config_toml: &str, args: &[&str]) -> (Option<i32>, String, String) {
@@ -137,6 +221,104 @@ fn check_strict_exits_zero_on_a_clean_config() {
         stdout.contains("config OK"),
         "clean check did not print the OK summary:\n{stdout}"
     );
+}
+
+/// A warning raised inside `Config::validate` has to reach the operator.
+/// It is detected before `init_logging` runs, so logging it there wrote to
+/// no subscriber: `--check` printed a clean result for a config with a
+/// permanently inert ORR configuration in it.
+#[test]
+fn check_reports_a_validation_origin_warning() {
+    let (code, stdout, stderr) = run(ORR_WARNS, &["--check"]);
+    assert_eq!(code, Some(0), "stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(
+        stdout.contains("config VALID, 1 WARNING — NOT a clean check"),
+        "summary line did not count the validation warning:\n{stdout}"
+    );
+    assert!(
+        stderr.contains("orr_vantage") && stderr.contains("linkstate"),
+        "warning did not name the condition:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("Add \"linkstate\" to the families"),
+        "warning did not give the action:\n{stderr}"
+    );
+}
+
+/// The point of routing validation diagnostics through the counted set: a
+/// warning that never surfaced could never fail the gate, whatever its
+/// severity.
+#[test]
+fn check_strict_fails_on_a_validation_origin_warning() {
+    let (code, stdout, stderr) = run(ORR_WARNS, &["--check", "--strict"]);
+    assert_eq!(code, Some(1), "stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(
+        stdout.contains("config VALID, 1 WARNING — NOT a clean check"),
+        "summary line changed under --strict:\n{stdout}"
+    );
+}
+
+/// Legacy gRPC enforcement is a risk in the operator's own config, not an
+/// unfinished feature of the release, so `--check` reports it and it must
+/// state the migration action rather than only the state.
+#[test]
+fn check_reports_legacy_grpc_enforcement() {
+    let (code, stdout, stderr) = run(LEGACY_GRPC_WARNS, &["--check"]);
+    assert_eq!(code, Some(0), "stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(
+        stdout.contains("config VALID, 1 WARNING — NOT a clean check"),
+        "summary line did not count the legacy-enforcement warning:\n{stdout}"
+    );
+    assert!(
+        stderr.contains("security.grpc.enforcement = \"legacy\""),
+        "warning did not name the condition:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("max_tier cap"),
+        "warning did not name the consequence:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("To migrate:")
+            && stderr.contains("[security.grpc.roles]")
+            && stderr.contains("security.grpc.enforcement = \"tier\""),
+        "warning did not give the migration action:\n{stderr}"
+    );
+}
+
+#[test]
+fn check_strict_fails_on_legacy_grpc_enforcement() {
+    let (code, stdout, stderr) = run(LEGACY_GRPC_WARNS, &["--check", "--strict"]);
+    assert_eq!(code, Some(1), "stdout:\n{stdout}\nstderr:\n{stderr}");
+}
+
+/// The aggregate. `--strict` gates on the total, so every kind has to be
+/// summed into the one count — the case a per-warning fix gets wrong.
+#[test]
+fn check_counts_every_warning_kind_together() {
+    let (code, stdout, stderr) = run(THREE_KINDS, &["--check"]);
+    assert_eq!(code, Some(0), "stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(
+        stdout.contains("config VALID, 3 WARNINGS — NOT a clean check"),
+        "the three warning kinds were not summed into one total:\n{stdout}"
+    );
+    for expected in [
+        "eBGP neighbor",
+        "orr_vantage",
+        "security.grpc.enforcement = \"legacy\"",
+    ] {
+        assert!(
+            stderr.contains(expected),
+            "{expected:?} missing from the framed warnings:\n{stderr}"
+        );
+    }
+    assert_eq!(
+        stderr.matches("WARNING:").count(),
+        3,
+        "each kind gets its own framed block:\n{stderr}"
+    );
+
+    let (code, _, _) = run(THREE_KINDS, &["--check", "--strict"]);
+    assert_eq!(code, Some(1), "strict must fail the same config");
 }
 
 /// Silently accepting `--strict` without `--check` would start the daemon

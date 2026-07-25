@@ -767,24 +767,6 @@ impl Config {
             .collect()
     }
 
-    /// Emit the startup warning for the pre-ADR-0064 legacy gRPC
-    /// authorization mode, if active. Tier enforcement becomes
-    /// mandatory in a future release.
-    pub fn warn_if_legacy_grpc_enforcement(&self) {
-        if matches!(
-            self.security.grpc.enforcement,
-            schema::GrpcEnforcementConfig::Legacy
-        ) {
-            tracing::warn!(
-                "security.grpc.enforcement = \"legacy\" is active: per-method tier \
-                 authorization is NOT enforced on read_write listeners. Tier \
-                 enforcement becomes mandatory in a future release — migrate to \
-                 enforcement = \"tier\" with [security.grpc.roles]; see \
-                 docs/adr/0064-grpc-authorization.md."
-            );
-        }
-    }
-
     /// Resolve the global import policy chain (named policies referenced
     /// by `[policy] import_chain`). `None` when no chain is configured.
     pub fn import_chain(&self) -> Result<Option<PolicyChain>, ConfigError> {

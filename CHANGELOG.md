@@ -21,9 +21,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and `--strict` without `--check` is rejected with exit 2 rather than silently
   accepted — that invocation would otherwise start a daemon. `--strict` is
   defined over the whole `--check` warning set, not one warning, so anything
-  `--check` reports in future fails a strict run. Startup-time `tracing`
-  warnings are not part of that set and are unchanged. `--help` and
-  `rustbgpd(8)` now document the exit-status ladder.
+  `--check` reports in future fails a strict run. `--help` and `rustbgpd(8)`
+  now document the exit-status ladder.
 
 - **Per-peer outbound unicast prefix limits (ADR-0113).** New
   `max_prefixes_out_ipv4` / `max_prefixes_out_ipv6` on `[[neighbors]]` and peer
@@ -244,6 +243,34 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   peer-group edits inherited by dynamic peers follow the same rules.
 
 ### Fixed
+
+- **`--check` reports the warnings raised during config validation, which were
+  previously discarded.** `Config::validate` emitted its non-fatal diagnostics
+  through `tracing`, but `Config::load` runs before `init_logging` on every
+  path — `--check` returns long before it, and daemon startup only reaches it
+  later. No subscriber was installed, so those records were written nowhere:
+  the RFC 9107 warning for an `orr_vantage` with no neighbor negotiating
+  `linkstate` — a topology feed that can never fill, leaving every vantage
+  permanently unresolved — was invisible on every path except a SIGHUP reload.
+  It also silently capped `--strict`, because a warning that never surfaces
+  cannot fail a gate however severe it is. Validation diagnostics are now
+  returned rather than logged, so they join the one counted `--check` warning
+  set: framed on stderr, summed into the reported total, failing `--check
+  --strict`, and logged once at daemon startup where a subscriber exists.
+
+- **`security.grpc.enforcement = "legacy"` is reported by `--check`.** It fired
+  only at daemon startup, so a config gate could pass a configuration whose
+  management surface enforces no per-method tier authorization: every
+  authenticated client of a `read_write` listener may call every method up to
+  the listener's `max_tier` cap, including the `operator_only` methods that
+  reconfigure the daemon, and `[security.grpc.roles]` entries deny nothing.
+  Tier enforcement has been the default since v0.24.0 and becomes mandatory,
+  so the warning now states the migration — give every listener a role
+  identity, map each principal to a role, then set `enforcement = "tier"` —
+  rather than only reporting the setting. Plain `--check` still exits 0;
+  `--check --strict` exits 1. The `ebgp_requires_policy` partial-enforcement
+  notice deliberately stays a startup-only record: it reports what this release
+  has not finished building, not a defect in the operator's config.
 
 - **The BGP listener sets `SO_REUSEADDR`, so an ordinary restart under traffic
   no longer fails `EADDRINUSE`.** The listener socket is built through

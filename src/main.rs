@@ -1844,14 +1844,42 @@ fn tcp_ao_listener_key_for_dynamic_range(
 /// `--strict` the moment it is summed here — there is no per-warning strict
 /// handling to keep in sync.
 ///
-/// Startup warnings are deliberately not part of this set. The
-/// `ebgp_requires_policy` partial-enforcement notice reports what this
-/// release has not finished building, not a defect in the operator's config,
-/// and the legacy-`security.grpc.enforcement` warning and the ORR
-/// vantage-without-linkstate warning are `tracing` records emitted after
-/// logging is initialized, which `--check` returns before reaching.
+/// Config-load diagnostics reach this through [`Config::advisories`] rather
+/// than through `tracing`. `Config::load` runs before `init_logging` on
+/// every path, so a warning logged during validation had no subscriber to
+/// write to and was silently dropped — which also capped `--strict`, since a
+/// warning nobody can see can never fail the gate.
+///
+/// The `ebgp_requires_policy` partial-enforcement notice stays out of this
+/// set on purpose: it reports what this release has not finished building,
+/// not a defect in the operator's config, so gating on it would make a
+/// correct deployment unshippable.
 fn check_warnings(config: &Config) -> usize {
-    warn_unpoliced_ebgp(config)
+    let mut warnings = warn_unpoliced_ebgp(config);
+    for advisory in config.advisories() {
+        print_framed_warning(advisory.headline, advisory.detail);
+        warnings += 1;
+    }
+    warnings
+}
+
+/// Print one `--check` warning as a framed stderr block.
+///
+/// Framed and on stderr so the exit-0 summary line on stdout cannot be the
+/// only thing an operator reads. `headline` states the condition; `body`
+/// carries the consequence and the action that clears it.
+fn print_framed_warning(headline: &str, body: &str) {
+    use owo_colors::{OwoColorize, Stream::Stderr};
+
+    let rule = "=".repeat(74);
+    eprintln!("\n{}", rule.if_supports_color(Stderr, OwoColorize::yellow));
+    eprintln!(
+        "{}: {headline}",
+        "WARNING".if_supports_color(Stderr, OwoColorize::yellow)
+    );
+    eprintln!();
+    eprintln!("{body}");
+    eprintln!("{}\n", rule.if_supports_color(Stderr, OwoColorize::yellow));
 }
 
 /// Print the `--check` warning for eBGP neighbors that resolve no explicit
@@ -1861,58 +1889,49 @@ fn check_warnings(config: &Config) -> usize {
 /// production, so a wide-open (or, under `ebgp_requires_policy`, a fully
 /// denied) eBGP edge has to be visible here. It stays a warning: a permit-all
 /// route server is a legitimate configuration and refusing it would break
-/// deployments that mean it. It goes to stderr, framed, so that the exit-0
-/// summary on stdout cannot be the only thing an operator reads.
+/// deployments that mean it.
 fn warn_unpoliced_ebgp(config: &Config) -> usize {
-    use owo_colors::{OwoColorize, Stream::Stderr};
+    use std::fmt::Write as _;
 
     let unpoliced = config.unpoliced_ebgp_neighbors();
     if unpoliced.is_empty() {
         return 0;
     }
-    let rule = "=".repeat(74);
-    eprintln!(
-        "\n{}",
-        rule.if_supports_color(Stderr, owo_colors::OwoColorize::yellow)
-    );
-    eprintln!(
-        "{}: {} eBGP neighbor{} resolve{} no explicit policy.",
-        "WARNING".if_supports_color(Stderr, owo_colors::OwoColorize::yellow),
+    let headline = format!(
+        "{} eBGP neighbor{} resolve{} no explicit policy.",
         unpoliced.len(),
         if unpoliced.len() == 1 { "" } else { "s" },
         if unpoliced.len() == 1 { "s" } else { "" },
     );
-    eprintln!();
+    let mut body = String::new();
     for neighbor in &unpoliced {
-        eprintln!(
+        let _ = writeln!(
+            body,
             "  {} (AS {}): {}",
             neighbor.address,
             neighbor.remote_asn,
             neighbor.missing_phrase()
         );
     }
-    eprintln!();
+    body.push('\n');
     if config.global.ebgp_requires_policy {
-        eprintln!(
+        body.push_str(
             "[global] ebgp_requires_policy = true, so every direction listed above runs the\n\
              RFC 8212 reserved deny: the session establishes and then carries no routes in\n\
              that direction, in any negotiated family. Configure an import_policy_chain /\n\
-             export_policy_chain there to start passing traffic."
+             export_policy_chain there to start passing traffic.",
         );
     } else {
-        eprintln!(
+        body.push_str(
             "Every direction listed above is unfiltered. An unfiltered import direction\n\
              accepts every route the peer sends; an unfiltered export direction re-advertises\n\
              every route selected for that peer, as received. If that is what you meant, this\n\
              is the expected result for a permit-all route server. If it is not, configure an\n\
              import_policy_chain / export_policy_chain there, or set\n\
-             [global] ebgp_requires_policy = true to fail closed until you do."
+             [global] ebgp_requires_policy = true to fail closed until you do.",
         );
     }
-    eprintln!(
-        "{}\n",
-        rule.if_supports_color(Stderr, owo_colors::OwoColorize::yellow)
-    );
+    print_framed_warning(&headline, &body);
     unpoliced.len()
 }
 
@@ -2937,7 +2956,12 @@ async fn run<T>(
         neighbors = config.neighbors.len(),
         "starting rustbgpd"
     );
-    config.warn_if_legacy_grpc_enforcement();
+    // The same set `--check` frames, logged here because this is the first
+    // point on the daemon path with a subscriber installed — `Config::load`
+    // runs before `init_logging`.
+    for advisory in config.advisories() {
+        tracing::warn!("{}", advisory.one_line());
+    }
 
     let metrics = BgpMetrics::new();
     let grpc_listeners = resolve_grpc_listeners(&config).unwrap_or_else(|e| {

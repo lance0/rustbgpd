@@ -64,6 +64,40 @@ pub(crate) fn effective_prefix_str(prefix: &str) -> Option<(IpAddr, u8)> {
     Some(effective_prefix(addr, len))
 }
 
+/// A legal configuration with a consequence its operator should see.
+///
+/// Not an error — `Config::load` accepts the config — but reported by
+/// `rustbgpd --check`, counted for `--check --strict`, and logged once at
+/// daemon startup. Each one states the condition (`headline`) and then the
+/// consequence and the action that clears it (`detail`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ConfigAdvisory {
+    /// The condition, as a single sentence.
+    pub(crate) headline: &'static str,
+    /// Consequence, then the action. Hard-wrapped for the framed `--check`
+    /// block; use [`ConfigAdvisory::one_line`] for a log record.
+    pub(crate) detail: &'static str,
+}
+
+impl ConfigAdvisory {
+    /// Headline and detail collapsed onto one line, for `tracing`, where a
+    /// record spanning several lines is a parsing hazard.
+    pub(crate) fn one_line(&self) -> String {
+        let mut out = String::with_capacity(self.headline.len() + self.detail.len() + 1);
+        for word in self
+            .headline
+            .split_whitespace()
+            .chain(self.detail.split_whitespace())
+        {
+            if !out.is_empty() {
+                out.push(' ');
+            }
+            out.push_str(word);
+        }
+        out
+    }
+}
+
 impl Config {
     #[expect(clippy::too_many_lines)]
     pub(crate) fn validate(&self) -> Result<(), ConfigError> {
@@ -1155,18 +1189,6 @@ impl Config {
         validate_fib_tables(self)?;
         validate_bfd(self)?;
 
-        // RFC 9107 ORR: a vantage without a BGP-LS feed can never
-        // resolve — the topology would be permanently empty. Legal
-        // (linkstate peers may be added later), but worth a warning.
-        if self.orr_vantage_without_linkstate() {
-            tracing::warn!(
-                "orr_vantage is configured but no neighbor negotiates the \
-                 \"linkstate\" family — the ORR topology feed will be empty \
-                 and every vantage will stay unresolved (standard best-path \
-                 fallback applies)"
-            );
-        }
-
         Ok(())
     }
 
@@ -1198,6 +1220,68 @@ impl Config {
             };
             effective.iter().any(|f| f == "linkstate")
         })
+    }
+
+    /// Every advisory this configuration raises, in a stable order.
+    ///
+    /// Returning them — rather than logging them where they are detected —
+    /// is what makes them reach an operator at all. `validate()` runs
+    /// inside `Config::load`, which both `--check` and daemon startup call
+    /// *before* `init_logging`: a `tracing::warn!` there has no subscriber
+    /// installed and is discarded, so a validation-time diagnostic was
+    /// invisible on every path except a SIGHUP reload. A returned list is
+    /// countable (the `--check --strict` exit code is that count),
+    /// printable wherever the caller does have an output channel, and
+    /// testable without standing up a subscriber.
+    pub(crate) fn advisories(&self) -> Vec<ConfigAdvisory> {
+        let mut advisories = Vec::new();
+
+        // RFC 9107 ORR: a vantage without a BGP-LS feed can never resolve.
+        // Legal — linkstate peers may be added later — so it warns rather
+        // than rejects.
+        if self.orr_vantage_without_linkstate() {
+            advisories.push(ConfigAdvisory {
+                headline: "orr_vantage is configured but no neighbor negotiates the \
+                           \"linkstate\" family.",
+                detail: "The optimal-route-reflection SPF runs on the BGP-LS topology feed, and\n\
+                         nothing feeds it: the topology stays permanently empty, every vantage\n\
+                         stays unresolved, and best-path selection falls back to the standard\n\
+                         IGP-metric comparison for every client — the orr_vantage settings in\n\
+                         this config have no effect. Add \"linkstate\" to the families of the\n\
+                         neighbor carrying the BGP-LS feed, or remove orr_vantage from the\n\
+                         neighbors and peer groups that set it. See\n\
+                         docs/adr/0095-optimal-route-reflection.md.",
+            });
+        }
+
+        // Pre-ADR-0064 gRPC authorization. Tier enforcement has been the
+        // default since v0.24.0 and becomes mandatory, so an operator still
+        // pinned to `legacy` is carrying both an open management surface and
+        // a config that a future release will reject.
+        if matches!(
+            self.security.grpc.enforcement,
+            GrpcEnforcementConfig::Legacy
+        ) {
+            advisories.push(ConfigAdvisory {
+                headline: "security.grpc.enforcement = \"legacy\" disables per-method tier \
+                           authorization.",
+                detail: "Every authenticated client of a read_write listener may call every\n\
+                         method up to that listener's max_tier cap, including the\n\
+                         operator_only methods that reconfigure the daemon; the\n\
+                         [security.grpc.roles] entries are recorded as audit context and deny\n\
+                         nothing. Tier enforcement is the default since v0.24.0 and becomes\n\
+                         mandatory in a future release, which will reject this config.\n\
+                         \n\
+                         To migrate: give every listener a role identity — mTLS listeners\n\
+                         derive it from the client certificate, bearer-token TCP and UDS\n\
+                         listeners need an explicit `principal` — map each principal in\n\
+                         [security.grpc.roles] to observer, automation, or operator, then set\n\
+                         security.grpc.enforcement = \"tier\". See\n\
+                         docs/adr/0064-grpc-authorization.md and docs/SECURITY.md.",
+            });
+        }
+
+        advisories
     }
 }
 
