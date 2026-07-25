@@ -99,6 +99,12 @@ transaction with an optimistic runtime snapshot token:
 
 `rbgp` is the supported CLI spelling.
 
+> **Before the first runtime change.** Any mutation that persists rewrites the
+> config file in canonical form: comments and formatting are not preserved,
+> defaulted fields are written out explicitly, and the file ends up owned by
+> the daemon user at mode `0600`. See
+> [Runtime changes rewrite the config file](#runtime-changes-rewrite-the-config-file).
+
 ```bash
 # What is the daemon actually running? Dump the effective config with
 # defaults materialized (hold_time, send_hold_time, GR timers, families)
@@ -227,8 +233,8 @@ commit live (for example restart-required `[global]` fields) is rejected
 without mutation, exactly like an apply of that file would be. Rolling back
 past the retained history fails cleanly, naming how many entries exist.
 
-History and rollback require the daemon to have been started with `--config`
-(no persisted config means nothing to retain). SIGHUP reloads adopt the
+History retains what the daemon itself persisted, so it starts empty on a
+daemon that has never made a runtime change. SIGHUP reloads adopt the
 operator's edited file without recording it — the history tracks what the
 daemon itself persisted; your config file under version control remains the
 authority for hand-edited changes.
@@ -366,6 +372,10 @@ chain, etc.).
 | MRT dump files | `[mrt] output_dir` | On periodic timer or `TriggerMrtDump` |
 | gRPC UDS socket | `<runtime_state_dir>/grpc.sock` | Daemon lifetime |
 
+There is no non-persisting mode: the daemon always takes a config path (the
+positional argument, `/etc/rustbgpd/config.toml` by default), and the rows
+above that name the config file always write to it.
+
 The GR marker format is versioned. V1 is generationless and wall-clock-only;
 v2 adds a required checkpoint generation; v3 adds a complete Linux boot and
 time-namespace identity plus an absolute `CLOCK_BOOTTIME` deadline, with an
@@ -405,6 +415,28 @@ not load, select, install, or advertise any route from it. Loc-RIB and
 Adj-RIB-Out are never checkpointed. The ADR-0061 FIB file is only an ownership
 receipt for rows rustbgpd already installed; all route selection state is
 rebuilt from peers after restart.
+
+### Runtime changes rewrite the config file
+
+Every persisted runtime mutation — `rbgp neighbor add/delete`,
+`rbgp dynamic-neighbor add/delete`, `rbgp fib-table set/delete`, policy and
+peer-group RPCs, `rbgp config apply`, `rbgp config rollback` — serializes the
+daemon's whole config snapshot and replaces the file with it. On the **first**
+such change, expect all of the following:
+
+- comments are gone, and formatting and key order are re-derived;
+- fields you left at their defaults are written out explicitly, so the file
+  gains sections you never typed;
+- the temp-file + rename leaves the file owned by the daemon user at mode
+  `0600`.
+
+The rewritten file carries a header saying so. This is what makes the write
+atomic and crash-safe, and it is the intended behavior — a persisted mutation
+never patches your text in place.
+
+Keep the annotated config under version control and treat the daemon's file as
+generated output. A deployment that only ever edits the file and sends SIGHUP
+keeps its comments; SIGHUP alone never writes the file.
 
 ---
 
@@ -1493,8 +1525,8 @@ duplicate an existing range. `delete` stops *future* accepts only —
 already-established dynamic peers keep running and drain when they next
 return to Idle. Omitting `--remote-asn` uses the accept-any sentinel (`remote_asn = 0`);
 once a peer is accepted, operational state surfaces the ASN learned from the
-peer's OPEN. When the daemon was started with `--config`, changes persist to the
-TOML file (atomic write) before the RPC returns and survive a restart.
+peer's OPEN. Changes persist to the TOML file (atomic write) before the RPC
+returns and survive a restart.
 The live mutation path is serialized with SIGHUP reload, so a reload cannot
 drop an accepted-but-not-yet-persisted range.
 
@@ -1878,10 +1910,9 @@ rbgp fib-table delete edge
 `set` is create-or-replace by name and carries the full table definition (not
 a patch); optional ECMP caps are `--maximum-paths`, `--maximum-paths-ebgp`,
 and `--maximum-paths-ibgp`. Edits hot-apply through the running ADR-0061
-reconciler and persist to the TOML config (atomic write) when the daemon was
-started with `--config`. Changing `--table-id` / `--metric` for an existing
-name is a table-key move: the old kernel rows withdraw and the new table
-back-fills. The mutating verbs require the reconciler to be running (at least
+reconciler and persist to the TOML config (atomic write). Changing `--table-id`
+/ `--metric` for an existing name is a table-key move: the old kernel rows
+withdraw and the new table back-fills. The mutating verbs require the reconciler to be running (at least
 one `[[fib_tables]]` entry at startup, on Linux); otherwise they fail
 `FAILED_PRECONDITION` — add the first table to the config and restart. See
 [CONFIGURATION.md](CONFIGURATION.md) for the full `[[fib_tables]]` lifecycle.

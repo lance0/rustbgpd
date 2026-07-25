@@ -197,10 +197,10 @@ inbound connections are accepted without bouncing existing sessions. Runtime
 gRPC CRUD — `rbgp dynamic-neighbor {add,delete}`
 (`AddDynamicNeighbor` / `DeleteDynamicNeighbor`) — uses the same reload-applied
 matcher-update path: it updates the runtime config snapshot and inbound-accept
-matcher, then persists the accepted change back to the TOML when the daemon was
-started with `--config`. Runtime CRUD and SIGHUP reload share a coordinator
-lock, held through the persistence acknowledgement, so reload sees either the
-pre-mutation TOML or the committed post-mutation TOML.
+matcher, then persists the accepted change back to the TOML. Runtime CRUD and
+SIGHUP reload share a coordinator lock, held through the persistence
+acknowledgement, so reload sees either the pre-mutation TOML or the committed
+post-mutation TOML.
 
 The exception is direct `tcp_ao` on a dynamic range. SIGHUP can append a
 non-preferred successor to an unchanged protected prefix owner, then select
