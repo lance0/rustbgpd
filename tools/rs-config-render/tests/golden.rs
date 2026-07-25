@@ -472,7 +472,9 @@ fn add_path_replaces_per_client_best() {
     let rendered = render(&to_yaml(&value), &rtr_options()).expect("render");
     let toml = &rendered.files["config.toml"];
     assert!(toml.contains("[neighbors.add_path]"), "{toml}");
-    assert!(!toml.contains("per_client_best"), "{toml}");
+    // The assignment, not the bare name: the export-policy comment block
+    // names the knob prose-side in every render.
+    assert!(!toml.contains("per_client_best = true"), "{toml}");
 }
 
 // ---------------------------------------------------------------------------

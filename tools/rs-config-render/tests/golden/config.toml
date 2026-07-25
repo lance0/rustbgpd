@@ -8,6 +8,13 @@ router_id = "192.0.2.1"
 listen_port = 179
 # RFC 8326: honor GRACEFUL_SHUTDOWN from members (local-pref 0 chain tail).
 honor_graceful_shutdown = true
+# RFC 8212: a member session with no explicit policy carries nothing in
+# that direction. The export chain below is deliberately permit-all, and
+# this knob is what keeps that a decision: delete the chain and members
+# stop receiving routes, loudly, instead of inheriting the same permit-all
+# by omission. Startup-only — SIGHUP keeps the running value, so changing
+# it takes a daemon restart.
+ebgp_requires_policy = true
 
 # Local management surface (`rbgp` over UDS, file-permission gated) —
 # the same shape as examples/route-server/. Add prometheus_addr here to
@@ -29,12 +36,32 @@ operator = "operator"
 [[rpki.cache_servers]]
 address = "127.0.0.1:3323"
 
+# --- Export policy: permit-all, on purpose ---
+#
+# An IX route server is transparent by design (RFC 7947): it hands each
+# member what that member's own filters selected, without imposing the
+# route server's opinion on top. So permit-all is the correct export
+# posture here — but it is *declared*, not inherited. A route server that
+# is permit-all because nobody wrote an export chain behaves identically
+# on the wire; only this chain, and this comment, record that it was a
+# choice rather than an omission.
+#
+# Per-member filtering belongs in that member's arouteserver
+# configuration, which renders into the per-client import chain below —
+# editing this file loses the change on the next refresh. The per-client
+# best-path handling below (`per_client_best`, or Add-Path where the
+# context enables it) is what makes such a per-member denial advertise
+# the best permitted candidate rather than hide the prefix.
+[policy.definitions.rs-transparent-export]
+default_action = "permit"
+
 [policy]
 rpol_files = [
     "policy/rs-hygiene.rpol",
     "policy/client-as4242-1.rpol",
     "policy/client-as197000-1.rpol",
 ]
+export_chain = ["rs-transparent-export"]
 
 [[neighbors]]
 address = "192.0.2.11"

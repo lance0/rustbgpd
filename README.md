@@ -209,21 +209,24 @@ curl -fLO "https://github.com/lance0/rustbgpd/releases/latest/download/rustbgpd-
 curl -fLO "https://github.com/lance0/rustbgpd/releases/latest/download/checksums-${SUFFIX}.txt"
 sha256sum -c "checksums-${SUFFIX}.txt"
 tar -xzf "rustbgpd-${SUFFIX}.tar.gz"
-sudo install -m 0755 rustbgpd rbgp /usr/local/bin/
+sudo install -m 0755 rustbgpd rbgp rs-config-render /usr/local/bin/
 ```
 
-The tarball also carries man pages and bash/zsh/fish completions under
-`share/` — the [install walkthrough](docs/deployment.md#install) covers
-installing those and pinning a specific version.
+Three binaries: the daemon, the `rbgp` CLI, and `rs-config-render` (the
+[IXP route-server config renderer](tools/rs-config-render/README.md) —
+harmless if you don't run one). The tarball also carries man pages and
+bash/zsh/fish completions under `share/` — the
+[install walkthrough](docs/deployment.md#install) covers installing those
+and pinning a specific version.
 
 ### From source
 
 ```bash
 # Prerequisites: Rust 1.95+, protobuf-compiler
 sudo apt-get install -y protobuf-compiler   # Debian/Ubuntu
-cargo build --release -p rustbgpd -p rustbgpctl
+cargo build --release -p rustbgpd -p rustbgpctl -p rs-config-render
 
-# Binaries are at target/release/rustbgpd and target/release/rbgp
+# Binaries are at target/release/{rustbgpd,rbgp,rs-config-render}
 ```
 
 ### Docker

@@ -1368,6 +1368,15 @@ fn render_toml(
         );
     }
     out.push_str(
+        "# RFC 8212: a member session with no explicit policy carries nothing in\n\
+         # that direction. The export chain below is deliberately permit-all, and\n\
+         # this knob is what keeps that a decision: delete the chain and members\n\
+         # stop receiving routes, loudly, instead of inheriting the same permit-all\n\
+         # by omission. Startup-only — SIGHUP keeps the running value, so changing\n\
+         # it takes a daemon restart.\n\
+         ebgp_requires_policy = true\n",
+    );
+    out.push_str(
         "\n# Local management surface (`rbgp` over UDS, file-permission gated) —\n\
          # the same shape as examples/route-server/. Add prometheus_addr here to\n\
          # scrape metrics.\n\
@@ -1388,11 +1397,33 @@ fn render_toml(
         }
     }
 
+    // Export policy: permit-all, on purpose — and declared rather than
+    // inherited, so `ebgp_requires_policy` above has something to enforce.
+    out.push_str(
+        "\n# --- Export policy: permit-all, on purpose ---\n\
+         #\n\
+         # An IX route server is transparent by design (RFC 7947): it hands each\n\
+         # member what that member's own filters selected, without imposing the\n\
+         # route server's opinion on top. So permit-all is the correct export\n\
+         # posture here — but it is *declared*, not inherited. A route server that\n\
+         # is permit-all because nobody wrote an export chain behaves identically\n\
+         # on the wire; only this chain, and this comment, record that it was a\n\
+         # choice rather than an omission.\n\
+         #\n\
+         # Per-member filtering belongs in that member's arouteserver\n\
+         # configuration, which renders into the per-client import chain below —\n\
+         # editing this file loses the change on the next refresh. The per-client\n\
+         # best-path handling below (`per_client_best`, or Add-Path where the\n\
+         # context enables it) is what makes such a per-member denial advertise\n\
+         # the best permitted candidate rather than hide the prefix.\n\
+         [policy.definitions.rs-transparent-export]\ndefault_action = \"permit\"\n",
+    );
+
     out.push_str("\n[policy]\nrpol_files = [\n    \"policy/rs-hygiene.rpol\",\n");
     for rc in clients {
         let _ = writeln!(out, "    \"policy/client-{}.rpol\",", rc.slug);
     }
-    out.push_str("]\n");
+    out.push_str("]\nexport_chain = [\"rs-transparent-export\"]\n");
 
     for rc in clients {
         let family = if rc.client.ip.contains(':') {

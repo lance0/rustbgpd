@@ -1,8 +1,14 @@
 //! Emitted-config gate for `tools/rs-config-render`: what the renderer
 //! produces from its checked-in fixture must pass the real daemon's
-//! `rustbgpd --check` (which also compiles every referenced `.rpol`
-//! file), and the fixture's deliberately-empty IRR bundle must abort
-//! the render rather than emit a config at all.
+//! `rustbgpd --check --strict` (which also compiles every referenced
+//! `.rpol` file), and the fixture's deliberately-empty IRR bundle must
+//! abort the render rather than emit a config at all.
+//!
+//! Strict, not plain `--check`: the renderer is the IXP adoption path, so
+//! its output is the config an operator gates in a refresh loop every day.
+//! A plain `--check` here passed while every rendered member session was
+//! warned about for resolving no export policy — the tool taught operators
+//! that the gate they run is noise.
 
 use rs_config_render::{Options, RenderError, render};
 
@@ -28,8 +34,9 @@ fn untouched_fixture_aborts_on_the_empty_irr_bundle() {
 #[test]
 /// Load-bearing proof: dropping the active family ceiling or 37-minute to
 /// 2,220-second conversion breaks the exact assertions; emitting a daemon-
-/// invalid timer breaks the real `rustbgpd --check` invocation.
-fn emitted_config_passes_rustbgpd_check() {
+/// invalid timer, or dropping the rendered export chain, breaks the real
+/// `rustbgpd --check --strict` invocation.
+fn emitted_config_passes_rustbgpd_check_strict() {
     // Drop the abort-proving client, then render the healthy context.
     let mut value: serde_yaml::Value = serde_yaml::from_str(FIXTURE).expect("fixture parses");
     value["clients"]
@@ -69,13 +76,20 @@ fn emitted_config_passes_rustbgpd_check() {
     let config = out_dir.path().join("config.toml");
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_rustbgpd"))
         .arg("--check")
+        .arg("--strict")
         .arg(&config)
         .output()
-        .expect("run rustbgpd --check");
+        .expect("run rustbgpd --check --strict");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         output.status.success(),
-        "rustbgpd --check rejected the emitted config\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr),
+        "rustbgpd --check --strict rejected the emitted config\nstdout:\n{stdout}\nstderr:\n{stderr}",
+    );
+    // Assert the summary line, not just the exit code: a warning that
+    // somehow exited 0 would otherwise pass this gate silently.
+    assert!(
+        stdout.contains("config OK"),
+        "strict check exited 0 without a clean summary\nstdout:\n{stdout}\nstderr:\n{stderr}",
     );
 }
