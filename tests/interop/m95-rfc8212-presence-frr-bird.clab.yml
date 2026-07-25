@@ -1,0 +1,94 @@
+# Containerlab topology: rustbgpd ↔ FRR + BIRD 2 (M95 — ADR-0112 step 4,
+# live RFC 8212 import policy-presence transitions)
+#
+# Validates that a live edit which moves an eBGP peer's RFC 8212 import verdict
+# is qualified before it is applied, converges through a real Route Refresh
+# when it is allowed, and is rejected whole — with nothing mutated — when it is
+# not.
+#
+# The two peers exist for exactly one difference:
+#
+#   frr  (AS 65002) advertises the RFC 2918 Route Refresh capability and runs
+#        graceful restart, so it can converge a presence transition and can
+#        also hold stale routes after its bgpd is killed.
+#   bird (AS 65003) runs `enable route refresh off`, so its Established session
+#        genuinely cannot be asked to re-advertise. Nothing is mocked: the
+#        capability is absent from its OPEN.
+#
+# rustbgpd (AS 65001) runs `[global] ebgp_requires_policy = true` in every
+# config variant — the knob is restart-required, so no reload flips it.
+#
+# Phases (see tests/interop/scripts/test-m95-rfc8212-presence.sh):
+#   1. Remove the global import chain while BOTH peers inherit it. BIRD cannot
+#      converge, so the two-peer edit is rejected before either is touched.
+#   2. Pin BIRD's own (content-equal) chain, then remove the global chain: only
+#      FRR transitions, its Route Refresh fires, and its routes leave the RIB.
+#   3. Restore the global chain: FRR transitions back and the routes return —
+#      only the Route Refresh can bring them back.
+#   4. Kill FRR's bgpd so its routes are retained as graceful-restart stale,
+#      then retry the phase-2 edit: it is deferred while anything is retained.
+#
+# Usage:
+#   docker build --target dev -t rustbgpd:dev .
+#   docker build -t bird:2-bookworm -f tests/interop/Dockerfile.bird tests/interop
+#   containerlab deploy -t tests/interop/m95-rfc8212-presence-frr-bird.clab.yml
+#   bash tests/interop/scripts/test-m95-rfc8212-presence.sh
+#   containerlab destroy -t tests/interop/m95-rfc8212-presence-frr-bird.clab.yml --cleanup
+
+name: m95-rfc8212-presence
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        # Every variant lands at a fixed read-only path; the test script
+        # `docker cp`s the one it wants onto the daemon's working path and
+        # SIGHUPs, so no host-side file is mutated by a bind-RW mount.
+        - ./configs/rustbgpd-m95-rfc8212-base.toml:/etc/rustbgpd/config.base.toml:ro
+        - ./configs/rustbgpd-m95-rfc8212-no-global-import.toml:/etc/rustbgpd/config.no-global-import.toml:ro
+        - ./configs/rustbgpd-m95-rfc8212-bird-pinned.toml:/etc/rustbgpd/config.bird-pinned.toml:ro
+        - ./configs/rustbgpd-m95-rfc8212-frr-missing.toml:/etc/rustbgpd/config.frr-missing.toml:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+        - ../fixtures/grpc-test-only-operator.token:/run/rustbgpd/grpc-test-only-operator.token:ro
+      exec:
+        - ip addr add 10.95.1.1/24 dev eth1
+        - ip link set eth1 up
+        - ip addr add 10.95.2.1/24 dev eth2
+        - ip link set eth2 up
+        - cp /etc/rustbgpd/config.base.toml /etc/rustbgpd/config.toml
+      env:
+        RUST_LOG: info
+
+    frr:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m95-rfc8212.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.95.1.2/24 dev eth1
+        - ip link set eth1 up
+
+    bird:
+      kind: linux
+      image: bird:2-bookworm
+      cmd: sleep infinity
+      binds:
+        - ./configs/bird-m95-no-route-refresh.conf:/etc/bird/bird.conf:ro
+      exec:
+        - ip addr add 10.95.2.2/24 dev eth1
+        - ip link set eth1 up
+        - mkdir -p /run/bird
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "frr:eth1"]
+    - endpoints: ["rustbgpd:eth2", "bird:eth1"]
+
+# rustbgpd: AS 65001, router-id 10.95.0.1, ebgp_requires_policy = true
+# frr:  10.95.1.2, AS 65002, advertises 192.168.95.0/24, 192.168.96.0/24,
+#       10.95.100.0/24; Route Refresh + graceful restart
+# bird: 10.95.2.2, AS 65003, advertises 203.0.113.0/24, 198.51.100.0/24;
+#       NO Route Refresh capability

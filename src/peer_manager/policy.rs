@@ -18,7 +18,7 @@ use rustbgpd_telemetry::BgpMetrics;
 use tokio::sync::oneshot;
 use tracing::{info, warn};
 
-use crate::config::Config;
+use crate::config::{Config, RFC8212_MISSING_IMPORT_POLICY, is_reserved_rfc8212_deny};
 use crate::policy_admin::{
     api_peer_group_to_config, apply_config_event, catalog_config_error, neighbor_set_references,
     peer_group_references, policy_references,
@@ -147,6 +147,196 @@ fn record_import_validation_refresh_metrics(
 }
 
 impl PeerManager {
+    /// ADR-0112: would installing `candidate_import` flip this peer's RFC 8212
+    /// import-presence verdict?
+    ///
+    /// The reserved deny replaces the whole direction, so its presence on the
+    /// installed chain *is* the running verdict — the same identity test the
+    /// operator status surface uses, for the same reason: a second stored bool
+    /// can drift from the chain it describes, and an identity test cannot.
+    /// With `[global] ebgp_requires_policy` off the reserved deny is never
+    /// installed and never resolved, so this is false on both sides and every
+    /// caller below behaves exactly as it did before the knob existed.
+    fn rfc8212_import_presence_transition(
+        &self,
+        peer_key: &PeerKey,
+        candidate_import: Option<&PolicyChain>,
+    ) -> bool {
+        self.peers.get(peer_key).is_some_and(|managed| {
+            is_reserved_rfc8212_deny(
+                managed.import_policy.as_ref(),
+                RFC8212_MISSING_IMPORT_POLICY,
+            ) != is_reserved_rfc8212_deny(candidate_import, RFC8212_MISSING_IMPORT_POLICY)
+        })
+    }
+
+    /// ADR-0112: may this peer take a live RFC 8212 import-presence edit right
+    /// now? Read-only — it mutates nothing, so a rejection leaves the peer
+    /// exactly where it was.
+    ///
+    /// An import-presence transition is only convergent through Route Refresh:
+    /// removing the last explicit import policy has to re-evaluate the routes
+    /// the prior chain already accepted into `AdjRibIn`, and adding one has to
+    /// ask for the routes the reserved deny refused to retain. Neither is
+    /// something an export re-emit or session bookkeeping can recover, so a
+    /// peer that cannot be asked is rejected here rather than half-applied and
+    /// reported as converged.
+    ///
+    /// Three cases, all fail-closed:
+    ///
+    /// - Established: require the negotiated RFC 2918 capability. Without it
+    ///   the operator must clear/reconnect the session, which relearns
+    ///   everything under the new chain.
+    /// - Not Established: the session actor may have cleared its own route set
+    ///   while the RIB still serves what GR or LLGR retained under the prior
+    ///   policy. Ask the RIB, not the session, and defer while anything is
+    ///   retained so those routes stay paired with the verdict they were
+    ///   accepted under.
+    /// - No answer: an ambiguous state query cannot prove either, and a
+    ///   back-pressured Established session is one of the readings it covers.
+    ///
+    /// Returns whether the transition owes a Route Refresh. Only the
+    /// Established case does; a peer that is down with nothing retained has no
+    /// `AdjRibIn` to re-evaluate and converges naturally when it comes up under
+    /// the new chain. The caller needs the distinction because an undelivered
+    /// refresh is fatal for the first case and vacuous for the second.
+    async fn qualify_rfc8212_import_transition(
+        &mut self,
+        peer_key: &PeerKey,
+    ) -> Result<bool, String> {
+        let Some(managed) = self.peers.get(peer_key) else {
+            return Ok(false);
+        };
+        let commands = managed.handle.commands_sender();
+        let state = self
+            .await_with_readiness(rustbgpd_transport::PeerHandle::query_state_with(
+                commands,
+                PEER_QUERY_TIMEOUT,
+            ))
+            .await;
+        self.drain_readiness_queries().await;
+
+        let Some(state) = state else {
+            return Err(format!(
+                "{peer_key}: cannot apply an RFC 8212 import policy-presence change — the \
+                 session did not report its state within {PEER_QUERY_TIMEOUT:?}, so neither \
+                 its Route Refresh capability nor its retained routes can be confirmed; \
+                 retry the edit"
+            ));
+        };
+        if state.fsm_state == SessionState::Established {
+            if state
+                .negotiated_session
+                .is_some_and(|negotiated| negotiated.peer_route_refresh)
+            {
+                return Ok(true);
+            }
+            return Err(format!(
+                "{peer_key}: cannot apply an RFC 8212 import policy-presence change — the \
+                 Established session did not negotiate Route Refresh (RFC 2918), so already \
+                 accepted routes cannot be re-evaluated against the new verdict; clear the \
+                 session (rbgp neighbor clear) or let it reconnect, then reapply"
+            ));
+        }
+
+        let retained = self.query_peer_retained_stale(peer_key.address).await?;
+        if retained > 0 {
+            return Err(format!(
+                "{peer_key}: cannot apply an RFC 8212 import policy-presence change — the \
+                 session is {:?} and the RIB still retains {retained} graceful-restart or \
+                 long-lived-graceful-restart stale route(s) accepted under the current \
+                 verdict; retry once retention expires, or purge them by clearing the peer",
+                state.fsm_state
+            ));
+        }
+        Ok(false)
+    }
+
+    /// One read-only RIB round trip for [`Self::qualify_rfc8212_import_transition`],
+    /// bounded by the same reply deadline the export replacement uses and
+    /// servicing the dedicated readiness lane throughout.
+    async fn query_peer_retained_stale(&mut self, peer: IpAddr) -> Result<usize, String> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let rib_tx = self.rib_tx.clone();
+        if self
+            .await_with_readiness(rib_tx.send(RibUpdate::QueryPeerRetainedStale {
+                peer,
+                reply: reply_tx,
+            }))
+            .await
+            .is_err()
+        {
+            return Err(format!(
+                "{peer}: cannot apply an RFC 8212 import policy-presence change — the RIB \
+                 manager is unavailable, so its retained stale routes cannot be confirmed"
+            ));
+        }
+        match tokio::time::timeout(
+            super::RIB_REPLY_TIMEOUT,
+            self.await_with_readiness(reply_rx),
+        )
+        .await
+        {
+            Err(_) => Err(format!(
+                "{peer}: cannot apply an RFC 8212 import policy-presence change — the RIB \
+                 manager did not report retained stale routes within {:?}",
+                super::RIB_REPLY_TIMEOUT
+            )),
+            Ok(Err(_)) => Err(format!(
+                "{peer}: cannot apply an RFC 8212 import policy-presence change — the RIB \
+                 manager dropped the retained-stale reply"
+            )),
+            Ok(Ok(retained)) => Ok(retained),
+        }
+    }
+
+    /// ADR-0112: qualify every target whose RFC 8212 import verdict would move,
+    /// before the snapshot mutates any peer.
+    ///
+    /// A multi-peer edit is all-or-nothing on this rule: one unqualified peer
+    /// rejects the whole set with zero peers touched, rather than letting the
+    /// qualified peers commit and leaving the caller to reason about a partial
+    /// fleet. Every unqualified peer is named, so one round trip tells the
+    /// operator the full remediation list.
+    async fn preflight_rfc8212_import_transitions(
+        &mut self,
+        targets: &[ResolvedPeerPolicy],
+    ) -> Result<(), String> {
+        let transitioning: Vec<PeerKey> = targets
+            .iter()
+            .map(|target| PeerKey::new(target.address, target.interface.clone()))
+            .zip(targets)
+            .filter(|(peer_key, target)| {
+                self.rfc8212_import_presence_transition(peer_key, target.import_policy.as_ref())
+            })
+            .map(|(peer_key, _)| peer_key)
+            .collect();
+        if transitioning.is_empty() {
+            return Ok(());
+        }
+
+        let mut rejections = Vec::new();
+        for peer_key in &transitioning {
+            if let Err(error) = self.qualify_rfc8212_import_transition(peer_key).await {
+                rejections.push(error);
+            }
+        }
+        if rejections.is_empty() {
+            info!(
+                peers = transitioning.len(),
+                "qualified RFC 8212 import policy-presence transitions for live apply"
+            );
+            return Ok(());
+        }
+        Err(format!(
+            "rejected {} of {} RFC 8212 import policy-presence transition(s); no peer was \
+             modified: {}",
+            rejections.len(),
+            transitioning.len(),
+            rejections.join("; ")
+        ))
+    }
+
     pub(super) fn peer_group_policy_only_update(
         &self,
         name: &str,
@@ -225,6 +415,10 @@ impl PeerManager {
         &mut self,
         targets: Vec<ResolvedPeerPolicy>,
     ) -> Result<Vec<ResolvedPeerPolicy>, String> {
+        // ADR-0112: qualify RFC 8212 import-presence transitions before
+        // anything below can touch a peer, so one incapable peer rejects the
+        // whole edit rather than being discovered mid-fanout and unwound.
+        self.preflight_rfc8212_import_transitions(&targets).await?;
         let mut rollback_rib_budget = PolicyRollbackRibBudget::default();
         let total_targets = targets.len();
         let mut seen = BTreeSet::new();
@@ -419,11 +613,21 @@ impl PeerManager {
     /// commit, so an import+export reload no longer disqualifies the fleet.
     /// The returned pair stays export-only because only the export move keys
     /// cohort identity — the RIB batch touches nothing else.
+    ///
+    /// ADR-0112: a member whose RFC 8212 import verdict would move is
+    /// disqualified outright. The cohort hot-applies import chains during setup
+    /// and defers their Route Refresh past the batched RIB commit, which is a
+    /// window a presence transition must not have — its refresh is the whole
+    /// convergence, not an optimisation. Sending presence transitions down the
+    /// authoritative per-peer path keeps that contract in one place.
     fn local_export_only_policy_pair<'a>(
         &'a self,
         target: &'a ResolvedPeerPolicy,
     ) -> Option<(&'a Option<PolicyChain>, &'a Option<PolicyChain>)> {
         let peer_key = PeerKey::new(target.address, target.interface.clone());
+        if self.rfc8212_import_presence_transition(&peer_key, target.import_policy.as_ref()) {
+            return None;
+        }
         let managed = self.peers.get(&peer_key)?;
         (managed.export_policy != target.export_policy
             && !managed.pending_refresh
@@ -1640,6 +1844,28 @@ impl PeerManager {
     ) -> Result<(), String> {
         use std::fmt::Write as _;
         let address = peer_key.address;
+
+        // ADR-0112: the last gate before this peer is touched. Every live chain
+        // apply funnels through here — the snapshot transaction, `hot_update_peer`
+        // for a neighbor or peer-group field edit, and the honor-knob fan-outs —
+        // so qualifying an import-presence transition here covers all of them,
+        // and re-running it after the multi-peer preflight is what catches a peer
+        // that flapped in between. Rollback applies are exempt: restoring a prior
+        // chain is best-effort by contract and must never be blocked by the state
+        // that made the forward apply fail.
+        let rfc8212_fatal_transition = matches!(refresh_failure, RefreshFailureHandling::Fatal)
+            && self.rfc8212_import_presence_transition(&peer_key, import_policy.as_ref());
+        // True only for the Established case: that peer's `AdjRibIn` holds
+        // routes the prior verdict accepted, so its refresh is the transition's
+        // whole convergence and an undelivered one is fatal. A down peer with
+        // nothing retained owes no refresh, so the guard below must not fire
+        // for it.
+        let rfc8212_refresh_required = if rfc8212_fatal_transition {
+            self.qualify_rfc8212_import_transition(&peer_key).await?
+        } else {
+            false
+        };
+
         let Some(managed) = self.peers.get_mut(&peer_key) else {
             return Ok(());
         };
@@ -2030,6 +2256,20 @@ impl PeerManager {
                     }
                     RefreshFailureHandling::Fatal | RefreshFailureHandling::BestEffortRearm => true,
                 };
+            }
+            // ADR-0112: for an import-presence transition the deferred refresh
+            // is not an optimisation that can wait for the next edit — it is
+            // the entire convergence. The peer qualified moments ago and has
+            // since flapped or stopped answering, so the desired verdict must
+            // not commit: fail and let the caller roll the chains back, leaving
+            // whatever routes are retained paired with the prior verdict.
+            if rfc8212_refresh_required {
+                return Err(format!(
+                    "policy hot-apply to peer {address} failed: the RFC 8212 import \
+                     policy-presence change could not deliver its Route Refresh because the \
+                     session is no longer reportably Established; the prior chain remains \
+                     authoritative and the edit must be reapplied once the session settles"
+                ));
             }
         }
 

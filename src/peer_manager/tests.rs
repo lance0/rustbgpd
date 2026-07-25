@@ -2183,6 +2183,7 @@ async fn negotiated_snapshot_uses_only_fresh_established_actor_state() {
         remote_router_id: Ipv4Addr::new(192, 0, 2, 7),
         four_octet_as: false,
         families: vec![(Afi::Ipv6, Safi::Unicast)],
+        peer_route_refresh: true,
         graceful_restart: None,
     });
 
@@ -7758,6 +7759,23 @@ async fn rpol_sync_reaps_removed_dataset_series() {
     );
 }
 
+/// The Established-only negotiated projection a stub session reports.
+///
+/// Keep it coherent with how the same stub answers `SendRouteRefresh`: a
+/// session that acks a refresh advertises the capability, and one that rejects
+/// it does not. ADR-0112's import-presence gate reads exactly this field, so an
+/// incoherent stub would let a test pass against a peer no real session could be.
+fn test_negotiated_session(route_refresh: bool) -> rustbgpd_transport::NegotiatedSessionState {
+    rustbgpd_transport::NegotiatedSessionState {
+        hold_time: 90,
+        remote_router_id: Ipv4Addr::new(192, 0, 2, 1),
+        four_octet_as: true,
+        families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_route_refresh: route_refresh,
+        graceful_restart: None,
+    }
+}
+
 /// Like `acking_policy_handle`, but counting `QueryState` and Route Refresh
 /// sends so policy fan-out coverage can be asserted per peer.
 fn acking_counted_policy_handle(peer_addr: IpAddr, counters: Arc<FakePeerCounters>) -> PeerHandle {
@@ -7777,7 +7795,7 @@ fn acking_counted_policy_handle(peer_addr: IpAddr, counters: Arc<FakePeerCounter
                         negotiated_hold_time: None,
                         four_octet_as: None,
                         remote_router_id: None,
-                        negotiated_session: None,
+                        negotiated_session: Some(test_negotiated_session(true)),
                         local_role: None,
                         remote_role: None,
                         role_negotiated: false,
@@ -8812,7 +8830,8 @@ fn acking_policy_handle(peer_addr: IpAddr, state: SessionState) -> PeerHandle {
                         negotiated_hold_time: None,
                         four_octet_as: None,
                         remote_router_id: None,
-                        negotiated_session: None,
+                        negotiated_session: (state == SessionState::Established)
+                            .then(|| test_negotiated_session(true)),
                         local_role: None,
                         remote_role: None,
                         role_negotiated: false,
@@ -18785,4 +18804,502 @@ async fn neighbor_delete_persists_and_applies_when_the_config_is_writable() {
         !rig.staged_temp_path().exists(),
         "the staged temp file must be renamed into place, not left behind"
     );
+}
+
+/// A whole-peer Route Refresh is bounded by what the session negotiated: a
+/// configured family the peer never accepted has no `AdjRibIn` to re-evaluate,
+/// so it is skipped rather than failing the refresh. An explicitly requested
+/// family still errors.
+///
+/// Load-bearing: dropping the `refresh_all` guard in `soft_reset_in` makes the
+/// first case red; dropping the whole arm makes it red the other way, because
+/// every policy edit on an asymmetric session would fail.
+#[tokio::test]
+async fn soft_reset_in_skips_configured_families_the_peer_never_negotiated() {
+    use rustbgpd_transport::{PeerCommand, PeerCommandError};
+
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9));
+    let refreshed = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&refreshed);
+    let (session_tx, mut session_rx) = mpsc::channel::<PeerCommand>(8);
+    let task = tokio::spawn(async move {
+        while let Some(cmd) = session_rx.recv().await {
+            match cmd {
+                // IPv4 unicast negotiated, IPv6 unicast configured but not.
+                PeerCommand::SendRouteRefresh { afi, safi, reply } => {
+                    if (afi, safi) == (Afi::Ipv4, Safi::Unicast) {
+                        counted.fetch_add(1, Ordering::SeqCst);
+                        let _ = reply.send(Ok(()));
+                    } else {
+                        let _ =
+                            reply.send(Err(PeerCommandError::FamilyNotNegotiated { afi, safi }));
+                    }
+                }
+                PeerCommand::Shutdown | PeerCommand::Stop { .. } => break,
+                _ => {}
+            }
+        }
+        Ok(())
+    });
+
+    let mut mgr = test_peer_manager();
+    insert_test_managed_peer(
+        &mut mgr,
+        addr,
+        PeerHandle::from_parts(session_tx, task),
+        false,
+    );
+    mgr.peers
+        .get_mut(&key(addr))
+        .unwrap()
+        .transport_config
+        .peer
+        .families = vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
+
+    mgr.soft_reset_in(key(addr), Vec::new())
+        .await
+        .expect("an un-negotiated configured family must not fail the whole refresh");
+    assert_eq!(
+        refreshed.load(Ordering::SeqCst),
+        1,
+        "the negotiated family must still be refreshed"
+    );
+
+    mgr.soft_reset_in(key(addr), vec![(Afi::Ipv6, Safi::Unicast)])
+        .await
+        .expect_err("an explicitly named un-negotiated family still errors");
+
+    let managed = mgr.peers.remove(&key(addr)).unwrap();
+    managed.handle.shutdown().await.unwrap().unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0112 step 4 — live policy-presence transitions
+// ---------------------------------------------------------------------------
+
+fn rfc8212_missing_import() -> PolicyChain {
+    crate::config::reserved_rfc8212_deny_chain(crate::config::RFC8212_MISSING_IMPORT_POLICY)
+}
+
+fn rfc8212_missing_export() -> PolicyChain {
+    crate::config::reserved_rfc8212_deny_chain(crate::config::RFC8212_MISSING_EXPORT_POLICY)
+}
+
+/// A stub session whose reported FSM state and Route Refresh capability are
+/// scripted, and which refuses `SendRouteRefresh` exactly when it reports the
+/// capability absent — the two answers a real session keeps consistent.
+///
+/// `established_for` bounds how many `QueryState` answers report Established
+/// before the session starts reporting `Idle`, which is how a flap between the
+/// snapshot preflight and the per-peer apply is reproduced deterministically.
+fn scripted_policy_handle(
+    peer_addr: IpAddr,
+    route_refresh: bool,
+    established_for: usize,
+    refreshes: Arc<AtomicUsize>,
+) -> PeerHandle {
+    use rustbgpd_transport::{PeerCommand, PeerCommandError};
+    let (session_tx, mut session_rx) = mpsc::channel::<PeerCommand>(8);
+    let task = tokio::spawn(async move {
+        let mut queries = 0usize;
+        while let Some(cmd) = session_rx.recv().await {
+            match cmd {
+                PeerCommand::QueryState { reply } => {
+                    queries += 1;
+                    let state = if queries <= established_for {
+                        SessionState::Established
+                    } else {
+                        SessionState::Idle
+                    };
+                    let mut snapshot = policy_test_peer_state(peer_addr, state);
+                    snapshot.negotiated_session = (state == SessionState::Established)
+                        .then(|| test_negotiated_session(route_refresh));
+                    let _ = reply.send(snapshot);
+                }
+                PeerCommand::SendRouteRefresh { reply, .. } => {
+                    if route_refresh {
+                        refreshes.fetch_add(1, Ordering::SeqCst);
+                        let _ = reply.send(Ok(()));
+                    } else {
+                        let _ = reply.send(Err(PeerCommandError::RouteRefreshUnsupported));
+                    }
+                }
+                PeerCommand::UpdateImportPolicy { reply, .. }
+                | PeerCommand::UpdateExportPolicy { reply, .. } => {
+                    let _ = reply.send(Ok(()));
+                }
+                PeerCommand::Shutdown | PeerCommand::Stop { .. } | PeerCommand::CollisionDump => {
+                    break;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    });
+    PeerHandle::from_parts(session_tx, task)
+}
+
+/// Answer every RIB command the policy snapshot can emit, reporting a fixed
+/// retained GR/LLGR stale count for `QueryPeerRetainedStale`.
+fn spawn_rfc8212_rib_stub(
+    mut rib_rx: mpsc::Receiver<RibUpdate>,
+    retained_stale: usize,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        while let Some(update) = rib_rx.recv().await {
+            match update {
+                RibUpdate::QueryPeerRetainedStale { reply, .. } => {
+                    let _ = reply.send(retained_stale);
+                }
+                RibUpdate::ReplacePeerExportPolicy { reply, .. } => {
+                    let _ = reply.send(Ok(()));
+                }
+                _ => {}
+            }
+        }
+    })
+}
+
+fn rfc8212_target(
+    addr: IpAddr,
+    import: Option<PolicyChain>,
+) -> rustbgpd_api::peer_types::ResolvedPeerPolicy {
+    rustbgpd_api::peer_types::ResolvedPeerPolicy {
+        address: addr,
+        interface: None,
+        import_policy: import,
+        export_policy: Some(rfc8212_missing_export()),
+    }
+}
+
+fn install_rfc8212_peer(
+    mgr: &mut PeerManager,
+    addr: IpAddr,
+    handle: PeerHandle,
+    import: Option<PolicyChain>,
+) {
+    insert_test_managed_peer(mgr, addr, handle, false);
+    let managed = mgr.peers.get_mut(&key(addr)).unwrap();
+    managed.rfc8212_external = true;
+    managed.import_policy = import;
+    managed.export_policy = Some(rfc8212_missing_export());
+}
+
+/// ADR-0112 step 4: an Established peer that never negotiated Route Refresh
+/// cannot converge an import policy-presence change, so the edit is rejected
+/// with clear/reconnect guidance and its chains stay exactly where they were.
+///
+/// Load-bearing: dropping the capability check in
+/// `qualify_rfc8212_import_transition` lets the apply proceed and the assertion
+/// on the retained prior chain fails — the peer would be left running the new
+/// import chain over an `AdjRibIn` still full of routes the old verdict
+/// accepted.
+#[tokio::test]
+async fn rfc8212_import_presence_edit_rejects_a_peer_without_route_refresh() {
+    let (mut mgr, rib_rx) = rfc8212_status_manager();
+    let rib = spawn_rfc8212_rib_stub(rib_rx, 0);
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5));
+    let refreshes = Arc::new(AtomicUsize::new(0));
+    let handle = scripted_policy_handle(addr, false, usize::MAX, Arc::clone(&refreshes));
+    install_rfc8212_peer(&mut mgr, addr, handle, Some(rfc8212_missing_import()));
+
+    let error = mgr
+        .apply_resolved_policy_snapshot(vec![rfc8212_target(addr, Some(deny_policy_chain()))])
+        .await
+        .expect_err("a peer without Route Refresh must not take a presence transition");
+    assert!(
+        error.contains("did not negotiate Route Refresh"),
+        "the error must name the missing capability: {error}"
+    );
+    assert!(
+        error.contains("clear the session"),
+        "the error must be actionable: {error}"
+    );
+    assert!(
+        error.contains("no peer was modified"),
+        "the rejection must state that nothing was mutated: {error}"
+    );
+
+    let managed = mgr.peers.get(&key(addr)).unwrap();
+    assert_eq!(
+        managed.import_policy,
+        Some(rfc8212_missing_import()),
+        "the prior reserved deny must remain authoritative"
+    );
+    assert!(
+        !managed.pending_refresh && !managed.pending_export_apply,
+        "a rejection before mutation must not arm retry intent"
+    );
+    assert_eq!(
+        refreshes.load(Ordering::SeqCst),
+        0,
+        "no Route Refresh may be attempted for a rejected transition"
+    );
+
+    drop(mgr);
+    rib.await.unwrap();
+}
+
+/// ADR-0112 step 4: one incapable peer rejects the whole multi-peer edit before
+/// any peer is mutated.
+///
+/// Load-bearing: moving the preflight from `apply_resolved_policy_snapshot`
+/// into the per-peer apply lets the capable peer commit first, and the
+/// assertion that its chains are untouched fails.
+#[tokio::test]
+async fn rfc8212_import_presence_preflight_rejects_the_whole_edit_before_mutation() {
+    let (mut mgr, rib_rx) = rfc8212_status_manager();
+    let rib = spawn_rfc8212_rib_stub(rib_rx, 0);
+    let capable = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5));
+    let incapable = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 6));
+    let capable_refreshes = Arc::new(AtomicUsize::new(0));
+    install_rfc8212_peer(
+        &mut mgr,
+        capable,
+        scripted_policy_handle(capable, true, usize::MAX, Arc::clone(&capable_refreshes)),
+        Some(rfc8212_missing_import()),
+    );
+    install_rfc8212_peer(
+        &mut mgr,
+        incapable,
+        scripted_policy_handle(incapable, false, usize::MAX, Arc::new(AtomicUsize::new(0))),
+        Some(rfc8212_missing_import()),
+    );
+
+    let error = mgr
+        .apply_resolved_policy_snapshot(vec![
+            rfc8212_target(capable, Some(deny_policy_chain())),
+            rfc8212_target(incapable, Some(deny_policy_chain())),
+        ])
+        .await
+        .expect_err("one incapable peer rejects the edit");
+    assert!(
+        error.contains(&incapable.to_string()),
+        "the rejection must name the incapable peer: {error}"
+    );
+
+    for addr in [capable, incapable] {
+        let managed = mgr.peers.get(&key(addr)).unwrap();
+        assert_eq!(
+            managed.import_policy,
+            Some(rfc8212_missing_import()),
+            "{addr} must keep its prior chain when the edit is rejected whole"
+        );
+    }
+    assert_eq!(
+        capable_refreshes.load(Ordering::SeqCst),
+        0,
+        "the capable peer must not be refreshed for an edit that never committed"
+    );
+
+    drop(mgr);
+    rib.await.unwrap();
+}
+
+/// ADR-0112 step 4: a capable Established peer converges the transition —
+/// chains advance and every negotiated family is asked to re-advertise.
+#[tokio::test]
+async fn rfc8212_import_presence_edit_commits_and_refreshes_a_capable_peer() {
+    let (mut mgr, rib_rx) = rfc8212_status_manager();
+    let rib = spawn_rfc8212_rib_stub(rib_rx, 0);
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5));
+    let refreshes = Arc::new(AtomicUsize::new(0));
+    let handle = scripted_policy_handle(addr, true, usize::MAX, Arc::clone(&refreshes));
+    install_rfc8212_peer(&mut mgr, addr, handle, Some(rfc8212_missing_import()));
+
+    mgr.apply_resolved_policy_snapshot(vec![rfc8212_target(addr, Some(deny_policy_chain()))])
+        .await
+        .expect("a Route Refresh capable peer takes the transition");
+
+    let managed = mgr.peers.get(&key(addr)).unwrap();
+    assert_eq!(managed.import_policy, Some(deny_policy_chain()));
+    assert!(
+        refreshes.load(Ordering::SeqCst) >= 1,
+        "the committed transition must have queued a Route Refresh"
+    );
+    assert!(
+        !managed.pending_refresh,
+        "a delivered refresh must not leave retry intent armed"
+    );
+
+    drop(mgr);
+    rib.await.unwrap();
+}
+
+/// ADR-0112 step 4: a down peer whose routes GR or LLGR still retains defers
+/// the transition, and takes it once nothing is retained.
+///
+/// Load-bearing: answering from session-local state instead of the RIB (or
+/// skipping the query for a non-Established peer) makes the retained case
+/// commit, and the first assertion fails.
+#[tokio::test]
+async fn rfc8212_import_presence_edit_defers_while_gr_llgr_state_is_retained() {
+    for (retained, expect_commit) in [(3usize, false), (0usize, true)] {
+        let (mut mgr, rib_rx) = rfc8212_status_manager();
+        let rib = spawn_rfc8212_rib_stub(rib_rx, retained);
+        let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5));
+        let handle = scripted_policy_handle(addr, true, 0, Arc::new(AtomicUsize::new(0)));
+        install_rfc8212_peer(&mut mgr, addr, handle, Some(rfc8212_missing_import()));
+
+        let outcome = mgr
+            .apply_resolved_policy_snapshot(vec![rfc8212_target(addr, Some(deny_policy_chain()))])
+            .await;
+        let managed = mgr.peers.get(&key(addr)).unwrap();
+        if expect_commit {
+            outcome.expect("a down peer with nothing retained may take the transition");
+            assert_eq!(managed.import_policy, Some(deny_policy_chain()));
+        } else {
+            let error = outcome.expect_err("retained stale state must defer the transition");
+            assert!(
+                error.contains("stale route"),
+                "the error must name the retained state: {error}"
+            );
+            assert_eq!(
+                managed.import_policy,
+                Some(rfc8212_missing_import()),
+                "the prior verdict stays paired with the routes retained under it"
+            );
+        }
+
+        drop(mgr);
+        rib.await.unwrap();
+    }
+}
+
+/// ADR-0112 step 4: a peer that qualifies at preflight and flaps before its
+/// Route Refresh can be delivered fails the edit rather than committing the
+/// desired verdict over an undelivered refresh.
+///
+/// Load-bearing: letting the non-Established branch arm `pending_refresh` and
+/// return `Ok` for a presence transition makes the error assertion fail and
+/// leaves the new chain installed with no convergence behind it.
+#[tokio::test]
+async fn rfc8212_import_presence_edit_fails_when_the_peer_flaps_after_preflight() {
+    let (mut mgr, rib_rx) = rfc8212_status_manager();
+    let rib = spawn_rfc8212_rib_stub(rib_rx, 0);
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5));
+    let refreshes = Arc::new(AtomicUsize::new(0));
+    // Established for the snapshot preflight and the per-peer requalification,
+    // Idle by the time the apply queries state for the refresh decision.
+    let handle = scripted_policy_handle(addr, true, 2, Arc::clone(&refreshes));
+    install_rfc8212_peer(&mut mgr, addr, handle, Some(rfc8212_missing_import()));
+
+    let error = mgr
+        .apply_resolved_policy_snapshot(vec![rfc8212_target(addr, Some(deny_policy_chain()))])
+        .await
+        .expect_err("a flap before the refresh must fail the edit");
+    assert!(
+        error.contains("Route Refresh"),
+        "the error must name the undelivered refresh: {error}"
+    );
+    assert_eq!(
+        refreshes.load(Ordering::SeqCst),
+        0,
+        "no refresh was delivered, so none may be reported"
+    );
+    let managed = mgr.peers.get(&key(addr)).unwrap();
+    assert_eq!(
+        managed.import_policy,
+        Some(rfc8212_missing_import()),
+        "rollback must restore the prior chain"
+    );
+    // Retry intent for a fully unwound forward is the captured prior, not an
+    // armed flag: the rollback reasserted the prior import chain, so there is
+    // no unfired refresh owed and arming one would fire a spurious Route
+    // Refresh on the next unrelated edit. The operator's intent survives
+    // because `current_config` never advanced — the next reload re-derives the
+    // same delta and requalifies the peer.
+    assert!(
+        !managed.pending_refresh && !managed.pending_export_apply,
+        "a fully restored peer must not carry a spurious retry"
+    );
+
+    drop(mgr);
+    rib.await.unwrap();
+}
+
+/// ADR-0112 step 4: the batched export cohort defers its members' Route
+/// Refresh past the RIB commit, so a member whose RFC 8212 import verdict moves
+/// is never selected into it.
+///
+/// Load-bearing: removing the disqualification from
+/// `local_export_only_policy_pair` selects both peers and the presence
+/// transition's refresh — its entire convergence — rides the deferred path.
+#[tokio::test]
+async fn rfc8212_import_presence_transition_is_excluded_from_the_export_cohort() {
+    let (mut mgr, rib_rx) = rfc8212_status_manager();
+    let rib = spawn_rfc8212_rib_stub(rib_rx, 0);
+    let plain = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5));
+    let transitioning = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 6));
+    install_rfc8212_peer(
+        &mut mgr,
+        plain,
+        scripted_policy_handle(plain, true, usize::MAX, Arc::new(AtomicUsize::new(0))),
+        Some(deny_policy_chain()),
+    );
+    install_rfc8212_peer(
+        &mut mgr,
+        transitioning,
+        scripted_policy_handle(
+            transitioning,
+            true,
+            usize::MAX,
+            Arc::new(AtomicUsize::new(0)),
+        ),
+        Some(rfc8212_missing_import()),
+    );
+
+    // Identical export moves, so cohort identity is satisfied for both and only
+    // the import-presence rule can separate them.
+    let targets = vec![
+        rustbgpd_api::peer_types::ResolvedPeerPolicy {
+            address: plain,
+            interface: None,
+            import_policy: Some(deny_policy_chain()),
+            export_policy: Some(distinct_deny_policy_chain(3)),
+        },
+        rustbgpd_api::peer_types::ResolvedPeerPolicy {
+            address: transitioning,
+            interface: None,
+            import_policy: Some(deny_policy_chain()),
+            export_policy: Some(distinct_deny_policy_chain(3)),
+        },
+    ];
+    let mask = mgr.export_only_policy_cohort_mask(&targets).await;
+    assert_eq!(
+        mask,
+        vec![false, false],
+        "a presence transition disqualifies its cohort, dropping the pair below two members"
+    );
+
+    drop(mgr);
+    rib.await.unwrap();
+}
+
+/// ADR-0112 step 4 scoping: an ordinary import edit between two explicit chains
+/// is not a policy-presence transition, so it keeps the pre-existing path — the
+/// new gate must not start rejecting every policy edit on a peer that happens
+/// to lack Route Refresh.
+#[tokio::test]
+async fn rfc8212_gate_ignores_an_ordinary_import_edit() {
+    let (mut mgr, rib_rx) = rfc8212_status_manager();
+    let rib = spawn_rfc8212_rib_stub(rib_rx, 0);
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5));
+    let handle = scripted_policy_handle(addr, false, usize::MAX, Arc::new(AtomicUsize::new(0)));
+    install_rfc8212_peer(&mut mgr, addr, handle, Some(deny_policy_chain()));
+
+    let error = mgr
+        .apply_resolved_policy_snapshot(vec![rfc8212_target(
+            addr,
+            Some(distinct_deny_policy_chain(3)),
+        )])
+        .await
+        .expect_err("the stub session still rejects the ordinary refresh it cannot send");
+    assert!(
+        !error.contains("policy-presence"),
+        "the presence gate must not claim an ordinary chain edit: {error}"
+    );
+
+    drop(mgr);
+    rib.await.unwrap();
 }

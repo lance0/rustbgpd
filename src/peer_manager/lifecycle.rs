@@ -1511,28 +1511,41 @@ impl PeerManager {
             .get(&peer)
             .ok_or_else(|| PeerLifecycleError::NotFound(peer.clone()))?;
 
-        // Determine which families to request refresh for
-        let target_families = if families.is_empty() {
-            // All configured families for this peer
+        // An empty request means "everything this peer can be asked for".
+        let refresh_all = families.is_empty();
+        let target_families = if refresh_all {
             managed.transport_config.peer.families.clone()
         } else {
             families
         };
 
+        let mut refreshed = Vec::with_capacity(target_families.len());
         for (afi, safi) in &target_families {
-            if let Err(e) = managed
+            match managed
                 .handle
                 .send_route_refresh_timeout(*afi, *safi, PEER_LIFECYCLE_COMMAND_TIMEOUT)
                 .await
             {
-                warn!(%address, error = %e, "failed to send route refresh");
-                return Err(PeerLifecycleError::Internal(format!(
-                    "send failed: route refresh to {address}: {e}"
-                )));
+                Ok(()) => refreshed.push((*afi, *safi)),
+                // ADR-0112: "everything" is bounded by the *negotiated* set,
+                // not the configured one. A configured family the peer did not
+                // negotiate has no `AdjRibIn` to re-evaluate, so refusing to
+                // ask for it is right — but failing the whole refresh over it
+                // is not, and it made every whole-peer refresh (policy edits,
+                // RPKI/ASPA cache updates, dataset swaps) fail on any session
+                // that negotiated down. An explicitly requested family still
+                // errors: the caller named it, so it deserves the answer.
+                Err(PeerCommandError::FamilyNotNegotiated { .. }) if refresh_all => {}
+                Err(e) => {
+                    warn!(%address, error = %e, "failed to send route refresh");
+                    return Err(PeerLifecycleError::Internal(format!(
+                        "send failed: route refresh to {address}: {e}"
+                    )));
+                }
             }
         }
 
-        info!(%address, families = ?target_families, "soft reset in requested");
+        info!(%address, families = ?refreshed, "soft reset in requested");
         Ok(())
     }
 }

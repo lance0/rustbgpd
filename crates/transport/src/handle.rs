@@ -561,6 +561,10 @@ pub struct NegotiatedSessionState {
     pub four_octet_as: bool,
     /// Address families mutually negotiated in the OPEN exchange.
     pub families: Vec<(Afi, Safi)>,
+    /// Whether the peer advertised the RFC 2918 Route Refresh capability, so a
+    /// `SendRouteRefresh` command against this session can be delivered rather
+    /// than rejected as `RouteRefreshUnsupported`.
+    pub peer_route_refresh: bool,
     /// Usable peer Graceful Restart coverage, when any exists.
     pub graceful_restart: Option<NegotiatedGracefulRestartState>,
 }

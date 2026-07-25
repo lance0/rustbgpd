@@ -875,9 +875,9 @@ jobs:
           script: tests/interop/scripts/test-m83-routeserver-multistack.sh
 
   m85:
-    name: M85/M93 — RR core + required-family enforcement against BIRD 2
+    name: M85/M93/M95 — RR core, required families, and RFC 8212 presence transitions against BIRD 2
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
 
@@ -919,6 +919,17 @@ jobs:
           label: M93
           topology: tests/interop/m93-required-families-bird.clab.yml
           script: tests/interop/scripts/test-m93-required-families-bird.sh
+
+      # M95 also needs FRR, which this runner already has via the other jobs'
+      # images; the topology pulls it. BIRD is the load-bearing half: it is the
+      # only speaker in the matrix that can be told not to advertise Route
+      # Refresh, which is what ADR-0112's rejection path requires.
+      - name: Run M95 (RFC 8212 live policy-presence transitions)
+        uses: ./.github/actions/run-interop-test
+        with:
+          label: M95
+          topology: tests/interop/m95-rfc8212-presence-frr-bird.clab.yml
+          script: tests/interop/scripts/test-m95-rfc8212-presence.sh
 
   m94:
     name: M94 — RFC 6793 AS4 migration against OLD speakers

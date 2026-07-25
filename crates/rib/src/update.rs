@@ -1806,6 +1806,21 @@ pub enum RibUpdate {
         /// Response channel.
         reply: oneshot::Sender<usize>,
     },
+    /// Query: how many of a peer's Adj-RIB-In routes are still retained as
+    /// Graceful Restart or Long-Lived Graceful Restart stale.
+    ///
+    /// ADR-0112 needs this before it lets a live RFC 8212 import-presence edit
+    /// touch a peer that is not Established. Session-local route bookkeeping
+    /// cannot answer it: the session actor can have cleared its own route set
+    /// while the RIB still serves the routes it learned under the prior policy,
+    /// and re-evaluating those against a new verdict is exactly the pairing the
+    /// ADR forbids.
+    QueryPeerRetainedStale {
+        /// The target peer.
+        peer: IpAddr,
+        /// Response channel.
+        reply: oneshot::Sender<usize>,
+    },
     /// Query: return aggregate route-policy counters for a specific peer.
     QueryNeighborPolicyStats {
         /// The target peer.

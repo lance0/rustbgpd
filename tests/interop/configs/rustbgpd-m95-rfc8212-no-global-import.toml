@@ -1,0 +1,53 @@
+[global]
+asn = 65001
+router_id = "10.95.0.1"
+listen_port = 179
+# ADR-0112: opt into RFC 8212 enforcement. Restart-required, so every
+# variant in this lab carries the same value — the reload never flips it.
+ebgp_requires_policy = true
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+token_file = "/run/rustbgpd/grpc-test-only-operator.token"
+principal = "rustbgpd://operator/test-only"
+
+# One permit-all operator policy in each direction. RFC 8212 asks for a
+# deliberate policy, not a filtering one, so both neighbors read PRESENT while
+# every received route still reaches the RIB and every best path is advertised.
+[policy.definitions.edge-in]
+default_action = "permit"
+
+[policy.definitions.edge-out]
+default_action = "permit"
+
+# Phase 1 variant: the global import chain is gone while BOTH neighbors still
+# inherit it, so one reload asks for a two-peer RFC 8212 import-presence
+# transition. BIRD never negotiated Route Refresh, so the whole edit must be
+# rejected before either peer is touched.
+[policy]
+import_chain = []
+export_chain = ["edge-out"]
+
+[[neighbors]]
+address = "10.95.1.2"
+remote_asn = 65002
+description = "frr-m95"
+hold_time = 90
+graceful_restart = true
+gr_stale_routes_time = 300
+
+[[neighbors]]
+address = "10.95.2.2"
+remote_asn = 65003
+description = "bird-m95-no-route-refresh"
+hold_time = 90
+
+[security.grpc]
+enforcement = "tier"
+
+[security.grpc.roles]
+"rustbgpd://operator/test-only" = "operator"

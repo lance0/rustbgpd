@@ -1,0 +1,56 @@
+[global]
+asn = 65001
+router_id = "10.95.0.1"
+listen_port = 179
+# ADR-0112: opt into RFC 8212 enforcement. Restart-required, so every
+# variant in this lab carries the same value — the reload never flips it.
+ebgp_requires_policy = true
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+token_file = "/run/rustbgpd/grpc-test-only-operator.token"
+principal = "rustbgpd://operator/test-only"
+
+# One permit-all operator policy in each direction. RFC 8212 asks for a
+# deliberate policy, not a filtering one, so both neighbors read PRESENT while
+# every received route still reaches the RIB and every best path is advertised.
+[policy.definitions.edge-in]
+default_action = "permit"
+
+[policy.definitions.edge-out]
+default_action = "permit"
+
+# FRR still inherits the global import chain; BIRD pins its own below.
+[policy]
+import_chain = ["edge-in"]
+export_chain = ["edge-out"]
+
+[[neighbors]]
+address = "10.95.1.2"
+remote_asn = 65002
+description = "frr-m95"
+hold_time = 90
+graceful_restart = true
+gr_stale_routes_time = 300
+
+# BIRD pins the same chain at neighbor level. It compiles to the chain BIRD
+# already runs, so this reload installs nothing and asks for no Route Refresh —
+# which is the point: a peer without the capability may still take an edit that
+# does not move its chain. It also takes BIRD out of the next phase's transition
+# set, leaving FRR as the only peer whose verdict moves.
+[[neighbors]]
+address = "10.95.2.2"
+remote_asn = 65003
+description = "bird-m95-no-route-refresh"
+hold_time = 90
+import_policy_chain = ["edge-in"]
+
+[security.grpc]
+enforcement = "tier"
+
+[security.grpc.roles]
+"rustbgpd://operator/test-only" = "operator"
