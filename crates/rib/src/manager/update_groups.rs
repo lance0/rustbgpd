@@ -890,10 +890,16 @@ pub(in crate::manager) struct GroupRibOut {
     /// with [`GROUP_FILTERED_PLACEHOLDER`], restamped per member) with
     /// the denying policy's label for join-time counter replay.
     policy_filtered: FxHashMap<PolicyFilteredRouteKey, Option<String>>,
-    /// Terminal policy label per staged entry (`None` = inline) —
-    /// join-time counter replay residue.
+    /// Terminal policy label per staged entry — join-time counter replay
+    /// residue. Entries ONLY for labelled entries: an inline (unlabelled)
+    /// entry stores nothing and its key is removed, so absent and
+    /// present-`None` are the same verdict. Every reader collapses the
+    /// two, so keep the insert conditional — an unconditional insert
+    /// costs a slot per staged route across the whole table for a value
+    /// no reader can distinguish from absence.
     staged_labels: FxHashMap<(Prefix, u32), Option<String>>,
-    /// VPN sibling of `staged_labels`, keyed by RD+prefix identity.
+    /// VPN sibling of `staged_labels`, keyed by RD+prefix identity, with
+    /// the same absent-means-inline invariant.
     vpn_staged_labels: FxHashMap<VpnRouteKey, Option<String>>,
     /// Persistent group-verdict VPN export-policy denials: denied key →
     /// (source peer, denying policy label, the denied route's extended
@@ -1088,7 +1094,14 @@ impl GroupRibOut {
                     self.source_attrs.remove(&key);
                 }
             }
-            self.staged_labels.insert(key, delta.policy_label.clone());
+            match &delta.policy_label {
+                Some(label) => {
+                    self.staged_labels.insert(key, Some(label.clone()));
+                }
+                None => {
+                    self.staged_labels.remove(&key);
+                }
+            }
             self.table.insert(route.clone());
         } else {
             self.table.withdraw(&delta.prefix, delta.path_id);
@@ -1113,8 +1126,15 @@ impl GroupRibOut {
         }
         if let Some(route) = &delta.new {
             self.inc_source_slot(route.peer, slot);
-            self.vpn_staged_labels
-                .insert(delta.key, delta.policy_label.clone());
+            match &delta.policy_label {
+                Some(label) => {
+                    self.vpn_staged_labels
+                        .insert(delta.key, Some(label.clone()));
+                }
+                None => {
+                    self.vpn_staged_labels.remove(&delta.key);
+                }
+            }
             self.table.insert_vpn(route.clone());
         } else {
             self.table.remove_vpn(&rib_key);
@@ -4358,6 +4378,77 @@ mod tests {
         );
         assert!(rtc_group.stages_vpn());
         assert!(rtc_group.rtc_negotiated());
+    }
+
+    /// Inline (unlabelled) staged entries leave NO slot in either label
+    /// residue map. Absent and present-`None` are the same verdict at
+    /// every reader, so the unlabelled case — the whole table when no
+    /// export policy is configured — must not pay a slot per staged
+    /// route. Asserted on map occupancy: the resolved label is `None`
+    /// either way, so occupancy is the only observable difference.
+    #[test]
+    fn inline_staged_entries_leave_no_label_residue() {
+        let mut group = GroupRibOut::new(
+            None,
+            false,
+            false,
+            true,
+            None,
+            vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv4, Safi::MplsVpn)],
+            vec![],
+            0,
+        );
+        let key = (prefix(1), 0);
+        let resolved = |g: &GroupRibOut| {
+            (
+                g.staged_labels
+                    .get(&key)
+                    .and_then(|l| l.as_deref())
+                    .is_none(),
+                g.vpn_staged_labels
+                    .get(&vpn_key(1))
+                    .cloned()
+                    .unwrap_or(None)
+                    .is_none(),
+            )
+        };
+
+        // Unlabelled announce: no slot, and the readers still see None.
+        group.apply_delta(&announce_delta(prefix(1), OTHER1, None));
+        group.apply_vpn_delta(&vpn_announce_delta(1, OTHER1, None));
+        assert!(!group.staged_labels.contains_key(&key));
+        assert!(!group.vpn_staged_labels.contains_key(&vpn_key(1)));
+        assert_eq!(resolved(&group), (true, true));
+
+        // A labelled restage DOES take a slot — the residue still
+        // carries what join-time counter replay reads.
+        let mut labelled = announce_delta(prefix(1), OTHER1, Some(OTHER1));
+        labelled.policy_label = Some("export-chain".to_owned());
+        group.apply_delta(&labelled);
+        let mut vpn_labelled = vpn_announce_delta(1, OTHER1, Some(OTHER1));
+        vpn_labelled.policy_label = Some("export-chain".to_owned());
+        group.apply_vpn_delta(&vpn_labelled);
+        assert_eq!(
+            group.staged_labels.get(&key).and_then(|l| l.as_deref()),
+            Some("export-chain")
+        );
+        assert_eq!(
+            group
+                .vpn_staged_labels
+                .get(&vpn_key(1))
+                .cloned()
+                .unwrap_or(None),
+            Some("export-chain".to_owned())
+        );
+
+        // Restaging inline REMOVES the slot rather than retaining the
+        // stale label — a skipped insert would leak the old verdict
+        // into the joining member's replayed counters.
+        group.apply_delta(&announce_delta(prefix(1), OTHER1, Some(OTHER1)));
+        group.apply_vpn_delta(&vpn_announce_delta(1, OTHER1, Some(OTHER1)));
+        assert!(!group.staged_labels.contains_key(&key));
+        assert!(!group.vpn_staged_labels.contains_key(&vpn_key(1)));
+        assert_eq!(resolved(&group), (true, true));
     }
 
     /// An RTC membership over a specific Route Target (full 96-bit
