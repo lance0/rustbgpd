@@ -49,6 +49,13 @@ services:
       - "127.0.0.1:9179:9179"     # Prometheus metrics
     cap_add:
       - NET_BIND_SERVICE
+    # Docker's default soft nofile limit is 1024, under the 4096 floor
+    # `rbgp doctor` enforces — a peer costs sockets plus per-session
+    # handles, so the default fails the first doctor run out of the box.
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 524288
 
   frr:
     image: quay.io/frrouting/frr:10.3.1

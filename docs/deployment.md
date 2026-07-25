@@ -119,15 +119,17 @@ GHCR. Three tag flavors are available per the
 
 | Tag | Resolves to | Updates on |
 |-----|-------------|------------|
-| `:0.45.0` | exact version | nothing (immutable) |
-| `:0.45` | latest patch in the 0.45 minor | each 0.45.x release |
+| `:X.Y.Z` | exact version | nothing (immutable) |
+| `:X.Y` | latest patch in the X.Y minor | each X.Y.z release |
 | `:latest` | latest non-prerelease release | each minor or patch release |
 
 Major-minor is the usual operator default — auto-receives bug-fix
-releases but pins against minor-version churn:
+releases but pins against minor-version churn. The examples in this
+document use `:latest` so they stay copy-pasteable across releases;
+substitute the major-minor tag of the series you standardize on:
 
 ```sh
-docker pull ghcr.io/lance0/rustbgpd:0.45
+docker pull ghcr.io/lance0/rustbgpd:latest
 ```
 
 The published image is the Dockerfile's default `runtime` target:
@@ -302,19 +304,39 @@ For your own deployment:
 
 - **State**: mount a volume at the daemon's `runtime_state_dir` so the
   GR restart marker and FIB ownership receipt survive container
-  restarts:
+  restarts. The daemon runs as uid/gid 999 and rewrites its config in
+  place, so both host directories must be owned by that uid and the
+  config must already exist — the image's default command is
+  `rustbgpd /etc/rustbgpd/config.toml` and it will not create one:
 
   ```sh
+  # One-time host prep.
+  sudo install -d -o 999 -g 999 /etc/rustbgpd /var/lib/rustbgpd
+  docker run --rm ghcr.io/lance0/rustbgpd:latest \
+    rustbgpd --init-config edge --stdout > config.toml
+  # Edit config.toml for your ASN, router ID, peers, and policy.
+  sudo install -o 999 -g 999 -m 0600 config.toml /etc/rustbgpd/config.toml
+
   docker run --rm -d \
     --name rustbgpd \
     -v /etc/rustbgpd:/etc/rustbgpd \
     -v /var/lib/rustbgpd:/var/lib/rustbgpd \
     -p 179:179 \
     -p 9179:9179 \
+    --ulimit nofile=65536:524288 \
     --cap-add=NET_BIND_SERVICE \
     --cap-add=NET_ADMIN \
-    ghcr.io/lance0/rustbgpd:0.45
+    ghcr.io/lance0/rustbgpd:latest
   ```
+
+  The `edge` profile is used because its `runtime_state_dir`,
+  `grpc_uds` path, and `0.0.0.0` metrics bind are already the container
+  forms; the `lab` profile's `/tmp` state directory and `127.0.0.1`
+  metrics bind both need editing first.
+
+- **File descriptors**: `--ulimit nofile` is required, not tuning. The
+  Docker default soft limit is 1024, well under the 4096 floor
+  `rbgp doctor` enforces, and peers exhaust descriptors at scale.
 
 - **Writable config directory**: mount `/etc/rustbgpd` read-write and
   make it owned by the daemon user (`chown` the host directory to the
