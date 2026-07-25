@@ -26,7 +26,7 @@ External context:
 
 The highest-risk area is the privileged gRPC management surface. rustbgpd
 already has safe listener defaults, optional bearer-token auth, native mTLS,
-UDS permissions, read-only listener mode, a checked 66-RPC method-tier matrix,
+UDS permissions, read-only listener mode, a checked 101-RPC method-tier matrix,
 runtime tier telemetry, and enforced listener `max_tier` caps. The remaining
 v1.0 security work is to turn that matrix into real principal-aware
 enforcement: extract mTLS principals, assign roles, deny over-role calls, and
@@ -45,7 +45,7 @@ In scope:
   `access_mode`.
 - ADR-0064 method-tier inventory and runtime tier-decision layer:
   `docs/grpc-method-inventory.md`, `crates/api/src/authz.rs`,
-  `crates/api/src/authz_runtime.rs`, and
+  `crates/api/src/authz_runtime/`, and
   `crates/telemetry/src/metrics.rs`.
 - gRPC services and high-risk RPCs in `proto/rustbgpd.proto` and
   `crates/api/src/*_service.rs`.
@@ -94,9 +94,9 @@ Open questions that could change risk ranking:
 | Bearer interceptor | Per-call token check for listeners with `token_file` | `crates/api/src/server.rs::AuthInterceptor` |
 | Service handlers | Implement Global, Config, Neighbor, Policy, PeerGroup, RIB, Event, Injection, Control, and EVPN RPCs | `proto/rustbgpd.proto`, `crates/api/src/*_service.rs` |
 | Access mode guard | Per-service mutating RPC rejection on read-only listeners | `crates/api/src/server.rs::read_only_rejection` |
-| Method-tier matrix | Static ADR-0064 classification for all 66 RPCs | `crates/api/src/authz.rs`, `docs/grpc-method-inventory.md`, `docs/grpc-method-inventory.json` |
-| Audit runtime layer | Audit-only method-tier lookup, structured logs, bounded metric | `crates/api/src/authz_runtime.rs`, `crates/telemetry/src/metrics.rs` |
-| Core actors | PeerManager, RIB, dataplane, config persistence, and shutdown actors behind RPC handlers | `src/main.rs`, `src/peer_manager.rs`, `crates/rib/src/manager` |
+| Method-tier matrix | Static ADR-0064 classification for all 101 RPCs | `crates/api/src/authz.rs`, `docs/grpc-method-inventory.md`, `docs/grpc-method-inventory.json` |
+| Audit runtime layer | Audit-only method-tier lookup, structured logs, bounded metric | `crates/api/src/authz_runtime/`, `crates/telemetry/src/metrics.rs` |
+| Core actors | PeerManager, RIB, dataplane, config persistence, and shutdown actors behind RPC handlers | `src/main.rs`, `src/peer_manager/`, `crates/rib/src/manager` |
 
 ### Data flows and trust boundaries
 
@@ -297,7 +297,7 @@ External reviewers should be able to verify:
 |------|----------------|-----------------|
 | `crates/api/src/server.rs` | Listener setup, bearer interceptor, mTLS config, access mode, audit layer wiring | TM-001, TM-002, TM-003, TM-004, TM-006 |
 | `crates/api/src/authz.rs` | Source of truth for per-method tiers | TM-001, TM-008 |
-| `crates/api/src/authz_runtime.rs` | Audit-only decision path and structured log fields | TM-001, TM-005, TM-009 |
+| `crates/api/src/authz_runtime/` | Audit-only decision path and structured log fields | TM-001, TM-005, TM-009 |
 | `crates/telemetry/src/metrics.rs` | Bounded authz metric labels and evidence surface | TM-007, TM-009 |
 | `crates/api/src/injection_service.rs` | High-blast-radius route, FlowSpec, EVPN injection | TM-001 |
 | `crates/api/src/control_service.rs` | Shutdown and MRT trigger controls | TM-001 |

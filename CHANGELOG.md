@@ -112,6 +112,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Every shipped starter profile and interop lab now runs under tier
   authorization; `security.grpc.enforcement = "legacy"` is reported by
   `--check` rather than only at daemon startup.
+- The gRPC method inventory an external reviewer reads is now checked
+  against the generated tier export on every test run, so the published
+  classification cannot drift from the one the daemon enforces.
 
 **Library crates**
 
