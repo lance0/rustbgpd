@@ -10,9 +10,26 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@nightly
+      # fuzz/rust-nightly.txt holds the single reviewed nightly, shared with
+      # the OSS-Fuzz and ClusterFuzzLite images. A floating `nightly` lets an
+      # upstream compiler regression take the campaign down with no change on
+      # our side, and the failure reads as if it came from this repository.
+      # RUSTUP_TOOLCHAIN then applies the pin to every cargo call below.
+      - name: Select the reviewed nightly
+        id: nightly
+        run: |
+          toolchain=$(cat fuzz/rust-nightly.txt)
+          if [ -z "$toolchain" ]; then
+            echo "fuzz/rust-nightly.txt is empty" >&2
+            exit 1
+          fi
+          echo "toolchain=$toolchain" >> "$GITHUB_OUTPUT"
+          echo "RUSTUP_TOOLCHAIN=$toolchain" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.nightly.outputs.toolchain }}
       - uses: Swatinem/rust-cache@v2
-      - run: cargo install cargo-fuzz
+      - run: cargo install cargo-fuzz --locked
       # Every target in each fuzz crate, 2 minutes apiece. Seed corpora are
       # tracked under fuzz/seeds/<target>/ (fuzz/corpus/ is gitignored, so a
       # CI run starts from the seeds).
@@ -21,7 +38,7 @@ jobs:
           cd crates/wire
           # `$(cargo fuzz list)` inline would let an errored or empty
           # enumeration silently run zero targets — fail loudly instead.
-          targets=$(cargo +nightly fuzz list)
+          targets=$(cargo fuzz list)
           if [ -z "$targets" ]; then
             echo "fuzz-target enumeration returned no targets" >&2
             exit 1
@@ -30,14 +47,14 @@ jobs:
             mkdir -p "fuzz/corpus/$t"
             seeds=""
             [ -d "fuzz/seeds/$t" ] && seeds="fuzz/seeds/$t"
-            cargo +nightly fuzz run "$t" "fuzz/corpus/$t" $seeds -- -max_total_time=120 -max_len=4096
+            cargo fuzz run "$t" "fuzz/corpus/$t" $seeds -- -max_total_time=120 -max_len=4096
           done
       - name: Fuzz rpol policy frontend (2 minutes per target)
         run: |
           cd crates/policy
           # `$(cargo fuzz list)` inline would let an errored or empty
           # enumeration silently run zero targets — fail loudly instead.
-          targets=$(cargo +nightly fuzz list)
+          targets=$(cargo fuzz list)
           if [ -z "$targets" ]; then
             echo "fuzz-target enumeration returned no targets" >&2
             exit 1
@@ -46,13 +63,13 @@ jobs:
             mkdir -p "fuzz/corpus/$t"
             seeds=""
             [ -d "fuzz/seeds/$t" ] && seeds="fuzz/seeds/$t"
-            cargo +nightly fuzz run "$t" "fuzz/corpus/$t" $seeds -- -max_total_time=120 -max_len=8192
+            cargo fuzz run "$t" "fuzz/corpus/$t" $seeds -- -max_total_time=120 -max_len=8192
           done
       - name: Fuzz EVPN parsers (2 minutes per target)
         run: |
           cd crates/evpn
           # Keep target discovery fail-closed as new EVPN parsers are added.
-          targets=$(cargo +nightly fuzz list)
+          targets=$(cargo fuzz list)
           if [ -z "$targets" ]; then
             echo "fuzz-target enumeration returned no targets" >&2
             exit 1
@@ -65,13 +82,13 @@ jobs:
             mkdir -p "fuzz/corpus/$t"
             seeds=""
             [ -d "fuzz/seeds/$t" ] && seeds="fuzz/seeds/$t"
-            cargo +nightly fuzz run "$t" "fuzz/corpus/$t" $seeds -- -max_total_time=120 -max_len=1024
+            cargo fuzz run "$t" "fuzz/corpus/$t" $seeds -- -max_total_time=120 -max_len=1024
           done
       - name: Fuzz MRT snapshot and warm-bundle readers (2 minutes per target)
         run: |
           cd crates/mrt
           # Keep target discovery fail-closed as new MRT parsers are added.
-          targets=$(cargo +nightly fuzz list)
+          targets=$(cargo fuzz list)
           if [ -z "$targets" ]; then
             echo "fuzz-target enumeration returned no targets" >&2
             exit 1
@@ -84,7 +101,7 @@ jobs:
             mkdir -p "fuzz/corpus/$t"
             seeds=""
             [ -d "fuzz/seeds/$t" ] && seeds="fuzz/seeds/$t"
-            cargo +nightly fuzz run "$t" "fuzz/corpus/$t" $seeds -- -max_total_time=120 -max_len=65536
+            cargo fuzz run "$t" "fuzz/corpus/$t" $seeds -- -max_total_time=120 -max_len=65536
           done
       - name: Upload crash artifacts
         if: failure()
