@@ -9,204 +9,445 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+> **Release framing.** This is the policy-safety line. RFC 8212
+> explicit-policy enforcement and per-peer outbound prefix limits both
+> ship complete and opt-in, `rustbgpd --check` learns to say when a
+> configuration is merely *valid* rather than *clean*, and every starter
+> config we ship was rewritten to pass the strict form of that check.
+> Around them sits a correctness pass over the paths that fail: a
+> rejected config mutation no longer changes anything an operator can
+> observe, a listener that cannot bind exits instead of parking with its
+> core function dead, and the initial table dump finally evaluates the
+> peer's group-scoped export policy. RFC 6793 AS4 migration, RFC 9072
+> extended OPEN, and RFC 9552 BGP-LS attribute framing complete the
+> conformance surface, and `rustbgpd-wire` 0.16.0 / `rustbgpd-fsm` 0.3.1
+> publish alongside. The first Highlights group lists what needs an
+> operator decision before the upgrade.
+
+### Highlights
+
+**Act on these before you upgrade**
+
+- **Breaking: the `peer` metric label is now the bare neighbor address on
+  every metric family.** Session-owned series previously used the
+  transport endpoint (`192.0.2.1:179`). Existing PromQL, recording rules,
+  dashboards, and alert rules that pin the `addr:port` form match nothing
+  after the upgrade, and Prometheus reports no error for a selector that
+  matches nothing. The affected series and the exact query rewrites are
+  listed under *Changed*.
+- **The `Adj-RIB-Out prefixes per peer` panel now floors to zero during a
+  graceful restart** instead of holding the departed session's plateau
+  for the whole restart timer. Any panel, recording rule, or alert
+  written against that plateau sees a new shape. `bgp_rib_prefixes`,
+  `bgp_gr_active_peers`, and `bgp_gr_stale_routes` remain the series that
+  stay nonzero for a peer expected back.
+- **Group-scoped export policy now applies to the initial table dump.**
+  This is wire-visible: an upgraded daemon's first dump to a peer whose
+  export policy matches on peer-group may now be correctly filtered, or
+  otherwise transformed by group-matched actions, where it previously was
+  not — at every session establishment *and* every re-establishment.
+  Peers whose export policy does not match on peer-group are unaffected.
+- **`config OK` now means a genuinely clean check.** A configuration with
+  anything to flag prints `config VALID, <n> WARNINGS — NOT a clean
+  check`, and the new `--check --strict` exits 1 on any warning so a CI
+  or deployment gate can refuse it. Every shipped starter config —
+  including both `--init-config` profiles, whose output changed
+  accordingly — was rewritten to pass that strict check.
+- **`rustbgpd-wire` 0.16.0 changes decode acceptance in six places**
+  while keeping an additive API. Embedders should read the *Library
+  crates* entry under *Changed* before bumping.
+
+**Policy safety**
+
+- RFC 8212 explicit-policy enforcement lands end to end behind opt-in
+  `[global] ebgp_requires_policy`: an eBGP direction with no explicit
+  operator policy carries no routes instead of everything, per direction,
+  with the resulting status on neighbor detail, JSON, Prometheus,
+  `rbgp rib advertised --explain`, and `rbgp doctor`.
+- Per-peer outbound unicast prefix limits (ADR-0113) bound how far one
+  client's export policy can grow its advertised state, without
+  withdrawing what is already out and without resetting a session, with
+  usage/limit/headroom/blocking on every operator surface.
+- `rustbgpd --check` now warns about eBGP neighbors that resolve no
+  policy, `rbgp config import` emits configs that fail closed, and the
+  shipped starters are all policy-complete.
+
+**Correctness when something fails**
+
+- A rejected config mutation is now externally invisible: persistence is
+  reserved before runtime state is touched, so a refused RPC can no
+  longer have dropped a session, double-bounced a peer group, or put two
+  rounds of Route Refresh on the wire.
+- The BGP listener sets `SO_REUSEADDR`, and a bind failure exits 1 rather
+  than leaving a live daemon that accepts no BGP; an unexpected gRPC
+  server exit also exits non-zero; configured BFD that cannot open its
+  sockets refuses to start rather than serving BFD-configured peers
+  without it.
+- Hot-applicable peer-group edits apply in place instead of bouncing
+  every inheriting session — so on a route server, a group-level limit
+  raise is flap-free during exactly the incident the limit exists to
+  contain.
+
+**Protocol conformance**
+
+- RFC 6793 four-octet-AS migration is lossless end to end across loop
+  detection, policy, RIB, export encoding, MRT, and BMP, proven against a
+  pinned ExaBGP source and an independent old-speaker sink.
+- RFC 9072 extended OPEN optional-parameter lengths, RFC 9552 BGP-LS
+  attribute framing with whole-attribute discard, RFC 9774 AS_SET
+  prohibition, and RFC 7607 / RFC 6286 OPEN identity validation.
+- New admission controls: `min_hold_time` rejects an OPEN proposing too
+  short a hold time, `required_families` rejects an OPEN whose negotiated
+  intersection is missing a family you depend on.
+
+**Guardrails and observability**
+
+- The max-prefix suite is now alertable before teardown and recoverable
+  after it: usage/limit/headroom metrics per scope, per-neighbor
+  headroom on neighbor detail, opt-in timed restart, and a live duration
+  edit that re-arms the pending attempt instead of silently latching the
+  peer down.
+- TCP-AO keys can be rotated and retired on a live session across two
+  immutable generations, fail-closed, without resetting it.
+- Every shipped starter profile and interop lab now runs under tier
+  authorization; `security.grpc.enforcement = "legacy"` is reported by
+  `--check` rather than only at daemon startup.
+
+**Library crates**
+
+- `rustbgpd-wire` 0.16.0 (additive API, six decode-acceptance changes)
+  and `rustbgpd-fsm` 0.3.1 (two additive fields on a `#[non_exhaustive]`
+  struct).
+
 ### Added
 
-- **`rustbgpd --check --strict`.** `--check` reports a valid-but-risky
-  configuration as a warning and exits 0, so that adding a warning can never
-  break a deployment that meant its configuration — which also means a CI job
-  running `--check` passes a config nobody looked at. `--strict` is the opt-in
-  for gates that cannot accept that: identical output, but any warning exits
-  **1**, the same code `--check` already uses for a config it rejects, since a
-  gate reads both as "this config did not pass". A clean check still exits 0,
-  and `--strict` without `--check` is rejected with exit 2 rather than silently
-  accepted — that invocation would otherwise start a daemon. `--strict` is
-  defined over the whole `--check` warning set, not one warning, so anything
-  `--check` reports in future fails a strict run. `--help` and `rustbgpd(8)`
-  now document the exit-status ladder.
+- **RFC 8212 explicit-policy enforcement — `[global] ebgp_requires_policy`
+  (ADR-0112).** Opt-in, default `false`, restart-required, and pinned to
+  the startup value across SIGHUP: a reload logs an `ERROR`, keeps the
+  running import/export treatment of every eBGP session unchanged, and
+  carries the operator's edit forward on disk. `rustbgpd --diff` and the
+  v1 runtime configuration transaction name `[global].ebgp_requires_policy`
+  explicitly, and the transaction rejects such a candidate rather than
+  persisting or partly adopting it.
 
-- **Per-peer outbound unicast prefix limits (ADR-0113).** New
-  `max_prefixes_out_ipv4` / `max_prefixes_out_ipv6` on `[[neighbors]]` and peer
-  groups bound how much of the table one client's export policy can grow its
-  advertised state to. A neighbor value overrides its group, an absent value
-  inherits, and accepted dynamic children inherit their configured group's
-  effective values. Excess net-new prefixes are withheld while the session
-  stays Established — nothing already advertised is withdrawn, no NOTIFICATION
-  is sent, and slots count distinct prefixes, so every Add-Path identity for
-  one NLRI shares one. Only IPv4- and IPv6-unicast are in scope. Edits are live
-  and transactional: adding or lowering a maximum is accepted only when every
-  affected live peer is already at or below the candidate, and an over-limit
-  family rejects the whole edit with the peer, family, current usage, and
-  requested maximum rather than pruning an existing view; a valid raise or
-  removal schedules one coalesced, family-scoped resync. Commit-confirmed
-  transactions may only tighten, because their automatic undo can only loosen.
-  A maximum is a reload-matrix `live` field, so both a `[[neighbors]]` edit and
-  a maxima-only `[peer_groups.*]` edit apply in place without touching a
-  session.
-  `rbgp neighbor <addr>` (human and JSON) and the neighbor API report one row
-  per unicast family — usage, optional maximum, optional headroom, blocking
-  state, and the stable reason `outbound_prefix_limit_reached` — and
-  Prometheus exposes `bgp_outbound_prefix_usage`, `bgp_outbound_prefix_limit`,
-  `bgp_outbound_prefix_headroom`, `bgp_outbound_prefix_blocking`, and
-  `bgp_outbound_prefix_blocked_total`, labelled by peer and family only. An
-  episode logs once when it opens and once when recovery proves nothing is
-  still withheld, never per prefix.
-
-- **`[global] ebgp_requires_policy` configuration boundary (ADR-0112,
-  RFC 8212).** The opt-in enforcement mode now parses, defaults to `false`,
-  classifies as restart-required, and is pinned to the startup value across
-  SIGHUP: a reload logs an `ERROR`, keeps the running import/export treatment
-  of every eBGP session unchanged, and carries the operator's edit forward on
-  disk. `rustbgpd --diff` and the v1 runtime configuration transaction name
-  `[global].ebgp_requires_policy` explicitly instead of only the `[global]`
-  section, and the transaction rejects such a candidate rather than persisting
-  or partly adopting it.
-
-- **`[global] ebgp_requires_policy` enforcement in policy resolution
-  (ADR-0112, RFC 8212).** With the knob on, an eBGP direction that resolves no
-  explicit operator policy now runs a reserved internal deny-all chain instead
-  of the permit-all default: a missing import policy makes received routes
+  With the knob on, an eBGP direction that resolves no explicit operator
+  policy runs a reserved internal deny-all chain instead of the
+  permit-all default: a missing import policy makes received routes
   ineligible, a missing export policy keeps routes out of that peer's
   Adj-RIB-Out, the session stays Established, and the two directions are
   independent. The verdict is decided before the implicit RFC 8326
-  `GRACEFUL_SHUTDOWN` and RFC 7999 `BLACKHOLE` import tails are appended, so
-  enabling `honor_graceful_shutdown` or `honor_blackhole` cannot satisfy the
-  requirement; a chain whose configured result is permit-all does satisfy it.
-  Every negotiated family is covered, because policy is neighbor-wide. iBGP is
-  untouched. A `[[dynamic_neighbors]]` range with `remote_asn = 0` is
-  accept-any rather than AS 0, so its accepted children are classified external
-  for the whole session, including after OPEN replaces the sentinel with a
-  learned ASN. With the knob off (the default) resolution is unchanged, and
-  `evaluate_chain(None, ...)` keeps its process-wide permit-all contract in
-  every case.
+  `GRACEFUL_SHUTDOWN` and RFC 7999 `BLACKHOLE` import tails are appended,
+  so enabling `honor_graceful_shutdown` or `honor_blackhole` cannot
+  satisfy the requirement; a chain whose configured result is permit-all
+  does satisfy it. Every negotiated family is covered, because policy is
+  neighbor-wide. iBGP is untouched. A `[[dynamic_neighbors]]` range with
+  `remote_asn = 0` is accept-any rather than AS 0, so its accepted
+  children are classified external for the whole session, including after
+  OPEN replaces the sentinel with a learned ASN. With the knob off the
+  default resolution is unchanged.
 
-- **Qualified live RFC 8212 policy-presence transitions (ADR-0112).** An edit
-  that moves a direction between explicit operator policy and the reserved deny
-  is only convergent through a Route Refresh — removing the last explicit
-  import policy has to re-evaluate what the prior chain already accepted into
-  Adj-RIB-In, and adding one has to ask for the routes the deny refused to
-  retain — so every affected peer is now qualified before any peer is
-  modified, and one unqualified peer rejects the whole edit with nothing
-  mutated. An Established peer that never negotiated RFC 2918 Route Refresh is
-  rejected with clear/reconnect guidance; a peer that is down while the RIB
-  still retains its graceful-restart or long-lived-graceful-restart stale
-  routes is deferred, so those routes stay paired with the verdict they were
-  accepted under; a session that cannot report its state in time is rejected
-  rather than guessed at. A peer that qualifies and then flaps before its
-  refresh is delivered fails the edit and has its prior chains restored
-  through the existing rollback path, instead of committing a verdict nothing
-  converged to. Presence transitions are excluded from the batched export
-  cohort, whose deferred refresh is the wrong shape for them, and the export
-  side keeps using the existing actor-fenced replacement unchanged. Nothing
-  changes with the knob off: the reserved deny is never installed, so no edit
-  is ever classified as a presence transition. Proven on real sessions by the
-  new M95 interop lab (FRR with Route Refresh, BIRD 2 with
-  `enable route refresh off`).
+  Live edits that move a direction between explicit policy and the
+  reserved deny are only convergent through a Route Refresh, so every
+  affected peer is qualified before any peer is modified and one
+  unqualified peer rejects the whole edit with nothing mutated: an
+  Established peer that never negotiated RFC 2918 Route Refresh is
+  rejected with clear/reconnect guidance, a peer that is down while the
+  RIB still retains its graceful-restart or long-lived stale routes is
+  deferred so those routes stay paired with the verdict they were
+  accepted under, and a session that cannot report its state in time is
+  rejected rather than guessed at. A peer that qualifies and then flaps
+  before its refresh is delivered fails the edit and has its prior chains
+  restored. Proven on real sessions by the new M95 interop lab (FRR with
+  Route Refresh, BIRD 2 with `enable route refresh off`).
 
-- **Directional RFC 8212 policy status on every operator surface (ADR-0112).**
-  Neighbor detail reports import and export separately — a one-sided
-  configuration is never collapsed into a single "policy present" answer:
+- **Per-direction RFC 8212 policy status on every operator surface.** A
+  one-sided configuration is never collapsed into a single "policy
+  present" answer:
 
-  - `NeighborState.rfc8212_import_policy` / `.rfc8212_export_policy` carry the
-    new `Rfc8212PolicyStatus` enum (`UNSPECIFIED`, `UNKNOWN`, `NOT_REQUIRED`,
-    `PRESENT`, `MISSING`) as appended fields 51 and 52. A daemon that predates
-    them leaves `UNSPECIFIED`; `rbgp` renders that and any unrecognized future
-    value as `unknown` rather than as "no requirement", so a new client
-    against an old daemon and an old client against a new one are both safe.
+  - `NeighborState.rfc8212_import_policy` / `.rfc8212_export_policy` carry
+    the new `Rfc8212PolicyStatus` enum (`UNSPECIFIED`, `UNKNOWN`,
+    `NOT_REQUIRED`, `PRESENT`, `MISSING`) as appended fields 51 and 52. A
+    daemon that predates them leaves `UNSPECIFIED`; `rbgp` renders that
+    and any unrecognized future value as `unknown` rather than as "no
+    requirement", so a new client against an old daemon and an old client
+    against a new one are both safe.
   - `rbgp neighbor <addr>` prints an `RFC 8212 Policy` block and `--json`
     gains `rfc8212_import_policy` / `rfc8212_export_policy`.
   - `bgp_rfc8212_missing_import_policy{peer}` and
     `bgp_rfc8212_missing_export_policy{peer}` are 0/1 per direction.
   - `rbgp rib advertised <peer> --explain` attributes a rejection by the
-    reserved chain under the `rfc8212_missing_export_policy` gate code instead
-    of `policy_denied`, and `rbgp policy explain` labels the import side.
+    reserved chain under the `rfc8212_missing_export_policy` gate code
+    instead of `policy_denied`, and `rbgp policy explain` labels the
+    import side.
   - `rbgp doctor` adds `peer.<addr>.rfc8212_policy`: green for
     `not_required` (the compatibility default) and `present`, red for a
     `missing` direction, yellow against a daemon that does not expose the
     status. `/readyz` is deliberately untouched — a peer without operator
-    policy is a configuration state to repair, not a daemon that cannot serve
-    traffic.
+    policy is a configuration state to repair, not a daemon that cannot
+    serve traffic.
 
   The status is read from the chain the peer currently has installed, not
-  re-resolved from the running configuration, so it cannot report `present`
-  over a live deny. `rfc8212_missing_import_policy` and
+  re-resolved from the running configuration, so it cannot report
+  `present` over a live deny. `rfc8212_missing_import_policy` and
   `rfc8212_missing_export_policy` are now reserved policy names: a
-  `[policy.definitions]` entry or `.rpol` policy using either is rejected at
-  load, which is what makes both the status comparison and the explain
+  `[policy.definitions]` entry or `.rpol` policy using either is rejected
+  at load, which is what makes both the status comparison and the explain
   attribution unambiguous.
+
+- **Per-peer outbound unicast prefix limits (ADR-0113).** New
+  `max_prefixes_out_ipv4` / `max_prefixes_out_ipv6` on `[[neighbors]]` and
+  peer groups bound how much of the table one client's export policy can
+  grow its advertised state to. A neighbor value overrides its group, an
+  absent value inherits, and accepted dynamic children inherit their
+  configured group's effective values. Excess net-new prefixes are
+  withheld while the session stays Established — nothing already
+  advertised is withdrawn, no NOTIFICATION is sent, and slots count
+  distinct prefixes, so every Add-Path identity for one NLRI shares one.
+  Only IPv4- and IPv6-unicast are in scope. Edits are live and
+  transactional: adding or lowering a maximum is accepted only when every
+  affected live peer is already at or below the candidate, and an
+  over-limit family rejects the whole edit with the peer, family, current
+  usage, and requested maximum rather than pruning an existing view; a
+  valid raise or removal schedules one coalesced, family-scoped resync.
+  Commit-confirmed transactions may only tighten, because their automatic
+  undo can only loosen. A maximum is a reload-matrix `live` field, so both
+  a `[[neighbors]]` edit and a maxima-only `[peer_groups.*]` edit apply in
+  place without touching a session.
+
+  `rbgp neighbor <addr>` (human and JSON) and the neighbor API report one
+  row per unicast family — usage, optional maximum, optional headroom,
+  blocking state, and the stable reason `outbound_prefix_limit_reached` —
+  and Prometheus exposes `bgp_outbound_prefix_usage`,
+  `bgp_outbound_prefix_limit`, `bgp_outbound_prefix_headroom`,
+  `bgp_outbound_prefix_blocking`, and `bgp_outbound_prefix_blocked_total`,
+  labelled by peer and family only. An episode logs once when it opens and
+  once when recovery proves nothing is still withheld, never per prefix.
+  A committed real-session receipt drives four live sessions and reads the
+  wire at every phase: 96/96 precommitted checks, caps bound on both the
+  shared update-group fanout and the private per-peer path, and no session
+  reset by either limit edit including the peer-group one.
+
+- **`rustbgpd --check --strict`.** `--check` reports a valid-but-risky
+  configuration as a warning and exits 0, so that adding a warning can
+  never break a deployment that meant its configuration — which also
+  means a CI job running `--check` passes a config nobody looked at.
+  `--strict` is the opt-in for gates that cannot accept that: identical
+  output, but any warning exits **1**, the same code `--check` already
+  uses for a config it rejects, since a gate reads both as "this config
+  did not pass". A clean check still exits 0, and `--strict` without
+  `--check` is rejected with exit 2 rather than silently accepted — that
+  invocation would otherwise start a daemon. `--strict` is defined over
+  the whole `--check` warning set, not one warning, so anything `--check`
+  reports in future fails a strict run. `--help` and `rustbgpd(8)` now
+  document the exit-status ladder.
+
+- **Applied-config history and `rbgp config rollback N`,** completing the
+  Junos-style transactional quartet (check / compare / commit confirmed /
+  rollback). Every applied config — transaction applies, gRPC config CRUD,
+  successful SIGHUP reloads, and the boot-time config — is recorded in a
+  bounded on-disk history under `<runtime_state_dir>/config-history/`
+  (last 20 distinct configs, content-hash-deduplicated, timestamped,
+  restart-safe). `rbgp config history` lists index / timestamp / SHA-256 /
+  one-line summary; `rbgp config rollback N` restores entry N through the
+  existing transaction executor — same plan classification, reload-impact
+  and update-group annotations, receipts, and optional
+  `--confirm-id`/`--confirm-timeout` confirmed-commit window (timeout
+  auto-revert and boot revert included). Entry reads verify the content
+  digest embedded in the file name and reject non-regular or corrupt
+  snapshots. Rolling back past the retained history fails cleanly. New
+  `ConfigService.ListConfigHistory` (`sensitive_read`) and
+  `ConfigService.RollbackConfigTransaction` (`operator_only`, same tier as
+  apply) RPCs; history responses carry metadata only, never config
+  documents. A committed receipt exercises the whole area against a real
+  daemon with three real sessions attached, including a SIGKILL inside the
+  confirmation window and an injected persistence failure.
+
+- **`rbgp config import` — bounded structural importer for BIRD 2, FRR,
+  and GoBGP configurations.** Translates the structural subset (local AS,
+  router-id, neighbors, peer groups, address families, hold timers,
+  max-prefix limits) of a BIRD 2, FRR (vtysh running-config), or GoBGP
+  TOML source into a rustbgpd `config.toml` and refuses to guess at
+  policy: BIRD filters, FRR route-maps/prefix-lists, and GoBGP
+  policy-definitions are listed — with source line numbers — in an import
+  report for hand-translation to `.rpol`. Secrets are never imported
+  (MD5/auth presence is flagged instead). Distinct exit codes: 0 clean
+  full translation, 1 error, 2 translated-with-warnings-or-skips, 3
+  nothing translatable; the emitted config for every checked-in fixture is
+  gate-tested against `rustbgpd --check`. The route-server migration
+  cookbook now opens with the mechanical importer → `--check` → shadow
+  trial → `rbgp diff advertised` flow.
+
+- **Minimum accepted hold time and required OPEN families.** Neighbors and
+  peer groups accept `min_hold_time`, which rejects a peer OPEN proposing
+  a lower hold time — including zero — with OPEN Error 2/6; and
+  `required_families`, which rejects an OPEN with RFC 5492 Unsupported
+  Capability (2/7) when any required family is absent from the final
+  negotiated intersection, the notification Data listing only the missing
+  MultiProtocol capabilities in configured order. Both default to unset,
+  preserving RFC 4271 hold-time and RFC 4760 partial-intersection
+  compatibility. M93 proves the required-families rejection against
+  BIRD 2.
+
+- **RFC 9072 extended BGP OPEN Optional Parameters lengths.** OPEN
+  messages keep the RFC 4271 encoding through 255 optional-parameter
+  octets and use the extended aggregate and per-parameter lengths only
+  above that boundary. Receivers accept extended encodings at any length,
+  including zero, while OPEN remains bounded to 4096 bytes. Unknown
+  capabilities inside the Capabilities parameter remain accepted.
+
+- **Live TCP-AO successor selection and fail-closed key deletion.** After
+  an add-only SIGHUP installs the successor everywhere, a later SIGHUP
+  sets only local RNext and commits predecessor deprecation after one
+  generation-relative peer-traffic observation across affected sessions;
+  `awaiting_peer` retries the identical generation on a later SIGHUP, and
+  live selection never deletes an MKT or sets Linux Current. A third
+  immutable generation can then remove only deprecated MKTs that are
+  neither Current nor RNext, preserving the protected owner set, survivor
+  order, key definitions, and selected MKT. Listener deletion precedes
+  queued-child and protected-session reconciliation; ambiguous partial
+  session mutation discards the whole changed cohort; failures retry only
+  the identical generation when the listener remained exact, restored its
+  exact prior inventory, or already reached desired, and a failed
+  prior-inventory restoration requires restart. Key edits/reordering,
+  selected or non-deprecated-key deletion, and protected-owner CRUD remain
+  restart-required. M43 proves the full live add/select/deprecate/delete
+  lifecycle against BIRD while preserving the established session and its
+  received route, including recovery from a crash mid-rotation.
+
+- **Max-prefix capacity is alertable before teardown, and visible per
+  neighbor.** Prometheus and the shipped Grafana overview expose
+  actor-owned usage, finite limits, and headroom for aggregate,
+  IPv4-unicast, and IPv6-unicast scopes; the example alert pack warns on
+  sustained 80% utilization. Neighbor detail exposes the authoritative
+  O(1) aggregate max-prefix-counted NLRI identity count plus unique IPv4-
+  and IPv6-unicast prefix counts, with effective finite limits and
+  remaining headroom through gRPC, human CLI, and JSON. Unlimited and
+  disconnected scopes are absent rather than reporting fake zeroes, and
+  stale session snapshots withhold non-authoritative headroom.
+
+- **Opt-in timed restart after a max-prefix teardown.** Neighbors and peer
+  groups accept a non-zero `max_prefix_restart_seconds`; the default
+  remains an indefinite fail-closed shutdown latch. The peer manager makes
+  one generation-fenced restart attempt after the hold-down, invalidates
+  stale countdowns on config or dynamic-range replacement, and exposes the
+  action, configured duration, and remaining milliseconds through gRPC,
+  CLI, and JSON. `rs-config-render` maps ARouteServer's OpenBGPD-style
+  `restart_after` minutes to checked seconds and records the emitted timer
+  in its render receipt.
+
+- **Negotiated session and Graceful Restart state is visible per
+  neighbor.** Neighbor detail reports the current Established session's
+  negotiated hold time, remote router ID, four-octet-AS result, mutual
+  families, usable peer GR coverage, peer-advertised Restart Time, and
+  locally capped effective retention through gRPC, human CLI, and JSON.
+  Presence distinguishes older daemons, stale queries, down sessions,
+  unsupported GR, locally disabled GR, and active helper state without
+  substituting configured defaults.
+
+- **Peer-advertised Graceful Restart retention can be bounded locally.**
+  Neighbors and peer groups accept `gr_peer_restart_time_max`
+  (default 4095) to cap the RFC 4724 Restart Time used for initial
+  disconnected stale-route retention, without changing the Restart Time
+  rustbgpd advertises in its own OPEN.
+
+- **BFD remote AdminDown is a distinct state.** `rbgp bfd`, the BFD API,
+  and `rbgp doctor` report a peer that has administratively disabled its
+  own BFD session separately from a session that is failing, so the
+  operator is pointed at the far end's configuration rather than at a
+  transport fault.
+
+- **RFC 8326 graceful-shutdown advertise intent is visible per neighbor.**
+  `rbgp neighbor <peer>` reports the local desired state as enabled,
+  disabled, or unknown when connected to an older daemon; JSON and
+  `NeighborState` field 37 preserve the same presence-aware state. This is
+  advertisement intent, not evidence of downstream receipt or
+  convergence.
+
+- **Per-disposition malformed-UPDATE counters, with an RFC 7606 interop
+  proof.** New `bgp_update_malformed_total{peer, disposition}` counter
+  (`disposition` ∈ `attribute_discard` / `treat_as_withdraw` /
+  `session_reset`) increments once per malformed UPDATE at the point the
+  RFC 7606 disposition is decided, on every handling path — including the
+  §5.2 no-reachable-NLRI session-reset escalation and decode-level resets.
+  The M91 interop lab drives a raw speaker injecting one malformed UPDATE
+  per disposition class and asserts session survival, RIB contents, the
+  counter, and the §6 DEBUG full-message capture end to end.
+
+- **Exact per-candidate export explain for unicast Add-Path.**
+  `ExplainAdvertisedRoute` and `rbgp rib advertised --explain` can select
+  a presence-bearing Adj-RIB-In source peer/path ID (including ID 0) for a
+  peer with negotiated IPv4/IPv6 unicast Add-Path send. The response keeps
+  that inbound identity separate from the independently assigned compact
+  outbound rank, explains policy/cap/OTC/exact-wire denials, and diffs the
+  exact rank against Adj-RIB-Out. Selector absence preserves the existing
+  winner view.
+
+- **`rbgp neighbor A --compare B`** explains live update-group sharing
+  with stable, ID-free reasons.
+
+- **Birdwatcher adapter serves the Alice-LG noexport views.**
+  `GET /routes/noexport/{id}` completes the adapter's looking-glass
+  contract: Loc-RIB best routes not advertised to the peer
+  (`RibService.ListBestRoutes` minus `ListAdvertisedRoutes`), each
+  explained by a live-ladder dry run (`ExplainAdvertisedRoute`) and tagged
+  with a synthesized `64496:65521:<gate id>` noexport-reason large
+  community plus human-readable `noexport_reason` /
+  `noexport_reason_detail` keys. The view covers every export-ladder
+  suppression (split horizon, RFC 4456 reflection, family, RFC 9494 LLGR,
+  RFC 5291 ORF, RFC 4684 RT membership, export policy), is prefix-granular,
+  and serves an empty view for peers with no live session. All backing
+  RPCs are `sensitive_read`-tier — no authorization change for existing
+  adapter deployments.
+
+- **Route-safety and slow-peer dashboards with actionable alerts.** The
+  shipped Grafana overview adds exact-export rejection and
+  malformed-UPDATE disposition rates, raw step-rendered selection-deferral
+  state, timeout/ledger-overflow rates, coalesced outbound queues,
+  slow-peer state, discrete update-group membership, export-policy
+  transition state and duration, actor-poll latency, and accepted-policy
+  age, each preserving its metric's native labels. Prometheus rules warn
+  on increases in the failure counters, on a peer that remains slow for
+  five minutes, and on actor polls above the exact 200 ms histogram
+  boundary; structural dashboard and promtool gates protect both. The
+  daemon materializes the bounded counter label sets when sessions and
+  selection-deferral families are created, so ordinary scrape history can
+  establish a zero baseline before producers emit failures.
+
+- **Official ClusterFuzzLite integration for all 17 cargo-fuzz targets.**
+  The address-sanitized code-change workflow is manual-dispatch only; the
+  existing cargo-fuzz workflow remains the sole nightly campaign. The
+  ordinary PR/push CI check and the shared OSS-Fuzz / ClusterFuzzLite
+  build path enforce the exact manifest/source inventory, whose mutation
+  tests remove every manifest and source target in turn and inject empty,
+  failed, and redirected enumeration, an unexpected fuzz crate, and a
+  cross-crate target-name collision. A 40m42s commissioning run rejected
+  putting this work on the PR critical path. Batch fuzzing, pruning,
+  storage, and coverage are not part of this integration.
 
 ### Changed
 
-- **`rustbgpd --check` warns about eBGP neighbors that resolve no policy, and
-  no longer summarizes a flagged config as `config OK`.** `--check` is the last
-  gate before a config reaches a production box, and it previously said nothing
-  about policy — so a config whose eBGP sessions were wide open in both
-  directions passed as cleanly as one that was fully filtered. It now names
-  each such neighbor and the direction(s) it is missing, framed on stderr, and
-  says which consequence applies: unfiltered in that direction with
-  `[global] ebgp_requires_policy` off, or carrying no routes in that direction
-  with it on. The exit code stays 0 — a permit-all route server is a legitimate
-  configuration and rejecting it would break deployments that mean it — but a
-  check with warnings now summarizes as
-  `config VALID, <n> WARNINGS — NOT a clean check: <path>` so the summary line
-  alone cannot read as a clean result. A check with nothing to flag still
-  prints `config OK: <path>`.
-
-- **Every shipped starter config is policy-complete and passes
-  `rustbgpd --check --strict`.** The warning above immediately found that our
-  own starters were the unpoliced shape it describes: eight of eleven failed a
-  strict check, including both `--init-config` profiles, `examples/minimal`,
-  the Docker Compose quick-start, and the IXP route server. A starter that
-  trips our own safety warning on a first run teaches the operator running it
-  that the warning is noise, so each one now resolves an explicit import and
-  export chain for every eBGP neighbor. Permit-all postures stay permit-all —
-  the `lab` profile, `examples/minimal`, the compose quick-start, the route
-  server's transparent export (RFC 7947), the collector's import, and the
-  mitigation injector's export are all unfiltered by design — but each is now
-  written as a named chain whose comment states that it was chosen and what it
-  is wrong for, rather than being permit-all by omission, which is
-  indistinguishable from having forgotten. The `edge` profile and
-  `examples/linux-edge-fib` gain a default-deny export chain to fill in; the
-  latter attaches both directions to its `transit` peer group, so a new
-  session inherits them. Each of these also sets
-  `[global] ebgp_requires_policy = true`, so deleting a shipped chain fails
-  closed instead of reverting to permit-all; it is startup-only, which each
-  config's comment says where an operator would look. The iBGP-only starters
-  (`hosting-provider`, `rr-evpn-fabric`, `evpn-vtep-leaf`) are unchanged —
-  RFC 8212 scopes the requirement to eBGP. A new workspace test enumerates the
-  profiles from the daemon's own profile list and the examples from the
-  `examples/` tree, then asserts a clean `--check --strict` for each, so a
-  starter added later is covered without editing the test. The release
-  checklist now requires that command instead of documenting the warnings.
-
-- **`rbgp config import` generates configs that fail closed.** The importer
-  never translates policy, so every config it emitted came up permit-all on
-  every eBGP session it declared. The generated `[global]` now sets
-  `ebgp_requires_policy = true`, which makes each eBGP direction with no
-  explicit policy carry no routes until one is configured, instead of silently
-  passing everything. Because this is a runtime behavior the source config did
-  not ask for, the import report states that it was added, why, what it does to
-  the sessions below, and that it is startup-only; the emitted config carries
-  the same explanation as a comment, and deleting the line restores permit-all.
-- **BREAKING (metrics): the `peer` label is now the bare neighbor address on
-  every metric family.** Metric labels are a public API, and this one had two
-  incompatible formats — sometimes within a single family. Session-owned
-  series labelled `peer` with the transport endpoint (`192.0.2.1:179`,
-  `[2001:db8::1]:179`) while RIB-, policy-, BFD-, and BMP-owned series used the
-  bare configured address (`192.0.2.1`, `2001:db8::1`). `bgp_policy_routes_total`
-  carried both: its `direction="import"` series came from the session and its
-  `direction="export"` series from the RIB. The consequence was silent, because
-  Prometheus reports no error for a query that matches nothing:
-  `sum by (peer) (bgp_policy_routes_total)` returned two series per peer, and
-  any `by (peer)` join across the two groups returned empty — so an alert built
-  that way never fired.
+- **BREAKING (metrics): the `peer` label is now the bare neighbor address
+  on every metric family.** Metric labels are a public API, and this one
+  had two incompatible formats — sometimes within a single family.
+  Session-owned series labelled `peer` with the transport endpoint
+  (`192.0.2.1:179`, `[2001:db8::1]:179`) while RIB-, policy-, BFD-, and
+  BMP-owned series used the bare configured address (`192.0.2.1`,
+  `2001:db8::1`). `bgp_policy_routes_total` carried both: its
+  `direction="import"` series came from the session and its
+  `direction="export"` series from the RIB. The consequence was silent,
+  because Prometheus reports no error for a query that matches nothing:
+  `sum by (peer) (bgp_policy_routes_total)` returned two series per peer,
+  and any `by (peer)` join across the two groups returned empty — so an
+  alert built that way never fired.
 
   Every emission site now uses the bare address, produced by one helper
-  (`rustbgpd_telemetry::peer_label`). The port carried nothing joinable: it was
-  the *configured* endpoint, not the observed source port, and neighbor
-  identity is already unique by address (configuration validation rejects the
-  same IPv6 link-local address on two interfaces), so no peer needed it to be
-  told apart. The structured-log `peer` field on session events follows the
-  same change, and now matches the rest of the daemon's logs.
+  (`rustbgpd_telemetry::peer_label`). The port carried nothing joinable:
+  it was the *configured* endpoint, not the observed source port, and
+  neighbor identity is already unique by address (configuration validation
+  rejects the same IPv6 link-local address on two interfaces), so no peer
+  needed it to be told apart. The structured-log `peer` field on session
+  events follows the same change, and now matches the rest of the daemon's
+  logs.
 
   **Series that changed format** — all previously `addr:port`, now bare
   address: `bgp_session_state_transitions_total`, `bgp_session_flaps_total`,
@@ -219,559 +460,527 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `bgp_max_prefix_exceeded_total`, `bgp_update_malformed_total`,
   `bgp_otc_routes_blocked_total`, `bgp_role_mismatch_total`,
   `bgp_as_path_loop_detected_total`, `bgp_bgpls_nlri_discarded_total`,
-  `bgp_rr_loop_detected_total`,
-  `bgp_inbound_rib_backpressure_total`,
+  `bgp_rr_loop_detected_total`, `bgp_inbound_rib_backpressure_total`,
   `bgp_hold_timer_rearmed_pending_input_total`,
   `bgp_send_hold_expirations_total`, `bmp_source_drops_total`, and the
   `direction="import"` half of `bgp_policy_routes_total`. Every other
   `peer`-labelled family already used the bare address and is unchanged.
 
-  **What operator PromQL needs:** drop any port-stripping `label_replace` from
-  cross-family joins, and rewrite selectors that pinned an endpoint —
+  **What operator PromQL needs:** drop any port-stripping `label_replace`
+  from cross-family joins, and rewrite selectors that pinned an endpoint —
   `bgp_peer_slow{peer="192.0.2.1:179"}` becomes
-  `bgp_peer_slow{peer="192.0.2.1"}`, and `peer=~"192\\.0\\.2\\.1:.*"` becomes an
-  exact match. Recording rules and dashboards keyed on the old values see the
-  old series go stale and new ones appear; counters restart from zero, which
-  `rate()` and `increase()` handle as an ordinary reset. The shipped dashboard
-  and alert pack are updated: the dashboard's two peer selectors
-  (`$peer` endpoint / `$neighbor` address) collapse into one `$peer`, which
-  also fixes the RIB, GR, and BFD panels that returned no data whenever a
-  specific peer was selected, and `BgpPeerAdjRibInEmpty` joins directly instead
-  of rewriting the label. `rbgp doctor`'s slow-peer remediation now prints a
-  selector that resolves. No transitional dual-emit is provided: emitting both
-  formats would double the per-peer series count of 26 families for the whole
-  transition window, and it would preserve the exact failure being fixed —
-  `sum by (peer)` would still return two series per peer, so a dashboard that
-  looked correct during the overlap would break at removal instead of now.
+  `bgp_peer_slow{peer="192.0.2.1"}`, and `peer=~"192\\.0\\.2\\.1:.*"`
+  becomes an exact match. Recording rules and dashboards keyed on the old
+  values see the old series go stale and new ones appear; counters restart
+  from zero, which `rate()` and `increase()` handle as an ordinary reset.
+  The shipped dashboard and alert pack are updated: the dashboard's two
+  peer selectors (`$peer` endpoint / `$neighbor` address) collapse into one
+  `$peer`, which also fixes the RIB, GR, and BFD panels that returned no
+  data whenever a specific peer was selected, and `BgpPeerAdjRibInEmpty`
+  joins directly instead of rewriting the label. `rbgp doctor`'s slow-peer
+  remediation now prints a selector that resolves. No transitional
+  dual-emit is provided: emitting both formats would double the per-peer
+  series count of 26 families for the whole transition window, and it
+  would preserve the exact failure being fixed — `sum by (peer)` would
+  still return two series per peer, so a dashboard that looked correct
+  during the overlap would break at removal instead of now.
+
+- **`rustbgpd --check` no longer summarizes a flagged config as
+  `config OK`, and reports every warning it raises.** `--check` is the
+  last gate before a config reaches a production box, and three classes of
+  finding were escaping it.
+
+  It previously said nothing about policy, so a config whose eBGP sessions
+  were wide open in both directions passed as cleanly as one that was
+  fully filtered. It now names each eBGP neighbor that resolves no policy
+  and the direction(s) it is missing, framed on stderr, and says which
+  consequence applies: unfiltered in that direction with
+  `[global] ebgp_requires_policy` off, or carrying no routes in that
+  direction with it on.
+
+  `Config::validate` also emitted its non-fatal diagnostics through
+  `tracing`, but `Config::load` runs before `init_logging` on every path —
+  `--check` returns long before it — so no subscriber was installed and
+  those records were written nowhere. The RFC 9107 warning for an
+  `orr_vantage` with no neighbor negotiating `linkstate` (a topology feed
+  that can never fill, leaving every vantage permanently unresolved) was
+  invisible on every path except a SIGHUP reload. Validation diagnostics
+  are now returned rather than logged, so they join the counted warning
+  set and are logged once at daemon startup where a subscriber exists.
+
+  `security.grpc.enforcement = "legacy"` fired only at daemon startup, so
+  a config gate could pass a configuration whose management surface
+  enforces no per-method tier authorization: every authenticated client of
+  a `read_write` listener may call every method up to the listener's
+  `max_tier` cap, including the `operator_only` methods that reconfigure
+  the daemon, and `[security.grpc.roles]` entries deny nothing. Tier
+  enforcement has been the default since v0.24.0 and becomes mandatory in
+  a future release that will reject the config, so the warning now states
+  the migration — give every listener a role identity, map each principal
+  to a role, then set `enforcement = "tier"` — rather than only reporting
+  the setting.
+
+  A check with warnings now summarizes as
+  `config VALID, <n> WARNINGS — NOT a clean check: <path>`, so the summary
+  line alone cannot read as a clean result. A check with nothing to flag
+  still prints `config OK: <path>`. Plain `--check` still exits 0 — a
+  permit-all route server is a legitimate configuration and rejecting it
+  would break deployments that mean it — and `--check --strict` exits 1.
+  The `ebgp_requires_policy` partial-enforcement notice deliberately stays
+  a startup-only record: it reports what this release has not finished
+  building, not a defect in the operator's config.
+
+- **Every shipped starter config is policy-complete and passes
+  `rustbgpd --check --strict`.** The warning above immediately found that
+  our own starters were the unpoliced shape it describes: eight of eleven
+  failed a strict check, including both `--init-config` profiles,
+  `examples/minimal`, the Docker Compose quick-start, and the IXP route
+  server. A starter that trips our own safety warning on a first run
+  teaches the operator running it that the warning is noise, so each one
+  now resolves an explicit import and export chain for every eBGP
+  neighbor. Permit-all postures stay permit-all — the `lab` profile,
+  `examples/minimal`, the compose quick-start, the route server's
+  transparent export (RFC 7947), the collector's import, and the
+  mitigation injector's export are all unfiltered by design — but each is
+  now written as a named chain whose comment states that it was chosen and
+  what it is wrong for, rather than being permit-all by omission, which is
+  indistinguishable from having forgotten. The `edge` profile and
+  `examples/linux-edge-fib` gain a default-deny export chain to fill in;
+  the latter attaches both directions to its `transit` peer group, so a
+  new session inherits them. Each of these also sets
+  `[global] ebgp_requires_policy = true`, so deleting a shipped chain fails
+  closed instead of reverting to permit-all; it is startup-only, which each
+  config's comment says where an operator would look. The iBGP-only
+  starters (`hosting-provider`, `rr-evpn-fabric`, `evpn-vtep-leaf`) are
+  unchanged — RFC 8212 scopes the requirement to eBGP. A workspace test
+  enumerates the profiles from the daemon's own profile list and the
+  examples from the `examples/` tree, then asserts a clean
+  `--check --strict` for each, so a starter added later is covered without
+  editing the test. The release checklist now requires that command
+  instead of documenting the warnings.
+
+  Independently, every starter profile now ships an explicit tier-authorized
+  local control socket — a `[global.telemetry.grpc_uds]` listener with a
+  stable `principal`, `enforcement = "tier"`, and a matching
+  `[security.grpc.roles]` entry — so a first run is authorized the way the
+  documentation describes rather than through legacy enforcement.
+
+- **`rbgp config import` generates configs that fail closed.** The
+  importer never translates policy, so every config it emitted came up
+  permit-all on every eBGP session it declared. The generated `[global]`
+  now sets `ebgp_requires_policy = true`, which makes each eBGP direction
+  with no explicit policy carry no routes until one is configured, instead
+  of silently passing everything. Because this is a runtime behavior the
+  source config did not ask for, the import report states that it was
+  added, why, what it does to the sessions below, and that it is
+  startup-only; the emitted config carries the same explanation as a
+  comment, and deleting the line restores permit-all.
+
+- **RFC 6793 legacy-AS migration is lossless end to end.** Sessions
+  without capability 65 now normalize received type 2/17 paths and
+  type 7/18 aggregators before loop detection, policy, and RIB
+  processing, then derive the required compatibility attributes in the
+  shared classic/MP export encoder. Modern peers never receive stale
+  migration shadows; exact-export sizing includes generated AS4 bytes;
+  malformed compatibility attributes retain RFC 7606 fault isolation. MRT,
+  Loc-RIB BMP, and from-BMP ribsnap serialization preserve the canonical
+  aggregator, while the pre-policy BMP tap remains byte-identical. M94
+  proves the legacy IPv4 session against a pinned ExaBGP 5.0.9 source and
+  an independent old-speaker sink, including reconstructed loop rejection,
+  exact path/aggregator wire pairs, withdrawal, and session continuity.
+
+- **RFC 9774: AS_SET and AS_CONFED_SET are prohibited.** A prohibited
+  segment type in a received `AS_PATH` or `AS4_PATH` is rejected on decode
+  with the RFC 7606 treat-as-withdraw disposition — the UPDATE's routes
+  are withdrawn and the session stays Established — and an `AS_PATH`
+  containing an AS_SET refuses to encode.
+
+- **RFC 7607 / RFC 6286 OPEN identity validation.** An OPEN claiming AS 0
+  is rejected with Bad Peer AS in either representation (`my_as` or the
+  four-octet capability), checked before the dynamic-neighbor
+  accept-any wildcard; and an OPEN whose BGP Identifier equals the local
+  router ID is rejected with Bad BGP Identifier for iBGP only, per
+  RFC 6286 §2.2.
 
 - **Unknown FlowSpec component types keep their hard rejection, now with a
-  conformance-citing diagnostic.** *No decode-acceptance change: input that
-  errored before still errors, and input that parsed before still parses.*
-  `rustbgpd-wire` embedders tracking the 0.16.0 acceptance changes can ignore
-  this entry — only the `DecodeError::MalformedField` detail string and the
-  documentation changed. Component types outside 1–13 remain a malformed
-  NLRI per RFC 8955 §4.2, dispositioned per RFC 7606 §7.11. Skip-unknown was
+  conformance-citing diagnostic.** *No decode-acceptance change: input
+  that errored before still errors, and input that parsed before still
+  parses* — `rustbgpd-wire` embedders tracking the 0.16.0 acceptance
+  changes can ignore this entry, since only the
+  `DecodeError::MalformedField` detail string and the documentation
+  changed. Component types outside 1–13 remain a malformed NLRI per
+  RFC 8955 §4.2, dispositioned per RFC 7606 §7.11. Skip-unknown was
   re-examined and is not implementable for this encoding: only the rule is
   length-prefixed, each component's value grammar is selected by its type
   code, so an unrecognized component cannot be measured or stepped over
   without misparsing the remainder of the rule — and silently dropping one
   would widen the rule's match set past what the sender specified.
-  `KNOWN_ISSUES.md` previously described the rejection as a forward-
-  compatibility defect to be fixed; it now records it as required behavior.
+  `KNOWN_ISSUES.md` previously described the rejection as a
+  forward-compatibility defect to be fixed; it now records it as required
+  behavior.
 
-- **Live edits of `max_prefix_restart_seconds` reschedule the pending
-  automatic restart instead of cancelling it.** While a max-prefix hold-down
-  countdown is armed, changing the duration re-arms the single pending attempt
-  to now + the new value (the superseded deadline never fires); previously the
-  edit silently converted timed recovery into an indefinite latch requiring
-  manual enable. Removing the duration still cancels the countdown, adding one
-  to an already-latched peer still does not retroactively restart it, and
-  peer-group edits inherited by dynamic peers follow the same rules.
+- **RFC-correct RT/RO policy action encoding.** TOML
+  `set_community_add` / `set_community_remove` and `.rpol` `add` /
+  `remove` actions now share the same typed encoder: numeric ASNs through
+  65535 use RFC 4360 type `0x00`, larger ASNs use RFC 5668 type `0x02`,
+  and dotted IPv4 administrators preserve their spelling and use RFC 4360
+  type `0x01`. The narrow AS4/IPv4 forms reject local administrators above
+  65535 with an actionable config error.
+
+- **RFC 8092 Large Community duplicate normalization.** Received
+  attributes silently retain only the first occurrence of each value, and
+  the encoder applies the same stable deduplication so locally constructed
+  API or policy attributes cannot transmit duplicates. Distinct-value
+  order, flags, length-encoding rules, and malformed-length behavior
+  remain unchanged; the emitted length is recomputed from the retained
+  values.
+
+- **RFC 10005 Link Bandwidth receiver subset.** The typed wire accessor
+  recognizes exact transitive and non-transitive communities; weighting
+  selects the lowest finite nonnegative value without altering raw
+  reflection. Zero stays valid; construction stays type `0x40`.
+
+- **The shipped Docker quick-start supports the workflow it documents.**
+  `examples/docker-compose` mounted the config read-only, so every
+  mutating command failed and the README's "no restarts to add peers,
+  change policy, or inject routes" was false out of the box. The config is
+  now shipped as a template and copied into the daemon's writable state
+  volume on first start, following the pattern the interop labs already
+  use; runtime edits survive `docker compose restart` and `down -v`
+  reseeds from the template. The standalone `docker run`, containerlab,
+  and deployment examples carry the same correction, and
+  `docs/CONFIGURATION.md` states the requirement directly: the config
+  file's *directory* must be writable by the daemon for runtime mutation,
+  because persistence writes `<config>.tmp` alongside it and renames.
+
+- **Library crates: `rustbgpd-wire` 0.16.0 and `rustbgpd-fsm` 0.3.1.** The
+  wire API surface is additive, but **decode acceptance changed in six
+  places** — embedders should diff exactly this list:
+
+  - **Unsupported OPEN Optional Parameter types now error** with OPEN
+    Message Error / Unsupported Optional Parameter (2/4) instead of being
+    skipped. Unknown capabilities *inside* the Capabilities parameter
+    remain accepted.
+  - **BGP-LS attribute 29 enforces its optional non-transitive flags and
+    contained TLV framing.** Malformed contained framing discards the
+    complete attribute (RFC 9552 whole-attribute discard) while preserving
+    the BGP-LS NLRI and the session; valid unknown TLVs remain byte-stable
+    for reflection.
+  - **AGGREGATOR decodes as a typed `PathAttribute::Aggregator` value**
+    instead of falling through to `PathAttribute::Unknown`. Code matching
+    on `Unknown` for type code 7 no longer sees it.
+  - **OPEN and KEEPALIVE over 4096 bytes are rejected** at header peek,
+    before a framing caller buffers the declared body, regardless of a
+    negotiated RFC 8654 extended message length.
+  - **AS_SET and AS_CONFED_SET are rejected in a received `AS_PATH` or
+    `AS4_PATH`** per RFC 9774, with the RFC 7606 treat-as-withdraw
+    disposition. Paths that decoded before now withdraw their routes.
+  - **`ExtendedCommunity::as_link_bandwidth()` matches exact types only.**
+    Communities it previously accepted by a looser match no longer resolve
+    as link bandwidth.
+
+  `rustbgpd-fsm` 0.3.1 is purely additive: `PeerConfig` gains
+  `min_hold_time: Option<u16>` and `required_families: Vec<(Afi, Safi)>`,
+  and `PeerConfig` is `#[non_exhaustive]`, so external construction through
+  its builder is unaffected.
 
 ### Fixed
 
-- **`--check` reports the warnings raised during config validation, which were
-  previously discarded.** `Config::validate` emitted its non-fatal diagnostics
-  through `tracing`, but `Config::load` runs before `init_logging` on every
-  path — `--check` returns long before it, and daemon startup only reaches it
-  later. No subscriber was installed, so those records were written nowhere:
-  the RFC 9107 warning for an `orr_vantage` with no neighbor negotiating
-  `linkstate` — a topology feed that can never fill, leaving every vantage
-  permanently unresolved — was invisible on every path except a SIGHUP reload.
-  It also silently capped `--strict`, because a warning that never surfaces
-  cannot fail a gate however severe it is. Validation diagnostics are now
-  returned rather than logged, so they join the one counted `--check` warning
-  set: framed on stderr, summed into the reported total, failing `--check
-  --strict`, and logged once at daemon startup where a subscriber exists.
+- **A rejected runtime mutation no longer causes any externally visible
+  change.** When config persistence failed — an unwritable config
+  directory, a read-only mount, a full filesystem — every persisted
+  mutating RPC had already applied its runtime change and then tried to
+  undo it by applying the inverse. `rbgp neighbor <addr> delete` returned
+  `FAILED_PRECONDITION`, which reads as "nothing happened", while the BGP
+  session had in fact been torn down and a *different* session
+  re-established in its place: new identity, uptime back to zero,
+  cumulative counters back to zero, metric series reaped and restarted,
+  and `Flaps` still reading 0 so the event was invisible in the operator's
+  own flap accounting. Any `rate()` or `increase()` spanning the window
+  was silently wrong. The same apply-then-compensate ordering affected
+  `neighbor add`, both dynamic-neighbor RPCs, all twelve policy and
+  neighbor-set / policy-chain mutators, and the peer-group and membership
+  mutators, where it put a Route Refresh and an Adj-RIB-Out rewrite on the
+  wire twice — once forward, once as "rollback" — or bounced every
+  inheriting member's session twice, for a request that was rejected.
 
-- **`security.grpc.enforcement = "legacy"` is reported by `--check`.** It fired
-  only at daemon startup, so a config gate could pass a configuration whose
-  management surface enforces no per-method tier authorization: every
-  authenticated client of a `read_write` listener may call every method up to
-  the listener's `max_tier` cap, including the `operator_only` methods that
-  reconfigure the daemon, and `[security.grpc.roles]` entries deny nothing.
-  Tier enforcement has been the default since v0.24.0 and becomes mandatory,
-  so the warning now states the migration — give every listener a role
-  identity, map each principal to a role, then set `enforcement = "tier"` —
-  rather than only reporting the setting. Plain `--check` still exits 0;
-  `--check --strict` exits 1. The `ebgp_requires_policy` partial-enforcement
-  notice deliberately stays a startup-only record: it reports what this release
-  has not finished building, not a defect in the operator's config.
+  Persistence is now a two-phase reservation shared by all of them: the
+  candidate config is serialized and durably staged next to the config
+  file *before* any runtime state is touched, the runtime change is
+  applied only once that succeeded, and the staged write is then published
+  with a rename. A staging failure is reported while the sessions, their
+  counters, and their metric series are still untouched, and an apply
+  failure discards the staged write instead of leaving it on disk.
+  `FAILED_PRECONDITION` from a mutating RPC now means what it says: no
+  externally visible mutation. Rejections that are simply bad requests keep
+  their own status codes rather than being reported as persistence faults.
+  The ADR-0076 config-transaction executor and FIB-table CRUD keep
+  single-phase persistence — each owns a rollback that restores exact prior
+  state and already reports an ambiguous outcome when it cannot.
 
-- **The BGP listener sets `SO_REUSEADDR`, so an ordinary restart under traffic
-  no longer fails `EADDRINUSE`.** The listener socket is built through
-  `socket2`, which does not apply the `SO_REUSEADDR` that `std`/`mio` set for
-  the gRPC and metrics listeners. The daemon is normally the active closer at
-  shutdown, so on every restart with sessions up a connection the previous
-  generation accepted still holds the listen port in `FIN_WAIT`/`TIME_WAIT` —
-  and the next generation's bind was rejected. `SO_REUSEADDR` is set before
-  `bind`, ahead of the TCP-AO listener MKT installation, which keeps its
-  bind→install→listen ordering. `SO_REUSEPORT` is deliberately not used: it
-  permits concurrent binds, which would let two daemon generations serve the
-  listen port at once. Because Linux requires the option on both endpoints, the
-  first restart of a daemon whose previous generation predates this fix can
-  still be rejected; every restart after that is clean.
+- **The BGP listener sets `SO_REUSEADDR`, and a bind failure exits 1.**
+  The listener socket is built through `socket2`, which does not apply the
+  `SO_REUSEADDR` that `std`/`mio` set for the gRPC and metrics listeners.
+  The daemon is normally the active closer at shutdown, so on every
+  restart with sessions up a connection the previous generation accepted
+  still holds the listen port in `FIN_WAIT`/`TIME_WAIT` — and the next
+  generation's bind was rejected with `EADDRINUSE`. `SO_REUSEADDR` is set
+  before `bind`, ahead of the TCP-AO listener MKT installation, which keeps
+  its bind→install→listen ordering. `SO_REUSEPORT` is deliberately not
+  used: it permits concurrent binds, which would let two daemon
+  generations serve the listen port at once. Because Linux requires the
+  option on both endpoints, the first restart of a daemon whose previous
+  generation predates this fix can still be rejected; every restart after
+  that is clean.
 
-- **A BGP listener bind failure now exits 1 instead of leaving a live daemon
-  that accepts no sessions.** The daemon previously marked itself not-ready and
-  kept serving gRPC. That state had no recovery path — `listen_port` is
-  mandatory, the listener is never rebound without a restart, and the only
-  surface reporting the fault was `/readyz`, which exists only when
-  `prometheus_addr` is configured — so the process parked with its core
-  function dead while its management plane looked healthy. Exit 1 matches the
-  code already used for an unexpected gRPC server exit and for a bind failure
-  with TCP-AO peers configured, so supervisors with `Restart=on-failure` retry;
-  the retry also clears a transient bind failure without an operator, and a
-  permanent one repeats the bind error in the journal. `rbgp doctor` reports
-  the cause (port in use, missing `CAP_NET_BIND_SERVICE`) against the down
-  daemon through its existing `bgp.listener` check.
+  A bind failure that does happen now exits 1 instead of leaving a live
+  daemon that accepts no sessions. The daemon previously marked itself
+  not-ready and kept serving gRPC — a state with no recovery path, since
+  `listen_port` is mandatory, the listener is never rebound without a
+  restart, and the only surface reporting the fault was `/readyz`, which
+  exists only when `prometheus_addr` is configured. The process parked
+  with its core function dead while its management plane looked healthy.
+  Exit 1 matches the code already used for an unexpected gRPC server exit
+  and for a bind failure with TCP-AO peers configured, so supervisors with
+  `Restart=on-failure` retry; the retry also clears a transient bind
+  failure without an operator, and a permanent one repeats the bind error
+  in the journal. `rbgp doctor` reports the cause (port in use, missing
+  `CAP_NET_BIND_SERVICE`) against the down daemon through its existing
+  `bgp.listener` check.
+
+- **The initial table dump now evaluates export policy with the peer's
+  peer-group.** The session staged its peer-group policy context *after*
+  the `PeerUp` registration, but `PeerUp` builds the initial Adj-RIB-Out
+  synchronously — so the first full-table dump to a newly established peer
+  was evaluated with no peer-group, and any export rule matching on
+  peer-group began applying only from the next update. On a route server
+  with group-scoped export filtering this advertised routes the operator's
+  policy intends to deny, at every session establishment and every
+  re-establishment. The context is now staged before `PeerUp`, alongside
+  the RFC 9234 role, RFC 7947 control-community, exact-encoder, and
+  RFC 4724 contexts. **This is a wire-visible change to the initial
+  dump:** an upgraded daemon's first dump to a group-scoped peer may now
+  be correctly filtered, or otherwise transformed by group-matched policy
+  actions, where it previously was not. Peers whose export policy does not
+  match on peer-group are unaffected.
+
+- **`bgp_rib_adj_out_prefixes` no longer reads stale-nonzero through a
+  graceful-restart hold window.** Entering GR tears down the peer's
+  outbound registration and its Adj-RIB-Out along with it, but only the
+  `PeerDown` teardown zeroed the seven per-family gauge series; the GR
+  down path left them advertising the departed session's counts for the
+  whole restart timer. The reset moved into the shared outbound-teardown
+  helper, so both paths — plus collision failback and
+  replacement-`PeerUp`, which empty the same table — now zero it where the
+  table is actually removed. RFC 4724 retention is an Adj-RIB-In property:
+  `bgp_rib_prefixes`, `bgp_gr_active_peers`, and `bgp_gr_stale_routes`
+  remain the series that stay nonzero for a peer expected back, and
+  `bgp_rib_outbound_registered_peers` already decremented at GR entry.
+  **Operator-visible for dashboards and alerts:** the
+  `Adj-RIB-Out prefixes per peer` panel, or any rule that read the old
+  nonzero plateau during a restart, now sees zero until the peer returns
+  and its table is rebuilt.
+
+- **Hot-applicable peer-group edits no longer tear down every inheriting
+  session.** `apply_peer_group_change` reshaped (delete + re-add) the
+  group's static members for *any* change, so raising a group-level
+  maximum bounced every client that inherits from it — while the identical
+  neighbor-level edit hot-applied in place. A peer-group change's changed
+  fields are now partitioned by reload-matrix impact class the way
+  neighbor changes already were: a change set whose every field is `live`
+  is applied to each member in place, with no session reset, and a set
+  that mixes in any session-reset, restart-required, or unclassified field
+  keeps the ADR-0081 reshape path. The in-place path carries the same
+  atomicity contract — every member's next config is resolved and its live
+  prior captured before any peer is touched, a mid-cohort failure restores
+  the earlier members in reverse order and reports a compound error naming
+  any it could not, and the stored group definition advances only after
+  the whole cohort succeeded. Dynamic inheritors are part of that cohort
+  and pick the new values up without waiting for a reconnect. For a route
+  server, where clients inherit from a group, a group-level limit raise is
+  now flap-free during exactly the incident the limit exists to contain.
+
+- **Live edits of `max_prefix_restart_seconds` reschedule the pending
+  automatic restart instead of cancelling it.** While a max-prefix
+  hold-down countdown is armed, changing the duration re-arms the single
+  pending attempt to now + the new value (the superseded deadline never
+  fires); previously the edit silently converted timed recovery into an
+  indefinite latch requiring manual enable. Removing the duration still
+  cancels the countdown, adding one to an already-latched peer still does
+  not retroactively restart it, and peer-group edits inherited by dynamic
+  peers follow the same rules.
+
+- **The daemon exits non-zero when shutdown is caused by unexpected gRPC
+  server termination.** The coordinated teardown (NOTIFICATIONs, GR
+  marker, checkpoints) still runs, but the process now exits 1 so
+  supervisors with `Restart=on-failure` restart the daemon instead of
+  treating the component failure as a clean stop. Operator-initiated
+  shutdowns (SIGINT/SIGTERM, Shutdown RPC) still exit 0.
+
+- **Configured BFD fails closed when its sockets cannot open.** A BFD
+  runtime that could not start — including on a non-Linux host — left the
+  daemon serving BFD-configured peers with no liveness detection behind
+  them. Startup now aborts with the reason instead.
+
 - **A policy rollback no longer drops retry intent when the forward Route
-  Refresh was partially delivered.** Families are requested sequentially, so a
-  forward refresh can have IPv4 accepted before IPv6 fails, and a reply timeout
-  or dropped reply is ambiguous in both directions — Adj-RIB-In may already sit
-  on the candidate policy. The rollback treated any incomplete forward as
-  "nothing moved" and restored the prior `pending_refresh`, so if its own
-  refresh back also failed the peer was left with real unfinished convergence
-  and no armed retry. The forward now reports whether delivery began, and the
-  rollback re-arms in that case. A forward that failed *before* any refresh was
-  attempted still restores the prior state exactly: after a fully unwound
-  rollback the retry is structural, because the configuration never advanced,
-  and arming the flag would make an unrelated later edit refresh the restored
-  policy.
+  Refresh was partially delivered.** Families are requested sequentially,
+  so a forward refresh can have IPv4 accepted before IPv6 fails, and a
+  reply timeout or dropped reply is ambiguous in both directions —
+  Adj-RIB-In may already sit on the candidate policy. The rollback treated
+  any incomplete forward as "nothing moved" and restored the prior
+  `pending_refresh`, so if its own refresh back also failed the peer was
+  left with real unfinished convergence and no armed retry. The forward
+  now reports whether delivery began, and the rollback re-arms in that
+  case. A forward that failed *before* any refresh was attempted still
+  restores the prior state exactly.
 
 - **A whole-peer Route Refresh now asks only for the families the session
   negotiated.** Requesting "everything" iterated the peer's *configured*
-  families, so on any session that negotiated fewer than were configured — a
-  neighbor offering IPv4 and IPv6 to a peer that accepted only IPv4, say — the
-  unnegotiated family's request was rejected and failed the whole refresh.
-  Policy edits, RPKI/ASPA cache refreshes, dataset swaps, and `SoftResetIn`
-  with no explicit family list are all affected. The negotiated set is read
-  from the session; a session that cannot report one keeps the previous
-  behavior, which is where the per-family error was already the honest answer.
+  families, so on any session that negotiated fewer than were configured —
+  a neighbor offering IPv4 and IPv6 to a peer that accepted only IPv4, say
+  — the unnegotiated family's request was rejected and failed the whole
+  refresh. Policy edits, RPKI/ASPA cache refreshes, dataset swaps, and
+  `SoftResetIn` with no explicit family list are all affected. The
+  negotiated set is read from the session; a session that cannot report
+  one keeps the previous behavior, which is where the per-family error was
+  already the honest answer.
 
-- **`rbgp config import` no longer splits BIRD constructs that reuse block or
-  statement punctuation inside an expression.** Prefix-set range suffixes
-  (`[ 0.0.0.0/8{8,32}, ... ]`) were read as block braces, so one `define` was
-  reported as one entry per member plus a trailing bare `]`;
-  `;`-separated declaration lists (`function f (int a; int b)`, and the
-  `filter f` / local-variable form) were read as statement terminators, so each
-  header came back in fragments and left the following `{` reported with an
-  empty stanza and a stale line number. Both shapes are ordinary
-  ARouteServer-generated output, and both now produce exactly one report entry
-  at the construct's own line. A `filter`/`function` header that arrives
-  through the statement path is also pointed at `.rpol` rather than labelled an
-  unknown structural stanza, and report entries folded out of a multi-line
-  source no longer carry that source's indentation runs.
-- **A rejected runtime mutation no longer tears down the session it was
-  refusing to change.** When config persistence failed — an unwritable config
-  directory, a read-only mount, a full filesystem — every persisted mutating
-  RPC had already applied its runtime change and then tried to undo it by
-  applying the inverse. `rbgp neighbor <addr> delete` returned
-  `FAILED_PRECONDITION`, which reads as "nothing happened", while the BGP
-  session had in fact been torn down and a *different* session re-established
-  in its place: new identity, uptime back to zero, cumulative counters back to
-  zero, metric series reaped and restarted, and `Flaps` still reading 0 so the
-  event was invisible in the operator's own flap accounting. Any `rate()` or
-  `increase()` spanning the window was silently wrong. The same
-  apply-then-compensate ordering affected `neighbor add`, both dynamic-neighbor
-  RPCs, all twelve policy and neighbor-set / policy-chain mutators, and the
-  peer-group and membership mutators, where it put a Route Refresh and an
-  Adj-RIB-Out rewrite on the wire twice — once forward, once as "rollback" —
-  or bounced every inheriting member's session twice, for a request that was
-  rejected.
+- **A duplicate Graceful Restart capability in an OPEN now honors the last
+  instance,** per RFC 4724 §3, rather than the first — which changed every
+  negotiated restart flag, timer, and family-forwarding value on a peer
+  that sends more than one.
 
-  Persistence is now a two-phase reservation shared by all of them: the
-  candidate config is serialized and durably staged next to the config file
-  *before* any runtime state is touched, the runtime change is applied only
-  once that succeeded, and the staged write is then published with a rename.
-  A staging failure is reported while the sessions, their counters, and their
-  metric series are still untouched, and an apply failure discards the staged
-  write instead of leaving it on disk. `FAILED_PRECONDITION` from a mutating
-  RPC now means what it says: no externally visible mutation. Rejections that
-  are simply bad requests keep their own status codes rather than being
-  reported as persistence faults. The ADR-0076 config-transaction executor and
-  FIB-table CRUD keep single-phase persistence — each owns a rollback that
-  restores exact prior state and already reports an ambiguous outcome when it
-  cannot.
+- **Session reset causes survive into diagnostics.** A NOTIFICATION sent
+  or received now records a bounded, secret-free cause
+  (`sent NOTIFICATION 6/4 (…)`) that `rbgp neighbor` and `rbgp doctor`
+  report, including on the Cease/8 send-hold path that previously closed
+  without assigning one. An intentional local administrative shutdown or
+  reset deliberately does not overwrite an actionable earlier error.
 
-- **The shipped Docker quick-start now supports the workflow it documents.**
-  `examples/docker-compose` mounted the config read-only, so every mutating
-  command failed and the README's "no restarts to add peers, change policy, or
-  inject routes" was false out of the box. The config is now shipped as a
-  template and copied into the daemon's writable state volume on first start,
-  following the pattern the interop labs already use; runtime edits survive
-  `docker compose restart` and `down -v` reseeds from the template. The
-  standalone `docker run`, containerlab, and deployment examples carry the same
-  correction, and `docs/CONFIGURATION.md` states the requirement directly: the
-  config file's *directory* must be writable by the daemon for runtime
-  mutation, because persistence writes `<config>.tmp` alongside it and renames.
+- **RFC 9552 BGP-LS Attribute fault isolation.** Attribute 29 now enforces
+  its optional non-transitive flags and contained TLV framing. Malformed
+  contained framing discards only the complete attribute while preserving
+  the BGP-LS NLRI and the session; valid unknown TLVs remain byte-stable
+  for reflection.
 
-- **`rbgp doctor` no longer fails in the container image.** The image runs as
-  a nonroot user with a working directory it cannot write, and doctor
-  defaulted its bundle to `./rustbgpd-doctor-<ts>.tar.gz` — so the tool the
-  README names for bug reports exited 1 with a bare `Permission denied` at the
-  moment someone was trying to file one. Without `--output` the bundle now
-  goes to the first writable of: the working directory (unchanged where it
-  works), the daemon's `runtime_state_dir`, the temp directory. Independently,
-  a bundle that still cannot be written now names the target path and points
-  at `--output`, and a missing or unreadable `--token-file` names the path
-  instead of surfacing a bare errno.
-- **The `already_advertised` export-explain gate no longer claims the peer
-  holds the route.** `identical route already advertised — peer is in sync`
-  overstated what BGP can tell a sender: there is no acceptance signal, so a
-  peer that treats every UPDATE as withdrawn (RFC 7606) stays Established with
-  zero routes while that line reads "in sync". The unicast, VPN, and
-  labeled-unicast rungs, the `rbgp rib advertised --explain` summary line, and
-  the `already_advertised` field documentation now scope the claim to local
-  Adj-RIB-Out state and say that remote acceptance is not observable.
-- **Route-server cookbooks give the FRR first-AS relaxation in the form that
-  works.** Both `docs/cookbook/route-server.md` and
-  `docs/cookbook/route-server-migration.md` told operators to disable
-  `enforce-first-as` on the member without saying the fix must be
-  per-neighbor; the global `no bgp enforce-first-as` alone is insufficient in
-  FRR 10.3.1, as `docs/INTEROP.md` already recorded. Both pages now give
-  `no neighbor <route-server> enforce-first-as` and describe the failure mode,
-  which is silent: the member treats the updates as withdrawn (RFC 7606),
-  stays Established, holds zero routes, and neither side logs an error.
-- **Alice-LG adapter no longer serves a fabricated preferred-route count.**
-  `examples/birdwatcher-adapter` emitted a hardcoded `"preferred": 0` on
-  `/protocols/bgp`, so a looking glass showed every member with zero preferred
-  routes regardless of the Loc-RIB. The gRPC surface exposes no per-peer best
-  count and deriving one means paging the whole Loc-RIB on every poll, so the
-  field is omitted rather than served wrong; the README records the omission.
-  `imported`, `filtered`, and `exported` are unchanged.
-- **`bgp_rib_adj_out_prefixes` no longer reads stale-nonzero through a
-  graceful-restart hold window.** Entering GR tears down the peer's outbound
-  registration and its Adj-RIB-Out along with it, but only the `PeerDown`
-  teardown zeroed the seven per-family gauge series; the GR down path left
-  them advertising the departed session's counts for the whole restart timer.
-  The reset moved into the shared outbound-teardown helper, so both paths —
-  plus collision failback and replacement-`PeerUp`, which empty the same table
-  — now zero it where the table is actually removed. RFC 4724 retention is an
-  Adj-RIB-In property: `bgp_rib_prefixes`, `bgp_gr_active_peers`, and
-  `bgp_gr_stale_routes` remain the series that stay nonzero for a peer
-  expected back, and `bgp_rib_outbound_registered_peers` already decremented at
-  GR entry. **Operator-visible for dashboards and alerts:** an advertised-count
-  panel or rule that read the old nonzero plateau during a restart now sees
-  zero until the peer returns and its table is rebuilt.
-- **Hot-applicable peer-group edits no longer tear down every inheriting
-  session.** `apply_peer_group_change` reshaped (delete + re-add) the group's
-  static members for *any* change, so raising a group-level maximum bounced
-  every client that inherits from it — while the identical neighbor-level edit
-  hot-applied in place. A peer-group change's changed fields are now
-  partitioned by reload-matrix impact class the way neighbor changes already
-  were: a change set whose every field is `live` is applied to each member in
-  place, with no session reset, and a set that mixes in any session-reset,
-  restart-required, or unclassified field keeps the ADR-0081 reshape path. The
-  in-place path carries the same atomicity contract — every member's next
-  config is resolved and its live prior captured before any peer is touched, a
-  mid-cohort failure restores the earlier members in reverse order and reports
-  a compound error naming any it could not, and the stored group definition
-  advances only after the whole cohort succeeded. Dynamic inheritors are part
-  of that cohort and pick the new values up without waiting for a reconnect.
-  For a route server, where clients inherit from a group, a group-level limit
-  raise is now flap-free during exactly the incident the limit exists to
-  contain.
+- **TCP-AO RNext updates preserve socket policy and fresh counters.**
+  Runtime RNext selection now read-modify-writes Linux `TCP_AO_INFO`
+  without forcing Current or resetting counters, and composite inspection
+  returns the trailing INFO snapshot so errors arriving during key
+  enumeration remain visible.
 
-- **The initial table dump now evaluates export policy with the peer's
-  peer-group.** The session staged its peer-group policy context *after* the
-  `PeerUp` registration, but `PeerUp` builds the initial Adj-RIB-Out
-  synchronously — so the first full-table dump to a newly established peer was
-  evaluated with no peer-group, and any export rule matching on peer-group
-  began applying only from the next update. On a route server with
-  group-scoped export filtering this advertised routes the operator's policy
-  intends to deny, at every session establishment and every re-establishment.
-  The context is now staged before `PeerUp`, alongside the RFC 9234 role, RFC
-  7947 control-community, exact-encoder, and RFC 4724 contexts. **This is a
-  wire-visible change to the initial dump:** an upgraded daemon's first dump to
-  a group-scoped peer may now be correctly filtered, or otherwise transformed
-  by group-matched policy actions, where it previously was not. Peers whose
-  export policy does not match on peer-group are unaffected.
-
-- **Daemon exits non-zero when shutdown is caused by unexpected gRPC server
-  termination.** The coordinated teardown (NOTIFICATIONs, GR marker,
-  checkpoints) still runs, but the process now exits 1 so supervisors with
-  `Restart=on-failure` restart the daemon instead of treating the component
-  failure as a clean stop. Operator-initiated shutdowns (SIGINT/SIGTERM,
-  Shutdown RPC) still exit 0.
-
-- **RFC 6793 legacy-AS migration is lossless end to end.** Sessions without
-  capability 65 now normalize received type 2/17 paths and type 7/18
-  aggregators before loop detection, policy, and RIB processing, then derive
-  the required compatibility attributes in the shared classic/MP export
-  encoder. Modern peers never receive stale migration shadows; exact-export
-  sizing includes generated AS4 bytes; malformed compatibility attributes
-  retain RFC 7606 fault isolation. MRT, Loc-RIB BMP, and from-BMP ribsnap
-  serialization preserve the canonical aggregator, while the pre-policy BMP
-  tap remains byte-identical. Hosted M94 proves the legacy IPv4 session against
-  a pinned ExaBGP 5.0.9 source and an independent OLD-speaker sink, including
-  reconstructed loop rejection, exact path/aggregator wire pairs, withdrawal,
-  and session continuity.
-
-- **Bounded BMP collector shutdown.** Disconnected collectors now stop connect
-  and backoff waits promptly after the BMP manager queues its final Peer Down
-  messages. Connected collectors still drain that queue, send Termination, and
-  flush; all collector clients share one two-second shutdown budget instead of
-  consuming two seconds per collector.
-
-- **RFC 9552 BGP-LS Attribute fault isolation.** Attribute 29 now enforces its
-  optional non-transitive flags and contained TLV framing. Malformed contained
-  framing discards only the complete attribute while preserving the BGP-LS
-  NLRI and session; valid unknown TLVs remain byte-stable for reflection.
-
-- **GShut receiver verification is executable from `rbgp`.** The runbook uses
-  the parse-valid received-RIB command, whose JSON now exposes optional
-  `local_pref_attr` so operators can distinguish an explicit demotion to zero.
-
-- **RFC-correct RT/RO policy action encoding.** TOML
-  `set_community_add` / `set_community_remove` and `.rpol` `add` / `remove`
-  actions now share the same typed encoder: numeric ASNs through 65535 use RFC
-  4360 type `0x00`, larger ASNs use RFC 5668 type `0x02`, and dotted IPv4
-  administrators preserve their spelling and use RFC 4360 type `0x01`. The
-  narrow AS4/IPv4 forms reject local administrators above 65535 with an
-  actionable config error.
-
-- **RFC 8092 Large Community duplicate normalization.** Received attributes
-  silently retain only the first occurrence of each value, and the encoder
-  applies the same stable deduplication so locally constructed API or policy
-  attributes cannot transmit duplicates. Distinct-value order, flags,
-  length-encoding rules, and malformed-length behavior remain unchanged; the
-  emitted length is recomputed from the retained values.
-
-- **TCP-AO RNext updates preserve socket policy and fresh counters.** Runtime
-  RNext selection now read-modify-writes Linux `TCP_AO_INFO` without forcing
-  Current or resetting counters, and composite inspection returns the trailing
-  INFO snapshot so errors arriving during key enumeration remain visible.
-
-- **Peer-advertised Graceful Restart retention can be bounded locally.**
-  Neighbors and peer groups accept `gr_peer_restart_time_max` (default 4095)
-  to cap the RFC 4724 Restart Time used for initial disconnected stale-route
-  retention without changing the Restart Time rustbgpd advertises in its OPEN.
+- **Bounded BMP collector shutdown.** Disconnected collectors now stop
+  connect and backoff waits promptly after the BMP manager queues its
+  final Peer Down messages. Connected collectors still drain that queue,
+  send Termination, and flush; all collector clients share one two-second
+  shutdown budget instead of consuming two seconds per collector.
 
 - **RFC 1997 export parity for EVPN and FlowSpec.** Source routes carrying
-  `NO_EXPORT` or `NO_EXPORT_SUBCONFED` are suppressed toward honor-mode eBGP
-  peers across live updates, initial dumps, route refresh, and forced resync;
-  iBGP and transparent route-server sessions remain eligible, policy-added
-  communities remain deliverable, and prior advertisements withdraw by exact
-  family key.
+  `NO_EXPORT` or `NO_EXPORT_SUBCONFED` are suppressed toward honor-mode
+  eBGP peers across live updates, initial dumps, route refresh, and forced
+  resync; iBGP and transparent route-server sessions remain eligible,
+  policy-added communities remain deliverable, and prior advertisements
+  withdraw by exact family key.
 
-- **BIRD config imports report standalone `include` statements.** The bounded
-  single-file importer preserves their source lines in every parser context,
-  gives explicit flattening guidance, and exits 2 with the translated skeleton
-  for operator review.
+- **EVPN and FlowSpec exports enforce `NO_ADVERTISE` and the generic
+  export-policy contract.** EVPN exports enforce stored-route
+  `NO_ADVERTISE` before policy and policy-added `NO_ADVERTISE` before the
+  Adj-RIB-Out commit; FlowSpec exports enforce source and policy-added
+  `NO_ADVERTISE`, apply generic export-policy path-attribute
+  modifications, and ignore inapplicable next-hop rewrites. Both withdraw
+  only the exact prior advertisement identity and stay silent for
+  first-seen suppression, and an import-policy-denied replacement
+  withdraws the exact accepted identity.
+
+- **Outbound RFC 9234 OTC diagnostics emit once per transition** into a
+  blocked disposition, rather than repeating on unchanged refresh/resync
+  retries; permit, withdrawal, or session reset re-arms the edge.
+
+- **`rbgp doctor` no longer fails in the container image.** The image runs
+  as a nonroot user with a working directory it cannot write, and doctor
+  defaulted its bundle to `./rustbgpd-doctor-<ts>.tar.gz` — so the tool
+  the README names for bug reports exited 1 with a bare `Permission
+  denied` at the moment someone was trying to file one. Without `--output`
+  the bundle now goes to the first writable of: the working directory
+  (unchanged where it works), the daemon's `runtime_state_dir`, the temp
+  directory. A bundle that still cannot be written names the target path
+  and points at `--output`, and a missing or unreadable `--token-file`
+  names the path instead of surfacing a bare errno.
+
+- **The `already_advertised` export-explain gate no longer claims the peer
+  holds the route.** `identical route already advertised — peer is in
+  sync` overstated what BGP can tell a sender: there is no acceptance
+  signal, so a peer that treats every UPDATE as withdrawn (RFC 7606) stays
+  Established with zero routes while that line reads "in sync". The
+  unicast, VPN, and labeled-unicast rungs, the
+  `rbgp rib advertised --explain` summary line, and the
+  `already_advertised` field documentation now scope the claim to local
+  Adj-RIB-Out state and say that remote acceptance is not observable.
+
+- **GShut receiver verification is executable from `rbgp`.** The runbook
+  uses the parse-valid received-RIB command, whose JSON now exposes
+  optional `local_pref_attr` so operators can distinguish an explicit
+  demotion to zero.
+
+- **Route-server cookbooks give the FRR first-AS relaxation in the form
+  that works.** Both `docs/cookbook/route-server.md` and
+  `docs/cookbook/route-server-migration.md` told operators to disable
+  `enforce-first-as` on the member without saying the fix must be
+  per-neighbor; the global `no bgp enforce-first-as` alone is insufficient
+  in FRR 10.3.1, as `docs/INTEROP.md` already recorded. Both pages now
+  give `no neighbor <route-server> enforce-first-as` and describe the
+  failure mode, which is silent: the member treats the updates as
+  withdrawn (RFC 7606), stays Established, holds zero routes, and neither
+  side logs an error.
+
+- **`rbgp config import` no longer splits BIRD constructs that reuse block
+  or statement punctuation inside an expression.** Prefix-set range
+  suffixes (`[ 0.0.0.0/8{8,32}, ... ]`) were read as block braces, so one
+  `define` was reported as one entry per member plus a trailing bare `]`;
+  `;`-separated declaration lists (`function f (int a; int b)`, and the
+  `filter f` / local-variable form) were read as statement terminators, so
+  each header came back in fragments and left the following `{` reported
+  with an empty stanza and a stale line number. Both shapes are ordinary
+  ARouteServer-generated output, and both now produce exactly one report
+  entry at the construct's own line. A `filter`/`function` header that
+  arrives through the statement path is also pointed at `.rpol` rather
+  than labelled an unknown structural stanza, and report entries folded
+  out of a multi-line source no longer carry that source's indentation
+  runs. Standalone `include` statements are reported with their source
+  lines preserved in every parser context, with explicit flattening
+  guidance and exit 2 alongside the translated skeleton.
 
 - **ARouteServer renders fail stale on unsupported session semantics.**
-  `rs-config-render` now exits 2 before writing output for effective multihop,
-  IPv6-session RFC 8950, and active blackhole policy/propagation settings
-  instead of warning and silently omitting them.
+  `rs-config-render` now exits 2 before writing output for effective
+  multihop, IPv6-session RFC 8950, and active blackhole
+  policy/propagation settings instead of warning and silently omitting
+  them.
 
-- **Cold-ingest fanout services readiness between outbound peers.** Ordinary
-  route ingest now services the dedicated read-only readiness lane at peer
-  boundaries, including mixed update-group and private-policy fleets, without
-  admitting general queries or weakening stalled policy-transition verdicts.
+- **Alice-LG adapter no longer serves a fabricated preferred-route
+  count.** `examples/birdwatcher-adapter` emitted a hardcoded
+  `"preferred": 0` on `/protocols/bgp`, so a looking glass showed every
+  member with zero preferred routes regardless of the Loc-RIB. The gRPC
+  surface exposes no per-peer best count and deriving one means paging the
+  whole Loc-RIB on every poll, so the field is omitted rather than served
+  wrong; the README records the omission. `imported`, `filtered`, and
+  `exported` are unchanged.
 
-- **RFC 10005 Link Bandwidth receiver subset.** The typed wire accessor recognizes
-  exact transitive/non-transitive communities; weighting selects the lowest finite
-  nonnegative value without altering raw reflection. Zero stays valid;
-  construction stays type `0x40`.
+- **Cold-ingest fanout services readiness between outbound peers.**
+  Ordinary route ingest now services the dedicated read-only readiness
+  lane at peer boundaries, including mixed update-group and private-policy
+  fleets, without admitting general queries or weakening stalled
+  policy-transition verdicts.
 
-### Added
+- Rejected-route retention builds its bounded attribute prototype lazily
+  on the first actual rejection in an UPDATE, avoiding reject-only summary
+  and timestamp construction on clean permitted UPDATEs while preserving
+  one shared prototype per rejected batch.
 
-- **Route-safety dashboard and actionable alerts.** The shipped Grafana
-  overview adds exact-export rejection and malformed-UPDATE disposition rates, raw
-  step-rendered selection-deferral state, and timeout/ledger-overflow rates
-  while preserving each metric's native labels. Four warning rules alert only on
-  increases in those failure counters; exhaustive Prometheus fixtures and the
-  structural dashboard checker pin the queries, discrete rendering, and the
-  exclusion of normal deferral activity. The daemon materializes the bounded
-  counter label sets when sessions and selection-deferral families are created
-  so ordinary scrape history can establish a zero baseline before producers
-  emit failures.
-
-- **Minimum accepted BGP hold time.** Per-neighbor and peer-group
-  `min_hold_time` controls cause the daemon to reject peer OPEN proposals
-  below the configured floor (including zero) with OPEN Error 2/6. Unset
-  configuration preserves RFC 4271 compatibility.
-
-- **RFC 9072 extended BGP OPEN Optional Parameters lengths.** OPEN messages
-  keep the RFC 4271 encoding through 255 optional-parameter octets and use the
-  extended aggregate and per-parameter lengths only above that boundary.
-  Receivers accept extended encodings at any length, including zero, while
-  OPEN remains bounded to 4096 bytes. Unsupported Optional Parameter types
-  now produce OPEN Message Error / Unsupported Optional Parameter (2/4);
-  unknown capabilities inside the Capabilities parameter remain accepted.
-
-- **Fail-closed live TCP-AO MKT deletion on SIGHUP.** After a successor has
-  been selected and its predecessor deprecated, a later immutable generation
-  can remove only deprecated MKTs that are neither Current nor RNext while
-  preserving the protected owner set, survivor order, key definitions, and
-  selected MKT. Listener deletion precedes queued-child and protected-session
-  reconciliation; ambiguous partial session mutation discards the whole
-  changed cohort. Failures retry only the identical generation when the
-  listener remained exact, restored its exact prior inventory, or already
-  reached desired; a failed prior-inventory restoration requires restart.
-  Key edits/reordering, selected or non-deprecated-key deletion, and
-  protected-owner CRUD remain restart-required. M43 proves the full live
-  add/select/deprecate/delete lifecycle against BIRD while preserving the
-  established session and received route.
-
-- **Exact per-candidate export explain for unicast Add-Path.**
-  `ExplainAdvertisedRoute` and `rbgp rib advertised --explain` can select a
-  presence-bearing Adj-RIB-In source peer/path ID (including ID 0) for a peer
-  with negotiated IPv4/IPv6 unicast Add-Path send. The response keeps that
-  inbound identity separate from the independently assigned compact outbound
-  rank, explains policy/cap/OTC/exact-wire denials, and diffs the exact rank
-  against Adj-RIB-Out. Selector absence preserves the existing winner view.
-
-- **Required OPEN address families.** Neighbors and peer groups can declare
-  `required_families`; rustbgpd now rejects an OPEN with RFC 5492 Unsupported
-  Capability (2/7) when any required family is absent from the final negotiated
-  intersection. The notification Data lists only the missing MultiProtocol
-  capabilities in configured order, while the default empty list preserves
-  partial-family and capability-less IPv4 compatibility.
-
-- **TCP-AO successors can be selected live in a second immutable generation.**
-  After an add-only SIGHUP installs the successor everywhere, a later SIGHUP
-  sets only local RNext and commits predecessor deprecation after one
-  generation-relative peer-traffic observation across affected sessions.
-  `awaiting_peer` retries the identical generation on a later SIGHUP; live
-  selection never deletes an MKT or sets Linux Current.
-
-- **Negotiated session and Graceful Restart state is visible per neighbor.**
-  Neighbor detail reports the current Established session's negotiated hold
-  time, remote router ID, four-octet-AS result, mutual families, usable peer GR
-  coverage, peer-advertised Restart Time, and locally capped effective
-  retention through gRPC, human CLI, and JSON. Presence distinguishes older
-  daemons, stale queries, down sessions, unsupported GR, locally disabled GR,
-  and active helper state without substituting configured defaults.
-
-- **Official ClusterFuzzLite integration for all 17 cargo-fuzz targets.** The
-  address-sanitized code-change workflow is manual-dispatch only; the existing
-  cargo-fuzz workflow remains the sole nightly campaign. The ordinary PR/push
-  CI check and the shared OSS-Fuzz / ClusterFuzzLite build path enforce the
-  exact manifest/source inventory, whose mutation tests remove every manifest
-  and source target in turn and inject empty, failed, and redirected
-  enumeration, an unexpected fuzz crate, and a cross-crate target-name
-  collision. PR #1061's 40m42s commissioning run rejected putting this work on
-  the PR critical path, without requiring an injected PR crash. Batch fuzzing,
-  pruning, storage, and coverage are not part of this integration.
-
-- **Max-prefix capacity is alertable before teardown.** Prometheus and the
-  shipped Grafana overview expose actor-owned usage, finite limits, and
-  headroom for aggregate, IPv4-unicast, and IPv6-unicast scopes. Unlimited and
-  disconnected scopes remain absent instead of reporting fake zeroes, and the
-  example alert pack warns on sustained 80% utilization.
-
-- **Per-neighbor max-prefix headroom is operator-visible.** Neighbor detail now
-  exposes the authoritative O(1) aggregate max-prefix-counted NLRI identity
-  count plus unique IPv4- and IPv6-unicast prefix counts, with effective finite
-  limits and remaining headroom through gRPC, human CLI, and JSON. Unlimited
-  limits use presence instead of a fake zero, and stale session snapshots
-  withhold non-authoritative headroom.
-
-- `rbgp neighbor A --compare B` explains live update-group sharing with stable,
-  ID-free reasons.
-- **Opt-in timed restart after max-prefix teardown.** Neighbors and peer groups
-  accept a non-zero `max_prefix_restart_seconds`; the default remains an
-  indefinite fail-closed shutdown latch. The peer manager makes one
-  generation-fenced restart attempt after the hold-down, invalidates stale
-  countdowns on config or dynamic-range replacement, and exposes the action,
-  configured duration, and remaining milliseconds through gRPC, CLI, and JSON.
-  `rs-config-render` maps ARouteServer's OpenBGPD-style `restart_after` minutes
-  to checked seconds and records the emitted timer in its render receipt.
-
-- **Operator dashboard and alerting cover slow peers and RIB actor latency.**
-  The shipped Grafana overview now separates transport endpoints from bare
-  neighbor addresses, exposes coalesced outbound queues, slow-peer state,
-  discrete update-group membership, export-policy transition state/duration,
-  actor-poll latency, and accepted-policy age. Prometheus rules warn on a peer
-  that remains slow for five minutes and on actor polls above the exact 200ms
-  histogram boundary; structural dashboard and promtool gates protect both.
-
-- **RFC 8326 graceful-shutdown advertise intent is visible per neighbor.**
-  `rbgp neighbor <peer>` reports the local desired state as enabled, disabled,
-  or unknown when connected to an older daemon; JSON and `NeighborState` field
-  37 preserve the same presence-aware state. This is advertisement intent, not
-  evidence of downstream receipt or convergence.
-
-- **`rbgp config import` — bounded structural importer for BIRD 2, FRR,
-  and GoBGP configurations.** Translates the structural subset (local
-  AS, router-id, neighbors, peer groups, address families, hold timers,
-  max-prefix limits) of a BIRD 2, FRR (vtysh running-config), or GoBGP
-  TOML source into a rustbgpd `config.toml` and refuses to guess at
-  policy: BIRD filters, FRR route-maps/prefix-lists, and GoBGP
-  policy-definitions are listed — with source line numbers — in an
-  import report for hand-translation to `.rpol`. Secrets are never
-  imported (MD5/auth presence is flagged instead). Distinct exit codes:
-  0 clean full translation, 1 error, 2 translated-with-warnings-or-skips,
-  3 nothing translatable; the emitted config for every checked-in fixture is
-  gate-tested against `rustbgpd --check`. The route-server migration
-  cookbook now opens with the mechanical importer → `--check` → shadow
-  trial → `rbgp diff advertised` flow.
-- **Birdwatcher adapter serves the Alice-LG noexport views.**
-  `GET /routes/noexport/{id}` completes the adapter's looking-glass
-  contract: Loc-RIB best routes not advertised to the peer
-  (`RibService.ListBestRoutes` minus `ListAdvertisedRoutes`), each
-  explained by a live-ladder dry run (`ExplainAdvertisedRoute`) and
-  tagged with a synthesized `64496:65521:<gate id>` noexport-reason
-  large community plus human-readable `noexport_reason` /
-  `noexport_reason_detail` keys. The view covers every export-ladder
-  suppression (split horizon, RFC 4456 reflection, family, RFC 9494
-  LLGR, RFC 5291 ORF, RFC 4684 RT membership, export policy), is
-  prefix-granular, and serves an empty view for peers with no live
-  session. All backing RPCs are `sensitive_read`-tier — no
-  authorization change for existing adapter deployments.
-- **Per-disposition malformed-UPDATE counters + RFC 7606 interop
-  proof.** New `bgp_update_malformed_total{peer, disposition}` counter
-  (`disposition` ∈ `attribute_discard` / `treat_as_withdraw` /
-  `session_reset`) increments once per malformed UPDATE at the point
-  the RFC 7606 disposition is decided, on every handling path —
-  including the §5.2 no-reachable-NLRI session-reset escalation and
-  decode-level resets. The M91 interop lab
-  (`tests/interop/m91-rfc7606-malformed.clab.yml`) drives a raw
-  speaker injecting one malformed UPDATE per disposition class and
-  asserts session survival, RIB contents, the counter, and the §6
-  DEBUG full-message capture end to end.
-
-### Fixed
-
-- Rejected-route retention now builds its bounded attribute prototype lazily
-  on the first actual rejection in an UPDATE, avoiding reject-only summary and
-  timestamp construction on clean permitted UPDATEs while preserving one
-  shared prototype per rejected batch.
-- FlowSpec exports now enforce source and policy-added `NO_ADVERTISE`, apply
-  generic export-policy path-attribute modifications, ignore inapplicable
-  next-hop rewrites, and withdraw only the exact prior `(AFI, rule)` identity.
-- EVPN exports now enforce stored-route `NO_ADVERTISE` before policy and
-  policy-added `NO_ADVERTISE` before Adj-RIB-Out commit, withdrawing only the
-  exact prior advertisement and remaining silent for first-seen suppression.
-- Outbound RFC 9234 OTC diagnostics now emit once per transition into a blocked disposition, rather than repeating on unchanged refresh/resync retries; permit, withdrawal, or session reset re-arms the edge.
-- Import-policy-denied FlowSpec and EVPN replacements now withdraw the exact accepted identity.
-- **Release tarballs ship `rs-config-render`.** The route-server
-  config renderer was built by the release workflow but never staged
-  into `rustbgpd-<arch>.tar.gz` — v0.60.0 tarballs contain only
-  `rustbgpd` and `rbgp`. The binary is now packed alongside them, and
-  the tarball content assertion checks all three binaries for
-  presence and non-emptiness.
-- Applied-config history and `rollback N`, completing the Junos-style
-  transactional quartet (check / compare / commit confirmed / rollback).
-  Every applied config — transaction applies, gRPC config CRUD,
-  successful SIGHUP reloads, and the boot-time config — is recorded in a
-  bounded on-disk history under
-  `<runtime_state_dir>/config-history/` (last 20 distinct configs,
-  content-hash-deduplicated, timestamped, restart-safe). `rbgp config
-  history` lists index / timestamp / SHA-256 / one-line summary; `rbgp
-  config rollback N` restores entry N through the existing transaction
-  executor — same plan classification, reload-impact and update-group
-  annotations, receipts, and optional `--confirm-id`/`--confirm-timeout`
-  confirmed-commit window (timeout auto-revert and boot revert included).
-  Entry reads verify the content digest embedded in the file name and
-  reject non-regular or corrupt snapshots. Rolling back past the retained
-  history fails cleanly. New
-  `ConfigService.ListConfigHistory` (`sensitive_read`) and
-  `ConfigService.RollbackConfigTransaction` (`operator_only`, same tier as
-  apply) RPCs; history responses carry metadata only, never config
-  documents.
+- **Release tarballs ship `rs-config-render`.** The route-server config
+  renderer was built by the release workflow but never staged into
+  `rustbgpd-<arch>.tar.gz` — v0.60.0 tarballs contain only `rustbgpd` and
+  `rbgp`. The binary is now packed alongside them, and the tarball content
+  assertion checks all three binaries for presence and non-emptiness.
 
 ## [0.60.0] — 2026-07-18
 
