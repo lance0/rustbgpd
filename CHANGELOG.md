@@ -53,7 +53,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   or deployment gate can refuse it. Every shipped starter config —
   including both `--init-config` profiles, whose output changed
   accordingly — was rewritten to pass that strict check.
-- **`rustbgpd-wire` 0.16.0 changes decode acceptance in four places**
+- **`rustbgpd-wire` 0.16.0 changes decode acceptance in six places**
   while keeping an additive API. Embedders should read the *Library
   crates* entry under *Changed* before bumping.
 
@@ -115,7 +115,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 **Library crates**
 
-- `rustbgpd-wire` 0.16.0 (additive API, four decode-acceptance changes)
+- `rustbgpd-wire` 0.16.0 (additive API, six decode-acceptance changes)
   and `rustbgpd-fsm` 0.3.1 (two additive fields on a `#[non_exhaustive]`
   struct).
 
@@ -654,7 +654,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   because persistence writes `<config>.tmp` alongside it and renames.
 
 - **Library crates: `rustbgpd-wire` 0.16.0 and `rustbgpd-fsm` 0.3.1.** The
-  wire API surface is additive, but **decode acceptance changed in four
+  wire API surface is additive, but **decode acceptance changed in six
   places** — embedders should diff exactly this list:
 
   - **Unsupported OPEN Optional Parameter types now error** with OPEN
@@ -672,10 +672,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - **OPEN and KEEPALIVE over 4096 bytes are rejected** at header peek,
     before a framing caller buffers the declared body, regardless of a
     negotiated RFC 8654 extended message length.
+  - **AS_SET and AS_CONFED_SET are rejected in a received `AS_PATH` or
+    `AS4_PATH`** per RFC 9774, with the RFC 7606 treat-as-withdraw
+    disposition. Paths that decoded before now withdraw their routes.
+  - **`ExtendedCommunity::as_link_bandwidth()` matches exact types only.**
+    Communities it previously accepted by a looser match no longer resolve
+    as link bandwidth.
 
-  RFC 9774's prohibited-segment rejection above is also a decode-acceptance
-  change, and `ExtendedCommunity::as_link_bandwidth()` now matches exact
-  types only. `rustbgpd-fsm` 0.3.1 is purely additive: `PeerConfig` gains
+  `rustbgpd-fsm` 0.3.1 is purely additive: `PeerConfig` gains
   `min_hold_time: Option<u16>` and `required_families: Vec<(Afi, Safi)>`,
   and `PeerConfig` is `#[non_exhaustive]`, so external construction through
   its builder is unaffected.
