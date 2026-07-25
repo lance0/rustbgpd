@@ -14,8 +14,9 @@ supported mutations back to the config file. Those writes rewrite the file in
 canonical form and do not preserve comments or formatting — read
 [Config Persistence](#config-persistence) before you make the first runtime
 change. `SIGHUP` is the file-driven compatibility/reconcile path; it follows
-the reload matrix and is not an atomic compound-mutation API. Starting with zero `[[neighbors]]` is valid when all
-peers are managed via gRPC. The exact compatibility boundary is the narrow
+the reload matrix and is not an atomic compound-mutation API. Starting with
+zero `[[neighbors]]` is valid when all peers are managed via gRPC. The exact
+compatibility boundary is the narrow
 [v1 RS/RR inventory](v1-stable-contract.md), not the full schema.
 
 > **Reload behavior.** For a per-field table of which config keys hot-apply,
