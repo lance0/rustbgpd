@@ -160,6 +160,17 @@ Notes on the sandbox:
 - `ExecReload=kill -HUP` is the supported reload path. See the
   [reload matrix](reload-matrix.md) for which fields hot-apply vs.
   need a restart.
+- `Restart=on-failure` is load-bearing. The daemon exits `0` only on an
+  operator-initiated shutdown (SIGINT/SIGTERM, the `Shutdown` RPC) and
+  `1` on a component failure it cannot recover from in place — the BGP
+  listener failing to bind, or the gRPC server exiting unexpectedly.
+  Neither listener is rebound without a restart, so the daemon exits
+  rather than run on deaf; the supervisor's retry is the recovery path.
+  With `RestartSec=5` a transient bind failure clears on the next
+  attempt, and a permanent one (port held by another speaker, missing
+  `CAP_NET_BIND_SERVICE`) repeats the bind error in the journal on every
+  attempt. `rbgp doctor` reports the same cause against the down daemon
+  through its `bgp.listener` check.
 
 ### Installation
 

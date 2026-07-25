@@ -226,6 +226,34 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The BGP listener sets `SO_REUSEADDR`, so an ordinary restart under traffic
+  no longer fails `EADDRINUSE`.** The listener socket is built through
+  `socket2`, which does not apply the `SO_REUSEADDR` that `std`/`mio` set for
+  the gRPC and metrics listeners. The daemon is normally the active closer at
+  shutdown, so on every restart with sessions up a connection the previous
+  generation accepted still holds the listen port in `FIN_WAIT`/`TIME_WAIT` —
+  and the next generation's bind was rejected. `SO_REUSEADDR` is set before
+  `bind`, ahead of the TCP-AO listener MKT installation, which keeps its
+  bind→install→listen ordering. `SO_REUSEPORT` is deliberately not used: it
+  permits concurrent binds, which would let two daemon generations serve the
+  listen port at once. Because Linux requires the option on both endpoints, the
+  first restart of a daemon whose previous generation predates this fix can
+  still be rejected; every restart after that is clean.
+
+- **A BGP listener bind failure now exits 1 instead of leaving a live daemon
+  that accepts no sessions.** The daemon previously marked itself not-ready and
+  kept serving gRPC. That state had no recovery path — `listen_port` is
+  mandatory, the listener is never rebound without a restart, and the only
+  surface reporting the fault was `/readyz`, which exists only when
+  `prometheus_addr` is configured — so the process parked with its core
+  function dead while its management plane looked healthy. Exit 1 matches the
+  code already used for an unexpected gRPC server exit and for a bind failure
+  with TCP-AO peers configured, so supervisors with `Restart=on-failure` retry;
+  the retry also clears a transient bind failure without an operator, and a
+  permanent one repeats the bind error in the journal. `rbgp doctor` reports
+  the cause (port in use, missing `CAP_NET_BIND_SERVICE`) against the down
+  daemon through its existing `bgp.listener` check.
+
 - **`rbgp config import` no longer splits BIRD constructs that reuse block or
   statement punctuation inside an expression.** Prefix-set range suffixes
   (`[ 0.0.0.0/8{8,32}, ... ]`) were read as block braces, so one `define` was
