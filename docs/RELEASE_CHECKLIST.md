@@ -198,6 +198,7 @@ done
 # Guards must exit non-zero:
 ./target/release/rustbgpd --stdout                              # --stdout without --init-config
 ./target/release/rustbgpd --init-config lab --stdout --check x  # --init-config combined with --check/--diff
+./target/release/rustbgpd --strict /tmp/init-lab.toml           # --strict without --check
 ```
 
 ### README quickstart smoke

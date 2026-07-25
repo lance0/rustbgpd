@@ -11,6 +11,20 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`rustbgpd --check --strict`.** `--check` reports a valid-but-risky
+  configuration as a warning and exits 0, so that adding a warning can never
+  break a deployment that meant its configuration — which also means a CI job
+  running `--check` passes a config nobody looked at. `--strict` is the opt-in
+  for gates that cannot accept that: identical output, but any warning exits
+  **1**, the same code `--check` already uses for a config it rejects, since a
+  gate reads both as "this config did not pass". A clean check still exits 0,
+  and `--strict` without `--check` is rejected with exit 2 rather than silently
+  accepted — that invocation would otherwise start a daemon. `--strict` is
+  defined over the whole `--check` warning set, not one warning, so anything
+  `--check` reports in future fails a strict run. Startup-time `tracing`
+  warnings are not part of that set and are unchanged. `--help` and
+  `rustbgpd(8)` now document the exit-status ladder.
+
 - **Per-peer outbound unicast prefix limits (ADR-0113).** New
   `max_prefixes_out_ipv4` / `max_prefixes_out_ipv6` on `[[neighbors]]` and peer
   groups bound how much of the table one client's export policy can grow its
