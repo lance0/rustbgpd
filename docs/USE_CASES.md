@@ -526,7 +526,11 @@ topology:
       kind: linux
       image: rustbgpd:latest
       binds:
-        - config.toml:/etc/rustbgpd/config.toml:ro
+        # Template + copy, not a read-only bind: config persistence rewrites
+        # this file, so runtime mutation needs a writable config directory.
+        - config.toml:/etc/rustbgpd/config.template.toml:ro
+      exec:
+        - cp -n /etc/rustbgpd/config.template.toml /etc/rustbgpd/config.toml
     frr:
       kind: linux
       image: quay.io/frrouting/frr:10.3.1

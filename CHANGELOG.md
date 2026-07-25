@@ -225,6 +225,49 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   through the statement path is also pointed at `.rpol` rather than labelled an
   unknown structural stanza, and report entries folded out of a multi-line
   source no longer carry that source's indentation runs.
+- **A rejected runtime mutation no longer tears down the session it was
+  refusing to change.** When config persistence failed — an unwritable config
+  directory, a read-only mount, a full filesystem — every persisted mutating
+  RPC had already applied its runtime change and then tried to undo it by
+  applying the inverse. `rbgp neighbor <addr> delete` returned
+  `FAILED_PRECONDITION`, which reads as "nothing happened", while the BGP
+  session had in fact been torn down and a *different* session re-established
+  in its place: new identity, uptime back to zero, cumulative counters back to
+  zero, metric series reaped and restarted, and `Flaps` still reading 0 so the
+  event was invisible in the operator's own flap accounting. Any `rate()` or
+  `increase()` spanning the window was silently wrong. The same
+  apply-then-compensate ordering affected `neighbor add`, both dynamic-neighbor
+  RPCs, all twelve policy and neighbor-set / policy-chain mutators, and the
+  peer-group and membership mutators, where it put a Route Refresh and an
+  Adj-RIB-Out rewrite on the wire twice — once forward, once as "rollback" —
+  or bounced every inheriting member's session twice, for a request that was
+  rejected.
+
+  Persistence is now a two-phase reservation shared by all of them: the
+  candidate config is serialized and durably staged next to the config file
+  *before* any runtime state is touched, the runtime change is applied only
+  once that succeeded, and the staged write is then published with a rename.
+  A staging failure is reported while the sessions, their counters, and their
+  metric series are still untouched, and an apply failure discards the staged
+  write instead of leaving it on disk. `FAILED_PRECONDITION` from a mutating
+  RPC now means what it says: no externally visible mutation. Rejections that
+  are simply bad requests keep their own status codes rather than being
+  reported as persistence faults. The ADR-0076 config-transaction executor and
+  FIB-table CRUD keep single-phase persistence — each owns a rollback that
+  restores exact prior state and already reports an ambiguous outcome when it
+  cannot.
+
+- **The shipped Docker quick-start now supports the workflow it documents.**
+  `examples/docker-compose` mounted the config read-only, so every mutating
+  command failed and the README's "no restarts to add peers, change policy, or
+  inject routes" was false out of the box. The config is now shipped as a
+  template and copied into the daemon's writable state volume on first start,
+  following the pattern the interop labs already use; runtime edits survive
+  `docker compose restart` and `down -v` reseeds from the template. The
+  standalone `docker run`, containerlab, and deployment examples carry the same
+  correction, and `docs/CONFIGURATION.md` states the requirement directly: the
+  config file's *directory* must be writable by the daemon for runtime
+  mutation, because persistence writes `<config>.tmp` alongside it and renames.
 
 - **`rbgp doctor` no longer fails in the container image.** The image runs as
   a nonroot user with a working directory it cannot write, and doctor

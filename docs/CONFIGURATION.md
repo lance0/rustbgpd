@@ -162,6 +162,17 @@ allow_blackhole_broad_prefixes = false
 non-root deployments, override the default to a mounted writable path (for
 example `/var/lib/rustbgpd` on a volume, or `/data/rustbgpd`).
 
+The **directory holding the config file** must also be writable by the
+rustbgpd process if you use runtime mutation. Every accepted `rbgp neighbor
+add` / `delete`, policy or peer-group edit, dynamic-range change, gNMI `Set`,
+and `rbgp config apply` is written back to the config file with a temp-file +
+rename, which creates `<config>.tmp` alongside it. Without a writable
+directory those RPCs are rejected with `FAILED_PRECONDITION` before they
+change anything — the session, its counters, and the wire are untouched. A
+config directory that is read-only on purpose (external configuration
+management, SIGHUP-only reload) is supported; the rejection is the contract,
+not a failure mode to work around.
+
 `warm_cache_checkpoint_on_shutdown` is an opt-in, restart-required publication
 step. During a coordinated shutdown, rustbgpd has up to 30 seconds to capture
 eligible established static peers' post-import-policy Adj-RIB-In views and

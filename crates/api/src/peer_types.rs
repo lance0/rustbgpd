@@ -1265,16 +1265,6 @@ pub enum PeerManagerCommand {
         /// Reply channel for success/failure.
         reply: oneshot::Sender<Result<(), CatalogMutationError>>,
     },
-    /// Create or replace a peer group while preserving the existing
-    /// MD5 password atomically inside the peer-manager actor.
-    SetPeerGroupPreserveMd5 {
-        /// Peer-group name.
-        name: String,
-        /// Full replacement definition except for the MD5 password.
-        definition: PeerGroupDefinition,
-        /// Reply channel returning the applied definition for persistence.
-        reply: oneshot::Sender<Result<PeerGroupDefinition, CatalogMutationError>>,
-    },
     /// Delete a peer group.
     DeletePeerGroup {
         /// Peer-group name.
@@ -1730,6 +1720,99 @@ pub struct FibTableSnapshot {
     pub maximum_paths_ibgp: Option<u32>,
 }
 
+/// Why a config event never reached the config file. Either way nothing was
+/// written, and — because staging runs before the caller's runtime change —
+/// nothing was mutated.
+#[derive(Debug, Clone)]
+pub enum ConfigPersistError {
+    /// The candidate config did not validate. Staging is now the first thing
+    /// a mutating RPC does, so this is where a bad request is caught; it
+    /// carries the same typed error the runtime apply would have produced, so
+    /// the caller still answers `NOT_FOUND` / `INVALID_ARGUMENT` rather than
+    /// dressing a rejected request up as a persistence fault.
+    Rejected(CatalogMutationError),
+    /// The durable write itself failed (unwritable directory, read-only
+    /// mount, full filesystem).
+    Write(String),
+}
+
+impl std::fmt::Display for ConfigPersistError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Rejected(error) => write!(f, "{error}"),
+            Self::Write(message) => write!(f, "{message}"),
+        }
+    }
+}
+
+/// Two-phase persistence acknowledgement carried by a [`ConfigEvent`].
+///
+/// `FAILED_PRECONDITION` from a mutating RPC means the request did nothing.
+/// Honouring that on a persistence failure requires reserving the on-disk
+/// write *before* the runtime change, because the runtime changes a mutating
+/// RPC makes are not undoable: re-adding a deleted neighbor starts a new
+/// session with a new identity, a zeroed uptime, zeroed counters, and a fresh
+/// metric series — the operator's flap accounting never even records it.
+///
+/// So the config bridge folds the event onto the config snapshot, serializes
+/// it, and durably stages the result next to the config file, then reports on
+/// `staged`. Nothing is observable on disk yet. The caller applies its runtime
+/// change and returns its commit channel through `commit`; dropping that
+/// channel discards the staged write instead.
+pub struct ConfigPersistAck {
+    /// Fires once the candidate is durably staged, or with the staging
+    /// failure. A failure here means nothing was written and — because the
+    /// caller has not applied yet — nothing was mutated.
+    pub staged: oneshot::Sender<Result<(), ConfigPersistError>>,
+    /// Carries the caller's reply channel once its runtime change landed,
+    /// which publishes the staged write. Dropping it discards the stage.
+    ///
+    /// `None` requests single-phase persistence: the bridge publishes as soon
+    /// as the candidate is staged and reports the durable outcome on `staged`.
+    /// Used by the paths that own an apply/rollback executor of their own
+    /// (ADR-0076 config transactions, FIB-table CRUD).
+    pub commit: Option<oneshot::Receiver<oneshot::Sender<Result<(), String>>>>,
+}
+
+impl ConfigPersistAck {
+    /// Single-phase acknowledgement: stage and publish in one step, reporting
+    /// the durable outcome on the supplied channel.
+    #[must_use]
+    pub fn immediate(staged: oneshot::Sender<Result<(), ConfigPersistError>>) -> Self {
+        Self {
+            staged,
+            commit: None,
+        }
+    }
+
+    /// Drive the handshake to a successful persist, the way the config bridge
+    /// does: acknowledge the stage, then acknowledge the caller's commit.
+    ///
+    /// Returns whether the caller committed. `false` means it dropped the
+    /// staged write, so nothing was persisted.
+    pub async fn accept(self) -> bool {
+        let _ = self.staged.send(Ok(()));
+        let Some(commit) = self.commit else {
+            return true;
+        };
+        match commit.await {
+            Ok(reply) => {
+                let _ = reply.send(Ok(()));
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// Fail the handshake the way an unwritable config file does: the durable
+    /// write never landed, and the caller has not mutated anything yet.
+    pub fn fail_write(self, message: impl Into<String>) {
+        let _ = self
+            .staged
+            .send(Err(ConfigPersistError::Write(message.into())));
+    }
+}
+
 /// A config persistence event sent after successful peer add/delete.
 ///
 /// The binary crate converts these into config file mutations.
@@ -1744,7 +1827,7 @@ pub enum ConfigEvent {
         /// Full accepted table set.
         tables: Vec<FibTableSnapshot>,
         /// Optional persistence acknowledgement.
-        ack: Option<oneshot::Sender<Result<(), String>>>,
+        ack: Option<ConfigPersistAck>,
     },
     /// A neighbor was successfully added at runtime.
     NeighborAdded {
@@ -1753,14 +1836,14 @@ pub enum ConfigEvent {
         /// Optional persistence acknowledgement. Runtime CRUD paths hold the
         /// shared runtime-config lock until this fires, so SIGHUP cannot read a
         /// stale TOML between runtime mutation and on-disk commit.
-        ack: Option<oneshot::Sender<Result<(), String>>>,
+        ack: Option<ConfigPersistAck>,
     },
     /// A neighbor was successfully deleted at runtime.
     NeighborDeleted {
         /// Peer identity that was deleted.
         peer: PeerKey,
         /// Optional persistence acknowledgement (see `NeighborAdded`).
-        ack: Option<oneshot::Sender<Result<(), String>>>,
+        ack: Option<ConfigPersistAck>,
     },
     /// A dynamic neighbor range was successfully added at runtime.
     DynamicNeighborAdded {
@@ -1776,14 +1859,14 @@ pub enum ConfigEvent {
         /// holds the shared runtime-config lock until this fires, so a SIGHUP
         /// reload cannot read a stale TOML between the runtime mutation and the
         /// on-disk commit.
-        ack: Option<oneshot::Sender<Result<(), String>>>,
+        ack: Option<ConfigPersistAck>,
     },
     /// A dynamic neighbor range was successfully removed at runtime.
     DynamicNeighborDeleted {
         /// IP prefix range that was removed (matched by effective prefix).
         prefix: String,
         /// Optional persistence acknowledgement (see `DynamicNeighborAdded`).
-        ack: Option<oneshot::Sender<Result<(), String>>>,
+        ack: Option<ConfigPersistAck>,
     },
     /// A config transaction committed a full candidate snapshot. This event is
     /// daemon-internal: transaction apply has already proven the live diff is a
@@ -1793,7 +1876,7 @@ pub enum ConfigEvent {
         /// Complete candidate TOML to parse, validate, and persist.
         candidate_toml: String,
         /// Optional persistence acknowledgement.
-        ack: Option<oneshot::Sender<Result<(), String>>>,
+        ack: Option<ConfigPersistAck>,
     },
     /// Create or replace a named policy definition.
     SetPolicy {
@@ -1804,14 +1887,14 @@ pub enum ConfigEvent {
         /// Optional persistence acknowledgement. Catalog CRUD paths hold
         /// the shared runtime-config lock until this fires (see
         /// `NeighborAdded`).
-        ack: Option<oneshot::Sender<Result<(), String>>>,
+        ack: Option<ConfigPersistAck>,
     },
     /// Delete a named policy definition.
     DeletePolicy {
         /// Policy definition name.
         name: String,
         /// Optional persistence acknowledgement (see `SetPolicy`).
-        ack: Option<oneshot::Sender<Result<(), String>>>,
+        ack: Option<ConfigPersistAck>,
     },
     /// Create or replace a named neighbor set.
     SetNeighborSet {
@@ -1820,38 +1903,38 @@ pub enum ConfigEvent {
         /// Full replacement definition.
         definition: NeighborSetDefinition,
         /// Optional persistence acknowledgement (see `SetPolicy`).
-        ack: Option<oneshot::Sender<Result<(), String>>>,
+        ack: Option<ConfigPersistAck>,
     },
     /// Delete a named neighbor set.
     DeleteNeighborSet {
         /// Neighbor-set name.
         name: String,
         /// Optional persistence acknowledgement (see `SetPolicy`).
-        ack: Option<oneshot::Sender<Result<(), String>>>,
+        ack: Option<ConfigPersistAck>,
     },
     /// Replace the global import policy chain.
     SetGlobalImportChain {
         /// Ordered policy names.
         policy_names: Vec<String>,
         /// Optional persistence acknowledgement (see `SetPolicy`).
-        ack: Option<oneshot::Sender<Result<(), String>>>,
+        ack: Option<ConfigPersistAck>,
     },
     /// Replace the global export policy chain.
     SetGlobalExportChain {
         /// Ordered policy names.
         policy_names: Vec<String>,
         /// Optional persistence acknowledgement (see `SetPolicy`).
-        ack: Option<oneshot::Sender<Result<(), String>>>,
+        ack: Option<ConfigPersistAck>,
     },
     /// Clear the global import policy chain.
     ClearGlobalImportChain {
         /// Optional persistence acknowledgement (see `SetPolicy`).
-        ack: Option<oneshot::Sender<Result<(), String>>>,
+        ack: Option<ConfigPersistAck>,
     },
     /// Clear the global export policy chain.
     ClearGlobalExportChain {
         /// Optional persistence acknowledgement (see `SetPolicy`).
-        ack: Option<oneshot::Sender<Result<(), String>>>,
+        ack: Option<ConfigPersistAck>,
     },
     /// Replace the per-neighbor import policy chain.
     SetNeighborImportChain {
@@ -1860,7 +1943,7 @@ pub enum ConfigEvent {
         /// Ordered policy names.
         policy_names: Vec<String>,
         /// Optional persistence acknowledgement (see `SetPolicy`).
-        ack: Option<oneshot::Sender<Result<(), String>>>,
+        ack: Option<ConfigPersistAck>,
     },
     /// Replace the per-neighbor export policy chain.
     SetNeighborExportChain {
@@ -1869,21 +1952,21 @@ pub enum ConfigEvent {
         /// Ordered policy names.
         policy_names: Vec<String>,
         /// Optional persistence acknowledgement (see `SetPolicy`).
-        ack: Option<oneshot::Sender<Result<(), String>>>,
+        ack: Option<ConfigPersistAck>,
     },
     /// Clear the per-neighbor import policy chain.
     ClearNeighborImportChain {
         /// Neighbor address.
         address: IpAddr,
         /// Optional persistence acknowledgement (see `SetPolicy`).
-        ack: Option<oneshot::Sender<Result<(), String>>>,
+        ack: Option<ConfigPersistAck>,
     },
     /// Clear the per-neighbor export policy chain.
     ClearNeighborExportChain {
         /// Neighbor address.
         address: IpAddr,
         /// Optional persistence acknowledgement (see `SetPolicy`).
-        ack: Option<oneshot::Sender<Result<(), String>>>,
+        ack: Option<ConfigPersistAck>,
     },
     /// Create or replace a peer-group definition.
     SetPeerGroup {
@@ -1892,14 +1975,14 @@ pub enum ConfigEvent {
         /// Full replacement definition.
         definition: PeerGroupDefinition,
         /// Optional persistence acknowledgement (see `SetPolicy`).
-        ack: Option<oneshot::Sender<Result<(), String>>>,
+        ack: Option<ConfigPersistAck>,
     },
     /// Delete a peer-group definition.
     DeletePeerGroup {
         /// Peer-group name.
         name: String,
         /// Optional persistence acknowledgement (see `SetPolicy`).
-        ack: Option<oneshot::Sender<Result<(), String>>>,
+        ack: Option<ConfigPersistAck>,
     },
     /// Set a neighbor's peer-group membership.
     SetNeighborPeerGroup {
@@ -1908,14 +1991,14 @@ pub enum ConfigEvent {
         /// Peer-group name.
         peer_group: String,
         /// Optional persistence acknowledgement (see `SetPolicy`).
-        ack: Option<oneshot::Sender<Result<(), String>>>,
+        ack: Option<ConfigPersistAck>,
     },
     /// Clear a neighbor's peer-group membership.
     ClearNeighborPeerGroup {
         /// Neighbor address.
         address: IpAddr,
         /// Optional persistence acknowledgement (see `SetPolicy`).
-        ack: Option<oneshot::Sender<Result<(), String>>>,
+        ack: Option<ConfigPersistAck>,
     },
 }
 

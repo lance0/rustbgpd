@@ -197,6 +197,9 @@ serde_yaml.workspace = true
 tempfile.workspace = true
 tower.workspace = true
 criterion.workspace = true
+# Drives the gRPC services directly (Request/Status/Code) in the tests that
+# prove a rejected mutation leaves no observable trace.
+tonic.workspace = true
 # Enables Tokio's paused-clock test harness (`start_paused`) for deterministic,
 # wall-clock-free timer tests (e.g. the confirm-timeout auto-revert).
 tokio = { workspace = true, features = ["test-util"] }

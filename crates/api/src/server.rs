@@ -378,25 +378,116 @@ pub async fn check_config_mutation_gate(
     Ok(())
 }
 
-/// Queue a runtime-config event through a reserved persistence slot and
-/// wait for the config bridge to acknowledge the on-disk write.
+/// A durable config write that is written and fsynced but not yet published.
 ///
-/// Shared by every persisted runtime CRUD path (neighbors, dynamic
-/// ranges, policy/peer-group catalogs): the caller holds the shared
-/// runtime-config lock across this await so a SIGHUP reload cannot read
-/// a stale TOML between the runtime mutation and the disk commit.
-pub(crate) async fn persist_runtime_config_event(
+/// Holding one means the persistence failure modes an operator actually hits
+/// — an unwritable config directory, a read-only mount, a full filesystem —
+/// have already been ruled out. Committing it is a rename; dropping it
+/// discards the write with no trace.
+#[must_use = "a staged config write must be committed or explicitly dropped"]
+pub(crate) struct StagedConfigWrite {
+    commit_tx: tokio::sync::oneshot::Sender<tokio::sync::oneshot::Sender<Result<(), String>>>,
+}
+
+impl StagedConfigWrite {
+    /// Publish the staged write. Call only once the runtime change landed.
+    ///
+    /// # Errors
+    ///
+    /// Returns `INTERNAL` if publishing fails after the runtime change was
+    /// already applied: runtime and disk have drifted and only SIGHUP or a
+    /// restart reconciles them.
+    pub(crate) async fn commit(self) -> Result<(), Status> {
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+        self.commit_tx
+            .send(ack_tx)
+            .map_err(|_| Status::internal(COMMIT_LOST))?;
+        ack_rx
+            .await
+            .map_err(|_| Status::internal(COMMIT_LOST))?
+            .map_err(|error| {
+                Status::internal(format!(
+                    "config persistence commit failed after the runtime change was applied \
+                     (runtime and persisted config have drifted — SIGHUP or restart to \
+                     reconcile): {error}"
+                ))
+            })
+    }
+}
+
+const COMMIT_LOST: &str = "config bridge dropped the staged config write after the runtime change \
+                           was applied (runtime and persisted config have drifted — SIGHUP or \
+                           restart to reconcile)";
+
+/// Reserve the on-disk write for a runtime-config event *before* the caller
+/// mutates anything.
+///
+/// Shared by every persisted runtime CRUD path (neighbors, dynamic ranges,
+/// policy/peer-group catalogs). The config bridge folds the event onto the
+/// config snapshot, serializes it, and durably stages the result next to the
+/// config file; this returns once that succeeded. Nothing is observable on
+/// disk or on the wire yet.
+///
+/// That ordering is the contract: `FAILED_PRECONDITION` from a mutating RPC
+/// means the request did nothing. Applying first and compensating afterwards
+/// cannot honour it — re-adding a deleted neighbor produces a *new* session
+/// with a new identity, a zeroed uptime, zeroed counters, and a fresh metric
+/// series, and the teardown never even appears in the operator's flap count.
+///
+/// The caller holds the shared runtime-config lock across the whole
+/// stage/apply/commit window, so a SIGHUP reload cannot read a stale TOML in
+/// the middle of it.
+///
+/// # Errors
+///
+/// Returns `FAILED_PRECONDITION` when the candidate cannot be written. The
+/// caller has not mutated anything at that point, and must not.
+pub(crate) async fn stage_runtime_config_event(
     permit: tokio::sync::mpsc::OwnedPermit<crate::peer_types::ConfigEvent>,
-    build_event: impl FnOnce(
-        tokio::sync::oneshot::Sender<Result<(), String>>,
-    ) -> crate::peer_types::ConfigEvent,
-) -> Result<(), Status> {
-    let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
-    permit.send(build_event(ack_tx));
-    ack_rx
+    build_event: impl FnOnce(crate::peer_types::ConfigPersistAck) -> crate::peer_types::ConfigEvent,
+) -> Result<StagedConfigWrite, Status> {
+    let (staged_tx, staged_rx) = tokio::sync::oneshot::channel();
+    let (commit_tx, commit_rx) = tokio::sync::oneshot::channel();
+    permit.send(build_event(crate::peer_types::ConfigPersistAck {
+        staged: staged_tx,
+        commit: Some(commit_rx),
+    }));
+    staged_rx
         .await
         .map_err(|_| Status::internal("config bridge dropped persistence acknowledgement"))?
-        .map_err(|error| Status::failed_precondition(format!("config persistence failed: {error}")))
+        .map_err(|error| match error {
+            crate::peer_types::ConfigPersistError::Rejected(error) => {
+                catalog_mutation_error_to_status(&error)
+            }
+            crate::peer_types::ConfigPersistError::Write(message) => {
+                Status::failed_precondition(format!("config persistence failed: {message}"))
+            }
+        })?;
+    Ok(StagedConfigWrite { commit_tx })
+}
+
+/// Stage a runtime-config event, run `apply`, then publish the write.
+///
+/// A staging failure returns before `apply` runs at all; an `apply` failure
+/// drops the stage, so the config file is never written. `persist_permit` is
+/// `None` when the daemon has no config file to persist to, in which case
+/// only `apply` runs.
+pub(crate) async fn persist_then_apply<F, Fut>(
+    persist_permit: Option<tokio::sync::mpsc::OwnedPermit<crate::peer_types::ConfigEvent>>,
+    build_event: impl FnOnce(crate::peer_types::ConfigPersistAck) -> crate::peer_types::ConfigEvent,
+    apply: F,
+) -> Result<(), Status>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<(), Status>>,
+{
+    let Some(permit) = persist_permit else {
+        return apply().await;
+    };
+    let staged = stage_runtime_config_event(permit, build_event).await?;
+    // `staged` drops here on an apply failure, discarding the write.
+    apply().await?;
+    staged.commit().await
 }
 
 /// Run a persisted catalog mutation on a detached task: take the shared
@@ -460,25 +551,6 @@ pub(crate) async fn apply_catalog_mutation(
     peer_manager_request(peer_mgr_tx, build_command)
         .await?
         .map_err(|error| catalog_mutation_error_to_status(&error))
-}
-
-/// Compose the persist failure with a rollback failure, if any: a failed
-/// rollback means runtime and disk have drifted and only a restart or
-/// SIGHUP repair reconciles them — the error must say so.
-pub(crate) fn persist_rollback_error(
-    operation: &str,
-    error: Status,
-    rollback: Result<(), Status>,
-) -> Status {
-    match rollback {
-        Ok(()) => error,
-        Err(rollback_error) => Status::internal(format!(
-            "{}; rollback of {operation} failed (runtime and persisted config have drifted — \
-             SIGHUP or restart to reconcile): {}",
-            error.message(),
-            rollback_error.message()
-        )),
-    }
 }
 
 /// Configuration for the gRPC server beyond basic connectivity.

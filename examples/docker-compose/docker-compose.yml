@@ -17,8 +17,24 @@
 services:
   rustbgpd:
     build: ../..
+    # The daemon persists runtime mutations (`rbgp neighbor add`, policy edits,
+    # gNMI Set) back to its config file with a temp-file + rename write, so the
+    # config must live in a directory the daemon user can write. A bind-mounted
+    # file cannot be one: the mount is read-only and its parent is the image's
+    # root-owned /etc. So the checked-in file is mounted as a template and
+    # copied once into the daemon's writable state directory, which is where
+    # the running config lives. `-n` keeps a restart from discarding runtime
+    # edits already made in the volume.
+    command:
+      - /bin/sh
+      - -c
+      - cp -n /etc/rustbgpd/config.template.toml /var/lib/rustbgpd/config.toml
+        && exec rustbgpd /var/lib/rustbgpd/config.toml
     volumes:
-      - ./rustbgpd.toml:/etc/rustbgpd/config.toml:ro
+      - ./rustbgpd.toml:/etc/rustbgpd/config.template.toml:ro
+      # Named volume so runtime config edits survive `docker compose restart`.
+      # It inherits the image directory's rustbgpd ownership on first use.
+      - rustbgpd-state:/var/lib/rustbgpd
       # Public test-only credential shared with the interop harness. It is a
       # runnable example, never a production secret.
       - ../../tests/fixtures/grpc-test-only-operator.token:/run/rustbgpd/grpc-test-only-operator.token:ro
@@ -56,3 +72,6 @@ networks:
       config:
         - subnet: 10.99.0.0/24
         - subnet: fd99::/64
+
+volumes:
+  rustbgpd-state:

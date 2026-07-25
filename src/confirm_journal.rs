@@ -384,15 +384,59 @@ fn refuse_after_revert_message(
 /// directory (os error 2)") is useless to an operator who doesn't know
 /// which file the daemon was writing.
 pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    write_atomic_inner(path, bytes).map_err(|error| {
-        io::Error::new(
-            error.kind(),
-            format!("failed to write {}: {error}", path.display()),
-        )
-    })
+    stage_atomic(path, bytes)?.commit()
 }
 
-fn write_atomic_inner(path: &Path, bytes: &[u8]) -> io::Result<()> {
+/// A durable write that has been fully written and fsynced next to its
+/// destination but not yet published. Every failure mode an operator hits in
+/// practice — an unwritable directory, a read-only mount, a full filesystem —
+/// is consumed by [`stage_atomic`], so a staged write can be committed with
+/// only a `rename(2)` left to do, or discarded with no trace.
+///
+/// This is what lets runtime config mutations reserve their on-disk write
+/// *before* touching a live BGP session: a staging failure has changed
+/// nothing anywhere, and discarding costs nothing.
+pub(crate) struct StagedWrite {
+    tmp: PathBuf,
+    target: PathBuf,
+}
+
+impl StagedWrite {
+    /// Publish the staged bytes: rename into place and fsync the directory.
+    pub(crate) fn commit(self) -> io::Result<()> {
+        commit_staged(&self.tmp, &self.target)
+            .map_err(|error| name_write_failure(&self.target, &error))
+    }
+
+    /// Drop the staged bytes. Best effort: a leftover temp file is harmless
+    /// (the next stage truncates it) and there is nothing useful to report.
+    pub(crate) fn discard(self) {
+        let _ = fs::remove_file(&self.tmp);
+    }
+}
+
+/// Write temp file + fsync, stopping short of the rename that publishes it.
+///
+/// Failures name the destination path: a bare io error ("No such file or
+/// directory (os error 2)") is useless to an operator who doesn't know
+/// which file the daemon was writing.
+pub(crate) fn stage_atomic(path: &Path, bytes: &[u8]) -> io::Result<StagedWrite> {
+    stage_atomic_inner(path, bytes).map_err(|error| name_write_failure(path, &error))
+}
+
+fn name_write_failure(path: &Path, error: &io::Error) -> io::Error {
+    io::Error::new(
+        error.kind(),
+        format!("failed to write {}: {error}", path.display()),
+    )
+}
+
+fn commit_staged(tmp: &Path, target: &Path) -> io::Result<()> {
+    fs::rename(tmp, target)?;
+    fsync_dir(parent_dir(target)?)
+}
+
+fn stage_atomic_inner(path: &Path, bytes: &[u8]) -> io::Result<StagedWrite> {
     // Resolve symlinks so the write lands on the REAL file: `rename(2)` over
     // a symlink replaces the symlink itself (orphaning its target), and
     // resolving at write time means the rename cannot be redirected by a
@@ -433,8 +477,7 @@ fn write_atomic_inner(path: &Path, bytes: &[u8]) -> io::Result<()> {
     file.write_all(bytes)?;
     file.sync_all()?;
     drop(file);
-    fs::rename(&tmp, &target)?;
-    fsync_dir(parent_dir(&target)?)
+    Ok(StagedWrite { tmp, target })
 }
 
 fn parent_dir(path: &Path) -> io::Result<&Path> {

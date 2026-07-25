@@ -15,7 +15,7 @@ use crate::peer_types::{
 };
 use crate::proto;
 use crate::server::{
-    AccessMode, ConfigMutationGateFn, check_config_mutation_gate, persist_runtime_config_event,
+    AccessMode, ConfigMutationGateFn, check_config_mutation_gate, persist_then_apply,
     read_only_rejection,
 };
 use rustbgpd_rib::{
@@ -90,6 +90,7 @@ pub struct NeighborService {
 impl NeighborService {
     /// Create a new neighbor service with the given channels.
     #[cfg(test)]
+    #[must_use]
     pub fn new(
         local_asn: u32,
         access_mode: AccessMode,
@@ -372,25 +373,6 @@ async fn delete_static_peer(
         .await
         .map_err(|_| Status::internal("peer manager dropped reply"))?
         .map_err(peer_lifecycle_error_status)
-}
-
-async fn apply_peer_manager_config_event(
-    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
-    event: ConfigEvent,
-) -> Result<(), Status> {
-    let (reply_tx, reply_rx) = oneshot::channel();
-    peer_mgr_tx
-        .send(PeerManagerCommand::ApplyConfigEvent {
-            event,
-            reply: reply_tx,
-        })
-        .await
-        .map_err(|_| Status::internal("peer manager unavailable"))?;
-
-    reply_rx
-        .await
-        .map_err(|_| Status::internal("peer manager dropped reply"))?
-        .map_err(Status::internal)
 }
 
 async fn delete_dynamic_range(
@@ -1036,7 +1018,6 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         // Reserve config persistence capacity before mutating runtime state.
         // This makes AddNeighbor fail-fast when persistence is unavailable.
         let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
-        let peer_key = PeerKey::new(peer_config.address, peer_config.interface.clone());
         let peer_mgr_tx = self.peer_mgr_tx.clone();
         let runtime_config_lock = self.runtime_config_lock.clone();
         let config_mutation_gate = self.config_mutation_gate.clone();
@@ -1044,28 +1025,21 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             let _guard = runtime_config_lock.lock().await;
             check_config_mutation_gate(&config_mutation_gate, "NeighborService.AddNeighbor")
                 .await?;
-            add_static_peer(&peer_mgr_tx, peer_config.clone()).await?;
 
-            // Keep the shared runtime-config lock held until the TOML write is
-            // acknowledged; otherwise a concurrent SIGHUP could reload stale
-            // disk and drop the accepted runtime neighbor from the snapshot.
-            if let Some(permit) = persist_permit
-                && let Err(error) =
-                    persist_runtime_config_event(permit, |ack| ConfigEvent::NeighborAdded {
-                        config: peer_config.clone(),
-                        ack: Some(ack),
-                    })
-                    .await
-            {
-                let rollback = delete_static_peer(&peer_mgr_tx, peer_key, true).await;
-                if let Err(rollback_error) = rollback {
-                    return Err(Status::internal(format!(
-                        "{error}; rollback of neighbor add failed: {rollback_error}"
-                    )));
-                }
-                return Err(error);
-            }
-            Ok::<(), Status>(())
+            // Stage the write first: a session that has already dialed out and
+            // sent an OPEN cannot be un-dialed, so a persistence failure must
+            // be known before the peer exists. Keep the shared runtime-config
+            // lock held across the whole window; otherwise a concurrent SIGHUP
+            // could reload stale disk between the runtime add and the commit.
+            persist_then_apply(
+                persist_permit,
+                |ack| ConfigEvent::NeighborAdded {
+                    config: peer_config.clone(),
+                    ack: Some(ack),
+                },
+                || add_static_peer(&peer_mgr_tx, peer_config.clone()),
+            )
+            .await
         });
         join.await
             .map_err(|_| Status::internal("neighbor add task did not complete"))??;
@@ -1094,47 +1068,27 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             let _guard = runtime_config_lock.lock().await;
             check_config_mutation_gate(&config_mutation_gate, "NeighborService.DeleteNeighbor")
                 .await?;
-            let removed = delete_static_peer(&peer_mgr_tx, peer.clone(), false).await?;
-
-            // Hold the shared runtime-config lock until persistence completes
-            // so SIGHUP cannot rebuild from stale TOML in the middle.
-            if let Some(permit) = persist_permit
-                && let Err(error) =
-                    persist_runtime_config_event(permit, |ack| ConfigEvent::NeighborDeleted {
-                        peer: peer.clone(),
-                        ack: Some(ack),
-                    })
-                    .await
-            {
-                let rollback = add_static_peer(&peer_mgr_tx, removed).await;
-                if let Err(rollback_error) = rollback {
-                    return Err(Status::internal(format!(
-                        "{error}; rollback of neighbor delete failed: {rollback_error}"
-                    )));
-                }
-                return Err(error);
-            }
-            // Delete differs from add on purpose: the live peer is removed
-            // before persistence, but the peer-manager config snapshot is only
-            // updated after the TOML write succeeds. That keeps the original
-            // config row available for rollback instead of reconstructing it
-            // from a lossy runtime snapshot.
-            if let Err(error) = apply_peer_manager_config_event(
-                &peer_mgr_tx,
-                ConfigEvent::NeighborDeleted {
+            // The session teardown below is irreversible: re-adding the peer
+            // builds a *new* session with a new identity, a zeroed uptime,
+            // zeroed counters, and a fresh metric series, and the teardown
+            // never reaches the operator's flap count. So the write is staged
+            // and acknowledged first — a persistence failure is reported while
+            // the session is still up and untouched. The shared runtime-config
+            // lock is held across the whole window so SIGHUP cannot rebuild
+            // from stale TOML in the middle.
+            persist_then_apply(
+                persist_permit,
+                |ack| ConfigEvent::NeighborDeleted {
                     peer: peer.clone(),
-                    ack: None,
+                    ack: Some(ack),
+                },
+                || async {
+                    delete_static_peer(&peer_mgr_tx, peer.clone(), true)
+                        .await
+                        .map(|_| ())
                 },
             )
             .await
-            {
-                tracing::warn!(
-                    %peer,
-                    error = %error,
-                    "neighbor delete persisted but peer-manager snapshot update failed"
-                );
-            }
-            Ok::<(), Status>(())
         });
         join.await
             .map_err(|_| Status::internal("neighbor delete task did not complete"))??;
@@ -1413,41 +1367,32 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             let _guard = runtime_config_lock.lock().await;
             check_config_mutation_gate(&config_mutation_gate, "NeighborService.AddDynamicNeighbor")
                 .await?;
-            add_dynamic_range(
-                &peer_mgr_tx,
-                range.prefix.clone(),
-                range.peer_group.clone(),
-                range.remote_asn,
-                description.clone(),
+            // Stage the write before the matcher changes, so a persistence
+            // failure cannot leave a range that briefly accepted a session.
+            // This runs inside the spawned task so a canceled gRPC request
+            // cannot split the runtime add from the queued config event, and
+            // the shared runtime-config lock is held across the whole window
+            // so a concurrent SIGHUP cannot reload stale disk in the middle.
+            persist_then_apply(
+                persist_permit,
+                |ack| ConfigEvent::DynamicNeighborAdded {
+                    prefix: range.prefix.clone(),
+                    peer_group: range.peer_group.clone(),
+                    remote_asn: range.remote_asn,
+                    description: description.clone(),
+                    ack: Some(ack),
+                },
+                || {
+                    add_dynamic_range(
+                        &peer_mgr_tx,
+                        range.prefix.clone(),
+                        range.peer_group.clone(),
+                        range.remote_asn,
+                        description.clone(),
+                    )
+                },
             )
-            .await?;
-
-            // Persist only after successful runtime mutation. This runs inside
-            // the spawned task so a canceled gRPC request cannot split runtime
-            // add from the queued config event. When persistence is configured,
-            // keep the shared runtime-config lock held until the TOML write is
-            // acknowledged; otherwise a concurrent SIGHUP could reload stale
-            // disk and drop the accepted runtime add from the rebuilt matcher.
-            if let Some(permit) = persist_permit
-                && let Err(error) =
-                    persist_runtime_config_event(permit, |ack| ConfigEvent::DynamicNeighborAdded {
-                        prefix: range.prefix.clone(),
-                        peer_group: range.peer_group.clone(),
-                        remote_asn: range.remote_asn,
-                        description: description.clone(),
-                        ack: Some(ack),
-                    })
-                    .await
-            {
-                let rollback = delete_dynamic_range(&peer_mgr_tx, range.prefix.clone()).await;
-                if let Err(rollback_error) = rollback {
-                    return Err(Status::internal(format!(
-                        "{error}; rollback of dynamic-neighbor add failed: {rollback_error}"
-                    )));
-                }
-                return Err(error);
-            }
-            Ok::<(), Status>(())
+            .await
         });
         join.await
             .map_err(|_| Status::internal("dynamic-neighbor add task did not complete"))??;
@@ -1479,37 +1424,25 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
                 "NeighborService.DeleteDynamicNeighbor",
             )
             .await?;
-            let removed = delete_dynamic_range(&peer_mgr_tx, prefix.clone()).await?;
-
-            // Queue persistence inside the spawned task so cancellation after
-            // runtime delete cannot leave disk with the removed range. Hold the
-            // shared runtime-config lock until the write is acknowledged so
-            // SIGHUP cannot rebuild from stale TOML in the middle.
-            if let Some(permit) = persist_permit
-                && let Err(error) = persist_runtime_config_event(permit, |ack| {
-                    ConfigEvent::DynamicNeighborDeleted {
-                        prefix: prefix.clone(),
-                        ack: Some(ack),
-                    }
-                })
-                .await
-            {
-                let rollback = add_dynamic_range(
-                    &peer_mgr_tx,
-                    removed.prefix,
-                    removed.peer_group,
-                    removed.remote_asn,
-                    removed.description,
-                )
-                .await;
-                if let Err(rollback_error) = rollback {
-                    return Err(Status::internal(format!(
-                        "{error}; rollback of dynamic-neighbor delete failed: {rollback_error}"
-                    )));
-                }
-                return Err(error);
-            }
-            Ok::<(), Status>(())
+            // Stage the write first so a persistence failure leaves the range
+            // in place rather than removing and re-adding it. This runs inside
+            // the spawned task so cancellation cannot split runtime delete
+            // from the queued config event, and the shared runtime-config lock
+            // is held across the window so SIGHUP cannot rebuild from stale
+            // TOML in the middle.
+            persist_then_apply(
+                persist_permit,
+                |ack| ConfigEvent::DynamicNeighborDeleted {
+                    prefix: prefix.clone(),
+                    ack: Some(ack),
+                },
+                || async {
+                    delete_dynamic_range(&peer_mgr_tx, prefix.clone())
+                        .await
+                        .map(|_| ())
+                },
+            )
+            .await
         });
         join.await
             .map_err(|_| Status::internal("dynamic-neighbor delete task did not complete"))??;
@@ -2055,6 +1988,28 @@ mod tests {
             .unwrap();
         });
 
+        let staged = match config_rx.recv().await.unwrap() {
+            ConfigEvent::DynamicNeighborAdded {
+                prefix,
+                peer_group,
+                remote_asn,
+                description,
+                ack,
+            } => {
+                assert_eq!(prefix, "192.0.2.0/24");
+                assert_eq!(peer_group, "fabric");
+                assert_eq!(remote_asn, 65002);
+                assert_eq!(description.as_deref(), Some("lab range"));
+                assert!(
+                    matches!(peer_mgr_rx.try_recv(), Err(TryRecvError::Empty)),
+                    "the matcher must not change before the write is staged"
+                );
+                ack.unwrap()
+            }
+            _ => panic!("expected DynamicNeighborAdded"),
+        };
+        let staged = tokio::spawn(staged.accept());
+
         match peer_mgr_rx.recv().await.unwrap() {
             PeerManagerCommand::AddDynamicRange {
                 prefix,
@@ -2067,39 +2022,22 @@ mod tests {
                 assert_eq!(peer_group, "fabric");
                 assert_eq!(remote_asn, 65002);
                 assert_eq!(description.as_deref(), Some("lab range"));
-                reply.send(Ok(())).unwrap();
-            }
-            _ => panic!("expected AddDynamicRange"),
-        }
-
-        match config_rx.recv().await.unwrap() {
-            ConfigEvent::DynamicNeighborAdded {
-                prefix,
-                peer_group,
-                remote_asn,
-                description,
-                ack,
-            } => {
-                assert_eq!(prefix, "192.0.2.0/24");
-                assert_eq!(peer_group, "fabric");
-                assert_eq!(remote_asn, 65002);
-                assert_eq!(description.as_deref(), Some("lab range"));
-                let ack = ack.unwrap();
                 assert!(
                     tokio::time::timeout(Duration::from_millis(20), &mut call)
                         .await
                         .is_err(),
-                    "call must wait for config persistence acknowledgement"
+                    "call must wait for the staged write to be committed"
                 );
-                ack.send(Ok(())).unwrap();
+                reply.send(Ok(())).unwrap();
             }
-            _ => panic!("expected DynamicNeighborAdded"),
+            _ => panic!("expected AddDynamicRange"),
         }
+        assert!(staged.await.unwrap(), "the staged write must be committed");
         call.await.unwrap();
     }
 
     #[tokio::test]
-    async fn add_dynamic_neighbor_rolls_back_when_persist_fails() {
+    async fn add_dynamic_neighbor_persist_failure_adds_no_range() {
         let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(16);
         let (rib_tx, _rib_rx) = mpsc::channel(16);
         let (config_tx, mut config_rx) = mpsc::channel(16);
@@ -2123,38 +2061,23 @@ mod tests {
             .await
         });
 
-        match peer_mgr_rx.recv().await.unwrap() {
-            PeerManagerCommand::AddDynamicRange { reply, .. } => {
-                reply.send(Ok(())).unwrap();
-            }
-            _ => panic!("expected AddDynamicRange"),
-        }
         match config_rx.recv().await.unwrap() {
             ConfigEvent::DynamicNeighborAdded { ack, .. } => {
-                ack.unwrap()
-                    .send(Err("disk full".to_string()))
-                    .expect("send persist failure");
+                ack.unwrap().fail_write("disk full");
             }
             _ => panic!("expected DynamicNeighborAdded"),
-        }
-        match peer_mgr_rx.recv().await.unwrap() {
-            PeerManagerCommand::DeleteDynamicRange { prefix, reply } => {
-                assert_eq!(prefix, "192.0.2.0/24");
-                reply
-                    .send(Ok(RemovedDynamicRange {
-                        prefix,
-                        peer_group: "fabric".to_string(),
-                        remote_asn: 65002,
-                        description: Some("lab range".to_string()),
-                    }))
-                    .unwrap();
-            }
-            _ => panic!("expected DeleteDynamicRange rollback"),
         }
 
         let err = call.await.unwrap().unwrap_err();
         assert_eq!(err.code(), tonic::Code::FailedPrecondition);
         assert!(err.message().contains("config persistence failed"));
+        assert!(
+            matches!(
+                peer_mgr_rx.try_recv(),
+                Err(TryRecvError::Empty | TryRecvError::Disconnected)
+            ),
+            "a rejected dynamic-range add must not touch the matcher"
+        );
     }
 
     #[tokio::test]
@@ -2211,9 +2134,28 @@ mod tests {
             .unwrap();
         });
 
+        let staged = match config_rx.recv().await.unwrap() {
+            ConfigEvent::DynamicNeighborDeleted { prefix, ack } => {
+                assert_eq!(prefix, "192.0.2.0/24");
+                assert!(
+                    matches!(peer_mgr_rx.try_recv(), Err(TryRecvError::Empty)),
+                    "the matcher must not change before the write is staged"
+                );
+                ack.unwrap()
+            }
+            _ => panic!("expected DynamicNeighborDeleted"),
+        };
+        let staged = tokio::spawn(staged.accept());
+
         match peer_mgr_rx.recv().await.unwrap() {
             PeerManagerCommand::DeleteDynamicRange { prefix, reply } => {
                 assert_eq!(prefix, "192.0.2.0/24");
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(20), &mut call)
+                        .await
+                        .is_err(),
+                    "call must wait for the staged write to be committed"
+                );
                 reply
                     .send(Ok(RemovedDynamicRange {
                         prefix,
@@ -2225,26 +2167,12 @@ mod tests {
             }
             _ => panic!("expected DeleteDynamicRange"),
         }
-
-        match config_rx.recv().await.unwrap() {
-            ConfigEvent::DynamicNeighborDeleted { prefix, ack } => {
-                assert_eq!(prefix, "192.0.2.0/24");
-                let ack = ack.unwrap();
-                assert!(
-                    tokio::time::timeout(Duration::from_millis(20), &mut call)
-                        .await
-                        .is_err(),
-                    "call must wait for config persistence acknowledgement"
-                );
-                ack.send(Ok(())).unwrap();
-            }
-            _ => panic!("expected DynamicNeighborDeleted"),
-        }
+        assert!(staged.await.unwrap(), "the staged write must be committed");
         call.await.unwrap();
     }
 
     #[tokio::test]
-    async fn delete_dynamic_neighbor_rolls_back_when_persist_fails() {
+    async fn delete_dynamic_neighbor_persist_failure_keeps_the_range() {
         let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(16);
         let (rib_tx, _rib_rx) = mpsc::channel(16);
         let (config_tx, mut config_rx) = mpsc::channel(16);
@@ -2263,47 +2191,23 @@ mod tests {
             .await
         });
 
-        let removed = RemovedDynamicRange {
-            prefix: "192.0.2.0/24".to_string(),
-            peer_group: "fabric".to_string(),
-            remote_asn: 65002,
-            description: Some("lab range".to_string()),
-        };
-        match peer_mgr_rx.recv().await.unwrap() {
-            PeerManagerCommand::DeleteDynamicRange { prefix, reply } => {
-                assert_eq!(prefix, "192.0.2.0/24");
-                reply.send(Ok(removed.clone())).unwrap();
-            }
-            _ => panic!("expected DeleteDynamicRange"),
-        }
         match config_rx.recv().await.unwrap() {
             ConfigEvent::DynamicNeighborDeleted { ack, .. } => {
-                ack.unwrap()
-                    .send(Err("disk full".to_string()))
-                    .expect("send persist failure");
+                ack.unwrap().fail_write("disk full");
             }
             _ => panic!("expected DynamicNeighborDeleted"),
-        }
-        match peer_mgr_rx.recv().await.unwrap() {
-            PeerManagerCommand::AddDynamicRange {
-                prefix,
-                peer_group,
-                remote_asn,
-                description,
-                reply,
-            } => {
-                assert_eq!(prefix, removed.prefix);
-                assert_eq!(peer_group, removed.peer_group);
-                assert_eq!(remote_asn, removed.remote_asn);
-                assert_eq!(description, removed.description);
-                reply.send(Ok(())).unwrap();
-            }
-            _ => panic!("expected AddDynamicRange rollback"),
         }
 
         let err = call.await.unwrap().unwrap_err();
         assert_eq!(err.code(), tonic::Code::FailedPrecondition);
         assert!(err.message().contains("config persistence failed"));
+        assert!(
+            matches!(
+                peer_mgr_rx.try_recv(),
+                Err(TryRecvError::Empty | TryRecvError::Disconnected)
+            ),
+            "a rejected dynamic-range delete must not touch the matcher"
+        );
     }
 
     #[tokio::test]
@@ -2994,6 +2898,21 @@ mod tests {
             .await
         });
 
+        // The config write is staged BEFORE the peer exists.
+        let staged = match config_rx.recv().await.unwrap() {
+            ConfigEvent::NeighborAdded { config, ack } => {
+                assert_eq!(config.address.to_string(), "10.0.0.2");
+                assert_eq!(config.required_families, vec![(Afi::Ipv4, Safi::Unicast)]);
+                assert!(
+                    matches!(peer_mgr_rx.try_recv(), Err(TryRecvError::Empty)),
+                    "no runtime mutation may be issued before the write is staged"
+                );
+                ack.unwrap()
+            }
+            _ => panic!("expected NeighborAdded"),
+        };
+        let staged = tokio::spawn(staged.accept());
+
         match peer_mgr_rx.recv().await.unwrap() {
             PeerManagerCommand::AddPeer {
                 config,
@@ -3001,33 +2920,25 @@ mod tests {
                 reply,
             } => {
                 assert_eq!(config.address.to_string(), "10.0.0.2");
+                assert_eq!(config.remote_asn, 65002);
                 assert_eq!(config.required_families, vec![(Afi::Ipv4, Safi::Unicast)]);
                 assert!(sync_config_snapshot);
-                reply.send(Ok(())).unwrap();
-            }
-            _ => panic!("expected AddPeer"),
-        }
-
-        match config_rx.recv().await.unwrap() {
-            ConfigEvent::NeighborAdded { config, ack } => {
-                assert_eq!(config.address.to_string(), "10.0.0.2");
-                assert_eq!(config.required_families, vec![(Afi::Ipv4, Safi::Unicast)]);
-                let ack = ack.unwrap();
                 assert!(
                     tokio::time::timeout(Duration::from_millis(20), &mut call)
                         .await
                         .is_err(),
-                    "call must wait for config persistence acknowledgement"
+                    "call must wait for the staged write to be committed"
                 );
-                ack.send(Ok(())).unwrap();
+                reply.send(Ok(())).unwrap();
             }
-            _ => panic!("expected NeighborAdded"),
+            _ => panic!("expected AddPeer"),
         }
+        assert!(staged.await.unwrap(), "the staged write must be committed");
         call.await.unwrap().unwrap();
     }
 
     #[tokio::test]
-    async fn add_neighbor_rolls_back_when_persist_fails() {
+    async fn add_neighbor_persist_failure_creates_no_peer() {
         let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(16);
         let (rib_tx, _rib_rx) = mpsc::channel(16);
         let (config_tx, mut config_rx) = mpsc::channel(16);
@@ -3057,36 +2968,25 @@ mod tests {
             .await
         });
 
-        match peer_mgr_rx.recv().await.unwrap() {
-            PeerManagerCommand::AddPeer { reply, .. } => {
-                reply.send(Ok(())).unwrap();
-            }
-            _ => panic!("expected AddPeer"),
-        }
         match config_rx.recv().await.unwrap() {
             ConfigEvent::NeighborAdded { ack, .. } => {
-                ack.unwrap()
-                    .send(Err("disk full".to_string()))
-                    .expect("send persist failure");
+                ack.unwrap().fail_write("disk full");
             }
             _ => panic!("expected NeighborAdded"),
-        }
-        match peer_mgr_rx.recv().await.unwrap() {
-            PeerManagerCommand::DeletePeer {
-                peer,
-                sync_config_snapshot,
-                reply,
-            } => {
-                assert_eq!(peer.address.to_string(), "10.0.0.2");
-                assert!(sync_config_snapshot);
-                assert!(reply.send(Ok(test_static_peer_config())).is_ok());
-            }
-            _ => panic!("expected DeletePeer rollback"),
         }
 
         let err = call.await.unwrap().unwrap_err();
         assert_eq!(err.code(), tonic::Code::FailedPrecondition);
         assert!(err.message().contains("config persistence failed"));
+        // No session was ever created, so there is nothing to compensate for:
+        // the peer manager saw no command at all.
+        assert!(
+            matches!(
+                peer_mgr_rx.try_recv(),
+                Err(TryRecvError::Empty | TryRecvError::Disconnected)
+            ),
+            "a rejected add must not touch the peer manager"
+        );
     }
 
     #[tokio::test]
@@ -3110,6 +3010,20 @@ mod tests {
             .await
         });
 
+        // The write is staged while the session is still up.
+        let staged = match config_rx.recv().await.unwrap() {
+            ConfigEvent::NeighborDeleted { peer, ack } => {
+                assert_eq!(peer.address.to_string(), "10.0.0.2");
+                assert!(
+                    matches!(peer_mgr_rx.try_recv(), Err(TryRecvError::Empty)),
+                    "the session must not be torn down before the write is staged"
+                );
+                ack.unwrap()
+            }
+            _ => panic!("expected NeighborDeleted"),
+        };
+        let staged = tokio::spawn(staged.accept());
+
         match peer_mgr_rx.recv().await.unwrap() {
             PeerManagerCommand::DeletePeer {
                 peer,
@@ -3117,90 +3031,25 @@ mod tests {
                 reply,
             } => {
                 assert_eq!(peer.address.to_string(), "10.0.0.2");
-                assert!(!sync_config_snapshot);
-                assert!(reply.send(Ok(test_static_peer_config())).is_ok());
-            }
-            _ => panic!("expected DeletePeer"),
-        }
-
-        match config_rx.recv().await.unwrap() {
-            ConfigEvent::NeighborDeleted { peer, ack } => {
-                assert_eq!(peer.address.to_string(), "10.0.0.2");
-                let ack = ack.unwrap();
+                // One command now does both: there is no separate snapshot
+                // fix-up, because the config row is no longer rollback state.
+                assert!(sync_config_snapshot);
                 assert!(
                     tokio::time::timeout(Duration::from_millis(20), &mut call)
                         .await
                         .is_err(),
-                    "call must wait for config persistence acknowledgement"
+                    "call must wait for the staged write to be committed"
                 );
-                ack.send(Ok(())).unwrap();
-            }
-            _ => panic!("expected NeighborDeleted"),
-        }
-        match peer_mgr_rx.recv().await.unwrap() {
-            PeerManagerCommand::ApplyConfigEvent { event, reply } => {
-                assert!(matches!(event, ConfigEvent::NeighborDeleted { .. }));
-                reply.send(Ok(())).unwrap();
-            }
-            _ => panic!("expected ApplyConfigEvent"),
-        }
-        call.await.unwrap().unwrap();
-    }
-
-    #[tokio::test]
-    async fn delete_neighbor_succeeds_when_snapshot_update_fails_after_persist() {
-        let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(16);
-        let (rib_tx, _rib_rx) = mpsc::channel(16);
-        let (config_tx, mut config_rx) = mpsc::channel(16);
-        let svc = NeighborService::new(
-            65001,
-            AccessMode::ReadWrite,
-            peer_mgr_tx,
-            rib_tx,
-            Some(config_tx),
-        );
-
-        let call = tokio::spawn(async move {
-            svc.delete_neighbor(Request::new(proto::DeleteNeighborRequest {
-                address: "10.0.0.2".into(),
-                interface: String::new(),
-            }))
-            .await
-        });
-
-        match peer_mgr_rx.recv().await.unwrap() {
-            PeerManagerCommand::DeletePeer {
-                sync_config_snapshot,
-                reply,
-                ..
-            } => {
-                assert!(!sync_config_snapshot);
                 assert!(reply.send(Ok(test_static_peer_config())).is_ok());
             }
             _ => panic!("expected DeletePeer"),
         }
-        match config_rx.recv().await.unwrap() {
-            ConfigEvent::NeighborDeleted { ack, .. } => {
-                ack.unwrap()
-                    .send(Ok(()))
-                    .expect("send persist acknowledgement");
-            }
-            _ => panic!("expected NeighborDeleted"),
-        }
-        match peer_mgr_rx.recv().await.unwrap() {
-            PeerManagerCommand::ApplyConfigEvent { reply, .. } => {
-                reply
-                    .send(Err("peer manager shutting down".to_string()))
-                    .unwrap();
-            }
-            _ => panic!("expected ApplyConfigEvent"),
-        }
-
+        assert!(staged.await.unwrap(), "the staged write must be committed");
         call.await.unwrap().unwrap();
     }
 
     #[tokio::test]
-    async fn delete_neighbor_rolls_back_when_persist_fails() {
+    async fn delete_neighbor_persist_failure_leaves_the_session_alone() {
         let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(16);
         let (rib_tx, _rib_rx) = mpsc::channel(16);
         let (config_tx, mut config_rx) = mpsc::channel(16);
@@ -3212,7 +3061,6 @@ mod tests {
             Some(config_tx),
         );
 
-        let removed = test_static_peer_config();
         let call = tokio::spawn(async move {
             svc.delete_neighbor(Request::new(proto::DeleteNeighborRequest {
                 address: "10.0.0.2".into(),
@@ -3221,42 +3069,26 @@ mod tests {
             .await
         });
 
-        match peer_mgr_rx.recv().await.unwrap() {
-            PeerManagerCommand::DeletePeer {
-                sync_config_snapshot,
-                reply,
-                ..
-            } => {
-                assert!(!sync_config_snapshot);
-                assert!(reply.send(Ok(removed.clone())).is_ok());
-            }
-            _ => panic!("expected DeletePeer"),
-        }
         match config_rx.recv().await.unwrap() {
             ConfigEvent::NeighborDeleted { ack, .. } => {
-                ack.unwrap()
-                    .send(Err("disk full".to_string()))
-                    .expect("send persist failure");
+                ack.unwrap().fail_write("disk full");
             }
             _ => panic!("expected NeighborDeleted"),
-        }
-        match peer_mgr_rx.recv().await.unwrap() {
-            PeerManagerCommand::AddPeer {
-                config,
-                sync_config_snapshot,
-                reply,
-            } => {
-                assert_eq!(config.address, removed.address);
-                assert_eq!(config.remote_asn, removed.remote_asn);
-                assert!(sync_config_snapshot);
-                reply.send(Ok(())).unwrap();
-            }
-            _ => panic!("expected AddPeer rollback"),
         }
 
         let err = call.await.unwrap().unwrap_err();
         assert_eq!(err.code(), tonic::Code::FailedPrecondition);
         assert!(err.message().contains("config persistence failed"));
+        // The old ordering tore the session down and then re-added the peer,
+        // which the operator sees as a brand-new session with zeroed counters
+        // and no flap recorded. Nothing reaches the peer manager now.
+        assert!(
+            matches!(
+                peer_mgr_rx.try_recv(),
+                Err(TryRecvError::Empty | TryRecvError::Disconnected)
+            ),
+            "a rejected delete must not touch the live session"
+        );
     }
 
     #[tokio::test]

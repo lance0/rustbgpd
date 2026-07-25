@@ -28,8 +28,27 @@ cargo run -p rustbgpctl --bin rbgp -- -s http://127.0.0.1:50051 neighbor
 cargo run -p rustbgpctl --bin rbgp -- -s http://127.0.0.1:50051 top
 ```
 
+## Change it without restarting
+
+Runtime mutations are persisted back to the config file, so they survive a
+restart:
+
+```bash
+docker compose exec rustbgpd rbgp -s http://127.0.0.1:50051 \
+  neighbor 10.99.0.30 add --remote-as 65003
+docker compose exec rustbgpd cat /var/lib/rustbgpd/config.toml
+```
+
+`rustbgpd.toml` in this directory is a **template**. The daemon copies it into
+its writable state volume on first start and runs from
+`/var/lib/rustbgpd/config.toml` — a read-only bind mount cannot accept the
+temp-file + rename write that config persistence uses, and every mutating
+command would fail. Edit the template and `docker compose down -v` to start
+over from it.
+
 ## Stop
 
 ```bash
-docker compose down
+docker compose down       # keeps runtime config edits
+docker compose down -v    # discards them, next start reseeds from the template
 ```
