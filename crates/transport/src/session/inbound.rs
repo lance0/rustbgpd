@@ -420,7 +420,6 @@ impl<'a> PolicyAttrSummary<'a> {
             extended_communities: self.extended_communities.to_vec(),
             communities: self.communities.to_vec(),
             large_communities: self.large_communities.to_vec(),
-            as_path_str: self.as_path_str.clone(),
             as_path: self.as_path.cloned(),
             as_path_len: self.as_path_len,
             origin_asn: self.origin_asn,
