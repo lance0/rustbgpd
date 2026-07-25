@@ -811,10 +811,17 @@ impl AdjRibIn {
 
     /// Withdraw all BGP-LS routes from this Adj-RIB-In.
     ///
-    /// BGP-LS GR/LLGR stale preservation is not wired into GR entry yet (the
-    /// stale-lifecycle helpers below are the substrate), so GR entry uses this
-    /// helper to make the conservative exclusion explicit instead of
-    /// accidentally retaining stale controller-feed objects as live.
+    /// Not on the GR path: BGP-LS spans two family tuples ((`BgpLs`,
+    /// `BgpLs`) and (`BgpLs`, `BgpLsVpn`)), so GR entry prunes per tuple
+    /// rather than clearing the table. A tuple the peer advertised for GR is
+    /// retained by `mark_stale_bgpls` and stays visible to `iter_bgpls` —
+    /// which is what keeps ORR vantages resolved through the restart window
+    /// — then either promotes via `promote_to_llgr_stale_bgpls` or is swept
+    /// by `sweep_stale_bgpls` / `sweep_stale_family_bgpls` when its deadline
+    /// fires. A tuple outside the peer's GR capability is withdrawn key by
+    /// key at GR entry instead. This whole-table clear stays available for
+    /// dropping every BGP-LS object at once, and clears the locally-injected
+    /// `LLGR_STALE` tags with them.
     pub fn withdraw_all_bgpls(&mut self) -> Vec<BgpLsRouteKey> {
         let keys: Vec<_> = self.bgpls_routes.keys().cloned().collect();
         self.bgpls_routes.clear();
@@ -1117,10 +1124,16 @@ impl AdjRibIn {
 
     /// Withdraw all VPN routes from this Adj-RIB-In.
     ///
-    /// VPN GR/LLGR stale preservation is not wired into GR entry yet (the
-    /// stale-lifecycle helpers below are the substrate), so GR entry uses this
-    /// helper to make the conservative exclusion explicit instead of
-    /// accidentally retaining stale controller-feed routes as live.
+    /// Not on the GR path: VPN spans two family tuples ((`Ipv4`, `MplsVpn`)
+    /// and (`Ipv6`, `MplsVpn`)), so GR entry prunes per tuple rather than
+    /// clearing the table. A tuple the peer advertised for GR is retained by
+    /// `mark_stale_vpn` and recomputed so the demoted tiebreak rank reaches
+    /// the Loc-RIB, then either promotes via `promote_to_llgr_stale_vpn` or
+    /// is swept by `sweep_stale_vpn` / `sweep_stale_family_vpn` when its
+    /// deadline fires. A tuple outside the peer's GR capability is withdrawn
+    /// key by key at GR entry instead. This whole-table clear stays available
+    /// for dropping every VPN route at once, and clears the locally-injected
+    /// `LLGR_STALE` tags with them.
     pub fn withdraw_all_vpn(&mut self) -> Vec<VpnRibRouteKey> {
         let keys: Vec<_> = self.vpn_routes.keys().cloned().collect();
         self.vpn_routes.clear();
@@ -1683,10 +1696,17 @@ impl AdjRibIn {
 
     /// Withdraw all RTC routes from this Adj-RIB-In.
     ///
-    /// RTC GR/LLGR stale preservation is not wired into GR entry yet (the
-    /// stale-lifecycle helpers below are the substrate), so GR entry uses this
-    /// helper to make the conservative exclusion explicit instead of
-    /// accidentally retaining stale membership routes as live.
+    /// Unlike the VPN and BGP-LS whole-table clears, this one is still on the
+    /// GR path. RTC has a single family tuple (AFI 1 / SAFI 132), so
+    /// clearing the table and pruning that one tuple are the same operation:
+    /// GR entry calls this helper exactly when the peer did NOT advertise GR
+    /// for RTC, and the returned keys drive the recompute that withdraws the
+    /// uncovered VPN routes downstream. When the peer DID advertise it, the
+    /// routes are instead retained by `mark_stale_rtc`, then either promote
+    /// via `promote_to_llgr_stale_rtc` or are swept by `sweep_stale_rtc` /
+    /// `sweep_stale_family_rtc` when the deadline fires. Dropping the
+    /// locally-injected `LLGR_STALE` tags here keeps a later retention cycle
+    /// from resurrecting a tag for a key this peer no longer advertises.
     pub fn withdraw_all_rtc(&mut self) -> Vec<RtcRibRouteKey> {
         let keys: Vec<_> = self.rtc_routes.keys().cloned().collect();
         self.rtc_routes.clear();
