@@ -13,6 +13,12 @@
 asn = 65534                      # Collector ASN (private, or use your own)
 router_id = "10.255.0.1"
 listen_port = 179
+# RFC 8212: an eBGP neighbor with no explicit policy carries nothing in
+# that direction. Both directions are spelled out below, so losing the
+# export chain leaves a silent collector rather than a collector that
+# re-advertises its upstreams to each other. Startup-only — SIGHUP keeps
+# the running value, so changing it takes a daemon restart.
+ebgp_requires_policy = true
 
 [global.telemetry]
 prometheus_addr = "0.0.0.0:9179"
@@ -61,10 +67,22 @@ sys_name = "rustbgpd-collector"
 [[bmp.collectors]]
 address = "10.0.0.100:5000"
 
+# --- Global import policy: accept everything, on purpose ---
+# A collector's job is to observe the table as its peers actually send it,
+# so filtering on import would corrupt the archive it exists to produce.
+# Permit-all is therefore the right import posture here — and it is stated
+# rather than left off, so nothing downstream has to guess whether an
+# unfiltered collector was intended. Add denies here only for data you
+# deliberately refuse to record.
+
+[policy.definitions.observe-all]
+default_action = "permit"
+
 # --- Global export policy: deny everything ---
 # A collector never advertises routes to peers.
 
 [policy]
+import_chain = ["observe-all"]
 export_chain = ["deny-all"]
 
 [policy.definitions.deny-all]

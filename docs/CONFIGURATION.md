@@ -438,7 +438,11 @@ WARNINGS — NOT a clean check` rather than `config OK`. The exit code is 0
 either way; add `--strict` (see [deployment.md](deployment.md)) to make any
 warning exit 1 in a CI or deployment gate. `rbgp config import` sets the knob
 in every config it generates,
-since it never translates policy; its report says so.
+since it never translates policy; its report says so. Every shipped starter —
+both `--init-config` profiles and every config under `examples/` — sets it too
+and passes `--check --strict`, so a first run is genuinely clean; where a
+starter is permit-all by design it says so in a named chain, because
+permit-all by omission is indistinguishable from an oversight.
 
 **Observing it.** Each direction is reported independently — `not_required`
 (enforcement off, or iBGP), `present`, `missing`, or `unknown`:
