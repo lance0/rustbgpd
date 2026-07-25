@@ -725,11 +725,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Turning off `[policy.explain]` now actually costs nothing per peer.**
   The import-decision cache was built at session construction, so every
   peer paid for it whether or not explain was enabled: at the default
-  `cache_size = 4096` that is roughly 150 KiB of resident allocation per
-  session — the LRU index sized to capacity up front, plus a 512-entry
-  eviction ring — held for the life of a session that, with explain off,
-  never writes a single entry. On a 1000-peer route reflector that is
-  about 150 MiB reserved for a disabled feature. Both allocations are now
+  `cache_size = 4096` that is roughly 150 KiB allocated per session — the
+  LRU index sized to capacity up front, plus a 512-entry eviction ring —
+  held for the life of a session that, with explain off, never writes a
+  single entry. On a 1000-peer route reflector that is about 150 MiB
+  allocated for a disabled feature. Most of it is never written, so it is
+  address space and allocator bookkeeping rather than measured RSS, but a
+  disabled feature should reserve neither. Both allocations are now
   built on the first recorded decision instead, so a disabled session
   holds none of it, and a session that is down releases what it had.
   Enabled sessions are unaffected: the LRU and the eviction ring still
