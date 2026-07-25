@@ -2962,6 +2962,23 @@ async fn run<T>(
     for advisory in config.advisories() {
         tracing::warn!("{}", advisory.one_line());
     }
+    // The eBGP policy posture, in the log. `--check` frames this before
+    // deployment, but a runtime config mutation rewrites the file
+    // canonically and takes any banner the operator wrote with it — the log
+    // is then the only place the posture is still stated.
+    let unpoliced_ebgp = config.unpoliced_ebgp_neighbors().len();
+    if unpoliced_ebgp > 0 {
+        tracing::warn!(
+            neighbors = unpoliced_ebgp,
+            ebgp_requires_policy = config.global.ebgp_requires_policy,
+            "eBGP policy posture: {unpoliced_ebgp} neighbor(s) resolve no explicit policy — {}",
+            if config.global.ebgp_requires_policy {
+                "those directions carry no routes (RFC 8212 reserved deny)"
+            } else {
+                "those directions are unfiltered (permit all)"
+            }
+        );
+    }
 
     let metrics = BgpMetrics::new();
     let grpc_listeners = resolve_grpc_listeners(&config).unwrap_or_else(|e| {
@@ -3434,7 +3451,7 @@ async fn run<T>(
             mutation_rx,
             path.clone(),
             config.clone(),
-            Some(config_history::history_dir(&config.runtime_state_dir())),
+            Some(config.runtime_state_dir()),
         );
         tokio::spawn(persister.run());
         tokio::spawn(run_config_bridge(
@@ -4169,12 +4186,11 @@ async fn run<T>(
                     &config.runtime_state_dir(),
                 )),
                 // Rollback resolution reads the history the config persister
-                // records; without --config there is no persister and the
-                // history/rollback RPCs fail closed.
-                config_history_dir: config
-                    .file_path
-                    .is_some()
-                    .then(|| config_history::history_dir(&config.runtime_state_dir())),
+                // records. The daemon always loads its config from a file, so
+                // the history directory is always wired here; the field stays
+                // optional for the FIB-CRUD deps below and for embedders that
+                // run the control surface without persistence.
+                config_history_dir: Some(config_history::history_dir(&config.runtime_state_dir())),
             },
             metrics.clone(),
         );

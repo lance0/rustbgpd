@@ -3332,6 +3332,46 @@ impl RuntimeSnapshotKey {
 /// live credential.
 pub const REDACTED_SECRET: &str = "<redacted>";
 
+/// Header the daemon writes at the top of every config file it maintains.
+///
+/// A runtime mutation rewrites the operator's file in canonical form: the
+/// comments and formatting they wrote are gone and defaulted fields are
+/// materialized. The file itself is the only place that fact is guaranteed to
+/// reach whoever opens it next, so it says so.
+///
+/// Deliberately carries no version and no timestamp — either would change the
+/// bytes on every write, defeating the applied-config history's content-hash
+/// dedup and adding noise to every history diff.
+pub const PERSISTED_CONFIG_HEADER: &str = "\
+# This file is maintained by rustbgpd. Runtime configuration changes
+# rewrite it in canonical form: comments and formatting from the
+# previous file are not preserved, and defaulted fields are written
+# out explicitly. Keep an annotated copy under version control if you
+# need one.
+";
+
+/// The exact document the daemon writes for `config`:
+/// [`PERSISTED_CONFIG_HEADER`] followed by the canonical TOML rendering.
+///
+/// Every durable config write and every applied-config history entry goes
+/// through here, so a new persist call site cannot omit the header.
+///
+/// The header cannot be duplicated by construction: the input is a `Config`,
+/// never a document. Re-persisting a file that already carries a header
+/// regenerates the whole document from the parsed struct — TOML comments do
+/// not survive parsing — rather than prepending to existing text, so there is
+/// no strip step for a slightly different prior header to defeat.
+///
+/// # Errors
+///
+/// Returns the TOML serialization error.
+pub fn persisted_config_document(config: &Config) -> Result<String, toml::ser::Error> {
+    Ok(format!(
+        "{PERSISTED_CONFIG_HEADER}\n{}",
+        toml::to_string_pretty(config)?
+    ))
+}
+
 impl Config {
     /// The running post-defaults config for `rbgp config effective`:
     /// a clone of this config with per-neighbor session defaults

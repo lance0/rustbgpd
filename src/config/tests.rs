@@ -12190,6 +12190,52 @@ fn runtime_snapshot_token_is_stable_and_changes_with_config() {
     assert!(token_a.starts_with("kv1:"));
 }
 
+/// The maintenance header belongs to files the daemon writes, and nowhere
+/// else. Two neighbouring canonical renderings sit right next to the persist
+/// path and must stay clean of it: the commit-confirm snapshot token and the
+/// `GetEffectiveConfig` response body, which is an API payload, not a file.
+///
+/// The header is inert comment text, so everything derived from a persisted
+/// file must be identical to the same thing derived from a header-free
+/// rendering — a header that stopped being inert, or that leaked into a
+/// derived surface, shows up here.
+#[test]
+fn persisted_config_header_stays_out_of_the_token_and_the_effective_dump() {
+    let config = parse(valid_toml()).unwrap();
+    let document = persisted_config_document(&config).unwrap();
+    assert!(document.starts_with(PERSISTED_CONFIG_HEADER));
+
+    let bare = toml::to_string_pretty(&config).unwrap();
+    assert!(
+        !bare.contains("maintained by rustbgpd"),
+        "the bare canonical rendering must carry no header"
+    );
+
+    // Same config, one document with the header and one without. Everything
+    // downstream must agree.
+    let from_persisted = Config::load_toml_with_diagnostics(&document, "persisted.toml")
+        .expect("the header must stay inert TOML that the loader ignores");
+    let from_bare = Config::load_toml_with_diagnostics(&bare, "bare.toml").unwrap();
+
+    let key = RuntimeSnapshotKey::random();
+    assert_eq!(
+        key.token(&from_persisted).unwrap(),
+        key.token(&from_bare).unwrap(),
+        "the snapshot token must follow the config, not the document it was read from"
+    );
+
+    let effective = from_persisted.effective_redacted_toml().unwrap();
+    assert_eq!(
+        effective,
+        from_bare.effective_redacted_toml().unwrap(),
+        "the effective dump must not vary with the file header"
+    );
+    assert!(
+        !effective.contains("maintained by rustbgpd"),
+        "the effective-config API response must not carry the file header:\n{effective}"
+    );
+}
+
 #[test]
 fn runtime_snapshot_token_changes_when_only_a_secret_rotates() {
     // The token hashes the full config, secrets included, so a bare secret

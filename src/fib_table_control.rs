@@ -57,8 +57,9 @@ pub struct FibTableControlDeps {
     /// admission. `None` disables the prepared limit transaction (unit tests
     /// and non-transaction consumers of these deps).
     pub rib_tx: Option<mpsc::Sender<rustbgpd_rib::RibUpdate>>,
-    /// Config-persistence channel. `None` when the daemon was started without
-    /// `--config` (nothing to persist to).
+    /// Config-persistence channel. `None` when the control surface is wired
+    /// without a persistence sink (unit tests, embedders). The daemon always
+    /// loads its config from a file, so it always supplies one.
     pub config_tx: Option<mpsc::Sender<ConfigEvent>>,
     /// Coordinator lock shared with the SIGHUP reload FIB step.
     pub lock: Arc<Mutex<()>>,
@@ -169,7 +170,8 @@ async fn mutate(
         .ok_or_else(|| runtime_unavailable_error(!deps.startup_tables.is_empty()))?;
     let config_tx = deps.config_tx.clone().ok_or_else(|| {
         FibTableControlError::FailedPrecondition(
-            "FIB-table CRUD requires a persisted config (start rustbgpd with --config)".to_string(),
+            "FIB-table CRUD is unavailable: this daemon is running without config persistence"
+                .to_string(),
         )
     })?;
     let peer_mgr_tx = deps.peer_mgr_tx.clone();

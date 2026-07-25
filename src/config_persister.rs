@@ -12,7 +12,16 @@ use std::path::PathBuf;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{error, info, warn};
 
-use crate::config::{Config, Neighbor};
+use crate::config::{Config, Neighbor, persisted_config_document};
+
+/// File under `runtime_state_dir` recording the config file's mtime as of the
+/// daemon's last read or write of it.
+///
+/// `rbgp doctor`'s config-freshness check reads it to tell the daemon's own
+/// canonical rewrite from an operator's editor; without it the check compares
+/// against process start and warns forever after the first runtime mutation.
+/// The reader is `crates/cli/src/commands/doctor.rs` — keep the name in step.
+pub const LAST_PERSIST_FILE: &str = "config-last-persist";
 
 /// A mutation to apply to the persisted config.
 #[allow(dead_code)]
@@ -51,9 +60,10 @@ pub struct ConfigPersister {
     rx: mpsc::Receiver<ConfigMutation>,
     config_path: PathBuf,
     current: Config,
-    /// Applied-config history directory (`config_history` module). `None`
-    /// disables recording (unit tests, embedders without a state dir).
-    history_dir: Option<PathBuf>,
+    /// `runtime_state_dir`, the home of the applied-config history
+    /// (`config_history`) and the last-persist marker. `None` disables both
+    /// (unit tests, embedders without a state dir).
+    state_dir: Option<PathBuf>,
     /// Durably written but unpublished snapshot, awaiting commit or discard.
     staged: Option<(crate::confirm_journal::StagedWrite, Config, String)>,
 }
@@ -63,13 +73,13 @@ impl ConfigPersister {
         rx: mpsc::Receiver<ConfigMutation>,
         config_path: PathBuf,
         current: Config,
-        history_dir: Option<PathBuf>,
+        state_dir: Option<PathBuf>,
     ) -> Self {
         Self {
             rx,
             config_path,
             current,
-            history_dir,
+            state_dir,
             staged: None,
         }
     }
@@ -138,7 +148,7 @@ impl ConfigPersister {
         // A superseded stage is discarded, never published: its caller either
         // failed its apply or is gone.
         self.discard_staged();
-        let toml_str = toml::to_string_pretty(&new_config).map_err(std::io::Error::other)?;
+        let toml_str = persisted_config_document(&new_config).map_err(std::io::Error::other)?;
         let staged = crate::confirm_journal::stage_atomic(&self.config_path, toml_str.as_bytes())?;
         info!(
             path = %self.config_path.display(),
@@ -233,7 +243,7 @@ impl ConfigPersister {
     }
 
     fn persist(&self) -> std::io::Result<()> {
-        let toml_str = toml::to_string_pretty(&self.current).map_err(std::io::Error::other)?;
+        let toml_str = persisted_config_document(&self.current).map_err(std::io::Error::other)?;
 
         // Durable atomic write: temp file → fsync → rename → fsync parent dir.
         // Reuses the commit-confirm journal's proven primitive so a crash in the
@@ -246,12 +256,22 @@ impl ConfigPersister {
         Ok(())
     }
 
-    /// Best-effort applied-config history recording. A history failure must
-    /// never fail the persist that already succeeded — the config on disk is
-    /// authoritative; history is the rollback convenience layer.
+    /// Best-effort recording of an applied config: the rollback history entry
+    /// and the last-persist marker.
+    ///
+    /// Both are best-effort by design. A failure here must never fail the
+    /// persist that already succeeded — the config on disk is authoritative;
+    /// history is the rollback convenience layer and the marker is a hint for
+    /// `rbgp doctor`.
+    ///
+    /// Every point at which the daemon's view of the config file becomes
+    /// current — boot, every durable write, and a SIGHUP snapshot refresh —
+    /// already funnels here, which is why the marker is recorded here too
+    /// rather than at each call site.
     fn record_history(&self, toml_str: &str) {
-        if let Some(dir) = &self.history_dir
-            && let Err(error) = crate::config_history::record(dir, toml_str)
+        self.record_last_persist();
+        if let Some(dir) = self.history_dir()
+            && let Err(error) = crate::config_history::record(&dir, toml_str)
         {
             warn!(
                 dir = %dir.display(),
@@ -261,8 +281,47 @@ impl ConfigPersister {
         }
     }
 
+    fn history_dir(&self) -> Option<PathBuf> {
+        self.state_dir
+            .as_deref()
+            .map(crate::config_history::history_dir)
+    }
+
+    /// Record the config file's mtime as the daemon's own last-persist stamp.
+    ///
+    /// The value is the file's mtime rather than wall-clock now, so it
+    /// compares byte-for-byte against the mtime `rbgp doctor` reads from the
+    /// same file — no clock skew or rounding in between. A later external edit
+    /// necessarily carries a higher mtime and still warns.
+    fn record_last_persist(&self) {
+        let Some(dir) = &self.state_dir else {
+            return;
+        };
+        let Some(mtime) = std::fs::metadata(&self.config_path)
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|since| since.as_secs())
+        else {
+            return;
+        };
+        let path = dir.join(LAST_PERSIST_FILE);
+        // A plain write is enough: a torn or missing marker only degrades the
+        // freshness check to comparing against process start, which is what it
+        // did before the marker existed.
+        if let Err(error) =
+            std::fs::create_dir_all(dir).and_then(|()| std::fs::write(&path, format!("{mtime}\n")))
+        {
+            warn!(
+                path = %path.display(),
+                error = %error,
+                "failed to record the config last-persist marker — `rbgp doctor` may report the daemon's own config write as an external edit"
+            );
+        }
+    }
+
     fn record_current_history(&self) {
-        match toml::to_string_pretty(&self.current) {
+        match persisted_config_document(&self.current) {
             Ok(toml_str) => self.record_history(&toml_str),
             Err(error) => warn!(
                 error = %error,
@@ -453,13 +512,14 @@ log_format = "json"
     async fn persister_records_history_at_boot_and_on_every_persist() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        let history = dir.path().join("config-history");
+        let state_dir = dir.path().to_path_buf();
+        let history = crate::config_history::history_dir(&state_dir);
         let config = minimal_config();
         std::fs::write(&path, toml::to_string_pretty(&config).unwrap()).unwrap();
 
         let (tx, rx) = mpsc::channel(16);
         let persister =
-            ConfigPersister::new(rx, path.clone(), config.clone(), Some(history.clone()));
+            ConfigPersister::new(rx, path.clone(), config.clone(), Some(state_dir.clone()));
         let handle = tokio::spawn(persister.run());
         tx.send(ConfigMutation::AddNeighbor(Box::new(test_neighbor(
             "10.0.0.2", 65002,
@@ -476,13 +536,13 @@ log_format = "json"
         let (_, newest) = crate::config_history::read_entry(&history, 0).unwrap();
         assert_eq!(newest, std::fs::read_to_string(&path).unwrap());
         let (_, previous) = crate::config_history::read_entry(&history, 1).unwrap();
-        assert_eq!(previous, toml::to_string_pretty(&config).unwrap());
+        assert_eq!(previous, persisted_config_document(&config).unwrap());
 
         // "Restart": a fresh persister over the same state boot-records the
         // unchanged config — dedup keeps history from growing.
         let restarted: Config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         let (tx, rx) = mpsc::channel(16);
-        let persister = ConfigPersister::new(rx, path.clone(), restarted, Some(history.clone()));
+        let persister = ConfigPersister::new(rx, path.clone(), restarted, Some(state_dir.clone()));
         let handle = tokio::spawn(persister.run());
         drop(tx);
         handle.await.unwrap();
@@ -497,12 +557,13 @@ log_format = "json"
     fn refresh_snapshot_no_persist_records_validated_config_history() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        let history = dir.path().join("config-history");
+        let state_dir = dir.path().to_path_buf();
+        let history = crate::config_history::history_dir(&state_dir);
         let config = minimal_config();
         std::fs::write(&path, toml::to_string_pretty(&config).unwrap()).unwrap();
 
         let (_tx, rx) = mpsc::channel(1);
-        let mut persister = ConfigPersister::new(rx, path, config, Some(history.clone()));
+        let mut persister = ConfigPersister::new(rx, path, config, Some(state_dir));
         persister.record_current_history();
 
         let mut refreshed = minimal_config();
@@ -516,7 +577,7 @@ log_format = "json"
         let entries = crate::config_history::list(&history).unwrap();
         assert_eq!(entries.len(), 2);
         let newest = crate::config_history::read(&entries[0]).unwrap();
-        assert_eq!(newest, toml::to_string_pretty(&refreshed).unwrap());
+        assert_eq!(newest, persisted_config_document(&refreshed).unwrap());
     }
 
     #[tokio::test]
@@ -554,5 +615,199 @@ log_format = "json"
         );
         assert_eq!(reloaded.neighbors[0].address, "10.0.0.2");
         assert_eq!(reloaded.neighbors[1].address, "10.0.0.3");
+    }
+
+    /// The first runtime mutation rewrites the operator's file canonically:
+    /// their comments, their key order, and any posture banner they wrote are
+    /// gone. The file has to say so itself — and say it exactly once, however
+    /// many times it is rewritten.
+    #[tokio::test]
+    async fn persisted_config_carries_exactly_one_maintenance_header() {
+        use crate::config::PERSISTED_CONFIG_HEADER;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let config = minimal_config();
+        std::fs::write(&path, toml::to_string_pretty(&config).unwrap()).unwrap();
+
+        let (tx, rx) = mpsc::channel(16);
+        let persister = ConfigPersister::new(rx, path.clone(), config, None);
+        let handle = tokio::spawn(persister.run());
+        // Two durable writes, so a second header would have somewhere to land.
+        tx.send(ConfigMutation::AddNeighbor(Box::new(test_neighbor(
+            "10.0.0.2", 65002,
+        ))))
+        .await
+        .unwrap();
+        tx.send(ConfigMutation::AddNeighbor(Box::new(test_neighbor(
+            "10.0.0.3", 65003,
+        ))))
+        .await
+        .unwrap();
+        drop(tx);
+        handle.await.unwrap();
+
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            written.starts_with(PERSISTED_CONFIG_HEADER),
+            "the header must be the first lines of the file, got:\n{written}"
+        );
+        assert_eq!(
+            written.matches(PERSISTED_CONFIG_HEADER).count(),
+            1,
+            "persisting twice must leave exactly one header, got:\n{written}"
+        );
+    }
+
+    /// A persisted file is a file the daemon must be able to boot from: it
+    /// loads through the same gate `rustbgpd --check` uses, and persisting it
+    /// again is byte-identical — the header does not accumulate and the body
+    /// does not drift.
+    #[tokio::test]
+    async fn persisted_config_round_trips_through_load_and_persist() {
+        use crate::config::PERSISTED_CONFIG_HEADER;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        // A config the daemon would really boot from: full validation, not
+        // bare deserialization, so the reload below exercises the same gate
+        // `rustbgpd --check` runs.
+        std::fs::write(
+            &path,
+            crate::test_support::tier_authorized_uds_test_config(
+                r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+"#,
+            ),
+        )
+        .unwrap();
+        let config = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+
+        let (tx, rx) = mpsc::channel(16);
+        let persister = ConfigPersister::new(rx, path.clone(), config, None);
+        let handle = tokio::spawn(persister.run());
+        tx.send(ConfigMutation::AddNeighbor(Box::new(test_neighbor(
+            "10.0.0.2", 65002,
+        ))))
+        .await
+        .unwrap();
+        drop(tx);
+        handle.await.unwrap();
+        let first = std::fs::read_to_string(&path).unwrap();
+
+        // `--check` and daemon boot both start here; a header that broke
+        // parsing would fail this line.
+        let reloaded = Config::load_with_diagnostics(path.to_str().unwrap())
+            .expect("a persisted config must load through the daemon's own gate");
+
+        // Restart over the persisted file and persist it again unchanged.
+        let (tx, rx) = mpsc::channel(16);
+        let persister = ConfigPersister::new(rx, path.clone(), reloaded.clone(), None);
+        let handle = tokio::spawn(persister.run());
+        tx.send(ConfigMutation::ReplaceConfig(Box::new(reloaded)))
+            .await
+            .unwrap();
+        drop(tx);
+        handle.await.unwrap();
+        let second = std::fs::read_to_string(&path).unwrap();
+
+        assert_eq!(
+            first, second,
+            "load → persist must not drift the persisted document"
+        );
+        assert_eq!(second.matches(PERSISTED_CONFIG_HEADER).count(), 1);
+    }
+
+    /// `rbgp doctor` needs to tell the daemon's own canonical rewrite from an
+    /// operator's editor. The marker is that evidence: after a daemon write it
+    /// holds the config file's own mtime, so the freshness check reads equal
+    /// (clean) rather than greater (a pending external edit).
+    #[tokio::test]
+    async fn last_persist_marker_records_the_config_file_mtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let state_dir = dir.path().join("state");
+        let config = minimal_config();
+        std::fs::write(&path, toml::to_string_pretty(&config).unwrap()).unwrap();
+
+        let (tx, rx) = mpsc::channel(16);
+        let persister = ConfigPersister::new(rx, path.clone(), config, Some(state_dir.clone()));
+        let handle = tokio::spawn(persister.run());
+        tx.send(ConfigMutation::AddNeighbor(Box::new(test_neighbor(
+            "10.0.0.2", 65002,
+        ))))
+        .await
+        .unwrap();
+        drop(tx);
+        handle.await.unwrap();
+
+        let recorded: u64 = std::fs::read_to_string(state_dir.join(LAST_PERSIST_FILE))
+            .expect("a durable write must record the last-persist marker")
+            .trim()
+            .parse()
+            .expect("the marker holds unix seconds");
+        let mtime = std::fs::metadata(&path)
+            .unwrap()
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert_eq!(
+            recorded, mtime,
+            "the marker must hold the mtime of the file the daemon just wrote, \
+             or doctor reads the daemon's own write as an external edit"
+        );
+    }
+
+    /// The marker filename is agreed on across two crates by name alone: the
+    /// daemon writes it, `rbgp doctor` reads it, and `crates/cli` cannot share
+    /// a constant with the daemon without an unnatural dependency.
+    ///
+    /// Nothing else holds the halves together. If either side is renamed,
+    /// doctor's read misses, the check falls back to comparing against process
+    /// start, and the permanent-warn defect returns — with both crates' own
+    /// tests still green, because each exercises only its own literal. So the
+    /// agreement is fenced here, the way the gRPC authz inventory fences its
+    /// own cross-artifact agreement.
+    #[test]
+    fn doctor_reads_the_marker_filename_the_persister_writes() {
+        const DOCTOR_SOURCE: &str = include_str!("../crates/cli/src/commands/doctor.rs");
+
+        // Extract the literal doctor actually assigns — never search the
+        // source for the current value. A containment check would still pass
+        // after the daemon's constant alone changed, which is precisely the
+        // drift that breaks the agreement.
+        let declared = DOCTOR_SOURCE
+            .lines()
+            .find_map(|line| {
+                line.trim_start()
+                    .strip_prefix("const LAST_PERSIST_FILE: &str = ")
+            })
+            .and_then(|rest| rest.trim_end().strip_suffix(';'))
+            .and_then(|literal| literal.strip_prefix('"'))
+            .and_then(|literal| literal.strip_suffix('"'));
+
+        // Its own step: a reformatted declaration must fail loudly here rather
+        // than leave the comparison below matching against nothing.
+        let declared = declared.expect(
+            "could not find `const LAST_PERSIST_FILE: &str = \"…\";` in \
+             crates/cli/src/commands/doctor.rs — if the declaration was \
+             reformatted, update this extraction; do not delete the check",
+        );
+
+        assert_eq!(
+            declared, LAST_PERSIST_FILE,
+            "`rbgp doctor` reads a different marker filename than the persister \
+             writes — the config-freshness check will silently fall back to \
+             process start and warn forever after the first runtime mutation"
+        );
     }
 }

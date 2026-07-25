@@ -365,11 +365,15 @@ impl ConfigTransactionController {
         let rollback_config = runtime_config_snapshot(&self.deps.peer_mgr_tx)
             .await
             .map_err(ConfigTransactionApplyError::Unavailable)?;
-        let rollback_toml = toml::to_string_pretty(&rollback_config).map_err(|error| {
-            ConfigTransactionApplyError::Internal(format!(
-                "failed to serialize confirmed transaction rollback snapshot: {error}"
-            ))
-        })?;
+        // Rendered as a persisted document, not a bare snapshot: the boot-time
+        // revert writes these bytes straight back over the operator's config
+        // file, so they have to be a file the daemon would have written.
+        let rollback_toml =
+            crate::config::persisted_config_document(&rollback_config).map_err(|error| {
+                ConfigTransactionApplyError::Internal(format!(
+                    "failed to serialize confirmed transaction rollback snapshot: {error}"
+                ))
+            })?;
 
         // ADR-0113: a confirmed transaction may TIGHTEN an outbound prefix
         // maximum, because its automatic undo only loosens and a loosening is
@@ -818,7 +822,8 @@ impl ConfigTransactionController {
     fn history_dir(&self) -> Result<&std::path::Path, ConfigTransactionApplyError> {
         self.deps.config_history_dir.as_deref().ok_or_else(|| {
             ConfigTransactionApplyError::FailedPrecondition(
-                "config history requires a persisted config (start rustbgpd with --config)"
+                "config history is unavailable: this daemon is running without an \
+                 applied-config history directory"
                     .to_string(),
             )
         })
@@ -1407,7 +1412,8 @@ async fn apply_config_transaction_locked(
             .map_err(ConfigTransactionApplyError::InvalidArgument)?;
     let config_tx = deps.config_tx.clone().ok_or_else(|| {
         ConfigTransactionApplyError::FailedPrecondition(
-            "config transactions require a persisted config (start rustbgpd with --config)"
+            "config transactions are unavailable: this daemon is running without config \
+             persistence"
                 .to_string(),
         )
     })?;
@@ -8419,7 +8425,7 @@ log_format = "json"
             .expect_err("history without a state dir must fail closed");
         assert!(
             matches!(err, ConfigTransactionApplyError::FailedPrecondition(ref message)
-                if message.contains("--config")),
+                if message.contains("applied-config history directory")),
             "{err:?}"
         );
         let err = controller
@@ -8436,7 +8442,7 @@ log_format = "json"
             .expect_err("rollback without a state dir must fail closed");
         assert!(
             matches!(err, ConfigTransactionApplyError::FailedPrecondition(ref message)
-                if message.contains("--config")),
+                if message.contains("applied-config history directory")),
             "{err:?}"
         );
     }
