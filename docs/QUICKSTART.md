@@ -113,8 +113,8 @@ With the systemd unit, the default CLI address is already
 ## 5. Operate
 
 ```bash
-# Add static peers at runtime; persisted to config when the daemon was started
-# with --config.
+# Add static peers at runtime. These are persisted back to the config file,
+# which is rewritten in canonical form — see CONFIGURATION.md.
 rbgp neighbor 10.0.0.5 add --remote-asn 65005
 rbgp neighbor 203.0.113.2 add --remote-asn 65002 --role provider --strict-role
 rbgp neighbor fe80::5054:ff:fe00:1%eth1 add --remote-asn 65101
