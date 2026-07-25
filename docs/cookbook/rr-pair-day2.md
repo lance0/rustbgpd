@@ -41,8 +41,9 @@ rbgp neighbor 10.0.0.42 add --remote-asn 65000 --description "new-client"
 rbgp dynamic-neighbor add 10.0.9.0/24 --peer-group rr-clients
 ```
 
-Both persist to the config file (when the daemon was started with
-`--config`) before the RPC returns. Verify with `rbgp neighbor --wide`
+Both persist to the daemon's config file — the `CONFIG_PATH` argument,
+or `/etc/rustbgpd/config.toml` when it is omitted — before the RPC
+returns. Verify with `rbgp neighbor --wide`
 — the `RRC` column marks reflector clients. Uniform clients join the
 existing update group automatically; there is nothing to tune.
 

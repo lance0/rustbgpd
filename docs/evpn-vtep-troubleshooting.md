@@ -89,7 +89,7 @@ Expected signals:
 5. Enable targeted debug logging for the Linux classifier:
 
    ```bash
-   RUST_LOG=rustbgpd_evpn_linux=debug,rustbgpd=info rustbgpd --config config.toml
+   RUST_LOG=rustbgpd_evpn_linux=debug,rustbgpd=info rustbgpd config.toml
    ```
 
    Look for local-MAC classifier messages and cache misses. On legacy
