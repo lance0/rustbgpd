@@ -10,9 +10,11 @@ The config file defines the initial boot state. The canonical live compound
 mutation path is the gRPC config transaction lifecycle (plan, snapshot-fenced
 apply, and optional commit-confirmed confirm/abort). Focused RPCs can add,
 remove, enable, and disable peers without restarting the daemon and persist
-supported mutations back to the config file. `SIGHUP` is the file-driven
-compatibility/reconcile path; it follows the reload matrix and is not an atomic
-compound-mutation API. Starting with zero `[[neighbors]]` is valid when all
+supported mutations back to the config file. Those writes rewrite the file in
+canonical form and do not preserve comments or formatting — read
+[Config Persistence](#config-persistence) before you make the first runtime
+change. `SIGHUP` is the file-driven compatibility/reconcile path; it follows
+the reload matrix and is not an atomic compound-mutation API. Starting with zero `[[neighbors]]` is valid when all
 peers are managed via gRPC. The exact compatibility boundary is the narrow
 [v1 RS/RR inventory](v1-stable-contract.md), not the full schema.
 
@@ -1238,8 +1240,8 @@ Dynamic peers:
 - inherit transport and policy defaults from the referenced peer group
 - never initiate outbound TCP connections
 - the ephemeral peer entry is not written back to `[[neighbors]]` (the *range*,
-  however, is persisted to `[[dynamic_neighbors]]` when added at runtime with the
-  daemon started under `--config` — see "Runtime management" below)
+  however, is persisted to `[[dynamic_neighbors]]` when added at runtime — see
+  "Runtime management" below)
 - the ephemeral peer is removed automatically when its session returns to Idle
   (the range itself persists)
 - count against `global.dynamic_neighbor_limit`
@@ -1314,13 +1316,14 @@ rbgp dynamic-neighbor delete 10.0.0.0/24
 
 - Backed by `NeighborService` (`AddDynamicNeighbor` / `DeleteDynamicNeighbor` /
   `ListDynamicNeighbors`); add/delete are tier `mutating`.
-- When the daemon was started with `--config`, runtime changes reserve config
-  persistence capacity before mutating and then wait for the atomic TOML write
-  to be acknowledged after the peer manager accepts the change. Runtime
-  dynamic-neighbor CRUD is serialized with SIGHUP reload, so a reload sees
-  either the pre-mutation TOML or the committed post-mutation TOML. If the write
-  is rejected after the runtime mutation, the matcher is rolled back and the RPC
-  reports failure. Without `--config`, changes are in-memory only.
+- Runtime changes reserve config persistence capacity before mutating and then
+  wait for the atomic TOML write to be acknowledged after the peer manager
+  accepts the change. Runtime dynamic-neighbor CRUD is serialized with SIGHUP
+  reload, so a reload sees either the pre-mutation TOML or the committed
+  post-mutation TOML. If the write is rejected after the runtime mutation, the
+  matcher is rolled back and the RPC reports failure. The write rewrites the
+  whole config file in canonical form — see
+  [Config Persistence](#config-persistence).
 - **Delete stops *future* accepts only.** Already-established dynamic peers from
   a removed range keep running and drain naturally when they next return to
   Idle; delete never tears down a live session.
@@ -3719,6 +3722,40 @@ runtime CRUD share the runtime-config coordinator lock with SIGHUP, so reload
 sees either the pre-mutation TOML or the committed post-mutation TOML. If the
 write is rejected after runtime apply, the accepted runtime mutation is rolled
 back and the RPC reports failure.
+
+There is no non-persisting mode. The daemon always takes a config path — the
+positional argument, or `/etc/rustbgpd/config.toml` by default — so every
+runtime mutation that persists writes to that file.
+
+### The config file is rewritten in canonical form
+
+Persistence serializes the daemon's whole runtime config snapshot and replaces
+the file with it (temp file + rename). It is not a patch against your text, so
+on the **first** runtime mutation the file you wrote is replaced by an
+equivalent canonical rendering:
+
+- **Comments are not preserved.** Every comment in the file is gone after the
+  first persisted change.
+- **Formatting and key order are not preserved.** Blank lines, spacing, table
+  order, and inline-vs-expanded table style are all re-derived.
+- **Defaults are written out explicitly.** Fields you left out appear with
+  their default values (`dynamic_neighbors = []`, `evpn_instances = []`, and so
+  on), so the file grows sections you never typed.
+- **Ownership and mode change.** The rename installs a fresh file owned by the
+  daemon user at mode `0600`, whatever the previous file's owner and mode were.
+
+The rewritten file starts with a header saying the same thing, so a later
+reader of the file is not surprised by it.
+
+This is deliberate: a full canonical write is what makes the update atomic and
+crash-safe, and what lets the daemon guarantee that a concurrent SIGHUP sees
+either the pre-mutation file or the committed post-mutation file, never a torn
+one. It is not going to change.
+
+If you want an annotated config, keep the annotated copy under version control
+and treat the daemon's file as generated output. Operators who never mutate at
+runtime — file edits plus SIGHUP only — keep their comments, because SIGHUP
+alone never writes the file.
 
 ### SIGHUP Reload
 
