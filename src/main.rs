@@ -1837,6 +1837,23 @@ fn tcp_ao_listener_key_for_dynamic_range(
     })
 }
 
+/// Emit every `--check` warning and return the total count.
+///
+/// The single place the check-time warning set is defined. `--strict` turns
+/// this count into the exit code, so a new check warning is covered by
+/// `--strict` the moment it is summed here — there is no per-warning strict
+/// handling to keep in sync.
+///
+/// Startup warnings are deliberately not part of this set. The
+/// `ebgp_requires_policy` partial-enforcement notice reports what this
+/// release has not finished building, not a defect in the operator's config,
+/// and the legacy-`security.grpc.enforcement` warning and the ORR
+/// vantage-without-linkstate warning are `tracing` records emitted after
+/// logging is initialized, which `--check` returns before reaching.
+fn check_warnings(config: &Config) -> usize {
+    warn_unpoliced_ebgp(config)
+}
+
 /// Print the `--check` warning for eBGP neighbors that resolve no explicit
 /// policy, and return how many there are.
 ///
@@ -2113,6 +2130,7 @@ fn bfd_status_to_proto(status: &bfd_runtime::BfdStatus) -> rustbgpd_api::proto::
 /// The `rustbgpd(8)` man page, hand-maintained roff. The daemon's arg
 /// parser is hand-rolled (no clap), so this mirrors the `--help` text
 /// above — keep the two in sync when adding a flag.
+#[expect(clippy::too_many_lines, reason = "one roff document, one literal")]
 fn man_page() -> String {
     format!(
         r#".TH RUSTBGPD 8 "" "rustbgpd {version}" "System Administration"
@@ -2138,7 +2156,20 @@ Path to the TOML config file. Defaults to
 .SH OPTIONS
 .TP
 \fB\-\-check\fR
-Validate the config and exit without starting the daemon.
+Validate the config and exit without starting the daemon. A valid
+config that was warned about still exits 0; see
+.B EXIT STATUS
+and
+.BR \-\-strict .
+.TP
+\fB\-\-strict\fR
+Only with
+.BR \-\-check :
+exit 1 if the check reported any warning, instead of 0. Intended for
+CI and deployment gates that must not accept a valid\-but\-risky
+config. Passing it without
+.B \-\-check
+is an error.
 .TP
 \fB\-\-diff\fR \fIPATH\fR
 Compare the config against \fIPATH\fR and show what SIGHUP would
@@ -2166,6 +2197,28 @@ Print version and exit.
 .TP
 \fB\-\-help\fR, \fB\-h\fR
 Print the help message.
+.SH EXIT STATUS
+.TP
+.B 0
+Success. For
+.BR \-\-check ,
+the config is valid; without
+.B \-\-strict
+this includes a valid config that warnings were reported for.
+.TP
+.B 1
+The config was rejected, or
+.B \-\-check \-\-strict
+reported at least one warning. For
+.BR \-\-diff ,
+1 means the diff carries actionable changes.
+.TP
+.B 2
+Invalid invocation: an unusable flag combination or a missing
+argument.
+.TP
+.B 70
+Internal error.
 .SH SIGNALS
 .TP
 \fBSIGHUP\fR
@@ -2211,6 +2264,8 @@ fn main() {
                CONFIG_PATH  Path to TOML config file [default: /etc/rustbgpd/config.toml]\n\n\
              Options:\n  \
                --check               Validate config and exit without starting the daemon\n  \
+               --strict              With --check, exit 1 if anything was warned about (for CI\n                        \
+                                     and deployment gates). Rejected without --check\n  \
                --diff PATH           Compare config against PATH and show what SIGHUP would change\n  \
                --json                Output diff as JSON (only with --diff)\n  \
                --init-config PROFILE Print a starter config to stdout and exit (needs --stdout).\n                        \
@@ -2219,7 +2274,13 @@ fn main() {
                --dump-config-schema  Print the config JSON Schema to stdout and exit\n  \
                --man                 Print the man page (roff) to stdout and exit\n  \
                --version             Print version and exit\n  \
-               --help                Print this help message",
+               --help                Print this help message\n\n\
+             Exit status:\n  \
+               0  Success. For --check: the config is valid; without --strict this\n     \
+                  includes a valid config that was warned about\n  \
+               1  The config was rejected, or --check --strict found warnings\n  \
+               2  Invalid invocation (unknown flag combination, missing argument)\n  \
+               70 Internal error",
             env!("CARGO_PKG_VERSION")
         );
         return;
@@ -2227,6 +2288,7 @@ fn main() {
 
     // Parse flags and config path from remaining args.
     let mut check_only = false;
+    let mut strict = false;
     let mut diff_path: Option<String> = None;
     let mut json_output = false;
     let mut init_profile: Option<String> = None;
@@ -2244,6 +2306,8 @@ fn main() {
             expect_init_profile = false;
         } else if arg == "--check" {
             check_only = true;
+        } else if arg == "--strict" {
+            strict = true;
         } else if arg == "--diff" {
             expect_diff_path = true;
         } else if arg == "--json" {
@@ -2259,7 +2323,7 @@ fn main() {
         } else {
             eprintln!("error: unknown option: {arg}");
             eprintln!(
-                "usage: rustbgpd [--check] [--diff PATH] [--json] [--init-config PROFILE --stdout] [--dump-config-schema] [--version] [CONFIG_PATH]"
+                "usage: rustbgpd [--check [--strict]] [--diff PATH] [--json] [--init-config PROFILE --stdout] [--dump-config-schema] [--version] [CONFIG_PATH]"
             );
             process::exit(1);
         }
@@ -2277,6 +2341,13 @@ fn main() {
     }
     if json_output && diff_path.is_none() {
         eprintln!("error: --json can only be used with --diff");
+        process::exit(2);
+    }
+    // `--strict` only modifies `--check`. Accepting it silently on a
+    // daemon run would let a CI gate that meant `--check --strict` boot a
+    // daemon instead and still report success.
+    if strict && !check_only {
+        eprintln!("error: --strict can only be used with --check");
         process::exit(2);
     }
     // `--stdout` is only the `--init-config` output target. Without it,
@@ -2362,16 +2433,27 @@ fn main() {
         // The summary line is the only thing some operators read. When
         // anything was flagged it must not be able to pass for a clean
         // result, so `OK` is spent only on a check with nothing to report
-        // and otherwise gives way to the count. The exit code stays 0
-        // either way — these are warnings, not failures.
-        let warnings = warn_unpoliced_ebgp(&config);
+        // and otherwise gives way to the count. Without `--strict` the exit
+        // code stays 0 either way — these are warnings, not failures.
+        let warnings = check_warnings(&config);
         if warnings == 0 {
             println!("config OK: {config_path}");
-        } else {
-            println!(
-                "config VALID, {warnings} WARNING{} — NOT a clean check: {config_path}",
-                if warnings == 1 { "" } else { "S" }
+            return;
+        }
+        println!(
+            "config VALID, {warnings} WARNING{} — NOT a clean check: {config_path}",
+            if warnings == 1 { "" } else { "S" }
+        );
+        if strict {
+            // Exit 1, the same code a `--check` that could not load the
+            // config uses: from a gate's point of view both mean "this
+            // config did not pass". 2 stays reserved for how the command
+            // was invoked.
+            eprintln!(
+                "error: --strict: {warnings} warning{} — not a clean check",
+                if warnings == 1 { "" } else { "s" }
             );
+            process::exit(1);
         }
         return;
     }
@@ -5372,6 +5454,7 @@ mod tests {
         assert!(man.starts_with(".TH RUSTBGPD 8"), "missing roff .TH header");
         for flag in [
             r"\-\-check",
+            r"\-\-strict",
             r"\-\-diff",
             r"\-\-json",
             r"\-\-init\-config",
@@ -5384,6 +5467,12 @@ mod tests {
             assert!(man.contains(flag), "man page missing {flag}");
         }
         assert!(man.contains("SIGHUP"));
+        // `--strict` is only useful if the codes it selects between are
+        // written down where an operator writing a gate will look.
+        assert!(
+            man.contains(".SH EXIT STATUS"),
+            "man page missing the EXIT STATUS section"
+        );
     }
 
     fn tcp_ao_neighbor_toml(address: &str) -> String {

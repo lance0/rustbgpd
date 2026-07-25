@@ -435,7 +435,9 @@ knob is on (that direction will carry no routes) or off (that direction is
 unfiltered). It stays a warning — a permit-all route server is a legitimate
 configuration — but a check with warnings summarizes as `config VALID, <n>
 WARNINGS — NOT a clean check` rather than `config OK`. The exit code is 0
-either way. `rbgp config import` sets the knob in every config it generates,
+either way; add `--strict` (see [deployment.md](deployment.md)) to make any
+warning exit 1 in a CI or deployment gate. `rbgp config import` sets the knob
+in every config it generates,
 since it never translates policy; its report says so.
 
 **Observing it.** Each direction is reported independently — `not_required`
