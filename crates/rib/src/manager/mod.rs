@@ -191,9 +191,12 @@ pub struct RibManager {
     loc_rib: LocRib,
     adj_ribs_out: HashMap<IpAddr, AdjRibOut>,
     /// Per-peer outbound unicast prefix admission state (ADR-0113). An entry
-    /// exists only for a peer with at least one configured family limit, so
-    /// today — with no operator-facing knob — this map stays empty and the
-    /// export path keeps its unlimited state shape and per-route cost.
+    /// exists only for a peer whose resolved `max_prefixes_out_ipv4` /
+    /// `max_prefixes_out_ipv6` sets a limit in at least one family — a
+    /// neighbor value overriding its peer group, an absent one inheriting.
+    /// A peer left unlimited in both families has no entry, and clearing a
+    /// peer's last family limit removes its entry again, so the unlimited
+    /// export path keeps its original state shape and per-route cost.
     outbound_prefix_limits: HashMap<IpAddr, outbound_prefix_limits::OutboundPrefixLimits>,
     /// Resolver tables, prepared-transaction slot, admission epoch, and
     /// coalesced family-scoped recovery intent for those limits (ADR-0113).

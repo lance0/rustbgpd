@@ -597,8 +597,19 @@ pub struct Global {
     /// as operator policy), and covers every negotiated family because
     /// rustbgpd's policy model is neighbor-wide.
     ///
-    /// The directional policy-presence status in neighbor detail, JSON,
-    /// metrics/explain attribution and `rbgp doctor` is not exposed yet.
+    /// The directional policy-presence status is observable per peer.
+    /// Neighbor detail prints an `RFC 8212 Policy:` block with separate
+    /// import and export verdicts (`not_required`, `present`, `missing` or
+    /// `unknown`), and `--json` carries the same pair as
+    /// `rfc8212_import_policy` / `rfc8212_export_policy`. The
+    /// `bgp_rfc8212_missing_import_policy` and
+    /// `bgp_rfc8212_missing_export_policy` gauges report where a reserved
+    /// deny-all chain is installed. Export explain attributes a route held
+    /// out of a peer's Adj-RIB-Out to the `export_policy` gate with the
+    /// distinct code `rfc8212_missing_export_policy`, and import explain
+    /// annotates the deciding statement rather than reporting a plain
+    /// operator deny. `rbgp doctor` raises `peer.<address>.rfc8212_policy`,
+    /// naming the direction that is missing a policy.
     #[serde(default)]
     pub ebgp_requires_policy: bool,
     /// Publish one durable, daemon-private MRT warm-cache checkpoint during

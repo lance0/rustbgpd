@@ -207,7 +207,7 @@ log_check log.rejection_names_the_violation 1 "above the requested maximum"
 # ADR-0113: "Limit edits are live, local RIB-manager changes. They do not
 # reset the session." Neither SIGHUP in this run changes anything but the two
 # maxima, so no peer may be torn down and re-created.
-log_check log.no_peer_rebuild_on_limit_edit 0 '"message":"peer deleted"' 
+log_check log.no_peer_rebuild_on_limit_edit 0 '"message":"peer deleted"'
 
 cleanup
 daemon_pid=""
