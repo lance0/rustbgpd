@@ -1610,6 +1610,15 @@ impl PeerSession {
         };
 
         let cached = &decision.policy_context;
+        // Rendered from the cached typed `AS_PATH` with the same
+        // formatter the inbound extractor uses, so the string the
+        // re-derivation matches against is byte-identical to the one
+        // the live evaluation saw — without the cache carrying a
+        // second copy of it per entry.
+        let as_path_str = cached
+            .as_path
+            .as_ref()
+            .map_or_else(String::new, rustbgpd_wire::AsPath::to_aspath_string);
         // Session-identity fields mirror the inbound eval sites: the
         // peer's negotiated ASN and eBGP/iBGP classification are
         // properties of the established session and cannot have
@@ -1624,7 +1633,7 @@ impl PeerSession {
             extended_communities: &cached.extended_communities,
             communities: &cached.communities,
             large_communities: &cached.large_communities,
-            as_path_str: &cached.as_path_str,
+            as_path_str: &as_path_str,
             as_path: cached.as_path.as_ref(),
             as_path_len: cached.as_path_len,
             origin_asn: cached.origin_asn,

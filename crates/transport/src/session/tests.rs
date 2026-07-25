@@ -11125,6 +11125,137 @@ async fn explain_disabled_stores_no_decisions() {
         ),
         "explain disabled must store no decision"
     );
+    // Stronger than the lookup above, which an eagerly-allocated empty
+    // cache satisfies just as well: a disabled session must be
+    // allocation-free, not merely insert-free. `LruCache::new` sizes
+    // its index at the configured cap up front, so building it at
+    // session construction charged every peer for a cache it never
+    // writes to.
+    assert!(
+        session.import_decision_cache.is_unallocated(),
+        "explain disabled must hold no cache allocation"
+    );
+}
+
+/// ADR-0073: the cached decision stores the typed `AS_PATH` only; the
+/// `RouteContext.as_path_str` the statement re-derivation matches
+/// against is rendered from it at query time. This drives a real
+/// explain query through the command dispatch whose *rendered output*
+/// exists only if that reconstruction reproduces the evaluation-time
+/// string byte for byte.
+///
+/// The statement's regex is anchored to the exact
+/// `AsPath::to_aspath_string` rendering of a three-ASN path. A
+/// reconstruction that dropped the path, truncated it, or joined it
+/// differently fails the regex, the statement stops matching, and the
+/// trace disappears — so the rendered `matched_conditions` below exist
+/// only if the reconstruction is byte-identical.
+#[tokio::test]
+async fn explain_trace_renders_as_path_from_the_cached_typed_value() {
+    use rustbgpd_policy::NamedPolicy;
+    let mut peer_config = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
+    peer_config.connect_retry_secs = 30;
+    peer_config.families = vec![(Afi::Ipv4, Safi::Unicast)];
+    peer_config.gr_restart_time = 120;
+    let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
+    let metrics = BgpMetrics::new();
+    let (_cmd_tx, cmd_rx) = mpsc::channel(8);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
+    // Matches "65002 65003 65004" and nothing else — in particular not
+    // the empty string a dropped `AS_PATH` would render as.
+    let pattern = "^65002 65003 65004$";
+    let permit_stmt = PolicyStatement {
+        prefix: Some(Prefix::V4(prefix)),
+        ge: None,
+        le: None,
+        action: PolicyAction::Permit,
+        match_community: vec![],
+        match_as_path: Some(AsPathRegex::new(pattern).unwrap()),
+        match_neighbor_set: None,
+        match_route_type: None,
+        match_evpn_route_type: None,
+        match_rpki_validation: None,
+        match_aspa_validation: None,
+        match_as_path_length_ge: None,
+        match_as_path_length_le: None,
+        match_local_pref_ge: None,
+        match_local_pref_le: None,
+        match_med_ge: None,
+        match_med_le: None,
+        match_next_hop: None,
+        modifications: RouteModifications::default(),
+    };
+    let chain = PolicyChain::from_named(vec![NamedPolicy {
+        name: Some("as-path-explain".to_string()),
+        policy: Policy {
+            entries: vec![permit_stmt],
+            default_action: PolicyAction::Deny,
+        },
+        rpol: None,
+    }]);
+    let mut session = PeerSession::new(
+        config,
+        metrics,
+        cmd_rx,
+        rib_tx,
+        Some(chain),
+        None,
+        None,
+        None,
+        None,
+        false,
+    );
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.peer_enhanced_route_refresh = true;
+    session
+        .negotiated_families
+        .clone_from(&negotiated.negotiated_families);
+    session.negotiated = Some(negotiated);
+    let attrs = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002, 65003, 65004])],
+        }),
+        PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+    ];
+    let update = UpdateMessage::build(
+        &[Ipv4NlriEntry { path_id: 0, prefix }],
+        &[],
+        &attrs,
+        true,
+        false,
+        Ipv4UnicastMode::Body,
+    );
+    session.process_update(update).await;
+    // The live evaluation permitted it: the regex matched the string the
+    // inbound extractor rendered.
+    assert_eq!(session.import_policy_routes_permitted, 1);
+
+    let (reply_tx, reply_rx) = oneshot::channel();
+    let _ = session
+        .handle_command(PeerCommand::ExplainImportPolicy {
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+            prefix: Prefix::V4(prefix),
+            path_id: None,
+            reply: reply_tx,
+        })
+        .await;
+    let reply = reply_rx.await.expect("session replied");
+    assert_eq!(reply.matches.len(), 1);
+    let steps = &reply.matches[0].statements;
+    assert_eq!(steps.len(), 1, "the hit re-derives a statement trace");
+    assert_eq!(steps[0].action, PolicyAction::Permit);
+    assert_eq!(
+        steps[0].matched_conditions,
+        vec![
+            "prefix 192.0.2.0/24".to_string(),
+            format!("as_path ~ {pattern:?}"),
+        ],
+        "the AS_PATH condition is rendered only if the query-time \
+         reconstruction reproduced \"65002 65003 65004\"",
+    );
 }
 /// LAN-320: the explain reply carries the session's own cache-enabled
 /// flag (snapshotted from `[policy.explain] enabled` at session build)

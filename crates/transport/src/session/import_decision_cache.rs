@@ -103,10 +103,17 @@ pub struct CachedPolicyContext {
     pub extended_communities: Vec<ExtendedCommunity>,
     pub communities: Vec<u32>,
     pub large_communities: Vec<LargeCommunity>,
-    pub as_path_str: String,
     /// Typed `AS_PATH` (owned), so an explain re-derivation of a chain
-    /// with `for asn in route.as-path` loops (LAN-303) sees the same
-    /// iteration the live evaluation saw. Explain-enabled path only.
+    /// with `for asn in route.as-path` loops sees the same iteration the
+    /// live evaluation saw. Explain-enabled path only.
+    ///
+    /// The single source of truth for the `AS_PATH` surface: the
+    /// `RouteContext.as_path_str` an explain query needs is rendered
+    /// from this at query time via
+    /// [`rustbgpd_wire::AsPath::to_aspath_string`] — the same formatter
+    /// the inbound extractor uses — rather than stored alongside it.
+    /// `None` renders as the empty string, exactly as the live path's
+    /// `unwrap_or_default` does, so nothing is lost by not storing it.
     pub as_path: Option<rustbgpd_wire::AsPath>,
     pub as_path_len: usize,
     pub origin_asn: Option<u32>,
@@ -210,11 +217,25 @@ pub struct ImportExplainReply {
 /// readers (the explain RPC) go through an `Arc<Mutex<…>>` wrapper.
 #[derive(Debug)]
 pub struct ImportDecisionCache {
-    entries: LruCache<ImportDecisionKey, CachedDecision>,
+    /// Per-peer LRU cap, retained so `entries` can be built on demand.
+    cap: NonZeroUsize,
+    /// `None` until the first `insert`. `LruCache::new` eagerly
+    /// allocates its index (`HashMap::with_capacity(cap)`) plus the two
+    /// sigil nodes of its intrusive list, so building it at session
+    /// construction charges every peer for the cache whether or not
+    /// `[policy.explain] enabled` is set — and a disabled session never
+    /// inserts. Deferring the build keeps a disabled session (and an
+    /// enabled one that has not yet seen an UPDATE) allocation-free.
+    entries: Option<LruCache<ImportDecisionKey, CachedDecision>>,
     /// FIFO of recently-evicted keys. False-positive-only by
     /// construction: every `insert` for a key clears it from this ring
     /// before recording the new entry, so the ring can never mask a
     /// genuine live entry.
+    ///
+    /// Allocated in lockstep with `entries` — see [`Self::storage`] —
+    /// at its full [`EVICTION_TRACKER_CAPACITY`], never grown
+    /// incrementally. An enabled cache therefore has exactly the ring
+    /// it always had by the time any eviction can occur.
     recently_evicted: VecDeque<ImportDecisionKey>,
 }
 
@@ -222,12 +243,15 @@ impl ImportDecisionCache {
     /// Create a cache with the given per-peer capacity. A zero or
     /// otherwise nonsensical input is clamped to `1` — the cache is
     /// always at least nominally usable.
+    ///
+    /// Allocates nothing: both the LRU and the eviction ring are built
+    /// on first use.
     #[must_use]
     pub fn with_capacity(cap: usize) -> Self {
-        let cap = NonZeroUsize::new(cap.max(1)).expect("clamped to at least 1");
         Self {
-            entries: LruCache::new(cap),
-            recently_evicted: VecDeque::with_capacity(EVICTION_TRACKER_CAPACITY),
+            cap: NonZeroUsize::new(cap.max(1)).expect("clamped to at least 1"),
+            entries: None,
+            recently_evicted: VecDeque::new(),
         }
     }
 
@@ -240,9 +264,14 @@ impl ImportDecisionCache {
     /// A reconnecting `PeerSession` is not reconstructed, so without this
     /// a stale decision could answer for any prefix the peer has not yet
     /// re-advertised.
+    ///
+    /// Drops the backing allocations too, returning the cache to the
+    /// state `with_capacity` left it in — a session that is down holds
+    /// no cache memory, and the next `insert` rebuilds both at their
+    /// full configured sizes.
     pub fn clear(&mut self) {
-        self.entries.clear();
-        self.recently_evicted.clear();
+        self.entries = None;
+        self.recently_evicted = VecDeque::new();
     }
 
     /// Insert or replace an entry. On capacity overflow the LRU victim
@@ -254,9 +283,28 @@ impl ImportDecisionCache {
     /// decision rather than spuriously reporting `Evicted`.
     pub fn insert(&mut self, key: ImportDecisionKey, decision: CachedDecision) {
         self.drop_eviction_record(&key);
-        if let Some((victim_key, _)) = self.entries.push(key, decision) {
+        let evicted = self.storage().push(key, decision);
+        if let Some((victim_key, _)) = evicted {
             self.record_eviction(victim_key);
         }
+    }
+
+    /// The backing LRU, built on first write.
+    ///
+    /// Both allocations happen here, together and at their full
+    /// configured sizes, so an enabled cache reaches exactly the shape
+    /// eager construction gave it — only the *moment* moves, from
+    /// session build to the first recorded decision. In particular the
+    /// eviction ring is at `EVICTION_TRACKER_CAPACITY` before the LRU
+    /// can possibly evict anything (that needs `cap` inserts first), so
+    /// eviction behaviour is unchanged.
+    fn storage(&mut self) -> &mut LruCache<ImportDecisionKey, CachedDecision> {
+        if self.entries.is_none() {
+            self.recently_evicted
+                .reserve_exact(EVICTION_TRACKER_CAPACITY);
+        }
+        let cap = self.cap;
+        self.entries.get_or_insert_with(|| LruCache::new(cap))
     }
 
     /// Tombstone the entry under `key` as `Withdrawn`. No-op when the
@@ -272,7 +320,7 @@ impl ImportDecisionCache {
     /// the least useful field for the "why is it gone?" question
     /// anyway.
     pub fn mark_withdrawn(&mut self, key: &ImportDecisionKey) {
-        if let Some(decision) = self.entries.get_mut(key) {
+        if let Some(decision) = self.entries.as_mut().and_then(|e| e.get_mut(key)) {
             decision.outcome = CachedOutcome::Withdrawn;
             decision.policy_context = CachedPolicyContext::default();
             decision.modifications = RouteModifications::default();
@@ -289,7 +337,7 @@ impl ImportDecisionCache {
     /// surprising; the hot write path is the sole owner of recency.
     #[must_use]
     pub fn lookup(&self, key: &ImportDecisionKey, current_generation: u64) -> LookupResult {
-        if let Some(decision) = self.entries.peek(key) {
+        if let Some(decision) = self.entries.as_ref().and_then(|e| e.peek(key)) {
             Self::classify(decision.clone(), current_generation)
         } else if self.recently_evicted.iter().any(|k| k == key) {
             LookupResult::Evicted
@@ -316,6 +364,7 @@ impl ImportDecisionCache {
         let mut matches: Vec<ResolvedMatch> = self
             .entries
             .iter()
+            .flat_map(|entries| entries.iter())
             .filter(|(k, _)| k.afi == afi && k.safi == safi && &k.prefix == prefix)
             .map(|(k, decision)| ResolvedMatch {
                 path_id: k.path_id,
@@ -353,12 +402,22 @@ impl ImportDecisionCache {
     /// it.
     #[cfg(test)]
     fn len(&self) -> usize {
-        self.entries.len()
+        self.entries.as_ref().map_or(0, LruCache::len)
     }
 
     #[cfg(test)]
     fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.entries.as_ref().is_none_or(LruCache::is_empty)
+    }
+
+    /// Whether the cache is holding zero heap allocation — no LRU index
+    /// and no eviction ring. The structural fact a disabled session
+    /// must satisfy: an occupancy assertion (`lookup` returns
+    /// `NotSeen`) is satisfied by an eagerly-allocated empty cache too,
+    /// so it cannot pin this.
+    #[cfg(test)]
+    pub(super) fn is_unallocated(&self) -> bool {
+        self.entries.is_none() && self.recently_evicted.capacity() == 0
     }
 
     fn record_eviction(&mut self, key: ImportDecisionKey) {
@@ -488,7 +547,9 @@ mod tests {
         let mut decision = permit_at(0);
         decision.policy_context = CachedPolicyContext {
             communities: vec![100],
-            as_path_str: "65002".to_string(),
+            as_path: Some(rustbgpd_wire::AsPath {
+                segments: vec![rustbgpd_wire::AsPathSegment::AsSequence(vec![65002])],
+            }),
             as_path_len: 1,
             ..CachedPolicyContext::default()
         };
@@ -653,5 +714,70 @@ mod tests {
         let mut cache = ImportDecisionCache::with_capacity(0);
         cache.insert(key(1, 0), permit_at(0));
         assert!(matches!(cache.lookup(&key(1, 0), 0), LookupResult::Hit(_)));
+    }
+
+    #[test]
+    fn cache_allocates_nothing_until_first_insert() {
+        // Structural, not behavioural: an eagerly-built cache answers
+        // every lookup identically, so only the allocation state can
+        // distinguish the two. A session with `[policy.explain]
+        // enabled = false` never inserts and must therefore cost
+        // nothing.
+        let mut cache = ImportDecisionCache::with_capacity(DEFAULT_EXPLAIN_CACHE_SIZE);
+        assert!(
+            cache.is_unallocated(),
+            "a cache with no entries must hold no LRU index and no eviction ring",
+        );
+        // Reads must not allocate either.
+        let _ = cache.lookup(&key(1, 0), 0);
+        let _ = cache.lookup_all_paths(Afi::Ipv4, Safi::Unicast, &key(1, 0).prefix, 0);
+        cache.mark_withdrawn(&key(1, 0));
+        assert!(
+            cache.is_unallocated(),
+            "lookups and withdraws must not build the cache"
+        );
+
+        cache.insert(key(1, 0), permit_at(0));
+        assert!(!cache.is_unallocated(), "the first insert builds the LRU");
+        assert_eq!(cache.len(), 1);
+
+        // A session reset returns the peer to zero resident cost.
+        cache.clear();
+        assert!(
+            cache.is_unallocated(),
+            "clear releases the backing allocations"
+        );
+        assert!(matches!(cache.lookup(&key(1, 0), 0), LookupResult::NotSeen));
+    }
+
+    #[test]
+    fn enabled_cache_ring_is_full_size_before_any_eviction() {
+        // Deferring construction must not defer the eviction ring into
+        // incremental growth: by the time the LRU can evict anything,
+        // the ring must already be the size eager construction gave it.
+        let mut cache = ImportDecisionCache::with_capacity(4);
+        cache.insert(key(1, 0), permit_at(0));
+        assert!(
+            cache.recently_evicted.is_empty(),
+            "no eviction has happened yet",
+        );
+        assert_eq!(
+            cache.recently_evicted.capacity(),
+            EVICTION_TRACKER_CAPACITY,
+            "the ring is allocated in full on the first insert, not grown",
+        );
+    }
+
+    #[test]
+    fn eviction_ring_stays_bounded_at_its_cap() {
+        let mut cache = ImportDecisionCache::with_capacity(1);
+        for i in 0..(EVICTION_TRACKER_CAPACITY + 50) {
+            cache.insert(
+                key(1, u32::try_from(i).expect("loop bound fits u32")),
+                permit_at(0),
+            );
+        }
+        assert_eq!(cache.recently_evicted.len(), EVICTION_TRACKER_CAPACITY);
+        assert_eq!(cache.recently_evicted.capacity(), EVICTION_TRACKER_CAPACITY);
     }
 }

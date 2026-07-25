@@ -200,11 +200,10 @@ pub(crate) struct PeerSession {
     import_policy: Option<PolicyChain>,
     /// Whether the inbound hot path must build the per-UPDATE `AS_PATH`
     /// match string (`PolicyAttrSummary::as_path_str`). Derived from
-    /// the import chain via `PolicyChain::requires_as_path_string`
-    /// (mirroring the export-side gate in the RIB distribution
-    /// modules) plus the explain toggle — cached decisions store the
-    /// evaluation-time context verbatim. Recomputed once per chain
-    /// install (`install_import_policy`), not per UPDATE.
+    /// the import chain via `PolicyChain::requires_as_path_string`,
+    /// mirroring the export-side gate in the RIB distribution modules.
+    /// Recomputed once per chain install (`install_import_policy`), not
+    /// per UPDATE.
     import_needs_as_path_string: bool,
     /// Export policy (sent to RIB manager on `PeerUp` for per-peer filtering).
     export_policy: Option<PolicyChain>,
@@ -1017,7 +1016,7 @@ impl PeerSession {
         let tcp_ao_protected = config.tcp_ao.is_some();
         let tcp_ao_key_metadata = tcp_ao_key_metadata(&config, None, None);
         let import_needs_as_path_string =
-            Self::import_chain_needs_as_path_string(import_policy.as_ref(), explain_enabled);
+            Self::import_chain_needs_as_path_string(import_policy.as_ref());
         let (outbound_tx, outbound_rx) = mpsc::channel(OUTBOUND_BUFFER);
         let max_prefix_metric_lease = MaxPrefixMetricLease::new(
             metrics.clone(),
@@ -1166,7 +1165,7 @@ impl PeerSession {
         let tcp_ao_key_metadata =
             tcp_ao_key_metadata(&config, tcp_ao_info.as_ref(), tcp_ao_selected_owner);
         let import_needs_as_path_string =
-            Self::import_chain_needs_as_path_string(import_policy.as_ref(), explain_enabled);
+            Self::import_chain_needs_as_path_string(import_policy.as_ref());
         let (outbound_tx, outbound_rx) = mpsc::channel(OUTBOUND_BUFFER);
         let max_prefix_metric_lease = MaxPrefixMetricLease::new(
             metrics.clone(),
@@ -1288,14 +1287,15 @@ impl PeerSession {
         }
     }
 
-    /// Whether an import chain (plus the explain toggle) needs the
-    /// per-UPDATE `AS_PATH` match string. See
-    /// [`Self::install_import_policy`].
-    fn import_chain_needs_as_path_string(
-        import_policy: Option<&PolicyChain>,
-        explain_enabled: bool,
-    ) -> bool {
-        explain_enabled || import_policy.is_some_and(PolicyChain::requires_as_path_string)
+    /// Whether an import chain needs the per-UPDATE `AS_PATH` match
+    /// string. See [`Self::install_import_policy`].
+    ///
+    /// The explain toggle is deliberately *not* a term here: the
+    /// explain cache stores the typed `AS_PATH` and renders the string
+    /// at query time, so enabling explain no longer forces the render
+    /// for every inbound route on the session.
+    fn import_chain_needs_as_path_string(import_policy: Option<&PolicyChain>) -> bool {
+        import_policy.is_some_and(PolicyChain::requires_as_path_string)
     }
 
     /// Install (or clear) the import chain, recomputing the cached
@@ -1303,8 +1303,7 @@ impl PeerSession {
     /// `import_policy` after construction — assigning the field
     /// directly would desynchronize the gate.
     pub(super) fn install_import_policy(&mut self, policy: Option<PolicyChain>) {
-        self.import_needs_as_path_string =
-            Self::import_chain_needs_as_path_string(policy.as_ref(), self.import_explain_enabled);
+        self.import_needs_as_path_string = Self::import_chain_needs_as_path_string(policy.as_ref());
         self.import_policy = policy;
     }
 

@@ -722,6 +722,34 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the tiers the daemon enforces — in place of a file-non-empty check on
   the annex.
 
+- **Turning off `[policy.explain]` now actually costs nothing per peer.**
+  The import-decision cache was built at session construction, so every
+  peer paid for it whether or not explain was enabled: at the default
+  `cache_size = 4096` that is roughly 150 KiB of resident allocation per
+  session — the LRU index sized to capacity up front, plus a 512-entry
+  eviction ring — held for the life of a session that, with explain off,
+  never writes a single entry. On a 1000-peer route reflector that is
+  about 150 MiB reserved for a disabled feature. Both allocations are now
+  built on the first recorded decision instead, so a disabled session
+  holds none of it, and a session that is down releases what it had.
+  Enabled sessions are unaffected: the LRU and the eviction ring still
+  come up together at their full configured sizes, before any eviction
+  can occur. `[policy.explain] enabled` still defaults to on, and its
+  behaviour there is unchanged.
+
+- **Enabling import explain no longer slows down every inbound route.**
+  Explain needs a formatted `AS_PATH` string to re-derive which policy
+  statement decided a route, and the session used to get it by forcing
+  the per-UPDATE string render for *every* inbound route whenever explain
+  was on — re-imposing on ingress the cost that per-chain gating removed
+  on the export side. The cached decision already stores the typed
+  `AS_PATH`, so the string is now rendered from it at explain-query time,
+  with the same formatter that produced it. The render is once per
+  explain query rather than once per route, the cache stops carrying a
+  second copy of the path per entry, and the inbound path builds the
+  string only when the import chain's own `AS_PATH` matches need it.
+  Explain output is unchanged.
+
 ### Fixed
 
 - **A config file the daemon has rewritten now says so.** The first
