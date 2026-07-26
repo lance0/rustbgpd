@@ -474,7 +474,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   unknown type 255, and the existing RFC 9774 inspection order. On the retained
   53-byte, six-attribute section it removes exactly one allocation request and
   48 requested bytes per public revised attribute-decoder call. The target
-  full-UPDATE timing band is separated from a biased same-revision control,
+  production UPDATE-body timing band is separated from a biased same-revision
+  control,
   establishing a fixture-scoped speedup without publishing the raw -21.73% as
   a causal percentage. See
   [`docs/perf/revised-update-duplicate-table-2026-07.md`](docs/perf/revised-update-duplicate-table-2026-07.md).

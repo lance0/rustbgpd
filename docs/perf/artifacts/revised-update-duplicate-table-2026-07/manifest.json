@@ -21,7 +21,7 @@
   "scope": {
     "timing_entrypoint": "UpdateMessage::parse_revised",
     "allocation_entrypoint": "decode_path_attributes_revised",
-    "measured_stage": "revised path-attribute decode, with full UPDATE framing included only in timing",
+    "measured_stage": "revised path-attribute decode plus withdrawn/body-NLRI parsing in timing; allocation isolates the attribute section",
     "fixture": "timing uses one syntactically clean UPDATE with ORIGIN, AS_PATH, NEXT_HOP, LOCAL_PREF, MED, COMMUNITIES, and one body NLRI through the eBGP disposition branch; allocation uses its encoded path-attribute section",
     "fixture_attributes": 6,
     "allocation_attribute_section_len_bytes": 53,
