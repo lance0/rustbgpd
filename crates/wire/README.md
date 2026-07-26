@@ -70,10 +70,10 @@ analyzers, test harnesses, MRT readers, etc.
 
 ### 0.16.0 compatibility note
 
-The 0.16.0 API surface is additive, but **decode acceptance changed in six
-places**. Bytes that decoded under 0.15.0 may now be rejected or typed
-differently, so diff exactly this list before upgrading a consumer that asserts
-on decode outcomes:
+`rustbgpd-wire` 0.16.0 keeps the public API additive, but **decode acceptance
+changed in six places**. Bytes that decoded under 0.15.0 may now be rejected or
+typed differently, so diff exactly this list before upgrading a consumer that
+asserts on decode outcomes:
 
 - **Unsupported OPEN Optional Parameter types now error** with OPEN Message
   Error / Unsupported Optional Parameter (2/4) instead of being skipped.

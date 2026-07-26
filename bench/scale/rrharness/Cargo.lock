@@ -912,7 +912,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-wire"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "bytes",
  "thiserror 2.0.18",
