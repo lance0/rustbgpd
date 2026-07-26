@@ -668,7 +668,7 @@ fn distribute_direct_route(manager: &mut RibManager, source: Ipv4Addr, prefix: I
 }
 
 #[test]
-fn distribution_control_counts_pristine_otc_prefix_visits() {
+fn distribution_skips_pristine_otc_prefix_visits() {
     const PEERS: usize = 4;
     const CHANGED: usize = 64;
 
@@ -700,11 +700,11 @@ fn distribution_control_counts_pristine_otc_prefix_visits() {
     // Load-bearing proof: moving the production clone back inside the peer
     // loop makes this read four and fails the assertion.
     assert_eq!(manager.adj_rib_out_commit_stats.bgp_metrics_clones, 1);
-    // Control for the pristine-state OTC fast path: the target changes this
-    // exact production-loop count from CHANGED * PEERS to zero.
+    // Load-bearing proof: removing the production early return makes this
+    // read CHANGED * PEERS and fails the assertion.
     assert_eq!(
         manager.adj_rib_out_commit_stats.otc_reconcile_prefix_visits,
-        CHANGED * PEERS
+        0
     );
     assert!(manager.peer_otc_blocked.is_empty());
     assert!(manager.pending_otc_blocked.is_empty());

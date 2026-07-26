@@ -1890,7 +1890,6 @@ impl RibManager {
         affected_prefixes: &HashSet<Prefix>,
         blocked_routes: Vec<crate::route::Route>,
     ) {
-        #[cfg(any(test, feature = "bench-internals"))]
         let pristine_otc_reconcile = blocked_routes.is_empty()
             && !self.peer_otc_blocked.contains_key(&peer)
             && !self.pending_otc_blocked.contains_key(&peer);
@@ -1901,6 +1900,9 @@ impl RibManager {
                 .adj_rib_out_commit_stats
                 .pristine_otc_reconcile_candidates
                 .saturating_add(1);
+        }
+        if pristine_otc_reconcile {
+            return;
         }
         let mut blocked_by_prefix: HashMap<Prefix, HashMap<u32, crate::route::Route>> =
             HashMap::new();
