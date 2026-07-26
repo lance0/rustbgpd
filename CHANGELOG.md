@@ -802,22 +802,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and `PeerConfig` is `#[non_exhaustive]`, so external construction through
   its builder is unaffected.
 
-- **The gRPC threat-model annex is withdrawn; stop citing it as security
-  evidence.** `docs/adr/0064-threat-model.md` described the management
-  plane as it stood before v0.24.0 — tier enforcement audit-only and off
-  by default, principal mapping unimplemented, and any accepted credential
-  reaching the whole read-write surface. Tier enforcement has been the
-  default since v0.24.0, so a reviewer working from that document
-  prioritised threats the daemon already denies before the handler runs.
-  Its risk rankings were all derived from the superseded assumption and
-  could not be repaired by editing the prose around them, so the file is
-  now a stub that says so and points at the surfaces that are current;
-  the rewrite is slice 7 of ADR-0064. `docs/API.md`, `docs/SECURITY.md`,
-  and the method inventory no longer present it as an external-review
-  packet, and the release checklist now audits the inventory's structural
-  fence — the tests that hold `grpc-method-inventory.md` and `.json` to
-  the tiers the daemon enforces — in place of a file-non-empty check on
-  the annex.
+- **The gRPC threat-model annex now describes the enforced tier system.**
+  The pre-v0.24.0 audit-only draft was withdrawn because its attacker
+  assumptions and risk rankings no longer matched the daemon. The replacement
+  re-derives the authorization path, trust boundaries, and residual risks from
+  the current listener-cap plus principal-role enforcement, including the
+  explicit `legacy` opt-out, live credential rotation, accepted-client and
+  unauthenticated resource abuse, and audit-retention limits. The release
+  checklist keeps the mechanically fenced method inventory separate from the
+  required manual review of the threat model's assumptions and rankings.
 
 - **Turning off `[policy.explain]` now actually costs nothing per peer.**
   The import-decision cache was built at session construction, so every

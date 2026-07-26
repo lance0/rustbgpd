@@ -321,10 +321,11 @@ failing:
 cargo test -p rustbgpd-api authz
 ```
 
-`docs/adr/0064-threat-model.md` is withdrawn pending rewrite and is deliberately
-not audited here. It is prose with no code fence; the `test -s` check it used to
-carry proved only that the file was non-empty, which is why it outlived its own
-accuracy.
+`docs/adr/0064-threat-model.md` is prose, so the structural inventory tests do
+not prove its attacker assumptions or risk rankings. Review its authorization
+path and residual-risk claims against the source paths named in its
+**Evidence and review focus** section; do not substitute a non-empty-file check
+for that review.
 
 ### Interop smoke (requires Docker + containerlab)
 

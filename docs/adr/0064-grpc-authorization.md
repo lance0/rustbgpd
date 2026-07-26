@@ -349,10 +349,10 @@ review/rollback unit.
    operators need configurable sampling.
 7. **External-review prep.** Threat-model doc, per-slice security
    sign-off, external auditor packet (inventory + ADR + threat model
-   + audit-log sample). The draft written against the pre-v0.24.0
-   audit-only posture is withdrawn — `docs/adr/0064-threat-model.md` is
-   a stub recording that and pointing at the surfaces that are current —
-   so this slice starts from the enforced model.
+   + audit-log sample). `docs/adr/0064-threat-model.md` now models the
+   enforced tier system and re-derives the residual risks from that
+   posture. Per-slice sign-off and assembly of an external auditor packet
+   remain follow-up work.
 
 Slices 1–5 are the v1.0 blocker; slice 6 is hardening that should
 land in the same release window; slice 7 is the gate the external
@@ -377,9 +377,11 @@ own migration window.
   operational network controls. Per-principal or per-listener request/stream
   budgets remain future work if production evidence shows the existing signals
   are insufficient.
-- **Dynamic role updates.** Slice 2 reads the role map at startup
-  and on SIGHUP. Live role revocation without a SIGHUP (e.g. a
-  "kick this principal" RPC) is not v1.
+- **Dynamic role updates.** Listeners read the role map at startup. SIGHUP
+  keeps the live startup authorization pinned and requires a restart for role,
+  principal, enforcement, listener, or access changes. Live role revocation
+  without rebuilding the listener (for example, a "kick this principal" RPC)
+  is not v1.
 - **Capability-token alternative.** A future model could replace
   static principal role mapping with short-lived capability tokens minted by
   an external IAM. This ADR's principal-lookup mechanism does not
@@ -396,23 +398,22 @@ implemented by the runtime tier-decision layer: method-path lookup, structured
 `[security.grpc.roles]`, `enforcement = "legacy"`, and explicit non-mTLS
 listener principal labels for bearer-token TCP and UDS audit identity.
 Slice 4a adds enforced per-listener `max_tier` caps while preserving
-`access_mode` as a compatibility ceiling. Slice 3b adds audit-only native mTLS
-certificate principal extraction (`rustbgpd:` URI SAN, then email SAN, then
-Subject CN). Slice 5a adds opt-in per-principal role enforcement while leaving
-`legacy` as the default. Slice 6a adds result-aware audit records and
-credential-masked request summaries for `DiffRuntimeConfig`, `SetPeerGroup`,
-`PlanConfigTransaction`, and `ApplyConfigTransaction`.
-Slice 5b adds migration guidance and config-test coverage for staged tier-mode
-UDS / bearer-token deployments without flipping the default. Later slices
-implement the default enforcement flip, durable audit-sink guidance, and
-optional proto credential markers.
+`access_mode` as a compatibility ceiling. Slice 3b adds native mTLS certificate
+principal extraction (`rustbgpd:` URI SAN, then email SAN, then Subject CN);
+slice 5 uses that principal for enforced authorization. Slice 5a adds opt-in
+per-principal role enforcement, slice 5b adds migration guidance and config
+coverage, and the final phase makes `tier` the default. Slice 6a adds
+result-aware audit records and credential-masked request summaries for
+`DiffRuntimeConfig`, `SetPeerGroup`, `PlanConfigTransaction`, and
+`ApplyConfigTransaction`. Durable in-daemon audit-sink semantics and optional
+proto credential markers remain deferred.
 
 | Slice | Status |
 |-------|--------|
 | 1. Foundation | Implemented by the checked method-matrix PR + machine-readable JSON export |
-| 2. Audit-only runtime path | Implemented by the runtime audit-layer PR |
-| 3. Identity + roles | Partial: roles config + bearer/UDS principals + mTLS audit principal extraction |
+| 2. Audit/runtime path | Done: decision/audit layer, used by the enforced cap and role checks |
+| 3. Identity + roles | Done: roles config + bearer/UDS principals + mTLS principal extraction |
 | 4. Listener tier cap | Done: `max_tier` listener cap enforced |
 | 5. Enforcement + default flip | Done in v0.24.0: opt-in `tier` role enforcement (slice 4a) + migration prep + default flip from `legacy` to `tier` (slice 4b, closes #164) |
 | 6. Audit log hardening | Partial: result-aware records + explicit credential masking table + operations guidance for audit retention and resource guardrails |
-| 7. External-review prep | Not started |
+| 7. External-review prep | Partial: current enforced-system threat model; external sign-off and auditor packet remain |
