@@ -20,9 +20,11 @@ TOPO="m14-rr-frr"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 INTEROP_TEST_OPERATOR_AUTH=1
 export INTEROP_TEST_OPERATOR_AUTH
+# shellcheck source=tests/interop/scripts/test-lib.sh
 source "$SCRIPT_DIR/test-lib.sh"
 FRR_C1="clab-${TOPO}-frr-client1"
 FRR_C2="clab-${TOPO}-frr-client2"
+RR_CLUSTER_ID="10.0.0.1"
 
 
 grpc_list_received() {
@@ -33,6 +35,15 @@ grpc_list_received() {
 grpc_list_best() {
     grpcurl_call \
         "$GRPC_ADDR" rustbgpd.v1.RibService/ListBestRoutes 2>/dev/null
+}
+
+cluster_list_contains() {
+    local cluster_id=${1:?}
+
+    jq -e --arg cluster_id "$cluster_id" '
+        any(.paths[]?;
+            any(.clusterList.list[]?; . == $cluster_id))
+    ' >/dev/null
 }
 
 wait_established() {
@@ -158,23 +169,15 @@ test_originator_id() {
 # Test 4: CLUSTER_LIST contains RR's cluster_id
 # ---------------------------------------------------------------------------
 test_cluster_list() {
-    log "Test 4: CLUSTER_LIST contains RR cluster_id 10.0.0.1"
+    log "Test 4: CLUSTER_LIST contains RR cluster_id $RR_CLUSTER_ID"
 
     local route_json
     route_json=$(docker exec "$FRR_C2" vtysh -c "show bgp ipv4 unicast 192.168.10.0/24 json" 2>/dev/null)
 
-    if echo "$route_json" | grep -q "10.0.0.1"; then
-        # Check it's in the clusterList context
-        local cluster
-        cluster=$(echo "$route_json" | grep -o '"clusterList":"[^"]*"' | head -1 | cut -d'"' -f4 || true)
-        if echo "$cluster" | grep -q "10.0.0.1"; then
-            ok "CLUSTER_LIST contains 10.0.0.1"
-        else
-            # Some FRR versions format cluster list differently
-            ok "10.0.0.1 present in route attributes (cluster list)"
-        fi
+    if echo "$route_json" | cluster_list_contains "$RR_CLUSTER_ID"; then
+        ok "CLUSTER_LIST contains $RR_CLUSTER_ID"
     else
-        fail "CLUSTER_LIST missing 10.0.0.1"
+        fail "CLUSTER_LIST missing $RR_CLUSTER_ID at .paths[].clusterList.list[]"
         echo "$route_json" | head -30 || true
     fi
 }

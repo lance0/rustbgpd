@@ -28,14 +28,21 @@
 #
 # Usage:
 #   bash tests/interop/scripts/test-m86-rr-openbgpd.sh
+#   bash tests/interop/scripts/test-m86-rr-openbgpd.sh --self-test-diagnostics
 
+set -euo pipefail
 
 TOPO="m86-rr-openbgpd"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 INTEROP_TEST_OPERATOR_AUTH=1
 export INTEROP_TEST_OPERATOR_AUTH
-# shellcheck source=test-lib.sh
-source "$SCRIPT_DIR/test-lib.sh"
+if [ "${1:-}" = "--self-test-diagnostics" ]; then
+    ok() { printf 'PASS %s\n' "$*"; }
+    fail() { printf 'FAIL %s\n' "$*"; }
+else
+    # shellcheck source=test-lib.sh
+    source "$SCRIPT_DIR/test-lib.sh"
+fi
 OBGP1="clab-${TOPO}-obgp1"
 OBGP2="clab-${TOPO}-obgp2"
 CLIENT="clab-${TOPO}-client"
@@ -82,35 +89,39 @@ wait_obgp_established() {
     return 1
 }
 
-grpc_get_metrics() {
-    grpcurl_call \
-        "$GRPC_ADDR" rustbgpd.v1.ControlService/GetMetrics 2>/dev/null
-}
-
-# Sum of bgp_gr_stale_routes across peers on the RR.
-rr_stale_count() {
-    local total=0
-    while IFS= read -r val; do
-        total=$((total + ${val%.*}))
-    done < <(grpc_get_metrics | grep -oP 'bgp_gr_stale_routes\{[^}]*\}\s+\K[0-9.]+' || true)
-    echo "$total"
-}
-
-stale_is_zero() { [ "$(rr_stale_count)" -eq 0 ]; }
-
 # Poll until a command succeeds; usage: poll <tries> <sleep> <label> cmd...
 poll() {
-    local tries=${1:?} pause=${2:?} label=${3:?}
+    local tries=${1:?} pause=${2:?} label=${3:?} last_output=""
     shift 3
     for i in $(seq 1 "$tries"); do
-        if "$@" >/dev/null 2>&1; then
+        if last_output=$("$@" 2>&1); then
             ok "$label (attempt $i)"
             return 0
         fi
         sleep "$pause"
     done
     fail "$label — timed out after $((tries * pause))s"
+    if [ -n "$last_output" ]; then
+        printf 'Last failed observation:\n%s\n' "$last_output" >&2
+    fi
     return 1
+}
+
+record_absence_check() {
+    local absent_message=${1:?} present_message=${2:?} inspection_message=${3:?}
+    shift 3
+    local status
+    if "$@"; then
+        ok "$absent_message"
+        return
+    else
+        status=$?
+    fi
+    case "$status" in
+        1) fail "$present_message" ;;
+        2) fail "$inspection_message" ;;
+        *) fail "$inspection_message (unexpected inspector status $status)" ;;
+    esac
 }
 
 # True if the OpenBGPD node has a VALID BGP path for the prefix learned
@@ -120,7 +131,40 @@ obgp_has_bgp_route() {
         | jq -e '[.rib[]? | select(((.announced // false) | not) and .valid == true)] | length > 0'
 }
 
-obgp_lacks_bgp_route() { ! obgp_has_bgp_route "$1" "$2"; }
+obgp_lacks_bgp_route() {
+    local container=${1:?} rr_addr=${2:?} prefix=${3:?} neighbor output
+    if ! neighbor=$(docker exec "$container" bgpctl show neighbor "$rr_addr" 2>&1); then
+        printf 'OpenBGPD neighbor inspection failed for %s in %s:\n%s\n' \
+            "$rr_addr" "$container" "$neighbor" >&2
+        return 2
+    fi
+    if ! grep -q 'BGP state = Established' <<<"$neighbor"; then
+        printf 'OpenBGPD neighbor %s in %s is not Established:\n%s\n' \
+            "$rr_addr" "$container" "$neighbor" >&2
+        return 1
+    fi
+    # An exact-prefix bgpctl query exits nonzero when the route is absent, so
+    # inspect the full RIB and apply the exact-prefix predicate with jq.
+    if ! output=$(docker exec "$container" bgpctl -j show rib 2>&1); then
+        printf 'OpenBGPD RIB inspection failed for %s in %s:\n%s\n' \
+            "$prefix" "$container" "$output" >&2
+        return 2
+    fi
+    if ! jq -e '.rib | type == "array"' <<<"$output" >/dev/null 2>&1; then
+        printf 'OpenBGPD RIB inspection returned malformed JSON or a non-array .rib:\n%s\n' \
+            "$output" >&2
+        return 2
+    fi
+    if ! jq -e '.rib | length > 0 and all(.[]; .prefix | type == "string")' \
+        <<<"$output" >/dev/null 2>&1; then
+        printf 'OpenBGPD RIB inspection returned no survivor rows or a row without a string prefix:\n%s\n' \
+            "$output" >&2
+        return 2
+    fi
+    jq -e --arg p "$prefix" \
+        '[.rib[] | select(.prefix == $p and ((.announced // false) | not) and .valid == true)]
+         | length == 0' <<<"$output" >/dev/null
+}
 
 # True if the rustbgpd client's Loc-RIB has the prefix.
 client_has_route() {
@@ -128,12 +172,59 @@ client_has_route() {
         '[.[] | select(.prefix == $p)] | length > 0'
 }
 
-client_lacks_route() { ! client_has_route "$1"; }
+client_lacks_route() {
+    local prefix=${1:?} output
+    if ! client_established; then
+        printf 'rustbgpd client session is not Established while checking absence of %s\n' \
+            "$prefix" >&2
+        return 1
+    fi
+    if ! output=$(client_ctl rib -j 2>&1); then
+        printf 'rustbgpd client RIB inspection failed for %s:\n%s\n' "$prefix" "$output" >&2
+        return 2
+    fi
+    if ! jq -e 'type == "array"' <<<"$output" >/dev/null 2>&1; then
+        printf 'rustbgpd client RIB inspection returned malformed or non-array JSON:\n%s\n' \
+            "$output" >&2
+        return 2
+    fi
+    if ! jq -e 'all(.[]; .prefix | type == "string")' \
+        <<<"$output" >/dev/null 2>&1; then
+        printf 'rustbgpd client RIB inspection returned a row without a string prefix:\n%s\n' \
+            "$output" >&2
+        return 2
+    fi
+    jq -e --arg p "$prefix" --arg survivor "$O2_V4" \
+        '([.[] | select(.prefix == $p)] | length == 0)
+         and ([.[] | select(.prefix == $survivor)] | length >= 1)' \
+        <<<"$output" >/dev/null
+}
+
+rr_lacks_routes_from() {
+    local peer=${1:?} output
+    if ! output=$(rr_ctl rib -j 2>&1); then
+        printf 'RR RIB inspection failed for peer %s:\n%s\n' "$peer" "$output" >&2
+        return 2
+    fi
+    if ! jq -e 'type == "array"' <<<"$output" >/dev/null 2>&1; then
+        printf 'RR RIB inspection returned malformed or non-array JSON:\n%s\n' "$output" >&2
+        return 2
+    fi
+    if ! jq -e 'length > 0 and all(.[]; .peer_address | type == "string")' \
+        <<<"$output" >/dev/null 2>&1; then
+        printf 'RR RIB inspection returned no survivor rows or a row without a string peer_address:\n%s\n' \
+            "$output" >&2
+        return 2
+    fi
+    jq -e --arg peer "$peer" '[.[] | select(.peer_address == $peer)] | length == 0' \
+        <<<"$output" >/dev/null
+}
 
 # True if the rustbgpd client's session to the RR is Established.
 client_established() {
     client_ctl neighbor -j 2>/dev/null \
-        | jq -e '[.[] | select(.state == "Established")] | length >= 1'
+        | jq -e 'type == "array"
+                 and ([.[] | select(.state == "Established")] | length >= 1)'
 }
 
 # ---------------------------------------------------------------------------
@@ -240,11 +331,11 @@ test_no_reflect_back() {
         fail "RR does not advertise obgp2's $O2_V4 to obgp1"
     fi
 
-    if obgp_lacks_bgp_route "$OBGP1" "$O1_V4"; then
-        ok "obgp1 has no BGP-learned path for its own $O1_V4 (announced only)"
-    else
-        fail "obgp1 received its own $O1_V4 back from the RR"
-    fi
+    record_absence_check \
+        "obgp1 has no BGP-learned path for its own $O1_V4 (announced only)" \
+        "obgp1 received its own $O1_V4 back from the RR" \
+        "could not verify that obgp1 lacks its own $O1_V4 because OpenBGPD inspection failed" \
+        obgp_lacks_bgp_route "$OBGP1" "$RR_FROM_OBGP1" "$O1_V4"
 }
 
 # ---------------------------------------------------------------------------
@@ -258,22 +349,71 @@ test_gr_helper_only() {
     # No AF was advertised as preserved, so the RR must withdraw
     # obgp1's routes from the surviving clients immediately.
     poll 20 2 "obgp2 loses $O1_V4 (withdraw propagated)" \
-        obgp_lacks_bgp_route "$OBGP2" "$O1_V4"
+        obgp_lacks_bgp_route "$OBGP2" "$RR_FROM_OBGP2" "$O1_V4"
     poll 10 2 "obgp2 loses $O1_V6 (withdraw propagated)" \
-        obgp_lacks_bgp_route "$OBGP2" "$O1_V6"
+        obgp_lacks_bgp_route "$OBGP2" "$RR_FROM_OBGP2" "$O1_V6"
     poll 10 2 "rustbgpd client loses $O1_V4" client_lacks_route "$O1_V4"
 
-    if stale_is_zero; then
-        ok "no stale routes on the RR (helper-only peer not GR-preserved)"
-    else
-        fail "RR stale-preserved a helper-only (no-AF) GR peer: $(rr_stale_count) stale"
-    fi
+    record_absence_check \
+        "no routes from obgp1 remain on the RR (helper-only peer not GR-preserved)" \
+        "RR retained routes from helper-only (no-AF) GR peer $OBGP1_ADDR" \
+        "could not verify removal of routes from helper-only GR peer $OBGP1_ADDR because RR RIB inspection failed" \
+        rr_lacks_routes_from "$OBGP1_ADDR"
 
     # Recovery: obgp1 comes back, everything re-converges.
     start_bgpd "$OBGP1"
     wait_obgp_established "$OBGP1" "$RR_FROM_OBGP1" "obgp1 (restarted)" || return 1
     poll 15 2 "obgp2 re-learns $O1_V4" obgp_has_bgp_route "$OBGP2" "$O1_V4"
     poll 15 2 "rustbgpd client re-learns $O1_V6" client_has_route "$O1_V6"
+}
+
+self_test_output() {
+    local output=${1:?} expected=${2:?} rejected=${3:-}
+    if [[ "$output" != *"$expected"* ]] \
+        || { [ -n "$rejected" ] && [[ "$output" == *"$rejected"* ]]; }; then
+        printf 'diagnostic self-test expected %q and rejected %q in:\n%s\n' \
+            "$expected" "$rejected" "$output" >&2
+        return 1
+    fi
+}
+
+self_test_status() {
+    local status=${1:?}
+    if [ "$status" -eq 2 ]; then
+        printf 'pinned inspector diagnostic\n' >&2
+    fi
+    return "$status"
+}
+
+self_test_diagnostics() {
+    local output
+    if output=$(poll 2 0 "self-test poll" self_test_status 2 2>&1); then
+        printf 'diagnostic self-test expected poll failure\n' >&2
+        return 1
+    fi
+    self_test_output "$output" "self-test poll — timed out"
+    self_test_output "$output" "Last failed observation:"
+    self_test_output "$output" "pinned inspector diagnostic"
+
+    output=$(record_absence_check "route absent" "route still present" \
+        "inspection failed" self_test_status 0 2>&1)
+    self_test_output "$output" "route absent" "route still present"
+    self_test_output "$output" "route absent" "inspection failed"
+
+    output=$(record_absence_check "route absent" "route still present" \
+        "inspection failed" self_test_status 1 2>&1)
+    self_test_output "$output" "route still present" "inspection failed"
+
+    output=$(record_absence_check "route absent" "route still present" \
+        "inspection failed" self_test_status 2 2>&1)
+    self_test_output "$output" "pinned inspector diagnostic"
+    self_test_output "$output" "inspection failed" "route still present"
+
+    output=$(record_absence_check "route absent" "route still present" \
+        "inspection failed" self_test_status 7 2>&1)
+    self_test_output "$output" "inspection failed (unexpected inspector status 7)"
+
+    printf 'M86 diagnostic self-test passed\n'
 }
 
 # ---------------------------------------------------------------------------
@@ -307,4 +447,8 @@ main() {
     fi
 }
 
-main "$@"
+if [ "${1:-}" = "--self-test-diagnostics" ]; then
+    self_test_diagnostics
+else
+    main "$@"
+fi
