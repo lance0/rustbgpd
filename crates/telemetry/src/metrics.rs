@@ -366,7 +366,10 @@ impl BgpMetrics {
     ///
     /// Panics if metric registration fails.
     #[must_use]
-    #[expect(clippy::too_many_lines)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the constructor keeps the complete metric inventory and registration wiring together"
+    )]
     pub fn with_registry(registry: Registry) -> Self {
         let state_transitions = IntCounterVec::new(
             Opts::new(
