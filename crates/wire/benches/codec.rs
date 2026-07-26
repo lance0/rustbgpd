@@ -1,4 +1,4 @@
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
@@ -8,8 +8,9 @@ use rustbgpd_wire::attribute::{
 use rustbgpd_wire::nlri::{decode_nlri, encode_nlri};
 use rustbgpd_wire::validate::validate_update_attributes;
 use rustbgpd_wire::{
-    Aggregator, AsPath, AsPathSegment, ErrorDisposition, ExtendedCommunity, Ipv4NlriEntry,
-    Ipv4Prefix, Ipv4UnicastMode, LargeCommunity, Origin, PathAttribute, UpdateMessage,
+    Afi, Aggregator, AsPath, AsPathSegment, ErrorDisposition, ExtendedCommunity, Ipv4NlriEntry,
+    Ipv4Prefix, Ipv4UnicastMode, Ipv6Prefix, LargeCommunity, MpReachNlri, MpUnreachNlri, NlriEntry,
+    Origin, PathAttribute, Prefix, Safi, UpdateMessage,
 };
 
 fn generate_ipv4_prefixes(count: usize) -> Vec<Ipv4Prefix> {
@@ -96,6 +97,62 @@ fn as_set_as_path_wire() -> Vec<u8> {
     buf
 }
 
+fn ipv6_mp_add_path_update() -> (
+    UpdateMessage,
+    Vec<PathAttribute>,
+    NlriEntry,
+    NlriEntry,
+    IpAddr,
+) {
+    let announced = NlriEntry {
+        path_id: 7,
+        prefix: Prefix::V6(Ipv6Prefix::new(
+            Ipv6Addr::new(0x2001, 0xdb8, 0x100, 0, 0, 0, 0, 0),
+            48,
+        )),
+    };
+    let withdrawn = NlriEntry {
+        path_id: 11,
+        prefix: Prefix::V6(Ipv6Prefix::new(
+            Ipv6Addr::new(0x2001, 0xdb8, 0x200, 0, 0, 0, 0, 0),
+            48,
+        )),
+    };
+    let next_hop = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1));
+    let attrs = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65001])],
+        }),
+        PathAttribute::MpReachNlri(MpReachNlri {
+            afi: Afi::Ipv6,
+            safi: Safi::Unicast,
+            next_hop,
+            link_local_next_hop: None,
+            announced: vec![announced],
+            flowspec_announced: vec![],
+            evpn_announced: vec![],
+            bgpls_announced: vec![],
+            vpn_announced: vec![],
+            labeled_announced: vec![],
+            rtc_announced: vec![],
+        }),
+        PathAttribute::MpUnreachNlri(MpUnreachNlri {
+            afi: Afi::Ipv6,
+            safi: Safi::Unicast,
+            withdrawn: vec![withdrawn],
+            flowspec_withdrawn: vec![],
+            evpn_withdrawn: vec![],
+            bgpls_withdrawn: vec![],
+            vpn_withdrawn: vec![],
+            labeled_withdrawn: vec![],
+            rtc_withdrawn: vec![],
+        }),
+    ];
+    let msg = UpdateMessage::build(&[], &[], &attrs, true, true, Ipv4UnicastMode::Body);
+    (msg, attrs, announced, withdrawn, next_hop)
+}
+
 fn bench_nlri_decode(c: &mut Criterion) {
     let mut group = c.benchmark_group("nlri_decode");
     for count in [1, 10, 100, 500] {
@@ -168,6 +225,82 @@ fn bench_update_parse(c: &mut Criterion) {
             b.iter(|| msg.parse(true, false, &[]).unwrap());
         });
     }
+    group.finish();
+}
+
+fn bench_update_parse_revised(c: &mut Criterion) {
+    let mut group = c.benchmark_group("update_parse_revised");
+    let attrs = typical_attributes();
+    for count in [1, 10, 100, 500] {
+        let entries: Vec<Ipv4NlriEntry> = generate_ipv4_prefixes(count)
+            .into_iter()
+            .map(|prefix| Ipv4NlriEntry { path_id: 0, prefix })
+            .collect();
+        let msg = UpdateMessage::build(&entries, &[], &attrs, true, false, Ipv4UnicastMode::Body);
+        let decoded = msg
+            .parse_revised(true, false, false, &[])
+            .expect("clean eBGP UPDATE must parse through the production path");
+        assert!(
+            decoded.malformed.is_empty(),
+            "clean fixture must not exercise malformed recovery"
+        );
+        assert_eq!(decoded.update.announced, entries);
+        assert!(decoded.update.withdrawn.is_empty());
+        assert_eq!(decoded.update.attributes, attrs);
+        assert_eq!(decoded.update.bgpls_nlri_discarded, 0);
+
+        group.bench_with_input(BenchmarkId::from_parameter(count), &msg, |b, msg| {
+            b.iter(|| msg.parse_revised(true, false, false, &[]).unwrap());
+        });
+    }
+
+    let (msg, attrs, announced, withdrawn, next_hop) = ipv6_mp_add_path_update();
+    let add_path_families = [(Afi::Ipv6, Safi::Unicast)];
+    let decoded = msg
+        .parse_revised(true, false, false, &add_path_families)
+        .expect("clean IPv6 MP-BGP Add-Path UPDATE must parse");
+    assert!(
+        decoded.malformed.is_empty(),
+        "clean fixture must not exercise malformed recovery"
+    );
+    assert!(decoded.update.announced.is_empty());
+    assert!(decoded.update.withdrawn.is_empty());
+    assert_eq!(decoded.update.attributes, attrs);
+    assert_eq!(decoded.update.bgpls_nlri_discarded, 0);
+
+    let reach = decoded
+        .update
+        .attributes
+        .iter()
+        .find_map(|attr| match attr {
+            PathAttribute::MpReachNlri(mp) => Some(mp),
+            _ => None,
+        })
+        .expect("fixture must decode MP_REACH_NLRI");
+    assert_eq!((reach.afi, reach.safi), (Afi::Ipv6, Safi::Unicast));
+    assert_eq!(reach.next_hop, next_hop);
+    assert_eq!(reach.announced, vec![announced]);
+    assert_ne!(reach.announced[0].path_id, 0);
+
+    let unreach = decoded
+        .update
+        .attributes
+        .iter()
+        .find_map(|attr| match attr {
+            PathAttribute::MpUnreachNlri(mp) => Some(mp),
+            _ => None,
+        })
+        .expect("fixture must decode MP_UNREACH_NLRI");
+    assert_eq!((unreach.afi, unreach.safi), (Afi::Ipv6, Safi::Unicast));
+    assert_eq!(unreach.withdrawn, vec![withdrawn]);
+    assert_ne!(unreach.withdrawn[0].path_id, 0);
+
+    group.bench_function("ipv6_mp_add_path", |b| {
+        b.iter(|| {
+            msg.parse_revised(true, false, false, &add_path_families)
+                .unwrap()
+        });
+    });
     group.finish();
 }
 
@@ -259,6 +392,7 @@ criterion_group!(
     bench_nlri_encode,
     bench_update_build,
     bench_update_parse,
+    bench_update_parse_revised,
     bench_attr_decode,
     bench_attr_encode,
     bench_validate_update,
