@@ -2869,6 +2869,14 @@ impl RibManager {
     /// transition commit. Ungrouped peers never pass through it and retain
     /// their independently installed chain.
     fn install_group_member(&mut self, gid: usize, peer: IpAddr) {
+        // Grouped unicast state belongs to GroupRibOut. Install the private
+        // multi-family table with no unicast reservation before any family
+        // can become its first creator; non-unicast state still lives here,
+        // and an eventual ungroup grows the slab while seeding its baseline.
+        self.adj_ribs_out
+            .entry(peer)
+            .or_insert_with(|| AdjRibOut::new(peer));
+
         let export_chain = self
             .group_ribs
             .get(&gid)

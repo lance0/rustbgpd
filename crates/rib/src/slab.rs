@@ -88,7 +88,7 @@ impl<T> RouteSlab<T> {
 
     /// Backing slot capacity (the memory-profile analog of
     /// `HashMap::capacity` on the maps this replaces).
-    #[cfg(feature = "bench-internals")]
+    #[cfg(any(test, feature = "bench-internals"))]
     pub(crate) fn capacity(&self) -> usize {
         self.slots.capacity()
     }
