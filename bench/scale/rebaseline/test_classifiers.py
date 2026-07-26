@@ -13,6 +13,9 @@ import unittest
 
 HERE = Path(__file__).resolve().parent
 FIXTURES = HERE / "fixtures"
+sys.path.insert(0, str(HERE))
+
+import classify_dhat  # noqa: E402
 
 
 class ClassifierFixtures(unittest.TestCase):
@@ -150,6 +153,153 @@ class ClassifierFixtures(unittest.TestCase):
                     )
                     self.assertNotEqual(result.returncode, 0)
                     self.assertRegex(result.stderr, "refusing unsanitized|path or address")
+
+    def test_dhat_current_demangled_adj_rib_in_owner(self) -> None:
+        self.assertEqual(
+            classify_dhat.classify_stack(
+                ["<rustbgpd_rib::adj_rib_in::AdjRibIn>::insert"]
+            ),
+            "Adj-RIB-In route storage",
+        )
+
+    def test_dhat_current_demangled_loc_rib_owner(self) -> None:
+        self.assertEqual(
+            classify_dhat.classify_stack(
+                [
+                    "<rustbgpd_rib::loc_rib::LocRib>::recompute::"
+                    "<core::slice::iter::Iter<&rustbgpd_rib::route::Route>>"
+                ]
+            ),
+            "Loc-RIB best-path map",
+        )
+
+    def test_dhat_current_demangled_group_and_per_peer_owners(self) -> None:
+        group_owner = "<rustbgpd_rib::update_group::GroupRibOut>::apply_delta"
+        self.assertEqual(
+            classify_dhat.classify_stack([group_owner]),
+            "Group RIB-Out table",
+        )
+        self.assertEqual(
+            classify_dhat.classify_stack(
+                [
+                    "<prefix_trie::map::PrefixMap<ipnet::ipnet::Ipv4Net, u32>>::insert",
+                    group_owner,
+                ]
+            ),
+            "Prefix-trie index - group table",
+        )
+        self.assertEqual(
+            classify_dhat.classify_stack(
+                ["<rustbgpd_rib::adj_rib_out::AdjRibOut>::apply_delta"]
+            ),
+            "Per-peer Adj-RIB-Out",
+        )
+
+    def test_dhat_current_demangled_slab_and_daemon_owners(self) -> None:
+        self.assertEqual(
+            classify_dhat.classify_stack(
+                [
+                    "<rustbgpd_rib::slab::RouteSlab<rustbgpd_rib::route::Route>>::insert",
+                    "<rustbgpd_rib::adj_rib_in::AdjRibIn>::insert",
+                ]
+            ),
+            "Adj-RIB-In route storage",
+        )
+        for owner in (
+            "<rustbgpd_rib::manager::RibManager>::new",
+            "<rustbgpd_transport::session::PeerSession>::new",
+        ):
+            with self.subTest(owner=owner):
+                self.assertEqual(
+                    classify_dhat.classify_stack([owner]),
+                    "Daemon core",
+                )
+
+    def test_dhat_cache_requires_import_decision_cache_owner(self) -> None:
+        self.assertEqual(
+            classify_dhat.classify_stack(
+                [
+                    "<rustbgpd_transport::session::import_decision_cache::"
+                    "ImportDecisionCache>::insert"
+                ]
+            ),
+            "Transport import-decision cache",
+        )
+        self.assertNotEqual(
+            classify_dhat.classify_stack(
+                [
+                    "<alloc::boxed::Box<lru::LruEntry<"
+                    "rustbgpd_transport::session::import_decision_cache::"
+                    "ImportDecisionKey, "
+                    "rustbgpd_transport::session::rejected_routes::"
+                    "RejectedRouteEntry>>>::new"
+                ]
+            ),
+            "Transport import-decision cache",
+        )
+
+    def test_dhat_unsymbolized_live_stack_explains_profiling_build(self) -> None:
+        document = {
+            "dhatFileVersion": 2,
+            "ftbl": ["", "", ""],
+            "pps": [{"gb": 1, "fs": [1]}],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "unsymbolized.json"
+            path.write_text(json.dumps(document), encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(HERE / "classify_dhat.py"), str(path)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("no symbolized stack", result.stderr)
+        self.assertIn("--profile release-prof", result.stderr)
+        self.assertIn("stripped release profile", result.stderr)
+
+    def test_explain_cache_peak_uses_daemon_vmhwm_not_sampled_tree_max(self) -> None:
+        runner = HERE.parents[2] / "docs" / "perf" / "run-explain-cache-variant.sh"
+        marker = (
+            "# Summary: steady = median of post-convergence samples; "
+            "peak = daemon kernel VmHWM.\n"
+        )
+        script = runner.read_text(encoding="utf-8")
+        summary = script.split(marker, 1)[1].split("\nPY\n", 1)[0]
+        self.assertTrue(summary.startswith("python3 - \"$OUT\" <<'PY'\n"))
+        python = summary.split("\n", 1)[1]
+
+        with tempfile.TemporaryDirectory() as directory:
+            out = Path(directory)
+            (out / "provenance.env").write_text(
+                "converged_monotonic=11.0\n", encoding="utf-8"
+            )
+            (out / "rss.tsv").write_text(
+                "monotonic_seconds\tutc\ttree_rss_kib\n"
+                "10.0\t2026-07-25T00:00:00Z\t1024\n"
+                "11.0\t2026-07-25T00:00:01Z\t2048\n",
+                encoding="utf-8",
+            )
+            (out / "proc-status-final.txt").write_text(
+                "VmRSS:\t2048 kB\nVmHWM:\t4096 kB\n", encoding="utf-8"
+            )
+            subprocess.run(
+                [sys.executable, "-c", python, str(out)],
+                check=True,
+                stdout=subprocess.PIPE,
+                text=True,
+            )
+            values = dict(
+                line.split("=", 1)
+                for line in (out / "summary.env").read_text().splitlines()
+            )
+
+        self.assertEqual(values["peak_rss_kib_daemon_vmhwm"], "4096")
+        self.assertEqual(values["peak_rss_mib_daemon_vmhwm"], "4.0")
+        self.assertEqual(
+            values["sampled_tree_peak_rss_kib_lower_bound"],
+            "2048",
+        )
 
     def test_dhat_derivative_bounds_fail_without_partial_output(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

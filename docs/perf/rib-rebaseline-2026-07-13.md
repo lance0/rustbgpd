@@ -69,9 +69,9 @@ live at the process-wide heap maximum:
 | Adj-RIB-In + group prefix tries | 34,435,264 | 16.37% |
 | Transport known-path memory | 15,204,416 | 7.23% |
 | Announcing-peers index | 14,942,224 | 7.10% |
-| Transport import-decision cache | 5,002,096 | 2.38% |
+| Transport import-decision cache | 4,674,416 | 2.22% |
 | Daemon core | 4,632,060 | 2.20% |
-| Transport session buffers/scratch | 3,236,991 | 1.54% |
+| Transport session buffers/scratch | 3,564,671 | 1.69% |
 | Telemetry / tokio / rest | 5,329,665 | 2.53% |
 | API / peer-manager | 2,521,505 | 1.20% |
 | RIB other + unclassified | 677,340 | 0.32% |

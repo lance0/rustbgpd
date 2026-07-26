@@ -2229,17 +2229,17 @@ daemon, or nothing.
 **partial-table**, not complete. Budget roughly:
 
 ```
-peers × min(cache_size, distinct prefixes per peer) × ~610 B
-  + peers × ~155 KiB   (the LRU index is allocated at capacity, so this
-                        floor is resident before a single UPDATE)
+peers × (154 KiB + min(cache_size, distinct prefixes per peer) × 587 B)
 ```
 
-The ~610 B per entry is **measured**
-([`perf/rib-rebaseline-2026-07-13.md`](perf/rib-rebaseline-2026-07-13.md),
-DHAT, saturated caches). Worked examples, **modeled** from it: 10 peers
-× 4096 entries ≈ 26 MiB; 1000 peers × 400 retained prefixes ≈ 355 MiB;
-1000 peers each announcing at least 4096 distinct routes ≈ 2.5 GB, the
-saturation ceiling for that fleet shape.
+The fixed and per-entry terms are a **computed model** solved from two
+same-binary fleet shapes in the
+[`explain-cache opt-in receipt`](perf/explain-cache-opt-in-2026-07.md).
+Worked examples: 10 saturated peers ≈ 24.4 MiB; 1000 peers × 400
+retained prefixes ≈ 374 MiB; 1000 peers each announcing at least 4096
+distinct routes ≈ 2.4 GiB, the extrapolated saturation ceiling for that
+fleet shape. The receipt computes the 1000 × 400 steady-RSS difference
+from four measured runs and discloses the fleet, allocator, and host limits.
 
 This is **diagnostic state only** — it never affects which routes are
 accepted. Scope is IPv4 / IPv6 unicast. The cache resets on peer session

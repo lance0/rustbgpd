@@ -44,9 +44,9 @@ def has(stack: list[str], *markers: str) -> bool:
 
 def classify_stack(stack: list[str]) -> str:
     """Return the first owning component while walking DHAT leaf to root."""
-    is_group = has(stack, "GroupRibOut::", "stage_group_prefixes")
-    is_adj_in = has(stack, "AdjRibIn::")
-    is_adj_out = has(stack, "AdjRibOut::")
+    is_group = has(stack, "GroupRibOut::", "GroupRibOut>::", "stage_group_prefixes")
+    is_adj_in = has(stack, "AdjRibIn::", "AdjRibIn>::")
+    is_adj_out = has(stack, "AdjRibOut::", "AdjRibOut>::")
 
     for frame in stack:  # DHAT/backtrace stores leaf to root.
         if "prefix_trie::" in frame or "FamilyPrefixMap" in frame:
@@ -56,17 +56,19 @@ def classify_stack(stack: list[str]) -> str:
                 return "Prefix-trie index - group table"
         if "RouteSlab::" in frame and is_adj_in:
             return "Adj-RIB-In route storage"
-        if "GroupRibOut::" in frame or ("AdjRibOut::" in frame and is_group):
+        if "GroupRibOut::" in frame or "GroupRibOut>::" in frame or (
+            ("AdjRibOut::" in frame or "AdjRibOut>::" in frame) and is_group
+        ):
             return "Group RIB-Out table"
-        if "LocRib::" in frame:
+        if "LocRib::" in frame or "LocRib>::" in frame:
             return "Loc-RIB best-path map"
-        if "AdjRibIn::" in frame:
+        if "AdjRibIn::" in frame or "AdjRibIn>::" in frame:
             return "Adj-RIB-In route storage"
         if "remember_known_path" in frame or "known_prefix_refcounts" in frame:
             return "Transport known-path memory"
         if "register_unicast_announcer" in frame or "unicast_prefix_peers" in frame:
             return "Announcing-peers index"
-        if "ImportDecisionCache::" in frame or "import_decision_cache" in frame:
+        if "ImportDecisionCache::" in frame or "ImportDecisionCache>::" in frame:
             return "Transport import-decision cache"
         if any(
             marker in frame
@@ -80,11 +82,19 @@ def classify_stack(stack: list[str]) -> str:
             )
         ):
             return "Transport session buffers/scratch"
-        if "RibManager::new" in frame or "PeerSession::new" in frame:
+        if any(
+            marker in frame
+            for marker in (
+                "RibManager::new",
+                "RibManager>::new",
+                "PeerSession::new",
+                "PeerSession>::new",
+            )
+        ):
             return "Daemon core"
         if "rustbgpd_api::" in frame or "peer_manager::" in frame:
             return "API / peer-manager"
-        if "AdjRibOut::" in frame and is_adj_out:
+        if ("AdjRibOut::" in frame or "AdjRibOut>::" in frame) and is_adj_out:
             return "Per-peer Adj-RIB-Out"
     # Generic crate/runtime markers are fallbacks, not owners. A leaf tokio
     # allocation under read_tcp or RibManager::new belongs to that later,
@@ -188,6 +198,12 @@ def load_profile(path: Path) -> tuple[dict[str, int], list[tuple[str, int, tuple
         if any(item < 0 for item in frame_indexes):
             raise ValueError(f"{path}: pps[{index}].fs contains an invalid ftbl index")
         if live_bytes:
+            if not stack or any(not frame.strip() for frame in stack):
+                raise ValueError(
+                    f"{path}: pps[{index}] has live bytes but no symbolized stack; "
+                    "DHAT requires a profiling build with symbols "
+                    "(use --profile release-prof, not the stripped release profile)"
+                )
             normalized_stack = tuple(normalized_symbol(frame) for frame in stack)
             component = classify_stack(list(normalized_stack))
             totals[component] = checked_add(

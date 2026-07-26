@@ -175,6 +175,29 @@ jobs:
           # canonical form of the sanitized receipt only.
           python3 bench/scale/rebaseline/sanitize_bgperf_csv.py \
             --from-sanitized "$receipt/2p-100k.csv" >/dev/null
+      - name: Verify committed known-path accounting receipt
+        run: |
+          set -euo pipefail
+          receipt=docs/perf/artifacts/known-path-accounting-2026-07
+          (cd "$receipt" && sha256sum -c SHA256SUMS)
+          for variant in baseline candidate; do
+            python3 bench/scale/rebaseline/classify_dhat.py \
+              --from-derivative "$receipt/$variant.dhat-derivative.tsv" \
+              --check "$receipt/$variant.memory.tsv"
+          done
+      - name: Verify committed explain-cache DHAT receipt
+        run: |
+          set -euo pipefail
+          receipt=docs/perf/artifacts/explain-cache-opt-in-2026-07
+          (cd "$receipt" && sha256sum -c SHA256SUMS)
+          for variant in D3-explain-true D4-explain-false; do
+            derivative="$RUNNER_TEMP/$variant.dhat-derivative.tsv"
+            gzip -cd "$receipt/dhat/$variant.dhat-derivative.tsv.gz" \
+              > "$derivative"
+            python3 bench/scale/rebaseline/classify_dhat.py \
+              --from-derivative "$derivative" \
+              --check "$receipt/dhat/$variant.memory.tsv"
+          done
       - name: Check event-history producer fail-closed measurement tooling
         run: |
           set -euo pipefail

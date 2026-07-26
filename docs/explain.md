@@ -137,9 +137,10 @@ global — there is no per-peer or per-group override. At the default
 size retention is **partial-table**: a peer announcing more than 4096
 distinct prefixes keeps the cache saturated, so a query for an
 arbitrary prefix of theirs answers `evicted` rather than a decision.
-Budget roughly `peers × min(cache_size, prefixes per peer) × ~610 B`,
-plus ~155 KiB per session once enabled, and raise `cache_size` toward
-a peer's retained-prefix count when you need full-table answers.
+Budget roughly
+`peers × (154 KiB + min(cache_size, prefixes per peer) × 587 B)`,
+and raise `cache_size` toward a peer's retained-prefix count when you
+need full-table answers.
 Details:
 [CONFIGURATION.md](CONFIGURATION.md#import-decision-explain-policyexplain)
 and

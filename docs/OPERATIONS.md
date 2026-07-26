@@ -1616,8 +1616,7 @@ there is no per-peer or per-group override.
   partial-table size. For reliable full-table explain, raise it toward
   the peer's expected retained-prefix count and budget the memory: the
   number applies to every session, so the bill is
-  `peers × min(cache_size, prefixes per peer) × ~610 B` plus a
-  ~155 KiB per-session floor. See
+  `peers × (154 KiB + min(cache_size, prefixes per peer) × 587 B)`. See
   [`CONFIGURATION.md`](CONFIGURATION.md#import-decision-explain-policyexplain).
 
 ### Answer a member's "why is my route filtered?" (LAN-472)

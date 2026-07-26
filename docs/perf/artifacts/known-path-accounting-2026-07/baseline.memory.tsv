@@ -4,11 +4,11 @@ Loc-RIB best-path map	44302352	21.036009
 Adj-RIB-In route storage	33556528	15.933588
 Transport known-path memory	15204416	7.219487
 Announcing-peers index	14942224	7.094990
-Transport session buffers/scratch	3482907	1.653783
+Transport session buffers/scratch	3810587	1.809374
 Prefix-trie index - Adj-RIB-In	17219712	8.176406
 Prefix-trie index - group table	17215568	8.174438
 Daemon core	4633596	2.200162
-Transport import-decision cache	5002096	2.375137
+Transport import-decision cache	4674416	2.219545
 RIB other	679467	0.322630
 API / peer-manager	2524001	1.198467
 Per-peer Adj-RIB-Out	98688	0.046860

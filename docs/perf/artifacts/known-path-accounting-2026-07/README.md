@@ -15,8 +15,15 @@ timeout evidence.
 
 The raw DHAT JSON is not committed. The lossless sanitized derivatives retain
 the allocation bytes and stack text required by the classifier, without raw
-addresses or host paths. Reproduce the classified tables from the repository
-root:
+addresses or host paths. The capture-time classifier hashes remain recorded in
+`manifest.json`. A later ownership-precedence correction reclassified the same
+six retained stacks, totaling 327,680 bytes in each profile, from the
+import-decision cache to transport session buffers/scratch. The normalized
+stacks, per-stack byte counts, total live heaps, and known-path comparison did
+not change; only the derivatives' component labels/order and generated
+summaries did.
+
+Reproduce the classified tables from the repository root:
 
 ```text
 python3 bench/scale/rebaseline/classify_dhat.py \
