@@ -526,25 +526,44 @@ test_relaunch_eor_sweep() {
 test_no_dataplane_install() {
     log "Test 7: RR installed nothing into any dataplane"
 
-    local mpls
-    mpls=$(docker exec "$RUSTBGPD" ip -M route show 2>/dev/null || true)
-    if [ -z "$mpls" ]; then
-        ok "RR MPLS routing table is empty"
-    else
-        fail "RR has unexpected MPLS routes"
-        echo "$mpls" >&2
+    local mpls ipv4 ipv6
+    if capture_ip_routes mpls "$RUSTBGPD" MPLS -M; then
+        if [ -z "$mpls" ]; then
+            ok "RR MPLS routing table is empty"
+        else
+            fail "RR has unexpected MPLS routes"
+            printf '%s\n' "$mpls" >&2
+        fi
     fi
 
-    if docker exec "$RUSTBGPD" ip route show \
-        | grep -qE "${V4_PREFIX_A%/*}|${V4_PREFIX_B%/*}"; then
-        fail "RR kernel routing table contains a labeled-derived route"
-        docker exec "$RUSTBGPD" ip route show >&2 || true
-    elif docker exec "$RUSTBGPD" ip -6 route show | grep -qF "${V6_PREFIX%/*}"; then
-        fail "RR kernel v6 routing table contains a labeled-derived route"
-        docker exec "$RUSTBGPD" ip -6 route show >&2 || true
-    else
-        ok "RR kernel routing tables have no labeled-derived routes"
+    if capture_ip_routes ipv4 "$RUSTBGPD" IPv4; then
+        if grep -qE "${V4_PREFIX_A%/*}|${V4_PREFIX_B%/*}" <<<"$ipv4"; then
+            fail "RR kernel routing table contains a labeled-derived route"
+            printf '%s\n' "$ipv4" >&2
+        else
+            ok "RR kernel IPv4 routing table has no labeled-derived routes"
+        fi
     fi
+
+    if capture_ip_routes ipv6 "$RUSTBGPD" IPv6 -6; then
+        if grep -qF "${V6_PREFIX%/*}" <<<"$ipv6"; then
+            fail "RR kernel v6 routing table contains a labeled-derived route"
+            printf '%s\n' "$ipv6" >&2
+        else
+            ok "RR kernel IPv6 routing table has no labeled-derived routes"
+        fi
+    fi
+}
+
+capture_ip_routes() {
+    local output_var=$1 container=$2 table_label=$3 captured
+    shift 3
+    if ! captured=$(docker exec "$container" ip "$@" route show 2>&1); then
+        fail "$container $table_label route inspection failed"
+        printf '%s\n' "$captured" >&2
+        return 1
+    fi
+    printf -v "$output_var" '%s' "$captured"
 }
 
 main() {

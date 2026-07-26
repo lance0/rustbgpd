@@ -496,24 +496,37 @@ test_withdraw_restore() {
 
 test_dataplane_clean() {
     log "Test 7: neither RR installed anything into any dataplane"
-    local rr
+    local rr mpls ipv4
     for rr in "$RR1" "$RR2"; do
-        local mpls
-        mpls=$(docker exec "$rr" ip -M route show 2>/dev/null || true)
-        if [ -z "$mpls" ]; then
-            ok "$rr MPLS routing table is empty"
-        else
-            fail "$rr has unexpected MPLS routes"
-            echo "$mpls" >&2
+        if capture_ip_routes mpls "$rr" MPLS -M; then
+            if [ -z "$mpls" ]; then
+                ok "$rr MPLS routing table is empty"
+            else
+                fail "$rr has unexpected MPLS routes"
+                printf '%s\n' "$mpls" >&2
+            fi
         fi
 
-        if docker exec "$rr" ip route show | grep -q "${PREFIX%/*}"; then
-            fail "$rr kernel routing table contains $PREFIX"
-            docker exec "$rr" ip route show >&2 || true
-        else
-            ok "$rr kernel routing table has no route for $PREFIX"
+        if capture_ip_routes ipv4 "$rr" IPv4; then
+            if grep -q "${PREFIX%/*}" <<<"$ipv4"; then
+                fail "$rr kernel routing table contains $PREFIX"
+                printf '%s\n' "$ipv4" >&2
+            else
+                ok "$rr kernel routing table has no route for $PREFIX"
+            fi
         fi
     done
+}
+
+capture_ip_routes() {
+    local output_var=$1 container=$2 table_label=$3 captured
+    shift 3
+    if ! captured=$(docker exec "$container" ip "$@" route show 2>&1); then
+        fail "$container $table_label route inspection failed"
+        printf '%s\n' "$captured" >&2
+        return 1
+    fi
+    printf -v "$output_var" '%s' "$captured"
 }
 
 main() {
