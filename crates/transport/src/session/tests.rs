@@ -17745,11 +17745,14 @@ fn rejected_route_prototype_builds(session: &PeerSession) -> usize {
         .load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// Clean permitted UPDATEs must not construct reject-only diagnostic state.
-/// Break-to-red: eagerly initializing the prototype makes the build-count
-/// assertion fail, while dropping accepted paths fails the state assertions.
+/// Clean permitted UPDATEs must not construct reject-only diagnostic state
+/// or allocate the rejected-route LRU.
+/// Break-to-red: restoring eager `LruCache::new` makes the structural
+/// allocation assertion fail; eagerly initializing the prototype makes the
+/// build-count assertion fail; dropping accepted paths fails the state
+/// assertions.
 #[tokio::test]
-async fn reject_retention_permitted_update_builds_no_prototype() {
+async fn reject_retention_permitted_update_stays_allocation_free() {
     let first = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
     let second = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
     let (mut session, _metrics) = retention_session_with_chain(None, |_| {});
@@ -17760,6 +17763,10 @@ async fn reject_retention_permitted_update_builds_no_prototype() {
 
     assert_eq!(rejected_route_prototype_builds(&session), 0);
     assert!(session.rejected_routes.is_empty());
+    assert!(
+        session.rejected_routes.is_unallocated(),
+        "a session with no retained rejection must hold no LRU allocation"
+    );
     assert_eq!(session.known_prefix_count(), 2);
     assert_eq!(session.import_policy_routes_permitted, 2);
 }

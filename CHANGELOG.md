@@ -797,6 +797,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   can occur. `[policy.explain] enabled` still defaults to on, and its
   behaviour there is unchanged.
 
+- **A peer with no rejected routes no longer allocates its rejected-route
+  LRU.** The store previously reserved its 1024-entry index when the
+  session was constructed, even if every received route was accepted.
+  The existing corrected
+  [DHAT capture](docs/perf/explain-cache-opt-in-2026-07.md#dhat-attribution)
+  attributes 704,320 allocated bytes to 20 such stores — 35,216 bytes per
+  peer. Those are allocated bytes, not an RSS measurement. The backing
+  LRU is now created on the first retained rejection and released on
+  session reset; listing, replacement, eviction, ordering, counters, and
+  the configured capacity are unchanged.
+
 - **Enabling import explain no longer slows down every inbound route.**
   Explain needs a formatted `AS_PATH` string to re-derive which policy
   statement decided a route, and the session used to get it by forcing
