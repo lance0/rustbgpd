@@ -207,8 +207,8 @@ test_nexthop_preserved_on_a() {
 # ---------------------------------------------------------------------------
 # Test 5: Both prefixes from FRR-A arrive at FRR-B
 # ---------------------------------------------------------------------------
-test_all_prefixes_forwarded() {
-    log "Test 5: Both FRR-A prefixes forwarded to FRR-B"
+test_all_prefixes_advertised() {
+    log "Test 5: Both FRR-A prefixes advertised to and received by FRR-B"
 
     for prefix in "192.168.1.0" "192.168.2.0"; do
         local frr_b_routes
@@ -237,16 +237,16 @@ main() {
     # Wait for routes from both peers
     wait_routes 3 || true
 
-    # Wait for FRR-B to receive forwarded routes (1 local + 2 from FRR-A = 3)
+    # Wait for FRR-B to receive advertised routes (1 local + 2 from FRR-A = 3)
     wait_frr_routes "$FRR_B" 3 || true
-    # Wait for FRR-A to receive forwarded routes (2 local + 1 from FRR-B = 3)
+    # Wait for FRR-A to receive advertised routes (2 local + 1 from FRR-B = 3)
     wait_frr_routes "$FRR_A" 3 || true
 
     test_no_asn_prepend_on_b
     test_nexthop_preserved_on_b
     test_no_asn_prepend_on_a
     test_nexthop_preserved_on_a
-    test_all_prefixes_forwarded
+    test_all_prefixes_advertised
 
     echo ""
     log "Results: $pass passed, $fail failed"

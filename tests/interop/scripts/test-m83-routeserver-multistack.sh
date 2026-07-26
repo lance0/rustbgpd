@@ -68,15 +68,15 @@
 #   40  wire large community 65002:2:2 verbatim
 #   41  wire OTC path attribute (type code 35) present on RS→BIRD
 #       announcements (value pinned as 65500 by assertion 18)
-#   42  EoR: RS→BIRD IPv4-unicast End-of-RIB present, after the first
-#       NLRI-bearing UPDATE (ordering sanity)
+#   42  EoR: exactly one RS→BIRD IPv4-unicast End-of-RIB follows the
+#       final NLRI-bearing UPDATE by (frame, BGP-PDU) order
 #   --- withdraw propagation + reload stability ---
 #   43  BIRD withdraws 203.0.113.0/24 → gone on FRR
 #   44  BIRD withdraws 203.0.113.0/24 → gone on GoBGP
-#   45  policy reload (import-chain LP edit + SIGHUP): FRR session
-#       survives (connectionsEstablished unchanged)
-#   46  after the reload BIRD still holds 100.66.0.0/24 (no spurious
-#       withdraw/churn — the OpenBGPd bug class, negative)
+#   45  policy reload changes still-present FRR route 100.67.0.0/24
+#       from LP 100→110 and bumps its import-chain install generation
+#   46  FRR remains authoritatively Established/non-stale with unchanged
+#       flap count, nondecreasing uptime, and cumulative session marker
 #
 # Prerequisites:
 #   - docker build --target dev -t rustbgpd:dev .
@@ -86,6 +86,162 @@
 #
 # Usage:
 #   bash tests/interop/scripts/test-m83-routeserver-multistack.sh
+
+check_ipv4_eor_order() {
+    python3 - "${1:?}" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+
+root = ET.parse(sys.argv[1]).getroot()
+events = []
+for packet in root.findall("packet"):
+    frame_field = packet.find(".//field[@name='frame.number']")
+    if frame_field is None or frame_field.get("show") is None:
+        raise SystemExit("packet missing frame.number")
+    frame = int(frame_field.get("show"))
+    for index, bgp in enumerate(packet.findall(".//proto[@name='bgp']"), 1):
+        bgp_type = bgp.find(".//field[@name='bgp.type']")
+        if bgp_type is not None:
+            events.append(((frame, index), bgp_type.get("show"), bgp))
+
+opens = [key for key, bgp_type, _ in events if bgp_type == "1"]
+if not opens:
+    raise SystemExit("no RS-to-BIRD OPEN in capture")
+last_open = max(opens)
+
+last_nlri = None
+eors = []
+for key, bgp_type, bgp in events:
+    if key <= last_open or bgp_type != "2":
+        continue
+    classic = bgp.findall(".//field[@name='bgp.nlri_prefix']")
+    if classic:
+        last_nlri = key
+    withdrawn = bgp.find(".//field[@name='bgp.update.withdrawn_routes.length']")
+    attrs = bgp.find(".//field[@name='bgp.update.path_attributes.length']")
+    codes = bgp.findall(".//field[@name='bgp.update.path_attribute.type_code']")
+    if (bgp.get("size") == "23"
+            and withdrawn is not None and withdrawn.get("show") == "0"
+            and attrs is not None and attrs.get("show") == "0"
+            and not codes and not classic):
+        eors.append(key)
+
+if last_nlri is None:
+    raise SystemExit(f"no IPv4 NLRI-bearing UPDATE after final OPEN {last_open}")
+if len(eors) != 1:
+    raise SystemExit(f"{len(eors)} exact IPv4 EoRs after final OPEN {last_open} (want 1)")
+if eors[0] <= last_nlri:
+    raise SystemExit(f"IPv4 EoR {eors[0]} not after final NLRI {last_nlri}")
+print(f"final OPEN {last_open}; final IPv4 NLRI {last_nlri} < EoR {eors[0]}")
+PY
+}
+
+self_test_ipv4_eor_order() {
+    local valid reversed
+    valid=$(mktemp)
+    reversed=$(mktemp)
+    python3 - "$valid" "$reversed" <<'PY'
+from pathlib import Path
+import sys
+
+opening = """<proto name="bgp"><field name="bgp.type" show="1"/></proto>"""
+nlri = """<proto name="bgp"><field name="bgp.type" show="2"/>
+<field name="bgp.nlri_prefix" show="100.67.0.0"/></proto>"""
+eor = """<proto name="bgp" size="23"><field name="bgp.type" show="2"/>
+<field name="bgp.update.withdrawn_routes.length" show="0"/>
+<field name="bgp.update.path_attributes.length" show="0"/></proto>"""
+
+def pdml(first, second):
+    return f"""<pdml>
+<packet><proto name="frame"><field name="frame.number" show="1"/></proto>{opening}</packet>
+<packet><proto name="frame"><field name="frame.number" show="2"/></proto>{first}{second}</packet>
+</pdml>"""
+
+Path(sys.argv[1]).write_text(pdml(nlri, eor))
+Path(sys.argv[2]).write_text(pdml(eor, nlri))
+PY
+    if ! check_ipv4_eor_order "$valid" >/dev/null; then
+        rm -f "$valid" "$reversed"
+        return 1
+    fi
+    if check_ipv4_eor_order "$reversed" >/dev/null 2>&1; then
+        echo "ERROR: same-frame EoR-before-NLRI fixture passed" >&2
+        rm -f "$valid" "$reversed"
+        return 1
+    fi
+    rm -f "$valid" "$reversed"
+    echo "M83 IPv4 EoR tuple-order self-test passed"
+}
+
+authoritative_established_snapshot() {
+    printf '%s\n' "${1:?}" | jq -e '
+        type == "object"
+        and .state == "SESSION_STATE_ESTABLISHED"
+        and ((.stale // false) == false)
+        and ((try ((.flapCount // 0) | tonumber) catch -1) >= 0)
+        and ((try ((.uptimeSeconds // 0) | tonumber) catch -1) >= 0)
+    ' >/dev/null
+}
+
+check_session_continuity() {
+    local before=${1:?} after=${2:?} marker_before=${3:?} marker_after=${4:?}
+    authoritative_established_snapshot "$before" || return 1
+    authoritative_established_snapshot "$after" || return 1
+    jq -en \
+        --argjson before "$before" \
+        --argjson after "$after" \
+        --arg marker_before "$marker_before" \
+        --arg marker_after "$marker_after" '
+        (($before.flapCount // 0) | tonumber)
+            == (($after.flapCount // 0) | tonumber)
+        and (($after.uptimeSeconds // 0) | tonumber)
+            >= (($before.uptimeSeconds // 0) | tonumber)
+        and ($marker_before | test("^[1-9][0-9]*$"))
+        and $marker_after == $marker_before
+    ' >/dev/null
+}
+
+self_test_session_continuity() {
+    local before healthy dropped stale flapped replaced marker_before marker_after
+    before='{"state":"SESSION_STATE_ESTABLISHED","flapCount":2,"uptimeSeconds":120}'
+    healthy='{"state":"SESSION_STATE_ESTABLISHED","flapCount":2,"uptimeSeconds":121}'
+    dropped='{"state":"SESSION_STATE_ACTIVE","flapCount":2,"uptimeSeconds":0}'
+    stale='{"state":"SESSION_STATE_ESTABLISHED","stale":true,"flapCount":2,"uptimeSeconds":121}'
+    flapped='{"state":"SESSION_STATE_ESTABLISHED","flapCount":3,"uptimeSeconds":1}'
+    replaced='{"state":"SESSION_STATE_ESTABLISHED","flapCount":2,"uptimeSeconds":1}'
+    marker_before=7
+    marker_after=7
+
+    # The former proof was only this marker predicate. Demonstrate that it
+    # accepts a peer that dropped and never reconnected before requiring the
+    # production continuity oracle to reject that same fixture.
+    if [ "$marker_before" != "$marker_after" ] || [ "$marker_after" = "0" ]; then
+        echo "ERROR: marker-only discriminator fixture is invalid" >&2
+        return 1
+    fi
+    if ! check_session_continuity "$before" "$healthy" "$marker_before" "$marker_after"; then
+        echo "ERROR: healthy authoritative continuity fixture failed" >&2
+        return 1
+    fi
+    for invalid in "$dropped" "$stale" "$flapped" "$replaced"; do
+        if check_session_continuity "$before" "$invalid" "$marker_before" "$marker_after"; then
+            echo "ERROR: invalid continuity fixture passed: $invalid" >&2
+            return 1
+        fi
+    done
+    echo "M83 authoritative session-continuity self-test passed"
+}
+
+case "${1:-}" in
+    --self-test-eor-order)
+        self_test_ipv4_eor_order
+        exit
+        ;;
+    --self-test-session-continuity)
+        self_test_session_continuity
+        exit
+        ;;
+esac
 
 TOPO="m83-routeserver-multistack"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -111,6 +267,12 @@ FRR_ADDR="10.83.3.2"
 
 rs_ctl() {
     docker exec "$RUSTBGPD" rbgp -s http://127.0.0.1:50051 "$@" 2>/dev/null
+}
+
+rs_neighbor_state() {
+    grpcurl_call \
+        -d "{\"address\": \"${1:?}\"}" \
+        "$GRPC_ADDR" rustbgpd.v1.NeighborService/GetNeighborState 2>/dev/null
 }
 
 birdc_route_all() {
@@ -205,9 +367,42 @@ start_capture() {
 
 stop_capture() {
     log "Stopping tshark capture..."
-    docker exec "$BIRD" sh -c \
-        'pkill -INT tshark >/dev/null 2>&1 || pkill tshark >/dev/null 2>&1 || true'
-    sleep 2
+    local signaled
+    if ! signaled=$(docker exec "$BIRD" sh -c '
+        found=0
+        capture_pid=
+        for file in /proc/[0-9]*/comm; do
+            [ "$(cat "$file" 2>/dev/null)" = tshark ] || continue
+            pid=${file#/proc/}; pid=${pid%/comm}
+            capture_pid=$pid
+            found=$((found + 1))
+        done
+        [ "$found" -eq 1 ] || {
+            echo "expected exactly one tshark capture, found $found" >&2
+            exit 1
+        }
+        kill -INT "$capture_pid" || exit 1
+        printf "%s\n" "$capture_pid"
+    '); then
+        fail "could not identify and signal exactly one tshark capture"
+        return 1
+    fi
+
+    for _ in $(seq 1 10); do
+        if ! docker exec "$BIRD" sh -c 'cat /proc/[0-9]*/comm 2>/dev/null' \
+            | grep -qx tshark; then
+            if docker exec "$BIRD" test -s /tmp/m83.pcap \
+                && docker exec "$BIRD" tshark -r /tmp/m83.pcap -c 1 >/dev/null 2>&1; then
+                log "tshark capture $signaled terminated; pcap is nonempty and readable"
+                return 0
+            fi
+            fail "tshark terminated without a nonempty readable /tmp/m83.pcap"
+            return 1
+        fi
+        sleep 1
+    done
+    fail "tshark did not flush and exit within 10s"
+    return 1
 }
 
 start_bird() {
@@ -612,23 +807,21 @@ assert_wire() {
     fi
 
     # EoR ordering over the LAST BIRD session (bounced above over a
-    # full RS table, so the flood-then-EoR order is deterministic —
-    # the very first session's EoR may legitimately precede member
-    # routes that hadn't arrived yet). EoR = empty UPDATE (no
-    # withdrawn routes, no path attributes). >= because rustbgpd may
-    # pack the last UPDATE and the EoR into one TCP segment.
-    local last_open first_eor first_nlri
-    last_open=$(bird_tshark -Y "ip.src == ${RS_BIRD_ADDR} && bgp.type == 1" \
-        -T fields -e frame.number | tail -1)
-    first_eor=$(bird_tshark -Y "$base && frame.number > ${last_open:-0} && bgp.update.withdrawn_routes.length == 0 && bgp.update.path_attributes.length == 0" \
-        -T fields -e frame.number | head -1)
-    first_nlri=$(bird_tshark -Y "$base && frame.number > ${last_open:-0} && bgp.nlri_prefix" \
-        -T fields -e frame.number | head -1)
-    if [ -n "$first_eor" ] && [ -n "$first_nlri" ] && [ "$first_eor" -ge "$first_nlri" ]; then
-        ok "IPv4-unicast EoR after the table flood (session at frame ${last_open}: NLRI $first_nlri → EoR $first_eor)"
+    # full RS table, so the flood-then-EoR order is deterministic).
+    # PDML preserves multiple BGP PDUs within one frame; comparing the
+    # (frame number, PDU index) tuple prevents a coalesced EoR that
+    # precedes the final NLRI from passing on frame equality.
+    local pdml eor_order
+    pdml=$(mktemp)
+    if bird_tshark \
+        -Y "ip.src == ${RS_BIRD_ADDR} && ip.dst == ${BIRD_ADDR} && bgp" \
+        -T pdml >"$pdml" \
+        && eor_order=$(check_ipv4_eor_order "$pdml" 2>&1); then
+        ok "IPv4-unicast EoR follows the final table-flood NLRI by (frame,PDU): $eor_order"
     else
-        fail "EoR ordering check failed (open='$last_open', first NLRI='$first_nlri', first EoR='$first_eor')"
+        fail "EoR ordering check failed: ${eor_order:-PDML export failed}"
     fi
+    rm -f "$pdml"
 }
 
 # Bounce the BIRD session over the now-full RS table so the last
@@ -665,31 +858,89 @@ assert_withdraw_propagation() {
 }
 
 assert_reload_stability() {
-    log "Assertions 45-46: session stability through a policy reload"
-    local estab_before estab_after
-    estab_before=$(docker exec "$FRR" vtysh -c "show bgp neighbors ${RS_FRR_ADDR} json" 2>/dev/null \
-        | jq -r --arg p "$RS_FRR_ADDR" '.[$p].connectionsEstablished // 0')
-
-    # Content-changing import-chain edit (LP 200 → 210 in
-    # prefer-rpki-valid) + SIGHUP: refresh, not session reset.
-    docker exec "$RUSTBGPD" sh -c \
-        'sed -i "s/set_local_pref = 200/set_local_pref = 210/" /tmp/config.toml'
-    rs_sighup
-    sleep 6
-
-    estab_after=$(docker exec "$FRR" vtysh -c "show bgp neighbors ${RS_FRR_ADDR} json" 2>/dev/null \
-        | jq -r --arg p "$RS_FRR_ADDR" '.[$p].connectionsEstablished // 0')
-    if [ -n "$estab_before" ] && [ "$estab_before" = "$estab_after" ] \
-        && [ "$estab_after" != "0" ]; then
-        ok "FRR session survived the policy reload (connectionsEstablished $estab_before → $estab_after)"
-    else
-        fail "FRR session bounced across the reload ($estab_before → $estab_after)"
+    log "Assertions 45-46: live route change and session stability through a policy reload"
+    local marker_before marker_after state_before state_after
+    local flaps_before flaps_after uptime_before uptime_after
+    local lp_before lp_after generation_before generation_after
+    if ! marker_before=$(docker exec "$FRR" vtysh \
+        -c "show bgp neighbors ${RS_FRR_ADDR} json" 2>/dev/null \
+        | jq -er --arg p "$RS_FRR_ADDR" '.[$p].connectionsEstablished // 0'); then
+        fail "FRR cumulative establishment marker unavailable before reload"
+        return
+    fi
+    if ! state_before=$(rs_neighbor_state "$FRR_ADDR") \
+        || ! authoritative_established_snapshot "$state_before"; then
+        fail "FRR continuity baseline is not an authoritative, non-stale Established snapshot"
+        return
+    fi
+    flaps_before=$(printf '%s\n' "$state_before" | jq -r '(.flapCount // 0) | tonumber')
+    uptime_before=$(printf '%s\n' "$state_before" | jq -r '(.uptimeSeconds // 0) | tonumber')
+    lp_before=$(rs_ctl rib --prefix 100.67.0.0/24 -j \
+        | jq -er --arg peer "$FRR_ADDR" '
+            [.[] | select(.prefix == "100.67.0.0/24" and .peer_address == $peer)]
+            | if length == 1 then .[0].local_pref
+              else error("FRR probe route is not uniquely present")
+              end')
+    generation_before=$(rs_ctl -j policy stats --peer "$FRR_ADDR" --direction import \
+        | jq -er --arg peer "$FRR_ADDR" '
+            [.chains[] | select(.peer_address == $peer and .direction == "import")]
+            | if length == 1 then .[0].policy_generation
+              else error("FRR import chain is not uniquely installed")
+              end')
+    if [ "$lp_before" != "100" ]; then
+        fail "FRR probe 100.67.0.0/24 pre-reload LP is $lp_before (want 100)"
+        return
     fi
 
-    if birdc_route_all 100.66.0.0/24 | grep -q "BGP.as_path: 65002"; then
-        ok "BIRD still holds 100.66.0.0/24 after the reload (no spurious churn)"
+    # 100.67.0.0/24 is uniquely sourced by FRR and remains present for
+    # this phase. Mutate the not-found term that accepted it, then
+    # require both the live route and installed-chain generation to move.
+    docker exec "$RUSTBGPD" sh -c '
+        set -e
+        [ "$(grep -c "^set_local_pref = 100$" /tmp/config.toml)" -eq 1 ]
+        sed -i "s/^set_local_pref = 100$/set_local_pref = 110/" /tmp/config.toml
+        [ "$(grep -c "^set_local_pref = 110$" /tmp/config.toml)" -eq 1 ]
+    '
+    rs_sighup
+
+    lp_after=$lp_before
+    generation_after=$generation_before
+    for _ in $(seq 1 20); do
+        lp_after=$(rs_ctl rib --prefix 100.67.0.0/24 -j \
+            | jq -er --arg peer "$FRR_ADDR" '
+                [.[] | select(.prefix == "100.67.0.0/24" and .peer_address == $peer)]
+                | if length == 1 then .[0].local_pref
+                  else error("FRR probe route is not uniquely present")
+                  end')
+        generation_after=$(rs_ctl -j policy stats --peer "$FRR_ADDR" --direction import \
+            | jq -er --arg peer "$FRR_ADDR" '
+                [.chains[] | select(.peer_address == $peer and .direction == "import")]
+                | if length == 1 then .[0].policy_generation
+                  else error("FRR import chain is not uniquely installed")
+                  end')
+        [ "$lp_after" = "110" ] && [ "$generation_after" -gt "$generation_before" ] && break
+        sleep 1
+    done
+    if [ "$lp_after" = "110" ] && [ "$generation_after" -gt "$generation_before" ]; then
+        ok "FRR probe stayed present and changed LP 100→110; import generation $generation_before→$generation_after"
     else
-        fail "BIRD lost 100.66.0.0/24 across the policy reload"
+        fail "live reload did not move FRR probe LP/generation (LP $lp_before→$lp_after, generation $generation_before→$generation_after)"
+    fi
+
+    marker_after=$(docker exec "$FRR" vtysh \
+        -c "show bgp neighbors ${RS_FRR_ADDR} json" 2>/dev/null \
+        | jq -er --arg p "$RS_FRR_ADDR" '.[$p].connectionsEstablished // 0') \
+        || marker_after=""
+    state_after=$(rs_neighbor_state "$FRR_ADDR") || state_after='{}'
+    flaps_after=$(printf '%s\n' "$state_after" | jq -r '(.flapCount // 0) | tonumber' 2>/dev/null) \
+        || flaps_after="unavailable"
+    uptime_after=$(printf '%s\n' "$state_after" | jq -r '(.uptimeSeconds // 0) | tonumber' 2>/dev/null) \
+        || uptime_after="unavailable"
+    if check_session_continuity \
+        "$state_before" "$state_after" "$marker_before" "$marker_after"; then
+        ok "FRR stayed authoritatively Established/non-stale across reload (flapCount $flaps_before→$flaps_after, uptime $uptime_before→$uptime_after, connectionsEstablished=$marker_after)"
+    else
+        fail "FRR session continuity failed across reload (state=$(printf '%s\n' "$state_after" | jq -r '.state // "unavailable"' 2>/dev/null || echo unavailable), stale=$(printf '%s\n' "$state_after" | jq -r '.stale // false' 2>/dev/null || echo unavailable), flapCount $flaps_before→$flaps_after, uptime $uptime_before→$uptime_after, connectionsEstablished $marker_before→${marker_after:-unavailable})"
     fi
 }
 
