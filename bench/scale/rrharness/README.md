@@ -74,9 +74,12 @@ rrharness late-join <n_clients> <n_prefixes>
 The late-join wall time includes peer registration, update-group assignment,
 manager staging and trivial channel draining. Its `/proc/self/status` snapshots
 cover the whole rrharness process. It excludes TCP/session actors, UPDATE
-preparation and encoding, socket writers, kernel socket buffers, and remote
-peer memory. It does not write a profile or make a capacity/performance claim.
-All convergence waits have a five-minute fail-fast deadline.
+final-envelope/output encoding in the transport actor, socket writers, kernel
+socket buffers, and remote peer memory. Manager-side exact-export precommit
+probing still uses the real fanout encoder and can prepare/build candidate
+UPDATEs. The mode does not write a profile or make a capacity/performance
+claim. Its convergence polling loops use a five-minute deadline while the
+manager continues answering their query messages.
 
 Receipt run shapes:
 

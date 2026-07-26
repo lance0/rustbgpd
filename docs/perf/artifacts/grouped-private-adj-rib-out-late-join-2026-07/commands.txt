@@ -1,0 +1,18 @@
+# CONTROL_ROOT and CANDIDATE_ROOT are local clean worktrees.
+cargo build --release --manifest-path bench/scale/rrharness/Cargo.toml
+
+pgrep -af 'cargo|rustc|rrharness|rustbgpd|bgperf|containerlab'
+cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor
+
+# A/B/B/A, one late-joining client.
+(cd "$CONTROL_ROOT" && ./bench/scale/rrharness/target/release/rrharness late-join 1 1000000)
+(cd "$CANDIDATE_ROOT" && ./bench/scale/rrharness/target/release/rrharness late-join 1 1000000)
+(cd "$CANDIDATE_ROOT" && ./bench/scale/rrharness/target/release/rrharness late-join 1 1000000)
+(cd "$CONTROL_ROOT" && ./bench/scale/rrharness/target/release/rrharness late-join 1 1000000)
+
+# A/B/B/A, eight late-joining clients.
+(cd "$CONTROL_ROOT" && ./bench/scale/rrharness/target/release/rrharness late-join 8 1000000)
+(cd "$CANDIDATE_ROOT" && ./bench/scale/rrharness/target/release/rrharness late-join 8 1000000)
+(cd "$CANDIDATE_ROOT" && ./bench/scale/rrharness/target/release/rrharness late-join 8 1000000)
+(cd "$CONTROL_ROOT" && ./bench/scale/rrharness/target/release/rrharness late-join 8 1000000)
+
