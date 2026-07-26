@@ -1,0 +1,8 @@
+# reloadstall peers=10 changed_peers=10 stable_peers=0 prefixes=10000 per_peer=1000 pid=$PID
+established 10 at 0.1s
+converged (>= 9000/observer) at 0.3s rss_mib=47
+control_maxgap_ms: p50=42.07 p95=42.45 max=42.45 (n=10)
+control_rss_mib 45
+reloadstall_csv_header,reload,peers_total,peers_changed,peers_stable,prefixes,completion_p50_s,completion_p95_s,completion_max_s,changed_maxgap_p50_ms,changed_maxgap_p95_ms,changed_maxgap_max_ms,all_observer_maxgap_p50_ms,all_observer_maxgap_p95_ms,all_observer_maxgap_max_ms,changed_first_update_p50_ms,changed_first_update_p95_ms,changed_first_update_max_ms,rss_before_mib,rss_after_mib,stable_marker_peers,sessions_up,parse_errors
+final sessions_up 10/10 parse_errors=0
+done rss_mib=45

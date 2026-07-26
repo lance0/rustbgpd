@@ -1,0 +1,27 @@
+# Replace $REPO_CONTROL and $REPO_CANDIDATE with clean worktrees at the
+# commits below. $OUT is an empty output directory.
+# TOTAL is the BASE route total. After the accumulated-base-announcement
+# convergence gate, the last 8 stubs each flap a distinct 16-prefix block
+# every 125ms for the rest of the run.
+#
+# Baseline 2x2, counterbalanced:
+REPO=$REPO_CONTROL LABEL=A1-p10-r10k OUTBASE=$OUT PEERS=10 TOTAL=10000 EXPLAIN=false RELOADS=0 CONTROL_SECS=30 PROFILE=release docs/perf/run-explain-cache-variant.sh
+REPO=$REPO_CONTROL LABEL=A1-p10-r100k OUTBASE=$OUT PEERS=10 TOTAL=100000 EXPLAIN=false RELOADS=0 CONTROL_SECS=30 PROFILE=release docs/perf/run-explain-cache-variant.sh
+REPO=$REPO_CONTROL LABEL=A1-p100-r10k OUTBASE=$OUT PEERS=100 TOTAL=10000 EXPLAIN=false RELOADS=0 CONTROL_SECS=30 PROFILE=release docs/perf/run-explain-cache-variant.sh
+REPO=$REPO_CONTROL LABEL=A1-p100-r100k OUTBASE=$OUT PEERS=100 TOTAL=100000 EXPLAIN=false RELOADS=0 CONTROL_SECS=30 PROFILE=release docs/perf/run-explain-cache-variant.sh
+REPO=$REPO_CONTROL LABEL=B2-p100-r100k OUTBASE=$OUT PEERS=100 TOTAL=100000 EXPLAIN=false RELOADS=0 CONTROL_SECS=30 PROFILE=release docs/perf/run-explain-cache-variant.sh
+REPO=$REPO_CONTROL LABEL=B2-p100-r10k OUTBASE=$OUT PEERS=100 TOTAL=10000 EXPLAIN=false RELOADS=0 CONTROL_SECS=30 PROFILE=release docs/perf/run-explain-cache-variant.sh
+REPO=$REPO_CONTROL LABEL=B2-p10-r100k OUTBASE=$OUT PEERS=10 TOTAL=100000 EXPLAIN=false RELOADS=0 CONTROL_SECS=30 PROFILE=release docs/perf/run-explain-cache-variant.sh
+REPO=$REPO_CONTROL LABEL=B2-p10-r10k OUTBASE=$OUT PEERS=10 TOTAL=10000 EXPLAIN=false RELOADS=0 CONTROL_SECS=30 PROFILE=release docs/perf/run-explain-cache-variant.sh
+#
+# Candidate A/B, immediate-parent C/N/N/C:
+REPO=$REPO_CONTROL LABEL=C1-control-p100-r10k OUTBASE=$OUT PEERS=100 TOTAL=10000 EXPLAIN=false RELOADS=0 CONTROL_SECS=30 PROFILE=release docs/perf/run-explain-cache-variant.sh
+REPO=$REPO_CANDIDATE LABEL=N1-candidate-p100-r10k OUTBASE=$OUT PEERS=100 TOTAL=10000 EXPLAIN=false RELOADS=0 CONTROL_SECS=30 PROFILE=release docs/perf/run-explain-cache-variant.sh
+REPO=$REPO_CANDIDATE LABEL=N2-candidate-p100-r10k OUTBASE=$OUT PEERS=100 TOTAL=10000 EXPLAIN=false RELOADS=0 CONTROL_SECS=30 PROFILE=release docs/perf/run-explain-cache-variant.sh
+REPO=$REPO_CONTROL LABEL=C2-control-p100-r10k OUTBASE=$OUT PEERS=100 TOTAL=10000 EXPLAIN=false RELOADS=0 CONTROL_SECS=30 PROFILE=release docs/perf/run-explain-cache-variant.sh
+#
+# DHAT attribution. The retained control D2 and candidate ND use the same
+# 100-peer/10,000-route shape. D1 is the 10-peer fixed-route attribution point.
+REPO=$REPO_CONTROL LABEL=D1-p10-r10k OUTBASE=$OUT PEERS=10 TOTAL=10000 EXPLAIN=false DHAT=1 RELOADS=0 CONTROL_SECS=10 PROFILE=release-prof docs/perf/run-explain-cache-variant.sh
+REPO=$REPO_CONTROL LABEL=D2-p100-r10k OUTBASE=$OUT PEERS=100 TOTAL=10000 EXPLAIN=false DHAT=1 RELOADS=0 CONTROL_SECS=10 PROFILE=release-prof docs/perf/run-explain-cache-variant.sh
+REPO=$REPO_CANDIDATE LABEL=ND-candidate-p100-r10k OUTBASE=$OUT PEERS=100 TOTAL=10000 EXPLAIN=false DHAT=1 RELOADS=0 CONTROL_SECS=10 PROFILE=release-prof docs/perf/run-explain-cache-variant.sh

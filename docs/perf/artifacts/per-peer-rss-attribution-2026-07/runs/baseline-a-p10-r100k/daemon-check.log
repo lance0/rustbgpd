@@ -1,0 +1,20 @@
+
+==========================================================================
+WARNING: security.grpc.enforcement = "legacy" disables per-method tier authorization.
+
+Every authenticated client of a read_write listener may call every
+method up to that listener's max_tier cap, including the
+operator_only methods that reconfigure the daemon; the
+[security.grpc.roles] entries are recorded as audit context and deny
+nothing. Tier enforcement is the default since v0.24.0 and becomes
+mandatory in a future release, which will reject this config.
+
+To migrate: give every listener a role identity — mTLS listeners
+derive it from the client certificate, bearer-token TCP and UDS
+listeners need an explicit `principal` — map each principal in
+[security.grpc.roles] to observer, automation, or operator, then set
+security.grpc.enforcement = "tier". See
+docs/adr/0064-grpc-authorization.md and docs/SECURITY.md.
+==========================================================================
+
+config VALID, 1 WARNING — NOT a clean check: $RUN/config.toml

@@ -1,0 +1,39 @@
+Release-run acceptance:
+- every run exited 0 and recorded harness_rc=0 and rss_sampler_rc=0
+- every run settled with the requested 10/10 or 100/100 sessions
+- every observer accumulated at least BASE - BASE/peers base announcements;
+  this is not a unique or final holdings proof
+- every run reported exactly one update group
+- every retained final metrics snapshot has max outbound queue depth 0
+- every retained final metrics snapshot sums exact-export rejections to 0
+- every run used EXPLAIN=false and RELOADS=0
+- after convergence, the last 8 stubs each continuously flapped a distinct
+  16-prefix block every 125ms
+- runs.tsv records each point-in-time final Adj-RIB-In total from the retained
+  final metrics snapshot
+
+Candidate acceptance:
+- mean RSS reduction is 0.324%, below the predeclared 0.645% floor: no RSS claim
+- release final Adj-RIB-In totals differ: controls 10,016, candidates 10,000
+- DHAT final Adj-RIB-In totals differ: control 10,064, candidate 10,000
+- jemalloc point totals and DHAT total/component deltas are retained as raw
+  observations but support no attributable improvement claim
+- the exact ReadBuffer::set_max_message_len reserve owner falls 6,150,300 -> 0
+  and is the only causal allocation claim
+
+Load-bearing test proof:
+- restoring the eager reserve makes
+  session::tests::inbound_extended_message_accepted_from_peer_without_capability
+  fail at the post-negotiation 4096-byte capacity assertion
+- maximum_extended_message_grows_and_decodes_byte_exactly fails if on-demand
+  growth or maximum-length byte-exact decoding is broken
+- the real-session test sends a >4096-byte UPDATE through a connected TCP
+  socket, reaches Established with 1100 routes, and verifies the BMP UPDATE PDU
+  byte for byte
+
+Archive verification:
+- deterministic gzip headers
+- no symlinks, devices, FIFOs, or sockets
+- no home or ephemeral-temp paths, host names, user names, email addresses,
+  credentials, raw DHAT instruction addresses, or tool attribution
+- every retained file except SHA256SUMS is covered by SHA256SUMS

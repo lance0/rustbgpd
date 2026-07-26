@@ -826,8 +826,21 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   holds none of it, and a session that is down releases what it had.
   Enabled sessions are unaffected: the LRU and the eviction ring still
   come up together at their full configured sizes, before any eviction
-  can occur. `[policy.explain] enabled` still defaults to on, and its
-  behaviour there is unchanged.
+  can occur. `[policy.explain] enabled` now defaults to off; an explicit
+  `true` retains the same cache behaviour.
+
+- **RFC 8654 receive buffers now grow on demand.** Negotiating the 65,535-byte
+  inbound limit previously reserved the full difference from 4096 bytes for
+  every peer even when every message stayed small. A controlled 100-peer
+  DHAT pair removes the exact 6,150,300-byte eager-reserve owner. The release
+  C/N/N/C steady-RSS delta is only −0.324%, below the predeclared 0.645%
+  floor, so no RSS win is claimed. Continuous churn also leaves different
+  final route totals, so allocator-total and aggregate DHAT deltas are
+  descriptive only; the exact changed-function owner removal is the allocation
+  claim. A legal extended message still grows and decodes byte-exactly; after
+  a large message, that session object retains the high-water allocation. The
+  controlled peer/route matrix and sanitized artifacts are in
+  [`docs/perf/per-peer-rss-attribution-2026-07.md`](docs/perf/per-peer-rss-attribution-2026-07.md).
 
 - **A peer with no rejected routes no longer allocates its rejected-route
   LRU.** The store previously reserved its 1024-entry index when the

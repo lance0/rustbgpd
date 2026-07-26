@@ -25,13 +25,11 @@ impl ReadBuffer {
     }
 
     /// Update the maximum message length (e.g., after Extended Messages negotiation).
-    /// Reserves additional capacity if the new limit exceeds current capacity.
+    ///
+    /// The backing buffer grows on demand as bytes arrive; raising the limit
+    /// does not eagerly allocate space for a maximum-size message.
     pub fn set_max_message_len(&mut self, len: u16) {
         self.max_message_len = len;
-        let needed = usize::from(len);
-        if self.buf.capacity() < needed {
-            self.buf.reserve(needed - self.buf.capacity());
-        }
     }
 
     /// Try to extract and decode one complete BGP message from the buffer.
@@ -98,7 +96,11 @@ impl Default for ReadBuffer {
 #[cfg(test)]
 mod tests {
     use bytes::BufMut;
-    use rustbgpd_wire::{Message, encode_message};
+    use rustbgpd_wire::constants::HEADER_LEN;
+    use rustbgpd_wire::{
+        EXTENDED_MAX_MESSAGE_LEN, Message, NotificationCode, NotificationMessage, encode_message,
+        encode_message_with_limit,
+    };
 
     use super::*;
 
@@ -169,6 +171,43 @@ mod tests {
         // Second chunk: rest of message
         rb.buf.put_slice(&encoded[10..]);
         assert_eq!(rb.try_decode().unwrap().unwrap().0, Message::Keepalive);
+    }
+
+    #[test]
+    fn extended_limit_does_not_eagerly_grow_buffer() {
+        let mut rb = ReadBuffer::new();
+        let initial_capacity = rb.buf.capacity();
+        assert_eq!(initial_capacity, usize::from(MAX_MESSAGE_LEN));
+
+        rb.set_max_message_len(EXTENDED_MAX_MESSAGE_LEN);
+
+        assert_eq!(rb.max_message_len, EXTENDED_MAX_MESSAGE_LEN);
+        assert_eq!(rb.buf.capacity(), initial_capacity);
+    }
+
+    #[test]
+    fn maximum_extended_message_grows_and_decodes_byte_exactly() {
+        let message = Message::Notification(NotificationMessage::new(
+            NotificationCode::Cease,
+            2,
+            Bytes::from(vec![
+                0xab;
+                usize::from(EXTENDED_MAX_MESSAGE_LEN) - HEADER_LEN - 2
+            ]),
+        ));
+        let encoded = encode_message_with_limit(&message, EXTENDED_MAX_MESSAGE_LEN).unwrap();
+        assert_eq!(encoded.len(), usize::from(EXTENDED_MAX_MESSAGE_LEN));
+
+        let mut rb = ReadBuffer::new();
+        rb.set_max_message_len(EXTENDED_MAX_MESSAGE_LEN);
+        let initial_capacity = rb.buf.capacity();
+        rb.buf.extend_from_slice(&encoded);
+        assert!(rb.buf.capacity() > initial_capacity);
+
+        let (decoded, raw) = rb.try_decode().unwrap().unwrap();
+        assert_eq!(decoded, message);
+        assert_eq!(raw.as_ref(), encoded.as_ref());
+        assert!(rb.buf.is_empty());
     }
 
     #[test]
