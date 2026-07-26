@@ -812,6 +812,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **RPKI VRP visibility now follows the exported metric family.** The TUI sums
+  IPv4 and IPv6 `bgp_rpki_vrp_count` samples, and `rbgp doctor` warns when
+  configured caches have a zero, missing, malformed, or unavailable snapshot.
+
 - **A config file the daemon has rewritten now says so.** The first
   runtime mutation — `rbgp neighbor add`, a config transaction, a gNMI
   `Set` — rewrites the config file in canonical form, and always has:

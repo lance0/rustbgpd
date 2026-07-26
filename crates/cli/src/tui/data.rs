@@ -3,6 +3,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
+use crate::commands::control::rpki_vrp_count_sum;
 use crate::connection::Connection;
 use crate::proto::control_service_client::ControlServiceClient;
 use crate::proto::global_service_client::GlobalServiceClient;
@@ -39,12 +40,7 @@ fn format_event_type(t: i32) -> &'static str {
 }
 
 fn parse_vrp_count(prometheus_text: &str) -> Option<u64> {
-    for line in prometheus_text.lines() {
-        if let Some(rest) = line.strip_prefix("rpki_vrp_count ") {
-            return rest.trim().parse().ok();
-        }
-    }
-    None
+    rpki_vrp_count_sum(prometheus_text)
 }
 
 pub fn spawn_fetcher(
@@ -164,4 +160,22 @@ async fn stream_routes(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::connection::connect;
+    use crate::test_support::spawn_mock_server;
+
+    /// Red proof: the old polling parser loses this production-shaped value.
+    #[tokio::test]
+    async fn rpki_vrp_count_uses_the_exported_family() {
+        let server = spawn_mock_server(None).await;
+        *server.state.metrics_text.lock().await = Some(
+            "bgp_rpki_vrp_count{af=\"ipv4\"} 12\nbgp_rpki_vrp_count{af=\"ipv6\"} 3\n".to_string(),
+        );
+        let connection = connect(&server.addr, None).await.unwrap();
+        assert_eq!(poll_once(&connection, None).await.rpki_vrp_count, Some(15));
+    }
 }
