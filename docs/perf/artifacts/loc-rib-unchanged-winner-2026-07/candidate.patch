@@ -1,0 +1,31 @@
+diff --git a/crates/rib/src/loc_rib.rs b/crates/rib/src/loc_rib.rs
+index d3ce7484..cd7bd91f 100644
+--- a/crates/rib/src/loc_rib.rs
++++ b/crates/rib/src/loc_rib.rs
+@@ -112,7 +112,7 @@ impl LocRib {
+         prefix: Prefix,
+         candidates: impl Iterator<Item = &'a Route>,
+     ) -> bool {
+-        let best = candidates.min_by(|a, b| best_path_cmp(a, b)).cloned();
++        let best = candidates.min_by(|a, b| best_path_cmp(a, b));
+ 
+         if let Some(new_best) = best {
+             // Detect preference-relevant changes AND same-peer payload
+@@ -125,7 +125,7 @@ impl LocRib {
+             // peers or FIB install candidates. Mirrors the
+             // `recompute_evpn` payload comparison below.
+             let changed = self.routes.get(&prefix).is_none_or(|(old, _)| {
+-                best_path_cmp(old, &new_best) != std::cmp::Ordering::Equal
++                best_path_cmp(old, new_best) != std::cmp::Ordering::Equal
+                     || old.next_hop != new_best.next_hop
+                     || old.link_local_next_hop != new_best.link_local_next_hop
+                     || old.next_hop_scope != new_best.next_hop_scope
+@@ -136,7 +136,7 @@ impl LocRib {
+             if changed {
+                 let was_absent = self
+                     .routes
+-                    .insert(prefix, (new_best, SystemTime::now()))
++                    .insert(prefix, (new_best.clone(), SystemTime::now()))
+                     .is_none();
+                 if was_absent {
+                     self.note_membership_change(prefix);

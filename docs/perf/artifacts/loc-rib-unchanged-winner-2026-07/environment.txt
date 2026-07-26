@@ -1,0 +1,23 @@
+measurement_date=2026-07-26
+host_class=AMD Ryzen Threadripper 7970X 32-Cores
+kernel=Linux 6.17.0-35-generic x86_64
+rustc=1.97.0 (2d8144b78 2026-07-07)
+cargo=1.97.0 (c980f4866 2026-06-30)
+core=5
+governor=performance
+taskset=enabled
+attempts=6
+package=rustbgpd-rib
+bench=rib_ops
+filter=loc_rib_recompute/no_change
+permanent_base_sha=aea3d4133047bb06cce5813658bf619e5c11b829
+control_sha=35b33a5d0ca901e15e995aaff5aff1e31038e88b
+target_sha=80b34f3af806a4cca378e570e436adaa261b3211
+benchmark_sha256=4d4b0718c39e6f8011f9f94534d0c6881b8813310ea456fe85b79cecb2bc265d
+driver_sha256=136748740699b71770e37dd81ec28075ab92e8fd380f3c2b768d2e9061db4685
+control_patch_sha256=eee1ddd6fa987a1bc9ff36524dcd38873713a41a8e20d68e484d19af41aee0a6
+candidate_patch_sha256=aef8e30d6ff9998beb4bffc02807ce9b0bcd2f5851a0b37dafc5caf066d4f326
+
+same_sha_command=bench/compare-criterion.sh --base 35b33a5d0ca901e15e995aaff5aff1e31038e88b --head 35b33a5d0ca901e15e995aaff5aff1e31038e88b --package rustbgpd-rib --bench rib_ops --filter loc_rib_recompute/no_change --core 5 --attempts 6 --require-performance
+ab_command=bench/compare-criterion.sh --base 35b33a5d0ca901e15e995aaff5aff1e31038e88b --head 80b34f3af806a4cca378e570e436adaa261b3211 --package rustbgpd-rib --bench rib_ops --filter loc_rib_recompute/no_change --core 5 --attempts 6 --require-performance
+reconstruction_recipe=README.md
