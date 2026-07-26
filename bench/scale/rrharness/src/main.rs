@@ -594,6 +594,10 @@ fn main() {
                 assert!(n_prefixes > 0, "n_prefixes must be greater than zero");
                 let mut h = setup(0).await;
                 println!("# late-join clients={n_clients} prefixes={n_prefixes}");
+                println!(
+                    "late_join_unicast_slot_bytes {}",
+                    std::mem::size_of::<Option<Route>>()
+                );
 
                 h.inject_flood_block(0, n_prefixes).await;
                 h.wait_loc_rib_exact(
