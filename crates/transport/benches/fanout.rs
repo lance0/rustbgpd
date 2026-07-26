@@ -22,7 +22,9 @@
 //! Gated behind `bench-internals`; run with:
 //!   cargo bench -p rustbgpd-transport --features bench-internals --bench fanout
 //!
-//! Pinned A/B receipt: `docs/perf/exact-export-fanout-2026-07.md`.
+//! Pinned A/B receipts: `docs/perf/exact-export-fanout-2026-07.md`,
+//! `docs/perf/adj-rib-out-family-gauge-2026-07.md`, and
+//! `docs/perf/fanout-metrics-handle-2026-07.md`.
 
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr};
@@ -49,7 +51,7 @@ const CHANGED: usize = 64;
 const PEER_COUNTS: [usize; 4] = [1, 8, 64, 256];
 /// IXP route-server fanout factors retained in the exact-export receipt.
 const IXP_PEER_COUNTS: [usize; 3] = [8, 64, 256];
-/// Route-server fleets retained for the family-gauge A/B receipt.
+/// Route-server fleets retained for the real-encoder grouped fanout receipts.
 const ADJ_RIB_OUT_GAUGE_PEER_COUNTS: [usize; 5] = [1, 8, 64, 256, 1_000];
 /// Per-peer channel capacity — one pass of `CHANGED` announces fits without
 /// filling (a full channel would divert the peer to the dirty-resync path).

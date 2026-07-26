@@ -81,7 +81,7 @@ struct AdjRibOutCommitStats {
     family_gauge_writes: usize,
     last_family_gauge_write_mask: u8,
     #[cfg(test)]
-    metrics_handle_clones: usize,
+    bgp_metrics_clones: usize,
 }
 
 #[cfg(test)]

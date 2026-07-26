@@ -1,0 +1,20 @@
+Same-SHA control:
+bench/compare-criterion.sh \
+  --base a91394e8d7c5781aa3a7da12808053ec5f6e83d6 \
+  --head a91394e8d7c5781aa3a7da12808053ec5f6e83d6 \
+  --package rustbgpd-transport --bench fanout \
+  --features bench-internals --filter adj_rib_out_family_gauge \
+  --core 8 --attempts 6 --require-performance \
+  --out-dir target/fanout-metrics-same-sha
+
+Immediate-parent before/after:
+bench/compare-criterion.sh \
+  --base a91394e8d7c5781aa3a7da12808053ec5f6e83d6 \
+  --head 6e1cf047ed406572614e65a828b584478c740cf4 \
+  --package rustbgpd-transport --bench fanout \
+  --features bench-internals --filter adj_rib_out_family_gauge \
+  --core 8 --attempts 6 --require-performance \
+  --out-dir target/fanout-metrics-before-after
+
+Focused structural proof:
+cargo test -p rustbgpd-rib distribution_clones_metrics_once_per_pass -- --nocapture

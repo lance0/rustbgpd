@@ -678,7 +678,7 @@ fn distribution_clones_metrics_once_per_pass() {
 
     // Load-bearing proof: moving the production clone back inside the peer
     // loop makes this read four and fails the assertion.
-    assert_eq!(manager.adj_rib_out_commit_stats.metrics_handle_clones, 1);
+    assert_eq!(manager.adj_rib_out_commit_stats.bgp_metrics_clones, 1);
     assert_eq!(manager.adj_rib_out_commit_stats.successful_commits, PEERS);
     assert_eq!(manager.adj_rib_out_commit_stats.successful_enqueues, PEERS);
     for receiver in &mut outbound {

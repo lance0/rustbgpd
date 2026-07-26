@@ -1,0 +1,29 @@
+Test:
+cargo test -p rustbgpd-rib distribution_clones_metrics_once_per_pass -- --nocapture
+
+Injected production break:
+Move clone_distribution_metrics from pass scope back inside the four-peer loop.
+
+Mutation:
+@@
+-        let metrics = Self::clone_distribution_metrics(
+-            &self.metrics,
+-            #[cfg(any(test, feature = "bench-internals"))]
+-            &mut self.adj_rib_out_commit_stats,
+-        );
+         for peer in peers {
++            let metrics = Self::clone_distribution_metrics(
++                &self.metrics,
++                #[cfg(any(test, feature = "bench-internals"))]
++                &mut self.adj_rib_out_commit_stats,
++            );
+
+Observed failure:
+assertion `left == right` failed
+  left: 4
+ right: 1
+test manager::tests::update_groups::distribution_clones_metrics_once_per_pass ... FAILED
+
+Restored result:
+test manager::tests::update_groups::distribution_clones_metrics_once_per_pass ... ok
+git diff --exit-code ... clean

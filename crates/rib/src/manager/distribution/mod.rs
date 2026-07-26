@@ -3544,7 +3544,7 @@ impl RibManager {
     ) -> BgpMetrics {
         #[cfg(test)]
         {
-            stats.metrics_handle_clones = stats.metrics_handle_clones.saturating_add(1);
+            stats.bgp_metrics_clones = stats.bgp_metrics_clones.saturating_add(1);
         }
         #[cfg(all(not(test), feature = "bench-internals"))]
         let _ = stats;
