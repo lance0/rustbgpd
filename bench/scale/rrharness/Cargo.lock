@@ -811,7 +811,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-bmp"
-version = "0.60.0"
+version = "0.61.0"
 dependencies = [
  "bytes",
  "rustbgpd-telemetry",
@@ -823,7 +823,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-fsm"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "bytes",
  "rustbgpd-wire",
@@ -832,7 +832,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-policy"
-version = "0.60.0"
+version = "0.61.0"
 dependencies = [
  "arc-swap",
  "ariadne",
@@ -847,7 +847,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-rib"
-version = "0.60.0"
+version = "0.61.0"
 dependencies = [
  "bytes",
  "ipnet",
@@ -868,7 +868,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-rpki"
-version = "0.60.0"
+version = "0.61.0"
 dependencies = [
  "rustbgpd-wire",
  "smallvec",
@@ -879,7 +879,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-telemetry"
-version = "0.60.0"
+version = "0.61.0"
 dependencies = [
  "prometheus",
  "thiserror 2.0.18",
@@ -889,7 +889,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-transport"
-version = "0.60.0"
+version = "0.61.0"
 dependencies = [
  "bytes",
  "libc",
@@ -912,7 +912,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-wire"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "bytes",
  "thiserror 2.0.18",
