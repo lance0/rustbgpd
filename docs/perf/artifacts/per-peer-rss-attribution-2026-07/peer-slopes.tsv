@@ -1,0 +1,5 @@
+dimension	fixed_shape	low_mean_rss_kib	high_mean_rss_kib	low_count	high_count	slope
+peer	base_total_routes=10000	46428	57066	10	100	118.200_KiB_per_peer
+peer	base_total_routes=100000	118983	131839	10	100	142.844_KiB_per_peer
+base_route	peers=10	46428	118983	10000	100000	825.515_B_per_BASE_route
+base_route	peers=100	57066	131839	10000	100000	850.751_B_per_BASE_route

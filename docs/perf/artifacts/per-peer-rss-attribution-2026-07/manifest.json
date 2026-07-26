@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "campaign": "per-peer-rss-attribution-2026-07",
+  "control": {
+    "commit": "5c4fdc8f9cf64177af75b47f9afe77f23aca963c",
+    "tree": "2b6bd7e57a2c753033d35b57a18fbf221aca9dd2",
+    "release_binary_sha256": "cc3fb12d1cbc73167513cec68287a340f9b8076b26e6662dc080a4b67be7f865",
+    "release_prof_binary_sha256": "735c3d4938aa63dd235146ef83aedea0087b00cd8b59a4b69fa63c2e8dfca23d"
+  },
+  "candidate": {
+    "commit": "b40ec3e8b50774c0257166bf06812be84f47df8e",
+    "tree": "9db9dddcf01d73bf8328dbc435b0b99572583568",
+    "release_binary_sha256": "d4fde47c4d917d9d09ba6d7f3ba61ef2eeb565f9b4d826d5ca7202f2f5e1c1df",
+    "release_prof_binary_sha256": "b73b3ee07892d3d8a81498e62232d04cb6c11ab7f2f0946ea9c0a58a31080bce"
+  },
+  "candidate_shape": {
+    "peers": 100,
+    "base_routes_per_peer": 100,
+    "base_total_routes": 10000,
+    "families": ["ipv4_unicast"],
+    "update_groups": 1,
+    "explain": false,
+    "reloads": 0
+  },
+  "method": {
+    "release_order": ["C1-control", "N1-candidate", "N2-candidate", "C2-control"],
+    "control_seconds": 30,
+    "rss_floor_percent": 0.645,
+    "dhat_metric": "bytes live at process-wide heap maximum",
+    "convergence_gate": "accumulated base announcements per observer >= base total - own base slice; not a unique or final holdings proof",
+    "continuous_churn": {
+      "stubs": 8,
+      "distinct_prefixes_per_stub": 16,
+      "interval_ms_per_stub": 125,
+      "starts": "after base-announcement convergence"
+    }
+  },
+  "verdict": {
+    "rss_claim": false,
+    "rss_control_mean_kib": 57141,
+    "rss_candidate_mean_kib": 56956,
+    "rss_delta_kib": -185,
+    "rss_delta_percent": -0.323761,
+    "jemalloc_total_claim": false,
+    "dhat_total_or_component_claim": false,
+    "exact_owner_removal_claim": true,
+    "eager_reserve_control_bytes": 6150300,
+    "eager_reserve_candidate_bytes": 0
+  },
+  "raw_descriptive_observations": {
+    "jemalloc_allocated_control_mean_bytes": 41214128,
+    "jemalloc_allocated_candidate_mean_bytes": 35345524,
+    "dhat_control_live_heap_bytes": 39887660,
+    "dhat_candidate_live_heap_bytes": 34150991,
+    "release_final_adj_rib_in_routes": {
+      "C1-control": 10016,
+      "N1-candidate": 10000,
+      "N2-candidate": 10000,
+      "C2-control": 10016
+    },
+    "dhat_final_adj_rib_in_routes": {
+      "D1-control": 10080,
+      "D2-control": 10064,
+      "ND-candidate": 10000
+    },
+    "confounder": "continuous churn left different point-in-time Adj-RIB-In route totals"
+  },
+  "retention": {
+    "raw_dhat_json": false,
+    "lossless_sanitized_derivatives": true,
+    "raw_metrics": true,
+    "raw_rss_samples": true,
+    "checksums": "SHA256SUMS"
+  }
+}

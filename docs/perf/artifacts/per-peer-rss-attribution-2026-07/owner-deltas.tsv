@@ -1,0 +1,4 @@
+component	control_live_bytes	candidate_live_bytes	delta_bytes	attribution
+TOTAL	39887660	34150991	-5736669	descriptive_only_final_routes_10064_vs_10000
+Transport session buffers/scratch	7615149	1459093	-6156056	descriptive_only_component_aggregate
+ReadBuffer::set_max_message_len eager reserve	6150300	0	-6150300	causal_exact_normalized_owner_stack
