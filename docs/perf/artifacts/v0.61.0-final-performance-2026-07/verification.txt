@@ -1,0 +1,22 @@
+Verification contract
+=====================
+
+Command:
+  python3 docs/perf/artifacts/v0.61.0-final-performance-2026-07/verify.py
+
+Expected success:
+  PASS: 3 route runs, 71 Criterion rows, sanitization, and checksums verified
+
+Extractor reproduction:
+  derive_criterion.py was run against the accepted saved-baseline tree and its
+  output compared byte-for-byte with criterion/results.tsv: PASS.
+
+The verifier recomputes every RSS median from the compressed streams, requires
+the exact source revision and three-run shape, checks all settled group/member/
+fallback/residue/registration/rejection/writer gates, requires four positive
+allocator gauges per run, checks raw process status and binary identity, checks
+deterministic gzip headers, checks the literal Criterion baseline and clean
+swap page counters, validates the pinned 71-name Criterion inventory plus every
+median interval and sample count,
+rejects mixed-in data from the excluded attempt, scans decompressed content for
+identity and runtime residue, and verifies complete checksum coverage.

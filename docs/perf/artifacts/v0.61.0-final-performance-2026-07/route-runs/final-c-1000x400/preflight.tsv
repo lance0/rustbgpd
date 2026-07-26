@@ -1,0 +1,4 @@
+phase	monotonic_seconds	utc	load_1m	governors	competitors	mem_available_kib	fd_limit	pswpin_delta	pswpout_delta	ports_free
+prebuild	1933906.85	2026-07-26T22:03:22Z	2.06	64/64	none	110837252	1048576	0	0	1
+prebuild	1933910.02	2026-07-26T22:03:25Z	1.90	64/64	none	110854892	1048576	0	0	1
+postbuild	1933912.41	2026-07-26T22:03:28Z	1.90	64/64	none	110848976	1048576	0	0	1

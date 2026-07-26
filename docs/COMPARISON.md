@@ -330,6 +330,14 @@ routes, 399.6 million observer-NLRI cold deliveries, four generation-complete
 export reloads, and continuous readiness/RSS/grouping checks. It is capacity
 acceptance for that disclosed same-host shape, not another competitor result.
 
+The exact v0.61.0 release tip also has an
+[absolute baseline](perf/v0.61.0-final-performance-2026-07.md): three
+1,000-peer × 400-BASE-route real-daemon runs measured steady process-tree RSS
+medians of 441.760/441.215/441.131 MiB while all settled grouping,
+registration, rejection, and writer gates held. Its 71-row Criterion archive
+is likewise single-revision. Neither set is a competitor comparison or a
+causal delta, and neither rewrites the pinned `515659b1` campaign above.
+
 ## Positioning
 
 **rustbgpd** is an API-first BGP daemon targeting data-center fabric, IX

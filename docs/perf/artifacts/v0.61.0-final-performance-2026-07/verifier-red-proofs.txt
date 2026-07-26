@@ -1,0 +1,52 @@
+Verifier destructive proofs
+===========================
+
+Each mutation used a disposable copy of the complete artifact directory. The
+production verifier was unchanged.
+
+1. Missing accepted route run
+   Break: remove route-runs/final-c-1000x400.
+   Exact red:
+     FAIL: accepted route-run inventory mismatch: ['final-a-1000x400', 'final-b-1000x400']
+
+2. Wrong source revision
+   Break: replace the commit in final-a-1000x400/provenance.env.
+   Exact red:
+     FAIL: final-a-1000x400: commit expected '99ee74ba67ec24ce8e09c0c18a83b652da35712b', got '0000000000000000000000000000000000000000'
+
+3. Missing allocator evidence
+   Break: remove jemalloc_allocated_bytes from
+   final-a-1000x400/settled-metrics.env.
+   Exact red:
+     FAIL: final-a-1000x400: missing positive allocator gauge jemalloc_allocated_bytes
+
+4. Corrupted retained byte
+   Break: replace README.md without updating SHA256SUMS.
+   Exact red:
+     FAIL: checksum mismatch: README.md
+
+5. Incomplete Criterion extractor input
+   Break: remove the saved `update_parse_revised/1` estimate from a disposable
+   copy of the accepted saved-baseline tree.
+   Exact red:
+     FAIL: expected 71 rows, got 70
+
+6. Substituted Criterion identity with unchanged cardinality
+   Break A: rename the saved `value_expr/constant_actions` benchmark to
+   `value_expr/fabricated_untracked_benchmark` in a disposable raw-baseline
+   copy. This preserves 71 unique rows and the 18/28/25 suite counts.
+   Exact extractor red:
+     FAIL: benchmark inventory mismatch: missing=['value_expr/constant_actions'] unexpected=['value_expr/fabricated_untracked_benchmark']
+   Break B: make the same substitution in a disposable retained table and
+   regenerate its checksums.
+   Exact verifier red:
+     FAIL: Criterion results: benchmark inventory mismatch: missing=['value_expr/constant_actions'] unexpected=['value_expr/fabricated_untracked_benchmark']
+   Break C: swap the retained suite labels for
+   `adj_rib_in_insert/10000` and `update_build/1`, preserving every benchmark
+   name and the 18/28/25 suite counts, then regenerate checksums.
+   Exact verifier red:
+     FAIL: Criterion results: suite mismatch for adj_rib_in_insert/10000: expected 'rib_ops', got 'codec'
+
+The verifier went red on every guarded verifier break, and the extractor
+refused both the incomplete and same-cardinality substituted source
+inventories.
