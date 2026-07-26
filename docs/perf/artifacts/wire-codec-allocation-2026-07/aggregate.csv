@@ -1,0 +1,5 @@
+comparison,base_revision,head_revision,benchmark,attempts,base_mean_of_medians_ns,head_mean_of_medians_ns,mean_delta_percent,stddev_percent,min_delta_percent,max_delta_percent,last_ci_low_percent,last_ci_high_percent,verdict
+attr-same-sha,643900e76d1101a50974dcdac1c1e2b36c7991cc,643900e76d1101a50974dcdac1c1e2b36c7991cc,attr_encode/rich/11,6,484.9,486.7,0.39,2.28,-3.54,2.73,-0.91,-0.21,noise
+attr-target,643900e76d1101a50974dcdac1c1e2b36c7991cc,ed3b7a72fde7d69eff51d334e7feb65d698bae60,attr_encode/rich/11,6,492.1,352.6,-28.34,0.88,-29.39,-27.01,-29.94,-28.71,improvement
+validate-same-sha,ed3b7a72fde7d69eff51d334e7feb65d698bae60,ed3b7a72fde7d69eff51d334e7feb65d698bae60,validate_update,6,156.3,156.2,-0.06,0.35,-0.74,0.30,-0.10,0.16,noise
+validate-target,ed3b7a72fde7d69eff51d334e7feb65d698bae60,f95d894069216662c33e9c109e2891d12fb8350f,validate_update,6,156.2,14.7,-90.57,0.58,-90.87,-89.42,-90.85,-90.82,improvement

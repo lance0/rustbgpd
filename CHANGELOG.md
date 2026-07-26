@@ -443,6 +443,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Wire-codec temporary allocation churn is lower on the measured attribute
+  hot paths.** Path-attribute encoding now reuses one value scratch across an
+  invocation, and UPDATE validation uses one stack-resident presence table for
+  duplicate and mandatory-attribute checks. Six-pair same-host Criterion
+  receipts measure the exact rich encoder and typical validator fixtures
+  28.34% and 90.57% faster respectively; separate `System`-wrapped
+  `GlobalAlloc` diagnostics reduce the rich fixture from 21 to 8 requests per
+  call and the typical valid fixture from 2 to 0. These are fixture-scoped
+  request/timing results, not whole-daemon CPU, convergence, RSS, or
+  allocation-free encoder claims. See
+  [`docs/perf/wire-codec-allocation-2026-07.md`](docs/perf/wire-codec-allocation-2026-07.md).
+
 - **Grouped route-server fanout avoids two peer-multiplied bookkeeping
   costs.** Metrics handles are now cloned once per distribution pass, and
   peers with no new, current, or pending RFC 9234 OTC-blocked state skip the

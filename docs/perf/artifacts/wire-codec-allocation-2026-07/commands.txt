@@ -1,0 +1,77 @@
+# Criterion timing campaigns (run from a clean repository)
+bench/compare-criterion.sh \
+  --base 643900e76d1101a50974dcdac1c1e2b36c7991cc \
+  --head 643900e76d1101a50974dcdac1c1e2b36c7991cc \
+  --core 8 --package rustbgpd-wire --bench codec \
+  --filter '^attr_encode/rich/11$' --attempts 6 \
+  --require-performance --fail-on-regression --verdict-min-attempts 6 \
+  --out-dir <RUN_ROOT>/01-attr-same-sha
+
+bench/compare-criterion.sh \
+  --base 643900e76d1101a50974dcdac1c1e2b36c7991cc \
+  --head ed3b7a72fde7d69eff51d334e7feb65d698bae60 \
+  --core 8 --package rustbgpd-wire --bench codec \
+  --filter '^attr_encode/rich/11$' --attempts 6 \
+  --require-performance --fail-on-regression --verdict-min-attempts 6 \
+  --out-dir <RUN_ROOT>/02-attr-target
+
+bench/compare-criterion.sh \
+  --base ed3b7a72fde7d69eff51d334e7feb65d698bae60 \
+  --head ed3b7a72fde7d69eff51d334e7feb65d698bae60 \
+  --core 8 --package rustbgpd-wire --bench codec \
+  --filter '^validate_update$' --attempts 6 \
+  --require-performance --fail-on-regression --verdict-min-attempts 6 \
+  --out-dir <RUN_ROOT>/03-validate-same-sha
+
+bench/compare-criterion.sh \
+  --base ed3b7a72fde7d69eff51d334e7feb65d698bae60 \
+  --head f95d894069216662c33e9c109e2891d12fb8350f \
+  --core 8 --package rustbgpd-wire --bench codec \
+  --filter '^validate_update$' --attempts 6 \
+  --require-performance --fail-on-regression --verdict-min-attempts 6 \
+  --out-dir <RUN_ROOT>/04-validate-target
+
+# Allocation diagnostics (repeat for H, S, and P in detached clean worktrees)
+CARGO_TARGET_DIR=<TARGET_DIR> cargo bench -p rustbgpd-wire \
+  --bench codec --features codec-allocation-diagnostics --no-run
+taskset -c 8 <CODEC_DIAGNOSTIC_BINARY> \
+  >diagnostic.jsonl 2>stderr.log
+
+# Each diagnostic must retain the exact operation and fixture contract.
+jq -e -s '
+  length == 2 and
+  all(.[]; .schema_version == 1 and .operations == 10000) and
+  (map(select(.benchmark == "attr_encode/rich/11")) | length == 1) and
+  (map(select(.benchmark == "validate_update")) | length == 1)
+' diagnostic.jsonl
+
+# Harness red proof: this mutation must make the preceding jq command fail.
+sed 's/"operations":10000/"operations":9999/' diagnostic.jsonl \
+  >diagnostic-9999.jsonl
+! jq -e -s '
+  length == 2 and all(.[]; .operations == 10000)
+' diagnostic-9999.jsonl
+
+# Focused load-bearing production tests.
+cargo test -p rustbgpd-wire encoder_clears_and_reuses_value_scratch
+cargo test -p rustbgpd-wire encoder_preserves_opaque_extended_length_header
+cargo test -p rustbgpd-wire encoder_retains_partial_output_before_as_set_error
+cargo test -p rustbgpd-wire duplicate_scan_returns_full_non_dropping_presence_table
+cargo test -p rustbgpd-wire duplicate_error_precedes_other_attribute_errors
+
+# Deterministic archive (run from the parent of the sanitized top-level tree).
+tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner \
+  --mode='u+rwX,go+rX,go-w' --format=ustar \
+  -cf - lan622-wire-codec-evidence |
+  gzip -n -9 >wire-codec-allocation-evidence.tar.gz
+
+# Source/build gates.
+cargo fmt --all -- --check
+cargo bench -p rustbgpd-wire --bench codec --no-run
+cargo bench -p rustbgpd-wire --bench codec \
+  --features codec-allocation-diagnostics --no-run
+cargo clippy -p rustbgpd-wire --all-targets \
+  --features codec-allocation-diagnostics -- -D warnings
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+cargo doc --workspace --no-deps
