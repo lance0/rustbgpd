@@ -9,7 +9,6 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 #[cfg(not(feature = "codec-allocation-diagnostics"))]
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
-#[cfg(not(feature = "codec-allocation-diagnostics"))]
 use rustbgpd_wire::attribute::decode_path_attributes_revised;
 use rustbgpd_wire::attribute::{decode_path_attributes, encode_path_attributes};
 #[cfg(not(feature = "codec-allocation-diagnostics"))]
@@ -313,7 +312,7 @@ fn bench_update_parse_revised(c: &mut Criterion) {
         let msg = UpdateMessage::build(&entries, &[], &attrs, true, false, Ipv4UnicastMode::Body);
         let decoded = msg
             .parse_revised(true, false, false, &[])
-            .expect("clean eBGP UPDATE must parse through the production path");
+            .expect("syntactically clean UPDATE must parse through the eBGP disposition branch");
         assert!(
             decoded.malformed.is_empty(),
             "clean fixture must not exercise malformed recovery"
@@ -690,14 +689,88 @@ fn run_validate_update_diagnostic() -> DiagnosticRow {
 }
 
 #[cfg(feature = "codec-allocation-diagnostics")]
+fn run_attr_decode_revised_diagnostic() -> DiagnosticRow {
+    let attrs = typical_attributes();
+    assert_eq!(
+        attrs.len(),
+        6,
+        "diagnostic must retain the Criterion typical/6 fixture"
+    );
+
+    let mut encoded_fixture = Vec::with_capacity(128);
+    encode_path_attributes(&attrs, &mut encoded_fixture, true, false)
+        .expect("revised decode fixture must have a stable wire representation");
+    let decoded = decode_path_attributes_revised(&encoded_fixture, true, false, &[])
+        .expect("revised decode fixture must decode before measurement");
+    assert_eq!(
+        decoded.attributes, attrs,
+        "revised decode fixture must preserve every attribute"
+    );
+    assert!(
+        decoded.malformed.is_empty(),
+        "revised decode fixture must not exercise recovery"
+    );
+    assert_eq!(
+        decoded.bgpls_nlri_discarded, 0,
+        "revised decode fixture must not discard BGP-LS NLRI"
+    );
+
+    ALLOCATOR.reset();
+    for _ in 0..DIAGNOSTIC_OPERATIONS {
+        ALLOCATOR.enable();
+        let result = decode_path_attributes_revised(&encoded_fixture, true, false, &[]);
+        ALLOCATOR.disable();
+        let decoded = result.expect("every measured revised decode must accept the fixture");
+        assert_eq!(
+            decoded.attributes, attrs,
+            "every measured revised decode must preserve every attribute"
+        );
+        assert!(
+            decoded.malformed.is_empty(),
+            "measured revised decode must not exercise recovery"
+        );
+        assert_eq!(
+            decoded.bgpls_nlri_discarded, 0,
+            "measured revised decode must not discard BGP-LS NLRI"
+        );
+    }
+    let allocation = ALLOCATOR.receipt();
+    assert_eq!(
+        (
+            allocation.alloc_calls,
+            allocation.alloc_zeroed_calls,
+            allocation.realloc_calls,
+            allocation.allocation_calls,
+            allocation.requested_bytes,
+        ),
+        (40_000, 0, 10_000, 50_000, 26_440_000),
+        "the fixed duplicate table must remove one 48-byte allocation per revised decode"
+    );
+
+    DiagnosticRow {
+        benchmark: "attr_decode_revised/typical/6",
+        fixture_attributes: attrs.len(),
+        fixture_len_bytes: encoded_fixture.len(),
+        fixture_digest: fnv1a64(&encoded_fixture),
+        allocation,
+    }
+}
+
+#[cfg(feature = "codec-allocation-diagnostics")]
 fn main() {
     let attr_encode = run_attr_encode_diagnostic();
+    let attr_decode_revised = run_attr_decode_revised_diagnostic();
     let validate_update = run_validate_update_diagnostic();
     assert_ne!(
         attr_encode.fixture_digest, validate_update.fixture_digest,
         "the two diagnostic fixtures must retain distinct digests"
     );
+    assert_eq!(
+        attr_decode_revised.fixture_digest, validate_update.fixture_digest,
+        "revised decode and validation must retain the same typical/6 fixture"
+    );
     attr_encode.write_json();
+    attr_decode_revised.write_json();
     validate_update.write_json();
 }
 

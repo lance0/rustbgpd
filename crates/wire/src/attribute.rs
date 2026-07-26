@@ -957,7 +957,7 @@ pub fn decode_path_attributes_revised(
     let mut attrs = Vec::new();
     let mut bgpls_discarded = 0_u32;
     let mut malformed = Vec::new();
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = [false; 256];
     while !buf.is_empty() {
         let (flags, type_code, value) = match split_next_attribute(&mut buf) {
             Ok(split) => split,
@@ -996,7 +996,8 @@ pub fn decode_path_attributes_revised(
                 },
             });
         }
-        if !seen.insert(type_code) {
+        let duplicate = std::mem::replace(&mut seen[usize::from(type_code)], true);
+        if duplicate {
             // RFC 7606 §3 (g): duplicate MP_REACH/MP_UNREACH is fatal; any
             // other duplicate keeps the first occurrence and discards the
             // rest while the UPDATE continues to be processed.
@@ -6260,6 +6261,39 @@ mod tests {
             decoded.malformed[0].disposition,
             ErrorDisposition::AttributeDiscard
         );
+    }
+    /// Load-bearing full-octet duplicate proof: shrinking the fixed duplicate
+    /// table below all 256 type codes panics on this fixture; special-casing
+    /// unknown attributes retains the second value or loses the exact discard.
+    #[test]
+    fn revised_duplicate_unknown_type_255_keeps_first_and_discards_rest() {
+        let flags = attr_flags::OPTIONAL | attr_flags::TRANSITIVE;
+        let mut buf = attr_bytes(flags, u8::MAX, &[0x11, 0x22]);
+        buf.extend(attr_bytes(flags, u8::MAX, &[0x33, 0x44]));
+
+        let decoded = decode_path_attributes_revised(&buf, true, false, &[]).unwrap();
+        assert_eq!(
+            decoded.attributes,
+            [PathAttribute::Unknown(RawAttribute {
+                flags,
+                type_code: u8::MAX,
+                data: Bytes::from_static(&[0x11, 0x22]),
+            })],
+            "the first unknown optional-transitive attribute must win"
+        );
+        assert_eq!(decoded.malformed.len(), 1);
+        assert_eq!(decoded.malformed[0].type_code, u8::MAX);
+        assert_eq!(
+            decoded.malformed[0].disposition,
+            ErrorDisposition::AttributeDiscard
+        );
+        assert!(matches!(
+            decoded.malformed[0].error,
+            DecodeError::UpdateAttributeError {
+                subcode: update_subcode::MALFORMED_ATTRIBUTE_LIST,
+                ..
+            }
+        ));
     }
     #[test]
     fn revised_duplicate_mp_unreach_is_session_reset() {

@@ -1,0 +1,96 @@
+{
+  "schema_version": 1,
+  "measurement_date_utc": "2026-07-26",
+  "source": {
+    "baseline_commit": "b874b847554a758563ce7f09e8d7b36a35d1ea8c",
+    "baseline_tree": "2f62167c8269a31d05f29e7335d18795c324d2fe",
+    "candidate_commit": "0bae2ba31ebb6d99bbbeb1cfb07fe98dcdd32eb6",
+    "candidate_tree": "152ecc5c08b70c620f3f5f4ec890393b6a216879",
+    "candidate_parent": "b874b847554a758563ce7f09e8d7b36a35d1ea8c",
+    "cargo_lock_sha256": "1b3a9db0e37873e649587e9f6eea90cbb921723b398e5a8253f8ae2a1bb1bc4d"
+  },
+  "environment": {
+    "cpu": "AMD Ryzen Threadripper 7970X 32-Cores",
+    "logical_cpu": 8,
+    "governor": "performance",
+    "kernel": "6.17.0-35-generic",
+    "rustc": "1.97.0 (2d8144b78 2026-07-07)",
+    "llvm": "22.1.6",
+    "cargo": "1.97.0 (c980f4866 2026-06-30)"
+  },
+  "scope": {
+    "timing_entrypoint": "UpdateMessage::parse_revised",
+    "allocation_entrypoint": "decode_path_attributes_revised",
+    "measured_stage": "revised path-attribute decode plus withdrawn/body-NLRI parsing in timing; allocation isolates the attribute section",
+    "fixture": "timing uses one syntactically clean UPDATE with ORIGIN, AS_PATH, NEXT_HOP, LOCAL_PREF, MED, COMMUNITIES, and one body NLRI through the eBGP disposition branch; allocation uses its encoded path-attribute section",
+    "fixture_attributes": 6,
+    "allocation_attribute_section_len_bytes": 53,
+    "allocation_operations": 10000,
+    "excludes": [
+      "daemon",
+      "peer fleet",
+      "full table",
+      "convergence",
+      "RSS"
+    ]
+  },
+  "timing": {
+    "attempts": 6,
+    "order": "odd base-first; even head-first",
+    "criterion_warmup_seconds": 3,
+    "criterion_measurement_seconds": 5,
+    "criterion_samples": 100,
+    "control": {
+      "comparison": "baseline versus the same baseline revision",
+      "expected_rounded": {
+        "base_median_mean_ns": 293.6,
+        "head_median_mean_ns": 272.6,
+        "mean_delta_percent": -7.09,
+        "delta_stddev_percent": 2.82,
+        "delta_min_percent": -11.15,
+        "delta_max_percent": -3.88,
+        "last_ci_low_percent": -5.21,
+        "last_ci_high_percent": -4.32
+      }
+    },
+    "target": {
+      "comparison": "immediate baseline versus candidate",
+      "expected_rounded": {
+        "base_median_mean_ns": 271.7,
+        "head_median_mean_ns": 212.6,
+        "mean_delta_percent": -21.73,
+        "delta_stddev_percent": 1.71,
+        "delta_min_percent": -24.34,
+        "delta_max_percent": -19.26,
+        "last_ci_low_percent": -22.09,
+        "last_ci_high_percent": -21.24
+      }
+    },
+    "minimum_band_gap_percentage_points": 8.11,
+    "claim": "The target and same-revision control bands do not overlap, establishing a fixture-scoped speedup without assigning a bias-corrected percentage."
+  },
+  "allocation": {
+    "allocator": "Rust System wrapped through GlobalAlloc",
+    "baseline_tuple": [50000, 0, 10000, 60000, 26920000],
+    "candidate_tuple": [40000, 0, 10000, 50000, 26440000],
+    "tuple_fields": [
+      "alloc_calls",
+      "alloc_zeroed_calls",
+      "realloc_calls",
+      "allocation_calls",
+      "requested_bytes"
+    ],
+    "requests_removed_per_call": 1,
+    "requested_bytes_removed_per_call": 48,
+    "negative_controls": [
+      "attr_encode/rich/11",
+      "validate_update"
+    ]
+  },
+  "protocol_fences": [
+    "The fixed table spans the complete u8 attribute type-code domain.",
+    "Unknown optional-transitive duplicate attributes keep the first value and discard later values.",
+    "RFC 7606 duplicate disposition remains unchanged.",
+    "RFC 9774 prohibited-segment inspection remains before duplicate handling."
+  ]
+}
