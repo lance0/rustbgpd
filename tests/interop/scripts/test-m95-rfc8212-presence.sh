@@ -102,6 +102,62 @@ assert_no_flap() {
     fi
 }
 
+capture_bird_local_capabilities() {
+    local output_var=${1:?} output line trimmed block=""
+    local local_count=0 neighbor_count=0 in_local=0 neighbor_after_local=0
+
+    if ! output=$(docker exec "$BIRD" birdc show protocols all edge 2>&1); then
+        fail "could not inspect BIRD's advertised capabilities"
+        printf '%s\n' "$output" >&2
+        return 1
+    fi
+
+    while IFS= read -r line; do
+        trimmed=${line#"${line%%[![:space:]]*}"}
+        trimmed=${trimmed%"${trimmed##*[![:space:]]}"}
+        case "$trimmed" in
+            "Local capabilities")
+                local_count=$((local_count + 1))
+                in_local=1
+                ;;
+            "Neighbor capabilities")
+                neighbor_count=$((neighbor_count + 1))
+                if [ "$in_local" -eq 1 ]; then
+                    neighbor_after_local=$((neighbor_after_local + 1))
+                fi
+                in_local=0
+                ;;
+            *)
+                if [ "$in_local" -eq 1 ] && [ -n "$trimmed" ]; then
+                    block+="${block:+$'\n'}$trimmed"
+                fi
+                ;;
+        esac
+    done <<<"$output"
+
+    if [ "$local_count" -ne 1 ]; then
+        fail "expected exactly one Local capabilities sentinel, found $local_count"
+        printf '%s\n' "$output" >&2
+        return 1
+    fi
+    if [ "$neighbor_count" -ne 1 ]; then
+        fail "expected exactly one Neighbor capabilities sentinel, found $neighbor_count"
+        printf '%s\n' "$output" >&2
+        return 1
+    fi
+    if [ "$neighbor_after_local" -ne 1 ]; then
+        fail "Neighbor capabilities sentinel did not follow Local capabilities"
+        printf '%s\n' "$output" >&2
+        return 1
+    fi
+    if [ -z "$block" ]; then
+        fail "BIRD's bounded Local capabilities block is empty"
+        printf '%s\n' "$output" >&2
+        return 1
+    fi
+    printf -v "$output_var" '%s' "$block"
+}
+
 daemon_pid() {
     docker exec "$RUSTBGPD" sh -c \
         'grep -lF rustbgpd /proc/[0-9]*/comm 2>/dev/null | head -1 | cut -d/ -f3'
@@ -176,12 +232,13 @@ fi
 # off rustbgpd, so the lab cannot pass against a daemon that merely believes it.
 # Only BIRD's OWN advertisement counts; the "Neighbor capabilities" block right
 # below it is rustbgpd's, which does offer Route Refresh.
-if docker exec "$BIRD" birdc show protocols all edge 2>/dev/null \
-    | awk '/Local capabilities/{f=1; next} /Neighbor capabilities/{f=0} f' \
-    | grep -qi "route refresh"; then
-    fail "BIRD advertised Route Refresh — the no-capability half of this lab is vacuous"
-else
-    ok "BIRD advertised NO Route Refresh capability (premise of phases 1 and 4)"
+bird_local_capabilities=""
+if capture_bird_local_capabilities bird_local_capabilities; then
+    if grep -qi "route refresh" <<<"$bird_local_capabilities"; then
+        fail "BIRD advertised Route Refresh — the no-capability half of this lab is vacuous"
+    else
+        ok "BIRD advertised NO Route Refresh capability (premise of phases 1 and 4)"
+    fi
 fi
 if docker exec "$FRR" vtysh -c "show bgp neighbors 10.95.1.1 json" 2>/dev/null \
     | jq -e '.["10.95.1.1"].neighborCapabilities.routeRefresh != null' >/dev/null; then
