@@ -399,7 +399,7 @@ cutover blockers.
 
 ## Cutover checklist
 
-1. Build the candidate config and run `rustbgpd --check`.
+1. Build the candidate config and run `rustbgpd --check --strict`.
 2. Run `rbgp policy check` for every `.rpol` file.
 3. Shadow-peer the same members with a non-production listener so no accidental
    TCP/179 collision occurs.

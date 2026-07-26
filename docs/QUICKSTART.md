@@ -75,7 +75,7 @@ the route-server cookbook.
 
 ```bash
 # Validate config without starting the daemon.
-rustbgpd --check config.toml
+rustbgpd --check --strict config.toml
 
 # Preview what a config reload would change.
 rustbgpd --diff new-config.toml config.toml
@@ -176,7 +176,8 @@ An Envoy proxy front-end is also supported for multi-host fan-out; see
 Release images are published to GHCR; `:latest` tracks the newest release and
 `:X.Y` pins a minor series (see
 [deployment.md](deployment.md#container-image) for the full tag table).
-`docker build -t rustbgpd .` produces the same lean runtime image locally.
+`docker build -t rustbgpd .` produces the same lean runtime image under the
+bare `rustbgpd` tag for local use only.
 
 First adapt the `lab` config from step 2 for a container. Two of its values
 are host defaults that do not work under Docker: state under `/tmp` is not on
@@ -199,7 +200,7 @@ docker run -d --name rustbgpd \
   -v rustbgpd-state:/var/lib/rustbgpd \
   -p 179:179 -p 9179:9179 \
   --ulimit nofile=65536:524288 \
-  rustbgpd \
+  ghcr.io/lance0/rustbgpd:latest \
   /bin/sh -c 'cp -n /etc/rustbgpd/config.template.toml /var/lib/rustbgpd/config.toml && exec rustbgpd /var/lib/rustbgpd/config.toml'
 ```
 
