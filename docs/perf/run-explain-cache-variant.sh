@@ -75,7 +75,7 @@ OUT="$OUTBASE/$(date -u +%Y%m%dT%H%M%SZ)-${LABEL}"
 readonly COMMIT TREE OUT
 [[ ! -e "$OUT" ]] || { echo "output already exists: $OUT" >&2; exit 2; }
 mkdir -p "$OUT/build" "$OUT/scenario"
-SUCCESS=0 RUN='' DAEMON_PID='' H_PID='' RSS_PID='' GUARD_PID=''
+RUN='' DAEMON_PID='' H_PID='' RSS_PID='' GUARD_PID=''
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
@@ -216,7 +216,10 @@ PY
 
 printf 'daemon_start_monotonic=%s\n' "$(monotonic_now)" >>"$OUT/provenance.env"
 cold_deadline=$((SECONDS + COLD_CAP))
-runtime_guard & GUARD_PID=$!
+runtime_guard &
+# Used indirectly by cleanup/terminate_pid through a nameref.
+# shellcheck disable=SC2034
+GUARD_PID=$!
 timeout -k 10 "$OVERALL_CAP" "$HARNESS" "$PEERS" "$TOTAL" "$PORT" "$DAEMON_PID" \
     "$RUN/member.rpol" "$RUN/gen-a.rpol" "$RUN/gen-b.rpol" "$RELOADS" \
     "$CONTROL_SECS" "$CHANGED" >"$OUT/reloadstall.log" 2>&1 & H_PID=$!
@@ -249,9 +252,9 @@ terminate_pid DAEMON_PID
 terminate_pid GUARD_PID
 ((DHAT == 0)) || [[ -f "$OUT/dhat-heap.json" ]] || echo "warning: no dhat-heap.json produced" >&2
 
-# Summary: steady = median of post-convergence samples; peak = max over run.
+# Summary: steady = median of post-convergence samples; peak = daemon kernel VmHWM.
 python3 - "$OUT" <<'PY'
-import pathlib, statistics, sys
+import pathlib, re, statistics, sys
 out = pathlib.Path(sys.argv[1])
 prov = dict(line.split("=", 1) for line in
             out.joinpath("provenance.env").read_text().strip().split("\n"))
@@ -261,13 +264,22 @@ rows = [line.split("\t") for line in
 samples = [(float(t), int(r)) for t, _, r in rows]
 post = [r for t, r in samples if t >= conv]
 allr = [r for _, r in samples]
+vmhwm = []
+for status in out.glob("proc-status-*.txt"):
+    match = re.search(r"^VmHWM:\s+([0-9]+)\s+kB$", status.read_text(), re.MULTILINE)
+    if match:
+        vmhwm.append(int(match.group(1)))
+if not vmhwm:
+    raise SystemExit("no kernel VmHWM retained in proc-status snapshots")
+peak = max(vmhwm)
 summary = {
     "rss_samples_total": len(allr),
     "rss_samples_post_convergence": len(post),
     "steady_rss_kib_median_post_convergence": int(statistics.median(post)) if post else 0,
     "steady_rss_mib_median_post_convergence": round(statistics.median(post) / 1024, 1) if post else 0,
-    "peak_rss_kib": max(allr) if allr else 0,
-    "peak_rss_mib": round(max(allr) / 1024, 1) if allr else 0,
+    "peak_rss_kib_daemon_vmhwm": peak,
+    "peak_rss_mib_daemon_vmhwm": round(peak / 1024, 1),
+    "sampled_tree_peak_rss_kib_lower_bound": max(allr) if allr else 0,
     "min_rss_kib": min(allr) if allr else 0,
     "post_convergence_min_kib": min(post) if post else 0,
     "post_convergence_max_kib": max(post) if post else 0,
@@ -283,5 +295,4 @@ PY
     echo "worktree changed during run" >&2; exit 1; }
 ((hrc == 0 && rrc == 0)) || { echo "run failed: harness=$hrc rss_sampler=$rrc" >&2; exit 1; }
 printf 'status=success\n' >"$OUT/exit-status.env"
-SUCCESS=1
 echo "variant complete: $OUT"
