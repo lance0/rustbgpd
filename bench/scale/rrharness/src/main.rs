@@ -13,6 +13,7 @@
 //! Modes:
 //!   rrharness flood <n_clients> <n_prefixes> <secs> <out_prefix>
 //!   rrharness churn <n_clients> <n_cand> <n_prefixes> <secs> <out_prefix>
+//!   rrharness late-join <n_clients> <n_prefixes>
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
@@ -36,6 +37,7 @@ use tokio::sync::{mpsc, oneshot};
 const BATCH: usize = 1000;
 const CHANNEL_CAP: usize = 8192;
 const INGRESS_FLOOD: u32 = 4;
+const CONVERGENCE_TIMEOUT: Duration = Duration::from_secs(300);
 
 fn route(prefix: Ipv4Prefix, src: Ipv4Addr, local_pref: u32) -> Route {
     let attributes = vec![
@@ -99,6 +101,50 @@ fn rss_mib() -> u64 {
         }
     }
     0
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ProcStatus {
+    vm_rss_kib: u64,
+    vm_size_kib: u64,
+    vm_hwm_kib: u64,
+}
+
+fn parse_proc_status(status: &str) -> io::Result<ProcStatus> {
+    fn value(status: &str, key: &str) -> io::Result<u64> {
+        let line = status
+            .lines()
+            .find(|line| line.starts_with(key))
+            .ok_or_else(|| invalid_stat(format!("/proc status is missing {key}")))?;
+        let mut fields = line[key.len()..].split_whitespace();
+        let value = fields
+            .next()
+            .ok_or_else(|| invalid_stat(format!("/proc status {key} is missing a value")))?
+            .parse()
+            .map_err(|error| invalid_stat(format!("invalid /proc status {key}: {error}")))?;
+        if fields.next() != Some("kB") || fields.next().is_some() {
+            return Err(invalid_stat(format!(
+                "/proc status {key} does not use the expected kB unit"
+            )));
+        }
+        Ok(value)
+    }
+
+    Ok(ProcStatus {
+        vm_rss_kib: value(status, "VmRSS:")?,
+        vm_size_kib: value(status, "VmSize:")?,
+        vm_hwm_kib: value(status, "VmHWM:")?,
+    })
+}
+
+fn proc_status() -> io::Result<ProcStatus> {
+    parse_proc_status(&fs::read_to_string("/proc/self/status")?)
+}
+
+fn print_proc_status(scope: &str, status: ProcStatus) {
+    println!("{scope}_vmrss_kib {}", status.vm_rss_kib);
+    println!("{scope}_vmsize_kib {}", status.vm_size_kib);
+    println!("{scope}_vmhwm_kib {}", status.vm_hwm_kib);
 }
 
 fn invalid_stat(message: impl Into<String>) -> io::Error {
@@ -213,60 +259,123 @@ async fn setup(n_clients: u32) -> Harness {
         .unwrap();
     let mgr_tid = tid_rx.recv().unwrap();
 
-    let drained = Arc::new(AtomicU64::new(0));
-    let mut clients = Vec::with_capacity(n_clients as usize);
-    for i in 0..n_clients {
-        let peer = client_addr(i);
-        clients.push(peer);
-        let (otx, mut orx) = mpsc::channel::<OutboundRouteUpdate>(CHANNEL_CAP);
-        let drained = Arc::clone(&drained);
-        tokio::spawn(async move {
-            while let Some(update) = orx.recv().await {
-                let n = update.announce.len() + update.withdraw.len();
-                if n > 0 {
-                    drained.fetch_add(n as u64, Ordering::Relaxed);
-                }
-            }
-        });
-        tx.send(RibUpdate::SetPeerExportEncoder {
-            peer,
-            session_id: 1,
-            encoder: fanout_bench_export_encoder(),
-        })
-        .await
-        .unwrap();
-        tx.send(RibUpdate::PeerUp {
-            peer,
-            session_id: 1,
-            peer_asn: 64512,
-            peer_router_id: Ipv4Addr::new(192, 0, 2, 1),
-            outbound_tx: otx,
-            export_policy: None,
-            sendable_families: vec![(Afi::Ipv4, Safi::Unicast)],
-            is_ebgp: false,
-            route_reflector_client: true,
-            orr_vantage: None,
-            per_client_best: false,
-            interpret_rfc1997: true,
-            add_path_send_families: Vec::new(),
-            add_path_send_max: 0,
-            negotiated_orf_recv: Vec::new(),
-            negotiated_llgr_families: Vec::new(),
-        })
-        .await
-        .unwrap();
-    }
-    Harness {
+    let mut harness = Harness {
         tx,
         qtx,
-        drained,
-        clients,
+        drained: Arc::new(AtomicU64::new(0)),
+        clients: Vec::with_capacity(n_clients as usize),
         mgr_tid,
         ticks_per_second,
-    }
+    };
+    harness.add_clients(n_clients).await;
+    harness
 }
 
 impl Harness {
+    async fn add_clients(&mut self, n_clients: u32) {
+        let first = u32::try_from(self.clients.len()).expect("client count exceeds u32");
+        for i in first..first.checked_add(n_clients).expect("client count overflow") {
+            let peer = client_addr(i);
+            self.clients.push(peer);
+            let (otx, mut orx) = mpsc::channel::<OutboundRouteUpdate>(CHANNEL_CAP);
+            let drained = Arc::clone(&self.drained);
+            tokio::spawn(async move {
+                while let Some(update) = orx.recv().await {
+                    let n = update.announce.len() + update.withdraw.len();
+                    if n > 0 {
+                        drained.fetch_add(n as u64, Ordering::Relaxed);
+                    }
+                }
+            });
+            self.tx
+                .send(RibUpdate::SetPeerExportEncoder {
+                    peer,
+                    session_id: 1,
+                    encoder: fanout_bench_export_encoder(),
+                })
+                .await
+                .unwrap();
+            self.tx
+                .send(RibUpdate::PeerUp {
+                    peer,
+                    session_id: 1,
+                    peer_asn: 64512,
+                    peer_router_id: Ipv4Addr::new(192, 0, 2, 1),
+                    outbound_tx: otx,
+                    export_policy: None,
+                    sendable_families: vec![(Afi::Ipv4, Safi::Unicast)],
+                    is_ebgp: false,
+                    route_reflector_client: true,
+                    orr_vantage: None,
+                    per_client_best: false,
+                    interpret_rfc1997: true,
+                    add_path_send_families: Vec::new(),
+                    add_path_send_max: 0,
+                    negotiated_orf_recv: Vec::new(),
+                    negotiated_llgr_families: Vec::new(),
+                })
+                .await
+                .unwrap();
+        }
+    }
+
+    async fn loc_rib_count(&self) -> usize {
+        let (reply, rx) = oneshot::channel();
+        self.qtx
+            .send(RibUpdate::QueryLocRibCount { reply })
+            .await
+            .unwrap();
+        rx.await.unwrap()
+    }
+
+    async fn peer_update_group(&self, peer: IpAddr) -> String {
+        let (reply, rx) = oneshot::channel();
+        self.qtx
+            .send(RibUpdate::QueryPeerUpdateGroup { peer, reply })
+            .await
+            .unwrap();
+        rx.await.unwrap()
+    }
+
+    async fn wait_loc_rib_exact(&self, expected: usize, timeout: Duration) {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let actual = self.loc_rib_count().await;
+            assert!(
+                actual <= expected,
+                "Loc-RIB count exceeded exact target: expected={expected} actual={actual}"
+            );
+            if actual == expected {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for exact Loc-RIB count: expected={expected} actual={actual}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    async fn wait_one_update_group(&self, timeout: Duration) -> String {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let mut labels = Vec::with_capacity(self.clients.len());
+            for &peer in &self.clients {
+                labels.push(self.peer_update_group(peer).await);
+            }
+            if labels.iter().all(|label| label.starts_with("group:"))
+                && labels.iter().all(|label| label == &labels[0])
+            {
+                return labels[0].clone();
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for one homogeneous update group: labels={labels:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
     async fn staged_counts(&self) -> HashMap<IpAddr, u64> {
         let (reply, rx) = oneshot::channel();
         self.qtx
@@ -323,6 +432,49 @@ impl Harness {
 
     async fn wait_drained(&self, target: u64) {
         while self.drained.load(Ordering::Relaxed) < target {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    async fn wait_staged_exact(&self, expected: u64, timeout: Duration) -> u64 {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let counts = self.staged_counts().await;
+            let values: Vec<u64> = self
+                .clients
+                .iter()
+                .map(|client| counts.get(client).copied().unwrap_or(0))
+                .collect();
+            assert!(
+                values.iter().all(|&actual| actual <= expected),
+                "Adj-RIB-Out count exceeded exact target: expected={expected} counts={values:?}"
+            );
+            if values.iter().all(|&actual| actual == expected) {
+                return values.iter().sum();
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for exact Adj-RIB-Out counts: expected={expected} counts={values:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    async fn wait_drained_exact(&self, target: u64, timeout: Duration) {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let actual = self.drained.load(Ordering::Relaxed);
+            assert!(
+                actual <= target,
+                "drained count exceeded exact target: expected={target} actual={actual}"
+            );
+            if actual == target {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for exact drained count: expected={target} actual={actual}"
+            );
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     }
@@ -430,6 +582,61 @@ fn main() {
         .unwrap();
     rt.block_on(async move {
         match mode.as_str() {
+            "late-join" => {
+                assert_eq!(
+                    args.len(),
+                    4,
+                    "usage: rrharness late-join <n_clients> <n_prefixes>"
+                );
+                let n_clients: u32 = args[2].parse().expect("n_clients must be a u32");
+                let n_prefixes: u64 = args[3].parse().expect("n_prefixes must be a u64");
+                assert!(n_clients > 0, "n_clients must be greater than zero");
+                assert!(n_prefixes > 0, "n_prefixes must be greater than zero");
+                let mut h = setup(0).await;
+                println!("# late-join clients={n_clients} prefixes={n_prefixes}");
+                println!(
+                    "late_join_unicast_slot_bytes {}",
+                    std::mem::size_of::<Option<Route>>()
+                );
+
+                h.inject_flood_block(0, n_prefixes).await;
+                h.wait_loc_rib_exact(
+                    usize::try_from(n_prefixes).expect("n_prefixes exceeds usize"),
+                    CONVERGENCE_TIMEOUT,
+                )
+                .await;
+                print_proc_status(
+                    "late_join_pre_join",
+                    proc_status().expect("failed to read pre-join /proc/self/status"),
+                );
+
+                let join_started = Instant::now();
+                h.add_clients(n_clients).await;
+                let group_id = h.wait_one_update_group(CONVERGENCE_TIMEOUT).await;
+                let staged_total = h
+                    .wait_staged_exact(n_prefixes, CONVERGENCE_TIMEOUT)
+                    .await;
+                let expected_total = n_prefixes
+                    .checked_mul(u64::from(n_clients))
+                    .expect("n_clients*n_prefixes overflowed u64");
+                assert_eq!(staged_total, expected_total);
+                h.wait_drained_exact(expected_total, CONVERGENCE_TIMEOUT)
+                    .await;
+                let join_wall = join_started.elapsed();
+
+                println!("late_join_wall_s {:.3}", join_wall.as_secs_f64());
+                println!("late_join_group_id {group_id}");
+                println!("late_join_group_members {n_clients}");
+                println!("late_join_staged_total {staged_total}");
+                println!(
+                    "late_join_drained_total {}",
+                    h.drained.load(Ordering::Relaxed)
+                );
+                print_proc_status(
+                    "late_join_post_join",
+                    proc_status().expect("failed to read post-join /proc/self/status"),
+                );
+            }
             "flood" => {
                 let n_clients: u32 = args[2].parse().unwrap();
                 let n_prefixes: u64 = args[3].parse().unwrap();
@@ -631,6 +838,25 @@ mod tests {
         assert!(validate_clock_ticks(-1).is_err());
         assert!(validate_clock_ticks(0).is_err());
         assert_eq!(validate_clock_ticks(250).unwrap(), 250);
+    }
+
+    #[test]
+    fn parses_required_proc_status_memory_fields() {
+        let status = "Name:\trrharness\nVmSize:\t 12345 kB\nVmHWM:\t 4567 kB\nVmRSS:\t 3456 kB\n";
+        assert_eq!(
+            parse_proc_status(status).unwrap(),
+            ProcStatus {
+                vm_rss_kib: 3456,
+                vm_size_kib: 12345,
+                vm_hwm_kib: 4567,
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_missing_or_malformed_proc_status_memory_fields() {
+        assert!(parse_proc_status("VmRSS: 1 kB\nVmSize: 2 kB\n").is_err());
+        assert!(parse_proc_status("VmRSS: 1 MB\nVmSize: 2 kB\nVmHWM: 3 kB\n").is_err());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

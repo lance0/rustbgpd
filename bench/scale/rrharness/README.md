@@ -1,6 +1,7 @@
 # rrharness
 
-RibManager flood/churn CPU + memory profiling harness.
+RibManager flood/churn CPU + memory profiling and late-client-join measurement
+harness.
 
 ## What it measures
 
@@ -47,11 +48,12 @@ cargo build --release
 
 ## Arg contract
 
-Two modes (from `src/main.rs`):
+Three modes (from `src/main.rs`):
 
 ```text
 rrharness flood <n_clients> <n_prefixes> <secs> <out_prefix>
 rrharness churn <n_clients> <n_cand> <n_prefixes> <secs> <out_prefix>
+rrharness late-join <n_clients> <n_prefixes>
 ```
 
 - `flood`: `n_clients` RR clients, inject `n_prefixes` distinct /24s, then run
@@ -61,6 +63,23 @@ rrharness churn <n_clients> <n_cand> <n_prefixes> <secs> <out_prefix>
   `n_prefixes` set, then run best-path flap waves (rotating winning source with
   escalating LOCAL_PREF) for `secs` under the profiler. Folded output at
   `<out_prefix>.folded`.
+- `late-join`: start the real manager with no outbound peers, converge exactly
+  `n_prefixes` routes in the Loc-RIB, snapshot process `VmRSS`, `VmSize`, and
+  `VmHWM`, then register `n_clients` homogeneous route-reflector clients using
+  the real fanout benchmark export encoder. It fails unless every client
+  resolves to the same shared update group, every client reaches exactly
+  `n_prefixes` staged Adj-RIB-Out routes, and the drain total reaches exactly
+  `n_clients * n_prefixes`. Both arguments must be greater than zero.
+
+The late-join wall time includes peer registration, update-group assignment,
+manager staging and trivial channel draining. Its `/proc/self/status` snapshots
+cover the whole rrharness process. It excludes TCP/session actors, UPDATE
+final-envelope/output encoding in the transport actor, socket writers, kernel
+socket buffers, and remote peer memory. Manager-side exact-export precommit
+probing still uses the real fanout encoder and can prepare/build candidate
+UPDATEs. The mode does not write a profile or make a capacity/performance
+claim. Its convergence polling loops use a five-minute deadline while the
+manager continues answering their query messages.
 
 Receipt run shapes:
 
@@ -86,6 +105,13 @@ production diff before the shared host lock or any build begins.
 
 A tiny smoke shape (`flood 4 100 2 /tmp/smoke`) runs in a couple of seconds and
 emits a folded profile.
+
+A tiny late-join smoke shape exercises the staged/drained parity contract
+without producing a retained measurement:
+
+```text
+rrharness late-join 2 100
+```
 
 The manager busy fraction uses the host's checked `sysconf(_SC_CLK_TCK)` value
 and treats malformed or unreadable `/proc/self/task/<tid>/stat` data as an

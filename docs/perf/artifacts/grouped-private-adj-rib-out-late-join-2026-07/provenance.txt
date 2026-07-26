@@ -1,0 +1,18 @@
+product_control=aea3d4133047bb06cce5813658bf619e5c11b829
+product_candidate=d25578b20ddfaad9eb688c38bc156b910141c993
+control_with_harness=34bfc2b91579915a1a48bf0f54fe58c90ac1f258
+candidate_with_harness=65129f178699955b16e133fecf01a6770514bf15
+harness_tree_diff=clean
+rustc=1.97.0 (2d8144b78 2026-07-07)
+llvm=22.1.6
+kernel_release=6.17.0-35-generic
+architecture=x86_64
+cpu_model=AMD Ryzen Threadripper 7970X 32-Cores
+logical_cpus=64
+memory_total_kib=131379692
+cpu_governor=performance
+preflight_matching_processes=none
+pre_existing_background_containers=4
+run_order_per_shape=control,candidate,candidate,control
+unicast_slot_bytes=128
+

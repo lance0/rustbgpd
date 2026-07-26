@@ -64,8 +64,11 @@ impl AdjRibOut {
 
     /// Create a new Adj-RIB-Out with pre-sized capacity.
     ///
-    /// Use `LocRib::len()` as a good estimate — each peer's outbound view
-    /// converges to approximately the same prefix count as the best-path table.
+    /// Use `LocRib::len()` for an authoritative per-peer unicast table. A
+    /// freshly installed grouped peer's private table owns only the other
+    /// address families, so it starts with zero unicast capacity; the shared
+    /// group table carries the Loc-RIB-sized reservation. Moving an existing
+    /// ungrouped table into a group may retain its prior allocation.
     #[must_use]
     pub fn with_capacity(peer: IpAddr, capacity: usize) -> Self {
         Self {
@@ -226,7 +229,7 @@ impl AdjRibOut {
     ///
     /// Exposed only to benchmark / memory-profile harnesses so they can
     /// distinguish route-count growth from hash-table capacity cliffs.
-    #[cfg(feature = "bench-internals")]
+    #[cfg(any(test, feature = "bench-internals"))]
     #[must_use]
     pub fn bench_route_capacity(&self) -> usize {
         self.routes.capacity()

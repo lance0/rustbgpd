@@ -608,6 +608,163 @@ fn register_direct_exact_peer(
     outbound_rx
 }
 
+fn register_direct_peer(
+    manager: &mut RibManager,
+    peer: IpAddr,
+) -> mpsc::Receiver<OutboundRouteUpdate> {
+    register_direct_peer_with_families(manager, peer, ipv4_sendable())
+}
+
+fn register_direct_peer_with_families(
+    manager: &mut RibManager,
+    peer: IpAddr,
+    sendable_families: Vec<(Afi, Safi)>,
+) -> mpsc::Receiver<OutboundRouteUpdate> {
+    let (outbound_tx, outbound_rx) = mpsc::channel(8);
+    manager.handle_update(RibUpdate::PeerUp {
+        peer,
+        session_id: 0,
+        peer_asn: 65_000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx,
+        export_policy: None,
+        sendable_families,
+        is_ebgp: false,
+        route_reflector_client: false,
+        orr_vantage: None,
+        per_client_best: false,
+        interpret_rfc1997: true,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: vec![],
+        negotiated_llgr_families: vec![],
+    });
+    outbound_rx
+}
+
+fn distribute_direct_route(manager: &mut RibManager, source: Ipv4Addr, prefix: Ipv4Prefix) {
+    manager.handle_update(RibUpdate::RoutesReceived {
+        peer: IpAddr::V4(source),
+        session_id: 0,
+        announced: vec![crate::test_support::make_route(prefix, source)],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    });
+    while manager.process_next_route_chunk() {}
+}
+
+#[test]
+fn grouped_peer_private_unicast_stays_unallocated_during_distribution() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 63, 1, 1));
+    let mut outbound = register_direct_peer(&mut manager, peer);
+    assert_eq!(outbound.try_recv().unwrap().end_of_rib, ipv4_sendable());
+    assert!(manager.grouped_member_of(peer).is_some());
+
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    distribute_direct_route(&mut manager, Ipv4Addr::new(192, 0, 2, 1), prefix);
+
+    let update = outbound.try_recv().unwrap();
+    assert_eq!(update.announce.len(), 1);
+    assert_eq!(update.announce[0].prefix, Prefix::V4(prefix));
+    assert_eq!(manager.grouped_advertised_routes(peer).unwrap().len(), 1);
+    let private = manager
+        .adj_ribs_out
+        .get(&peer)
+        .expect("private family state");
+    assert_eq!(private.len(), 0);
+    assert_eq!(private.bench_route_capacity(), 0);
+}
+
+#[test]
+fn grouped_late_join_private_unicast_stays_unallocated_during_initial_dump() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 114, 0), 24);
+    distribute_direct_route(&mut manager, Ipv4Addr::new(192, 0, 2, 2), prefix);
+
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 63, 1, 2));
+    let mut outbound = register_direct_peer(&mut manager, peer);
+    let dump = outbound.try_recv().unwrap();
+    assert_eq!(dump.announce.len(), 1);
+    assert_eq!(dump.announce[0].prefix, Prefix::V4(prefix));
+    assert_eq!(outbound.try_recv().unwrap().end_of_rib, ipv4_sendable());
+    assert!(manager.grouped_member_of(peer).is_some());
+    assert_eq!(manager.grouped_advertised_routes(peer).unwrap().len(), 1);
+    let private = manager
+        .adj_ribs_out
+        .get(&peer)
+        .expect("private family state");
+    assert_eq!(private.len(), 0);
+    assert_eq!(private.bench_route_capacity(), 0);
+}
+
+#[test]
+fn grouped_peer_non_unicast_first_delta_keeps_private_unicast_unallocated() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 115, 0), 24);
+    distribute_direct_route(&mut manager, Ipv4Addr::new(192, 0, 2, 3), prefix);
+    assert_eq!(manager.loc_rib.len(), 1);
+
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 63, 1, 3));
+    let mut outbound =
+        register_direct_peer_with_families(&mut manager, peer, ipv4_flowspec_sendable());
+    assert_eq!(
+        outbound.try_recv().unwrap().end_of_rib,
+        ipv4_flowspec_sendable()
+    );
+    assert!(manager.grouped_member_of(peer).is_some());
+
+    let (reply_tx, _reply_rx) = oneshot::channel();
+    manager.handle_inject_flowspec(make_flowspec_route(Ipv4Addr::new(192, 0, 2, 4)), reply_tx);
+
+    let update = outbound.try_recv().unwrap();
+    assert_eq!(update.flowspec_announce.len(), 1);
+    let private = manager
+        .adj_ribs_out
+        .get(&peer)
+        .expect("private non-unicast family state");
+    assert_eq!(private.flowspec_len(), 1);
+    assert_eq!(private.len(), 0);
+    assert_eq!(private.bench_route_capacity(), 0);
+}
+
+#[test]
+fn grouped_peer_ungroup_seeds_private_advertised_routes() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 63, 1, 4));
+    let mut outbound = register_direct_peer(&mut manager, peer);
+    assert_eq!(outbound.try_recv().unwrap().end_of_rib, ipv4_sendable());
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 115, 0), 24);
+    distribute_direct_route(&mut manager, Ipv4Addr::new(192, 0, 2, 5), prefix);
+    assert_eq!(outbound.try_recv().unwrap().announce.len(), 1);
+
+    manager.handle_update(RibUpdate::PeerSlowState {
+        peer,
+        session_id: 0,
+        slow: true,
+    });
+    while manager.process_next_route_chunk() {}
+
+    assert!(manager.grouped_member_of(peer).is_none());
+    let private = manager
+        .adj_ribs_out
+        .get(&peer)
+        .expect("private fallback state");
+    assert_eq!(private.len(), 1);
+    assert!(private.get(&Prefix::V4(prefix), 0).is_some());
+    assert!(matches!(
+        outbound.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
+}
+
 fn drive_exact_precommit_step(
     manager: &mut RibManager,
     peers: [IpAddr; 2],
