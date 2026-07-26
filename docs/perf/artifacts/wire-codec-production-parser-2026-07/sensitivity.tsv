@@ -1,0 +1,11 @@
+proof	benchmark	low	estimate	high	unit	role	affinity
+parse_revised_entry_delay	update_parse_revised/1	76.941	76.958	76.978	us	affected	unpinned
+parse_revised_entry_delay	update_parse_revised/10	76.965	76.988	77.014	us	affected	unpinned
+parse_revised_entry_delay	update_parse_revised/100	76.975	77.002	77.033	us	affected	unpinned
+parse_revised_entry_delay	update_parse_revised/500	80.067	80.111	80.163	us	affected	unpinned
+parse_revised_entry_delay	update_parse_revised/ipv6_mp_add_path	76.934	76.949	76.967	us	affected	unpinned
+parse_revised_entry_delay	update_parse/1	248.50	249.35	250.32	ns	control	unpinned
+ipv6_add_path_decoder_delays	update_parse_revised/ipv6_mp_add_path	153.89	153.93	153.98	us	affected	unpinned
+ipv6_add_path_decoder_delays	update_parse_revised/1	269.98	271.27	273.24	ns	control	unpinned
+mp_encoder_delays	update_build/ipv6_mp_add_path	153.90	153.98	154.09	us	affected	cpu8
+mp_encoder_delays	update_build/1	162.38	162.67	163.09	ns	control	cpu8

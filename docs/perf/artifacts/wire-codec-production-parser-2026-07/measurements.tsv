@@ -1,0 +1,12 @@
+benchmark	low	estimate	high	unit
+update_parse_revised/1	303.26	304.20	305.24	ns
+update_parse_revised/10	368.43	369.06	369.87	ns
+update_parse_revised/100	952.18	955.76	960.05	ns
+update_parse_revised/500	3.3228	3.3358	3.3496	us
+update_parse_revised/ipv6_mp_add_path	221.79	222.27	222.83	ns
+update_build/ipv6_mp_add_path	148.67	148.96	149.23	ns
+attr_decode/typical/6	247.00	253.53	260.61	ns
+attr_decode/rich/11	523.75	536.71	550.79	ns
+attr_decode/as_set_revised/1	129.27	129.49	129.77	ns
+attr_encode/typical/6	108.17	109.20	110.14	ns
+attr_encode/rich/11	514.02	515.13	516.54	ns

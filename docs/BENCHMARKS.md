@@ -27,7 +27,8 @@ structured high-N RIB memory profile: 2026-06-08; authoritative exact-export
 distribution fanout A/B, update-group recovery, and grouped exact-precommit
 fast path: 2026-07-13; revision-pinned production-exact manager CPU and
 full-daemon DHAT rebaseline: 2026-07-13; structured high-N RIB memory
-profile refresh (RouteSlab + attribute interning correction): 2026-07-17.
+profile refresh (RouteSlab + attribute interning correction): 2026-07-17;
+production UPDATE parser and IPv6 MP-BGP Add-Path coverage: 2026-07-26.
 
 | Field | Value |
 |-------|-------|
@@ -307,8 +308,11 @@ for the noise-floor rationale).
 ## Wire Codec
 
 The wire codec (`rustbgpd-wire`) is the hot path for every inbound and outbound
-UPDATE. It uses a two-phase design: `decode()` is O(1) framing only, `parse()`
-is O(n) structural decode.
+UPDATE. Outbound sessions use structured UPDATE build/encode. Live inbound
+sessions first decode message framing, then call `parse_revised()` for the
+O(n) structural decode and RFC 7606 disposition pass. The older `parse()` path
+remains benchmarked as a historical IPv4-body baseline, but it does not
+describe daemon ingress.
 
 ### NLRI Encode / Decode
 
@@ -322,29 +326,88 @@ is O(n) structural decode.
 NLRI encoding is a tight `memcpy` loop. Decoding adds masking and validation.
 At 500 prefixes, decode throughput is ~180M prefixes/sec.
 
-### UPDATE Build / Parse
+### UPDATE Build / Legacy Parse
 
-Full UPDATE message construction and structural parsing, including path
-attributes and NLRI.
+Historical full UPDATE construction and IPv4-body `parse()` measurements,
+including path attributes and NLRI. These figures predate the production-path
+coverage below and must not be used as daemon-ingress numbers.
 
-| Prefixes | Build | Parse | Per-prefix parse |
-|----------|-------|-------|------------------|
+| Prefixes | Build | Legacy `parse()` | Per-prefix legacy parse |
+|----------|-------|------------------|-------------------------|
 | 1 | 154 ns | 147 ns | 147 ns |
 | 10 | 206 ns | 205 ns | 20 ns |
 | 100 | 487 ns | 798 ns | 8.0 ns |
 | 500 | 1.50 µs | 3.11 µs | 6.2 ns |
 
-At 500 prefixes, parse throughput is ~161M prefixes/sec. The fixed cost
-(~130 ns) is attribute decode; marginal cost per prefix is ~6 ns.
+The former 161M-prefix/s and ~6 ns marginal-cost interpretation applied only
+to this compact legacy fixture.
+
+### Production UPDATE Parse
+
+Pinned current measurements for the live revised parser use a clean eBGP
+IPv4-body UPDATE with the typical six attributes. The special MP-BGP row has
+one IPv6 announcement, one IPv6 withdrawal, distinct nonzero Add-Path IDs, and
+four attributes (`ORIGIN`, `AS_PATH`, `MP_REACH_NLRI`, and
+`MP_UNREACH_NLRI`). It is intentionally a branch-coverage shape, not a
+full-table extrapolation.
+
+| Shape | Operation | Criterion estimate |
+|-------|-----------|--------------------|
+| 1 IPv4 prefix | revised parse | 304.20 ns [303.26, 305.24] |
+| 10 IPv4 prefixes | revised parse | 369.06 ns [368.43, 369.87] |
+| 100 IPv4 prefixes | revised parse | 955.76 ns [952.18, 960.05] |
+| 500 IPv4 prefixes | revised parse | 3.3358 µs [3.3228, 3.3496] |
+| IPv6 MP-BGP Add-Path | revised parse | 222.27 ns [221.79, 222.83] |
+| IPv6 MP-BGP Add-Path | structured build + MP encode | 148.96 ns [148.67, 149.23] |
+
+Measurement contract: benchmark code commit `ab518890`; AMD Ryzen Threadripper
+7970X; Linux 6.17.0-35-generic; rustc 1.97.0; Criterion 0.8.2; CPU 8 pinned with
+the `performance` governor; no other rustbgpd build, benchmark, or harness
+process active. Commands:
+
+```console
+taskset -c 8 cargo bench -p rustbgpd-wire --bench codec -- \
+  'update_parse_revised'
+taskset -c 8 cargo bench -p rustbgpd-wire --bench codec -- \
+  '^update_build/ipv6_mp_add_path$'
+taskset -c 8 cargo bench -p rustbgpd-wire --bench codec -- \
+  'attr_(decode|encode)'
+```
+
+Each timed fixture is parsed once first. The assertions require a clean
+disposition, exact attributes and body NLRI, zero discarded BGP-LS NLRI, both
+MP attributes, the negotiated IPv6/unicast family, the expected next hop, and
+the exact nonzero Add-Path IDs.
+
+The sensitivity proof deliberately added a nominal 25 µs delay at the
+`parse_revised()` entry: all five revised rows moved to 76.9–80.2 µs while the
+legacy-parser control measured 249 ns and did not inherit that cost (it did
+show 11.6% same-code run-to-run drift). Separate nominal 25 µs delays in the
+IPv6 Add-Path `MP_REACH_NLRI` and `MP_UNREACH_NLRI` decoder arms moved only
+the MP row to 153.93 µs; the IPv4 revised control measured 271 ns. Matching
+delays in the two MP encoder functions moved the MP build row from 148.96 ns
+to 153.98 µs; the IPv4 build control measured 163 ns. The scheduler overshoots
+such short sleeps, so the proof is path sensitivity, not delay calibration.
+All proof-only product mutations were removed.
+
+The normalized measurements, sensitivity receipt, exact proof commands, and
+checksums are retained under
+[`docs/perf/artifacts/wire-codec-production-parser-2026-07/`](perf/artifacts/wire-codec-production-parser-2026-07/).
 
 ### Path Attributes
 
-| Set | Decode | Encode |
-|-----|--------|--------|
-| Typical (6 attrs) | 117 ns | 91 ns |
-| Rich (8 attrs, large communities) | 166 ns | 169 ns |
+| Set | Decoder | Decode estimate | Encode estimate |
+|-----|---------|-----------------|-----------------|
+| Typical (6 attrs) | legacy | 253.53 ns [247.00, 260.61] | 109.20 ns [108.17, 110.14] |
+| Rich (11 attrs, extended-length communities) | legacy | 536.71 ns [523.75, 550.79] | 515.13 ns [514.02, 516.54] |
+| AS_SET (1 received attribute) | revised | 129.49 ns [129.27, 129.77] | N/A — prohibited to originate |
 
 "Typical" = Origin, AS_PATH (3 ASNs), NextHop, LocalPref, MED, Communities (2).
+The rich fixture includes 128 standard communities, forcing the
+extended-length attribute header. The dedicated `as_set_revised` row exercises
+the RFC 7606 revised decoder; the typical and rich decode rows still call the
+legacy attribute decoder. These rows used the same pinned contract and
+benchmark-code commit as the production UPDATE table.
 
 ### Validation
 
@@ -868,11 +931,13 @@ RIB, so the full shell can never be shared. Reproducible harness:
 
 ## Interpretation
 
-**Wire codec** — The codec is not a bottleneck. Parsing a full-size UPDATE (500
-prefixes, typical attributes) takes 3.1us. At 1 Gbps line rate, BGP UPDATE
-arrival rate is far lower than decode capacity. The two-phase decode/parse
-design means sessions that only need header inspection (keepalives, most
-notifications) pay no attribute decode cost.
+**Wire codec** — The live revised parser now has direct coverage for compact
+IPv4-body UPDATEs plus an IPv6 MP-BGP Add-Path branch fixture. A 500-prefix
+IPv4-body UPDATE with typical attributes measured 3.34 µs on the pinned host.
+That establishes a regression baseline for those shapes; it does not by itself
+prove that the codec is never a bottleneck for large MP-BGP, VPN, EVPN, or
+malformed-recovery workloads. Framing-only messages still avoid UPDATE
+attribute parsing.
 
 **RIB insert** — Bulk insert now ranges from ~3.2M routes/sec at 100k rows to
 ~5.6M routes/sec at 500k rows. A 900k-prefix Internet table extrapolates to
