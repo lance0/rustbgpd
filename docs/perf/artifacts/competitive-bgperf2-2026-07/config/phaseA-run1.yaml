@@ -1,0 +1,31 @@
+tests:
+  -
+    name: A1_10x1000
+    neighbors: [10]
+    prefixes: [1000]
+    filter_test: ['None']
+    targets:
+      - {name: rustbgpd, tester_type: bird}
+      - {name: bird, tester_type: bird}
+      - {name: gobgp, tester_type: bird}
+      - {name: frr_c, tester_type: bird}
+  -
+    name: A1_2x10000
+    neighbors: [2]
+    prefixes: [10000]
+    filter_test: ['None']
+    targets:
+      - {name: rustbgpd, tester_type: bird}
+      - {name: bird, tester_type: bird}
+      - {name: gobgp, tester_type: bird}
+      - {name: frr_c, tester_type: bird}
+  -
+    name: A1_2x100000
+    neighbors: [2]
+    prefixes: [100000]
+    filter_test: ['None']
+    targets:
+      - {name: rustbgpd, tester_type: bird}
+      - {name: bird, tester_type: bird}
+      - {name: gobgp, tester_type: bird}
+      - {name: frr_c, tester_type: bird}

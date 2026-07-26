@@ -273,33 +273,39 @@ IPv4/IPv6 `Prefix` routes.
     multi-path *send* (RFC 7911, route-server mode) and EVPN aliasing ECMP
     (ADR-0059 FDB nexthop groups, default-on) also ship.
 
-## Performance Snapshot (bgperf2 — 2026-07-09, v0.50.0)
+## Performance Snapshot (bgperf2 — 2026-07-26)
 
-Same host and harness, all targets run back to back on an idle machine.
-"Converged" is bgperf2's elapsed-to-full-table figure; RSS is full-daemon
-max over the run.
+Same host and harness, all targets run back to back on an idle machine,
+medians of 3 runs per cell (6 at 10×1k). "Converged" is bgperf2's
+elapsed-to-full-table figure; RSS is full-daemon max over the run, in MiB.
 
-| Scenario | rustbgpd 0.50.0 | BIRD 2.18 (master) | GoBGP 4.3.0 |
-|---|---|---|---|
-| 10 peers × 1k prefixes | 2 s / 42 MB | 2 s / 9 MB | 3 s / 51 MB |
-| 2 peers × 10k prefixes | 2 s / 52 MB | 2 s / 9 MB | 3 s / 43 MB |
-| 2 peers × 100k prefixes | 3 s / 246 MB | 3 s / 25 MB | 6 s / 197 MB |
+| Scenario | rustbgpd | BIRD 2.18 (master) | GoBGP 4.3.0 | FRR 10.7.0-dev |
+|---|---|---|---|---|
+| 10 peers × 1k prefixes | 2 s / 37.9 | 2 s / 8.2 | 3 s / 38.9 | 3 s / 27.6 |
+| 2 peers × 10k prefixes | 2 s / 48.1 | 2 s / 9.2 | 3 s / 44.0 | 3 s / 36.9 |
+| 2 peers × 100k prefixes | 3 s / 212.0 | 3 s / 27.6 | 6 s / 202.8 | 4 s / 228.4 |
+| 30 peers × 1k prefixes | 3 s / 108.5 | 3 s / 11.3 | 4 s / 68.6 | 4 s / 51.2 |
+| 100 peers × 1k prefixes | 3 s / 212.0 | 5 s / 32.8 | 20 s / 193.5 | 7 s / 134.1 |
 
-Convergence is at or ahead of both peers in every scenario (GoBGP takes
-twice as long at 2×100k). BIRD's single-process C core remains far ahead
-of both Go and Rust daemons on memory. rustbgpd's full-daemon RSS still
-sits above GoBGP at the 100k-per-peer scale — route storage is less
-compact: a 2026-06-02 whole-daemon dhat profile attributes the
+rustbgpd is fastest on total time at all five shapes, and its convergence
+lead widens with peer count: 3 s at 100 peers against 5 / 7 / 20 s.
+**On memory it is last of the four at 100 peers × 1k — its own target
+shape** — at 1.10× GoBGP, 1.58× FRR, and 6.46× BIRD; against BIRD the
+ratio is 4.6×–9.6× at every shape. rustbgpd's RSS is also the noisiest
+figure in the run (86.0 / 108.5 / 131.1 MiB across three runs at 30
+peers), so treat it as a range. 100 peers × 1k and 2 peers × 100k carry
+half and whole route counts respectively yet both measure 212.0 MiB —
+at route-server shapes memory is dominated by per-peer state, not route
+count. A 2026-06-02 whole-daemon dhat profile attributes the
 live-at-peak heap primarily to the three-layer RIB model (Adj-RIB-In +
 Loc-RIB + Adj-RIB-Out) and its route-map / prefix-index storage, not
-operational surfaces — though the gap has narrowed materially since
-v0.32.0 (~284 → 246 MB at this scale, ~90 → 42 MB at 10×1k) via the
-trie-backed prefix indexes, attribute interning, and the update-groups
-work. At smaller scales rustbgpd and GoBGP are equivalent. The durable
-event-history outbox is opt-in (default off); enabling it adds RSS
-roughly proportional to event volume. FRR and OpenBGPd were not in this
-run. See [BENCHMARKS.md](BENCHMARKS.md) for the full cross-stack tables,
-the RIB memory profile, and methodology.
+operational surfaces. The durable event-history outbox is opt-in
+(default off); enabling it adds RSS roughly proportional to event
+volume. OpenBGPD is absent because a bgperf2 harness defect prevented it
+from starting, not because of a daemon result. See
+[BENCHMARKS.md](BENCHMARKS.md) for the full cross-stack tables and
+[the receipt](perf/competitive-bgperf2-2026-07.md) for per-run values,
+disclosed defects, and artifacts.
 
 At route-server scale, the [IXP receipt
 matrix](perf/ixp-matrix-2026-07.md) compares rustbgpd, BIRD 3.3.1, and

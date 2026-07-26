@@ -902,147 +902,151 @@ The monitor's accepted route count is the ground truth for completion.
 **Environment:** AMD Ryzen Threadripper 7970X (32 cores / 64 threads), 125 GB
 RAM, Linux 6.17, Docker 27.x. All daemons run in containers on the same host.
 
-**Methodology:** Convergence time is measured from first prefix received by the
-monitor to all expected prefixes received. The test harness waits for 5 seconds
-of stability before declaring completion. Total time includes session
-establishment.
+**Methodology:** "Convergence" is the harness `elapsed` column — monitor start
+to all expected prefixes received — so it includes the wait for the first
+prefix as well as the flood. "Total time" additionally includes session
+establishment and harness setup. The harness prints memory labelled "MB" but
+computes it 1024-based; the tables below convert it and label the result
+**MiB**. RSS is the maximum resident set of the target container over the run.
 
 ### Results
 
-Re-run on current `main` (shipping as **v0.32.0**) on 2026-05-29 — all three
-daemons on the same host, same harness. Versions: **BIRD 2.18**
-(`branch.master.0ee9f93`), **GoBGP 4.3.0**, **rustbgpd** current `main` (the
-container self-reports `0.31.0`, the pre-release-bump workspace version).
-"Convergence" is the route-flood time (monitor first-prefix → all-received);
-"Total time" includes session establishment. RSS is the max of the target
-container; 2p/100k is the median of 3 (rustbgpd eh-on) / 2 (eh-off) runs. The
-rustbgpd 10k/20k columns were measured with **event-history enabled** (the
-opt-in config); at those scales the on/off difference is within noise. The
-2p/100k row shows **both** the v0.32.0 default (event-history off) and the
-opt-in (on).
+**Re-measured 2026-07-26** (UTC; the harness records the host's local date as
+2026-07-25) at commit `515659b1` — the code now on `main`, which has since moved
+only through documentation changes. This run widened the field from three
+daemons to **four** and added the two route-server shapes, which had never been
+published. The full write-up, with per-run values behind every median, the
+per-second establishment progressions, the disclosed harness defects, and the
+retained artifacts, is the [cross-stack bgperf2
+receipt](perf/competitive-bgperf2-2026-07.md).
 
-**Re-run 2026-07-09** on current `main` (**v0.50.0**, default event-history
-off), same host and harness, all targets back to back on an idle machine —
-these are the current headline numbers (also summarized in
-[COMPARISON.md](COMPARISON.md)):
+**The target reports `rustbgpd 0.60.0` in the raw rows because the v0.61.0
+version bump had not happened when the campaign ran.** The binary is the
+v0.61.0 candidate; only the version string is behind.
 
-| Scenario | rustbgpd 0.50.0 | BIRD 2.18 (master) | GoBGP 4.3.0 |
-|---|---|---|---|
-| 10p × 1k | conv 2 s · total 8.3 s · 42 MB | conv 2 s · total 9.3 s · 9 MB | conv 3 s · total 10.4 s · 51 MB |
-| 2p × 10k | conv 2 s · total 8.3 s · 52 MB | conv 2 s · total 9.3 s · 9 MB | conv 3 s · total 10.4 s · 43 MB |
-| 2p × 100k | conv 3 s · total 12.1 s · 246 MB | conv 3 s · total 12.2 s · 25 MB | conv 6 s · total 15.4 s · 197 MB |
+Medians of 3 runs per cell, 6 for 10p × 1k. Versions: **rustbgpd** at
+`515659b1`, **BIRD 2.18** (`branch.master.0ee9f93bd076`), **GoBGP 4.3.0**,
+**FRR 10.7.0-dev** (an unpinned development build — every cell reported a
+distinct build identifier). **Same-host caveat:** all four daemons, the BIRD
+tester fleet, and the GoBGP monitor ran in containers on the one host described
+above, so every target competes with the load generators that drive it. This is
+a comparison under identical conditions, not an absolute figure for any daemon.
 
-Deltas vs the v0.32.0 table below: rustbgpd 2p/100k RSS ~284 → 246 MB and
-10p/1k ~90 → 42 MB (trie prefix indexes, attribute interning, update-groups);
-convergence and total time flat-to-better everywhere; GoBGP's 2p/100k
-convergence doubled relative to rustbgpd's. BIRD/GoBGP versions identical to
-the prior run, so their cells move only within noise.
+| Shape | rustbgpd | BIRD 2.18 | GoBGP 4.3.0 | FRR 10.7.0-dev |
+|---|---|---|---|---|
+| 10p × 1k | conv 2 s · total **8.23 s** · 7% · 37.9 MiB | conv 2 s · total 9.20 s · 2% · **8.2 MiB** | conv 3 s · total 10.32 s · 126% · 38.9 MiB | conv 3 s · total 10.27 s · 4% · 27.6 MiB |
+| 2p × 10k | conv 2 s · total **8.26 s** · 7% · 48.1 MiB | conv 2 s · total 9.24 s · 1% · **9.2 MiB** | conv 3 s · total 10.34 s · 88% · 44.0 MiB | conv 3 s · total 9.31 s · 5% · 36.9 MiB |
+| 2p × 100k | conv 3 s · total **12.32 s** · 41% · 212.0 MiB | conv 3 s · total 13.22 s · 6% · **27.6 MiB** | conv 6 s · total 16.49 s · 565% · 202.8 MiB | conv 4 s · total 13.39 s · 94% · 228.4 MiB |
+| 30p × 1k *(new)* | conv 3 s · total **9.83 s** · 22% · 108.5 MiB | conv 3 s · total 10.87 s · 14% · **11.3 MiB** | conv 4 s · total 11.84 s · 897% · 68.6 MiB | conv 4 s · total 10.85 s · 11% · 51.2 MiB |
+| 100p × 1k *(new)* | conv **3 s** · total **11.79 s** · 122% · 212.0 MiB | conv 5 s · total 15.22 s · 101% · **32.8 MiB** | conv 20 s · total 28.50 s · 1281% · 193.5 MiB | conv 7 s · total 16.01 s · 68% · 134.1 MiB |
 
-**Re-confirmed 2026-06-02** on current `main` (post-v0.33.0, default
-**event-history off**), same host — this is a no-regression check, not a new set
-of headline numbers:
+**rustbgpd is fastest on total time at all five shapes**, and at 100 peers it
+converges in 3 s against FRR's 7 s, BIRD's 5 s, and GoBGP's 20 s — the largest
+separation in the campaign, at the shape rustbgpd is designed for.
 
-- **Total time is flat** vs the v0.32.0 figures (8.3s / 8.3s / 12.2s across
-  10p×1k / 2p×10k / 2p×100k).
-- **2p×100k event-history-off RSS holds within noise** — ~291 MB vs the ~284 MB
-  below.
-- **Max-CPU peaks trended lower** across all three configs, but bgperf2 samples
-  peak CPU coarsely (one reading per second), so treat that as advisory, not a
-  measured improvement.
-- The small-scale **10k/20k RSS cells below were measured event-history-*on***
-  and are left unchanged here — they are not apples-to-apples with a default
-  eh-off run, so refreshing them would require converting the whole table to a
-  single eh-off mode.
+> **rustbgpd is last on memory of all four daemons at 100p × 1k — its own
+> target deployment.** 212.0 MiB against GoBGP's 193.5 MiB (1.10×), FRR's
+> 134.1 MiB (1.58×), and BIRD's 32.8 MiB (6.46×). Against BIRD the ratio runs
+> **4.6×–9.6× across every shape**, worst at 30p × 1k. This is the standing
+> memory position, and it did not improve in this campaign.
 
-> **The earlier "2.3× less memory than GoBGP" framing no longer holds — and was
-> based on a stale GoBGP figure.** GoBGP 4.3.0 measures **~200 MB** at 2p/100k
-> here (and measured 198 MB in the prior March run); the old 578 MB was a much
-> older snapshot. On *full-daemon RSS*, rustbgpd (~346 MB on / ~284 MB off) now
-> uses **more** than GoBGP (~203 MB) and far more than BIRD (~30 MB) at this
-> scale. The whole-daemon dhat profile (see the *Memory Footprint* correction)
-> attributes that to **RIB route-storage map/index bucket arrays** — the
-> three-layer Adj-RIB-In + Loc-RIB + Adj-RIB-Out model, with Adj-RIB-Out the
-> largest single piece — **not** operational surfaces, which the profile shows
-> are negligible (<1 MB). The event-history outbox adds the on-vs-off RSS delta
-> when enabled (opt-in, default-off), but the structural cost is the route maps.
-> BIRD's radix-tree RIB with global attribute deduplication is what makes it an
-> order of magnitude leaner on this same data.
+> **Do not quote rustbgpd's RSS at these shapes as a single value.** It was the
+> noisiest figure in the campaign: 86.0 / 108.5 / 131.1 MiB at 30p × 1k (a 42%
+> spread) and 180.2 / 212.0 / 230.4 MiB at 100p × 1k (24%). GoBGP and FRR span
+> 0.8–7.9% at the same shapes. A reader who reproduces and measures 131 MiB at
+> 30 peers has not found a regression — that value is inside the measured
+> range. The spread is published, not explained.
 
-#### 10 peers × 1,000 prefixes (10k total)
+**Memory tracks peers, not routes.** 100p × 1k is 100,000 routes and 2p × 100k
+is 200,000 routes, and both measure 212.0 MiB. Half the routes, identical
+resident set: at route-server shapes memory is dominated by per-peer state
+rather than route count. The *computed* marginal cost over the 10 → 100 peer
+span is ~1.93 MiB/peer for rustbgpd against BIRD's ~0.27 MiB/peer (GoBGP ~1.72,
+FRR ~1.18) — an upper bound for all four, since prefix totals also grow tenfold
+across that span. **Any projection beyond 100 peers is *extrapolated*** and
+assumes a linearity this campaign did not demonstrate; the 42% spread at the
+midpoint says the curve needs measuring. The 1,000-peer receipts
+([`perf/scale-receipt-2026-07.md`](perf/scale-receipt-2026-07.md),
+[`perf/route-server-1000-2026-07.md`](perf/route-server-1000-2026-07.md)) are
+the evidence at that scale.
 
-| | BIRD 2.18 | GoBGP 4.3.0 | rustbgpd (main / v0.32.0) |
-|---|---|---|---|
-| Convergence | 1s | 2s | 1s |
-| Max CPU | 2% | 118% | 14% |
-| Max RSS | 10 MB | 55 MB | 94 MB |
-| Total time | 9s | 10s | 8s |
+**OpenBGPD could not be collected — a bgperf2 harness defect, not a daemon
+result.** The harness launches `/usr/local/sbin/bgpd` while the image ships
+binaries at `/usr/sbin/`, so the harness config never loads and the image's own
+entrypoint runs with zero neighbors; `monitor.py wait_established()` is an
+unbounded loop and hung about 11 minutes before the attempt was killed. The
+comparison is therefore four-way. Root cause and retained evidence are in the
+[receipt](perf/competitive-bgperf2-2026-07.md#openbgpd-could-not-be-collected--harness-defect-not-a-daemon-result).
+The [IXP receipt matrix](perf/ixp-matrix-2026-07.md) carries a head-to-head
+OpenBGPD 9.1 comparison through a different harness.
 
-#### 2 peers × 10,000 prefixes (20k total)
+One BIRD cell needed a third run: 100p × 1k total measured 24.51 s, then
+15.17 s, then 15.22 s, and the published median is 15.22 s. The outlier is a
+harness startup artifact — the monitor-wait column read 9 s in that run against
+0 s in the other two, and the difference is 9.34 s — not a BIRD result; BIRD's
+convergence column read 5 s in all three runs.
 
-| | BIRD 2.18 | GoBGP 4.3.0 | rustbgpd (main / v0.32.0) |
-|---|---|---|---|
-| Convergence | 1s | 2s | 1s |
-| Max CPU | 1% | 78% | 13% |
-| Max RSS | 10 MB | 45 MB | 79 MB |
-| Total time | 9s | 10s | 8s |
-
-#### 2 peers × 100,000 prefixes (200k total)
-
-| | BIRD 2.18 | GoBGP 4.3.0 | rustbgpd (main / v0.32.0) |
-|---|---|---|---|
-| Convergence | 2s | 5s | 2s |
-| Max CPU | 10% | 598% | 115% default (239% eh-on) |
-| Max RSS | 30 MB | 203 MB | 284 MB default (346 MB eh-on) |
-| Total time | 13s | 16s | 12s |
+**Deltas against the 2026-07-09 v0.50.0 three-way run** (same host and harness,
+event-history off in both): the three shared shapes are flat to slightly better
+on time (10p × 1k total 8.3 → 8.23 s, 2p × 10k 8.3 → 8.26 s, 2p × 100k
+12.1 → 12.32 s) and 2p/100k RSS moved 246 → 212.0 MiB. The earlier run's memory
+figures were reported in 1000-based MB against this run's MiB, so small
+differences there are partly unit conversion; the shape of the result is
+unchanged. BIRD and GoBGP versions are identical across the two runs.
 
 ### Understanding the Numbers
 
-**Session establishment.** The total-time rows above reflect post-fast-retry
-`main`, re-measured 2026-05-30 on the same host. rustbgpd dials the passive
-BIRD testers, which bind their listeners ~1-2s after rustbgpd starts, so the
-first outbound TCP dial is refused. Before the fast-retry change, that first
-refusal armed a ~10s backoff timer (`connect_retry_secs` base × exponential),
-so rustbgpd sat idle until the timer fired even though the testers were ready
-within ~2s — establishment took ~10s. `main` now retries the first two refused
-dials at a 1s floor before resuming the exponential curve, catching the testers
-almost immediately; unreachable peers that wait for the TCP connect timeout, and
-OPEN-validation / NOTIFICATION failures, still use the slower guards so
-misconfigured peers do not hot-loop. A controlled same-host before/after at
-10 peers × 1,000 prefixes (both event-history off, isolating the FSM change from
-the v0.32.0 event-history default flip) measured total time **16.7s → 8.3s**
-(establishment ~10s → ~2s).
+**Session establishment.** rustbgpd dials the passive BIRD testers, which bind
+their listeners ~1-2s after rustbgpd starts, so the first outbound TCP dial is
+refused. Before the fast-retry change, that first refusal armed a ~10s backoff
+timer (`connect_retry_secs` base × exponential), so rustbgpd sat idle until the
+timer fired even though the testers were ready within ~2s — establishment took
+~10s. `main` now retries the first two refused dials at a 1s floor before
+resuming the exponential curve, catching the testers almost immediately;
+unreachable peers that wait for the TCP connect timeout, and OPEN-validation /
+NOTIFICATION failures, still use the slower guards so misconfigured peers do not
+hot-loop. A controlled same-host before/after at 10 peers × 1,000 prefixes
+measured total time **16.7s → 8.3s** (establishment ~10s → ~2s).
 
-**Route processing.** At 10k and below, convergence completes in 2 seconds —
-matching GoBGP and within 1 second of BIRD. At 200k prefixes, rustbgpd
-converges in 2 seconds (monitor time), competitive with BIRD (2s) and faster
-than GoBGP (5s). The key optimizations were: (1) secondary prefix index in
-`AdjRibOut` converting per-prefix lookup from O(N) to O(1), and (2) skipping
-unnecessary `Arc::make_mut()` deep clones in the distribution path when no
-export policy modifications are configured.
+**Establishment versus flood at 100 peers.** Splitting convergence into "time to
+the monitor's first prefix" and "time from first prefix to all 100,000"
+separates session setup from route processing. The split was measured
+identically in all three runs for rustbgpd, BIRD, and GoBGP: rustbgpd reaches
+its first prefix at 1 s and the full 100,000 at 2 s, in one step; BIRD ramps
+1 s → 4 s; GoBGP climbs linearly for seventeen seconds, 1 s → 18 s. FRR is the
+opposite shape — its monitor count stays at zero through second 4, then the
+whole table lands in a single sample at second 6. FRR spends its time before
+the flood; rustbgpd does neither.
 
-**CPU efficiency.** rustbgpd uses a single-threaded RIB (single tokio task,
-no locks). At 200k scale it peaks at ~115% CPU by default and ~239% with the
-(opt-in) event-history outbox enabled (RIB + transport + the SQLite outbox
-writer) — so the durable outbox roughly doubles peak flood CPU when on. GoBGP
-peaks far higher (~598%, goroutine-per-peer + GC); BIRD is the most efficient
-at ~10% CPU, reflecting decades of C optimization with a radix-tree RIB.
+**Route processing.** At 10k and below, convergence completes in 2 seconds,
+matching BIRD and ahead of GoBGP and FRR. At 200k prefixes rustbgpd converges
+in 3 seconds, matching BIRD, ahead of FRR (4s) and GoBGP (6s). The key
+optimizations were: (1) secondary prefix index in `AdjRibOut` converting
+per-prefix lookup from O(N) to O(1), and (2) skipping unnecessary
+`Arc::make_mut()` deep clones in the distribution path when no export policy
+modifications are configured.
 
-**Memory.** *Full-daemon RSS* at 2p/100k is ~284 MB by default / ~346 MB with
-the opt-in event-history outbox — **both above GoBGP's ~203 MB** and far more
-than BIRD's ~30 MB at this scale. A whole-daemon dhat heap profile
-(2026-06-02; see the *Memory Footprint* correction) attributes that RSS to
-**RIB route-storage map/index bucket arrays — ~76% of the live-at-peak heap** —
-across the three-layer Adj-RIB-In + Loc-RIB + Adj-RIB-Out model, with Adj-RIB-Out
-the single largest piece (~115 MB across its route map + prefix index). API /
-event / metrics operational surfaces were **negligible (<1 MB)**. The opt-in
-event-history outbox adds the on-vs-off RSS delta when enabled (~62 MB), but the
-default-off structural cost is the route maps, **not** operational surfaces. The
-earlier 60.6 MB "RIB-only is lean" figure is a synthetic Adj-RIB-In + Loc-RIB
-micro-bench that excludes Adj-RIB-Out and so undercounts full-daemon route
-storage. BIRD's radix-tree RIB with global attribute deduplication is what makes
-it an order of magnitude leaner on this same data. At full-table scale (900k
-prefixes, RIB-only micro-bench) rustbgpd's Adj-RIB-In + Loc-RIB is ~533 MB vs
-GoBGP's published 8–16+ GB.
+**CPU efficiency.** rustbgpd uses a single-threaded RIB (single tokio task, no
+locks). It peaks at ~41% at 2p/100k and ~122% at 100p/1k. GoBGP peaks far
+higher (565% and 1281%, goroutine-per-peer + GC). BIRD is the most efficient
+below 100 peers, reflecting decades of C optimization with a radix-tree RIB;
+at 100 peers BIRD and rustbgpd are close (101% vs 122%). FRR sits between.
+
+**Memory.** *Full-daemon RSS* at 2p/100k is 212.0 MiB — above GoBGP's
+202.8 MiB, below FRR's 228.4 MiB, and far above BIRD's 27.6 MiB. At 100p/1k
+rustbgpd is last of the four. A whole-daemon dhat heap profile (2026-06-02; see
+the *Memory Footprint* correction) attributes that RSS to **RIB route-storage
+map/index bucket arrays — ~76% of the live-at-peak heap** — across the
+three-layer Adj-RIB-In + Loc-RIB + Adj-RIB-Out model, with Adj-RIB-Out the
+single largest piece. API / event / metrics operational surfaces were
+**negligible (<1 MB)**. The opt-in event-history outbox adds RSS when enabled,
+but the default-off structural cost is the route maps, **not** operational
+surfaces. The earlier 60.6 MB "RIB-only is lean" figure is a synthetic
+Adj-RIB-In + Loc-RIB micro-bench that excludes Adj-RIB-Out and so undercounts
+full-daemon route storage. BIRD's radix-tree RIB with global attribute
+deduplication is what makes it an order of magnitude leaner on this same data.
+At full-table scale (900k prefixes, RIB-only micro-bench) rustbgpd's
+Adj-RIB-In + Loc-RIB is ~533 MB vs GoBGP's published 8–16+ GB.
 
 **gRPC under load.** A priority query channel separates read-only gRPC queries
 from the route-processing pipeline, ensuring management API requests are
@@ -1052,35 +1056,39 @@ updates.
 
 ### Comparison Summary
 
-| Metric | BIRD | GoBGP | rustbgpd |
-|--------|------|-------|----------|
-| Architecture | Single-threaded C, radix tree | Go, goroutine-per-peer | Single-threaded Rust, HashMap RIB |
-| Route processing (200k) | 2s | 5s | 2s |
-| CPU model | 1 core, very efficient | Multi-core, GC overhead | 1-2 cores, no GC |
-| Memory model | Radix tree, minimal overhead | Go heap, GC managed | Arc sharing, attribute interning |
-| Full-daemon RSS (200k) | 30 MB | 203 MB | 284 MB default / 346 MB eh-on |
-| RIB-only memory (200k, allocator-tracked) | n/a | n/a | 60.6 MB |
-| RIB-only (900k, micro-bench) | ~325 MB (published, 30 peers) | 8-16+ GB (published) | ~533 MB (2 peers + Loc-RIB) |
-| API during load | Responsive (no RIB contention) | Responsive (concurrent) | Responsive (priority query channel) |
+| Metric | BIRD | GoBGP | FRR | rustbgpd |
+|--------|------|-------|-----|----------|
+| Architecture | Single-threaded C, radix tree | Go, goroutine-per-peer | Multi-daemon C (`bgpd` + `zebra`) | Single-threaded Rust, HashMap RIB |
+| Total time (100p × 1k) | 15.22 s | 28.50 s | 16.01 s | **11.79 s** |
+| Convergence (100p × 1k) | 5 s | 20 s | 7 s | **3 s** |
+| Convergence (2p × 100k) | 3 s | 6 s | 4 s | **3 s** |
+| CPU model | 1 core, very efficient | Multi-core, GC overhead | 1-2 cores | 1-2 cores, no GC |
+| Memory model | Radix tree, global attribute dedup | Go heap, GC managed | Per-daemon route storage | Arc sharing, attribute interning |
+| Full-daemon RSS (2p × 100k) | **27.6 MiB** | 202.8 MiB | 228.4 MiB | 212.0 MiB |
+| Full-daemon RSS (100p × 1k) | **32.8 MiB** | 193.5 MiB | 134.1 MiB | 212.0 MiB *(last of four)* |
+| Marginal MiB/peer, 10 → 100p (*computed*) | **0.27** | 1.72 | 1.18 | 1.93 |
+| API during load | Responsive (no RIB contention) | Responsive (concurrent) | Responsive | Responsive (priority query channel) |
 
-BIRD is the clear performance leader — 30+ years of optimization in a
-purpose-built C codebase is hard to beat. On **convergence**, rustbgpd is
-competitive: it floods 200k prefixes in ~2 seconds (monitor time), matching
-BIRD and beating GoBGP (5s). On **full-daemon memory**, rustbgpd is no longer
-the leader it was at v0.4.2 — ~284 MB by default (346 MB with the opt-in outbox)
-at 2p/100k is above GoBGP's ~203 MB. The whole-daemon dhat profile (2026-06-02;
-see the *Memory Footprint* correction) attributes this to **RIB route-storage
-map/index bucket arrays** (~76% of the live-at-peak heap) across the three-layer
-Adj-RIB-In + Loc-RIB + Adj-RIB-Out model — **not** operational surfaces
-(negligible) or runtime threads (a worker-thread cap measured RSS-neutral). So
-the headroom for full-daemon RSS is **compact prefix-keyed RIB storage** —
-reducing `hashbrown` bucket overhead across those maps and prefix indexes — not
-operational-surface trimming. Note this does not contradict the rejected
-shared-`RouteData` refactor (below): that shared the Route *payload*, which is
+**Time:** rustbgpd is the fastest of the four on total time at every shape
+measured, and its convergence lead widens with peer count rather than with
+route count — 3 s against 5 / 7 / 20 s at 100 peers. That is the route-server
+shape, and it is where the update-group work shows.
+
+**Memory:** rustbgpd is not competitive with BIRD anywhere (4.6×–9.6×), sits
+just above GoBGP at 100 peers, and is last of the four at that shape. BIRD is
+30+ years of optimization in a purpose-built C codebase with a radix-tree RIB
+and global attribute deduplication; that gap is structural, not a tuning
+oversight. The open lever for rustbgpd remains **compact prefix-keyed RIB
+storage** — reducing `hashbrown` bucket overhead across the route maps and
+prefix indexes — plus whatever explains the 42% run-to-run RSS spread at 30
+peers, which is not yet understood. Note this does not contradict the rejected
+shared-`RouteData` refactor (above): that shared the Route *payload*, which is
 the minority cost; the dominant cost is the maps' bucket arrays, so the open
-lever is the map/index *data structure*, not payload sharing. BIRD's radix-tree
-RIB with global attribute deduplication stays an order of magnitude leaner on
-the same data.
+lever is the map/index *data structure*, not payload sharing.
+
+Historical progression of these figures across releases is in [Optimization
+History (end-to-end, bgperf2 2p/100k)](#optimization-history-end-to-end-bgperf2-2p100k)
+above.
 
 ## EVPN RR Scale (M33)
 

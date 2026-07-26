@@ -1,0 +1,36 @@
+COMPETITIVE BENCHMARK CAMPAIGN - ARTIFACT INDEX
+Benchmarked commit: 515659b191b7fde91a1a1c9f973e7c8ae3731086 (workspace version 0.60.0)
+Campaign window: 2026-07-26 00:22Z - 01:57Z
+
+src/                        git-archive export of 515659b1 (1918/1918 files, verified
+                            against `git ls-tree -r`). ALL builds and Phase D ran here,
+                            never in the working repo, so a concurrently active branch
+                            could not perturb the measurement. Repo confirmed clean
+                            before and after.
+
+meta/
+  phaseA-run{1,2,3}.yaml    bgperf2 batch configs, shapes 10x1k / 2x10k / 2x100k
+  phaseB-run{1,2,3}.yaml    bgperf2 batch configs, shapes 10x1k / 30x1k / 100x1k
+  quiet-gate.sh             idle interlock: BENCH_HOLD.lock absent + no cargo/rustc
+                            + 1-min load < 1.0, confirmed twice 30s apart
+  run-phase.sh              gate -> container cleanup -> bounded batch run
+  run-phaseD.sh             per-target: build unpinned, settle, measure taskset -c 8
+  openbgpd-defect.txt       root cause for the excluded OpenBGPD cell
+
+phaseA/  A{1,2,3}_*.csv     Phase A raw bgperf2 stats (3 runs x 3 shapes x 4 targets)
+phaseB/  B{1,2,3}_*.csv     Phase B raw bgperf2 stats (3 runs x 3 shapes x 4 targets)
+phaseD/  snapshot_allocation.csv   MRT snapshot timing samples (JSON lines)
+
+logs/
+  image-build.log           nocache Docker build of bgperf/rustbgpd:latest
+  phaseA-run{1,2,3}.log     full per-second progression incl. neighbors_accepted
+  phaseB-run{1,2,3}.log     ditto
+  phaseA-run1-ABORTED-openbgp-hang.log   the aborted 5-way attempt (kept as evidence)
+  phaseD.log                criterion build+measure transcript, all 11 bench targets
+  phaseD-custom.log         the two non-criterion harness benches
+  chain.log / chain3.log    phase sequencing + quiet-gate decisions
+
+src/target/criterion/<group>/[<bench_id>/]v0.61.0/estimates.json
+                            159 saved criterion baselines named "v0.61.0".
+                            To reuse from the repo later, copy that tree into the
+                            repo's target/criterion/ and pass --baseline v0.61.0.
