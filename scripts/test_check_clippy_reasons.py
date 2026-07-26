@@ -12,6 +12,7 @@ from pathlib import Path
 
 
 SCRIPT = Path(__file__).with_name("check-clippy-reasons.py")
+REPO = SCRIPT.parent.parent
 SPEC = importlib.util.spec_from_file_location("check_clippy_reasons", SCRIPT)
 assert SPEC is not None and SPEC.loader is not None
 checker = importlib.util.module_from_spec(SPEC)
@@ -40,6 +41,19 @@ class ClippyReasonTests(unittest.TestCase):
     def test_cli_and_event_history_are_ratcheted_by_default(self) -> None:
         self.assertIn("crates/cli/src", checker.DEFAULT_PATHS)
         self.assertIn("crates/event-history/src", checker.DEFAULT_PATHS)
+
+    def test_bfd_mrt_and_telemetry_are_ratcheted_and_clean(self) -> None:
+        for path in (
+            "crates/bfd/src",
+            "crates/mrt/src",
+            "crates/telemetry/src",
+        ):
+            with self.subTest(path=path):
+                self.assertIn(path, checker.DEFAULT_PATHS)
+        self.assertEqual(
+            checker.missing_reasons(REPO / "crates/telemetry/src/metrics.rs"),
+            [],
+        )
 
 
 if __name__ == "__main__":

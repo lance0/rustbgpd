@@ -21,6 +21,9 @@ DEFAULT_PATHS = (
     "crates/transport/src",
     "crates/wire/src",
     "crates/bmp/src",
+    "crates/bfd/src",
+    "crates/mrt/src",
+    "crates/telemetry/src",
 )
 ATTRIBUTE_HEAD = re.compile(r"#!?\[\s*(?:allow|expect)\s*\(")
 REASON = re.compile(r"\breason\s*=")

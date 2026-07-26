@@ -1907,10 +1907,10 @@ branch is between features.
   non-adversarial control-plane maps that show up in `dhat` or Criterion.
 - [ ] **CI gate: `#[allow(clippy::*)]` / `#[expect(clippy::*)]` requires
   `reason = "..."`.** The ratchet exists and CI enforces it for
-  `crates/rib/src`, whose suppressions are backfilled. Remaining work:
-  add more paths to `scripts/check-clippy-reasons.py` as each crate/file
-  group is backfilled; do not flip this to complete until the whole
-  workspace is covered.
+  the 14 backfilled crate source trees named in `DEFAULT_PATHS`. Remaining
+  work: backfill root `src/` and `crates/evpn-linux/src`, then add them to
+  `scripts/check-clippy-reasons.py`; do not flip this to complete until the
+  whole workspace is covered.
 - [x] **`cargo deny` for license / dependency / advisory audit.** Done: the
   dependabot + cargo-audit half of the stale branch had already landed;
   `deny.toml` now gates `cargo deny check advisories bans licenses sources`
