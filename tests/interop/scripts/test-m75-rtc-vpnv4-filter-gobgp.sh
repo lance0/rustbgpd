@@ -447,22 +447,35 @@ test_default_rtc_injection() {
 test_no_dataplane_install() {
     log "Test 9: RR installed nothing into any dataplane"
 
-    local mpls
-    mpls=$(docker exec "$RUSTBGPD" ip -M route show 2>/dev/null || true)
-    if [ -z "$mpls" ]; then
-        ok "RR MPLS routing table is empty"
-    else
-        fail "RR has unexpected MPLS routes"
-        echo "$mpls" >&2
+    local mpls ipv4
+    if capture_ip_routes mpls "$RUSTBGPD" MPLS -M; then
+        if [ -z "$mpls" ]; then
+            ok "RR MPLS routing table is empty"
+        else
+            fail "RR has unexpected MPLS routes"
+            printf '%s\n' "$mpls" >&2
+        fi
     fi
 
-    if docker exec "$RUSTBGPD" ip route show \
-        | grep -qE "${BLUE_PREFIX%/*}|${RED_PREFIX%/*}"; then
-        fail "RR kernel routing table contains a VPN-derived route"
-        docker exec "$RUSTBGPD" ip route show >&2 || true
-    else
-        ok "RR kernel routing table has no VPN-derived routes"
+    if capture_ip_routes ipv4 "$RUSTBGPD" IPv4; then
+        if grep -qE "${BLUE_PREFIX%/*}|${RED_PREFIX%/*}" <<<"$ipv4"; then
+            fail "RR kernel routing table contains a VPN-derived route"
+            printf '%s\n' "$ipv4" >&2
+        else
+            ok "RR kernel routing table has no VPN-derived routes"
+        fi
     fi
+}
+
+capture_ip_routes() {
+    local output_var=$1 container=$2 table_label=$3 captured
+    shift 3
+    if ! captured=$(docker exec "$container" ip "$@" route show 2>&1); then
+        fail "$container $table_label route inspection failed"
+        printf '%s\n' "$captured" >&2
+        return 1
+    fi
+    printf -v "$output_var" '%s' "$captured"
 }
 
 test_no_update_storm() {
