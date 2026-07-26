@@ -9,6 +9,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.61.0] — 2026-07-26
+
 > **Release framing.** This is the policy-safety line. RFC 8212
 > explicit-policy enforcement and per-peer outbound prefix limits both
 > ship complete and opt-in, `rustbgpd --check` learns to say when a
@@ -932,7 +934,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   daemon-authored write and a post-start template seed both read clean,
   a genuine external edit still warns with the same validate-and-SIGHUP
   advice, and a daemon that recorded nothing falls back to the previous
-  process-start comparison.
+  process-start comparison. The marker has whole-second precision: an
+  external edit within the same second as the last daemon read or write
+  can compare equal and evade the warning.
 
 - **Three gRPC errors no longer tell operators to pass a `--config` flag
   that does not exist.** `config history`, config transactions, and
