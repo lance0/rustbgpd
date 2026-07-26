@@ -1,0 +1,10 @@
+   Compiling rustbgpd-wire v0.15.0 (<WORKTREE>/crates/wire)
+    Finished `bench` profile [optimized] target(s) in 3.97s
+     Running benches/codec.rs (target/release/deps/codec-b12ffc8d7ea03d71)
+
+thread 'main' panicked at crates/wire/benches/codec.rs:738:5:
+assertion `left == right` failed: the fixed duplicate table must remove one 48-byte allocation per revised decode
+  left: (50000, 0, 10000, 60000, 26920000)
+ right: (40000, 0, 10000, 50000, 26440000)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+error: bench failed, to rerun pass `-p rustbgpd-wire --bench codec`

@@ -212,6 +212,13 @@ machine-readable CSV or JSON summary and index the receipt from
 `target/criterion/` are useful review evidence, but they are not a durable
 project receipt.
 
+The revised UPDATE duplicate-table receipt is a worked example of why a
+same-revision control must be read before the target mean: the target's six
+attempts are separated from the control band, but the control has a systematic
+head-side bias large enough that the raw target percentage is not published as
+a causal speedup. See
+[`perf/revised-update-duplicate-table-2026-07.md`](perf/revised-update-duplicate-table-2026-07.md).
+
 ## Manual CI Workflow
 
 `.github/workflows/bench.yml` exposes the same comparison as a manual
