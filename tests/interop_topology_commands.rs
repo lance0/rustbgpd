@@ -93,6 +93,26 @@ fn m83_eor_order_rejects_same_frame_reversal() {
 }
 
 #[test]
+fn m83_reload_continuity_rejects_a_dropped_peer() {
+    // Destructive red proof: replacing the production continuity oracle with
+    // the former nonzero-and-unchanged connectionsEstablished predicate makes
+    // the script's dropped-not-reconnected fixture pass and this test fail.
+    let script = interop_path("scripts/test-m83-routeserver-multistack.sh");
+    let output = Command::new("bash")
+        .arg(&script)
+        .arg("--self-test-session-continuity")
+        .output()
+        .unwrap_or_else(|error| panic!("run {}: {error}", script.display()));
+    assert!(
+        output.status.success(),
+        "{} --self-test-session-continuity failed\nstdout:\n{}\nstderr:\n{}",
+        script.display(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn m83_capture_and_reload_receipts_cannot_become_no_ops() {
     // Destructive red proof: deleting the /proc signal, pcap validation, live
     // LP mutation, or generation probe makes the matching source fence fail.
@@ -105,12 +125,28 @@ fn m83_capture_and_reload_receipts_cannot_become_no_ops() {
         "kill -INT \"$pid\"",
         "test -s /tmp/m83.pcap",
         "tshark -r /tmp/m83.pcap -c 1",
-        "s/^set_local_pref = 100$/set_local_pref = 110/",
-        "100.67.0.0/24",
-        ".policy_generation",
     ] {
         assert!(
             source.contains(required),
+            "{} must retain receipt guard `{required}`",
+            script.display()
+        );
+    }
+
+    let reload = source
+        .split_once("assert_reload_stability() {")
+        .and_then(|(_, remainder)| remainder.split_once("# Main").map(|(body, _)| body))
+        .expect("M83 reload receipt function has a bounded source section");
+    for required in [
+        "s/^set_local_pref = 100$/set_local_pref = 110/",
+        "100.67.0.0/24",
+        ".policy_generation",
+        "state_before=$(rs_neighbor_state \"$FRR_ADDR\")",
+        "state_after=$(rs_neighbor_state \"$FRR_ADDR\")",
+        "check_session_continuity",
+    ] {
+        assert!(
+            reload.contains(required),
             "{} must retain receipt guard `{required}`",
             script.display()
         );

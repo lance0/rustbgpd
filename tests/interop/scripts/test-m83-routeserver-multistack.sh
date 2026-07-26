@@ -75,7 +75,8 @@
 #   44  BIRD withdraws 203.0.113.0/24 → gone on GoBGP
 #   45  policy reload changes still-present FRR route 100.67.0.0/24
 #       from LP 100→110 and bumps its import-chain install generation
-#   46  the FRR session marker remains unchanged across that reload
+#   46  FRR remains authoritatively Established/non-stale with unchanged
+#       flap count, nondecreasing uptime, and cumulative session marker
 #
 # Prerequisites:
 #   - docker build --target dev -t rustbgpd:dev .
@@ -172,10 +173,75 @@ PY
     echo "M83 IPv4 EoR tuple-order self-test passed"
 }
 
-if [ "${1:-}" = "--self-test-eor-order" ]; then
-    self_test_ipv4_eor_order
-    exit
-fi
+authoritative_established_snapshot() {
+    printf '%s\n' "${1:?}" | jq -e '
+        type == "object"
+        and .state == "SESSION_STATE_ESTABLISHED"
+        and ((.stale // false) == false)
+        and ((try ((.flapCount // 0) | tonumber) catch -1) >= 0)
+        and ((try ((.uptimeSeconds // 0) | tonumber) catch -1) >= 0)
+    ' >/dev/null
+}
+
+check_session_continuity() {
+    local before=${1:?} after=${2:?} marker_before=${3:?} marker_after=${4:?}
+    authoritative_established_snapshot "$before" || return 1
+    authoritative_established_snapshot "$after" || return 1
+    jq -en \
+        --argjson before "$before" \
+        --argjson after "$after" \
+        --arg marker_before "$marker_before" \
+        --arg marker_after "$marker_after" '
+        (($before.flapCount // 0) | tonumber)
+            == (($after.flapCount // 0) | tonumber)
+        and (($after.uptimeSeconds // 0) | tonumber)
+            >= (($before.uptimeSeconds // 0) | tonumber)
+        and ($marker_before | test("^[1-9][0-9]*$"))
+        and $marker_after == $marker_before
+    ' >/dev/null
+}
+
+self_test_session_continuity() {
+    local before healthy dropped stale flapped replaced marker_before marker_after
+    before='{"state":"SESSION_STATE_ESTABLISHED","flapCount":2,"uptimeSeconds":120}'
+    healthy='{"state":"SESSION_STATE_ESTABLISHED","flapCount":2,"uptimeSeconds":121}'
+    dropped='{"state":"SESSION_STATE_ACTIVE","flapCount":2,"uptimeSeconds":0}'
+    stale='{"state":"SESSION_STATE_ESTABLISHED","stale":true,"flapCount":2,"uptimeSeconds":121}'
+    flapped='{"state":"SESSION_STATE_ESTABLISHED","flapCount":3,"uptimeSeconds":1}'
+    replaced='{"state":"SESSION_STATE_ESTABLISHED","flapCount":2,"uptimeSeconds":1}'
+    marker_before=7
+    marker_after=7
+
+    # The former proof was only this marker predicate. Demonstrate that it
+    # accepts a peer that dropped and never reconnected before requiring the
+    # production continuity oracle to reject that same fixture.
+    if [ "$marker_before" != "$marker_after" ] || [ "$marker_after" = "0" ]; then
+        echo "ERROR: marker-only discriminator fixture is invalid" >&2
+        return 1
+    fi
+    if ! check_session_continuity "$before" "$healthy" "$marker_before" "$marker_after"; then
+        echo "ERROR: healthy authoritative continuity fixture failed" >&2
+        return 1
+    fi
+    for invalid in "$dropped" "$stale" "$flapped" "$replaced"; do
+        if check_session_continuity "$before" "$invalid" "$marker_before" "$marker_after"; then
+            echo "ERROR: invalid continuity fixture passed: $invalid" >&2
+            return 1
+        fi
+    done
+    echo "M83 authoritative session-continuity self-test passed"
+}
+
+case "${1:-}" in
+    --self-test-eor-order)
+        self_test_ipv4_eor_order
+        exit
+        ;;
+    --self-test-session-continuity)
+        self_test_session_continuity
+        exit
+        ;;
+esac
 
 TOPO="m83-routeserver-multistack"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -201,6 +267,12 @@ FRR_ADDR="10.83.3.2"
 
 rs_ctl() {
     docker exec "$RUSTBGPD" rbgp -s http://127.0.0.1:50051 "$@" 2>/dev/null
+}
+
+rs_neighbor_state() {
+    grpcurl_call \
+        -d "{\"address\": \"${1:?}\"}" \
+        "$GRPC_ADDR" rustbgpd.v1.NeighborService/GetNeighborState 2>/dev/null
 }
 
 birdc_route_all() {
@@ -785,9 +857,22 @@ assert_withdraw_propagation() {
 
 assert_reload_stability() {
     log "Assertions 45-46: live route change and session stability through a policy reload"
-    local marker_before marker_after lp_before lp_after generation_before generation_after
-    marker_before=$(docker exec "$FRR" vtysh -c "show bgp neighbors ${RS_FRR_ADDR} json" 2>/dev/null \
-        | jq -r --arg p "$RS_FRR_ADDR" '.[$p].connectionsEstablished // 0')
+    local marker_before marker_after state_before state_after
+    local flaps_before flaps_after uptime_before uptime_after
+    local lp_before lp_after generation_before generation_after
+    if ! marker_before=$(docker exec "$FRR" vtysh \
+        -c "show bgp neighbors ${RS_FRR_ADDR} json" 2>/dev/null \
+        | jq -er --arg p "$RS_FRR_ADDR" '.[$p].connectionsEstablished // 0'); then
+        fail "FRR cumulative establishment marker unavailable before reload"
+        return
+    fi
+    if ! state_before=$(rs_neighbor_state "$FRR_ADDR") \
+        || ! authoritative_established_snapshot "$state_before"; then
+        fail "FRR continuity baseline is not an authoritative, non-stale Established snapshot"
+        return
+    fi
+    flaps_before=$(printf '%s\n' "$state_before" | jq -r '(.flapCount // 0) | tonumber')
+    uptime_before=$(printf '%s\n' "$state_before" | jq -r '(.uptimeSeconds // 0) | tonumber')
     lp_before=$(rs_ctl rib --prefix 100.67.0.0/24 -j \
         | jq -er --arg peer "$FRR_ADDR" '
             [.[] | select(.prefix == "100.67.0.0/24" and .peer_address == $peer)]
@@ -840,13 +925,20 @@ assert_reload_stability() {
         fail "live reload did not move FRR probe LP/generation (LP $lp_before→$lp_after, generation $generation_before→$generation_after)"
     fi
 
-    marker_after=$(docker exec "$FRR" vtysh -c "show bgp neighbors ${RS_FRR_ADDR} json" 2>/dev/null \
-        | jq -r --arg p "$RS_FRR_ADDR" '.[$p].connectionsEstablished // 0')
-    if [ -n "$marker_before" ] && [ "$marker_before" = "$marker_after" ] \
-        && [ "$marker_after" != "0" ]; then
-        ok "FRR session marker unchanged across reload (connectionsEstablished=$marker_after)"
+    marker_after=$(docker exec "$FRR" vtysh \
+        -c "show bgp neighbors ${RS_FRR_ADDR} json" 2>/dev/null \
+        | jq -er --arg p "$RS_FRR_ADDR" '.[$p].connectionsEstablished // 0') \
+        || marker_after=""
+    state_after=$(rs_neighbor_state "$FRR_ADDR") || state_after='{}'
+    flaps_after=$(printf '%s\n' "$state_after" | jq -r '(.flapCount // 0) | tonumber' 2>/dev/null) \
+        || flaps_after="unavailable"
+    uptime_after=$(printf '%s\n' "$state_after" | jq -r '(.uptimeSeconds // 0) | tonumber' 2>/dev/null) \
+        || uptime_after="unavailable"
+    if check_session_continuity \
+        "$state_before" "$state_after" "$marker_before" "$marker_after"; then
+        ok "FRR stayed authoritatively Established/non-stale across reload (flapCount $flaps_before→$flaps_after, uptime $uptime_before→$uptime_after, connectionsEstablished=$marker_after)"
     else
-        fail "FRR session marker moved across reload ($marker_before→$marker_after)"
+        fail "FRR session continuity failed across reload (state=$(printf '%s\n' "$state_after" | jq -r '.state // "unavailable"' 2>/dev/null || echo unavailable), stale=$(printf '%s\n' "$state_after" | jq -r '.stale // false' 2>/dev/null || echo unavailable), flapCount $flaps_before→$flaps_after, uptime $uptime_before→$uptime_after, connectionsEstablished $marker_before→${marker_after:-unavailable})"
     fi
 }
 
