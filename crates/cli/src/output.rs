@@ -367,6 +367,15 @@ pub struct JsonNegotiatedSession {
     pub four_octet_as: Option<bool>,
     pub families: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub peer_route_refresh: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peer_enhanced_route_refresh: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peer_extended_message: Option<bool>,
+    /// Directional send-side BGP message limit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outbound_max_message_bytes: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub graceful_restart: Option<JsonNegotiatedGracefulRestart>,
 }
 
@@ -1348,6 +1357,10 @@ mod tests {
                 remote_router_id: Some("192.0.2.7".to_string()),
                 four_octet_as: Some(false),
                 families: vec!["ipv4_unicast".to_string()],
+                peer_route_refresh: Some(false),
+                peer_enhanced_route_refresh: Some(false),
+                peer_extended_message: Some(false),
+                outbound_max_message_bytes: Some(4096),
                 graceful_restart: Some(JsonNegotiatedGracefulRestart {
                     peer_families: vec!["ipv4_unicast".to_string()],
                     peer_restart_time_seconds: Some(0),
@@ -1514,11 +1527,22 @@ mod tests {
         assert_eq!(value["messages_sent"], 21);
         assert_eq!(value["route_reflector_client"], false);
         // Load-bearing: dropping protobuf scalar presence at the JSON
-        // boundary, collapsing false/zero, or renaming either nested family
-        // field makes these exact assertions or the inventory shape check red.
+        // boundary, collapsing false/zero, dropping a capability key, or
+        // renaming either nested family field makes an exact assertion or the
+        // inventory shape check red.
         assert_eq!(value["negotiation_available"], true);
         assert_eq!(value["negotiated_session"]["hold_time_seconds"], 0);
         assert_eq!(value["negotiated_session"]["four_octet_as"], false);
+        assert_eq!(value["negotiated_session"]["peer_route_refresh"], false);
+        assert_eq!(
+            value["negotiated_session"]["peer_enhanced_route_refresh"],
+            false
+        );
+        assert_eq!(value["negotiated_session"]["peer_extended_message"], false);
+        assert_eq!(
+            value["negotiated_session"]["outbound_max_message_bytes"],
+            4096
+        );
         assert_eq!(
             value["negotiated_session"]["graceful_restart"]["peer_restart_time_seconds"],
             0
@@ -1527,6 +1551,22 @@ mod tests {
             value["negotiated_session"]["graceful_restart"]
                 .get("effective_retention_time_seconds")
                 .is_none()
+        );
+        let negotiated = detail.negotiated_session.as_mut().unwrap();
+        negotiated.peer_route_refresh = Some(true);
+        negotiated.peer_enhanced_route_refresh = Some(true);
+        negotiated.peer_extended_message = Some(true);
+        negotiated.outbound_max_message_bytes = Some(65_535);
+        let value = serde_json::to_value(&detail).expect("JSON serialize");
+        assert_eq!(value["negotiated_session"]["peer_route_refresh"], true);
+        assert_eq!(
+            value["negotiated_session"]["peer_enhanced_route_refresh"],
+            true
+        );
+        assert_eq!(value["negotiated_session"]["peer_extended_message"], true);
+        assert_eq!(
+            value["negotiated_session"]["outbound_max_message_bytes"],
+            65_535
         );
         assert_eq!(value["graceful_shutdown_advertise_intent"], true);
         assert_eq!(value["selection_deferral"][0]["afi"], 1);

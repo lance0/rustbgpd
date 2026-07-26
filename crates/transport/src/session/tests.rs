@@ -967,9 +967,10 @@ async fn warm_checkpoint_query_uses_current_gr_and_add_path_receive_direction() 
 }
 
 /// Load-bearing proof: removing the Established-state gate, copying configured
-/// families, omitting the peer/local restart-time cap, or projecting the raw
-/// GR capability families instead of their usable intersection makes an exact
-/// field assertion below fail.
+/// families, omitting a negotiated capability, deriving the outbound limit
+/// from our advertisement instead of the peer's, omitting the peer/local
+/// restart-time cap, or projecting the raw GR capability families instead of
+/// their usable intersection makes an exact field assertion below fail.
 #[tokio::test]
 async fn query_state_projects_established_negotiation_and_capped_gr_runtime() {
     let mut peer_config = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
@@ -994,6 +995,9 @@ async fn query_state_projects_established_negotiation_and_capped_gr_runtime() {
                     safi: Safi::Unicast,
                 },
                 Capability::FourOctetAs { asn: 65002 },
+                Capability::RouteRefresh,
+                Capability::EnhancedRouteRefresh,
+                Capability::ExtendedMessage,
                 Capability::GracefulRestart {
                     restart_state: false,
                     notification: false,
@@ -1040,6 +1044,13 @@ async fn query_state_projects_established_negotiation_and_capped_gr_runtime() {
     assert_eq!(negotiated.remote_router_id, Ipv4Addr::new(192, 0, 2, 7));
     assert!(negotiated.four_octet_as);
     assert_eq!(negotiated.families, vec![(Afi::Ipv4, Safi::Unicast)]);
+    assert!(negotiated.peer_route_refresh);
+    assert!(negotiated.peer_enhanced_route_refresh);
+    assert!(negotiated.peer_extended_message);
+    assert_eq!(
+        negotiated.outbound_max_message_bytes,
+        rustbgpd_wire::EXTENDED_MAX_MESSAGE_LEN
+    );
     assert_eq!(
         negotiated.graceful_restart,
         Some(crate::NegotiatedGracefulRestartState {
@@ -1051,7 +1062,8 @@ async fn query_state_projects_established_negotiation_and_capped_gr_runtime() {
 }
 
 /// Load-bearing proof: deriving effective retention solely from peer GR
-/// capability makes this test fail because the local helper is disabled.
+/// capability, inventing absent capabilities, or reporting the extended
+/// outbound limit without the peer capability makes an exact assertion fail.
 #[tokio::test]
 async fn query_state_with_local_gr_helper_disabled_omits_effective_retention() {
     let mut session = make_test_session(65001, 65002);
@@ -1092,6 +1104,13 @@ async fn query_state_with_local_gr_helper_disabled_omits_effective_retention() {
     let negotiated = state.await.unwrap().negotiated_session.unwrap();
     assert_eq!(negotiated.hold_time, 0);
     assert!(!negotiated.four_octet_as);
+    assert!(!negotiated.peer_route_refresh);
+    assert!(!negotiated.peer_enhanced_route_refresh);
+    assert!(!negotiated.peer_extended_message);
+    assert_eq!(
+        negotiated.outbound_max_message_bytes,
+        rustbgpd_wire::MAX_MESSAGE_LEN
+    );
     assert_eq!(
         negotiated.graceful_restart,
         Some(crate::NegotiatedGracefulRestartState {

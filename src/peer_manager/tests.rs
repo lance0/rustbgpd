@@ -2184,6 +2184,9 @@ async fn negotiated_snapshot_uses_only_fresh_established_actor_state() {
         four_octet_as: false,
         families: vec![(Afi::Ipv6, Safi::Unicast)],
         peer_route_refresh: true,
+        peer_enhanced_route_refresh: true,
+        peer_extended_message: true,
+        outbound_max_message_bytes: rustbgpd_wire::EXTENDED_MAX_MESSAGE_LEN,
         graceful_restart: None,
     });
 
@@ -7772,6 +7775,9 @@ fn test_negotiated_session(route_refresh: bool) -> rustbgpd_transport::Negotiate
         four_octet_as: true,
         families: vec![(Afi::Ipv4, Safi::Unicast)],
         peer_route_refresh: route_refresh,
+        peer_enhanced_route_refresh: false,
+        peer_extended_message: false,
+        outbound_max_message_bytes: rustbgpd_wire::MAX_MESSAGE_LEN,
         graceful_restart: None,
     }
 }

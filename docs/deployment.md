@@ -643,6 +643,13 @@ Most data-oriented read commands support `--json` for scripting. Commands with
 fixed formats, such as `metrics`, `completions`, and `top`, keep their
 command-specific output.
 
+For an Established neighbor, `rbgp neighbor <addr>` reports whether the peer
+negotiated Route Refresh, Enhanced Route Refresh, and Extended Messages, plus
+the directional maximum BGP message size rustbgpd may send (4096 or 65535
+bytes). The JSON fields preserve `false` as an explicit negotiated result and
+omit values an older daemon did not expose; a missing live-session snapshot is
+reported separately by `negotiation_available`.
+
 ## Upgrade & state migration
 
 ### Routine upgrade (no schema change)

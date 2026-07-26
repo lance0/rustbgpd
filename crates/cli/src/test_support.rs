@@ -823,6 +823,10 @@ impl rustbgpd_api::proto::neighbor_service_server::NeighborService for MockNeigh
                 remote_router_id: Some("192.0.2.7".to_string()),
                 four_octet_as: Some(true),
                 families: vec!["ipv4_unicast".to_string()],
+                peer_route_refresh: Some(true),
+                peer_enhanced_route_refresh: Some(true),
+                peer_extended_message: Some(true),
+                outbound_max_message_bytes: Some(65_535),
                 graceful_restart: Some(server_proto::NegotiatedGracefulRestartState {
                     peer_families: vec!["ipv4_unicast".to_string()],
                     peer_restart_time_seconds: Some(777),
