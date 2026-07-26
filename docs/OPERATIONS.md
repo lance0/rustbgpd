@@ -1321,11 +1321,12 @@ does not expose the status, because "no evidence" is not "no problem". A red
 verdict here never affects `/readyz`: missing operator policy is a
 configuration state to repair, not a daemon that cannot serve traffic.
 
-First-deploy probes (each bounded to a 2s timeout, read-only):
+First-deploy checks (network probes are bounded to a 2s timeout; all are read-only):
 
 | Check | What it probes | Red/yellow advice |
 |-------|----------------|-------------------|
 | `bgp.listener` | Daemon up: TCP connect to the BGP listen port. Daemon down: test-bind the port and release it | `CAP_NET_BIND_SERVICE` for ports below 1024; port-in-use is yellow (an unreachable daemon may hold it) |
+| `rpki.vrp_table` | With configured caches and a reachable daemon, sums the complete IPv4 + IPv6 `bgp_rpki_vrp_count` snapshot | yellow when the merged table is zero, missing, malformed, or unavailable; verify RTR synchronization and `/metrics` |
 | `rpki.cache.<addr>.reachable` | TCP connect to each `[rpki] cache_servers` entry | origin validation stays degraded until the cache connects |
 | `bmp.collector.<addr>.reachable` | TCP connect to each `[bmp] collectors` entry | monitoring export is down; the daemon retries on its reconnect interval |
 | `gnmi_dialout.<name>.reachable` | TCP connect to each `[gnmi_dialout] targets` entry | dial-out telemetry backs off and retries |
@@ -1350,8 +1351,8 @@ rustbgpd-doctor-<ts>/
 └── system/                  # environment.json, health.json, global.json, metrics.prom, daemon rlimits
 ```
 
-Exit codes: `0` all checks green, `1` error, `2` bundle written but one or
-more checks are red. A doctor run against a down daemon still produces a
+Exit codes: `0` no checks red (green and yellow warnings may be present), `1`
+error, `2` bundle written but one or more checks are red. A down-daemon run produces a
 bundle (system facts + crash reports) and the manifest records which
 sections are missing.
 

@@ -758,6 +758,42 @@ fn deploy_targets(toml_text: &str) -> DeployTargets {
     }
 }
 
+fn rpki_vrp_table_check(configured: bool, metrics: Option<&str>) -> Option<Check> {
+    if !configured {
+        return None;
+    }
+    let count = metrics.and_then(crate::commands::control::rpki_vrp_count_sum);
+    let (status, detail) = match count {
+        Some(count @ 1..) => (
+            CheckStatus::Ok,
+            format!("RPKI VRP table contains {count} IPv4+IPv6 entries"),
+        ),
+        Some(0) => (
+            CheckStatus::Warn,
+            "RPKI caches are configured but the daemon reports 0 VRPs; \
+             verify RTR synchronization before relying on NotFound decisions"
+                .to_string(),
+        ),
+        None if metrics.is_some() => (
+            CheckStatus::Warn,
+            "RPKI caches are configured but bgp_rpki_vrp_count is absent or malformed; \
+             inspect /metrics and RTR synchronization"
+                .to_string(),
+        ),
+        None => (
+            CheckStatus::Warn,
+            "RPKI caches are configured but the metrics snapshot is unavailable; \
+             rerun doctor after the metrics RPC succeeds"
+                .to_string(),
+        ),
+    };
+    Some(Check {
+        name: "rpki.vrp_table".to_string(),
+        status,
+        detail,
+    })
+}
+
 /// One bounded TCP connect, immediately dropped on success.
 async fn probe_tcp(addr: String) -> Result<(), String> {
     match tokio::time::timeout(
@@ -1177,6 +1213,7 @@ pub(crate) async fn run(
     let mut daemon_version: Option<String> = None;
     let mut state_dir: Option<String> = None;
     let mut effective_toml: Option<String> = None;
+    let mut metrics_text: Option<String> = None;
     let mut tcp_ao_support = crate::proto::TcpAoSupport::Unspecified.into();
     let daemon_reachable = connection.is_ok();
 
@@ -1278,10 +1315,9 @@ pub(crate) async fn run(
             // system/metrics.prom.
             match control.get_metrics(MetricsRequest {}).await {
                 Ok(resp) => {
-                    bundle.add(
-                        "system/metrics.prom",
-                        redact_text(&resp.into_inner().prometheus_text).into_bytes(),
-                    );
+                    let text = resp.into_inner().prometheus_text;
+                    bundle.add("system/metrics.prom", redact_text(&text).into_bytes());
+                    metrics_text = Some(text);
                 }
                 Err(e) => {
                     sections.insert("system", format!("partial: metrics RPC failed: {e}"));
@@ -1301,6 +1337,12 @@ pub(crate) async fn run(
                 Ok(resp) => {
                     let toml_text = resp.into_inner().toml;
                     for check in tcp_ao_capability_checks(&toml_text, tcp_ao_support) {
+                        reporter.record(check.name, check.status, check.detail);
+                    }
+                    if let Some(check) = rpki_vrp_table_check(
+                        !deploy_targets(&toml_text).rpki_caches.is_empty(),
+                        metrics_text.as_deref(),
+                    ) {
                         reporter.record(check.name, check.status, check.detail);
                     }
                     state_dir = parse_state_dir(&toml_text);
@@ -2179,6 +2221,36 @@ paths = ["x"]
         assert!(empty.gnmi_collectors.is_empty());
     }
 
+    /// Red proofs: zero-as-OK and dropping the configured guard fail below.
+    #[test]
+    fn rpki_vrp_table_check_distinguishes_configuration_and_snapshot_state() {
+        assert!(rpki_vrp_table_check(false, None).is_none());
+
+        let nonzero = rpki_vrp_table_check(
+            true,
+            Some("bgp_rpki_vrp_count{af=\"ipv4\"} 1\nbgp_rpki_vrp_count{af=\"ipv6\"} 2"),
+        )
+        .unwrap();
+        assert_eq!(nonzero.status, CheckStatus::Ok);
+
+        let zero = rpki_vrp_table_check(
+            true,
+            Some("bgp_rpki_vrp_count{af=\"ipv4\"} 0\nbgp_rpki_vrp_count{af=\"ipv6\"} 0"),
+        )
+        .unwrap();
+        assert_eq!(zero.status, CheckStatus::Warn);
+        assert_eq!(
+            rpki_vrp_table_check(true, Some("unrelated_metric 1"))
+                .unwrap()
+                .status,
+            CheckStatus::Warn
+        );
+        assert_eq!(
+            rpki_vrp_table_check(true, None).unwrap().status,
+            CheckStatus::Warn
+        );
+    }
+
     #[tokio::test]
     async fn reachability_probe_is_green_for_listening_and_red_for_refused() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2610,6 +2682,9 @@ paths = ["x"]
 "#,
             state = state_dir.path().display()
         ));
+        *server.state.metrics_text.lock().await = Some(
+            "bgp_rpki_vrp_count{af=\"ipv4\"} 0\nbgp_rpki_vrp_count{af=\"ipv6\"} 0\n".to_string(),
+        );
         let connection = connect(&server.addr, None).await;
         let dir = tempfile::tempdir().unwrap();
         let bundle_path = dir.path().join("bundle.tar.gz");
@@ -2649,6 +2724,8 @@ paths = ["x"]
             status_of(&format!("rpki.cache.127.0.0.1:{live_port}.reachable")),
             "ok"
         );
+        // Red proof: removing effective-config/metrics wiring removes this check.
+        assert_eq!(status_of("rpki.vrp_table"), "warn");
         assert_eq!(status_of(&format!("rpki.cache.{dead}.reachable")), "fail");
         assert_eq!(
             status_of(&format!("bmp.collector.{dead}.reachable")),
