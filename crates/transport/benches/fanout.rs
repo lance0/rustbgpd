@@ -50,7 +50,7 @@ const PEER_COUNTS: [usize; 4] = [1, 8, 64, 256];
 /// IXP route-server fanout factors retained in the exact-export receipt.
 const IXP_PEER_COUNTS: [usize; 3] = [8, 64, 256];
 /// Route-server fleets retained for the family-gauge A/B receipt.
-const ADJ_RIB_OUT_GAUGE_PEER_COUNTS: [usize; 4] = [8, 64, 256, 1_000];
+const ADJ_RIB_OUT_GAUGE_PEER_COUNTS: [usize; 5] = [1, 8, 64, 256, 1_000];
 /// Per-peer channel capacity — one pass of `CHANGED` announces fits without
 /// filling (a full channel would divert the peer to the dirty-resync path).
 const CHANNEL_CAP: usize = CHANGED + 8;

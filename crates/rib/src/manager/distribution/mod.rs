@@ -3538,6 +3538,19 @@ impl RibManager {
         self.distribute_changes_inner(best_changed, all_affected, false);
     }
 
+    fn clone_distribution_metrics(
+        metrics: &BgpMetrics,
+        #[cfg(any(test, feature = "bench-internals"))] stats: &mut super::AdjRibOutCommitStats,
+    ) -> BgpMetrics {
+        #[cfg(test)]
+        {
+            stats.metrics_handle_clones = stats.metrics_handle_clones.saturating_add(1);
+        }
+        #[cfg(all(not(test), feature = "bench-internals"))]
+        let _ = stats;
+        metrics.clone()
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "distribution loop coordinates dirty peers, forced resync, and all families"
@@ -4080,7 +4093,11 @@ impl RibManager {
             let loc_rib = &self.loc_rib;
             let loc_rib_len = loc_rib.len();
             let target_peer_label = peer.to_string();
-            let metrics = self.metrics.clone();
+            let metrics = Self::clone_distribution_metrics(
+                &self.metrics,
+                #[cfg(any(test, feature = "bench-internals"))]
+                &mut self.adj_rib_out_commit_stats,
+            );
             let policy_stats = self.export_policy_stats.entry(peer).or_default();
 
             let rib_out = self
