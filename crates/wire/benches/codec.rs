@@ -735,6 +735,17 @@ fn run_attr_decode_revised_diagnostic() -> DiagnosticRow {
         );
     }
     let allocation = ALLOCATOR.receipt();
+    assert_eq!(
+        (
+            allocation.alloc_calls,
+            allocation.alloc_zeroed_calls,
+            allocation.realloc_calls,
+            allocation.allocation_calls,
+            allocation.requested_bytes,
+        ),
+        (40_000, 0, 10_000, 50_000, 26_440_000),
+        "the fixed duplicate table must remove one 48-byte allocation per revised decode"
+    );
 
     DiagnosticRow {
         benchmark: "attr_decode_revised/typical/6",
