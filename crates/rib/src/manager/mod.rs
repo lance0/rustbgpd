@@ -80,8 +80,11 @@ struct AdjRibOutCommitStats {
     successful_enqueues: usize,
     family_gauge_writes: usize,
     last_family_gauge_write_mask: u8,
+    pristine_otc_reconcile_candidates: usize,
     #[cfg(test)]
     bgp_metrics_clones: usize,
+    #[cfg(test)]
+    otc_reconcile_prefix_visits: usize,
 }
 
 #[cfg(test)]
