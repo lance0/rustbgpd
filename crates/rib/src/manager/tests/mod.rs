@@ -19,6 +19,7 @@ use crate::route::{
     VpnRibRoute,
 };
 use crate::test_support::{make_flowspec_route, make_route, make_route_with_lp, make_v6_route};
+use crate::update::EffectiveDistributionMode;
 
 fn evpn_sendable() -> Vec<(Afi, Safi)> {
     vec![(Afi::L2Vpn, Safi::Evpn)]
@@ -211,6 +212,44 @@ fn make_vpn_rib_route(
 /// Create a dummy (unused) query channel receiver for tests.
 fn dummy_query_rx() -> mpsc::Receiver<RibUpdate> {
     mpsc::channel(1).1
+}
+
+/// Load-bearing: the aggregate operator query must project the policy
+/// counters from the same actor turn as the rest of the peer row. Removing
+/// that projection makes the nonzero counters below revert to zero.
+#[test]
+fn neighbor_rib_snapshot_query_projects_policy_stats() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+    manager.export_policy_stats.insert(
+        peer,
+        NeighborPolicyStats {
+            export_policy_routes_permitted: 17,
+            export_policy_routes_denied: 19,
+            ..Default::default()
+        },
+    );
+    let (reply, mut response) = oneshot::channel();
+    manager.handle_update(RibUpdate::QueryNeighborRibSnapshots {
+        peers: vec![peer],
+        comparison: None,
+        reply,
+    });
+    let response = response
+        .try_recv()
+        .expect("aggregate query replies synchronously");
+    assert!(response.comparison.is_none());
+    assert_eq!(response.snapshots.len(), 1);
+    let snapshot = &response.snapshots[0];
+    assert_eq!(snapshot.peer, peer);
+    assert_eq!(snapshot.advertised_count, 0);
+    assert_eq!(snapshot.policy_stats.export_policy_routes_permitted, 17);
+    assert_eq!(snapshot.policy_stats.export_policy_routes_denied, 19);
+    assert_eq!(
+        snapshot.outbound.effective_distribution_mode,
+        EffectiveDistributionMode::Unknown
+    );
 }
 
 /// Default sendable families for IPv4-only test peers.
