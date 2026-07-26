@@ -1,0 +1,49 @@
+{
+  "schema": 1,
+  "source": {
+    "commit": "99ee74ba67ec24ce8e09c0c18a83b652da35712b",
+    "tree": "c6ef0d7da50b8be28ff62b8edb749f0fae0bd21f"
+  },
+  "route_server": {
+    "run_ids": [
+      "final-a-1000x400",
+      "final-b-1000x400",
+      "final-c-1000x400"
+    ],
+    "peers": 1000,
+    "routes_per_peer": 400,
+    "total_routes": 400000,
+    "expected_per_observer": 399600,
+    "explain": false,
+    "reloads": 0,
+    "profile": "release",
+    "steady_rss_mib": [441.8, 441.2, 441.1]
+  },
+  "criterion": {
+    "baseline": "v0.61.0-final-99ee74ba",
+    "logical_cpu": 8,
+    "row_count": 71,
+    "suite_rows": {
+      "rib_ops": 18,
+      "codec": 28,
+      "policy_eval": 25
+    },
+    "required_rows": [
+      "adj_rib_in_insert/10000",
+      "rib_pipeline/1000",
+      "update_build/1",
+      "update_build/ipv6_mp_add_path",
+      "update_parse_revised/1",
+      "update_parse_revised/ipv6_mp_add_path",
+      "policy_chain_eval/1",
+      "policy_chain_eval_early_deny",
+      "export_policy_eval/lazy_as_path_string"
+    ]
+  },
+  "rejected_criterion": {
+    "reason": "swap-in-pages-advanced",
+    "pswpin_delta": 1377,
+    "evidence_source": "orchestration-observation-not-retained-raw",
+    "estimates_retained": false
+  }
+}

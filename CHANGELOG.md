@@ -457,6 +457,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **The v0.61.0 release tip now has an exact, durable performance baseline.**
+  Three accepted real release-daemon runs at 1,000 eBGP peers × 400 BASE routes
+  measured steady process-tree RSS medians of 441.760/441.215/441.131 MiB,
+  with positive jemalloc gauges reported separately and every settled
+  group/registration/rejection/writer gate holding. A swap-clean,
+  single-revision Criterion archive retains all 71 RIB/codec/policy median
+  point estimates and confidence intervals under the literal release-tip
+  baseline. This is an absolute regression anchor, not a CPU delta or a
+  replacement for the historical cross-stack comparisons. See
+  [`docs/perf/v0.61.0-final-performance-2026-07.md`](docs/perf/v0.61.0-final-performance-2026-07.md).
+
 - **Wire-codec temporary allocation churn is lower on the measured attribute
   hot paths.** Path-attribute encoding now reuses one value scratch across an
   invocation, and UPDATE validation uses one stack-resident presence table for

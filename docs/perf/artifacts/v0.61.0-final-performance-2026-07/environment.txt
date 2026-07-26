@@ -1,0 +1,9 @@
+hardware=AMD Ryzen Threadripper 7970X 32-Cores
+online_cpus=64
+memory_total_kib=131379692
+kernel=Linux 6.17.0-35-generic x86_64
+rustc=1.97.0 2d8144b78 2026-07-07
+cargo=1.97.0 c980f4866 2026-06-30
+criterion=0.8.2
+criterion_logical_cpu=8
+route_run_governors=64/64 performance

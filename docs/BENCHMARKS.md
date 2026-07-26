@@ -28,7 +28,9 @@ distribution fanout A/B, update-group recovery, and grouped exact-precommit
 fast path: 2026-07-13; revision-pinned production-exact manager CPU and
 full-daemon DHAT rebaseline: 2026-07-13; structured high-N RIB memory
 profile refresh (RouteSlab + attribute interning correction): 2026-07-17;
-production UPDATE parser and IPv6 MP-BGP Add-Path coverage: 2026-07-26.
+production UPDATE parser and IPv6 MP-BGP Add-Path coverage: 2026-07-26;
+v0.61.0 release-tip real-daemon and single-revision absolute baseline:
+2026-07-26.
 
 | Field | Value |
 |-------|-------|
@@ -218,6 +220,23 @@ attempts are separated from the control band, but the control has a systematic
 head-side bias large enough that the raw target percentage is not published as
 a causal speedup. See
 [`perf/revised-update-duplicate-table-2026-07.md`](perf/revised-update-duplicate-table-2026-07.md).
+
+## v0.61.0 release-tip absolute baseline
+
+The exact release-tip revision `99ee74ba` has a compact absolute baseline at
+[`perf/v0.61.0-final-performance-2026-07.md`](perf/v0.61.0-final-performance-2026-07.md).
+Three real release-daemon runs at 1,000 eBGP peers × 400 BASE routes measured
+steady process-tree RSS medians of 441.760, 441.215, and 441.131 MiB, with
+1,000/1,000 sessions, one 1,000-member update group, zero fallback/residue,
+1,000 registered outbound peers, zero retained rejected routes, and zero
+settled writer backlog. jemalloc allocated/active/resident/mapped gauges are
+reported separately from RSS.
+
+The same receipt retains 71 median point estimates and confidence intervals
+from the maintained RIB, codec, and policy Criterion suites under the literal
+baseline `v0.61.0-final-99ee74ba`. It is a single-revision regression anchor:
+it makes no CPU delta claim and does not rewrite the historical `515659b1`
+cross-stack or explain-cache comparisons below.
 
 ## Manual CI Workflow
 
