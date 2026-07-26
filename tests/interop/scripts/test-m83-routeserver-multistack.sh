@@ -370,17 +370,19 @@ stop_capture() {
     local signaled
     if ! signaled=$(docker exec "$BIRD" sh -c '
         found=0
+        capture_pid=
         for file in /proc/[0-9]*/comm; do
             [ "$(cat "$file" 2>/dev/null)" = tshark ] || continue
             pid=${file#/proc/}; pid=${pid%/comm}
-            kill -INT "$pid" || exit 1
+            capture_pid=$pid
             found=$((found + 1))
         done
         [ "$found" -eq 1 ] || {
             echo "expected exactly one tshark capture, found $found" >&2
             exit 1
         }
-        printf "%s\n" "$found"
+        kill -INT "$capture_pid" || exit 1
+        printf "%s\n" "$capture_pid"
     '); then
         fail "could not identify and signal exactly one tshark capture"
         return 1

@@ -122,7 +122,7 @@ fn m83_capture_and_reload_receipts_cannot_become_no_ops() {
 
     for required in [
         "/proc/[0-9]*/comm",
-        "kill -INT \"$pid\"",
+        "kill -INT \"$capture_pid\"",
         "test -s /tmp/m83.pcap",
         "tshark -r /tmp/m83.pcap -c 1",
     ] {
@@ -132,6 +132,23 @@ fn m83_capture_and_reload_receipts_cannot_become_no_ops() {
             script.display()
         );
     }
+    let stop_capture = source
+        .split_once("stop_capture() {")
+        .and_then(|(_, remainder)| remainder.split_once("start_bird() {").map(|(body, _)| body))
+        .expect("M83 capture stop function has a bounded source section");
+    let exact_one = stop_capture
+        .find("[ \"$found\" -eq 1 ]")
+        .expect("capture stop must require exactly one tshark");
+    let signal = stop_capture
+        .find("kill -INT \"$capture_pid\"")
+        .expect("capture stop must signal the selected tshark");
+    // Load-bearing ordering proof: moving the signal back into the scan, before
+    // exact-one validation, makes this assertion red and can kill unrelated
+    // captures before the receipt notices the ambiguity.
+    assert!(
+        exact_one < signal,
+        "M83 must validate exactly one tshark before signaling it"
+    );
 
     let reload = source
         .split_once("assert_reload_stability() {")
