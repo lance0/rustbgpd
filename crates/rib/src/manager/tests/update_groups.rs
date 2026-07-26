@@ -657,7 +657,7 @@ fn distribute_direct_route(manager: &mut RibManager, source: Ipv4Addr, prefix: I
 }
 
 #[test]
-fn distribution_metrics_clone_count_control() {
+fn distribution_clones_metrics_once_per_pass() {
     const PEERS: usize = 4;
 
     let (_tx, rx) = mpsc::channel(1);
@@ -676,10 +676,9 @@ fn distribution_metrics_clone_count_control() {
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 116, 0), 24);
     distribute_direct_route(&mut manager, Ipv4Addr::new(192, 0, 2, 6), prefix);
 
-    assert_eq!(
-        manager.adj_rib_out_commit_stats.metrics_handle_clones,
-        PEERS
-    );
+    // Load-bearing proof: moving the production clone back inside the peer
+    // loop makes this read four and fails the assertion.
+    assert_eq!(manager.adj_rib_out_commit_stats.metrics_handle_clones, 1);
     assert_eq!(manager.adj_rib_out_commit_stats.successful_commits, PEERS);
     assert_eq!(manager.adj_rib_out_commit_stats.successful_enqueues, PEERS);
     for receiver in &mut outbound {
