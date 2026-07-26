@@ -1,0 +1,13 @@
+run	live_at_t_gmax_bytes	owner	classifier_matched_frame
+D3-explain-true	37355520	explain cache	rustbgpd_transport::session::import_decision_cache::ImportDecisionKey, rustbgpd_transport::session::import_decision_cache::CachedDecision>>>::new
+D3-explain-true	2785600	explain cache	<hashbrown::raw::RawTable<(lru::KeyRef<rustbgpd_transport::session::import_decision_cache::ImportDecisionKey>, core::ptr::non_null::NonNull<lru::LruEntry<rustbgpd_transport::session::import_decision_cache::ImportDecisionKey, rustbgpd_transport::session::import_decision_cache::CachedDecision>>)>>::with_capacity_in
+D3-explain-true	2618144	explain cache	<rustbgpd_transport::session::import_decision_cache::CachedPolicyContext as core::clone::Clone>::clone
+D3-explain-true	696640	RejectedRouteStore	<hashbrown::raw::RawTable<(lru::KeyRef<rustbgpd_transport::session::import_decision_cache::ImportDecisionKey>, core::ptr::non_null::NonNull<lru::LruEntry<rustbgpd_transport::session::import_decision_cache::ImportDecisionKey, rustbgpd_transport::session::rejected_routes::RejectedRouteEntry>>)>>::with_capacity_in
+D3-explain-true	327268	explain cache	<rustbgpd_transport::session::import_decision_cache::CachedPolicyContext as core::clone::Clone>::clone
+D3-explain-true	286720	explain cache	rustbgpd_transport::session::import_decision_cache::ImportDecisionKey>>::reserve_exact
+D3-explain-true	18240	explain cache	rustbgpd_transport::session::import_decision_cache::ImportDecisionKey, rustbgpd_transport::session::import_decision_cache::CachedDecision>>>::new
+D3-explain-true	7680	RejectedRouteStore	rustbgpd_transport::session::import_decision_cache::ImportDecisionKey, rustbgpd_transport::session::rejected_routes::RejectedRouteEntry>>>::new
+D3-explain-true	2784	explain cache	<rustbgpd_transport::session::import_decision_cache::CachedPolicyContext as core::clone::Clone>::clone
+D3-explain-true	348	explain cache	<rustbgpd_transport::session::import_decision_cache::CachedPolicyContext as core::clone::Clone>::clone
+D4-explain-false	696640	RejectedRouteStore	<hashbrown::raw::RawTable<(lru::KeyRef<rustbgpd_transport::session::import_decision_cache::ImportDecisionKey>, core::ptr::non_null::NonNull<lru::LruEntry<rustbgpd_transport::session::import_decision_cache::ImportDecisionKey, rustbgpd_transport::session::rejected_routes::RejectedRouteEntry>>)>>::with_capacity_in
+D4-explain-false	7680	RejectedRouteStore	rustbgpd_transport::session::import_decision_cache::ImportDecisionKey, rustbgpd_transport::session::rejected_routes::RejectedRouteEntry>>>::new

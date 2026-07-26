@@ -1,0 +1,43 @@
+# reloadstall peers=100 changed_peers=100 stable_peers=0 prefixes=500000 per_peer=5000 pid=3747357
+established 100 at 0.1s
+converged (>= 495000/observer) at 3.3s rss_mib=585
+control_maxgap_ms: p50=41.45 p95=42.01 max=66.15 (n=100)
+control_rss_mib 515
+reloadstall_csv_header,reload,peers_total,peers_changed,peers_stable,prefixes,completion_p50_s,completion_p95_s,completion_max_s,changed_maxgap_p50_ms,changed_maxgap_p95_ms,changed_maxgap_max_ms,all_observer_maxgap_p50_ms,all_observer_maxgap_p95_ms,all_observer_maxgap_max_ms,changed_first_update_p50_ms,changed_first_update_p95_ms,changed_first_update_max_ms,rss_before_mib,rss_after_mib,stable_marker_peers,sessions_up,parse_errors
+reload 1 SIGHUP wall_us=1785019174199737 policy=$RUN/gen-b.rpol
+reload 1 completion_s: p50=1.15 p95=1.23 max=1.24 (n=100)
+reload 1 maxgap_ms: p50=418.06 p95=423.13 max=428.55 (n=100)
+reload 1 all_observer_maxgap_ms: p50=418.06 p95=423.13 max=428.55 (n=100)
+reload 1 first_update_ms: p50=61.47 p95=61.72 max=62.04 (n=100)
+reload 1 rss_mib before=515 after=557 comms_sample=[4286056400]
+reload 1 sessions_up 100/100
+reload 1 stable_marker_peers 0/0
+reloadstall_csv,1,100,100,0,500000,1.145610,1.231431,1.238611,418.058,423.129,428.553,418.058,423.129,428.553,61.473,61.715,62.044,515,557,0,100,0
+reload 2 SIGHUP wall_us=1785019195499294 policy=$RUN/gen-a.rpol
+reload 2 completion_s: p50=1.12 p95=1.22 max=1.23 (n=100)
+reload 2 maxgap_ms: p50=421.00 p95=423.98 max=447.01 (n=100)
+reload 2 all_observer_maxgap_ms: p50=421.00 p95=423.98 max=447.01 (n=100)
+reload 2 first_update_ms: p50=64.03 p95=64.17 max=64.65 (n=100)
+reload 2 rss_mib before=525 after=568 comms_sample=[4286055400]
+reload 2 sessions_up 100/100
+reload 2 stable_marker_peers 0/0
+reloadstall_csv,2,100,100,0,500000,1.117954,1.222915,1.225680,421.002,423.978,447.010,421.002,423.978,447.010,64.029,64.167,64.646,525,568,0,100,0
+reload 3 SIGHUP wall_us=1785019216773457 policy=$RUN/gen-b.rpol
+reload 3 completion_s: p50=1.12 p95=1.15 max=1.16 (n=100)
+reload 3 maxgap_ms: p50=392.31 p95=393.28 max=393.61 (n=100)
+reload 3 all_observer_maxgap_ms: p50=392.31 p95=393.28 max=393.61 (n=100)
+reload 3 first_update_ms: p50=60.59 p95=60.89 max=61.40 (n=100)
+reload 3 rss_mib before=525 after=564 comms_sample=[4286056400]
+reload 3 sessions_up 100/100
+reload 3 stable_marker_peers 0/0
+reloadstall_csv,3,100,100,0,500000,1.118248,1.151468,1.158207,392.313,393.277,393.611,392.313,393.277,393.611,60.592,60.891,61.397,525,564,0,100,0
+reload 4 SIGHUP wall_us=1785019238024278 policy=$RUN/gen-a.rpol
+reload 4 completion_s: p50=1.10 p95=1.15 max=1.15 (n=100)
+reload 4 maxgap_ms: p50=433.71 p95=434.16 max=443.69 (n=100)
+reload 4 all_observer_maxgap_ms: p50=433.71 p95=434.16 max=443.69 (n=100)
+reload 4 first_update_ms: p50=61.31 p95=61.65 max=62.27 (n=100)
+reload 4 rss_mib before=525 after=575 comms_sample=[4286055400]
+reload 4 sessions_up 100/100
+reload 4 stable_marker_peers 0/0
+reloadstall_csv,4,100,100,0,500000,1.098970,1.146554,1.150188,433.712,434.156,443.689,433.712,434.156,443.689,61.312,61.651,62.275,525,575,0,100,0
+done rss_mib=525
