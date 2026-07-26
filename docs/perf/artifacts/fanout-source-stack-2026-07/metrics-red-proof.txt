@@ -1,0 +1,22 @@
+Test:
+cargo test -p rustbgpd-rib --lib distribution_clones_metrics_once_per_pass -- --nocapture
+
+Injected production break:
+Move clone_distribution_metrics from pass scope back inside the outbound-peer
+loop without changing the test or its counters.
+
+Observed failure:
+assertion `left == right` failed
+  left: 4
+ right: 1
+test manager::tests::update_groups::distribution_clones_metrics_once_per_pass ... FAILED
+
+Why this is load-bearing:
+The four-peer fixture reaches the real route-bearing grouped distribution
+path, and the counter is incremented by the helper that performs the actual
+BgpMetrics::clone(). Restoring the per-peer clone therefore changes the
+observed production operation count from one to four.
+
+Restored result:
+test manager::tests::update_groups::distribution_clones_metrics_once_per_pass ... ok
+Production mutation diff after restore: clean
