@@ -1177,6 +1177,9 @@ impl PeerSession {
                             four_octet_as: negotiated.four_octet_as,
                             families,
                             peer_route_refresh: negotiated.peer_route_refresh,
+                            peer_enhanced_route_refresh: negotiated.peer_enhanced_route_refresh,
+                            peer_extended_message: negotiated.peer_extended_message,
+                            outbound_max_message_bytes: self.outbound_max_message_len(),
                             graceful_restart,
                         })
                     })

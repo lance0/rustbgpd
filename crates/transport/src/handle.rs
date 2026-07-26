@@ -552,6 +552,10 @@ pub struct NegotiatedGracefulRestartState {
 
 /// Authoritative negotiation values for the current Established session.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "query DTO mirrors independent peer capability results"
+)]
 pub struct NegotiatedSessionState {
     /// Negotiated Hold Time in seconds.
     pub hold_time: u16,
@@ -565,6 +569,13 @@ pub struct NegotiatedSessionState {
     /// `SendRouteRefresh` command against this session can be delivered rather
     /// than rejected as `RouteRefreshUnsupported`.
     pub peer_route_refresh: bool,
+    /// Whether the peer advertised Enhanced Route Refresh (RFC 7313).
+    pub peer_enhanced_route_refresh: bool,
+    /// Whether the peer advertised Extended Messages (RFC 8654).
+    pub peer_extended_message: bool,
+    /// Maximum BGP message size this session may send to the peer. This is
+    /// directional: the peer's Extended Messages capability controls it.
+    pub outbound_max_message_bytes: u16,
     /// Usable peer Graceful Restart coverage, when any exists.
     pub graceful_restart: Option<NegotiatedGracefulRestartState>,
 }

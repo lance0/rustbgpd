@@ -643,6 +643,12 @@ message NegotiatedSessionState {
   // Present only when the peer advertised usable GR coverage for at least one
   // mutually negotiated family supported by the local helper.
   NegotiatedGracefulRestartState graceful_restart = 5;
+  optional bool peer_route_refresh = 6;
+  optional bool peer_enhanced_route_refresh = 7;
+  optional bool peer_extended_message = 8;
+  // Directional send-side limit: the peer's Extended Messages capability
+  // governs whether rustbgpd may send 4096 or 65535-byte BGP messages.
+  optional uint32 outbound_max_message_bytes = 9;
 }
 
 message NegotiatedGracefulRestartState {

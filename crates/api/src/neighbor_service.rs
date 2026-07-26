@@ -599,6 +599,10 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
                             .map(u32::from),
                     }
                 }),
+                peer_route_refresh: Some(negotiated.peer_route_refresh),
+                peer_enhanced_route_refresh: Some(negotiated.peer_enhanced_route_refresh),
+                peer_extended_message: Some(negotiated.peer_extended_message),
+                outbound_max_message_bytes: Some(u32::from(negotiated.outbound_max_message_bytes)),
             });
 
     let tcp_ao_health = if info.authentication != "tcp_ao" {
@@ -1531,6 +1535,8 @@ mod tests {
         }
     }
 
+    /// Load-bearing: renumbering any additive negotiated-capability field
+    /// breaks the exact source assertion below and the v1 message-graph gate.
     #[test]
     fn neighbor_observability_proto_fields_are_append_only() {
         let source = include_str!("../../../proto/rustbgpd.proto");
@@ -1554,6 +1560,10 @@ mod tests {
         assert!(source.contains("optional uint32 max_prefix_headroom = 46;"));
         assert!(source.contains("optional uint32 max_prefix_headroom_ipv4 = 47;"));
         assert!(source.contains("optional uint32 max_prefix_headroom_ipv6 = 48;"));
+        assert!(source.contains("optional bool peer_route_refresh = 6;"));
+        assert!(source.contains("optional bool peer_enhanced_route_refresh = 7;"));
+        assert!(source.contains("optional bool peer_extended_message = 8;"));
+        assert!(source.contains("optional uint32 outbound_max_message_bytes = 9;"));
         assert!(source.contains("Rfc8212PolicyStatus rfc8212_import_policy = 51;"));
         assert!(source.contains("Rfc8212PolicyStatus rfc8212_export_policy = 52;"));
     }
@@ -2562,7 +2572,8 @@ mod tests {
     }
 
     /// Load-bearing proof: replacing the actor snapshot with defaults, losing
-    /// optional scalar presence, or omitting the nested GR mapping makes the
+    /// optional scalar presence, omitting a negotiated capability or its
+    /// directional send limit, or omitting the nested GR mapping makes the
     /// exact non-default/false/zero assertions below fail.
     #[test]
     fn peer_info_to_proto_preserves_negotiated_session_presence_and_values() {
@@ -2573,6 +2584,9 @@ mod tests {
             four_octet_as: false,
             families: vec![(Afi::Ipv6, Safi::Unicast)],
             peer_route_refresh: false,
+            peer_enhanced_route_refresh: false,
+            peer_extended_message: false,
+            outbound_max_message_bytes: rustbgpd_wire::MAX_MESSAGE_LEN,
             graceful_restart: Some(rustbgpd_transport::NegotiatedGracefulRestartState {
                 peer_families: vec![(Afi::Ipv6, Safi::Unicast)],
                 peer_restart_time: 0,
@@ -2587,10 +2601,25 @@ mod tests {
         assert_eq!(negotiated.remote_router_id.as_deref(), Some("192.0.2.7"));
         assert_eq!(negotiated.four_octet_as, Some(false));
         assert_eq!(negotiated.families, vec!["ipv6_unicast"]);
+        assert_eq!(negotiated.peer_route_refresh, Some(false));
+        assert_eq!(negotiated.peer_enhanced_route_refresh, Some(false));
+        assert_eq!(negotiated.peer_extended_message, Some(false));
+        assert_eq!(negotiated.outbound_max_message_bytes, Some(4096));
         let gr = negotiated.graceful_restart.unwrap();
         assert_eq!(gr.peer_families, vec!["ipv6_unicast"]);
         assert_eq!(gr.peer_restart_time_seconds, Some(0));
         assert_eq!(gr.effective_retention_time_seconds, Some(300));
+
+        let live = info.negotiated_session.as_mut().unwrap();
+        live.peer_route_refresh = true;
+        live.peer_enhanced_route_refresh = true;
+        live.peer_extended_message = true;
+        live.outbound_max_message_bytes = rustbgpd_wire::EXTENDED_MAX_MESSAGE_LEN;
+        let negotiated = peer_info_to_proto(&info).negotiated_session.unwrap();
+        assert_eq!(negotiated.peer_route_refresh, Some(true));
+        assert_eq!(negotiated.peer_enhanced_route_refresh, Some(true));
+        assert_eq!(negotiated.peer_extended_message, Some(true));
+        assert_eq!(negotiated.outbound_max_message_bytes, Some(65_535));
 
         info.negotiated_session = None;
         let unavailable = peer_info_to_proto(&info);

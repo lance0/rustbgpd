@@ -374,6 +374,7 @@ pub async fn show(
                 "Four-Octet AS:        {}",
                 optional_bool_label(negotiated.four_octet_as)
             );
+            print!("{}", render_negotiated_capability_details(negotiated));
             println!(
                 "Negotiated Families:  {}",
                 negotiated_families_label(&negotiated.families)
@@ -651,6 +652,10 @@ fn negotiated_session_json(
             remote_router_id: negotiated.remote_router_id.clone(),
             four_octet_as: negotiated.four_octet_as,
             families: negotiated.families.clone(),
+            peer_route_refresh: negotiated.peer_route_refresh,
+            peer_enhanced_route_refresh: negotiated.peer_enhanced_route_refresh,
+            peer_extended_message: negotiated.peer_extended_message,
+            outbound_max_message_bytes: negotiated.outbound_max_message_bytes,
             graceful_restart: negotiated.graceful_restart.as_ref().map(|gr| {
                 JsonNegotiatedGracefulRestart {
                     peer_families: gr.peer_families.clone(),
@@ -672,6 +677,23 @@ fn optional_bool_label(value: Option<bool>) -> &'static str {
         Some(false) => "false",
         None => "unknown",
     }
+}
+
+fn render_negotiated_capability_details(
+    negotiated: &crate::proto::NegotiatedSessionState,
+) -> String {
+    format!(
+        "Peer Route Refresh:   {}\n\
+         Peer Enhanced RR:     {}\n\
+         Peer Extended Msgs:   {}\n\
+         Outbound Max Message: {}\n",
+        optional_bool_label(negotiated.peer_route_refresh),
+        optional_bool_label(negotiated.peer_enhanced_route_refresh),
+        optional_bool_label(negotiated.peer_extended_message),
+        negotiated
+            .outbound_max_message_bytes
+            .map_or_else(|| "unknown".to_string(), |bytes| format!("{bytes} bytes"))
+    )
 }
 
 fn negotiated_families_label(families: &[String]) -> String {
@@ -1180,8 +1202,9 @@ mod tests {
     }
 
     /// Load-bearing proof: collapsing protobuf presence, ignoring stale, or
-    /// treating peer GR capability as local helper activation changes at
-    /// least one exact label in this six-state operator matrix.
+    /// treating peer GR capability as local helper activation, dropping a
+    /// negotiated-capability mapping/row, or inventing an answer for an older
+    /// daemon changes an exact JSON value or human label below.
     #[test]
     fn negotiated_runtime_labels_cover_rolling_upgrade_and_gr_states() {
         let mut state = crate::proto::NeighborState::default();
@@ -1212,6 +1235,10 @@ mod tests {
             remote_router_id: Some("192.0.2.7".to_string()),
             four_octet_as: Some(false),
             families: vec!["ipv4_unicast".to_string()],
+            peer_route_refresh: Some(false),
+            peer_enhanced_route_refresh: Some(false),
+            peer_extended_message: Some(false),
+            outbound_max_message_bytes: Some(4096),
             graceful_restart: None,
         });
         assert_eq!(negotiation_status_label(&state), "negotiated");
@@ -1227,7 +1254,50 @@ mod tests {
         let json = json.unwrap();
         assert_eq!(json.hold_time_seconds, Some(0));
         assert_eq!(json.four_octet_as, Some(false));
+        assert_eq!(json.peer_route_refresh, Some(false));
+        assert_eq!(json.peer_enhanced_route_refresh, Some(false));
+        assert_eq!(json.peer_extended_message, Some(false));
+        assert_eq!(json.outbound_max_message_bytes, Some(4096));
         assert!(json.graceful_restart.is_none());
+        let rendered = render_negotiated_capability_details(negotiated);
+        assert!(rendered.contains("Peer Route Refresh:   false\n"));
+        assert!(rendered.contains("Peer Enhanced RR:     false\n"));
+        assert!(rendered.contains("Peer Extended Msgs:   false\n"));
+        assert!(rendered.contains("Outbound Max Message: 4096 bytes\n"));
+
+        let negotiated = state.negotiated_session.as_mut().unwrap();
+        negotiated.peer_route_refresh = Some(true);
+        negotiated.peer_enhanced_route_refresh = Some(true);
+        negotiated.peer_extended_message = Some(true);
+        negotiated.outbound_max_message_bytes = Some(65_535);
+        let json = negotiated_session_json(&state).1.unwrap();
+        assert_eq!(json.peer_route_refresh, Some(true));
+        assert_eq!(json.peer_enhanced_route_refresh, Some(true));
+        assert_eq!(json.peer_extended_message, Some(true));
+        assert_eq!(json.outbound_max_message_bytes, Some(65_535));
+        let rendered =
+            render_negotiated_capability_details(state.negotiated_session.as_ref().unwrap());
+        assert!(rendered.contains("Peer Route Refresh:   true\n"));
+        assert!(rendered.contains("Peer Enhanced RR:     true\n"));
+        assert!(rendered.contains("Peer Extended Msgs:   true\n"));
+        assert!(rendered.contains("Outbound Max Message: 65535 bytes\n"));
+
+        let negotiated = state.negotiated_session.as_mut().unwrap();
+        negotiated.peer_route_refresh = None;
+        negotiated.peer_enhanced_route_refresh = None;
+        negotiated.peer_extended_message = None;
+        negotiated.outbound_max_message_bytes = None;
+        let json = negotiated_session_json(&state).1.unwrap();
+        assert_eq!(json.peer_route_refresh, None);
+        assert_eq!(json.peer_enhanced_route_refresh, None);
+        assert_eq!(json.peer_extended_message, None);
+        assert_eq!(json.outbound_max_message_bytes, None);
+        let rendered =
+            render_negotiated_capability_details(state.negotiated_session.as_ref().unwrap());
+        assert!(rendered.contains("Peer Route Refresh:   unknown\n"));
+        assert!(rendered.contains("Peer Enhanced RR:     unknown\n"));
+        assert!(rendered.contains("Peer Extended Msgs:   unknown\n"));
+        assert!(rendered.contains("Outbound Max Message: unknown\n"));
 
         state.negotiated_session.as_mut().unwrap().graceful_restart =
             Some(crate::proto::NegotiatedGracefulRestartState {

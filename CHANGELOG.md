@@ -138,6 +138,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Live negotiated-capability visibility.** `NeighborState`,
+  `rbgp neighbor <peer>`, and its JSON now expose peer Route Refresh,
+  Enhanced Route Refresh, and Extended Messages support plus the directional
+  outbound BGP message limit (4096 or 65535 bytes). Optional protobuf and JSON
+  scalars distinguish an explicit negotiated `false` from a field absent on an
+  older daemon; the existing negotiation status remains authoritative when no
+  Established-session snapshot is available.
+
 - **RFC 8212 explicit-policy enforcement — `[global] ebgp_requires_policy`
   (ADR-0112).** Opt-in, default `false`, restart-required, and pinned to
   the startup value across SIGHUP: a reload logs an `ERROR`, keeps the
