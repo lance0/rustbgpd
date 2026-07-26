@@ -19,6 +19,14 @@ import classify_dhat  # noqa: E402
 
 
 class ClassifierFixtures(unittest.TestCase):
+    def runner_embedded_python(self, marker: str) -> str:
+        runner = HERE.parents[2] / "docs" / "perf" / "run-explain-cache-variant.sh"
+        script = runner.read_text(encoding="utf-8")
+        start = script.index(marker)
+        body_start = script.index("<<'PY'\n", start) + len("<<'PY'\n")
+        body_end = script.index("\nPY\n", body_start)
+        return script[body_start:body_end]
+
     def run_check(self, script: str, source: str, expected: str) -> None:
         subprocess.run(
             [
@@ -58,8 +66,14 @@ class ClassifierFixtures(unittest.TestCase):
             ("oversize", raw + ("x" * (16 * 1024))),
             ("header drift", raw.replace("max cpu %", "cpu max", 1)),
             ("missing field", raw.replace(",0,0,,,\n", ",0,0,,\n")),
-            ("required mismatch", raw.replace(",200000,200000,40,", ",10000,10000,40,")),
-            ("received mismatch", raw.replace(",200000,200000,40,", ",200000,199999,40,")),
+            (
+                "required mismatch",
+                raw.replace(",200000,200000,40,", ",10000,10000,40,"),
+            ),
+            (
+                "received mismatch",
+                raw.replace(",200000,200000,40,", ",200000,199999,40,"),
+            ),
             ("tester error", raw.replace(",0,0,,,\n", ",1,0,,,\n")),
             ("tester timeout", raw.replace(",0,0,,,\n", ",0,1,,,\n")),
             ("failed", raw.replace(",0,0,,,\n", ",0,0,FAILED,,\n")),
@@ -70,7 +84,10 @@ class ClassifierFixtures(unittest.TestCase):
             ("nan metric", raw.replace(",50.25,98,", ",NaN,98,")),
             ("hostile exponent", raw.replace(",50.25,98,", ",1e999999999,98,")),
             ("long hex id", raw.replace("rustbgpd 0.51.0", "deadbeefdeadbeef")),
-            ("zero loaded metrics", raw.replace(",45,5,40,50.25,98,0.321,", ",0,5,40,0,0,0,")),
+            (
+                "zero loaded metrics",
+                raw.replace(",45,5,40,50.25,98,0.321,", ",0,5,40,0,0,0,"),
+            ),
         )
         with tempfile.TemporaryDirectory() as directory:
             for index, (case, text) in enumerate(bad_inputs):
@@ -152,7 +169,9 @@ class ClassifierFixtures(unittest.TestCase):
                         text=True,
                     )
                     self.assertNotEqual(result.returncode, 0)
-                    self.assertRegex(result.stderr, "refusing unsanitized|path or address")
+                    self.assertRegex(
+                        result.stderr, "refusing unsanitized|path or address"
+                    )
 
     def test_dhat_current_demangled_adj_rib_in_owner(self) -> None:
         self.assertEqual(
@@ -283,6 +302,20 @@ class ClassifierFixtures(unittest.TestCase):
             (out / "proc-status-final.txt").write_text(
                 "VmRSS:\t2048 kB\nVmHWM:\t4096 kB\n", encoding="utf-8"
             )
+            (out / "settled-proc.env").write_text(
+                "settled_proc_vmrss_kib=2048\n"
+                "settled_proc_vmhwm_kib=4096\n"
+                "settled_proc_vmpeak_kib=8192\n"
+                "settled_proc_vmsize_kib=6144\n",
+                encoding="utf-8",
+            )
+            (out / "settled-metrics.env").write_text(
+                "jemalloc_allocated_bytes=1000\n"
+                "jemalloc_active_bytes=2000\n"
+                "jemalloc_resident_bytes=3000\n"
+                "jemalloc_mapped_bytes=4000\n",
+                encoding="utf-8",
+            )
             subprocess.run(
                 [sys.executable, "-c", python, str(out)],
                 check=True,
@@ -300,6 +333,206 @@ class ClassifierFixtures(unittest.TestCase):
             values["sampled_tree_peak_rss_kib_lower_bound"],
             "2048",
         )
+        self.assertEqual(values["settled_proc_vmrss_kib"], "2048")
+        self.assertEqual(values["settled_proc_vmhwm_kib"], "4096")
+        self.assertEqual(values["settled_proc_vmpeak_kib"], "8192")
+        self.assertEqual(values["settled_proc_vmsize_kib"], "6144")
+        self.assertEqual(values["jemalloc_allocated_bytes"], "1000")
+        self.assertEqual(values["jemalloc_active_bytes"], "2000")
+        self.assertEqual(values["jemalloc_resident_bytes"], "3000")
+        self.assertEqual(values["jemalloc_mapped_bytes"], "4000")
+
+    @staticmethod
+    def settled_metrics_fixture() -> str:
+        return (
+            "bgp_update_groups 1\n"
+            'bgp_update_group_members{group="7"} 2\n'
+            "bgp_update_group_fallback_peers 0\n"
+            "bgp_update_group_residue_entries 0\n"
+            "bgp_rib_outbound_registered_peers 2\n"
+            'bgp_rejected_routes_retained{peer="127.1.0.1"} 0\n'
+            'bgp_rejected_routes_retained{peer="127.1.0.2"} 0\n'
+            'bgp_peer_outbound_queue_depth{peer="127.1.0.1"} 0\n'
+            'bgp_peer_outbound_queue_depth{peer="127.1.0.2"} 0\n'
+            "jemalloc_allocated_bytes 1000\n"
+            "jemalloc_active_bytes 2000\n"
+            "jemalloc_resident_bytes 3000\n"
+            "jemalloc_mapped_bytes 4000\n"
+        )
+
+    def run_settled_metrics_validator(
+        self, fixture: str, *, dhat: int = 0
+    ) -> subprocess.CompletedProcess[str]:
+        python = self.runner_embedded_python(
+            "# LAN-630 settled-state gates: missing metrics are failures, never zero."
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            metrics = Path(directory) / "metrics.prom"
+            metrics.write_text(fixture, encoding="utf-8")
+            return subprocess.run(
+                [sys.executable, "-c", python, str(metrics), "2", str(dhat)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+    def test_settled_metrics_validator_rejects_every_false_green(self) -> None:
+        fixture = self.settled_metrics_fixture()
+        valid = self.run_settled_metrics_validator(fixture)
+        self.assertEqual(valid.returncode, 0, valid.stderr)
+        self.assertIn("jemalloc_allocated_bytes=1000", valid.stdout)
+
+        mutations = {
+            "missing group count": fixture.replace("bgp_update_groups 1\n", ""),
+            "wrong group members": fixture.replace(
+                'bgp_update_group_members{group="7"} 2',
+                'bgp_update_group_members{group="7"} 1',
+            ),
+            "fallback peer": fixture.replace(
+                "bgp_update_group_fallback_peers 0",
+                "bgp_update_group_fallback_peers 1",
+            ),
+            "withdrawal residue": fixture.replace(
+                "bgp_update_group_residue_entries 0",
+                "bgp_update_group_residue_entries 1",
+            ),
+            "missing registration": fixture.replace(
+                "bgp_rib_outbound_registered_peers 2",
+                "bgp_rib_outbound_registered_peers 1",
+            ),
+            "missing rejected-route peer": fixture.replace(
+                'bgp_rejected_routes_retained{peer="127.1.0.2"} 0\n', ""
+            ),
+            "retained rejection": fixture.replace(
+                'bgp_rejected_routes_retained{peer="127.1.0.2"} 0',
+                'bgp_rejected_routes_retained{peer="127.1.0.2"} 1',
+            ),
+            "missing writer-depth peer": fixture.replace(
+                'bgp_peer_outbound_queue_depth{peer="127.1.0.2"} 0\n', ""
+            ),
+            "writer backlog": fixture.replace(
+                'bgp_peer_outbound_queue_depth{peer="127.1.0.2"} 0',
+                'bgp_peer_outbound_queue_depth{peer="127.1.0.2"} 1',
+            ),
+            "missing jemalloc": fixture.replace("jemalloc_allocated_bytes 1000\n", ""),
+        }
+        for label, mutation in mutations.items():
+            with self.subTest(label=label):
+                result = self.run_settled_metrics_validator(mutation)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+
+    def test_settled_metrics_validator_does_not_mislabel_dhat_as_jemalloc(
+        self,
+    ) -> None:
+        fixture = "\n".join(
+            line
+            for line in self.settled_metrics_fixture().splitlines()
+            if not line.startswith("jemalloc_")
+        )
+        result = self.run_settled_metrics_validator(fixture, dhat=1)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "")
+
+    def test_settled_proc_validator_requires_every_numeric_kib_field(self) -> None:
+        python = self.runner_embedded_python("validate_settled_proc_status()")
+        valid = (
+            "VmRSS:\t2048 kB\n"
+            "VmHWM:\t4096 kB\n"
+            "VmPeak:\t8192 kB\n"
+            "VmSize:\t6144 kB\n"
+        )
+        mutations = {
+            "valid": (valid, 0),
+            "missing VmRSS": (valid.replace("VmRSS:\t2048 kB\n", ""), 1),
+            "missing VmHWM": (valid.replace("VmHWM:\t4096 kB\n", ""), 1),
+            "missing VmPeak": (valid.replace("VmPeak:\t8192 kB\n", ""), 1),
+            "missing VmSize": (valid.replace("VmSize:\t6144 kB\n", ""), 1),
+            "wrong unit": (valid.replace("VmRSS:\t2048 kB", "VmRSS:\t2048 MB"), 1),
+        }
+        for label, (fixture, expected_rc) in mutations.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                status = Path(directory) / "status"
+                status.write_text(fixture, encoding="utf-8")
+                result = subprocess.run(
+                    [sys.executable, "-c", python, str(status)],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                self.assertEqual(result.returncode, expected_rc, result.stderr)
+
+    def test_zero_reload_evidence_is_captured_before_stub_release(self) -> None:
+        runner = HERE.parents[2] / "docs" / "perf" / "run-explain-cache-variant.sh"
+        script = runner.read_text(encoding="utf-8")
+        order = [
+            'until [[ -e "$EVIDENCE_DIR/ready" ]]',
+            'mv "$candidate" "$OUT/metrics-after.prom"',
+            'validate_settled_proc_status "$OUT/proc-status-after.txt"',
+            'touch "$EVIDENCE_DIR/ack"',
+            'if wait "$H_PID"',
+        ]
+        positions = [script.index(marker) for marker in order]
+        self.assertEqual(positions, sorted(positions))
+
+        harness = (HERE.parent / "reloadstall" / "src" / "main.rs").read_text(
+            encoding="utf-8"
+        )
+        handshake = harness.rindex(
+            "await_evidence_capture(evidence_dir, EVIDENCE_TIMEOUT)"
+        )
+        done = harness.rindex('println!("done rss_mib={}", rss_mib(pid));')
+        self.assertLess(handshake, done)
+
+    def test_dhat_receipt_requires_allocator_artifact_before_success(self) -> None:
+        runner = HERE.parents[2] / "docs" / "perf" / "run-explain-cache-variant.sh"
+        script = runner.read_text(encoding="utf-8")
+        gate_start = script.index("if ((DHAT != 0)); then")
+        gate_end = script.index("\nfi\n", gate_start) + len("\nfi\n")
+        gate = script[gate_start:gate_end]
+        required = gate_start + gate.index(
+            '[[ -f "$OUT/dhat-heap.json" && -s "$OUT/dhat-heap.json" ]] || {'
+        )
+        summary = script.index("# Summary: steady = median")
+        success = script.index("printf 'status=success\\n'")
+        self.assertLess(required, summary)
+        self.assertLess(required, success)
+
+        with tempfile.TemporaryDirectory() as directory:
+            out = Path(directory)
+            artifact = out / "dhat-heap.json"
+            cases = (
+                ("disabled and absent", "0", 0),
+                ("enabled and absent", "1", 1),
+                ("enabled and empty", "1", 1),
+                ("enabled and directory", "1", 1),
+                ("enabled and nonempty regular", "1", 0),
+            )
+            for label, dhat, expected_rc in cases:
+                with self.subTest(label=label):
+                    if artifact.is_dir():
+                        artifact.rmdir()
+                    else:
+                        artifact.unlink(missing_ok=True)
+                    if label.endswith("empty"):
+                        artifact.touch()
+                    elif label.endswith("directory"):
+                        artifact.mkdir()
+                    elif label.endswith("nonempty regular"):
+                        artifact.write_text("{}\n", encoding="utf-8")
+                    result = subprocess.run(
+                        [
+                            "bash",
+                            "-c",
+                            f"set -euo pipefail\nOUT=$1\nDHAT=$2\n{gate}",
+                            "_",
+                            str(out),
+                            dhat,
+                        ],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                    )
+                    self.assertEqual(result.returncode, expected_rc, result.stderr)
 
     def test_dhat_derivative_bounds_fail_without_partial_output(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
