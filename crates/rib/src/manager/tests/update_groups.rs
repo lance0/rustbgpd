@@ -668,7 +668,43 @@ fn distribute_direct_route(manager: &mut RibManager, source: Ipv4Addr, prefix: I
 }
 
 #[test]
-fn distribution_control_counts_pristine_otc_prefix_visits() {
+fn distribution_clones_metrics_once_per_pass() {
+    const PEERS: usize = 4;
+
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let mut outbound = Vec::with_capacity(PEERS);
+    for index in 0..PEERS {
+        let host = u8::try_from(index + 1).expect("four peers fit in an IPv4 host octet");
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 63, 2, host));
+        let mut receiver = register_direct_peer(&mut manager, peer);
+        assert_eq!(receiver.try_recv().unwrap().end_of_rib, ipv4_sendable());
+        assert!(manager.grouped_member_of(peer).is_some());
+        outbound.push(receiver);
+    }
+
+    manager.adj_rib_out_commit_stats = AdjRibOutCommitStats::default();
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 116, 0), 24);
+    distribute_direct_route(&mut manager, Ipv4Addr::new(192, 0, 2, 6), prefix);
+
+    // Load-bearing proof: moving the production clone back inside the peer
+    // loop makes this read four and fails the assertion.
+    assert_eq!(manager.adj_rib_out_commit_stats.metrics_handle_clones, 1);
+    assert_eq!(manager.adj_rib_out_commit_stats.successful_commits, PEERS);
+    assert_eq!(manager.adj_rib_out_commit_stats.successful_enqueues, PEERS);
+    for receiver in &mut outbound {
+        let update = receiver.try_recv().unwrap();
+        assert_eq!(update.announce.len(), 1);
+        assert_eq!(update.announce[0].prefix, Prefix::V4(prefix));
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+}
+
+#[test]
+fn distribution_skips_pristine_otc_prefix_visits() {
     const PEERS: usize = 4;
     const CHANGED: usize = 64;
 
@@ -700,11 +736,11 @@ fn distribution_control_counts_pristine_otc_prefix_visits() {
     // Load-bearing proof: moving the production clone back inside the peer
     // loop makes this read four and fails the assertion.
     assert_eq!(manager.adj_rib_out_commit_stats.metrics_handle_clones, 1);
-    // Control for the pristine-state OTC fast path: the target changes this
-    // exact production-loop count from CHANGED * PEERS to zero.
+    // Load-bearing proof: removing the production early return makes this
+    // read CHANGED * PEERS and fails the assertion.
     assert_eq!(
         manager.adj_rib_out_commit_stats.otc_reconcile_prefix_visits,
-        CHANGED * PEERS
+        0
     );
     assert!(manager.peer_otc_blocked.is_empty());
     assert!(manager.pending_otc_blocked.is_empty());
