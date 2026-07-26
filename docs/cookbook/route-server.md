@@ -35,7 +35,7 @@ Start from the checked-in route-server example:
 ```bash
 cp examples/route-server/config.toml ./rs.toml
 cp examples/route-server/hygiene.rpol ./hygiene.rpol
-rustbgpd --check rs.toml
+rustbgpd --check --strict rs.toml
 rbgp policy check hygiene.rpol
 ```
 
@@ -220,7 +220,7 @@ server from ~1.3 GiB to over 100 GiB of RSS when enabled fleet-wide.
 ## Verify
 
 ```console
-$ rustbgpd --check config.toml          # config + rpol validate offline
+$ rustbgpd --check --strict config.toml # config + rpol validate offline
 $ rbgp policy check hygiene.rpol         # rpol in-language tests
 $ export RUSTBGPD_ADDR=unix:///var/lib/rustbgpd/grpc.sock
 $ rbgp summary                           # both members Established
@@ -325,7 +325,7 @@ Prometheus (`prometheus_addr`, `/metrics`; dashboards in
 | Metric | Healthy shape |
 |--------|---------------|
 | `bgp_session_state_transitions_total` | flat outside member churn |
-| `bgp_rpki_vrp_total` | non-zero once the RTR cache syncs |
+| `sum without (af) (bgp_rpki_vrp_count)` | per-target IPv4 + IPv6 total; non-zero once the RTR cache syncs (`rbgp doctor` warns when configured caches have no visible VRPs) |
 | `bgp_update_group_fallback_peers` | ≥ your `per_client_best` member count (they never group) |
 | `bgp_rib_outbound_registered_peers` | = established member count |
 | `bgp_policy_generation_loaded_timestamp_seconds` | recent — ages past your render/SIGHUP cadence when the filter pipeline is stuck; see "Policy artifact freshness" in [`OPERATIONS.md`](../OPERATIONS.md) for the alert expressions |
@@ -375,9 +375,9 @@ The first command works on a stock route server. The second needs
 route-server starter turns it off explicitly, because the decision cache
 is per session and its cost multiplies by member count
 ([CONFIGURATION.md](../CONFIGURATION.md#import-decision-explain-policyexplain)).
-Enable it, reload, and let the member's session re-establish when you
-need the statement-level trace; the rejected-route view above needs no
-such switch.
+Enable it and reload so future sessions adopt the setting; the target
+member must then re-establish before you query the statement-level trace.
+The rejected-route view above needs no such switch.
 
 The explain names the deciding term — typically `reject-rpki-invalid`
 (fix the member's ROA or your RTR feed) or an `ixp-hygiene` rule

@@ -26,7 +26,7 @@ the two prefix sets together, then run:
 ```bash
 rbgp policy fmt --check hygiene.rpol
 rbgp policy check hygiene.rpol
-rustbgpd --check config.toml
+rustbgpd --check --strict config.toml
 ```
 
 The long-prefix guard remains a separate, later chain member. If the exchange
@@ -60,7 +60,7 @@ member; plain (non-RS) eBGP neighbors get that enforcement by default.
 
 ```bash
 # Validate the config and the rpol policy (both offline):
-rustbgpd --check config.toml
+rustbgpd --check --strict config.toml
 rbgp policy check hygiene.rpol
 
 # Run, then inspect a member:

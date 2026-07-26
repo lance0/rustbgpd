@@ -389,6 +389,8 @@ When an Adj-RIB-Out channel is full, the update is dropped and the peer is marke
 
 Per-neighbor `max_prefixes` (aggregate) and the independent per-family `max_prefixes_ipv4` / `max_prefixes_ipv6` caps (ADR-0108) are enforced at Adj-RIB-In insertion. Exceeding any cap produces NOTIFICATION (Cease, Maximum Number of Prefixes Reached) and session teardown. There is no global/aggregate route limit across neighbors.
 
+The current tree also implements the unreleased ADR-0113 outbound contract: distinct `max_prefixes_out_ipv4` and `max_prefixes_out_ipv6` limits count post-export-gate IPv4- and IPv6-unicast prefixes per peer. At a limit, excess net-new prefixes are withheld; existing advertisements remain, and updates to admitted prefixes and withdrawals continue. The session stays Established and no NOTIFICATION is sent. A neighbor value overrides its peer group, an absent neighbor value inherits, and there is no aggregate outbound cap. Live limit edits use one all-peer transactional preflight and activation; an invalid add or lower candidate is rejected before any affected peer's limit changes.
+
 ### Why no locks
 
 The RIB is the hottest data structure. Wrapping it in `Arc<RwLock>` would create contention under UPDATE storms and make reasoning about ordering difficult. Instead, the RIB runs as a single task with exclusive ownership. All access is serialized through the channel. This trades parallelism for simplicity and determinism — the right tradeoff at current scale. The sharding seam (channel boundary) is ready if scale demands splitting.

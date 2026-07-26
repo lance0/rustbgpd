@@ -1,6 +1,6 @@
 # ADR-0113: Per-peer outbound unicast prefix limits
 
-**Status:** Proposed
+**Status:** Accepted — implementation complete on `main`; pending release under [Unreleased](../../CHANGELOG.md#unreleased)
 **Date:** 2026-07-21
 
 ## Context
@@ -45,8 +45,7 @@ intent and can advance before an individual member send, as ADR-0098 specifies.
 
 ## Decision
 
-This ADR proposes an implementation contract. It does not authorize feature
-code in this tranche.
+This decision defines the contract implemented on `main`.
 
 ### Scope and configuration
 
