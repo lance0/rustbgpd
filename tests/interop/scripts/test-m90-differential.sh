@@ -54,6 +54,7 @@ source "$SCRIPT_DIR/test-lib.sh"
 
 LAB_DIR="$SCRIPT_DIR/../m90-differential"
 MANIFEST="$LAB_DIR/announcements.json"
+POLICY_EXPLAIN_FRAGMENT="$LAB_DIR/policy-explain.toml"
 
 BIRD="clab-${TOPO}-bird"
 RS_ADDR="192.0.2.9"
@@ -188,6 +189,11 @@ render_rustbgpd_config() {
         fail "rs-config-render failed"
         exit 1
     fi
+
+    # This receipt asserts deciding policy/term attribution for every reject.
+    # Keep the production and renderer defaults off; opt in only in the
+    # generated lab config before its production validation gate.
+    cat "$POLICY_EXPLAIN_FRAGMENT" >>"$RENDER_DIR/config.toml"
 
     # Load-bearing proof: suppressing shutdown-gated limit emission makes this
     # exact receipt/config assertion fail before either
