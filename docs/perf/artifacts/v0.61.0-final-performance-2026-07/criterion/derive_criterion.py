@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import math
 import sys
@@ -13,6 +14,9 @@ from pathlib import Path
 
 BASELINE = "v0.61.0-final-99ee74ba"
 EXPECTED_SUITES = {"rib_ops": 18, "codec": 28, "policy_eval": 25}
+EXPECTED_PAIR_INVENTORY_SHA256 = (
+    "d3f326d38aea4bc9c62cd6fb0690cd1ba4eb7ec760331aa08ca27a83546fdb47"
+)
 REQUIRED_ROWS = {
     "adj_rib_in_insert/10000",
     "rib_pipeline/1000",
@@ -54,6 +58,24 @@ def suite_for(benchmark: str) -> str:
     ):
         return "policy_eval"
     return "rib_ops"
+
+
+def expected_inventory() -> set[str]:
+    manifest_path = Path(__file__).resolve().parents[1] / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    inventory = manifest.get("criterion", {}).get("row_inventory", [])
+    if (
+        not isinstance(inventory, list)
+        or len(inventory) != 71
+        or any(not isinstance(row, str) for row in inventory)
+        or len(set(inventory)) != 71
+    ):
+        fail("manifest Criterion row inventory must contain 71 unique names")
+    encoded = "".join(f"{suite_for(row)}\t{row}\n" for row in inventory).encode()
+    digest = hashlib.sha256(encoded).hexdigest()
+    if digest != EXPECTED_PAIR_INVENTORY_SHA256:
+        fail("manifest Criterion suite/benchmark inventory digest mismatch")
+    return set(inventory)
 
 
 def main() -> None:
@@ -103,6 +125,13 @@ def main() -> None:
     identities = {row[1] for row in rows}
     if len(identities) != 71:
         fail("benchmark identities are not unique")
+    inventory = expected_inventory()
+    if identities != inventory:
+        fail(
+            "benchmark inventory mismatch: "
+            f"missing={sorted(inventory - identities)} "
+            f"unexpected={sorted(identities - inventory)}"
+        )
     missing = REQUIRED_ROWS - identities
     if missing:
         fail(f"missing required rows: {sorted(missing)}")

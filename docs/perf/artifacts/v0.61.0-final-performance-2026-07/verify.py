@@ -19,6 +19,9 @@ ROOT = Path(__file__).resolve().parent
 EXPECTED_COMMIT = "99ee74ba67ec24ce8e09c0c18a83b652da35712b"
 EXPECTED_TREE = "c6ef0d7da50b8be28ff62b8edb749f0fae0bd21f"
 EXPECTED_BASELINE = "v0.61.0-final-99ee74ba"
+EXPECTED_PAIR_INVENTORY_SHA256 = (
+    "d3f326d38aea4bc9c62cd6fb0690cd1ba4eb7ec760331aa08ca27a83546fdb47"
+)
 EXPECTED_RUNS = {
     "final-a-1000x400": 441.8,
     "final-b-1000x400": 441.2,
@@ -107,6 +110,23 @@ def require(env: dict[str, str], expected: dict[str, str], label: str) -> None:
             fail(f"{label}: {key} expected {value!r}, got {env.get(key)!r}")
 
 
+def suite_for(benchmark: str) -> str:
+    if benchmark.startswith(("nlri_", "update_", "attr_")) or benchmark == "validate_update":
+        return "codec"
+    if benchmark.startswith(
+        (
+            "policy_",
+            "loop_eval/",
+            "set_heavy/",
+            "value_expr/",
+            "fn_eval/",
+            "dataset_parity/",
+        )
+    ):
+        return "policy_eval"
+    return "rib_ops"
+
+
 def verify_manifest() -> dict[str, object]:
     manifest = json.loads((ROOT / "manifest.json").read_text(encoding="utf-8"))
     if manifest.get("schema") != 1:
@@ -124,6 +144,18 @@ def verify_manifest() -> dict[str, object]:
         fail("manifest Criterion baseline mismatch")
     if criterion.get("row_count") != 71:
         fail("manifest Criterion row count mismatch")
+    inventory = criterion.get("row_inventory", [])
+    if (
+        not isinstance(inventory, list)
+        or len(inventory) != 71
+        or any(not isinstance(row, str) for row in inventory)
+        or len(set(inventory)) != 71
+    ):
+        fail("manifest Criterion row inventory must contain 71 unique names")
+    encoded = "".join(f"{suite_for(row)}\t{row}\n" for row in inventory).encode()
+    digest = hashlib.sha256(encoded).hexdigest()
+    if digest != EXPECTED_PAIR_INVENTORY_SHA256:
+        fail("manifest Criterion suite/benchmark inventory digest mismatch")
     if set(criterion.get("required_rows", [])) != REQUIRED_ROWS:
         fail("manifest required Criterion rows mismatch")
     rejected = manifest.get("rejected_criterion", {})
@@ -319,6 +351,13 @@ def verify_criterion(manifest: dict[str, object]) -> None:
     identities = [row["benchmark"] for row in rows]
     if len(set(identities)) != 71:
         fail("Criterion results: benchmark identities are not unique")
+    inventory = set(manifest["criterion"]["row_inventory"])  # type: ignore[index]
+    if set(identities) != inventory:
+        fail(
+            "Criterion results: benchmark inventory mismatch: "
+            f"missing={sorted(inventory - set(identities))} "
+            f"unexpected={sorted(set(identities) - inventory)}"
+        )
     missing = REQUIRED_ROWS - set(identities)
     if missing:
         fail(f"Criterion results: missing required rows {sorted(missing)}")
@@ -327,6 +366,12 @@ def verify_criterion(manifest: dict[str, object]) -> None:
     if dict(suites) != expected_suites:
         fail(f"Criterion results: suite counts mismatch {dict(suites)}")
     for row in rows:
+        if row["suite"] != suite_for(row["benchmark"]):
+            fail(
+                "Criterion results: suite mismatch for "
+                f"{row['benchmark']}: expected {suite_for(row['benchmark'])!r}, "
+                f"got {row['suite']!r}"
+            )
         try:
             lower = float(row["median_lower_ns"])
             point = float(row["median_ns"])

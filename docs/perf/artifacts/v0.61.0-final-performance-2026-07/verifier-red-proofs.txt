@@ -31,5 +31,22 @@ production verifier was unchanged.
    Exact red:
      FAIL: expected 71 rows, got 70
 
+6. Substituted Criterion identity with unchanged cardinality
+   Break A: rename the saved `value_expr/constant_actions` benchmark to
+   `value_expr/fabricated_untracked_benchmark` in a disposable raw-baseline
+   copy. This preserves 71 unique rows and the 18/28/25 suite counts.
+   Exact extractor red:
+     FAIL: benchmark inventory mismatch: missing=['value_expr/constant_actions'] unexpected=['value_expr/fabricated_untracked_benchmark']
+   Break B: make the same substitution in a disposable retained table and
+   regenerate its checksums.
+   Exact verifier red:
+     FAIL: Criterion results: benchmark inventory mismatch: missing=['value_expr/constant_actions'] unexpected=['value_expr/fabricated_untracked_benchmark']
+   Break C: swap the retained suite labels for
+   `adj_rib_in_insert/10000` and `update_build/1`, preserving every benchmark
+   name and the 18/28/25 suite counts, then regenerate checksums.
+   Exact verifier red:
+     FAIL: Criterion results: suite mismatch for adj_rib_in_insert/10000: expected 'rib_ops', got 'codec'
+
 The verifier went red on every guarded verifier break, and the extractor
-refused the incomplete source inventory.
+refused both the incomplete and same-cardinality substituted source
+inventories.
