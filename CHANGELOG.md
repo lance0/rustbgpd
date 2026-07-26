@@ -146,6 +146,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   older daemon; the existing negotiation status remains authoritative when no
   Established-session snapshot is available.
 
+- **Strict RFC 9003 shutdown-communication visibility.** Received and locally
+  sent notification events now retain valid Administrative Shutdown/Reset text,
+  including one RFC 8538 Hard Reset envelope. Malformed lengths, trailing data,
+  invalid UTF-8, nested envelopes, and unrelated notification subcodes remain
+  uninterpreted; locally encoded reasons retain the existing 128-byte cap.
+
 - **RFC 8212 explicit-policy enforcement — `[global] ebgp_requires_policy`
   (ADR-0112).** Opt-in, default `false`, restart-required, and pinned to
   the startup value across SIGHUP: a reload logs an `ERROR`, keeps the

@@ -199,6 +199,21 @@ impl PeerSession {
                 Action::SendNotification(notif) => {
                     let code = notif.code;
                     let subcode = notif.subcode;
+                    let shutdown_reason =
+                        match rustbgpd_wire::notification::extract_shutdown_communication(&notif) {
+                            Ok(reason) => reason.map(str::to_owned),
+                            Err(error) => {
+                                warn!(
+                                    peer = %self.peer_label,
+                                    direction = "sent",
+                                    code = code.as_u8(),
+                                    subcode,
+                                    error_category = error.category(),
+                                    "ignored malformed BGP shutdown communication"
+                                );
+                                None
+                            }
+                        };
                     self.record_notification_cause(SessionNotificationDirection::Sent, &notif);
                     // RFC 8538: track outbound Hard Reset to bypass GR
                     if code == NotificationCode::Cease && subcode == cease_subcode::HARD_RESET {
@@ -222,7 +237,7 @@ impl PeerSession {
                             Message::Notification(notif) => notif,
                             _ => unreachable!("constructed as notification"),
                         },
-                        None,
+                        shutdown_reason,
                     );
                     self.notifications_sent += 1;
                     self.metrics.record_notification_sent(
