@@ -1,0 +1,17 @@
+[phaseA-run2] gate start 00:47:40
+[phaseA-run2] quiet-1 00:47:40 load=0.28 0.32 0.73
+[phaseA-run2] CONFIRMED 00:48:10 load=0.17 0.29 0.71
+phaseA-run2 finished rc=0
+  load=1.18
+  load=1.08
+  load=1.00
+[phaseB-run1] quiet-1 00:50:56 load=0.92 0.60 0.76
+[phaseB-run1] CONFIRMED 00:51:26 load=0.55 0.55 0.74
+phaseB-run1 finished rc=0
+  load=1.27
+  load=1.17
+  load=1.07
+[phaseB-run2] quiet-1 00:56:07 load=0.99 1.45 1.10
+[phaseB-run2] CONFIRMED 00:56:38 load=0.87 1.37 1.08
+phaseB-run2 finished rc=0
+CHAIN_DONE

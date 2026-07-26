@@ -1,0 +1,11 @@
+tests:
+  -
+    name: B3_Nx1000
+    neighbors: [10, 30, 100]
+    prefixes: [1000]
+    filter_test: ['None']
+    targets:
+      - {name: rustbgpd, tester_type: bird}
+      - {name: bird, tester_type: bird}
+      - {name: gobgp, tester_type: bird}
+      - {name: frr_c, tester_type: bird}

@@ -1,0 +1,13 @@
+  load=1.06
+  load=1.14
+  load=1.05
+[phaseB-run3] quiet-1 01:00:45 load=0.96 1.50 1.21
+[phaseB-run3] CONFIRMED 01:01:15 load=0.58 1.35 1.17
+phaseB-run3 finished rc=0
+  load=1.20
+  load=1.10
+  load=1.02
+[phaseA-run3] quiet-1 01:07:38 load=0.93 1.97 1.63
+[phaseA-run3] CONFIRMED 01:08:08 load=0.57 1.78 1.58
+phaseA-run3 finished rc=0
+CHAIN3_DONE

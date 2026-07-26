@@ -1,0 +1,33 @@
+OpenBGPD cell: EXCLUDED - bgperf2 harness defect (not a rustbgpd issue)
+
+Symptom: campaign hangs indefinitely at "Waiting N seconds for monitor".
+
+Root cause chain (verified live on the stuck container, 2026-07-26 ~00:41Z):
+1. bgperf2 openbgp.py get_startup_cmd() invokes /usr/local/sbin/bgpd.
+   The openbgpd/openbgpd image ships binaries at /usr/sbin/ instead:
+     /usr/sbin/bgpd, /usr/sbin/bgpctl, /usr/sbin/bgplgd
+   /usr/local/sbin/ does not exist in the image at all.
+2. start.sh therefore fails instantly; /root/config/openbgp.log is never
+   created, and the harness-generated /root/config/bgpd.conf (which DOES
+   contain all the correct neighbor stanzas) is never loaded.
+3. The image's own ENTRYPOINT is already running bgpd with the image
+   default config, which has zero neighbors:
+     PID 1  multirun bgpd -d -v bgplgd -d haproxy ...
+     PID 15 bgpd -d -v
+   That daemon logs "connection from non-peer 10.10.0.2 refused" for
+   every monitor dial.
+4. GoBGP monitor stays in Active state forever.
+5. monitor.py wait_established() is an unbounded `while True:` with no
+   timeout, so the batch never advances past the first openbgp cell.
+
+Why not patched here: a correct fix is not a one-line path change. The
+image entrypoint already binds TCP/179, so a second bgpd started from the
+harness config would fail to bind. Producing an OpenBGPD number would
+require restructuring the target (suppress entrypoint bgpd, or rewrite the
+image default config in place). Doing that ad hoc mid-campaign would yield
+the least defensible figure in the report, so OpenBGPD is reported as an
+uncollected cell instead. bgperf2 is a third-party harness and was out of
+scope to modify for this campaign.
+
+Consequence: Phases A and B are FOUR-way (rustbgpd, BIRD, GoBGP, FRR),
+not five-way.
