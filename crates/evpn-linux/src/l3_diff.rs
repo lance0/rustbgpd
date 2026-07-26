@@ -442,7 +442,10 @@ impl Candidate {
 /// `desired_*` to have been seen during the `want` build. Both
 /// `.expect(...)` sites prove a programmer error, not a runtime
 /// condition.
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the L3 diff keeps all dependent kernel object comparisons in order"
+)]
 #[must_use]
 pub fn compute_l3_diff(
     intent: &RemoteIpPrefixTable,
@@ -1069,7 +1072,10 @@ fn family_matches(prefix: EvpnIpPrefixValue, addr: IpAddr) -> bool {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(
+    clippy::unwrap_used,
+    reason = "the test helper constructs a fixed valid six-octet MAC address"
+)]
 mod tests {
     use super::*;
     use rustbgpd_evpn::ip_vrf::{

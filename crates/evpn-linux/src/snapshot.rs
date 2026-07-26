@@ -81,7 +81,10 @@ pub struct KernelLinkInfo {
 
 /// Parsed Linux bridge VLAN flags kept as raw booleans so the snapshot
 /// layer remains independent of the netlink crate's bitflags type.
-#[allow(clippy::struct_excessive_bools)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "bridge VLAN flags mirror independent kernel flag bits"
+)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct KernelBridgeVlanFlags {
     /// `BRIDGE_VLAN_INFO_MASTER` / crate `Controller`: operation or row
@@ -389,7 +392,10 @@ impl KernelFdbEntry {
 /// Phase 2 wires only what the diff loop reads. Each field maps 1:1 to
 /// a kernel flag bit, so refactoring into a state enum would lose the
 /// direct correspondence we need at the netlink boundary.
-#[allow(clippy::struct_excessive_bools)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "FDB flags mirror independent kernel flag bits"
+)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct KernelFdbFlags {
     /// `NTF_EXT_LEARNED` — set by rustbgpd on entries it programs.

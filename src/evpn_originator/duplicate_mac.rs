@@ -7,7 +7,10 @@ use super::{
 };
 use crate::evpn_originator::rib_write::apply_actions;
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "duplicate-MAC state construction keeps all explicit ownership inputs visible"
+)]
 pub(super) async fn handle_originator_command(
     command: OriginatorCommand,
     state: &mut OriginatorState,
@@ -189,7 +192,10 @@ pub(super) fn record_duplicate_mac_move(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "duplicate-MAC observation handling needs the key, timers, and actor state"
+)]
 pub(super) async fn apply_actions_with_duplicate_policy(
     actions: Vec<OriginationAction>,
     view_present: bool,
@@ -233,7 +239,10 @@ pub(super) async fn apply_actions_with_duplicate_policy(
     .await;
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "duplicate-MAC transition handling needs the key, timers, and actor state"
+)]
 pub(super) async fn suppress_local_originations_for_mac(
     vni: EvpnInstanceId,
     mac: MacAddress,
@@ -273,7 +282,10 @@ pub(super) async fn suppress_local_originations_for_mac(
     .await;
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "duplicate-MAC recovery handling needs the key, timers, and actor state"
+)]
 pub(super) async fn recover_duplicate_macs(
     state: &mut OriginatorState,
     instances: &EvpnInstanceTable,
@@ -316,7 +328,10 @@ pub(super) async fn recover_duplicate_macs(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "duplicate-MAC expiry handling needs the key, timers, and actor state"
+)]
 pub(super) async fn clear_duplicate_mac_quarantine(
     key: DuplicateMacKey,
     state: &mut OriginatorState,
@@ -369,7 +384,10 @@ pub(super) async fn clear_duplicate_mac_quarantine(
     ClearDuplicateMacQuarantineResult::Cleared
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "duplicate-MAC publication needs the observed state and all actor outputs"
+)]
 pub(super) async fn replay_local_mac_after_recovery(
     vni: EvpnInstanceId,
     mac: MacAddress,

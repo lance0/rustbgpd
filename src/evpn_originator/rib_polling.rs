@@ -79,7 +79,10 @@ pub(super) fn drain_ready_evpn_events(
 /// MAC+IP), diff against the cached state, and fire
 /// `on_remote_changed` / `on_remote_ip_changed` for any tracked
 /// `(MAC)` or `(MAC, IP)` whose view changed.
-#[allow(clippy::too_many_lines)] // MAC-only and MAC+IP diffs intentionally stay adjacent for symmetry.
+#[allow(
+    clippy::too_many_lines,
+    reason = "MAC-only and MAC-plus-IP diffs remain adjacent to preserve symmetry"
+)]
 pub(super) async fn repoll_rib(
     instances: &EvpnInstanceTable,
     rib_tx: &mpsc::Sender<RibUpdate>,
@@ -273,7 +276,10 @@ pub(super) async fn handle_evpn_event(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "RIB poll reconciliation needs the snapshot, generation, and actor outputs"
+)]
 pub(super) async fn handle_evpn_event_coalesced(
     event: EvpnRouteEvent,
     rx: &mut Option<broadcast::Receiver<EvpnRouteEvent>>,

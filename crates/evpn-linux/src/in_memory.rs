@@ -364,7 +364,10 @@ impl InMemoryDataplane {
     /// Synchronous half of `apply` — does the fail-injection lookup
     /// and the kernel-state mutation under the same lock so the test
     /// can't observe a partially-applied op.
-    #[allow(clippy::too_many_lines)] // one arm per op shape; splitting obscures the dispatch
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one arm per operation shape keeps the in-memory dispatch mirror readable"
+    )]
     fn apply_inner(&self, op: &DataplaneOp) -> Result<(), DataplaneError> {
         let mut state = self.state.lock().expect("poisoned");
         state.apply_count += 1;
@@ -1247,7 +1250,10 @@ pub struct InMemoryHandle {
 // Every method panics only on Mutex lock-poisoning, which is
 // unrecoverable in this test fake. Documenting `# Panics` on each
 // would be noise; suppress at the impl level.
-#[allow(clippy::missing_panics_doc)]
+#[allow(
+    clippy::missing_panics_doc,
+    reason = "the test-only in-memory handle mirrors the trait's panicking index contract"
+)]
 impl InMemoryHandle {
     /// Pre-load a foreign FDB entry the actor must preserve.
     pub fn pre_load_fdb(&self, vni: EvpnInstanceId, entry: KernelFdbEntry) {

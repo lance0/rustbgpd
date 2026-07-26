@@ -9,7 +9,10 @@
 
 #![deny(clippy::all)]
 #![warn(clippy::pedantic)]
-#![allow(clippy::too_many_lines)]
+#![allow(
+    clippy::too_many_lines,
+    reason = "the monitor binary keeps its command wiring and reporting flow in one entrypoint"
+)]
 
 use std::collections::HashSet;
 use std::net::{Ipv4Addr, SocketAddr};

@@ -675,7 +675,10 @@ mod tests {
     /// "permanent + noarp share the NUD bitmask" relationship so
     /// each test reads as one assertion rather than four bool
     /// fields.
-    #[allow(clippy::struct_excessive_bools)]
+    #[allow(
+        clippy::struct_excessive_bools,
+        reason = "netlink FDB flags are independent kernel bits, not a state enum"
+    )]
     #[derive(Debug, Clone, Copy, Default)]
     struct FlagSet {
         extern_learn: bool,

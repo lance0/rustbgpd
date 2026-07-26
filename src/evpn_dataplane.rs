@@ -391,7 +391,10 @@ pub async fn spawn(
 ///
 /// Quarantined `(VNI, MAC)` keys are excluded from remote-FDB intent while
 /// preserving RIB and route-reflector visibility.
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the spawn API keeps each explicit actor dependency visible"
+)]
 pub async fn spawn_with_quarantine(
     config: SupervisorConfig,
     evpn_instances: &Arc<EvpnInstanceTable>,
@@ -504,7 +507,10 @@ where
 
 /// Test/production helper that injects a dataplane implementation and an
 /// external duplicate-MAC quarantine feed.
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the generic dataplane spawn API keeps each explicit actor dependency visible"
+)]
 pub fn spawn_with_dataplane_and_quarantine<D>(
     config: SupervisorConfig,
     evpn_instances: &Arc<EvpnInstanceTable>,
@@ -762,7 +768,10 @@ impl SupervisorIntentState {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "intent publication needs the actor handles and shared generation state"
+)]
 async fn publish_dataplane_intent(
     rib_tx: &mpsc::Sender<RibUpdate>,
     intent_tx: &watch::Sender<Arc<DataplaneIntent>>,
@@ -899,7 +908,11 @@ fn publish_cached_dataplane_intent(
 /// tables. A future coordinator commit can publish a complete effective
 /// L2VNI/IP-VRF snapshot, and the supervisor will re-project
 /// immediately without waiting for the next poll interval.
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)] // Supervisor wiring intentionally keeps actor dependencies explicit.
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "the supervisor keeps actor dependencies and its ordered lifecycle handling explicit"
+)]
 async fn supervisor_loop(
     poll_interval: Duration,
     mut instances_rx: watch::Receiver<Arc<EvpnInstanceTable>>,

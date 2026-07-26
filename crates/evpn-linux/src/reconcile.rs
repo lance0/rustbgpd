@@ -729,7 +729,10 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
     }
 
     /// One reconcile pass: probe → dump → diff → apply → emit report.
-    #[allow(clippy::too_many_lines)]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one reconciliation pass preserves the plan's ordered safety checks"
+    )]
     async fn reconcile_once(&mut self) {
         self.state.reconcile_generation = self.state.reconcile_generation.saturating_add(1);
 
@@ -1838,7 +1841,10 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
     ///    is in the retry schedule and not yet due are skipped; the
     ///    actor's outer `tokio::select!` re-fires on the retry timer
     ///    so a deferred op runs as soon as its backoff elapses.
-    #[allow(clippy::too_many_lines)] // per-op-shape dispatch is naturally long; further extraction hurts readability
+    #[allow(
+        clippy::too_many_lines,
+        reason = "per-operation dispatch preserves the plan's ordering and error boundaries"
+    )]
     async fn apply_plan(
         &mut self,
         plan: &Plan,
@@ -2579,7 +2585,10 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
     /// the drift gate entirely — mirrors the startup-adoption
     /// permanent-failure semantics. Transient / conflict failures
     /// leave drift enabled; the next reconcile pass retries.
-    #[allow(clippy::too_many_lines)]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "drift reconciliation keeps detection, repair, and retry ordering together"
+    )]
     async fn reconcile_drift(
         &mut self,
         snapshot: &KernelSnapshot,
@@ -3298,7 +3307,10 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
     /// rows that resolve its inner DMAC / tunnel endpoint go away —
     /// the inverse of the install pipeline's resolution-before-route
     /// ordering.
-    #[allow(clippy::too_many_lines)] // three parallel reap surfaces; splitting obscures the shared gate/order
+    #[allow(
+        clippy::too_many_lines,
+        reason = "three reap surfaces share one gate and ordering contract"
+    )]
     async fn reap_adopted_l3(
         &mut self,
         desired: &rustbgpd_evpn::ip_vrf::RemoteIpPrefixTable,
@@ -4017,7 +4029,10 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
     /// entries. BUM restoration is best-effort because leaving a CE
     /// port suppressed after the daemon exits is more operator-hostile
     /// than a redundant allow-all write.
-    #[allow(clippy::too_many_lines)]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "drain coordinates ordered withdrawal across all managed object classes"
+    )]
     async fn drain(&mut self) {
         let bum_restore_ops: Vec<_> = if self.config.apply_bum_enforcement {
             self.state
@@ -6599,7 +6614,10 @@ where
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "L3 FDB/NHG removal needs the complete reconciliation operation context"
+)]
 async fn apply_remove_l3_fdb_nhg<D>(
     dataplane: &mut D,
     state: &mut ActorState,
@@ -6689,7 +6707,11 @@ async fn rollback_l3_partial_install<D>(
 /// delete → FDB row. ADR-0059 §5 invariants 1 + 3. Reads
 /// top-to-bottom; further breaking this up would obscure the rollback
 /// ordering.
-#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_lines,
+    clippy::too_many_arguments,
+    reason = "FDB/NHG installation keeps its ordered kernel operations and shared context together"
+)]
 async fn apply_install_fdb_nhg<D>(
     dataplane: &mut D,
     state: &mut ActorState,

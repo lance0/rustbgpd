@@ -70,7 +70,10 @@ fn park_pending_ip_binding(
 ///
 /// See `docs/RFC_NOTES.md` for the RFC 9135 §7.2.3 framing and the
 /// FRR mailing-list bugs that motivated this model.
-#[allow(clippy::too_many_arguments)] // ADR-0084 drain gate nudged the count over the threshold; refactoring to a context struct is a separate slice.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the ADR-0084 drain gate shares explicit observation and actor context"
+)]
 pub(super) async fn handle_observation(
     obs: &LocalMacObservation,
     state: &mut OriginatorState,
@@ -295,7 +298,11 @@ fn drop_local_mac_caches(state: &mut OriginatorState, vni: EvpnInstanceId, mac: 
     }
 }
 
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "observation classification keeps its ordered checks and actor context together"
+)]
 pub(super) async fn handle_learned(
     vni: EvpnInstanceId,
     mac: MacAddress,
@@ -468,7 +475,10 @@ pub(super) async fn handle_learned(
     }
 }
 
-#[allow(clippy::too_many_arguments)] // ESI-aware origination nudged the count over the threshold; refactoring to a context struct is a separate slice.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "ESI-aware origination needs explicit observation and actor context"
+)]
 pub(super) async fn handle_aged(
     vni: EvpnInstanceId,
     mac: MacAddress,
@@ -515,7 +525,10 @@ pub(super) async fn handle_aged(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "observation withdrawal needs the complete route and actor context"
+)]
 pub(super) async fn handle_ip_added(
     vni: EvpnInstanceId,
     mac: MacAddress,
@@ -621,7 +634,10 @@ pub(super) async fn handle_ip_added(
         .insert(ip);
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "observation publication needs the complete route and actor context"
+)]
 pub(super) async fn handle_ip_removed(
     vni: EvpnInstanceId,
     mac: MacAddress,

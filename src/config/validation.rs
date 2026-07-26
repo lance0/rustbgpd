@@ -99,7 +99,10 @@ impl ConfigAdvisory {
 }
 
 impl Config {
-    #[expect(clippy::too_many_lines)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "validation keeps related operator diagnostics in one ordered pass"
+    )]
     pub(crate) fn validate(&self) -> Result<(), ConfigError> {
         if self.global.asn == 0 {
             return Err(ConfigError::InvalidLocalAsn {

@@ -3464,7 +3464,10 @@ mod tests {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "a typed drift event carries all explicit observation and recovery context"
+    )]
     fn drift_event_typed(
         kind: KernelRouteEventKind,
         table_id: u32,
@@ -4702,7 +4705,10 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[tokio::test]
-    #[allow(clippy::too_many_lines)]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the netns scenario keeps setup, convergence, and cleanup in one receipt"
+    )]
     async fn netns_general_unicast_fib_runtime_round_trip() {
         if !netns_gate() {
             eprintln!("skipping: set EVPN_LINUX_NETNS=1 to run privileged general FIB netns test");
@@ -5033,7 +5039,10 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[tokio::test]
-    #[allow(clippy::too_many_lines)]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the ECMP netns scenario keeps setup, convergence, and cleanup in one receipt"
+    )]
     async fn netns_general_unicast_fib_ecmp_round_trip() {
         if !netns_gate() {
             eprintln!("skipping: set EVPN_LINUX_NETNS=1 to run privileged ECMP FIB netns test");
@@ -5156,7 +5165,10 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[tokio::test]
-    #[allow(clippy::too_many_lines)]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the weighted-ECMP netns scenario keeps setup, convergence, and cleanup in one receipt"
+    )]
     async fn netns_general_unicast_fib_weighted_round_trip() {
         if !netns_gate() {
             eprintln!(

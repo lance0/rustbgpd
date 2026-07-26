@@ -265,7 +265,10 @@ fn shared_test_only_operator_auth_is_tier_valid_and_wired() {
 }
 
 #[test]
-#[allow(clippy::too_many_lines)] // one frozen inventory keeps config/topology/driver wiring atomic
+#[allow(
+    clippy::too_many_lines,
+    reason = "one frozen inventory keeps config, topology, and driver wiring atomic"
+)]
 fn early_interop_auth_inventory_is_tier_wired() {
     // Load-bearing: reverting a config to legacy, dropping a token bind,
     // downgrading the operator role, bypassing the helper, removing a driver

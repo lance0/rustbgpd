@@ -285,7 +285,10 @@ impl PeerManager {
         self.peers.contains_key(&key).then_some(key)
     }
 
-    #[expect(clippy::too_many_lines)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the inbound candidate regression keeps all collision and fencing assertions together"
+    )]
     pub(super) async fn handle_inbound(
         &mut self,
         stream: TcpStream,

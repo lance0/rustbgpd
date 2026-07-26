@@ -495,7 +495,10 @@ fn default_rpki_expire() -> u64 {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[allow(clippy::struct_excessive_bools)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "global configuration switches are independently meaningful operator settings"
+)]
 #[serde(deny_unknown_fields)]
 pub struct Global {
     /// Local autonomous system number.

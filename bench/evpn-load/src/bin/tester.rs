@@ -10,7 +10,10 @@
 
 #![deny(clippy::all)]
 #![warn(clippy::pedantic)]
-#![allow(clippy::too_many_lines)]
+#![allow(
+    clippy::too_many_lines,
+    reason = "the test driver keeps scenario construction and reporting in one entrypoint"
+)]
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};

@@ -391,7 +391,10 @@ pub(crate) struct EvpnRuntimeActorConverger {
 }
 
 impl EvpnRuntimeActorConverger {
-    #[allow(clippy::too_many_arguments)] // one optional control per EVPN actor plus the shared drain state
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one optional control per EVPN actor plus shared drain state is explicit wiring"
+    )]
     pub(crate) fn new(
         rib_tx: mpsc::Sender<RibUpdate>,
         imet_controller: Arc<tokio::sync::Mutex<evpn_imet::EvpnImetController>>,
