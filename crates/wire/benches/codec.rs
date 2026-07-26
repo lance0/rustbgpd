@@ -2,12 +2,14 @@ use std::net::Ipv4Addr;
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
-use rustbgpd_wire::attribute::{decode_path_attributes, encode_path_attributes};
+use rustbgpd_wire::attribute::{
+    decode_path_attributes, decode_path_attributes_revised, encode_path_attributes,
+};
 use rustbgpd_wire::nlri::{decode_nlri, encode_nlri};
 use rustbgpd_wire::validate::validate_update_attributes;
 use rustbgpd_wire::{
-    AsPath, AsPathSegment, Ipv4NlriEntry, Ipv4Prefix, Ipv4UnicastMode, Origin, PathAttribute,
-    UpdateMessage,
+    Aggregator, AsPath, AsPathSegment, ErrorDisposition, ExtendedCommunity, Ipv4NlriEntry,
+    Ipv4Prefix, Ipv4UnicastMode, LargeCommunity, Origin, PathAttribute, UpdateMessage,
 };
 
 fn generate_ipv4_prefixes(count: usize) -> Vec<Ipv4Prefix> {
@@ -33,22 +35,65 @@ fn typical_attributes() -> Vec<PathAttribute> {
     ]
 }
 
+/// A wider attribute set than [`typical_attributes`]: multi-segment
+/// `AS_PATH`, communities of every flavor, route-reflection attributes, an
+/// aggregator, and an extended-length (>255 B value) attribute.
+///
+/// `AS_SET` is deliberately absent — RFC 9774 §3 prohibits originating it, so
+/// `encode_path_attributes` rejects it and the whole `attr_encode` group would
+/// panic. Multi-segment coverage comes from a second `AS_SEQUENCE` instead;
+/// received-side `AS_SET` coverage lives in [`as_set_as_path_wire`].
 fn rich_attributes() -> Vec<PathAttribute> {
-    let mut attrs = typical_attributes();
-    attrs.push(PathAttribute::AsPath(AsPath {
-        segments: vec![
-            AsPathSegment::AsSequence(vec![65001, 65002, 65003, 65004, 65005]),
-            AsPathSegment::AsSet(vec![65010, 65011]),
-        ],
-    }));
-    attrs.push(PathAttribute::Communities(vec![
-        0xFFFF_0001,
-        0xFFFF_0002,
-        0xFFFF_0003,
-        0x0001_0001,
-        0x0001_0002,
-    ]));
-    attrs
+    vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![
+                AsPathSegment::AsSequence(vec![65001, 65002, 65003, 65004, 65005]),
+                AsPathSegment::AsSequence(vec![65010, 65011]),
+            ],
+        }),
+        PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 1)),
+        PathAttribute::LocalPref(100),
+        PathAttribute::Med(50),
+        // 128 communities = 512-byte value, which forces the extended-length
+        // header path on both encode and decode.
+        PathAttribute::Communities((0..128).map(|i| 0x0001_0000 + i).collect()),
+        PathAttribute::ExtendedCommunities(vec![ExtendedCommunity::new(0x0002_FDE8_0000_0007)]),
+        PathAttribute::LargeCommunities(vec![LargeCommunity {
+            global_admin: 65001,
+            local_data1: 7,
+            local_data2: 9,
+        }]),
+        PathAttribute::OriginatorId(Ipv4Addr::new(10, 0, 0, 9)),
+        PathAttribute::ClusterList(vec![Ipv4Addr::new(10, 0, 0, 1), Ipv4Addr::new(10, 0, 0, 2)]),
+        PathAttribute::Aggregator(Aggregator {
+            asn: 65001,
+            router_id: Ipv4Addr::new(10, 0, 0, 9),
+            partial: false,
+        }),
+    ]
+}
+
+/// A hand-framed `AS_PATH` carrying a single `AS_SET` segment.
+///
+/// Framed by hand because `encode_path_attributes` refuses to originate one
+/// (RFC 9774 §3). Receiving one is still a real shape with a defined RFC 7606
+/// treat-as-withdraw disposition, and the raw segment scan that reaches that
+/// verdict runs on every UPDATE, so it stays on the decode side of the bench.
+fn as_set_as_path_wire() -> Vec<u8> {
+    let asns: [u32; 2] = [65010, 65011];
+    let count = u8::try_from(asns.len()).expect("fixture segment fits one octet");
+    let mut buf = vec![
+        0x40,          // flags: well-known transitive
+        2,             // type: AS_PATH
+        2 + count * 4, // value length: segment header + 4-octet ASNs
+        1,             // segment type: AS_SET
+        count,
+    ];
+    for asn in asns {
+        buf.extend_from_slice(&asn.to_be_bytes());
+    }
+    buf
 }
 
 fn bench_nlri_decode(c: &mut Criterion) {
@@ -146,6 +191,29 @@ fn bench_attr_decode(c: &mut Criterion) {
     group.bench_with_input(BenchmarkId::new("rich", rich.len()), &rich_buf, |b, buf| {
         b.iter(|| decode_path_attributes(buf, true, &[]).unwrap());
     });
+
+    // RFC 9774 §3 leaves `AS_SET` un-originatable but still receivable, so the
+    // revised decoder is the only side that can carry the shape. The RFC 7606
+    // treat-as-withdraw verdict is what makes the fixture load-bearing; assert
+    // it once outside the measurement so a silently-clean decode cannot pass
+    // for coverage.
+    let as_set_buf = as_set_as_path_wire();
+    let verdict = decode_path_attributes_revised(&as_set_buf, true, false, &[])
+        .expect("AS_SET in AS_PATH is recoverable, not session-reset");
+    assert!(
+        verdict
+            .malformed
+            .iter()
+            .any(|m| m.disposition == ErrorDisposition::TreatAsWithdraw),
+        "AS_SET fixture must keep its RFC 7606 treat-as-withdraw disposition"
+    );
+    group.bench_with_input(
+        BenchmarkId::new("as_set_revised", 1),
+        &as_set_buf,
+        |b, buf| {
+            b.iter(|| decode_path_attributes_revised(buf, true, false, &[]).unwrap());
+        },
+    );
 
     group.finish();
 }

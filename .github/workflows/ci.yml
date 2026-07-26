@@ -93,6 +93,14 @@ jobs:
       - run: cargo check -p rustbgpd-transport --features bench-internals --benches
       # API owns the feature-gated event-history producer bench.
       - run: cargo check -p rustbgpd-api --features bench-internals --benches
+      # `--no-run` above proves the bench targets compile, not that they run.
+      # A fixture the codec later made illegal (RFC 9774 AS_SET in the wire
+      # `rich` AS_PATH) compiled clean and panicked on first iteration, so two
+      # benchmark groups stopped executing without any gate noticing. Criterion
+      # `--test` mode runs every benchmark body once, unmeasured, which is what
+      # separates "broken" from "nobody ran it". Smoke only — no timings.
+      - name: Smoke every criterion bench target
+        run: bash bench/smoke-benches.sh
       # LAN-572 keeps the real MRT snapshot encoder benchmark usable in both
       # deliberately incompatible builds: bare-jemalloc timing, and opt-in
       # allocation/growth diagnostics.  `--smoke` bounds both executions for
@@ -129,6 +137,7 @@ jobs:
             --locked --all-targets -- -D warnings
           cargo test --test reloadstall_scenario_emitted_check
           bash -n bench/compare-criterion.sh
+          shellcheck bench/smoke-benches.sh
           bash -n bench/scale/route-server-1000/run-receipt.sh
           bash -n bench/scale/outbound-prefix-limits/run-receipt.sh
           bash -n bench/scale/config-persistence/run-receipt.sh
