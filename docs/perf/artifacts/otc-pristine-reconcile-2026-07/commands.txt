@@ -1,0 +1,21 @@
+Same-SHA control:
+bench/compare-criterion.sh \
+  --base ff055f75233f5fcbfa2dd12c7976c87489ee55fa \
+  --head ff055f75233f5fcbfa2dd12c7976c87489ee55fa \
+  --package rustbgpd-transport --bench fanout \
+  --features bench-internals --filter adj_rib_out_family_gauge \
+  --core 8 --attempts 6 --require-performance \
+  --out-dir target/otc-pristine-reconcile-same-sha-v2
+
+Immediate-parent before/after:
+bench/compare-criterion.sh \
+  --base ff055f75233f5fcbfa2dd12c7976c87489ee55fa \
+  --head 8526b27e839bf1eb3974f2df2d7a7745a8b00f70 \
+  --package rustbgpd-transport --bench fanout \
+  --features bench-internals --filter adj_rib_out_family_gauge \
+  --core 8 --attempts 6 --require-performance \
+  --out-dir target/otc-pristine-reconcile-before-after-v2
+
+Focused structural proofs:
+cargo test -p rustbgpd-rib distribution_skips_pristine_otc_prefix_visits -- --nocapture
+cargo test -p rustbgpd-rib otc_reconcile_non_pristine_state_uses_prefix_loop_and_clears_exactly -- --nocapture

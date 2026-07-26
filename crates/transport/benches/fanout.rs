@@ -23,8 +23,9 @@
 //!   cargo bench -p rustbgpd-transport --features bench-internals --bench fanout
 //!
 //! Pinned A/B receipts: `docs/perf/exact-export-fanout-2026-07.md`,
-//! `docs/perf/adj-rib-out-family-gauge-2026-07.md`, and
-//! `docs/perf/fanout-metrics-handle-2026-07.md`.
+//! `docs/perf/adj-rib-out-family-gauge-2026-07.md`,
+//! `docs/perf/fanout-metrics-handle-2026-07.md`, and
+//! `docs/perf/otc-pristine-reconcile-2026-07.md`.
 
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr};

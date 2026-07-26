@@ -1,0 +1,22 @@
+Test:
+cargo test -p rustbgpd-rib distribution_skips_pristine_otc_prefix_visits -- --nocapture
+
+Injected production break:
+Remove only the pristine-state early return from reconcile_peer_otc_blocked.
+
+Mutation:
+@@
+-        if pristine_otc_reconcile {
+-            return;
+-        }
+
+Observed failure:
+assertion `left == right` failed
+  left: 256
+ right: 0
+test manager::tests::update_groups::distribution_skips_pristine_otc_prefix_visits ... FAILED
+
+Restored result:
+test manager::tests::update_groups::distribution_skips_pristine_otc_prefix_visits ... ok
+test manager::tests::update_groups::otc_reconcile_non_pristine_state_uses_prefix_loop_and_clears_exactly ... ok
+Production mutation diff after restore: clean
