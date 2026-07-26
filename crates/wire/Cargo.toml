@@ -10,6 +10,11 @@ categories.workspace = true
 description = "BGP message codec — encode/decode OPEN, KEEPALIVE, UPDATE, NOTIFICATION, ROUTE-REFRESH"
 readme = "README.md"
 
+[features]
+# Enables allocation counters in the codec diagnostic binary. The ordinary
+# Criterion benchmark compiles without this feature and has no probe atomics.
+codec-allocation-diagnostics = []
+
 [dependencies]
 bytes.workspace = true
 thiserror.workspace = true
