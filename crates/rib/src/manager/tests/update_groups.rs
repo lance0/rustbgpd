@@ -642,11 +642,18 @@ fn register_direct_peer_with_families(
     outbound_rx
 }
 
-fn distribute_direct_route(manager: &mut RibManager, source: Ipv4Addr, prefix: Ipv4Prefix) {
+fn distribute_direct_routes(
+    manager: &mut RibManager,
+    source: Ipv4Addr,
+    prefixes: impl IntoIterator<Item = Ipv4Prefix>,
+) {
     manager.handle_update(RibUpdate::RoutesReceived {
         peer: IpAddr::V4(source),
         session_id: 0,
-        announced: vec![crate::test_support::make_route(prefix, source)],
+        announced: prefixes
+            .into_iter()
+            .map(|prefix| crate::test_support::make_route(prefix, source))
+            .collect(),
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
@@ -656,9 +663,14 @@ fn distribute_direct_route(manager: &mut RibManager, source: Ipv4Addr, prefix: I
     while manager.process_next_route_chunk() {}
 }
 
+fn distribute_direct_route(manager: &mut RibManager, source: Ipv4Addr, prefix: Ipv4Prefix) {
+    distribute_direct_routes(manager, source, [prefix]);
+}
+
 #[test]
-fn distribution_clones_metrics_once_per_pass() {
+fn distribution_control_counts_pristine_otc_prefix_visits() {
     const PEERS: usize = 4;
+    const CHANGED: usize = 64;
 
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
@@ -673,23 +685,89 @@ fn distribution_clones_metrics_once_per_pass() {
     }
 
     manager.adj_rib_out_commit_stats = AdjRibOutCommitStats::default();
-    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 116, 0), 24);
-    distribute_direct_route(&mut manager, Ipv4Addr::new(192, 0, 2, 6), prefix);
+    let prefixes: Vec<_> = (0..CHANGED)
+        .map(|index| {
+            let octet = u8::try_from(index).expect("64 prefixes fit in one IPv4 octet");
+            Ipv4Prefix::new(Ipv4Addr::new(203, 0, octet, 0), 24)
+        })
+        .collect();
+    distribute_direct_routes(
+        &mut manager,
+        Ipv4Addr::new(192, 0, 2, 6),
+        prefixes.iter().copied(),
+    );
 
     // Load-bearing proof: moving the production clone back inside the peer
     // loop makes this read four and fails the assertion.
     assert_eq!(manager.adj_rib_out_commit_stats.metrics_handle_clones, 1);
+    // Control for the pristine-state OTC fast path: the target changes this
+    // exact production-loop count from CHANGED * PEERS to zero.
+    assert_eq!(
+        manager.adj_rib_out_commit_stats.otc_reconcile_prefix_visits,
+        CHANGED * PEERS
+    );
+    assert!(manager.peer_otc_blocked.is_empty());
+    assert!(manager.pending_otc_blocked.is_empty());
     assert_eq!(manager.adj_rib_out_commit_stats.successful_commits, PEERS);
     assert_eq!(manager.adj_rib_out_commit_stats.successful_enqueues, PEERS);
     for receiver in &mut outbound {
         let update = receiver.try_recv().unwrap();
-        assert_eq!(update.announce.len(), 1);
-        assert_eq!(update.announce[0].prefix, Prefix::V4(prefix));
+        assert_eq!(update.announce.len(), CHANGED);
+        assert_eq!(
+            update
+                .announce
+                .iter()
+                .map(|route| route.prefix)
+                .collect::<HashSet<_>>(),
+            prefixes
+                .iter()
+                .copied()
+                .map(Prefix::V4)
+                .collect::<HashSet<_>>()
+        );
         assert!(matches!(
             receiver.try_recv(),
             Err(mpsc::error::TryRecvError::Empty)
         ));
     }
+}
+
+#[test]
+fn otc_reconcile_non_pristine_state_uses_prefix_loop_and_clears_exactly() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 63, 3, 1));
+    let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24));
+    let route = crate::test_support::make_route(
+        Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24),
+        Ipv4Addr::new(192, 0, 2, 7),
+    );
+    let identity = (route.prefix, route.path_id);
+    let affected = HashSet::from([prefix]);
+
+    manager.reconcile_peer_otc_blocked(peer, &affected, vec![route.clone()]);
+
+    assert_eq!(
+        manager.adj_rib_out_commit_stats.otc_reconcile_prefix_visits,
+        1
+    );
+    assert_eq!(
+        manager.peer_otc_blocked[&peer][&prefix],
+        HashSet::from([route.path_id])
+    );
+    let pending = &manager.pending_otc_blocked[&peer][&identity];
+    assert_eq!(pending.prefix, route.prefix);
+    assert_eq!(pending.path_id, route.path_id);
+    assert_eq!(pending.next_hop, route.next_hop);
+
+    manager.reconcile_peer_otc_blocked(peer, &affected, vec![]);
+
+    assert_eq!(
+        manager.adj_rib_out_commit_stats.otc_reconcile_prefix_visits,
+        2
+    );
+    assert!(!manager.peer_otc_blocked.contains_key(&peer));
+    assert!(!manager.pending_otc_blocked.contains_key(&peer));
 }
 
 #[test]

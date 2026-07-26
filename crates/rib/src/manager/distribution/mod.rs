@@ -1890,6 +1890,18 @@ impl RibManager {
         affected_prefixes: &HashSet<Prefix>,
         blocked_routes: Vec<crate::route::Route>,
     ) {
+        #[cfg(any(test, feature = "bench-internals"))]
+        let pristine_otc_reconcile = blocked_routes.is_empty()
+            && !self.peer_otc_blocked.contains_key(&peer)
+            && !self.pending_otc_blocked.contains_key(&peer);
+        #[cfg(any(test, feature = "bench-internals"))]
+        if pristine_otc_reconcile {
+            self.adj_rib_out_commit_stats
+                .pristine_otc_reconcile_candidates = self
+                .adj_rib_out_commit_stats
+                .pristine_otc_reconcile_candidates
+                .saturating_add(1);
+        }
         let mut blocked_by_prefix: HashMap<Prefix, HashMap<u32, crate::route::Route>> =
             HashMap::new();
         for route in blocked_routes {
@@ -1904,6 +1916,13 @@ impl RibManager {
         let current = self.peer_otc_blocked.entry(peer).or_default();
         let pending = self.pending_otc_blocked.entry(peer).or_default();
         for prefix in affected_prefixes {
+            #[cfg(test)]
+            {
+                self.adj_rib_out_commit_stats.otc_reconcile_prefix_visits = self
+                    .adj_rib_out_commit_stats
+                    .otc_reconcile_prefix_visits
+                    .saturating_add(1);
+            }
             let old = current.remove(prefix).unwrap_or_default();
             let blocked = blocked_by_prefix.remove(prefix).unwrap_or_default();
             let next: HashSet<u32> = blocked.keys().copied().collect();
