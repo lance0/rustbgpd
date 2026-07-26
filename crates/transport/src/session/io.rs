@@ -564,16 +564,23 @@ impl PeerSession {
                             Event::KeepaliveReceived
                         }
                         Message::Notification(notif) => {
-                            let shutdown_reason = if notif.code == NotificationCode::Cease
-                                && (notif.subcode == cease_subcode::ADMINISTRATIVE_SHUTDOWN
-                                    || notif.subcode == cease_subcode::ADMINISTRATIVE_RESET)
-                            {
-                                rustbgpd_wire::notification::decode_shutdown_communication(
-                                    &notif.data,
-                                )
-                            } else {
-                                None
-                            };
+                            let shutdown_reason =
+                                match rustbgpd_wire::notification::extract_shutdown_communication(
+                                    &notif,
+                                ) {
+                                    Ok(reason) => reason.map(str::to_owned),
+                                    Err(error) => {
+                                        warn!(
+                                            peer = %self.peer_label,
+                                            direction = "received",
+                                            code = notif.code.as_u8(),
+                                            subcode = notif.subcode,
+                                            error_category = error.category(),
+                                            "ignored malformed BGP shutdown communication"
+                                        );
+                                        None
+                                    }
+                                };
                             // Cache raw NOTIFICATION PDU for BMP Peer Down (reason 3: remote sent NOTIFICATION)
                             if self.bmp_tx.is_some() {
                                 self.last_down_reason =
@@ -591,10 +598,18 @@ impl PeerSession {
                             );
                             self.metrics
                                 .record_message_received(&self.peer_label, "notification");
+                            // Log shutdown communication reason (RFC 9003)
+                            if let Some(reason) = shutdown_reason.as_deref() {
+                                info!(
+                                    peer = %self.peer_label,
+                                    reason,
+                                    "peer sent shutdown communication"
+                                );
+                            }
                             self.emit_notification_event(
                                 SessionNotificationDirection::Received,
                                 &notif,
-                                shutdown_reason.clone(),
+                                shutdown_reason,
                             );
                             // RFC 8538: detect Cease/Hard Reset to bypass GR
                             if notif.code == NotificationCode::Cease
@@ -605,14 +620,6 @@ impl PeerSession {
                                     "peer sent Cease/Hard Reset, GR will be skipped"
                                 );
                                 self.received_hard_reset = true;
-                            }
-                            // Log shutdown communication reason (RFC 8203)
-                            if let Some(reason) = shutdown_reason {
-                                info!(
-                                    peer = %self.peer_label,
-                                    reason = %reason,
-                                    "peer sent shutdown communication"
-                                );
                             }
                             Event::NotificationReceived(notif)
                         }
