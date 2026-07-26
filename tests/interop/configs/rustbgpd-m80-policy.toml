@@ -18,6 +18,10 @@ principal = "rustbgpd://operator/test-only"
 [policy]
 rpol_files = ["policies/core.rpol"]
 
+# M80 asserts live import-decision traces; the production default stays off.
+[policy.explain]
+enabled = true
+
 [[neighbors]]
 address = "10.0.0.2"
 remote_asn = 65002

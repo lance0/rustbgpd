@@ -107,6 +107,10 @@ import_chain = [
     "prefer-rpki-valid",
 ]
 
+# M83 asserts the ROV reject term; the production default stays off.
+[policy.explain]
+enabled = true
+
 # --- IXP members ---
 
 # BIRD 2: plain transparent client, tshark capture rides this link.

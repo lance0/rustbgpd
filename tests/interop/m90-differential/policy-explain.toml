@@ -1,0 +1,4 @@
+# M90 asserts the deciding policy and term for every rejected route.
+# The production default remains off; this receipt opts into its evidence.
+[policy.explain]
+enabled = true
