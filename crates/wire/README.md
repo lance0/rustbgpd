@@ -71,9 +71,9 @@ analyzers, test harnesses, MRT readers, etc.
 ### 0.16.0 compatibility note
 
 `rustbgpd-wire` 0.16.0 keeps the public API additive, but **decode acceptance
-changed in six places**. Bytes that decoded under 0.15.0 may now be rejected or
-typed differently, so diff exactly this list before upgrading a consumer that
-asserts on decode outcomes:
+or type classification changed in six places**. Bytes that decoded under
+0.15.0 may now be rejected or typed differently, so diff exactly this list
+before upgrading a consumer that asserts on acceptance or typed variants:
 
 - **Unsupported OPEN Optional Parameter types now error** with OPEN Message
   Error / Unsupported Optional Parameter (2/4) instead of being skipped.
@@ -94,6 +94,11 @@ asserts on decode outcomes:
 - **`ExtendedCommunity::as_link_bandwidth()` matches exact types only.**
   Communities it previously accepted by a looser match no longer resolve as
   link bandwidth.
+
+Decoded values have one additional normalization change outside that
+acceptance/type list: duplicate RFC 8092 Large Communities retain only their
+first occurrence. Consumers that compare decoded attribute values should
+account for that stable deduplication too.
 
 ### 0.15.0 compatibility note
 

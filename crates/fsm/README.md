@@ -30,14 +30,16 @@ exposes wire types, so the incompatible wire dependency required the paired
 additions become non-breaking. `SessionState` remains exhaustively
 matchable: the six RFC 4271 §8 states are fixed by the protocol.
 
-`rustbgpd-fsm 0.3.1` is purely additive and pairs with `rustbgpd-wire 0.16.0`.
-`PeerConfig` gains `min_hold_time: Option<u16>` and
+`rustbgpd-fsm 0.3.1` keeps its public API backward-compatible and pairs with
+`rustbgpd-wire 0.16.0`. `PeerConfig` gains `min_hold_time: Option<u16>` and
 `required_families: Vec<(Afi, Safi)>`; because `PeerConfig` is
 `#[non_exhaustive]`, external construction goes through `PeerConfig::new` and
-is unaffected by the new fields. The paired wire 0.16.0 API is additive too,
-but its **decode acceptance changed in six places** — see the "0.16.0
-compatibility note" in the `rustbgpd-wire` README, since the FSM surfaces wire
-decode results to its callers.
+is unaffected by the new fields. Negotiation behavior also carries conformance
+fixes: the last duplicate Graceful Restart capability wins, and invalid OPEN
+identities (AS 0, or the local router ID on iBGP) are rejected. The paired wire
+0.16.0 API is additive too, but its **decode acceptance changed in six places**
+— see the "0.16.0 compatibility note" in the `rustbgpd-wire` README, since the
+FSM surfaces wire decode results to its callers.
 
 ## Key types
 

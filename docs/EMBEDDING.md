@@ -117,10 +117,12 @@ in a minor release without a semver-major break. Closed-by-construction sets
 carries the full split under "Enum exhaustiveness".
 
 **The prepared 0.16.0 change** is additive at the API level, but **decode
-acceptance changed in six places** — bytes that decoded under 0.15.0 may now be
-rejected or typed differently. `crates/wire/README.md` carries the itemized
-list under "0.16.0 compatibility note"; diff exactly that list before you
-upgrade a consumer that asserts on decode outcomes.
+acceptance or type classification changed in six places** — bytes that decoded
+under 0.15.0 may now be rejected or typed differently. `crates/wire/README.md`
+carries the itemized list under "0.16.0 compatibility note"; diff exactly that
+list before you upgrade a consumer that asserts on acceptance or typed
+variants. Consumers comparing decoded values must also account for RFC 8092
+Large Community duplicate normalization, which keeps the first occurrence.
 
 ---
 
@@ -302,10 +304,12 @@ and `policy` are later.**
    level with six decode-acceptance changes (§2.3).
 
 2. **`rustbgpd-fsm` (published as `0.3.0`; `0.3.1` prepared).** The prepared
-   `0.3.1` is purely additive: `PeerConfig` gains `min_hold_time` and
-   `required_families`, and `PeerConfig` is `#[non_exhaustive]`, so external
-   construction through `PeerConfig::new` is unaffected. Why the FSM was the
-   second published crate:
+   `0.3.1` keeps the public API backward-compatible: `PeerConfig` gains
+   `min_hold_time` and `required_families`, and `PeerConfig` is
+   `#[non_exhaustive]`, so external construction through `PeerConfig::new` is
+   unaffected. Negotiation behavior also carries conformance fixes: the last
+   duplicate Graceful Restart capability wins, and invalid OPEN identities
+   are rejected. Why the FSM was the second published crate:
    - It depends *only* on `rustbgpd-wire` + `thiserror` + `bytes`. Zero
      daemon-tier coupling.
    - It is the smallest, purest building block a second consumer needs. A test

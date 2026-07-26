@@ -652,9 +652,11 @@ do not force an FSM release for every daemon tag.
    - If no: skip. Do not publish a no-op release.
    - If yes: continue.
 2. Decide semver bump:
-   - **Patch**: bug fixes, docs/test improvements, no public API expansion.
-   - **Minor**: additive events/actions/helpers or new non-breaking
-     negotiation surfaces.
+   - **Patch**: bug fixes, docs/test improvements, or backward-compatible
+     fields on an existing `#[non_exhaustive]` config struct when its
+     constructor preserves the prior defaults.
+   - **Minor**: additive events/actions/helpers, new public types, or other
+     non-breaking negotiation surfaces.
    - **Major**: changed method signatures, removed variants, or enum/struct
      shape changes not protected by `#[non_exhaustive]`.
 3. Update `version` in `crates/fsm/Cargo.toml`

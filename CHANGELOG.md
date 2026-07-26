@@ -796,8 +796,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   because persistence writes `<config>.tmp` alongside it and renames.
 
 - **Library crates: `rustbgpd-wire` 0.16.0 and `rustbgpd-fsm` 0.3.1.** The
-  wire API surface is additive, but **decode acceptance changed in six
-  places** — embedders should diff exactly this list:
+  wire API surface is additive, but **decode acceptance or type
+  classification changed in six places** — embedders should diff exactly
+  this list for those outcomes:
 
   - **Unsupported OPEN Optional Parameter types now error** with OPEN
     Message Error / Unsupported Optional Parameter (2/4) instead of being
@@ -821,10 +822,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     Communities it previously accepted by a looser match no longer resolve
     as link bandwidth.
 
-  `rustbgpd-fsm` 0.3.1 is purely additive: `PeerConfig` gains
-  `min_hold_time: Option<u16>` and `required_families: Vec<(Afi, Safi)>`,
-  and `PeerConfig` is `#[non_exhaustive]`, so external construction through
-  its builder is unaffected.
+  Decoded-value comparisons must also account for RFC 8092 Large Community
+  duplicate normalization, which keeps the first occurrence.
+
+  `rustbgpd-fsm` 0.3.1 keeps its public API backward-compatible:
+  `PeerConfig` gains `min_hold_time: Option<u16>` and
+  `required_families: Vec<(Afi, Safi)>`, and `PeerConfig` is
+  `#[non_exhaustive]`, so external construction through its builder is
+  unaffected. Negotiation behavior also carries conformance fixes: the last
+  duplicate Graceful Restart capability wins, and invalid OPEN identities
+  are rejected.
 
 - **The gRPC threat-model annex now describes the enforced tier system.**
   The pre-v0.24.0 audit-only draft was withdrawn because its attacker
