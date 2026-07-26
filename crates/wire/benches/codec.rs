@@ -153,6 +153,54 @@ fn ipv6_mp_add_path_update() -> (
     (msg, attrs, announced, withdrawn, next_hop)
 }
 
+fn assert_ipv6_mp_add_path_update(
+    msg: &UpdateMessage,
+    attrs: &[PathAttribute],
+    announced: NlriEntry,
+    withdrawn: NlriEntry,
+    next_hop: IpAddr,
+) {
+    let add_path_families = [(Afi::Ipv6, Safi::Unicast)];
+    let decoded = msg
+        .parse_revised(true, false, false, &add_path_families)
+        .expect("clean IPv6 MP-BGP Add-Path UPDATE must parse");
+    assert!(
+        decoded.malformed.is_empty(),
+        "clean fixture must not exercise malformed recovery"
+    );
+    assert!(decoded.update.announced.is_empty());
+    assert!(decoded.update.withdrawn.is_empty());
+    assert_eq!(decoded.update.attributes, attrs);
+    assert_eq!(decoded.update.bgpls_nlri_discarded, 0);
+
+    let reach = decoded
+        .update
+        .attributes
+        .iter()
+        .find_map(|attr| match attr {
+            PathAttribute::MpReachNlri(mp) => Some(mp),
+            _ => None,
+        })
+        .expect("fixture must decode MP_REACH_NLRI");
+    assert_eq!((reach.afi, reach.safi), (Afi::Ipv6, Safi::Unicast));
+    assert_eq!(reach.next_hop, next_hop);
+    assert_eq!(reach.announced, vec![announced]);
+    assert_ne!(reach.announced[0].path_id, 0);
+
+    let unreach = decoded
+        .update
+        .attributes
+        .iter()
+        .find_map(|attr| match attr {
+            PathAttribute::MpUnreachNlri(mp) => Some(mp),
+            _ => None,
+        })
+        .expect("fixture must decode MP_UNREACH_NLRI");
+    assert_eq!((unreach.afi, unreach.safi), (Afi::Ipv6, Safi::Unicast));
+    assert_eq!(unreach.withdrawn, vec![withdrawn]);
+    assert_ne!(unreach.withdrawn[0].path_id, 0);
+}
+
 fn bench_nlri_decode(c: &mut Criterion) {
     let mut group = c.benchmark_group("nlri_decode");
     for count in [1, 10, 100, 500] {
@@ -206,6 +254,12 @@ fn bench_update_build(c: &mut Criterion) {
             },
         );
     }
+
+    let (msg, attrs, announced, withdrawn, next_hop) = ipv6_mp_add_path_update();
+    assert_ipv6_mp_add_path_update(&msg, &attrs, announced, withdrawn, next_hop);
+    group.bench_function("ipv6_mp_add_path", |b| {
+        b.iter(|| UpdateMessage::build(&[], &[], &attrs, true, true, Ipv4UnicastMode::Body));
+    });
     group.finish();
 }
 
@@ -256,44 +310,7 @@ fn bench_update_parse_revised(c: &mut Criterion) {
 
     let (msg, attrs, announced, withdrawn, next_hop) = ipv6_mp_add_path_update();
     let add_path_families = [(Afi::Ipv6, Safi::Unicast)];
-    let decoded = msg
-        .parse_revised(true, false, false, &add_path_families)
-        .expect("clean IPv6 MP-BGP Add-Path UPDATE must parse");
-    assert!(
-        decoded.malformed.is_empty(),
-        "clean fixture must not exercise malformed recovery"
-    );
-    assert!(decoded.update.announced.is_empty());
-    assert!(decoded.update.withdrawn.is_empty());
-    assert_eq!(decoded.update.attributes, attrs);
-    assert_eq!(decoded.update.bgpls_nlri_discarded, 0);
-
-    let reach = decoded
-        .update
-        .attributes
-        .iter()
-        .find_map(|attr| match attr {
-            PathAttribute::MpReachNlri(mp) => Some(mp),
-            _ => None,
-        })
-        .expect("fixture must decode MP_REACH_NLRI");
-    assert_eq!((reach.afi, reach.safi), (Afi::Ipv6, Safi::Unicast));
-    assert_eq!(reach.next_hop, next_hop);
-    assert_eq!(reach.announced, vec![announced]);
-    assert_ne!(reach.announced[0].path_id, 0);
-
-    let unreach = decoded
-        .update
-        .attributes
-        .iter()
-        .find_map(|attr| match attr {
-            PathAttribute::MpUnreachNlri(mp) => Some(mp),
-            _ => None,
-        })
-        .expect("fixture must decode MP_UNREACH_NLRI");
-    assert_eq!((unreach.afi, unreach.safi), (Afi::Ipv6, Safi::Unicast));
-    assert_eq!(unreach.withdrawn, vec![withdrawn]);
-    assert_ne!(unreach.withdrawn[0].path_id, 0);
+    assert_ipv6_mp_add_path_update(&msg, &attrs, announced, withdrawn, next_hop);
 
     group.bench_function("ipv6_mp_add_path", |b| {
         b.iter(|| {
