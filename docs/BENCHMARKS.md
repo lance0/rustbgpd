@@ -67,11 +67,25 @@ deltas on PRs without coupling them to a single machine.
 | Pinning | `taskset -c <core>` (set by the workflow input; default core 0) |
 | cpufreq governor | **Not available** — virtualized CPU does not expose `cpufreq` sysfs, so `--require-performance` is set to `false` for runs on this host |
 
-**Empirical noise floor: ~11% spread.** Five sequential pinned runs at
-the same `main` SHA (2026-05-28 calibration on `adj_rib_in_insert/10000`)
-produced medians of 8.232 ms, 8.446 ms, 8.693 ms, 8.979 ms, and
-9.212 ms — a max-minus-min spread of 11.2% of the mean. This is the
-floor every CI delta must clear before the signal exceeds the noise.
+**Empirical noise floor: ~11% spread on this host, at this one shape.**
+Five sequential pinned runs at the same `main` SHA (2026-05-28
+calibration on `adj_rib_in_insert/10000`) produced medians of 8.232 ms,
+8.446 ms, 8.693 ms, 8.979 ms, and 9.212 ms — a max-minus-min spread of
+11.2% of the mean.
+
+**Do not carry that 11.2% to other hosts or other shapes.** The floor is
+a property of a (host, benchmark, size) triple, not a global constant.
+Same-SHA controls on the primary host (2026-07-25, six alternating
+attempts, `performance` governor, `taskset -c 8`) measured
+`adj_rib_in_insert/10000` at 1.44% — roughly eight times tighter than
+this runner's figure for the identical shape — while
+`adj_rib_in_insert/100000` on that same host measured 16.76%, and
+`rib_pipeline/1000` measured 0.55%. Applied as one number, an 11.2%
+floor hides real regressions at the tight shapes and manufactures
+phantom ones at the noisy shapes. Read the floor from a same-SHA control
+on the host doing the measuring, at the shape being measured; the
+per-shape figures and the method are in
+[`perf/rib-criterion-noise-floor-2026-07.md`](perf/rib-criterion-noise-floor-2026-07.md).
 
 **Hardware speed ratio: ~2.2× slower than the primary host.** Wire
 `validate_update` measures 323 ns here vs 133 ns on the primary host;

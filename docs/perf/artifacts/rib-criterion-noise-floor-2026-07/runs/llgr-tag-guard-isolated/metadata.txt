@@ -1,0 +1,35 @@
+run_id=20260725T211102Z-12c63b7cd637-vs-5e2ae925157a-rustbgpd-rib-rib_ops
+base_ref=5e2ae925^
+base_sha=12c63b7cd637699cb692a22d5e447cf65962a89a
+head_ref=5e2ae925
+head_sha=5e2ae925157ae6237babaabdaf17b2802094d0c7
+package=rustbgpd-rib
+bench=rib_ops
+filter=rib_pipeline|adj_rib_in_insert
+features=
+core=8
+attempts=6
+fail_on_regression=0
+regression_threshold_pct=3
+regression_max_stddev_pct=10
+verdict_min_attempts=3
+governor=performance
+use_taskset=1
+base_target_dir=$OUT/target-base
+head_target_dir=$OUT/target-head
+criterion_dir=$OUT/criterion
+
+Linux 6.17.0-35-generic #35~24.04.1-Ubuntu SMP PREEMPT_DYNAMIC Tue May 26 19:30:42 UTC 2 x86_64 x86_64 x86_64 GNU/Linux
+
+rustc 1.97.0 (2d8144b78 2026-07-07)
+binary: rustc
+commit-hash: 2d8144b7880597b6e6d3dfd63a9a9efae3f533d3
+commit-date: 2026-07-07
+host: x86_64-unknown-linux-gnu
+release: 1.97.0
+LLVM version: 22.1.6
+
+cargo 1.97.0 (c980f4866 2026-06-30)
+
+model name	: AMD Ryzen Threadripper 7970X 32-Cores
+kernel.perf_event_paranoid = 4

@@ -1,0 +1,79 @@
+# Exact per-run driver invocations, in execution order.
+#
+# $REPO is a clean worktree checked out at that run's commit= (recorded in
+# runs/<label>/provenance.env); $OUT is the campaign output root. The driver
+# is docs/perf/run-explain-cache-variant.sh. Regenerate rather than
+# executing the sanitized placeholders verbatim.
+
+REPO=$REPO LABEL=smoke OUTBASE=$OUT \
+    PEERS=20 TOTAL=20000 EXPLAIN=true \
+    RELOADS=1 CONTROL_SECS=5 \
+    docs/perf/run-explain-cache-variant.sh
+
+REPO=$REPO LABEL=R1a-post-omit-1000x400 OUTBASE=$OUT \
+    PEERS=1000 TOTAL=400000 EXPLAIN=omit \
+    docs/perf/run-explain-cache-variant.sh
+
+REPO=$REPO LABEL=R1b-post-omit-1000x400 OUTBASE=$OUT \
+    PEERS=1000 TOTAL=400000 EXPLAIN=omit \
+    docs/perf/run-explain-cache-variant.sh
+
+REPO=$REPO LABEL=R2a-pre-omit-1000x400 OUTBASE=$OUT \
+    PEERS=1000 TOTAL=400000 EXPLAIN=omit \
+    docs/perf/run-explain-cache-variant.sh
+
+REPO=$REPO LABEL=R2b-pre-omit-1000x400 OUTBASE=$OUT \
+    PEERS=1000 TOTAL=400000 EXPLAIN=omit \
+    docs/perf/run-explain-cache-variant.sh
+
+REPO=$REPO LABEL=R3a-post-true-1000x400 OUTBASE=$OUT \
+    PEERS=1000 TOTAL=400000 EXPLAIN=true \
+    docs/perf/run-explain-cache-variant.sh
+
+REPO=$REPO LABEL=R3b-post-true-1000x400 OUTBASE=$OUT \
+    PEERS=1000 TOTAL=400000 EXPLAIN=true \
+    docs/perf/run-explain-cache-variant.sh
+
+REPO=$REPO LABEL=R3c-post-false-1000x400 OUTBASE=$OUT \
+    PEERS=1000 TOTAL=400000 EXPLAIN=false \
+    docs/perf/run-explain-cache-variant.sh
+
+REPO=$REPO LABEL=R4a-post-true-100x5000 OUTBASE=$OUT \
+    PEERS=100 TOTAL=500000 EXPLAIN=true \
+    docs/perf/run-explain-cache-variant.sh
+
+REPO=$REPO LABEL=R4b-post-true-100x5000 OUTBASE=$OUT \
+    PEERS=100 TOTAL=500000 EXPLAIN=true \
+    docs/perf/run-explain-cache-variant.sh
+
+REPO=$REPO LABEL=R4c-post-false-100x5000 OUTBASE=$OUT \
+    PEERS=100 TOTAL=500000 EXPLAIN=false \
+    docs/perf/run-explain-cache-variant.sh
+
+REPO=$REPO LABEL=R4d-post-false-100x5000 OUTBASE=$OUT \
+    PEERS=100 TOTAL=500000 EXPLAIN=false \
+    docs/perf/run-explain-cache-variant.sh
+
+REPO=$REPO LABEL=D1-dhat-true-20x5000 OUTBASE=$OUT \
+    PEERS=20 TOTAL=100000 EXPLAIN=true \
+    DHAT=1 PROFILE=release \
+    RELOADS=1 CONTROL_SECS=5 \
+    docs/perf/run-explain-cache-variant.sh
+
+REPO=$REPO LABEL=D2-dhat-false-20x5000 OUTBASE=$OUT \
+    PEERS=20 TOTAL=100000 EXPLAIN=false \
+    DHAT=1 PROFILE=release \
+    RELOADS=1 CONTROL_SECS=5 \
+    docs/perf/run-explain-cache-variant.sh
+
+REPO=$REPO LABEL=D3-dhatprof-true-20x5000 OUTBASE=$OUT \
+    PEERS=20 TOTAL=100000 EXPLAIN=true \
+    DHAT=1 PROFILE=release-prof \
+    RELOADS=1 CONTROL_SECS=5 \
+    docs/perf/run-explain-cache-variant.sh
+
+REPO=$REPO LABEL=D4-dhatprof-false-20x5000 OUTBASE=$OUT \
+    PEERS=20 TOTAL=100000 EXPLAIN=false \
+    DHAT=1 PROFILE=release-prof \
+    RELOADS=1 CONTROL_SECS=5 \
+    docs/perf/run-explain-cache-variant.sh

@@ -1,0 +1,16 @@
+run	commit	peers	routes_per_peer	explain	profile	steady_rss_mib_median_postconv	peak_rss_mib_kernel_VmHWM	sampled_peak_rss_mib_1hz	harness_control_window_rss_mib	jemalloc_allocated_mib	jemalloc_resident_mib	converge_s	rss_samples	retained_dir
+R1a-post-omit-1000x400	515659b191b7fde91a1a1c9f973e7c8ae3731086	1000	400	omit	release	496.1	723.9	599.1	476	627.8	699.0	20.0	147	runs/R1a-post-omit-1000x400
+R1b-post-omit-1000x400	515659b191b7fde91a1a1c9f973e7c8ae3731086	1000	400	omit	release	498.0	737.0	685.6	477	621.6	718.2	20.0	147	runs/R1b-post-omit-1000x400
+R2a-pre-omit-1000x400	530badfef268bed9821f5a363a415b77bed6c47f	1000	400	omit	release	870.3	1112.2	1030.6	849	993.9	1085.1	20.5	144	runs/R2a-pre-omit-1000x400
+R2b-pre-omit-1000x400	530badfef268bed9821f5a363a415b77bed6c47f	1000	400	omit	release	870.8	1103.1	1053.7	852	989.0	1079.4	20.5	146	runs/R2b-pre-omit-1000x400
+R3a-post-true-1000x400	515659b191b7fde91a1a1c9f973e7c8ae3731086	1000	400	true	release	871.5	1102.9	999.9	852	945.0	1045.8	20.2	147	runs/R3a-post-true-1000x400
+R3b-post-true-1000x400	515659b191b7fde91a1a1c9f973e7c8ae3731086	1000	400	true	release	872.1	1109.7	1003.4	851	997.9	1085.4	20.0	155	runs/R3b-post-true-1000x400
+R3c-post-false-1000x400	515659b191b7fde91a1a1c9f973e7c8ae3731086	1000	400	false	release	497.1	727.4	616.4	477	616.9	683.1	20.0	193	runs/R3c-post-false-1000x400
+R4a-post-true-100x5000	515659b191b7fde91a1a1c9f973e7c8ae3731086	100	5000	true	release	771.6	1069.7	999.3	760	837.1	910.8	3.3	118	runs/R4a-post-true-100x5000
+R4b-post-true-100x5000	515659b191b7fde91a1a1c9f973e7c8ae3731086	100	5000	true	release	768.2	1061.9	974.0	757	776.4	848.8	3.3	118	runs/R4b-post-true-100x5000
+R4c-post-false-100x5000	515659b191b7fde91a1a1c9f973e7c8ae3731086	100	5000	false	release	526.0	835.1	748.4	515	600.2	684.3	3.3	118	runs/R4c-post-false-100x5000
+R4d-post-false-100x5000	515659b191b7fde91a1a1c9f973e7c8ae3731086	100	5000	false	release	524.9	821.5	754.6	513	600.3	666.2	3.4	118	runs/R4d-post-false-100x5000
+D1-dhat-true-20x5000	515659b191b7fde91a1a1c9f973e7c8ae3731086	20	5000	true	release	268.5	270.4	268.6	204	0.1	11.2	3.9	33	runs/D1-dhat-true-20x5000
+D2-dhat-false-20x5000	515659b191b7fde91a1a1c9f973e7c8ae3731086	20	5000	false	release	171.9	198.8	183.9	138	0.1	11.2	2.7	32	runs/D2-dhat-false-20x5000
+D3-dhatprof-true-20x5000	515659b191b7fde91a1a1c9f973e7c8ae3731086	20	5000	true	release-prof	263.5	265.6	263.6	200	0.1	11.2	3.7	33	runs/D3-dhatprof-true-20x5000
+D4-dhatprof-false-20x5000	515659b191b7fde91a1a1c9f973e7c8ae3731086	20	5000	false	release-prof	172.3	199.9	172.4	140	0.1	11.2	2.5	32	runs/D4-dhatprof-false-20x5000

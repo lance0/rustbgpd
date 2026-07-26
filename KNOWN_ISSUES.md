@@ -142,6 +142,49 @@ resolved.
   monitoring retains the original wire UPDATE, including the peer-supplied
   attribute.
 
+## Measurement tooling defects
+
+Bugs in the profiling instruments, not in the daemon. They do not affect
+shipped behavior, but they silently distort or block memory attribution,
+so they are recorded here rather than discovered again. All three were
+found during the explain-cache memory campaign
+(`docs/perf/explain-cache-opt-in-2026-07.md`), whose published figures
+are stated net of them.
+
+- **DHAT classifier over-matches the import-decision cache.**
+  `bench/scale/rebaseline/classify_dhat.py` assigns a stack to
+  "Transport import-decision cache" if any frame contains
+  `import_decision_cache`. `RejectedRouteStore` is an
+  `LruCache<ImportDecisionKey, RejectedRouteEntry>`, so its own
+  allocations carry that module path in a generic type parameter and are
+  folded into the explain bucket. Measured at 20 sessions × 5,000
+  routes, the misattribution is 704,320 bytes and is identical whether
+  the explain cache is enabled or disabled — which is how the
+  cache-disabled bucket reads as non-zero when the true figure is zero.
+  The owner test needs to match the cache's own types and functions
+  rather than any occurrence of the module name.
+
+- **DHAT classifier reports zero for every RIB owner.** In the same
+  captures, `Group RIB-Out table`, `Loc-RIB best-path map`,
+  `Adj-RIB-In route storage`, `Prefix-trie index - Adj-RIB-In`, `Daemon
+  core`, and `Per-peer Adj-RIB-Out` all report 0 bytes, while 63.8% (cache
+  enabled) to 80.9% (cache disabled) of live bytes land in the `RIB other`
+  fallback. The named-marker frames the classifier keys on
+  (`LocRib::`, `AdjRibIn::`, `RouteSlab::`, …) do not survive to the
+  retained stacks, so the fallback absorbs the work. Any component split
+  read out of these captures is unusable until the markers are re-anchored
+  on symbols that survive an optimized build.
+
+- **`[profile.release] strip = "symbols"` makes DHAT captures
+  unclassifiable, with an opaque error.** A `--features dhat-heap` build
+  on the plain release profile produces a `dhat-heap.json` whose points
+  carry empty frame stacks. `classify_dhat.py` then fails with
+  `encoded DHAT symbol is empty or contains a TSV/stack delimiter`, which
+  names neither stripping nor the profile, and the run has to be repeated.
+  Use `--profile release-prof` (`strip = false`, `debug = 1`) for any DHAT
+  capture; the classifier should reject an empty-stack profile with a
+  message that says so.
+
 ## Limitations (by design, not bugs)
 
 - **Required-family enforcement is local.** `required_families` lets rustbgpd

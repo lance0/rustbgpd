@@ -16,9 +16,13 @@ describe this disclosed fleet rather than a universal deployment forecast.
 > with the import-decision explain cache **enabled** — the default at the
 > time. That default is now `false` (ADR-0073), which means the RSS
 > figures below include retention a current daemon does not pay for by
-> default. How much they would drop is a separate before/after
-> measurement that has not been run; do not read a saving out of this
-> receipt.
+> default. That before/after measurement has since been made at the same
+> fleet shape: see
+> [`explain-cache-opt-in-2026-07.md`](explain-cache-opt-in-2026-07.md),
+> which measures 870.5 → 497.1 MiB steady RSS across the default flip at
+> 1,000 sessions × 400 routes. Read the saving out of that receipt, not
+> this one — this campaign measured a different commit and a different
+> workload, so its own figures are not a before/after pair.
 
 ## Result
 

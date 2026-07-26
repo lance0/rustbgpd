@@ -1,0 +1,8 @@
+21:[policy]
+22-rpol_files = ["member.rpol"]
+23-import_chain = ["member-in"]
+24-export_chain = ["member-out"]
+25-
+26-[policy.explain]
+27-enabled = true
+28-

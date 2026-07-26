@@ -1,0 +1,1 @@
+wrote $RUN/config.toml (20 neighbors), member.rpol, gen-a.rpol, gen-b.rpol; listen_port=1790, changed_peers=20, stable_peers=0, grpc_uds=$RUN/grpc.sock
