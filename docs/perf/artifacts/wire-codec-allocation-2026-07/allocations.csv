@@ -1,0 +1,17 @@
+label,revision,benchmark,operations,fixture_attributes,fixture_len_bytes,fixture_digest,alloc_calls,alloc_zeroed_calls,realloc_calls,allocation_calls,requested_bytes,allocation_calls_per_op,requested_bytes_per_op
+"H-a","643900e76d1101a50974dcdac1c1e2b36c7991cc","attr_encode/rich/11",10000,11,631,"fnv1a64:96bb16b5bb7cbf8b",120000,0,90000,210000,12280000,21,1228
+"H-a","643900e76d1101a50974dcdac1c1e2b36c7991cc","validate_update",10000,6,53,"fnv1a64:1fbab958f3d35d0b",20000,0,0,20000,960000,2,96
+"H-b","643900e76d1101a50974dcdac1c1e2b36c7991cc","attr_encode/rich/11",10000,11,631,"fnv1a64:96bb16b5bb7cbf8b",120000,0,90000,210000,12280000,21,1228
+"H-b","643900e76d1101a50974dcdac1c1e2b36c7991cc","validate_update",10000,6,53,"fnv1a64:1fbab958f3d35d0b",20000,0,0,20000,960000,2,96
+"H","643900e76d1101a50974dcdac1c1e2b36c7991cc","attr_encode/rich/11",10000,11,631,"fnv1a64:96bb16b5bb7cbf8b",120000,0,90000,210000,12280000,21,1228
+"H","643900e76d1101a50974dcdac1c1e2b36c7991cc","validate_update",10000,6,53,"fnv1a64:1fbab958f3d35d0b",20000,0,0,20000,960000,2,96
+"P","f95d894069216662c33e9c109e2891d12fb8350f","attr_encode/rich/11",10000,11,631,"fnv1a64:96bb16b5bb7cbf8b",20000,0,60000,80000,10840000,8,1084
+"P","f95d894069216662c33e9c109e2891d12fb8350f","validate_update",10000,6,53,"fnv1a64:1fbab958f3d35d0b",0,0,0,0,0,0,0
+"S-a","ed3b7a72fde7d69eff51d334e7feb65d698bae60","attr_encode/rich/11",10000,11,631,"fnv1a64:96bb16b5bb7cbf8b",20000,0,60000,80000,10840000,8,1084
+"S-a","ed3b7a72fde7d69eff51d334e7feb65d698bae60","validate_update",10000,6,53,"fnv1a64:1fbab958f3d35d0b",20000,0,0,20000,960000,2,96
+"S-b","ed3b7a72fde7d69eff51d334e7feb65d698bae60","attr_encode/rich/11",10000,11,631,"fnv1a64:96bb16b5bb7cbf8b",20000,0,60000,80000,10840000,8,1084
+"S-b","ed3b7a72fde7d69eff51d334e7feb65d698bae60","validate_update",10000,6,53,"fnv1a64:1fbab958f3d35d0b",20000,0,0,20000,960000,2,96
+"S-control","ed3b7a72fde7d69eff51d334e7feb65d698bae60","attr_encode/rich/11",10000,11,631,"fnv1a64:96bb16b5bb7cbf8b",20000,0,60000,80000,10840000,8,1084
+"S-control","ed3b7a72fde7d69eff51d334e7feb65d698bae60","validate_update",10000,6,53,"fnv1a64:1fbab958f3d35d0b",20000,0,0,20000,960000,2,96
+"S","ed3b7a72fde7d69eff51d334e7feb65d698bae60","attr_encode/rich/11",10000,11,631,"fnv1a64:96bb16b5bb7cbf8b",20000,0,60000,80000,10840000,8,1084
+"S","ed3b7a72fde7d69eff51d334e7feb65d698bae60","validate_update",10000,6,53,"fnv1a64:1fbab958f3d35d0b",20000,0,0,20000,960000,2,96

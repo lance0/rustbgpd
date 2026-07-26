@@ -1,0 +1,38 @@
+campaign_id=20260726T165206Z
+campaign_end_utc=2026-07-26T17:13:49Z
+campaign_duration_seconds=1303
+campaign_exit_status=0
+
+H=643900e76d1101a50974dcdac1c1e2b36c7991cc
+H_parent=e68e8e5b3253f90773732ddd0c481011a1a5514a
+S=ed3b7a72fde7d69eff51d334e7feb65d698bae60
+S_parent=643900e76d1101a50974dcdac1c1e2b36c7991cc
+P=f95d894069216662c33e9c109e2891d12fb8350f
+P_parent=ed3b7a72fde7d69eff51d334e7feb65d698bae60
+
+bench_host=<BENCH_HOST>
+cpu=AMD Ryzen Threadripper 7970X 32-Cores
+pinned_cpu=8
+governor=performance
+kernel=Linux 6.17.0-35-generic x86_64 GNU/Linux
+kernel_perf_event_paranoid=4
+rustc=1.97.0 (2d8144b78 2026-07-07)
+llvm=22.1.6
+cargo=1.97.0 (c980f4866 2026-06-30)
+cargo_lock_sha256=1b3a9db0e37873e649587e9f6eea90cbb921723b398e5a8253f8ae2a1bb1bc4d
+
+timing_H_binary_sha256=e987cbdfb527266716a416e800c21c1f60a734d615c7cc0533908d1da916b93b
+timing_S_binary_sha256=d02f5463425eaf4e209f9f9ad64cbd6c4f4ed042937be40aec7ee1632c89fc61
+timing_P_binary_sha256=e1f03723b3a7b730c51f77311bcda070c28400fdc8b7b14c112458c7a725418f
+diagnostic_H_binary_sha256=f2c9546723e8cbaada3034bf6868c15d520b6800d71b7ca496111d52b5f4ec36
+diagnostic_S_binary_sha256=5e3beef6ebd8f5b27d8aa5d3222924641a48c7d80337d37f989b3dba259b8dac
+diagnostic_P_binary_sha256=095fee25be858921a4b49bef796e20c6d34375df0df1adac46b5d7704e0a3356
+
+timing_attempts=6
+timing_order=odd base-first; even head-first
+criterion_warmup_seconds=3
+criterion_measurement_seconds=5
+criterion_samples=100
+diagnostic_operations=10000
+diagnostic_allocator=Rust System wrapped through GlobalAlloc
+diagnostic_counter_scope=successful alloc, alloc_zeroed, and realloc requests inside each public codec call

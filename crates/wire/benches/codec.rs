@@ -1,18 +1,30 @@
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+#[cfg(feature = "codec-allocation-diagnostics")]
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::net::Ipv4Addr;
+#[cfg(not(feature = "codec-allocation-diagnostics"))]
+use std::net::{IpAddr, Ipv6Addr};
+#[cfg(feature = "codec-allocation-diagnostics")]
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+#[cfg(not(feature = "codec-allocation-diagnostics"))]
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
-use rustbgpd_wire::attribute::{
-    decode_path_attributes, decode_path_attributes_revised, encode_path_attributes,
-};
+#[cfg(not(feature = "codec-allocation-diagnostics"))]
+use rustbgpd_wire::attribute::decode_path_attributes_revised;
+use rustbgpd_wire::attribute::{decode_path_attributes, encode_path_attributes};
+#[cfg(not(feature = "codec-allocation-diagnostics"))]
 use rustbgpd_wire::nlri::{decode_nlri, encode_nlri};
 use rustbgpd_wire::validate::validate_update_attributes;
+#[cfg(not(feature = "codec-allocation-diagnostics"))]
 use rustbgpd_wire::{
-    Afi, Aggregator, AsPath, AsPathSegment, ErrorDisposition, ExtendedCommunity, Ipv4NlriEntry,
-    Ipv4Prefix, Ipv4UnicastMode, Ipv6Prefix, LargeCommunity, MpReachNlri, MpUnreachNlri, NlriEntry,
-    Origin, PathAttribute, Prefix, Safi, UpdateMessage,
+    Afi, ErrorDisposition, Ipv4NlriEntry, Ipv4Prefix, Ipv4UnicastMode, Ipv6Prefix, MpReachNlri,
+    MpUnreachNlri, NlriEntry, Prefix, Safi, UpdateMessage,
+};
+use rustbgpd_wire::{
+    Aggregator, AsPath, AsPathSegment, ExtendedCommunity, LargeCommunity, Origin, PathAttribute,
 };
 
+#[cfg(not(feature = "codec-allocation-diagnostics"))]
 fn generate_ipv4_prefixes(count: usize) -> Vec<Ipv4Prefix> {
     (0..count)
         .map(|i| {
@@ -81,6 +93,7 @@ fn rich_attributes() -> Vec<PathAttribute> {
 /// (RFC 9774 §3). Receiving one is still a real shape with a defined RFC 7606
 /// treat-as-withdraw disposition, and the raw segment scan that reaches that
 /// verdict runs on every UPDATE, so it stays on the decode side of the bench.
+#[cfg(not(feature = "codec-allocation-diagnostics"))]
 fn as_set_as_path_wire() -> Vec<u8> {
     let asns: [u32; 2] = [65010, 65011];
     let count = u8::try_from(asns.len()).expect("fixture segment fits one octet");
@@ -97,6 +110,7 @@ fn as_set_as_path_wire() -> Vec<u8> {
     buf
 }
 
+#[cfg(not(feature = "codec-allocation-diagnostics"))]
 fn ipv6_mp_add_path_update() -> (
     UpdateMessage,
     Vec<PathAttribute>,
@@ -153,6 +167,7 @@ fn ipv6_mp_add_path_update() -> (
     (msg, attrs, announced, withdrawn, next_hop)
 }
 
+#[cfg(not(feature = "codec-allocation-diagnostics"))]
 fn assert_ipv6_mp_add_path_update(
     msg: &UpdateMessage,
     attrs: &[PathAttribute],
@@ -201,6 +216,7 @@ fn assert_ipv6_mp_add_path_update(
     assert_ne!(unreach.withdrawn[0].path_id, 0);
 }
 
+#[cfg(not(feature = "codec-allocation-diagnostics"))]
 fn bench_nlri_decode(c: &mut Criterion) {
     let mut group = c.benchmark_group("nlri_decode");
     for count in [1, 10, 100, 500] {
@@ -214,6 +230,7 @@ fn bench_nlri_decode(c: &mut Criterion) {
     group.finish();
 }
 
+#[cfg(not(feature = "codec-allocation-diagnostics"))]
 fn bench_nlri_encode(c: &mut Criterion) {
     let mut group = c.benchmark_group("nlri_encode");
     for count in [1, 10, 100, 500] {
@@ -233,6 +250,7 @@ fn bench_nlri_encode(c: &mut Criterion) {
     group.finish();
 }
 
+#[cfg(not(feature = "codec-allocation-diagnostics"))]
 fn bench_update_build(c: &mut Criterion) {
     let mut group = c.benchmark_group("update_build");
     let attrs = typical_attributes();
@@ -263,6 +281,7 @@ fn bench_update_build(c: &mut Criterion) {
     group.finish();
 }
 
+#[cfg(not(feature = "codec-allocation-diagnostics"))]
 fn bench_update_parse(c: &mut Criterion) {
     let mut group = c.benchmark_group("update_parse");
     let attrs = typical_attributes();
@@ -282,6 +301,7 @@ fn bench_update_parse(c: &mut Criterion) {
     group.finish();
 }
 
+#[cfg(not(feature = "codec-allocation-diagnostics"))]
 fn bench_update_parse_revised(c: &mut Criterion) {
     let mut group = c.benchmark_group("update_parse_revised");
     let attrs = typical_attributes();
@@ -321,6 +341,7 @@ fn bench_update_parse_revised(c: &mut Criterion) {
     group.finish();
 }
 
+#[cfg(not(feature = "codec-allocation-diagnostics"))]
 fn bench_attr_decode(c: &mut Criterion) {
     let mut group = c.benchmark_group("attr_decode");
 
@@ -368,6 +389,7 @@ fn bench_attr_decode(c: &mut Criterion) {
     group.finish();
 }
 
+#[cfg(not(feature = "codec-allocation-diagnostics"))]
 fn bench_attr_encode(c: &mut Criterion) {
     let mut group = c.benchmark_group("attr_encode");
 
@@ -396,6 +418,7 @@ fn bench_attr_encode(c: &mut Criterion) {
     group.finish();
 }
 
+#[cfg(not(feature = "codec-allocation-diagnostics"))]
 fn bench_validate_update(c: &mut Criterion) {
     let attrs = typical_attributes();
     c.bench_function("validate_update", |b| {
@@ -403,6 +426,282 @@ fn bench_validate_update(c: &mut Criterion) {
     });
 }
 
+#[cfg(feature = "codec-allocation-diagnostics")]
+const DIAGNOSTIC_OPERATIONS: usize = 10_000;
+
+#[cfg(feature = "codec-allocation-diagnostics")]
+struct TrackingAllocator {
+    enabled: AtomicBool,
+    alloc_calls: AtomicUsize,
+    alloc_zeroed_calls: AtomicUsize,
+    realloc_calls: AtomicUsize,
+    requested_bytes: AtomicUsize,
+}
+
+#[cfg(feature = "codec-allocation-diagnostics")]
+impl TrackingAllocator {
+    const fn new() -> Self {
+        Self {
+            enabled: AtomicBool::new(false),
+            alloc_calls: AtomicUsize::new(0),
+            alloc_zeroed_calls: AtomicUsize::new(0),
+            realloc_calls: AtomicUsize::new(0),
+            requested_bytes: AtomicUsize::new(0),
+        }
+    }
+
+    fn reset(&self) {
+        self.enabled.store(false, Ordering::Relaxed);
+        self.alloc_calls.store(0, Ordering::Relaxed);
+        self.alloc_zeroed_calls.store(0, Ordering::Relaxed);
+        self.realloc_calls.store(0, Ordering::Relaxed);
+        self.requested_bytes.store(0, Ordering::Relaxed);
+    }
+
+    fn enable(&self) {
+        self.enabled.store(true, Ordering::Relaxed);
+    }
+
+    fn disable(&self) {
+        self.enabled.store(false, Ordering::Relaxed);
+    }
+
+    fn count(&self, counter: &AtomicUsize, requested_bytes: usize) {
+        if self.enabled.load(Ordering::Relaxed) {
+            counter.fetch_add(1, Ordering::Relaxed);
+            self.requested_bytes
+                .fetch_add(requested_bytes, Ordering::Relaxed);
+        }
+    }
+
+    fn receipt(&self) -> AllocationReceipt {
+        assert!(
+            !self.enabled.load(Ordering::Relaxed),
+            "allocation counters must be disabled before reading a receipt"
+        );
+        let alloc_calls = self.alloc_calls.load(Ordering::Relaxed);
+        let alloc_zeroed_calls = self.alloc_zeroed_calls.load(Ordering::Relaxed);
+        let realloc_calls = self.realloc_calls.load(Ordering::Relaxed);
+        AllocationReceipt {
+            alloc_calls,
+            alloc_zeroed_calls,
+            realloc_calls,
+            allocation_calls: alloc_calls
+                .saturating_add(alloc_zeroed_calls)
+                .saturating_add(realloc_calls),
+            requested_bytes: self.requested_bytes.load(Ordering::Relaxed),
+        }
+    }
+}
+
+#[cfg(feature = "codec-allocation-diagnostics")]
+// SAFETY: every operation is forwarded unchanged to `System`; the wrapper
+// performs only allocation-free atomic bookkeeping around successful requests.
+unsafe impl GlobalAlloc for TrackingAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        // SAFETY: the caller's `GlobalAlloc` contract provides a valid layout,
+        // which is forwarded unchanged to the wrapped allocator.
+        let pointer = unsafe { System.alloc(layout) };
+        if !pointer.is_null() {
+            self.count(&self.alloc_calls, layout.size());
+        }
+        pointer
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        // SAFETY: the caller's `GlobalAlloc` contract provides a valid layout,
+        // which is forwarded unchanged to the wrapped allocator.
+        let pointer = unsafe { System.alloc_zeroed(layout) };
+        if !pointer.is_null() {
+            self.count(&self.alloc_zeroed_calls, layout.size());
+        }
+        pointer
+    }
+
+    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        // SAFETY: the caller guarantees the pointer/layout pair came from this
+        // allocator. All allocations are delegated to `System`, so forwarding
+        // the pair and requested new size preserves that contract.
+        let resized = unsafe { System.realloc(pointer, layout, new_size) };
+        if !resized.is_null() {
+            self.count(&self.realloc_calls, new_size);
+        }
+        resized
+    }
+
+    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+        // SAFETY: every successful allocation came from `System`, and the
+        // caller supplies the matching pointer/layout pair.
+        unsafe { System.dealloc(pointer, layout) };
+    }
+}
+
+#[cfg(feature = "codec-allocation-diagnostics")]
+#[global_allocator]
+static ALLOCATOR: TrackingAllocator = TrackingAllocator::new();
+
+#[cfg(feature = "codec-allocation-diagnostics")]
+#[derive(Clone, Copy)]
+struct AllocationReceipt {
+    alloc_calls: usize,
+    alloc_zeroed_calls: usize,
+    realloc_calls: usize,
+    allocation_calls: usize,
+    requested_bytes: usize,
+}
+
+#[cfg(feature = "codec-allocation-diagnostics")]
+struct DiagnosticRow {
+    benchmark: &'static str,
+    fixture_attributes: usize,
+    fixture_len_bytes: usize,
+    fixture_digest: u64,
+    allocation: AllocationReceipt,
+}
+
+#[cfg(feature = "codec-allocation-diagnostics")]
+impl DiagnosticRow {
+    fn write_json(&self) {
+        assert_eq!(
+            self.allocation.allocation_calls,
+            self.allocation
+                .alloc_calls
+                .saturating_add(self.allocation.alloc_zeroed_calls)
+                .saturating_add(self.allocation.realloc_calls)
+        );
+        println!(
+            concat!(
+                "{{\"schema_version\":1,",
+                "\"benchmark\":\"{}\",",
+                "\"operations\":{},",
+                "\"fixture_attributes\":{},",
+                "\"fixture_len_bytes\":{},",
+                "\"fixture_digest\":\"fnv1a64:{:016x}\",",
+                "\"alloc_calls\":{},",
+                "\"alloc_zeroed_calls\":{},",
+                "\"realloc_calls\":{},",
+                "\"allocation_calls\":{},",
+                "\"requested_bytes\":{}}}"
+            ),
+            self.benchmark,
+            DIAGNOSTIC_OPERATIONS,
+            self.fixture_attributes,
+            self.fixture_len_bytes,
+            self.fixture_digest,
+            self.allocation.alloc_calls,
+            self.allocation.alloc_zeroed_calls,
+            self.allocation.realloc_calls,
+            self.allocation.allocation_calls,
+            self.allocation.requested_bytes,
+        );
+    }
+}
+
+#[cfg(feature = "codec-allocation-diagnostics")]
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut digest = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in bytes {
+        digest ^= u64::from(*byte);
+        digest = digest.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    digest
+}
+
+#[cfg(feature = "codec-allocation-diagnostics")]
+fn run_attr_encode_diagnostic() -> DiagnosticRow {
+    let attrs = rich_attributes();
+    assert_eq!(
+        attrs.len(),
+        11,
+        "diagnostic must retain the Criterion rich/11 fixture"
+    );
+
+    let mut expected = Vec::with_capacity(1024);
+    encode_path_attributes(&attrs, &mut expected, true, false)
+        .expect("rich attributes must encode before measurement");
+    assert!(
+        expected.len() <= 1024,
+        "the caller output must fit its preallocated diagnostic buffer"
+    );
+    let decoded = decode_path_attributes(&expected, true, &[])
+        .expect("rich diagnostic output must round-trip");
+    assert_eq!(
+        decoded, attrs,
+        "rich diagnostic output must round-trip exactly"
+    );
+
+    let mut output = Vec::with_capacity(1024);
+    assert!(output.capacity() >= 1024);
+    ALLOCATOR.reset();
+    for _ in 0..DIAGNOSTIC_OPERATIONS {
+        output.clear();
+        ALLOCATOR.enable();
+        let result = encode_path_attributes(&attrs, &mut output, true, false);
+        ALLOCATOR.disable();
+        result.expect("rich attributes must encode during measurement");
+        assert_eq!(
+            output, expected,
+            "every measured encode must produce the exact fixture bytes"
+        );
+    }
+    let allocation = ALLOCATOR.receipt();
+    assert_eq!(
+        output, expected,
+        "the final measured output must remain exact"
+    );
+
+    DiagnosticRow {
+        benchmark: "attr_encode/rich/11",
+        fixture_attributes: attrs.len(),
+        fixture_len_bytes: expected.len(),
+        fixture_digest: fnv1a64(&expected),
+        allocation,
+    }
+}
+
+#[cfg(feature = "codec-allocation-diagnostics")]
+fn run_validate_update_diagnostic() -> DiagnosticRow {
+    let attrs = typical_attributes();
+    validate_update_attributes(&attrs, true, true, true)
+        .expect("Criterion validation fixture must be valid before measurement");
+
+    let mut encoded_fixture = Vec::with_capacity(1024);
+    encode_path_attributes(&attrs, &mut encoded_fixture, true, false)
+        .expect("validation fixture must have a stable wire representation");
+
+    ALLOCATOR.reset();
+    for _ in 0..DIAGNOSTIC_OPERATIONS {
+        ALLOCATOR.enable();
+        let result = validate_update_attributes(&attrs, true, true, true);
+        ALLOCATOR.disable();
+        result.expect("every measured validation must accept the fixture");
+    }
+    let allocation = ALLOCATOR.receipt();
+    validate_update_attributes(&attrs, true, true, true)
+        .expect("validation fixture must remain valid after measurement");
+
+    DiagnosticRow {
+        benchmark: "validate_update",
+        fixture_attributes: attrs.len(),
+        fixture_len_bytes: encoded_fixture.len(),
+        fixture_digest: fnv1a64(&encoded_fixture),
+        allocation,
+    }
+}
+
+#[cfg(feature = "codec-allocation-diagnostics")]
+fn main() {
+    let attr_encode = run_attr_encode_diagnostic();
+    let validate_update = run_validate_update_diagnostic();
+    assert_ne!(
+        attr_encode.fixture_digest, validate_update.fixture_digest,
+        "the two diagnostic fixtures must retain distinct digests"
+    );
+    attr_encode.write_json();
+    validate_update.write_json();
+}
+
+#[cfg(not(feature = "codec-allocation-diagnostics"))]
 criterion_group!(
     benches,
     bench_nlri_decode,
@@ -414,4 +713,5 @@ criterion_group!(
     bench_attr_encode,
     bench_validate_update,
 );
+#[cfg(not(feature = "codec-allocation-diagnostics"))]
 criterion_main!(benches);
