@@ -36,6 +36,7 @@
 #![allow(dead_code)]
 
 use std::net::{Ipv4Addr, SocketAddr};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -68,6 +69,7 @@ const COMMUNITY_STABLE: u32 = (65_400 << 16) | 9_000;
 const STALL_WINDOW: Duration = Duration::from_secs(120);
 const FLAP_ROUNDS: u32 = 3;
 const FLAP_RECONNECT_SECS: u64 = 10;
+const EVIDENCE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// What the shared per-observer bitmap is armed to track (flapstorm mode).
 const FLAP_OFF: u32 = 0;
@@ -863,6 +865,38 @@ async fn run_flapstorm(ctx: &Arc<Ctx>, stubs: &mut [Stub], k: u32, pid: i32) {
     }
 }
 
+/// Hold the live stub sessions open while an outer measurement runner captures
+/// its final daemon evidence.
+///
+/// This is deliberately opt-in and file-based: the frozen positional CLI stays
+/// unchanged, while the ready/ack boundary makes it impossible for the runner
+/// to accidentally scrape after dropping every stub socket. The bounded wait
+/// fails the receipt instead of parking the host if the runner disappears.
+async fn await_evidence_capture(evidence_dir: &Path, timeout: Duration) -> std::io::Result<()> {
+    std::fs::create_dir_all(evidence_dir)?;
+    if std::fs::read_dir(evidence_dir)?.next().is_some() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "final evidence directory is not empty",
+        ));
+    }
+    std::fs::write(evidence_dir.join("ready"), b"ready\n")?;
+    let deadline = Instant::now() + timeout;
+    while !evidence_dir.join("ack").is_file() {
+        if Instant::now() >= deadline {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!(
+                    "final evidence acknowledgement not received within {}s",
+                    timeout.as_secs()
+                ),
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_lines)]
 fn main() {
     let mut a: Vec<String> = std::env::args().collect();
@@ -902,6 +936,7 @@ fn main() {
     let control_secs: u64 = a[9].parse().unwrap();
     let changed_peers: u32 = a.get(10).map_or(n_peers, |value| value.parse().unwrap());
     let reload_cmd: Option<String> = a.get(11).cloned();
+    let evidence_dir = std::env::var_os("RELOADSTALL_EVIDENCE_DIR").map(PathBuf::from);
     assert!(n_peers >= CHURNERS, "n_peers must be at least {CHURNERS}");
     assert!(
         (1..=n_peers).contains(&changed_peers),
@@ -910,6 +945,10 @@ fn main() {
     assert!(
         pid != 0 || reload_cmd.is_some() || flapstorm.is_some(),
         "daemon_pid 0 (outer RSS sampler) requires reload_cmd or --flapstorm"
+    );
+    assert!(
+        evidence_dir.is_none() || (reloads == 0 && flapstorm.is_none()),
+        "RELOADSTALL_EVIDENCE_DIR is only valid for zero-reload measurements"
     );
     if let Some(k) = flapstorm {
         assert!(
@@ -1318,14 +1357,34 @@ fn main() {
             tokio::time::sleep(Duration::from_secs(20)).await;
         }
 
-        println!("done rss_mib={}", rss_mib(pid));
         let parse_errors = ctx.parse_errors.load(Ordering::Relaxed);
-        if parse_errors > 0 {
+        let Some(evidence_dir) = evidence_dir.as_deref() else {
+            println!("done rss_mib={}", rss_mib(pid));
+            if parse_errors > 0 {
+                eprintln!(
+                    "FAIL: {parse_errors} daemon UPDATE decode error(s) — a wire defect; measurement is invalid"
+                );
+                std::process::exit(1);
+            }
+            std::process::exit(0);
+        };
+        let up = ctx
+            .obs
+            .iter()
+            .filter(|observer| observer.established.load(Ordering::Relaxed))
+            .count();
+        if up != n_peers as usize || parse_errors != 0 {
             eprintln!(
-                "FAIL: {parse_errors} daemon UPDATE decode error(s) — a wire defect; measurement is invalid"
+                "FAIL: final integrity check failed: sessions_up={up}/{n_peers}, parse_errors={parse_errors}"
             );
             std::process::exit(1);
         }
+        println!("final sessions_up {up}/{n_peers} parse_errors={parse_errors}");
+        if let Err(error) = await_evidence_capture(evidence_dir, EVIDENCE_TIMEOUT).await {
+            eprintln!("FAIL: final evidence handshake failed: {error}");
+            std::process::exit(1);
+        }
+        println!("done rss_mib={}", rss_mib(pid));
         std::process::exit(0);
     });
 }
@@ -1333,6 +1392,61 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn evidence_test_dir(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "reloadstall-{label}-{}-{}",
+            std::process::id(),
+            wall_us()
+        ))
+    }
+
+    #[tokio::test]
+    async fn evidence_handshake_keeps_boundary_until_ack() {
+        let directory = evidence_test_dir("ack");
+        let writer_dir = directory.clone();
+        let ack_writer = tokio::spawn(async move {
+            while !writer_dir.join("ready").is_file() {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            std::fs::write(writer_dir.join("ack"), b"ack\n").unwrap();
+        });
+
+        await_evidence_capture(&directory, Duration::from_secs(1))
+            .await
+            .unwrap();
+        ack_writer.await.unwrap();
+        assert!(directory.join("ready").is_file());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn evidence_handshake_timeout_fails_closed() {
+        let directory = evidence_test_dir("timeout");
+        let error = await_evidence_capture(&directory, Duration::from_millis(10))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(directory.join("ready").is_file());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn evidence_handshake_rejects_stale_boundary_files() {
+        for marker in ["ready", "ack"] {
+            let directory = evidence_test_dir(marker);
+            std::fs::create_dir_all(&directory).unwrap();
+            std::fs::write(directory.join(marker), b"stale\n").unwrap();
+
+            let error = await_evidence_capture(&directory, Duration::from_millis(10))
+                .await
+                .unwrap_err();
+
+            assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+            std::fs::remove_dir_all(directory).unwrap();
+        }
+    }
 
     #[test]
     fn generation_progress_counts_unique_prefixes_only() {

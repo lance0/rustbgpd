@@ -214,13 +214,109 @@ os.kill(int(parent_pid), signal.SIGTERM)
 PY
 }
 
+validate_settled_metrics() {
+    local metrics=$1
+    # LAN-630 settled-state gates: missing metrics are failures, never zero.
+    python3 - "$metrics" "$PEERS" "$DHAT" <<'PY'
+import math
+import pathlib
+import re
+import sys
+
+path, peers_arg, dhat_arg = sys.argv[1:]
+peers = int(peers_arg)
+dhat = int(dhat_arg)
+sample_re = re.compile(
+    r"^([a-zA-Z_:][a-zA-Z0-9_:]*)(?:\{[^}]*\})?\s+"
+    r"([-+]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][-+]?[0-9]+)?)$"
+)
+samples: dict[str, list[float]] = {}
+for line in pathlib.Path(path).read_text(encoding="utf-8").splitlines():
+    match = sample_re.match(line)
+    if match:
+        samples.setdefault(match.group(1), []).append(float(match.group(2)))
+
+
+def values(name: str, count: int) -> list[float]:
+    found = samples.get(name, [])
+    if len(found) != count:
+        raise SystemExit(f"{name}: expected {count} samples, got {len(found)}")
+    if not all(math.isfinite(value) for value in found):
+        raise SystemExit(f"{name}: non-finite sample")
+    return found
+
+
+def singleton(name: str, expected: int) -> None:
+    value = values(name, 1)[0]
+    if value != expected:
+        raise SystemExit(f"{name}: expected {expected}, got {value:g}")
+
+
+singleton("bgp_update_groups", 1)
+members = values("bgp_update_group_members", 1)
+if sum(members) != peers:
+    raise SystemExit(
+        f"bgp_update_group_members: expected sum {peers}, got {sum(members):g}"
+    )
+singleton("bgp_update_group_fallback_peers", 0)
+singleton("bgp_update_group_residue_entries", 0)
+singleton("bgp_rib_outbound_registered_peers", peers)
+
+rejected = values("bgp_rejected_routes_retained", peers)
+if sum(rejected) != 0:
+    raise SystemExit(
+        f"bgp_rejected_routes_retained: expected sum 0, got {sum(rejected):g}"
+    )
+writer_depth = values("bgp_peer_outbound_queue_depth", peers)
+if sum(writer_depth) != 0 or max(writer_depth) != 0:
+    raise SystemExit(
+        "bgp_peer_outbound_queue_depth: expected every peer settled at 0, "
+        f"got sum={sum(writer_depth):g} max={max(writer_depth):g}"
+    )
+
+if dhat == 0:
+    for name in (
+        "jemalloc_allocated_bytes",
+        "jemalloc_active_bytes",
+        "jemalloc_resident_bytes",
+        "jemalloc_mapped_bytes",
+    ):
+        value = values(name, 1)[0]
+        if value <= 0:
+            raise SystemExit(f"{name}: expected a positive release-build sample")
+        print(f"{name}={int(value)}")
+PY
+}
+
+validate_settled_proc_status() {
+    local status=$1
+    python3 - "$status" <<'PY'
+import pathlib
+import re
+import sys
+
+text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+for field in ("VmRSS", "VmHWM", "VmPeak", "VmSize"):
+    found = re.findall(rf"^{field}:\s+([0-9]+)\s+kB$", text, re.MULTILINE)
+    if len(found) != 1:
+        raise SystemExit(f"{field}: expected one numeric-kB field, got {len(found)}")
+    print(f"settled_proc_{field.lower()}_kib={found[0]}")
+PY
+}
+
 printf 'daemon_start_monotonic=%s\n' "$(monotonic_now)" >>"$OUT/provenance.env"
 cold_deadline=$((SECONDS + COLD_CAP))
 runtime_guard &
 # Used indirectly by cleanup/terminate_pid through a nameref.
 # shellcheck disable=SC2034
 GUARD_PID=$!
-timeout -k 10 "$OVERALL_CAP" "$HARNESS" "$PEERS" "$TOTAL" "$PORT" "$DAEMON_PID" \
+HARNESS_ENV=()
+EVIDENCE_DIR=''
+if ((RELOADS == 0)); then
+    EVIDENCE_DIR="$RUN/final-evidence"
+    HARNESS_ENV=(env "RELOADSTALL_EVIDENCE_DIR=$EVIDENCE_DIR")
+fi
+timeout -k 10 "$OVERALL_CAP" "${HARNESS_ENV[@]}" "$HARNESS" "$PEERS" "$TOTAL" "$PORT" "$DAEMON_PID" \
     "$RUN/member.rpol" "$RUN/gen-a.rpol" "$RUN/gen-b.rpol" "$RELOADS" \
     "$CONTROL_SECS" "$CHANGED" >"$OUT/reloadstall.log" 2>&1 & H_PID=$!
 rss_sampler & RSS_PID=$!
@@ -234,14 +330,45 @@ printf 'converged_monotonic=%s\n' "$(monotonic_now)" >>"$OUT/provenance.env"
 curl -fsS --max-time 2 "http://127.0.0.1:${METRICS_PORT}/metrics" >"$OUT/metrics-converged.prom"
 grep -E '^(VmRSS|VmHWM|VmPeak|VmSize)' "/proc/$DAEMON_PID/status" >"$OUT/proc-status-converged.txt"
 
-while pid_running "$H_PID"; do
-    if grep -q "^reloadstall_csv,${RELOADS}," "$OUT/reloadstall.log"; then
-        curl -fsS --max-time 2 "http://127.0.0.1:${METRICS_PORT}/metrics" >"$OUT/metrics-after.prom"
-        grep -E '^(VmRSS|VmHWM|VmPeak|VmSize)' "/proc/$DAEMON_PID/status" >"$OUT/proc-status-after.txt"
-        break
+if ((RELOADS == 0)); then
+    evidence_deadline=$((SECONDS + CONTROL_SECS + 20))
+    until [[ -e "$EVIDENCE_DIR/ready" ]]; do
+        pid_running "$H_PID" || { echo "harness exited before final evidence boundary" >&2; exit 1; }
+        ((SECONDS < evidence_deadline)) || { echo "final evidence ready timeout" >&2; exit 1; }
+        sleep 0.025
+    done
+    evidence_deadline=$((SECONDS + 10))
+    accepted=0
+    while ((SECONDS < evidence_deadline)); do
+        candidate="$RUN/metrics-candidate.prom"
+        if curl -fsS --max-time 2 "http://127.0.0.1:${METRICS_PORT}/metrics" >"$candidate" &&
+            validate_settled_metrics "$candidate" >"$RUN/settled-metrics.env" \
+                2>"$RUN/settled-metrics.error"; then
+            mv "$candidate" "$OUT/metrics-after.prom"
+            mv "$RUN/settled-metrics.env" "$OUT/settled-metrics.env"
+            accepted=1
+            break
+        fi
+        sleep 0.1
+    done
+    if ((accepted == 0)); then
+        [[ ! -s "$RUN/settled-metrics.error" ]] || cat "$RUN/settled-metrics.error" >&2
+        echo "no settled final metrics scrape accepted before timeout" >&2
+        exit 1
     fi
-    sleep 0.1
-done
+    grep -E '^(VmRSS|VmHWM|VmPeak|VmSize)' "/proc/$DAEMON_PID/status" >"$OUT/proc-status-after.txt"
+    validate_settled_proc_status "$OUT/proc-status-after.txt" >"$OUT/settled-proc.env"
+    touch "$EVIDENCE_DIR/ack"
+else
+    while pid_running "$H_PID"; do
+        if grep -q "^reloadstall_csv,${RELOADS}," "$OUT/reloadstall.log"; then
+            curl -fsS --max-time 2 "http://127.0.0.1:${METRICS_PORT}/metrics" >"$OUT/metrics-after.prom"
+            grep -E '^(VmRSS|VmHWM|VmPeak|VmSize)' "/proc/$DAEMON_PID/status" >"$OUT/proc-status-after.txt"
+            break
+        fi
+        sleep 0.1
+    done
+fi
 if wait "$H_PID"; then hrc=0; else hrc=$?; fi
 H_PID=''
 if wait "$RSS_PID"; then rrc=0; else rrc=$?; fi
@@ -250,7 +377,12 @@ printf 'harness_rc=%s\nrss_sampler_rc=%s\n' "$hrc" "$rrc" >>"$OUT/provenance.env
 grep -E '^(VmRSS|VmHWM|VmPeak|VmSize)' "/proc/$DAEMON_PID/status" >"$OUT/proc-status-final.txt" || true
 terminate_pid DAEMON_PID
 terminate_pid GUARD_PID
-((DHAT == 0)) || [[ -f "$OUT/dhat-heap.json" ]] || echo "warning: no dhat-heap.json produced" >&2
+if ((DHAT != 0)); then
+    [[ -f "$OUT/dhat-heap.json" && -s "$OUT/dhat-heap.json" ]] || {
+        echo "DHAT run produced no non-empty regular dhat-heap.json" >&2
+        exit 1
+    }
+fi
 
 # Summary: steady = median of post-convergence samples; peak = daemon kernel VmHWM.
 python3 - "$OUT" <<'PY'
@@ -284,6 +416,12 @@ summary = {
     "post_convergence_min_kib": min(post) if post else 0,
     "post_convergence_max_kib": max(post) if post else 0,
 }
+for evidence in ("settled-proc.env", "settled-metrics.env"):
+    path = out / evidence
+    if path.exists():
+        for line in path.read_text().splitlines():
+            key, value = line.split("=", 1)
+            summary[key] = int(value)
 out.joinpath("summary.env").write_text(
     "".join(f"{k}={v}\n" for k, v in summary.items()))
 print("\n".join(f"{k}={v}" for k, v in summary.items()))
