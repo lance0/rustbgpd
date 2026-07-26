@@ -4,7 +4,7 @@
 # Useful for trying out rbgp commands without real routers.
 #
 # Usage:
-#   docker compose up -d
+#   docker compose up -d --build
 # The rustbgpd service sets RUSTBGPD_TOKEN_FILE for in-container rbgp calls.
 #   docker compose exec rustbgpd rbgp -s http://127.0.0.1:50051 neighbor
 #   docker compose exec rustbgpd rbgp -s http://127.0.0.1:50051 top

@@ -56,8 +56,12 @@ peer that advertises sample IPv4 and IPv6 prefixes — no real routers needed.
 
 ```bash
 cd examples/docker-compose
-docker compose up -d
+docker compose up -d --build
 ```
+
+`--build` asks Compose to build from the current checkout before startup.
+Without it, Compose may reuse an older `docker-compose-rustbgpd` image already
+on the host. Cached layers keep unchanged repeat builds quick.
 
 Once both containers are running (a few seconds):
 
