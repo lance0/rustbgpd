@@ -46,11 +46,16 @@ also had no consistent improvement and is not claimed.
 - Candidate plus byte-identical measurement harness:
   `65129f178699955b16e133fecf01a6770514bf15`
 
-`git diff --exit-code
-34bfc2b9:bench/scale/rrharness
-65129f17:bench/scale/rrharness` passed before the campaign. The only product
-difference is the grouped private-table invariant, its allocation
-introspection, documentation, and regressions.
+The harness identity check passed before the campaign:
+
+```console
+git diff --exit-code \
+  34bfc2b9:bench/scale/rrharness \
+  65129f17:bench/scale/rrharness
+```
+
+The only product difference is the grouped private-table invariant, its
+allocation introspection, documentation, and regressions.
 
 ## Measurement contract
 
