@@ -312,7 +312,7 @@ fn bench_update_parse_revised(c: &mut Criterion) {
         let msg = UpdateMessage::build(&entries, &[], &attrs, true, false, Ipv4UnicastMode::Body);
         let decoded = msg
             .parse_revised(true, false, false, &[])
-            .expect("clean eBGP UPDATE must parse through the production path");
+            .expect("syntactically clean UPDATE must parse through the eBGP disposition branch");
         assert!(
             decoded.malformed.is_empty(),
             "clean fixture must not exercise malformed recovery"

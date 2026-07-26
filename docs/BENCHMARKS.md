@@ -351,10 +351,11 @@ to this compact legacy fixture.
 
 ### Production UPDATE Parse
 
-Pinned current measurements for the live revised parser use a clean eBGP
-IPv4-body UPDATE with the typical six attributes. The special MP-BGP row has
-one IPv6 announcement, one IPv6 withdrawal, distinct nonzero Add-Path IDs, and
-four attributes (`ORIGIN`, `AS_PATH`, `MP_REACH_NLRI`, and
+Pinned current measurements for the live revised parser use a syntactically
+clean IPv4-body UPDATE with the typical six attributes, parsed through the eBGP
+disposition branch. The special MP-BGP row has one IPv6 announcement, one IPv6
+withdrawal, distinct nonzero Add-Path IDs, and four attributes (`ORIGIN`,
+`AS_PATH`, `MP_REACH_NLRI`, and
 `MP_UNREACH_NLRI`). It is intentionally a branch-coverage shape, not a
 full-table extrapolation.
 

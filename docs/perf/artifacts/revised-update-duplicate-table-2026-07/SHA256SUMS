@@ -56,7 +56,7 @@ da36bb5f1bd2a8539561ac55da29506b112553ed7fa2404126ab61a2b2229897  ./logs/target/
 612a12409f5bd21f260c9516a02a49c05ce03b77cbdfbbc82db732d60d5c13c0  ./logs/target/attempt-5-head.log.gz
 f5bbe0b8d7fc94b14cde8aacde7e5cabd3d48f97e44d767a2e720d23d50b0d30  ./logs/target/attempt-6-base.log.gz
 4d67a81471238c2bd5355a43e5343f7a8b7b84b2ddeb0a8d4ebebdbe067f8749  ./logs/target/attempt-6-head.log.gz
-318e7a54e674fa58b48dac62d81f422fcc7787fcce4acef262d5b0275076d418  ./manifest.json
+6f02b4d1e563b8da964601733fa8799fef47149166c0f8cd489de2f9c9c15f43  ./manifest.json
 4e81c5b56156a8669a661103640dea45f74797b87e3590b4618b9346de54e8b6  ./restored-hashset-red.txt
 916c73133231ffc171a7e31d8a6415160a16b2c941b787622fdb02bceb3d79af  ./target-metadata.txt
 ea1d322353afbd3ab7f067a71cd20b071165da512cff3c28bc22111bc6d5c522  ./target-summary.md

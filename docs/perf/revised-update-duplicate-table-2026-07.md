@@ -12,10 +12,11 @@ heap request per decode without changing duplicate ordering or disposition.
 | Baseline | `b874b847554a758563ce7f09e8d7b36a35d1ea8c` | `2f62167c8269a31d05f29e7335d18795c324d2fe` | Fresh duplicate `HashSet` per revised attribute decode |
 | Candidate | `0bae2ba31ebb6d99bbbeb1cfb07fe98dcdd32eb6` | `152ecc5c08b70c620f3f5f4ec890393b6a216879` | Full-domain `[bool; 256]` duplicate table |
 
-The timing fixture is one clean eBGP UPDATE with ORIGIN, AS_PATH, NEXT_HOP,
-LOCAL_PREF, MED, COMMUNITIES, and one body NLRI. It enters the public
-`UpdateMessage::parse_revised` production path and exercises the revised
-attribute decoder. Separately, the allocation diagnostic calls the public
+The timing fixture is one syntactically clean UPDATE with ORIGIN, AS_PATH,
+NEXT_HOP, LOCAL_PREF, MED, COMMUNITIES, and one body NLRI, parsed through the
+eBGP disposition branch. It enters the public `UpdateMessage::parse_revised`
+production path and exercises the revised attribute decoder. Separately, the
+allocation diagnostic calls the public
 `decode_path_attributes_revised` attribute decoder 10,000 times on the same
 53-byte, six-attribute section through a `System`-wrapped `GlobalAlloc`.
 
@@ -64,10 +65,10 @@ corrected percentage to it.
 The stack table spans all 256 possible `u8` type codes. A production regression
 test sends duplicate unknown optional-transitive type 255 attributes and
 requires the first value to survive while the later value receives RFC 7606
-`AttributeDiscard`. Existing tests retain duplicate MP_REACH/MP_UNREACH
-session-reset behavior and ordinary duplicate handling. RFC 9774 prohibited
-AS-set segment inspection remains before duplicate handling, so a malformed
-later duplicate cannot be hidden by the discard.
+`AttributeDiscard`. Existing tests retain duplicate MP_UNREACH session-reset
+behavior and ordinary duplicate handling. RFC 9774 prohibited AS-set segment
+inspection remains before duplicate handling, so a malformed later duplicate
+cannot be hidden by the discard.
 
 Restoring only the fresh `HashSet` implementation makes the candidate
 diagnostic fail:
