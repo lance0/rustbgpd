@@ -26,7 +26,9 @@
 //! Entry count: per-peer LRU cap from `[policy.reject_retention]
 //! capacity` ([`DEFAULT_REJECT_RETENTION_CAPACITY`] = 1024). A reject
 //! storm therefore converges on "the most recent `capacity` rejects",
-//! never unbounded growth.
+//! never unbounded growth. The LRU is allocated on the first retained
+//! rejection, so a healthy session with no rejected routes pays no
+//! backing-store allocation.
 //!
 //! Entry size: [`RejectedRouteStore::insert`] truncates every entry's
 //! wire-derived owned data — a hostile peer with maximal `AS_PATH` /
@@ -192,7 +194,10 @@ pub struct RejectedRoutesReply {
 /// queries on its command path, exactly like the import-decision cache.
 #[derive(Debug)]
 pub struct RejectedRouteStore {
-    entries: LruCache<ImportDecisionKey, RejectedRouteEntry>,
+    /// Built on first insert. `LruCache::new` eagerly reserves its hash
+    /// index at `capacity`, so constructing it with the session would
+    /// charge every peer even when the peer has no rejected routes.
+    entries: Option<LruCache<ImportDecisionKey, RejectedRouteEntry>>,
     capacity: usize,
 }
 
@@ -203,9 +208,15 @@ impl RejectedRouteStore {
     pub fn with_capacity(cap: usize) -> Self {
         let cap = cap.max(1);
         Self {
-            entries: LruCache::new(NonZeroUsize::new(cap).expect("clamped to at least 1")),
+            entries: None,
             capacity: cap,
         }
+    }
+
+    /// The backing LRU, built at its configured size on first use.
+    fn storage(&mut self) -> &mut LruCache<ImportDecisionKey, RejectedRouteEntry> {
+        let capacity = NonZeroUsize::new(self.capacity).expect("capacity is clamped to at least 1");
+        self.entries.get_or_insert_with(|| LruCache::new(capacity))
     }
 
     /// Insert or refresh a rejection. On overflow the least-recently
@@ -216,30 +227,32 @@ impl RejectedRouteStore {
     /// can exceed the documented per-entry budget.
     pub fn insert(&mut self, key: ImportDecisionKey, mut entry: RejectedRouteEntry) {
         entry.enforce_bounds();
-        self.entries.push(key, entry);
+        self.storage().push(key, entry);
     }
 
     /// Remove the entry for an identity that was subsequently accepted
     /// or explicitly withdrawn. No-op when absent.
     pub fn remove(&mut self, key: &ImportDecisionKey) {
-        self.entries.pop(key);
+        if let Some(entries) = self.entries.as_mut() {
+            entries.pop(key);
+        }
     }
 
     /// Drop everything — session reset, same contract as
     /// [`super::import_decision_cache::ImportDecisionCache::clear`].
     pub fn clear(&mut self) {
-        self.entries.clear();
+        self.entries = None;
     }
 
     /// Number of retained rejections (the gauge value).
     #[must_use]
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.entries.as_ref().map_or(0, LruCache::len)
     }
 
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.entries.as_ref().is_none_or(LruCache::is_empty)
     }
 
     /// The configured cap, echoed on the query reply.
@@ -253,11 +266,12 @@ impl RejectedRouteStore {
     /// the cap, so the clone is fine for a diagnostic query path.
     #[must_use]
     pub fn snapshot(&self) -> Vec<(ImportDecisionKey, RejectedRouteEntry)> {
-        let mut out: Vec<_> = self
-            .entries
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
+        let mut out: Vec<_> = self.entries.as_ref().map_or_else(Vec::new, |entries| {
+            entries
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        });
         out.sort_by(|(a, _), (b, _)| {
             (a.afi as u16, a.safi as u8, a.prefix, a.path_id).cmp(&(
                 b.afi as u16,
@@ -267,6 +281,14 @@ impl RejectedRouteStore {
             ))
         });
         out
+    }
+
+    /// Whether the store has no backing LRU allocation. An empty-store
+    /// assertion is insufficient because an eagerly allocated LRU is
+    /// empty too.
+    #[cfg(test)]
+    pub(super) fn is_unallocated(&self) -> bool {
+        self.entries.is_none()
     }
 }
 
@@ -341,13 +363,19 @@ mod tests {
     #[test]
     fn remove_and_clear() {
         let mut store = RejectedRouteStore::with_capacity(4);
+        assert!(store.is_unallocated());
         store.insert(key(1), entry(ImportRejectReason::PolicyReject));
         store.insert(key(2), entry(ImportRejectReason::PolicyReject));
+        assert!(!store.is_unallocated());
         store.remove(&key(1));
         assert_eq!(store.len(), 1);
         store.remove(&key(9)); // absent → no-op
         store.clear();
         assert!(store.is_empty());
+        assert!(
+            store.is_unallocated(),
+            "session reset must release the backing LRU allocation"
+        );
     }
 
     #[test]
