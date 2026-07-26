@@ -2522,15 +2522,26 @@ fn encode_vpn_mp_next_hop(mp: &MpReachNlri, buf: &mut Vec<u8>) {
 ///
 /// Returns [`EncodeError`] when a structured MP payload cannot be represented
 /// on the wire, such as an oversized `FlowSpec` rule or BGP-LS NLRI/TLV.
-#[expect(
-    clippy::too_many_lines,
-    reason = "dispatch arms are inherently O(variants); each new path attribute adds a small block"
-)]
 pub fn encode_path_attributes(
     attrs: &[PathAttribute],
     buf: &mut Vec<u8>,
     four_octet_as: bool,
     add_path_mp: bool,
+) -> Result<(), EncodeError> {
+    let mut value_scratch = Vec::new();
+    encode_path_attributes_with_scratch(attrs, buf, four_octet_as, add_path_mp, &mut value_scratch)
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "dispatch arms are inherently O(variants); each new path attribute adds a small block"
+)]
+fn encode_path_attributes_with_scratch(
+    attrs: &[PathAttribute],
+    buf: &mut Vec<u8>,
+    four_octet_as: bool,
+    add_path_mp: bool,
+    value_scratch: &mut Vec<u8>,
 ) -> Result<(), EncodeError> {
     for attr in attrs {
         if matches!(
@@ -2542,7 +2553,7 @@ pub fn encode_path_attributes(
             // never reflect stale received copies.
             continue;
         }
-        let mut value = Vec::new();
+        value_scratch.clear();
         let mut compatibility = None;
         let flags;
         let type_code;
@@ -2550,7 +2561,7 @@ pub fn encode_path_attributes(
             PathAttribute::Origin(origin) => {
                 flags = attr_flags::TRANSITIVE;
                 type_code = attr_type::ORIGIN;
-                value.push(*origin as u8);
+                value_scratch.push(*origin as u8);
             }
             PathAttribute::AsPath(as_path) => {
                 if as_path
@@ -2565,7 +2576,7 @@ pub fn encode_path_attributes(
                 }
                 flags = attr_flags::TRANSITIVE;
                 type_code = attr_type::AS_PATH;
-                encode_as_path(as_path, &mut value, four_octet_as);
+                encode_as_path(as_path, value_scratch, four_octet_as);
                 if !four_octet_as && as_path.asns().any(|asn| asn > u32::from(u16::MAX)) {
                     let mut as4_path = Vec::new();
                     encode_as_path(as_path, &mut as4_path, true);
@@ -2586,10 +2597,10 @@ pub fn encode_path_attributes(
                     };
                 type_code = attr_type::AGGREGATOR;
                 if four_octet_as {
-                    value.extend_from_slice(&aggregator.asn.to_be_bytes());
+                    value_scratch.extend_from_slice(&aggregator.asn.to_be_bytes());
                 } else {
                     let asn = u16::try_from(aggregator.asn).unwrap_or(crate::constants::AS_TRANS);
-                    value.extend_from_slice(&asn.to_be_bytes());
+                    value_scratch.extend_from_slice(&asn.to_be_bytes());
                     if aggregator.asn > u32::from(u16::MAX) {
                         let mut as4_aggregator = Vec::with_capacity(8);
                         as4_aggregator.extend_from_slice(&aggregator.asn.to_be_bytes());
@@ -2597,35 +2608,35 @@ pub fn encode_path_attributes(
                         compatibility = Some((flags, attr_type::AS4_AGGREGATOR, as4_aggregator));
                     }
                 }
-                value.extend_from_slice(&aggregator.router_id.octets());
+                value_scratch.extend_from_slice(&aggregator.router_id.octets());
             }
             PathAttribute::NextHop(addr) => {
                 flags = attr_flags::TRANSITIVE;
                 type_code = attr_type::NEXT_HOP;
-                value.extend_from_slice(&addr.octets());
+                value_scratch.extend_from_slice(&addr.octets());
             }
             PathAttribute::Med(med) => {
                 flags = attr_flags::OPTIONAL;
                 type_code = attr_type::MULTI_EXIT_DISC;
-                value.extend_from_slice(&med.to_be_bytes());
+                value_scratch.extend_from_slice(&med.to_be_bytes());
             }
             PathAttribute::LocalPref(lp) => {
                 flags = attr_flags::TRANSITIVE;
                 type_code = attr_type::LOCAL_PREF;
-                value.extend_from_slice(&lp.to_be_bytes());
+                value_scratch.extend_from_slice(&lp.to_be_bytes());
             }
             PathAttribute::Communities(communities) => {
                 flags = attr_flags::OPTIONAL | attr_flags::TRANSITIVE;
                 type_code = attr_type::COMMUNITIES;
                 for &c in communities {
-                    value.extend_from_slice(&c.to_be_bytes());
+                    value_scratch.extend_from_slice(&c.to_be_bytes());
                 }
             }
             PathAttribute::ExtendedCommunities(communities) => {
                 flags = attr_flags::OPTIONAL | attr_flags::TRANSITIVE;
                 type_code = attr_type::EXTENDED_COMMUNITIES;
                 for &c in communities {
-                    value.extend_from_slice(&c.as_u64().to_be_bytes());
+                    value_scratch.extend_from_slice(&c.as_u64().to_be_bytes());
                 }
             }
             PathAttribute::LargeCommunities(communities) => {
@@ -2636,32 +2647,32 @@ pub fn encode_path_attributes(
                     if !seen.insert(c) {
                         continue;
                     }
-                    value.extend_from_slice(&c.global_admin.to_be_bytes());
-                    value.extend_from_slice(&c.local_data1.to_be_bytes());
-                    value.extend_from_slice(&c.local_data2.to_be_bytes());
+                    value_scratch.extend_from_slice(&c.global_admin.to_be_bytes());
+                    value_scratch.extend_from_slice(&c.local_data1.to_be_bytes());
+                    value_scratch.extend_from_slice(&c.local_data2.to_be_bytes());
                 }
             }
             PathAttribute::OriginatorId(addr) => {
                 flags = attr_flags::OPTIONAL;
                 type_code = attr_type::ORIGINATOR_ID;
-                value.extend_from_slice(&addr.octets());
+                value_scratch.extend_from_slice(&addr.octets());
             }
             PathAttribute::ClusterList(ids) => {
                 flags = attr_flags::OPTIONAL;
                 type_code = attr_type::CLUSTER_LIST;
                 for id in ids {
-                    value.extend_from_slice(&id.octets());
+                    value_scratch.extend_from_slice(&id.octets());
                 }
             }
             PathAttribute::MpReachNlri(mp) => {
                 flags = attr_flags::OPTIONAL;
                 type_code = attr_type::MP_REACH_NLRI;
-                encode_mp_reach_nlri(mp, &mut value, add_path_mp)?;
+                encode_mp_reach_nlri(mp, value_scratch, add_path_mp)?;
             }
             PathAttribute::MpUnreachNlri(mp) => {
                 flags = attr_flags::OPTIONAL;
                 type_code = attr_type::MP_UNREACH_NLRI;
-                encode_mp_unreach_nlri(mp, &mut value, add_path_mp)?;
+                encode_mp_unreach_nlri(mp, value_scratch, add_path_mp)?;
             }
             PathAttribute::PmsiTunnel(pmsi) => {
                 // RFC 6514 §5: Optional + Transitive.
@@ -2669,7 +2680,7 @@ pub fn encode_path_attributes(
                     attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
                     attr_type::PMSI_TUNNEL,
                 );
-                pmsi.encode(&mut value);
+                pmsi.encode(value_scratch);
             }
             PathAttribute::OnlyToCustomer(asn) => {
                 // RFC 9234 §5: Optional + Transitive, length 4, 32-bit ASN.
@@ -2678,7 +2689,7 @@ pub fn encode_path_attributes(
                 // `Unknown` arm so the original Partial bit is preserved.
                 flags = attr_flags::OPTIONAL | attr_flags::TRANSITIVE;
                 type_code = attr_type::ONLY_TO_CUSTOMER;
-                value.extend_from_slice(&asn.to_be_bytes());
+                value_scratch.extend_from_slice(&asn.to_be_bytes());
             }
             PathAttribute::Unknown(raw) => {
                 // RFC 4271 §5: unrecognized *optional* transitive attributes
@@ -2691,10 +2702,10 @@ pub fn encode_path_attributes(
                     raw.flags
                 };
                 type_code = raw.type_code;
-                value.extend_from_slice(&raw.data);
+                value_scratch.extend_from_slice(&raw.data);
             }
         }
-        encode_attribute_triplet(flags, type_code, &value, buf);
+        encode_attribute_triplet(flags, type_code, value_scratch, buf);
         if let Some((compat_flags, compat_type, compat_value)) = compatibility {
             encode_attribute_triplet(compat_flags, compat_type, &compat_value, buf);
         }
@@ -6853,6 +6864,99 @@ mod tests {
                 }
             ));
         }
+    }
+
+    #[test]
+    fn encoder_clears_and_reuses_value_scratch() {
+        let communities = PathAttribute::Communities((0_u32..128).collect());
+        let origin = PathAttribute::Origin(Origin::Igp);
+        let mut scratch = Vec::new();
+
+        encode_path_attributes_with_scratch(
+            std::slice::from_ref(&communities),
+            &mut Vec::new(),
+            true,
+            false,
+            &mut scratch,
+        )
+        .unwrap();
+        assert_eq!(scratch.len(), 512);
+        let community_ptr = scratch.as_ptr();
+        let community_capacity = scratch.capacity();
+
+        encode_path_attributes_with_scratch(
+            std::slice::from_ref(&origin),
+            &mut Vec::new(),
+            true,
+            false,
+            &mut scratch,
+        )
+        .unwrap();
+        assert_eq!(scratch, [Origin::Igp as u8]);
+        assert_eq!(scratch.as_ptr(), community_ptr);
+        assert_eq!(scratch.capacity(), community_capacity);
+
+        let mut invocation_scratch = Vec::new();
+        let mut encoded = Vec::new();
+        encode_path_attributes_with_scratch(
+            &[communities, origin],
+            &mut encoded,
+            true,
+            false,
+            &mut invocation_scratch,
+        )
+        .unwrap();
+        assert_eq!(invocation_scratch, [Origin::Igp as u8]);
+        assert!(
+            invocation_scratch.capacity() >= 512,
+            "one invocation must retain the Communities allocation for ORIGIN"
+        );
+    }
+
+    #[test]
+    fn encoder_preserves_opaque_extended_length_header() {
+        let attribute = PathAttribute::Unknown(RawAttribute {
+            flags: attr_flags::OPTIONAL | attr_flags::EXTENDED_LENGTH,
+            type_code: 99,
+            data: Bytes::from_static(&[1, 2, 3]),
+        });
+        let mut encoded = Vec::new();
+        encode_path_attributes(&[attribute], &mut encoded, true, false).unwrap();
+        assert_eq!(
+            encoded,
+            [
+                attr_flags::OPTIONAL | attr_flags::EXTENDED_LENGTH,
+                99,
+                0,
+                3,
+                1,
+                2,
+                3
+            ]
+        );
+    }
+
+    #[test]
+    fn encoder_retains_partial_output_before_as_set_error() {
+        let attributes = [
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSet(vec![65_000])],
+            }),
+        ];
+        let mut encoded = vec![0xaa];
+        let error = encode_path_attributes(&attributes, &mut encoded, true, false).unwrap_err();
+        assert!(matches!(
+            error,
+            EncodeError::ValueOutOfRange {
+                field: "AS_PATH",
+                ..
+            }
+        ));
+        assert_eq!(
+            encoded,
+            [0xaa, attr_flags::TRANSITIVE, attr_type::ORIGIN, 1, 0]
+        );
     }
 
     /// Load-bearing stale-sidecar proof: removing the suppression branch
