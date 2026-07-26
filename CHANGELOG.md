@@ -463,21 +463,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   choice becomes an informed memory-versus-observability trade the
   operator makes.
 
-  **The figures, each labelled — none of them is an observed RSS
-  saving.**
+  **The settled memory receipt, with each figure labelled:**
 
   | Figure | Kind |
   |---|---|
-  | ~610 B per retained entry; ~2.5 MB per saturated session | **measured** — DHAT capture at 2 sessions × 100k prefixes each, `docs/perf/rib-rebaseline-2026-07-13.md` |
-  | ~155 KiB allocated per session before a single UPDATE | **computed** from the allocator's own sizing — the LRU index and the eviction ring are both reserved at capacity up front. Most of it is never written, so it is address space and allocator bookkeeping rather than measured RSS |
-  | ~355 MiB retained heap on the 1000×400 route-server receipt | **modeled** from the two measured values above, equivalent to **35–40% of that run's recorded RSS**. It is a model of retained heap, *not* an observed RSS saving |
-  | ~2.5 GB saturation ceiling | **modeled**, and only at one fleet shape: roughly **1000 ingress peers each announcing at least 4096 distinct routes**. It is not the cost of one full-table member |
+  | 373.5 MiB steady RSS returned at 1000 sessions × 400 routes | **computed from four measured runs** — same config across the immediate default-on/default-off commits |
+  | 154 KiB fixed per session plus 587 B per retained entry | **computed model** — solved from same-binary 1000 × 400 and saturated 100 × 5000 fleet shapes |
+  | 2.44 MiB per saturated session | **computed** from the measured 100 × 5000 shape |
+  | 2.4 GiB saturation ceiling | **extrapolated**, and only at one fleet shape: roughly **1000 ingress peers each announcing at least 4096 distinct routes**. It was never measured at that fleet size and is not the cost of one full-table member |
 
-  **The RSS actually recovered by this change has not been measured
-  yet.** Establishing it needs a separate before/after run of
-  `bench/scale/route-server-1000/run-receipt.sh` on both defaults with
-  the retained RSS sampler streams diffed; that campaign follows this
-  release note, and no saving is claimed here until it does.
+  The fifteen-run receipt, controls, raw bounds, and artifacts are in
+  `docs/perf/explain-cache-opt-in-2026-07.md`.
 
   Every shipped starter config and both `--init-config` profiles now
   state the choice explicitly rather than inheriting it: the lab,

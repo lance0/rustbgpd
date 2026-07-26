@@ -24,6 +24,13 @@ adapter's `RMT`-excluding-`NEXT_HOP` error rule to those exact logs. bgperf2's
 BIRD timeout field is structurally zero and is retained only as raw schema, not
 claimed as independent timeout evidence.
 
+The capture-time classifier hash remains recorded in `manifest.json`. A later
+ownership-precedence correction reclassified six retained stacks totaling
+327,680 bytes from the import-decision cache to transport session
+buffers/scratch. The normalized stacks, per-stack byte counts, and total live
+heap did not change; the derivative's component labels/order and its generated
+summary did.
+
 Reviewer verification from the repository root:
 
 ```text

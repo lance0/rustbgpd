@@ -251,10 +251,10 @@ discrimination) and need their own ADRs.
 - New persistent state surface in transport, **off unless enabled**.
   When it is enabled the memory cost scales with session count ×
   cache size. The plan-stage estimate here was `peers × 4096 × ~256 B`;
-  the measured entry cost came in at roughly **610 B** (see the
-  Reversal below), so the real bill is about 2.4× the estimate, and it
-  is the multiplication by session count — not the per-entry size —
-  that decides the outcome at route-server scale.
+  the post-implementation receipt instead models roughly **154 KiB fixed
+  per session plus 587 B per retained entry** (see the Reversal below).
+  It is the multiplication by session count — not the cost of one entry
+  — that decides the outcome at route-server scale.
 - A new contract operators will rely on. Future changes to the
   surface (outcome enum, field set, key shape) carry compatibility
   cost.
@@ -308,17 +308,10 @@ Label at the point of use — these are three different kinds of number.
 
 | Figure | Kind | Source |
 |---|---|---|
-| ~610 B per retained entry; ~2.5 MB per saturated session | **measured** | DHAT capture at 2 sessions × 100k prefixes each (both caches saturated at 4096), [`rib-rebaseline-2026-07-13.md`](../perf/rib-rebaseline-2026-07-13.md) — "Transport import-decision cache", 5,002,096 B live at process heap maximum |
-| ~155 KiB resident per session before a single UPDATE | **measured** (structural) | `LruCache::new(4096)` allocates its index at capacity, plus the 512-entry eviction ring |
-| ~355 MiB retained heap at 1000 sessions × 400 routes each | **modeled** | `1000 × (155 KiB floor + 400 × ~536 B)`, against the ~890–926 MiB steady RSS recorded on the 1000×400 route-server receipt — i.e. **35–40% of recorded RSS, not an observed RSS saving** |
-| ~2.5 GB saturation ceiling | **modeled** | `1000 × 2.5 MB`, and only at that fleet shape: roughly 1000 ingress peers **each announcing at least 4096 distinct routes**. It is not the cost of one full-table member |
-
-The RSS actually recovered by this default change is established by a
-separate before/after measurement — re-running
-`bench/scale/route-server-1000/run-receipt.sh` on both defaults and
-diffing the retained RSS sampler stream. **That measurement has not run
-yet**, so no observed-saving figure is claimed here or in the release
-notes.
+| 373.5 MiB steady RSS returned at 1000 sessions × 400 routes | **computed from four measured runs** | Same config across the immediate default-on/default-off commits, [`explain-cache-opt-in-2026-07.md`](../perf/explain-cache-opt-in-2026-07.md) |
+| 154 KiB fixed per session plus 587 B per retained entry | **computed model** | Solved from the same-binary 1000 × 400 and 100 × 5000 fleet shapes in that receipt |
+| 2.44 MiB per saturated session | **computed** | Same-binary 100 × 5000 shape with every session at the 4096-entry ceiling |
+| 2.4 GiB saturation ceiling at 1000 peers | **extrapolated** | `1000 × 2.44 MiB`; requires roughly 1000 ingress peers **each announcing at least 4096 distinct routes** and was never measured at that fleet size |
 
 ### Rejected alternative: a smaller default-on cache
 

@@ -39,10 +39,10 @@ them. `SHA256SUMS` covers the retained, sanitized bytes.
   level: the generator emits byte-identical policy files for every run.
 - `dhat/` holds the two DHAT captures' component tables (`*.memory.tsv`), their
   full sanitized derivatives (`*.dhat-derivative.tsv.gz`), and
-  `explain-bucket-netting.tsv` — the derived per-row table that separates the
-  real explain-cache allocations from the `RejectedRouteStore` rows the
-  classifier misattributes into the same bucket. DHAT bytes are *allocated*
-  bytes from a non-jemalloc `release-prof` build and are not comparable to the
+  `explain-bucket-netting.tsv` — the derived per-row table that assigns retained
+  policy-context clones to their eventual explain-cache lifetime and separates
+  the unrelated `RejectedRouteStore` rows. DHAT bytes are *allocated* bytes
+  from a non-jemalloc `release-prof` build and are not comparable to the
   resident-memory streams.
 
 ## Disclosures
@@ -65,3 +65,11 @@ final form. Its `PROFILE` knob was added ahead of the D3/D4 runs; every earlier
 run used the same default (`release`) that the knob now names, so no earlier
 run's behavior differs from what the retained script reproduces. Runs recorded
 before that point have no `profile=` line in `provenance.env`.
+
+The capture-time classifier hashes remain recorded with the run provenance. A
+later owner-matching correction regenerated both compressed derivatives'
+component labels/order and their summaries from the unchanged normalized
+stacks and per-stack byte counts. It now reports current demangled RIB owners,
+requires an actual `ImportDecisionCache` owner, and makes the disabled cache's
+zero directly visible. The total live heaps and the semantic explain-cache
+netting result did not change.

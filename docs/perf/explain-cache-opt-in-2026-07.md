@@ -112,12 +112,18 @@ are not comparable to the RSS table above; they answer *what allocated it*, not
 - With the cache disabled, the explain cache allocates a *measured*
   **exactly zero bytes**.
 
-That zero is only visible after netting out a classifier defect: the DHAT
-classifier folds the unrelated `RejectedRouteStore` into the explain bucket,
-identically in both runs (704,320 B). The per-row evidence is
+The corrected structural classifier reports 40,446,080 B directly owned by the
+enabled cache and zero for the disabled cache. The semantic total above also
+includes 2,948,544 B of retained policy-context clones allocated in the inbound
+session path, which the structural classifier leaves in transport scratch
+because their allocation stacks do not contain a cache owner. The per-row
+netting table assigns those clones to their eventual cache lifetime and
+separately records the unrelated `RejectedRouteStore` rows (704,320 B in each
+run):
 [`dhat/explain-bucket-netting.tsv`](artifacts/explain-cache-opt-in-2026-07/dhat/explain-bucket-netting.tsv);
-the defect and two others found alongside it are recorded in
-[`KNOWN_ISSUES.md`](../../KNOWN_ISSUES.md).
+the capture-time classifier defects exposed by that table are now resolved in
+[`KNOWN_ISSUES.md`](../../KNOWN_ISSUES.md), and the retained component tables
+were regenerated from unchanged normalized stacks and byte counts.
 
 ## Method and fail-closed gates
 
