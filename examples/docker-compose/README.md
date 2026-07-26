@@ -6,10 +6,14 @@ bridge network. FRR advertises 4 IPv4 and 3 IPv6 sample prefixes.
 ## Start
 
 ```bash
-docker compose up -d
+docker compose up -d --build
 ```
 
-First run builds the rustbgpd image (~60s). Sessions establish within seconds.
+`--build` asks Compose to build from the current checkout before startup.
+Without it, Compose may reuse an older `docker-compose-rustbgpd` image already
+on the host. Cached layers keep unchanged repeat builds quick. The first build
+takes about 60 seconds; sessions establish within seconds.
+
 The committed bearer token is intentionally public and test-only: it keeps the
 quick-start runnable while demonstrating tier authorization. Replace this
 entire credential arrangement in any real deployment.

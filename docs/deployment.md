@@ -294,7 +294,7 @@ prefixes — no real routers required.
 
 ```sh
 cd examples/docker-compose
-docker compose up -d
+docker compose up -d --build
 docker compose exec rustbgpd \
   rbgp -s http://127.0.0.1:50051 neighbor
 docker compose down
