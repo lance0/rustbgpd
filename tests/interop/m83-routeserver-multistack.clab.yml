@@ -32,8 +32,9 @@
 #   BIRD 2.0.12: `enforce first as off` (also the default)
 #   GoBGP 3.37:  no first-AS enforcement exists; nothing to disable
 #
-# Cross-subnet static routes + ip_forward on the RS keep the
-# preserved next hops resolvable (M19 note 1).
+# Cross-subnet static routes make the preserved BGP NEXT_HOPs
+# resolvable for this control-plane receipt. M83 sends no data-plane
+# traffic and does not prove packet forwarding through rustbgpd.
 #
 # Usage:
 #   docker build --target dev -t rustbgpd:dev .
@@ -63,7 +64,6 @@ topology:
         - ip link set eth2 up
         - ip addr add 10.83.3.1/24 dev eth3
         - ip link set eth3 up
-        - sysctl -w net.ipv4.ip_forward=1
       env:
         RUST_LOG: info
         RUSTBGPD_TOKEN_FILE: /run/rustbgpd/grpc-test-only-operator.token

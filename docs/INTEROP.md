@@ -1608,7 +1608,7 @@ M19 Transparent Route Server (3-node):
   FRR-A (AS 65002)       rustbgpd RS (AS 65001)       FRR-B (AS 65003)
   eth1: 10.0.0.2/24  ──  eth1: 10.0.0.1/24
   route_server_client     eth2: 10.0.1.1/24  ──  eth1: 10.0.1.2/24
-                          ip_forward=1                 route_server_client
+                                                       route_server_client
 ```
 
 FRR-A advertises: 192.168.1.0/24, 192.168.2.0/24.
@@ -1622,10 +1622,12 @@ Both peers are `route_server_client = true` on rustbgpd.
 (containerlab point-to-point links). Because `route_server_client` preserves
 the original NEXT_HOP, FRR-B receives routes with NH=10.0.0.2 (a different
 subnet). Each FRR peer needs a static route to the other's subnet via
-rustbgpd, and rustbgpd needs `ip_forward=1`.
+rustbgpd so FRR's BGP next-hop tracking can resolve the preserved address.
+M19 sends no data-plane traffic and does not prove packet forwarding through
+rustbgpd.
 
 **FRR enforce-first-as (critical):** FRR 10.x enables `enforce-first-as` by
-default. When rustbgpd (AS 65001) transparently forwards a route with
+default. When rustbgpd (AS 65001) transparently advertises a route with
 AS_PATH `[65002]`, FRR-B rejects it with `"incorrect first AS (must be 65001)"`.
 The fix is `no neighbor X.X.X.X enforce-first-as` **per-neighbor** in each FRR
 config. The global `no bgp enforce-first-as` alone is insufficient in FRR 10.3.1.
@@ -1646,7 +1648,7 @@ Verify routes from FRR-B arrive at FRR-A with AS_PATH `[65003]`.
 
 Verify routes show NEXT_HOP = 10.0.1.2 (FRR-B's original address).
 
-### Test 5: All Prefixes Forwarded
+### Test 5: All Prefixes Advertised and Received
 
 Verify both FRR-A prefixes (192.168.1.0/24, 192.168.2.0/24) are present on FRR-B.
 
@@ -1675,8 +1677,8 @@ Automated test: `bash tests/interop/scripts/test-m19-routeserver-frr.sh` — **1
 | AS_PATH on FRR-A contains 65003 | PASS | Origin AS preserved |
 | AS_PATH on FRR-A no 65001 | PASS | Route server ASN not prepended |
 | NEXT_HOP on FRR-A = 10.0.1.2 | PASS | FRR-B's original NH preserved |
-| 192.168.1.0/24 on FRR-B | PASS | Prefix forwarded |
-| 192.168.2.0/24 on FRR-B | PASS | Prefix forwarded |
+| 192.168.1.0/24 on FRR-B | PASS | Prefix advertised by FRR-A and received by FRR-B |
+| 192.168.2.0/24 on FRR-B | PASS | Prefix advertised by FRR-A and received by FRR-B |
 
 ---
 
