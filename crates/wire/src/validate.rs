@@ -2,7 +2,6 @@ use crate::attribute::{AsPath, AsPathSegment, PathAttribute, attr_error_data};
 use crate::capability::Safi;
 use crate::constants::{attr_flags, attr_type};
 use crate::notification::update_subcode;
-use std::collections::HashSet;
 use std::net::IpAddr;
 /// RFC 7606 §2 error-handling approach for a malformed UPDATE, ordered from
 /// the weakest action to the strongest. The `Ord` derive implements the
@@ -127,10 +126,10 @@ pub fn validate_update_attributes_with_options(
     is_ebgp: bool,
     options: UpdateValidationOptions,
 ) -> Result<(), UpdateError> {
-    check_duplicate_types(attrs)?;
+    let present = check_duplicate_types(attrs)?;
     check_unrecognized_wellknown(attrs)?;
     if has_nlri {
-        check_mandatory_present(attrs, has_body_nlri, is_ebgp)?;
+        check_mandatory_present(&present, has_body_nlri, is_ebgp)?;
     }
     for attr in attrs {
         match attr {
@@ -162,19 +161,20 @@ pub fn validate_update_attributes_with_options(
     Ok(())
 }
 /// (3,1) Duplicate attribute type codes.
-fn check_duplicate_types(attrs: &[PathAttribute]) -> Result<(), UpdateError> {
-    let mut seen = HashSet::new();
+fn check_duplicate_types(attrs: &[PathAttribute]) -> Result<[bool; 256], UpdateError> {
+    let mut present = [false; 256];
     for attr in attrs {
         let tc = attr.type_code();
-        if !seen.insert(tc) {
+        if present[usize::from(tc)] {
             return Err(UpdateError {
                 subcode: update_subcode::MALFORMED_ATTRIBUTE_LIST,
                 data: vec![],
                 disposition: ErrorDisposition::SessionReset,
             });
         }
+        present[usize::from(tc)] = true;
     }
-    Ok(())
+    Ok(present)
 }
 /// (3,2) Unrecognized well-known attribute: Optional=0 and type code unknown.
 fn check_unrecognized_wellknown(attrs: &[PathAttribute]) -> Result<(), UpdateError> {
@@ -199,13 +199,12 @@ fn check_unrecognized_wellknown(attrs: &[PathAttribute]) -> Result<(), UpdateErr
 /// inside the MP attribute (RFC 4760 §3) and not required as a separate attribute.
 /// Mixed UPDATEs (body NLRI + `MP_REACH_NLRI`) still require body `NEXT_HOP`.
 fn check_mandatory_present(
-    attrs: &[PathAttribute],
+    present: &[bool; 256],
     has_body_nlri: bool,
     is_ebgp: bool,
 ) -> Result<(), UpdateError> {
-    let present: HashSet<u8> = attrs.iter().map(PathAttribute::type_code).collect();
     for &tc in MANDATORY_ATTRS {
-        if !present.contains(&tc) {
+        if !present[usize::from(tc)] {
             return Err(UpdateError {
                 subcode: update_subcode::MISSING_WELLKNOWN,
                 data: vec![tc],
@@ -215,7 +214,7 @@ fn check_mandatory_present(
     }
     // NEXT_HOP mandatory for eBGP when body NLRI is present. When only MP_REACH
     // carries NLRI, the next-hop is inside the MP attribute (RFC 4760 §3).
-    if is_ebgp && has_body_nlri && !present.contains(&attr_type::NEXT_HOP) {
+    if is_ebgp && has_body_nlri && !present[usize::from(attr_type::NEXT_HOP)] {
         return Err(UpdateError {
             subcode: update_subcode::MISSING_WELLKNOWN,
             data: vec![attr_type::NEXT_HOP],
@@ -380,6 +379,43 @@ mod tests {
         ];
         let err = validate_update_attributes(&attrs, false, false, true).unwrap_err();
         assert_eq!(err.subcode, update_subcode::MALFORMED_ATTRIBUTE_LIST);
+    }
+    #[test]
+    fn duplicate_scan_returns_full_non_dropping_presence_table() {
+        assert_eq!(std::mem::size_of::<[bool; 256]>(), 256);
+        assert!(!std::mem::needs_drop::<[bool; 256]>());
+        let attrs = [
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::Unknown(RawAttribute {
+                flags: attr_flags::OPTIONAL,
+                type_code: u8::MAX,
+                data: Bytes::new(),
+            }),
+        ];
+        let present = check_duplicate_types(&attrs).unwrap();
+        assert!(present[usize::from(attr_type::ORIGIN)]);
+        assert!(present[usize::from(u8::MAX)]);
+        assert_eq!(
+            present.into_iter().filter(|is_present| *is_present).count(),
+            2
+        );
+    }
+    #[test]
+    fn duplicate_error_precedes_other_attribute_errors() {
+        let attrs = [
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::Origin(Origin::Egp),
+            PathAttribute::Unknown(RawAttribute {
+                flags: attr_flags::TRANSITIVE,
+                type_code: 99,
+                data: Bytes::from_static(&[1, 2, 3]),
+            }),
+            PathAttribute::NextHop(Ipv4Addr::UNSPECIFIED),
+        ];
+        let err = validate_update_attributes(&attrs, true, true, true).unwrap_err();
+        assert_eq!(err.subcode, update_subcode::MALFORMED_ATTRIBUTE_LIST);
+        assert!(err.data.is_empty());
+        assert_eq!(err.disposition, ErrorDisposition::SessionReset);
     }
     #[test]
     fn reject_missing_origin() {
