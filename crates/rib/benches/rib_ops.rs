@@ -192,6 +192,44 @@ fn bench_loc_rib_recompute(c: &mut Criterion) {
             },
         );
     }
+
+    for count in [1_000, 10_000, 50_000] {
+        let routes: Vec<Route> = generate_prefixes(count)
+            .into_iter()
+            .map(|prefix| make_route(prefix, 1))
+            .collect();
+        group.bench_with_input(
+            BenchmarkId::new("no_change", count),
+            &routes,
+            |b, routes| {
+                b.iter_batched(
+                    || {
+                        let mut rib = LocRib::with_capacity(routes.len());
+                        for route in routes {
+                            assert!(
+                                rib.recompute(route.prefix, std::iter::once(route)),
+                                "fresh deterministic winner must install"
+                            );
+                        }
+                        rib
+                    },
+                    |mut rib| {
+                        let mut unexpected_changes = 0;
+                        for route in routes {
+                            unexpected_changes +=
+                                usize::from(rib.recompute(route.prefix, std::iter::once(route)));
+                        }
+                        assert_eq!(
+                            unexpected_changes, 0,
+                            "identical installed winners must remain unchanged"
+                        );
+                        rib
+                    },
+                    BatchSize::LargeInput,
+                );
+            },
+        );
+    }
     group.finish();
 }
 
