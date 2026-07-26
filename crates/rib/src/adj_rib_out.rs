@@ -65,9 +65,10 @@ impl AdjRibOut {
     /// Create a new Adj-RIB-Out with pre-sized capacity.
     ///
     /// Use `LocRib::len()` for an authoritative per-peer unicast table. A
-    /// grouped peer's private table owns only the other address families, so
-    /// its unicast capacity must remain zero; the shared group table carries
-    /// the Loc-RIB-sized reservation.
+    /// freshly installed grouped peer's private table owns only the other
+    /// address families, so it starts with zero unicast capacity; the shared
+    /// group table carries the Loc-RIB-sized reservation. Moving an existing
+    /// ungrouped table into a group may retain its prior allocation.
     #[must_use]
     pub fn with_capacity(peer: IpAddr, capacity: usize) -> Self {
         Self {

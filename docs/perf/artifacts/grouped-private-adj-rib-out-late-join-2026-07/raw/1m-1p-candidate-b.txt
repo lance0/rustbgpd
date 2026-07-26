@@ -1,0 +1,14 @@
+# late-join clients=1 prefixes=1000000
+late_join_unicast_slot_bytes 128
+late_join_pre_join_vmrss_kib 1433376
+late_join_pre_join_vmsize_kib 2292832
+late_join_pre_join_vmhwm_kib 1587196
+late_join_wall_s 1.211
+late_join_group_id group:0
+late_join_group_members 1
+late_join_staged_total 1000000
+late_join_drained_total 1000000
+late_join_post_join_vmrss_kib 1697388
+late_join_post_join_vmsize_kib 2542840
+late_join_post_join_vmhwm_kib 1894428
+
