@@ -1898,7 +1898,8 @@ impl PeerSession {
                                 self.build_rejected_route_prototype(reject_proto_attrs)
                             });
                             let mut reject_entry = proto.clone();
-                            reject_entry.detail.clone_from(&evaluation.matched_policy);
+                            reject_entry.detail =
+                                evaluation.matched_policy.as_ref().map(ToString::to_string);
                             reject_entry.next_hop = Some(body_next_hop);
                             reject_entry.rpki = rpki_state;
                             reject_entry.aspa = body_aspa_state;
@@ -2544,7 +2545,8 @@ impl PeerSession {
                                     self.build_rejected_route_prototype(reject_proto_attrs)
                                 });
                                 let mut reject_entry = proto.clone();
-                                reject_entry.detail.clone_from(&evaluation.matched_policy);
+                                reject_entry.detail =
+                                    evaluation.matched_policy.as_ref().map(ToString::to_string);
                                 reject_entry.next_hop = Some(mp.next_hop);
                                 reject_entry.rpki = mp_rpki_state;
                                 reject_entry.aspa = mp_aspa_state;

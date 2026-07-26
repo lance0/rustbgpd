@@ -34,6 +34,7 @@
 use std::collections::VecDeque;
 use std::net::IpAddr;
 use std::num::NonZeroUsize;
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use lru::LruCache;
@@ -129,7 +130,7 @@ pub struct CachedDecision {
     /// Terminal-decision policy name from
     /// [`rustbgpd_policy::PolicyEvaluation::matched_policy`]. `None` =
     /// inline / anonymous.
-    pub matched_policy: Option<String>,
+    pub matched_policy: Option<Arc<str>>,
     /// RPKI origin-validation state at evaluation time.
     pub rpki: RpkiValidation,
     /// ASPA path-verification state at evaluation time.

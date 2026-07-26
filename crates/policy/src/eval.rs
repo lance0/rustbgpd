@@ -11,7 +11,7 @@
 //! The no-match / no-modification path allocates nothing: guard
 //! evaluation is all borrows, modifications are cloned only when a
 //! matched permit term actually carries some, and the attribution name
-//! is cloned only when the caller actually asked for attribution
+//! is Arc-cloned only when the caller actually asked for attribution
 //! (the `ATTR` const generic) — the plain [`CompiledChain::evaluate`]
 //! path never touches it.
 
@@ -696,7 +696,7 @@ impl CompiledChain {
                     warn_eval_error(policy.name.as_deref(), term_label.as_deref(), kind);
                     let error = EvalError {
                         kind,
-                        policy: policy.name.clone(),
+                        policy: policy.name.as_ref().map(ToString::to_string),
                         term: term_label,
                     };
                     if COUNT && let Some(hits) = hits {
@@ -1604,6 +1604,40 @@ mod tests {
         }
     }
 
+    /// Attribution is requested for the live metrics path. It must share
+    /// the compiled policy-name allocation rather than reconstructing an
+    /// owned label for every evaluated route.
+    ///
+    /// Red proof: replacing the evaluator's `policy.name.clone()` with
+    /// `Arc::from(policy.name.as_deref().unwrap())` preserves text output
+    /// but allocates a distinct backing buffer, making this assertion fail.
+    #[test]
+    fn attributed_policy_name_shares_compiled_allocation() {
+        let name: Arc<str> = Arc::from("customer-import");
+        let chain = CompiledChain {
+            policies: vec![CompiledPolicy {
+                name: Some(name.clone()),
+                terms: vec![Term {
+                    name: None,
+                    guard: MatchExpr::True,
+                    action: TermAction::Permit(RouteModifications::default()),
+                }],
+                default_action: PolicyAction::Deny,
+                source: PolicySource::Toml,
+            }],
+            ..CompiledChain::empty()
+        };
+
+        let (result, evaluation) = chain.evaluate_with_attribution(&ctx(None));
+        assert_eq!(result.action, PolicyAction::Permit);
+        let attributed = evaluation.matched_policy.expect("named terminal policy");
+        assert_eq!(attributed.as_ref(), "customer-import");
+        assert!(
+            Arc::ptr_eq(&name, &attributed),
+            "attribution must reuse the compiled policy-name allocation"
+        );
+    }
+
     fn v4(addr: [u8; 4], len: u8) -> Prefix {
         Prefix::V4(Ipv4Prefix::new(
             Ipv4Addr::new(addr[0], addr[1], addr[2], addr[3]),
@@ -1664,7 +1698,7 @@ mod tests {
         };
         let chain = CompiledChain {
             policies: vec![CompiledPolicy {
-                name: Some("p".to_string()),
+                name: Some(Arc::from("p")),
                 terms: vec![
                     Term {
                         name: Some("tag".to_string()),
@@ -1806,7 +1840,7 @@ mod tests {
         let big = CompiledChain {
             policies: vec![
                 CompiledPolicy {
-                    name: Some("p0".to_string()),
+                    name: Some(Arc::from("p0")),
                     terms: vec![
                         Term {
                             name: None,
@@ -1823,7 +1857,7 @@ mod tests {
                     source: PolicySource::Toml,
                 },
                 CompiledPolicy {
-                    name: Some("p1".to_string()),
+                    name: Some(Arc::from("p1")),
                     terms: vec![Term {
                         name: None,
                         guard: MatchExpr::True,

@@ -502,7 +502,8 @@ fn statement_trace_agrees_with_live_evaluation_across_matrix() {
             // live evaluator attributes the decision to.
             match trace.steps.last() {
                 Some(last) => assert_eq!(
-                    last.policy_name, evaluation.matched_policy,
+                    last.policy_name.as_deref(),
+                    evaluation.matched_policy.as_deref(),
                     "terminal policy diverged for chain={chain_name} ctx={ctx_name}"
                 ),
                 None => assert_eq!(
@@ -735,7 +736,8 @@ fn rpol_statement_trace_agrees_with_live_evaluation_and_recorded_hits() {
             );
             let last = trace.steps.last().expect("non-empty chains");
             assert_eq!(
-                last.policy_name, evaluation.matched_policy,
+                last.policy_name.as_deref(),
+                evaluation.matched_policy.as_deref(),
                 "terminal policy diverged for chain={chain_name} ctx={ctx_name}"
             );
 

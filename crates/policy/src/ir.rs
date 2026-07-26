@@ -830,8 +830,10 @@ pub enum PolicySource {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompiledPolicy {
     /// Configured policy name (`None` for inline / anonymous policies);
-    /// carried for chain attribution.
-    pub name: Option<String>,
+    /// carried for chain attribution. Shared with each attributed
+    /// evaluation so the live metrics path does not allocate one owned
+    /// policy label per route.
+    pub name: Option<Arc<str>>,
     /// Ordered terms; the first whose guard matches decides.
     pub terms: Vec<Term>,
     /// Action when no term matches.

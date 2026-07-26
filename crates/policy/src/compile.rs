@@ -53,13 +53,13 @@ pub fn compile_chain(chain: &PolicyChain, store: &mut SetStore) -> CompiledChain
                 // Attribute to the configured chain-reference name
                 // (e.g. `"customer-in(200)"`), matching how TOML
                 // members are labeled for metrics / explain.
-                spliced.name.clone_from(&named.name);
+                spliced.name = named.name.clone().map(Arc::from);
                 policies.push(spliced);
             }
             continue;
         }
         policies.push(CompiledPolicy {
-            name: named.name.clone(),
+            name: named.name.clone().map(Arc::from),
             terms: named
                 .policy
                 .entries
