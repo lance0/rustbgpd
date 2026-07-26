@@ -3605,6 +3605,11 @@ impl RibManager {
         // passes (the overwhelming majority) keep every
         // `rs_control_communities` member on the shared Arc emission.
         let mut rs_tagged_pass: HashMap<(usize, u32), bool> = HashMap::new();
+        let metrics = Self::clone_distribution_metrics(
+            &self.metrics,
+            #[cfg(any(test, feature = "bench-internals"))]
+            &mut self.adj_rib_out_commit_stats,
+        );
         for peer in peers {
             // Cold ingest is the path that requires in-pass readiness:
             // service the dedicated, read-only lane at each peer boundary
@@ -4093,11 +4098,6 @@ impl RibManager {
             let loc_rib = &self.loc_rib;
             let loc_rib_len = loc_rib.len();
             let target_peer_label = peer.to_string();
-            let metrics = Self::clone_distribution_metrics(
-                &self.metrics,
-                #[cfg(any(test, feature = "bench-internals"))]
-                &mut self.adj_rib_out_commit_stats,
-            );
             let policy_stats = self.export_policy_stats.entry(peer).or_default();
 
             let rib_out = self
