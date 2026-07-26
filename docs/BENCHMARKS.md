@@ -984,13 +984,16 @@ computes it 1024-based; the tables below convert it and label the result
 ### Results
 
 **Re-measured 2026-07-26** (UTC; the harness records the host's local date as
-2026-07-25) at commit `515659b1` — the code now on `main`, which has since moved
-only through documentation changes. This run widened the field from three
-daemons to **four** and added the two route-server shapes, which had never been
-published. The full write-up, with per-run values behind every median, the
-per-second establishment progressions, the disclosed harness defects, and the
-retained artifacts, is the [cross-stack bgperf2
-receipt](perf/competitive-bgperf2-2026-07.md).
+2026-07-25) at commit `515659b1`. This is a pinned historical candidate, not
+current `main`: routing and memory code has moved since it was measured. The
+run widened the field from three daemons to **four** and added the two
+route-server shapes, which had never been published. The full write-up, with
+per-run values behind every median, the per-second establishment progressions,
+the disclosed harness defects, and the retained artifacts, is the [cross-stack
+bgperf2 receipt](perf/competitive-bgperf2-2026-07.md). A later controlled
+peer/route matrix corrects the sizing interpretation without rewriting these
+historical rows; see
+[`per-peer-rss-attribution-2026-07.md`](perf/per-peer-rss-attribution-2026-07.md).
 
 **The target reports `rustbgpd 0.60.0` in the raw rows because the v0.61.0
 version bump had not happened when the campaign ran.** The binary is the
@@ -1029,15 +1032,18 @@ separation in the campaign, at the shape rustbgpd is designed for.
 > 30 peers has not found a regression — that value is inside the measured
 > range. The spread is published, not explained.
 
-**Memory tracks peers, not routes.** 100p × 1k is 100,000 routes and 2p × 100k
-is 200,000 routes, and both measure 212.0 MiB. Half the routes, identical
-resident set: at route-server shapes memory is dominated by per-peer state
-rather than route count. The *computed* marginal cost over the 10 → 100 peer
-span is ~1.93 MiB/peer for rustbgpd against BIRD's ~0.27 MiB/peer (GoBGP ~1.72,
-FRR ~1.18) — an upper bound for all four, since prefix totals also grow tenfold
-across that span. **Any projection beyond 100 peers is *extrapolated*** and
-assumes a linearity this campaign did not demonstrate; the 42% spread at the
-midpoint says the curve needs measuring. The 1,000-peer receipts
+**The cross-stack campaign does not isolate peer cost.** Its 100p × 1k and
+2p × 100k cells both measure 212.0 MiB, but the former has a 24% run-to-run
+spread and the 10 → 100 peer comparison also grows total routes tenfold. The
+computed ~1.93 MiB/peer value for rustbgpd (BIRD ~0.27, GoBGP ~1.72, FRR
+~1.18) is therefore a mixed-shape upper bound. A later counterbalanced matrix
+holds BASE routes and peers independently under continuous churn: rustbgpd
+grows by 118.200/142.844 KiB per peer at fixed 10k/100k BASE routes and
+825.515/850.751 B per BASE route at fixed 10/100 peers. Both dimensions
+are material. See the [controlled attribution
+receipt](perf/per-peer-rss-attribution-2026-07.md). **Any projection beyond
+100 peers is *extrapolated*** and assumes a linearity neither campaign
+demonstrated. The 1,000-peer receipts
 ([`perf/scale-receipt-2026-07.md`](perf/scale-receipt-2026-07.md),
 [`perf/route-server-1000-2026-07.md`](perf/route-server-1000-2026-07.md)) are
 the evidence at that scale.
@@ -1048,7 +1054,7 @@ binaries at `/usr/sbin/`, so the harness config never loads and the image's own
 entrypoint runs with zero neighbors; `monitor.py wait_established()` is an
 unbounded loop and hung about 11 minutes before the attempt was killed. The
 comparison is therefore four-way. Root cause and retained evidence are in the
-[receipt](perf/competitive-bgperf2-2026-07.md#openbgpd-could-not-be-collected--harness-defect-not-a-daemon-result).
+[receipt](perf/competitive-bgperf2-2026-07.md#openbgpd-could-not-be-collected-harness-defect-not-a-daemon-result).
 The [IXP receipt matrix](perf/ixp-matrix-2026-07.md) carries a head-to-head
 OpenBGPD 9.1 comparison through a different harness.
 
@@ -1104,7 +1110,8 @@ higher (565% and 1281%, goroutine-per-peer + GC). BIRD is the most efficient
 below 100 peers, reflecting decades of C optimization with a radix-tree RIB;
 at 100 peers BIRD and rustbgpd are close (101% vs 122%). FRR sits between.
 
-**Memory.** *Full-daemon RSS* at 2p/100k is 212.0 MiB — above GoBGP's
+**Memory.** In the historical cross-stack campaign, *full-daemon RSS* at
+2p/100k is 212.0 MiB — above GoBGP's
 202.8 MiB, below FRR's 228.4 MiB, and far above BIRD's 27.6 MiB. At 100p/1k
 rustbgpd is last of the four. A whole-daemon dhat heap profile (2026-06-02; see
 the *Memory Footprint* correction) attributes that RSS to **RIB route-storage
@@ -1112,10 +1119,16 @@ map/index bucket arrays — ~76% of the live-at-peak heap** — across the
 three-layer Adj-RIB-In + Loc-RIB + Adj-RIB-Out model, with Adj-RIB-Out the
 single largest piece. API / event / metrics operational surfaces were
 **negligible (<1 MB)**. The opt-in event-history outbox adds RSS when enabled,
-but the default-off structural cost is the route maps, **not** operational
-surfaces. The earlier 60.6 MB "RIB-only is lean" figure is a synthetic
-Adj-RIB-In + Loc-RIB micro-bench that excludes Adj-RIB-Out and so undercounts
-full-daemon route storage. BIRD's radix-tree RIB with global attribute
+but that two-peer route-heavy profile does not price a 100-peer session fleet.
+A controlled 10/100-peer × 10k/100k-route follow-up measures both dimensions
+and attributes 6,150,300 control bytes at 100 ordinary-message peers to eager
+RFC 8654 receive-buffer reservation. The lazy-buffer candidate removes that
+exact DHAT owner; its −0.324% release RSS result is below the 0.645% floor and
+carries no RSS claim. Continuous churn leaves different final route totals, so
+allocator-total and aggregate DHAT deltas are also descriptive only. The
+earlier 60.6 MB "RIB-only is lean" figure is a synthetic Adj-RIB-In + Loc-RIB
+micro-bench that excludes Adj-RIB-Out and so undercounts full-daemon route
+storage. BIRD's radix-tree RIB with global attribute
 deduplication is what makes it an order of magnitude leaner on this same data.
 At full-table scale (900k prefixes, RIB-only micro-bench) rustbgpd's
 Adj-RIB-In + Loc-RIB is ~533 MB vs GoBGP's published 8–16+ GB.
@@ -1138,7 +1151,7 @@ updates.
 | Memory model | Radix tree, global attribute dedup | Go heap, GC managed | Per-daemon route storage | Arc sharing, attribute interning |
 | Full-daemon RSS (2p × 100k) | **27.6 MiB** | 202.8 MiB | 228.4 MiB | 212.0 MiB |
 | Full-daemon RSS (100p × 1k) | **32.8 MiB** | 193.5 MiB | 134.1 MiB | 212.0 MiB *(last of four)* |
-| Marginal MiB/peer, 10 → 100p (*computed*) | **0.27** | 1.72 | 1.18 | 1.93 |
+| Mixed-shape marginal MiB/peer, 10 → 100p (*historical upper bound*) | **0.27** | 1.72 | 1.18 | 1.93 |
 | API during load | Responsive (no RIB contention) | Responsive (concurrent) | Responsive | Responsive (priority query channel) |
 
 **Time:** rustbgpd is the fastest of the four on total time at every shape
@@ -1150,10 +1163,12 @@ shape, and it is where the update-group work shows.
 just above GoBGP at 100 peers, and is last of the four at that shape. BIRD is
 30+ years of optimization in a purpose-built C codebase with a radix-tree RIB
 and global attribute deduplication; that gap is structural, not a tuning
-oversight. The open lever for rustbgpd remains **compact prefix-keyed RIB
-storage** — reducing `hashbrown` bucket overhead across the route maps and
-prefix indexes — plus whatever explains the 42% run-to-run RSS spread at 30
-peers, which is not yet understood. Note this does not contradict the rejected
+oversight. At route-heavy shapes the open lever for rustbgpd remains **compact
+prefix-keyed RIB storage** — reducing `hashbrown` bucket overhead across the
+route maps and prefix indexes. At peer-heavy shapes, the controlled follow-up
+separately identifies session allocations and removes the eager RFC 8654
+receive-buffer owner. The 42% run-to-run RSS spread at 30 peers remains
+unexplained. Note this does not contradict the rejected
 shared-`RouteData` refactor (above): that shared the Route *payload*, which is
 the minority cost; the dominant cost is the maps' bucket arrays, so the open
 lever is the map/index *data structure*, not payload sharing.

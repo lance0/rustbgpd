@@ -1,0 +1,4 @@
+VmPeak:	  646780 kB
+VmSize:	  613976 kB
+VmHWM:	   67964 kB
+VmRSS:	   67964 kB

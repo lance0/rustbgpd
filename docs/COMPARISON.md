@@ -293,19 +293,29 @@ lead widens with peer count: 3 s at 100 peers against 5 / 7 / 20 s.
 shape** — at 1.10× GoBGP, 1.58× FRR, and 6.46× BIRD; against BIRD the
 ratio is 4.6×–9.6× at every shape. rustbgpd's RSS is also the noisiest
 figure in the run (86.0 / 108.5 / 131.1 MiB across three runs at 30
-peers), so treat it as a range. 100 peers × 1k and 2 peers × 100k carry
-half and whole route counts respectively yet both measure 212.0 MiB —
-at route-server shapes memory is dominated by per-peer state, not route
-count. A 2026-06-02 whole-daemon dhat profile attributes the
-live-at-peak heap primarily to the three-layer RIB model (Adj-RIB-In +
-Loc-RIB + Adj-RIB-Out) and its route-map / prefix-index storage, not
-operational surfaces. The durable event-history outbox is opt-in
+peers), so treat it as a range. The campaign's 100 peers × 1k and
+2 peers × 100k cells both measure 212.0 MiB, but that coincidence does
+not isolate a scaling dimension. A controlled follow-up varies peers and
+BASE routes independently under continuous churn: steady RSS grows by
+118.200/142.844 KiB per peer at fixed 10k/100k BASE routes and
+825.515/850.751 B per BASE route at fixed 10/100 peers. Both dimensions
+are material; the old 1.93
+MiB/peer value is a mixed-shape upper bound, not a sizing coefficient.
+The same follow-up removes a 6,150,300-byte eager RFC 8654 receive-buffer
+owner. It makes no RSS claim because the measured −0.324% falls below
+its 0.645% floor, and no allocator-total or aggregate-DHAT claim because
+continuous churn left different final route totals. A 2026-06-02
+whole-daemon DHAT profile still attributes
+the route-heavy shape primarily to the three-layer RIB model
+(Adj-RIB-In + Loc-RIB + Adj-RIB-Out) and its route-map / prefix-index
+storage. The durable event-history outbox is opt-in
 (default off); enabling it adds RSS roughly proportional to event
 volume. OpenBGPD is absent because a bgperf2 harness defect prevented it
 from starting, not because of a daemon result. See
 [BENCHMARKS.md](BENCHMARKS.md) for the full cross-stack tables and
-[the receipt](perf/competitive-bgperf2-2026-07.md) for per-run values,
-disclosed defects, and artifacts.
+[the cross-stack receipt](perf/competitive-bgperf2-2026-07.md) for
+per-run values, plus the [controlled attribution
+receipt](perf/per-peer-rss-attribution-2026-07.md) for the correction.
 
 At route-server scale, the [IXP receipt
 matrix](perf/ixp-matrix-2026-07.md) compares rustbgpd, BIRD 3.3.1, and

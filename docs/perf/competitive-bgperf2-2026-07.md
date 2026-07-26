@@ -17,9 +17,10 @@ of use.
 
 ## Provenance
 
-**Measured commit:** `515659b191b7fde91a1a1c9f973e7c8ae3731086`. That is the
-code now on `main`; `main` has since moved to `211c2571` with documentation-only
-changes, so no measured behavior sits between the two.
+**Measured commit:** `515659b191b7fde91a1a1c9f973e7c8ae3731086`. That was the
+candidate tip when this campaign ran. `main` has since moved through routing
+and memory changes, so these remain pinned historical results rather than a
+current-tip measurement.
 
 **The target reports `rustbgpd 0.60.0` in every raw row, and that is expected.**
 The v0.61.0 version bump had not happened when the campaign ran. The binary is
@@ -193,7 +194,20 @@ range, not a point.
 We have not root-caused the spread. It is a finding this receipt publishes, not
 one it explains.
 
-## The structural finding: memory tracks peers, not routes
+## Historical structural hypothesis: memory tracks peers, not routes
+
+> **2026-07-26 controlled follow-up:** this heading was too strong. The two
+> cells below changed both dimensions and had 24% RSS spread at 100 peers.
+> A counterbalanced 2 × 2 release-daemon matrix now holds BASE routes fixed
+> while varying peers, then holds peers fixed while varying BASE routes. The
+> last 8 stubs continuously flap distinct 16-prefix blocks after convergence.
+> Under that workload it measures 118.200/142.844 KiB per peer and
+> 825.515/850.751 B per BASE route. Both dimensions are material, so the
+> 1.93 MiB/peer table remains the historical campaign's mixed-shape upper
+> bound, not an isolated per-peer cost or sizing coefficient.
+> The follow-up and immutable artifacts are in
+> [`per-peer-rss-attribution-2026-07.md`](per-peer-rss-attribution-2026-07.md).
+> The raw cross-stack tables below are retained unchanged.
 
 Two shapes in this campaign carry very different route counts and produce
 identical memory:
@@ -203,10 +217,9 @@ identical memory:
 | 100p × 1k | 100,000 | 212.0 |
 | 2p × 100k | 200,000 | 212.0 |
 
-**Half the routes, the same resident set.** At route-server shapes rustbgpd's
-memory is dominated by per-peer state — per-session structures and the
-Adj-RIB-Out fanout that scales with peer count — rather than by the size of the
-route table.
+**Half the routes, the same campaign median.** This observation motivated the
+controlled follow-up; it does not by itself establish which dimension
+dominates.
 
 Across the 10 → 100 peer span the *computed* marginal cost is:
 

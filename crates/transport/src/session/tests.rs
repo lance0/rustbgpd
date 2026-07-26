@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 
@@ -16016,13 +16016,23 @@ async fn send_hold_expiry_tears_down_without_notification() {
 /// UPDATE from it must be accepted because we always advertise it.
 #[tokio::test]
 async fn inbound_extended_message_accepted_from_peer_without_capability() {
-    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
-    let (client, _server) = connected_stream_pair().await;
+    let (mut session, mut rib_rx, mut bmp_rx) = make_test_session_with_rib_and_bmp(65001, 65002);
+    let initial_capacity = session.read_buf.buf.capacity();
+    assert_eq!(
+        initial_capacity,
+        usize::from(rustbgpd_wire::MAX_MESSAGE_LEN)
+    );
+    let (client, mut server) = connected_stream_pair().await;
     session.test_install_stream(client);
     establish_test_session(&mut session, 65002).await;
     assert!(
         !session.negotiated.as_ref().unwrap().peer_extended_message,
         "test premise: the peer did not advertise Extended Messages"
+    );
+    assert_eq!(
+        session.read_buf.buf.capacity(),
+        initial_capacity,
+        "negotiating the extended inbound limit must not eagerly grow the buffer"
     );
     // ~1100 /24 prefixes at 4 bytes of NLRI each pushes the UPDATE past 4096.
     let entries: Vec<Ipv4NlriEntry> = (0..1100_u32)
@@ -16063,7 +16073,21 @@ async fn inbound_extended_message_accepted_from_peer_without_capability() {
         "test premise: the UPDATE exceeds 4096 bytes (got {})",
         encoded.len()
     );
-    session.read_buf.buf.extend_from_slice(&encoded);
+    server.write_all(&encoded).await.unwrap();
+    while !session.read_buf.has_complete_frame() {
+        let bytes_read = tokio::time::timeout(
+            Duration::from_secs(5),
+            read_tcp(&mut session.read_half, &mut session.read_buf.buf),
+        )
+        .await
+        .expect("session must read the extended UPDATE promptly")
+        .unwrap();
+        assert!(bytes_read > 0, "peer closed before the UPDATE was complete");
+    }
+    assert!(
+        session.read_buf.buf.capacity() > initial_capacity,
+        "the buffer must grow on demand after extended UPDATE bytes arrive"
+    );
     session.process_read_buffer().await;
     assert_eq!(
         session.fsm.state(),
@@ -16076,6 +16100,14 @@ async fn inbound_extended_message_accepted_from_peer_without_capability() {
             rib_rx.recv().await.expect("routes delivered")
         {
             assert_eq!(announced.len(), 1100);
+            break;
+        }
+    }
+    loop {
+        if let BmpEvent::RouteMonitoring { update_pdu, .. } =
+            bmp_rx.recv().await.expect("BMP event delivered")
+        {
+            assert_eq!(update_pdu.as_ref(), encoded.as_ref());
             break;
         }
     }
