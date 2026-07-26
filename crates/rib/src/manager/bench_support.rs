@@ -63,6 +63,7 @@ pub struct AdjRibOutFanoutBenchReceipt {
     pub successful_enqueues: usize,
     pub family_gauge_writes: usize,
     pub last_family_gauge_write_mask: u8,
+    pub pristine_otc_reconcile_candidates: usize,
     pub first_peer_family_values: [i64; 7],
 }
 
@@ -362,6 +363,7 @@ impl RibManager {
             successful_enqueues: stats.successful_enqueues,
             family_gauge_writes: stats.family_gauge_writes,
             last_family_gauge_write_mask: stats.last_family_gauge_write_mask,
+            pristine_otc_reconcile_candidates: stats.pristine_otc_reconcile_candidates,
             first_peer_family_values: self
                 .bench_adj_rib_out_family_values(Self::bench_peer_address(0)),
         }

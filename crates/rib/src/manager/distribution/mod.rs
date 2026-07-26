@@ -1890,6 +1890,20 @@ impl RibManager {
         affected_prefixes: &HashSet<Prefix>,
         blocked_routes: Vec<crate::route::Route>,
     ) {
+        let pristine_otc_reconcile = blocked_routes.is_empty()
+            && !self.peer_otc_blocked.contains_key(&peer)
+            && !self.pending_otc_blocked.contains_key(&peer);
+        #[cfg(any(test, feature = "bench-internals"))]
+        if pristine_otc_reconcile {
+            self.adj_rib_out_commit_stats
+                .pristine_otc_reconcile_candidates = self
+                .adj_rib_out_commit_stats
+                .pristine_otc_reconcile_candidates
+                .saturating_add(1);
+        }
+        if pristine_otc_reconcile {
+            return;
+        }
         let mut blocked_by_prefix: HashMap<Prefix, HashMap<u32, crate::route::Route>> =
             HashMap::new();
         for route in blocked_routes {
@@ -1904,6 +1918,13 @@ impl RibManager {
         let current = self.peer_otc_blocked.entry(peer).or_default();
         let pending = self.pending_otc_blocked.entry(peer).or_default();
         for prefix in affected_prefixes {
+            #[cfg(test)]
+            {
+                self.adj_rib_out_commit_stats.otc_reconcile_prefix_visits = self
+                    .adj_rib_out_commit_stats
+                    .otc_reconcile_prefix_visits
+                    .saturating_add(1);
+            }
             let old = current.remove(prefix).unwrap_or_default();
             let blocked = blocked_by_prefix.remove(prefix).unwrap_or_default();
             let next: HashSet<u32> = blocked.keys().copied().collect();
@@ -3538,6 +3559,19 @@ impl RibManager {
         self.distribute_changes_inner(best_changed, all_affected, false);
     }
 
+    fn clone_distribution_metrics(
+        metrics: &BgpMetrics,
+        #[cfg(any(test, feature = "bench-internals"))] stats: &mut super::AdjRibOutCommitStats,
+    ) -> BgpMetrics {
+        #[cfg(test)]
+        {
+            stats.metrics_handle_clones = stats.metrics_handle_clones.saturating_add(1);
+        }
+        #[cfg(all(not(test), feature = "bench-internals"))]
+        let _ = stats;
+        metrics.clone()
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "distribution loop coordinates dirty peers, forced resync, and all families"
@@ -3592,6 +3626,11 @@ impl RibManager {
         // passes (the overwhelming majority) keep every
         // `rs_control_communities` member on the shared Arc emission.
         let mut rs_tagged_pass: HashMap<(usize, u32), bool> = HashMap::new();
+        let metrics = Self::clone_distribution_metrics(
+            &self.metrics,
+            #[cfg(any(test, feature = "bench-internals"))]
+            &mut self.adj_rib_out_commit_stats,
+        );
         for peer in peers {
             // Cold ingest is the path that requires in-pass readiness:
             // service the dedicated, read-only lane at each peer boundary
@@ -4080,7 +4119,6 @@ impl RibManager {
             let loc_rib = &self.loc_rib;
             let loc_rib_len = loc_rib.len();
             let target_peer_label = peer.to_string();
-            let metrics = self.metrics.clone();
             let policy_stats = self.export_policy_stats.entry(peer).or_default();
 
             let rib_out = self

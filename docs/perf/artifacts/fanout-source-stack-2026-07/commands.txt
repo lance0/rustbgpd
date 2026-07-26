@@ -1,0 +1,46 @@
+Metrics-handle same-SHA control:
+bench/compare-criterion.sh \
+  --base c933a0da8156af5e56da4e9544141170e40c7e8f \
+  --head c933a0da8156af5e56da4e9544141170e40c7e8f \
+  --package rustbgpd-transport --bench fanout \
+  --features bench-internals --filter adj_rib_out_family_gauge \
+  --core 8 --attempts 6 --require-performance \
+  --out-dir <OUTPUT_ROOT>/01-metrics-control
+
+Metrics-handle immediate-parent A/B:
+bench/compare-criterion.sh \
+  --base c933a0da8156af5e56da4e9544141170e40c7e8f \
+  --head 067663e532191bc5b3f8828e7ad659633e37f2bd \
+  --package rustbgpd-transport --bench fanout \
+  --features bench-internals --filter adj_rib_out_family_gauge \
+  --core 8 --attempts 6 --require-performance \
+  --out-dir <OUTPUT_ROOT>/02-metrics-target
+
+Pristine-OTC same-SHA control:
+bench/compare-criterion.sh \
+  --base 6a5d19b854c9f16cbde7b0cc5956ba4182f05e2c \
+  --head 6a5d19b854c9f16cbde7b0cc5956ba4182f05e2c \
+  --package rustbgpd-transport --bench fanout \
+  --features bench-internals --filter adj_rib_out_family_gauge \
+  --core 8 --attempts 6 --require-performance \
+  --out-dir <OUTPUT_ROOT>/03-otc-control
+
+Pristine-OTC immediate-parent A/B:
+bench/compare-criterion.sh \
+  --base 6a5d19b854c9f16cbde7b0cc5956ba4182f05e2c \
+  --head bf14cdd64c8a99f85a959c755120bd10df947025 \
+  --package rustbgpd-transport --bench fanout \
+  --features bench-internals --filter adj_rib_out_family_gauge \
+  --core 8 --attempts 6 --require-performance \
+  --out-dir <OUTPUT_ROOT>/04-otc-target
+
+Focused structural proofs:
+cargo test -p rustbgpd-rib --lib distribution_clones_metrics_once_per_pass -- --nocapture
+cargo test -p rustbgpd-rib --lib distribution_skips_pristine_otc_prefix_visits -- --nocapture
+cargo test -p rustbgpd-rib --lib otc_reconcile_non_pristine_state_uses_prefix_loop_and_clears_exactly -- --nocapture
+
+Artifact verification:
+sha256sum -c SHA256SUMS
+mkdir receipt-extract
+tar -xzf criterion-evidence.tar.gz -C receipt-extract
+(cd receipt-extract/criterion-evidence && sha256sum -c SHA256SUMS)

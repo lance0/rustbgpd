@@ -1,0 +1,42 @@
+Test:
+cargo test -p rustbgpd-rib --lib distribution_skips_pristine_otc_prefix_visits -- --nocapture
+
+Injected production break:
+Delete only the pristine-state early return from reconcile_peer_otc_blocked.
+
+Observed failure:
+assertion `left == right` failed
+  left: 256
+ right: 0
+test manager::tests::update_groups::distribution_skips_pristine_otc_prefix_visits ... FAILED
+
+Why this is load-bearing:
+The fixture distributes 64 changed prefixes to four grouped peers whose new,
+current, and pending OTC blocked sets are all empty. Removing the production
+return makes all 64 * 4 prefix visits observable through the exact loop
+counter.
+
+Restored results:
+test manager::tests::update_groups::distribution_skips_pristine_otc_prefix_visits ... ok
+test manager::tests::update_groups::otc_reconcile_non_pristine_state_uses_prefix_loop_and_clears_exactly ... ok
+
+Second test:
+cargo test -p rustbgpd-rib --lib otc_reconcile_non_pristine_state_uses_prefix_loop_and_clears_exactly -- --nocapture
+
+Injected production break:
+Delete the cleanup that removes an empty per-peer current blocked-route map
+after the non-pristine reconciliation loop.
+
+Observed failure:
+assertion failed: !manager.peer_otc_blocked.contains_key(&peer)
+test manager::tests::update_groups::otc_reconcile_non_pristine_state_uses_prefix_loop_and_clears_exactly ... FAILED
+
+Why this is load-bearing:
+The test first creates real current and pending OTC diagnostic state, then
+reconciles the same prefix with no blocked route. Removing production cleanup
+leaves an empty current-map entry behind and makes the exact absence assertion
+fail.
+
+Restored result:
+test manager::tests::update_groups::otc_reconcile_non_pristine_state_uses_prefix_loop_and_clears_exactly ... ok
+Production mutation diff after restore: clean

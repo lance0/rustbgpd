@@ -443,6 +443,19 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Grouped route-server fanout avoids two peer-multiplied bookkeeping
+  costs.** Metrics handles are now cloned once per distribution pass, and
+  peers with no new, current, or pending RFC 9234 OTC-blocked state skip the
+  empty per-prefix reconciliation scan. Six-pair, pinned real-encoder receipts
+  over 64 changed routes show 14.10%..15.04% lower measured fanout time for the
+  metrics change and 42.09%..44.61% for the OTC fast path at 64..1,000 peers;
+  the metrics one-peer negative control is noise and carries no claim. These
+  are bounded actor/probe/commit/enqueue measurements, not whole-daemon
+  convergence claims. See
+  [`docs/perf/fanout-metrics-handle-2026-07.md`](docs/perf/fanout-metrics-handle-2026-07.md)
+  and
+  [`docs/perf/otc-pristine-reconcile-2026-07.md`](docs/perf/otc-pristine-reconcile-2026-07.md).
+
 - **Import-decision explain (`[policy.explain] enabled`) now defaults to
   `false`.** Both construction paths moved together: the schema default
   applied when a config file omits `[policy.explain]`, and
