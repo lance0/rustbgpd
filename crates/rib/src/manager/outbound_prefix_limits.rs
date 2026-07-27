@@ -540,14 +540,42 @@ impl RibManager {
             .collect()
     }
 
-    /// Whether any family-scoped capacity recovery is still owed.
-    ///
-    /// The resync timer that drains it is otherwise armed only by
-    /// `dirty_peers`, and a limit edit deliberately marks no peer dirty, so
-    /// this is what keeps a scheduled recovery from parking forever on an
-    /// otherwise quiescent daemon.
+    /// Whether any family-scoped capacity recovery is still owed, including
+    /// intent parked behind a selection or ORF gate.
+    #[cfg(test)]
     pub(in crate::manager) fn outbound_limit_recovery_pending(&self) -> bool {
         !self.outbound_limit_control.recovery.is_empty()
+    }
+
+    /// Whether at least one queued recovery can run under the current
+    /// selection and RFC 5291 gates.
+    ///
+    /// Gate-blocked intent stays durable but does not keep the resync timer
+    /// spinning. The event-loop message that releases either gate makes this
+    /// predicate true, so the ordinary timer is armed on the next loop turn.
+    pub(in crate::manager) fn outbound_limit_recovery_runnable(&self) -> bool {
+        self.outbound_limit_control
+            .recovery
+            .iter()
+            .any(|(&peer, families)| {
+                if !self.outbound_peers.contains_key(&peer)
+                    || !LIMITED_FAMILIES
+                        .into_iter()
+                        .any(|afi| families.contains(&afi))
+                {
+                    // One timer turn cleans stale/corrupt intent, then
+                    // disarms; it is never retried as replay work.
+                    return true;
+                }
+                LIMITED_FAMILIES.into_iter().any(|afi| {
+                    families.contains(&afi)
+                        && !self.selection_convergence_held((afi, Safi::Unicast))
+                        && !self
+                            .peer_orf_pending
+                            .get(&peer)
+                            .is_some_and(|pending| pending.contains(&(afi, Safi::Unicast)))
+                })
+            })
     }
 
     /// Coalesce one family-scoped capacity-recovery resync.
@@ -559,60 +587,103 @@ impl RibManager {
             .insert(afi);
     }
 
-    /// Run every scheduled family-scoped recovery resync, one per peer and
-    /// family. Re-derives current intent through the ordinary export and
-    /// exact-export path without touching siblings or other families, and
-    /// suppresses the End-of-RIB marker: this is an internal capacity
-    /// replay, not an RFC 7313 route-refresh response the peer asked for.
+    /// Select the next runnable family in deterministic peer/family order.
+    ///
+    /// IPv4 precedes IPv6 within a peer, matching [`LIMITED_FAMILIES`].
+    /// Empty/corrupt entries and departed peers are discarded rather than
+    /// parking the queue. Gate-blocked entries remain in place while the
+    /// first runnable sibling is selected.
+    fn take_next_outbound_limit_recovery(&mut self) -> Option<(IpAddr, Afi)> {
+        let outbound_peers = &self.outbound_peers;
+        self.outbound_limit_control
+            .recovery
+            .retain(|peer, families| {
+                outbound_peers.contains_key(peer)
+                    && LIMITED_FAMILIES
+                        .into_iter()
+                        .any(|afi| families.contains(&afi))
+            });
+        for (&peer, families) in &self.outbound_limit_control.recovery {
+            for afi in LIMITED_FAMILIES {
+                if families.contains(&afi)
+                    && !self.selection_convergence_held((afi, Safi::Unicast))
+                    && !self
+                        .peer_orf_pending
+                        .get(&peer)
+                        .is_some_and(|pending| pending.contains(&(afi, Safi::Unicast)))
+                {
+                    return Some((peer, afi));
+                }
+            }
+        }
+        None
+    }
+
+    /// Remove one recovery only after its replay committed.
+    fn complete_outbound_limit_recovery(&mut self, peer: IpAddr, afi: Afi) {
+        let remove_peer = self
+            .outbound_limit_control
+            .recovery
+            .get_mut(&peer)
+            .is_some_and(|families| {
+                families.remove(&afi);
+                families.is_empty()
+            });
+        if remove_peer {
+            self.outbound_limit_control.recovery.remove(&peer);
+        }
+    }
+
+    /// Run at most one live family-scoped recovery resync.
+    ///
+    /// Departed peers are discarded until one live peer/family is found or
+    /// no runnable intent remains. Any runnable remainder stays ordered and
+    /// keeps the ordinary resync timer armed for a later actor tick; gated
+    /// intent parks until its release message. The replay
+    /// re-derives current intent through the ordinary export and exact-export
+    /// path without touching siblings or other families, and suppresses both
+    /// End-of-RIB and RFC 7313 response markers: this is internal capacity
+    /// recovery, not a route-refresh response the peer asked for.
     pub(super) fn drain_outbound_limit_recovery(&mut self) -> bool {
-        let scheduled = std::mem::take(&mut self.outbound_limit_control.recovery);
-        if scheduled.is_empty() {
+        let Some((peer, afi)) = self.take_next_outbound_limit_recovery() else {
+            return false;
+        };
+        let started = std::time::Instant::now();
+        let outcome = self.send_route_refresh_response_inner(
+            peer,
+            afi,
+            Safi::Unicast,
+            super::route_refresh::FamilyReplayKind::PrefixLimitRecovery,
+        );
+        if outcome != super::route_refresh::FamilyReplayOutcome::Committed {
             return false;
         }
-        let started = std::time::Instant::now();
-        let mut did_work = false;
-        for (peer, families) in scheduled {
-            if !self.outbound_peers.contains_key(&peer) {
-                continue;
-            }
-            for afi in LIMITED_FAMILIES {
-                if !families.contains(&afi) {
-                    continue;
-                }
-                did_work = true;
-                // Clear the latch first: the replay below re-derives the whole
-                // family, so it re-sets the latch if excess intent remains and
-                // leaves it clear when nothing is still withheld. That is what
-                // "a complete recovery resync that blocks nothing ends the
-                // episode" means, and it is why an ordinary batch never ends
-                // one.
-                self.set_outbound_blocking(peer, afi, false);
-                self.send_route_refresh_response_inner(peer, afi, Safi::Unicast, true);
-                if !self.outbound_blocking(peer, afi) {
-                    info!(
-                        %peer,
-                        family = family_label(afi),
-                        "outbound prefix limit recovered: this family no longer withholds intent"
-                    );
-                }
-            }
-            self.refresh_outbound_limit_gauges(peer);
+        self.complete_outbound_limit_recovery(peer, afi);
+        if !self.outbound_blocking(peer, afi) {
+            info!(
+                %peer,
+                family = family_label(afi),
+                "outbound prefix limit recovered: this family no longer withholds intent"
+            );
         }
-        if did_work {
-            self.metrics
-                .observe_rib_outbound_prefix_limit_recovery(started.elapsed());
-        }
+        self.metrics
+            .observe_rib_outbound_prefix_limit_recovery(started.elapsed());
         true
     }
 
-    fn outbound_blocking(&self, peer: IpAddr, afi: Afi) -> bool {
+    pub(in crate::manager) fn outbound_blocking(&self, peer: IpAddr, afi: Afi) -> bool {
         self.outbound_prefix_limits
             .get(&peer)
             .and_then(|limits| limits.family(afi))
             .is_some_and(|family| family.blocking)
     }
 
-    fn set_outbound_blocking(&mut self, peer: IpAddr, afi: Afi, blocking: bool) {
+    pub(in crate::manager) fn set_outbound_blocking(
+        &mut self,
+        peer: IpAddr,
+        afi: Afi,
+        blocking: bool,
+    ) {
         if let Some(family) = self
             .outbound_prefix_limits
             .get_mut(&peer)

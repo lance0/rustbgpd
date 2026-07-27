@@ -53,6 +53,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   daemon-lifetime flap count is red only when retained history also proves a
   recent session loss. Genuinely old retained transitions remain red.
 
+- **Outbound prefix-limit recovery now yields between peer/family replays.**
+  A capacity raise or newly freed slot re-derives at most one live
+  peer/family per RIB resync tick, retains the deterministic remainder, and
+  re-arms the ordinary timer while work is runnable. Selection/ORF-gated
+  recovery parks until gate release, and outbound backpressure retains the
+  internal retry without widening into a full peer resync. This bounds one
+  actor turn without claiming less total replay work; departed peers are
+  skipped, and recovery emits no End-of-RIB or route-refresh markers.
+
 - **Policy introspection no longer turns a stalled live session into an
   absent one.** Import explain and rejected-route reads return
   `DEADLINE_EXCEEDED` when their bounded session query times out; policy stats
