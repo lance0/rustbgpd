@@ -279,7 +279,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_readyz_returns_503_when_rib_probe_times_out() {
+    async fn get_readyz_fails_closed_when_rib_probe_reaches_deadline() {
         let (peer_tx, mut peer_rx) = mpsc::channel(1);
         let (rib_tx, mut rib_rx) = mpsc::channel(1);
         let addr = start_server(CoreReadinessProbe::new(peer_tx, rib_tx)).await;
@@ -298,7 +298,21 @@ mod tests {
 
         let response = request(addr, "/readyz").await;
         assert!(response.starts_with("HTTP/1.1 503 Service Unavailable"));
-        assert!(response.ends_with("not ready: RIB manager probe timed out (200ms deadline)\n"));
+        let body = response
+            .split_once("\r\n\r\n")
+            .map(|(_, body)| body)
+            .expect("HTTP response must contain a header/body boundary");
+        // The HTTP guard and the actor probe intentionally share the same
+        // 200 ms deadline. Either timer may win under scheduler load; both
+        // exact bodies are fail-closed, while the status above must stay 503.
+        assert!(
+            matches!(
+                body,
+                "not ready: RIB manager probe timed out (200ms deadline)\n"
+                    | "not ready: readiness probe deadline exceeded\n"
+            ),
+            "unexpected readiness deadline response: {body:?}"
+        );
     }
 
     #[tokio::test]
