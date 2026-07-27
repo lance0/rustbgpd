@@ -45,6 +45,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   peak requested bytes below 10 MB. This is allocation-owner evidence, not a
   daemon RSS or convergence claim.
 
+- Grouped outbound prefix-limit admission sets now store family-typed IPv4
+  and IPv6 keys instead of the larger cross-family `Prefix` enum. In a pinned
+  literal-parent A/B at 400,000 IPv4 routes and 1/10/100 grouped members, the
+  candidate's apply-phase live jemalloc allocated delta is
+  31.43%/31.51%/31.64% of the parent's, clearing the predeclared 50% gate in
+  all three cells. All 9,042 production-path behavior checks pass. Allocator
+  active/resident pages and kernel RSS are reported separately; this is not a
+  DHAT or exact retained-heap attribution claim. See
+  [`docs/perf/outbound-prefix-limit-admission-compaction-2026-07.md`](docs/perf/outbound-prefix-limit-admission-compaction-2026-07.md).
+
 ### Fixed
 
 - **Outbound prefix-limit recovery now yields between peer/family replays.**
