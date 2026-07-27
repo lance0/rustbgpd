@@ -626,7 +626,8 @@ Bounded channels, prefix limits, and backpressure behavior are detailed in [ARCH
 |---|---|---|
 | Max message size | 4096 bytes (65535 with RFC 8654) | 4096 by default; raised per-session only when Extended Messages is negotiated |
 | Max attributes per UPDATE | 256 | Safety bound |
-| Max prefixes per neighbor | none (unbounded) | `max_prefixes` (aggregate) and the independent `max_prefixes_ipv4` / `max_prefixes_ipv6` per-family caps (ADR-0108) default to `None`; exceeding a cap latches the peer down until explicit enable and sends bare Cease/1 per RFC 4486, or RFC 8538 Cease/9 encapsulating that Cease/1 when Notification GR was negotiated |
+| Max prefixes per neighbor | none (unbounded) | `max_prefixes` (aggregate) and the independent `max_prefixes_ipv4` / `max_prefixes_ipv6` per-family caps (ADR-0108) default to `None`; exceeding a cap latches the peer down and sends bare Cease/1 per RFC 4486, or RFC 8538 Cease/9 encapsulating that Cease/1 when Notification GR was negotiated |
+| Max-prefix restart hold-down | none (indefinite latch) | A non-zero `max_prefix_restart_seconds` opts into one generation-fenced automatic attempt after the hold-down. Failure to deliver `PeerCommand::Start` consumes that attempt and leaves the peer latched until explicit enable; successful delivery removes the latch and returns the session to ordinary TCP/OPEN retry. `rbgp neighbor <addr>` exposes the effective action and active countdown |
 | Bounded channel size | 4096 | Per-session and RIB channels |
 | Connect retry interval | 1s for the first two refused TCP dials, then 5s exponential backoff capped at 300s | Applies to prompt TCP failures where the peer is not listening yet; OPEN/config failures use the slower Idle reconnect guard. The 1s floor and two-attempt count are fixed daemon defaults. |
 | Hold time | 90s | Negotiated per-peer |

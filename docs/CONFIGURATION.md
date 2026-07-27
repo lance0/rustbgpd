@@ -746,7 +746,7 @@ dynamic-only deployment where peers are added at runtime via gRPC.
 | `max_prefixes_ipv6`    | u32      | no       | --      | IPv6-unicast sibling of `max_prefixes_ipv4` (ADR-0108) |
 | `max_prefixes_out_ipv4` | non-zero u32 | no | -- | Maximum distinct IPv4-unicast prefixes advertised **to** this peer (ADR-0113). Excess net-new prefixes are withheld while the session stays Established; nothing already advertised is withdrawn and no NOTIFICATION is sent. Counts prefixes, not paths: every Add-Path identity for one NLRI shares a slot |
 | `max_prefixes_out_ipv6` | non-zero u32 | no | -- | IPv6-unicast sibling of `max_prefixes_out_ipv4` (ADR-0113) |
-| `max_prefix_restart_seconds` | non-zero u32 | no | -- | Opt in to one timed restart attempt after max-prefix teardown. Omit to retain the fail-closed latch until explicit enable; a failed timed attempt stays latched off |
+| `max_prefix_restart_seconds` | non-zero u32 | no | unset | Opt in to one timed restart attempt after max-prefix teardown. Omit to retain the indefinite fail-closed latch until explicit enable; failure to deliver the timed session `Start` command consumes the attempt and stays latched off |
 | `md5_password`         | string   | no       | --      | TCP MD5 authentication password (RFC 2385, Linux only) |
 | `tcp_ao`               | table or array | no | -- | Ordered TCP-AO keyring for static neighbors (RFC 5925; Linux; append a non-preferred successor, then select it in a later observation-gated SIGHUP generation) |
 | `bfd`                  | table    | no       | --      | Single-hop BFD attachment referencing a `[[bfd_profiles]]` entry (RFC 5880/5881/5882; static neighbors only, restart-required edits) |
@@ -783,6 +783,21 @@ counts are unicast-only. Human output
 prints `unlimited` when a limit is absent, while JSON and gRPC preserve that
 state as field absence rather than a synthetic zero. A stale neighbor snapshot
 withholds headroom because its zero count is only a placeholder.
+
+`max_prefix_restart_seconds` is inheritable and hot-applied. Changing it while
+a hold-down countdown is armed reschedules that one pending attempt to
+`now + new duration`; removing it cancels the countdown. Adding a duration to
+an already-indefinite latch, or editing it after a `Start` delivery failure
+consumed its one chance, does not retroactively arm another attempt. Before an
+explicit enable, inspect `rbgp neighbor <addr>`:
+`Max-Prefix Action: restart` plus
+`Max-Prefix Hold-Down: ... remaining` means the countdown is active. JSON
+exposes the same distinction through `max_prefix_action` and
+`max_prefix_restart_remaining_millis`. Failure to deliver the automatic
+session `Start` command reports `shutdown`, no remaining countdown, and an
+actionable `last_error`. Successful delivery clears the latch and returns the
+session to ordinary TCP/OPEN retry; it does not assert that establishment
+already succeeded.
 
 `max_prefixes_out_ipv4` / `max_prefixes_out_ipv6` are the outbound mirror:
 they bound what a bad export policy can grow one client's advertised table
