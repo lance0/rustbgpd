@@ -1701,9 +1701,22 @@ async fn main() {
         owo_colors::set_override(false);
     }
 
-    if let Err(e) = run(cli, binary_name).await {
-        eprintln!("Error: {e}");
+    if let Err(error) = run(cli, binary_name).await {
+        if let Some(diagnostic) = main_error_diagnostic(&error) {
+            eprintln!("{diagnostic}");
+        }
         std::process::exit(1);
+    }
+}
+
+fn main_error_diagnostic(error: &CliError) -> Option<String> {
+    if matches!(
+        error,
+        CliError::Io(io_error) if io_error.kind() == std::io::ErrorKind::BrokenPipe
+    ) {
+        None
+    } else {
+        Some(format!("Error: {error}"))
     }
 }
 
@@ -3019,6 +3032,21 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn generic_broken_pipe_error_has_no_rendered_diagnostic() {
+        let error = CliError::Io(std::io::Error::from(std::io::ErrorKind::BrokenPipe));
+        assert_eq!(main_error_diagnostic(&error), None);
+    }
+
+    #[test]
+    fn generic_non_broken_pipe_error_remains_actionable() {
+        let error = CliError::Io(std::io::Error::other("stdout flush failed"));
+        assert_eq!(
+            main_error_diagnostic(&error).as_deref(),
+            Some("Error: stdout flush failed")
+        );
+    }
 
     #[test]
     fn curated_documentation_commands_parse_with_the_real_cli() {
