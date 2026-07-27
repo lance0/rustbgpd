@@ -52,7 +52,8 @@ Every phase retains:
 
 - `jemalloc_allocated_bytes`, `active`, `resident`, and `mapped` from the
   shipped daemon's scrape;
-- the daemon's kernel `VmRSS`, `VmSize`, and `VmHWM`;
+- the daemon's kernel `VmRSS`, `VmSize`, and `VmHWM`, plus an independent
+  one-second maximum across the scenario;
 - the production
   `bgp_rib_outbound_prefix_limit_actor_duration_seconds{operation}` count and
   sum;
@@ -61,8 +62,11 @@ Every phase retains:
 
 The apply and recovery gates require exactly one new histogram sample. For one
 sample, the `_sum` delta is the exact complete synchronous actor duration for
-that operation. `VmHWM` is cumulative process high-water memory; it is not
-treated as a point-in-time RSS value.
+that operation. A later `/proc` `VmHWM` snapshot is not assumed to preserve an
+earlier maximum: concurrent accounting was observed to lower it during the
+100-member campaign. The published high-water observation is therefore the
+maximum across the independent sampler rows. `VmRSS` remains a point-in-time
+value.
 
 ## Run
 

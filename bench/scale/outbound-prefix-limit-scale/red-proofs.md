@@ -16,6 +16,14 @@ with `--exact`. Each mutation was restored before the next run.
 After restoration, all five tests pass together; standalone fmt, check, and
 Clippy with warnings denied also pass.
 
+## Executed publication mutation
+
+The campaign aggregator was run against a private copy of the accepted raw
+receipt after deleting every data row from `1-control/rss.tsv`. It exited
+non-zero with `1-control has no RSS sampler rows`. Restoring the accepted file
+produces all six `rss_samples` and sampled-maximum columns. This proves that the
+published high-water values cannot be emitted from a missing sampler.
+
 ## Real-daemon campaign gates
 
 These are precommitted before the loaded campaign. The production break that

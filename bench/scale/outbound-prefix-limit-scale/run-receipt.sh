@@ -367,6 +367,12 @@ root = pathlib.Path(sys.argv[1])
 rows = []
 for summary_path in sorted(root.glob("*-*/summary.json")):
     value = json.loads(summary_path.read_text(encoding="utf-8"))
+    with (summary_path.parent / "rss.tsv").open(
+        newline="", encoding="utf-8"
+    ) as stream:
+        rss_rows = list(csv.DictReader(stream, delimiter="\t"))
+    if not rss_rows:
+        raise SystemExit(f"{summary_path.parent.name} has no RSS sampler rows")
     baseline = value["snapshots"]["baseline"]
     applied = value["snapshots"]["applied"]
     blocked = value["snapshots"]["blocked"]
@@ -387,6 +393,11 @@ for summary_path in sorted(root.glob("*-*/summary.json")):
         "recovered_allocated_bytes": recovered["jemalloc_allocated_bytes"],
         "recovered_vm_rss_kib": recovered["vm_rss_kib"],
         "recovered_vm_hwm_kib": recovered["vm_hwm_kib"],
+        "rss_samples": len(rss_rows),
+        "sampled_max_vm_rss_kib":
+            max(int(row["vm_rss_kib"]) for row in rss_rows),
+        "sampled_max_vm_hwm_kib":
+            max(int(row["vm_hwm_kib"]) for row in rss_rows),
         "checks_total": value["checks_total"],
         "checks_failed": value["checks_failed"],
     })
