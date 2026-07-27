@@ -889,7 +889,9 @@ service PolicyService {
   // [policy.explain] cache_size.
   //
   // Side-effect free read. Does not touch RIB, does not increment
-  // any policy counter, does not log a new policy decision.
+  // any policy counter, does not log a new policy decision. A live
+  // session that misses the bounded read deadline returns
+  // DEADLINE_EXCEEDED rather than NO_SESSION.
   rpc ExplainImportPolicy(ExplainImportPolicyRequest) returns (ExplainImportPolicyResponse);
 
   // ListRejectedRoutes — the looking-glass filtered-route surface
@@ -907,7 +909,9 @@ service PolicyService {
   // gone, honestly distinct from "nothing rejected").
   //
   // Side-effect free read. Does not touch RIB, does not increment
-  // any policy counter, does not log a new policy decision.
+  // any policy counter, does not log a new policy decision. A live
+  // session that misses the bounded read deadline returns
+  // DEADLINE_EXCEEDED rather than NOT_FOUND.
   rpc ListRejectedRoutes(ListRejectedRoutesRequest) returns (ListRejectedRoutesResponse);
 
   // TestPolicy — dry-run a candidate .rpol policy against a snapshot
@@ -1260,8 +1264,7 @@ message ClearNeighborExportChainResponse {}
 //                NOT_SEEN so a misconfigured daemon never
 //                masquerades as an evaluated answer.
 //   NO_SESSION — no live session exists for the requested peer
-//                address (or its task could not be reached in
-//                time), so there is no session-local cache to
+//                address, so there is no session-local cache to
 //                consult.
 enum ImportExplainOutcome {
   IMPORT_EXPLAIN_OUTCOME_UNSPECIFIED    = 0;
@@ -1546,8 +1549,9 @@ message TestPolicyDiff {
 }
 
 message GetPolicyStatsRequest {
-  // Optional peer filter (IPv4 or IPv6 literal). Empty = every peer
-  // with an installed chain.
+  // Optional managed-peer filter (IPv4 or IPv6 literal). Empty =
+  // every peer with an installed chain. An unknown peer returns
+  // NOT_FOUND rather than falling through to a global chain.
   string peer_address = 1;
   // Direction filter: "export" (the default when empty), "import", or
   // "both". "both" returns export chains first, then import chains,

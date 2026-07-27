@@ -1235,6 +1235,103 @@ fn insert_test_managed_peer_with_asn(
     mgr.register_session(1, &peer_key);
 }
 
+fn stalled_policy_query_handle() -> PeerHandle {
+    let (commands, mut command_rx) = mpsc::channel(4);
+    let task = tokio::spawn(async move {
+        let mut held_queries = Vec::new();
+        while let Some(command) = command_rx.recv().await {
+            if matches!(command, rustbgpd_transport::PeerCommand::Shutdown) {
+                break;
+            }
+            held_queries.push(command);
+        }
+        Ok(())
+    });
+    PeerHandle::from_parts(commands, task)
+}
+
+/// LAN-661 red proof: validating against static config rejects the accepted
+/// dynamic peer; replacing the typed forwarding result with the old `Option`
+/// path makes its stalled task return `SessionGone`. Each production break
+/// fails its corresponding assertion.
+#[tokio::test(start_paused = true)]
+async fn policy_query_timeout_does_not_masquerade_as_missing_session() {
+    let (tx, rx) = mpsc::channel(4);
+    let (rib_tx, _rib_rx) = mpsc::channel(4);
+    let mut manager = PeerManager::new(
+        rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    let configured = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+    insert_test_managed_peer(
+        &mut manager,
+        configured,
+        stalled_policy_query_handle(),
+        false,
+    );
+    manager.peers.get_mut(&key(configured)).unwrap().is_dynamic = true;
+    let manager_task = tokio::spawn(manager.run());
+
+    let (reply, response) = oneshot::channel();
+    tx.send(PeerManagerCommand::HasPeerAddress {
+        address: configured,
+        reply,
+    })
+    .await
+    .unwrap();
+    assert!(
+        response.await.unwrap(),
+        "runtime validation must include an accepted dynamic peer"
+    );
+
+    let prefix = rustbgpd_wire::Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(
+        Ipv4Addr::new(198, 51, 100, 0),
+        24,
+    ));
+    let (reply, response) = oneshot::channel();
+    tx.send(PeerManagerCommand::ExplainImportPolicy {
+        address: configured,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+        prefix,
+        path_id: None,
+        reply,
+    })
+    .await
+    .unwrap();
+    tokio::task::yield_now().await;
+    tokio::time::advance(EXPLAIN_QUERY_TIMEOUT).await;
+    assert!(matches!(
+        response.await.unwrap(),
+        SessionQueryOutcome::TimedOut
+    ));
+
+    let (reply, response) = oneshot::channel();
+    tx.send(PeerManagerCommand::ExplainImportPolicy {
+        address: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 99)),
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+        prefix,
+        path_id: None,
+        reply,
+    })
+    .await
+    .unwrap();
+    assert!(matches!(
+        response.await.unwrap(),
+        SessionQueryOutcome::SessionGone
+    ));
+
+    tx.send(PeerManagerCommand::Shutdown).await.unwrap();
+    manager_task.await.unwrap();
+}
+
 fn recording_runtime_config_handle() -> (PeerHandle, mpsc::UnboundedReceiver<u16>) {
     use rustbgpd_transport::PeerCommand;
 
