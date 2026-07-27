@@ -522,10 +522,9 @@ fn expected_grouped_withdrawal_exact_probe_batches(peers: usize) -> usize {
     const ENV: &str = "RUSTBGPD_GROUPED_WITHDRAWAL_EXPECT_EXACT_PROBE_BATCHES";
 
     match std::env::var(ENV) {
+        Ok(value) if value == "0" => 0,
         Ok(value) if value == "per-peer" => peers,
-        Ok(value) => value
-            .parse()
-            .unwrap_or_else(|_| panic!("{ENV} must be an integer or \"per-peer\", got {value:?}")),
+        Ok(value) => panic!("{ENV} must be unset, \"0\", or \"per-peer\", got {value:?}"),
         Err(std::env::VarError::NotPresent) => 0,
         Err(std::env::VarError::NotUnicode(_)) => panic!("{ENV} must be valid Unicode"),
     }

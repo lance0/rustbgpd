@@ -362,42 +362,6 @@ fn commit_batch(manager: &mut RibManager, peer: IpAddr, batch: ExactBatch) -> bo
     )
 }
 
-fn commit_shared_exact_batch_with_precommit(
-    manager: &mut RibManager,
-    peer: IpAddr,
-    batch: ExactBatch,
-    group_prior: HashSet<ExactExportKey>,
-    cache: &mut crate::manager::distribution::SharedUnicastProbeCache,
-) -> bool {
-    let next_hop_override = vec![None; batch.announce.len()].into();
-    manager.try_send_and_commit_outbound_update_with_group_prior(
-        peer,
-        next_hop_override,
-        batch.announce.into(),
-        batch.withdraw,
-        Vec::new(),
-        Vec::new(),
-        batch.flowspec_announce,
-        batch.flowspec_withdraw,
-        batch.evpn_announce,
-        batch.evpn_withdraw,
-        batch.bgpls_announce,
-        batch.bgpls_withdraw,
-        batch.vpn_announce,
-        batch.vpn_withdraw,
-        batch.labeled_announce,
-        batch.labeled_withdraw,
-        batch.rtc_announce,
-        batch.rtc_withdraw,
-        group_prior,
-        Some(crate::manager::distribution::SharedUnicastPrecommit {
-            group_id: 7,
-            probe_cache: cache,
-            lazy_group_prior: None,
-        }),
-    )
-}
-
 fn commit_shared_unicast_with_cache(
     manager: &mut RibManager,
     peer: IpAddr,
@@ -426,37 +390,11 @@ fn commit_shared_unicast_with_precommit(
     cache: &mut crate::manager::distribution::SharedUnicastProbeCache,
     lazy_group_prior: Option<crate::manager::distribution::LazyCleanGroupPrior<'_>>,
 ) -> bool {
-    commit_shared_unicast_batch_with_precommit(
-        manager,
-        peer,
-        announce,
-        next_hop_override,
-        Vec::new(),
-        group_prior,
-        cache,
-        lazy_group_prior,
-    )
-}
-
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the helper exposes the grouped unicast batch fields needed by exact-export tests"
-)]
-fn commit_shared_unicast_batch_with_precommit(
-    manager: &mut RibManager,
-    peer: IpAddr,
-    announce: Arc<[Route]>,
-    next_hop_override: Arc<[Option<rustbgpd_policy::NextHopAction>]>,
-    withdraw: Vec<(Prefix, u32)>,
-    group_prior: HashSet<ExactExportKey>,
-    cache: &mut crate::manager::distribution::SharedUnicastProbeCache,
-    lazy_group_prior: Option<crate::manager::distribution::LazyCleanGroupPrior<'_>>,
-) -> bool {
     manager.try_send_and_commit_outbound_update_with_group_prior(
         peer,
         next_hop_override,
         announce,
-        withdraw,
+        Vec::new(),
         Vec::new(),
         Vec::new(),
         Vec::new(),
@@ -633,8 +571,8 @@ async fn private_route_rejection_withdraws_once_then_recovers() {
     assert!(manager.adj_ribs_out[&peer].get(&route.prefix, 0).is_some());
 }
 
-#[tokio::test]
-async fn grouped_withdrawal_only_skips_exact_probe_and_keeps_snapshot_commit() {
+#[test]
+fn post_otc_withdrawal_only_skips_exact_probe_and_keeps_snapshot() {
     let peer = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 61));
     let route = make_route(
         Ipv4Prefix::new(Ipv4Addr::new(203, 0, 116, 0), 24),
@@ -653,128 +591,48 @@ async fn grouped_withdrawal_only_skips_exact_probe_and_keeps_snapshot_commit() {
             ..ExactBatch::default()
         }
     ));
-    assert_eq!(rx.recv().await.unwrap().announce.len(), 1);
-    assert_eq!(encoder.probe_batch_count(), 1);
+    assert_eq!(rx.try_recv().unwrap().announce.len(), 1);
+    let initial_probe_batches = encoder.probe_batch_count();
     assert!(manager.adj_ribs_out[&peer].get(&route.prefix, 0).is_some());
 
+    manager
+        .peer_local_roles
+        .insert(peer, Some(rustbgpd_wire::BgpRole::Customer));
+    let mut otc_blocked = route.clone();
+    Arc::make_mut(&mut otc_blocked.attributes)
+        .push(rustbgpd_wire::PathAttribute::OnlyToCustomer(64_512));
     manager.adj_rib_out_commit_stats = Default::default();
     let mut cache = crate::manager::distribution::SharedUnicastProbeCache::default();
-    assert!(commit_shared_unicast_batch_with_precommit(
+    assert!(commit_shared_unicast_with_precommit(
         &mut manager,
         peer,
-        Vec::<Route>::new().into(),
-        Vec::<Option<rustbgpd_policy::NextHopAction>>::new().into(),
-        vec![(route.prefix, route.path_id)],
+        vec![otc_blocked].into(),
+        vec![None].into(),
         HashSet::from([key]),
         &mut cache,
         None,
     ));
 
-    let withdrawn = rx.recv().await.unwrap();
+    let withdrawn = rx.try_recv().unwrap();
     let snapshot = withdrawn
         .exact_export_snapshot
         .as_ref()
-        .expect("route-bearing grouped withdrawal retains the concrete snapshot");
+        .expect("post-OTC withdrawal retains the concrete snapshot");
     assert_eq!((snapshot.owner_id(), snapshot.generation()), (1, 61));
     assert!(withdrawn.announce.is_empty());
     assert_eq!(withdrawn.withdraw, vec![(route.prefix, route.path_id)]);
     assert_eq!(
         encoder.probe_batch_count(),
-        1,
-        "withdrawal-only grouped precommit must not issue an empty exact batch"
+        initial_probe_batches,
+        "an announcement removed by OTC must not issue an empty exact batch"
     );
     assert_eq!(manager.adj_rib_out_commit_stats.exact_probe_batches, 0);
     assert_eq!(manager.adj_rib_out_commit_stats.exact_probe_candidates, 0);
     assert_eq!(manager.adj_rib_out_commit_stats.successful_commits, 1);
     assert_eq!(manager.adj_rib_out_commit_stats.successful_enqueues, 1);
     assert!(manager.adj_ribs_out[&peer].get(&route.prefix, 0).is_none());
-    assert!(rx.try_recv().is_err(), "the commit enqueues exactly once");
-}
-
-#[tokio::test]
-async fn grouped_mixed_family_rejection_still_probes_and_retires_overlay() {
-    let peer = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 62));
-    let source = Ipv4Addr::new(198, 51, 100, 62);
-    let route = make_route(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 117, 0), 24), source);
-    let route_key = ExactExportKey::Unicast(route.prefix, route.path_id);
-    let flowspec = make_flowspec_route(source);
-    let flowspec_selection_key = flowspec.selection_key();
-    let flowspec_key = ExactExportKey::FlowSpec(flowspec_selection_key.clone());
-    let encoder = MockExactExportEncoder::accepting(62);
-    let mut manager = test_manager();
-    let mut rx = register_exact_target(&mut manager, peer, encoder.clone());
-
-    assert!(commit_batch(
-        &mut manager,
-        peer,
-        ExactBatch {
-            announce: vec![route.clone()],
-            ..ExactBatch::default()
-        }
-    ));
-    assert_eq!(rx.recv().await.unwrap().announce.len(), 1);
-    let initial_probe_batches = encoder.probe_batch_count();
-
-    encoder.set_profile(63, [flowspec_key.clone()]);
-    manager.adj_rib_out_commit_stats = Default::default();
-    let mut cache = crate::manager::distribution::SharedUnicastProbeCache::default();
-    assert!(commit_shared_exact_batch_with_precommit(
-        &mut manager,
-        peer,
-        ExactBatch {
-            withdraw: vec![(route.prefix, route.path_id)],
-            flowspec_announce: vec![flowspec],
-            ..ExactBatch::default()
-        },
-        HashSet::from([route_key]),
-        &mut cache,
-    ));
-
-    let mixed = rx.recv().await.unwrap();
-    let snapshot = mixed
-        .exact_export_snapshot
-        .as_ref()
-        .expect("mixed grouped envelope retains its probed snapshot");
-    assert_eq!((snapshot.owner_id(), snapshot.generation()), (1, 63));
-    assert!(mixed.announce.is_empty());
-    assert_eq!(mixed.withdraw, vec![(route.prefix, route.path_id)]);
-    assert!(
-        mixed.flowspec_announce.is_empty(),
-        "the rejected announcement must fail closed"
-    );
-    assert_eq!(encoder.probe_batch_count(), initial_probe_batches + 1);
-    assert_eq!(encoder.probed().last(), Some(&flowspec_key));
-    assert_eq!(manager.adj_rib_out_commit_stats.exact_probe_batches, 1);
-    assert_eq!(manager.adj_rib_out_commit_stats.exact_probe_candidates, 1);
-    assert_eq!(manager.adj_rib_out_commit_stats.successful_commits, 1);
-    assert_eq!(manager.adj_rib_out_commit_stats.successful_enqueues, 1);
-    assert_eq!(
-        manager.peer_unexportable[&peer],
-        HashSet::from([flowspec_key])
-    );
-    assert!(manager.adj_ribs_out[&peer].get(&route.prefix, 0).is_none());
-    assert_eq!(manager.adj_ribs_out[&peer].flowspec_len(), 0);
-
-    manager.adj_rib_out_commit_stats = Default::default();
-    assert!(commit_shared_exact_batch_with_precommit(
-        &mut manager,
-        peer,
-        ExactBatch {
-            flowspec_withdraw: vec![flowspec_selection_key],
-            ..ExactBatch::default()
-        },
-        HashSet::new(),
-        &mut cache,
-    ));
-    let retired = rx.recv().await.unwrap();
-    assert!(
-        retired.flowspec_withdraw.is_empty(),
-        "a route rejected before commit must not receive a wire withdrawal"
-    );
-    assert!(retired.exact_export_snapshot.is_some());
-    assert_eq!(encoder.probe_batch_count(), initial_probe_batches + 1);
-    assert_eq!(manager.adj_rib_out_commit_stats.exact_probe_batches, 0);
     assert!(!manager.peer_unexportable.contains_key(&peer));
+    assert!(rx.try_recv().is_err(), "the commit enqueues exactly once");
 }
 
 #[tokio::test]
@@ -788,6 +646,10 @@ async fn every_route_family_is_probed_before_commit() {
     let vpn = make_vpn_rib_route(source, 41, 1041, 100);
     let labeled = make_labeled_rib_route(source, 42, 1042, 100);
     let rtc = make_rtc_rib_route(source, 43, 100);
+    let withdrawal = (
+        Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 2, 0), 24)),
+        0,
+    );
     let expected = HashSet::from([
         ExactExportKey::Unicast(unicast.prefix, unicast.path_id),
         ExactExportKey::FlowSpec(flowspec.selection_key()),
@@ -813,6 +675,7 @@ async fn every_route_family_is_probed_before_commit() {
         peer,
         ExactBatch {
             announce: vec![unicast],
+            withdraw: vec![withdrawal],
             flowspec_announce: vec![flowspec],
             evpn_announce: vec![evpn],
             bgpls_announce: vec![bgpls],
@@ -825,12 +688,18 @@ async fn every_route_family_is_probed_before_commit() {
 
     let update = rx.recv().await.unwrap();
     assert_eq!(update.announce.len(), 1);
+    assert_eq!(update.withdraw, vec![withdrawal]);
     assert_eq!(update.flowspec_announce.len(), 1);
     assert_eq!(update.evpn_announce.len(), 1);
     assert_eq!(update.bgpls_announce.len(), 1);
     assert_eq!(update.vpn_announce.len(), 1);
     assert_eq!(update.labeled_announce.len(), 1);
     assert_eq!(update.rtc_announce.len(), 1);
+    assert_eq!(
+        encoder.probe_batch_count(),
+        1,
+        "mixed announcements and withdrawals retain one nonempty exact batch"
+    );
     assert_eq!(
         encoder.probed().into_iter().collect::<HashSet<_>>(),
         expected
