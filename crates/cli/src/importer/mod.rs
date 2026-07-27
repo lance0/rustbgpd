@@ -308,14 +308,22 @@ fn finish(
         items.append(&mut model.warnings);
         return Err(ImportError::Empty(items));
     };
+    if local_asn == 0 {
+        model.warnings.push(
+            "local AS 0 is reserved; emitted verbatim — `rustbgpd --check` rejects this \
+             config until a non-zero ASN is configured"
+                .to_owned(),
+        );
+    }
 
     // Resolve remote AS down from groups (rustbgpd peer groups carry no
     // remote_asn) and drop neighbors that cannot be emitted, moving
     // each to the skip list — a neighbor silently dropped would be a
     // lie, a neighbor emitted without a remote AS fails `--check`.
     let mut neighbors = Vec::new();
+    let mut seen_neighbor_addresses = std::collections::HashSet::new();
     for mut neighbor in std::mem::take(&mut model.neighbors) {
-        if neighbor.address.parse::<std::net::IpAddr>().is_err() {
+        let Ok(address) = neighbor.address.parse::<std::net::IpAddr>() else {
             model.skips.push(Skip {
                 line: line_opt(neighbor.source_line),
                 stanza: format!("neighbor {}", neighbor.address),
@@ -324,7 +332,7 @@ fn finish(
                     .to_owned(),
             });
             continue;
-        }
+        };
         if neighbor.remote_asn.is_none() {
             neighbor.remote_asn = neighbor
                 .peer_group
@@ -341,6 +349,29 @@ fn finish(
                     .to_owned(),
             });
             continue;
+        }
+        if matches!(address, std::net::IpAddr::V6(ip) if ip.is_unicast_link_local()) {
+            model.warnings.push(format!(
+                "neighbor {} is IPv6 link-local, but the importer cannot preserve its \
+                 required interface scope; emitted without an interface — `rustbgpd \
+                 --check` rejects this config until the interface is added",
+                neighbor.address
+            ));
+        }
+        if !seen_neighbor_addresses.insert(address) {
+            model.warnings.push(format!(
+                "duplicate neighbor {} resolves to the same IP address as an earlier \
+                 neighbor; emitted verbatim — `rustbgpd --check` rejects duplicate \
+                 neighbor identities until one is removed",
+                neighbor.address
+            ));
+        }
+        if neighbor.remote_asn == Some(0) {
+            model.warnings.push(format!(
+                "neighbor {}: remote AS 0 is reserved; emitted verbatim — `rustbgpd \
+                 --check` rejects this config until a non-zero remote_asn is configured",
+                neighbor.address
+            ));
         }
         if let Some(hold) = neighbor.hold_time
             && hold != 0
@@ -363,7 +394,25 @@ fn finish(
         items.append(&mut model.warnings);
         return Err(ImportError::Empty(items));
     }
+    let mut seen_group_names = std::collections::HashSet::new();
     for group in &mut model.groups {
+        if !seen_group_names.insert(group.name.clone()) {
+            model.warnings.push(format!(
+                "duplicate peer group {:?} would emit the same TOML table twice; \
+                 `rustbgpd --check` rejects this config until one definition is removed",
+                group.name
+            ));
+        }
+        if let Some(hold) = group.hold_time
+            && hold != 0
+            && hold < 3
+        {
+            model.warnings.push(format!(
+                "peer group {}: hold time {hold} raised to the protocol minimum 3",
+                group.name
+            ));
+            group.hold_time = Some(3);
+        }
         dedupe(&mut group.families);
     }
 
@@ -470,9 +519,21 @@ fn dedupe(families: &mut Vec<String>) {
 }
 
 fn toml_escape(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace(['\n', '\r'], " ")
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            ch if ch.is_control() => {
+                let _ = write!(out, "\\u{:04X}", u32::from(ch));
+            }
+            ch => out.push(ch),
+        }
+    }
+    out
 }
 
 fn write_families(out: &mut String, families: &[String]) {

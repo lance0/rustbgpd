@@ -1470,13 +1470,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **`rbgp config import` now exits nonzero when the emitted config would be
   rejected by `rustbgpd --check`.** A source router-id that is not a usable
-  IPv4 address (all three frontends copy it verbatim) and a neighbor
-  `peer_group` reference that resolves to no translated peer group are
-  reported as warnings (exit 2) instead of leaving the importer with a clean
-  exit alongside an unloadable translation. Out-of-range numeric fields
-  (GoBGP `peer-as`, `hold-time`, `keepalive-interval`, `max-prefixes`, local
-  `as`; FRR unparseable keepalive) now name the field, the source value, and
-  what was done instead of being silently dropped.
+  IPv4 address (all three frontends copy it verbatim), reserved local or
+  remote AS 0, an unscoped IPv6 link-local neighbor, duplicate typed neighbor
+  identities or peer-group names, and a neighbor `peer_group` reference that
+  resolves to no translated group are reported as warnings (exit 2) instead
+  of leaving the importer with a clean exit alongside an unloadable
+  translation. Group hold times 1–2 are raised to the protocol minimum just
+  like neighbor hold times, and decoded control characters are re-escaped
+  before TOML emission. Out-of-range numeric fields (GoBGP `peer-as`,
+  `hold-time`, `keepalive-interval`, `max-prefixes`, local `as`; FRR
+  unparseable keepalive) now name the field, the source value, and what was
+  done instead of being silently dropped.
 
 - **A cosmetic IPv6 respelling of a static neighbor address no longer tears
   down and re-establishes the session on reload.** Neighbor addresses are
