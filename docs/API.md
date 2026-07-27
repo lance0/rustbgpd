@@ -958,6 +958,14 @@ Query the routing information base and subscribe to real-time route changes.
 | `WatchRoutes` | Server-streaming: real-time route add / withdraw / best-change / export-policy-filtered events |
 | `WatchRouteEvents` | Server-streaming: real-time route add / withdraw / best-change / export-policy-filtered events wrapped as `BgpEvent`, including explicit lag warnings |
 
+The three unicast route-listing RPCs return raw ordered
+`extended_communities`, the ASPA verification string in `aspa_state`, and
+`received_at_epoch_seconds` on every `Route` (`0` means unknown). Native
+`rbgp --json rib` preserves the raw extended-community values, omits an empty
+`aspa_state` from an older daemon but retains a genuine `"unknown"` state, and
+retains the zero receive-time sentinel. The same native route serializer is
+used by best, received, advertised, and embedded `ExplainBestPath` routes.
+
 ### Runtime observability surfaces
 
 Runtime visibility is intentionally split by access pattern rather than forced

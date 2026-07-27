@@ -693,7 +693,8 @@ _arguments "${_arguments_options[@]}" : \
 '-l[Show longer (more specific) prefixes matching --prefix]' \
 '--longer[Show longer (more specific) prefixes matching --prefix]' \
 '(--count)--explain[Show why the best route was selected (requires --prefix)]' \
-'--count[Print only the number of matching best, received, or advertised routes]' \
+'(--age)--count[Print only the number of matching best, received, or advertised routes]' \
+'(--explain)--age[Append the original route receive age to best, received, or advertised rows]' \
 '-j[Output in JSON format]' \
 '--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
@@ -716,7 +717,8 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
-'--count[Print only the number of matching received routes]' \
+'(--age)--count[Print only the number of matching received routes]' \
+'(--rejected)--age[Append the original route receive age]' \
 '(--count)--rejected[Show the retained rejected routes with their reject reasons instead of the accepted Adj-RIB-In (the looking-glass filtered-route view; \[policy.reject_retention\])]' \
 '-j[Output in JSON format]' \
 '--json[Output in JSON format]' \
@@ -733,7 +735,8 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
-'--count[Print only the number of matching received routes]' \
+'(--age)--count[Print only the number of matching received routes]' \
+'(--rejected)--age[Append the original route receive age]' \
 '(--count)--rejected[Show the retained rejected routes with their reject reasons instead of the accepted Adj-RIB-In (the looking-glass filtered-route view; \[policy.reject_retention\])]' \
 '-j[Output in JSON format]' \
 '--json[Output in JSON format]' \
@@ -753,7 +756,8 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
-'--count[Print only the number of matching advertised routes]' \
+'(--age)--count[Print only the number of matching advertised routes]' \
+'(--explain)--age[Append the original route receive age]' \
 '(--count)--explain[Explain whether this exact prefix would be advertised to the peer]' \
 '(--rd)--labeled[Explain the labeled-unicast (SAFI 4, RFC 8277) export ladder for the prefix instead of the plain unicast ladder]' \
 '-j[Output in JSON format]' \
@@ -774,7 +778,8 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
-'--count[Print only the number of matching advertised routes]' \
+'(--age)--count[Print only the number of matching advertised routes]' \
+'(--explain)--age[Append the original route receive age]' \
 '(--count)--explain[Explain whether this exact prefix would be advertised to the peer]' \
 '(--rd)--labeled[Explain the labeled-unicast (SAFI 4, RFC 8277) export ladder for the prefix instead of the plain unicast ladder]' \
 '-j[Output in JSON format]' \

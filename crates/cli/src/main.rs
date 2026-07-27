@@ -173,8 +173,12 @@ enum Command {
         explain: bool,
 
         /// Print only the number of matching best, received, or advertised routes
-        #[arg(long)]
+        #[arg(long, conflicts_with = "age")]
         count: bool,
+
+        /// Append the original route receive age to best, received, or advertised rows
+        #[arg(long, conflicts_with = "explain")]
+        age: bool,
 
         /// Scope --explain to a specific peer's Add-Path send view.
         /// When set, candidates are filtered by the peer's export
@@ -1135,8 +1139,11 @@ enum RibAction {
         #[arg(short = 'a', long)]
         family: Option<String>,
         /// Print only the number of matching received routes
-        #[arg(long)]
+        #[arg(long, conflicts_with = "age")]
         count: bool,
+        /// Append the original route receive age
+        #[arg(long, conflicts_with = "rejected")]
+        age: bool,
         /// Show the retained rejected routes with their reject reasons
         /// instead of the accepted Adj-RIB-In (the looking-glass
         /// filtered-route view; [policy.reject_retention])
@@ -1152,8 +1159,11 @@ enum RibAction {
         #[arg(short = 'a', long)]
         family: Option<String>,
         /// Print only the number of matching advertised routes
-        #[arg(long)]
+        #[arg(long, conflicts_with = "age")]
         count: bool,
+        /// Append the original route receive age
+        #[arg(long, conflicts_with = "explain")]
+        age: bool,
         /// Explain whether this exact prefix would be advertised to the peer
         #[arg(long, conflicts_with = "count")]
         explain: bool,
@@ -1664,6 +1674,10 @@ fn route_count_requested(parent_count: bool, view_count: bool) -> bool {
     parent_count || view_count
 }
 
+fn route_age_requested(parent_age: bool, view_age: bool) -> bool {
+    parent_age || view_age
+}
+
 fn validate_rib_count_action(command: &Command) -> Result<(), CliError> {
     let Command::Rib { action, count, .. } = command else {
         return Ok(());
@@ -1698,6 +1712,68 @@ fn validate_rib_count_action(command: &Command) -> Result<(), CliError> {
         }
         Some(_) if *count => Err(CliError::Argument(
             "--count is only valid for best, received, or advertised routes".into(),
+        )),
+        Some(_) => Ok(()),
+    }
+}
+
+fn validate_rib_age_action(command: &Command) -> Result<(), CliError> {
+    let Command::Rib {
+        action,
+        count,
+        age,
+        explain: parent_explain,
+        ..
+    } = command
+    else {
+        return Ok(());
+    };
+    match action {
+        None => Ok(()),
+        Some(RibAction::Received {
+            count: view_count,
+            age: view_age,
+            rejected,
+            ..
+        }) => {
+            let age = route_age_requested(*age, *view_age);
+            if age && route_count_requested(*count, *view_count) {
+                Err(CliError::Argument(
+                    "--age cannot be combined with --count".into(),
+                ))
+            } else if age && *parent_explain {
+                Err(CliError::Argument(
+                    "--age cannot be combined with --explain".into(),
+                ))
+            } else if age && *rejected {
+                Err(CliError::Argument(
+                    "--age cannot be combined with --rejected".into(),
+                ))
+            } else {
+                Ok(())
+            }
+        }
+        Some(RibAction::Advertised {
+            count: view_count,
+            age: view_age,
+            explain,
+            ..
+        }) => {
+            let age = route_age_requested(*age, *view_age);
+            if age && route_count_requested(*count, *view_count) {
+                Err(CliError::Argument(
+                    "--age cannot be combined with --count".into(),
+                ))
+            } else if age && (*parent_explain || *explain) {
+                Err(CliError::Argument(
+                    "--age cannot be combined with --explain".into(),
+                ))
+            } else {
+                Ok(())
+            }
+        }
+        Some(_) if *age => Err(CliError::Argument(
+            "--age is only valid for best, received, or advertised routes".into(),
         )),
         Some(_) => Ok(()),
     }
@@ -2074,6 +2150,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
 
     validate_neighbor_compare_action(&cli.command)?;
     validate_rib_count_action(&cli.command)?;
+    validate_rib_age_action(&cli.command)?;
     let connection = connect(&cli.addr, cli.token_file.as_deref()).await?;
     let json = cli.json;
 
@@ -2252,6 +2329,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
             longer,
             explain,
             count,
+            age,
             explain_peer,
             origin_asn,
             community,
@@ -2449,16 +2527,18 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                     } else if count {
                         commands::rib::count_best(connection, family_val, &filters, json).await
                     } else {
-                        commands::rib::best(connection, family_val, &filters, json).await
+                        commands::rib::best(connection, family_val, &filters, age, json).await
                     }
                 }
                 Some(RibAction::Received {
                     address,
                     family: fam,
                     count: count_received,
+                    age: age_received,
                     rejected,
                 }) => {
                     let count = route_count_requested(count, count_received);
+                    let age = route_age_requested(age, age_received);
                     if explain {
                         return Err(CliError::Argument(
                             "--explain is only valid for the default best-routes view (rib --prefix X --explain)".into(),
@@ -2471,13 +2551,14 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                     if count {
                         commands::rib::count_received(connection, &address, f, &filters, json).await
                     } else {
-                        commands::rib::received(connection, &address, f, &filters, json).await
+                        commands::rib::received(connection, &address, f, &filters, age, json).await
                     }
                 }
                 Some(RibAction::Advertised {
                     address,
                     family: fam,
                     count: count_advertised,
+                    age: age_advertised,
                     explain: explain_advertised,
                     rd,
                     labeled,
@@ -2485,6 +2566,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                     source_path_id,
                 }) => {
                     let count = route_count_requested(count, count_advertised);
+                    let age = route_age_requested(age, age_advertised);
                     if explain {
                         return Err(CliError::Argument(
                             "--explain is only valid for the default best-routes view (rib --prefix X --explain)".into(),
@@ -2526,7 +2608,8 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                         commands::rib::count_advertised(connection, &address, f, &filters, json)
                             .await
                     } else {
-                        commands::rib::advertised(connection, &address, f, &filters, json).await
+                        commands::rib::advertised(connection, &address, f, &filters, age, json)
+                            .await
                     }
                 }
                 Some(
@@ -3917,6 +4000,151 @@ mod tests {
             0
         );
         assert!(server.state.last_explain_advertised.lock().await.is_none());
+    }
+
+    /// Load-bearing placement/conflict proof: removing either local age flag,
+    /// making it global, dropping the parent/local OR, or removing a direct
+    /// Clap conflict makes an exact parse or helper assertion red.
+    #[test]
+    fn rib_age_has_natural_view_scoped_placement_and_direct_conflicts() {
+        let best = Cli::try_parse_from(["rbgp", "rib", "--age"]).unwrap();
+        assert!(matches!(
+            best.command,
+            Command::Rib {
+                action: None,
+                age: true,
+                ..
+            }
+        ));
+
+        for args in [
+            "rbgp rib --age received 192.0.2.1",
+            "rbgp rib received 192.0.2.1 --age",
+            "rbgp rib --age advertised 192.0.2.2",
+            "rbgp rib advertised 192.0.2.2 --age",
+        ] {
+            Cli::try_parse_from(args.split_whitespace())
+                .expect("both natural age placements parse");
+        }
+        assert!(route_age_requested(true, false));
+        assert!(route_age_requested(false, true));
+        assert!(!route_age_requested(false, false));
+
+        for args in [
+            "rbgp rib --age --count",
+            "rbgp rib --prefix 203.0.113.0/24 --age --explain",
+            "rbgp rib received 192.0.2.1 --age --count",
+            "rbgp rib received 192.0.2.1 --age --rejected",
+            "rbgp rib advertised 192.0.2.2 --age --explain",
+        ] {
+            assert!(
+                Cli::try_parse_from(args.split_whitespace()).is_err(),
+                "conflicting age shape unexpectedly parsed"
+            );
+        }
+    }
+
+    /// Load-bearing cross-scope proof: removing the pre-connect validator or
+    /// failing to combine parent and local flags makes one exact diagnostic
+    /// disappear.
+    #[test]
+    fn rib_age_rejects_cross_scope_count_rejected_and_explain() {
+        for (args, expected) in [
+            (
+                "rbgp rib --age received 192.0.2.1 --count",
+                "--age cannot be combined with --count",
+            ),
+            (
+                "rbgp rib --count advertised 192.0.2.2 --age",
+                "--age cannot be combined with --count",
+            ),
+            (
+                "rbgp rib --age received 192.0.2.1 --rejected",
+                "--age cannot be combined with --rejected",
+            ),
+            (
+                "rbgp rib --prefix 203.0.113.0/24 --age advertised 192.0.2.2 --explain",
+                "--age cannot be combined with --explain",
+            ),
+            (
+                "rbgp rib --prefix 203.0.113.0/24 --explain received 192.0.2.1 --age",
+                "--age cannot be combined with --explain",
+            ),
+            (
+                "rbgp rib --prefix 203.0.113.0/24 --explain advertised 192.0.2.2 --age",
+                "--age cannot be combined with --explain",
+            ),
+        ] {
+            let cli = Cli::try_parse_from(args.split_whitespace()).unwrap();
+            assert_eq!(
+                validate_rib_age_action(&cli.command)
+                    .unwrap_err()
+                    .to_string(),
+                expected
+            );
+        }
+    }
+
+    /// Load-bearing scope proof: making local age global lets unsupported
+    /// placements parse, while removing the parent action guard makes an
+    /// unsupported command validate.
+    #[test]
+    fn rib_age_is_rejected_by_unrelated_subcommands() {
+        for subcommand in ["blackholes", "fib", "bgpls", "vpn", "labeled", "rtc"] {
+            assert!(
+                Cli::try_parse_from(["rbgp", "rib", subcommand, "--age"]).is_err(),
+                "rib {subcommand} unexpectedly accepted --age"
+            );
+            let parent_form = Cli::try_parse_from(["rbgp", "rib", "--age", subcommand]).unwrap();
+            assert_eq!(
+                validate_rib_age_action(&parent_form.command)
+                    .unwrap_err()
+                    .to_string(),
+                "--age is only valid for best, received, or advertised routes"
+            );
+        }
+    }
+
+    /// Load-bearing preflight proof: bypassing the age validator reaches the
+    /// deliberately unreachable transport for status and mutating actions.
+    #[tokio::test]
+    async fn rib_parent_age_rejects_unrelated_actions_before_transport() {
+        for action in [
+            "blackholes",
+            "fib",
+            "bgpls",
+            "vpn",
+            "labeled",
+            "rtc",
+            "add 203.0.113.0/24 --nexthop 192.0.2.1",
+            "delete 203.0.113.0/24",
+        ] {
+            let args = format!("rbgp --addr http://127.0.0.1:1 rib --age {action}");
+            let cli = Cli::try_parse_from(args.split_whitespace()).unwrap();
+            assert_eq!(
+                run(cli, BINARY_NAME).await.unwrap_err().to_string(),
+                "--age is only valid for best, received, or advertised routes",
+                "rib {action} did not fail before transport"
+            );
+        }
+    }
+
+    /// Load-bearing parent-explain preflight proof: if the age validator
+    /// ignores the parent best-view explain flag, this reaches transport and
+    /// returns a connection error instead of the exact argument error.
+    #[tokio::test]
+    async fn rib_local_age_rejects_parent_explain_before_transport() {
+        for view in ["received 192.0.2.1", "advertised 192.0.2.2"] {
+            let args = format!(
+                "rbgp --addr http://127.0.0.1:1 rib --prefix \
+                 203.0.113.0/24 --explain {view} --age"
+            );
+            let cli = Cli::try_parse_from(args.split_whitespace()).unwrap();
+            assert_eq!(
+                run(cli, BINARY_NAME).await.unwrap_err().to_string(),
+                "--age cannot be combined with --explain"
+            );
+        }
     }
 
     #[test]

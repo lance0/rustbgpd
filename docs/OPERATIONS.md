@@ -1863,13 +1863,24 @@ their effective send value is explicitly `inactive`, `unlimited`, or finite.
 
 ```bash
 rbgp rib received 10.0.0.2
+rbgp rib received 10.0.0.2 --age
 ```
 
 ### View best routes (Loc-RIB)
 
 ```bash
 rbgp rib
+rbgp rib --age
 ```
+
+`--age` appends the time since the route was originally received into the RIB.
+It also works on `rbgp rib advertised PEER --age`, where it remains the
+original RIB receive age rather than the advertisement age. Unknown timestamps
+render as `-`; future timestamps (for example, from CLI/daemon clock skew)
+clamp to `00:00:00`. A remote CLI compares the daemon-supplied epoch timestamp
+with the CLI host's clock. The default human table is unchanged. JSON always
+returns the raw `received_at_epoch_seconds` value and is identical with or
+without `--age`.
 
 ### View general FIB route status
 
