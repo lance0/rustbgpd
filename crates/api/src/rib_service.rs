@@ -42,6 +42,15 @@ fn explain_advertised_error_status(error: ExplainAdvertisedRouteError) -> Status
     }
 }
 
+fn parse_optional_peer_filter(value: &str) -> Result<Option<IpAddr>, Status> {
+    if value.is_empty() {
+        return Ok(None);
+    }
+    value.parse::<IpAddr>().map(Some).map_err(|error| {
+        Status::invalid_argument(format!("invalid peer_filter {value:?}: {error}"))
+    })
+}
+
 /// One CRUD operation for the daemon FIB-table control hook (`[[fib_tables]]`).
 ///
 /// The binary-owned closure behind [`FibTableControlFn`] interprets these:
@@ -1731,6 +1740,27 @@ impl proto::rib_service_server::RibService for RibService {
         request: Request<proto::ListEvpnRequest>,
     ) -> Result<Response<proto::ListEvpnResponse>, Status> {
         let req = request.into_inner();
+        if req.route_type_filter > 5 {
+            return Err(Status::invalid_argument(format!(
+                "invalid route_type_filter {}: expected 0 or 1..=5",
+                req.route_type_filter
+            )));
+        }
+        let peer_filter = parse_optional_peer_filter(&req.peer_filter)?;
+        let rd_filter = if req.rd_filter.is_empty() {
+            None
+        } else {
+            Some(
+                req.rd_filter
+                    .parse::<rustbgpd_wire::RouteDistinguisher>()
+                    .map_err(|error| {
+                        Status::invalid_argument(format!(
+                            "invalid rd_filter {:?}: {error}",
+                            req.rd_filter
+                        ))
+                    })?,
+            )
+        };
 
         let (reply_tx, reply_rx) = oneshot::channel();
         self.rib_tx
@@ -1743,8 +1773,6 @@ impl proto::rib_service_server::RibService for RibService {
             .map_err(|_| Status::internal("RIB manager dropped reply"))?;
 
         let type_filter = req.route_type_filter;
-        let peer_filter = req.peer_filter;
-        let rd_filter = req.rd_filter;
 
         let routes: Vec<proto::EvpnRouteEntry> = all_routes
             .iter()
@@ -1752,17 +1780,17 @@ impl proto::rib_service_server::RibService for RibService {
                 if type_filter != 0 && u32::from(r.route_type()) != type_filter {
                     return false;
                 }
-                if !peer_filter.is_empty() && r.peer.to_string() != peer_filter {
+                if peer_filter.is_some_and(|peer| r.peer != peer) {
                     return false;
                 }
-                if !rd_filter.is_empty() {
+                if let Some(rd_filter) = rd_filter {
                     let entry_rd = match &r.route {
-                        EvpnRoute::EadPerEs(e) => e.rd.to_string(),
-                        EvpnRoute::EadPerEvi(e) => e.rd.to_string(),
-                        EvpnRoute::MacIp(e) => e.rd.to_string(),
-                        EvpnRoute::Imet(e) => e.rd.to_string(),
-                        EvpnRoute::Es(e) => e.rd.to_string(),
-                        EvpnRoute::IpPrefix(e) => e.rd.to_string(),
+                        EvpnRoute::EadPerEs(e) => e.rd,
+                        EvpnRoute::EadPerEvi(e) => e.rd,
+                        EvpnRoute::MacIp(e) => e.rd,
+                        EvpnRoute::Imet(e) => e.rd,
+                        EvpnRoute::Es(e) => e.rd,
+                        EvpnRoute::IpPrefix(e) => e.rd,
                         // Unmodeled route types never match an RD filter.
                         _ => return false,
                     };
@@ -1783,6 +1811,18 @@ impl proto::rib_service_server::RibService for RibService {
         request: Request<proto::ListBgpLsRequest>,
     ) -> Result<Response<proto::ListBgpLsResponse>, Status> {
         let req = request.into_inner();
+        if !matches!(
+            req.afi_safi,
+            x if x == proto::AddressFamily::Unspecified as i32
+                || x == proto::AddressFamily::BgpLs as i32
+                || x == proto::AddressFamily::BgpLsVpn as i32
+        ) {
+            return Err(Status::invalid_argument(format!(
+                "invalid afi_safi {}: expected BGP-LS, BGP-LS VPN, or unspecified",
+                req.afi_safi
+            )));
+        }
+        let peer_filter = parse_optional_peer_filter(&req.peer_filter)?;
 
         let (reply_tx, reply_rx) = oneshot::channel();
         self.rib_tx
@@ -1794,7 +1834,6 @@ impl proto::rib_service_server::RibService for RibService {
             .await
             .map_err(|_| Status::internal("RIB manager dropped reply"))?;
 
-        let peer_filter = req.peer_filter;
         let family_filter = req.afi_safi;
         let type_filter = req.nlri_type_filter;
         let routes = all_routes
@@ -1805,7 +1844,7 @@ impl proto::rib_service_server::RibService for RibService {
                 {
                     return false;
                 }
-                if !peer_filter.is_empty() && route.peer.to_string() != peer_filter {
+                if peer_filter.is_some_and(|peer| route.peer != peer) {
                     return false;
                 }
                 if type_filter != 0 && u32::from(route.nlri.nlri_type.as_u16()) != type_filter {
@@ -1824,6 +1863,7 @@ impl proto::rib_service_server::RibService for RibService {
         request: Request<proto::ListVpnRoutesRequest>,
     ) -> Result<Response<proto::ListVpnRoutesResponse>, Status> {
         let req = request.into_inner();
+        let peer_filter = parse_optional_peer_filter(&req.peer_filter)?;
 
         if !req.afi_safi.is_empty()
             && req.afi_safi != "l3vpn_ipv4_unicast"
@@ -1845,7 +1885,6 @@ impl proto::rib_service_server::RibService for RibService {
             .await
             .map_err(|_| Status::internal("RIB manager dropped reply"))?;
 
-        let peer_filter = req.peer_filter;
         let family_filter = req.afi_safi;
         let routes = all_routes
             .iter()
@@ -1853,7 +1892,7 @@ impl proto::rib_service_server::RibService for RibService {
                 if !family_filter.is_empty() && vpn_family_label(route) != family_filter {
                     return false;
                 }
-                if !peer_filter.is_empty() && route.peer.to_string() != peer_filter {
+                if peer_filter.is_some_and(|peer| route.peer != peer) {
                     return false;
                 }
                 true
@@ -1869,6 +1908,7 @@ impl proto::rib_service_server::RibService for RibService {
         request: Request<proto::ListLabeledRoutesRequest>,
     ) -> Result<Response<proto::ListLabeledRoutesResponse>, Status> {
         let req = request.into_inner();
+        let peer_filter = parse_optional_peer_filter(&req.peer_filter)?;
 
         if !req.afi_safi.is_empty()
             && req.afi_safi != "ipv4_labeled_unicast"
@@ -1890,7 +1930,6 @@ impl proto::rib_service_server::RibService for RibService {
             .await
             .map_err(|_| Status::internal("RIB manager dropped reply"))?;
 
-        let peer_filter = req.peer_filter;
         let family_filter = req.afi_safi;
         let routes = all_routes
             .iter()
@@ -1898,7 +1937,7 @@ impl proto::rib_service_server::RibService for RibService {
                 if !family_filter.is_empty() && labeled_family_label(route) != family_filter {
                     return false;
                 }
-                if !peer_filter.is_empty() && route.peer.to_string() != peer_filter {
+                if peer_filter.is_some_and(|peer| route.peer != peer) {
                     return false;
                 }
                 true
@@ -1914,6 +1953,7 @@ impl proto::rib_service_server::RibService for RibService {
         request: Request<proto::ListRtcRoutesRequest>,
     ) -> Result<Response<proto::ListRtcRoutesResponse>, Status> {
         let req = request.into_inner();
+        let peer_filter = parse_optional_peer_filter(&req.peer_filter)?;
 
         let (reply_tx, reply_rx) = oneshot::channel();
         self.rib_tx
@@ -1925,10 +1965,9 @@ impl proto::rib_service_server::RibService for RibService {
             .await
             .map_err(|_| Status::internal("RIB manager dropped reply"))?;
 
-        let peer_filter = req.peer_filter;
         let routes = all_routes
             .iter()
-            .filter(|route| peer_filter.is_empty() || route.peer.to_string() == peer_filter)
+            .filter(|route| peer_filter.is_none_or(|peer| route.peer == peer))
             .map(rtc_route_to_proto)
             .collect();
 
@@ -2694,8 +2733,9 @@ fn format_bitmask_ops(ops: &[rustbgpd_wire::BitmaskMatch]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::net::Ipv4Addr;
+    use std::net::{Ipv4Addr, Ipv6Addr};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Instant;
 
     use bytes::Bytes;
@@ -2713,6 +2753,380 @@ mod tests {
     fn make_service() -> RibService {
         let (tx, _rx) = mpsc::channel(16);
         RibService::new(tx)
+    }
+
+    fn bgpls_test_routes(peer: IpAddr) -> Vec<BgpLsRibRoute> {
+        use rustbgpd_wire::bgpls::{decode_bgpls_nlri, decode_bgpls_vpn_nlri};
+
+        let base = BgpLsRibRoute {
+            family: BgpLsFamily::LinkState,
+            nlri: decode_bgpls_nlri(&[0xfd, 0xe8, 0, 3, 0xaa, 0xbb, 0xcc])
+                .unwrap()
+                .pop()
+                .unwrap(),
+            next_hop: peer,
+            peer,
+            attributes: Arc::new(Vec::new()),
+            received_at: Instant::now(),
+            origin_type: rustbgpd_rib::RouteOrigin::Ibgp,
+            peer_router_id: Ipv4Addr::new(192, 0, 2, 1),
+            is_stale: false,
+            is_llgr_stale: false,
+            path_id: 0,
+        };
+        let vpn = BgpLsRibRoute {
+            family: BgpLsFamily::LinkStateVpn,
+            nlri: decode_bgpls_vpn_nlri(&[
+                0xfd, 0xe8, 0, 11, // type, length = RD + opaque payload
+                0, 0, 0xfd, 0xe8, 0, 0, 0, 100, 0xaa, 0xbb, 0xcc,
+            ])
+            .unwrap()
+            .pop()
+            .unwrap(),
+            ..base.clone()
+        };
+        vec![base, vpn]
+    }
+
+    fn non_unicast_routes(
+        peer: IpAddr,
+    ) -> (
+        EvpnRibRoute,
+        Vec<BgpLsRibRoute>,
+        VpnRibRoute,
+        LabeledRibRoute,
+        RtcRibRoute,
+    ) {
+        use rustbgpd_wire::{
+            EthernetTagId, EvpnImet, LabeledNlri, MplsLabelEntry, VpnNlri, VpnPrefix,
+        };
+        let rd: rustbgpd_wire::RouteDistinguisher = "65000:100".parse().unwrap();
+        let common = (
+            peer,
+            Arc::new(Vec::new()),
+            Instant::now(),
+            rustbgpd_rib::RouteOrigin::Ibgp,
+            Ipv4Addr::new(192, 0, 2, 1),
+        );
+        let evpn = EvpnRibRoute {
+            route: EvpnRoute::Imet(EvpnImet {
+                rd,
+                ethernet_tag: EthernetTagId(100),
+                originator_ip: "2001:db8::10".parse().unwrap(),
+            }),
+            next_hop: peer,
+            link_local_next_hop: None,
+            peer: common.0,
+            attributes: Arc::clone(&common.1),
+            received_at: common.2,
+            origin_type: common.3,
+            peer_router_id: common.4,
+            is_stale: false,
+            is_llgr_stale: false,
+        };
+        let bgpls = bgpls_test_routes(peer);
+        let vpn = VpnRibRoute {
+            nlri: VpnNlri {
+                labels: vec![MplsLabelEntry::try_new(16_000, 0, true).unwrap()],
+                route_distinguisher: rd,
+                prefix: VpnPrefix::v6("2001:db8:100::".parse::<Ipv6Addr>().unwrap(), 64).unwrap(),
+            },
+            next_hop: peer,
+            link_local_next_hop: None,
+            peer: common.0,
+            attributes: Arc::clone(&common.1),
+            received_at: common.2,
+            origin_type: common.3,
+            peer_router_id: common.4,
+            is_stale: false,
+            is_llgr_stale: false,
+            path_id: 0,
+        };
+        let labeled = LabeledRibRoute {
+            nlri: LabeledNlri {
+                labels: vec![MplsLabelEntry::try_new(16_001, 0, true).unwrap()],
+                prefix: Prefix::V6(Ipv6Prefix::new("2001:db8:200::".parse().unwrap(), 64)),
+            },
+            next_hop: peer,
+            link_local_next_hop: None,
+            peer: common.0,
+            attributes: Arc::clone(&common.1),
+            received_at: common.2,
+            origin_type: common.3,
+            peer_router_id: common.4,
+            is_stale: false,
+            is_llgr_stale: false,
+            path_id: 0,
+        };
+        let rtc = RtcRibRoute {
+            nlri: rustbgpd_wire::RtcNlri::DEFAULT,
+            next_hop: peer,
+            peer: common.0,
+            attributes: common.1,
+            received_at: common.2,
+            origin_type: common.3,
+            peer_router_id: common.4,
+            is_stale: false,
+            is_llgr_stale: false,
+            path_id: 0,
+        };
+        (evpn, bgpls, vpn, labeled, rtc)
+    }
+
+    fn non_unicast_service(peer: IpAddr) -> RibService {
+        let routes = non_unicast_routes(peer);
+        let (tx, mut rx) = mpsc::channel(16);
+        tokio::spawn(async move {
+            while let Some(update) = rx.recv().await {
+                match update {
+                    RibUpdate::QueryEvpnRoutes { reply } => {
+                        let _ = reply.send(vec![routes.0.clone()]);
+                    }
+                    RibUpdate::QueryBgpLsRoutes { reply } => {
+                        let _ = reply.send(routes.1.clone());
+                    }
+                    RibUpdate::QueryVpnRoutes { reply } => {
+                        let _ = reply.send(vec![routes.2.clone()]);
+                    }
+                    RibUpdate::QueryLabeledRoutes { reply } => {
+                        let _ = reply.send(vec![routes.3.clone()]);
+                    }
+                    RibUpdate::QueryRtcRoutes { reply } => {
+                        let _ = reply.send(vec![routes.4.clone()]);
+                    }
+                    _ => panic!("unexpected RIB update"),
+                }
+            }
+        });
+        RibService::new(tx)
+    }
+
+    fn counting_non_unicast_service() -> (RibService, Arc<AtomicUsize>, tokio::task::JoinHandle<()>)
+    {
+        let (tx, mut rx) = mpsc::channel(16);
+        let queries = Arc::new(AtomicUsize::new(0));
+        let actor_queries = Arc::clone(&queries);
+        let actor = tokio::spawn(async move {
+            while let Some(update) = rx.recv().await {
+                actor_queries.fetch_add(1, Ordering::Relaxed);
+                match update {
+                    RibUpdate::QueryEvpnRoutes { reply } => {
+                        let _ = reply.send(Vec::new());
+                    }
+                    RibUpdate::QueryBgpLsRoutes { reply } => {
+                        let _ = reply.send(Vec::new());
+                    }
+                    RibUpdate::QueryVpnRoutes { reply } => {
+                        let _ = reply.send(Vec::new());
+                    }
+                    RibUpdate::QueryLabeledRoutes { reply } => {
+                        let _ = reply.send(Vec::new());
+                    }
+                    RibUpdate::QueryRtcRoutes { reply } => {
+                        let _ = reply.send(Vec::new());
+                    }
+                    _ => panic!("unexpected RIB update"),
+                }
+            }
+        });
+        (RibService::new(tx), queries, actor)
+    }
+
+    async fn assert_empty_non_unicast_filters_noop(svc: &RibService) {
+        assert_eq!(
+            svc.list_evpn_routes(Request::new(proto::ListEvpnRequest::default()))
+                .await
+                .unwrap()
+                .into_inner()
+                .routes
+                .len(),
+            1
+        );
+        assert_eq!(
+            svc.list_bgp_ls_routes(Request::new(proto::ListBgpLsRequest::default()))
+                .await
+                .unwrap()
+                .into_inner()
+                .routes
+                .len(),
+            2
+        );
+        assert_eq!(
+            svc.list_vpn_routes(Request::new(proto::ListVpnRoutesRequest::default()))
+                .await
+                .unwrap()
+                .into_inner()
+                .routes
+                .len(),
+            1
+        );
+        assert_eq!(
+            svc.list_labeled_routes(Request::new(proto::ListLabeledRoutesRequest::default()))
+                .await
+                .unwrap()
+                .into_inner()
+                .routes
+                .len(),
+            1
+        );
+        assert_eq!(
+            svc.list_rtc_routes(Request::new(proto::ListRtcRoutesRequest::default()))
+                .await
+                .unwrap()
+                .into_inner()
+                .routes
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn non_unicast_peer_and_rd_filters_are_typed_and_empty_is_noop() {
+        let peer: IpAddr = "2001:db8::1".parse().unwrap();
+        let expanded_peer = "2001:0db8:0:0:0:0:0:1";
+        let svc = non_unicast_service(peer);
+
+        let evpn = svc
+            .list_evpn_routes(Request::new(proto::ListEvpnRequest {
+                route_type_filter: 3,
+                peer_filter: expanded_peer.to_string(),
+                rd_filter: "065000:000100".to_string(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(evpn.routes.len(), 1);
+        let bgpls = svc
+            .list_bgp_ls_routes(Request::new(proto::ListBgpLsRequest {
+                afi_safi: proto::AddressFamily::BgpLs as i32,
+                peer_filter: expanded_peer.to_string(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(bgpls.routes.len(), 1);
+        assert_eq!(
+            svc.list_bgp_ls_routes(Request::new(proto::ListBgpLsRequest {
+                afi_safi: proto::AddressFamily::BgpLsVpn as i32,
+                ..Default::default()
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .routes
+            .len(),
+            1
+        );
+        let vpn = svc
+            .list_vpn_routes(Request::new(proto::ListVpnRoutesRequest {
+                peer_filter: expanded_peer.to_string(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(vpn.routes.len(), 1);
+        let labeled = svc
+            .list_labeled_routes(Request::new(proto::ListLabeledRoutesRequest {
+                peer_filter: expanded_peer.to_string(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(labeled.routes.len(), 1);
+        let rtc = svc
+            .list_rtc_routes(Request::new(proto::ListRtcRoutesRequest {
+                peer_filter: expanded_peer.to_string(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(rtc.routes.len(), 1);
+
+        assert_empty_non_unicast_filters_noop(&svc).await;
+    }
+
+    #[tokio::test]
+    async fn invalid_non_unicast_filters_fail_before_rib_query() {
+        let (svc, queries, actor) = counting_non_unicast_service();
+
+        for status in [
+            svc.list_evpn_routes(Request::new(proto::ListEvpnRequest {
+                peer_filter: "not-an-ip".to_string(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap_err(),
+            svc.list_bgp_ls_routes(Request::new(proto::ListBgpLsRequest {
+                peer_filter: "not-an-ip".to_string(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap_err(),
+            svc.list_vpn_routes(Request::new(proto::ListVpnRoutesRequest {
+                peer_filter: "not-an-ip".to_string(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap_err(),
+            svc.list_labeled_routes(Request::new(proto::ListLabeledRoutesRequest {
+                peer_filter: "not-an-ip".to_string(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap_err(),
+            svc.list_rtc_routes(Request::new(proto::ListRtcRoutesRequest {
+                peer_filter: "not-an-ip".to_string(),
+            }))
+            .await
+            .unwrap_err(),
+        ] {
+            assert_eq!(status.code(), tonic::Code::InvalidArgument);
+            assert!(status.message().contains("peer_filter"));
+        }
+
+        for (status, field) in [
+            (
+                svc.list_evpn_routes(Request::new(proto::ListEvpnRequest {
+                    rd_filter: "not-an-rd".to_string(),
+                    ..Default::default()
+                }))
+                .await
+                .unwrap_err(),
+                "rd_filter",
+            ),
+            (
+                svc.list_evpn_routes(Request::new(proto::ListEvpnRequest {
+                    route_type_filter: 6,
+                    ..Default::default()
+                }))
+                .await
+                .unwrap_err(),
+                "route_type_filter",
+            ),
+            (
+                svc.list_bgp_ls_routes(Request::new(proto::ListBgpLsRequest {
+                    afi_safi: 99,
+                    ..Default::default()
+                }))
+                .await
+                .unwrap_err(),
+                "afi_safi",
+            ),
+        ] {
+            assert_eq!(status.code(), tonic::Code::InvalidArgument);
+            assert!(status.message().contains(field));
+        }
+
+        drop(svc);
+        actor.await.unwrap();
+        assert_eq!(
+            queries.load(Ordering::Relaxed),
+            0,
+            "invalid filters must not query the RIB actor"
+        );
     }
 
     fn fib_table_proto(name: &str) -> proto::FibTableConfig {

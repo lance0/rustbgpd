@@ -204,6 +204,9 @@ impl fmt::Display for RouteDistinguisher {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum RouteDistinguisherParseError {
+    /// A raw fallback was not exactly `0x` plus 16 hexadecimal digits, or
+    /// encoded one of the three RD types that has a structured text form.
+    InvalidHexFallback(String),
     /// Input did not contain exactly one `':'` separating administrator and
     /// assigned-number fields.
     MissingColon,
@@ -221,6 +224,10 @@ pub enum RouteDistinguisherParseError {
 impl fmt::Display for RouteDistinguisherParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidHexFallback(s) => write!(
+                f,
+                "invalid RD hex fallback {s:?}: expected `0x` plus 16 hexadecimal digits for an unknown RD type"
+            ),
             Self::MissingColon => write!(
                 f,
                 "expected RD in form `<asn|ipv4>:<assigned>`, missing `:`"
@@ -253,11 +260,29 @@ impl std::str::FromStr for RouteDistinguisher {
     /// - `<u16-asn>:<u32-assigned>`  → Type 0
     /// - `<ipv4>:<u16-assigned>`     → Type 1
     /// - `<u32-asn>:<u16-assigned>`  → Type 2 (when ASN > 65535)
+    /// - `0x<16-hex-digits>`         → unknown type, matching its display form
     ///
     /// Disambiguation between Type 0 and Type 2 follows the convention
     /// adopted by FRR / Cisco / Junos: an `asn:value` form with
     /// `asn ≤ 65535` is Type 0; otherwise Type 2.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if let Some(hex) = s.strip_prefix("0x") {
+            if hex.len() != 16 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                return Err(RouteDistinguisherParseError::InvalidHexFallback(
+                    s.to_string(),
+                ));
+            }
+            let raw = u64::from_str_radix(hex, 16)
+                .map_err(|_| RouteDistinguisherParseError::InvalidHexFallback(s.to_string()))?;
+            let rd = Self(raw.to_be_bytes());
+            if rd.rd_type() <= 2 {
+                return Err(RouteDistinguisherParseError::InvalidHexFallback(
+                    s.to_string(),
+                ));
+            }
+            return Ok(rd);
+        }
+
         let (admin, assigned) = s
             .split_once(':')
             .ok_or(RouteDistinguisherParseError::MissingColon)?;
@@ -1281,6 +1306,33 @@ mod tests {
         let rd: RouteDistinguisher = "4200000000:200".parse().unwrap();
         assert_eq!(rd.rd_type(), 2);
         assert_eq!(rd.to_string(), "4200000000:200");
+    }
+
+    #[test]
+    fn rd_parse_unknown_type_display_roundtrip() {
+        let rd = RouteDistinguisher([0x12, 0x34, 0xAB, 0xCD, 0xEF, 0x01, 0x23, 0x45]);
+        let display = rd.to_string();
+        assert_eq!(display, "0x1234abcdef012345");
+        assert_eq!(display.parse::<RouteDistinguisher>().unwrap(), rd);
+        assert_eq!(
+            "0x1234ABCDEF012345".parse::<RouteDistinguisher>().unwrap(),
+            rd
+        );
+    }
+
+    #[test]
+    fn rd_parse_rejects_noncanonical_hex_fallback() {
+        for invalid in [
+            "0x1234abcdef01234",
+            "0x1234abcdef0123456",
+            "0x1234abcdef01234g",
+            "0x0000fde800000064",
+        ] {
+            assert!(matches!(
+                invalid.parse::<RouteDistinguisher>(),
+                Err(RouteDistinguisherParseError::InvalidHexFallback(_))
+            ));
+        }
     }
 
     #[test]
