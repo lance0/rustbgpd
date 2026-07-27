@@ -19,6 +19,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   inbound Enhanced Route Refresh actor work. Its closed `operation` label is
   `begin`, `eorr`, or `timeout`.
 
+- A host-locked real-session Enhanced Route Refresh receipt now exercises one
+  peer with 100,000 routes through BoRR, replay, duplicate BoRR, EoRR, and the
+  independent timeout. It retains exact state, actor-duration, allocator, RSS,
+  and load-bearing validation evidence without adding the six-minute campaign
+  to pull-request CI.
+
 ### Changed
 
 - `rbgp top` keeps health and neighbor polling on the operator-selected

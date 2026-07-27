@@ -123,7 +123,13 @@ fi
 readonly DAEMON="$REPO/target/release/rustbgpd"
 readonly RBGP="$REPO/target/release/rbgp"
 readonly HARNESS="$RECEIPT_DIR/target/release/enhanced-route-refresh-receipt"
-sha256sum "$DAEMON" "$RBGP" "$HARNESS" >"$OUT/build/binaries.sha256"
+(
+    cd "$REPO"
+    sha256sum \
+        target/release/rustbgpd \
+        target/release/rbgp \
+        bench/scale/enhanced-route-refresh/target/release/enhanced-route-refresh-receipt
+) >"$OUT/build/binaries.sha256"
 
 python3 "$RECEIPT_DIR/gen-scenario.py" "$RUN" "$PORT" "$METRICS_PORT" \
     >"$OUT/scenario/generator.log"
@@ -375,7 +381,17 @@ summary = {
     "phases": [],
     "memory": {},
 }
-for path in sorted((out / "phase").glob("*.json")):
+for name in (
+    "baseline",
+    "first-borr",
+    "replay-one",
+    "duplicate-borr",
+    "eorr",
+    "restored",
+    "timeout-borr",
+    "timeout-complete",
+):
+    path = out / "phase" / f"{name}.json"
     summary["phases"].append(json.loads(path.read_text(encoding="utf-8")))
 with (out / "memory-boundaries.tsv").open(encoding="utf-8") as stream:
     rows = list(csv.DictReader(stream, delimiter="\t"))
