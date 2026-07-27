@@ -961,10 +961,10 @@ enum DiffAction {
     /// fail-closed: equality is never asserted from incomplete, truncated,
     /// over-limit, or drifting input.
     ///
-    /// Live-source limitation: the daemon proto carries MED as a bare
-    /// integer, so MED-absent and MED 0 are indistinguishable over gRPC;
-    /// live med=0 is compared as absent and snapshot producers should omit
-    /// `med` when it is zero or absent (or pass --ignore-attribute med).
+    /// Live-source limitation: when a daemon response carries no optional
+    /// MED-presence markers, MED-absent and MED 0 cannot be distinguished;
+    /// that compatibility caveat is reported in the diff output only when
+    /// encountered at runtime.
     #[command(after_help = "Exit codes:\n  \
         0  complete inputs, no semantic differences\n  \
         1  complete inputs, differences found\n  \
@@ -1006,7 +1006,9 @@ enum DiffAction {
         #[arg(long, default_value_t = 20)]
         detail: usize,
 
-        /// Overall wall-clock budget in seconds; expiry refuses the
+        /// Aggregate wall-clock budget for the live query phase, starting
+        /// after bounded local snapshot parsing and shared by neighbor
+        /// discovery and every advertised-route page; expiry refuses the
         /// comparison (exit 2)
         #[arg(long, default_value_t = 120)]
         deadline: u64,
@@ -3191,6 +3193,40 @@ mod tests {
                 "config {name} --help must document exit code 1: {help}"
             );
         }
+    }
+
+    #[test]
+    fn diff_advertised_help_describes_aggregate_live_deadline_and_conditional_med_caveat() {
+        let mut command = cli_command(BINARY_NAME);
+        let advertised = command
+            .find_subcommand_mut("diff")
+            .expect("diff subcommand exists")
+            .find_subcommand_mut("advertised")
+            .expect("diff advertised subcommand exists");
+        let help = advertised.render_long_help().to_string();
+        let normalized = help.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        assert!(
+            normalized.contains(
+                "Aggregate wall-clock budget for the live query phase, starting after bounded \
+                 local snapshot parsing and shared by neighbor discovery and every \
+                 advertised-route page"
+            ),
+            "deadline help was: {help}"
+        );
+        assert!(
+            !normalized.contains("daemon proto carries MED as a bare integer"),
+            "stale unconditional MED limitation returned: {help}"
+        );
+        // Red proof: restoring the old unconditional claim makes this fail,
+        // while the replacement must retain the runtime compatibility caveat.
+        assert!(
+            normalized.contains(
+                "when a daemon response carries no optional MED-presence markers, MED-absent \
+                 and MED 0 cannot be distinguished"
+            ),
+            "conditional MED caveat was absent: {help}"
+        );
     }
 
     #[test]
