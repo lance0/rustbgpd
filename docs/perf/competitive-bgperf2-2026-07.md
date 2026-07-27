@@ -369,6 +369,63 @@ measurement.
 - OpenBGPD is uncollected, so the comparison is four-way.
 - No claim is made about behavior beyond 100 peers or beyond 200,000 routes.
 
+## v0.61.0 exact-tag refresh (2026-07-27)
+
+The three phase-A shapes were re-measured on the same host through the
+same harness at `d1877d4b` — the `v0.61.0` tag plus five docs-only
+commits, verified code-identical to the tag — closing the "pinned
+historical candidate" gap above for these shapes. The target now
+reports `rustbgpd 0.61.0` in every raw row. Three runs per cell, all
+clean; the image was rebuilt `nocache` (digest `sha256:b0e77db8ebf7…`,
+zero `Using cache` lines in the retained transcript); event-history
+was **on** — the harness default, with `RUSTBGPD_EVENT_HISTORY_OFF`
+explicitly unset and recorded. Campaign window: 2026-07-27
+19:30–19:46 UTC.
+
+Scope differences from the campaign above, disclosed: phase-A shapes
+only (10p × 1k, 30p × 1k, and 100p × 1k route-server shapes were not
+rerun, and 10p × 1k therefore has 3 runs here, not 6); the target was
+built from the repository checkout at the named commit rather than a
+git-archive export; OpenBGPD was excluded up front — the harness
+defect documented above was verified still present, and an attempted
+cell would still hang the batch. Peer versions: BIRD
+`2.18+branch.master.0ee9f93bd076` and GoBGP `4.3.0` identical to the
+campaign above; FRR `10.7.0-dev` remains an unpinned development
+build with a distinct build identifier per cell.
+
+Medians of 3 runs per cell:
+
+| Shape | Daemon | Total (s) | Convergence (s) | Max CPU | Max RSS (MiB) |
+|---|---|---:|---:|---:|---:|
+| 10p × 1k | **rustbgpd** | **8.28** | 2 | 6% | 37.9 |
+| | BIRD 2.18 | 9.23 | 2 | 3% | **9.2** |
+| | GoBGP 4.3.0 | 10.29 | 3 | 140% | 37.9 |
+| | FRR 10.7.0-dev | 10.32 | 3 | 3% | 27.6 |
+| 2p × 10k | **rustbgpd** | **8.21** | 2 | 7% | 48.1 |
+| | BIRD 2.18 | 9.22 | 2 | 1% | **9.2** |
+| | GoBGP 4.3.0 | 10.35 | 3 | 82% | 45.1 |
+| | FRR 10.7.0-dev | 9.28 | 3 | 6% | 36.9 |
+| 2p × 100k | **rustbgpd** | **12.33** | 3 | 41% | 212.0 |
+| | BIRD 2.18 | 13.20 | 3 | 6% | **27.6** |
+| | GoBGP 4.3.0 | 16.45 | 6 | 580% | 204.8 |
+| | FRR 10.7.0-dev | 13.26 | 4 | 92% | 228.4 |
+
+The result is stable against the campaign above: rustbgpd is the
+**fastest on total time at the three measured shapes** (this refresh
+makes no claim about the two unmeasured route-server shapes), with
+every rustbgpd median within 0.05 s of its published value. The
+memory ordering is likewise unchanged: BIRD remains far leaner at
+every shape (rustbgpd/BIRD ratio 4.1×–7.7× here), rustbgpd sits with
+GoBGP at the small shapes, and 2p × 100k remains the one shape where
+FRR is larger than rustbgpd. CPU stays mid-pack, with BIRD cheapest
+and GoBGP most expensive at every shape.
+
+Raw per-run harness CSVs, full run transcripts, the `nocache` build
+transcript, the per-run medians, the campaign timeline with quiet-gate
+admissions, and a checksum `MANIFEST` with a `verify.sh` re-checker
+are in
+[`artifacts/competitive-bgperf2-2026-07/v0610-refresh-2026-07/`](artifacts/competitive-bgperf2-2026-07/v0610-refresh-2026-07/).
+
 ## Reproduce and artifacts
 
 With a bgperf2 checkout and Docker on an otherwise idle host:

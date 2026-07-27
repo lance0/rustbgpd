@@ -1133,6 +1133,22 @@ figures were reported in 1000-based MB against this run's MiB, so small
 differences there are partly unit conversion; the shape of the result is
 unchanged. BIRD and GoBGP versions are identical across the two runs.
 
+**Re-measured 2026-07-27 at the v0.61.0 tag** (commit `d1877d4b`,
+code-identical to `v0.61.0`; the target reports `rustbgpd 0.61.0`): the three
+non-route-server shapes were rerun on the same host through the same harness,
+3 runs per cell, image rebuilt `nocache`, event-history **on** (the harness
+default, explicitly recorded). Medians: rustbgpd total **8.28 s** at 10p × 1k
+(BIRD 9.23, GoBGP 10.29, FRR 10.32), **8.21 s** at 2p × 10k (BIRD 9.22, FRR
+9.28, GoBGP 10.35), **12.33 s** at 2p × 100k (BIRD 13.20, FRR 13.26, GoBGP
+16.45) — fastest total time at the three measured shapes, every rustbgpd
+median within 0.05 s of the table above. Memory is unchanged in ordering:
+BIRD stays far leaner everywhere (rustbgpd 37.9 vs BIRD 9.2 MiB at 10p × 1k;
+212.0 vs 27.6 MiB at 2p × 100k), and FRR remains the only daemon larger than
+rustbgpd at 2p × 100k (228.4 MiB). The 30p × 1k and 100p × 1k rows above were
+not rerun and stand at `515659b1`. Full tables, raw CSVs, transcripts, and
+checksums: [the receipt's refresh
+section](perf/competitive-bgperf2-2026-07.md#v0610-exact-tag-refresh-2026-07-27).
+
 ### Understanding the Numbers
 
 **Session establishment.** rustbgpd dials the passive BIRD testers, which bind

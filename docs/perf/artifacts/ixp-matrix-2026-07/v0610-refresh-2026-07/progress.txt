@@ -1,0 +1,20 @@
+campaign=ixp-v0610 start=2026-07-27T15:46:20-04:00
+repo_head=d1877d4b823c0dad69a18f8658fe7af0bf7efedc describe=v0.61.0-5-gd1877d4b
+start_gate: clear at 2026-07-27T15:46:20-04:00
+cell=build-rustbgpd exit=0 start=2026-07-27T15:46:20-04:00 end=2026-07-27T15:50:18-04:00
+cell=build-reloadstall exit=0 start=2026-07-27T15:50:18-04:00 end=2026-07-27T15:50:21-04:00
+cell=build-rrharness exit=0 start=2026-07-27T15:50:21-04:00 end=2026-07-27T15:50:40-04:00
+cell=runA-s2-rustbgpd exit=0 start=2026-07-27T15:50:40-04:00 end=2026-07-27T15:58:23-04:00
+cell=runA-s2-bird exit=0 start=2026-07-27T15:58:24-04:00 end=2026-07-27T16:12:32-04:00
+cell=runA-s2-openbgpd exit=0 start=2026-07-27T16:12:32-04:00 end=2026-07-27T16:42:12-04:00
+cell=runA-s3-rustbgpd exit=0 start=2026-07-27T16:42:12-04:00 end=2026-07-27T16:48:55-04:00
+cell=runA-s3-bird exit=0 start=2026-07-27T16:48:55-04:00 end=2026-07-27T16:56:59-04:00
+cell=runA-s3-openbgpd exit=0 start=2026-07-27T16:56:59-04:00 end=2026-07-27T17:11:13-04:00
+cell=runB-s2-rustbgpd exit=0 start=2026-07-27T17:11:13-04:00 end=2026-07-27T17:18:26-04:00
+cell=runB-s2-bird exit=0 start=2026-07-27T17:18:26-04:00 end=2026-07-27T17:32:35-04:00
+cell=runB-s2-openbgpd exit=0 start=2026-07-27T17:32:35-04:00 end=2026-07-27T18:03:14-04:00
+cell=runB-s3-rustbgpd exit=0 start=2026-07-27T18:03:14-04:00 end=2026-07-27T18:09:58-04:00
+cell=runB-s3-bird exit=0 start=2026-07-27T18:09:58-04:00 end=2026-07-27T18:18:01-04:00
+cell=runB-s3-openbgpd exit=0 start=2026-07-27T18:18:01-04:00 end=2026-07-27T18:31:25-04:00
+cell=rr1000-flood exit=0 start=2026-07-27T18:31:25-04:00 end=2026-07-27T18:31:47-04:00
+campaign=ixp-v0610 end=2026-07-27T18:31:47-04:00
