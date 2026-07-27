@@ -109,6 +109,62 @@ async fn fetch_all_route_pages(
     }
 }
 
+/// Fetch only the backend's exact matching-row count for one route
+/// view. A one-row page keeps the response bounded; the continuation
+/// token and row itself are deliberately ignored because `total_count`
+/// describes the complete filtered query.
+async fn fetch_route_count(
+    client: &mut RibClient,
+    rpc: &RouteListRpc,
+    mut req: ListRoutesRequest,
+) -> Result<u64, CliError> {
+    req.page_size = 1;
+    req.page_token.clear();
+    let resp = match rpc {
+        RouteListRpc::Best => client.list_best_routes(req).await?,
+        RouteListRpc::Received => client.list_received_routes(req).await?,
+        RouteListRpc::Advertised => client.list_advertised_routes(req).await?,
+    }
+    .into_inner();
+    Ok(resp.total_count)
+}
+
+fn route_count_message(total_count: u64) -> String {
+    format!("Total matching routes: {total_count}")
+}
+
+fn route_count_json(total_count: u64) -> serde_json::Value {
+    serde_json::json!({ "total_count": total_count })
+}
+
+fn print_route_count(total_count: u64, json: bool) -> Result<(), CliError> {
+    if json {
+        output::print_json_pretty(&route_count_json(total_count))
+    } else {
+        println!("{}", route_count_message(total_count));
+        Ok(())
+    }
+}
+
+async fn count_routes(
+    connection: Connection,
+    rpc: RouteListRpc,
+    neighbor: Option<&str>,
+    family: Option<i32>,
+    filters: &RouteFilterOpts,
+    json: bool,
+) -> Result<(), CliError> {
+    let mut client =
+        RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let total_count = fetch_route_count(
+        &mut client,
+        &rpc,
+        make_route_request(neighbor, family, filters)?,
+    )
+    .await?;
+    print_route_count(total_count, json)
+}
+
 fn parse_fib_state(s: &str) -> Result<i32, CliError> {
     match s {
         "installed" => Ok(FibRouteState::Installed as i32),
@@ -1594,6 +1650,15 @@ pub async fn best(
     print_routes(&routes, json)
 }
 
+pub async fn count_best(
+    connection: Connection,
+    family: Option<i32>,
+    filters: &RouteFilterOpts,
+    json: bool,
+) -> Result<(), CliError> {
+    count_routes(connection, RouteListRpc::Best, None, family, filters, json).await
+}
+
 pub async fn blackholes(connection: Connection, json: bool) -> Result<(), CliError> {
     let mut client =
         RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
@@ -1692,6 +1757,24 @@ pub async fn received(
     )
     .await?;
     print_routes(&routes, json)
+}
+
+pub async fn count_received(
+    connection: Connection,
+    address: &str,
+    family: Option<i32>,
+    filters: &RouteFilterOpts,
+    json: bool,
+) -> Result<(), CliError> {
+    count_routes(
+        connection,
+        RouteListRpc::Received,
+        Some(address),
+        family,
+        filters,
+        json,
+    )
+    .await
 }
 
 /// LAN-472: list the retained rejected routes for a peer with their
@@ -1846,6 +1929,24 @@ pub async fn advertised(
     )
     .await?;
     print_routes(&routes, json)
+}
+
+pub async fn count_advertised(
+    connection: Connection,
+    address: &str,
+    family: Option<i32>,
+    filters: &RouteFilterOpts,
+    json: bool,
+) -> Result<(), CliError> {
+    count_routes(
+        connection,
+        RouteListRpc::Advertised,
+        Some(address),
+        family,
+        filters,
+        json,
+    )
+    .await
 }
 
 #[expect(
@@ -3001,6 +3102,174 @@ mod tests {
             next_page_token: next_page_token.to_string(),
             total_count: 2,
         }
+    }
+
+    fn count_filters() -> RouteFilterOpts {
+        RouteFilterOpts {
+            prefix: Some("2001:db8::/32".to_string()),
+            longer: true,
+            origin_asn: Some(64512),
+            community: vec![(64512_u32 << 16) | 100],
+            large_community: vec!["64512:1:100".to_string()],
+        }
+    }
+
+    fn count_page(total_count: u64) -> rustbgpd_api::proto::ListRoutesResponse {
+        rustbgpd_api::proto::ListRoutesResponse {
+            routes: vec![rustbgpd_api::proto::Route {
+                prefix: "2001:db8::".to_string(),
+                prefix_length: 32,
+                ..Default::default()
+            }],
+            // A count client must not follow this deliberately poisoned
+            // continuation: `total_count` already covers the query.
+            next_page_token: "poison-if-followed".to_string(),
+            total_count,
+        }
+    }
+
+    fn assert_count_request(request: &rustbgpd_api::proto::ListRoutesRequest, neighbor: &str) {
+        assert_eq!(request.neighbor_address, neighbor);
+        assert_eq!(request.afi_safi, AddressFamily::Ipv6Unicast as i32);
+        assert_eq!(request.page_size, 1);
+        assert!(request.page_token.is_empty());
+        assert_eq!(request.prefix_filter, "2001:db8::");
+        assert_eq!(request.prefix_filter_length, 32);
+        assert!(request.longer_prefixes);
+        assert_eq!(request.origin_asn, 64512);
+        assert_eq!(request.community_filter, vec![(64512_u32 << 16) | 100]);
+        assert_eq!(request.large_community_filter, vec!["64512:1:100"]);
+    }
+
+    /// Load-bearing output proof: changing the human label, JSON key, or
+    /// dropping a zero count makes these exact assertions red.
+    #[test]
+    fn route_count_output_is_exact_for_zero_and_nonzero_totals() {
+        assert_eq!(route_count_message(0), "Total matching routes: 0");
+        assert_eq!(route_count_message(27), "Total matching routes: 27");
+        assert_eq!(route_count_json(0), serde_json::json!({ "total_count": 0 }));
+        assert_eq!(
+            route_count_json(27),
+            serde_json::json!({ "total_count": 27 })
+        );
+    }
+
+    /// Load-bearing response proof: replacing the backend total with the
+    /// returned row count (one) or following the poison continuation makes
+    /// the value/call-count assertions red.
+    #[tokio::test]
+    async fn route_count_uses_backend_total_not_returned_row_count() {
+        let server = spawn_mock_server(None).await;
+        server
+            .state
+            .list_route_pages
+            .lock()
+            .await
+            .push(count_page(73));
+        server
+            .state
+            .list_route_pages
+            .lock()
+            .await
+            .push(count_page(999));
+        let connection = connect(&server.addr, None).await.unwrap();
+        let mut client =
+            RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+
+        let total = fetch_route_count(
+            &mut client,
+            &RouteListRpc::Best,
+            make_route_request(
+                None,
+                Some(AddressFamily::Ipv6Unicast as i32),
+                &count_filters(),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(total, 73);
+        assert_eq!(
+            server
+                .state
+                .list_best_route_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        let remaining = server.state.list_route_pages.lock().await;
+        assert_eq!(remaining.len(), 1, "poison continuation was consumed");
+        assert_eq!(remaining[0].total_count, 999);
+    }
+
+    /// Load-bearing transport proof: selecting the wrong RPC, requesting
+    /// more than one row, dropping any filter/scope, or following the poison
+    /// continuation changes a counter/request assertion and makes this red.
+    #[tokio::test]
+    async fn count_uses_one_view_correct_filtered_rpc_for_each_route_view() {
+        let server = spawn_mock_server(None).await;
+        {
+            let mut pages = server.state.list_route_pages.lock().await;
+            pages.push(count_page(11));
+            pages.push(count_page(22));
+            pages.push(count_page(33));
+        }
+        let family = Some(AddressFamily::Ipv6Unicast as i32);
+        let filters = count_filters();
+
+        count_best(
+            connect(&server.addr, None).await.unwrap(),
+            family,
+            &filters,
+            false,
+        )
+        .await
+        .unwrap();
+        count_received(
+            connect(&server.addr, None).await.unwrap(),
+            "fe80::1",
+            family,
+            &filters,
+            true,
+        )
+        .await
+        .unwrap();
+        count_advertised(
+            connect(&server.addr, None).await.unwrap(),
+            "fe80::2",
+            family,
+            &filters,
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            server
+                .state
+                .list_best_route_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert_eq!(
+            server
+                .state
+                .list_received_route_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert_eq!(
+            server
+                .state
+                .list_advertised_route_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        let requests = server.state.list_route_requests.lock().await;
+        assert_eq!(requests.len(), 3, "exactly one request per view");
+        assert_count_request(&requests[0], "");
+        assert_count_request(&requests[1], "fe80::1");
+        assert_count_request(&requests[2], "fe80::2");
     }
 
     /// `rbgp rib received` follows `next_page_token` until the listing

@@ -20,6 +20,7 @@ use rustbgpd_api::proto::control_service_server::ControlServiceServer;
 use rustbgpd_api::proto::event_service_server::EventServiceServer;
 use rustbgpd_api::proto::evpn_service_server::EvpnServiceServer;
 use rustbgpd_api::proto::global_service_server::GlobalServiceServer;
+use rustbgpd_api::proto::injection_service_server::InjectionServiceServer;
 use rustbgpd_api::proto::neighbor_service_server::NeighborServiceServer;
 use rustbgpd_api::proto::peer_group_service_server::PeerGroupServiceServer;
 use rustbgpd_api::proto::policy_service_server::PolicyServiceServer;
@@ -94,6 +95,12 @@ pub(crate) struct MockState {
     // Empty = every call returns an empty final page.
     pub(crate) list_route_pages: Mutex<Vec<server_proto::ListRoutesResponse>>,
     pub(crate) list_route_requests: Mutex<Vec<server_proto::ListRoutesRequest>>,
+    pub(crate) list_best_route_calls: AtomicUsize,
+    pub(crate) list_received_route_calls: AtomicUsize,
+    pub(crate) list_advertised_route_calls: AtomicUsize,
+    pub(crate) add_path_calls: AtomicUsize,
+    pub(crate) delete_path_calls: AtomicUsize,
+    pub(crate) list_rejected_route_calls: AtomicUsize,
     // Canned ListNeighbors response — drives `rbgp diff` peer-availability
     // gating. Empty = no neighbors configured on the daemon.
     pub(crate) list_neighbors_response: Mutex<Vec<server_proto::NeighborState>>,
@@ -223,6 +230,9 @@ pub(crate) async fn spawn_mock_server(auth_token: Option<&str>) -> MockServerHan
     let rib = MockRibService {
         state: Arc::clone(&state),
     };
+    let injection = MockInjectionService {
+        state: Arc::clone(&state),
+    };
     let evpn = MockEvpnService;
     let event = MockEventService {
         state: Arc::clone(&state),
@@ -254,6 +264,10 @@ pub(crate) async fn spawn_mock_server(auth_token: Option<&str>) -> MockServerHan
                 interceptor.clone(),
             ))
             .add_service(RibServiceServer::with_interceptor(rib, interceptor.clone()))
+            .add_service(InjectionServiceServer::with_interceptor(
+                injection,
+                interceptor.clone(),
+            ))
             .add_service(EvpnServiceServer::with_interceptor(
                 evpn,
                 interceptor.clone(),
@@ -316,6 +330,9 @@ pub(crate) async fn spawn_mock_uds_server(
     let rib = MockRibService {
         state: Arc::clone(&state),
     };
+    let injection = MockInjectionService {
+        state: Arc::clone(&state),
+    };
     let evpn = MockEvpnService;
     let event = MockEventService {
         state: Arc::clone(&state),
@@ -347,6 +364,10 @@ pub(crate) async fn spawn_mock_uds_server(
                 interceptor.clone(),
             ))
             .add_service(RibServiceServer::with_interceptor(rib, interceptor.clone()))
+            .add_service(InjectionServiceServer::with_interceptor(
+                injection,
+                interceptor.clone(),
+            ))
             .add_service(EvpnServiceServer::with_interceptor(
                 evpn,
                 interceptor.clone(),
@@ -981,6 +1002,61 @@ struct MockRibService {
     state: Arc<MockState>,
 }
 
+struct MockInjectionService {
+    state: Arc<MockState>,
+}
+
+#[tonic::async_trait]
+impl rustbgpd_api::proto::injection_service_server::InjectionService for MockInjectionService {
+    async fn add_path(
+        &self,
+        _request: Request<server_proto::AddPathRequest>,
+    ) -> Result<Response<server_proto::AddPathResponse>, Status> {
+        self.state.add_path_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(Response::new(server_proto::AddPathResponse::default()))
+    }
+
+    async fn delete_path(
+        &self,
+        _request: Request<server_proto::DeletePathRequest>,
+    ) -> Result<Response<server_proto::DeletePathResponse>, Status> {
+        self.state.delete_path_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(Response::new(server_proto::DeletePathResponse::default()))
+    }
+
+    async fn add_flow_spec(
+        &self,
+        _request: Request<server_proto::AddFlowSpecRequest>,
+    ) -> Result<Response<server_proto::AddFlowSpecResponse>, Status> {
+        Ok(Response::new(server_proto::AddFlowSpecResponse::default()))
+    }
+
+    async fn delete_flow_spec(
+        &self,
+        _request: Request<server_proto::DeleteFlowSpecRequest>,
+    ) -> Result<Response<server_proto::DeleteFlowSpecResponse>, Status> {
+        Ok(Response::new(
+            server_proto::DeleteFlowSpecResponse::default(),
+        ))
+    }
+
+    async fn add_evpn_route(
+        &self,
+        _request: Request<server_proto::AddEvpnRouteRequest>,
+    ) -> Result<Response<server_proto::AddEvpnRouteResponse>, Status> {
+        Ok(Response::new(server_proto::AddEvpnRouteResponse::default()))
+    }
+
+    async fn delete_evpn_route(
+        &self,
+        _request: Request<server_proto::DeleteEvpnRouteRequest>,
+    ) -> Result<Response<server_proto::DeleteEvpnRouteResponse>, Status> {
+        Ok(Response::new(
+            server_proto::DeleteEvpnRouteResponse::default(),
+        ))
+    }
+}
+
 struct MockWatchRoutesStream {
     state: Arc<MockState>,
     clean_end: bool,
@@ -1306,6 +1382,9 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
         &self,
         request: Request<server_proto::ListRoutesRequest>,
     ) -> Result<Response<server_proto::ListRoutesResponse>, Status> {
+        self.state
+            .list_received_route_calls
+            .fetch_add(1, Ordering::SeqCst);
         Ok(Response::new(
             self.next_route_page(request.into_inner()).await,
         ))
@@ -1315,6 +1394,9 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
         &self,
         request: Request<server_proto::ListRoutesRequest>,
     ) -> Result<Response<server_proto::ListRoutesResponse>, Status> {
+        self.state
+            .list_best_route_calls
+            .fetch_add(1, Ordering::SeqCst);
         Ok(Response::new(
             self.next_route_page(request.into_inner()).await,
         ))
@@ -1324,6 +1406,9 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
         &self,
         request: Request<server_proto::ListRoutesRequest>,
     ) -> Result<Response<server_proto::ListRoutesResponse>, Status> {
+        self.state
+            .list_advertised_route_calls
+            .fetch_add(1, Ordering::SeqCst);
         Ok(Response::new(
             self.next_route_page(request.into_inner()).await,
         ))
@@ -1939,6 +2024,9 @@ impl rustbgpd_api::proto::policy_service_server::PolicyService for MockPolicySer
         &self,
         request: Request<server_proto::ListRejectedRoutesRequest>,
     ) -> Result<Response<server_proto::ListRejectedRoutesResponse>, Status> {
+        self.state
+            .list_rejected_route_calls
+            .fetch_add(1, Ordering::SeqCst);
         let req = request.into_inner();
         Ok(Response::new(server_proto::ListRejectedRoutesResponse {
             peer_address: req.peer_address,

@@ -70,9 +70,12 @@ rbgp bfd show <addr>
 
 ```bash
 rbgp rib
+rbgp rib --count                            # best-route count only
 rbgp rib received <addr>
+rbgp rib received <addr> --count
 rbgp rib recv <addr>                        # alias
 rbgp rib advertised <addr>
+rbgp rib advertised <addr> --count
 rbgp rib sent <addr>                        # alias
 rbgp rib --prefix <prefix> --explain
 rbgp rib blackholes
@@ -105,6 +108,14 @@ rbgp flowspec
 rbgp fib-table list
 rbgp fib-table set edge --table-id 1000 --metric 200 --families ipv4_unicast,ipv6_unicast
 ```
+
+`--count` applies the same family, prefix, longer-prefix, origin-ASN, standard
+community, and large-community filters as the corresponding best, received, or
+advertised route listing. It makes exactly one request and transfers at most one
+route row, rendering `Total matching routes: N` or `{"total_count":N}` with
+`--json`. A filtered count still scans the matching backend view to compute the
+exact total; `--count` bounds response transfer, not server-side query work. It
+cannot be combined with the rejected-route or explain views.
 
 ### EVPN
 
@@ -161,6 +172,7 @@ a non-TTY.
 | Neighbor summary | `rbgp summary` or `rbgp neighbor` |
 | Received routes | `rbgp rib received <peer>` or `rbgp rib recv <peer>` |
 | Advertised routes | `rbgp rib advertised <peer>` or `rbgp rib sent <peer>` |
+| Count matching best/received/advertised routes | add `--count` to the corresponding command |
 | Explain best path | `rbgp rib --prefix <cidr> --explain` |
 | Explain export policy / gates | `rbgp rib --prefix <cidr> advertised <peer> --explain` |
 | Explain import policy | `rbgp policy explain --neighbor <peer> --prefix <cidr>` |

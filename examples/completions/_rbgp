@@ -692,7 +692,8 @@ _arguments "${_arguments_options[@]}" : \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '-l[Show longer (more specific) prefixes matching --prefix]' \
 '--longer[Show longer (more specific) prefixes matching --prefix]' \
-'--explain[Show why the best route was selected (requires --prefix)]' \
+'(--count)--explain[Show why the best route was selected (requires --prefix)]' \
+'--count[Print only the number of matching best, received, or advertised routes]' \
 '-j[Output in JSON format]' \
 '--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
@@ -715,7 +716,8 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
-'--rejected[Show the retained rejected routes with their reject reasons instead of the accepted Adj-RIB-In (the looking-glass filtered-route view; \[policy.reject_retention\])]' \
+'--count[Print only the number of matching received routes]' \
+'(--count)--rejected[Show the retained rejected routes with their reject reasons instead of the accepted Adj-RIB-In (the looking-glass filtered-route view; \[policy.reject_retention\])]' \
 '-j[Output in JSON format]' \
 '--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
@@ -731,7 +733,8 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
-'--rejected[Show the retained rejected routes with their reject reasons instead of the accepted Adj-RIB-In (the looking-glass filtered-route view; \[policy.reject_retention\])]' \
+'--count[Print only the number of matching received routes]' \
+'(--count)--rejected[Show the retained rejected routes with their reject reasons instead of the accepted Adj-RIB-In (the looking-glass filtered-route view; \[policy.reject_retention\])]' \
 '-j[Output in JSON format]' \
 '--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
@@ -750,7 +753,8 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
-'--explain[Explain whether this exact prefix would be advertised to the peer]' \
+'--count[Print only the number of matching advertised routes]' \
+'(--count)--explain[Explain whether this exact prefix would be advertised to the peer]' \
 '(--rd)--labeled[Explain the labeled-unicast (SAFI 4, RFC 8277) export ladder for the prefix instead of the plain unicast ladder]' \
 '-j[Output in JSON format]' \
 '--json[Output in JSON format]' \
@@ -770,7 +774,8 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
-'--explain[Explain whether this exact prefix would be advertised to the peer]' \
+'--count[Print only the number of matching advertised routes]' \
+'(--count)--explain[Explain whether this exact prefix would be advertised to the peer]' \
 '(--rd)--labeled[Explain the labeled-unicast (SAFI 4, RFC 8277) export ladder for the prefix instead of the plain unicast ladder]' \
 '-j[Output in JSON format]' \
 '--json[Output in JSON format]' \

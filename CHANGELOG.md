@@ -11,6 +11,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `rbgp rib --count`, `rbgp rib received PEER --count`, and
+  `rbgp rib advertised PEER --count` report the exact filtered route count
+  without transferring a full route listing. Each count uses one view-correct
+  RPC and transfers at most one route row; filtered counts still require the
+  backend to scan the selected view.
+
 - `rbgp neighbor PEER refresh-out` and the
   `NeighborService.RefreshOutbound` RPC re-emit one peer's current exportable
   outbound inventory without resetting the session. The bounded single-peer
