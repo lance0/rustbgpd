@@ -42,6 +42,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`rbgp doctor` no longer fabricates a stuck-peer failure from missing
+  retained session history.** A failed event RPC or a peer absent from the
+  bounded fleet history reports explicit unknown evidence as a warning, and a
+  daemon-lifetime flap count is red only when retained history also proves a
+  recent session loss. Genuinely old retained transitions remain red.
+
 - **Policy introspection no longer turns a stalled live session into an
   absent one.** Import explain and rejected-route reads return
   `DEADLINE_EXCEEDED` when their bounded session query times out; policy stats
