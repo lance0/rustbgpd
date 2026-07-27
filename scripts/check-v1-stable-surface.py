@@ -378,9 +378,25 @@ def check_effective_defaults(
                 f"effective-default validation test {test!r} does not exercise {linkage[:-1]}"
             )
 
-    config_source = (ROOT / "src/config/mod.rs").read_text()
+    config_source = "\n".join(
+        (ROOT / path).read_text()
+        for path in ("src/config/mod.rs", "src/config/resolution.rs")
+    )
     peer_manager_source = (ROOT / "src/peer_manager/mod.rs").read_text()
     check_dynamic_neighbor_limit_linkage(config_source, peer_manager_source)
+    expect_checker_failure(
+        lambda: check_dynamic_neighbor_limit_linkage(
+            config_source.replace(
+                ".unwrap_or(DEFAULT_DYNAMIC_NEIGHBOR_LIMIT)",
+                ".unwrap_or(100)",
+                1,
+            ),
+            peer_manager_source,
+        ),
+        "Config::effective_dynamic_neighbor_limit must resolve the shared "
+        "DEFAULT_DYNAMIC_NEIGHBOR_LIMIT",
+        "literal dynamic-neighbor-limit fallback",
+    )
     expect_checker_failure(
         lambda: check_dynamic_neighbor_limit_linkage(
             config_source,
