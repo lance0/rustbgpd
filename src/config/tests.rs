@@ -15283,6 +15283,200 @@ fn rpol_files_load_resolve_and_evaluate_in_chains() {
     assert_eq!(eval.matched_policy.as_deref(), Some("bogon-filter"));
 }
 
+/// The real startup roster resolves neighbors through bounded set-interning
+/// chunks. Common `.rpol` set content within one chunk must share its backing
+/// index, distinct content must not alias, and allocation identity must remain
+/// invisible to structural policy equality / reload planning.
+///
+/// Red proofs:
+/// - restoring one `SetStore` per neighbor makes the within-chunk `ptr_eq` red;
+/// - interning distinct set contents under one key makes the non-alias red;
+/// - changing compiled-chain equality to allocation identity makes the
+///   independently resolved equality and no-impact diff assertions red.
+#[test]
+fn resolved_neighbor_batch_shares_only_content_equal_rpol_sets() {
+    let source = r"
+prefix-set shared { 10.0.0.0/8 le 32, 192.0.2.0/24 }
+prefix-set distinct { 198.51.100.0/24, 203.0.113.0/24 }
+
+policy shared-import {
+    term allow { if route.prefix in shared { accept } }
+}
+policy distinct-import {
+    term allow { if route.prefix in distinct { accept } }
+}
+";
+    let dir = tempfile::tempdir().expect("tempdir");
+    fs::create_dir(dir.path().join("policies")).expect("mkdir");
+    fs::write(dir.path().join("policies/core.rpol"), source).expect("write rpol");
+    let toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[policy]
+rpol_files = ["policies/core.rpol"]
+
+[[neighbors]]
+address = "192.0.2.1"
+remote_asn = 65002
+import_policy_chain = ["shared-import"]
+
+[[neighbors]]
+address = "192.0.2.2"
+remote_asn = 65003
+import_policy_chain = ["shared-import"]
+
+[[neighbors]]
+address = "192.0.2.3"
+remote_asn = 65004
+import_policy_chain = ["distinct-import"]
+"#;
+    fs::write(
+        dir.path().join("config.toml"),
+        tier_authorized_uds_test_config(toml),
+    )
+    .expect("write config");
+    let config = load_dir(&dir).expect("sharing fixture loads");
+    let resolved = config
+        .resolved_neighbors()
+        .expect("startup roster resolves");
+
+    let named_set = |neighbor: &ResolvedNeighbor, name: &str| {
+        let chain = neighbor.import_policy.as_ref().expect("import chain");
+        let compiled = chain.policies[0].rpol.as_ref().expect("rpol member");
+        let index = compiled
+            .prefix_set_names
+            .iter()
+            .position(|candidate| candidate.as_deref() == Some(name))
+            .expect("named set");
+        std::sync::Arc::clone(&compiled.prefix_sets[index])
+    };
+    let first = named_set(&resolved[0], "shared");
+    let second = named_set(&resolved[1], "shared");
+    let distinct = named_set(&resolved[2], "distinct");
+    assert!(
+        std::sync::Arc::ptr_eq(&first, &second),
+        "content-equal sets in one resolved roster must share one index"
+    );
+    assert!(
+        !std::sync::Arc::ptr_eq(&first, &distinct),
+        "content-distinct sets must never alias"
+    );
+
+    let independently_resolved = config
+        .resolve_neighbor(&config.neighbors[0])
+        .expect("standalone resolution");
+    assert_eq!(
+        resolved[0].import_policy, independently_resolved.import_policy,
+        "shared allocation identity must not change structural chain equality"
+    );
+    let unchanged = diff_config(&config, &config.clone());
+    assert!(
+        unchanged.effective_neighbor_impact.is_empty(),
+        "allocation identity must not manufacture reload impact: {:?}",
+        unchanged.effective_neighbor_impact
+    );
+}
+
+/// Set sharing is bounded to contiguous roster chunks without changing
+/// neighbor order.
+///
+/// Red proofs:
+/// - restoring one store per neighbor makes the within-chunk identity and
+///   canonical-copy-count assertions red;
+/// - restoring one unbounded store makes the boundary identity and
+///   canonical-copy-count assertions red;
+/// - reordering chunk output makes the address-order assertion red.
+#[test]
+fn resolved_neighbor_set_sharing_is_chunk_bounded_and_ordered() {
+    let source = r"
+prefix-set shared { 10.0.0.0/8 le 32, 192.0.2.0/24 }
+policy shared-import {
+    term allow { if route.prefix in shared { accept } }
+}
+";
+    let dir = tempfile::tempdir().expect("tempdir");
+    fs::create_dir(dir.path().join("policies")).expect("mkdir");
+    fs::write(dir.path().join("policies/core.rpol"), source).expect("write rpol");
+    let toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[policy]
+rpol_files = ["policies/core.rpol"]
+
+[[neighbors]]
+address = "192.0.2.1"
+remote_asn = 65002
+import_policy_chain = ["shared-import"]
+"#;
+    fs::write(
+        dir.path().join("config.toml"),
+        tier_authorized_uds_test_config(toml),
+    )
+    .expect("write config");
+    let mut config = load_dir(&dir).expect("bounded-sharing fixture loads");
+    let template = config.neighbors[0].clone();
+    config.neighbors = (0..65)
+        .map(|index| {
+            let mut neighbor = template.clone();
+            neighbor.address = format!("192.0.2.{}", index + 1);
+            neighbor.remote_asn = 65_002 + index;
+            neighbor
+        })
+        .collect();
+
+    let resolved = config
+        .resolved_neighbors()
+        .expect("bounded roster resolves");
+    let set = |neighbor: &ResolvedNeighbor| {
+        std::sync::Arc::clone(
+            &neighbor.import_policy.as_ref().unwrap().policies[0]
+                .rpol
+                .as_ref()
+                .unwrap()
+                .prefix_sets[0],
+        )
+    };
+    assert!(std::sync::Arc::ptr_eq(
+        &set(&resolved[0]),
+        &set(&resolved[31])
+    ));
+    assert!(!std::sync::Arc::ptr_eq(
+        &set(&resolved[31]),
+        &set(&resolved[32])
+    ));
+    let canonical_copies: std::collections::HashSet<_> = resolved
+        .iter()
+        .map(|neighbor| std::sync::Arc::as_ptr(&set(neighbor)))
+        .collect();
+    assert_eq!(
+        canonical_copies.len(),
+        3,
+        "65 peers must retain one canonical set per 32-neighbor chunk"
+    );
+    let actual_order: Vec<_> = resolved
+        .iter()
+        .map(|neighbor| neighbor.transport_config.remote_addr.ip().to_string())
+        .collect();
+    let expected_order: Vec<_> = config
+        .neighbors
+        .iter()
+        .map(|neighbor| neighbor.address.clone())
+        .collect();
+    assert_eq!(actual_order, expected_order);
+}
+
 /// LAN-300: a config-referenced `.rpol` file resolves its `import`
 /// graph — from its own directory and from `[policy] rpol_roots`
 /// (rewritten absolute like `rpol_files`) — and a broken import

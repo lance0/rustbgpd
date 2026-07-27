@@ -317,15 +317,18 @@ pub(crate) enum ChainDirection {
 /// call-form — `"customer-in(200)"` — and monomorphized here; the
 /// resulting chain member carries its pre-compiled IR, so evaluation
 /// and the ADR-0076 planner's structural diff both see the compiled
-/// content. Every `.rpol` member of one chain compiles through one
-/// `SetStore`, so identical set data dedupes within the chain.
+/// content. Direct chain and validation callers compile each chain through
+/// one local `SetStore`. Standalone effective-policy / neighbor resolution
+/// shares one store across that single neighbor's inherited chains, while the
+/// resolved-neighbor roster uses [`resolve_chain_with_store`] with one fresh
+/// store per bounded 32-neighbor chunk.
 ///
 /// LAN-296: every `.rpol` member is stamped with `local_asn` (the
 /// `[global] asn`, backing `prepend as self`), and an export-bound
 /// chain is rejected when any member carries the import-only
 /// `prepend as peer` action. Every install path — initial load, SIGHUP
 /// reload, the rpol overlay, config transactions, and the gRPC policy
-/// admin — resolves through this function, so the direction check
+/// admin — resolves through these entry points, so the direction check
 /// holds everywhere by construction.
 #[expect(
     clippy::too_many_arguments,
@@ -341,10 +344,43 @@ pub(super) fn resolve_chain(
     direction: ChainDirection,
     local_asn: u32,
 ) -> Result<Option<PolicyChain>, ConfigError> {
+    let mut store = rustbgpd_policy::sets::SetStore::new();
+    resolve_chain_with_store(
+        names,
+        definitions,
+        rpol,
+        datasets,
+        neighbor_sets,
+        peer_groups,
+        direction,
+        local_asn,
+        &mut store,
+    )
+}
+
+/// Resolve one chain through a caller-owned store. Effective-policy and
+/// standalone-neighbor resolution scope the store to one neighbor call; roster
+/// resolution scopes it to one bounded 32-neighbor chunk. Validation and
+/// direct chain resolution use [`resolve_chain`] and retain one store per
+/// chain.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the chain resolver threads every policy namespace; a params struct would just rename them"
+)]
+pub(super) fn resolve_chain_with_store(
+    names: &[String],
+    definitions: &HashMap<String, NamedPolicyConfig>,
+    rpol: &rustbgpd_policy::rpol::RpolPolicySet,
+    datasets: &rustbgpd_policy::datasets::DatasetBindings,
+    neighbor_sets: &HashMap<String, NeighborSetConfig>,
+    peer_groups: &HashMap<String, PeerGroupConfig>,
+    direction: ChainDirection,
+    local_asn: u32,
+    store: &mut rustbgpd_policy::sets::SetStore,
+) -> Result<Option<PolicyChain>, ConfigError> {
     if names.is_empty() {
         return Ok(None);
     }
-    let mut store = rustbgpd_policy::sets::SetStore::new();
     let policies = names
         .iter()
         .map(|name| {
@@ -357,7 +393,7 @@ pub(super) fn resolve_chain(
                     }
                 });
             }
-            resolve_rpol_chain_ref(name, rpol, datasets, &mut store, local_asn)
+            resolve_rpol_chain_ref(name, rpol, datasets, store, local_asn)
         })
         .collect::<Result<Vec<_>, _>>()?;
     // LAN-296 direction legality: `prepend as peer` on an export chain
