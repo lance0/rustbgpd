@@ -1548,10 +1548,7 @@ impl RibManager {
             | RibUpdate::PeerDeleted { .. }
             | RibUpdate::InjectRoute { .. }
             | RibUpdate::WithdrawInjected { .. }
-            | RibUpdate::EndOfRib { .. }
             | RibUpdate::PeerGracefulRestart { .. }
-            | RibUpdate::BeginRouteRefresh { .. }
-            | RibUpdate::EndRouteRefresh { .. }
             | RibUpdate::RpkiCacheUpdate { .. }
             | RibUpdate::AspaTableUpdate { .. } => self.advance_all_route_pages(),
             _ => {}
@@ -2333,6 +2330,7 @@ impl RibManager {
                 safi,
             } => {
                 if !self.stale_session_message(peer, session_id, "EndOfRib", "eor") {
+                    self.advance_all_route_pages();
                     let selection_transition =
                         self.selection_deferral_end_of_rib(peer, session_id, (afi, safi));
                     self.handle_end_of_rib(peer, afi, safi);
@@ -2361,6 +2359,7 @@ impl RibManager {
                 safi,
             } => {
                 if !self.stale_session_message(peer, session_id, "BeginRouteRefresh", "refresh") {
+                    self.advance_all_route_pages();
                     self.handle_begin_route_refresh(peer, afi, safi);
                     if let Some(transition) =
                         self.selection_deferral_begin_route_refresh(peer, session_id, (afi, safi))
