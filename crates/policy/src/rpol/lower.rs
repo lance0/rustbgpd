@@ -473,7 +473,7 @@ impl<'a> Lowerer<'a> {
             }
         }
         CompiledPolicy {
-            name: Some(def.name.node.clone()),
+            name: Some(Arc::from(def.name.node.clone())),
             terms,
             default_action: PolicyAction::Permit,
             source: PolicySource::Rpol,

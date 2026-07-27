@@ -49,6 +49,12 @@ use crate::update::{
 };
 use rustbgpd_wire::{ExtendedCommunity, VpnAddressFamily, VpnRouteKey};
 
+/// A configured policy name retained by shared staging. `Arc` keeps a
+/// group-wide per-route verdict from rebuilding the same owned label at every
+/// accumulator, delta, and residue handoff; metric/output boundaries convert
+/// only when they need an owned string.
+type PolicyLabel = Arc<str>;
+
 /// Fingerprint of every RIB-staging input that makes per-peer staged
 /// output differ (design §1). Per-peer wire preparation (next-hop
 /// rewrite, AS prepend, `ORIGINATOR_ID`/`CLUSTER_LIST` stamping, …) lives
@@ -293,7 +299,7 @@ pub(in crate::manager) struct GroupDelta {
     /// Terminal policy of the permitting evaluation (`None` = inline /
     /// no chain). Retained on the staged entry so a later join can
     /// replay the member's export counters without re-running policy.
-    pub(in crate::manager) policy_label: Option<String>,
+    pub(in crate::manager) policy_label: Option<PolicyLabel>,
     /// Pre-policy SOURCE attributes of an announce delta (`None` for a
     /// withdrawal, or when the source carries no communities). RFC 7947
     /// control decisions — per-target suppression and prepend — are
@@ -535,17 +541,17 @@ impl GroupStageOutput {
 /// prometheus lookups (design §6).
 #[derive(Default)]
 pub(in crate::manager) struct GroupEvalAccumulator {
-    totals: Vec<(Option<String>, PolicyAction, u64)>,
-    per_source: FxHashMap<IpAddr, Vec<(Option<String>, PolicyAction, u64)>>,
+    totals: Vec<(Option<PolicyLabel>, PolicyAction, u64)>,
+    per_source: FxHashMap<IpAddr, Vec<(Option<PolicyLabel>, PolicyAction, u64)>>,
     /// Verdict (and source peer) of the most recent evaluation, consumed
     /// per key by the staging loops to label the staged entry / denial
     /// residue (single-best stages at most one eval per key).
-    last: Option<(Option<String>, PolicyAction, IpAddr)>,
+    last: Option<(Option<PolicyLabel>, PolicyAction, IpAddr)>,
 }
 
 fn bump_eval_row(
-    rows: &mut Vec<(Option<String>, PolicyAction, u64)>,
-    policy: Option<&String>,
+    rows: &mut Vec<(Option<PolicyLabel>, PolicyAction, u64)>,
+    policy: Option<&PolicyLabel>,
     action: PolicyAction,
 ) {
     if let Some((_, _, n)) = rows
@@ -555,6 +561,24 @@ fn bump_eval_row(
         *n += 1;
     } else {
         rows.push((policy.cloned(), action, 1));
+    }
+}
+
+/// Materialize a policy label only at the peer-counter boundary. Group
+/// staging itself retains `PolicyLabel` handles, but telemetry's keyed rows
+/// own their strings after the shared pass is complete.
+fn bump_counter_row(
+    rows: &mut Vec<(Option<String>, PolicyAction, u64)>,
+    policy: Option<&PolicyLabel>,
+    action: PolicyAction,
+) {
+    if let Some((_, _, n)) = rows
+        .iter_mut()
+        .find(|(p, a, _)| *a == action && p.as_deref() == policy.map(AsRef::as_ref))
+    {
+        *n += 1;
+    } else {
+        rows.push((policy.map(ToString::to_string), action, 1));
     }
 }
 
@@ -576,7 +600,7 @@ impl GroupEvalAccumulator {
 
     /// Take (and clear) the last recorded verdict — the staging loop's
     /// per-key label / denial-residue hook.
-    fn take_last(&mut self) -> Option<(Option<String>, PolicyAction, IpAddr)> {
+    fn take_last(&mut self) -> Option<(Option<PolicyLabel>, PolicyAction, IpAddr)> {
         self.last.take()
     }
 }
@@ -709,7 +733,7 @@ pub(in crate::manager) fn emit_rs_tag_transitions(
 /// A persistent group-verdict VPN denial: (source peer, denying policy
 /// label, the denied route's extended communities — the Φ gate input
 /// for an RTC member's join-time counter replay).
-type VpnDenialRecord = (IpAddr, Option<String>, Vec<ExtendedCommunity>);
+type VpnDenialRecord = (IpAddr, Option<PolicyLabel>, Vec<ExtendedCommunity>);
 
 /// One entry of a shared group VPN staging pass. Unlike the unicast
 /// [`GroupDelta`] this carries the full displaced route (`old`), not just
@@ -727,7 +751,7 @@ pub(in crate::manager) struct VpnGroupDelta {
     pub(in crate::manager) old: Option<VpnRibRoute>,
     /// Terminal policy of the permitting evaluation — join-time counter
     /// replay residue, exactly like [`GroupDelta::policy_label`].
-    pub(in crate::manager) policy_label: Option<String>,
+    pub(in crate::manager) policy_label: Option<PolicyLabel>,
 }
 
 /// Result of one shared VPN staging pass over a group: deltas (already
@@ -889,7 +913,7 @@ pub(in crate::manager) struct GroupRibOut {
     /// Persistent group-verdict export-policy denials (target stamped
     /// with [`GROUP_FILTERED_PLACEHOLDER`], restamped per member) with
     /// the denying policy's label for join-time counter replay.
-    policy_filtered: FxHashMap<PolicyFilteredRouteKey, Option<String>>,
+    policy_filtered: FxHashMap<PolicyFilteredRouteKey, Option<PolicyLabel>>,
     /// Terminal policy label per staged entry — join-time counter replay
     /// residue. Entries ONLY for labelled entries: an inline (unlabelled)
     /// entry stores nothing and its key is removed, so absent and
@@ -897,10 +921,10 @@ pub(in crate::manager) struct GroupRibOut {
     /// two, so keep the insert conditional — an unconditional insert
     /// costs a slot per staged route across the whole table for a value
     /// no reader can distinguish from absence.
-    staged_labels: FxHashMap<(Prefix, u32), Option<String>>,
+    staged_labels: FxHashMap<(Prefix, u32), Option<PolicyLabel>>,
     /// VPN sibling of `staged_labels`, keyed by RD+prefix identity, with
     /// the same absent-means-inline invariant.
-    vpn_staged_labels: FxHashMap<VpnRouteKey, Option<String>>,
+    vpn_staged_labels: FxHashMap<VpnRouteKey, Option<PolicyLabel>>,
     /// Persistent group-verdict VPN export-policy denials: denied key →
     /// (source peer, denying policy label, the denied route's extended
     /// communities). The per-peer VPN path keeps no denial *records*
@@ -1368,7 +1392,7 @@ impl GroupRibOut {
     fn record_policy_filtered(
         &mut self,
         staged: &HashSet<Prefix>,
-        current: &[(PolicyFilteredRouteKey, Option<String>)],
+        current: &[(PolicyFilteredRouteKey, Option<PolicyLabel>)],
     ) {
         self.policy_filtered
             .retain(|key, _| !staged.contains(&key.prefix));
@@ -1724,7 +1748,7 @@ impl RibManager {
         memo: &mut super::distribution::ExportMemo,
     ) -> GroupStageOutput {
         let mut out = GroupStageOutput::default();
-        let mut labeled_filtered: Vec<(PolicyFilteredRouteKey, Option<String>)> = Vec::new();
+        let mut labeled_filtered: Vec<(PolicyFilteredRouteKey, Option<PolicyLabel>)> = Vec::new();
         {
             let Some(group) = self.group_ribs.get(&gid) else {
                 return out;
@@ -2220,7 +2244,7 @@ impl RibManager {
                         let key = route.nlri.key();
                         count_delta[GroupRibOut::vpn_count_slot(&key) - 2] += 1;
                         let label = group.vpn_staged_labels.get(&key).cloned().unwrap_or(None);
-                        bump_eval_row(&mut permit_rows, label.as_ref(), PolicyAction::Permit);
+                        bump_counter_row(&mut permit_rows, label.as_ref(), PolicyAction::Permit);
                         vpn_announce.push(route.clone());
                     }
                     (true, false) => {
@@ -2316,7 +2340,11 @@ impl RibManager {
                             .map(|(_, _, n)| *n)
                     })
                     .unwrap_or(0);
-                (policy.clone(), *action, total.saturating_sub(own_n))
+                (
+                    policy.as_ref().map(ToString::to_string),
+                    *action,
+                    total.saturating_sub(own_n),
+                )
             })
             .collect();
         self.bump_export_counters(peer, &rows);
@@ -2345,15 +2373,8 @@ impl RibManager {
             let Some(group) = self.group_ribs.get(&gid) else {
                 return;
             };
-            let mut bump = |policy: &Option<String>, action: PolicyAction| {
-                if let Some((_, _, n)) = rows
-                    .iter_mut()
-                    .find(|(p, a, _)| *a == action && p == policy)
-                {
-                    *n += 1;
-                } else {
-                    rows.push((policy.clone(), action, 1));
-                }
+            let mut bump = |policy: &Option<PolicyLabel>, action: PolicyAction| {
+                bump_counter_row(&mut rows, policy.as_ref(), action);
             };
             let in_family =
                 |prefix: &Prefix| family.is_none_or(|f| super::helpers::prefix_family(prefix) == f);
@@ -4431,10 +4452,10 @@ mod tests {
         // A labelled restage DOES take a slot — the residue still
         // carries what join-time counter replay reads.
         let mut labelled = announce_delta(prefix(1), OTHER1, Some(OTHER1));
-        labelled.policy_label = Some("export-chain".to_owned());
+        labelled.policy_label = Some(Arc::from("export-chain"));
         group.apply_delta(&labelled);
         let mut vpn_labelled = vpn_announce_delta(1, OTHER1, Some(OTHER1));
-        vpn_labelled.policy_label = Some("export-chain".to_owned());
+        vpn_labelled.policy_label = Some(Arc::from("export-chain"));
         group.apply_vpn_delta(&vpn_labelled);
         assert_eq!(
             group.staged_labels.get(&key).and_then(|l| l.as_deref()),
@@ -4444,9 +4465,8 @@ mod tests {
             group
                 .vpn_staged_labels
                 .get(&vpn_key(1))
-                .cloned()
-                .unwrap_or(None),
-            Some("export-chain".to_owned())
+                .and_then(|label| label.as_deref()),
+            Some("export-chain")
         );
 
         // Restaging inline REMOVES the slot rather than retaining the
@@ -4457,6 +4477,39 @@ mod tests {
         assert!(!group.staged_labels.contains_key(&key));
         assert!(!group.vpn_staged_labels.contains_key(&vpn_key(1)));
         assert_eq!(resolved(&group), (true, true));
+    }
+
+    /// Shared staging must retain the evaluator's policy-label allocation from
+    /// one delta through the group-table residue. Two routes ending in the
+    /// same policy therefore share one backing label rather than allocating a
+    /// `String` per staged key.
+    ///
+    /// Red proof: rebuilding either stored label with
+    /// `Arc::from(label.as_ref())` leaves the operator-visible text unchanged
+    /// but makes the pointer-identity assertion fail.
+    #[test]
+    fn staged_policy_labels_share_the_evaluation_allocation() {
+        let mut group = empty_group();
+        let label: Arc<str> = Arc::from("shared-export-policy");
+        for n in [1, 2] {
+            let mut delta = announce_delta(prefix(n), OTHER1, None);
+            delta.policy_label = Some(Arc::clone(&label));
+            group.apply_delta(&delta);
+        }
+
+        let first = group
+            .staged_labels
+            .get(&(prefix(1), 0))
+            .and_then(Option::as_ref)
+            .expect("first route carries its terminal policy");
+        let second = group
+            .staged_labels
+            .get(&(prefix(2), 0))
+            .and_then(Option::as_ref)
+            .expect("second route carries its terminal policy");
+        assert_eq!(first.as_ref(), "shared-export-policy");
+        assert!(Arc::ptr_eq(&label, first));
+        assert!(Arc::ptr_eq(first, second));
     }
 
     /// An RTC membership over a specific Route Target (full 96-bit

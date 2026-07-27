@@ -168,7 +168,7 @@ fn resolved_match_to_proto(
     // keeps the same historical decision fields but overrides the
     // outcome to STALE so the operator knows the policy has since moved.
     let fill = |m: &mut proto::ImportExplainMatch, d: rustbgpd_transport::CachedDecision| {
-        m.matched_policy = d.matched_policy.unwrap_or_default();
+        m.matched_policy = d.matched_policy.as_deref().unwrap_or_default().to_string();
         m.rpki_validation = d.rpki.to_string();
         m.aspa_validation = d.aspa.to_string();
         m.modifications = Some(explain_modifications_to_proto(&d.modifications));
@@ -1725,6 +1725,7 @@ mod tests {
             proto::AddressFamily::Ipv4Unicast as i32,
             resolved,
         );
+        assert_eq!(m.matched_policy, "edge-import");
         assert_eq!(m.statements.len(), 2);
         let matched = &m.statements[0];
         assert_eq!(matched.policy_index, 0);

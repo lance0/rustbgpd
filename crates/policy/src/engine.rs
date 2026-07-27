@@ -1218,7 +1218,7 @@ pub struct PolicyEvaluation {
     /// The terminal action — `Permit` or `Deny`.
     pub action: PolicyAction,
     /// Configured name of the terminal-decision policy, if it has one.
-    pub matched_policy: Option<String>,
+    pub matched_policy: Option<Arc<str>>,
     /// Set when the Deny is the fail-closed disposition of an
     /// evaluation error (ADR-0103 Decision 4) rather than a clean
     /// policy verdict — the kind plus the failing policy/term. Always
@@ -1563,7 +1563,7 @@ impl PolicyChain {
             for (term_index, (term, hits)) in policy.terms.iter().zip(hits).enumerate() {
                 rows.push(TermHitRow {
                     policy_index,
-                    policy: policy.name.clone(),
+                    policy: policy.name.as_ref().map(ToString::to_string),
                     term_index,
                     term: term.name.clone(),
                     hits: *hits,
@@ -1593,7 +1593,7 @@ impl PolicyChain {
                         PolicyResult::deny(),
                         PolicyEvaluation {
                             action: PolicyAction::Deny,
-                            matched_policy: named.name.clone(),
+                            matched_policy: named.name.clone().map(Arc::from),
                             eval_error: None,
                         },
                     );
@@ -1604,7 +1604,10 @@ impl PolicyChain {
         // All policies permitted (including an empty chain). Attribute
         // to the last policy in the chain since chain evaluation
         // completes only after every policy permits.
-        let matched_policy = self.policies.last().and_then(|n| n.name.clone());
+        let matched_policy = self
+            .policies
+            .last()
+            .and_then(|n| n.name.clone().map(Arc::from));
         (
             PolicyResult {
                 action: PolicyAction::Permit,
