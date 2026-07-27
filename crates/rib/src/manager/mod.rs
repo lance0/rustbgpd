@@ -37,9 +37,10 @@ use crate::loc_rib::LocRib;
 use crate::update::{
     BestPathCandidate, ExactExportEncoder, ExactExportKey, ExplainAdvertisedRoute,
     ExplainAdvertisedRouteError, ExplainBestPath, MrtPeerEntry, MrtSnapshotData,
-    NeighborPolicyStats, OutboundRouteUpdate, RibReadinessError, RibReadinessQuery, RibUpdate,
-    RoutePage, RoutePageError, RoutePageVersion, RouteQueryFilter, RouteQueryKey, RouteQueryScope,
-    WarmMrtSnapshotBudget, WarmMrtSnapshotView, route_query_key,
+    NeighborPolicyStats, NeighborRibSnapshot, NeighborRibSnapshotResponse, OutboundRouteUpdate,
+    RibReadinessError, RibReadinessQuery, RibUpdate, RoutePage, RoutePageError, RoutePageVersion,
+    RouteQueryFilter, RouteQueryKey, RouteQueryScope, WarmMrtSnapshotBudget, WarmMrtSnapshotView,
+    route_query_key,
 };
 
 use helpers::{
@@ -2232,6 +2233,13 @@ impl RibManager {
             RibUpdate::QueryPeerOutboundState { peer, reply } => {
                 self.handle_query_peer_outbound_state(peer, reply);
             }
+            RibUpdate::QueryNeighborRibSnapshots {
+                peers,
+                comparison,
+                reply,
+            } => {
+                self.handle_query_neighbor_rib_snapshots(peers, comparison, reply);
+            }
             RibUpdate::QueryUpdateGroupSnapshot { reply } => {
                 self.handle_query_update_group_snapshot(reply);
             }
@@ -4155,6 +4163,39 @@ impl RibManager {
             .copied()
             .unwrap_or_default();
         let _ = reply.send(stats);
+    }
+
+    /// Answer `NeighborService`'s aggregate read in one actor turn.  Keep this
+    /// adjacent to the individual count/counter handlers so their semantics
+    /// cannot drift: the aggregate is deliberately their one-turn projection,
+    /// not a second notion of neighbor state.
+    fn handle_query_neighbor_rib_snapshots(
+        &self,
+        peers: Vec<IpAddr>,
+        comparison: Option<(IpAddr, IpAddr)>,
+        reply: tokio::sync::oneshot::Sender<NeighborRibSnapshotResponse>,
+    ) {
+        let snapshots = peers
+            .into_iter()
+            .map(|peer| NeighborRibSnapshot {
+                peer,
+                advertised_count: self
+                    .grouped_advertised_count(peer)
+                    .unwrap_or_else(|| self.adj_ribs_out.get(&peer).map_or(0, AdjRibOut::len)),
+                policy_stats: self
+                    .export_policy_stats
+                    .get(&peer)
+                    .copied()
+                    .unwrap_or_default(),
+                outbound: self.peer_outbound_state(peer),
+            })
+            .collect();
+        let comparison = comparison
+            .map(|(primary, comparison)| self.update_group_comparison(primary, comparison));
+        let _ = reply.send(NeighborRibSnapshotResponse {
+            snapshots,
+            comparison,
+        });
     }
 
     /// Snapshot the live per-term hit counters of installed export

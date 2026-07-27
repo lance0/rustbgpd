@@ -1214,6 +1214,31 @@ pub struct PeerOutboundState {
     pub outbound_prefix_limits: Vec<OutboundPrefixLimitFamilyState>,
 }
 
+/// One neighbor's RIB-owned fields returned by the aggregate operator
+/// snapshot query.  These fields must be read in one RIB actor turn so an
+/// API response never joins advertised, policy, and outbound state from
+/// different generations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NeighborRibSnapshot {
+    /// Peer whose outbound state was read.
+    pub peer: IpAddr,
+    /// Prefixes currently advertised to this peer.
+    pub advertised_count: usize,
+    /// Route-policy evaluation counters for this peer.
+    pub policy_stats: NeighborPolicyStats,
+    /// Live outbound registration and capacity state.
+    pub outbound: PeerOutboundState,
+}
+
+/// One actor-turn response for `NeighborService`'s RIB-owned state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NeighborRibSnapshotResponse {
+    /// Snapshot rows in request order.
+    pub snapshots: Vec<NeighborRibSnapshot>,
+    /// Optional update-group comparison requested with the primary snapshot.
+    pub comparison: Option<UpdateGroupPeerComparison>,
+}
+
 /// Neighbor-facing ADR-0113 outbound capacity for one unicast family.
 ///
 /// `usage` is the post-policy, post-OTC, post-exact-export admitted
@@ -1844,6 +1869,18 @@ pub enum RibUpdate {
         peer: IpAddr,
         /// Response channel.
         reply: oneshot::Sender<PeerOutboundState>,
+    },
+    /// Query: atomically return every RIB-owned field `NeighborService` exposes
+    /// for a set of peers, plus an optional update-group comparison.  One
+    /// actor turn avoids per-peer request amplification and mixed-generation
+    /// rows in `ListNeighbors` and `GetNeighborState`.
+    QueryNeighborRibSnapshots {
+        /// Peers to snapshot, in the desired response order.
+        peers: Vec<IpAddr>,
+        /// Optional `(primary, comparison)` update-group comparison.
+        comparison: Option<(IpAddr, IpAddr)>,
+        /// Response channel.
+        reply: oneshot::Sender<NeighborRibSnapshotResponse>,
     },
     /// Side-effect-free snapshot used by config impact planning.
     QueryUpdateGroupSnapshot {

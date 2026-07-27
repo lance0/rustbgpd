@@ -3262,6 +3262,17 @@ impl RibManager {
         comparison: IpAddr,
         reply: tokio::sync::oneshot::Sender<UpdateGroupPeerComparison>,
     ) {
+        let _ = reply.send(self.update_group_comparison(primary, comparison));
+    }
+
+    /// Compute a comparison without crossing the actor boundary.  The
+    /// aggregate `NeighborService` snapshot uses this alongside its primary
+    /// peer row, so both values describe one manager generation.
+    pub(super) fn update_group_comparison(
+        &self,
+        primary: IpAddr,
+        comparison: IpAddr,
+    ) -> UpdateGroupPeerComparison {
         let primary_runtime = self.update_groups.members.get(&primary);
         let comparison_runtime = self.update_groups.members.get(&comparison);
         let primary_membership = primary_runtime.map_or(
@@ -3294,7 +3305,7 @@ impl RibManager {
             (Some(_), Some(_)) => (UpdateGroupComparisonVerdict::Private, Vec::new()),
         };
 
-        let _ = reply.send(UpdateGroupPeerComparison {
+        UpdateGroupPeerComparison {
             primary_update_group: primary_runtime
                 .map(GroupMembership::label)
                 .unwrap_or_default(),
@@ -3302,7 +3313,7 @@ impl RibManager {
             primary_membership,
             comparison_membership,
             differences,
-        });
+        }
     }
 
     /// Re-derive every update-group gauge from the membership map.
@@ -3429,8 +3440,12 @@ impl RibManager {
         peer: IpAddr,
         reply: tokio::sync::oneshot::Sender<crate::update::PeerOutboundState>,
     ) {
-        use crate::update::PeerOutboundState;
+        let _ = reply.send(self.peer_outbound_state(peer));
+    }
 
+    /// Compute the atomically-read outbound projection for one peer.
+    pub(super) fn peer_outbound_state(&self, peer: IpAddr) -> crate::update::PeerOutboundState {
+        use crate::update::PeerOutboundState;
         let update_group = self
             .update_groups
             .membership(peer)
@@ -3447,7 +3462,7 @@ impl RibManager {
             orr_resolved,
         );
         let outbound_prefix_limits = self.outbound_prefix_limit_rows(peer);
-        let _ = reply.send(PeerOutboundState {
+        PeerOutboundState {
             update_group,
             effective_distribution_mode,
             selection_deferral: self
@@ -3455,7 +3470,7 @@ impl RibManager {
                 .as_ref()
                 .map_or_else(Vec::new, |selection| selection.peer_snapshot(peer)),
             outbound_prefix_limits,
-        });
+        }
     }
 }
 

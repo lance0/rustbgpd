@@ -19,11 +19,17 @@ use crate::server::{
     read_only_rejection,
 };
 use rustbgpd_rib::{
-    EffectiveDistributionMode, PeerOutboundState, RibUpdate, UpdateGroupComparisonDifference,
-    UpdateGroupComparisonMembership, UpdateGroupComparisonVerdict, UpdateGroupPeerComparison,
+    EffectiveDistributionMode, NeighborRibSnapshot, NeighborRibSnapshotResponse, RibUpdate,
+    UpdateGroupComparisonDifference, UpdateGroupComparisonMembership, UpdateGroupComparisonVerdict,
+    UpdateGroupPeerComparison,
 };
 
 const CONFIG_PERSIST_RESERVE_TIMEOUT: Duration = Duration::from_secs(2);
+/// Bound both channel admission and the reply from the single-threaded RIB
+/// actor.  This matches the existing internal RIB-query timeout precedent and
+/// prevents an operator inventory request from waiting indefinitely behind a
+/// wedged actor.
+const RIB_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(2);
 
 fn is_ipv6_link_local(address: IpAddr) -> bool {
     match address {
@@ -151,75 +157,41 @@ async fn reserve_config_event_slot(
     Ok(Some(permit))
 }
 
-async fn query_advertised_count(
+async fn query_neighbor_rib_snapshots(
     rib_tx: &mpsc::Sender<RibUpdate>,
-    peer: std::net::IpAddr,
-) -> Result<u64, Status> {
+    peers: Vec<IpAddr>,
+    comparison: Option<(IpAddr, IpAddr)>,
+) -> Result<NeighborRibSnapshotResponse, Status> {
     let (reply_tx, reply_rx) = oneshot::channel();
-    rib_tx
-        .send(RibUpdate::QueryAdvertisedCount {
-            peer,
-            reply: reply_tx,
-        })
-        .await
-        .map_err(|_| Status::internal("RIB manager unavailable"))?;
-    let count = reply_rx
-        .await
-        .map_err(|_| Status::internal("RIB manager dropped reply"))?;
-    Ok(u64::try_from(count).unwrap_or(u64::MAX))
+    tokio::time::timeout(RIB_SNAPSHOT_TIMEOUT, async {
+        rib_tx
+            .send(RibUpdate::QueryNeighborRibSnapshots {
+                peers,
+                comparison,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| Status::internal("RIB manager unavailable"))?;
+        reply_rx
+            .await
+            .map_err(|_| Status::internal("RIB manager dropped reply"))
+    })
+    .await
+    .map_err(|_| Status::deadline_exceeded("RIB snapshot query timed out"))?
 }
 
-async fn query_export_policy_stats(
-    rib_tx: &mpsc::Sender<RibUpdate>,
-    peer: std::net::IpAddr,
-) -> Result<rustbgpd_rib::NeighborPolicyStats, Status> {
-    let (reply_tx, reply_rx) = oneshot::channel();
-    rib_tx
-        .send(RibUpdate::QueryNeighborPolicyStats {
-            peer,
-            reply: reply_tx,
-        })
-        .await
-        .map_err(|_| Status::internal("RIB manager unavailable"))?;
-    reply_rx
-        .await
-        .map_err(|_| Status::internal("RIB manager dropped reply"))
-}
-
-async fn query_peer_outbound_state(
-    rib_tx: &mpsc::Sender<RibUpdate>,
-    peer: std::net::IpAddr,
-) -> Result<PeerOutboundState, Status> {
-    let (reply_tx, reply_rx) = oneshot::channel();
-    rib_tx
-        .send(RibUpdate::QueryPeerOutboundState {
-            peer,
-            reply: reply_tx,
-        })
-        .await
-        .map_err(|_| Status::internal("RIB manager unavailable"))?;
-    reply_rx
-        .await
-        .map_err(|_| Status::internal("RIB manager dropped reply"))
-}
-
-async fn query_update_group_comparison(
-    rib_tx: &mpsc::Sender<RibUpdate>,
-    primary: IpAddr,
-    comparison: IpAddr,
-) -> Result<UpdateGroupPeerComparison, Status> {
-    let (reply_tx, reply_rx) = oneshot::channel();
-    rib_tx
-        .send(RibUpdate::QueryUpdateGroupComparison {
-            primary,
-            comparison,
-            reply: reply_tx,
-        })
-        .await
-        .map_err(|_| Status::internal("RIB manager unavailable"))?;
-    reply_rx
-        .await
-        .map_err(|_| Status::internal("RIB manager dropped reply"))
+fn apply_rib_snapshot(state: &mut proto::NeighborState, snapshot: &NeighborRibSnapshot) {
+    state.prefixes_sent = u64::try_from(snapshot.advertised_count).unwrap_or(u64::MAX);
+    state.export_policy_routes_permitted = snapshot.policy_stats.export_policy_routes_permitted;
+    state.export_policy_routes_denied = snapshot.policy_stats.export_policy_routes_denied;
+    state
+        .update_group
+        .clone_from(&snapshot.outbound.update_group);
+    state.effective_distribution_mode =
+        effective_distribution_mode_to_proto(snapshot.outbound.effective_distribution_mode).into();
+    state.selection_deferral = selection_deferral_to_proto(&snapshot.outbound.selection_deferral);
+    state.outbound_prefix_limits =
+        outbound_prefix_limits_to_proto(&snapshot.outbound.outbound_prefix_limits);
 }
 
 fn update_group_comparison_to_proto(
@@ -753,11 +725,11 @@ fn effective_distribution_mode_to_proto(
 }
 
 fn outbound_prefix_limits_to_proto(
-    rows: Vec<rustbgpd_rib::OutboundPrefixLimitFamilyState>,
+    rows: &[rustbgpd_rib::OutboundPrefixLimitFamilyState],
 ) -> Vec<proto::OutboundPrefixLimitState> {
-    rows.into_iter()
+    rows.iter()
         .map(|row| proto::OutboundPrefixLimitState {
-            family: row.family,
+            family: row.family.clone(),
             usage: row.usage,
             limit: row.limit,
             headroom: row.headroom,
@@ -770,18 +742,18 @@ fn outbound_prefix_limits_to_proto(
 }
 
 fn selection_deferral_to_proto(
-    rows: Vec<rustbgpd_rib::SelectionDeferralPeerFamilyState>,
+    rows: &[rustbgpd_rib::SelectionDeferralPeerFamilyState],
 ) -> Vec<proto::SelectionDeferralFamilyState> {
-    rows.into_iter()
+    rows.iter()
         .map(|row| proto::SelectionDeferralFamilyState {
             afi: row.afi as u32,
             safi: row.safi as u32,
             active: row.active,
-            waiter_state: row.waiter_state,
+            waiter_state: row.waiter_state.clone(),
             waiter_session_id: row.waiter_session_id,
             blocking_waiters: row.blocking_waiters,
             remaining_millis: row.remaining_millis,
-            release_reason: row.release_reason,
+            release_reason: row.release_reason.clone(),
         })
         .collect()
 }
@@ -1114,20 +1086,27 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             .await
             .map_err(|_| Status::internal("peer manager dropped reply"))?;
 
+        let snapshots = query_neighbor_rib_snapshots(
+            &self.rib_tx,
+            infos.iter().map(|info| info.address).collect(),
+            None,
+        )
+        .await?;
+        if snapshots.snapshots.len() != infos.len() {
+            return Err(Status::internal(
+                "RIB snapshot did not include every requested neighbor",
+            ));
+        }
+
         let mut neighbors = Vec::with_capacity(infos.len());
-        for info in &infos {
+        for (info, snapshot) in infos.iter().zip(snapshots.snapshots) {
+            if snapshot.peer != info.address {
+                return Err(Status::internal(
+                    "RIB snapshot did not preserve requested neighbor order",
+                ));
+            }
             let mut state = peer_info_to_proto(info);
-            state.prefixes_sent = query_advertised_count(&self.rib_tx, info.address).await?;
-            let policy_stats = query_export_policy_stats(&self.rib_tx, info.address).await?;
-            state.export_policy_routes_permitted = policy_stats.export_policy_routes_permitted;
-            state.export_policy_routes_denied = policy_stats.export_policy_routes_denied;
-            let outbound = query_peer_outbound_state(&self.rib_tx, info.address).await?;
-            state.update_group = outbound.update_group;
-            state.effective_distribution_mode =
-                effective_distribution_mode_to_proto(outbound.effective_distribution_mode).into();
-            state.selection_deferral = selection_deferral_to_proto(outbound.selection_deferral);
-            state.outbound_prefix_limits =
-                outbound_prefix_limits_to_proto(outbound.outbound_prefix_limits);
+            apply_rib_snapshot(&mut state, &snapshot);
             neighbors.push(state);
         }
 
@@ -1182,28 +1161,30 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
                 .ok_or_else(|| Status::not_found(format!("peer {compare_peer} not found")))?;
         }
 
-        let mut state = peer_info_to_proto(&info);
-        if let Some(compare_peer) = compare_peer {
-            let comparison =
-                query_update_group_comparison(&self.rib_tx, info.address, compare_peer.address)
-                    .await?;
-            state
-                .update_group
-                .clone_from(&comparison.primary_update_group);
-            state.update_group_comparison = Some(update_group_comparison_to_proto(&comparison));
-            return Ok(Response::new(state));
+        let comparison_pair = compare_peer
+            .as_ref()
+            .map(|compare_peer| (info.address, compare_peer.address));
+        let snapshots =
+            query_neighbor_rib_snapshots(&self.rib_tx, vec![info.address], comparison_pair).await?;
+        if snapshots.snapshots.len() != 1 {
+            return Err(Status::internal(
+                "RIB snapshot did not include exactly the requested neighbor",
+            ));
         }
-        state.prefixes_sent = query_advertised_count(&self.rib_tx, info.address).await?;
-        let policy_stats = query_export_policy_stats(&self.rib_tx, info.address).await?;
-        state.export_policy_routes_permitted = policy_stats.export_policy_routes_permitted;
-        state.export_policy_routes_denied = policy_stats.export_policy_routes_denied;
-        let outbound = query_peer_outbound_state(&self.rib_tx, info.address).await?;
-        state.update_group = outbound.update_group;
-        state.effective_distribution_mode =
-            effective_distribution_mode_to_proto(outbound.effective_distribution_mode).into();
-        state.selection_deferral = selection_deferral_to_proto(outbound.selection_deferral);
-        state.outbound_prefix_limits =
-            outbound_prefix_limits_to_proto(outbound.outbound_prefix_limits);
+        let snapshot = snapshots
+            .snapshots
+            .into_iter()
+            .next()
+            .filter(|snapshot| snapshot.peer == info.address)
+            .ok_or_else(|| Status::internal("RIB snapshot did not include requested neighbor"))?;
+        let mut state = peer_info_to_proto(&info);
+        apply_rib_snapshot(&mut state, &snapshot);
+        if compare_peer.is_some() {
+            let comparison = snapshots.comparison.ok_or_else(|| {
+                Status::internal("RIB snapshot did not include requested update-group comparison")
+            })?;
+            state.update_group_comparison = Some(update_group_comparison_to_proto(&comparison));
+        }
         Ok(Response::new(state))
     }
 
@@ -2347,47 +2328,52 @@ mod tests {
         tokio::spawn(async move {
             while let Some(cmd) = rib_rx.recv().await {
                 match cmd {
-                    RibUpdate::QueryAdvertisedCount { reply, .. } => {
-                        let _ = reply.send(7);
-                    }
-                    RibUpdate::QueryNeighborPolicyStats { reply, .. } => {
-                        let _ = reply.send(rustbgpd_rib::NeighborPolicyStats {
-                            export_policy_routes_permitted: 3,
-                            export_policy_routes_denied: 4,
-                            ..Default::default()
+                    RibUpdate::QueryNeighborRibSnapshots {
+                        peers,
+                        comparison,
+                        reply,
+                    } => {
+                        assert_eq!(peers, vec![addr]);
+                        assert!(comparison.is_none());
+                        let _ = reply.send(NeighborRibSnapshotResponse {
+                            snapshots: vec![NeighborRibSnapshot {
+                                peer: addr,
+                                advertised_count: 7,
+                                policy_stats: rustbgpd_rib::NeighborPolicyStats {
+                                    export_policy_routes_permitted: 3,
+                                    export_policy_routes_denied: 4,
+                                    ..Default::default()
+                                },
+                                outbound: rustbgpd_rib::PeerOutboundState {
+                                    update_group: "group:0".to_string(),
+                                    effective_distribution_mode: EffectiveDistributionMode::AddPath,
+                                    selection_deferral: vec![
+                                        rustbgpd_rib::SelectionDeferralPeerFamilyState {
+                                            afi: Afi::Ipv4,
+                                            safi: Safi::Unicast,
+                                            active: true,
+                                            waiter_state: "awaiting_eor".to_string(),
+                                            waiter_session_id: Some(42),
+                                            blocking_waiters: 2,
+                                            remaining_millis: 1_500,
+                                            release_reason: String::new(),
+                                        },
+                                    ],
+                                    outbound_prefix_limits: vec![
+                                        rustbgpd_rib::OutboundPrefixLimitFamilyState {
+                                            family: "ipv4_unicast".to_string(),
+                                            usage: 3,
+                                            limit: Some(4),
+                                            headroom: Some(1),
+                                            blocking: false,
+                                        },
+                                    ],
+                                },
+                            }],
+                            comparison: None,
                         });
                     }
-                    RibUpdate::QueryPeerOutboundState { reply, .. } => {
-                        let _ = reply.send(PeerOutboundState {
-                            update_group: "group:0".to_string(),
-                            effective_distribution_mode: EffectiveDistributionMode::AddPath,
-                            selection_deferral: vec![
-                                rustbgpd_rib::SelectionDeferralPeerFamilyState {
-                                    afi: Afi::Ipv4,
-                                    safi: Safi::Unicast,
-                                    active: true,
-                                    waiter_state: "awaiting_eor".to_string(),
-                                    waiter_session_id: Some(42),
-                                    blocking_waiters: 2,
-                                    remaining_millis: 1_500,
-                                    release_reason: String::new(),
-                                },
-                            ],
-                            outbound_prefix_limits: vec![
-                                rustbgpd_rib::OutboundPrefixLimitFamilyState {
-                                    family: "ipv4_unicast".to_string(),
-                                    usage: 3,
-                                    limit: Some(4),
-                                    headroom: Some(1),
-                                    blocking: false,
-                                },
-                            ],
-                        });
-                    }
-                    RibUpdate::QueryUpdateGroupComparison { .. } => {
-                        panic!("ordinary neighbor query must not request a comparison");
-                    }
-                    _ => {}
+                    _ => panic!("expected one aggregate RIB snapshot"),
                 }
             }
         });
@@ -2420,9 +2406,174 @@ mod tests {
         assert_eq!(resp.selection_deferral[0].remaining_millis, 1_500);
     }
 
+    /// Load-bearing: restoring the former per-peer triple-query loop sends a
+    /// second RIB command here, while this responder accepts exactly one
+    /// aggregate request for both rows and fails it immediately.
+    #[tokio::test]
+    async fn list_neighbors_uses_one_aggregate_rib_snapshot_for_all_peers() {
+        let (peer_tx, mut peer_rx) = mpsc::channel(16);
+        let (rib_tx, mut rib_rx) = mpsc::channel(16);
+        let svc = NeighborService::new(65001, AccessMode::ReadWrite, peer_tx, rib_tx, None);
+        let first: IpAddr = "10.0.0.1".parse().unwrap();
+        let second: IpAddr = "10.0.0.2".parse().unwrap();
+
+        let peer_task = tokio::spawn(async move {
+            let Some(PeerManagerCommand::ListPeers { reply }) = peer_rx.recv().await else {
+                panic!("ListNeighbors must request one peer-manager snapshot");
+            };
+            reply
+                .send(vec![peer_info(first), peer_info(second)])
+                .unwrap();
+        });
+        let rib_task = tokio::spawn(async move {
+            let Some(RibUpdate::QueryNeighborRibSnapshots {
+                peers,
+                comparison,
+                reply,
+            }) = rib_rx.recv().await
+            else {
+                panic!("ListNeighbors must issue one aggregate RIB snapshot");
+            };
+            assert_eq!(peers, vec![first, second]);
+            assert!(comparison.is_none());
+            reply
+                .send(NeighborRibSnapshotResponse {
+                    snapshots: vec![
+                        NeighborRibSnapshot {
+                            peer: first,
+                            advertised_count: 7,
+                            policy_stats: rustbgpd_rib::NeighborPolicyStats {
+                                export_policy_routes_permitted: 3,
+                                export_policy_routes_denied: 4,
+                                ..Default::default()
+                            },
+                            outbound: rustbgpd_rib::PeerOutboundState {
+                                update_group: "group:7".into(),
+                                effective_distribution_mode: EffectiveDistributionMode::AddPath,
+                                selection_deferral: vec![],
+                                outbound_prefix_limits: vec![],
+                            },
+                        },
+                        NeighborRibSnapshot {
+                            peer: second,
+                            advertised_count: 9,
+                            policy_stats: rustbgpd_rib::NeighborPolicyStats {
+                                export_policy_routes_permitted: 5,
+                                export_policy_routes_denied: 6,
+                                ..Default::default()
+                            },
+                            outbound: rustbgpd_rib::PeerOutboundState {
+                                update_group: "private:policy_peer_context".into(),
+                                effective_distribution_mode:
+                                    EffectiveDistributionMode::PerClientBest,
+                                selection_deferral: vec![],
+                                outbound_prefix_limits: vec![],
+                            },
+                        },
+                    ],
+                    comparison: None,
+                })
+                .unwrap();
+            assert!(matches!(rib_rx.try_recv(), Err(TryRecvError::Empty)));
+        });
+
+        let neighbors = svc
+            .list_neighbors(Request::new(proto::ListNeighborsRequest {}))
+            .await
+            .unwrap()
+            .into_inner()
+            .neighbors;
+        peer_task.await.unwrap();
+        rib_task.await.unwrap();
+        assert_eq!(neighbors.len(), 2);
+        assert_eq!(neighbors[0].prefixes_sent, 7);
+        assert_eq!(neighbors[0].export_policy_routes_permitted, 3);
+        assert_eq!(neighbors[0].update_group, "group:7");
+        assert_eq!(neighbors[1].prefixes_sent, 9);
+        assert_eq!(neighbors[1].export_policy_routes_denied, 6);
+        assert_eq!(neighbors[1].update_group, "private:policy_peer_context");
+        assert_eq!(
+            neighbors[1].effective_distribution_mode,
+            proto::EffectiveDistributionMode::PerClientBest as i32
+        );
+    }
+
+    /// Load-bearing: removing `RIB_SNAPSHOT_TIMEOUT` leaves the request
+    /// pending, so the outer three-second guard expires instead of observing
+    /// the production `DeadlineExceeded` status.
+    #[tokio::test]
+    async fn stalled_rib_snapshot_returns_deadline_exceeded() {
+        let (peer_tx, mut peer_rx) = mpsc::channel(16);
+        let (rib_tx, mut rib_rx) = mpsc::channel(16);
+        let svc = NeighborService::new(65001, AccessMode::ReadWrite, peer_tx, rib_tx, None);
+        let addr: IpAddr = "10.0.0.1".parse().unwrap();
+        tokio::spawn(async move {
+            let Some(PeerManagerCommand::GetPeerState { reply, .. }) = peer_rx.recv().await else {
+                panic!("expected peer lookup");
+            };
+            reply.send(Some(peer_info(addr))).unwrap();
+        });
+        tokio::spawn(async move {
+            let Some(RibUpdate::QueryNeighborRibSnapshots { reply: _reply, .. }) =
+                rib_rx.recv().await
+            else {
+                panic!("expected aggregate RIB snapshot");
+            };
+            std::future::pending::<()>().await;
+        });
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(3),
+            svc.get_neighbor_state(Request::new(proto::GetNeighborStateRequest {
+                address: addr.to_string(),
+                ..Default::default()
+            })),
+        )
+        .await
+        .expect("production RIB timeout must finish before the test guard")
+        .unwrap_err();
+        assert_eq!(result.code(), tonic::Code::DeadlineExceeded);
+    }
+
+    /// Load-bearing: the timeout includes mpsc admission, not only a reply
+    /// after admission. Removing or moving it below `send` leaves this full
+    /// capacity-one channel stuck until the outer three-second test guard.
+    #[tokio::test]
+    async fn saturated_rib_snapshot_channel_returns_deadline_exceeded() {
+        let (peer_tx, mut peer_rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel(1);
+        let (queued_reply, _queued_response) = oneshot::channel();
+        rib_tx
+            .send(RibUpdate::QueryLocRibCount {
+                reply: queued_reply,
+            })
+            .await
+            .unwrap();
+        let svc = NeighborService::new(65001, AccessMode::ReadWrite, peer_tx, rib_tx, None);
+        let addr: IpAddr = "10.0.0.1".parse().unwrap();
+        tokio::spawn(async move {
+            let Some(PeerManagerCommand::GetPeerState { reply, .. }) = peer_rx.recv().await else {
+                panic!("expected peer lookup");
+            };
+            reply.send(Some(peer_info(addr))).unwrap();
+        });
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(3),
+            svc.get_neighbor_state(Request::new(proto::GetNeighborStateRequest {
+                address: addr.to_string(),
+                ..Default::default()
+            })),
+        )
+        .await
+        .expect("production RIB timeout must include channel admission")
+        .unwrap_err();
+        assert_eq!(result.code(), tonic::Code::DeadlineExceeded);
+    }
+
     #[tokio::test]
     #[rustfmt::skip]
-    async fn comparison_validates_both_peers_then_uses_one_typed_rib_query() {
+    async fn comparison_validates_both_peers_then_uses_one_aggregate_rib_snapshot() {
         let (peer_tx, mut peer_rx) = mpsc::channel(16);
         let (rib_tx, mut rib_rx) = mpsc::channel(16);
         let svc = NeighborService::new(65001, AccessMode::ReadWrite, peer_tx, rib_tx, None);
@@ -2438,16 +2589,41 @@ mod tests {
             }
         });
         let rib_task = tokio::spawn(async move {
-            let Some(RibUpdate::QueryUpdateGroupComparison { primary: left, comparison: right, reply })
+            let Some(RibUpdate::QueryNeighborRibSnapshots { peers, comparison: comparison_pair, reply })
                 = rib_rx.recv().await else {
-                panic!("comparison must be the only RIB snapshot query");
+                panic!("comparison must use the aggregate RIB snapshot query");
             };
-            assert_eq!((left, right), (primary, comparison));
-            reply.send(UpdateGroupPeerComparison {
-                primary_update_group: "group:7".into(), verdict: UpdateGroupComparisonVerdict::Separate,
-                primary_membership: UpdateGroupComparisonMembership::Grouped,
-                comparison_membership: UpdateGroupComparisonMembership::SlowPeer,
-                differences: vec![UpdateGroupComparisonDifference::SessionKind],
+            assert_eq!(peers, vec![primary]);
+            assert_eq!(comparison_pair, Some((primary, comparison)));
+            reply.send(NeighborRibSnapshotResponse {
+                snapshots: vec![NeighborRibSnapshot {
+                    peer: primary,
+                    advertised_count: 7,
+                    policy_stats: rustbgpd_rib::NeighborPolicyStats {
+                        export_policy_routes_permitted: 3,
+                        export_policy_routes_denied: 4,
+                        ..Default::default()
+                    },
+                    outbound: rustbgpd_rib::PeerOutboundState {
+                        update_group: "group:7".into(),
+                        effective_distribution_mode: EffectiveDistributionMode::AddPath,
+                        selection_deferral: vec![rustbgpd_rib::SelectionDeferralPeerFamilyState {
+                            afi: Afi::Ipv4, safi: Safi::Unicast, active: true,
+                            waiter_state: "awaiting_eor".into(), waiter_session_id: Some(42),
+                            blocking_waiters: 2, remaining_millis: 1_500, release_reason: String::new(),
+                        }],
+                        outbound_prefix_limits: vec![rustbgpd_rib::OutboundPrefixLimitFamilyState {
+                            family: "ipv4_unicast".into(), usage: 3, limit: Some(4),
+                            headroom: Some(1), blocking: false,
+                        }],
+                    },
+                }],
+                comparison: Some(UpdateGroupPeerComparison {
+                    primary_update_group: "group:7".into(), verdict: UpdateGroupComparisonVerdict::Separate,
+                    primary_membership: UpdateGroupComparisonMembership::Grouped,
+                    comparison_membership: UpdateGroupComparisonMembership::SlowPeer,
+                    differences: vec![UpdateGroupComparisonDifference::SessionKind],
+                }),
             }).unwrap();
         });
         let request = proto::GetNeighborStateRequest { address: primary.to_string(),
@@ -2457,10 +2633,140 @@ mod tests {
         peer_task.await.unwrap();
         rib_task.await.unwrap();
         assert_eq!(state.update_group, "group:7");
+        assert_eq!(state.prefixes_sent, 7);
+        assert_eq!(state.export_policy_routes_permitted, 3);
+        assert_eq!(state.export_policy_routes_denied, 4);
+        assert_eq!(state.effective_distribution_mode, proto::EffectiveDistributionMode::AddPath as i32);
+        assert_eq!(state.selection_deferral.len(), 1);
+        assert_eq!(state.outbound_prefix_limits.len(), 1);
         assert_eq!(result.verdict, proto::UpdateGroupComparisonVerdict::Separate as i32);
         assert_eq!(result.primary_membership, proto::UpdateGroupComparisonMembership::Grouped as i32);
         assert_eq!(result.comparison_membership, proto::UpdateGroupComparisonMembership::SlowPeer as i32);
         assert_eq!(result.differences, vec![proto::UpdateGroupComparisonDifference::SessionKind as i32]);
+    }
+
+    /// Load-bearing: the comparison is optional response detail, not a
+    /// shortcut around the primary peer's RIB-owned fields. Restoring the
+    /// former comparison early-return makes the two response projections
+    /// differ because the compared response falls back to proto defaults.
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the two end-to-end request/response traces are intentionally adjacent"
+    )]
+    async fn comparison_preserves_the_primary_neighbor_snapshot() {
+        let (peer_tx, mut peer_rx) = mpsc::channel(16);
+        let (rib_tx, mut rib_rx) = mpsc::channel(16);
+        let svc = NeighborService::new(65001, AccessMode::ReadWrite, peer_tx, rib_tx, None);
+        let primary: IpAddr = "10.0.0.1".parse().unwrap();
+        let secondary: IpAddr = "10.0.0.2".parse().unwrap();
+        let snapshot = NeighborRibSnapshot {
+            peer: primary,
+            advertised_count: 7,
+            policy_stats: rustbgpd_rib::NeighborPolicyStats {
+                export_policy_routes_permitted: 3,
+                export_policy_routes_denied: 4,
+                ..Default::default()
+            },
+            outbound: rustbgpd_rib::PeerOutboundState {
+                update_group: "group:7".into(),
+                effective_distribution_mode: EffectiveDistributionMode::AddPath,
+                selection_deferral: vec![rustbgpd_rib::SelectionDeferralPeerFamilyState {
+                    afi: Afi::Ipv4,
+                    safi: Safi::Unicast,
+                    active: true,
+                    waiter_state: "awaiting_eor".into(),
+                    waiter_session_id: Some(42),
+                    blocking_waiters: 2,
+                    remaining_millis: 1_500,
+                    release_reason: String::new(),
+                }],
+                outbound_prefix_limits: vec![rustbgpd_rib::OutboundPrefixLimitFamilyState {
+                    family: "ipv4_unicast".into(),
+                    usage: 3,
+                    limit: Some(4),
+                    headroom: Some(1),
+                    blocking: false,
+                }],
+            },
+        };
+        let peer_task = tokio::spawn(async move {
+            for expected in [primary, primary, secondary] {
+                let Some(PeerManagerCommand::GetPeerState { peer, reply }) = peer_rx.recv().await
+                else {
+                    panic!("expected configured-peer validation");
+                };
+                assert_eq!(peer.address, expected);
+                reply.send(Some(peer_info(expected))).unwrap();
+            }
+        });
+        let rib_task = tokio::spawn(async move {
+            for comparison in [None, Some((primary, secondary))] {
+                let Some(RibUpdate::QueryNeighborRibSnapshots {
+                    peers,
+                    comparison: actual,
+                    reply,
+                }) = rib_rx.recv().await
+                else {
+                    panic!("expected aggregate RIB snapshot");
+                };
+                assert_eq!(peers, vec![primary]);
+                assert_eq!(actual, comparison);
+                reply
+                    .send(NeighborRibSnapshotResponse {
+                        snapshots: vec![snapshot.clone()],
+                        comparison: comparison.map(|_| UpdateGroupPeerComparison {
+                            primary_update_group: "group:7".into(),
+                            verdict: UpdateGroupComparisonVerdict::Separate,
+                            primary_membership: UpdateGroupComparisonMembership::Grouped,
+                            comparison_membership: UpdateGroupComparisonMembership::Grouped,
+                            differences: vec![UpdateGroupComparisonDifference::SessionKind],
+                        }),
+                    })
+                    .unwrap();
+            }
+        });
+        let plain = svc
+            .get_neighbor_state(Request::new(proto::GetNeighborStateRequest {
+                address: primary.to_string(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        let compared = svc
+            .get_neighbor_state(Request::new(proto::GetNeighborStateRequest {
+                address: primary.to_string(),
+                compare_address: secondary.to_string(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        peer_task.await.unwrap();
+        rib_task.await.unwrap();
+        assert_eq!(plain.prefixes_sent, 7);
+        assert_eq!(
+            (
+                compared.prefixes_sent,
+                compared.export_policy_routes_permitted,
+                compared.export_policy_routes_denied,
+                compared.update_group,
+                compared.effective_distribution_mode,
+                compared.selection_deferral,
+                compared.outbound_prefix_limits
+            ),
+            (
+                plain.prefixes_sent,
+                plain.export_policy_routes_permitted,
+                plain.export_policy_routes_denied,
+                plain.update_group,
+                plain.effective_distribution_mode,
+                plain.selection_deferral,
+                plain.outbound_prefix_limits
+            ),
+        );
+        assert!(compared.update_group_comparison.is_some());
     }
 
     #[test]
