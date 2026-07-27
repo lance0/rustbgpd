@@ -409,6 +409,34 @@ self_test_session_continuity() {
     echo "M83 authoritative session-continuity self-test passed"
 }
 
+self_test_signal_artifacts() {
+    local script=${1:?}
+    local scratch status sentinel
+    scratch=$(mktemp -d)
+
+    # Keep this proof host-independent: artifact collection calls the exported
+    # stub instead of the Docker CLI while still exercising the production
+    # signal handler, work-directory copy, and cleanup ordering.
+    docker() { return 0; }
+    export -f docker
+    set +e
+    M83_ARTIFACT_ROOT="$scratch/artifacts" \
+        RUNNER_TEMP="$scratch" \
+        bash "$script" --self-test-signal-child >/dev/null 2>&1
+    status=$?
+    unset -f docker
+
+    sentinel=$(find "$scratch/artifacts" -type f -name signal-sentinel -print -quit 2>/dev/null)
+    if [ "$status" -ne 143 ] || [ -z "$sentinel" ] \
+        || ! grep -qxF "preserve on TERM" "$sentinel"; then
+        echo "ERROR: TERM handler status=$status sentinel=${sentinel:-missing}" >&2
+        rm -rf "$scratch"
+        return 1
+    fi
+    rm -rf "$scratch"
+    echo "M83 TERM failure-artifact self-test passed"
+}
+
 case "${1:-}" in
     --check-eor-order)
         if [ "$#" -ne 4 ]; then
@@ -425,6 +453,14 @@ case "${1:-}" in
     --self-test-session-continuity)
         self_test_session_continuity
         exit
+        ;;
+    --self-test-signal-artifacts)
+        self_test_signal_artifacts "$0"
+        exit
+        ;;
+    --self-test-signal-child)
+        # Continue through normal initialization so the subprocess proof uses
+        # the production traps. It terminates immediately after they are armed.
         ;;
 esac
 
@@ -585,22 +621,46 @@ collect_failure_artifacts() {
     log "Retained failed-attempt evidence under $artifact_dir"
 }
 
-m83_on_exit() {
-    local exit_code=$?
-    set +e
-    if [ "$exit_code" -ne 0 ] || [ "${fail:-0}" -gt 0 ]; then
-        collect_failure_artifacts
-    fi
+cleanup_m83_attempt() {
     rm -rf "$M83_WORK_DIR"
     if [ "${CLEANUP:-0}" = "1" ]; then
         _cleanup_on_exit || true
     fi
-    return "$exit_code"
+}
+
+m83_on_exit() {
+    local exit_code=$?
+    trap - EXIT INT TERM HUP
+    set +e
+    if [ "$exit_code" -ne 0 ] || [ "${fail:-0}" -gt 0 ]; then
+        collect_failure_artifacts
+    fi
+    cleanup_m83_attempt
+    exit "$exit_code"
+}
+
+m83_on_signal() {
+    local signal_number=${1:?}
+    trap - EXIT INT TERM HUP
+    set +e
+    collect_failure_artifacts
+    cleanup_m83_attempt
+    exit "$((128 + signal_number))"
 }
 
 # The shared cleanup trap cannot retain container-resident evidence because the
 # topology may already be gone. Collect first, then honor its opt-in cleanup.
-trap m83_on_exit EXIT INT TERM HUP
+trap m83_on_exit EXIT
+trap 'm83_on_signal 1' HUP
+trap 'm83_on_signal 2' INT
+trap 'm83_on_signal 15' TERM
+
+if [ "${1:-}" = "--self-test-signal-child" ]; then
+    printf '%s\n' "preserve on TERM" >"$M83_WORK_DIR/signal-sentinel"
+    kill -TERM "$$"
+    echo "ERROR: TERM handler returned to the test body" >&2
+    exit 0
+fi
 
 # ---------------------------------------------------------------------------
 # Phase 0: bring the stacks up
