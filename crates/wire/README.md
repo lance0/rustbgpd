@@ -100,6 +100,15 @@ acceptance/type list: duplicate RFC 8092 Large Communities retain only their
 first occurrence. Consumers that compare decoded attribute values should
 account for that stable deduplication too.
 
+Separately from those six binary wire-decode changes,
+`RouteDistinguisher::from_str` now accepts the `Display` fallback for an
+unknown RD type: `0x` followed by exactly 16 hexadecimal digits. Raw fallback
+text for the structured types 0, 1, and 2 remains noncanonical and is rejected.
+The non-exhaustive public `RouteDistinguisherParseError` enum gains
+`InvalidHexFallback(String)` for malformed or noncanonical fallback text. This
+is an additive text-parser acceptance and API change; it does not change the
+six-item binary decoder list above.
+
 ### 0.15.0 compatibility note
 
 0.15.0 added `Capability::PathsLimit`: code 76 now decodes to typed
@@ -195,7 +204,11 @@ let bytes = encode_message(&Message::Open(open)).expect("encode OPEN");
   `RtcNlri` / `RTC_SAFI` / `RTC_MAX_PREFIX_BITS`, `decode_rtc_nlri` /
   `encode_rtc_nlri` with default-route and prefix-bit bounds
 - **`PmsiTunnel`** / **`PmsiTunnelType`** / **`PmsiTunnelIdentifier`** — PMSI Tunnel attribute (RFC 6514 §5) carried on EVPN Type 3 IMET routes for ingress-replication BUM. Constructor `PmsiTunnel::for_evpn_ingress_replication(vni, ip)` emits the RFC 8365 §5.1.3 wire shape (raw 24-bit VNI in the label field, originator IP as the tunnel identifier).
-- **`RouteDistinguisher`** — RFC 4364 §4.2 8-byte RD, used by EVPN and VPNv4/v6. Implements `Display` + `FromStr` for the standard `asn:val` / `ipv4:val` textual encodings
+- **`RouteDistinguisher`** — RFC 4364 §4.2 8-byte RD, used by EVPN and
+  VPNv4/v6. Implements `Display` + `FromStr` for the structured `asn:val` /
+  `ipv4:val` textual encodings and the exact `0x<16-hex-digits>` display
+  fallback for unknown RD types; malformed or noncanonical fallback text
+  returns `RouteDistinguisherParseError::InvalidHexFallback`
 - **`DfElectionExtendedCommunity`** (`attribute`) — RFC 8584 §2.2 / RFC 9785 §3 DF Election Extended Community: `ExtendedCommunity::as_df_election()` decodes one, `ExtendedCommunity::df_election(algorithm, capabilities, preference: Option<u16>)` constructs it (EVPN DF election algorithm, capabilities, and the RFC 9785 preference / Don't-Preempt fields)
 - **Link Bandwidth** (RFC 10005 §§2, 3.2) — `ExtendedCommunity::as_link_bandwidth()` decodes exact type 0x00/0x40, subtype 0x04, without interpreting the raw AS/float payload; `ExtendedCommunity::link_bandwidth(asn, bytes_per_sec)` continues to construct non-transitive type 0x40
 - **Origin Validation State** (RFC 8097) — `ExtendedCommunity::ORIGIN_VALIDATION_VALID` /

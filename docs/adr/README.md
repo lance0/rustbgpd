@@ -120,8 +120,8 @@ consequences so future contributors understand *why*, not just *what*.
 | [0109](0109-update-group-shared-encode.md) | Encode-once wire sharing for update-group fanout | Accepted | 2026-07-16 |
 | [0110](0110-irr-peeringdb-filtering-pipeline.md) | IRR/PeeringDB-driven filtering pipeline — ride arouteserver, defer native ingestion | Proposed | 2026-07-17 |
 | [0111](0111-authoritative-policy-replacement-continuation.md) | Actor-owned authoritative export-policy replacement continuation | Rejected (borrow-free Gate 1 NO-GO) | 2026-07-20 |
-| [0112](0112-rfc-8212-ebgp-requires-policy.md) | Opt-in RFC 8212 explicit-policy enforcement for eBGP | Proposed | 2026-07-21 |
-| [0113](0113-outbound-prefix-limits.md) | Per-peer outbound unicast prefix limits | Proposed | 2026-07-21 |
+| [0112](0112-rfc-8212-ebgp-requires-policy.md) | Opt-in RFC 8212 explicit-policy enforcement for eBGP | Accepted — fully shipped | 2026-07-21 |
+| [0113](0113-outbound-prefix-limits.md) | Per-peer outbound unicast prefix limits | Accepted — released in v0.61.0 | 2026-07-21 |
 | [0114](0114-as4-path-migration.md) | RFC 6793 AS4 path migration across legacy peers | Accepted | 2026-07-21 |
 | [0115](0115-lean-daemon-build-flavors.md) | Lean daemon build flavors | Accepted (no additional flavor) | 2026-07-22 |
 | [0116](0116-rfc-9857-sr-policy-state.md) | RFC 9857 SR Policy state in BGP-LS | Accepted (feature implementation demand-gated) | 2026-07-22 |

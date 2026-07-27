@@ -74,9 +74,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   full-table explainability anyway — full price for a partial answer.
   Sizing guidance, labelled figures, and the conditions that would
   reopen the decision are under *Changed* and in ADR-0073.
-- **`rustbgpd-wire` 0.16.0 changes decode acceptance in six places**
-  while keeping an additive API. Embedders should read the *Library
-  crates* entry under *Changed* before bumping.
+- **`rustbgpd-wire` 0.16.0 changes binary decode acceptance in six places**
+  and separately accepts the displayed unknown-type Route Distinguisher
+  fallback in its text parser, while keeping an additive API. Embedders should
+  read the *Library crates* entry under *Changed* before bumping.
 
 **Policy safety**
 
@@ -120,8 +121,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `rbgp config import` exits nonzero when its emitted config would fail
   `rustbgpd --check`, route injection rejects out-of-range ORIGIN values
   and the limited-broadcast next hop instead of coercing or accepting
-  them, and full native RIB/EVPN listings decode up to a finite 64 MiB
-  instead of failing near tonic's 4 MiB default.
+  them, and full native RIB listings plus EVPN route-list queries decode up
+  to a finite 64 MiB instead of failing near tonic's 4 MiB default.
 
 **Protocol conformance**
 
@@ -160,9 +161,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 **Library crates**
 
-- `rustbgpd-wire` 0.16.0 (additive API, six decode-acceptance changes)
-  and `rustbgpd-fsm` 0.3.1 (two additive fields on a `#[non_exhaustive]`
-  struct).
+- `rustbgpd-wire` 0.16.0 (additive API, six binary decode-acceptance changes,
+  plus additive unknown-RD text-parser acceptance) and `rustbgpd-fsm` 0.3.1
+  (two additive fields on a `#[non_exhaustive]` struct).
 
 ### Added
 
@@ -885,6 +886,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Decoded-value comparisons must also account for RFC 8092 Large Community
   duplicate normalization, which keeps the first occurrence.
 
+  Separately from those six binary wire-decode changes,
+  `RouteDistinguisher::from_str` now accepts the `Display` fallback for an
+  unknown RD type: `0x` followed by exactly 16 hexadecimal digits. Fallback
+  text for the structured types 0, 1, and 2 remains noncanonical and is
+  rejected. The non-exhaustive public `RouteDistinguisherParseError` enum
+  gains `InvalidHexFallback(String)` for malformed or noncanonical fallback
+  text. This is an additive text-parser acceptance and API change, not a
+  seventh binary decoder change.
+
   `rustbgpd-fsm` 0.3.1 keeps its public API backward-compatible:
   `PeerConfig` gains `min_hold_time: Option<u16>` and
   `required_families: Vec<(Afi, Safi)>`, and `PeerConfig` is
@@ -1475,12 +1485,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   peer-group membership, persisted delete) match a non-canonical on-disk
   spelling. A genuine address change still reconciles as remove+add.
 
-- **Full native RIB and EVPN listings no longer fail with `out of range`
-  near 4 MiB.** The `rbgp` full unary listing surfaces (`rib
-  bgpls|vpn|labeled|rtc|blackholes|fib`, `flowspec`, `evpn list|diagnose`,
-  `topology nodes|links`, `orr`) now decode responses up to a finite 64 MiB
-  ceiling — roughly 0.7-1.3 million rows — instead of tonic's 4 MiB client
-  default. Responses above the ceiling still fail closed as `out of range`;
+- **Full native RIB and EVPN route listings no longer fail with `out of
+  range` near 4 MiB.** The `rbgp` full unary listing surfaces (`rib
+  bgpls|vpn|labeled|rtc|blackholes|fib`, `flowspec`, `evpn list`, the route
+  subqueries made by `evpn diagnose`, `topology nodes|links`, and `orr`) now
+  decode responses up to a finite 64 MiB ceiling instead of tonic's 4 MiB
+  client default. The non-route `evpn diagnose` calls
+  (`ListEvpnInstances` and `GetMetrics`) retain tonic's default ceiling.
+  Responses above the selected ceiling still fail closed as `out of range`;
   paginated unicast listings, streams, and control RPCs keep the default.
   Client-side only: no daemon, protobuf, or pagination change.
 
