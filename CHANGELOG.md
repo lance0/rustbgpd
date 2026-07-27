@@ -15,6 +15,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   exact synchronous apply-attempt and recovery-batch duration for outbound
   prefix limits.
 
+- `bgp_rib_route_refresh_actor_duration_seconds{operation}` exposes accepted
+  inbound Enhanced Route Refresh actor work. Its closed `operation` label is
+  `begin`, `eorr`, or `timeout`.
+
 ### Changed
 
 - `rbgp top` keeps health and neighbor polling on the operator-selected

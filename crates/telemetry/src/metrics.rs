@@ -226,6 +226,7 @@ pub struct BgpMetrics {
     rib_policy_transition_last_duration_milliseconds: IntGauge,
     rib_policy_transition_actor_poll_duration_seconds: HistogramVec,
     rib_outbound_prefix_limit_actor_duration_seconds: HistogramVec,
+    rib_route_refresh_actor_duration_seconds: HistogramVec,
 
     // ── Update groups (shared outbound staging) ─────────────────
     update_groups: IntGauge,
@@ -916,6 +917,19 @@ impl BgpMetrics {
         .expect("valid metric definition");
         for operation in OUTBOUND_PREFIX_LIMIT_ACTOR_OPERATIONS {
             rib_outbound_prefix_limit_actor_duration_seconds.with_label_values(&[operation]);
+        }
+
+        let rib_route_refresh_actor_duration_seconds = HistogramVec::new(
+            HistogramOpts::new(
+                "bgp_rib_route_refresh_actor_duration_seconds",
+                "Wall-clock duration of accepted inbound Enhanced Route Refresh actor work, partitioned by BoRR snapshot (begin), EoRR finish (eorr), or timeout finish (timeout).",
+            )
+            .buckets(RIB_ACTOR_DURATION_BUCKETS.to_vec()),
+            &["operation"],
+        )
+        .expect("valid metric definition");
+        for operation in ["begin", "eorr", "timeout"] {
+            rib_route_refresh_actor_duration_seconds.with_label_values(&[operation]);
         }
 
         let update_groups = IntGauge::new(
@@ -1930,6 +1944,9 @@ impl BgpMetrics {
             ))
             .expect("metric not already registered");
         registry
+            .register(Box::new(rib_route_refresh_actor_duration_seconds.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(update_groups.clone()))
             .expect("metric not already registered");
         registry
@@ -2282,6 +2299,7 @@ impl BgpMetrics {
             rib_policy_transition_last_duration_milliseconds,
             rib_policy_transition_actor_poll_duration_seconds,
             rib_outbound_prefix_limit_actor_duration_seconds,
+            rib_route_refresh_actor_duration_seconds,
             update_groups,
             update_group_members,
             peer_update_group,
@@ -3649,6 +3667,26 @@ impl BgpMetrics {
             .observe(duration.as_secs_f64());
     }
 
+    /// Observe one accepted inbound Enhanced Route Refresh stale-inventory
+    /// snapshot performed by the RIB actor.
+    pub fn observe_rib_route_refresh_begin_actor_duration(&self, duration: std::time::Duration) {
+        self.rib_route_refresh_actor_duration_seconds
+            .with_label_values(&["begin"])
+            .observe(duration.as_secs_f64());
+    }
+
+    /// Observe one active inbound Enhanced Route Refresh finisher performed by
+    /// the RIB actor.
+    pub fn observe_rib_route_refresh_finish_actor_duration(
+        &self,
+        timed_out: bool,
+        duration: std::time::Duration,
+    ) {
+        self.rib_route_refresh_actor_duration_seconds
+            .with_label_values(&[if timed_out { "timeout" } else { "eorr" }])
+            .observe(duration.as_secs_f64());
+    }
+
     /// Set how many entries are still awaiting replacement in an inbound
     /// Enhanced Route Refresh window.
     pub fn set_route_refresh_stale_entries(&self, peer: &str, afi_safi: &str, count: i64) {
@@ -4971,6 +5009,59 @@ mod tests {
         for (operation, (sample_count, buckets)) in observed {
             assert_eq!(sample_count, 0, "fresh {operation} series is zeroed");
             assert_eq!(buckets, expected_buckets, "actor buckets for {operation}");
+        }
+    }
+
+    #[test]
+    fn route_refresh_actor_duration_histogram_has_closed_zeroed_labels_and_actor_buckets() {
+        let m = BgpMetrics::new();
+
+        let family = m
+            .registry()
+            .gather()
+            .into_iter()
+            .find(|family| family.name() == "bgp_rib_route_refresh_actor_duration_seconds")
+            .expect("route-refresh actor duration histogram is registered");
+        let observed: std::collections::BTreeMap<_, _> = family
+            .metric
+            .iter()
+            .map(|metric| {
+                let operation = metric
+                    .get_label()
+                    .iter()
+                    .find(|label| label.name() == "operation")
+                    .expect("operation label exists")
+                    .value()
+                    .to_owned();
+                let histogram = metric.get_histogram();
+                let buckets = histogram
+                    .get_bucket()
+                    .iter()
+                    .map(|bucket| bucket.upper_bound().to_bits())
+                    .collect::<Vec<_>>();
+                (operation, (histogram.sample_count(), buckets))
+            })
+            .collect();
+        let expected_buckets = [
+            0.001, 0.005, 0.010, 0.025, 0.050, 0.100, 0.200, 0.500, 1.0, 2.5, 5.0, 10.0, 30.0,
+        ]
+        .map(f64::to_bits)
+        .to_vec();
+
+        assert_eq!(
+            observed.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["begin", "eorr", "timeout"],
+            "destructive break: a new operation label would make the metric's bounded cardinality untrue"
+        );
+        for (operation, (sample_count, buckets)) in observed {
+            assert_eq!(
+                sample_count, 0,
+                "destructive break: registration must expose a zeroed {operation} series before any refresh work"
+            );
+            assert_eq!(
+                buckets, expected_buckets,
+                "destructive break: route-refresh actor latency must retain the shared actor bucket contract"
+            );
         }
     }
 
