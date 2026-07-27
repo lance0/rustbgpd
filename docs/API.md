@@ -1222,11 +1222,13 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 ```
 
 `route_type_filter` accepts 0 (no filter) or `1..=5` matching the RFC 7432
-route type numbers. `peer_filter` is an optional **exact** match against the
-peer IP address (e.g. `"10.0.0.2"`); `rd_filter` is an optional **exact**
-match against the route distinguisher in display form (e.g. `"65000:100"`,
-`"10.0.0.1:100"`, or `"4200000000:100"` per RFC 4364 RD types 0/1/2). Empty
-strings disable each filter.
+route type numbers. `peer_filter` is an optional typed IP-address match (for
+example, expanded and compressed IPv6 spellings are equivalent); `rd_filter`
+is an optional typed route-distinguisher match (for example, `"65000:100"`,
+`"10.0.0.1:100"`, or `"4200000000:100"` per RFC 4364 RD types 0/1/2, plus
+the displayed `0x`/16-hex-digit fallback for unknown types). Empty strings
+disable each filter. Invalid filters fail with `INVALID_ARGUMENT` before the
+RIB actor is queried.
 
 ### List BGP-LS routes
 
@@ -1250,6 +1252,10 @@ the RFC 9107 ORR topology used for per-vantage best-path selection. The daemon
 does not synthesize BGP-LS from a local LSDB or negotiate BGP-LS Add-Path. GR /
 LLGR stale preservation for BGP-LS and BGP-LS VPN is implemented as part of the
 RR-family stale pipeline.
+Its `afi_safi` filter accepts only unspecified, BGP-LS, or BGP-LS VPN.
+As with EVPN, VPN, labeled-unicast, and RT-Constrain route listings, a
+non-empty `peer_filter` must parse as an IP address and matches by address
+identity rather than display spelling.
 
 ### List BLACKHOLE discard status
 

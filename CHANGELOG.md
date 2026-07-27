@@ -46,6 +46,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Non-unicast RIB listing RPCs now parse peer, EVPN Route Distinguisher and
+  family/type filters before querying the RIB, reject invalid values with
+  `INVALID_ARGUMENT`, and match equivalent IP/RD text forms by typed identity.
+
 - `rbgp top` keeps health and neighbor polling on the operator-selected
   interval while moving the full Prometheus metrics scrape to a separate
   60-second cadence. It now retries transient global-metadata failures until
