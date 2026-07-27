@@ -66,6 +66,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`rbgp doctor` retains failed reachability-probe evidence.** If a configured
+  BGP, RTR, BMP, or gNMI probe task panics or is cancelled, its ordered row now
+  remains in the bundle as a named failure instead of disappearing from the
+  diagnostic inventory.
+
 - **`rbgp` JSON and NDJSON output now returns stdout write failures instead of
   panicking.** Pretty, compact, raw, importer, advertised-diff, and MRT/BMP
   snapshot output is fully serialized before writing, preserves its existing
