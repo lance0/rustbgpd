@@ -426,6 +426,7 @@ self_test_signal_artifacts() {
     set +e
     M83_ARTIFACT_ROOT="$scratch/artifacts" \
         RUNNER_TEMP="$scratch" \
+        CLEANUP=0 \
         bash "$script" --self-test-signal-child >"$child_log" 2>&1
     status=$?
     unset -f docker grpcurl jq
