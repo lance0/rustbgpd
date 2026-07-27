@@ -39,7 +39,10 @@ pub(super) async fn drain_to_withdraws(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "RIB write construction keeps all route ownership inputs explicit"
+)]
 pub(super) async fn drain_vni_to_withdraws(
     state: &mut OriginatorState,
     instances: &EvpnInstanceTable,
@@ -90,7 +93,10 @@ pub(super) async fn drain_vni_to_withdraws(
 /// the same route identity) before its first attempt, and only the
 /// RIB's acknowledgement clears it. Failed attempts stay pending; the
 /// actor's retry arm re-drives them with bounded backoff.
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "RIB write dispatch needs the route, action, and actor outputs"
+)]
 pub(super) async fn apply_actions(
     pending: &mut PendingRibOps,
     actions: Vec<OriginationAction>,
@@ -158,7 +164,10 @@ fn action_key(action: &OriginationAction) -> EvpnRouteKey {
 /// Confirms (and does the success bookkeeping) on ack, defers on any
 /// failure. Shared by the first attempt ([`apply_actions`]) and the
 /// retry path ([`retry_pending_rib_ops`]).
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the action attempt needs its route, retry, and actor context"
+)]
 async fn attempt_action(
     pending: &mut PendingRibOps,
     generation: u64,

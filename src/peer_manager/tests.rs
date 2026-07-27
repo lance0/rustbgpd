@@ -6890,7 +6890,10 @@ fn build_transport_config_preserves_local_role_for_otc() {
 ///    default would pass a weaker test even with the copy missing, so the
 ///    sentinels are chosen to differ from those defaults.
 #[test]
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the inventory test keeps every transport field in one exact assertion"
+)]
 fn build_transport_config_reflects_every_transport_field() {
     let (_, rx) = mpsc::channel(16);
     let (rib_tx, _rib_rx) = mpsc::channel(64);
@@ -9226,7 +9229,10 @@ enum NonEstablishedRollbackRibOutcome {
     Internal,
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the rollback helper keeps all peer and RIB outcome assertions together"
+)]
 async fn assert_non_established_rollback_rib_outcome(
     rollback_outcome: NonEstablishedRollbackRibOutcome,
 ) {
@@ -9950,7 +9956,10 @@ async fn apply_resolved_policy_snapshot_rearms_refresh_on_compound_rollback_fail
     rib_drainer.abort();
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the regression drives both updates through one complete pending-refresh receipt"
+)]
 #[tokio::test]
 async fn back_to_back_updates_do_not_lose_pending_refresh() {
     use rustbgpd_transport::PeerCommand;
@@ -10189,7 +10198,10 @@ async fn peer_deletion_after_failed_update_drops_pending_retry_cleanly() {
 /// whose chains didn't change) — and no RIB `ReplacePeerExportPolicy`.
 /// The peer whose content moved gets exactly the prior behavior:
 /// session installs, RIB replace, and a Route Refresh.
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the fanout regression keeps affected and unaffected peer assertions together"
+)]
 #[tokio::test]
 async fn content_equal_policy_fanout_skips_unaffected_peers() {
     use rustbgpd_api::peer_types::ResolvedPeerPolicy;
@@ -13668,7 +13680,10 @@ async fn gshut_toggle_times_out_when_rib_reply_wedges() {
     );
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the timeout regression keeps its full transaction and recovery receipt together"
+)]
 #[tokio::test(start_paused = true)]
 async fn export_policy_apply_times_out_when_rib_reply_wedges() {
     use rustbgpd_transport::PeerCommand;
@@ -13799,7 +13814,10 @@ async fn gshut_not_found_preserves_scoped_peer_label() {
     assert_eq!(err.to_string(), "peer fe80::2%eth1 not found");
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the hot-apply regression keeps all eBGP and iBGP peer assertions together"
+)]
 #[tokio::test]
 async fn honor_graceful_shutdown_hot_apply_targets_ebgp_only() {
     use rustbgpd_transport::PeerCommand;
@@ -13970,7 +13988,10 @@ async fn honor_graceful_shutdown_hot_apply_targets_ebgp_only() {
 /// the production race: the session task can drop a reply
 /// mid-shutdown while the FSM is still reporting Established
 /// for one more poll.
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the failure regression keeps the rejected import and no-refresh receipt together"
+)]
 #[tokio::test]
 async fn import_apply_failure_on_established_peer_bails_without_refresh() {
     use rustbgpd_policy::{Policy, PolicyAction};
@@ -14163,7 +14184,10 @@ async fn import_apply_failure_on_established_peer_bails_without_refresh() {
 /// `pending_refresh = true`, leave `managed.import_policy` at
 /// the prior value, and (because peer is Idle) NOT fire Route
 /// Refresh.
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the idle-peer failure regression keeps pending-refresh state and wire assertions together"
+)]
 #[tokio::test]
 async fn import_apply_failure_on_idle_peer_bails_and_sets_pending_refresh() {
     use rustbgpd_policy::{Policy, PolicyAction};
@@ -14334,7 +14358,10 @@ async fn import_apply_failure_on_idle_peer_bails_and_sets_pending_refresh() {
 /// holds. Failure must propagate, the bookkeeping must not
 /// advance, and `pending_export_apply` must be set so the next
 /// call retries.
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the export failure regression keeps bookkeeping and wire assertions together"
+)]
 #[tokio::test]
 async fn export_apply_failure_bails_without_advancing_bookkeeping() {
     use rustbgpd_policy::{Policy, PolicyAction};
@@ -14546,7 +14573,10 @@ async fn export_apply_failure_bails_without_advancing_bookkeeping() {
 ///
 /// Asserts: first call returns Err with both flags set; second
 /// call returns Ok with `route_refresh_calls > 0`.
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the retry regression keeps import, export failure, and refresh receipt together"
+)]
 #[tokio::test]
 async fn import_succeeds_export_fails_then_retry_fires_refresh() {
     use rustbgpd_policy::{Policy, PolicyAction};
@@ -14784,7 +14814,10 @@ async fn import_succeeds_export_fails_then_retry_fires_refresh() {
 /// import-side intent independently re-arms `pending_refresh`. A
 /// content-equal retry must therefore revisit the RIB, then refresh
 /// Adj-RIB-In and clear both intents after success.
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the RIB failure regression keeps transaction and retry state together"
+)]
 #[tokio::test]
 async fn rib_failure_preserves_pending_refresh_for_retry() {
     use rustbgpd_policy::{Policy, PolicyAction};
@@ -15007,7 +15040,10 @@ async fn rib_failure_preserves_pending_refresh_for_retry() {
 /// small (Route Refresh against an empty `AdjRibIn` is a no-op
 /// on the wire) and is the right tradeoff against silent
 /// stale-routes.
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the stale-query regression keeps fencing and retry assertions together"
+)]
 #[tokio::test]
 async fn stale_query_state_re_arms_pending_refresh() {
     use rustbgpd_policy::{Policy, PolicyAction};
@@ -15151,7 +15187,10 @@ fn collision_remote_wins() {
     assert!(local_id < remote_id, "remote should win collision");
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the active-open regression keeps both candidate paths and fencing assertions together"
+)]
 #[tokio::test]
 async fn simultaneous_active_open_runs_inbound_candidate_before_primary_idle() {
     use rustbgpd_transport::PeerCommand;

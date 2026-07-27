@@ -113,7 +113,10 @@ pub(crate) enum InternalCommand {
     },
 }
 
-#[allow(clippy::struct_excessive_bools)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "peer lifecycle capabilities are independent negotiated and runtime states"
+)]
 struct ManagedPeer {
     handle: PeerHandle,
     session_id: u64,
@@ -373,7 +376,10 @@ pub struct PeerManager {
 
 impl PeerManager {
     #[cfg(test)]
-    #[expect(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "peer construction keeps all explicit lifecycle dependencies visible"
+    )]
     pub fn new(
         rx: mpsc::Receiver<PeerManagerCommand>,
         local_asn: u32,
@@ -534,7 +540,10 @@ impl PeerManager {
         }
     }
 
-    #[expect(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "configured peer construction keeps all explicit lifecycle dependencies visible"
+    )]
     pub fn new_with_config(
         rx: mpsc::Receiver<PeerManagerCommand>,
         internal_rx: mpsc::UnboundedReceiver<InternalCommand>,

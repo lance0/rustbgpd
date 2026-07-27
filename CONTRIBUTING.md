@@ -99,11 +99,12 @@ unknown scenarios, out-of-range operation indices, and overflowing seed ranges
 fail before a manager starts. The corpus uses virtual time and hard caps; it is
 not a replacement for a live or multi-day soak.
 
-The clippy-reason ratchet currently covers the paths listed in
-`DEFAULT_PATHS` in `scripts/check-clippy-reasons.py`. Any
-`#[allow(clippy::...)]` or `#[expect(clippy::...)]` in a ratcheted path must
-include `reason = "..."` explaining why the escape hatch is intentional. When
-another crate is backfilled, add it to `DEFAULT_PATHS`.
+The clippy-reason ratchet discovers every production source tree in the Cargo
+workspace through `cargo metadata`, including the daemon, crates, tools, and
+workspace benchmark packages. Any `#[allow(clippy::...)]` or
+`#[expect(clippy::...)]` there must include `reason = "..."` explaining why
+the escape hatch is intentional. New workspace packages are covered without
+maintaining a second crate list.
 
 ### Pre-commit hooks
 

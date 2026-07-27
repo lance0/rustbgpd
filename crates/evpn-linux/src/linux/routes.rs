@@ -124,7 +124,10 @@ pub fn classify(route: ClassifiedRoute) -> Classification {
     // return `Drop(InstalledByRoutingDaemon)` — listing the known
     // protocols documents *why* they're dropped and is easier to
     // extend than spelling the negative case out in the wildcard.
-    #[allow(clippy::match_same_arms)]
+    #[allow(
+        clippy::match_same_arms,
+        reason = "separate route kinds deliberately share the same netlink conversion"
+    )]
     match route.protocol {
         RouteProtocol::Kernel => Classification::Keep(RouteSource::Connected),
         RouteProtocol::Static => Classification::Keep(RouteSource::Static),

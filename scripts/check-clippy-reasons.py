@@ -4,40 +4,60 @@
 from __future__ import annotations
 
 import argparse
+import json
 import pathlib
 import re
+import subprocess
 import sys
 
 
-DEFAULT_PATHS = (
-    "crates/cli/src",
-    "crates/event-history/src",
-    "crates/api/src",
-    "crates/rib/src",
-    "crates/fsm/src",
-    "crates/policy/src",
-    "crates/rpki/src",
-    "crates/evpn/src",
-    "crates/transport/src",
-    "crates/wire/src",
-    "crates/bmp/src",
-    "crates/bfd/src",
-    "crates/mrt/src",
-    "crates/telemetry/src",
-)
 ATTRIBUTE_HEAD = re.compile(r"#!?\[\s*(?:allow|expect)\s*\(")
 REASON = re.compile(r"\breason\s*=")
 
 
+def workspace_source_roots(repo: pathlib.Path) -> list[pathlib.Path]:
+    """Return all workspace package source directories from Cargo metadata.
+
+    Target source paths, rather than a maintained crate list, include the daemon,
+    every workspace crate, tools, and workspace benchmark packages as they are
+    added. Test and bench targets are deliberately excluded: this ratchet covers
+    production source trees, while their owning package's ``src`` tree remains in
+    scope.
+    """
+    result = subprocess.run(
+        ["cargo", "metadata", "--no-deps", "--format-version", "1"],
+        cwd=repo,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or "cargo exited without an error message"
+        raise RuntimeError(f"cargo metadata failed:\n{detail}")
+    metadata = json.loads(result.stdout)
+    workspace_members = set(metadata["workspace_members"])
+    roots: set[pathlib.Path] = set()
+    for package in metadata["packages"]:
+        if package["id"] not in workspace_members:
+            continue
+        package_dir = pathlib.Path(package["manifest_path"]).parent
+        source_dir = package_dir / "src"
+        for target in package["targets"]:
+            if set(target["kind"]).isdisjoint({"test", "bench", "example"}):
+                source_path = pathlib.Path(target["src_path"])
+                roots.add(source_dir if source_path.is_relative_to(source_dir) else source_path)
+    return sorted(roots)
+
+
 def rust_files(paths: list[pathlib.Path]) -> list[pathlib.Path]:
-    files: list[pathlib.Path] = []
+    files: set[pathlib.Path] = set()
     for path in paths:
         if path.is_file():
             if path.suffix == ".rs":
-                files.append(path)
+                files.add(path)
             continue
         if path.is_dir():
-            files.extend(sorted(path.rglob("*.rs")))
+            files.update(path.rglob("*.rs"))
     return sorted(files)
 
 
@@ -101,16 +121,19 @@ def main() -> int:
         "paths",
         nargs="*",
         type=pathlib.Path,
-        default=[pathlib.Path(path) for path in DEFAULT_PATHS],
-        help=(
-            "Rust files or directories to check "
-            f"(default: {', '.join(DEFAULT_PATHS)})"
-        ),
+        default=None,
+        help="Rust files or directories to check (default: Cargo workspace production roots)",
     )
     args = parser.parse_args()
 
+    try:
+        paths = args.paths or workspace_source_roots(pathlib.Path.cwd())
+    except RuntimeError as error:
+        print(error, file=sys.stderr)
+        return 2
+
     failures: list[str] = []
-    for file in rust_files(args.paths):
+    for file in rust_files(paths):
         for line, attr in missing_reasons(file):
             failures.append(f"{file}:{line}: missing reason on {attr}")
 

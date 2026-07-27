@@ -10,7 +10,10 @@ use crate::evpn_originator::duplicate_mac::{
 use crate::evpn_originator::rib_polling::repoll_rib;
 use crate::evpn_originator::rib_write::drain_vni_to_withdraws;
 
-#[allow(clippy::too_many_lines)] // classification + drain + replay are one ordered sequence; splitting hurts the lifecycle story
+#[allow(
+    clippy::too_many_lines,
+    reason = "classification, drain, and replay are one ordered lifecycle sequence"
+)]
 pub(super) async fn apply_runtime_model(
     model: Arc<OriginatorRuntimeModel>,
     state: &mut OriginatorState,

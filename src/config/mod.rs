@@ -1972,7 +1972,10 @@ impl Config {
     ///
     /// Per-neighbor policy overrides global; if neighbor has no policy entries,
     /// the corresponding value is `None` (caller falls back to global).
-    #[expect(clippy::type_complexity)]
+    #[expect(
+        clippy::type_complexity,
+        reason = "the return preserves peer configuration and validation diagnostics together"
+    )]
     #[cfg(test)]
     pub fn to_peer_configs(
         &self,
@@ -2785,7 +2788,10 @@ impl PolicyDiff {
 }
 
 /// Full config diff result.
-#[expect(clippy::struct_excessive_bools)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each config change dimension is independently applicable"
+)]
 #[derive(Debug, serde::Serialize)]
 pub struct ConfigDiff {
     pub neighbors: NeighborDiffSummary,

@@ -7186,7 +7186,10 @@ remote_asn = 65002
     }
 
     #[tokio::test]
-    #[expect(clippy::too_many_lines)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the regression keeps persistence failure and snapshot-fence assertions together"
+    )]
     async fn config_bridge_does_not_advance_snapshot_on_acked_static_neighbor_persist_failure() {
         use rustbgpd_api::peer_types::{ConfigEvent, PeerManagerNeighborConfig};
         use rustbgpd_transport::RemovePrivateAs;

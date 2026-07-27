@@ -73,7 +73,10 @@ use crate::evpn_originator::{LOCAL_PEER, route_target_to_extcomm};
 /// commits publish complete ES snapshots through this control; the
 /// segment actor remains the only Type 1/4 originator.
 #[derive(Clone, Debug)]
-#[allow(clippy::struct_field_names)] // the `_tx` postfix is load-bearing: each field is the sender half of an actor watch
+#[allow(
+    clippy::struct_field_names,
+    reason = "the _tx postfix identifies each field as an actor-watch sender"
+)]
 pub(crate) struct EvpnSegmentRuntimeControl {
     instances_tx: watch::Sender<Arc<EvpnInstanceTable>>,
     segments_tx: watch::Sender<Arc<Vec<EthernetSegment>>>,
@@ -226,7 +229,10 @@ pub fn spawn(
 /// — no dataplane / no binding feed — in which case no bias snapshot
 /// is published / no segment counts as bound.
 #[must_use = "drop the handle to shut down the EVPN segment orchestrator"]
-#[allow(clippy::too_many_arguments)] // actor dependency spine, mirrored from the dataplane supervisor spawn
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the segment actor keeps the dataplane supervisor's dependency spine explicit"
+)]
 pub(crate) fn spawn_with_local_bias(
     instances: &Arc<EvpnInstanceTable>,
     segments: Vec<EthernetSegment>,
@@ -319,7 +325,10 @@ struct SegmentState {
     esi_label: MplsLabel,
 }
 
-#[allow(clippy::too_many_lines)] // setup + main select loop combined; further extraction hurts the lifecycle story
+#[allow(
+    clippy::too_many_lines,
+    reason = "setup and the select loop form one ordered segment lifecycle"
+)]
 async fn segment_loop(
     mut runtime: SegmentRuntime,
     mut instances_rx: watch::Receiver<Arc<EvpnInstanceTable>>,

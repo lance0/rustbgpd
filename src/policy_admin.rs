@@ -798,7 +798,10 @@ pub fn global_policy_chains_from_config(config: &Config) -> PolicyChainAssignmen
 /// Return a neighbor's configured peer-group membership. Outer `None` =
 /// neighbor not configured; inner `None` = no membership.
 #[must_use]
-#[allow(clippy::option_option)] // the two None levels are distinct contract states
+#[allow(
+    clippy::option_option,
+    reason = "the two None levels distinguish absent peer from an ungrouped peer"
+)]
 pub fn neighbor_peer_group_from_config(config: &Config, address: IpAddr) -> Option<Option<String>> {
     config
         .neighbors

@@ -2261,7 +2261,10 @@ Default configuration file.
     )
 }
 
-#[expect(clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the daemon entrypoint keeps startup validation and shutdown ownership together"
+)]
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
@@ -2762,7 +2765,10 @@ fn resolve_rib_channel_capacity_from(env: Option<&str>) -> usize {
     RIB_CHANNEL_CAPACITY
 }
 
-#[expect(clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "runtime startup keeps listener, API, and shutdown wiring in one owner"
+)]
 /// Returns `true` when shutdown was caused by the gRPC server exiting
 /// unexpectedly (a component failure — the process must exit non-zero),
 /// `false` for operator-initiated shutdowns (signals, Shutdown RPC).
@@ -6581,7 +6587,10 @@ tcp_ao = {{ key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)"
     }
 
     #[test]
-    #[expect(clippy::too_many_lines)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the regression inventory keeps all restart-time combinations in one oracle"
+    )]
     fn max_gr_restart_time_uses_largest_enabled_peer() {
         let config = crate::config::Config {
             global: crate::config::Global {

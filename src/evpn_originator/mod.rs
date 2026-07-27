@@ -396,7 +396,10 @@ pub(crate) fn vni_is_drained(
 
 /// Spawn the originator. Returns `None` for RR-only deployments
 /// (empty `evpn_instances`).
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "originator spawn keeps each explicit actor dependency visible"
+)]
 // ESI-aware origination nudged the count over the threshold; the daemon-side spawn is the only caller.
 #[allow(dead_code)]
 #[must_use = "call `EvpnOriginatorHandle::shutdown` to stop the originator — \
@@ -425,7 +428,10 @@ pub fn spawn(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "quarantine-aware spawn keeps each explicit actor dependency visible"
+)]
 #[must_use = "call `EvpnOriginatorHandle::shutdown` to stop the originator — \
               dropping the handle leaves the task running"]
 /// Spawn the originator with an external duplicate-MAC quarantine publisher.
@@ -610,7 +616,10 @@ impl OriginatorState {
     }
 }
 
-#[allow(clippy::too_many_lines)] // The actor select keeps shutdown, local observations, RIB events, and poll recovery together.
+#[allow(
+    clippy::too_many_lines,
+    reason = "the actor select keeps shutdown, observations, RIB events, and recovery ordered"
+)]
 async fn originator_loop(
     config: OriginatorConfig,
     mut runtime: OriginatorRuntime,
