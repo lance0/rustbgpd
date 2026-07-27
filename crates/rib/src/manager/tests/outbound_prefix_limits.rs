@@ -699,6 +699,29 @@ fn a_lowering_below_current_usage_rejects_the_whole_edit() {
     assert!(apply(&mut manager, 2, true).is_err());
 }
 
+/// A stale apply must leave the newer prepared transaction available for its
+/// own activation.
+///
+/// Load-bearing break: taking the prepared slot before checking its identity
+/// makes the final activation fail because the stale apply consumed txn 2.
+#[test]
+fn a_stale_apply_preserves_the_newer_prepared_transaction() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    manager.test_force_ungrouped = true;
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 113, 0, 1));
+    let _outbound_rx = register_peer(&mut manager, peer);
+
+    prepare(&mut manager, 1, limit_config(&[(peer, Some(1), None)], &[]))
+        .expect("first preflight passes");
+    prepare(&mut manager, 2, limit_config(&[(peer, Some(2), None)], &[]))
+        .expect("newer preflight replaces the first");
+
+    assert!(apply(&mut manager, 1, true).is_err());
+    apply(&mut manager, 2, true).expect("newer transaction still activates");
+    assert_eq!(ipv4_row(&manager, peer).limit, Some(2));
+}
+
 /// A raise re-derives only the affected family; activation is idempotent by
 /// transaction identity, and a superseded identity is refused.
 ///

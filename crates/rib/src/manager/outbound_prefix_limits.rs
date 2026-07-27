@@ -707,19 +707,30 @@ impl RibManager {
             let _ = reply.send(Ok(()));
             return;
         }
-        let Some(prepared) = self.outbound_limit_control.prepared.take() else {
+        let Some(prepared_txn) = self
+            .outbound_limit_control
+            .prepared
+            .as_ref()
+            .map(|prepared| prepared.txn)
+        else {
             let _ = reply.send(Err(format!(
                 "no prepared outbound prefix-limit transaction {txn}"
             )));
             return;
         };
-        if prepared.txn != txn {
+        if prepared_txn != txn {
             let _ = reply.send(Err(format!(
-                "prepared outbound prefix-limit transaction {} superseded {txn}",
-                prepared.txn
+                "prepared outbound prefix-limit transaction {prepared_txn} superseded {txn}",
             )));
             return;
         }
+        // The transaction identity is checked before consuming the slot so a
+        // stale Apply cannot discard a newer prepared transaction.
+        let prepared = self
+            .outbound_limit_control
+            .prepared
+            .take()
+            .expect("prepared transaction was checked above");
         if prepared.epoch != self.outbound_limit_control.epoch {
             let _ = reply.send(Err(
                 "outbound prefix-limit admission epoch advanced after preparation".to_string(),

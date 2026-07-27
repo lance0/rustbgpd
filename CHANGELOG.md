@@ -23,6 +23,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the daemon identity is available and retains the last-good RPKI VRP count
   through a transient metrics failure.
 
+### Fixed
+
+- **A stale outbound prefix-limit activation no longer discards a newer
+  prepared change.** The newer transaction remains available to activate.
+
 ## [0.61.0] — 2026-07-26
 
 > **Release framing.** This is the policy-safety line. RFC 8212
