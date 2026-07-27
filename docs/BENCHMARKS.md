@@ -578,6 +578,12 @@ It is an absolute measurement only, with no optimization, control, delta, or
 end-to-end network claim. Exact confidence intervals, samples, environment,
 preflight, and claim boundaries are retained in
 [`docs/perf/grouped-withdrawal-fanout-2026-07.md`](perf/grouped-withdrawal-fanout-2026-07.md).
+The immediate follow-up removed one empty exact-export batch per member from
+withdrawal-only envelopes while retaining the concrete transport snapshot and
+all commit/enqueue fences. In an A/B/B/A campaign with the same harness, the
+two-attempt mean improved by 6.80%, 8.41%, and 9.33% at 64, 256, and 1,000
+members; the 8-member result remains unclaimed. See
+[`docs/perf/grouped-withdrawal-probe-skip-2026-07.md`](perf/grouped-withdrawal-probe-skip-2026-07.md).
 
 The `adj_rib_out_family_gauge` group is the allocation-sensitive steady-state
 control. It keeps persistent homogeneous route-server fleets at 8, 64, 256,
