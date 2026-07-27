@@ -113,6 +113,26 @@ fn m83_reload_continuity_rejects_a_dropped_peer() {
 }
 
 #[test]
+fn m83_term_preserves_failure_artifacts_and_exits_nonzero() {
+    // Destructive red proof: routing TERM through the EXIT-status handler
+    // makes the subprocess observe status 0 and no copied sentinel, so this
+    // self-test exits nonzero.
+    let script = interop_path("scripts/test-m83-routeserver-multistack.sh");
+    let output = Command::new("bash")
+        .arg(&script)
+        .arg("--self-test-signal-artifacts")
+        .output()
+        .unwrap_or_else(|error| panic!("run {}: {error}", script.display()));
+    assert!(
+        output.status.success(),
+        "{} --self-test-signal-artifacts failed\nstdout:\n{}\nstderr:\n{}",
+        script.display(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn m83_capture_and_reload_receipts_cannot_become_no_ops() {
     // Destructive red proof: deleting the /proc signal, pcap validation, live
     // LP mutation, or generation probe makes the matching source fence fail.

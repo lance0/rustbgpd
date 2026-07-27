@@ -708,7 +708,23 @@ impl PeerHandle {
         deadline: Duration,
         build_command: impl FnOnce(oneshot::Sender<T>) -> PeerCommand,
     ) -> SessionQueryOutcome<T> {
-        let queried = tokio::time::timeout(deadline, async move {
+        Self::query_outcome_at(
+            commands,
+            tokio::time::Instant::now() + deadline,
+            build_command,
+        )
+        .await
+    }
+
+    async fn query_outcome_at<T>(
+        commands: mpsc::Sender<PeerCommand>,
+        deadline: tokio::time::Instant,
+        build_command: impl FnOnce(oneshot::Sender<T>) -> PeerCommand,
+    ) -> SessionQueryOutcome<T> {
+        if deadline <= tokio::time::Instant::now() {
+            return SessionQueryOutcome::TimedOut;
+        }
+        let queried = tokio::time::timeout_at(deadline, async move {
             let (reply_tx, reply_rx) = oneshot::channel();
             if commands.send(build_command(reply_tx)).await.is_err() {
                 return None;
@@ -1678,7 +1694,24 @@ impl PeerHandle {
         &self,
         deadline: Duration,
     ) -> SessionQueryOutcome<Option<ImportPolicyTermHits>> {
-        Self::query_outcome(self.commands.clone(), deadline, |reply| {
+        Self::query_import_policy_term_hits_with_deadline(
+            self.commands.clone(),
+            tokio::time::Instant::now() + deadline,
+        )
+        .await
+    }
+
+    /// Owned-sender variant of
+    /// [`Self::query_import_policy_term_hits_timeout`] using an absolute
+    /// deadline across both bounded-channel admission and the session reply.
+    ///
+    /// This is intended for concurrent fleet collectors that must share one
+    /// aggregate budget instead of granting every peer a fresh duration.
+    pub async fn query_import_policy_term_hits_with_deadline(
+        commands: mpsc::Sender<PeerCommand>,
+        deadline: tokio::time::Instant,
+    ) -> SessionQueryOutcome<Option<ImportPolicyTermHits>> {
+        Self::query_outcome_at(commands, deadline, |reply| {
             PeerCommand::QueryImportPolicyTermHits { reply }
         })
         .await
@@ -2080,6 +2113,50 @@ mod tests {
         assert!(
             matches!(chainless, SessionQueryOutcome::Reply(None)),
             "a healthy chainless session is an answered query"
+        );
+    }
+
+    /// LAN-661: an owned sender entering a full command channel late in the
+    /// fleet budget gets only the remaining time, not a fresh per-peer wait.
+    #[tokio::test(start_paused = true)]
+    async fn import_policy_query_full_channel_respects_absolute_deadline() {
+        let (handle, _rx) = handle_with_full_command_channel();
+        fill_command_channel(&handle).await;
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(50);
+        tokio::time::advance(Duration::from_millis(40)).await;
+
+        let start = tokio::time::Instant::now();
+        let outcome = PeerHandle::query_import_policy_term_hits_with_deadline(
+            handle.commands_sender(),
+            deadline,
+        )
+        .await;
+
+        assert!(matches!(outcome, SessionQueryOutcome::TimedOut));
+        assert_eq!(
+            start.elapsed(),
+            Duration::from_millis(10),
+            "the full channel must consume only the remaining aggregate budget"
+        );
+    }
+
+    /// LAN-661: `timeout_at` polls a ready inner future before observing an
+    /// expired timer, so the explicit pre-check is load-bearing here: a closed
+    /// session channel after the deadline is timeout, not session exit.
+    #[tokio::test(start_paused = true)]
+    async fn import_policy_query_expired_deadline_precedes_closed_channel() {
+        let (commands, command_rx) = mpsc::channel(1);
+        drop(command_rx);
+
+        let outcome = PeerHandle::query_import_policy_term_hits_with_deadline(
+            commands,
+            tokio::time::Instant::now(),
+        )
+        .await;
+
+        assert!(
+            matches!(outcome, SessionQueryOutcome::TimedOut),
+            "an already-expired aggregate deadline must win over a ready send failure"
         );
     }
 
