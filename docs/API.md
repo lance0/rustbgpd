@@ -351,6 +351,43 @@ config). It clears when the queue drains and on session teardown, and
 mirrors the `bgp_peer_slow{peer}` gauge. See the "Slow peers" section
 in `OPERATIONS.md` for interpretation.
 
+`NeighborState.negotiation_available` and `negotiated_session` expose the
+actor-authoritative capability outcome of the current Established session:
+hold time, remote router ID, four-octet AS, negotiated families,
+graceful-restart coverage, the peer's Route Refresh / Enhanced Route
+Refresh / Extended Message capabilities, and the resulting outbound
+message-size ceiling. Presence of `negotiation_available` distinguishes an
+older daemon that does not expose negotiation state from a current daemon
+reporting no Established session; `negotiated_session` is absent while the
+session is down, during OpenConfirm, or when the actor query is stale. The
+scalars inside it are optional so genuinely negotiated false/zero values
+stay distinct from fields an older daemon never sent during a rolling
+upgrade.
+
+`NeighborState.rfc8212_import_policy` and `rfc8212_export_policy` report
+the RFC 8212 explicit-policy status of each direction (ADR-0112); a
+one-sided configuration is never collapsed into a single "policy present"
+answer. `PRESENT` means enforcement applies and explicit operator policy is
+installed. `MISSING` means enforcement applies and the reserved internal
+deny is installed on that direction of this peer — no route crosses it, in
+any negotiated family. `NOT_REQUIRED` covers process-wide disabled
+enforcement and iBGP sessions. Clients must render `UNSPECIFIED` (a daemon
+that predates the field) and any unrecognized future value as "unknown",
+never as `NOT_REQUIRED`.
+
+`NeighborState.outbound_prefix_limits` reports ADR-0113 outbound unicast
+capacity, one `OutboundPrefixLimitState` per family: the `family` name
+(`ipv4_unicast` / `ipv6_unicast`), `usage` — distinct prefixes currently
+admitted into this peer's advertised state, post-policy, post-OTC, and
+post-exact-export, agreeing with advertised-route queries and never the
+shared update-group table's count — the optional configured `limit`
+(absence means unlimited, never zero), the saturating `headroom` (absent
+while the family is unlimited), a `blocking` flag for an open blocking
+episode, and the stable `reason` `outbound_prefix_limit_reached` while
+blocking. The list is empty from a daemon that does not expose it and from
+a peer with no outbound registration; a registered peer always reports
+both unicast families.
+
 ---
 
 ## ConfigService
@@ -949,6 +986,12 @@ Query the routing information base and subscribe to real-time route changes.
 | `ListFlowSpecRoutes` | FlowSpec routes in Adj-RIB-In / Loc-RIB view |
 | `ListEvpnRoutes` | EVPN routes (RFC 7432) in Loc-RIB view, filterable by route type / peer / RD |
 | `ListBgpLsRoutes` | BGP-LS / BGP-LS VPN routes (RFC 9552) in Loc-RIB view, exposed as opaque NLRI/TLV bytes and filterable by family, peer, and NLRI type |
+| `ListVpnRoutes` | RFC 4364/4659 VPNv4/VPNv6 routes — RD-scoped customer prefixes, Route Targets, and MPLS labels |
+| `ListLabeledRoutes` | RFC 8277 labeled-unicast (SAFI 4) routes in Loc-RIB view — MPLS label stack plus prefix reachability |
+| `ListRtcRoutes` | RFC 4684 RT-Constrain membership NLRI — which Route Targets each peer imports |
+| `ListTopologyNodes` | RFC 9107 ORR topology nodes built from the BGP-LS Adj-RIB-In union |
+| `ListTopologyLinks` | RFC 9107 ORR topology links — IGP adjacencies, link addresses, and metrics (the SPF input) |
+| `ListOrrStatus` | RFC 9107 ORR per-vantage status — configured vantages, their resolved topology nodes, and the peers bound to them |
 | `ListBlackholeDiscards` | RFC 7999 BLACKHOLE kernel-discard install status when `[global] honor_blackhole = true` and `[global] install_blackhole_discard = true` |
 | `ListFibRoutes` | ADR-0061 general unicast Linux FIB route status for configured `[[fib_tables]]` |
 | `ListFibTables` | List the configured `[[fib_tables]]` and whether the FIB reconciler is running (`sensitive_read`) |
@@ -1116,6 +1159,12 @@ that class makes the next request fail with gRPC `ABORTED`; a peer-specific
 listing can therefore restart after an unrelated peer in the same class
 changes. The server retains no route snapshot or cursor registry. `page_size`
 is capped server-side at 1000 rows per page (0 = default of 100).
+
+Every `ListRoutesResponse` also carries `total_count`: the exact filtered
+count for the whole selected view, regardless of page size. This is the
+contract behind `rbgp rib --count` and
+`rbgp rib received|advertised <PEER> --count`, which request a single-row
+page and read only `total_count`.
 
 ### Watch route changes (streaming)
 
