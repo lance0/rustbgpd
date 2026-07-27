@@ -9,6 +9,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `bgp_rib_outbound_prefix_limit_actor_duration_seconds{operation}` exposes
+  exact synchronous apply-attempt and recovery-batch duration for outbound
+  prefix limits.
+
 ### Changed
 
 - `rbgp top` keeps health and neighbor polling on the operator-selected

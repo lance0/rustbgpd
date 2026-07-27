@@ -569,6 +569,8 @@ impl RibManager {
         if scheduled.is_empty() {
             return false;
         }
+        let started = std::time::Instant::now();
+        let mut did_work = false;
         for (peer, families) in scheduled {
             if !self.outbound_peers.contains_key(&peer) {
                 continue;
@@ -577,6 +579,7 @@ impl RibManager {
                 if !families.contains(&afi) {
                     continue;
                 }
+                did_work = true;
                 // Clear the latch first: the replay below re-derives the whole
                 // family, so it re-sets the latch if excess intent remains and
                 // leaves it clear when nothing is still withheld. That is what
@@ -594,6 +597,10 @@ impl RibManager {
                 }
             }
             self.refresh_outbound_limit_gauges(peer);
+        }
+        if did_work {
+            self.metrics
+                .observe_rib_outbound_prefix_limit_recovery(started.elapsed());
         }
         true
     }
@@ -719,6 +726,7 @@ impl RibManager {
             ));
             return;
         }
+        let started = std::time::Instant::now();
         let live: Vec<_> = prepared
             .targets
             .iter()
@@ -733,6 +741,8 @@ impl RibManager {
                 };
                 let usage = self.outbound_family_usage(*peer, afi, grouped);
                 if usage > limit.get() as usize {
+                    self.metrics
+                        .observe_rib_outbound_prefix_limit_apply(started.elapsed());
                     let _ = reply.send(Err(format!(
                         "{}",
                         OutboundPrefixLimitViolation {
@@ -755,6 +765,8 @@ impl RibManager {
         }
         self.outbound_limit_control.epoch = self.outbound_limit_control.epoch.wrapping_add(1);
         self.outbound_limit_control.activated = Some(txn);
+        self.metrics
+            .observe_rib_outbound_prefix_limit_apply(started.elapsed());
         let _ = reply.send(Ok(()));
     }
 

@@ -453,6 +453,28 @@ fn apply(manager: &mut RibManager, txn: u64, activate: bool) -> Result<(), Strin
     rx.try_recv().expect("apply replies synchronously")
 }
 
+fn outbound_limit_actor_samples(metrics: &BgpMetrics) -> std::collections::BTreeMap<String, u64> {
+    metrics
+        .registry()
+        .gather()
+        .into_iter()
+        .find(|family| family.name() == "bgp_rib_outbound_prefix_limit_actor_duration_seconds")
+        .expect("outbound prefix-limit actor histogram is registered")
+        .metric
+        .iter()
+        .map(|metric| {
+            let operation = metric
+                .get_label()
+                .iter()
+                .find(|label| label.name() == "operation")
+                .expect("operation label exists")
+                .value()
+                .to_owned();
+            (operation, metric.get_histogram().sample_count())
+        })
+        .collect()
+}
+
 fn install(manager: &mut RibManager, txn: u64, config: OutboundPrefixLimitConfig) {
     prepare(manager, txn, config).expect("preflight passes");
     apply(manager, txn, true).expect("activation passes");
@@ -464,6 +486,124 @@ fn ipv4_row(manager: &RibManager, peer: IpAddr) -> OutboundPrefixLimitFamilyStat
         .into_iter()
         .find(|row| row.family == "ipv4_unicast")
         .expect("a registered peer reports both unicast families")
+}
+
+/// Load-bearing break: removing either active-attempt observation leaves the
+/// `apply` count short; observing discard, missing, superseded, or idempotent
+/// branches makes one of the exact zero/two assertions red.
+#[test]
+fn only_an_active_outbound_limit_apply_attempt_records_an_apply_batch() {
+    let metrics = BgpMetrics::new();
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    manager.test_force_ungrouped = true;
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 113, 0, 1));
+    let _outbound_rx = register_peer(&mut manager, peer);
+
+    assert_eq!(
+        outbound_limit_actor_samples(&metrics),
+        std::collections::BTreeMap::from([("apply".to_string(), 0), ("recovery".to_string(), 0),]),
+        "peer registration is not a prefix-limit apply or recovery batch"
+    );
+    assert!(apply(&mut manager, 10, false).is_ok());
+    assert!(apply(&mut manager, 10, true).is_err());
+    prepare(
+        &mut manager,
+        11,
+        limit_config(&[(peer, Some(4), None)], &[]),
+    )
+    .expect("first preflight passes");
+    prepare(
+        &mut manager,
+        12,
+        limit_config(&[(peer, Some(3), None)], &[]),
+    )
+    .expect("replacement preflight passes");
+    assert!(
+        apply(&mut manager, 11, true).is_err(),
+        "the first transaction was superseded"
+    );
+    assert_eq!(
+        outbound_limit_actor_samples(&metrics)["apply"],
+        0,
+        "inactive paths must not publish actor work"
+    );
+
+    prepare(
+        &mut manager,
+        13,
+        limit_config(&[(peer, Some(1), None)], &[]),
+    )
+    .expect("the empty peer passes preflight");
+    let source = Ipv4Addr::new(192, 0, 2, 113);
+    announce(
+        &mut manager,
+        IpAddr::V4(source),
+        source_routes(source, &[1, 2]),
+    );
+    assert!(
+        apply(&mut manager, 13, true).is_err(),
+        "the active apply recheck catches post-prepare growth"
+    );
+    assert_eq!(
+        outbound_limit_actor_samples(&metrics)["apply"],
+        1,
+        "the live precondition scan is real actor work even when it rejects"
+    );
+
+    prepare(
+        &mut manager,
+        12,
+        limit_config(&[(peer, Some(3), None)], &[]),
+    )
+    .expect("a fresh preflight passes after the superseded request");
+    apply(&mut manager, 12, true).expect("the prepared transaction activates");
+    assert_eq!(outbound_limit_actor_samples(&metrics)["apply"], 2);
+    assert_eq!(outbound_limit_actor_samples(&metrics)["recovery"], 0);
+
+    apply(&mut manager, 12, true).expect("an activation retry is idempotent");
+    assert_eq!(
+        outbound_limit_actor_samples(&metrics)["apply"],
+        2,
+        "an idempotent retry must not publish a second batch"
+    );
+}
+
+/// Load-bearing break: removing the production recovery observation leaves
+/// `recovery` at zero; observing an empty drain makes either zero/one
+/// assertion red.
+#[test]
+fn only_a_real_withheld_prefix_recovery_records_a_recovery_batch() {
+    let metrics = BgpMetrics::new();
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    manager.test_force_ungrouped = true;
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 113, 0, 1));
+    let mut outbound_rx = register_peer(&mut manager, peer);
+    install(&mut manager, 1, limit_config(&[(peer, Some(2), None)], &[]));
+    let source = Ipv4Addr::new(192, 0, 2, 113);
+    announce(
+        &mut manager,
+        IpAddr::V4(source),
+        source_routes(source, &[1, 2, 3]),
+    );
+    assert_eq!(wire_prefixes(&mut outbound_rx).len(), 2);
+    assert!(!manager.drain_outbound_limit_recovery());
+    assert_eq!(outbound_limit_actor_samples(&metrics)["recovery"], 0);
+
+    install(&mut manager, 2, limit_config(&[(peer, Some(3), None)], &[]));
+    assert_eq!(manager.outbound_limit_recovery_for(peer), vec![Afi::Ipv4]);
+    assert!(manager.drain_outbound_limit_recovery());
+    assert_eq!(wire_prefixes(&mut outbound_rx).len(), 3);
+    assert_eq!(outbound_limit_actor_samples(&metrics)["apply"], 2);
+    assert_eq!(outbound_limit_actor_samples(&metrics)["recovery"], 1);
+
+    assert!(!manager.drain_outbound_limit_recovery());
+    assert_eq!(
+        outbound_limit_actor_samples(&metrics)["recovery"],
+        1,
+        "an empty queue must not publish another batch"
+    );
 }
 
 /// A dynamic child has no neighbor entry: it inherits its configured group,
