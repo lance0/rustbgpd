@@ -23,6 +23,33 @@ use crate::server::{
 use std::sync::Arc;
 
 const CONFIG_PERSIST_RESERVE_TIMEOUT: Duration = Duration::from_secs(2);
+const POLICY_STATS_AGGREGATE_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// Run one policy-stats backend send and reply within the RPC's shared
+/// absolute deadline. A saturated bounded channel is part of the same budget
+/// as the reply wait; no sequential stage receives a fresh timeout.
+async fn policy_stats_request<C, T>(
+    tx: &mpsc::Sender<C>,
+    deadline: tokio::time::Instant,
+    build_command: impl FnOnce(oneshot::Sender<T>) -> C,
+    unavailable: &'static str,
+    dropped_reply: &'static str,
+) -> Result<T, Status> {
+    if deadline <= tokio::time::Instant::now() {
+        return Err(Status::deadline_exceeded(
+            "policy stats aggregate deadline exceeded",
+        ));
+    }
+    tokio::time::timeout_at(deadline, async {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(build_command(reply_tx))
+            .await
+            .map_err(|_| Status::internal(unavailable))?;
+        reply_rx.await.map_err(|_| Status::internal(dropped_reply))
+    })
+    .await
+    .map_err(|_| Status::deadline_exceeded("policy stats aggregate deadline exceeded"))?
+}
 
 /// Map the v1-supported `AddressFamily` proto values to `(Afi, Safi)`.
 /// ADR-0073 scopes `ExplainImportPolicy` to IPv4 / IPv6 unicast; anything
@@ -414,11 +441,15 @@ async fn require_configured_neighbor(
 async fn require_managed_peer_address(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
     address: IpAddr,
+    deadline: tokio::time::Instant,
 ) -> Result<(), Status> {
-    peer_manager_request(peer_mgr_tx, |reply| PeerManagerCommand::HasPeerAddress {
-        address,
-        reply,
-    })
+    policy_stats_request(
+        peer_mgr_tx,
+        deadline,
+        |reply| PeerManagerCommand::HasPeerAddress { address, reply },
+        "peer manager unavailable",
+        "peer manager dropped reply",
+    )
     .await?
     .then_some(())
     .ok_or_else(|| Status::not_found(format!("neighbor {address} not found")))
@@ -1346,6 +1377,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
     ) -> Result<Response<proto::GetPolicyStatsResponse>, Status> {
         use rustbgpd_rib::RibUpdate;
 
+        let deadline = tokio::time::Instant::now() + POLICY_STATS_AGGREGATE_TIMEOUT;
         let req = request.into_inner();
         let (want_export, want_import) = match req.direction.as_str() {
             "" | "export" => (true, false),
@@ -1365,7 +1397,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             })?)
         };
         if let Some(peer) = peer {
-            require_managed_peer_address(&self.peer_mgr_tx, peer).await?;
+            require_managed_peer_address(&self.peer_mgr_tx, peer, deadline).await?;
         }
         let term_stats = |terms: Vec<rustbgpd_policy::TermHitRow>| -> Vec<proto::PolicyTermStat> {
             terms
@@ -1387,17 +1419,14 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             let rib_tx = self.rib_tx.as_ref().ok_or_else(|| {
                 Status::failed_precondition("policy stats runtime unavailable on this listener")
             })?;
-            let (reply_tx, reply_rx) = oneshot::channel();
-            rib_tx
-                .send(RibUpdate::QueryExportPolicyTermHits {
-                    peer,
-                    reply: reply_tx,
-                })
-                .await
-                .map_err(|_| Status::internal("RIB manager unavailable"))?;
-            let chains = reply_rx
-                .await
-                .map_err(|_| Status::internal("RIB manager dropped reply"))?;
+            let chains = policy_stats_request(
+                rib_tx,
+                deadline,
+                |reply| RibUpdate::QueryExportPolicyTermHits { peer, reply },
+                "RIB manager unavailable",
+                "RIB manager dropped reply",
+            )
+            .await?;
             out.extend(chains.into_iter().map(|chain| {
                 proto::PolicyChainStats {
                     peer_address: chain
@@ -1415,17 +1444,18 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             }));
         }
         if want_import {
-            let (reply_tx, reply_rx) = oneshot::channel();
-            self.peer_mgr_tx
-                .send(PeerManagerCommand::QueryImportPolicyTermHits {
+            let chains = policy_stats_request(
+                &self.peer_mgr_tx,
+                deadline,
+                |reply| PeerManagerCommand::QueryImportPolicyTermHits {
                     peer,
-                    reply: reply_tx,
-                })
-                .await
-                .map_err(|_| Status::internal("peer manager unavailable"))?;
-            let chains = reply_rx
-                .await
-                .map_err(|_| Status::internal("peer manager dropped reply"))?;
+                    deadline,
+                    reply,
+                },
+                "peer manager unavailable",
+                "peer manager dropped reply",
+            )
+            .await?;
             let chains = match chains {
                 SessionQueryOutcome::Reply(chains) => chains,
                 SessionQueryOutcome::TimedOut => {
@@ -1457,24 +1487,24 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         // LAN-305: dataset status rides the stats surface — the
         // operator-visible half of "failed refresh keeps the prior
         // snapshot" (name, kind, generation, records, last error).
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.peer_mgr_tx
-            .send(PeerManagerCommand::QueryPolicyDatasets { reply: reply_tx })
-            .await
-            .map_err(|_| Status::internal("peer manager unavailable"))?;
-        let datasets = reply_rx
-            .await
-            .map_err(|_| Status::internal("peer manager dropped reply"))?
-            .into_iter()
-            .map(|row| proto::PolicyDatasetStatus {
-                name: row.status.name,
-                kind: row.status.kind.as_str().to_string(),
-                generation: row.status.generation,
-                records: u64::try_from(row.status.records).unwrap_or(u64::MAX),
-                path: row.path,
-                last_error: row.status.last_error.unwrap_or_default(),
-            })
-            .collect();
+        let datasets = policy_stats_request(
+            &self.peer_mgr_tx,
+            deadline,
+            |reply| PeerManagerCommand::QueryPolicyDatasets { reply },
+            "peer manager unavailable",
+            "peer manager dropped reply",
+        )
+        .await?
+        .into_iter()
+        .map(|row| proto::PolicyDatasetStatus {
+            name: row.status.name,
+            kind: row.status.kind.as_str().to_string(),
+            generation: row.status.generation,
+            records: u64::try_from(row.status.records).unwrap_or(u64::MAX),
+            path: row.path,
+            last_error: row.status.last_error.unwrap_or_default(),
+        })
+        .collect();
 
         Ok(Response::new(proto::GetPolicyStatsResponse {
             chains: out,
@@ -2853,8 +2883,17 @@ policy customer-in(peer_lp: u32) {
                         assert_eq!(address, "10.0.0.2".parse::<IpAddr>().unwrap());
                         let _ = reply.send(true);
                     }
-                    PeerManagerCommand::QueryImportPolicyTermHits { peer, reply } => {
+                    PeerManagerCommand::QueryImportPolicyTermHits {
+                        peer,
+                        deadline,
+                        reply,
+                    } => {
                         assert_eq!(peer, Some("10.0.0.2".parse().unwrap()));
+                        assert!(
+                            deadline
+                                <= tokio::time::Instant::now() + POLICY_STATS_AGGREGATE_TIMEOUT,
+                            "import collection must inherit the RPC aggregate deadline"
+                        );
                         let _ = reply.send(SessionQueryOutcome::Reply(vec![(
                             "10.0.0.2".parse().unwrap(),
                             rustbgpd_transport::ImportPolicyTermHits {
@@ -3070,6 +3109,226 @@ policy customer-in(peer_lp: u32) {
             .map(|chain| chain.direction.as_str())
             .collect();
         assert_eq!(directions, ["export", "import"]);
+    }
+
+    /// LAN-661: explicit-peer validation, export, import, and dataset reads
+    /// are sequential but spend one 500 ms RPC budget rather than receiving
+    /// independent timeouts.
+    #[tokio::test(start_paused = true)]
+    async fn get_policy_stats_sequential_stages_share_one_budget() {
+        const STAGE_DELAY: Duration = Duration::from_millis(150);
+
+        let (peer_tx, mut peer_rx) = mpsc::channel::<PeerManagerCommand>(4);
+        tokio::spawn(async move {
+            while let Some(command) = peer_rx.recv().await {
+                tokio::time::sleep(STAGE_DELAY).await;
+                match command {
+                    PeerManagerCommand::HasPeerAddress { reply, .. } => {
+                        let _ = reply.send(true);
+                    }
+                    PeerManagerCommand::QueryImportPolicyTermHits { reply, .. } => {
+                        let _ = reply.send(SessionQueryOutcome::Reply(Vec::new()));
+                    }
+                    PeerManagerCommand::QueryPolicyDatasets { reply } => {
+                        let _ = reply.send(Vec::new());
+                    }
+                    _ => panic!("unexpected peer-manager command"),
+                }
+            }
+        });
+        let (rib_tx, mut rib_rx) = mpsc::channel::<rustbgpd_rib::RibUpdate>(1);
+        tokio::spawn(async move {
+            while let Some(update) = rib_rx.recv().await {
+                tokio::time::sleep(STAGE_DELAY).await;
+                let rustbgpd_rib::RibUpdate::QueryExportPolicyTermHits { reply, .. } = update
+                else {
+                    panic!("unexpected RIB query");
+                };
+                let _ = reply.send(Vec::new());
+            }
+        });
+        let svc =
+            PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None).with_rib_query(rib_tx);
+        let started = tokio::time::Instant::now();
+
+        let error = PolicyServiceRpc::get_policy_stats(
+            &svc,
+            Request::new(proto::GetPolicyStatsRequest {
+                peer_address: "10.0.0.2".to_string(),
+                direction: "both".to_string(),
+            }),
+        )
+        .await
+        .expect_err("four 150 ms stages must not receive four fresh budgets");
+
+        assert_eq!(error.code(), tonic::Code::DeadlineExceeded);
+        assert_eq!(
+            tokio::time::Instant::now() - started,
+            POLICY_STATS_AGGREGATE_TIMEOUT
+        );
+    }
+
+    /// LAN-661: Tokio may poll a ready failed send before an expired
+    /// `timeout_at`; policy stats must preserve deadline precedence instead of
+    /// leaking backend closure as INTERNAL.
+    #[tokio::test(start_paused = true)]
+    async fn policy_stats_expired_deadline_precedes_immediately_closed_backend() {
+        let (tx, rx) = mpsc::channel::<u8>(1);
+        drop(rx);
+
+        let error = policy_stats_request::<u8, ()>(
+            &tx,
+            tokio::time::Instant::now(),
+            |_reply| 1,
+            "backend unavailable",
+            "backend dropped reply",
+        )
+        .await
+        .expect_err("already-expired request must fail");
+
+        assert_eq!(error.code(), tonic::Code::DeadlineExceeded);
+    }
+
+    async fn assert_policy_stats_deadline(
+        svc: &PolicyService,
+        direction: &str,
+        expected_stage: &str,
+    ) {
+        let started = tokio::time::Instant::now();
+        let error = PolicyServiceRpc::get_policy_stats(
+            svc,
+            Request::new(proto::GetPolicyStatsRequest {
+                peer_address: String::new(),
+                direction: direction.to_string(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.code(),
+            tonic::Code::DeadlineExceeded,
+            "{expected_stage} must be bounded"
+        );
+        assert_eq!(
+            tokio::time::Instant::now() - started,
+            POLICY_STATS_AGGREGATE_TIMEOUT,
+            "{expected_stage} must consume at most the one aggregate budget"
+        );
+    }
+
+    /// LAN-661: both admission to a saturated RIB command channel and an
+    /// admitted query whose reply is retained are bounded by the RPC deadline.
+    #[tokio::test(start_paused = true)]
+    async fn get_policy_stats_saturated_rib_send_and_reply_paths_remain_bounded() {
+        for hold_reply in [false, true] {
+            let (peer_tx, _peer_rx) = mpsc::channel::<PeerManagerCommand>(1);
+            let (rib_tx, mut rib_rx) = mpsc::channel::<rustbgpd_rib::RibUpdate>(1);
+            if hold_reply {
+                tokio::spawn(async move {
+                    let held = rib_rx.recv().await.expect("RIB query");
+                    std::future::pending::<()>().await;
+                    drop(held);
+                });
+            } else {
+                let (reply, _response) = oneshot::channel();
+                rib_tx
+                    .send(rustbgpd_rib::RibUpdate::QueryExportPolicyTermHits { peer: None, reply })
+                    .await
+                    .unwrap();
+            }
+            let svc = PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None)
+                .with_rib_query(rib_tx);
+            assert_policy_stats_deadline(
+                &svc,
+                "export",
+                if hold_reply { "RIB reply" } else { "RIB send" },
+            )
+            .await;
+        }
+    }
+
+    /// LAN-661: import stats cannot hang on either peer-manager channel
+    /// admission or a retained manager reply.
+    #[tokio::test(start_paused = true)]
+    async fn get_policy_stats_saturated_import_send_and_reply_paths_remain_bounded() {
+        for hold_reply in [false, true] {
+            let (peer_tx, mut peer_rx) = mpsc::channel::<PeerManagerCommand>(1);
+            if hold_reply {
+                tokio::spawn(async move {
+                    let held = peer_rx.recv().await.expect("import query");
+                    assert!(matches!(
+                        &held,
+                        PeerManagerCommand::QueryImportPolicyTermHits { .. }
+                    ));
+                    std::future::pending::<()>().await;
+                    drop(held);
+                });
+            } else {
+                let (reply, _response) = oneshot::channel();
+                peer_tx
+                    .send(PeerManagerCommand::QueryPolicyDatasets { reply })
+                    .await
+                    .unwrap();
+            }
+            let svc = PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None);
+            assert_policy_stats_deadline(
+                &svc,
+                "import",
+                if hold_reply {
+                    "import reply"
+                } else {
+                    "import send"
+                },
+            )
+            .await;
+        }
+    }
+
+    /// LAN-661: the final dataset stage uses the remaining aggregate budget
+    /// for both bounded-channel admission and its reply.
+    #[tokio::test(start_paused = true)]
+    async fn get_policy_stats_saturated_dataset_send_and_reply_paths_remain_bounded() {
+        for hold_reply in [false, true] {
+            let (peer_tx, mut peer_rx) = mpsc::channel::<PeerManagerCommand>(1);
+            if hold_reply {
+                tokio::spawn(async move {
+                    let held = peer_rx.recv().await.expect("dataset query");
+                    assert!(matches!(
+                        &held,
+                        PeerManagerCommand::QueryPolicyDatasets { .. }
+                    ));
+                    std::future::pending::<()>().await;
+                    drop(held);
+                });
+            } else {
+                let (reply, _response) = oneshot::channel();
+                peer_tx
+                    .send(PeerManagerCommand::QueryPolicyDatasets { reply })
+                    .await
+                    .unwrap();
+            }
+            let (rib_tx, mut rib_rx) = mpsc::channel::<rustbgpd_rib::RibUpdate>(1);
+            tokio::spawn(async move {
+                let rustbgpd_rib::RibUpdate::QueryExportPolicyTermHits { reply, .. } =
+                    rib_rx.recv().await.expect("export query")
+                else {
+                    panic!("unexpected RIB query");
+                };
+                let _ = reply.send(Vec::new());
+            });
+            let svc = PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None)
+                .with_rib_query(rib_tx);
+            assert_policy_stats_deadline(
+                &svc,
+                "export",
+                if hold_reply {
+                    "dataset reply"
+                } else {
+                    "dataset send"
+                },
+            )
+            .await;
+        }
     }
 
     #[tokio::test]
