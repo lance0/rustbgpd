@@ -120,6 +120,16 @@ route row, rendering `Total matching routes: N` or `{"total_count":N}` with
 exact total; `--count` bounds response transfer, not server-side query work. It
 cannot be combined with the rejected-route or explain views.
 
+The full unary listings (`rib bgpls|vpn|labeled|rtc|blackholes|fib`,
+`flowspec`, `evpn list|diagnose`, `topology nodes|links`, `orr`) return the
+whole table in one response and decode up to a finite 64 MiB ceiling (roughly
+0.7-1.3 million rows). A response above the ceiling still fails closed,
+currently as `out of range`. The ceiling is client-side compatibility headroom
+only: it does not add pagination, reduce daemon snapshot work, make filters
+cheaper, guarantee arbitrary table sizes, or change third-party gRPC clients.
+Paginated unicast listings, streams, and control RPCs keep tonic's 4 MiB
+default.
+
 `--age` appends an `Age` column to the human best, received, or advertised
 route table. It is the age of the original RIB receive event, including in the
 advertised view; it is not the age of the advertisement. Unknown timestamps

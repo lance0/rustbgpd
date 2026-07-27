@@ -185,6 +185,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   peer-group membership, persisted delete) match a non-canonical on-disk
   spelling. A genuine address change still reconciles as remove+add.
 
+- **Full native RIB and EVPN listings no longer fail with `out of range`
+  near 4 MiB.** The `rbgp` full unary listing surfaces (`rib
+  bgpls|vpn|labeled|rtc|blackholes|fib`, `flowspec`, `evpn list|diagnose`,
+  `topology nodes|links`, `orr`) now decode responses up to a finite 64 MiB
+  ceiling — roughly 0.7-1.3 million rows — instead of tonic's 4 MiB client
+  default. Responses above the ceiling still fail closed as `out of range`;
+  paginated unicast listings, streams, and control RPCs keep the default.
+  Client-side only: no daemon, protobuf, or pagination change.
+
 ## [0.61.0] — 2026-07-26
 
 > **Release framing.** This is the policy-safety line. RFC 8212

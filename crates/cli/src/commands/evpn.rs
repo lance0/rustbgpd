@@ -4,7 +4,6 @@ use crate::output;
 use crate::proto::control_service_client::ControlServiceClient;
 use crate::proto::evpn_service_client::EvpnServiceClient;
 use crate::proto::injection_service_client::InjectionServiceClient;
-use crate::proto::rib_service_client::RibServiceClient;
 use crate::proto::{
     AddEvpnRouteRequest, ClearDuplicateMacQuarantineRequest, DeleteEvpnRouteRequest,
     EthernetSegmentState, EvpnInstanceReadinessState, EvpnInstanceState, EvpnRuntimeLifecycle,
@@ -41,8 +40,7 @@ pub async fn list(
     rd: Option<String>,
     json: bool,
 ) -> Result<(), CliError> {
-    let mut client =
-        RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let mut client = connection.rib_listing_client();
     let resp = client
         .list_evpn_routes(ListEvpnRequest {
             route_type_filter: route_type.unwrap_or(0),
@@ -1094,8 +1092,7 @@ pub async fn diagnose(connection: Connection, json: bool) -> Result<(), CliError
         .into_inner()
         .instances;
 
-    let mut rib_client =
-        RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let mut rib_client = connection.rib_listing_client();
     let type2_routes = rib_client
         .list_evpn_routes(ListEvpnRequest {
             route_type_filter: 2,

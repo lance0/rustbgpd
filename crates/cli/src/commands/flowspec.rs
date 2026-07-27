@@ -2,7 +2,6 @@ use crate::connection::Connection;
 use crate::error::CliError;
 use crate::output;
 use crate::proto::injection_service_client::InjectionServiceClient;
-use crate::proto::rib_service_client::RibServiceClient;
 use crate::proto::{
     AddFlowSpecRequest, DeleteFlowSpecRequest, FlowSpecAction, FlowSpecComponent, FlowSpecRedirect,
     FlowSpecTrafficAction, FlowSpecTrafficMarking, FlowSpecTrafficRate, ListFlowSpecRequest,
@@ -62,8 +61,7 @@ fn format_action(a: &FlowSpecAction) -> String {
 }
 
 pub async fn list(connection: Connection, family: Option<i32>, json: bool) -> Result<(), CliError> {
-    let mut client =
-        RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let mut client = connection.rib_listing_client();
     let resp = client
         .list_flow_spec_routes(ListFlowSpecRequest {
             afi_safi: family.unwrap_or(0),

@@ -4,7 +4,6 @@
 use crate::connection::Connection;
 use crate::error::CliError;
 use crate::output;
-use crate::proto::rib_service_client::RibServiceClient;
 use crate::proto::{
     ListTopologyLinksRequest, ListTopologyNodesRequest, TopologyLinkEntry, TopologyNodeEntry,
 };
@@ -12,8 +11,7 @@ use serde::Serialize;
 use serde::ser::{SerializeMap, SerializeSeq, Serializer};
 
 pub async fn nodes(connection: Connection, json: bool) -> Result<(), CliError> {
-    let mut client =
-        RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let mut client = connection.rib_listing_client();
     let resp = client
         .list_topology_nodes(ListTopologyNodesRequest {})
         .await?
@@ -22,8 +20,7 @@ pub async fn nodes(connection: Connection, json: bool) -> Result<(), CliError> {
 }
 
 pub async fn links(connection: Connection, json: bool) -> Result<(), CliError> {
-    let mut client =
-        RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let mut client = connection.rib_listing_client();
     let resp = client
         .list_topology_links(ListTopologyLinksRequest {})
         .await?
