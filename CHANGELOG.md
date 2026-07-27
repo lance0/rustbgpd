@@ -66,6 +66,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`rbgp doctor` retains failed reachability-probe evidence.** If a configured
+  BGP, RTR, BMP, or gNMI probe task panics or is cancelled, its ordered row now
+  remains in the bundle as a named failure instead of disappearing from the
+  diagnostic inventory.
+
 - **`rbgp doctor` recognizes intentionally disabled peers.** For a current,
   non-stale snapshot, a retained `PeerDisabled` event makes the
   non-Established session verdict explicitly green unless a later retained
