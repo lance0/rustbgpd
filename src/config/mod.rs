@@ -15,6 +15,7 @@ use rustbgpd_evpn::{
     IpVrf, IpVrfId, IpVrfTable, OverlayIndexMode, RedundancyMode, RouteTarget,
 };
 use rustbgpd_fsm::PeerConfig;
+use rustbgpd_policy::sets::SetStore;
 use rustbgpd_policy::{
     CommunityMatch, NamedPolicy, NextHopAction, Policy, PolicyAction, PolicyChain, PolicyStatement,
     RouteModifications, parse_community_match,
@@ -34,7 +35,9 @@ use rustbgpd_wire::{
 pub use schema::*;
 pub(crate) use validation::{effective_prefix, effective_prefix_str};
 
-use self::parse::{ChainDirection, parse_families, parse_policy, resolve_chain};
+use self::parse::{
+    ChainDirection, parse_families, parse_policy, resolve_chain, resolve_chain_with_store,
+};
 use self::schema::{
     BGP_PORT, DEFAULT_CONNECT_RETRY_SECS, DEFAULT_DYNAMIC_NEIGHBOR_LIMIT, DEFAULT_HOLD_TIME,
 };
@@ -47,6 +50,10 @@ enum DatasetBindMode {
     Apply,
     Stage,
 }
+
+/// Bound canonical policy-set key retention while still sharing common sets
+/// across the dominant contiguous roster shape.
+const RESOLVED_NEIGHBOR_SET_STORE_CHUNK_SIZE: usize = 32;
 
 pub(crate) struct StagedDatasetCommit {
     updates: Vec<StagedDatasetUpdate>,
@@ -769,6 +776,10 @@ impl Config {
 
     /// Resolve the global import policy chain (named policies referenced
     /// by `[policy] import_chain`). `None` when no chain is configured.
+    #[allow(
+        dead_code,
+        reason = "direct global-chain probe used by config/reload tests; retained to keep per-chain resolution lifetimes explicit"
+    )]
     pub fn import_chain(&self) -> Result<Option<PolicyChain>, ConfigError> {
         if self.policy.import_chain.is_empty() {
             return Ok(None);
@@ -782,6 +793,26 @@ impl Config {
             &self.peer_groups,
             ChainDirection::Import,
             self.global.asn,
+        )
+    }
+
+    fn import_chain_with_store(
+        &self,
+        store: &mut SetStore,
+    ) -> Result<Option<PolicyChain>, ConfigError> {
+        if self.policy.import_chain.is_empty() {
+            return Ok(None);
+        }
+        resolve_chain_with_store(
+            &self.policy.import_chain,
+            &self.policy.definitions,
+            &self.policy.rpol,
+            &self.policy.dataset_bindings,
+            &self.policy.neighbor_sets,
+            &self.peer_groups,
+            ChainDirection::Import,
+            self.global.asn,
+            store,
         )
     }
 
@@ -799,6 +830,26 @@ impl Config {
             &self.peer_groups,
             ChainDirection::Export,
             self.global.asn,
+        )
+    }
+
+    fn export_chain_with_store(
+        &self,
+        store: &mut SetStore,
+    ) -> Result<Option<PolicyChain>, ConfigError> {
+        if self.policy.export_chain.is_empty() {
+            return Ok(None);
+        }
+        resolve_chain_with_store(
+            &self.policy.export_chain,
+            &self.policy.definitions,
+            &self.policy.rpol,
+            &self.policy.dataset_bindings,
+            &self.policy.neighbor_sets,
+            &self.peer_groups,
+            ChainDirection::Export,
+            self.global.asn,
+            store,
         )
     }
 
@@ -937,18 +988,28 @@ impl Config {
     /// # Errors
     /// Returns [`ConfigError`] when the neighbor references an undefined peer
     /// group, or when any referenced policy/chain fails to resolve or parse.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one linear inheritance resolution (global, group, neighbor, implicit tails); splitting would hide the precedence order"
-    )]
     pub fn effective_policy_for_neighbor(
         &self,
         neighbor: &Neighbor,
         external_pinned: bool,
     ) -> Result<EffectivePolicyChains, ConfigError> {
+        let mut store = SetStore::new();
+        self.effective_policy_for_neighbor_with_store(neighbor, external_pinned, &mut store)
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one linear inheritance resolution (global, group, neighbor, implicit tails); splitting would hide the precedence order"
+    )]
+    fn effective_policy_for_neighbor_with_store(
+        &self,
+        neighbor: &Neighbor,
+        external_pinned: bool,
+        store: &mut SetStore,
+    ) -> Result<EffectivePolicyChains, ConfigError> {
         let group = self.peer_group_for_neighbor(neighbor)?;
-        let global_import = self.import_chain()?;
-        let global_export = self.export_chain()?;
+        let global_import = self.import_chain_with_store(store)?;
+        let global_export = self.export_chain_with_store(store)?;
         let group_import = if let Some(group) = group {
             if group.import_policy_chain.is_empty() {
                 let policy = parse_policy(
@@ -959,7 +1020,7 @@ impl Config {
 
                 policy.map(|p| PolicyChain::new(vec![p]))
             } else {
-                resolve_chain(
+                resolve_chain_with_store(
                     &group.import_policy_chain,
                     &self.policy.definitions,
                     &self.policy.rpol,
@@ -968,6 +1029,7 @@ impl Config {
                     &self.peer_groups,
                     ChainDirection::Import,
                     self.global.asn,
+                    store,
                 )?
             }
         } else {
@@ -982,7 +1044,7 @@ impl Config {
                 )?
                 .map(|p| PolicyChain::new(vec![p]))
             } else {
-                resolve_chain(
+                resolve_chain_with_store(
                     &group.export_policy_chain,
                     &self.policy.definitions,
                     &self.policy.rpol,
@@ -991,6 +1053,7 @@ impl Config {
                     &self.peer_groups,
                     ChainDirection::Export,
                     self.global.asn,
+                    store,
                 )?
             }
         } else {
@@ -1009,7 +1072,7 @@ impl Config {
                 policy.map(|p| PolicyChain::new(vec![p]))
             }
         } else {
-            resolve_chain(
+            resolve_chain_with_store(
                 &neighbor.import_policy_chain,
                 &self.policy.definitions,
                 &self.policy.rpol,
@@ -1018,6 +1081,7 @@ impl Config {
                 &self.peer_groups,
                 ChainDirection::Import,
                 self.global.asn,
+                store,
             )?
         }
         .or_else(|| global_import.clone());
@@ -1033,7 +1097,7 @@ impl Config {
                 .map(|p| PolicyChain::new(vec![p]))
             }
         } else {
-            resolve_chain(
+            resolve_chain_with_store(
                 &neighbor.export_policy_chain,
                 &self.policy.definitions,
                 &self.policy.rpol,
@@ -1042,6 +1106,7 @@ impl Config {
                 &self.peer_groups,
                 ChainDirection::Export,
                 self.global.asn,
+                store,
             )?
         }
         .or_else(|| global_export.clone());
@@ -1218,14 +1283,24 @@ impl Config {
     /// [`Self::resolve_neighbor`] with the ADR-0112 external classification
     /// pinned on — see [`Self::effective_policy_for_neighbor`] for when that
     /// is required.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "neighbor resolution centralizes inheritance, validation, and transport projection"
-    )]
     pub(crate) fn resolve_neighbor_pinned(
         &self,
         neighbor: &Neighbor,
         external_pinned: bool,
+    ) -> Result<ResolvedNeighbor, ConfigError> {
+        let mut store = SetStore::new();
+        self.resolve_neighbor_pinned_with_store(neighbor, external_pinned, &mut store)
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "neighbor resolution centralizes inheritance, validation, and transport projection"
+    )]
+    fn resolve_neighbor_pinned_with_store(
+        &self,
+        neighbor: &Neighbor,
+        external_pinned: bool,
+        store: &mut SetStore,
     ) -> Result<ResolvedNeighbor, ConfigError> {
         let router_id: Ipv4Addr = self
             .global
@@ -1428,7 +1503,8 @@ impl Config {
         transport.reject_retention_enabled = self.policy.reject_retention.enabled;
         transport.reject_retention_capacity = self.policy.reject_retention.capacity;
 
-        let policy = self.effective_policy_for_neighbor(neighbor, external_pinned)?;
+        let policy =
+            self.effective_policy_for_neighbor_with_store(neighbor, external_pinned, store)?;
 
         Ok(ResolvedNeighbor {
             transport_config: transport,
@@ -1520,10 +1596,18 @@ impl Config {
     }
 
     pub fn resolved_neighbors(&self) -> Result<Vec<ResolvedNeighbor>, ConfigError> {
-        self.neighbors
-            .iter()
-            .map(|neighbor| self.resolve_neighbor(neighbor))
-            .collect()
+        let mut resolved = Vec::with_capacity(self.neighbors.len());
+        for chunk in self
+            .neighbors
+            .chunks(RESOLVED_NEIGHBOR_SET_STORE_CHUNK_SIZE)
+        {
+            let mut store = SetStore::new();
+            for neighbor in chunk {
+                resolved
+                    .push(self.resolve_neighbor_pinned_with_store(neighbor, false, &mut store)?);
+            }
+        }
+        Ok(resolved)
     }
 
     /// Resolve `[[evpn_instances]]` entries into a runtime
