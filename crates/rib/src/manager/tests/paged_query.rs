@@ -1369,6 +1369,157 @@ fn every_direct_timer_mutation_seam_advances_route_page_versions() {
     assert_ne!(versions(&manager), before, "selection-release seam");
 }
 
+fn refresh_test_manager() -> (RibManager, IpAddr) {
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let _outbound_rx = peer_up_direct(&mut manager, peer);
+    (manager, peer)
+}
+
+fn route_page_versions(manager: &RibManager) -> [RoutePageVersion; 3] {
+    [
+        manager
+            .route_page_received_version
+            .expect("received page generation remains available"),
+        manager
+            .route_page_best_version
+            .expect("best page generation remains available"),
+        manager
+            .route_page_advertised_version
+            .expect("advertised page generation remains available"),
+    ]
+}
+
+fn assert_each_route_page_version_advanced_once(
+    before: [RoutePageVersion; 3],
+    after: [RoutePageVersion; 3],
+) {
+    for (before, after) in before.into_iter().zip(after) {
+        assert_eq!(after.epoch, before.epoch);
+        assert_eq!(after.generation, before.generation + 1);
+    }
+}
+
+#[test]
+fn stale_refresh_markers_do_not_invalidate_route_page_continuations() {
+    let (mut manager, peer) = refresh_test_manager();
+    let before = route_page_versions(&manager);
+
+    manager.handle_update(RibUpdate::BeginRouteRefresh {
+        peer,
+        session_id: 1,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    });
+    manager.handle_update(RibUpdate::EndRouteRefresh {
+        peer,
+        session_id: 1,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    });
+
+    assert_eq!(
+        route_page_versions(&manager),
+        before,
+        "destructive break: moving refresh invalidation ahead of the current-session fence makes stale BoRR/EoRR invalidate all continuation scopes"
+    );
+}
+
+#[test]
+fn inactive_eorr_does_not_invalidate_route_page_continuations() {
+    let (mut manager, peer) = refresh_test_manager();
+    let before = route_page_versions(&manager);
+
+    manager.handle_update(RibUpdate::EndRouteRefresh {
+        peer,
+        session_id: 0,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    });
+
+    assert_eq!(
+        route_page_versions(&manager),
+        before,
+        "destructive break: advancing before the active-family gate makes an ignored EoRR invalidate all continuation scopes"
+    );
+}
+
+#[test]
+fn stale_end_of_rib_does_not_invalidate_route_page_continuations() {
+    let (mut manager, peer) = refresh_test_manager();
+    let before = route_page_versions(&manager);
+
+    manager.handle_update(RibUpdate::EndOfRib {
+        peer,
+        session_id: 1,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    });
+
+    assert_eq!(
+        route_page_versions(&manager),
+        before,
+        "destructive break: moving page invalidation ahead of the current-session EoR fence makes a discarded marker invalidate every continuation scope"
+    );
+}
+
+#[test]
+fn accepted_end_of_rib_advances_each_route_page_version_once() {
+    // Destructive break: removing the post-fence advance makes every scope
+    // observe no step for an accepted convergence marker.
+    let (mut manager, peer) = refresh_test_manager();
+    let before = route_page_versions(&manager);
+
+    manager.handle_update(RibUpdate::EndOfRib {
+        peer,
+        session_id: 0,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    });
+
+    assert_each_route_page_version_advanced_once(before, route_page_versions(&manager));
+}
+
+#[test]
+fn accepted_refresh_work_advances_each_route_page_version_once() {
+    // Destructive breaks: removing the post-fence BoRR advance makes the first
+    // assertion red; restoring the dispatcher EoRR advance makes the second
+    // observe two steps; removing the finisher advance makes EoRR/timeout
+    // observe no step.
+    let (mut manager, peer) = refresh_test_manager();
+    let begin = || RibUpdate::BeginRouteRefresh {
+        peer,
+        session_id: 0,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    };
+    let eorr = || RibUpdate::EndRouteRefresh {
+        peer,
+        session_id: 0,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    };
+
+    let before = route_page_versions(&manager);
+    manager.handle_update(begin());
+    assert_each_route_page_version_advanced_once(before, route_page_versions(&manager));
+
+    let before = route_page_versions(&manager);
+    manager.handle_update(eorr());
+    assert_each_route_page_version_advanced_once(before, route_page_versions(&manager));
+
+    manager.handle_update(begin());
+    let before = route_page_versions(&manager);
+    manager.handle_update(RibUpdate::RouteRefreshTimeout {
+        peer,
+        session_id: 0,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    });
+    assert_each_route_page_version_advanced_once(before, route_page_versions(&manager));
+}
+
 /// A shared clean export-policy transition commits its group-membership and
 /// export-overlay flips in `Finalize`, which does not always reach the
 /// distribution-pass fence (no dirty or forced peers). General queries stay

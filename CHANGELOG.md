@@ -32,6 +32,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **A stale outbound prefix-limit activation no longer discards a newer
   prepared change.** The newer transaction remains available to activate.
 
+- **Convergence-marker page-generation fencing now follows accepted work.**
+  Stale-session End-of-RIB/BoRR/EoRR and inactive EoRR markers no longer
+  invalidate paginated route queries, while accepted End-of-RIB, BoRR, EoRR,
+  and timeout work invalidates each route scope exactly once.
+
 ## [0.61.0] — 2026-07-26
 
 > **Release framing.** This is the policy-safety line. RFC 8212
