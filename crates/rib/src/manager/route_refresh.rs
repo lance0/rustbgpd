@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::net::IpAddr;
+use std::time::Instant;
 
 use rustbgpd_wire::{Afi, EvpnRouteKey, Prefix, RouteRefreshSubtype, Safi};
 use tracing::{debug, info, warn};
@@ -477,6 +478,7 @@ impl RibManager {
             (peer, afi, safi),
             tokio::time::Instant::now() + ERR_REFRESH_TIMEOUT,
         );
+        let started_at = Instant::now();
         // RFC 7313 §4 refresh-stale snapshot, kept distinct from GR/LLGR
         // retention. Transport rejects a GR-capable peer's BoRR until
         // this family has received End-of-RIB, so a conforming current session
@@ -576,6 +578,8 @@ impl RibManager {
         }
         self.set_refresh_stale_count(peer, afi, safi, stale_count);
         self.update_refresh_metrics(peer, afi, safi);
+        self.metrics
+            .observe_rib_route_refresh_begin_actor_duration(started_at.elapsed());
     }
 
     pub(super) fn handle_end_route_refresh(&mut self, peer: IpAddr, afi: Afi, safi: Safi) {
@@ -1354,6 +1358,7 @@ impl RibManager {
             debug!(%peer, ?afi, ?safi, "End-of-RIB-Refresh without active refresh state, ignoring");
             return;
         }
+        let started_at = Instant::now();
         // Timeout completion reaches this method directly from the timer arm;
         // ordinary End-of-RIB-Refresh is already fenced by `handle_update`.
         // Advancing here covers both without relying on a later distribution.
@@ -1639,5 +1644,7 @@ impl RibManager {
             // withdrawn from this peer's Adj-RIB-Out.
             self.rebuild_rtc_membership_and_restage_vpn(peer);
         }
+        self.metrics
+            .observe_rib_route_refresh_finish_actor_duration(timed_out, started_at.elapsed());
     }
 }

@@ -1,5 +1,122 @@
 use super::*;
 
+fn assert_route_refresh_actor_samples(metrics: &BgpMetrics, begin: u64, eorr: u64, timeout: u64) {
+    assert_eq!(
+        histogram_sample_counts_by_label(
+            metrics,
+            "bgp_rib_route_refresh_actor_duration_seconds",
+            "operation",
+        ),
+        BTreeMap::from([
+            ("begin".to_owned(), begin),
+            ("eorr".to_owned(), eorr),
+            ("timeout".to_owned(), timeout),
+        ])
+    );
+}
+
+#[test]
+fn route_refresh_actor_duration_counts_only_accepted_active_refresh_work() {
+    // Destructive breaks: each assertion follows one marker, so omitting a
+    // legitimate observation or moving one across the session/active gate
+    // changes that marker's own delta and cannot be hidden by a later sample.
+    let (_tx, rx) = mpsc::channel(8);
+    let metrics = BgpMetrics::new();
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let (outbound_tx, _outbound_rx) = mpsc::channel(8);
+    manager.handle_update(RibUpdate::PeerUp {
+        per_client_best: false,
+        interpret_rfc1997: true,
+        session_id: 2,
+        peer,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx,
+        export_policy: None,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+        negotiated_llgr_families: Vec::new(),
+    });
+
+    let begin = || RibUpdate::BeginRouteRefresh {
+        session_id: 2,
+        peer,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    };
+    let eorr = || RibUpdate::EndRouteRefresh {
+        session_id: 2,
+        peer,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    };
+
+    // Normal accepted BoRR/EoRR records one snapshot and one complete finisher.
+    manager.handle_update(begin());
+    assert_route_refresh_actor_samples(&metrics, 1, 0, 0);
+    manager.handle_update(eorr());
+    assert_route_refresh_actor_samples(&metrics, 1, 1, 0);
+
+    // A timeout is an active finisher and gets its distinct operation label.
+    manager.handle_update(begin());
+    assert_route_refresh_actor_samples(&metrics, 2, 1, 0);
+    manager.handle_update(RibUpdate::RouteRefreshTimeout {
+        session_id: 2,
+        peer,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    });
+    assert_route_refresh_actor_samples(&metrics, 2, 1, 1);
+
+    // A duplicate BoRR rebuilds the snapshot, so both accepted snapshots count.
+    manager.handle_update(begin());
+    assert_route_refresh_actor_samples(&metrics, 3, 1, 1);
+    manager.handle_update(begin());
+    assert_route_refresh_actor_samples(&metrics, 4, 1, 1);
+    manager.handle_update(eorr());
+    assert_route_refresh_actor_samples(&metrics, 4, 2, 1);
+
+    // Inactive finishers have no synchronous actor work to observe.
+    manager.handle_update(eorr());
+    assert_route_refresh_actor_samples(&metrics, 4, 2, 1);
+    manager.handle_update(RibUpdate::RouteRefreshTimeout {
+        session_id: 2,
+        peer,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    });
+    assert_route_refresh_actor_samples(&metrics, 4, 2, 1);
+
+    // A superseded session's markers must be discarded before observation.
+    manager.handle_update(RibUpdate::BeginRouteRefresh {
+        session_id: 1,
+        peer,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    });
+    assert_route_refresh_actor_samples(&metrics, 4, 2, 1);
+    manager.handle_update(RibUpdate::EndRouteRefresh {
+        session_id: 1,
+        peer,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    });
+    assert_route_refresh_actor_samples(&metrics, 4, 2, 1);
+    manager.handle_update(RibUpdate::RouteRefreshTimeout {
+        session_id: 1,
+        peer,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    });
+    assert_route_refresh_actor_samples(&metrics, 4, 2, 1);
+}
+
 #[tokio::test]
 async fn route_refresh_bgpls_re_advertises_routes() {
     let (tx, rx) = mpsc::channel(64);
