@@ -5,7 +5,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Wrap};
 
 use crate::output::{format_duration, format_family, format_state_with_stale};
-use crate::tui::app::{App, SortColumn, View};
+use crate::tui::app::{App, SortColumn, View, neighbor_key};
+use crate::tui::data::Freshness;
 use crate::tui::theme::Theme;
 
 pub fn draw(f: &mut Frame, app: &mut App, theme: &Theme) {
@@ -89,7 +90,29 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
         Span::styled(msg, Style::default().fg(theme.error))
     };
 
-    let content = Paragraph::new(Line::from(vec![Span::raw(" Status: "), status])).block(block);
+    let mut status_line = vec![Span::raw(" Status: ")];
+    let mut stale = Vec::new();
+    if !app.health_fresh && app.health.is_some() {
+        stale.push("health");
+    }
+    if app.neighbors_freshness == Some(Freshness::Stale) {
+        stale.push("neighbors");
+    }
+    if app.neighbors_freshness == Some(Freshness::Unavailable) {
+        status_line.push(Span::styled(
+            "neighbors unavailable | ",
+            Style::default().fg(theme.error),
+        ));
+    }
+    if !stale.is_empty() {
+        status_line.push(Span::styled(
+            format!("stale: {} | ", stale.join(", ")),
+            Style::default().fg(theme.state_connecting),
+        ));
+    }
+    status_line.push(status);
+
+    let content = Paragraph::new(Line::from(status_line)).block(block);
     f.render_widget(content, area);
 }
 
@@ -120,20 +143,27 @@ fn draw_peer_table(f: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
                 .fg(theme.header_fg)
                 .add_modifier(Modifier::BOLD),
         )
-    });
+    })
+    .chain(std::iter::once(
+        Cell::from("Description").style(
+            Style::default()
+                .fg(theme.header_fg)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ));
 
     let header = Row::new(header_cells).height(1);
 
     let rows = app.neighbors.iter().map(|n| {
         let cfg = n.config.as_ref();
-        let addr = cfg.map(|c| c.address.as_str()).unwrap_or("");
+        let identity = neighbor_key(n).unwrap_or_default();
         let asn = cfg.map(|c| c.remote_asn.to_string()).unwrap_or_default();
         let state_label = format_state_with_stale(n.state, n.stale);
         let state_color = theme.state_color_with_stale(n.state, n.stale);
         let uptime = format_duration(n.uptime_seconds);
         let rx = format_number(n.prefixes_received);
         let tx = format_number(n.prefixes_sent);
-        let rate = app.peer_update_rate(addr);
+        let rate = app.peer_update_rate(&identity);
         let rate_str = if rate < 0.05 {
             "0.0".to_string()
         } else {
@@ -143,7 +173,7 @@ fn draw_peer_table(f: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
         let desc = cfg.map(|c| c.description.as_str()).unwrap_or("");
 
         Row::new(vec![
-            Cell::from(addr.to_string()),
+            Cell::from(identity),
             Cell::from(asn),
             Cell::from(state_label).style(Style::default().fg(state_color)),
             Cell::from(uptime),
@@ -225,7 +255,7 @@ fn draw_events(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
 }
 
 fn draw_footer(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
-    let elapsed = app.last_update.elapsed().as_secs();
+    let elapsed = app.last_poll.elapsed().as_secs();
     let ago = if elapsed == 0 {
         "just now".to_string()
     } else {
@@ -239,7 +269,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     };
 
     let left = format!(" q Quit | h Help | {events_label} | s Sort | Enter Detail");
-    let right = format!("Last update: {ago} ");
+    let right = format!("Last poll: {ago} ");
 
     let available = area.width as usize;
     let pad = available.saturating_sub(left.len() + right.len());
@@ -253,13 +283,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
 }
 
 fn draw_peer_detail(f: &mut Frame, app: &mut App, address: &str, theme: &Theme) {
-    let Some(neighbor) = app.neighbors.iter().find(|neighbor| {
-        neighbor
-            .config
-            .as_ref()
-            .map(|config| config.address.as_str())
-            == Some(address)
-    }) else {
+    let Some(neighbor) = app.neighbor(address) else {
         app.view = View::PeerTable;
         return;
     };
@@ -515,6 +539,9 @@ fn format_number(n: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proto::{NeighborConfig, NeighborState};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     #[test]
     fn test_format_number() {
@@ -524,5 +551,61 @@ mod tests {
         assert_eq!(format_number(1000), "1,000");
         assert_eq!(format_number(12345), "12,345");
         assert_eq!(format_number(1234567), "1,234,567");
+    }
+
+    fn rendered_peer_table(with_neighbor: bool, freshness: Freshness) -> String {
+        let mut app = App::new();
+        if with_neighbor {
+            app.neighbors = vec![NeighborState {
+                config: Some(NeighborConfig {
+                    address: "fe80::1".into(),
+                    interface: "eth0".into(),
+                    remote_asn: 64512,
+                    description: "route-server member".into(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }];
+        }
+        app.neighbors_freshness = Some(freshness);
+        let mut terminal = Terminal::new(TestBackend::new(130, 8)).unwrap();
+        terminal
+            .draw(|frame| draw(frame, &mut app, &Theme::default()))
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    /// Red proof: removing the ninth header loses its rendered label.
+    #[test]
+    fn peer_table_labels_description_column() {
+        assert!(rendered_peer_table(true, Freshness::Stale).contains("Description"));
+    }
+
+    /// Red proof: rendering the bare address removes row interface scope.
+    #[test]
+    fn peer_table_renders_scoped_neighbor_identity() {
+        let rendered = rendered_peer_table(true, Freshness::Stale);
+        assert!(rendered.contains("fe80::1%eth0"));
+    }
+
+    /// Red proof: removing the stale label makes retained data look fresh.
+    #[test]
+    fn header_labels_retained_neighbor_roster_as_stale() {
+        let rendered = rendered_peer_table(true, Freshness::Stale);
+        assert!(rendered.contains("stale: neighbors"));
+    }
+
+    /// Red proof: collapsing unavailable into stale mislabels a first failure.
+    #[test]
+    fn header_distinguishes_first_neighbor_failure_from_stale_data() {
+        let rendered = rendered_peer_table(false, Freshness::Unavailable);
+        assert!(rendered.contains("neighbors unavailable"));
+        assert!(!rendered.contains("stale: neighbors"));
     }
 }

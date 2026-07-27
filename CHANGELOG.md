@@ -25,7 +25,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   interval while moving the full Prometheus metrics scrape to a separate
   60-second cadence. It now retries transient global-metadata failures until
   the daemon identity is available and retains the last-good RPKI VRP count
-  through a transient metrics failure.
+  through a transient metrics failure. Route-event streaming is now opt-in
+  while its panel is visible, with cancellation and a two-second reconnect
+  backoff after either a clean or error end. Health and neighbor failures retain
+  explicitly stale last-good data without corrupting peer selection or
+  update-rate baselines. Scoped neighbor identities and the missing Description
+  heading are also shown consistently.
 
 - Resolving a retained neighbor roster now shares content-equal compiled
   `.rpol` sets within bounded 32-neighbor chunks. At the measured 1,000-peer,
