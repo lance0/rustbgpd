@@ -19,6 +19,7 @@ deviations; [docs/INTEROP.md](INTEROP.md) has the interop matrix,
 | MP-BGP + extensions | RFC 4760, RFC 7911 (Add-Path), RFC 8654 (Extended Messages), RFC 8950 (Extended Next Hop) | Multiprotocol negotiation and modern capability set |
 | Route refresh / filtering | RFC 2918, RFC 7313 (Enhanced RR), RFC 5291/5292 (ORF) | Receive-side Address-Prefix ORF |
 | Communities | RFC 1997 (well-known), RFC 4360 (Extended), RFC 8092 (Large) | Match plus policy set/remove; `NO_ADVERTISE`, `NO_EXPORT`, and `NO_EXPORT_SUBCONFED` egress enforcement for unicast, VPNv4/VPNv6, labeled-unicast, RTC, BGP-LS, EVPN, and FlowSpec |
+| eBGP default policy | RFC 8212 | Opt-in `ebgp_requires_policy`: an eBGP direction with no explicit operator policy runs a reserved internal deny |
 | Route reflection | RFC 4456, RFC 9107 (ORR, ADR-0095) | Per-client best paths via BGP-LS-sourced SPF |
 | Route server (IXP) | RFC 7947 (ADR-0039/0101), RFC 8195 | Transparent redistribution, §2.3.2 per-client best-path, member-set control communities (per-target announce/prepend steering, scrubbed on egress) |
 | Graceful restart | RFC 4724 (GR helper), RFC 9494 (LLGR) | Stale retention across all RR families; no forwarding-state preservation |
@@ -116,6 +117,33 @@ deviations; [docs/INTEROP.md](INTEROP.md) has the interop matrix,
   update-groups: the filter is route-granular at emit (ADR-0101 Decision 3),
   so only routes carrying a control-form community pay per-target divergence
   while untagged routes share staging and encoding fleet-wide.
+
+---
+
+## RFC 8212 — Default eBGP route handling
+
+- RFC 8212 makes an eBGP route without an explicit import policy ineligible
+  for the decision process and keeps a route without an explicit export
+  policy out of that peer's Adj-RIB-Out. rustbgpd implements the boundary
+  behind the opt-in `[global] ebgp_requires_policy` knob (restart-required):
+  when on, an eBGP session that resolves no explicit operator policy in a
+  direction runs a reserved internal deny-all chain
+  (`rfc8212_missing_import_policy` / `rfc8212_missing_export_policy` — both
+  reserved names that operator policy cannot shadow) in that direction. The
+  two directions are independent, and the session stays Established, so the
+  gap is repairable without transport churn.
+- **Deviation:** the RFC mandates this as default behavior; rustbgpd ships it
+  opt-in (default `false`). The historical default is permit-all when a
+  session resolves no policy chain, and flipping the default would make an
+  upgrade silently drop routes in a way indistinguishable from a policy
+  change — the warn-first posture RFC 8212 Appendix A.1 describes for
+  implementations with an installed base. `rustbgpd --check` warns on every
+  eBGP neighbor missing explicit policy whether the knob is on or off, and
+  every shipped starter config sets the knob.
+- Full knob semantics, what counts as explicit policy, and the observability
+  surfaces (neighbor detail, Prometheus, doctor, export explain) are in
+  [docs/CONFIGURATION.md](CONFIGURATION.md) under
+  "`ebgp_requires_policy` — RFC 8212 explicit policy on eBGP".
 
 ---
 
@@ -1190,8 +1218,9 @@ while retaining the legacy raw unlimited sentinel for rolling compatibility.
   `RouteOrigin::Local` that flows through the same reflection
   pipeline as iBGP-learned routes. `rbgp evpn add-mac-ip /
   add-imet / delete-mac-ip / delete-imet` CLI subcommands cover
-  the operator-facing surface. Type 5 IP-Prefix injection is
-  deferred pending use-case signal. Native Type 1/4 multi-homing
+  the operator-facing surface. Type 5 IP-Prefix injection was
+  deferred at this gate pending use-case signal; it shipped later
+  (v0.25.0, M45). Native Type 1/4 multi-homing
   origination ships through `[[ethernet_segments]]`; controller
   injection for those route types is not exposed.
 - **Multi-homing Type 1 EAD + Type 4 ES reflection interop** (RFC 7432 §8):

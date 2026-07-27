@@ -132,9 +132,10 @@ runners via the shared `tests/soak/host-lock.sh` helper. A bench
 dispatch refuses to start while a soak is active and a soak refuses to
 start while a bench is mid-attempt; either workload fails fast with a
 clear error rather than producing useless numbers next to a busy host.
-Local dev boxes without that XDG state directory skip the locking
-entirely so this doesn't change anything for laptops / dev boxes that
-aren't shared with a bench runner. The sudo / `$HOME` trap (running soak as
+The scripts always take the lock, creating the state directory if
+needed — an uncontended `flock` is free on a laptop / dev box, and an
+earlier skip-when-absent escape hatch silently disabled the mutex on
+the shared runner. The sudo / `$HOME` trap (running soak as
 root moves the lock to `/root/...` and bypasses the guard) is covered
 in `tests/soak/README.md` under "Host mutex".
 
@@ -143,7 +144,8 @@ in `tests/soak/README.md` under "Host mutex".
 ```bash
 # Default-feature benchmarks. A bare `cargo bench` runs only the targets that
 # build with default features (codec, rib_ops, policy_eval, explain_snapshot,
-# validate); the five `bench-internals`-gated targets (fanout, inbound_attrs,
+# validate, and the mrt snapshot_allocation harness); the five
+# `bench-internals`-gated targets (fanout, inbound_attrs,
 # fib_projection, route_paging, event_history_producer) are skipped and must
 # be run explicitly with `--features bench-internals` as shown below.
 cargo bench
@@ -221,9 +223,11 @@ head-side bias large enough that the raw target percentage is not published as
 a causal speedup. See
 [`perf/revised-update-duplicate-table-2026-07.md`](perf/revised-update-duplicate-table-2026-07.md).
 
-## v0.61.0 release-tip absolute baseline
+## v0.61.0 candidate absolute baseline
 
-The exact release-tip revision `99ee74ba` has a compact absolute baseline at
+The v0.61.0 release-candidate revision `99ee74ba` (measured pre-tag; the
+final v0.61.0 tag landed 87 commits later at `c7066575`) has a compact
+absolute baseline at
 [`perf/v0.61.0-final-performance-2026-07.md`](perf/v0.61.0-final-performance-2026-07.md).
 Three real release-daemon runs at 1,000 eBGP peers × 400 BASE routes measured
 steady process-tree RSS medians of 441.760, 441.215, and 441.131 MiB, with
@@ -236,7 +240,8 @@ The same receipt retains 71 median point estimates and confidence intervals
 from the maintained RIB, codec, and policy Criterion suites under the literal
 baseline `v0.61.0-final-99ee74ba`. It is a single-revision regression anchor:
 it makes no CPU delta claim and does not rewrite the historical `515659b1`
-cross-stack or explain-cache comparisons below.
+cross-stack comparison below or the explain-cache comparison
+([perf/explain-cache-opt-in-2026-07.md](perf/explain-cache-opt-in-2026-07.md)).
 
 ## Manual CI Workflow
 
@@ -917,9 +922,10 @@ treated as allocator/map-capacity noise unless the PR is memory-targeted.
 | Arc + interning | 547 MB | 637 B | 15-29x less |
 
 The 900k×2 figures are the historical allocator-tracked journey; the 547 MB row
-is the last reliable one before the `memory_profile` harness stopped scaling
-past ~100k (see the limitation note above). RIB-structure regression tracking
-now uses the 100k allocator profile; full-daemon RSS at scale uses bgperf2.
+is the last from the pre-RouteSlab harness. The structured
+`memory_profile_high_n` harness (2026-07-17 provenance note above) now measures
+100k/500k/900k directly and is the RIB-structure regression-tracking surface;
+full-daemon RSS at scale uses bgperf2.
 
 ### Optimization History (end-to-end, bgperf2 2p/100k)
 
@@ -947,7 +953,8 @@ above** — they are *full-daemon* process RSS, not the RIB-only figure, and are
 **not a RIB memory regression** (RIB-only structural memory at 100k actually
 improved ~9% — see above). Since the ~257–260 MB era the daemon gained
 substantial always-available operational surfaces (BFD, gNMI, ASPA, BGP
-roles/OTC, the explain cache) and `PathAttribute` grew 72→112 B. The single
+roles/OTC, plus the explain cache — opt-in, default off since v0.61.0) and
+`PathAttribute` grew 72→112 B. The single
 biggest contributor is the durable **event-history outbox** (ADR-0072), which
 persists every route event to SQLite: enabling it
 (`[event_history].enabled = true`) adds **~62 MB** RSS (~284 → ~346 MB) **and
@@ -1185,7 +1192,7 @@ micro-bench that excludes Adj-RIB-Out and so undercounts full-daemon route
 storage. BIRD's radix-tree RIB with global attribute
 deduplication is what makes it an order of magnitude leaner on this same data.
 At full-table scale (900k prefixes, RIB-only micro-bench) rustbgpd's
-Adj-RIB-In + Loc-RIB is ~533 MB vs GoBGP's published 8–16+ GB.
+Adj-RIB-In + Loc-RIB is ~440 MiB vs GoBGP's published 8–16+ GB.
 
 **gRPC under load.** A priority query channel separates read-only gRPC queries
 from the route-processing pipeline, ensuring management API requests are
