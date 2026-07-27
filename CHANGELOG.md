@@ -9,6 +9,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- `rbgp top` keeps health and neighbor polling on the operator-selected
+  interval while moving the full Prometheus metrics scrape to a separate
+  60-second cadence. It now retries transient global-metadata failures until
+  the daemon identity is available and retains the last-good RPKI VRP count
+  through a transient metrics failure.
+
 ## [0.61.0] — 2026-07-26
 
 > **Release framing.** This is the policy-safety line. RFC 8212
