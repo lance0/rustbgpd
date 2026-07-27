@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+use tokio::time::Instant;
 
 use crate::commands::control::rpki_vrp_count_sum;
 use crate::connection::Connection;
@@ -43,6 +44,24 @@ fn parse_vrp_count(prometheus_text: &str) -> Option<u64> {
     rpki_vrp_count_sum(prometheus_text)
 }
 
+const METRICS_POLL_INTERVAL: Duration = Duration::from_secs(60);
+
+struct FetcherState {
+    global: Option<GlobalState>,
+    rpki_vrp_count: Option<u64>,
+    next_metrics_poll: Instant,
+}
+
+impl FetcherState {
+    fn new() -> Self {
+        Self {
+            global: None,
+            rpki_vrp_count: None,
+            next_metrics_poll: Instant::now(),
+        }
+    }
+}
+
 pub fn spawn_fetcher(
     connection: Connection,
     interval: Duration,
@@ -50,19 +69,6 @@ pub fn spawn_fetcher(
     event_tx: mpsc::Sender<RouteEventEntry>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        // Fetch global once
-        let global = {
-            let mut client = GlobalServiceClient::with_interceptor(
-                connection.channel(),
-                connection.interceptor(),
-            );
-            client
-                .get_global(GetGlobalRequest {})
-                .await
-                .ok()
-                .map(|r| r.into_inner())
-        };
-
         // Spawn WatchRoutes stream in a sub-task
         let conn2 = connection.clone();
         let event_tx2 = event_tx.clone();
@@ -76,8 +82,9 @@ pub fn spawn_fetcher(
         });
 
         // Poll loop
+        let mut state = FetcherState::new();
         loop {
-            let snapshot = poll_once(&connection, global.clone()).await;
+            let snapshot = poll_once(&connection, &mut state).await;
             if data_tx.send(snapshot).await.is_err() {
                 break;
             }
@@ -86,8 +93,16 @@ pub fn spawn_fetcher(
     })
 }
 
-async fn poll_once(connection: &Connection, global: Option<GlobalState>) -> DataSnapshot {
+async fn poll_once(connection: &Connection, state: &mut FetcherState) -> DataSnapshot {
     let mut error = None;
+
+    if state.global.is_none() {
+        let mut client =
+            GlobalServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+        if let Ok(response) = client.get_global(GetGlobalRequest {}).await {
+            state.global = Some(response.into_inner());
+        }
+    }
 
     let health = {
         let mut client =
@@ -115,20 +130,21 @@ async fn poll_once(connection: &Connection, global: Option<GlobalState>) -> Data
         }
     };
 
-    let rpki_vrp_count = {
+    let now = Instant::now();
+    if now >= state.next_metrics_poll {
+        state.next_metrics_poll = now + METRICS_POLL_INTERVAL;
         let mut client =
             ControlServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-        match client.get_metrics(MetricsRequest {}).await {
-            Ok(r) => parse_vrp_count(&r.into_inner().prometheus_text),
-            Err(_) => None,
+        if let Ok(response) = client.get_metrics(MetricsRequest {}).await {
+            state.rpki_vrp_count = parse_vrp_count(&response.into_inner().prometheus_text);
         }
-    };
+    }
 
     DataSnapshot {
-        global,
+        global: state.global.clone(),
         health,
         neighbors,
-        rpki_vrp_count,
+        rpki_vrp_count: state.rpki_vrp_count,
         error,
     }
 }
@@ -164,6 +180,8 @@ async fn stream_routes(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::Ordering;
+
     use super::*;
     use crate::connection::connect;
     use crate::test_support::spawn_mock_server;
@@ -176,6 +194,83 @@ mod tests {
             "bgp_rpki_vrp_count{af=\"ipv4\"} 12\nbgp_rpki_vrp_count{af=\"ipv6\"} 3\n".to_string(),
         );
         let connection = connect(&server.addr, None).await.unwrap();
-        assert_eq!(poll_once(&connection, None).await.rpki_vrp_count, Some(15));
+        let mut state = FetcherState::new();
+        assert_eq!(
+            poll_once(&connection, &mut state).await.rpki_vrp_count,
+            Some(15)
+        );
+    }
+
+    /// Red proof: putting `GetMetrics` back in every fast poll raises the
+    /// pre-deadline call count from one to thirty.
+    #[tokio::test(start_paused = true)]
+    async fn metrics_scrape_has_an_independent_slow_cadence() {
+        let server = spawn_mock_server(None).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+        let mut state = FetcherState::new();
+
+        poll_once(&connection, &mut state).await;
+        for _ in 0..29 {
+            tokio::time::advance(Duration::from_secs(2)).await;
+            poll_once(&connection, &mut state).await;
+        }
+
+        assert_eq!(server.state.metrics_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(server.state.health_calls.load(Ordering::SeqCst), 30);
+        assert_eq!(server.state.list_neighbors_calls.load(Ordering::SeqCst), 30);
+
+        tokio::time::advance(Duration::from_secs(2)).await;
+        poll_once(&connection, &mut state).await;
+        assert_eq!(server.state.metrics_calls.load(Ordering::SeqCst), 2);
+    }
+
+    /// Red proof: restoring the one-shot startup fetch leaves the second
+    /// snapshot's global metadata absent after the first RPC fails.
+    #[tokio::test(start_paused = true)]
+    async fn global_metadata_retries_until_success_then_stays_cached() {
+        let server = spawn_mock_server(None).await;
+        server
+            .state
+            .global_failures_remaining
+            .store(1, Ordering::SeqCst);
+        let connection = connect(&server.addr, None).await.unwrap();
+        let mut state = FetcherState::new();
+
+        let first = poll_once(&connection, &mut state).await;
+        assert!(first.global.is_none());
+
+        tokio::time::advance(Duration::from_secs(2)).await;
+        let second = poll_once(&connection, &mut state).await;
+        assert_eq!(second.global.as_ref().map(|global| global.asn), Some(65001));
+
+        tokio::time::advance(Duration::from_secs(2)).await;
+        let third = poll_once(&connection, &mut state).await;
+        assert_eq!(third.global.as_ref().map(|global| global.asn), Some(65001));
+        assert_eq!(server.state.global_calls.load(Ordering::SeqCst), 2);
+    }
+
+    /// Red proof: clearing the cached VRP value on a failed slow scrape makes
+    /// the second snapshot report `None` instead of the last-good count.
+    #[tokio::test(start_paused = true)]
+    async fn metrics_failure_retains_last_good_vrp_count() {
+        let server = spawn_mock_server(None).await;
+        *server.state.metrics_text.lock().await = Some(
+            "bgp_rpki_vrp_count{af=\"ipv4\"} 12\nbgp_rpki_vrp_count{af=\"ipv6\"} 3\n".to_string(),
+        );
+        let connection = connect(&server.addr, None).await.unwrap();
+        let mut state = FetcherState::new();
+
+        let first = poll_once(&connection, &mut state).await;
+        assert_eq!(first.rpki_vrp_count, Some(15));
+
+        server
+            .state
+            .metrics_failures_remaining
+            .store(1, Ordering::SeqCst);
+        tokio::time::advance(METRICS_POLL_INTERVAL).await;
+        let second = poll_once(&connection, &mut state).await;
+
+        assert_eq!(second.rpki_vrp_count, Some(15));
+        assert_eq!(server.state.metrics_calls.load(Ordering::SeqCst), 2);
     }
 }

@@ -29,6 +29,8 @@ pub(crate) struct MockState {
     pub(crate) health_calls: AtomicUsize,
     pub(crate) metrics_calls: AtomicUsize,
     pub(crate) global_calls: AtomicUsize,
+    pub(crate) metrics_failures_remaining: AtomicUsize,
+    pub(crate) global_failures_remaining: AtomicUsize,
     pub(crate) list_neighbors_calls: AtomicUsize,
     pub(crate) list_session_events_calls: AtomicUsize,
     pub(crate) list_policy_events_calls: AtomicUsize,
@@ -606,6 +608,16 @@ impl rustbgpd_api::proto::global_service_server::GlobalService for MockGlobalSer
         _request: Request<server_proto::GetGlobalRequest>,
     ) -> Result<Response<server_proto::GlobalState>, Status> {
         self.state.global_calls.fetch_add(1, Ordering::SeqCst);
+        if self
+            .state
+            .global_failures_remaining
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok()
+        {
+            return Err(Status::unavailable("transient global failure"));
+        }
         Ok(Response::new(server_proto::GlobalState {
             asn: 65001,
             router_id: "10.0.0.1".to_string(),
@@ -667,6 +679,16 @@ impl rustbgpd_api::proto::control_service_server::ControlService for MockControl
         _request: Request<server_proto::MetricsRequest>,
     ) -> Result<Response<server_proto::MetricsResponse>, Status> {
         self.state.metrics_calls.fetch_add(1, Ordering::SeqCst);
+        if self
+            .state
+            .metrics_failures_remaining
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok()
+        {
+            return Err(Status::unavailable("transient metrics failure"));
+        }
         let prometheus_text = self
             .state
             .metrics_text
