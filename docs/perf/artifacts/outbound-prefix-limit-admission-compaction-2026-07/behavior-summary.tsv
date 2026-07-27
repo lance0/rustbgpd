@@ -1,0 +1,7 @@
+members	variant	checks_total	checks_failed	config_validation	permit_all_warning_neighbors	session_flaps	decode_errors	final_prefixes_per_member
+1	parent	67	0	valid_with_expected_permit_all_warnings	2	0	0	400064
+1	candidate	67	0	valid_with_expected_permit_all_warnings	2	0	0	400064
+10	parent	427	0	valid_with_expected_permit_all_warnings	11	0	0	400064
+10	candidate	427	0	valid_with_expected_permit_all_warnings	11	0	0	400064
+100	parent	4027	0	valid_with_expected_permit_all_warnings	101	0	0	400064
+100	candidate	4027	0	valid_with_expected_permit_all_warnings	101	0	0	400064

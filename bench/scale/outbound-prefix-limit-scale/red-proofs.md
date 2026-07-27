@@ -16,14 +16,6 @@ with `--exact`. Each mutation was restored before the next run.
 After restoration, all five tests pass together; standalone fmt, check, and
 Clippy with warnings denied also pass.
 
-## Executed publication mutation
-
-The campaign aggregator was run against a private copy of the accepted raw
-receipt after deleting every data row from `1-control/rss.tsv`. It exited
-non-zero with `1-control has no RSS sampler rows`. Restoring the accepted file
-produces all six `rss_samples` and sampled-maximum columns. This proves that the
-published high-water values cannot be emitted from a missing sampler.
-
 ## Real-daemon campaign gates
 
 These are precommitted before the loaded campaign. The production break that
@@ -32,14 +24,17 @@ makes each class red is explicit:
 | Gate class | Production or harness break that makes it red |
 |---|---|
 | Fixed fleet/table provenance | Change any shape constant or run a fleet size outside 1/10/100; the fixed-shape unit gate or argument parser refuses it |
+| Literal-parent and immutable-harness provenance | Compare any commit other than `HEAD^`, or change the benchmark subtree in the candidate; the driver refuses the campaign before building |
+| Binary provenance | Build a detached worktree at any commit/tree other than the recorded parent/candidate pair; the worktree assertion fails before its binary digest is accepted |
 | Real production transaction | Skip SIGHUP's outbound-prefix-limit Apply; the `apply` histogram count delta is zero instead of exactly one in both variants |
-| First-cap materialization | Skip installing the candidate group cap; every finite-limit row is absent after Apply |
+| First-cap materialization | Skip installing either variant's group cap; every finite-limit row is absent after Apply |
 | One shared update group | Put any member on a private/different path or include the source; the sole group-series count and per-peer group-id equality fail |
 | Withholding | Bypass admission or admit beyond the cap; candidate wire counts exceed 400,000 and blocked counters do not reach 64 per member |
 | Recovery | Suppress scheduling/draining recovery; the recovery histogram count stays flat and members remain at 400,000 |
 | Every-member delivery | Recover only a subset; at least one member bitmap remains below 400,064 |
 | Real wire decode | Use a stubbed encoder or emit malformed/unknown NLRI; non-vacuity, decode-error, or unexpected-prefix checks fail |
 | Memory attribution | Omit jemalloc collection or conflate point RSS with high-water RSS; required metric collection or the strict `/proc` parser fails |
+| Allocated-memory improvement | Make the candidate materialization delta exceed half the parent delta; the campaign aggregator exits non-zero for that fleet size |
 
-No timing or memory row is accepted unless every path and behavior gate in its
-scenario is green.
+No allocated-memory row is accepted unless every path and behavior gate in its
+scenario is green. RSS and timing remain report-only.

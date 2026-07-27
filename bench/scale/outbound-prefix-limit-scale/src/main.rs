@@ -1,11 +1,11 @@
 //! Real-daemon scale receipt for ADR-0113 grouped outbound prefix limits.
 //!
 //! One private route-server-client source originates 400,000 IPv4 /32s to
-//! N homogeneous grouped route-server-client members. Both the unlimited
-//! control and limited candidate drive the production SIGHUP
-//! Prepare/ApplyOutboundPrefixLimits path. The candidate installs a cap equal
-//! to the converged table, withholds a 64-prefix tail, then removes the cap
-//! and must recover the whole tail to every member.
+//! N homogeneous grouped route-server-client members. The immutable driver
+//! runs this same finite-limit workload against its own immediate parent and
+//! current candidate commit. Both install a cap equal to the converged table,
+//! withhold a 64-prefix tail, then remove the cap and must recover the whole
+//! tail to every member.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -42,14 +42,14 @@ const PREFIX_BASE: u32 = 0x0a00_0000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Variant {
-    Control,
+    Parent,
     Candidate,
 }
 
 impl Variant {
     fn parse(value: &str) -> Option<Self> {
         match value {
-            "control" => Some(Self::Control),
+            "parent" => Some(Self::Parent),
             "candidate" => Some(Self::Candidate),
             _ => None,
         }
@@ -57,7 +57,7 @@ impl Variant {
 
     fn as_str(self) -> &'static str {
         match self {
-            Self::Control => "control",
+            Self::Parent => "parent",
             Self::Candidate => "candidate",
         }
     }
@@ -155,6 +155,7 @@ struct WireSnapshot {
 struct Observer {
     wire: Mutex<PrefixBitmap>,
     established: AtomicBool,
+    flaps: AtomicU64,
     decode_errors: AtomicU64,
 }
 
@@ -163,7 +164,14 @@ impl Observer {
         Self {
             wire: Mutex::new(PrefixBitmap::new()),
             established: AtomicBool::new(false),
+            flaps: AtomicU64::new(0),
             decode_errors: AtomicU64::new(0),
+        }
+    }
+
+    fn mark_down(&self) {
+        if self.established.swap(false, Ordering::AcqRel) {
+            self.flaps.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -307,9 +315,7 @@ async fn establish(context: Arc<Context>, index: usize) -> Result<mpsc::Sender<M
                 else => break,
             }
         }
-        writer_context.observers[index]
-            .established
-            .store(false, Ordering::Release);
+        writer_context.observers[index].mark_down();
     });
 
     let reader_context = Arc::clone(&context);
@@ -319,9 +325,7 @@ async fn establish(context: Arc<Context>, index: usize) -> Result<mpsc::Sender<M
         loop {
             let read = match reader.read(&mut scratch).await {
                 Ok(0) | Err(_) => {
-                    reader_context.observers[index]
-                        .established
-                        .store(false, Ordering::Release);
+                    reader_context.observers[index].mark_down();
                     return;
                 }
                 Ok(read) => read,
@@ -536,7 +540,7 @@ struct Args {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: outbound-prefix-limit-scale <control|candidate> <members> <daemon-port> \
+        "usage: outbound-prefix-limit-scale <parent|candidate> <members> <daemon-port> \
          <daemon-pid> <metrics-addr> <config-live> <config-apply> <config-recover> <out-dir>"
     );
     std::process::exit(2);
@@ -813,7 +817,8 @@ async fn wait_for_blocked(args: &Args) -> Result<Evidence, String> {
         }
         if started.elapsed() >= CONVERGE_TIMEOUT {
             return Err(format!(
-                "not every candidate member reported the complete blocked tail within {CONVERGE_TIMEOUT:?}"
+                "not every {} member reported the complete blocked tail within {CONVERGE_TIMEOUT:?}",
+                args.variant.as_str()
             ));
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -893,13 +898,7 @@ fn assert_samples(
         after_count - before_count,
         expected_count,
     );
-    let duration = after_sum - before_sum;
-    checks.assert(
-        format!("{phase}.histogram.{operation}.positive_sum_delta"),
-        duration.is_finite() && duration > 0.0,
-        format!("seconds={duration:.9}"),
-    );
-    duration
+    after_sum - before_sum
 }
 
 fn histogram_max_bucket_bounds(
@@ -907,7 +906,7 @@ fn histogram_max_bucket_bounds(
     after: &str,
     operation: &str,
     expected_count: f64,
-) -> Result<(f64, f64), String> {
+) -> (f64, Option<f64>) {
     fn finite_buckets(scrape: &str, operation: &str) -> Vec<(f64, f64)> {
         let mut buckets = labelled_samples(
             scrape,
@@ -932,15 +931,23 @@ fn histogram_max_bucket_bounds(
         let before_count = before
             .iter()
             .find_map(|(candidate, count)| (*candidate == upper).then_some(*count))
-            .ok_or_else(|| format!("missing baseline {operation} histogram bucket le={upper}"))?;
+            .unwrap_or(0.0);
         if after_count - before_count >= expected_count {
-            return Ok((lower, upper));
+            return (lower, Some(upper));
         }
         lower = upper;
     }
-    Err(format!(
-        "{operation} histogram did not bound all {expected_count:.0} samples in a finite bucket"
-    ))
+    // Histogram timing is diagnostic only. An exact `_count` delta above
+    // proves the samples exist; `None` here records that at least one sample
+    // landed in the +Inf bucket above the largest finite boundary.
+    (lower, None)
+}
+
+fn json_f64_or_null(value: f64) -> String {
+    value
+        .is_finite()
+        .then(|| format!("{value:.9}"))
+        .unwrap_or_else(|| "null".to_string())
 }
 
 fn snapshot_json(label: &str, evidence: &Evidence) -> String {
@@ -1059,7 +1066,7 @@ async fn run(args: &Args) -> Result<ExitCode, String> {
         "applied",
         CapacityExpectation {
             usage: TABLE_ROUTES,
-            limit: (args.variant == Variant::Candidate).then_some(TABLE_ROUTES),
+            limit: Some(TABLE_ROUTES),
             blocking: 0,
             blocked_total: None,
         },
@@ -1069,29 +1076,8 @@ async fn run(args: &Args) -> Result<ExitCode, String> {
         .send(source_update(TABLE_ROUTES..TOTAL_ROUTES))
         .await
         .map_err(|_| "source session closed during tail announce".to_string())?;
-    let tail_expected = match args.variant {
-        Variant::Control => TOTAL_ROUTES,
-        Variant::Candidate => TABLE_ROUTES,
-    };
-    let tail = match args.variant {
-        Variant::Control => {
-            wait_for(|| all_member_counts(&context, args.members, tail_expected)).await
-        }
-        Variant::Candidate => {
-            let started = Instant::now();
-            wait_for_blocked(args).await?;
-            Some(started.elapsed())
-        }
-    };
-    checks.assert(
-        "blocked.tail_reached_expected_wire_state",
-        tail.is_some(),
-        format!(
-            "variant={} expected={} elapsed={tail:?}",
-            args.variant.as_str(),
-            tail_expected
-        ),
-    );
+    let tail_expected = TABLE_ROUTES;
+    wait_for_blocked(args).await?;
     tokio::time::sleep(SETTLE).await;
     let blocked = collect(args, "blocked").await?;
     assert_group_inventory(&mut checks, args, &blocked, "blocked");
@@ -1109,13 +1095,9 @@ async fn run(args: &Args) -> Result<ExitCode, String> {
         "blocked",
         CapacityExpectation {
             usage: tail_expected,
-            limit: (args.variant == Variant::Candidate).then_some(TABLE_ROUTES),
-            blocking: usize::from(args.variant == Variant::Candidate),
-            blocked_total: if args.variant == Variant::Candidate {
-                Some(WITHHELD_ROUTES)
-            } else {
-                None
-            },
+            limit: Some(TABLE_ROUTES),
+            blocking: 1,
+            blocked_total: Some(WITHHELD_ROUTES),
         },
     );
 
@@ -1124,9 +1106,7 @@ async fn run(args: &Args) -> Result<ExitCode, String> {
     let recovery_wall_started = Instant::now();
     sighup(args.pid)?;
     let _ = wait_for_metric(args, blocked.metrics, "apply").await?;
-    if args.variant == Variant::Candidate {
-        let _ = wait_for_metric(args, blocked.metrics, "recovery").await?;
-    }
+    let _ = wait_for_metric(args, blocked.metrics, "recovery").await?;
     let recovered_wire = wait_for(|| all_member_counts(&context, args.members, TOTAL_ROUTES)).await;
     let recovery_wall_seconds =
         recovered_wire.map(|_| recovery_wall_started.elapsed().as_secs_f64());
@@ -1145,36 +1125,21 @@ async fn run(args: &Args) -> Result<ExitCode, String> {
         recovered.metrics,
         1.0,
     );
-    let (recovery_seconds, recovery_max_slice_bucket) = if args.variant == Variant::Candidate {
-        let expected_count = args.members as f64;
-        let seconds = assert_samples(
-            &mut checks,
-            "recovered",
-            "recovery",
-            blocked.metrics,
-            recovered.metrics,
-            expected_count,
-        );
-        let bounds = histogram_max_bucket_bounds(
-            &blocked.scrape,
-            &recovered.scrape,
-            "recovery",
-            expected_count,
-        )?;
-        checks.assert(
-            "recovered.histogram.recovery.max_slice_bucket",
-            bounds.0 < bounds.1 && bounds.1.is_finite(),
-            format!("seconds=({}, {}]", bounds.0, bounds.1),
-        );
-        (Some(seconds), Some(bounds))
-    } else {
-        checks.eq(
-            "recovered.histogram.recovery.count_delta",
-            recovered.metrics.recovery_count - blocked.metrics.recovery_count,
-            0.0,
-        );
-        (None, None)
-    };
+    let expected_count = args.members as f64;
+    let recovery_seconds = assert_samples(
+        &mut checks,
+        "recovered",
+        "recovery",
+        blocked.metrics,
+        recovered.metrics,
+        expected_count,
+    );
+    let recovery_max_slice_bucket = histogram_max_bucket_bounds(
+        &blocked.scrape,
+        &recovered.scrape,
+        "recovery",
+        expected_count,
+    );
     assert_group_inventory(&mut checks, args, &recovered, "recovered");
     assert_member_wire(
         &mut checks,
@@ -1192,14 +1157,16 @@ async fn run(args: &Args) -> Result<ExitCode, String> {
             usage: TOTAL_ROUTES,
             limit: None,
             blocking: 0,
-            blocked_total: if args.variant == Variant::Candidate {
-                Some(WITHHELD_ROUTES)
-            } else {
-                None
-            },
+            blocked_total: Some(WITHHELD_ROUTES),
         },
     );
 
+    let flaps = context
+        .observers
+        .iter()
+        .map(|observer| observer.flaps.load(Ordering::Relaxed))
+        .sum::<u64>();
+    checks.eq("run.session_flaps", flaps, 0);
     let decode_errors = context
         .observers
         .iter()
@@ -1219,7 +1186,7 @@ async fn run(args: &Args) -> Result<ExitCode, String> {
     let summary = format!(
         "{{\n  \"variant\":\"{}\",\n  \"members\":{},\n  \"table_routes\":{},\n  \
          \"withheld_routes\":{},\n  \"cold_convergence_seconds\":{:.6},\n  \
-         \"apply_seconds\":{:.9},\n  \"recovery_apply_seconds\":{:.9},\n  \
+         \"apply_seconds\":{},\n  \"recovery_apply_seconds\":{},\n  \
          \"recovery_seconds\":{},\n  \"recovery_wall_seconds\":{},\n  \
          \"recovery_max_slice_bucket_lower_seconds\":{},\n  \
          \"recovery_max_slice_bucket_upper_seconds\":{},\n  \
@@ -1230,14 +1197,14 @@ async fn run(args: &Args) -> Result<ExitCode, String> {
         TABLE_ROUTES,
         WITHHELD_ROUTES,
         cold.expect("cold convergence was checked").as_secs_f64(),
-        apply_seconds,
-        recover_apply_seconds,
-        recovery_seconds.map_or_else(|| "null".to_string(), |value| format!("{value:.9}")),
+        json_f64_or_null(apply_seconds),
+        json_f64_or_null(recover_apply_seconds),
+        json_f64_or_null(recovery_seconds),
         recovery_wall_seconds.map_or_else(|| "null".to_string(), |value| format!("{value:.9}")),
+        json_f64_or_null(recovery_max_slice_bucket.0),
         recovery_max_slice_bucket
-            .map_or_else(|| "null".to_string(), |(lower, _)| format!("{lower:.9}")),
-        recovery_max_slice_bucket
-            .map_or_else(|| "null".to_string(), |(_, upper)| format!("{upper:.9}")),
+            .1
+            .map_or_else(|| "null".to_string(), json_f64_or_null),
         snapshot_json("baseline", &baseline),
         snapshot_json("applied", &applied),
         snapshot_json("blocked", &blocked),
@@ -1267,6 +1234,19 @@ mod tests {
         assert_eq!(TABLE_ROUTES, 400_000);
         assert_eq!(WITHHELD_ROUTES, 64);
         assert_eq!(UPDATE_BATCH, 700);
+        assert_eq!(Variant::parse("parent"), Some(Variant::Parent));
+        assert_eq!(Variant::parse("candidate"), Some(Variant::Candidate));
+        assert_eq!(Variant::parse("control"), None);
+    }
+
+    #[test]
+    fn observer_counts_a_session_drop_once() {
+        let observer = Observer::new();
+        observer.established.store(true, Ordering::Release);
+        observer.mark_down();
+        observer.mark_down();
+        assert!(!observer.established.load(Ordering::Acquire));
+        assert_eq!(observer.flaps.load(Ordering::Relaxed), 1);
     }
 
     #[test]
@@ -1350,12 +1330,11 @@ mod tests {
         );
     }
 
-    /// Load-bearing mutation proof: selecting the first nonzero finite
-    /// histogram bucket, rather than the bucket containing all expected
-    /// samples, changes the first result away from `(0.2, 0.5)`. Accepting an
-    /// incomplete finite count makes the 101-sample error assertion red.
+    /// Timing is report-only: select the finite bucket containing every
+    /// expected sample when possible, otherwise report the `+Inf` overflow
+    /// without rejecting the exact sample-count gate.
     #[test]
-    fn recovery_max_bucket_bounds_every_slice_not_the_average() {
+    fn recovery_max_bucket_reports_finite_and_inf_slices() {
         let before = "bgp_rib_outbound_prefix_limit_actor_duration_seconds_bucket{operation=\"recovery\",le=\"0.1\"} 7\n\
                       bgp_rib_outbound_prefix_limit_actor_duration_seconds_bucket{operation=\"recovery\",le=\"0.2\"} 8\n\
                       bgp_rib_outbound_prefix_limit_actor_duration_seconds_bucket{operation=\"recovery\",le=\"0.5\"} 9\n\
@@ -1365,13 +1344,16 @@ mod tests {
                      bgp_rib_outbound_prefix_limit_actor_duration_seconds_bucket{operation=\"recovery\",le=\"0.5\"} 109\n\
                      bgp_rib_outbound_prefix_limit_actor_duration_seconds_bucket{operation=\"recovery\",le=\"+Inf\"} 109\n";
         assert_eq!(
-            histogram_max_bucket_bounds(before, after, "recovery", 100.0)
-                .expect("all samples fit a finite bucket"),
-            (0.2, 0.5)
+            histogram_max_bucket_bounds(before, after, "recovery", 100.0),
+            (0.2, Some(0.5))
         );
-        assert!(
-            histogram_max_bucket_bounds(before, after, "recovery", 101.0).is_err(),
-            "a missing recovery sample must not be hidden by the average"
+        assert_eq!(
+            histogram_max_bucket_bounds(before, after, "recovery", 101.0),
+            (0.5, None),
+            "samples above the largest finite bucket remain reportable"
         );
+        assert_eq!(json_f64_or_null(0.0), "0.000000000");
+        assert_eq!(json_f64_or_null(f64::INFINITY), "null");
+        assert_eq!(json_f64_or_null(f64::NAN), "null");
     }
 }

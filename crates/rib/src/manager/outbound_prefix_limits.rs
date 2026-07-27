@@ -23,7 +23,7 @@ use std::net::IpAddr;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 
-use rustbgpd_wire::{Afi, Prefix, Safi};
+use rustbgpd_wire::{Afi, Ipv4Prefix, Ipv6Prefix, Prefix, Safi};
 use tracing::{info, warn};
 
 use super::RibManager;
@@ -50,15 +50,6 @@ pub(in crate::manager) fn family_label(afi: Afi) -> &'static str {
 pub(in crate::manager) struct FamilyAdmission {
     /// Cap on distinct advertised prefixes; `None` is unlimited.
     pub(in crate::manager) limit: Option<NonZeroU32>,
-    /// Admitted prefixes for an update-group member, whose unicast
-    /// advertised state is group-owned and therefore has no private
-    /// Adj-RIB-Out to count (ADR-0098). Bounded by `limit`, per member, and
-    /// never part of `GroupKey` — the shared table still stages once.
-    ///
-    /// An ungrouped peer leaves this empty: its private Adj-RIB-Out prefix
-    /// index is the authoritative admitted set and already refcounts
-    /// Add-Path identities per prefix.
-    pub(in crate::manager) grouped_admitted: HashSet<Prefix>,
     /// Whether a blocking episode is open for this family. Set when a batch
     /// blocks a net-new prefix, cleared when a later batch blocks nothing
     /// and leaves headroom under the cap.
@@ -74,6 +65,12 @@ pub(in crate::manager) struct FamilyAdmission {
 pub(in crate::manager) struct OutboundPrefixLimits {
     ipv4: FamilyAdmission,
     ipv6: FamilyAdmission,
+    /// Admitted IPv4 prefixes for a grouped member. The group's shared
+    /// Adj-RIB-Out owns the route objects, so this exact typed set is only the
+    /// member's bounded projection.
+    grouped_admitted_ipv4: HashSet<Ipv4Prefix>,
+    /// IPv6 sibling of `grouped_admitted_ipv4`.
+    grouped_admitted_ipv6: HashSet<Ipv6Prefix>,
 }
 
 impl OutboundPrefixLimits {
@@ -92,7 +89,7 @@ impl OutboundPrefixLimits {
     /// shows the whole group projection.
     pub(in crate::manager) fn admits_grouped(&self, prefix: &Prefix) -> bool {
         self.family(prefix_family(prefix).0)
-            .is_none_or(|family| family.limit.is_none() || family.grouped_admitted.contains(prefix))
+            .is_none_or(|family| family.limit.is_none() || self.grouped_contains(prefix))
     }
 
     /// Mutable sibling of [`Self::family`].
@@ -103,6 +100,124 @@ impl OutboundPrefixLimits {
             _ => None,
         }
     }
+
+    /// Whether this grouped member retained the exact prefix in its typed
+    /// family set.
+    pub(in crate::manager) fn grouped_contains(&self, prefix: &Prefix) -> bool {
+        match prefix {
+            Prefix::V4(prefix) => self.grouped_admitted_ipv4.contains(prefix),
+            Prefix::V6(prefix) => self.grouped_admitted_ipv6.contains(prefix),
+        }
+    }
+
+    /// Distinct retained grouped prefixes for one limited family.
+    pub(in crate::manager) fn grouped_len(&self, afi: Afi) -> usize {
+        match afi {
+            Afi::Ipv4 => self.grouped_admitted_ipv4.len(),
+            Afi::Ipv6 => self.grouped_admitted_ipv6.len(),
+            _ => 0,
+        }
+    }
+
+    /// Remove one withdrawn prefix from its exact typed family set.
+    pub(in crate::manager) fn grouped_remove(&mut self, prefix: &Prefix) {
+        match prefix {
+            Prefix::V4(prefix) => {
+                self.grouped_admitted_ipv4.remove(prefix);
+            }
+            Prefix::V6(prefix) => {
+                self.grouped_admitted_ipv6.remove(prefix);
+            }
+        }
+    }
+
+    /// Insert admitted verdict prefixes into the selected typed family set.
+    pub(in crate::manager) fn grouped_extend(
+        &mut self,
+        afi: Afi,
+        prefixes: impl IntoIterator<Item = Prefix>,
+    ) {
+        for prefix in prefixes {
+            match (afi, prefix) {
+                (Afi::Ipv4, Prefix::V4(prefix)) => {
+                    self.grouped_admitted_ipv4.insert(prefix);
+                }
+                (Afi::Ipv6, Prefix::V6(prefix)) => {
+                    self.grouped_admitted_ipv6.insert(prefix);
+                }
+                _ => debug_assert!(false, "admission verdict crossed address families"),
+            }
+        }
+    }
+
+    /// Release retained grouped ownership for one family.
+    pub(in crate::manager) fn grouped_clear(&mut self, afi: Afi) {
+        match afi {
+            Afi::Ipv4 => self.grouped_admitted_ipv4.clear(),
+            Afi::Ipv6 => self.grouped_admitted_ipv6.clear(),
+            _ => {}
+        }
+    }
+
+    /// Install a directly collected family-typed materialization.
+    fn replace_grouped(&mut self, admitted: TypedGroupedAdmitted) {
+        match admitted {
+            TypedGroupedAdmitted::Ipv4(prefixes) => self.grouped_admitted_ipv4 = prefixes,
+            TypedGroupedAdmitted::Ipv6(prefixes) => self.grouped_admitted_ipv6 = prefixes,
+        }
+    }
+}
+
+/// A directly collected grouped projection, preserving the address-family
+/// type before it becomes retained peer state.
+enum TypedGroupedAdmitted {
+    Ipv4(HashSet<Ipv4Prefix>),
+    Ipv6(HashSet<Ipv6Prefix>),
+}
+
+impl TypedGroupedAdmitted {
+    fn collect(afi: Afi, prefixes: impl IntoIterator<Item = Prefix>) -> Self {
+        match afi {
+            Afi::Ipv4 => Self::Ipv4(
+                prefixes
+                    .into_iter()
+                    .filter_map(|prefix| match prefix {
+                        Prefix::V4(prefix) => Some(prefix),
+                        Prefix::V6(_) => None,
+                    })
+                    .collect(),
+            ),
+            Afi::Ipv6 => Self::Ipv6(
+                prefixes
+                    .into_iter()
+                    .filter_map(|prefix| match prefix {
+                        Prefix::V6(prefix) => Some(prefix),
+                        Prefix::V4(_) => None,
+                    })
+                    .collect(),
+            ),
+            _ => unreachable!("only limited unicast families are materialized"),
+        }
+    }
+
+    fn afi(&self) -> Afi {
+        match self {
+            Self::Ipv4(_) => Afi::Ipv4,
+            Self::Ipv6(_) => Afi::Ipv6,
+        }
+    }
+}
+
+/// Compile-time structural witness: changing either retained field back to
+/// `HashSet<Prefix>` makes test compilation fail at these exact borrows.
+#[cfg(test)]
+pub(in crate::manager) fn assert_grouped_admitted_storage_is_family_typed(
+    limits: &OutboundPrefixLimits,
+) {
+    fn ipv4(_: &HashSet<Ipv4Prefix>) {}
+    fn ipv6(_: &HashSet<Ipv6Prefix>) {}
+    ipv4(&limits.grouped_admitted_ipv4);
+    ipv6(&limits.grouped_admitted_ipv6);
 }
 
 /// Configuration and transaction state for outbound prefix limits.
@@ -237,7 +352,6 @@ impl RibManager {
             let Some(limit) = limits.family(afi).and_then(|family| family.limit) else {
                 continue;
             };
-            let admitted = limits.family(afi).map(|family| &family.grouped_admitted);
             let advertised_paths = |prefix: &Prefix| {
                 rib_out
                     .map(|rib| rib.path_ids_for_prefix(prefix))
@@ -245,7 +359,7 @@ impl RibManager {
             };
             let is_admitted = |prefix: &Prefix| {
                 if grouped {
-                    admitted.is_some_and(|admitted| admitted.contains(prefix))
+                    limits.grouped_contains(prefix)
                 } else {
                     !advertised_paths(prefix).is_empty()
                 }
@@ -268,7 +382,11 @@ impl RibManager {
                 })
                 .map(|(prefix, _)| prefix)
                 .collect();
-            let usage = self.outbound_family_usage(peer, afi, grouped);
+            let usage = if grouped {
+                limits.grouped_len(afi)
+            } else {
+                rib_out.map_or(0, |rib| rib.unicast_prefix_count(afi))
+            };
             let verdict = admit_batch(
                 limit,
                 usage,
@@ -342,17 +460,15 @@ impl RibManager {
             return;
         };
         for family_verdict in verdicts {
+            if grouped {
+                for prefix in &family_verdict.freed {
+                    limits.grouped_remove(prefix);
+                }
+                limits.grouped_extend(family_verdict.afi, family_verdict.verdict.admitted);
+            }
             let Some(family) = limits.family_mut(family_verdict.afi) else {
                 continue;
             };
-            if grouped {
-                for prefix in &family_verdict.freed {
-                    family.grouped_admitted.remove(prefix);
-                }
-                family
-                    .grouped_admitted
-                    .extend(family_verdict.verdict.admitted);
-            }
             let blocked = family_verdict.verdict.blocked.len();
             // Only a recovery resync ENDS an episode: it alone re-derives the
             // whole family and can prove nothing is still withheld. An
@@ -423,14 +539,12 @@ impl RibManager {
                 .get(&peer)
                 .map_or(0, |rib| rib.unicast_prefix_count(afi));
         }
-        let admitted = self
-            .outbound_prefix_limits
-            .get(&peer)
-            .and_then(|limits| limits.family(afi));
-        if let Some(family) = admitted
-            && family.limit.is_some()
+        if let Some(limits) = self.outbound_prefix_limits.get(&peer)
+            && limits
+                .family(afi)
+                .is_some_and(|family| family.limit.is_some())
         {
-            return family.grouped_admitted.len();
+            return limits.grouped_len(afi);
         }
         // An unlimited member materializes no admitted set, so its usage is
         // the group's own per-family accounting: shared table minus split
@@ -875,14 +989,10 @@ impl RibManager {
         // proved its whole advertised projection fits, so materialize it as
         // the bounded set the limiter now maintains.
         let materialized = (grouped && limit.is_some() && previous.is_none()).then(|| {
-            self.grouped_advertised_routes_iter(peer)
-                .map(|routes| {
-                    routes
-                        .filter(|route| prefix_family(&route.prefix).0 == afi)
-                        .map(|route| route.prefix)
-                        .collect::<HashSet<_>>()
-                })
-                .unwrap_or_default()
+            self.grouped_advertised_routes_iter(peer).map_or_else(
+                || TypedGroupedAdmitted::collect(afi, std::iter::empty()),
+                |routes| TypedGroupedAdmitted::collect(afi, routes.map(|route| route.prefix)),
+            )
         });
 
         let entry = self.outbound_prefix_limits.entry(peer).or_default();
@@ -890,12 +1000,14 @@ impl RibManager {
             return;
         };
         family.limit = limit;
+        if limit.is_none() {
+            family.blocking = false;
+        }
         if let Some(materialized) = materialized {
-            family.grouped_admitted = materialized;
+            entry.replace_grouped(materialized);
         }
         if limit.is_none() {
-            family.grouped_admitted = HashSet::new();
-            family.blocking = false;
+            entry.grouped_clear(afi);
         }
         // Keep the unlimited fast path exactly as it was: a peer with no
         // remaining limit owns no admission state at all.
@@ -928,33 +1040,31 @@ impl RibManager {
         if !self.outbound_prefix_limits.contains_key(&peer) {
             return;
         }
-        let seeded: Vec<(Afi, HashSet<Prefix>)> = LIMITED_FAMILIES
+        let seeded: Vec<TypedGroupedAdmitted> = LIMITED_FAMILIES
             .into_iter()
             .map(|afi| {
-                let admitted = if entering_group {
-                    self.adj_ribs_out
-                        .get(&peer)
-                        .map(|rib| {
-                            rib.iter()
-                                .filter(|route| prefix_family(&route.prefix).0 == afi)
-                                .map(|route| route.prefix)
-                                .collect()
-                        })
-                        .unwrap_or_default()
+                if entering_group {
+                    self.adj_ribs_out.get(&peer).map_or_else(
+                        || TypedGroupedAdmitted::collect(afi, std::iter::empty()),
+                        |rib| {
+                            TypedGroupedAdmitted::collect(afi, rib.iter().map(|route| route.prefix))
+                        },
+                    )
                 } else {
-                    HashSet::new()
-                };
-                (afi, admitted)
+                    TypedGroupedAdmitted::collect(afi, std::iter::empty())
+                }
             })
             .collect();
         let Some(entry) = self.outbound_prefix_limits.get_mut(&peer) else {
             return;
         };
-        for (afi, admitted) in seeded {
-            if let Some(family) = entry.family_mut(afi)
-                && family.limit.is_some()
-            {
-                family.grouped_admitted = admitted;
+        for admitted in seeded {
+            let afi = admitted.afi();
+            let limited = entry
+                .family(afi)
+                .is_some_and(|family| family.limit.is_some());
+            if limited {
+                entry.replace_grouped(admitted);
             }
         }
     }

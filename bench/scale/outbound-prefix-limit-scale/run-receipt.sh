@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Fixed-shape real-daemon scale campaign for ADR-0113 grouped outbound
-# prefix-limit admission sets. Measurement only: no optimized variant exists.
+# Fixed-shape immediate-parent A/B campaign for ADR-0113 grouped outbound
+# prefix-limit admission sets.
 
 set -euo pipefail
 
@@ -35,21 +35,45 @@ flock -n "${LOCK_FD}" || {
     exit 75
 }
 
-COMMIT="$(git rev-parse HEAD)"
-TREE="$(git rev-parse 'HEAD^{tree}')"
-OUT="${REPO}/target/outbound-prefix-limit-scale/$(date -u +%Y%m%dT%H%M%SZ)-${COMMIT:0:12}"
-readonly COMMIT TREE OUT
+CANDIDATE_COMMIT="$(git rev-parse HEAD)"
+PARENT_COMMIT="$(git rev-parse HEAD^)"
+CANDIDATE_TREE="$(git rev-parse "${CANDIDATE_COMMIT}^{tree}")"
+PARENT_TREE="$(git rev-parse "${PARENT_COMMIT}^{tree}")"
+CANDIDATE_PARENT="$(git rev-parse "${CANDIDATE_COMMIT}^")"
+CANDIDATE_HARNESS_TREE="$(
+    git rev-parse "${CANDIDATE_COMMIT}:bench/scale/outbound-prefix-limit-scale"
+)"
+PARENT_HARNESS_TREE="$(
+    git rev-parse "${PARENT_COMMIT}:bench/scale/outbound-prefix-limit-scale"
+)"
+readonly CANDIDATE_COMMIT PARENT_COMMIT CANDIDATE_TREE PARENT_TREE
+readonly CANDIDATE_PARENT CANDIDATE_HARNESS_TREE PARENT_HARNESS_TREE
+[[ "${CANDIDATE_PARENT}" == "${PARENT_COMMIT}" ]] ||
+    fail "candidate comparison base is not its literal first parent"
+[[ "${CANDIDATE_HARNESS_TREE}" == "${PARENT_HARNESS_TREE}" ]] ||
+    fail "parent and candidate harness trees differ; comparison is not immutable"
+
+OUT="${REPO}/target/outbound-prefix-limit-scale/$(date -u +%Y%m%dT%H%M%SZ)-${CANDIDATE_COMMIT:0:12}"
+WORK_ROOT="${REPO}/target/.outbound-prefix-limit-scale-work-${CANDIDATE_COMMIT:0:12}-$$"
+readonly OUT WORK_ROOT
 [[ ! -e "${OUT}" ]] || fail "output already exists: ${OUT}"
-mkdir -p "${OUT}/build"
+[[ ! -e "${WORK_ROOT}" ]] || fail "private build root already exists: ${WORK_ROOT}"
+mkdir -p "${OUT}/build" "${WORK_ROOT}"
 chmod 700 "${OUT}"
 
 {
-    printf 'commit=%s\n' "${COMMIT}"
-    printf 'tree=%s\n' "${TREE}"
+    printf 'candidate_commit=%s\n' "${CANDIDATE_COMMIT}"
+    printf 'candidate_tree=%s\n' "${CANDIDATE_TREE}"
+    printf 'candidate_parent=%s\n' "${CANDIDATE_PARENT}"
+    printf 'parent_commit=%s\n' "${PARENT_COMMIT}"
+    printf 'parent_tree=%s\n' "${PARENT_TREE}"
+    printf 'candidate_harness_tree=%s\n' "${CANDIDATE_HARNESS_TREE}"
+    printf 'parent_harness_tree=%s\n' "${PARENT_HARNESS_TREE}"
     printf 'table_routes=%s\n' "${TABLE_ROUTES}"
     printf 'withheld_routes=%s\n' "${WITHHELD_ROUTES}"
     printf 'members=1,10,100\n'
-    printf 'variants=control,candidate\n'
+    printf 'variants=parent,candidate\n'
+    printf 'memory_gate=candidate_apply_allocated_delta_le_50_percent_parent\n'
     printf 'started=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 } >"${OUT}/provenance.env"
 {
@@ -64,25 +88,85 @@ chmod 700 "${OUT}"
     awk '/^(MemTotal|MemAvailable):/{print tolower(substr($1,1,length($1)-1)) "_kib=" $2}' /proc/meminfo
 } >"${OUT}/host.txt"
 cat >"${OUT}/commands.txt" <<'EOF'
-env -u CARGO_TARGET_DIR -u RUSTFLAGS cargo build --release --locked -p rustbgpd
-env -u CARGO_TARGET_DIR -u RUSTFLAGS cargo build --release --locked --manifest-path bench/scale/outbound-prefix-limit-scale/Cargo.toml
+git worktree add --detach <private-parent-worktree> <parent-commit>
+git worktree add --detach <private-candidate-worktree> <candidate-commit>
+env -u RUSTFLAGS CARGO_TARGET_DIR=<private-parent-target> cargo build --release --locked -p rustbgpd
+env -u RUSTFLAGS CARGO_TARGET_DIR=<private-candidate-target> cargo build --release --locked -p rustbgpd
+env -u RUSTFLAGS CARGO_TARGET_DIR=<private-harness-target> cargo build --release --locked --manifest-path bench/scale/outbound-prefix-limit-scale/Cargo.toml
 EOF
 record_command() {
     printf '%q ' "$@" >>"${OUT}/commands.txt"
     printf '\n' >>"${OUT}/commands.txt"
 }
 
-env -u CARGO_TARGET_DIR -u RUSTFLAGS cargo build --release --locked -p rustbgpd \
-    >"${OUT}/build/daemon.log" 2>&1 ||
-    fail "daemon build failed (see ${OUT}/build/daemon.log)"
-env -u CARGO_TARGET_DIR -u RUSTFLAGS cargo build --release --locked \
-    --manifest-path "${HERE}/Cargo.toml" >"${OUT}/build/harness.log" 2>&1 ||
+cleanup_build_trees() {
+    local variant
+    for variant in parent candidate; do
+        if [[ -e "${WORK_ROOT}/${variant}/.git" ]]; then
+            git -C "${REPO}" worktree remove --force "${WORK_ROOT}/${variant}" \
+                >/dev/null 2>&1 || true
+        fi
+    done
+    git -C "${REPO}" worktree prune >/dev/null 2>&1 || true
+    rm -rf -- "${WORK_ROOT}"
+}
+trap cleanup_build_trees EXIT
+
+record_command git worktree add --detach "<private-parent-worktree>" "${PARENT_COMMIT}"
+git worktree add --detach "${WORK_ROOT}/parent" "${PARENT_COMMIT}" \
+    >"${OUT}/build/worktree-parent.log" 2>&1 ||
+    fail "parent worktree creation failed (see ${OUT}/build/worktree-parent.log)"
+record_command git worktree add --detach "<private-candidate-worktree>" "${CANDIDATE_COMMIT}"
+git worktree add --detach "${WORK_ROOT}/candidate" "${CANDIDATE_COMMIT}" \
+    >"${OUT}/build/worktree-candidate.log" 2>&1 ||
+    fail "candidate worktree creation failed (see ${OUT}/build/worktree-candidate.log)"
+
+[[ $(git -C "${WORK_ROOT}/parent" rev-parse HEAD) == "${PARENT_COMMIT}" ]] ||
+    fail "parent worktree HEAD does not match provenance"
+[[ $(git -C "${WORK_ROOT}/parent" rev-parse 'HEAD^{tree}') == "${PARENT_TREE}" ]] ||
+    fail "parent worktree tree does not match provenance"
+[[ $(git -C "${WORK_ROOT}/candidate" rev-parse HEAD) == "${CANDIDATE_COMMIT}" ]] ||
+    fail "candidate worktree HEAD does not match provenance"
+[[ $(git -C "${WORK_ROOT}/candidate" rev-parse 'HEAD^{tree}') == "${CANDIDATE_TREE}" ]] ||
+    fail "candidate worktree tree does not match provenance"
+
+record_command env -u RUSTFLAGS CARGO_TARGET_DIR="<private-parent-target>" \
+    cargo build --release --locked -p rustbgpd
+env -u RUSTFLAGS CARGO_TARGET_DIR="${WORK_ROOT}/target-parent" \
+    cargo build --release --locked -p rustbgpd \
+    --manifest-path "${WORK_ROOT}/parent/Cargo.toml" \
+    >"${OUT}/build/daemon-parent.log" 2>&1 ||
+    fail "parent daemon build failed (see ${OUT}/build/daemon-parent.log)"
+record_command env -u RUSTFLAGS CARGO_TARGET_DIR="<private-candidate-target>" \
+    cargo build --release --locked -p rustbgpd
+env -u RUSTFLAGS CARGO_TARGET_DIR="${WORK_ROOT}/target-candidate" \
+    cargo build --release --locked -p rustbgpd \
+    --manifest-path "${WORK_ROOT}/candidate/Cargo.toml" \
+    >"${OUT}/build/daemon-candidate.log" 2>&1 ||
+    fail "candidate daemon build failed (see ${OUT}/build/daemon-candidate.log)"
+record_command env -u RUSTFLAGS CARGO_TARGET_DIR="<private-harness-target>" \
+    cargo build --release --locked --manifest-path \
+    bench/scale/outbound-prefix-limit-scale/Cargo.toml
+env -u RUSTFLAGS CARGO_TARGET_DIR="${WORK_ROOT}/target-harness" \
+    cargo build --release --locked \
+    --manifest-path "${WORK_ROOT}/candidate/bench/scale/outbound-prefix-limit-scale/Cargo.toml" \
+    >"${OUT}/build/harness.log" 2>&1 ||
     fail "harness build failed (see ${OUT}/build/harness.log)"
 
-readonly DAEMON="${REPO}/target/release/rustbgpd"
-readonly HARNESS="${HERE}/target/release/outbound-prefix-limit-scale"
-sha256sum "${DAEMON}" "${HARNESS}" |
-    sed "s#${REPO}/##; s#${HERE}/##" >"${OUT}/binaries.sha256"
+readonly PARENT_DAEMON="${WORK_ROOT}/target-parent/release/rustbgpd"
+readonly CANDIDATE_DAEMON="${WORK_ROOT}/target-candidate/release/rustbgpd"
+readonly HARNESS="${WORK_ROOT}/target-harness/release/outbound-prefix-limit-scale"
+{
+    printf '%s  parent-rustbgpd commit=%s tree=%s\n' \
+        "$(sha256sum "${PARENT_DAEMON}" | awk '{print $1}')" \
+        "${PARENT_COMMIT}" "${PARENT_TREE}"
+    printf '%s  candidate-rustbgpd commit=%s tree=%s\n' \
+        "$(sha256sum "${CANDIDATE_DAEMON}" | awk '{print $1}')" \
+        "${CANDIDATE_COMMIT}" "${CANDIDATE_TREE}"
+    printf '%s  harness tree=%s\n' \
+        "$(sha256sum "${HARNESS}" | awk '{print $1}')" \
+        "${CANDIDATE_HARNESS_TREE}"
+} >"${OUT}/binaries.sha256"
 
 competitors() {
     ps -eo pid=,comm= --no-headers | awk -v self="$$" '
@@ -233,7 +317,11 @@ cleanup_scenario() {
     [[ -z "${RUNDIR}" ]] || rm -rf "${RUNDIR}"
     RUNDIR=''
 }
-trap cleanup_scenario EXIT
+cleanup_all() {
+    cleanup_scenario
+    cleanup_build_trees
+}
+trap cleanup_all EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
@@ -255,14 +343,17 @@ run_scenario() {
     local members="$1" variant="$2"
     local scenario="${members}-${variant}"
     local scenario_out="${OUT}/${scenario}"
-    RUNDIR="/tmp/rustbgpd-opscale-$$-${members}-${variant}"
-    mkdir -p "${scenario_out}" "${RUNDIR}"
+    local daemon
+    case "${variant}" in
+        parent) daemon="${PARENT_DAEMON}" ;;
+        candidate) daemon="${CANDIDATE_DAEMON}" ;;
+        *) fail "unknown source variant ${variant}" ;;
+    esac
+    RUNDIR="$(mktemp -d "${TMPDIR:-/tmp}/rustbgpd-opscale.XXXXXX")"
+    mkdir -p "${scenario_out}"
     chmod 700 "${scenario_out}" "${RUNDIR}"
 
-    local start_limit=unlimited apply_limit=unlimited recover_limit=unlimited
-    if [[ "${variant}" == candidate ]]; then
-        apply_limit="${TABLE_ROUTES}"
-    fi
+    local start_limit=unlimited apply_limit="${TABLE_ROUTES}" recover_limit=unlimited
     emit_config "${scenario_out}/config.start.toml" "${RUNDIR}" "${members}" "${start_limit}"
     emit_config "${scenario_out}/config.apply.toml" "${RUNDIR}" "${members}" "${apply_limit}"
     emit_config "${scenario_out}/config.recover.toml" "${RUNDIR}" "${members}" "${recover_limit}"
@@ -270,8 +361,8 @@ run_scenario() {
 
     local generation
     for generation in start apply recover; do
-        record_command "${DAEMON}" --check "${scenario_out}/config.${generation}.toml"
-        "${DAEMON}" --check "${scenario_out}/config.${generation}.toml" \
+        record_command "${daemon}" --check "${scenario_out}/config.${generation}.toml"
+        "${daemon}" --check "${scenario_out}/config.${generation}.toml" \
             >"${scenario_out}/check-${generation}.log" 2>&1 ||
             fail "${scenario} generated ${generation} config failed --check"
     done
@@ -279,8 +370,8 @@ run_scenario() {
     host_preflight "${scenario}" ||
         fail "${scenario} host preflight did not become valid; shape was not reduced"
 
-    record_command env RUST_LOG=info "${DAEMON}" "${scenario_out}/config.live.toml"
-    RUST_LOG=info "${DAEMON}" "${scenario_out}/config.live.toml" \
+    record_command env RUST_LOG=info "${daemon}" "${scenario_out}/config.live.toml"
+    RUST_LOG=info "${daemon}" "${scenario_out}/config.live.toml" \
         >"${scenario_out}/daemon.log" 2>&1 &
     DAEMON_PID=$!
     rss_sampler "${DAEMON_PID}" "${scenario_out}/rss.tsv" &
@@ -317,15 +408,10 @@ run_scenario() {
     local opened recovered
     opened="$(grep -c 'outbound prefix limit reached' "${scenario_out}/daemon.log" || true)"
     recovered="$(grep -c 'outbound prefix limit recovered' "${scenario_out}/daemon.log" || true)"
-    if [[ "${variant}" == candidate ]]; then
-        [[ "${opened}" -eq "${members}" ]] ||
-            fail "${scenario} blocking episode count ${opened}, expected ${members}"
-        [[ "${recovered}" -eq "${members}" ]] ||
-            fail "${scenario} recovery episode count ${recovered}, expected ${members}"
-    else
-        [[ "${opened}" -eq 0 && "${recovered}" -eq 0 ]] ||
-            fail "${scenario} unlimited control opened a blocking/recovery episode"
-    fi
+    [[ "${opened}" -eq "${members}" ]] ||
+        fail "${scenario} blocking episode count ${opened}, expected ${members}"
+    [[ "${recovered}" -eq "${members}" ]] ||
+        fail "${scenario} recovery episode count ${recovered}, expected ${members}"
     [[ "${harness_status}" -eq 0 ]] ||
         fail "${scenario} harness failed with status ${harness_status}"
     [[ $(grep -c '"message":"peer deleted"' "${scenario_out}/daemon.log" || true) -eq 0 ]] ||
@@ -341,20 +427,20 @@ run_scenario() {
         mv "${OUT}/.SHA256SUMS.$$" SHA256SUMS
     )
 
-    [[ $(git -C "${REPO}" rev-parse HEAD) == "${COMMIT}" ]] ||
+    [[ $(git -C "${REPO}" rev-parse HEAD) == "${CANDIDATE_COMMIT}" ]] ||
         fail "HEAD changed during campaign"
-    [[ $(git -C "${REPO}" rev-parse 'HEAD^{tree}') == "${TREE}" ]] ||
+    [[ $(git -C "${REPO}" rev-parse 'HEAD^{tree}') == "${CANDIDATE_TREE}" ]] ||
         fail "tree changed during campaign"
     [[ -z $(git -C "${REPO}" status --porcelain --untracked-files=normal) ]] ||
         fail "worktree changed during campaign"
 }
 
-# Adjacent same-SHA pairs with alternating order cancel fixed ordering bias.
-run_scenario 1 control
+# Adjacent immediate-parent pairs with alternating order cancel fixed ordering bias.
+run_scenario 1 parent
 run_scenario 1 candidate
 run_scenario 10 candidate
-run_scenario 10 control
-run_scenario 100 control
+run_scenario 10 parent
+run_scenario 100 parent
 run_scenario 100 candidate
 
 python3 - "${OUT}" <<'PY'
@@ -411,12 +497,65 @@ if len(rows) != 6:
     raise SystemExit(f"expected six summaries, found {len(rows)}")
 if any(row["checks_failed"] for row in rows):
     raise SystemExit("a scenario summary contains failed checks")
+if {(row["members"], row["variant"]) for row in rows} != {
+    (members, variant)
+    for members in (1, 10, 100)
+    for variant in ("parent", "candidate")
+}:
+    raise SystemExit("campaign does not contain exactly one parent/candidate row per fleet")
 
 fieldnames = list(rows[0])
 with (root / "campaign.csv").open("w", newline="", encoding="utf-8") as stream:
     writer = csv.DictWriter(stream, fieldnames=fieldnames)
     writer.writeheader()
     writer.writerows(rows)
+
+comparisons = []
+for members in (1, 10, 100):
+    pair = {
+        row["variant"]: row
+        for row in rows
+        if row["members"] == members
+    }
+    parent = pair["parent"]
+    candidate = pair["candidate"]
+    parent_delta = parent["apply_allocated_delta_bytes"]
+    candidate_delta = candidate["apply_allocated_delta_bytes"]
+    if parent_delta <= 0:
+        raise SystemExit(
+            f"{members}-parent allocated delta {parent_delta} is not positive"
+        )
+    if candidate_delta < 0:
+        raise SystemExit(
+            f"{members}-candidate allocated delta {candidate_delta} is negative"
+        )
+    memory_gate = candidate_delta * 2 <= parent_delta
+    comparisons.append({
+        "members": members,
+        "parent_apply_allocated_delta_bytes": parent_delta,
+        "candidate_apply_allocated_delta_bytes": candidate_delta,
+        "candidate_to_parent_allocated_ratio": candidate_delta / parent_delta,
+        "allocated_gate_candidate_le_50_percent_parent": memory_gate,
+        # Report-only observations: these never participate in acceptance.
+        "parent_apply_rss_delta_kib": parent["apply_rss_delta_kib"],
+        "candidate_apply_rss_delta_kib": candidate["apply_rss_delta_kib"],
+        "parent_apply_seconds": parent["apply_seconds"],
+        "candidate_apply_seconds": candidate["apply_seconds"],
+        "parent_recovery_seconds": parent["recovery_seconds"],
+        "candidate_recovery_seconds": candidate["recovery_seconds"],
+        "parent_recovery_wall_seconds": parent["recovery_wall_seconds"],
+        "candidate_recovery_wall_seconds": candidate["recovery_wall_seconds"],
+    })
+    if not memory_gate:
+        raise SystemExit(
+            f"{members}-candidate allocated delta {candidate_delta} exceeds "
+            f"50% of parent delta {parent_delta}"
+        )
+
+with (root / "comparison.csv").open("w", newline="", encoding="utf-8") as stream:
+    writer = csv.DictWriter(stream, fieldnames=list(comparisons[0]))
+    writer.writeheader()
+    writer.writerows(comparisons)
 PY
 
 {
