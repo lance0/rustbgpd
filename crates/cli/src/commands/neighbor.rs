@@ -8,8 +8,8 @@ use crate::output::{
 use crate::proto::neighbor_service_client::NeighborServiceClient;
 use crate::proto::{
     AddNeighborRequest, DeleteNeighborRequest, DisableNeighborRequest, EnableNeighborRequest,
-    GetNeighborStateRequest, ListNeighborsRequest, NeighborConfig, SetGracefulShutdownRequest,
-    SoftResetInRequest,
+    GetNeighborStateRequest, ListNeighborsRequest, NeighborConfig, RefreshOutboundRequest,
+    SetGracefulShutdownRequest, SoftResetInRequest,
 };
 
 fn split_scoped_address(address: &str) -> (String, String) {
@@ -1030,6 +1030,47 @@ pub async fn softreset(
     )
 }
 
+fn refresh_outbound_json(address: &str, scheduled: bool) -> serde_json::Value {
+    serde_json::json!({
+        "ok": true,
+        "action": "refresh_outbound",
+        "target": address,
+        "scheduled": scheduled,
+    })
+}
+
+fn refresh_outbound_message(address: &str) -> String {
+    format!("Outbound refresh scheduled for {address}")
+}
+
+pub async fn refresh_outbound(
+    connection: Connection,
+    address: &str,
+    json: bool,
+) -> Result<(), CliError> {
+    let mut client =
+        NeighborServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let (address_only, interface) = split_scoped_address(address);
+    let response = client
+        .refresh_outbound(RefreshOutboundRequest {
+            address: address_only,
+            interface,
+        })
+        .await?
+        .into_inner();
+    if !response.scheduled {
+        return Err(CliError::Rpc(
+            "daemon did not schedule the outbound refresh".into(),
+        ));
+    }
+    if json {
+        output::print_json_pretty(&refresh_outbound_json(address, response.scheduled))
+    } else {
+        println!("{}", refresh_outbound_message(address));
+        Ok(())
+    }
+}
+
 /// Toggle the RFC 8326 GRACEFUL_SHUTDOWN community on outbound updates.
 /// `peer = None` applies to every currently-managed peer (operator
 /// running planned maintenance on the whole router).
@@ -1516,5 +1557,68 @@ mod tests {
         let request = server.state.last_softreset.lock().await.clone().unwrap();
         assert_eq!(request.address, "10.0.0.2");
         assert_eq!(request.families, vec!["ipv6_unicast".to_string()]);
+    }
+
+    /// Load-bearing CLI proof: removing scoped-address splitting, duplicating
+    /// the RPC, or changing the exact human/JSON receipt makes this test red.
+    #[tokio::test]
+    async fn refresh_outbound_sends_scoped_peer_and_has_explicit_json_receipt() {
+        let server = spawn_mock_server(None).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+
+        refresh_outbound(connection, "fe80::2%eth1", true)
+            .await
+            .unwrap();
+
+        let request = server
+            .state
+            .last_refresh_outbound
+            .lock()
+            .await
+            .clone()
+            .unwrap();
+        assert_eq!(request.address, "fe80::2");
+        assert_eq!(request.interface, "eth1");
+        assert_eq!(
+            server
+                .state
+                .refresh_outbound_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "one CLI invocation must issue exactly one RPC"
+        );
+        assert_eq!(
+            refresh_outbound_message("fe80::2%eth1"),
+            "Outbound refresh scheduled for fe80::2%eth1"
+        );
+        assert_eq!(
+            refresh_outbound_json("fe80::2%eth1", true),
+            serde_json::json!({
+                "ok": true,
+                "action": "refresh_outbound",
+                "target": "fe80::2%eth1",
+                "scheduled": true,
+            })
+        );
+    }
+
+    /// Removing the fail-closed `scheduled` check makes this test return
+    /// success against a daemon that explicitly declined the operation.
+    #[tokio::test]
+    async fn refresh_outbound_rejects_unscheduled_response() {
+        let server = spawn_mock_server(None).await;
+        server
+            .state
+            .refresh_outbound_declined
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let connection = connect(&server.addr, None).await.unwrap();
+
+        let error = refresh_outbound(connection, "192.0.2.1", false)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "daemon did not schedule the outbound refresh"
+        );
     }
 }

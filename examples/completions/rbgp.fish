@@ -158,19 +158,20 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from help" -f -a "effective" -d 'Dump the daemon\'s effective running config (defaults materialized)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from help" -f -a "import" -d 'Import a BIRD 2 / FRR / GoBGP config into a rustbgpd config.toml'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
-complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and not __fish_seen_subcommand_from add delete enable disable softreset help" -l compare -d 'Compare this peer\'s live update-group membership with another configured peer without exposing internal group identifiers' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and not __fish_seen_subcommand_from add delete enable disable softreset help" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and not __fish_seen_subcommand_from add delete enable disable softreset help" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and not __fish_seen_subcommand_from add delete enable disable softreset help" -l wide -d 'Append summary columns to the list: MsgRcvd, MsgSent, Flaps, RRC (route-reflector client), Slow (`!` marks a slow peer), and State/PfxRcd (prefix count when Established). Display-only; JSON is unaffected by --wide and may omit optional false healthy-state fields'
-complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and not __fish_seen_subcommand_from add delete enable disable softreset help" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and not __fish_seen_subcommand_from add delete enable disable softreset help" -l no-color -d 'Disable colored output'
-complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and not __fish_seen_subcommand_from add delete enable disable softreset help" -s h -l help -d 'Print help (see more with \'--help\')'
-complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and not __fish_seen_subcommand_from add delete enable disable softreset help" -a "add" -d 'Add a new neighbor'
-complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and not __fish_seen_subcommand_from add delete enable disable softreset help" -a "delete" -d 'Delete this neighbor'
-complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and not __fish_seen_subcommand_from add delete enable disable softreset help" -a "enable" -d 'Enable this neighbor'
-complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and not __fish_seen_subcommand_from add delete enable disable softreset help" -a "disable" -d 'Disable this neighbor'
-complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and not __fish_seen_subcommand_from add delete enable disable softreset help" -a "softreset" -d 'Trigger soft reset (inbound)'
-complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and not __fish_seen_subcommand_from add delete enable disable softreset help" -a "help" -d 'Print this message or the help of the given subcommand(s)'
+complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and not __fish_seen_subcommand_from add delete enable disable softreset refresh-out help" -l compare -d 'Compare this peer\'s live update-group membership with another configured peer without exposing internal group identifiers' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and not __fish_seen_subcommand_from add delete enable disable softreset refresh-out help" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and not __fish_seen_subcommand_from add delete enable disable softreset refresh-out help" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and not __fish_seen_subcommand_from add delete enable disable softreset refresh-out help" -l wide -d 'Append summary columns to the list: MsgRcvd, MsgSent, Flaps, RRC (route-reflector client), Slow (`!` marks a slow peer), and State/PfxRcd (prefix count when Established). Display-only; JSON is unaffected by --wide and may omit optional false healthy-state fields'
+complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and not __fish_seen_subcommand_from add delete enable disable softreset refresh-out help" -s j -l json -d 'Output in JSON format'
+complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and not __fish_seen_subcommand_from add delete enable disable softreset refresh-out help" -l no-color -d 'Disable colored output'
+complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and not __fish_seen_subcommand_from add delete enable disable softreset refresh-out help" -s h -l help -d 'Print help (see more with \'--help\')'
+complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and not __fish_seen_subcommand_from add delete enable disable softreset refresh-out help" -a "add" -d 'Add a new neighbor'
+complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and not __fish_seen_subcommand_from add delete enable disable softreset refresh-out help" -a "delete" -d 'Delete this neighbor'
+complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and not __fish_seen_subcommand_from add delete enable disable softreset refresh-out help" -a "enable" -d 'Enable this neighbor'
+complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and not __fish_seen_subcommand_from add delete enable disable softreset refresh-out help" -a "disable" -d 'Disable this neighbor'
+complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and not __fish_seen_subcommand_from add delete enable disable softreset refresh-out help" -a "softreset" -d 'Trigger soft reset (inbound)'
+complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and not __fish_seen_subcommand_from add delete enable disable softreset refresh-out help" -a "refresh-out" -d 'Re-send this peer\'s current exportable outbound routes'
+complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and not __fish_seen_subcommand_from add delete enable disable softreset refresh-out help" -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from add" -l remote-asn -l asn -d 'Remote AS number of the peer (the local AS is `rbgp global`)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from add" -l description -d 'Description' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from add" -l hold-time -d 'Hold time in seconds' -r
@@ -214,25 +215,32 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subc
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from softreset" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from softreset" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from softreset" -s h -l help -d 'Print help (see more with \'--help\')'
+complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from refresh-out" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from refresh-out" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from refresh-out" -s j -l json -d 'Output in JSON format'
+complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from refresh-out" -l no-color -d 'Disable colored output'
+complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from refresh-out" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from help" -f -a "add" -d 'Add a new neighbor'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from help" -f -a "delete" -d 'Delete this neighbor'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from help" -f -a "enable" -d 'Enable this neighbor'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from help" -f -a "disable" -d 'Disable this neighbor'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from help" -f -a "softreset" -d 'Trigger soft reset (inbound)'
+complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from help" -f -a "refresh-out" -d 'Re-send this peer\'s current exportable outbound routes'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
-complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and not __fish_seen_subcommand_from add delete enable disable softreset help" -l compare -d 'Compare this peer\'s live update-group membership with another configured peer without exposing internal group identifiers' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and not __fish_seen_subcommand_from add delete enable disable softreset help" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and not __fish_seen_subcommand_from add delete enable disable softreset help" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and not __fish_seen_subcommand_from add delete enable disable softreset help" -l wide -d 'Append summary columns to the list: MsgRcvd, MsgSent, Flaps, RRC (route-reflector client), Slow (`!` marks a slow peer), and State/PfxRcd (prefix count when Established). Display-only; JSON is unaffected by --wide and may omit optional false healthy-state fields'
-complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and not __fish_seen_subcommand_from add delete enable disable softreset help" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and not __fish_seen_subcommand_from add delete enable disable softreset help" -l no-color -d 'Disable colored output'
-complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and not __fish_seen_subcommand_from add delete enable disable softreset help" -s h -l help -d 'Print help (see more with \'--help\')'
-complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and not __fish_seen_subcommand_from add delete enable disable softreset help" -a "add" -d 'Add a new neighbor'
-complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and not __fish_seen_subcommand_from add delete enable disable softreset help" -a "delete" -d 'Delete this neighbor'
-complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and not __fish_seen_subcommand_from add delete enable disable softreset help" -a "enable" -d 'Enable this neighbor'
-complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and not __fish_seen_subcommand_from add delete enable disable softreset help" -a "disable" -d 'Disable this neighbor'
-complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and not __fish_seen_subcommand_from add delete enable disable softreset help" -a "softreset" -d 'Trigger soft reset (inbound)'
-complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and not __fish_seen_subcommand_from add delete enable disable softreset help" -a "help" -d 'Print this message or the help of the given subcommand(s)'
+complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and not __fish_seen_subcommand_from add delete enable disable softreset refresh-out help" -l compare -d 'Compare this peer\'s live update-group membership with another configured peer without exposing internal group identifiers' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and not __fish_seen_subcommand_from add delete enable disable softreset refresh-out help" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and not __fish_seen_subcommand_from add delete enable disable softreset refresh-out help" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and not __fish_seen_subcommand_from add delete enable disable softreset refresh-out help" -l wide -d 'Append summary columns to the list: MsgRcvd, MsgSent, Flaps, RRC (route-reflector client), Slow (`!` marks a slow peer), and State/PfxRcd (prefix count when Established). Display-only; JSON is unaffected by --wide and may omit optional false healthy-state fields'
+complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and not __fish_seen_subcommand_from add delete enable disable softreset refresh-out help" -s j -l json -d 'Output in JSON format'
+complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and not __fish_seen_subcommand_from add delete enable disable softreset refresh-out help" -l no-color -d 'Disable colored output'
+complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and not __fish_seen_subcommand_from add delete enable disable softreset refresh-out help" -s h -l help -d 'Print help (see more with \'--help\')'
+complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and not __fish_seen_subcommand_from add delete enable disable softreset refresh-out help" -a "add" -d 'Add a new neighbor'
+complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and not __fish_seen_subcommand_from add delete enable disable softreset refresh-out help" -a "delete" -d 'Delete this neighbor'
+complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and not __fish_seen_subcommand_from add delete enable disable softreset refresh-out help" -a "enable" -d 'Enable this neighbor'
+complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and not __fish_seen_subcommand_from add delete enable disable softreset refresh-out help" -a "disable" -d 'Disable this neighbor'
+complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and not __fish_seen_subcommand_from add delete enable disable softreset refresh-out help" -a "softreset" -d 'Trigger soft reset (inbound)'
+complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and not __fish_seen_subcommand_from add delete enable disable softreset refresh-out help" -a "refresh-out" -d 'Re-send this peer\'s current exportable outbound routes'
+complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and not __fish_seen_subcommand_from add delete enable disable softreset refresh-out help" -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from add" -l remote-asn -l asn -d 'Remote AS number of the peer (the local AS is `rbgp global`)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from add" -l description -d 'Description' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from add" -l hold-time -d 'Hold time in seconds' -r
@@ -276,11 +284,17 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subco
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from softreset" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from softreset" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from softreset" -s h -l help -d 'Print help (see more with \'--help\')'
+complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from refresh-out" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from refresh-out" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from refresh-out" -s j -l json -d 'Output in JSON format'
+complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from refresh-out" -l no-color -d 'Disable colored output'
+complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from refresh-out" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from help" -f -a "add" -d 'Add a new neighbor'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from help" -f -a "delete" -d 'Delete this neighbor'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from help" -f -a "enable" -d 'Enable this neighbor'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from help" -f -a "disable" -d 'Disable this neighbor'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from help" -f -a "softreset" -d 'Trigger soft reset (inbound)'
+complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from help" -f -a "refresh-out" -d 'Re-send this peer\'s current exportable outbound routes'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand bfd; and not __fish_seen_subcommand_from list show help" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand bfd; and not __fish_seen_subcommand_from list show help" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
@@ -1115,6 +1129,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from neighbor" -f -a "enable" -d 'Enable this neighbor'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from neighbor" -f -a "disable" -d 'Disable this neighbor'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from neighbor" -f -a "softreset" -d 'Trigger soft reset (inbound)'
+complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from neighbor" -f -a "refresh-out" -d 'Re-send this peer\'s current exportable outbound routes'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from bfd" -f -a "list" -d 'List all BFD sessions (default)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from bfd" -f -a "show" -d 'Show a single BFD session by peer address'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from rib" -f -a "received" -d 'Show received routes from a neighbor'

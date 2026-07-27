@@ -1,10 +1,10 @@
 use std::collections::BTreeSet;
 
 use rustbgpd_api::peer_types::{
-    ConfigEvent, DynamicPeerBounceOutcome, DynamicRangeTarget, PeerKey, PeerLifecycleError,
-    PeerManagerNeighborConfig, SessionLifecycleEventType, SetGshutError,
+    ConfigEvent, DynamicPeerBounceOutcome, DynamicRangeTarget, OutboundRefreshError, PeerKey,
+    PeerLifecycleError, PeerManagerNeighborConfig, SessionLifecycleEventType, SetGshutError,
 };
-use rustbgpd_rib::RibUpdate;
+use rustbgpd_rib::{RibCommandError, RibUpdate};
 use rustbgpd_transport::{PeerCommand, PeerCommandError};
 use rustbgpd_transport::{PeerHandle, SessionIdentity, TcpAoKeyring};
 use rustbgpd_wire::{Afi, Safi};
@@ -1529,6 +1529,48 @@ impl PeerManager {
         self.soft_reset_in_reporting_delivery(peer, families)
             .await
             .map_err(|failure| failure.error)
+    }
+
+    /// Re-emit the current exportable outbound inventory for one managed peer.
+    ///
+    /// The RIB owns the authoritative outbound registration. A managed peer
+    /// that is down or has not completed `PeerUp` is therefore reported
+    /// separately from an unknown peer.
+    pub(super) async fn refresh_outbound(&self, peer: PeerKey) -> Result<(), OutboundRefreshError> {
+        if !self.peers.contains_key(&peer) {
+            return Err(OutboundRefreshError::PeerNotFound(peer));
+        }
+
+        let address = peer.address;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.rib_tx
+            .send(RibUpdate::RefreshPeerOutbound {
+                peer: address,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|error| {
+                OutboundRefreshError::Internal(format!(
+                    "failed to request outbound refresh for peer {peer}: {error}"
+                ))
+            })?;
+
+        match tokio::time::timeout(super::RIB_REPLY_TIMEOUT, reply_rx).await {
+            Err(_) => Err(OutboundRefreshError::Internal(format!(
+                "outbound refresh for peer {peer} timed out after {:?}",
+                super::RIB_REPLY_TIMEOUT
+            ))),
+            Ok(Err(_)) => Err(OutboundRefreshError::Internal(format!(
+                "RIB dropped outbound refresh reply for peer {peer}"
+            ))),
+            Ok(Ok(Ok(()))) => Ok(()),
+            Ok(Ok(Err(RibCommandError::NotFound(_)))) => {
+                Err(OutboundRefreshError::PeerUnavailable(peer))
+            }
+            Ok(Ok(Err(RibCommandError::Internal(message)))) => {
+                Err(OutboundRefreshError::Internal(message))
+            }
+        }
     }
 
     /// [`Self::soft_reset_in`], additionally reporting whether the peer's

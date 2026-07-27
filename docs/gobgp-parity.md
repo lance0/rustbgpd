@@ -114,7 +114,7 @@ releases rather than carried forward from older measurements.
 
 | Feature | GoBGP | rustbgpd | Notes |
 |---------|:-----:|:--------:|-------|
-| Total RPCs | ~55 | 98 | 94 `rustbgpd.v1` RPCs plus 4 `gnmi.gNMI` RPCs |
+| Total RPCs | ~55 | 102 | 98 `rustbgpd.v1` RPCs plus 4 `gnmi.gNMI` RPCs |
 | Peer CRUD | Yes | Yes | Add/Delete/List/Enable/Disable |
 | Peer groups | Yes | Yes | `PeerGroupService` + neighbor membership RPCs |
 | Dynamic neighbors (prefix-based) | Yes | Yes | `[[dynamic_neighbors]]` config plus runtime `AddDynamicNeighbor` / `DeleteDynamicNeighbor` / `ListDynamicNeighbors` (add/delete tier `mutating`, persisted to TOML); overlapping ranges resolve by longest-prefix-match |
@@ -133,7 +133,7 @@ releases rather than carried forward from older measurements.
 | Zebra/FRR integration | Yes | No | |
 | Runtime log level | Yes | Partial | Per-peer log level via config; no global runtime gRPC toggle |
 | Global config get/set | Partial | Partial | Get only on both |
-| Soft reset (in/out) | Yes | Yes | SoftResetIn RPC |
+| Soft reset (in/out) | Yes | Yes | `SoftResetIn` requests new inbound routes from the peer; `RefreshOutbound` re-emits this peer's retained, currently exportable outbound inventory without a session reset |
 | Graceful shutdown RPC | Yes | Yes | |
 
 ## Monitoring & Observability
@@ -211,7 +211,7 @@ the gRPC API table's "Total RPCs" row, not a Yes-tally.)
 | Core protocol | 16 | 16 | 100% |
 | Path attributes | 13 | 11 | ~85% |
 | Policy engine | 18 | 21 | 100%+ (`.rpol` language, live-RIB dry run, per-term hit counters are rustbgpd-only) |
-| gRPC RPCs | ~55 | 98 | 100%+ (94 `rustbgpd.v1` RPCs plus gNMI) |
+| gRPC RPCs | ~55 | 102 | 100%+ (98 `rustbgpd.v1` RPCs plus gNMI) |
 | Monitoring | 5 | 9 | 100%+ |
 | Security | 5 | 6 | 100%+ |
 | Best-path steps | 12 | 12 | 100% (different single gaps: GoBGP lacks Optimal Route Reflection, rustbgpd lacks AIGP) |

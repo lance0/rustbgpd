@@ -112,6 +112,7 @@ That includes privileged RPCs such as:
 - `AddNeighbor` / `DeleteNeighbor`
 - `EnableNeighbor` / `DisableNeighbor`
 - `SoftResetIn`
+- `RefreshOutbound`
 - `AddPath` / `DeletePath`
 - `AddFlowSpec` / `DeleteFlowSpec`
 - `AddEvpnRoute` / `DeleteEvpnRoute`

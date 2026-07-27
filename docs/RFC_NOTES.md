@@ -744,7 +744,9 @@ does not change that boundary.
 - Capability code 2, unconditionally advertised.
 - Inbound: on receiving ROUTE-REFRESH, re-advertise the requested family
   from Adj-RIB-Out.
-- Outbound: `SoftResetIn` gRPC RPC sends ROUTE-REFRESH to the peer.
+- Operator inbound refresh: `SoftResetIn` sends ROUTE-REFRESH to the peer.
+- Operator outbound refresh: `RefreshOutbound` re-emits rustbgpd's current
+  exportable outbound inventory to one peer; it does not send ROUTE-REFRESH.
 - See ADR-0027.
 
 ---

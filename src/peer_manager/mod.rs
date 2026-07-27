@@ -1035,6 +1035,10 @@ impl PeerManager {
                             let result = self.soft_reset_in(peer, families).await;
                             let _ = reply.send(result);
                         }
+                        PeerManagerCommand::RefreshOutbound { peer, reply } => {
+                            let result = self.refresh_outbound(peer).await;
+                            let _ = reply.send(result);
+                        }
                         PeerManagerCommand::SoftResetImportValidationDependents {
                             dependency,
                             reply,

@@ -84,6 +84,9 @@ pub(crate) struct MockState {
     pub(crate) last_get_neighbor_state: Mutex<Option<server_proto::GetNeighborStateRequest>>,
     pub(crate) neighbor_comparison: Mutex<Option<server_proto::UpdateGroupComparison>>,
     pub(crate) last_softreset: Mutex<Option<server_proto::SoftResetInRequest>>,
+    pub(crate) last_refresh_outbound: Mutex<Option<server_proto::RefreshOutboundRequest>>,
+    pub(crate) refresh_outbound_calls: AtomicUsize,
+    pub(crate) refresh_outbound_declined: AtomicBool,
     pub(crate) last_explain_advertised: Mutex<Option<server_proto::ExplainAdvertisedRouteRequest>>,
     pub(crate) last_explain_best_path: Mutex<Option<server_proto::ExplainBestPathRequest>>,
     // Canned pages served in order by the unicast route-listing RPCs
@@ -924,6 +927,19 @@ impl rustbgpd_api::proto::neighbor_service_server::NeighborService for MockNeigh
     ) -> Result<Response<server_proto::SoftResetInResponse>, Status> {
         *self.state.last_softreset.lock().await = Some(request.into_inner());
         Ok(Response::new(server_proto::SoftResetInResponse {}))
+    }
+
+    async fn refresh_outbound(
+        &self,
+        request: Request<server_proto::RefreshOutboundRequest>,
+    ) -> Result<Response<server_proto::RefreshOutboundResponse>, Status> {
+        self.state
+            .refresh_outbound_calls
+            .fetch_add(1, Ordering::SeqCst);
+        *self.state.last_refresh_outbound.lock().await = Some(request.into_inner());
+        Ok(Response::new(server_proto::RefreshOutboundResponse {
+            scheduled: !self.state.refresh_outbound_declined.load(Ordering::SeqCst),
+        }))
     }
 
     async fn list_dynamic_neighbors(

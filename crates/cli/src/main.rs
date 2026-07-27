@@ -948,6 +948,8 @@ enum NeighborAction {
         #[arg(short = 'a', long)]
         family: Option<String>,
     },
+    /// Re-send this peer's current exportable outbound routes
+    RefreshOut,
 }
 
 #[derive(Subcommand)]
@@ -2180,6 +2182,9 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
             }
             (Some(addr), Some(NeighborAction::Softreset { family })) => {
                 commands::neighbor::softreset(connection, &addr, family, json).await
+            }
+            (Some(addr), Some(NeighborAction::RefreshOut)) => {
+                commands::neighbor::refresh_outbound(connection, &addr, json).await
             }
             (None, Some(_)) => Err(CliError::Argument(
                 "neighbor address required for this action".into(),

@@ -240,6 +240,12 @@ pub const METHODS: &[GrpcMethodAuthz] = &[
     ),
     method(
         "rustbgpd.v1.NeighborService",
+        "RefreshOutbound",
+        "/rustbgpd.v1.NeighborService/RefreshOutbound",
+        AuthTier::Mutating,
+    ),
+    method(
+        "rustbgpd.v1.NeighborService",
         "ListDynamicNeighbors",
         "/rustbgpd.v1.NeighborService/ListDynamicNeighbors",
         AuthTier::SensitiveRead,
@@ -946,7 +952,7 @@ mod tests {
             .collect::<BTreeSet<_>>();
 
         assert_eq!(matrix_methods, proto_methods);
-        assert_eq!(METHODS.len(), 101);
+        assert_eq!(METHODS.len(), 102);
     }
 
     #[test]
@@ -988,7 +994,7 @@ mod tests {
     fn method_matrix_tier_counts_match_inventory() {
         assert_eq!(method_count_by_tier(AuthTier::Read), 0);
         assert_eq!(method_count_by_tier(AuthTier::SensitiveRead), 59);
-        assert_eq!(method_count_by_tier(AuthTier::Mutating), 19);
+        assert_eq!(method_count_by_tier(AuthTier::Mutating), 20);
         assert_eq!(method_count_by_tier(AuthTier::OperatorOnly), 23);
     }
 

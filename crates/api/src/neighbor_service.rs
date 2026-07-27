@@ -10,8 +10,8 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 use tonic::{Request, Response, Status};
 
 use crate::peer_types::{
-    ConfigEvent, DynamicRangeError, PeerInfo, PeerKey, PeerLifecycleError, PeerManagerCommand,
-    PeerManagerNeighborConfig, RemovedDynamicRange, Rfc8212PolicyStatus,
+    ConfigEvent, DynamicRangeError, OutboundRefreshError, PeerInfo, PeerKey, PeerLifecycleError,
+    PeerManagerCommand, PeerManagerNeighborConfig, RemovedDynamicRange, Rfc8212PolicyStatus,
 };
 use crate::proto;
 use crate::server::{
@@ -274,6 +274,18 @@ pub(crate) fn peer_lifecycle_error_status(error: PeerLifecycleError) -> Status {
         PeerLifecycleError::Invalid(message) => Status::invalid_argument(message),
         PeerLifecycleError::RestartRequired(message) => Status::failed_precondition(message),
         PeerLifecycleError::Internal(message) => Status::internal(message),
+    }
+}
+
+fn outbound_refresh_error_status(error: OutboundRefreshError) -> Status {
+    match error {
+        OutboundRefreshError::PeerNotFound(peer) => {
+            Status::not_found(format!("peer {peer} not found"))
+        }
+        OutboundRefreshError::PeerUnavailable(peer) => {
+            Status::failed_precondition(format!("peer {peer} has no active outbound session"))
+        }
+        OutboundRefreshError::Internal(message) => Status::internal(message),
     }
 }
 
@@ -1241,6 +1253,35 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             .map_err(peer_lifecycle_error_status)?;
 
         Ok(Response::new(proto::SoftResetInResponse {}))
+    }
+
+    async fn refresh_outbound(
+        &self,
+        request: Request<proto::RefreshOutboundRequest>,
+    ) -> Result<Response<proto::RefreshOutboundResponse>, Status> {
+        if let Some(status) = read_only_rejection(self.access_mode) {
+            return Err(status);
+        }
+        let req = request.into_inner();
+        let peer = peer_key(&req.address, &req.interface)?;
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.peer_mgr_tx
+            .send(PeerManagerCommand::RefreshOutbound {
+                peer,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| Status::internal("peer manager unavailable"))?;
+
+        reply_rx
+            .await
+            .map_err(|_| Status::internal("peer manager dropped reply"))?
+            .map_err(outbound_refresh_error_status)?;
+
+        Ok(Response::new(proto::RefreshOutboundResponse {
+            scheduled: true,
+        }))
     }
 
     async fn disable_neighbor(
@@ -2238,6 +2279,15 @@ mod tests {
         assert_eq!(err.code(), tonic::Code::PermissionDenied);
 
         let err = svc
+            .refresh_outbound(Request::new(proto::RefreshOutboundRequest {
+                address: "10.0.0.2".into(),
+                interface: String::new(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+
+        let err = svc
             .set_graceful_shutdown(Request::new(proto::SetGracefulShutdownRequest {
                 address: "10.0.0.2".into(),
                 interface: String::new(),
@@ -2296,6 +2346,53 @@ mod tests {
         });
         let resp = svc.soft_reset_in(req).await.unwrap();
         let _ = resp.into_inner();
+    }
+
+    /// Load-bearing API seam proof: removing the handler's interface-aware
+    /// `PeerKey` dispatch or returning the protobuf default makes this test
+    /// red before any CLI can falsely report success.
+    #[tokio::test]
+    async fn refresh_outbound_dispatches_scoped_peer_and_confirms_scheduling() {
+        let (peer_tx, mut peer_rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel(16);
+        let svc = NeighborService::new(65001, AccessMode::ReadWrite, peer_tx, rib_tx, None);
+
+        tokio::spawn(async move {
+            let Some(PeerManagerCommand::RefreshOutbound { peer, reply }) = peer_rx.recv().await
+            else {
+                panic!("expected outbound refresh command");
+            };
+            assert_eq!(peer.address, "fe80::2".parse::<IpAddr>().unwrap());
+            assert_eq!(peer.interface.as_deref(), Some("eth1"));
+            let _ = reply.send(Ok(()));
+        });
+
+        let response = svc
+            .refresh_outbound(Request::new(proto::RefreshOutboundRequest {
+                address: "fe80::2".into(),
+                interface: "eth1".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(response.scheduled);
+    }
+
+    #[test]
+    fn outbound_refresh_errors_have_stable_status_codes() {
+        let peer = PeerKey::new("192.0.2.1".parse().unwrap(), None);
+        assert_eq!(
+            outbound_refresh_error_status(OutboundRefreshError::PeerNotFound(peer.clone())).code(),
+            tonic::Code::NotFound
+        );
+        assert_eq!(
+            outbound_refresh_error_status(OutboundRefreshError::PeerUnavailable(peer)).code(),
+            tonic::Code::FailedPrecondition
+        );
+        assert_eq!(
+            outbound_refresh_error_status(OutboundRefreshError::Internal("boom".into())).code(),
+            tonic::Code::Internal
+        );
     }
 
     #[tokio::test]

@@ -14575,6 +14575,73 @@ async fn export_policy_apply_times_out_when_rib_reply_wedges() {
     assert!(!mgr.peers.get(&key(addr)).unwrap().pending_export_apply);
 }
 
+/// Load-bearing error classification proof: removing the managed-peer check
+/// emits a RIB command and turns an operator typo into `FAILED_PRECONDITION`;
+/// changing the forwarded address or collapsing the typed RIB error makes the
+/// exact-target/unavailable assertions red.
+#[tokio::test]
+async fn refresh_outbound_forwards_exact_peer_and_classifies_failures() {
+    let (_tx, rx) = mpsc::channel(16);
+    let (rib_tx, mut rib_rx) = mpsc::channel(4);
+    let mut mgr = PeerManager::new(
+        rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    let address = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 9));
+    let peer = key(address);
+
+    let unknown = mgr.refresh_outbound(peer.clone()).await.unwrap_err();
+    assert!(matches!(
+        unknown,
+        rustbgpd_api::peer_types::OutboundRefreshError::PeerNotFound(ref key) if key == &peer
+    ));
+    assert!(
+        rib_rx.try_recv().is_err(),
+        "an unknown peer must be rejected before the RIB"
+    );
+
+    insert_test_managed_peer(&mut mgr, address, closed_peer_handle(), false);
+    let success = mgr.refresh_outbound(peer.clone());
+    let respond = async {
+        let RibUpdate::RefreshPeerOutbound {
+            peer: target,
+            reply,
+        } = rib_rx.recv().await.expect("refresh command")
+        else {
+            panic!("expected outbound refresh");
+        };
+        assert_eq!(target, address);
+        let _ = reply.send(Ok(()));
+    };
+    let (result, ()) = tokio::join!(success, respond);
+    result.unwrap();
+
+    let unavailable = mgr.refresh_outbound(peer.clone());
+    let respond = async {
+        let RibUpdate::RefreshPeerOutbound { reply, .. } =
+            rib_rx.recv().await.expect("refresh command")
+        else {
+            panic!("expected outbound refresh");
+        };
+        let _ = reply.send(Err(rustbgpd_rib::RibCommandError::not_found(
+            "peer not registered",
+        )));
+    };
+    let (unavailable, ()) = tokio::join!(unavailable, respond);
+    let unavailable = unavailable.unwrap_err();
+    assert!(matches!(
+        unavailable,
+        rustbgpd_api::peer_types::OutboundRefreshError::PeerUnavailable(ref key)
+            if key == &peer
+    ));
+}
+
 #[tokio::test]
 async fn gshut_not_found_preserves_scoped_peer_label() {
     let (_tx, rx) = mpsc::channel(16);

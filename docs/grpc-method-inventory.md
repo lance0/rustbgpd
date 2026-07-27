@@ -95,7 +95,7 @@ shape itself does not raise the tier.
 | `ListConfigHistory` | `sensitive_read` | Lists the bounded on-disk applied-config history: per-entry index, timestamp, SHA-256 content hash, and a one-line count summary. Never returns config documents, but discloses change cadence and identity facts — full-config-adjacent read. |
 | `RollbackConfigTransaction` | `operator_only` | Junos-style `rollback N`: resolves a retained applied-config snapshot server-side and routes it through the same transaction executor as `ApplyConfigTransaction` (same plan/impact classification and receipts, optionally commit-confirmed). Same tier as apply because it is an apply. Comment is audit-redacted (presence only). |
 
-### NeighborService (11 RPCs)
+### NeighborService (12 RPCs)
 
 | RPC | Tier | Notes |
 |-----|------|-------|
@@ -106,6 +106,7 @@ shape itself does not raise the tier.
 | `EnableNeighbor` | `mutating` | Single-peer. |
 | `DisableNeighbor` | `mutating` | Single-peer; causes one session flap. |
 | `SoftResetIn` | `mutating` | Triggers RFC 7313 Route Refresh on one peer — heavy CPU + RIB churn but bounded. |
+| `RefreshOutbound` | `mutating` | Re-emits one peer's current exportable outbound inventory across its negotiated families. The reply confirms scheduling, not writer drain or remote receipt; full-table use is an O(table) burst and should be serialized. |
 | `ListDynamicNeighbors` | `sensitive_read` | Topology disclosure for the dynamic-prefix accepted peers. |
 | `AddDynamicNeighbor` | `mutating` | Adds an accept-prefix range. Wider than `AddNeighbor` (multi-peer effective), but still per-prefix scope. |
 | `DeleteDynamicNeighbor` | `mutating` | Removes a prefix range; stops future accepts only — established dynamic peers keep running and drain when they next return to Idle. |
@@ -241,13 +242,13 @@ shape itself does not raise the tier.
 | Tier | Count | % |
 |------|------:|--:|
 | `read` | 0 | 0.0% |
-| `sensitive_read` | 59 | 58.4% |
-| `mutating` | 19 | 18.8% |
-| `operator_only` | 23 | 22.8% |
-| **Total** | **101** | **100%** |
+| `sensitive_read` | 59 | 57.8% |
+| `mutating` | 20 | 19.6% |
+| `operator_only` | 23 | 22.5% |
+| **Total** | **102** | **100%** |
 
-(Counts include `SetGracefulShutdown` as one `NeighborService` RPC; the 101
-total is 97 native `rustbgpd.v1` RPCs plus 4 `gnmi.gNMI` RPCs.)
+(Counts include `SetGracefulShutdown` as one `NeighborService` RPC; the 102
+total is 98 native `rustbgpd.v1` RPCs plus 4 `gnmi.gNMI` RPCs.)
 
 ## Notes for ADR-0064
 
@@ -322,7 +323,7 @@ specific method if the model warrants it.
 
 ## Code matrix
 
-`crates/api/src/authz.rs` contains the same 101-method classification
+`crates/api/src/authz.rs` contains the same 102-method classification
 as a static Rust table. `docs/grpc-method-inventory.json` is the
 machine-readable export for auditors, tooling, and generated clients. The
 `authz` tests parse `proto/rustbgpd.proto` and fail if a new RPC is added

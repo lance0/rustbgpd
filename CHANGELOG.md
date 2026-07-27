@@ -11,6 +11,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `rbgp neighbor PEER refresh-out` and the
+  `NeighborService.RefreshOutbound` RPC re-emit one peer's current exportable
+  outbound inventory without resetting the session. The bounded single-peer
+  operation covers all negotiated families; its success response confirms
+  scheduling, not writer drain or remote receipt.
+
 - `bgp_rib_outbound_prefix_limit_actor_duration_seconds{operation}` exposes
   exact synchronous apply-attempt and recovery-batch duration for outbound
   prefix limits.

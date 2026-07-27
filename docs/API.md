@@ -41,7 +41,7 @@ not by itself make it v1-stable.
 |---------|------|---------|
 | `GlobalService` | `GetGlobal` | Daemon identity |
 | `ConfigService` | `DiffRuntimeConfig`, `PlanConfigTransaction`, `ApplyConfigTransaction`, `ConfirmConfigTransaction`, `AbortConfigTransaction`, `GetConfigTransactionStatus`, `GetEffectiveConfig`, `ListConfigHistory`, `RollbackConfigTransaction` | Candidate-vs-live config diff, effective running config with defaults materialized and secrets redacted, plus the v1 config-transaction lifecycle: validate/plan, commit/apply (incl. commit-confirmed), confirm, abort, status, and the bounded applied-config history with Junos-style `rollback N` through the same transaction executor |
-| `NeighborService` | `AddNeighbor`, `DeleteNeighbor`, `ListNeighbors`, `GetNeighborState`, `EnableNeighbor`, `DisableNeighbor`, `SoftResetIn`, `SetGracefulShutdown`, `AddDynamicNeighbor`, `DeleteDynamicNeighbor`, `ListDynamicNeighbors` | Peer lifecycle, inbound soft reset, RFC 8326 graceful-shutdown toggle, and dynamic-neighbor CRUD — `AddDynamicNeighbor` / `DeleteDynamicNeighbor` add and remove `[[dynamic_neighbors]]` prefix ranges at runtime (queued to the config file), `ListDynamicNeighbors` for visibility |
+| `NeighborService` | `AddNeighbor`, `DeleteNeighbor`, `ListNeighbors`, `GetNeighborState`, `EnableNeighbor`, `DisableNeighbor`, `SoftResetIn`, `RefreshOutbound`, `SetGracefulShutdown`, `AddDynamicNeighbor`, `DeleteDynamicNeighbor`, `ListDynamicNeighbors` | Peer lifecycle, inbound soft reset, single-peer outbound re-advertisement, RFC 8326 graceful-shutdown toggle, and dynamic-neighbor CRUD — `AddDynamicNeighbor` / `DeleteDynamicNeighbor` add and remove `[[dynamic_neighbors]]` prefix ranges at runtime (queued to the config file), `ListDynamicNeighbors` for visibility |
 | `PolicyService` | `ListPolicies`, `GetPolicy`, `SetPolicy`, `DeletePolicy`, `ListNeighborSets`, `GetNeighborSet`, `SetNeighborSet`, `DeleteNeighborSet`, `GetGlobalPolicyChains`, `GetNeighborPolicyChains`, `SetGlobalImportChain`, `SetGlobalExportChain`, `ClearGlobalImportChain`, `ClearGlobalExportChain`, `SetNeighborImportChain`, `SetNeighborExportChain`, `ClearNeighborImportChain`, `ClearNeighborExportChain`, `ExplainImportPolicy`, `ListRejectedRoutes`, `TestPolicy`, `GetPolicyStats` | Named policy CRUD, neighbor sets, global/per-neighbor chain attachment, import-policy decision explain (per-term traces for `.rpol` members), retained rejected-route views with reject reasons, read-only candidate-policy dry runs over the live RIB, and live per-term hit counters |
 | `PeerGroupService` | `ListPeerGroups`, `GetPeerGroup`, `SetPeerGroup`, `DeletePeerGroup`, `SetNeighborPeerGroup`, `ClearNeighborPeerGroup` | Peer-group CRUD and neighbor membership assignment |
 | `RibService` | `ListReceivedRoutes`, `ListBestRoutes`, `ListAdvertisedRoutes`, `ExplainAdvertisedRoute`, `ExplainBestPath`, `ListFlowSpecRoutes`, `ListEvpnRoutes`, `ListBgpLsRoutes`, `ListTopologyNodes`, `ListTopologyLinks`, `ListOrrStatus`, `ListVpnRoutes`, `ListRtcRoutes`, `ListLabeledRoutes`, `ListBlackholeDiscards`, `ListFibRoutes`, `ListFibTables`, `SetFibTable`, `DeleteFibTable`, `ListRouteEvents`, `WatchRoutes`, `WatchRouteEvents` | RIB queries (incl. EVPN, BGP-LS, VPNv4/v6, RT-Constrain, and labeled-unicast), the RFC 9107 ORR / BGP-LS topology read surface (`ListTopologyNodes` / `ListTopologyLinks` / `ListOrrStatus`), BLACKHOLE discard status, paginated FIB status, runtime FIB-table CRUD, explain, recent route-event history with per-prefix drilldown, and streaming |
@@ -177,7 +177,7 @@ for `grpc_authz` logs and the related Prometheus metrics live in
 |---------|----------------|---------------------------------------|
 | `GlobalService` | `GetGlobal` | — |
 | `ConfigService` | `DiffRuntimeConfig`, `PlanConfigTransaction`, `GetConfigTransactionStatus`, `GetEffectiveConfig`, `ListConfigHistory` | `ApplyConfigTransaction` (pure `[[fib_tables]]`, pure `[[dynamic_neighbors]]`, static `[[neighbors]]` add/delete/modify, catalog-only policy/neighbor-set/peer-group/global-chain changes, pure live policy-chain impact for static neighbors and accepted dynamic peers, or peer-group/session reshape impact for static members and live dynamic sessions; mixed or unsupported candidates rejected without mutation), `ConfirmConfigTransaction`, `AbortConfigTransaction`, `RollbackConfigTransaction` |
-| `NeighborService` | `ListNeighbors`, `GetNeighborState`, `ListDynamicNeighbors` | `AddNeighbor`, `DeleteNeighbor`, `EnableNeighbor`, `DisableNeighbor`, `SoftResetIn`, `AddDynamicNeighbor`, `DeleteDynamicNeighbor`, `SetGracefulShutdown` |
+| `NeighborService` | `ListNeighbors`, `GetNeighborState`, `ListDynamicNeighbors` | `AddNeighbor`, `DeleteNeighbor`, `EnableNeighbor`, `DisableNeighbor`, `SoftResetIn`, `RefreshOutbound`, `AddDynamicNeighbor`, `DeleteDynamicNeighbor`, `SetGracefulShutdown` |
 | `PolicyService` | `ListPolicies`, `GetPolicy`, `ListNeighborSets`, `GetNeighborSet`, `GetGlobalPolicyChains`, `GetNeighborPolicyChains`, `ExplainImportPolicy`, `ListRejectedRoutes`, `TestPolicy`, `GetPolicyStats` | `SetPolicy`, `DeletePolicy`, `SetNeighborSet`, `DeleteNeighborSet`, `SetGlobalImportChain`, `SetGlobalExportChain`, `ClearGlobalImportChain`, `ClearGlobalExportChain`, `SetNeighborImportChain`, `SetNeighborExportChain`, `ClearNeighborImportChain`, `ClearNeighborExportChain` |
 | `PeerGroupService` | `ListPeerGroups`, `GetPeerGroup` | `SetPeerGroup`, `DeletePeerGroup`, `SetNeighborPeerGroup`, `ClearNeighborPeerGroup` |
 | `RibService` | All read/list/explain RPCs (incl. `ListFibTables`) | `SetFibTable`, `DeleteFibTable` |
@@ -636,6 +636,7 @@ added at runtime.
 | `EnableNeighbor` | Re-enable a previously disabled peer |
 | `DisableNeighbor` | Administratively disable a peer (sends NOTIFICATION) |
 | `SoftResetIn` | Request inbound route refresh (RFC 2918/7313) for one or more families |
+| `RefreshOutbound` | Re-emit one peer's current exportable outbound inventory across all negotiated families, without resetting the session |
 | `AddDynamicNeighbor` | Add a `[[dynamic_neighbors]]` prefix range at runtime; persists the accepted change atomically before returning and rolls back runtime on persistence failure |
 | `DeleteDynamicNeighbor` | Remove a dynamic-neighbor range at runtime (stops future accepts; established peers drain on Idle); waits for the atomic config-file update and rolls runtime back on persistence failure |
 | `ListDynamicNeighbors` | List configured dynamic-neighbor ranges (prefix, peer group, remote ASN, description) |
@@ -716,6 +717,26 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   -d '{"address": "10.0.0.2", "families": ["ipv4_unicast"]}' \
   localhost:50051 rustbgpd.v1.NeighborService/SoftResetIn
 ```
+
+### Refresh one peer's outbound routes
+
+```bash
+rbgp neighbor 10.0.0.2 refresh-out
+
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"address": "10.0.0.2"}' \
+  localhost:50051 rustbgpd.v1.NeighborService/RefreshOutbound
+```
+
+`scheduled: true` means the RIB accepted the refresh pass; resulting updates
+were enqueued or retained for the ordinary dirty-retry path. It does not
+confirm writer drain or remote receipt.
+Unknown peers return `NOT_FOUND`; managed peers without an active outbound RIB
+registration return `FAILED_PRECONDITION`.
+
+This is an O(table) operation for the selected peer and can create a full-table
+UPDATE burst on a production session. Serialize operational use; the API
+intentionally has no all-peer or batch form.
 
 ---
 
