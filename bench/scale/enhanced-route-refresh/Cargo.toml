@@ -1,0 +1,14 @@
+[package]
+name = "enhanced-route-refresh-receipt"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bytes = "1"
+rustbgpd-wire = { path = "../../../crates/wire" }
+tokio = { version = "1", features = ["full"] }
+
+[profile.release]
+debug = 1
+
+[workspace]
