@@ -98,9 +98,9 @@ those report-only values is substituted for the allocated gate.
 
 The candidate's apply actor observations were 0.012111130, 0.148598562, and
 1.523071596 seconds, versus 0.020562114, 0.222357119, and 2.064777307 seconds
-for the parent. Recovery actor work and wall time remain close in the
-single observations. With one cell per revision and fleet size, this receipt
-makes no timing or variance claim.
+for the parent. Recovery actor work and wall time are retained only as single
+observations. With one cell per revision and fleet size, this receipt makes no
+timing or variance claim.
 
 ## Limits, reproduction, and artifacts
 
