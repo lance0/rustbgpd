@@ -539,7 +539,10 @@ mod tests {
     // current VPN fixture) while staying finite — never `usize::MAX`.
     // The upper-bound assertion is deliberately constant: it is the
     // fence that goes red if the ceiling is ever made unbounded.
-    #[allow(clippy::assertions_on_constants)]
+    #[allow(
+        clippy::assertions_on_constants,
+        reason = "the constant upper-bound assert is the mutation fence that goes red if the ceiling is ever made unbounded"
+    )]
     #[test]
     fn listing_decode_ceiling_budget_rationale() {
         let widest_row = crate::proto::VpnRouteEntry {
