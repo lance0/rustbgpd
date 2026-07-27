@@ -186,6 +186,7 @@ src/metrics_server.rs    # Prometheus /metrics HTTP endpoint
 crates/
   wire/                  # BGP codec — zero internal deps, independently publishable
   fsm/                   # RFC 4271 state machine — pure, no I/O
+  bfd/                   # RFC 5880/5881 single-hop BFD: control-packet codec + sans-IO session state machine
   transport/             # Tokio TCP glue — session runtime, BMP event emission
   rib/                   # RIB data structures, best-path selection, route distribution
   policy/                # Match + modify + filter engine: prefix, community, AS_PATH regex, RPKI
@@ -194,8 +195,9 @@ crates/
   mrt/                   # MRT dump export (RFC 6396): codec, writer, manager
   evpn/                  # EVPN local VTEP domain model (RFC 7432 / RFC 8365 / RFC 9136): EvpnInstance, IpVrf, RouteTarget, origination + projection state machines (kernel-free)
   evpn-linux/            # Linux kernel dataplane for EVPN VTEP mode (#[cfg(target_os = "linux")]): rtnetlink reconciler, FDB / link / IP-VRF dumps, RTNLGRP_NEIGH classifier, RTNLGRP_IPV4_ROUTE / RTNLGRP_IPV6_ROUTE route observer (Gate 9 slice 6), L3 FIB programming (Gate 9 slice 6 PR B), nexthop_raw raw-netlink FDB-NHG primitive + group_state refcount + nh_id_alloc tag bits (ADR-0059 aliasing-ECMP)
-  api/                   # gRPC server (tonic) — 11 services
+  api/                   # gRPC server (tonic) — twelve services (eleven native rustbgpd.v1 + vendored gnmi.gNMI)
   telemetry/             # Prometheus metrics + structured tracing
+  event-history/         # Durable local event outbox (ADR-0072): SQLite WAL store + broadcast
   cli/                   # rbgp — gRPC CLI with human-readable and JSON output
 proto/                   # gRPC proto definitions (rustbgpd.v1)
 tests/interop/           # Containerlab topologies and configs
@@ -211,12 +213,12 @@ These are not guidelines — they are enforced invariants:
 - `fsm` never imports tokio, never touches I/O
 - `policy` depends only on `wire`
 - `rpki` depends only on `wire`
-- `bmp` and `telemetry` have no internal dependencies
-- `rib` depends on `wire`, `policy`, `telemetry`, and `rpki`
-- `transport` owns BGP peer session I/O and drives the FSM — it depends on `wire`, `fsm`, `rib`, `policy`, `telemetry`, and `bmp`
+- `telemetry` has no internal dependencies; `bmp` depends on `wire` and `telemetry`
+- `rib` depends on `wire`, `policy`, `telemetry`, `rpki`, and `bmp`
+- `transport` owns BGP peer session I/O and drives the FSM — it depends on `wire`, `fsm`, `rib`, `policy`, `rpki`, `telemetry`, and `bmp`
 - `evpn` is the local-VTEP domain crate — depends only on `wire`, never on `rib` or `transport`, never programs the kernel
 - `evpn-linux` is the Linux kernel dataplane for EVPN VTEP mode — depends only on `evpn`, never on `rib` or `transport`
-- `cli` has no internal crate dependencies (client-only proto stubs)
+- `cli` depends only on `wire` and `policy` (client-only proto stubs; dev tests also use `api`, `evpn`, and `bmp`)
 
 ## Pull Request Process
 

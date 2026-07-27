@@ -371,8 +371,9 @@ byte counts.
   connections use plain TCP; TCP-AO (RFC 5925) is not available for the
   RTR transport. Use network-level access controls or SSH tunnels for RTR
   transport security. (TCP-AO *is* supported for BGP static-neighbor and
-  dynamic-prefix startup keys on Linux — see the runtime-rotation follow-up
-  in the limitations list.)
+  dynamic-prefix keys on Linux, including live successor installation,
+  selection, and deprecated-key deletion on SIGHUP — see SECURITY.md and
+  ADR-0062.)
 - **Non-negotiated Add-Path NLRI is not detected.** If a peer violates
   negotiation and sends Add-Path-encoded NLRI for a family where Add-Path
   was not negotiated, the wire format is ambiguous — the 4-byte path ID

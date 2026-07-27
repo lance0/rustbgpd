@@ -77,11 +77,14 @@ input from the network. It runs under continuous fuzzing in CI.
   dynamic-prefix listener keys on Linux (ADR-0062), including ordered startup
   keyrings, fail-closed accepted-socket owned-union validation, and live
   API/CLI health. SIGHUP can append non-preferred successor keys to unchanged
-  owners. Selection, deprecation, deletion, editing/reordering, and protected-
-  owner changes remain restart-required. Static-exact selection precedes
-  dynamic longest-prefix-match; overlapping protected owners require
-  directionally disjoint KeyIDs, AO/plaintext or AO/MD5 overlaps are rejected,
-  and listener inventories are capped at 4,096 MKTs per address family.
+  owners, then select the successor (observation-gated deprecation of the
+  predecessor) and later delete deprecated/unselected keys across further
+  SIGHUP generations. Key edits/reordering, selected or non-deprecated-key
+  deletion, and protected-owner changes remain restart-required. Static-exact
+  selection precedes dynamic longest-prefix-match; overlapping protected
+  owners require directionally disjoint KeyIDs, AO/plaintext or AO/MD5
+  overlaps are rejected, and listener inventories are capped at 4,096 MKTs
+  per address family.
 - **gRPC:** Unix domain socket by default (local-only). TCP listeners
   are opt-in via config. Per-listener bearer-token authentication is
   available via `token_file`. Native mTLS terminates in-process on TCP
