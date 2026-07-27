@@ -23,7 +23,10 @@ pub mod timer;
 // Authoritative export encoding plus inbound attribute handling exposed ONLY
 // for the off-by-default microbenches. Not part of the normal public API.
 #[cfg(feature = "bench-internals")]
-pub use session::export::{fanout_bench_export_encoder, fanout_bench_route_server_export_encoder};
+pub use session::export::{
+    FanoutBenchExportSnapshotEvidence, fanout_bench_export_encoder,
+    fanout_bench_export_snapshot_evidence, fanout_bench_route_server_export_encoder,
+};
 #[cfg(feature = "bench-internals")]
 pub use session::inbound::{RouteAttrBundle, materialize_attrs};
 

@@ -19,6 +19,16 @@
 //! target's negotiated ceiling; it does not perform a full exact encode per
 //! peer. This is not a resync or full-table convergence benchmark.
 //!
+//! `initial_table_peer_join` is a separate one-peer RR shape: it pre-seeds the
+//! Loc-RIB through production `RoutesReceived` handling before the timed call,
+//! then measures the production `PeerUp` registration and initial-table dump.
+//! Loc-RIB fixture construction, channel allocation, encoder construction, and
+//! envelope inspection stay outside accumulated time; the joining peer's first
+//! update-group construction remains inside it. The fixture uses one eBGP
+//! source, IPv4 /32 routes with the representative attribute set below, one
+//! joining iBGP RR client, no export policy, no Add-Path, and one negotiated
+//! IPv4 unicast family.
+//!
 //! Gated behind `bench-internals`; run with:
 //!   cargo bench -p rustbgpd-transport --features bench-internals --bench fanout
 //!
@@ -35,11 +45,14 @@ use rustbgpd_policy::{Policy, PolicyAction, PolicyChain, PolicyStatement, RouteM
 use rustbgpd_rib::RibManager;
 use rustbgpd_rib::manager::{AdjRibOutFanoutBenchReceipt, PolicyTransitionBenchReceipt};
 use rustbgpd_rib::route::{Route, RouteOrigin};
-use rustbgpd_rib::update::{OutboundRouteUpdate, RibUpdate};
+use rustbgpd_rib::update::{ExactExportEncoder, OutboundRouteUpdate, RibUpdate};
 use rustbgpd_telemetry::BgpMetrics;
-use rustbgpd_transport::{fanout_bench_export_encoder, fanout_bench_route_server_export_encoder};
+use rustbgpd_transport::{
+    FanoutBenchExportSnapshotEvidence, fanout_bench_export_encoder,
+    fanout_bench_export_snapshot_evidence, fanout_bench_route_server_export_encoder,
+};
 use rustbgpd_wire::{
-    AsPath, AsPathSegment, Ipv4Prefix, Origin, PathAttribute, Prefix, RpkiValidation,
+    Afi, AsPath, AsPathSegment, Ipv4Prefix, Origin, PathAttribute, Prefix, RpkiValidation, Safi,
 };
 use tokio::sync::mpsc;
 
@@ -51,6 +64,8 @@ const PEER_COUNTS: [usize; 4] = [1, 8, 64, 256];
 const IXP_PEER_COUNTS: [usize; 3] = [8, 64, 256];
 /// Route-server fleets retained for the family-gauge A/B receipt.
 const ADJ_RIB_OUT_GAUGE_PEER_COUNTS: [usize; 5] = [1, 8, 64, 256, 1_000];
+/// Loc-RIB sizes for the late RR-client initial-table join instrument.
+const INITIAL_TABLE_JOIN_ROUTE_COUNTS: [usize; 2] = [4_096, 65_536];
 /// Per-peer channel capacity — one pass of `CHANGED` announces fits without
 /// filling (a full channel would divert the peer to the dirty-resync path).
 const CHANNEL_CAP: usize = CHANGED + 8;
@@ -438,6 +453,225 @@ fn bench_adj_rib_out_family_gauge(c: &mut Criterion) {
     group.finish();
 }
 
+struct InitialTableJoinState {
+    manager: RibManager,
+    sender: Option<mpsc::Sender<OutboundRouteUpdate>>,
+    receiver: mpsc::Receiver<OutboundRouteUpdate>,
+    encoder: Option<Arc<dyn ExactExportEncoder>>,
+    snapshot_evidence: FanoutBenchExportSnapshotEvidence,
+    expected_inventory: HashSet<(Prefix, u32)>,
+}
+
+fn build_initial_table_join(routes: usize) -> InitialTableJoinState {
+    let (_tx, rx) = mpsc::channel::<RibUpdate>(16);
+    let (_qtx, qrx) = mpsc::channel::<RibUpdate>(16);
+    let mut manager = RibManager::new(
+        rx,
+        qrx,
+        None,
+        Some(Ipv4Addr::new(10, 255, 255, 255)),
+        BgpMetrics::new(),
+    );
+    // Pre-seeding is the defining control: registering first would time no
+    // initial inventory and leave the EoR as the first queued envelope.
+    let seeded = policy_regroup_routes(routes);
+    let expected_inventory = seeded
+        .iter()
+        .map(|route| (route.prefix, route.path_id))
+        .collect::<HashSet<_>>();
+    assert_eq!(
+        expected_inventory.len(),
+        routes,
+        "the deterministic seed must contain one unique route identity per row"
+    );
+    manager.bench_seed_loc_rib(seeded);
+    manager.bench_reset_adj_rib_out_fanout_receipt();
+
+    // Two synchronous envelopes are expected: one route-bearing dump and one
+    // EoR. Channel allocation and encoder construction remain outside the
+    // timed PeerUp call.
+    let (sender, receiver) = mpsc::channel(2);
+    let encoder = fanout_bench_export_encoder();
+    let snapshot = encoder.snapshot();
+    let snapshot_evidence = fanout_bench_export_snapshot_evidence(snapshot.as_ref())
+        .expect("the fixture must use the authoritative transport-session snapshot");
+    assert_ne!(
+        snapshot_evidence.owner_id, 0,
+        "the authoritative snapshot must be owned by a real session encoder"
+    );
+    assert_eq!(snapshot_evidence.owner_id, encoder.owner_id());
+    assert_eq!(
+        snapshot_evidence.max_message_len,
+        usize::from(rustbgpd_wire::MAX_MESSAGE_LEN),
+        "the fixture models a classic-message negotiated session"
+    );
+
+    InitialTableJoinState {
+        manager,
+        sender: Some(sender),
+        receiver,
+        encoder: Some(encoder),
+        snapshot_evidence,
+        expected_inventory,
+    }
+}
+
+fn assert_initial_table_join_receipt(state: &mut InitialTableJoinState, routes: usize) {
+    let receipt = state.manager.bench_adj_rib_out_fanout_receipt();
+    assert_eq!(
+        receipt.update_groups, 1,
+        "the joining RR client must build and replay one production update group"
+    );
+    assert_eq!(receipt.grouped_peers, 1);
+    assert_eq!(
+        receipt.ungrouped_peers, 0,
+        "a private fallback would measure the wrong initial-table join shape"
+    );
+    assert_eq!(receipt.dirty_peers, 0);
+    assert_eq!(
+        receipt.exact_probe_batches, 1,
+        "the initial inventory must traverse one real exact-export batch"
+    );
+    assert_eq!(
+        receipt.exact_probe_candidates, routes,
+        "every pre-seeded route must traverse the authoritative encoder"
+    );
+    assert_eq!(
+        receipt.exact_probe_nonzero_encoded_lengths, routes,
+        "every production probe must report a nonzero encoded UPDATE length"
+    );
+    assert_eq!(receipt.exact_probe_cache_reuses, 0);
+    assert_eq!(receipt.successful_commits, 1);
+    assert_eq!(receipt.successful_enqueues, 1);
+    assert_eq!(receipt.family_gauge_writes, 1);
+    assert_eq!(receipt.last_family_gauge_write_mask, 0x01);
+    assert_eq!(
+        receipt.first_peer_family_values,
+        [
+            i64::try_from(routes).expect("fixture size fits i64"),
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+        ],
+        "the committed Adj-RIB-Out inventory must match the pre-seeded table exactly"
+    );
+
+    let initial = state
+        .receiver
+        .try_recv()
+        .expect("initial-table join must enqueue one route-bearing envelope");
+    assert_eq!(initial.announce.len(), routes);
+    assert_eq!(initial.next_hop_override.len(), routes);
+    assert!(
+        initial.next_hop_override.iter().all(Option::is_none),
+        "the no-policy fixture must not carry any next-hop override"
+    );
+    let actual_inventory = initial
+        .announce
+        .iter()
+        .map(|route| (route.prefix, route.path_id))
+        .collect::<HashSet<_>>();
+    assert_eq!(
+        actual_inventory, state.expected_inventory,
+        "the initial envelope must contain exactly the deterministic seed inventory"
+    );
+    assert!(initial.announce_source_exclusion.is_none());
+    assert!(initial.withdraw.is_empty());
+    assert!(initial.end_of_rib.is_empty());
+    assert!(initial.refresh_markers.is_empty());
+    assert!(initial.flowspec_announce.is_empty());
+    assert!(initial.flowspec_withdraw.is_empty());
+    assert!(initial.evpn_announce.is_empty());
+    assert!(initial.evpn_withdraw.is_empty());
+    assert!(initial.bgpls_announce.is_empty());
+    assert!(initial.bgpls_withdraw.is_empty());
+    assert!(initial.vpn_announce.is_empty());
+    assert!(initial.vpn_withdraw.is_empty());
+    assert!(initial.labeled_announce.is_empty());
+    assert!(initial.labeled_withdraw.is_empty());
+    assert!(initial.rtc_announce.is_empty());
+    assert!(initial.rtc_withdraw.is_empty());
+    assert!(initial.otc_blocked.is_empty());
+    assert!(!initial.request_refresh_all_negotiated);
+    assert!(initial.shared_group_encode.is_none());
+    let snapshot = initial
+        .exact_export_snapshot
+        .expect("route-bearing initial dump must retain the real session snapshot");
+    assert_eq!(
+        fanout_bench_export_snapshot_evidence(snapshot.as_ref()),
+        Some(state.snapshot_evidence),
+        "the envelope must retain the authoritative transport-session snapshot"
+    );
+
+    let eor = state
+        .receiver
+        .try_recv()
+        .expect("initial-table inventory must be followed by one EoR envelope");
+    assert!(eor.exact_export_snapshot.is_none());
+    assert!(eor.announce_source_exclusion.is_none());
+    assert!(eor.announce.is_empty());
+    assert!(eor.withdraw.is_empty());
+    assert_eq!(eor.end_of_rib, vec![(Afi::Ipv4, Safi::Unicast)]);
+    assert!(eor.refresh_markers.is_empty());
+    assert!(eor.next_hop_override.is_empty());
+    assert!(eor.flowspec_announce.is_empty());
+    assert!(eor.flowspec_withdraw.is_empty());
+    assert!(eor.evpn_announce.is_empty());
+    assert!(eor.evpn_withdraw.is_empty());
+    assert!(eor.bgpls_announce.is_empty());
+    assert!(eor.bgpls_withdraw.is_empty());
+    assert!(eor.vpn_announce.is_empty());
+    assert!(eor.vpn_withdraw.is_empty());
+    assert!(eor.labeled_announce.is_empty());
+    assert!(eor.labeled_withdraw.is_empty());
+    assert!(eor.rtc_announce.is_empty());
+    assert!(eor.rtc_withdraw.is_empty());
+    assert!(eor.otc_blocked.is_empty());
+    assert!(!eor.request_refresh_all_negotiated);
+    assert!(eor.shared_group_encode.is_none());
+    assert!(
+        matches!(
+            state.receiver.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ),
+        "one initial-table join must enqueue exactly one inventory and one EoR envelope"
+    );
+}
+
+fn bench_initial_table_peer_join(c: &mut Criterion) {
+    let mut group = c.benchmark_group("initial_table_peer_join");
+    group.sample_size(10);
+    for &routes in &INITIAL_TABLE_JOIN_ROUTE_COUNTS {
+        group.bench_with_input(
+            BenchmarkId::new("rr_client_ipv4_unicast", routes),
+            &routes,
+            |bench, &routes| {
+                bench.iter_custom(|iterations| {
+                    let mut accumulated = Duration::ZERO;
+                    for _ in 0..iterations {
+                        let mut state = build_initial_table_join(routes);
+                        let sender = state.sender.take().expect("one timed join");
+                        let encoder = state.encoder.take().expect("one timed join");
+                        let started = Instant::now();
+                        state
+                            .manager
+                            .bench_join_route_reflector_peer(0, sender, encoder);
+                        accumulated += started.elapsed();
+                        // Production-path and queue inspection deliberately
+                        // stay outside the accumulated join duration.
+                        assert_initial_table_join_receipt(&mut state, routes);
+                    }
+                    accumulated
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
 type PolicyRegroupState = (
     RibManager,
     Vec<mpsc::Receiver<OutboundRouteUpdate>>,
@@ -644,6 +878,7 @@ criterion_group!(
     bench_fanout,
     bench_ixp_exact_export_fanout,
     bench_adj_rib_out_family_gauge,
+    bench_initial_table_peer_join,
     bench_policy_regroup_resync,
     bench_ixp_policy_regroup_resync
 );

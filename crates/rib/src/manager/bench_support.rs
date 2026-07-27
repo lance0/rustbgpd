@@ -58,6 +58,7 @@ pub struct AdjRibOutFanoutBenchReceipt {
     pub dirty_peers: usize,
     pub exact_probe_batches: usize,
     pub exact_probe_candidates: usize,
+    pub exact_probe_nonzero_encoded_lengths: usize,
     pub exact_probe_cache_reuses: usize,
     pub successful_commits: usize,
     pub successful_enqueues: usize,
@@ -120,6 +121,51 @@ impl RibManager {
             is_rr_client,
             |_| make_exact_export_encoder(),
         )
+    }
+
+    /// Register one synthetic iBGP route-reflector client against the current
+    /// Loc-RIB without draining its initial-table envelopes.
+    ///
+    /// The caller constructs the bounded channel and authoritative encoder
+    /// before starting its timer, then inspects the receiver after registration
+    /// to prove the timed call sent the expected route inventory and EoR. This
+    /// keeps Loc-RIB fixture construction, channel allocation, and encoder
+    /// construction outside an initial-table join measurement while still
+    /// driving the same `PeerUp` registration, first update-group construction,
+    /// and `send_initial_table` path as production.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `index` exceeds `u32::MAX`, far beyond a useful benchmark.
+    pub fn bench_join_route_reflector_peer(
+        &mut self,
+        index: usize,
+        outbound_tx: mpsc::Sender<OutboundRouteUpdate>,
+        exact_export_encoder: Arc<dyn ExactExportEncoder>,
+    ) {
+        let idx = u32::try_from(index).expect("bench peer index fits u32");
+        let peer = Self::bench_peer_address(index);
+        let session_id = u64::from(idx) + 1;
+        self.pending_peer_export_encoders
+            .insert((peer, session_id), exact_export_encoder);
+        self.handle_peer_up(
+            peer,
+            session_id,
+            64_512,
+            Ipv4Addr::new(192, 0, 2, 1),
+            outbound_tx,
+            None,
+            vec![(Afi::Ipv4, Safi::Unicast)],
+            false,
+            true,
+            None,
+            false,
+            true,
+            Vec::new(),
+            0,
+            Vec::new(),
+            Vec::new(),
+        );
     }
 
     /// Register synthetic eBGP route-server clients with the supplied remote
@@ -358,6 +404,7 @@ impl RibManager {
             dirty_peers: self.dirty_peers.len(),
             exact_probe_batches: stats.exact_probe_batches,
             exact_probe_candidates: stats.exact_probe_candidates,
+            exact_probe_nonzero_encoded_lengths: stats.exact_probe_nonzero_encoded_lengths,
             exact_probe_cache_reuses: stats.exact_probe_cache_reuses,
             successful_commits: stats.successful_commits,
             successful_enqueues: stats.successful_enqueues,

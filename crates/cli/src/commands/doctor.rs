@@ -40,13 +40,18 @@ const EVENT_HISTORY_LIMIT: u32 = 256;
 /// reasons). Redacted the same way `tcp_ao_detail`/metrics are.
 const EVENT_FREE_TEXT_KEYS: &[&str] = &["summary", "reason", "shutdown_reason", "target"];
 
-/// A non-Established peer that transitioned longer ago than this (or has
-/// no recent transition event at all) is red, not merely "settling".
+/// A non-Established peer with a retained transition older than this is
+/// red, not merely "settling". Missing history cannot prove the age.
 const STUCK_PEER_SECS: u64 = 120;
 
-/// Established peers that have flapped at least this often get a red
-/// check (hold-time expiry loops and unstable transport look like this).
-const FLAP_FAIL_THRESHOLD: u64 = 5;
+/// Established peers that have flapped at least this often get an
+/// additional check. It is red only when retained history also proves
+/// recent instability; the counter itself covers the daemon lifetime.
+const FLAP_REPORT_THRESHOLD: u64 = 5;
+
+/// A retained session loss within this window correlates a high lifetime
+/// flap count with instability that is still current.
+const RECENT_FLAP_SECS: u64 = 120;
 
 /// Daemon soft `nofile` limits below this are flagged: each peer costs
 /// sockets plus per-session file handles, and the systemd default of
@@ -105,6 +110,18 @@ struct Check {
     name: String,
     status: CheckStatus,
     detail: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionHistoryEvidence {
+    /// The history RPC failed, so even the bounded recent window is unknown.
+    Unavailable,
+    /// The history RPC succeeded. Either timestamp may still be absent
+    /// because the 256-event fleet-wide window did not retain this peer.
+    Retained {
+        last_transition_unix: Option<u64>,
+        last_loss_unix: Option<u64>,
+    },
 }
 
 /// Records checks and prints them live (human mode) as they are produced.
@@ -570,7 +587,7 @@ fn peer_checks(
     slow_peer: bool,
     uptime_seconds: u64,
     flap_count: u64,
-    last_transition_unix: Option<u64>,
+    session_evidence: SessionHistoryEvidence,
     now: u64,
     last_error: &str,
 ) -> Vec<Check> {
@@ -591,8 +608,11 @@ fn peer_checks(
             ),
         });
     } else {
-        let (status, since) = match last_transition_unix {
-            Some(ts) => {
+        let (status, since) = match session_evidence {
+            SessionHistoryEvidence::Retained {
+                last_transition_unix: Some(ts),
+                ..
+            } => {
                 let elapsed = now.saturating_sub(ts);
                 let status = if elapsed >= STUCK_PEER_SECS {
                     CheckStatus::Fail
@@ -601,11 +621,18 @@ fn peer_checks(
                 };
                 (status, format!("for {}", output::format_duration(elapsed)))
             }
-            // No recent transition event: it has been stuck at least as
-            // long as the event window covers.
-            None => (
-                CheckStatus::Fail,
-                "with no recent state transition".to_string(),
+            SessionHistoryEvidence::Retained {
+                last_transition_unix: None,
+                ..
+            } => (
+                CheckStatus::Warn,
+                format!(
+                    "for an unknown duration (no transition retained in the bounded {EVENT_HISTORY_LIMIT}-event fleet history)"
+                ),
+            ),
+            SessionHistoryEvidence::Unavailable => (
+                CheckStatus::Warn,
+                "for an unknown duration (session-event history unavailable)".to_string(),
             ),
         };
         let cause = if last_error.is_empty() {
@@ -628,12 +655,41 @@ fn peer_checks(
             ),
         });
     }
-    if flap_count >= FLAP_FAIL_THRESHOLD {
+    if flap_count >= FLAP_REPORT_THRESHOLD {
+        let last_loss_unix = match session_evidence {
+            SessionHistoryEvidence::Retained { last_loss_unix, .. } => last_loss_unix,
+            SessionHistoryEvidence::Unavailable => None,
+        };
+        let recent_loss_age = last_loss_unix
+            .filter(|ts| *ts <= now)
+            .map(|ts| now.saturating_sub(ts))
+            .filter(|age| *age < RECENT_FLAP_SECS);
+        let (status, evidence) = if let Some(age) = recent_loss_age {
+            (
+                CheckStatus::Fail,
+                format!(
+                    "; retained history shows a session loss {} ago",
+                    output::format_duration(age)
+                ),
+            )
+        } else {
+            let evidence = match session_evidence {
+                SessionHistoryEvidence::Unavailable => {
+                    "; recent correlation is unknown because session-event history is unavailable"
+                        .to_string()
+                }
+                SessionHistoryEvidence::Retained { .. } => format!(
+                    "; no session loss within the last {} is retained in the bounded history",
+                    output::format_duration(RECENT_FLAP_SECS)
+                ),
+            };
+            (CheckStatus::Warn, evidence)
+        };
         checks.push(Check {
             name: format!("peer.{address}.flaps"),
-            status: CheckStatus::Fail,
+            status,
             detail: format!(
-                "peer {address} flapped {flap_count} times (possible hold-time expiry loop)"
+                "peer {address} flapped {flap_count} times during this daemon lifetime{evidence}"
             ),
         });
     }
@@ -642,8 +698,26 @@ fn peer_checks(
 
 /// Most recent session-event timestamp per peer, for time-in-state.
 fn last_transition_by_peer(events: &[serde_json::Value]) -> HashMap<String, u64> {
+    last_event_by_peer(events, |_| true)
+}
+
+/// Most recent retained session-loss timestamp per peer, used to
+/// distinguish current instability from an old daemon-lifetime counter.
+fn last_loss_by_peer(events: &[serde_json::Value]) -> HashMap<String, u64> {
+    last_event_by_peer(events, |event| {
+        event.get("event_type").and_then(|v| v.as_str()) == Some("session_lost")
+    })
+}
+
+fn last_event_by_peer(
+    events: &[serde_json::Value],
+    include: impl Fn(&serde_json::Value) -> bool,
+) -> HashMap<String, u64> {
     let mut map: HashMap<String, u64> = HashMap::new();
     for event in events {
+        if !include(event) {
+            continue;
+        }
         let Some(peer) = event.get("peer_address").and_then(|v| v.as_str()) else {
             continue;
         };
@@ -1393,7 +1467,7 @@ pub(crate) async fn run(
 
             // peers/: neighbors + recent session/policy events, then the
             // per-peer red/green checks.
-            let session_events = match events
+            let (session_events, session_history_available) = match events
                 .list_session_events(ListSessionEventsRequest {
                     neighbor_address: String::new(),
                     event_types: Vec::new(),
@@ -1401,12 +1475,14 @@ pub(crate) async fn run(
                 })
                 .await
             {
-                Ok(resp) => resp
-                    .into_inner()
-                    .events
-                    .iter()
-                    .map(|e| bgp_event_json_value(e).map(redact_event))
-                    .collect::<Result<Vec<_>, _>>()?,
+                Ok(resp) => (
+                    resp.into_inner()
+                        .events
+                        .iter()
+                        .map(|e| bgp_event_json_value(e).map(redact_event))
+                        .collect::<Result<Vec<_>, _>>()?,
+                    true,
+                ),
                 Err(e) => {
                     sections.insert(
                         "session_events",
@@ -1415,7 +1491,7 @@ pub(crate) async fn run(
                             redact_text(&e.to_string())
                         ),
                     );
-                    Vec::new()
+                    (Vec::new(), false)
                 }
             };
             sections
@@ -1453,6 +1529,7 @@ pub(crate) async fn run(
                 Ok(resp) => {
                     let neighbors = resp.into_inner();
                     let transitions = last_transition_by_peer(&session_events);
+                    let losses = last_loss_by_peer(&session_events);
                     let snapshots: Vec<JsonNeighbor> = neighbors
                         .neighbors
                         .iter()
@@ -1501,6 +1578,14 @@ pub(crate) async fn run(
                         reporter.record(check.name, check.status, check.detail);
                     }
                     for snapshot in &snapshots {
+                        let session_evidence = if session_history_available {
+                            SessionHistoryEvidence::Retained {
+                                last_transition_unix: transitions.get(&snapshot.address).copied(),
+                                last_loss_unix: losses.get(&snapshot.address).copied(),
+                            }
+                        } else {
+                            SessionHistoryEvidence::Unavailable
+                        };
                         for check in peer_checks(
                             &snapshot.address,
                             &snapshot.state,
@@ -1508,7 +1593,7 @@ pub(crate) async fn run(
                             snapshot.slow_peer,
                             snapshot.uptime_seconds,
                             snapshot.flap_count,
-                            transitions.get(&snapshot.address).copied(),
+                            session_evidence,
                             now,
                             &snapshot.last_error,
                         ) {
@@ -1986,6 +2071,16 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
         assert_eq!(redacted["new_state"], "Idle");
     }
 
+    fn retained_session_evidence(
+        last_transition_unix: Option<u64>,
+        last_loss_unix: Option<u64>,
+    ) -> SessionHistoryEvidence {
+        SessionHistoryEvidence::Retained {
+            last_transition_unix,
+            last_loss_unix,
+        }
+    }
+
     #[test]
     fn established_peer_is_green() {
         let checks = peer_checks(
@@ -1995,7 +2090,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             false,
             3600,
             0,
-            None,
+            retained_session_evidence(None, None),
             1_000_000,
             "",
         );
@@ -2043,6 +2138,9 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
         assert!(unknown.detail.contains("unknown"));
     }
 
+    /// Load-bearing mutation proof: weakening the retained-age threshold,
+    /// or treating every retained timestamp as merely unknown, makes the
+    /// genuinely old transition assertion red.
     #[test]
     fn peer_stuck_in_connect_past_threshold_is_red_with_duration() {
         let now = 1_000_000;
@@ -2054,7 +2152,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             false,
             0,
             0,
-            Some(transitioned),
+            retained_session_evidence(Some(transitioned), None),
             now,
             "",
         );
@@ -2077,43 +2175,93 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             false,
             0,
             0,
-            Some(now - STUCK_PEER_SECS + 1),
+            retained_session_evidence(Some(now - STUCK_PEER_SECS + 1), None),
             now,
             "",
         );
         assert!(checks[0].status == CheckStatus::Warn);
     }
 
+    /// Load-bearing mutation proof: changing the missing-timestamp branch
+    /// back to `Fail` makes the status assertion red. The bounded fleet
+    /// history cannot establish how long this peer has been in Connect.
     #[test]
-    fn peer_in_connect_with_no_transition_event_is_red() {
+    fn peer_in_connect_with_no_retained_transition_warns_age_unknown() {
         let checks = peer_checks(
-            "10.0.0.2", "Connect", false, false, 0, 0, None, 1_000_000, "",
+            "10.0.0.2",
+            "Connect",
+            false,
+            false,
+            0,
+            0,
+            retained_session_evidence(None, None),
+            1_000_000,
+            "",
         );
-        assert!(checks[0].status == CheckStatus::Fail);
-        assert!(checks[0].detail.contains("no recent state transition"));
+        assert!(checks[0].status == CheckStatus::Warn);
+        assert!(checks[0].detail.contains("unknown duration"));
+        assert!(checks[0].detail.contains("bounded 256-event fleet history"));
     }
 
+    /// Load-bearing mutation proof: making every daemon-lifetime count red
+    /// again changes this warning to failure despite no retained recent loss.
     #[test]
-    fn flapping_peer_gets_extra_red_check() {
+    fn lifetime_flap_count_without_recent_loss_warns() {
         let checks = peer_checks(
             "10.0.0.2",
             "Established",
             false,
             false,
             60,
-            FLAP_FAIL_THRESHOLD,
-            None,
+            FLAP_REPORT_THRESHOLD,
+            retained_session_evidence(None, None),
             1_000_000,
             "",
         );
         assert_eq!(checks.len(), 2);
+        assert!(checks[1].status == CheckStatus::Warn);
+        assert!(checks[1].detail.contains("during this daemon lifetime"));
+        assert!(
+            checks[1]
+                .detail
+                .contains("is retained in the bounded history")
+        );
+    }
+
+    /// Load-bearing mutation proof: removing the recent-loss correlation,
+    /// or downgrading its branch to warning, makes the red assertion fail.
+    #[test]
+    fn lifetime_flap_count_with_recent_retained_loss_is_red() {
+        let now = 1_000_000;
+        let checks = peer_checks(
+            "10.0.0.2",
+            "Established",
+            false,
+            false,
+            60,
+            FLAP_REPORT_THRESHOLD,
+            retained_session_evidence(Some(now - 30), Some(now - 30)),
+            now,
+            "",
+        );
+        assert_eq!(checks.len(), 2);
         assert!(checks[1].status == CheckStatus::Fail);
-        assert!(checks[1].detail.contains("flapped 5 times"));
+        assert!(checks[1].detail.contains("session loss 00:00:30 ago"));
     }
 
     #[test]
     fn stale_peer_is_warn() {
-        let checks = peer_checks("10.0.0.2", "Stale", true, false, 0, 0, None, 1_000_000, "");
+        let checks = peer_checks(
+            "10.0.0.2",
+            "Stale",
+            true,
+            false,
+            0,
+            0,
+            SessionHistoryEvidence::Unavailable,
+            1_000_000,
+            "",
+        );
         assert!(checks[0].status == CheckStatus::Warn);
         assert!(checks[0].detail.contains("stale"));
     }
@@ -2130,7 +2278,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             true,
             3600,
             0,
-            None,
+            retained_session_evidence(None, None),
             1_000_000,
             "",
         );
@@ -2192,16 +2340,36 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
     }
 
     #[test]
-    fn last_transition_by_peer_takes_newest_event() {
+    fn session_evidence_maps_keep_latest_transition_and_latest_actual_loss() {
         let events = vec![
-            serde_json::json!({"peer_address": "10.0.0.2", "timestamp": "100"}),
-            serde_json::json!({"peer_address": "10.0.0.2", "timestamp": "250"}),
-            serde_json::json!({"peer_address": "10.0.0.3", "timestamp": "50"}),
+            serde_json::json!({
+                "peer_address": "10.0.0.2",
+                "timestamp": "100",
+                "event_type": "session_lost"
+            }),
+            serde_json::json!({
+                "peer_address": "10.0.0.2",
+                "timestamp": "250",
+                "event_type": "session_established"
+            }),
+            serde_json::json!({
+                "peer_address": "10.0.0.3",
+                "timestamp": "50",
+                "event_type": "session_state_changed"
+            }),
             serde_json::json!({"peer_address": "", "timestamp": "999"}),
         ];
-        let map = last_transition_by_peer(&events);
-        assert_eq!(map.get("10.0.0.2"), Some(&250));
-        assert_eq!(map.get("10.0.0.3"), Some(&50));
+        let transitions = last_transition_by_peer(&events);
+        assert_eq!(transitions.get("10.0.0.2"), Some(&250));
+        assert_eq!(transitions.get("10.0.0.3"), Some(&50));
+
+        let losses = last_loss_by_peer(&events);
+        // Load-bearing mutation proof: dropping the event-type filter makes
+        // the newer establishment overwrite the actual loss timestamp.
+        assert_eq!(losses.get("10.0.0.2"), Some(&100));
+        // A peer with only non-loss events must not acquire fabricated loss
+        // evidence; treating all session events as losses makes this red.
+        assert!(!losses.contains_key("10.0.0.3"));
     }
 
     // ---- first-deploy probes (LAN-482) --------------------------------
@@ -2562,9 +2730,16 @@ paths = ["x"]
             "[global]\nasn = 65000\nrouter_id = \"192.0.2.1\"\nruntime_state_dir = \"{}\"\n",
             state_dir.path().display()
         ));
-        let mut slow = neighbor("10.0.0.2", 6, 0, "core peer");
+        let mut slow = neighbor("10.0.0.2", 6, FLAP_REPORT_THRESHOLD, "core peer");
         slow.slow_peer = true;
         *server.state.list_neighbors_response.lock().await = vec![slow];
+        *server.state.session_events.lock().await = vec![rustbgpd_api::proto::BgpEvent {
+            timestamp: now_unix_seconds().to_string(),
+            peer_address: "10.0.0.2".to_string(),
+            event_type: rustbgpd_api::proto::BgpEventType::SessionLost as i32,
+            summary: "recent session loss".to_string(),
+            ..Default::default()
+        }];
         *server.state.bfd_sessions.lock().await = vec![rustbgpd_api::proto::BfdSession {
             peer_address: "10.0.0.2".to_string(),
             state: rustbgpd_api::proto::BfdSessionState::Down as i32,
@@ -2588,10 +2763,9 @@ paths = ["x"]
         )
         .await
         .unwrap();
-        // Exit code is 0 or 2 depending on host facts (e.g. a real local
-        // rustbgpd with a low rlimit); the contract-level cases are pinned
-        // by the pure-logic tests and the daemon-down test below.
-        assert!(code == 0 || code == 2);
+        // The evidenced recent loss is an unconditional red input; the
+        // manifest assertion below is the load-bearing correlation proof.
+        assert_eq!(code, 2);
 
         let files = extract_bundle(&bundle_path);
         for expected in [
@@ -2665,6 +2839,61 @@ paths = ["x"]
                 && check["status"] == "warn"
                 && detail.contains(r#"bgp_peer_outbound_queue_depth{peer="10.0.0.2"}"#)
         }));
+        // Load-bearing mutation proof: dropping the event-type correlation,
+        // the loss map, or its handoff into `peer_checks` changes this
+        // evidenced recent-instability verdict away from red.
+        assert!(manifest["checks"].as_array().unwrap().iter().any(|check| {
+            check["name"] == "peer.10.0.0.2.flaps"
+                && check["status"] == "fail"
+                && check["detail"]
+                    .as_str()
+                    .is_some_and(|detail| detail.contains("retained history shows a session loss"))
+        }));
+    }
+
+    #[tokio::test]
+    async fn doctor_marks_successful_empty_session_history_as_bounded_unknown() {
+        let server = spawn_mock_server(None).await;
+        *server.state.list_neighbors_response.lock().await = vec![neighbor(
+            "10.0.0.2",
+            rustbgpd_api::proto::SessionState::Connect as i32,
+            0,
+            "peer with no retained transition",
+        )];
+        let connection = connect(&server.addr, None).await;
+        let dir = tempfile::tempdir().unwrap();
+        let bundle_path = dir.path().join("bundle.tar.gz");
+
+        run(
+            connection,
+            &DoctorOptions {
+                output: Some(&bundle_path),
+                log_file: None,
+                daemon_address: &server.addr,
+                token_file_configured: false,
+                json: true,
+            },
+        )
+        .await
+        .unwrap();
+
+        let files = extract_bundle(&bundle_path);
+        let manifest: serde_json::Value =
+            serde_json::from_str(find(&files, "manifest.json")).unwrap();
+        // Load-bearing mutation proof: conflating an empty successful reply
+        // with an RPC failure changes either this collected source status or
+        // the bounded-history wording below to "unavailable".
+        assert_eq!(manifest["sections"]["session_events"], "collected");
+        let peer_session = manifest["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "peer.10.0.0.2.session")
+            .expect("Connect peer session check");
+        assert_eq!(peer_session["status"], "warn");
+        let detail = peer_session["detail"].as_str().unwrap();
+        assert!(detail.contains("bounded 256-event fleet history"));
+        assert!(!detail.contains("unavailable"));
     }
 
     #[tokio::test]
@@ -2672,7 +2901,7 @@ paths = ["x"]
         let server = spawn_mock_server(None).await;
         *server.state.list_neighbors_response.lock().await = vec![neighbor(
             "10.0.0.2",
-            rustbgpd_api::proto::SessionState::Established as i32,
+            rustbgpd_api::proto::SessionState::Connect as i32,
             0,
             "peer evidence survives",
         )];
@@ -2717,6 +2946,22 @@ paths = ["x"]
         let peers: serde_json::Value =
             serde_json::from_str(find(&files, "peers/neighbors.json")).unwrap();
         assert_eq!(peers[0]["address"], "10.0.0.2");
+        let peer_session = manifest["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "peer.10.0.0.2.session")
+            .expect("Connect peer session check");
+        // Load-bearing mutation proof: collapsing the failed RPC to an empty
+        // event vector fabricates the old red "no transition" verdict and
+        // makes both the warning and unavailable-evidence assertions red.
+        assert_eq!(peer_session["status"], "warn");
+        assert!(
+            peer_session["detail"]
+                .as_str()
+                .unwrap()
+                .contains("session-event history unavailable")
+        );
         let events: serde_json::Value =
             serde_json::from_str(find(&files, "peers/events.json")).unwrap();
         // Load-bearing mutation proof: discarding the successful policy
@@ -2888,12 +3133,18 @@ paths = ["x"]
             "[global]\nasn = 65000\nruntime_state_dir = \"{}\"\n",
             state_dir.path().display()
         ));
-        // State 2 = Connect, no session events => stuck with no recent
-        // transition => red.
+        // State 2 = Connect with a genuinely old retained transition => red.
         let mut stuck = neighbor("10.0.0.9", 2, 0, "stuck peer");
         stuck.last_error =
             "sent NOTIFICATION 2/7 (Unsupported Capability)\ntoken=must-not-escape".to_string();
         *server.state.list_neighbors_response.lock().await = vec![stuck];
+        *server.state.session_events.lock().await = vec![rustbgpd_api::proto::BgpEvent {
+            timestamp: "1".to_string(),
+            peer_address: "10.0.0.9".to_string(),
+            event_type: rustbgpd_api::proto::BgpEventType::SessionStateChanged as i32,
+            summary: "old transition".to_string(),
+            ..Default::default()
+        }];
         let connection = connect(&server.addr, None).await;
         let dir = tempfile::tempdir().unwrap();
         let bundle_path = dir.path().join("bundle.tar.gz");
