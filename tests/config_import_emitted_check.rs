@@ -61,6 +61,44 @@ fn emitted_configs_pass_rustbgpd_check() {
     }
 }
 
+/// Fail-closed exit contract: when the emitted config is one the daemon's
+/// `--check` rejects (unparseable router-id, dangling peer-group reference),
+/// the import itself must exit nonzero — a clean exit 0 alongside a rejected
+/// translation would break the ladder's "operator attention is non-zero by
+/// construction" promise.
+#[test]
+fn import_exits_nonzero_when_emitted_config_fails_check() {
+    for (format, path, source) in [
+        (
+            SourceFormat::Frr,
+            "frr-badrid.conf",
+            "router bgp 64500\n bgp router-id 2001:db8::1\n \
+             neighbor 192.0.2.1 remote-as 64496\n!\n",
+        ),
+        (
+            SourceFormat::Gobgp,
+            "gobgp-dangling.toml",
+            "[global.config]\nas = 64500\nrouter-id = \"192.0.2.10\"\n[[neighbors]]\n\
+             [neighbors.config]\nneighbor-address = \"192.0.2.1\"\npeer-as = 64496\n\
+             peer-group = \"CORE\"\n",
+        ),
+    ] {
+        let imported = import_source(format, path, source)
+            .unwrap_or_else(|e| panic!("{path}: import failed: {e}"));
+        let (code, _stdout, stderr) = run_check(&imported.config_toml);
+        assert_ne!(
+            code,
+            Some(0),
+            "{path}: precondition — the emitted config must fail --check:\n{stderr}"
+        );
+        assert_ne!(
+            imported.report.exit_code, 0,
+            "{path}: import exited 0 while emitting a --check-rejected config:\n{}",
+            imported.config_toml
+        );
+    }
+}
+
 /// The defect this gate exists for: an imported config has no policy, and
 /// `--check` is the last thing an operator runs before copying it to a
 /// production box. It must name the unpoliced neighbors, and its summary

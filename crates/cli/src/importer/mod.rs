@@ -299,10 +299,14 @@ fn finish(
     mut model: Model,
 ) -> Result<Imported, ImportError> {
     let Some(local_asn) = model.local_asn else {
-        return Err(ImportError::Empty(vec![format!(
+        let mut items = vec![format!(
             "no local AS found in the {} source (router bgp / local as / global.config.as)",
             format.name()
-        )]));
+        )];
+        // Frontend warnings (an out-of-range `as`, for one) explain *why*
+        // there is no local AS; a refusal must not swallow them.
+        items.append(&mut model.warnings);
+        return Err(ImportError::Empty(items));
     };
 
     // Resolve remote AS down from groups (rustbgpd peer groups carry no
@@ -352,13 +356,43 @@ fn finish(
         neighbors.push(neighbor);
     }
     if neighbors.is_empty() {
-        return Err(ImportError::Empty(vec![format!(
+        let mut items = vec![format!(
             "no translatable neighbors found in the {} source",
             format.name()
-        )]));
+        )];
+        items.append(&mut model.warnings);
+        return Err(ImportError::Empty(items));
     }
     for group in &mut model.groups {
         dedupe(&mut group.families);
+    }
+
+    // Fail closed on fields the daemon's `--check` rejects wholesale: a
+    // clean exit alongside a translation validation refuses would break
+    // the ladder's "operator attention is non-zero by construction"
+    // contract. The values are still emitted verbatim — the report names
+    // them, the exit code forces the review.
+    if let Some(id) = &model.router_id {
+        match id.parse::<std::net::Ipv4Addr>() {
+            Ok(ip) if !ip.is_unspecified() => {}
+            _ => model.warnings.push(format!(
+                "router-id {id:?} is not a usable IPv4 router_id (rustbgpd requires a \
+                 non-zero IPv4 address); emitted verbatim — `rustbgpd --check` rejects \
+                 this config until it is corrected"
+            )),
+        }
+    }
+    for neighbor in &neighbors {
+        if let Some(group) = &neighbor.peer_group
+            && !model.groups.iter().any(|g| &g.name == group)
+        {
+            model.warnings.push(format!(
+                "neighbor {}: peer_group {group:?} does not match any translated peer \
+                 group; emitted verbatim — `rustbgpd --check` rejects this config until \
+                 the group is defined or the reference removed",
+                neighbor.address
+            ));
+        }
     }
 
     let router_id_placeholder = model.router_id.is_none();

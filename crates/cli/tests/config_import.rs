@@ -562,6 +562,218 @@ peer-as = 64496
     assert!(matches!(error, ImportError::Empty(_)), "{error:?}");
 }
 
+// ---------------------------------------------------------------------------
+// Fail-closed on fields the daemon's `--check` rejects: a config the
+// daemon refuses wholesale must never leave the importer with exit 0.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn unparseable_router_id_warns_in_every_frontend() {
+    for (format, path, source, bad) in [
+        (
+            SourceFormat::Frr,
+            "frr-badrid.conf",
+            "router bgp 64500\n bgp router-id 2001:db8::1\n neighbor 192.0.2.1 remote-as 64496\n!\n",
+            "2001:db8::1",
+        ),
+        (
+            SourceFormat::Bird,
+            "bird-badrid.conf",
+            "router id fe80::1;\nprotocol bgp up { local as 64500; \
+             neighbor 192.0.2.1 as 64496; }\n",
+            "fe80::1",
+        ),
+        (
+            SourceFormat::Gobgp,
+            "gobgp-badrid.toml",
+            "[global.config]\nas = 64500\nrouter-id = \"not-an-ip\"\n[[neighbors]]\n\
+             [neighbors.config]\nneighbor-address = \"192.0.2.1\"\npeer-as = 64496\n",
+            "not-an-ip",
+        ),
+        // The daemon also refuses the unspecified address.
+        (
+            SourceFormat::Frr,
+            "frr-zerorid.conf",
+            "router bgp 64500\n bgp router-id 0.0.0.0\n neighbor 192.0.2.1 remote-as 64496\n!\n",
+            "0.0.0.0",
+        ),
+    ] {
+        let imported = import_source(format, path, source).expect("translates");
+        assert_eq!(imported.report.exit_code, 2, "{path}");
+        assert!(
+            imported
+                .report
+                .warnings
+                .iter()
+                .any(|w| w.contains("router-id") && w.contains(bad) && w.contains("--check")),
+            "{path}: {:?}",
+            imported.report.warnings
+        );
+    }
+}
+
+#[test]
+fn dangling_peer_group_reference_warns_in_every_frontend() {
+    for (format, path, source, group) in [
+        (
+            SourceFormat::Frr,
+            "frr-dangling.conf",
+            "router bgp 64500\n bgp router-id 192.0.2.10\n \
+             neighbor 192.0.2.1 remote-as 64496\n \
+             neighbor 192.0.2.1 peer-group CORE\n!\n",
+            "CORE",
+        ),
+        (
+            SourceFormat::Bird,
+            "bird-dangling.conf",
+            "router id 192.0.2.10;\nprotocol bgp up from missing_tmpl { local as 64500; \
+             neighbor 192.0.2.1 as 64496; }\n",
+            "missing_tmpl",
+        ),
+        (
+            SourceFormat::Gobgp,
+            "gobgp-dangling.toml",
+            "[global.config]\nas = 64500\nrouter-id = \"192.0.2.10\"\n[[neighbors]]\n\
+             [neighbors.config]\nneighbor-address = \"192.0.2.1\"\npeer-as = 64496\n\
+             peer-group = \"CORE\"\n",
+            "CORE",
+        ),
+    ] {
+        let imported = import_source(format, path, source).expect("translates");
+        assert_eq!(imported.report.exit_code, 2, "{path}");
+        assert!(
+            imported
+                .report
+                .warnings
+                .iter()
+                .any(|w| w.contains("192.0.2.1") && w.contains(group) && w.contains("--check")),
+            "{path}: {:?}",
+            imported.report.warnings
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Out-of-range numerics are reported, never silently dropped
+// ---------------------------------------------------------------------------
+
+#[test]
+fn gobgp_out_of_range_hold_time_warns_and_is_not_emitted() {
+    let source = "[global.config]\nas = 64500\nrouter-id = \"192.0.2.10\"\n[[neighbors]]\n\
+                  [neighbors.config]\nneighbor-address = \"192.0.2.1\"\npeer-as = 64496\n\
+                  [neighbors.timers.config]\nhold-time = 70000\n";
+    let imported = import_source(SourceFormat::Gobgp, "hold.toml", source).expect("translates");
+    assert!(!imported.config_toml.contains("hold_time"));
+    assert_eq!(imported.report.exit_code, 2);
+    assert!(
+        imported
+            .report
+            .warnings
+            .iter()
+            .any(|w| w.contains("hold-time") && w.contains("70000")),
+        "{:?}",
+        imported.report.warnings
+    );
+}
+
+#[test]
+fn gobgp_out_of_range_peer_as_warns_alongside_the_skip() {
+    let source = "[global.config]\nas = 64500\nrouter-id = \"192.0.2.10\"\n[[neighbors]]\n\
+                  [neighbors.config]\nneighbor-address = \"192.0.2.1\"\npeer-as = 64496\n\
+                  [[neighbors]]\n[neighbors.config]\n\
+                  neighbor-address = \"192.0.2.2\"\npeer-as = 4294967296\n";
+    let imported = import_source(SourceFormat::Gobgp, "peeras.toml", source).expect("translates");
+    assert_eq!(imported.report.exit_code, 2);
+    assert!(
+        imported
+            .report
+            .warnings
+            .iter()
+            .any(|w| w.contains("peer-as") && w.contains("4294967296")),
+        "{:?}",
+        imported.report.warnings
+    );
+    // The undeterminable neighbor still lands on the skip ladder.
+    assert!(
+        imported
+            .report
+            .skipped
+            .iter()
+            .any(|s| s.stanza.contains("192.0.2.2"))
+    );
+}
+
+#[test]
+fn gobgp_out_of_range_local_as_is_named_in_the_refusal() {
+    let source = "[global.config]\nas = 4294967296\nrouter-id = \"192.0.2.10\"\n[[neighbors]]\n\
+                  [neighbors.config]\nneighbor-address = \"192.0.2.1\"\npeer-as = 64496\n";
+    let error = import_source(SourceFormat::Gobgp, "localas.toml", source).unwrap_err();
+    assert!(matches!(error, ImportError::Empty(_)), "{error:?}");
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains("global.config.as") && rendered.contains("4294967296"),
+        "the refusal must name the dropped field and value: {rendered}"
+    );
+}
+
+#[test]
+fn gobgp_out_of_range_max_prefixes_warns() {
+    let source = "[global.config]\nas = 64500\nrouter-id = \"192.0.2.10\"\n[[neighbors]]\n\
+                  [neighbors.config]\nneighbor-address = \"192.0.2.1\"\npeer-as = 64496\n\
+                  [[neighbors.afi-safis]]\n[neighbors.afi-safis.config]\n\
+                  afi-safi-name = \"ipv4-unicast\"\n\
+                  [neighbors.afi-safis.prefix-limit.config]\nmax-prefixes = -5\n";
+    let imported = import_source(SourceFormat::Gobgp, "maxpfx.toml", source).expect("translates");
+    assert!(!imported.config_toml.contains("max_prefixes"));
+    assert_eq!(imported.report.exit_code, 2);
+    assert!(
+        imported
+            .report
+            .warnings
+            .iter()
+            .any(|w| w.contains("max-prefixes") && w.contains("-5")),
+        "{:?}",
+        imported.report.warnings
+    );
+}
+
+#[test]
+fn frr_unparseable_keepalive_warns_instead_of_skipping_the_ratio_check() {
+    let source = "router bgp 64500\n bgp router-id 192.0.2.10\n \
+                  neighbor 192.0.2.1 remote-as 64496\n \
+                  neighbor 192.0.2.1 timers garbage 180\n!\n";
+    let imported = import_source(SourceFormat::Frr, "keepalive.conf", source).expect("translates");
+    assert_eq!(imported.report.exit_code, 2);
+    assert!(
+        imported
+            .report
+            .warnings
+            .iter()
+            .any(|w| w.contains("keepalive") && w.contains("garbage")),
+        "{:?}",
+        imported.report.warnings
+    );
+}
+
+/// BIRD numeric parse failures already land on the skip ladder; pin it.
+#[test]
+fn bird_out_of_range_hold_time_lands_on_the_skip_ladder() {
+    let source = "router id 192.0.2.10;\nprotocol bgp up { local as 64500; \
+                  neighbor 192.0.2.1 as 64496; hold time 70000; }\n";
+    let imported = import_source(SourceFormat::Bird, "hold.conf", source).expect("translates");
+    assert_eq!(imported.report.exit_code, 2);
+    assert!(
+        imported
+            .report
+            .skipped
+            .iter()
+            .any(|s| s.stanza.contains("hold time 70000")),
+        "{:?}",
+        imported.report.skipped
+    );
+    assert!(!imported.config_toml.contains("hold_time"));
+}
+
 #[test]
 fn keepalive_mismatch_is_warned_never_guessed() {
     for (format, path, contents, needle) in [
