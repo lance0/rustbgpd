@@ -6,14 +6,11 @@ Part of [rustbgpd](https://github.com/lance0/rustbgpd).
 
 ## Metrics
 
-Exposes a `prometheus` HTTP endpoint with gauges and counters covering:
-
-- Peer state (established/down counts)
-- RIB sizes (Adj-RIB-In, Loc-RIB, Adj-RIB-Out per family)
-- UPDATE processing (received, sent, errors)
-- Graceful restart (active peers, stale routes, timer expirations)
-- RPKI (VRP count, validation outcomes)
-- FlowSpec (rule counts per family)
+Exposes a `prometheus` HTTP endpoint with gauges and counters covering
+peer state, RIB sizes, UPDATE processing, policy, graceful restart,
+RPKI, FlowSpec, BMP, EVPN, update-group, and outbound-prefix-limit
+state — see [docs/OPERATIONS.md](../../docs/OPERATIONS.md) for the
+operator-facing metrics coverage.
 
 ## Logging
 

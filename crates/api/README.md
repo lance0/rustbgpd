@@ -19,6 +19,7 @@ Part of [rustbgpd](https://github.com/lance0/rustbgpd).
 | **InjectionService** | Inject/withdraw unicast, FlowSpec, and EVPN routes |
 | **ControlService** | Health, metrics, shutdown, MRT trigger |
 | **EvpnService** | EVPN runtime read + L2VNI / next-hop / IP-VRF queries, duplicate-MAC quarantine clear, and the mutating `ApplyEvpnRuntime` (no longer read-only) |
+| **gnmi.gNMI** | OpenConfig gNMI: read-only telemetry (Capabilities/Get/Subscribe) plus a transaction-backed Set subset |
 
 See [docs/API.md](../../docs/API.md) for the full RPC reference and examples.
 

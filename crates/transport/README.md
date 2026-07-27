@@ -35,6 +35,11 @@ events.
   `[policy.explain] enabled`), because the cache is per session and its
   cost multiplies by session count. Embedders that want the surface set
   the field explicitly after `TransportConfig::new`.
+- **Rejected-route retention** — a bounded per-session store of
+  import-rejected routes with canonical reject reasons, backing
+  `PolicyService.ListRejectedRoutes` / `rbgp rib received <peer>
+  --rejected` (`[policy.reject_retention]`); diagnostic state only,
+  resets on session reset
 - **Private AS removal** — strip/replace private ASNs before eBGP export
 - **Route server transparency** — preserve original NEXT_HOP and skip
   local ASN prepend for route-server clients
