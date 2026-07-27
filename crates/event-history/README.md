@@ -32,7 +32,7 @@ one SQLite transaction, and serves cursor-based replay through the
 - `sequence.rs` — explicit `metadata.last_event_id` allocator and the
   txn-scoped `Allocator::load → next → finalize` lifecycle.
 - `migrations.rs` — schema bootstrap + version-fence downgrade
-  refusal (mirrors the `GR_RESTART_MARKER_VERSION` pattern in
+  refusal (mirrors the `GR_RESTART_MARKER_V*` version-fence pattern in
   `src/main.rs`).
 - `quarantine.rs` — corrupted-DB detection + `.stale` rename for
   `events.db`, `events.db-wal`, and `events.db-shm`, plus diagnostic

@@ -8,8 +8,9 @@ Part of [rustbgpd](https://github.com/lance0/rustbgpd).
 
 ## Features
 
-- All 6 BMP message types: Initiation, Peer Up, Peer Down, Route
-  Monitoring, Stats Report, Termination
+- Six BMP message types: Initiation, Peer Up, Peer Down, Route
+  Monitoring, Stats Report, Termination (Route Mirroring is out of
+  scope)
 - Per-collector async TCP client with automatic reconnect and backoff
 - Fan-out manager distributes events to all connected collectors
 - Peer Up replay on collector reconnect

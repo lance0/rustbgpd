@@ -20,6 +20,10 @@ Single-task ownership — `RibManager` runs as one tokio task with no
   deterministic MED (always-compare), route reflector tiebreakers
 - **Adj-RIB-Out** — per-peer outbound route tracking with split horizon,
   iBGP suppression, route reflector reflection rules
+- **Outbound prefix limits** — per-peer, per-family Adj-RIB-Out prefix
+  ceilings with non-destructive blocking: net-new advertisements are
+  held at the cap without withdrawing existing routes or resetting the
+  session (ADR-0113)
 - **FlowSpec** — parallel storage for FlowSpec rules (SAFI 133)
 - **Multi-path** — Add-Path multi-candidate distribution with
   rank-based path ID assignment

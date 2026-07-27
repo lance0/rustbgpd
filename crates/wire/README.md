@@ -42,8 +42,8 @@ analyzers, test harnesses, MRT readers, etc.
 | 7432 | EVPN: Types 1–4 (EAD, MAC/IP, IMET, Ethernet Segment) including MAC Mobility extended community (§7.7) |
 | 7606 | Revised UPDATE error handling: `UpdateMessage::parse_revised` recovers malformed path attributes without aborting the parse, each carrying its §7 per-attribute disposition (treat-as-withdraw / attribute-discard / session-reset) from `malformed_attr_disposition`; malformed or duplicated `MP_REACH_NLRI` / `MP_UNREACH_NLRI` and unparseable NLRI stay session-reset (§5.3, §7.11) |
 | 7674 | Clarification of MP_REACH_NLRI next-hop encoding |
-| 7999 | `BLACKHOLE` well-known community (`0xFFFF_029A`, rendered as `65535:666`) |
 | 7911 | Add-Path: path ID in NLRI encode/decode |
+| 7999 | `BLACKHOLE` well-known community (`0xFFFF_029A`, rendered as `65535:666`) |
 | 8092 | Large communities (3× u32) |
 | 8097 | Origin Validation State Extended Community (type 0x43): `ORIGIN_VALIDATION_{VALID,NOT_FOUND,INVALID}` `ExtendedCommunity` constants with `OV_*` textual rendering. Codec only — RPKI-to-community stamping lives in the daemon |
 | 8203 | Admin shutdown communication |

@@ -37,6 +37,14 @@ rbgp config status
 rbgp config confirm deploy-123
 rbgp config abort deploy-123
 rbgp config effective                       # dump running post-defaults config (redacted TOML; -j for JSON)
+rbgp config history                         # list applied config transactions
+rbgp config rollback <n>                    # roll back to a prior history entry (1 = previous applied config)
+
+# Translate a BIRD 2 / FRR / GoBGP config (local, no daemon; policy is
+# never translated — skipped constructs are reported with line numbers
+# for hand-translation to .rpol). Exit codes: 0 clean, 1 error,
+# 2 translated with warnings/skips, 3 refused.
+rbgp config import <source> [--format bird|frr|gobgp] [--out <path>]
 ```
 
 ### Peers and BFD
@@ -49,6 +57,7 @@ rbgp neighbor <addr> add --remote-asn <asn> [--role provider|rs|rs-client|custom
 rbgp neighbor <addr> enable
 rbgp neighbor <addr> disable --reason "maintenance"
 rbgp neighbor <addr> softreset
+rbgp neighbor <addr> refresh-out            # re-send this peer's current exportable outbound routes
 rbgp neighbor <addr> delete
 
 rbgp dynamic-neighbor list
@@ -75,6 +84,7 @@ rbgp rib --count                            # best-route count only
 rbgp rib received <addr>
 rbgp rib received <addr> --age
 rbgp rib received <addr> --count
+rbgp rib received <addr> --rejected         # retained rejected routes with reject reasons
 rbgp rib recv <addr>                        # alias
 rbgp rib advertised <addr>
 rbgp rib advertised <addr> --age
@@ -111,6 +121,10 @@ rbgp flowspec
 rbgp fib-table list
 rbgp fib-table set edge --table-id 1000 --metric 200 --families ipv4_unicast,ipv6_unicast
 ```
+
+`policy explain` requires the daemon's import-decision cache, which is
+opt-in: set `[policy.explain] enabled = true` in the daemon config. On a
+stock daemon the command exits nonzero with that hint.
 
 `--count` applies the same family, prefix, longer-prefix, origin-ASN, standard
 community, and large-community filters as the corresponding best, received, or
