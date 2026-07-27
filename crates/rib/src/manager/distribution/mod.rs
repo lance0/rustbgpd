@@ -2207,7 +2207,16 @@ impl RibManager {
             self.peer_unexportable.remove(&peer);
         }
 
-        if let Some(snapshot) = exact_export_snapshot.as_ref() {
+        let has_candidate_announcement_payload = !announce.is_empty()
+            || !flowspec_announce.is_empty()
+            || !evpn_announce.is_empty()
+            || !bgpls_announce.is_empty()
+            || !vpn_announce.is_empty()
+            || !labeled_announce.is_empty()
+            || !rtc_announce.is_empty();
+        if let Some(snapshot) = exact_export_snapshot.as_ref()
+            && has_candidate_announcement_payload
+        {
             use crate::update::{ExactExportCandidate, ExactExportKey};
 
             debug_assert_eq!(announce.len(), next_hop_override.len());
