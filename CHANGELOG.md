@@ -19,6 +19,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   inbound Enhanced Route Refresh actor work. Its closed `operation` label is
   `begin`, `eorr`, or `timeout`.
 
+- A host-locked real-session Enhanced Route Refresh receipt now exercises one
+  peer with 100,000 routes through BoRR, replay, duplicate BoRR, EoRR, and the
+  independent timeout. It retains exact state, actor-duration, allocator, RSS,
+  and load-bearing validation evidence without adding the six-minute campaign
+  to pull-request CI.
+
 ### Changed
 
 - `rbgp top` keeps health and neighbor polling on the operator-selected
@@ -35,6 +41,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   daemon RSS or convergence claim.
 
 ### Fixed
+
+- **Policy introspection no longer turns a stalled live session into an
+  absent one.** Import explain and rejected-route reads return
+  `DEADLINE_EXCEEDED` when their bounded session query times out; policy stats
+  also fail honestly on timeout/session exit and reject an explicit unknown
+  peer instead of labeling the global export chain as that peer. No protobuf
+  fields or numbers changed.
 
 - **A stale outbound prefix-limit activation no longer discards a newer
   prepared change.** The newer transaction remains available to activate.

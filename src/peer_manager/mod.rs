@@ -15,7 +15,7 @@ use rustbgpd_rib::RibUpdate;
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_transport::{
     PeerHandle, SessionLifecycleNotification, SessionNotification,
-    SessionNotificationEvent as TransportNotificationEvent, TransportConfig,
+    SessionNotificationEvent as TransportNotificationEvent, SessionQueryOutcome, TransportConfig,
 };
 use rustbgpd_wire::{Afi, Safi};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
@@ -97,9 +97,8 @@ const RIB_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 /// ADR-0073: deadline for an `ExplainImportPolicy` round-trip to a
 /// session task. Bounded for the same reason as the policy-update
 /// timeout — a session parked on TCP back-pressure must not park the
-/// peer-manager actor. On timeout the explain RPC reports the peer as
-/// having no answer (synthetic `NOT_SEEN`), which is honest: we could
-/// not read its cache in time.
+/// peer-manager actor. The typed outcome prevents that timeout from
+/// masquerading as a missing session.
 const EXPLAIN_QUERY_TIMEOUT: Duration = Duration::from_millis(500);
 
 pub(crate) enum InternalCommand {
@@ -1015,6 +1014,9 @@ impl PeerManager {
                             let info = self.get_peer_info(&peer).await;
                             let _ = reply.send(info);
                         }
+                        PeerManagerCommand::HasPeerAddress { address, reply } => {
+                            let _ = reply.send(self.unique_peer_key_for_address(address).is_some());
+                        }
                         PeerManagerCommand::EnablePeer { peer, reply } => {
                             let result = self.enable_peer(peer).await;
                             let _ = reply.send(result);
@@ -1119,10 +1121,10 @@ impl PeerManager {
                             address, afi, safi, prefix, path_id, reply,
                         } => {
                             // Resolve the unique session for this address and
-                            // forward to its task. No live session → None,
-                            // which the RPC layer renders as NO_SESSION (the
-                            // session-local cache is gone, per ADR-0073 /
-                            // LAN-320).
+                            // forward to its task. A missing/exited task is a
+                            // genuine no-session result; timeout remains
+                            // distinct so overload cannot masquerade as
+                            // absence (LAN-661).
                             let result = match self
                                 .unique_peer_key_for_address(address)
                                 .and_then(|key| self.peers.get(&key))
@@ -1135,15 +1137,15 @@ impl PeerManager {
                                         )
                                         .await
                                 }
-                                None => None,
+                                None => SessionQueryOutcome::SessionGone,
                             };
                             let _ = reply.send(result);
                         }
                         PeerManagerCommand::ListRejectedRoutes { address, reply } => {
                             // LAN-472: same resolution + bounded-forward
-                            // shape as ExplainImportPolicy — no live
-                            // session folds to None, rendered by the RPC
-                            // layer as NOT_FOUND.
+                            // shape as ExplainImportPolicy. A missing/exited
+                            // session maps to NOT_FOUND, while a stalled live
+                            // task remains an explicit timeout.
                             let result = match self
                                 .unique_peer_key_for_address(address)
                                 .and_then(|key| self.peers.get(&key))
@@ -1154,7 +1156,7 @@ impl PeerManager {
                                         .list_rejected_routes_timeout(EXPLAIN_QUERY_TIMEOUT)
                                         .await
                                 }
-                                None => None,
+                                None => SessionQueryOutcome::SessionGone,
                             };
                             let _ = reply.send(result);
                         }
@@ -1162,10 +1164,9 @@ impl PeerManager {
                             // Read-only snapshot forwarded to each session
                             // task (the import chain and its counters live
                             // there). Bounded per session like explain: a
-                            // wedged task drops out of the answer instead of
-                            // parking the actor. Sessions without an
-                            // installed import chain reply None and are
-                            // omitted.
+                            // wedged task cannot park the actor. Sessions
+                            // without an installed import chain are omitted;
+                            // timeout/task exit fail the snapshot honestly.
                             let keys: Vec<_> = match peer {
                                 Some(address) => self
                                     .unique_peer_key_for_address(address)
@@ -1173,21 +1174,35 @@ impl PeerManager {
                                     .collect(),
                                 None => self.peers.keys().cloned().collect(),
                             };
-                            let mut out = Vec::new();
-                            for key in keys {
-                                let Some(managed) = self.peers.get(&key) else {
-                                    continue;
-                                };
-                                if let Some(snapshot) = managed
-                                    .handle
-                                    .query_import_policy_term_hits_timeout(EXPLAIN_QUERY_TIMEOUT)
-                                    .await
-                                {
-                                    out.push((key.address, snapshot));
+                            let result = 'query: {
+                                let mut out = Vec::new();
+                                for key in keys {
+                                    let Some(managed) = self.peers.get(&key) else {
+                                        continue;
+                                    };
+                                    match managed
+                                        .handle
+                                        .query_import_policy_term_hits_timeout(
+                                            EXPLAIN_QUERY_TIMEOUT,
+                                        )
+                                        .await
+                                    {
+                                        SessionQueryOutcome::Reply(Some(snapshot)) => {
+                                            out.push((key.address, snapshot));
+                                        }
+                                        SessionQueryOutcome::Reply(None) => {}
+                                        SessionQueryOutcome::TimedOut => {
+                                            break 'query SessionQueryOutcome::TimedOut;
+                                        }
+                                        SessionQueryOutcome::SessionGone => {
+                                            break 'query SessionQueryOutcome::SessionGone;
+                                        }
+                                    }
                                 }
-                            }
-                            out.sort_unstable_by_key(|(address, _)| *address);
-                            let _ = reply.send(out);
+                                out.sort_unstable_by_key(|(address, _)| *address);
+                                SessionQueryOutcome::Reply(out)
+                            };
+                            let _ = reply.send(result);
                         }
                         PeerManagerCommand::GetPolicy { name, reply } => {
                             let _ = reply.send(named_policy_from_config(&self.current_config, &name));
