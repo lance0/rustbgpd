@@ -942,6 +942,17 @@ struct ProbeSpec {
     advice: &'static str,
 }
 
+struct ProbeTaskIdentity {
+    name: String,
+    label: String,
+    addr: String,
+}
+
+struct ProbeTask {
+    identity: ProbeTaskIdentity,
+    handle: tokio::task::JoinHandle<Check>,
+}
+
 async fn run_probe(spec: ProbeSpec) -> Check {
     match probe_tcp(spec.addr.clone()).await {
         Ok(()) => Check {
@@ -958,6 +969,25 @@ async fn run_probe(spec: ProbeSpec) -> Check {
             ),
         },
     }
+}
+
+async fn collect_probe_tasks(tasks: Vec<ProbeTask>) -> Vec<Check> {
+    let mut checks = Vec::with_capacity(tasks.len());
+    for task in tasks {
+        match task.handle.await {
+            Ok(check) => checks.push(check),
+            Err(error) => checks.push(Check {
+                name: task.identity.name,
+                status: CheckStatus::Fail,
+                detail: format!(
+                    "{} {} reachability probe task failed ({error}); \
+                     doctor could not determine reachability",
+                    task.identity.label, task.identity.addr
+                ),
+            }),
+        }
+    }
+    checks
 }
 
 /// Host to probe for the daemon-up BGP listener check: the host doctor
@@ -1024,17 +1054,21 @@ async fn reachability_checks(
                      and reachability",
         });
     }
-    let handles: Vec<_> = specs
+    let tasks = specs
         .into_iter()
-        .map(|s| tokio::spawn(run_probe(s)))
+        .map(|spec| {
+            let identity = ProbeTaskIdentity {
+                name: spec.name.clone(),
+                label: spec.label.clone(),
+                addr: spec.addr.clone(),
+            };
+            ProbeTask {
+                identity,
+                handle: tokio::spawn(run_probe(spec)),
+            }
+        })
         .collect();
-    let mut checks = Vec::new();
-    for handle in handles {
-        if let Ok(check) = handle.await {
-            checks.push(check);
-        }
-    }
-    checks
+    collect_probe_tasks(tasks).await
 }
 
 /// Daemon-down listener check: test-bind the BGP listen port and release
@@ -2648,6 +2682,72 @@ paths = ["x"]
         assert_eq!(checks[2].status, CheckStatus::Fail);
         assert!(
             checks[2].detail.contains("dial-out"),
+            "{}",
+            checks[2].detail
+        );
+    }
+
+    /// Load-bearing proof: silently collecting only `Ok` join results removes
+    /// the final two rows and makes the ordered name assertion red.
+    #[tokio::test]
+    async fn reachability_collector_keeps_failed_task_evidence_in_probe_order() {
+        let task = |name: &str, label: &str, addr: &str, handle: tokio::task::JoinHandle<Check>| {
+            ProbeTask {
+                identity: ProbeTaskIdentity {
+                    name: name.to_string(),
+                    label: label.to_string(),
+                    addr: addr.to_string(),
+                },
+                handle,
+            }
+        };
+
+        let ok = tokio::spawn(async {
+            Check {
+                name: "probe.ok".to_string(),
+                status: CheckStatus::Ok,
+                detail: "probe ok reachable".to_string(),
+            }
+        });
+        let panicked = tokio::spawn(async {
+            panic!("deliberate reachability probe failure");
+        });
+        let cancelled = tokio::spawn(std::future::pending::<Check>());
+        cancelled.abort();
+
+        let checks = collect_probe_tasks(vec![
+            task("probe.ok", "probe", "ok", ok),
+            task("probe.panic", "panic target", "192.0.2.1:179", panicked),
+            task(
+                "probe.cancelled",
+                "cancelled target",
+                "192.0.2.2:179",
+                cancelled,
+            ),
+        ])
+        .await;
+
+        assert_eq!(
+            checks
+                .iter()
+                .map(|check| check.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["probe.ok", "probe.panic", "probe.cancelled"]
+        );
+        assert_eq!(checks[0].status, CheckStatus::Ok);
+        for check in &checks[1..] {
+            assert_eq!(check.status, CheckStatus::Fail);
+            assert!(check.detail.contains("task failed"), "{}", check.detail);
+        }
+        assert!(
+            checks[1].detail.contains("panic target 192.0.2.1:179")
+                && checks[1].detail.contains("panicked"),
+            "{}",
+            checks[1].detail
+        );
+        assert!(
+            checks[2].detail.contains("cancelled target 192.0.2.2:179")
+                && checks[2].detail.contains("cancelled"),
             "{}",
             checks[2].detail
         );
