@@ -68,12 +68,15 @@ struct PolicyTransitionStats {
 /// Test/benchmark-only receipt from the authoritative outbound commit path.
 ///
 /// The counters live on the production path but compile out of normal builds.
-/// They prove performance fixtures reached exact export, committed one
-/// route-bearing envelope per peer, and exercised the intended family-gauge
-/// writes instead of an equality-suppressed no-op.
+/// They prove performance fixtures reached production ingress and exact
+/// export where applicable, committed one route-bearing envelope per peer,
+/// and exercised the intended family-gauge writes instead of an
+/// equality-suppressed no-op.
 #[cfg(any(test, feature = "bench-internals"))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct AdjRibOutCommitStats {
+    routes_received_dispatches: usize,
+    routes_received_withdrawals: usize,
     exact_probe_batches: usize,
     exact_probe_candidates: usize,
     exact_probe_nonzero_encoded_lengths: usize,
@@ -1856,6 +1859,17 @@ impl RibManager {
                 evpn_withdrawn,
             } => {
                 if !self.stale_session_message(peer, session_id, "RoutesReceived", "routes") {
+                    #[cfg(any(test, feature = "bench-internals"))]
+                    {
+                        self.adj_rib_out_commit_stats.routes_received_dispatches = self
+                            .adj_rib_out_commit_stats
+                            .routes_received_dispatches
+                            .saturating_add(1);
+                        self.adj_rib_out_commit_stats.routes_received_withdrawals = self
+                            .adj_rib_out_commit_stats
+                            .routes_received_withdrawals
+                            .saturating_add(withdrawn.len());
+                    }
                     self.enqueue_routes_received(
                         peer,
                         announced,

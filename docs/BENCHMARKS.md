@@ -551,6 +551,30 @@ a RIB-to-transport dependency cycle. Run it with:
 cargo bench -p rustbgpd-transport --features bench-internals --bench fanout
 ```
 
+The `grouped_withdrawal_fanout` group measures the common homogeneous
+route-server withdrawal shape that first-advertise and replacement targets do
+not cover. It pre-advertises a fixed inventory of 64 IPv4-unicast routes to one
+real update group, drains setup output, then times one production
+`RibUpdate::RoutesReceived` withdrawal at 8, 64, 256, and 1,000 members. The
+timed interval covers manager dispatch, bounded route-chunk processing,
+Loc-RIB recompute, grouped distribution, authoritative commit, and
+bounded-channel enqueue. It does not include manager-channel dequeue or Tokio
+actor scheduling, fixture construction, setup advertisement, receiver
+inspection, the session writer, socket, or network I/O. The synthetic
+eBGP-origin source is intentionally unregistered and therefore uses the
+production legacy-producer `session_id = 0` compatibility branch.
+
+Before resetting counters or starting each timer, an accepted iteration proves
+the setup pass populated 64 group-owned routes and the first member's
+IPv4-unicast gauge, used one clean group with no private/dirty fallback,
+traversed one real exact-probe batch with compatible reuse for the remaining
+members, and committed/enqueued once per member. It then proves the timed update
+crossed the production dispatcher with all 64 withdrawals, every member
+received exactly one envelope containing the exact inventory, and the final
+group-owned and private unicast Adj-RIB-Out tables are empty. The measurement
+receipt remains explicitly unmeasured until a host-fenced run is retained in
+[`docs/perf/grouped-withdrawal-fanout-2026-07.md`](perf/grouped-withdrawal-fanout-2026-07.md).
+
 The `adj_rib_out_family_gauge` group is the allocation-sensitive steady-state
 control. It keeps persistent homogeneous route-server fleets at 8, 64, 256,
 and 1,000 peers, drains the prewarm advertisement, and alternates a wire-visible

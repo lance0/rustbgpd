@@ -47,15 +47,19 @@ pub struct PolicyTransitionBenchReceipt {
     pub max_uninterrupted_work: std::time::Duration,
 }
 
-/// Evidence that the fanout benchmark traversed the authoritative grouped
-/// exact-export commit path rather than an equality-suppressed or fallback
-/// path.
+/// Evidence that the fanout benchmark traversed the intended production
+/// ingress and authoritative grouped commit paths rather than an
+/// equality-suppressed or fallback path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AdjRibOutFanoutBenchReceipt {
     pub update_groups: usize,
     pub grouped_peers: usize,
     pub ungrouped_peers: usize,
     pub dirty_peers: usize,
+    pub grouped_unicast_routes: usize,
+    pub private_unicast_routes: usize,
+    pub routes_received_dispatches: usize,
+    pub routes_received_withdrawals: usize,
     pub exact_probe_batches: usize,
     pub exact_probe_candidates: usize,
     pub exact_probe_nonzero_encoded_lengths: usize,
@@ -249,15 +253,20 @@ impl RibManager {
         receivers
     }
 
-    /// Drive one production `RoutesReceived` envelope to completion, including
-    /// the manager dispatcher, bounded ingest chunks, recompute, distribution,
+    /// Drive one production `RoutesReceived` envelope to completion through
+    /// the manager dispatcher, bounded route chunks, recompute, distribution,
     /// and every mutation-version fence implemented by the selected git ref.
+    /// This synchronous bench seam does not include manager-channel dequeue or
+    /// Tokio actor scheduling.
     fn bench_apply_routes_received(
         &mut self,
         peer: IpAddr,
         announced: Vec<Route>,
         withdrawn: Vec<(Prefix, u32)>,
     ) {
+        // An unregistered synthetic source deliberately takes the production
+        // legacy-producer compatibility branch, whose accepted session stamp
+        // is zero. Outbound benchmark peers retain their registered stamps.
         let session_id = self.outbound_session_ids.get(&peer).copied().unwrap_or(0);
         self.handle_update(RibUpdate::RoutesReceived {
             peer,
@@ -272,11 +281,10 @@ impl RibManager {
         while self.process_next_route_chunk() {}
     }
 
-    /// Seed the Loc-RIB through the production actor/event path, grouped into
-    /// one session envelope per source peer. The benchmark calls this before
-    /// outbound peers are registered, so distribution has no transport fanout
-    /// and the timed value isolates ingest, index maintenance, recompute, and
-    /// the selected ref's real continuation-invalidation work.
+    /// Seed the Loc-RIB through the production dispatcher/chunk path, grouped
+    /// into one envelope per synthetic source peer. A source without an
+    /// outbound registration uses the production legacy-unregistered
+    /// `session_id = 0` compatibility branch.
     pub fn bench_seed_loc_rib(&mut self, routes: Vec<Route>) {
         let mut by_peer: BTreeMap<IpAddr, Vec<Route>> = BTreeMap::new();
         for route in routes {
@@ -285,6 +293,16 @@ impl RibManager {
         for (peer, announced) in by_peer {
             self.bench_apply_routes_received(peer, announced, Vec::new());
         }
+    }
+
+    /// Withdraw a prepared unicast inventory through one production
+    /// `RoutesReceived` envelope. Callers build the owned withdrawal vector
+    /// before starting their timer so the measured interval begins at the
+    /// manager dispatcher and ends after its bounded route-chunk, recompute,
+    /// and distribution work drains. Manager-channel dequeue and Tokio actor
+    /// scheduling are outside this synchronous benchmark.
+    pub fn bench_withdraw_loc_rib(&mut self, peer: IpAddr, withdrawn: Vec<(Prefix, u32)>) {
+        self.bench_apply_routes_received(peer, Vec::new(), withdrawn);
     }
 
     /// Withdraw and re-announce an existing unicast subset through production
@@ -402,6 +420,14 @@ impl RibManager {
                 .len()
                 .saturating_sub(grouped_peers),
             dirty_peers: self.dirty_peers.len(),
+            grouped_unicast_routes: self
+                .group_ribs
+                .values()
+                .map(|group| group.table.len())
+                .sum(),
+            private_unicast_routes: self.adj_ribs_out.values().map(|rib| rib.len()).sum(),
+            routes_received_dispatches: stats.routes_received_dispatches,
+            routes_received_withdrawals: stats.routes_received_withdrawals,
             exact_probe_batches: stats.exact_probe_batches,
             exact_probe_candidates: stats.exact_probe_candidates,
             exact_probe_nonzero_encoded_lengths: stats.exact_probe_nonzero_encoded_lengths,
