@@ -162,6 +162,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   invalidate paginated route queries, while accepted End-of-RIB, BoRR, EoRR,
   and timeout work invalidates each route scope exactly once.
 
+- Route injection now rejects ORIGIN values outside 0–2 with
+  `INVALID_ARGUMENT` instead of silently coercing them to INCOMPLETE, and
+  rejects the limited-broadcast next hop `255.255.255.255` on both unicast
+  and EVPN injection — matching the scrutiny already applied to
+  peer-received routes.
+
 ## [0.61.0] — 2026-07-26
 
 > **Release framing.** This is the policy-safety line. RFC 8212

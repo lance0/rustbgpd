@@ -142,9 +142,9 @@ fn parse_type5_gateway(
     Ok(gateway)
 }
 
-/// Parse a unicast next-hop string and reject unspecified / multicast values.
-/// Shared by `AddPath`, `AddFlowSpec`, and `AddEvpnRoute` so all injection
-/// surfaces apply the same guardrails.
+/// Parse a unicast next-hop string and reject unspecified / multicast /
+/// broadcast values. Shared by `AddPath` and `AddEvpnRoute` so all
+/// next-hop-carrying injection surfaces apply the same guardrails.
 fn parse_unicast_nexthop(s: &str) -> Result<IpAddr, Status> {
     let nh: IpAddr = s
         .parse()
@@ -156,6 +156,11 @@ fn parse_unicast_nexthop(s: &str) -> Result<IpAddr, Status> {
             }
             if v4.is_multicast() {
                 return Err(Status::invalid_argument("next_hop must not be multicast"));
+            }
+            if v4.is_broadcast() {
+                return Err(Status::invalid_argument(
+                    "next_hop must not be 255.255.255.255",
+                ));
             }
         }
         IpAddr::V6(v6) => {
@@ -213,7 +218,12 @@ impl proto::injection_service_server::InjectionService for InjectionService {
         let origin = match req.origin {
             0 => Origin::Igp,
             1 => Origin::Egp,
-            _ => Origin::Incomplete,
+            2 => Origin::Incomplete,
+            other => {
+                return Err(Status::invalid_argument(format!(
+                    "origin must be 0 (igp), 1 (egp), or 2 (incomplete); got {other}"
+                )));
+            }
         };
 
         let mut attributes = vec![PathAttribute::Origin(origin)];
@@ -1252,6 +1262,22 @@ mod tests {
         (InjectionService::new(tx, AccessMode::ReadWrite), rx)
     }
 
+    fn add_path_request(origin: u32, next_hop: &str) -> Request<proto::AddPathRequest> {
+        Request::new(proto::AddPathRequest {
+            prefix: "10.0.0.0".into(),
+            prefix_length: 24,
+            next_hop: next_hop.into(),
+            origin,
+            as_path: vec![],
+            local_pref: None,
+            med: None,
+            communities: vec![],
+            extended_communities: vec![],
+            large_communities: vec![],
+            path_id: 0,
+        })
+    }
+
     fn oversized_flowspec_component() -> proto::FlowSpecComponent {
         let value = (0..2_200)
             .map(|i| format!("={i}"))
@@ -1386,6 +1412,89 @@ mod tests {
         let err = svc.add_path(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
         assert!(err.message().contains("multicast"));
+    }
+
+    #[tokio::test]
+    async fn add_path_rejects_origin_above_two() {
+        let svc = make_service();
+        for origin in [3u32, 255] {
+            let err = svc
+                .add_path(add_path_request(origin, "10.0.0.1"))
+                .await
+                .unwrap_err();
+            assert_eq!(err.code(), tonic::Code::InvalidArgument, "origin {origin}");
+            assert!(
+                err.message().contains("origin"),
+                "message must name the field: {}",
+                err.message()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn add_path_accepts_valid_origins() {
+        for (origin, expected) in [
+            (0u32, Origin::Igp),
+            (1, Origin::Egp),
+            (2, Origin::Incomplete),
+        ] {
+            let (svc, mut rx) = make_service_with_rx();
+            let reply_task = tokio::spawn(async move {
+                match rx.recv().await.expect("one RibUpdate") {
+                    RibUpdate::InjectRoute { route, reply } => {
+                        reply.send(Ok(())).ok();
+                        route
+                    }
+                    _ => panic!("expected InjectRoute"),
+                }
+            });
+            svc.add_path(add_path_request(origin, "10.0.0.1"))
+                .await
+                .unwrap();
+            let route = reply_task.await.unwrap();
+            assert!(
+                route
+                    .attributes
+                    .iter()
+                    .any(|a| matches!(a, PathAttribute::Origin(o) if *o == expected)),
+                "origin {origin} must map to {expected:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn add_path_rejects_broadcast_next_hop() {
+        let svc = make_service();
+        let err = svc
+            .add_path(add_path_request(0, "255.255.255.255"))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("255.255.255.255"));
+    }
+
+    #[tokio::test]
+    async fn add_evpn_route_rejects_broadcast_next_hop() {
+        let svc = make_service();
+        let req = Request::new(proto::AddEvpnRouteRequest {
+            route_type: 2,
+            rd: "65000:100".into(),
+            ethernet_tag: 0,
+            mac: "02:00:00:aa:bb:cc".into(),
+            ip: String::new(),
+            label: 100,
+            label2: 0,
+            next_hop: "255.255.255.255".into(),
+            route_targets: vec![],
+            disable_vxlan_encap: false,
+            prefix: String::new(),
+            prefix_length: 0,
+            router_mac: String::new(),
+            gateway: String::new(),
+        });
+        let err = svc.add_evpn_route(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("255.255.255.255"));
     }
 
     #[tokio::test]
