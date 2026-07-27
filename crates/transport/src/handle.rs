@@ -493,6 +493,22 @@ pub struct ImportPolicyTermHits {
     pub terms: Vec<rustbgpd_policy::TermHitRow>,
 }
 
+/// Outcome of a bounded read from a peer-session task.
+///
+/// A deadline expiry is not evidence that the session is gone: the task may
+/// still own an Established connection while parked on writer back-pressure.
+/// Callers must therefore keep [`Self::TimedOut`] distinct from
+/// [`Self::SessionGone`] instead of flattening both into an absent reply.
+#[derive(Debug, Clone)]
+pub enum SessionQueryOutcome<T> {
+    /// The session task answered within the deadline.
+    Reply(T),
+    /// The command was not accepted or answered before the deadline.
+    TimedOut,
+    /// The session task exited before accepting or answering the command.
+    SessionGone,
+}
+
 /// Outcome of a bounded session-state query
 /// ([`PeerHandle::query_state_outcome`]) that keeps "the task did not answer
 /// in time" separate from "the task is gone". The distinction is load-bearing
@@ -687,6 +703,26 @@ pub struct PeerHandle {
 const COMMAND_BUFFER: usize = 8;
 
 impl PeerHandle {
+    async fn query_outcome<T>(
+        commands: mpsc::Sender<PeerCommand>,
+        deadline: Duration,
+        build_command: impl FnOnce(oneshot::Sender<T>) -> PeerCommand,
+    ) -> SessionQueryOutcome<T> {
+        let queried = tokio::time::timeout(deadline, async move {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            if commands.send(build_command(reply_tx)).await.is_err() {
+                return None;
+            }
+            reply_rx.await.ok()
+        })
+        .await;
+        match queried {
+            Err(_elapsed) => SessionQueryOutcome::TimedOut,
+            Ok(None) => SessionQueryOutcome::SessionGone,
+            Ok(Some(reply)) => SessionQueryOutcome::Reply(reply),
+        }
+    }
+
     /// Immediately abort the owned session task for a fail-closed transport
     /// safety boundary. Normal lifecycle code should use bounded shutdown;
     /// this escape hatch is reserved for cases where the command channel
@@ -1598,13 +1634,10 @@ impl PeerHandle {
 
     /// Query this session's import-decision cache (ADR-0073).
     ///
-    /// Bounded like [`Self::query_state_timeout`]: a session parked on
-    /// TCP write back-pressure cannot service the command, so the
-    /// caller must not block indefinitely. Returns `None` on timeout,
-    /// on a full command channel, or if the session task has exited —
-    /// the caller (`PeerManager`) renders that as `NO_SESSION`: the
-    /// session-local cache is unreachable, which is honestly distinct
-    /// from an evaluated `NOT_SEEN` answer (LAN-320).
+    /// Bounded like [`Self::query_state_outcome`]: a session parked on TCP
+    /// write back-pressure cannot service the command, so the caller must not
+    /// block indefinitely. The typed result keeps that timeout distinct from
+    /// an exited session task.
     pub async fn explain_import_policy_timeout(
         &self,
         afi: Afi,
@@ -1612,71 +1645,43 @@ impl PeerHandle {
         prefix: Prefix,
         path_id: Option<u32>,
         deadline: Duration,
-    ) -> Option<ImportExplainReply> {
-        let commands = self.commands.clone();
-        tokio::time::timeout(deadline, async move {
-            let (reply_tx, reply_rx) = oneshot::channel();
-            commands
-                .send(PeerCommand::ExplainImportPolicy {
-                    afi,
-                    safi,
-                    prefix,
-                    path_id,
-                    reply: reply_tx,
-                })
-                .await
-                .ok()?;
-            reply_rx.await.ok()
+    ) -> SessionQueryOutcome<ImportExplainReply> {
+        Self::query_outcome(self.commands.clone(), deadline, |reply| {
+            PeerCommand::ExplainImportPolicy {
+                afi,
+                safi,
+                prefix,
+                path_id,
+                reply,
+            }
         })
         .await
-        .ok()
-        .flatten()
     }
 
     /// LAN-472: bounded snapshot of this session's retained rejected
     /// routes. Same timeout contract as
-    /// [`Self::explain_import_policy_timeout`]: `None` on timeout, full
-    /// command channel, or exited session task — the caller renders
-    /// that as "no live session".
+    /// [`Self::explain_import_policy_timeout`].
     pub async fn list_rejected_routes_timeout(
         &self,
         deadline: Duration,
-    ) -> Option<RejectedRoutesReply> {
-        let commands = self.commands.clone();
-        tokio::time::timeout(deadline, async move {
-            let (reply_tx, reply_rx) = oneshot::channel();
-            commands
-                .send(PeerCommand::ListRejectedRoutes { reply: reply_tx })
-                .await
-                .ok()?;
-            reply_rx.await.ok()
+    ) -> SessionQueryOutcome<RejectedRoutesReply> {
+        Self::query_outcome(self.commands.clone(), deadline, |reply| {
+            PeerCommand::ListRejectedRoutes { reply }
         })
         .await
-        .ok()
-        .flatten()
     }
 
     /// Bounded snapshot of this session's import-chain per-term hit
-    /// counters. `None` folds together "no import chain installed",
-    /// "deadline expired", and "session task gone" — the stats surface
-    /// simply omits the peer in all three cases.
+    /// counters. A successful `Reply(None)` means no import chain is installed;
+    /// timeout and task exit remain distinct outcomes.
     pub async fn query_import_policy_term_hits_timeout(
         &self,
         deadline: Duration,
-    ) -> Option<ImportPolicyTermHits> {
-        let commands = self.commands.clone();
-        tokio::time::timeout(deadline, async move {
-            let (reply_tx, reply_rx) = oneshot::channel();
-            commands
-                .send(PeerCommand::QueryImportPolicyTermHits { reply: reply_tx })
-                .await
-                .ok()?;
-            reply_rx.await.ok()
+    ) -> SessionQueryOutcome<Option<ImportPolicyTermHits>> {
+        Self::query_outcome(self.commands.clone(), deadline, |reply| {
+            PeerCommand::QueryImportPolicyTermHits { reply }
         })
         .await
-        .ok()
-        .flatten()
-        .flatten()
     }
 
     /// Replace the effective export policy chain for future `PeerUp` messages.
@@ -2017,6 +2022,65 @@ mod tests {
             .send(PeerCommand::Start)
             .await
             .expect("receiver is intentionally kept alive");
+    }
+
+    /// LAN-661 red proof: flattening any of these outcomes back to `Option`
+    /// makes a stalled live task, an exited task, and a legitimate chainless
+    /// reply indistinguishable, so at least one of these three assertions
+    /// fails.
+    #[tokio::test(start_paused = true)]
+    async fn policy_query_outcomes_keep_timeout_exit_and_empty_chain_distinct() {
+        let (stalled, _stalled_rx) = handle_with_full_command_channel();
+        fill_command_channel(&stalled).await;
+        let timeout = stalled
+            .explain_import_policy_timeout(
+                Afi::Ipv4,
+                Safi::Unicast,
+                Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(
+                    Ipv4Addr::new(192, 0, 2, 0),
+                    24,
+                )),
+                None,
+                Duration::from_millis(50),
+            )
+            .await;
+        assert!(
+            matches!(timeout, SessionQueryOutcome::TimedOut),
+            "stalled live session must not read as gone"
+        );
+
+        let (gone_tx, gone_rx) = mpsc::channel(1);
+        drop(gone_rx);
+        let gone = PeerHandle {
+            commands: gone_tx,
+            task: tokio::spawn(async { Ok::<(), TransportError>(()) }),
+        }
+        .list_rejected_routes_timeout(Duration::from_millis(50))
+        .await;
+        assert!(
+            matches!(gone, SessionQueryOutcome::SessionGone),
+            "closed session task must not read as a timeout"
+        );
+
+        let (chainless_tx, mut chainless_rx) = mpsc::channel(1);
+        let chainless_task = tokio::spawn(async move {
+            let Some(PeerCommand::QueryImportPolicyTermHits { reply }) = chainless_rx.recv().await
+            else {
+                panic!("expected import-policy term-hit query");
+            };
+            let _ = reply.send(None);
+            Ok::<(), TransportError>(())
+        });
+        let chainless = PeerHandle {
+            commands: chainless_tx,
+            task: chainless_task,
+        }
+        .query_import_policy_term_hits_timeout(Duration::from_millis(50))
+        .await;
+        assert!(
+            matches!(chainless, SessionQueryOutcome::Reply(None)),
+            "a healthy chainless session is an answered query"
+        );
     }
 
     fn assert_timed_out(result: &Result<(), PeerCommandError>, operation: &'static str) {
