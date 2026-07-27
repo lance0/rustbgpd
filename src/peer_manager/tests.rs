@@ -6691,6 +6691,54 @@ async fn session_event_history_records_events_without_subscriber() {
     assert_eq!(events[0].event_type, SessionLifecycleEventType::PeerEnabled);
 }
 
+/// LAN-668 production incarnation proof: successful configured-peer installs
+/// publish their current admin state only after installation. Removing the
+/// add-path publication leaves the old `PeerDisabled` as the newest retained
+/// intent after delete/re-add and makes doctor's paired regression red.
+#[tokio::test]
+async fn peer_add_and_readd_publish_current_admin_state_without_failed_add_noise() {
+    let mut mgr = test_peer_manager();
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let admin_types = [
+        SessionLifecycleEventType::PeerEnabled,
+        SessionLifecycleEventType::PeerDisabled,
+    ]
+    .into_iter()
+    .collect();
+
+    mgr.add_peer(make_config(addr, 65002), false).await.unwrap();
+    assert!(
+        mgr.add_peer(make_config(addr, 65002), false).await.is_err(),
+        "a failed duplicate add must not fabricate an admin event"
+    );
+    mgr.disable_peer(key(addr), None).await.unwrap();
+    mgr.delete_peer(key(addr), false).await.unwrap();
+    mgr.add_peer(make_config(addr, 65002), false).await.unwrap();
+    mgr.delete_peer(key(addr), false).await.unwrap();
+    mgr.add_peer_with_admin_state(make_config(addr, 65002), false, false)
+        .await
+        .unwrap();
+
+    let peers = mgr.list_peers().await;
+    assert_eq!(peers.len(), 1);
+    assert!(!peers[0].enabled);
+    let events = query_session_event_history(&mgr, Some(addr), admin_types, 0).await;
+    let event_types: Vec<_> = events.iter().map(|event| event.event_type).collect();
+    assert_eq!(
+        event_types,
+        vec![
+            SessionLifecycleEventType::PeerEnabled,
+            SessionLifecycleEventType::PeerDisabled,
+            SessionLifecycleEventType::PeerEnabled,
+            SessionLifecycleEventType::PeerDisabled,
+        ],
+        "add, disable, enabled re-add, and disabled re-add must expose exact current intent"
+    );
+    assert!(events[0].reason.contains("added administratively enabled"));
+    assert!(events[2].reason.contains("added administratively enabled"));
+    assert!(events[3].reason.contains("added administratively disabled"));
+}
+
 #[tokio::test]
 async fn session_event_history_filters_peer_type_and_limit_in_order() {
     let mut mgr = test_peer_manager();
