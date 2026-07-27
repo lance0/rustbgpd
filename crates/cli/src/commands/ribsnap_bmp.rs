@@ -59,6 +59,8 @@ use rustbgpd_wire::nlri::Prefix;
 use rustbgpd_wire::open::OpenMessage;
 use rustbgpd_wire::update::UpdateMessage;
 
+use crate::output;
+
 use super::ribsnap::{Cursor, EXIT_OK, EXIT_REFUSED, SnapRoute, route_record_json};
 
 // BMP message types (RFC 7854 §4.1).
@@ -131,13 +133,27 @@ pub struct FromBmpOpts<'a> {
 /// Run the adapter: print the snapshot to stdout on success (notes to
 /// stderr), an error to stderr on refusal, and return the exit code.
 pub fn from_bmp(opts: &FromBmpOpts<'_>) -> i32 {
-    match run(opts) {
+    let result = run(opts);
+    let stdout = std::io::stdout();
+    emit_bmp_snapshot(result, &mut stdout.lock())
+}
+
+fn emit_bmp_snapshot(
+    result: Result<(String, Vec<String>), String>,
+    writer: &mut dyn std::io::Write,
+) -> i32 {
+    match result {
         Ok((snapshot, notes)) => {
             for note in notes {
                 eprintln!("note: {note}");
             }
-            print!("{snapshot}");
-            EXIT_OK
+            match output::write_bytes(writer, snapshot.as_bytes()) {
+                Ok(()) => EXIT_OK,
+                Err(error) => {
+                    output::report_write_error("BMP snapshot output", &error);
+                    EXIT_REFUSED
+                }
+            }
         }
         Err(e) => {
             eprintln!("Error: {e}");
@@ -1470,6 +1486,17 @@ mod tests {
             source: Some("synthetic-lab"),
             generation: 3,
         }
+    }
+
+    #[test]
+    fn raw_ndjson_emitter_preserves_exact_bytes() {
+        let snapshot = "{\"record\":\"header\"}\n{\"record\":\"trailer\",\"routes\":0}\n";
+        let mut bytes = Vec::new();
+        assert_eq!(
+            emit_bmp_snapshot(Ok((snapshot.to_string(), Vec::new())), &mut bytes),
+            EXIT_OK
+        );
+        assert_eq!(bytes, snapshot.as_bytes());
     }
 
     fn run_capture(bytes: &[u8]) -> Result<(String, Vec<String>), String> {

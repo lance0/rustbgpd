@@ -31,6 +31,7 @@ pub mod frr;
 pub mod gobgp;
 
 use std::fmt::Write as _;
+use std::io::Write as IoWrite;
 
 use serde::Serialize;
 
@@ -566,6 +567,20 @@ fn emit_toml(
 /// CLI entry: read, translate, write, report. Returns the process exit
 /// code per the module-level ladder.
 pub fn run_import(source: &str, format: Option<&str>, out: Option<&str>, json: bool) -> i32 {
+    if json {
+        let stdout = std::io::stdout();
+        return run_import_with_json_writer(source, format, out, json, Some(&mut stdout.lock()));
+    }
+    run_import_with_json_writer(source, format, out, json, None)
+}
+
+fn run_import_with_json_writer(
+    source: &str,
+    format: Option<&str>,
+    out: Option<&str>,
+    json: bool,
+    json_writer: Option<&mut dyn IoWrite>,
+) -> i32 {
     if json && out.is_none() {
         eprintln!(
             "error: --json prints the import report on stdout; pass --out PATH for the \
@@ -607,12 +622,106 @@ pub fn run_import(source: &str, format: Option<&str>, out: Option<&str>, json: b
         None => print!("{}", imported.config_toml),
     }
     if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&imported.report).expect("report serializes")
-        );
+        let rendered = match serde_json::to_string_pretty(&imported.report) {
+            Ok(rendered) => rendered,
+            Err(error) => {
+                eprintln!("error: cannot encode import JSON output: {error}");
+                return 1;
+            }
+        };
+        let Some(writer) = json_writer else {
+            eprintln!("error: cannot write import JSON output: no output writer");
+            return 1;
+        };
+        if let Err(error) = writer
+            .write_all(rendered.as_bytes())
+            .and_then(|()| writer.write_all(b"\n"))
+            .and_then(|()| writer.flush())
+        {
+            if error.kind() != std::io::ErrorKind::BrokenPipe {
+                eprintln!("error: cannot write import JSON output: {error}");
+            }
+            return 1;
+        }
     } else {
         eprint!("{}", imported.report.render_text());
     }
     imported.report.exit_code()
+}
+
+#[cfg(test)]
+mod writer_tests {
+    use super::*;
+
+    const FRR: &str = include_str!("../../tests/fixtures/import/frr.conf");
+
+    fn paths() -> (tempfile::TempDir, String, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("frr.conf");
+        let out = dir.path().join("rustbgpd.toml");
+        std::fs::write(&source, FRR).unwrap();
+        (
+            dir,
+            source.to_str().unwrap().to_string(),
+            out.to_str().unwrap().to_string(),
+        )
+    }
+
+    #[test]
+    fn json_report_writer_preserves_pretty_bytes_and_one_newline() {
+        let (_dir, source, out) = paths();
+        let expected = import_source(SourceFormat::Frr, &source, FRR).unwrap();
+        let expected = format!(
+            "{}\n",
+            serde_json::to_string_pretty(&expected.report).unwrap()
+        );
+        let mut bytes = Vec::new();
+
+        let code = run_import_with_json_writer(&source, None, Some(&out), true, Some(&mut bytes));
+
+        assert_eq!(code, 2);
+        assert_eq!(bytes, expected.as_bytes());
+    }
+
+    struct BrokenWriter;
+
+    impl IoWrite for BrokenWriter {
+        fn write(&mut self, _bytes: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn json_report_write_failure_exits_one() {
+        let (_dir, source, out) = paths();
+        assert_eq!(
+            run_import_with_json_writer(&source, None, Some(&out), true, Some(&mut BrokenWriter),),
+            1
+        );
+    }
+
+    struct FlushFailure;
+
+    impl IoWrite for FlushFailure {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::Error::other("flush failed"))
+        }
+    }
+
+    #[test]
+    fn json_report_flush_failure_exits_one() {
+        let (_dir, source, out) = paths();
+        assert_eq!(
+            run_import_with_json_writer(&source, None, Some(&out), true, Some(&mut FlushFailure),),
+            1
+        );
+    }
 }

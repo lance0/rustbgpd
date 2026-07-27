@@ -214,16 +214,15 @@ fn check_local_with_json_writer(
     };
 
     if json {
-        if print_check_json(
+        if let Err(error) = print_check_json(
             path,
             &diagnostics,
             tests.as_ref(),
             cov.as_ref(),
             file.as_ref(),
             json_writer,
-        )
-        .is_err()
-        {
+        ) {
+            output::report_write_error("policy JSON output", &error);
             return 1;
         }
     } else if !diagnostics.is_empty() {
@@ -481,7 +480,8 @@ fn print_deps(
                 })
                 .collect(),
         };
-        if print_policy_json(json_writer, &out).is_err() {
+        if let Err(error) = print_policy_json(json_writer, &out) {
+            output::report_write_error("policy JSON output", &error);
             return 1;
         }
         return 0;

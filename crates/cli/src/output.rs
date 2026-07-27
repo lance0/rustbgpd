@@ -976,6 +976,33 @@ fn write_line<W: Write + ?Sized>(writer: &mut W, bytes: &[u8]) -> Result<(), Cli
     Ok(())
 }
 
+/// Write already-rendered output byte-for-byte and flush it.
+pub(crate) fn write_bytes<W: Write + ?Sized>(writer: &mut W, bytes: &[u8]) -> Result<(), CliError> {
+    writer.write_all(bytes)?;
+    writer.flush()?;
+    Ok(())
+}
+
+/// Direct-exit commands cannot propagate a `CliError` through `main`.
+/// Keep the normal Unix broken-pipe case quiet, but make every other
+/// output failure actionable.
+pub(crate) fn report_write_error(context: &str, error: &CliError) {
+    if let Some(message) = write_error_message(context, error) {
+        eprintln!("Error: {message}");
+    }
+}
+
+fn write_error_message(context: &str, error: &CliError) -> Option<String> {
+    if matches!(
+        error,
+        CliError::Io(io_error) if io_error.kind() == io::ErrorKind::BrokenPipe
+    ) {
+        None
+    } else {
+        Some(format!("cannot write {context}: {error}"))
+    }
+}
+
 pub(crate) fn write_json_pretty<W: Write + ?Sized, T: Serialize>(
     writer: &mut W,
     value: &T,
@@ -1311,12 +1338,14 @@ mod tests {
     }
 
     #[test]
-    fn print_json_pretty_surfaces_serialize_errors() {
+    fn serialization_failure_leaves_writer_empty() {
         let mut non_string_keyed_map = BTreeMap::new();
         non_string_keyed_map.insert(vec![1_u8], "value");
 
-        let err = print_json_pretty(&non_string_keyed_map).unwrap_err();
+        let mut bytes = Vec::new();
+        let err = write_json_pretty(&mut bytes, &non_string_keyed_map).unwrap_err();
         assert!(matches!(err, CliError::Json(_)));
+        assert!(bytes.is_empty());
     }
 
     #[derive(Serialize)]
@@ -1339,6 +1368,17 @@ mod tests {
         let mut serialized = Vec::new();
         write_serialized_json_line(&mut serialized, "{\"compact\":true}").unwrap();
         assert_eq!(serialized, b"{\"compact\":true}\n");
+
+        let mut ndjson = Vec::new();
+        write_bytes(
+            &mut ndjson,
+            b"{\"record\":\"header\"}\n{\"record\":\"trailer\"}\n",
+        )
+        .unwrap();
+        assert_eq!(
+            ndjson,
+            b"{\"record\":\"header\"}\n{\"record\":\"trailer\"}\n"
+        );
     }
 
     struct FailAfter {
@@ -1390,6 +1430,22 @@ mod tests {
         let value = JsonWriterFixture { ok: true, count: 2 };
         let err = write_json_line(&mut FailFlush(Vec::new()), &value).unwrap_err();
         assert!(matches!(err, CliError::Io(_)));
+
+        let err =
+            write_bytes(&mut FailFlush(Vec::new()), b"{\"record\":\"trailer\"}\n").unwrap_err();
+        assert!(matches!(err, CliError::Io(_)));
+    }
+
+    #[test]
+    fn direct_exit_write_errors_are_actionable_except_broken_pipe() {
+        let denied = CliError::Io(io::Error::from(io::ErrorKind::PermissionDenied));
+        assert_eq!(
+            write_error_message("policy JSON output", &denied).as_deref(),
+            Some("cannot write policy JSON output: permission denied")
+        );
+
+        let broken = CliError::Io(io::Error::from(io::ErrorKind::BrokenPipe));
+        assert_eq!(write_error_message("policy JSON output", &broken), None);
     }
 
     #[test]
