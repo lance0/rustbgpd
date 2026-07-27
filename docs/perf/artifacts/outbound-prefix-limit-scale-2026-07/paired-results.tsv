@@ -1,0 +1,4 @@
+members	control_apply_seconds	candidate_apply_seconds	paired_apply_delta_seconds	control_apply_allocated_delta_bytes	candidate_apply_allocated_delta_bytes	paired_allocated_delta_bytes	paired_allocated_delta_per_member_bytes	control_apply_rss_delta_kib	candidate_apply_rss_delta_kib	paired_rss_delta_kib	candidate_recovery_seconds
+1	0.000008362	0.020658089	0.020649727	121416	10003224	9881808	9881808	-6092	7408	13500	0.290743573
+10	0.000023385	0.208677172	0.208653787	510056	99707176	99197120	9919712	-2108	94536	96644	2.802760381
+100	0.000152399	2.050572101	2.050419702	682592	997068144	996385552	9963855.52	-5028	960264	965292	27.853558523

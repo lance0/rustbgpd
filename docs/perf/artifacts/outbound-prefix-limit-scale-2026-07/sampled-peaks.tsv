@@ -1,0 +1,7 @@
+members	variant	samples	max_vm_rss_kib	max_vm_hwm_kib
+1	control	10	369932	396620
+1	candidate	12	433648	445268
+10	control	11	457932	475580
+10	candidate	15	573828	582180
+100	control	16	493220	496044
+100	candidate	44	1332996	1332996
