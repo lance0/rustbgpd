@@ -152,7 +152,15 @@ message ListRoutesResponse {
 }
 ```
 
-**Streaming watch (opt-in).** `WatchRoutes` returns a live stream of `RouteEvent` messages (add, withdraw, best-path change). Backpressure via bounded server-side channel — if the consumer falls behind, the stream is terminated with a `RESOURCE_EXHAUSTED` status and the client must reconnect. This prevents a slow consumer from becoming a DoS vector.
+**Streaming watch (opt-in).** `WatchRoutes` returns a live stream of
+`RouteEvent` messages (add, withdraw, best-path change). A bounded broadcast
+channel prevents a slow consumer from becoming a DoS vector. If a consumer
+falls behind, `WatchRoutes` skips the missed events, increments
+`bgp_event_stream_lagged_total`, and keeps the stream connected; its legacy
+bare `RouteEvent` response cannot carry an in-band lag warning. Clients that
+need an explicit `stream_lagged` event use `WatchRouteEvents` or
+`EventService.WatchEvents`, and clients that need durable replay use
+`SubscribeFromEvent` with event history enabled.
 
 **Recent event history.** `ListRouteEvents` exposes the same unicast
 best-path event shape from a bounded in-memory RIB ring for after-the-fact
@@ -406,7 +414,7 @@ Dynamic peer management, per-peer policy, typed communities, real-time route eve
 - Shared types (`PeerManagerCommand`, `PeerInfo`) live in `crates/api/src/peer_types.rs` to avoid circular dependencies between the binary and API crates.
 - Per-peer export policy: `RibManager` stores per-peer policies from `PeerUp`, resolves via `export_policy_for()` (per-peer overrides global). Config supports per-neighbor `import_policy` / `export_policy` sections.
 - Typed COMMUNITIES (RFC 1997): `PathAttribute::Communities(Vec<u32>)` replaces opaque `Unknown` for type code 8. Each `u32` is `(ASN << 16) | value`.
-- `WatchRoutes` uses `tokio::sync::broadcast` (ADR-0018) — zero overhead with no subscribers, independent receivers, lagged subscribers get error instead of blocking.
+- `WatchRoutes` uses `tokio::sync::broadcast` (ADR-0018) — zero overhead with no subscribers, independent receivers, and lagged receivers skip missed events without blocking.
 - `PeerHandle::query_state()` enables FSM state queries from PeerManager without shared mutable state.
 - Starting with zero configured neighbors is now valid — peers can be added entirely via gRPC.
 
