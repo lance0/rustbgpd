@@ -62,18 +62,21 @@ fn emitted_configs_pass_rustbgpd_check() {
 }
 
 /// Fail-closed exit contract: when the emitted config is one the daemon's
-/// `--check` rejects (unparseable router-id, dangling peer-group reference),
-/// the import itself must exit nonzero — a clean exit 0 alongside a rejected
-/// translation would break the ladder's "operator attention is non-zero by
-/// construction" promise.
+/// `--check` rejects, the import itself must exit nonzero — a clean exit 0
+/// alongside a rejected translation would break the ladder's "operator
+/// attention is non-zero by construction" promise.
+///
+/// Load-bearing proof: removing any corresponding `finish` guard makes that
+/// case return exit 0 while the real daemon still rejects its output.
 #[test]
 fn import_exits_nonzero_when_emitted_config_fails_check() {
-    for (format, path, source) in [
+    for (format, path, source, warning) in [
         (
             SourceFormat::Frr,
             "frr-badrid.conf",
             "router bgp 64500\n bgp router-id 2001:db8::1\n \
              neighbor 192.0.2.1 remote-as 64496\n!\n",
+            "router-id",
         ),
         (
             SourceFormat::Gobgp,
@@ -81,6 +84,84 @@ fn import_exits_nonzero_when_emitted_config_fails_check() {
             "[global.config]\nas = 64500\nrouter-id = \"192.0.2.10\"\n[[neighbors]]\n\
              [neighbors.config]\nneighbor-address = \"192.0.2.1\"\npeer-as = 64496\n\
              peer-group = \"CORE\"\n",
+            "CORE",
+        ),
+        (
+            SourceFormat::Frr,
+            "frr-local-as-zero.conf",
+            "router bgp 0\n bgp router-id 192.0.2.10\n \
+             neighbor 192.0.2.1 remote-as 64496\n!\n",
+            "local AS 0",
+        ),
+        (
+            SourceFormat::Frr,
+            "frr-remote-as-zero.conf",
+            "router bgp 64500\n bgp router-id 192.0.2.10\n \
+             neighbor 192.0.2.1 remote-as 0\n!\n",
+            "remote AS 0",
+        ),
+        (
+            SourceFormat::Gobgp,
+            "gobgp-inherited-remote-as-zero.toml",
+            "[global.config]\nas = 64500\nrouter-id = \"192.0.2.10\"\n\
+             [[peer-groups]]\n[peer-groups.config]\npeer-group-name = \"ixp\"\n\
+             peer-as = 0\n[[neighbors]]\n[neighbors.config]\n\
+             neighbor-address = \"192.0.2.1\"\npeer-group = \"ixp\"\n",
+            "remote AS 0",
+        ),
+        (
+            SourceFormat::Frr,
+            "frr-link-local.conf",
+            "router bgp 64500\n bgp router-id 192.0.2.10\n \
+             neighbor fe80::1 remote-as 64496\n!\n",
+            "link-local",
+        ),
+        (
+            SourceFormat::Frr,
+            "frr-duplicate-neighbor.conf",
+            "router bgp 64500\n bgp router-id 192.0.2.10\n \
+             neighbor 2001:0db8:0:0:0:0:0:1 remote-as 64496\n \
+             neighbor 2001:db8::1 remote-as 64497\n!\n",
+            "duplicate neighbor",
+        ),
+        (
+            SourceFormat::Bird,
+            "bird-duplicate-neighbor.conf",
+            "router id 192.0.2.10;\n\
+             protocol bgp n1 { local as 64500; \
+             neighbor 2001:0db8:0:0:0:0:0:1 as 64496; }\n\
+             protocol bgp n2 { local as 64500; neighbor 2001:db8::1 as 64497; }\n",
+            "duplicate neighbor",
+        ),
+        (
+            SourceFormat::Gobgp,
+            "gobgp-duplicate-neighbor.toml",
+            "[global.config]\nas = 64500\nrouter-id = \"192.0.2.10\"\n\
+             [[neighbors]]\n[neighbors.config]\n\
+             neighbor-address = \"2001:0db8:0:0:0:0:0:1\"\npeer-as = 64496\n\
+             [[neighbors]]\n[neighbors.config]\n\
+             neighbor-address = \"2001:db8::1\"\npeer-as = 64497\n",
+            "duplicate neighbor",
+        ),
+        (
+            SourceFormat::Bird,
+            "bird-duplicate-group.conf",
+            "router id 192.0.2.10;\n\
+             template bgp ixp { local as 64500; }\n\
+             template bgp ixp { local as 64500; }\n\
+             protocol bgp member from ixp { neighbor 192.0.2.1 as 64496; }\n",
+            "duplicate peer group",
+        ),
+        (
+            SourceFormat::Gobgp,
+            "gobgp-duplicate-group.toml",
+            "[global.config]\nas = 64500\nrouter-id = \"192.0.2.10\"\n\
+             [[peer-groups]]\n[peer-groups.config]\npeer-group-name = \"ixp\"\n\
+             peer-as = 64496\n[[peer-groups]]\n[peer-groups.config]\n\
+             peer-group-name = \"ixp\"\npeer-as = 64497\n[[neighbors]]\n\
+             [neighbors.config]\nneighbor-address = \"192.0.2.1\"\n\
+             peer-group = \"ixp\"\n",
+            "duplicate peer group",
         ),
     ] {
         let imported = import_source(format, path, source)
@@ -96,7 +177,149 @@ fn import_exits_nonzero_when_emitted_config_fails_check() {
             "{path}: import exited 0 while emitting a --check-rejected config:\n{}",
             imported.config_toml
         );
+        assert!(
+            imported
+                .report
+                .warnings
+                .iter()
+                .any(|message| message.contains(warning)),
+            "{path}: report did not name {warning:?}: {:?}",
+            imported.report.warnings
+        );
     }
+}
+
+/// Identity diagnostics apply only to neighbors that survive translation.
+///
+/// Load-bearing proof: moving link-local/duplicate checks ahead of the
+/// missing-AS skip reports two nonexistent emitted rows; the warning
+/// assertions fail even though the retained config remains daemon-valid.
+#[test]
+fn skipped_neighbors_do_not_poison_emitted_identity_checks() {
+    let source = "[global.config]\nas = 64500\nrouter-id = \"192.0.2.10\"\n\
+                  [[neighbors]]\n[neighbors.config]\nneighbor-address = \"fe80::1\"\n\
+                  [[neighbors]]\n[neighbors.config]\n\
+                  neighbor-address = \"2001:0db8:0:0:0:0:0:1\"\n\
+                  [[neighbors]]\n[neighbors.config]\n\
+                  neighbor-address = \"2001:db8::1\"\npeer-as = 64496\n";
+    let imported =
+        import_source(SourceFormat::Gobgp, "gobgp-skipped-identity.toml", source).expect("import");
+    assert_eq!(imported.report.skipped.len(), 2);
+    assert!(
+        imported
+            .report
+            .warnings
+            .iter()
+            .all(|message| !message.contains("link-local")
+                && !message.contains("duplicate neighbor")),
+        "{:?}",
+        imported.report.warnings
+    );
+    let (code, stdout, stderr) = run_check(&imported.config_toml);
+    assert_eq!(
+        code,
+        Some(0),
+        "retained config failed --check\nstdout:\n{stdout}\nstderr:\n{stderr}\nconfig:\n{}",
+        imported.config_toml
+    );
+}
+
+/// Group timers share the daemon's hold-time constraint with neighbors.
+///
+/// Load-bearing proof: removing the group normalization emits `hold_time = 2`,
+/// returns exit 0, and makes the real daemon reject the translation.
+#[test]
+fn invalid_group_hold_time_is_repaired_and_requires_review() {
+    let source = "[global.config]\nas = 64500\nrouter-id = \"192.0.2.10\"\n\
+                  [[peer-groups]]\n[peer-groups.config]\npeer-group-name = \"ixp\"\n\
+                  peer-as = 64496\n[peer-groups.timers.config]\nhold-time = 2\n\
+                  [[neighbors]]\n[neighbors.config]\n\
+                  neighbor-address = \"192.0.2.1\"\npeer-group = \"ixp\"\n";
+    let imported =
+        import_source(SourceFormat::Gobgp, "gobgp-group-hold.toml", source).expect("import");
+    let (code, stdout, stderr) = run_check(&imported.config_toml);
+    assert_eq!(
+        code,
+        Some(0),
+        "repaired config failed --check\nstdout:\n{stdout}\nstderr:\n{stderr}\nconfig:\n{}",
+        imported.config_toml
+    );
+    assert!(imported.config_toml.contains("hold_time = 3"));
+    assert_eq!(imported.report.exit_code, 2);
+    assert!(
+        imported
+            .report
+            .warnings
+            .iter()
+            .any(|message| message.contains("peer group ixp")
+                && message.contains("hold time 2")
+                && message.contains("minimum 3")),
+        "{:?}",
+        imported.report.warnings
+    );
+}
+
+/// TOML-decoded control characters must be re-encoded as valid TOML escapes.
+///
+/// Load-bearing proof: restoring the old hand-escaper writes a raw U+0001,
+/// so the structural escape assertion and the real daemon check both fail.
+#[test]
+fn imported_control_characters_are_toml_escaped() {
+    let source = "[global.config]\nas = 64500\nrouter-id = \"192.0.2.10\"\n\
+                  [[neighbors]]\n[neighbors.config]\n\
+                  neighbor-address = \"192.0.2.1\"\npeer-as = 64496\n\
+                  description = \"\\u0001\\t\"\n";
+    let imported =
+        import_source(SourceFormat::Gobgp, "gobgp-control.toml", source).expect("import");
+    assert_eq!(imported.report.exit_code, 0);
+    assert!(
+        imported
+            .config_toml
+            .contains("description = \"\\u0001\\t\""),
+        "{}",
+        imported.config_toml
+    );
+    let (code, stdout, stderr) = run_check(&imported.config_toml);
+    assert_eq!(
+        code,
+        Some(0),
+        "escaped config failed --check\nstdout:\n{stdout}\nstderr:\n{stderr}\nconfig:\n{}",
+        imported.config_toml
+    );
+}
+
+/// Distinct decoded strings must remain distinct TOML keys after emission.
+///
+/// Load-bearing proof: replacing LF/CR with spaces collapses all three group
+/// names onto one TOML table, so the key assertions and real daemon check fail.
+#[test]
+fn escaped_group_names_do_not_collapse_onto_space() {
+    let source = "[global.config]\nas = 64500\nrouter-id = \"192.0.2.10\"\n\
+                  [[peer-groups]]\n[peer-groups.config]\n\
+                  peer-group-name = \"ixp\\nred\"\npeer-as = 64496\n\
+                  [[peer-groups]]\n[peer-groups.config]\n\
+                  peer-group-name = \"ixp\\rred\"\npeer-as = 64497\n\
+                  [[peer-groups]]\n[peer-groups.config]\n\
+                  peer-group-name = \"ixp red\"\npeer-as = 64498\n\
+                  [[neighbors]]\n[neighbors.config]\n\
+                  neighbor-address = \"192.0.2.1\"\npeer-as = 64499\n";
+    let imported =
+        import_source(SourceFormat::Gobgp, "gobgp-group-controls.toml", source).expect("import");
+    assert_eq!(imported.report.exit_code, 0);
+    for key in [
+        "[peer_groups.\"ixp\\nred\"]",
+        "[peer_groups.\"ixp\\rred\"]",
+        "[peer_groups.\"ixp red\"]",
+    ] {
+        assert!(imported.config_toml.contains(key), "missing {key:?}");
+    }
+    let (code, stdout, stderr) = run_check(&imported.config_toml);
+    assert_eq!(
+        code,
+        Some(0),
+        "escaped config failed --check\nstdout:\n{stdout}\nstderr:\n{stderr}\nconfig:\n{}",
+        imported.config_toml
+    );
 }
 
 /// The defect this gate exists for: an imported config has no policy, and
