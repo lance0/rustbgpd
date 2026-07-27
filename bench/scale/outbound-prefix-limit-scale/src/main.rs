@@ -1350,6 +1350,10 @@ mod tests {
         );
     }
 
+    /// Load-bearing mutation proof: selecting the first nonzero finite
+    /// histogram bucket, rather than the bucket containing all expected
+    /// samples, changes the first result away from `(0.2, 0.5)`. Accepting an
+    /// incomplete finite count makes the 101-sample error assertion red.
     #[test]
     fn recovery_max_bucket_bounds_every_slice_not_the_average() {
         let before = "bgp_rib_outbound_prefix_limit_actor_duration_seconds_bucket{operation=\"recovery\",le=\"0.1\"} 7\n\

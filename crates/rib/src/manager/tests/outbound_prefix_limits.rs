@@ -413,6 +413,11 @@ fn a_limited_group_member_blocks_alone() {
 
 /// Admission is per session generation: teardown reaps it on the same seam
 /// as the rest of the peer's outbound state.
+///
+/// Load-bearing mutation proof: removing
+/// `outbound_limit_control.reap_peer(peer)` from the `PeerDown` path leaves
+/// this generation's queued IPv4 recovery behind and makes the final
+/// empty-intent assertion red.
 #[test]
 fn peer_teardown_clears_admission_state() {
     let (_tx, rx) = mpsc::channel(1);
