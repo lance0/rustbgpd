@@ -6358,6 +6358,98 @@ fn diff_neighbors_no_changes() {
     assert!(diff.changed.is_empty());
 }
 
+fn loaded_config_with_neighbor_address(address: &str) -> Config {
+    let toml_str = tier_authorized_uds_test_config(&format!(
+        r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[neighbors]]
+address = "{address}"
+remote_asn = 65002
+"#
+    ));
+    Config::load_toml_with_diagnostics(&toml_str, "canonicalization test").unwrap()
+}
+
+#[test]
+fn load_canonicalizes_static_neighbor_address_spelling() {
+    // Uppercase, zero-expanded, and fully-expanded spellings all load as
+    // the one canonical form, so raw-string address comparisons against
+    // `IpAddr::to_string()` cannot silently miss.
+    for spelling in [
+        "2001:db8::1",
+        "2001:DB8::1",
+        "2001:db8:0:0:0:0:0:1",
+        "2001:0db8:0000:0000:0000:0000:0000:0001",
+    ] {
+        let config = loaded_config_with_neighbor_address(spelling);
+        assert_eq!(
+            config.neighbors[0].address, "2001:db8::1",
+            "spelling {spelling} must canonicalize"
+        );
+    }
+}
+
+#[test]
+fn reload_with_respelled_ipv6_neighbor_diffs_empty() {
+    // A representation-only respelling of the same IPv6 address is the
+    // same peer: reload must plan no session teardown (no removed+added
+    // pair) and no change.
+    let old = loaded_config_with_neighbor_address("2001:db8::1");
+    for respelled in [
+        "2001:DB8::1",
+        "2001:db8:0:0:0:0:0:1",
+        "2001:0db8:0000:0000:0000:0000:0000:0001",
+    ] {
+        let new = loaded_config_with_neighbor_address(respelled);
+        let diff = super::diff_neighbors(&old.neighbors, &new.neighbors);
+        assert!(
+            diff.removed.is_empty(),
+            "{respelled}: respelling must not plan a session teardown: {:?}",
+            diff.removed
+        );
+        assert!(
+            diff.added.is_empty(),
+            "{respelled}: respelling must not plan a session add: {:?}",
+            diff.added
+        );
+        assert!(
+            diff.changed.is_empty(),
+            "{respelled}: respelling is not a neighbor change"
+        );
+    }
+}
+
+#[test]
+fn genuine_ipv6_address_change_still_diffs_removed_and_added() {
+    // Canonicalization must not mask a real address change.
+    let old = loaded_config_with_neighbor_address("2001:db8::1");
+    let new = loaded_config_with_neighbor_address("2001:db8::2");
+    let diff = super::diff_neighbors(&old.neighbors, &new.neighbors);
+    assert_eq!(diff.removed.len(), 1);
+    assert_eq!(
+        diff.removed[0],
+        PeerKey::new("2001:db8::1".parse::<IpAddr>().unwrap(), None)
+    );
+    assert_eq!(diff.added.len(), 1);
+    assert_eq!(diff.added[0].address, "2001:db8::2");
+    assert!(diff.changed.is_empty());
+}
+
+#[test]
+fn ipv4_neighbor_address_load_is_identity() {
+    // `IpAddr` round-trip is the identity for a valid dotted quad; pin it.
+    let config = loaded_config_with_neighbor_address("192.0.2.1");
+    assert_eq!(config.neighbors[0].address, "192.0.2.1");
+}
+
 #[test]
 fn diff_neighbors_ignores_tcp_ao_only_changes_because_reload_pins_them() {
     let old = vec![test_neighbor("10.0.0.1", 65001)];

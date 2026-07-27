@@ -177,6 +177,19 @@ impl Config {
             return Err(diagnostic::render_diagnostic(content, source_name, &error)
                 .unwrap_or_else(|| format!("error: {error}")));
         }
+        // Canonicalize static neighbor address spellings. Reload diffs and
+        // runtime lookups compare the config string against
+        // `IpAddr::to_string()`, so a representation-only respelling
+        // (`2001:DB8:0:0:0:0:0:1` vs `2001:db8::1`) would otherwise read
+        // as remove+add — a real session teardown — or silently miss.
+        // Validation already rejected any unparseable static address and
+        // duplicate detection already keys on the parsed `IpAddr`, so this
+        // cannot fail or create collisions.
+        for neighbor in &mut config.neighbors {
+            if let Ok(address) = neighbor.address.parse::<IpAddr>() {
+                neighbor.address = address.to_string();
+            }
+        }
         Ok(config)
     }
 

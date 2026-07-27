@@ -178,6 +178,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `as`; FRR unparseable keepalive) now name the field, the source value, and
   what was done instead of being silently dropped.
 
+- **A cosmetic IPv6 respelling of a static neighbor address no longer tears
+  down and re-establishes the session on reload.** Neighbor addresses are
+  canonicalized at config load, so rewriting `2001:DB8:0:0:0:0:0:1` as
+  `2001:db8::1` diffs as no change, and runtime lookups (policy chains,
+  peer-group membership, persisted delete) match a non-canonical on-disk
+  spelling. A genuine address change still reconciles as remove+add.
+
 ## [0.61.0] — 2026-07-26
 
 > **Release framing.** This is the policy-safety line. RFC 8212
