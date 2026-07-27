@@ -168,6 +168,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and EVPN injection — matching the scrutiny already applied to
   peer-received routes.
 
+- **`rbgp config import` now exits nonzero when the emitted config would be
+  rejected by `rustbgpd --check`.** A source router-id that is not a usable
+  IPv4 address (all three frontends copy it verbatim) and a neighbor
+  `peer_group` reference that resolves to no translated peer group are
+  reported as warnings (exit 2) instead of leaving the importer with a clean
+  exit alongside an unloadable translation. Out-of-range numeric fields
+  (GoBGP `peer-as`, `hold-time`, `keepalive-interval`, `max-prefixes`, local
+  `as`; FRR unparseable keepalive) now name the field, the source value, and
+  what was done instead of being silently dropped.
+
 ## [0.61.0] — 2026-07-26
 
 > **Release framing.** This is the policy-safety line. RFC 8212

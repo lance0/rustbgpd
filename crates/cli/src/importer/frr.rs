@@ -434,12 +434,17 @@ impl Entry<'_> {
 /// rustbgpd derives keepalive as hold/3; note when the source chose a
 /// different ratio.
 fn warn_keepalive(model: &mut Model, scope: &str, keepalive: &str, hold: u16) {
-    if let Ok(keepalive) = keepalive.parse::<u16>()
-        && u32::from(keepalive) * 3 != u32::from(hold)
-    {
-        model.warnings.push(format!(
-            "{scope}: keepalive {keepalive}s is not hold/3 ({hold}/3); rustbgpd always \
-             derives keepalive as hold_time/3"
-        ));
+    match keepalive.parse::<u16>() {
+        Ok(keepalive) if u32::from(keepalive) * 3 != u32::from(hold) => {
+            model.warnings.push(format!(
+                "{scope}: keepalive {keepalive}s is not hold/3 ({hold}/3); rustbgpd always \
+                 derives keepalive as hold_time/3"
+            ));
+        }
+        Ok(_) => {}
+        Err(_) => model.warnings.push(format!(
+            "{scope}: keepalive {keepalive:?} is not a valid number (0..=65535); dropped — \
+             rustbgpd derives keepalive as hold_time/3 from the kept hold time {hold}"
+        )),
     }
 }

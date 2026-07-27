@@ -74,6 +74,31 @@ fn as_u32(value: &toml::Value) -> Option<u32> {
     }
 }
 
+/// `as_u32` with the drop made visible: a value that is present but
+/// unusable becomes a report warning (exit 2) instead of vanishing.
+fn u32_field(model: &mut Model, field: &str, value: &toml::Value) -> Option<u32> {
+    let parsed = as_u32(value);
+    if parsed.is_none() {
+        model.warnings.push(format!(
+            "{field} = {value} is not a valid u32 (0..=4294967295); dropped — carry it \
+             over by hand if needed"
+        ));
+    }
+    parsed
+}
+
+/// As `u32_field`, for fields rustbgpd bounds to u16 (hold_time).
+fn u16_field(model: &mut Model, field: &str, value: &toml::Value) -> Option<u16> {
+    let parsed = as_u32(value).and_then(|v| u16::try_from(v).ok());
+    if parsed.is_none() {
+        model.warnings.push(format!(
+            "{field} = {value} is not a valid u16 (0..=65535); dropped — the rustbgpd \
+             default applies"
+        ));
+    }
+    parsed
+}
+
 /// First 1-based source line containing `needle`.
 fn line_of(source: &str, needle: &str) -> Option<usize> {
     source
@@ -102,7 +127,7 @@ fn global(model: &mut Model, source: &str, value: &toml::Value) {
                 };
                 for (ckey, cval) in config {
                     match ckey.as_str() {
-                        "as" => model.local_asn = as_u32(cval),
+                        "as" => model.local_asn = u32_field(model, "global.config.as", cval),
                         "router-id" => {
                             model.router_id = cval.as_str().map(str::to_owned);
                         }
@@ -172,7 +197,10 @@ fn session(
                     match ckey.as_str() {
                         "neighbor-address" => s.address = cval.as_str().map(str::to_owned),
                         "peer-group-name" => s.group_name = cval.as_str().map(str::to_owned),
-                        "peer-as" => s.remote_asn = as_u32(cval),
+                        "peer-as" => {
+                            s.remote_asn =
+                                u32_field(model, &format!("{label}: config.peer-as"), cval);
+                        }
                         "description" => s.description = cval.as_str().map(str::to_owned),
                         "peer-group" => s.peer_group = cval.as_str().map(str::to_owned),
                         "auth-password" => {
@@ -191,11 +219,21 @@ fn session(
             "timers" => {
                 let config = val.get("config").and_then(toml::Value::as_table);
                 let Some(config) = config else { continue };
-                let keepalive = config.get("keepalive-interval").and_then(as_u32);
+                let keepalive = config.get("keepalive-interval").and_then(|v| {
+                    u32_field(
+                        model,
+                        &format!("{label}: timers.config.keepalive-interval"),
+                        v,
+                    )
+                });
                 for (tkey, tval) in config {
                     match tkey.as_str() {
                         "hold-time" => {
-                            s.hold_time = as_u32(tval).and_then(|h| u16::try_from(h).ok());
+                            s.hold_time = u16_field(
+                                model,
+                                &format!("{label}: timers.config.hold-time"),
+                                tval,
+                            );
                         }
                         "keepalive-interval" => {}
                         other => skip_key(
@@ -265,7 +303,8 @@ fn afi_safi(model: &mut Model, source: &str, label: &str, value: &toml::Value, s
         .get("prefix-limit")
         .and_then(|p| p.get("config"))
         .and_then(|c| c.get("max-prefixes"))
-        .and_then(as_u32)
+        .and_then(|v| u32_field(model, &format!("{label}: prefix-limit max-prefixes"), v))
+        // GoBGP treats 0 as "no limit"; dropping it is a translation, not a loss.
         .filter(|limit| *limit > 0)
     {
         if ipv6 {
