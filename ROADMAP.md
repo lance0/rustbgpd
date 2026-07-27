@@ -393,10 +393,13 @@ new AFI/SAFI and EVPN dataplane expansion.
   with fixed PR schedules plus a hard-capped weekly 24-fixture parameter sweep.
   Seeds vary identities, not operation ordering or scenario length. Automated
   failure minimization is also shipped
-  ([#1049](https://github.com/lance0/rustbgpd/pull/1049)). Remaining: a broader
-  fault matrix, restart/persistence, growth measurement, and long-running
-  folded-state comparison (LAN-18) rather than relying only on bounded
-  convergence receipts.
+  ([#1049](https://github.com/lance0/rustbgpd/pull/1049)). The combined
+  saturation/regroup/session-replacement schedule and the repeated
+  regroup/delete/recreate bounded-growth regression are shipped too
+  ([#1052](https://github.com/lance0/rustbgpd/pull/1052),
+  [#1060](https://github.com/lance0/rustbgpd/pull/1060)). Remaining:
+  design-blocked restart/persistence proof and a long-running folded-state
+  comparison (LAN-18), rather than relying only on bounded convergence receipts.
 - **Turn shipped shadow tooling into external evidence.** The canonical semantic
   diff engine, `rbgp diff`, incumbent snapshot adapters, and BMP Adj-RIB-Out
   importer are shipped. The remaining adoption gate is a real BIRD/FRR/GoBGP
@@ -540,12 +543,11 @@ multi-stack BIRD/GoBGP/FRR/StayRTR proof. The adapter's Alice-LG contract
 is complete: filtered-route views from `PolicyService.ListRejectedRoutes`
 (reject reasons mapped to large communities under `64496:65520:*`) and
 noexport views from the export-explain surface (`64496:65521:*`). Next
-useful work is shadow/canary RIB-diff tooling (`rbgp diff` against an
-incumbent's MRT/BMP feed); the 1,000-peer route-server scale receipt is
-[retained](docs/perf/route-server-1000-2026-07.md). The ARouteServer
-target ships as `tools/rs-config-render`. The current external adapter already
-serves the Birdwatcher-shaped status, peer, accepted-route, and filtered-route
-subset.
+useful work is a real shadow/canary receipt using the shipped `rbgp diff`
+against an incumbent's MRT/BMP feed; the 1,000-peer route-server scale receipt
+is [retained](docs/perf/route-server-1000-2026-07.md). The ARouteServer target
+ships as `tools/rs-config-render`. The current external adapter already serves
+the Birdwatcher-shaped status, peer, accepted-route, and filtered-route subset.
 
 **Researched and rejected** (recorded so they aren't re-litigated):
 confederations (RFC 5065 — no demand signal in two years of issues and
@@ -600,8 +602,10 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
   `rbgp policy test` live-RIB dry run, `rbgp policy stats` live per-term
   hit counters). M80 proves route-for-route parity against FRR
   route-maps expressing the same intent, plus refresh-scoping on an
-  `.rpol` edit under traffic. Follow-up: an import-side read surface for
-  the (already-accumulating) import hit counters.
+  `.rpol` edit under traffic. The import-side `GetPolicyStats` /
+  `rbgp policy stats --direction import|both` read shipped in #761 with
+  session-local install generations; its fleet collection now shares one
+  500 ms deadline and fails without partial rows (#1205).
 - **Optimal Route Reflection (RFC 9107)** — per-client best paths
   via SPF over the BGP-LS-sourced topology; typed topology accessors, graph +
   hand-rolled Dijkstra + NH-cost resolution, `orr_vantage` config, the
@@ -1393,9 +1397,10 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
     The current fixed fast path covers refused TCP dials during boot ordering;
     timeout-bound unreachable peers and protocol/config failures deliberately
     stay on slower guards.
-  - Explain cache: store pre-policy attributes behind `Arc<Vec<PathAttribute>>`
-    when `[policy.explain]` is enabled, matching the route-storage sharing model
-    and avoiding a deep attr clone per explained NLRI.
+  - Explain cache: the opt-in pre-policy snapshot already uses
+    `CachedPolicyContext`, deliberately narrower than a raw
+    `Arc<Vec<PathAttribute>>` because explain does not need unrelated
+    attributes. Further storage changes are measurement-gated.
   - Wire codec NLRI allocation cleanup: remove the non-AddPath IPv4 body-NLRI
     decode-then-map temporary `Vec` in `Update::parse` / build paths if codec
     benches show a clear win at bulk sizes. Low blast radius, but gate on
@@ -1959,10 +1964,10 @@ branch is between features.
   `manager/tests/` — shared fixtures in `mod.rs` plus per-concern sibling test
   modules. `crates/api/src/event_service.rs` is no longer a candidate — its
   2,318-line total is mostly the test module; real production body is ~630
-  lines. The current largest *production* files (test modules excluded,
-  2026-07-17) are `crates/rib/src/manager/mod.rs` (~5,090 lines) and
-  `src/config/mod.rs` (~6,168) — the two best next split candidates, since
-  neither has a test-module discount available. Keep splitting only where it
+  lines. The current largest *production* bodies (test modules excluded,
+  2026-07-27) are `crates/evpn-linux/src/reconcile.rs` (~7,647 lines),
+  `src/config/mod.rs` (~6,932), and `crates/rib/src/manager/mod.rs`
+  (~5,431) — the best next split candidates. Keep splitting only where it
   reduces real conflict or review cost.
 - [ ] **Doc-precision + lint-policy consistency sweep (v0.41.0 review).** A
   whole-codebase review found no correctness or security defects; the residue was
