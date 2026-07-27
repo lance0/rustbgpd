@@ -1341,7 +1341,7 @@ addresses only, never copied into the bundle.
 
 ```
 rustbgpd-doctor-<ts>/
-├── manifest.json            # versions, redaction note, per-section collected/unavailable, check results
+├── manifest.json            # versions, redaction note, per-section collected/partial/unavailable status, check results
 ├── config/effective.toml    # the daemon's GetEffectiveConfig dump (defaults materialized, secrets <redacted>)
 ├── peers/bfd.json           # BFD state/diagnostic/strict plus remote-AdminDown bool or null when unknown
 ├── peers/neighbors.json     # per-peer state, counters, flap/slow-peer status
@@ -1350,6 +1350,10 @@ rustbgpd-doctor-<ts>/
 ├── crashes/panic-*.toml     # panic reports swept from <runtime_state_dir>/crash/
 └── system/                  # environment.json, health.json, global.json, metrics.prom, daemon rlimits
 ```
+
+`session_events` and `policy_events` are reported independently in the
+manifest. A failed history RPC marks only its source `partial`; the bundle
+keeps the successful peer, BFD, and other event-history evidence.
 
 Exit codes: `0` no checks red (green and yellow warnings may be present), `1`
 error, `2` bundle written but one or more checks are red. A down-daemon run produces a

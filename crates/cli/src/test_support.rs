@@ -44,12 +44,15 @@ pub(crate) struct MockState {
     pub(crate) last_config_rollback: Mutex<Option<server_proto::RollbackConfigTransactionRequest>>,
     pub(crate) config_effective_calls: AtomicUsize,
     pub(crate) config_effective_error: Mutex<Option<(Code, String)>>,
-    // Doctor-bundle overrides: canned effective-config TOML, metrics
-    // text, and session events so redaction/layout tests can seed
-    // secret-looking material through every collection path.
+    // Doctor-bundle overrides: canned effective-config TOML, metrics,
+    // and event histories so redaction/layout tests can seed material
+    // through every collection path.
     pub(crate) config_effective_toml: Mutex<Option<String>>,
     pub(crate) metrics_text: Mutex<Option<String>>,
     pub(crate) session_events: Mutex<Vec<server_proto::BgpEvent>>,
+    pub(crate) policy_events: Mutex<Vec<server_proto::BgpEvent>>,
+    pub(crate) session_events_error: Mutex<Option<(Code, String)>>,
+    pub(crate) policy_events_error: Mutex<Option<(Code, String)>>,
     pub(crate) config_confirm_error: Mutex<Option<(Code, String)>>,
     pub(crate) config_abort_error: Mutex<Option<(Code, String)>>,
     pub(crate) config_status_error: Mutex<Option<(Code, String)>>,
@@ -1179,6 +1182,9 @@ impl rustbgpd_api::proto::event_service_server::EventService for MockEventServic
         self.state
             .list_session_events_calls
             .fetch_add(1, Ordering::SeqCst);
+        if let Some((code, message)) = self.state.session_events_error.lock().await.clone() {
+            return Err(Status::new(code, message));
+        }
         Ok(Response::new(server_proto::ListSessionEventsResponse {
             events: self.state.session_events.lock().await.clone(),
         }))
@@ -1191,8 +1197,11 @@ impl rustbgpd_api::proto::event_service_server::EventService for MockEventServic
         self.state
             .list_policy_events_calls
             .fetch_add(1, Ordering::SeqCst);
+        if let Some((code, message)) = self.state.policy_events_error.lock().await.clone() {
+            return Err(Status::new(code, message));
+        }
         Ok(Response::new(server_proto::ListPolicyEventsResponse {
-            events: vec![],
+            events: self.state.policy_events.lock().await.clone(),
         }))
     }
 }

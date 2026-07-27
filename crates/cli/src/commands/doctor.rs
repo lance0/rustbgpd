@@ -1407,8 +1407,20 @@ pub(crate) async fn run(
                     .iter()
                     .map(|e| bgp_event_json_value(e).map(redact_event))
                     .collect::<Result<Vec<_>, _>>()?,
-                Err(_) => Vec::new(),
+                Err(e) => {
+                    sections.insert(
+                        "session_events",
+                        format!(
+                            "partial: ListSessionEvents RPC failed: {}",
+                            redact_text(&e.to_string())
+                        ),
+                    );
+                    Vec::new()
+                }
             };
+            sections
+                .entry("session_events")
+                .or_insert_with(|| "collected".to_string());
             let policy_events = match events
                 .list_policy_events(ListPolicyEventsRequest {
                     neighbor_address: String::new(),
@@ -1423,8 +1435,20 @@ pub(crate) async fn run(
                     .iter()
                     .map(|e| bgp_event_json_value(e).map(redact_event))
                     .collect::<Result<Vec<_>, _>>()?,
-                Err(_) => Vec::new(),
+                Err(e) => {
+                    sections.insert(
+                        "policy_events",
+                        format!(
+                            "partial: ListPolicyEvents RPC failed: {}",
+                            redact_text(&e.to_string())
+                        ),
+                    );
+                    Vec::new()
+                }
             };
+            sections
+                .entry("policy_events")
+                .or_insert_with(|| "collected".to_string());
             match neighbor.list_neighbors(ListNeighborsRequest {}).await {
                 Ok(resp) => {
                     let neighbors = resp.into_inner();
@@ -1784,6 +1808,7 @@ mod tests {
     use super::*;
     use crate::connection::connect;
     use crate::test_support::spawn_mock_server;
+    use tonic::Code;
 
     /// Load-bearing proof: removing the remote-AdminDown branch makes the
     /// permitted warning red; defaulting absent presence to false makes the
@@ -2640,6 +2665,113 @@ paths = ["x"]
                 && check["status"] == "warn"
                 && detail.contains(r#"bgp_peer_outbound_queue_depth{peer="10.0.0.2"}"#)
         }));
+    }
+
+    #[tokio::test]
+    async fn doctor_marks_session_history_failure_without_discarding_peer_evidence() {
+        let server = spawn_mock_server(None).await;
+        *server.state.list_neighbors_response.lock().await = vec![neighbor(
+            "10.0.0.2",
+            rustbgpd_api::proto::SessionState::Established as i32,
+            0,
+            "peer evidence survives",
+        )];
+        *server.state.session_events_error.lock().await = Some((
+            Code::Unavailable,
+            "upstream bearer must-not-escape".to_string(),
+        ));
+        *server.state.policy_events.lock().await = vec![rustbgpd_api::proto::BgpEvent {
+            timestamp: "200".to_string(),
+            peer_address: "10.0.0.2".to_string(),
+            summary: "policy evidence survives".to_string(),
+            ..Default::default()
+        }];
+        let connection = connect(&server.addr, None).await;
+        let dir = tempfile::tempdir().unwrap();
+        let bundle_path = dir.path().join("bundle.tar.gz");
+
+        run(
+            connection,
+            &DoctorOptions {
+                output: Some(&bundle_path),
+                log_file: None,
+                daemon_address: &server.addr,
+                token_file_configured: false,
+                json: true,
+            },
+        )
+        .await
+        .unwrap();
+
+        let files = extract_bundle(&bundle_path);
+        let manifest: serde_json::Value =
+            serde_json::from_str(find(&files, "manifest.json")).unwrap();
+        let session_status = manifest["sections"]["session_events"].as_str().unwrap();
+        // Load-bearing mutation proof: restoring the old `Err(_) => Vec::new()`
+        // collapse makes this partial-source assertion red.
+        assert!(session_status.contains("partial: ListSessionEvents RPC failed"));
+        assert!(session_status.contains("[REDACTED]"));
+        assert!(!session_status.contains("must-not-escape"));
+        assert_eq!(manifest["sections"]["policy_events"], "collected");
+        assert_eq!(manifest["sections"]["peers"], "collected");
+        let peers: serde_json::Value =
+            serde_json::from_str(find(&files, "peers/neighbors.json")).unwrap();
+        assert_eq!(peers[0]["address"], "10.0.0.2");
+        let events: serde_json::Value =
+            serde_json::from_str(find(&files, "peers/events.json")).unwrap();
+        // Load-bearing mutation proof: discarding the successful policy
+        // vector while the session RPC fails makes this exact evidence
+        // assertion red.
+        assert_eq!(events["policy"][0]["summary"], "policy evidence survives");
+    }
+
+    #[tokio::test]
+    async fn doctor_marks_policy_history_failure_independently() {
+        let server = spawn_mock_server(None).await;
+        *server.state.policy_events_error.lock().await =
+            Some((Code::Unavailable, "policy source unavailable".to_string()));
+        *server.state.session_events.lock().await = vec![rustbgpd_api::proto::BgpEvent {
+            timestamp: "100".to_string(),
+            peer_address: "10.0.0.2".to_string(),
+            summary: "session evidence survives".to_string(),
+            ..Default::default()
+        }];
+        let connection = connect(&server.addr, None).await;
+        let dir = tempfile::tempdir().unwrap();
+        let bundle_path = dir.path().join("bundle.tar.gz");
+
+        run(
+            connection,
+            &DoctorOptions {
+                output: Some(&bundle_path),
+                log_file: None,
+                daemon_address: &server.addr,
+                token_file_configured: false,
+                json: true,
+            },
+        )
+        .await
+        .unwrap();
+
+        let files = extract_bundle(&bundle_path);
+        let manifest: serde_json::Value =
+            serde_json::from_str(find(&files, "manifest.json")).unwrap();
+        // Load-bearing mutation proof: restoring the old `Err(_) => Vec::new()`
+        // collapse makes this independently-named partial-source assertion red.
+        assert!(
+            manifest["sections"]["policy_events"]
+                .as_str()
+                .unwrap()
+                .contains("partial: ListPolicyEvents RPC failed")
+        );
+        assert_eq!(manifest["sections"]["session_events"], "collected");
+        assert_eq!(manifest["sections"]["peers"], "collected");
+        let events: serde_json::Value =
+            serde_json::from_str(find(&files, "peers/events.json")).unwrap();
+        // Load-bearing mutation proof: discarding the successful session
+        // vector while the policy RPC fails makes this exact evidence
+        // assertion red.
+        assert_eq!(events["session"][0]["summary"], "session evidence survives");
     }
 
     /// LAN-482: one full daemon-up run with every first-deploy probe
