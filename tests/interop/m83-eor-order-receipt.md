@@ -51,8 +51,9 @@ stream. The EoR and final initial NLRI were adjacent PDUs in every capture.
 The earlier intermittent legacy failure did not reproduce after member
 origination was quiesced. This campaign therefore found no control/current
 product divergence and supports correcting the receipt boundary. It does not
-claim that the old cross-stream, post-EoR event was impossible or that a legal
-live delta can never follow EoR.
+claim that the old unscoped post-EoR observation was impossible, establish
+which stream carried it, or imply that a legal live delta can never follow
+EoR.
 
 ## Load-bearing proofs
 
