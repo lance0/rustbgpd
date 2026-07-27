@@ -2774,6 +2774,8 @@ message AddPathRequest {
   uint32 prefix_length = 2;
   string next_hop = 3;
   repeated uint32 as_path = 4;
+  // ORIGIN path attribute: 0 = IGP, 1 = EGP, 2 = INCOMPLETE.
+  // Any other value is rejected with INVALID_ARGUMENT.
   uint32 origin = 5;
   optional uint32 local_pref = 6;
   optional uint32 med = 7;
