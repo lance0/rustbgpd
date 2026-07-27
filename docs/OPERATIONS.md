@@ -81,6 +81,13 @@ neighbor resolving no explicit policy in a direction: unfiltered with
 with it on. Both are legitimate configurations; neither should reach
 production unnoticed.
 
+Add `--strict` to make any warning exit 1 instead of 0
+(`rustbgpd --check --strict /etc/rustbgpd/config.toml`) — for CI and
+deployment gates that must not accept a valid-but-risky config.
+`--strict` without `--check` is rejected (exit 2). See the validation
+workflow table in [deployment.md](deployment.md) for the full exit-code
+contract.
+
 ## Config diff (dry-run reload)
 
 Preview what a SIGHUP reload would change before sending it:
@@ -1575,6 +1582,18 @@ the session.
 > of the original reload. The `pending_refresh` retry semantics on
 > `ManagedPeer` cover most of those edge cases automatically.
 
+### Refresh outbound (re-send a peer's Adj-RIB-Out)
+
+```bash
+rbgp neighbor 10.0.0.2 refresh-out
+```
+
+The outbound sibling of `softreset`: re-emits this one peer's current
+exportable routes through the live export path
+(`NeighborService.RefreshOutbound`) without tearing down or renegotiating
+the session. Useful when a peer is suspected of having missed or dropped
+advertisements and you want to reconverge it without a flap.
+
 ### Explain an import decision (ADR-0073)
 
 The task-oriented catalog of every explain surface — which question
@@ -1864,6 +1883,7 @@ their effective send value is explicitly `inactive`, `unlimited`, or finite.
 ```bash
 rbgp rib received 10.0.0.2
 rbgp rib received 10.0.0.2 --age
+rbgp rib received 10.0.0.2 --count
 ```
 
 ### View best routes (Loc-RIB)
@@ -1871,7 +1891,13 @@ rbgp rib received 10.0.0.2 --age
 ```bash
 rbgp rib
 rbgp rib --age
+rbgp rib --count
 ```
+
+`--count` (also on `rbgp rib advertised PEER --count`) applies the same
+filters as the full view and renders only the total:
+`Total matching routes: N` in human output, `{"total_count": N}` with
+`--json`.
 
 `--age` appends the time since the route was originally received into the RIB.
 It also works on `rbgp rib advertised PEER --age`, where it remains the

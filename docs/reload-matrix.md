@@ -39,7 +39,8 @@ waiting for a natural flap. The matrix calls this out per row as
 fields "session reset".
 
 Static-neighbor edits whose **every** changed field is hot-applied
-(`description`, `max_prefixes`, `max_prefixes_out_ipv4`,
+(`description`, `max_prefixes`, `max_prefixes_ipv4`,
+`max_prefixes_ipv6`, `max_prefixes_out_ipv4`,
 `max_prefixes_out_ipv6`, `max_prefix_restart_seconds`,
 `gr_peer_restart_time_max`, `gr_stale_routes_time`,
 `local_ipv6_nexthop`, `remove_private_as`, `log_level`, and the
@@ -110,6 +111,8 @@ reload).
 | `slow_peer_duration` | live (effective next session) | Seconds the backlog must persist before the slow-peer flag raises; 0 disables detection. Same capture semantics as the threshold. |
 | `slow_peer_isolation` | live (effective next session) | Move a flagged-slow peer to the per-peer update path. Same capture semantics as the threshold. |
 | `max_prefixes` | live | Threshold re-evaluated on every received UPDATE. |
+| `max_prefixes_ipv4` | live | Per-family IPv4-unicast inbound cap (ADR-0108), enforced independently of the aggregate `max_prefixes`. Hot-applied in place; the new threshold governs the next received UPDATE. |
+| `max_prefixes_ipv6` | live | IPv6-unicast sibling of `max_prefixes_ipv4` (ADR-0108). |
 | `max_prefixes_out_ipv4` | live | RIB-owned outbound capacity (ADR-0113). Applies without touching the session. Adding or lowering is accepted only when the peer currently advertises at or below the candidate: an over-limit family rejects the whole edit (SIGHUP abandons the reload; a config transaction fails its precondition) and leaves the running maxima, admission state, Adj-RIB-Out, and wire state untouched — lowering is not an implicit pruning policy. A valid raise or removal schedules one coalesced, family-scoped resync. Commit-confirmed transactions may only tighten, because their automatic undo only loosens. |
 | `max_prefixes_out_ipv6` | live | IPv6-unicast sibling of `max_prefixes_out_ipv4`. |
 | `max_prefix_restart_seconds` | live | Manager-owned hold-down policy. A successful value change hot-applies without touching the session and reschedules any armed countdown to now + the new duration (the superseded deadline never fires); removing the value cancels the countdown; a rejected change preserves it untouched. The field does not retroactively arm an indefinitely latched peer. |
@@ -129,6 +132,9 @@ reload).
 | `orr_vantage` | live (effective next session) | RFC 9107 ORR vantage point (the client's IGP location as a BGP-LS topology node). Registered with the RIB manager at session establishment, so a change takes effect on the next session. Currently drives the vantage registry, cached SPF state, and `rbgp orr` status only; the per-vantage best-path selection ships with the ORR distribution switch. |
 | `route_server_client` | live (effective next session) | Transparent RS-client behavior on egress. |
 | `per_client_best` | live (effective next session) | RFC 7947 §2.3.2 per-client best-path selection mode. Registered with the RIB manager at session establishment (like `orr_vantage`), so a change takes effect on the next session. |
+| `next_hop_ownership` | live (effective next session) | ADR-0107 pre-policy `NEXT_HOP` ownership enforcement for route-server clients (RFC 7948 §4.8). Bound at session establishment; on SIGHUP the reconciler rebuilds the session so the new mode applies right away. Annotated "session reset: session re-establish" by `rustbgpd --diff`. |
+| `interpret_rfc1997` | live (effective next session) | RFC 1997 `NO_EXPORT` egress enforcement (derived default: `true` unless `route_server_client` is set). Same session-re-establish bucket as `next_hop_ownership`. |
+| `rs_control_communities` | live (effective next session) | RFC 7947 §2.3.2 / RFC 8195 route-server control-community enforcement (derived default: `true` when `route_server_client` is set). Same session-re-establish bucket as `next_hop_ownership`. |
 | `role` | live (effective next session) | RFC 9234 BGP Role capability — advertised in OPEN. Compatibility check + NOTIFICATION 2/11 enforcement happen at OPEN time, so role changes require a session bounce to renegotiate. The §5 OTC procedures (driven by the local role) re-evaluate against the next received/emitted UPDATE. |
 | `strict_role` | live (effective next session) | Strict-mode toggle. Without an OPEN renegotiation, the existing session keeps whatever it negotiated. |
 | `prefix_orf_receive` | live (effective next session) | RFC 5291/5292 Address-Prefix ORF receive capability — advertised in OPEN. Like `add_path`/`role`, a toggle is reconciled by the ReconcilePeers delete/re-add path and takes effect on the next session; an established session keeps whatever ORF it negotiated. Reported by `describe_neighbor_changes`; a transaction-model edit is a supported `[[neighbors]] modify`. |
@@ -158,6 +164,8 @@ configure their keyring directly.
 | `slow_peer_duration` | live (effective next session) | Same as neighbor. |
 | `slow_peer_isolation` | live (effective next session) | Same as neighbor. |
 | `max_prefixes` | live | Same as neighbor. |
+| `max_prefixes_ipv4` | live | Same as neighbor; per-family ADR-0108 cap inherited by group members. |
+| `max_prefixes_ipv6` | live | Same as neighbor. |
 | `max_prefixes_out_ipv4` | live | Same maxima semantics as neighbor, evaluated by effective value: one over-limit member — static or accepted dynamic — rejects a group-wide lowering before any sibling changes. An all-`live` group edit swaps the maximum in place on every inheriting member, static and dynamic, without touching a session; a change set that also moves a session-reset field reshapes static members as before. Down children inherit the committed value when they reconnect. |
 | `max_prefixes_out_ipv6` | live | IPv6-unicast sibling of `max_prefixes_out_ipv4`. |
 | `max_prefix_restart_seconds` | live | Inherited by group members. An all-`live` group edit applies in place to static and dynamic members without bouncing them; a mixed change set reshapes static members and manager-syncs dynamic ones. Committed config transactions also bounce enabled dynamic sessions; disabled dynamic peers retain admin state and adopt the new duration. An armed countdown reschedules to now + the new duration; removing the duration cancels it. |
@@ -176,6 +184,9 @@ configure their keyring directly.
 | `orr_vantage` | live (effective next session) | Inherited RFC 9107 vantage; same semantics as the neighbor field. |
 | `route_server_client` | live (effective next session) | |
 | `per_client_best` | live (effective next session) | Inherited per-client best-path mode; same semantics as the neighbor field. |
+| `next_hop_ownership` | live (effective next session) | Inherited ADR-0107 ownership enforcement; same semantics as the neighbor field. |
+| `interpret_rfc1997` | live (effective next session) | Same as neighbor. |
+| `rs_control_communities` | live (effective next session) | Same as neighbor. |
 | `role` | live (effective next session) | |
 | `strict_role` | live (effective next session) | |
 | `prefix_orf_receive` | live (effective next session) | Group-level ORF toggle is caught by `diff_peer_groups` (whole-record compare) and named by `describe_peer_group_changes`; effective on the inheriting peer's next session. |
