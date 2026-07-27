@@ -518,6 +518,18 @@ fn assert_grouped_withdrawal_setup_receipt(receipt: AdjRibOutFanoutBenchReceipt,
     );
 }
 
+fn expected_grouped_withdrawal_exact_probe_batches(peers: usize) -> usize {
+    const ENV: &str = "RUSTBGPD_GROUPED_WITHDRAWAL_EXPECT_EXACT_PROBE_BATCHES";
+
+    match std::env::var(ENV) {
+        Ok(value) if value == "0" => 0,
+        Ok(value) if value == "per-peer" => peers,
+        Ok(value) => panic!("{ENV} must be unset, \"0\", or \"per-peer\", got {value:?}"),
+        Err(std::env::VarError::NotPresent) => 0,
+        Err(std::env::VarError::NotUnicode(_)) => panic!("{ENV} must be valid Unicode"),
+    }
+}
+
 fn assert_grouped_withdrawal_receipt(receipt: AdjRibOutFanoutBenchReceipt, peers: usize) {
     assert_eq!(
         receipt.routes_received_dispatches, 1,
@@ -544,6 +556,13 @@ fn assert_grouped_withdrawal_receipt(receipt: AdjRibOutFanoutBenchReceipt, peers
     assert_eq!(
         receipt.private_unicast_routes, 0,
         "no private Adj-RIB-Out may retain or receive a withdrawn route"
+    );
+    assert_eq!(
+        receipt.exact_probe_batches,
+        expected_grouped_withdrawal_exact_probe_batches(peers),
+        "withdrawal-only grouped envelopes must skip exact-export announcement probes; \
+         set RUSTBGPD_GROUPED_WITHDRAWAL_EXPECT_EXACT_PROBE_BATCHES=per-peer to measure the \
+         harness-only parent"
     );
     assert_eq!(receipt.exact_probe_candidates, 0);
     assert_eq!(receipt.exact_probe_nonzero_encoded_lengths, 0);

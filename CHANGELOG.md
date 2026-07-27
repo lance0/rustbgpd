@@ -55,6 +55,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   DHAT or exact retained-heap attribution claim. See
   [`docs/perf/outbound-prefix-limit-admission-compaction-2026-07.md`](docs/perf/outbound-prefix-limit-admission-compaction-2026-07.md).
 
+- Withdrawal-only outbound envelopes no longer run an empty exact-export
+  announcement probe for every member. The immutable transport snapshot,
+  rejection retirement, Adj-RIB-Out commit, gauges, and enqueue remain
+  unchanged. In the fixed 64-route grouped-withdrawal manager-path benchmark,
+  a controlled immediate-parent A/B/B/A campaign improved the two-attempt mean
+  by 6.80%, 8.41%, and 9.33% at 64, 256, and 1,000 members; the 8-member result
+  is not claimed. See
+  [`docs/perf/grouped-withdrawal-probe-skip-2026-07.md`](docs/perf/grouped-withdrawal-probe-skip-2026-07.md).
+
 ### Fixed
 
 - **`rbgp doctor` recognizes intentionally disabled peers.** For a current,
