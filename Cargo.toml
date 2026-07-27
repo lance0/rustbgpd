@@ -209,6 +209,16 @@ name = "fib_projection"
 harness = false
 required-features = ["bench-internals"]
 
+[[test]]
+name = "policy_set_store_allocation"
+path = "tests/policy_set_store_allocation.rs"
+required-features = ["bench-internals"]
+
+[[test]]
+name = "policy_set_store_dhat"
+path = "tests/policy_set_store_dhat.rs"
+required-features = ["bench-internals", "dhat-heap"]
+
 [profile.release]
 lto = true
 codegen-units = 1

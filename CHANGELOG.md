@@ -27,6 +27,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the daemon identity is available and retains the last-good RPKI VRP count
   through a transient metrics failure.
 
+- Resolving a retained neighbor roster now shares content-equal compiled
+  `.rpol` sets within bounded 32-neighbor chunks. At the measured 1,000-peer,
+  one-common-10k-set shape, retained requested bytes fell from 843.2 MB to
+  29.2 MB; the unique-set control added no retained bytes and bounded extra
+  peak requested bytes below 10 MB. This is allocation-owner evidence, not a
+  daemon RSS or convergence claim.
+
 ### Fixed
 
 - **A stale outbound prefix-limit activation no longer discards a newer

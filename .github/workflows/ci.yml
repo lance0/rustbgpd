@@ -115,6 +115,10 @@ jobs:
       # LAN-198: `config` referenced binary-only modules, so the lib
       # failed to build under `--all-features` while the bin stayed green.
       - run: cargo check -p rustbgpd --all-features --lib
+      # The root `Config` API is exported only by `bench-internals`, so the
+      # normal workspace test cannot compile this cheap allocation gate.
+      - name: Gate eager policy-set sharing allocation shape
+        run: cargo test -p rustbgpd --no-default-features --features bench-internals --test policy_set_store_allocation shared_set_batch_allocations_do_not_scale_per_peer -- --exact
       # jemalloc became the default feature; keep the stock-glibc build
       # compiling (debug/fallback builds use it) and keep the
       # deny(unsafe_code) lint posture — it is only armed when neither
