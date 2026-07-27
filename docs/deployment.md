@@ -619,11 +619,13 @@ events. See [`CONFIGURATION.md`](CONFIGURATION.md#bmp) for the schema.
 
 ### gNMI
 
-If `[global.telemetry.grpc_tcp]` or `[global.telemetry.grpc_uds]` is
-configured with TLS / mTLS, the gNMI adapter (ADR-0070) exposes
-`Capabilities` / `Get` / `Subscribe` telemetry plus the static numbered-neighbor
-`Set` subset over the same socket. RFC 7951 JSON encoding. See
-[`GNMI.md`](GNMI.md) for the path namespace and supported mutation leaves.
+The gNMI adapter (ADR-0070) exposes `Capabilities` / `Get` / `Subscribe`
+telemetry plus the static numbered-neighbor `Set` subset over the same
+sockets as the native API. Native gNMI is registered on
+`[global.telemetry.grpc_tcp]` only when native mTLS is configured; the
+`[global.telemetry.grpc_uds]` listener serves gNMI unconditionally as a
+local-only extension. RFC 7951 JSON encoding. See [`GNMI.md`](GNMI.md)
+for the path namespace and supported mutation leaves.
 
 ### CLI introspection
 
@@ -736,7 +738,7 @@ the AS, addresses, and TLS material before deploying.
 See [`SECURITY.md`](SECURITY.md) for the full posture document. The
 short version for first deployment:
 
-- **Bind addresses.** `prometheus_addr`, `grpc_tcp.addr`, `grpc_uds.path`
+- **Bind addresses.** `prometheus_addr`, `grpc_tcp.address`, `grpc_uds.path`
   default to listening on what the config says. Don't expose the
   Prometheus or gRPC endpoint to untrusted networks without
   authentication.

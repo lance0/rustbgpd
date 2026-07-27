@@ -585,11 +585,13 @@ reflection through controller injection; see
   community is decoded and preserved across reflection; `rbgp evpn`
   surfaces `encap=vxlan` for operator visibility.
 - **Controller injection** — `InjectionService::AddEvpnRoute` /
-  `DeleteEvpnRoute` cover Type 2 MAC/IP and Type 3 IMET, with display-
-  form RDs (`65000:100`, `10.0.0.1:100`, `4200000000:100`); injected
+  `DeleteEvpnRoute` cover Type 2 MAC/IP, Type 3 IMET, and Type 5
+  IP Prefix (RFC 9136, including non-zero Gateway Address for
+  targeted overlay-index testing), with display-form RDs
+  (`65000:100`, `10.0.0.1:100`, `4200000000:100`); injected
   routes flow through the same reflection pipeline as iBGP-learned
-  ones. CLI: `rbgp evpn add-mac-ip / add-imet / delete-mac-ip /
-  delete-imet`.
+  ones. CLI: `rbgp evpn add-mac-ip / add-imet / add-ip-prefix /
+  delete-mac-ip / delete-imet / delete-ip-prefix`.
 - **gRPC observability** — `ListEvpnRoutes(route_type, peer, rd)` for
   filtered EVPN RIB queries; Prometheus metrics per peer include
   `adj_rib_out_prefixes{family="evpn"}`. Max-prefix accounting counts
@@ -722,11 +724,12 @@ measurement path.
   for the full enablement ladder and
   [docs/evpn-alpha-soak.md](evpn-alpha-soak.md) for the residual
   alpha-confidence checklist.
-- Controller injection covers Type 2 MAC/IP and Type 3 IMET
-  via `InjectionService::AddEvpnRoute`; Type 5 IP-Prefix injection is
-  deferred pending use-case signal. Native Type 1/4 multi-homing
-  origination ships through `[[ethernet_segments]]`, but controller
-  injection for those route types is not exposed.
+- Controller injection covers Type 2 MAC/IP, Type 3 IMET, and Type 5
+  IP-Prefix (including non-zero Gateway Address for targeted
+  overlay-index testing) via `InjectionService::AddEvpnRoute`. Native
+  Type 1/4 multi-homing origination ships through
+  `[[ethernet_segments]]`, but controller injection for those route
+  types is not exposed.
 - Live FRR VTEP flap with tcpdump validation of the reflected
   `LLGR_STALE` community on the wire is the one piece of GR/LLGR
   coverage still tracked as a follow-up — the unit + integration

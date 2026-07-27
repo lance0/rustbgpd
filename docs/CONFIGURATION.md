@@ -761,6 +761,7 @@ dynamic-only deployment where peers are added at runtime via gRPC.
 | `per_client_best`      | bool     | no       | false   | RFC 7947 §2.3.2 per-client best-path for route-server clients: when export policy denies the Loc-RIB best toward this peer, advertise the best *permitted* candidate instead of hiding the prefix. Requires `route_server_client = true`; inherits from the peer-group (see below) |
 | `next_hop_ownership`   | string   | no       | --      | ADR-0107 pre-policy NEXT_HOP ownership enforcement for route-server clients (RFC 7948 §4.8). `"strict_peer"` accepts a unicast announcement only when its complete wire next-hop identity is the advertising session's own address; non-conforming announcements are rejected before import policy (fail-closed, treat-as-withdraw). Requires `route_server_client = true`; inherits from the peer-group (see below) |
 | `interpret_rfc1997`    | bool     | no       | (derived) | Honor RFC 1997 `NO_EXPORT`/`NO_EXPORT_SUBCONFED` at egress: routes received with either community are not advertised to this neighbor when it is eBGP. Default: `true` unless `route_server_client = true` (route servers pass communities through transparently and let members enforce them). Inherits from the peer-group; set explicitly to override either default (see below) |
+| `rs_control_communities` | bool   | no       | (derived) | Interpret RFC 7947 §2.3.2 / RFC 8195 route-server control communities set by this member: per-target announce suppression, announce-only overrides, and prepend toward a target, keyed on the *target* peer's ASN. Acted-on control communities are scrubbed from this session's outbound announcements. Default: `true` when `route_server_client = true`, `false` otherwise. Inherits from the peer-group; set explicitly to override either default (see below) |
 | `role`                 | string   | no       | --      | Local BGP Role for RFC 9234 route-leak protection: `"provider"`, `"rs"`, `"rs-client"`, `"customer"`, or `"peer"` (eBGP only) |
 | `strict_role`          | bool     | no       | false   | Require the peer to advertise a compatible BGP Role capability; only valid when `role` is set |
 | `prefix_orf_receive`   | bool     | no       | false   | Advertise receive-side Address-Prefix ORF (RFC 5291/5292); peer-pushed prefix filters constrain outbound advertisements |
@@ -1667,6 +1668,32 @@ Notes:
 - Selection cost is O(candidate paths × export-policy evaluations) per
   changed prefix for such peers — the same cost BIRD pays in filter runs
   for `secondary`.
+
+#### Route-server control communities (RFC 7947 §2.3.2 / RFC 8195, `rs_control_communities`)
+
+A member steers per-target redistribution with communities keyed on the
+*target* peer's ASN: `0:PEER` / `RS:0:PEER` (do not announce to `PEER`),
+`0:RS` / `RS:0:0` (announce to no one) overridable per target by
+`RS:PEER` / `RS:1:PEER`, and `RS:101|102|103:PEER` (prepend the
+announcing member's leftmost ASN 1–3× toward `PEER`; `RS:10x:0` = every
+target). Standard and RFC 8195 large forms compose.
+
+Enforcement is gated per session by `rs_control_communities` — default
+`true` when `route_server_client = true` (the standard IXP posture),
+`false` otherwise, inheritable from the peer-group. It is evaluated
+pre-policy on the source route, like the RFC 1997 gates, and covers the
+unicast export shapes: single-best, Add-Path, and per-client-best
+(suppressed candidates are removed before ranking). Acted-on control
+communities are scrubbed from the wire-bound announcement toward
+enabled sessions; sessions explicitly set off keep RFC 7947 §2.2
+byte-level transparency. Enabled sessions stay in shared update-groups:
+the filter is route-granular at emit, so only routes actually carrying
+a control-form community pay per-target divergence. Suppression shows
+up on the `rs_control` export-explain rung.
+
+Full community matrix and evaluation ladder:
+[the route-server cookbook](cookbook/route-server.md) and
+[RFC_NOTES.md](RFC_NOTES.md#rfc-7947-232--rfc-8195--route-server-control-communities).
 
 ### Receive-side Prefix ORF (RFC 5291/5292)
 

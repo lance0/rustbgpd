@@ -124,8 +124,8 @@ Expected signals:
    VXLAN member; remote-MAC FDB rows are then scoped with `NDA_VLAN`.
    Unmanaged deployments still provision bridge/VXLAN netdevs out of
    band. ADR-0091 is the explicit opt-in exception for bridge, fixed-VNI
-   VXLAN, VLAN upper, VRF, and L3VXLAN create/adopt/reap through
-   `[managed_netdevs]`.
+   VXLAN, SVD / collect-metadata VXLAN, VLAN upper, VRF, and L3VXLAN
+   create/adopt/reap through `[managed_netdevs]`.
    `rbgp evpn instances` reports the same probe result as `readiness`
    and, for `not-ready`, the concrete failed predicate. See
    [`examples/evpn-vtep-leaf/README.md`](../examples/evpn-vtep-leaf/README.md)
@@ -528,15 +528,22 @@ or installs remote prefixes.
    `ambiguous_overlay_index_gateway` means the Gateway Address resolved
    to multiple distinct MACs at the winning mobility sequence.
    `l3vni_mismatch`, `missing_router_mac`, `no_matching_ip_vrf`, and
-   `self_originated` cover the other fail-closed projection gates.
-5. If `evpn_ip_vrf_remote_prefix_drops` is empty/zero but
+   `self_originated` cover the other fail-closed projection gates, and
+   the ESI overlay-index gates emit their own reasons
+   (`unresolved_esi_overlay_index`, `ambiguous_esi_overlay_index`,
+   `esi_overlay_no_linked_l2vni`, and the other `*_esi_overlay_index`
+   labels in `crates/evpn/src/ip_vrf/projection.rs`).
+5. If none of the projection reasons above fire but
    `installed_routes_count == 0`, the route cleared projection and was
-   dropped at **L3 install time** instead — that path has no Prometheus
-   counter today. Confirm the IP-VRF is `Ready` (step 1; an unready VRF
-   yields `L3Drop::NotReady`), then read the daemon's `L3 install drop`
-   debug logs for `RouterMacConflict` (two prefixes mapping
-   `(L3VXLAN ifindex, router_mac)` to different next-hops drop *both*) or
-   `FamilyMismatch` (`L3Drop` in `crates/evpn-linux/src/l3_diff.rs`).
+   dropped at **L3 install time** instead. Install-time drops are counted
+   on the same `evpn_ip_vrf_remote_prefix_drops{vrf,reason}` series under
+   `ip_vrf_not_ready`, `family_mismatch`, `router_mac_conflict`, and
+   `unsupported_all_active_target_set`. Confirm the IP-VRF is `Ready`
+   (step 1; an unready VRF counts `ip_vrf_not_ready`), then read the
+   daemon's `L3 install drop` debug logs for the exact prefix:
+   `RouterMacConflict` (two prefixes mapping `(L3VXLAN ifindex,
+   router_mac)` to different next-hops drop *both*) or `FamilyMismatch`
+   (`L3Drop` in `crates/evpn-linux/src/l3_diff.rs`).
 
 ## Crash-restart adoption across upgrades (ADR-0082)
 

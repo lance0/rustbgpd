@@ -12,7 +12,7 @@ evaluation is `evaluate_export_chain` in
 `crates/rib/src/manager/distribution/mod.rs`, and `ExplainAdvertisedRoute`
 assembly lives in `crates/rib/src/manager/distribution/unicast.rs`), and
 the RPC surface hangs off the route-explain group at
-`proto/rustbgpd.proto:1342` (`RibService.ExplainAdvertisedRoute`).
+`proto/rustbgpd.proto:1677` (`RibService.ExplainAdvertisedRoute`).
 
 There is no equivalent for **import**. The operator question
 "why didn't this route come in?" cannot be answered today, because:
@@ -20,7 +20,7 @@ There is no equivalent for **import**. The operator question
 - Import policy is evaluated in the transport layer at
   the `evaluate_chain_with_attribution` call sites in
   `crates/transport/src/session/inbound.rs` (for example the IPv4
-  unicast body path around line 1459). A denied route drops at that
+  unicast body path around line 1855). A denied route drops at that
   point and never reaches RIB. Existing tests pin this behaviour.
 - Adj-RIB-In holds only **accepted, post-policy** routes; a
   re-evaluation against it can answer "what would current policy
@@ -28,7 +28,7 @@ There is no equivalent for **import**. The operator question
   prefix that was *rejected* on arrival.
 - `bgp_policy_routes_total{peer,policy,direction,action}`
   counters answer "how many," not "which prefix and why."
-- `PolicyEvaluation` (`crates/policy/src/engine.rs:1133`) carries
+- `PolicyEvaluation` (`crates/policy/src/engine.rs:1217`) carries
   the terminal-decision policy + action, which is what an explain
   surface should report — but it is consumed and discarded at the
   eval site.
@@ -359,7 +359,10 @@ review added the enable flag (7). They are pinned here, not deferred:
   re-derived at query time from the cached pre-policy context, not stored
   on `PolicyEvaluation`.)
 - Bulk "show every denied import for this peer" surface. v1 is
-  point-query only.
+  point-query only. (A bulk enumeration surface later shipped as
+  `PolicyService.ListRejectedRoutes` / `rbgp rib received --rejected` —
+  backed by the separate `[policy.reject_retention]` store, not this
+  cache; this ADR's point-query scope is unchanged.)
 - Durable cross-restart import-decision history. The cache is
   process-local on purpose; if a durable bridge surfaces a real
   need, it gets its own ADR.
@@ -387,11 +390,11 @@ built in stages but is not split across PRs:
 - Eval call sites: `evaluate_chain_with_attribution` in
   `crates/transport/src/session/inbound.rs` (body IPv4, FlowSpec, EVPN,
   and MP-unicast paths)
-- `PolicyEvaluation`: `crates/policy/src/engine.rs:1133`
+- `PolicyEvaluation`: `crates/policy/src/engine.rs:1217`
 - Export-explain reference: `evaluate_export_chain` in
   `crates/rib/src/manager/distribution/mod.rs` (assembly in
   `crates/rib/src/manager/distribution/unicast.rs`),
-  RPC at `proto/rustbgpd.proto:1342`
+  RPC at `proto/rustbgpd.proto:1677`
 - Existing import counters: `record_import_policy_eval` at
-  `crates/transport/src/session/inbound.rs:21`
+  `crates/transport/src/session/inbound.rs:34`
 - Authz tier reference: `crates/api/src/authz.rs`
