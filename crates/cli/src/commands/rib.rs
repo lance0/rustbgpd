@@ -1676,8 +1676,7 @@ pub async fn count_best(
 }
 
 pub async fn blackholes(connection: Connection, json: bool) -> Result<(), CliError> {
-    let mut client =
-        RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let mut client = connection.rib_listing_client();
     let resp = client
         .list_blackhole_discards(ListBlackholeDiscardsRequest {})
         .await?
@@ -1690,8 +1689,7 @@ pub async fn fib(
     filters: FibRouteFilterOpts,
     json: bool,
 ) -> Result<(), CliError> {
-    let mut client =
-        RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let mut client = connection.rib_listing_client();
     let resp = client
         .list_fib_routes(make_fib_request(&filters)?)
         .await?
@@ -1706,8 +1704,7 @@ pub async fn bgpls(
     nlri_type: Option<u32>,
     json: bool,
 ) -> Result<(), CliError> {
-    let mut client =
-        RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let mut client = connection.rib_listing_client();
     let resp = client
         .list_bgp_ls_routes(make_bgpls_request(family, peer, nlri_type)?)
         .await?
@@ -1721,8 +1718,7 @@ pub async fn vpn(
     peer: Option<String>,
     json: bool,
 ) -> Result<(), CliError> {
-    let mut client =
-        RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let mut client = connection.rib_listing_client();
     let resp = client
         .list_vpn_routes(make_vpn_request(family, peer)?)
         .await?
@@ -1736,8 +1732,7 @@ pub async fn labeled(
     peer: Option<String>,
     json: bool,
 ) -> Result<(), CliError> {
-    let mut client =
-        RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let mut client = connection.rib_listing_client();
     let resp = client
         .list_labeled_routes(make_labeled_request(family, peer)?)
         .await?
@@ -1746,8 +1741,7 @@ pub async fn labeled(
 }
 
 pub async fn rtc(connection: Connection, peer: Option<String>, json: bool) -> Result<(), CliError> {
-    let mut client =
-        RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let mut client = connection.rib_listing_client();
     let resp = client
         .list_rtc_routes(ListRtcRoutesRequest {
             peer_filter: peer.unwrap_or_default(),

@@ -105,6 +105,9 @@ pub(crate) struct MockState {
     // gating. Empty = no neighbors configured on the daemon.
     pub(crate) list_neighbors_response: Mutex<Vec<server_proto::NeighborState>>,
     pub(crate) last_list_bgpls: Mutex<Option<server_proto::ListBgpLsRequest>>,
+    // Canned ListBgpLsRoutes response — when set, served verbatim so the
+    // decode-ceiling tests can push multi-MiB listings through loopback.
+    pub(crate) list_bgpls_response: Mutex<Option<server_proto::ListBgpLsResponse>>,
     pub(crate) last_list_vpn: Mutex<Option<server_proto::ListVpnRoutesRequest>>,
     pub(crate) last_list_labeled: Mutex<Option<server_proto::ListLabeledRoutesRequest>>,
     pub(crate) last_list_rtc: Mutex<Option<server_proto::ListRtcRoutesRequest>>,
@@ -1542,6 +1545,9 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
         request: Request<server_proto::ListBgpLsRequest>,
     ) -> Result<Response<server_proto::ListBgpLsResponse>, Status> {
         *self.state.last_list_bgpls.lock().await = Some(request.into_inner());
+        if let Some(canned) = self.state.list_bgpls_response.lock().await.clone() {
+            return Ok(Response::new(canned));
+        }
         Ok(Response::new(server_proto::ListBgpLsResponse {
             routes: vec![server_proto::BgpLsRouteEntry {
                 afi_safi: server_proto::AddressFamily::BgpLs as i32,

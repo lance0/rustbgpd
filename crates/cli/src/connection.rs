@@ -12,15 +12,30 @@ use hyper_util::rt::TokioIo;
 use tokio::net::UnixStream;
 use tonic::metadata::AsciiMetadataValue;
 use tonic::service::Interceptor;
+use tonic::service::interceptor::InterceptedService;
 use tonic::transport::{Channel, Endpoint, Uri};
 use tonic::{Request, Status};
 use tower::service_fn;
 
 use crate::error::CliError;
+use crate::proto::rib_service_client::RibServiceClient;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const AUTHORIZATION_HEADER: &str = "authorization";
 const BEARER_PREFIX: &str = "Bearer ";
+
+/// Decode ceiling for full unary listing responses, replacing tonic's
+/// 4 MiB client default on the clients built by
+/// [`Connection::rib_listing_client`].
+///
+/// Budget rationale: representative encoded listing rows are roughly
+/// 52-101 bytes (the widest current fixture, a VPN route entry, encodes
+/// to ~101 bytes), so 64 MiB holds at least 500,000 of the largest rows
+/// (~50.5 MB) — roughly 0.7-1.3 million rows across the listing shapes —
+/// with headroom for attribute variation. Deliberately finite, never
+/// `usize::MAX`: a response above the ceiling still fails closed with
+/// `out of range` instead of buffering without bound.
+pub(crate) const LISTING_MAX_DECODE_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Clone)]
 pub(crate) struct Connection {
@@ -41,6 +56,27 @@ impl Connection {
         AuthInterceptor {
             token: self.token.clone(),
         }
+    }
+
+    /// A `RibService` client for the full unary listing RPCs (BGP-LS,
+    /// VPN, labeled, RTC, FlowSpec, EVPN, blackhole discards, unpaged
+    /// FIB, topology nodes/links, ORR status), with the decode ceiling
+    /// raised to [`LISTING_MAX_DECODE_BYTES`]. Every other client keeps
+    /// tonic's 4 MiB default.
+    pub(crate) fn rib_listing_client(
+        &self,
+    ) -> RibServiceClient<InterceptedService<Channel, AuthInterceptor>> {
+        self.rib_client_with_decode_limit(LISTING_MAX_DECODE_BYTES)
+    }
+
+    /// Shared constructor core; tests drive it with a small cap to prove
+    /// the ceiling is enforced rather than advisory.
+    fn rib_client_with_decode_limit(
+        &self,
+        limit: usize,
+    ) -> RibServiceClient<InterceptedService<Channel, AuthInterceptor>> {
+        RibServiceClient::with_interceptor(self.channel(), self.interceptor())
+            .max_decoding_message_size(limit)
     }
 }
 
@@ -310,6 +346,232 @@ mod tests {
                 "cannot reach rustbgpd at {addr} (socket does not exist)\n  \
                  hint: is the daemon running? if it uses a different endpoint, pass -s or set RUSTBGPD_ADDR"
             )
+        );
+    }
+
+    use prost::Message;
+    use rustbgpd_api::proto as server_proto;
+
+    /// A valid BGP-LS listing response whose encoded size is driven by
+    /// `route_count` x `payload_len` — the loopback fixture for the
+    /// decode-ceiling tests.
+    fn bgpls_listing_fixture(
+        route_count: usize,
+        payload_len: usize,
+    ) -> server_proto::ListBgpLsResponse {
+        let route = server_proto::BgpLsRouteEntry {
+            afi_safi: server_proto::AddressFamily::BgpLs as i32,
+            family: "bgp_ls".to_string(),
+            nlri_type: 1,
+            nlri_type_name: "node".to_string(),
+            payload: vec![0xab; payload_len],
+            descriptor: vec![0x04, 0x05],
+            next_hop: "192.0.2.1".to_string(),
+            peer_address: "198.51.100.1".to_string(),
+            as_path: vec![64512],
+            ..Default::default()
+        };
+        server_proto::ListBgpLsResponse {
+            routes: vec![route; route_count],
+        }
+    }
+
+    // The production listing client must decode a full unary listing
+    // response larger than tonic's 4 MiB client default, end to end over
+    // a real TCP loopback server.
+    #[tokio::test]
+    async fn listing_client_decodes_response_over_default_ceiling() {
+        let handle = crate::test_support::spawn_mock_server(None).await;
+        let resp = bgpls_listing_fixture(2200, 2048);
+        assert!(
+            resp.encoded_len() > 4 * 1024 * 1024,
+            "fixture must exceed the 4 MiB default: {} bytes",
+            resp.encoded_len()
+        );
+        let count = resp.routes.len();
+        *handle.state.list_bgpls_response.lock().await = Some(resp);
+
+        let connection = connect(&handle.addr, None).await.unwrap();
+        let got = connection
+            .rib_listing_client()
+            .list_bgp_ls_routes(crate::proto::ListBgpLsRequest::default())
+            .await
+            .expect("bounded listing client must decode a >4 MiB listing")
+            .into_inner();
+        assert_eq!(got.routes.len(), count);
+    }
+
+    // The raw generated constructor keeps tonic's 4 MiB default: the same
+    // >4 MiB listing must fail with OutOfRange. This pins both the defect
+    // and that non-listing clients (which all use this constructor) stay
+    // at the default.
+    #[tokio::test]
+    async fn default_generated_client_fails_out_of_range_over_default_ceiling() {
+        let handle = crate::test_support::spawn_mock_server(None).await;
+        *handle.state.list_bgpls_response.lock().await = Some(bgpls_listing_fixture(2200, 2048));
+
+        let connection = connect(&handle.addr, None).await.unwrap();
+        let mut client = crate::proto::rib_service_client::RibServiceClient::with_interceptor(
+            connection.channel(),
+            connection.interceptor(),
+        );
+        let err = client
+            .list_bgp_ls_routes(crate::proto::ListBgpLsRequest::default())
+            .await
+            .expect_err("default client must reject a >4 MiB listing");
+        assert_eq!(err.code(), tonic::Code::OutOfRange, "{err}");
+    }
+
+    // The ceiling is enforced, not advisory: the same constructor core
+    // with a 1 KiB cap must reject a response just over 1 KiB with
+    // OutOfRange.
+    #[tokio::test]
+    async fn listing_client_ceiling_is_enforced() {
+        let handle = crate::test_support::spawn_mock_server(None).await;
+        let resp = bgpls_listing_fixture(2, 1024);
+        assert!(resp.encoded_len() > 1024);
+        *handle.state.list_bgpls_response.lock().await = Some(resp);
+
+        let connection = connect(&handle.addr, None).await.unwrap();
+        let err = connection
+            .rib_client_with_decode_limit(1024)
+            .list_bgp_ls_routes(crate::proto::ListBgpLsRequest::default())
+            .await
+            .expect_err("a 1 KiB cap must reject a >1 KiB listing");
+        assert_eq!(err.code(), tonic::Code::OutOfRange, "{err}");
+    }
+
+    // Raising the decode ceiling must not drop the auth interceptor: the
+    // bearer token still reaches a server that enforces it, and a
+    // connection without the token is still rejected.
+    #[tokio::test]
+    async fn listing_client_carries_bearer_token() {
+        let handle = crate::test_support::spawn_mock_server(Some("listing-secret")).await;
+        let dir = tempfile::tempdir().unwrap();
+        let token_path = dir.path().join("token.txt");
+        fs::write(&token_path, "listing-secret\n").unwrap();
+
+        let connection = connect(&handle.addr, Some(token_path.to_str().unwrap()))
+            .await
+            .unwrap();
+        connection
+            .rib_listing_client()
+            .list_bgp_ls_routes(crate::proto::ListBgpLsRequest::default())
+            .await
+            .expect("authenticated listing call must succeed");
+
+        let bare = connect(&handle.addr, None).await.unwrap();
+        let err = bare
+            .rib_listing_client()
+            .list_bgp_ls_routes(crate::proto::ListBgpLsRequest::default())
+            .await
+            .expect_err("server must reject the tokenless client");
+        assert_eq!(err.code(), tonic::Code::Unauthenticated, "{err}");
+    }
+
+    // Inventory fence over the full unary listing surfaces. Every listing
+    // RPC invocation must be reachable only through the bounded
+    // constructor: adding a new listing call on a raw generated client,
+    // or reverting an inventoried command to one, changes a count and
+    // fails here. Counts cover non-test code only.
+    #[test]
+    fn listing_surface_inventory_uses_bounded_client() {
+        const LISTING_RPCS: &[&str] = &[
+            ".list_evpn_routes(",
+            ".list_bgp_ls_routes(",
+            ".list_vpn_routes(",
+            ".list_labeled_routes(",
+            ".list_rtc_routes(",
+            ".list_flow_spec_routes(",
+            ".list_blackhole_discards(",
+            ".list_fib_routes(",
+            ".list_topology_nodes(",
+            ".list_topology_links(",
+            ".list_orr_status(",
+        ];
+        // (file, source, bounded constructor sites, listing RPC invocations)
+        let surfaces = [
+            ("commands/rib.rs", include_str!("commands/rib.rs"), 6, 6),
+            ("commands/evpn.rs", include_str!("commands/evpn.rs"), 2, 3),
+            (
+                "commands/flowspec.rs",
+                include_str!("commands/flowspec.rs"),
+                1,
+                1,
+            ),
+            (
+                "commands/topology.rs",
+                include_str!("commands/topology.rs"),
+                2,
+                2,
+            ),
+            ("commands/orr.rs", include_str!("commands/orr.rs"), 1, 1),
+        ];
+
+        let mut total_ctors = 0;
+        let mut total_rpcs = 0;
+        for (name, source, expect_ctors, expect_rpcs) in surfaces {
+            let code = source.split("#[cfg(test)]").next().unwrap();
+            let ctors = code.matches(".rib_listing_client()").count();
+            let rpcs: usize = LISTING_RPCS
+                .iter()
+                .map(|rpc| code.matches(rpc).count())
+                .sum();
+            assert_eq!(ctors, expect_ctors, "{name}: bounded constructor sites");
+            assert_eq!(rpcs, expect_rpcs, "{name}: listing RPC invocations");
+            // The ceiling lives only in connection.rs — no per-command
+            // decode-limit overrides, so non-listing clients keep the
+            // tonic default.
+            assert_eq!(
+                code.matches("max_decoding_message_size").count(),
+                0,
+                "{name}: decode limits must come from Connection::rib_listing_client"
+            );
+            total_ctors += ctors;
+            total_rpcs += rpcs;
+        }
+        assert_eq!(total_ctors, 12, "inventoried constructor sites");
+        assert_eq!(total_rpcs, 13, "inventoried listing RPC invocations");
+    }
+
+    // Budget rationale for the 64 MiB ceiling: it must hold at least
+    // 500,000 of the largest representative listing rows (the widest
+    // current VPN fixture) while staying finite — never `usize::MAX`.
+    // The upper-bound assertion is deliberately constant: it is the
+    // fence that goes red if the ceiling is ever made unbounded.
+    #[allow(clippy::assertions_on_constants)]
+    #[test]
+    fn listing_decode_ceiling_budget_rationale() {
+        let widest_row = crate::proto::VpnRouteEntry {
+            afi_safi: "l3vpn_ipv4_unicast".to_string(),
+            route_distinguisher: vec![0, 0, 0xfd, 0xe8, 0, 0, 0, 1],
+            route_distinguisher_str: "65000:1".to_string(),
+            prefix: "10.1.0.0/24".to_string(),
+            labels: vec![24017],
+            next_hop: "192.0.2.1".to_string(),
+            peer_address: "198.51.100.1".to_string(),
+            as_path: vec![64512],
+            communities: vec![],
+            extended_communities: vec!["RT:65000:1".to_string()],
+            stale: false,
+            llgr_stale: false,
+            path_id: 0,
+        };
+        let row_len = widest_row.encoded_len();
+        // Representative encoded-row band across the listing fixtures.
+        assert!(
+            (52..=101).contains(&row_len),
+            "representative row drifted out of band: {row_len} bytes"
+        );
+        assert!(
+            LISTING_MAX_DECODE_BYTES >= 500_000 * row_len,
+            "ceiling no longer holds 500k of the largest rows: \
+             {LISTING_MAX_DECODE_BYTES} < {}",
+            500_000 * row_len
+        );
+        assert!(
+            LISTING_MAX_DECODE_BYTES <= 64 * 1024 * 1024,
+            "ceiling must stay finite by design"
         );
     }
 
