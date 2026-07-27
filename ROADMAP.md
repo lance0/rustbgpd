@@ -1890,13 +1890,14 @@ branch is between features.
   distribution functions, EVPN originators, BFD socket setup. A
   `DistributionContext` parameter struct would absorb the metric / policy
   threading; same trick fits the EVPN originators.
-- [ ] **`#[allow(clippy::result_large_err)]` — now spread across 6 files.**
-  15 suppressions (2026-07-17): `rib_service.rs` (8), `neighbor_service.rs`
-  (2), `policy_helpers.rs` (2), `peer_group_service.rs` (1),
-  `policy_service.rs` (1), `event-history/lib.rs` (1). The pattern has
-  leaked beyond its original single location — the *spread*, not a benchmark,
-  is now the signal to box the large `Result<_, …Error>` variant behind a
-  shared boxed-error alias rather than keep suppressing per-site.
+- [x] **`#[allow(clippy::result_large_err)]` audit.** The 2026-07-17 inventory
+  found 15 suppressions spread across six files. Fourteen stale API suppressions
+  have since been removed: tonic 0.14's `Status` is an 8-byte handle to an
+  already-boxed inner value, so those sites no longer return a large error. The
+  one event-history suppression is intentionally retained: its public
+  `TrySendError<EventEnvelope>` preserves ownership of the rejected event
+  without adding an overload-path allocation. The evidence did not justify
+  changing that API or introducing a shared boxed-error abstraction.
 - [ ] **Measurement-gated hash-map hasher audit.** The durable unicast RIB
   storage now uses `FxHashMap` / trie-backed prefix indexes, but manager,
   route-refresh, EVPN, RPKI, config, and API support paths still contain
@@ -1905,12 +1906,14 @@ branch is between features.
   benchmark or heap profile identifies a hot, bounded, internal map. Candidate
   follow-ups are RIB-manager temporary prefix/peer sets and other
   non-adversarial control-plane maps that show up in `dhat` or Criterion.
-- [ ] **CI gate: `#[allow(clippy::*)]` / `#[expect(clippy::*)]` requires
-  `reason = "..."`.** The ratchet exists and CI enforces it for
-  the 14 backfilled crate source trees named in `DEFAULT_PATHS`. Remaining
-  work: backfill root `src/` and `crates/evpn-linux/src`, then add them to
-  `scripts/check-clippy-reasons.py`; do not flip this to complete until the
-  whole workspace is covered.
+- [x] **CI gate: `#[allow(clippy::*)]` / `#[expect(clippy::*)]` requires
+  `reason = "..."`.** The original ratchet covered 14 statically named crate
+  source trees. It now derives every production workspace source root from
+  Cargo metadata, including the daemon, crates, tools, and workspace benchmark
+  packages as they are added; test, bench, and example targets remain
+  deliberately outside this production-source contract. CI runs both the
+  checker and mutation tests that prove an unreasoned suppression in a newly
+  added workspace package fails without another maintained path list.
 - [x] **`cargo deny` for license / dependency / advisory audit.** Done: the
   dependabot + cargo-audit half of the stale branch had already landed;
   `deny.toml` now gates `cargo deny check advisories bans licenses sources`
