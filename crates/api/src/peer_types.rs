@@ -225,6 +225,34 @@ impl std::fmt::Display for SetGshutError {
 
 impl std::error::Error for SetGshutError {}
 
+/// Failure modes for an operator-requested outbound refresh.
+///
+/// The distinction between an unknown peer and a managed peer without an
+/// active outbound RIB registration is operator-visible through gRPC.
+#[derive(Debug, Clone)]
+pub enum OutboundRefreshError {
+    /// Operator addressed a peer that is not currently managed.
+    PeerNotFound(PeerKey),
+    /// The peer is managed but has no active outbound RIB registration.
+    PeerUnavailable(PeerKey),
+    /// Peer-manager/RIB dispatch or reply failure.
+    Internal(String),
+}
+
+impl std::fmt::Display for OutboundRefreshError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PeerNotFound(peer) => write!(f, "peer {peer} not found"),
+            Self::PeerUnavailable(peer) => {
+                write!(f, "peer {peer} has no active outbound session")
+            }
+            Self::Internal(message) => f.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for OutboundRefreshError {}
+
 /// Typed failure for static peer lifecycle/admin commands.
 ///
 /// These commands are called by gRPC services, config transactions, and reload
@@ -905,6 +933,13 @@ pub enum PeerManagerCommand {
         families: Vec<(Afi, Safi)>,
         /// Reply channel for success/failure.
         reply: oneshot::Sender<Result<(), PeerLifecycleError>>,
+    },
+    /// Re-emit the current exportable Adj-RIB-Out inventory for one peer.
+    RefreshOutbound {
+        /// Peer identity.
+        peer: PeerKey,
+        /// Reply channel for success/failure.
+        reply: oneshot::Sender<Result<(), OutboundRefreshError>>,
     },
     /// Trigger soft inbound reset for established peers whose resolved import
     /// policy depends on an external validation cache.

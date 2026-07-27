@@ -96,6 +96,7 @@ service NeighborService {
   rpc EnableNeighbor(EnableNeighborRequest)  returns (EnableNeighborResponse);
   rpc DisableNeighbor(DisableNeighborRequest) returns (DisableNeighborResponse);
   rpc SoftResetIn(SoftResetInRequest)        returns (SoftResetInResponse);
+  rpc RefreshOutbound(RefreshOutboundRequest) returns (RefreshOutboundResponse);
 }
 
 // RIB queries — paginated unary for point-in-time, streaming for live watch

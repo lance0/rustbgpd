@@ -6,11 +6,11 @@
   "additional_protos": [
     "proto/github.com/openconfig/gnmi/proto/gnmi/gnmi.proto"
   ],
-  "method_count": 101,
+  "method_count": 102,
   "tier_counts": {
     "read": 0,
     "sensitive_read": 59,
-    "mutating": 19,
+    "mutating": 20,
     "operator_only": 23
   },
   "methods": [
@@ -35,6 +35,7 @@
     { "service": "rustbgpd.v1.NeighborService", "method": "EnableNeighbor", "path": "/rustbgpd.v1.NeighborService/EnableNeighbor", "tier": "mutating" },
     { "service": "rustbgpd.v1.NeighborService", "method": "DisableNeighbor", "path": "/rustbgpd.v1.NeighborService/DisableNeighbor", "tier": "mutating" },
     { "service": "rustbgpd.v1.NeighborService", "method": "SoftResetIn", "path": "/rustbgpd.v1.NeighborService/SoftResetIn", "tier": "mutating" },
+    { "service": "rustbgpd.v1.NeighborService", "method": "RefreshOutbound", "path": "/rustbgpd.v1.NeighborService/RefreshOutbound", "tier": "mutating" },
     { "service": "rustbgpd.v1.NeighborService", "method": "ListDynamicNeighbors", "path": "/rustbgpd.v1.NeighborService/ListDynamicNeighbors", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.NeighborService", "method": "AddDynamicNeighbor", "path": "/rustbgpd.v1.NeighborService/AddDynamicNeighbor", "tier": "mutating" },
     { "service": "rustbgpd.v1.NeighborService", "method": "DeleteDynamicNeighbor", "path": "/rustbgpd.v1.NeighborService/DeleteDynamicNeighbor", "tier": "mutating" },

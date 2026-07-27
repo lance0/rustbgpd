@@ -390,6 +390,7 @@ service NeighborService {
   rpc EnableNeighbor(EnableNeighborRequest) returns (EnableNeighborResponse);
   rpc DisableNeighbor(DisableNeighborRequest) returns (DisableNeighborResponse);
   rpc SoftResetIn(SoftResetInRequest) returns (SoftResetInResponse);
+  rpc RefreshOutbound(RefreshOutboundRequest) returns (RefreshOutboundResponse);
   rpc ListDynamicNeighbors(ListDynamicNeighborsRequest) returns (ListDynamicNeighborsResponse);
   rpc AddDynamicNeighbor(AddDynamicNeighborRequest) returns (AddDynamicNeighborResponse);
   rpc DeleteDynamicNeighbor(DeleteDynamicNeighborRequest) returns (DeleteDynamicNeighborResponse);
@@ -845,6 +846,15 @@ message SoftResetInRequest {
 }
 
 message SoftResetInResponse {}
+
+message RefreshOutboundRequest {
+  string address = 1;
+  string interface = 2;
+}
+
+message RefreshOutboundResponse {
+  bool scheduled = 1;
+}
 
 message SetGracefulShutdownRequest {
   // Per-peer toggle. Empty string means apply to every currently-managed peer.

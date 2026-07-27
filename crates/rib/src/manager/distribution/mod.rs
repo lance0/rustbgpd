@@ -2982,12 +2982,12 @@ impl RibManager {
     pub(super) fn handle_refresh_peer_outbound(
         &mut self,
         peer: IpAddr,
-        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+        reply: tokio::sync::oneshot::Sender<Result<(), RibCommandError>>,
     ) {
         if !self.outbound_peers.contains_key(&peer) {
-            let _ = reply.send(Err(format!(
+            let _ = reply.send(Err(RibCommandError::not_found(format!(
                 "peer {peer} not registered for outbound updates"
-            )));
+            ))));
             return;
         }
         // `force_outbound_peers` (not `dirty_peers`) — a force-only
@@ -3923,7 +3923,14 @@ impl RibManager {
                 && effective_labeled_keys.is_empty()
                 && effective_rtc_keys.is_empty()
             {
-                self.clear_policy_filtered_routes_for_peer(peer);
+                // An empty force/dirty resync replaces this peer's complete
+                // export view, so an empty filtered inventory is
+                // authoritative. An uninvolved sibling in the same
+                // empty-input pass was not re-evaluated: preserve its
+                // retained policy-denial inventory.
+                if resync {
+                    self.clear_policy_filtered_routes_for_peer(peer);
+                }
                 // Resync flags must clear here too — otherwise a
                 // force-only refresh on a peer with no exportable
                 // routes would leave `force_outbound_peers` populated,

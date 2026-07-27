@@ -346,6 +346,36 @@ fn an_ungrouped_peer_at_its_cap_blocks_the_excess_prefix() {
     );
 }
 
+/// Removing prefix-limit enforcement from the forced-resync commit seam makes
+/// the second prefix appear in the refreshed wire set.
+#[test]
+fn operator_force_refresh_preserves_outbound_prefix_cap() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    manager.test_force_ungrouped = true;
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 113, 0, 1));
+    let mut outbound_rx = register_peer(&mut manager, peer);
+    set_ipv4_limit(&mut manager, peer, 1);
+
+    let source = Ipv4Addr::new(192, 0, 2, 113);
+    announce(
+        &mut manager,
+        IpAddr::V4(source),
+        source_routes(source, &[1, 2]),
+    );
+    let admitted = wire_prefixes(&mut outbound_rx);
+    assert_eq!(admitted.len(), 1);
+
+    let (reply, mut result) = oneshot::channel();
+    manager.handle_refresh_peer_outbound(peer, reply);
+    assert_eq!(result.try_recv().unwrap(), Ok(()));
+    assert_eq!(
+        wire_prefixes(&mut outbound_rx),
+        admitted,
+        "a forced refresh must not bypass the installed outbound cap"
+    );
+}
+
 /// A withdrawal at the cap frees its slot, and the freed capacity is
 /// re-offered to intent the limiter previously blocked — without an
 /// inventory of blocked prefixes.

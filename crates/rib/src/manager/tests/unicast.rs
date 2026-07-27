@@ -80,6 +80,237 @@ fn drain_unicast_state(
     state
 }
 
+/// Operator-triggered outbound refresh is a one-peer replay of the exact
+/// currently exportable inventory. Removing the force insertion makes the
+/// target announcement assertion time out (ordinary equality suppression wins);
+/// broadening the target makes the sibling-empty assertion red; replaying
+/// withdrawn, source-split, RFC 1997-rejected, or unsendable routes makes the
+/// exact-prefix assertion red.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one fixture proves typed rejection, exact peer scope, and every retained export gate"
+)]
+async fn refresh_peer_outbound_replays_only_the_target_exportable_inventory() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+    let target: IpAddr = "192.0.2.30".parse().unwrap();
+    let sibling: IpAddr = "192.0.2.31".parse().unwrap();
+    let sibling_deny = PolicyChain::new(vec![Policy {
+        entries: vec![],
+        default_action: PolicyAction::Deny,
+    }]);
+    let mut receivers = Vec::new();
+
+    let (reply, result) = oneshot::channel();
+    tx.send(RibUpdate::RefreshPeerOutbound {
+        peer: target,
+        reply,
+    })
+    .await
+    .unwrap();
+    assert!(
+        matches!(
+            result.await.unwrap(),
+            Err(crate::RibCommandError::NotFound(_))
+        ),
+        "an unregistered peer must retain the typed not-found class"
+    );
+
+    for peer in [target, sibling] {
+        let (out_tx, mut out_rx) = mpsc::channel(16);
+        tx.send(RibUpdate::PeerUp {
+            peer,
+            session_id: 7,
+            peer_asn: 65100,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            outbound_tx: out_tx,
+            export_policy: (peer == sibling).then(|| sibling_deny.clone()),
+            sendable_families: dual_stack_sendable(),
+            is_ebgp: true,
+            route_reflector_client: false,
+            orr_vantage: None,
+            per_client_best: false,
+            interpret_rfc1997: true,
+            add_path_send_families: vec![],
+            add_path_send_max: 0,
+            negotiated_orf_recv: vec![],
+            negotiated_llgr_families: vec![],
+        })
+        .await
+        .unwrap();
+        drain_eor(&mut out_rx).await;
+        receivers.push((peer, out_rx));
+    }
+
+    let source = Ipv4Addr::new(198, 51, 100, 10);
+    let kept_prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let withdrawn_prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 114, 0), 24);
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(source),
+        announced: vec![
+            make_route(kept_prefix, source),
+            make_route(withdrawn_prefix, source),
+        ],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let _ = query_best_routes(&tx).await;
+
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(source),
+        announced: vec![],
+        withdrawn: vec![(Prefix::V4(withdrawn_prefix), 0)],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    // A target-sourced route is present in the Loc-RIB but split-horizon
+    // excluded for that target. A NO_ADVERTISE route and a VPN route that
+    // neither peer negotiated are likewise never part of its exportable view.
+    let target_source = match target {
+        IpAddr::V4(address) => address,
+        IpAddr::V6(_) => unreachable!("fixture is IPv4"),
+    };
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: target,
+        announced: vec![make_route(
+            Ipv4Prefix::new(Ipv4Addr::new(203, 0, 115, 0), 24),
+            target_source,
+        )],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let rejected = with_no_advertise(make_route(
+        Ipv4Prefix::new(Ipv4Addr::new(203, 0, 116, 0), 24),
+        source,
+    ));
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(source),
+        announced: vec![rejected],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let v6 = Ipv6Prefix::new("2001:db8:676::".parse().unwrap(), 64);
+    let v6_route = make_v6_route(v6, "2001:db8:676::1".parse().unwrap());
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: v6_route.peer,
+        announced: vec![v6_route],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    tx.send(RibUpdate::VpnRoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(source),
+        announced: vec![make_vpn_rib_route(source, 117, 16, 100)],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let _ = query_best_routes(&tx).await;
+    for (_, out_rx) in &mut receivers {
+        while out_rx.try_recv().is_ok() {}
+    }
+
+    let (reply, result) = oneshot::channel();
+    tx.send(RibUpdate::RefreshPeerOutbound {
+        peer: target,
+        reply,
+    })
+    .await
+    .unwrap();
+    assert_eq!(result.await.unwrap(), Ok(()));
+
+    let (_, target_rx) = receivers
+        .iter_mut()
+        .find(|(peer, _)| *peer == target)
+        .unwrap();
+    let refreshed = tokio::time::timeout(Duration::from_millis(100), target_rx.recv())
+        .await
+        .expect("force refresh must enqueue the target's retained exportable route")
+        .expect("target outbound channel stays open");
+    assert_eq!(
+        refreshed
+            .announce
+            .iter()
+            .map(|route| route.prefix)
+            .collect::<HashSet<_>>(),
+        HashSet::from([Prefix::V4(kept_prefix), Prefix::V6(v6)])
+    );
+    assert!(refreshed.vpn_announce.is_empty());
+    assert!(refreshed.withdraw.is_empty());
+
+    let (_, sibling_rx) = receivers
+        .iter_mut()
+        .find(|(peer, _)| *peer == sibling)
+        .unwrap();
+    assert!(
+        sibling_rx.try_recv().is_err(),
+        "a one-peer refresh must not emit to a sibling"
+    );
+
+    // Force the denied sibling after the target-only empty-input pass. If
+    // that pass erased the sibling's retained denial inventory, this
+    // re-evaluation publishes a duplicate PolicyFiltered transition.
+    let (reply, result) = oneshot::channel();
+    tx.send(RibUpdate::RefreshPeerOutbound {
+        peer: sibling,
+        reply,
+    })
+    .await
+    .unwrap();
+    assert_eq!(result.await.unwrap(), Ok(()));
+    let sibling_history = query_route_event_history(
+        &tx,
+        Some(sibling),
+        Some(Afi::Ipv4),
+        Some(Prefix::V4(kept_prefix)),
+        10,
+    )
+    .await;
+    assert_eq!(
+        sibling_history
+            .iter()
+            .filter(|event| event.event_type == RouteEventType::PolicyFiltered)
+            .count(),
+        1,
+        "refreshing another peer must preserve this sibling's denial inventory"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
 /// A grouped and a genuinely private single-best target must both apply
 /// RFC 1997 before a permit policy that removes `NO_ADVERTISE`. Replacing
 /// an advertised route with the scoped form withdraws it, clears logical

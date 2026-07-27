@@ -2033,7 +2033,7 @@ pub enum RibUpdate {
         /// The target peer.
         peer: IpAddr,
         /// Response channel for success/failure.
-        reply: oneshot::Sender<Result<(), String>>,
+        reply: oneshot::Sender<Result<(), RibCommandError>>,
     },
     /// Peer sent us a ROUTE-REFRESH — re-advertise our Loc-RIB for this family.
     RouteRefreshRequest {

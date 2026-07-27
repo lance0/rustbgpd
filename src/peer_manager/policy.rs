@@ -1824,7 +1824,7 @@ impl PeerManager {
                     Err("RIB manager unavailable".to_string())
                 } else {
                     match tokio::time::timeout(super::RIB_REPLY_TIMEOUT, reply_rx).await {
-                        Ok(Ok(result)) => result,
+                        Ok(Ok(result)) => result.map_err(|error| error.to_string()),
                         Ok(Err(_)) => Err("RIB manager dropped reply".to_string()),
                         Err(_) => Err(format!(
                             "RIB manager did not reply within {:?}",

@@ -10,7 +10,7 @@ Part of [rustbgpd](https://github.com/lance0/rustbgpd).
 |---------|-------|
 | **GlobalService** | Read daemon identity and bootstrap config |
 | **ConfigService** | Diff, plan, apply, confirm, abort, and inspect runtime config transactions |
-| **NeighborService** | Dynamic peer CRUD, enable/disable, soft reset |
+| **NeighborService** | Dynamic peer CRUD, enable/disable, inbound soft reset, and single-peer outbound refresh |
 | **PolicyService** | Named policy CRUD, neighbor-set CRUD, global/per-neighbor chain assignment, and import-policy explain (`ExplainImportPolicy`) |
 | **PeerGroupService** | Peer-group CRUD, neighbor-to-group assignment |
 | **RibService** | Received/best/advertised route queries (incl. EVPN), BLACKHOLE discard status, FIB route status, BGP-LS route queries (ListBgpLsRoutes, RFC 9552), and watch stream |
