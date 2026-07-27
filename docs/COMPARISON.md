@@ -415,7 +415,8 @@ incumbents fills gaps the daemons leave open — native JSON output for
 [bird-users in April 2020](https://bird.network.cz/pipermail/bird-users/2020-April/014524.html)
 with a list of regex-based parser projects standing in for it, and BIRD
 still has no JSON CLI output (see API & Programmability above). rustbgpd
-ships JSON CLI output and a gRPC API today; a bounded BIRD/FRR/GoBGP
-configuration importer — structure only, with a fail-stop report of
-everything left for hand-translation — is planned on the
-[ROADMAP](../ROADMAP.md) operator-experience track and has not shipped.
+ships JSON CLI output, a gRPC API, and `rbgp config import` — a bounded
+BIRD 2 / FRR / GoBGP structural importer that translates the mechanical
+subset (AS, router-id, neighbors, peer groups, families, timers,
+max-prefix) and fail-stops with a line-numbered report of every policy
+construct left for hand-translation to `.rpol`.
