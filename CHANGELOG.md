@@ -36,6 +36,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Policy introspection no longer turns a stalled live session into an
+  absent one.** Import explain and rejected-route reads return
+  `DEADLINE_EXCEEDED` when their bounded session query times out; policy stats
+  also fail honestly on timeout/session exit and reject an explicit unknown
+  peer instead of labeling the global export chain as that peer. No protobuf
+  fields or numbers changed.
+
 - **A stale outbound prefix-limit activation no longer discards a newer
   prepared change.** The newer transaction remains available to activate.
 

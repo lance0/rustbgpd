@@ -1250,10 +1250,28 @@ fn stalled_policy_query_handle() -> PeerHandle {
     PeerHandle::from_parts(commands, task)
 }
 
+fn chainless_policy_query_handle() -> PeerHandle {
+    let (commands, mut command_rx) = mpsc::channel(4);
+    let task = tokio::spawn(async move {
+        while let Some(command) = command_rx.recv().await {
+            match command {
+                rustbgpd_transport::PeerCommand::QueryImportPolicyTermHits { reply } => {
+                    let _ = reply.send(None);
+                }
+                rustbgpd_transport::PeerCommand::Shutdown => break,
+                other => panic!("unexpected peer command: {other:?}"),
+            }
+        }
+        Ok(())
+    });
+    PeerHandle::from_parts(commands, task)
+}
+
 /// LAN-661 red proof: validating against static config rejects the accepted
 /// dynamic peer; replacing the typed forwarding result with the old `Option`
-/// path makes its stalled task return `SessionGone`. Each production break
-/// fails its corresponding assertion.
+/// path makes its stalled task return `SessionGone`; silently omitting a
+/// timed-out term-hit query makes the second timeout assertion return
+/// `Reply([])`. Each production break fails its corresponding assertion.
 #[tokio::test(start_paused = true)]
 async fn policy_query_timeout_does_not_masquerade_as_missing_session() {
     let (tx, rx) = mpsc::channel(4);
@@ -1313,6 +1331,20 @@ async fn policy_query_timeout_does_not_masquerade_as_missing_session() {
     ));
 
     let (reply, response) = oneshot::channel();
+    tx.send(PeerManagerCommand::QueryImportPolicyTermHits {
+        peer: Some(configured),
+        reply,
+    })
+    .await
+    .unwrap();
+    tokio::task::yield_now().await;
+    tokio::time::advance(EXPLAIN_QUERY_TIMEOUT).await;
+    assert!(
+        matches!(response.await.unwrap(), SessionQueryOutcome::TimedOut),
+        "a stalled term-hit query must fail the snapshot instead of being omitted"
+    );
+
+    let (reply, response) = oneshot::channel();
     tx.send(PeerManagerCommand::ExplainImportPolicy {
         address: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 99)),
         afi: Afi::Ipv4,
@@ -1327,6 +1359,44 @@ async fn policy_query_timeout_does_not_masquerade_as_missing_session() {
         response.await.unwrap(),
         SessionQueryOutcome::SessionGone
     ));
+
+    tx.send(PeerManagerCommand::Shutdown).await.unwrap();
+    manager_task.await.unwrap();
+}
+
+/// LAN-661 red proof: changing the production `Reply(None)` arm to
+/// `SessionGone` (or treating it as a row) makes this healthy, answered
+/// chainless query fail instead of returning a successful empty snapshot.
+#[tokio::test]
+async fn import_policy_stats_omit_an_answered_chainless_peer() {
+    let (tx, rx) = mpsc::channel(4);
+    let (rib_tx, _rib_rx) = mpsc::channel(4);
+    let mut manager = PeerManager::new(
+        rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    let peer = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+    insert_test_managed_peer(&mut manager, peer, chainless_policy_query_handle(), false);
+    let manager_task = tokio::spawn(manager.run());
+
+    let (reply, response) = oneshot::channel();
+    tx.send(PeerManagerCommand::QueryImportPolicyTermHits {
+        peer: Some(peer),
+        reply,
+    })
+    .await
+    .unwrap();
+    let outcome = response.await.unwrap();
+    assert!(
+        matches!(&outcome, SessionQueryOutcome::Reply(rows) if rows.is_empty()),
+        "a healthy session without an import chain must answer with no row, got {outcome:?}"
+    );
 
     tx.send(PeerManagerCommand::Shutdown).await.unwrap();
     manager_task.await.unwrap();

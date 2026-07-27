@@ -3004,6 +3004,51 @@ policy customer-in(peer_lp: u32) {
         assert_eq!(chain.last_error, "", "no error since install");
     }
 
+    async fn import_stats_outcome(
+        outcome: SessionQueryOutcome<Vec<(IpAddr, rustbgpd_transport::ImportPolicyTermHits)>>,
+    ) -> Result<Response<proto::GetPolicyStatsResponse>, Status> {
+        let (peer_tx, mut peer_rx) = mpsc::channel::<PeerManagerCommand>(4);
+        tokio::spawn(async move {
+            let mut outcome = Some(outcome);
+            while let Some(command) = peer_rx.recv().await {
+                match command {
+                    PeerManagerCommand::HasPeerAddress { reply, .. } => {
+                        let _ = reply.send(true);
+                    }
+                    PeerManagerCommand::QueryImportPolicyTermHits { reply, .. } => {
+                        let _ = reply.send(outcome.take().expect("one stats query"));
+                    }
+                    _ => panic!("unexpected peer-manager command"),
+                }
+            }
+        });
+        let svc = PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None);
+        PolicyServiceRpc::get_policy_stats(
+            &svc,
+            Request::new(proto::GetPolicyStatsRequest {
+                peer_address: "10.0.0.2".to_string(),
+                direction: "import".to_string(),
+            }),
+        )
+        .await
+    }
+
+    /// LAN-661 red proof: treating timeout or task exit as a successful empty
+    /// snapshot (or swapping the two status mappings) changes at least one
+    /// asserted status. This pins the RPC half of the typed manager outcome.
+    #[tokio::test]
+    async fn get_policy_stats_import_failures_are_not_empty_successes() {
+        let timeout = import_stats_outcome(SessionQueryOutcome::TimedOut)
+            .await
+            .expect_err("a stalled selected session must fail the RPC");
+        assert_eq!(timeout.code(), tonic::Code::DeadlineExceeded);
+
+        let gone = import_stats_outcome(SessionQueryOutcome::SessionGone)
+            .await
+            .expect_err("a selected session that exits must fail the RPC");
+        assert_eq!(gone.code(), tonic::Code::Unavailable);
+    }
+
     /// `direction = "both"` returns the export block first, then the
     /// import block — one deterministic response, not two commands.
     #[tokio::test]
