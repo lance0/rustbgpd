@@ -944,10 +944,11 @@ fn histogram_max_bucket_bounds(
 }
 
 fn json_f64_or_null(value: f64) -> String {
-    value
-        .is_finite()
-        .then(|| format!("{value:.9}"))
-        .unwrap_or_else(|| "null".to_string())
+    if value.is_finite() {
+        format!("{value:.9}")
+    } else {
+        "null".to_string()
+    }
 }
 
 fn snapshot_json(label: &str, evidence: &Evidence) -> String {
