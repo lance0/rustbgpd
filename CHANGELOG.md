@@ -9,192 +9,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Added
-
-- Native `rbgp rib` JSON now exposes raw ordered `extended_communities`,
-  `aspa_state` when the daemon supplies it, and
-  `received_at_epoch_seconds` (including the zero unknown sentinel) for best,
-  received, advertised, and embedded best-path-explain routes. Human best,
-  received, and advertised tables accept `--age` to append the original route
-  receive age without changing the default table.
-
-- `rbgp rib --count`, `rbgp rib received PEER --count`, and
-  `rbgp rib advertised PEER --count` report the exact filtered route count
-  without transferring a full route listing. Each count uses one view-correct
-  RPC and transfers at most one route row; filtered counts still require the
-  backend to scan the selected view.
-
-- `rbgp neighbor PEER refresh-out` and the
-  `NeighborService.RefreshOutbound` RPC re-emit one peer's current exportable
-  outbound inventory without resetting the session. The bounded single-peer
-  operation covers all negotiated families; its success response confirms
-  scheduling, not writer drain or remote receipt.
-
-- `bgp_rib_outbound_prefix_limit_actor_duration_seconds{operation}` exposes
-  exact synchronous apply-attempt and recovery-batch duration for outbound
-  prefix limits.
-
-- `bgp_rib_route_refresh_actor_duration_seconds{operation}` exposes accepted
-  inbound Enhanced Route Refresh actor work. Its closed `operation` label is
-  `begin`, `eorr`, or `timeout`.
-
-- A host-locked real-session Enhanced Route Refresh receipt now exercises one
-  peer with 100,000 routes through BoRR, replay, duplicate BoRR, EoRR, and the
-  independent timeout. It retains exact state, actor-duration, allocator, RSS,
-  and load-bearing validation evidence without adding the six-minute campaign
-  to pull-request CI.
-
-### Changed
-
-- Non-unicast RIB listing RPCs now parse peer, EVPN Route Distinguisher and
-  family/type filters before querying the RIB, reject invalid values with
-  `INVALID_ARGUMENT`, and match equivalent IP/RD text forms by typed identity.
-
-- `rbgp top` keeps health and neighbor polling on the operator-selected
-  interval while moving the full Prometheus metrics scrape to a separate
-  60-second cadence. It now retries transient global-metadata failures until
-  the daemon identity is available and retains the last-good RPKI VRP count
-  through a transient metrics failure. Route-event streaming is now opt-in
-  while its panel is visible, with cancellation and a two-second reconnect
-  backoff after either a clean or error end. Health and neighbor failures retain
-  explicitly stale last-good data without corrupting peer selection or
-  update-rate baselines. Scoped neighbor identities and the missing Description
-  heading are also shown consistently.
-
-- Resolving a retained neighbor roster now shares content-equal compiled
-  `.rpol` sets within bounded 32-neighbor chunks. At the measured 1,000-peer,
-  one-common-10k-set shape, retained requested bytes fell from 843.2 MB to
-  29.2 MB; the unique-set control added no retained bytes and bounded extra
-  peak requested bytes below 10 MB. This is allocation-owner evidence, not a
-  daemon RSS or convergence claim.
-
-- Grouped outbound prefix-limit admission sets now store family-typed IPv4
-  and IPv6 keys instead of the larger cross-family `Prefix` enum. In a pinned
-  literal-parent A/B at 400,000 IPv4 routes and 1/10/100 grouped members, the
-  candidate's apply-phase live jemalloc allocated delta is
-  31.43%/31.51%/31.64% of the parent's, clearing the predeclared 50% gate in
-  all three cells. All 9,042 production-path behavior checks pass. Allocator
-  active/resident pages and kernel RSS are reported separately; this is not a
-  DHAT or exact retained-heap attribution claim. See
-  [`docs/perf/outbound-prefix-limit-admission-compaction-2026-07.md`](docs/perf/outbound-prefix-limit-admission-compaction-2026-07.md).
-
-- Withdrawal-only outbound envelopes no longer run an empty exact-export
-  announcement probe for every member. The immutable transport snapshot,
-  rejection retirement, Adj-RIB-Out commit, gauges, and enqueue remain
-  unchanged. In the fixed 64-route grouped-withdrawal manager-path benchmark,
-  a controlled immediate-parent A/B/B/A campaign improved the two-attempt mean
-  by 6.80%, 8.41%, and 9.33% at 64, 256, and 1,000 members; the 8-member result
-  is not claimed. See
-  [`docs/perf/grouped-withdrawal-probe-skip-2026-07.md`](docs/perf/grouped-withdrawal-probe-skip-2026-07.md).
-
-### Fixed
-
-- **`rbgp doctor` retains failed reachability-probe evidence.** If a configured
-  BGP, RTR, BMP, or gNMI probe task panics or is cancelled, its ordered row now
-  remains in the bundle as a named failure instead of disappearing from the
-  diagnostic inventory.
-
-- **`rbgp` JSON and NDJSON output now returns stdout write failures instead of
-  panicking.** Pretty, compact, raw, importer, advertised-diff, and MRT/BMP
-  snapshot output is fully serialized before writing, preserves its existing
-  bytes, and reports write or flush failures through each command's existing
-  nonzero exit contract. Normal Unix broken pipes remain quiet.
-
-- **`rbgp doctor` recognizes intentionally disabled peers.** For a current,
-  non-stale snapshot, a retained `PeerDisabled` event makes the
-  non-Established session verdict explicitly green unless a later retained
-  `PeerEnabled` supersedes it; stale snapshots remain warnings. Slow-peer and
-  flap checks remain independent, unavailable history stays unknown, and
-  scoped link-local peers keep their `address%interface` identity. Every
-  successfully installed configured-peer incarnation now publishes its
-  current enabled or disabled state after installation—including bootstrap,
-  re-add, and reconfigure—so delete/re-add cannot inherit an old incarnation's
-  disabled verdict; failed adds publish nothing. No protobuf fields changed.
-
-- **`rbgp doctor` no longer fabricates a stuck-peer failure from missing
-  retained session history.** A failed event RPC or a peer absent from the
-  bounded fleet history reports explicit unknown evidence as a warning, and a
-  daemon-lifetime flap count is red only when retained history also proves a
-  recent session loss. Genuinely old retained transitions remain red.
-
-- **`rbgp diff advertised --deadline` now bounds the complete live-query
-  phase.** One aggregate budget starts after bounded local snapshot parsing
-  and covers neighbor discovery plus every advertised-route page; a stalled
-  RPC exits 2 without rendering a partial equality verdict. Command help now
-  describes MED absence/zero conflation as the runtime-detected compatibility
-  caveat for daemon responses without optional MED-presence markers, rather
-  than an unconditional limitation.
-
-- **Outbound prefix-limit recovery now yields between peer/family replays.**
-  A capacity raise or newly freed slot re-derives at most one live
-  peer/family per RIB resync tick, retains the deterministic remainder, and
-  re-arms the ordinary timer while work is runnable. Selection/ORF-gated
-  recovery parks until gate release, and outbound backpressure retains the
-  internal retry without widening into a full peer resync. This bounds one
-  actor turn without claiming less total replay work; departed peers are
-  skipped, and recovery emits no End-of-RIB or route-refresh markers.
-
-- **Policy introspection no longer turns a stalled live session into an
-  absent one.** Import explain and rejected-route reads return
-  `DEADLINE_EXCEEDED` when their bounded session query times out; policy stats
-  also fail honestly on timeout/session exit and reject an explicit unknown
-  peer instead of labeling the global export chain as that peer. A policy
-  stats RPC now gives all backend waits across explicit-peer validation,
-  export/import collection, and dataset status one shared 500 ms deadline;
-  fleet import reads use bounded per-RPC concurrency without parking the
-  peer-manager actor awaiting sessions, release outstanding collection when
-  the caller cancels, and return only a complete, sorted snapshot (never
-  partial rows). No protobuf fields or numbers changed.
-
-- **A stale outbound prefix-limit activation no longer discards a newer
-  prepared change.** The newer transaction remains available to activate.
-
-- The M83 route-server receipt now checks its exact, snapshotted initial
-  RS-to-BIRD inventory on one TCP stream before End-of-RIB. Legal later
-  deltas no longer look like an initial-table ordering failure, and any
-  failed internal attempt retains its packet, event, inventory, and daemon
-  evidence for review. The
-  [controlled 6+6 receipt](tests/interop/m83-eor-order-receipt.md) records the
-  exact revisions, retained-artifact digest, and load-bearing mutations.
-
-- **Convergence-marker page-generation fencing now follows accepted work.**
-  Stale-session End-of-RIB/BoRR/EoRR and inactive EoRR markers no longer
-  invalidate paginated route queries, while accepted End-of-RIB, BoRR, EoRR,
-  and timeout work invalidates each route scope exactly once.
-
-- Route injection now rejects ORIGIN values outside 0–2 with
-  `INVALID_ARGUMENT` instead of silently coercing them to INCOMPLETE, and
-  rejects the limited-broadcast next hop `255.255.255.255` on both unicast
-  and EVPN injection — matching the scrutiny already applied to
-  peer-received routes.
-
-- **`rbgp config import` now exits nonzero when the emitted config would be
-  rejected by `rustbgpd --check`.** A source router-id that is not a usable
-  IPv4 address (all three frontends copy it verbatim) and a neighbor
-  `peer_group` reference that resolves to no translated peer group are
-  reported as warnings (exit 2) instead of leaving the importer with a clean
-  exit alongside an unloadable translation. Out-of-range numeric fields
-  (GoBGP `peer-as`, `hold-time`, `keepalive-interval`, `max-prefixes`, local
-  `as`; FRR unparseable keepalive) now name the field, the source value, and
-  what was done instead of being silently dropped.
-
-- **A cosmetic IPv6 respelling of a static neighbor address no longer tears
-  down and re-establishes the session on reload.** Neighbor addresses are
-  canonicalized at config load, so rewriting `2001:DB8:0:0:0:0:0:1` as
-  `2001:db8::1` diffs as no change, and runtime lookups (policy chains,
-  peer-group membership, persisted delete) match a non-canonical on-disk
-  spelling. A genuine address change still reconciles as remove+add.
-
-- **Full native RIB and EVPN listings no longer fail with `out of range`
-  near 4 MiB.** The `rbgp` full unary listing surfaces (`rib
-  bgpls|vpn|labeled|rtc|blackholes|fib`, `flowspec`, `evpn list|diagnose`,
-  `topology nodes|links`, `orr`) now decode responses up to a finite 64 MiB
-  ceiling — roughly 0.7-1.3 million rows — instead of tonic's 4 MiB client
-  default. Responses above the ceiling still fail closed as `out of range`;
-  paginated unicast listings, streams, and control RPCs keep the default.
-  Client-side only: no daemon, protobuf, or pagination change.
-
-## [0.61.0] — 2026-07-26
+## [0.61.0] — 2026-07-27
 
 > **Release framing.** This is the policy-safety line. RFC 8212
 > explicit-policy enforcement and per-peer outbound prefix limits both
@@ -208,8 +23,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 > peer's group-scoped export policy. RFC 6793 AS4 migration, RFC 9072
 > extended OPEN, and RFC 9552 BGP-LS attribute framing complete the
 > conformance surface, and `rustbgpd-wire` 0.16.0 / `rustbgpd-fsm` 0.3.1
-> publish alongside. The first Highlights group lists what needs an
-> operator decision before the upgrade.
+> publish alongside. The final pre-tag stretch widens the operations
+> surface — a one-peer outbound refresh RPC, exact filtered route counts,
+> richer route facts in JSON, typed fail-closed non-unicast filters — and
+> closes four late fixes, from an IPv6 respelling that needlessly flapped
+> sessions to a finite decode ceiling for full native listings. The first
+> Highlights group lists what needs an operator decision before the
+> upgrade.
 
 ### Highlights
 
@@ -272,6 +92,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `rustbgpd --check` now warns about eBGP neighbors that resolve no
   policy, `rbgp config import` emits configs that fail closed, and the
   shipped starters are all policy-complete.
+- This release ships the RFC 8212 contract opt-in, as documented:
+  policy-complete starters plus `--check --strict` give a deployment
+  everything it needs to enforce the posture today, while the default-on
+  transition is deliberately deferred — a fresh configuration and an
+  upgraded one are indistinguishable in the current boolean, and RFC 8212
+  Appendix A.1 recommends a warn-first transition, so the flip waits on
+  an upgrade-preserving migration design.
 
 **Correctness when something fails**
 
@@ -288,6 +115,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   every inheriting session — so on a route server, a group-level limit
   raise is flap-free during exactly the incident the limit exists to
   contain.
+- Four late fixes in the same spirit: a cosmetic IPv6 respelling of a
+  neighbor address no longer tears the session down on reload,
+  `rbgp config import` exits nonzero when its emitted config would fail
+  `rustbgpd --check`, route injection rejects out-of-range ORIGIN values
+  and the limited-broadcast next hop instead of coercing or accepting
+  them, and full native RIB/EVPN listings decode up to a finite 64 MiB
+  instead of failing near tonic's 4 MiB default.
 
 **Protocol conformance**
 
@@ -316,6 +150,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The gRPC method inventory an external reviewer reads is now checked
   against the generated tier export on every test run, so the published
   classification cannot drift from the one the daemon enforces.
+- The operations surface grows without a session cost anywhere:
+  `rbgp neighbor <peer> refresh-out` (`NeighborService.RefreshOutbound`)
+  re-emits one peer's exportable outbound inventory without resetting the
+  session, `rbgp rib --count` answers exact filtered route counts without
+  transferring a listing, route JSON carries raw extended communities,
+  ASPA state, and receive timestamps, and the non-unicast listing filters
+  are typed and fail closed on invalid values.
 
 **Library crates**
 
@@ -641,6 +482,40 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cross-crate target-name collision. A 40m42s commissioning run rejected
   putting this work on the PR critical path. Batch fuzzing, pruning,
   storage, and coverage are not part of this integration.
+
+- Native `rbgp rib` JSON now exposes raw ordered `extended_communities`,
+  `aspa_state` when the daemon supplies it, and
+  `received_at_epoch_seconds` (including the zero unknown sentinel) for best,
+  received, advertised, and embedded best-path-explain routes. Human best,
+  received, and advertised tables accept `--age` to append the original route
+  receive age as an extra column; the opt-in affects only the human table —
+  JSON route objects always include `received_at_epoch_seconds`.
+
+- `rbgp rib --count`, `rbgp rib received PEER --count`, and
+  `rbgp rib advertised PEER --count` report the exact filtered route count
+  without transferring a full route listing. Each count uses one view-correct
+  RPC and transfers at most one route row; filtered counts still require the
+  backend to scan the selected view.
+
+- `rbgp neighbor PEER refresh-out` and the
+  `NeighborService.RefreshOutbound` RPC re-emit one peer's current exportable
+  outbound inventory without resetting the session. The bounded single-peer
+  operation covers all negotiated families; its success response confirms
+  scheduling, not writer drain or remote receipt.
+
+- `bgp_rib_outbound_prefix_limit_actor_duration_seconds{operation}` exposes
+  exact synchronous apply-attempt and recovery-batch duration for outbound
+  prefix limits.
+
+- `bgp_rib_route_refresh_actor_duration_seconds{operation}` exposes accepted
+  inbound Enhanced Route Refresh actor work. Its closed `operation` label is
+  `begin`, `eorr`, or `timeout`.
+
+- A host-locked real-session Enhanced Route Refresh receipt now exercises one
+  peer with 100,000 routes through BoRR, replay, duplicate BoRR, EoRR, and the
+  independent timeout. It retains exact state, actor-duration, allocator, RSS,
+  and load-bearing validation evidence without adding the six-minute campaign
+  to pull-request CI.
 
 ### Changed
 
@@ -1082,6 +957,51 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   string only when the import chain's own `AS_PATH` matches need it.
   Explain output is unchanged.
 
+- Non-unicast RIB listing RPCs now parse peer, EVPN Route Distinguisher and
+  family/type filters before querying the RIB, reject invalid values with
+  `INVALID_ARGUMENT`, and match equivalent IP/RD text forms by typed identity.
+
+- `rbgp top` keeps health and neighbor polling on the operator-selected
+  interval while moving the full Prometheus metrics scrape to a separate
+  60-second cadence. It now retries transient global-metadata failures until
+  the daemon identity is available and retains the last-good RPKI VRP count
+  through a transient metrics failure. Route-event streaming is now opt-in
+  while its panel is visible, with cancellation and a two-second reconnect
+  backoff after either a clean or error end. Health and neighbor failures retain
+  explicitly stale last-good data without corrupting peer selection or
+  update-rate baselines. Scoped neighbor identities and the missing Description
+  heading are also shown consistently.
+
+- Resolving a retained neighbor roster now shares content-equal compiled
+  `.rpol` sets within bounded 32-neighbor chunks. At the measured 1,000-peer,
+  one-common-10k-set shape, retained requested bytes fell from 843.2 MB to
+  29.2 MB; the unique-set control added no retained bytes and bounded extra
+  peak requested bytes below 10 MB. This is allocation-owner evidence, not a
+  daemon RSS or convergence claim.
+
+- Grouped outbound prefix-limit admission sets now store family-typed IPv4
+  and IPv6 keys instead of the larger cross-family `Prefix` enum. In a pinned
+  literal-parent A/B at 400,000 IPv4 routes and 1/10/100 grouped members, the
+  candidate's apply-phase live jemalloc allocated delta is
+  31.43%/31.51%/31.64% of the parent's, clearing the predeclared 50% gate in
+  all three cells. All 9,042 production-path behavior checks pass. Allocator
+  active/resident pages and kernel RSS are reported separately; this is not a
+  DHAT or exact retained-heap attribution claim. See
+  [`docs/perf/outbound-prefix-limit-admission-compaction-2026-07.md`](docs/perf/outbound-prefix-limit-admission-compaction-2026-07.md).
+
+- Withdrawal-only outbound envelopes no longer run an empty exact-export
+  announcement probe for every member. The immutable transport snapshot,
+  rejection retirement, Adj-RIB-Out commit, gauges, and enqueue remain
+  unchanged. In the fixed 64-route grouped-withdrawal manager-path benchmark,
+  a controlled immediate-parent A/B/B/A campaign improved the two-attempt mean
+  by 6.80%, 8.41%, and 9.33% at 64, 256, and 1,000 members; the 8-member result
+  is not claimed. See
+  [`docs/perf/grouped-withdrawal-probe-skip-2026-07.md`](docs/perf/grouped-withdrawal-probe-skip-2026-07.md).
+
+- Neighbor listings are now served from one generation-consistent RIB
+  snapshot rather than per-peer serialized queries, so a listing cannot
+  mix rows observed across different RIB generations.
+
 ### Fixed
 
 - **RPKI VRP visibility now follows the exported metric family.** The TUI sums
@@ -1445,6 +1365,124 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   loop is a host-side cron job that runs `arouteserver` and the renderer
   next to each other and hands the daemon a finished config directory, and
   the deployment guide now says so instead of leaving the gap unexplained.
+
+- **`rbgp doctor` retains failed reachability-probe evidence.** If a configured
+  BGP, RTR, BMP, or gNMI probe task panics or is cancelled, its ordered row now
+  remains in the bundle as a named failure instead of disappearing from the
+  diagnostic inventory.
+
+- **`rbgp doctor` support bundles no longer hide failed event-history
+  reads.** A session or policy event-history RPC that fails during bundle
+  collection is now recorded in the bundle manifest as a named `partial:`
+  source instead of silently collapsing to an empty event list, so absent
+  evidence stays distinguishable from an absence of events.
+
+- **`rbgp` JSON and NDJSON output now returns stdout write failures instead of
+  panicking.** Pretty, compact, raw, importer, advertised-diff, and MRT/BMP
+  snapshot output is fully serialized before writing, preserves its existing
+  bytes, and reports write or flush failures through each command's existing
+  nonzero exit contract. Normal Unix broken pipes remain quiet.
+
+- **`rbgp doctor` recognizes intentionally disabled peers.** For a current,
+  non-stale snapshot, a retained `PeerDisabled` event makes the
+  non-Established session verdict explicitly green unless a later retained
+  `PeerEnabled` supersedes it; stale snapshots remain warnings. Slow-peer and
+  flap checks remain independent, unavailable history stays unknown, and
+  scoped link-local peers keep their `address%interface` identity. Every
+  successfully installed configured-peer incarnation now publishes its
+  current enabled or disabled state after installation—including bootstrap,
+  re-add, and reconfigure—so delete/re-add cannot inherit an old incarnation's
+  disabled verdict; failed adds publish nothing. No protobuf fields changed.
+
+- **`rbgp doctor` no longer fabricates a stuck-peer failure from missing
+  retained session history.** A failed event RPC or a peer absent from the
+  bounded fleet history reports explicit unknown evidence as a warning, and a
+  daemon-lifetime flap count is red only when retained history also proves a
+  recent session loss. Genuinely old retained transitions remain red.
+
+- **`rbgp diff advertised --deadline` now bounds the complete live-query
+  phase.** One aggregate budget starts after bounded local snapshot parsing
+  and covers neighbor discovery plus every advertised-route page; a stalled
+  RPC exits 2 without rendering a partial equality verdict. Command help now
+  describes MED absence/zero conflation as the runtime-detected compatibility
+  caveat for daemon responses without optional MED-presence markers, rather
+  than an unconditional limitation.
+
+- **Outbound prefix-limit recovery no longer puts convergence markers the
+  peer never requested on the wire.** Internal recovery replays emit no
+  unrequested RFC 7313 BoRR/EoRR markers and cannot consume a
+  graceful-restart deferred End-of-RIB, and recovery no longer bypasses
+  the RFC 5291 ORF initial-advertisement gate — selection- and ORF-gated
+  recovery parks until its gate releases. A recovering peer sees only the
+  convergence signaling its session actually negotiated.
+
+- **Outbound prefix-limit recovery now yields between peer/family replays.**
+  A capacity raise or newly freed slot re-derives at most one live
+  peer/family per RIB resync tick, retains the deterministic remainder, and
+  re-arms the ordinary timer while work is runnable; outbound backpressure
+  retains the internal retry without widening into a full peer resync. This
+  bounds one actor turn without claiming less total replay work; departed
+  peers are skipped.
+
+- **Policy introspection no longer turns a stalled live session into an
+  absent one.** Import explain and rejected-route reads return
+  `DEADLINE_EXCEEDED` when their bounded session query times out; policy stats
+  also fail honestly on timeout/session exit and reject an explicit unknown
+  peer instead of labeling the global export chain as that peer. A policy
+  stats RPC now gives all backend waits across explicit-peer validation,
+  export/import collection, and dataset status one shared 500 ms deadline;
+  fleet import reads use bounded per-RPC concurrency without parking the
+  peer-manager actor awaiting sessions, release outstanding collection when
+  the caller cancels, and return only a complete, sorted snapshot (never
+  partial rows). No protobuf fields or numbers changed.
+
+- **A stale outbound prefix-limit activation no longer discards a newer
+  prepared change.** The newer transaction remains available to activate.
+
+- The M83 route-server receipt now checks its exact, snapshotted initial
+  RS-to-BIRD inventory on one TCP stream before End-of-RIB. Legal later
+  deltas no longer look like an initial-table ordering failure, and any
+  failed internal attempt retains its packet, event, inventory, and daemon
+  evidence for review. The
+  [controlled 6+6 receipt](tests/interop/m83-eor-order-receipt.md) records the
+  exact revisions, retained-artifact digest, and load-bearing mutations.
+
+- **Convergence-marker page-generation fencing now follows accepted work.**
+  Stale-session End-of-RIB/BoRR/EoRR and inactive EoRR markers no longer
+  invalidate paginated route queries, while accepted End-of-RIB, BoRR, EoRR,
+  and timeout work invalidates each route scope exactly once.
+
+- Route injection now rejects ORIGIN values outside 0–2 with
+  `INVALID_ARGUMENT` instead of silently coercing them to INCOMPLETE, and
+  rejects the limited-broadcast next hop `255.255.255.255` on both unicast
+  and EVPN injection — matching the scrutiny already applied to
+  peer-received routes.
+
+- **`rbgp config import` now exits nonzero when the emitted config would be
+  rejected by `rustbgpd --check`.** A source router-id that is not a usable
+  IPv4 address (all three frontends copy it verbatim) and a neighbor
+  `peer_group` reference that resolves to no translated peer group are
+  reported as warnings (exit 2) instead of leaving the importer with a clean
+  exit alongside an unloadable translation. Out-of-range numeric fields
+  (GoBGP `peer-as`, `hold-time`, `keepalive-interval`, `max-prefixes`, local
+  `as`; FRR unparseable keepalive) now name the field, the source value, and
+  what was done instead of being silently dropped.
+
+- **A cosmetic IPv6 respelling of a static neighbor address no longer tears
+  down and re-establishes the session on reload.** Neighbor addresses are
+  canonicalized at config load, so rewriting `2001:DB8:0:0:0:0:0:1` as
+  `2001:db8::1` diffs as no change, and runtime lookups (policy chains,
+  peer-group membership, persisted delete) match a non-canonical on-disk
+  spelling. A genuine address change still reconciles as remove+add.
+
+- **Full native RIB and EVPN listings no longer fail with `out of range`
+  near 4 MiB.** The `rbgp` full unary listing surfaces (`rib
+  bgpls|vpn|labeled|rtc|blackholes|fib`, `flowspec`, `evpn list|diagnose`,
+  `topology nodes|links`, `orr`) now decode responses up to a finite 64 MiB
+  ceiling — roughly 0.7-1.3 million rows — instead of tonic's 4 MiB client
+  default. Responses above the ceiling still fail closed as `out of range`;
+  paginated unicast listings, streams, and control RPCs keep the default.
+  Client-side only: no daemon, protobuf, or pagination change.
 
 ## [0.60.0] — 2026-07-18
 

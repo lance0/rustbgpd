@@ -127,9 +127,10 @@ config from their existing `general.yml`/`clients.yml`:
 
 ## Why rustbgpd
 
-- **API-first control plane** — full gRPC surface across 11 services plus a
-  thin CLI (`rbgp`): dynamic peer management, policy CRUD, route injection,
-  streaming events, all without restarts
+- **API-first control plane** — full gRPC surface across twelve services
+  (eleven native `rustbgpd.v1` services plus the OpenConfig `gnmi.gNMI`
+  service) and a thin CLI (`rbgp`): dynamic peer management, policy CRUD,
+  route injection, streaming events, all without restarts
 - **Native route explainability** — "why is this route (not) here?" answered
   from the live RIB in one command, where incumbents need an external
   looking-glass stack for less. Best-path, export-gate, and filtered-route

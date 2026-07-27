@@ -1552,6 +1552,10 @@ Unified event types:
 
 NOTIFICATION events are metadata-only. Raw NOTIFICATION packet data remains
 limited to BMP peer-down handling; `WatchEvents` does not retain or replay it.
+`NotificationEvent.shutdown_reason` (RFC 9003) is peer-supplied free text
+delivered verbatim over the API — it can legally contain ANSI escape sequences
+as valid UTF-8, so consumers rendering it to a terminal must sanitize it;
+rustbgpd's own CLI and log paths already escape it.
 
 Stream health event types:
 
