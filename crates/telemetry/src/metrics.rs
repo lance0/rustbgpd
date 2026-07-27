@@ -85,6 +85,14 @@ const ORR_INPUT_CLASSIFICATIONS: [&str; 5] = [
     "default_with_ignored_flex_algo",
 ];
 
+/// Shared wall-clock buckets for synchronous work on the single RIB actor.
+const RIB_ACTOR_DURATION_BUCKETS: [f64; 13] = [
+    0.001, 0.005, 0.010, 0.025, 0.050, 0.100, 0.200, 0.500, 1.0, 2.5, 5.0, 10.0, 30.0,
+];
+
+/// Closed operation labels for outbound prefix-limit actor work.
+const OUTBOUND_PREFIX_LIMIT_ACTOR_OPERATIONS: [&str; 2] = ["apply", "recovery"];
+
 /// One memoized `bgp_policy_routes_total` child handle.
 ///
 /// `record_policy_routes` fires once per route × policy evaluation —
@@ -217,6 +225,7 @@ pub struct BgpMetrics {
     rib_policy_transition_in_progress: IntGauge,
     rib_policy_transition_last_duration_milliseconds: IntGauge,
     rib_policy_transition_actor_poll_duration_seconds: HistogramVec,
+    rib_outbound_prefix_limit_actor_duration_seconds: HistogramVec,
 
     // ── Update groups (shared outbound staging) ─────────────────
     update_groups: IntGauge,
@@ -891,13 +900,23 @@ impl BgpMetrics {
                 "bgp_rib_policy_transition_actor_poll_duration_seconds",
                 "Wall-clock duration of each real export-policy transition actor poll, partitioned by bounded work, complete prefix snapshot, pre-commit validation (finalize), or a bounded member commit/flush batch (commit; the terminal batch includes the global retry tail).",
             )
-            .buckets(vec![
-                0.001, 0.005, 0.010, 0.025, 0.050, 0.100, 0.200, 0.500, 1.0, 2.5, 5.0, 10.0,
-                30.0,
-            ]),
+            .buckets(RIB_ACTOR_DURATION_BUCKETS.to_vec()),
             &["poll_kind"],
         )
         .expect("valid metric definition");
+
+        let rib_outbound_prefix_limit_actor_duration_seconds = HistogramVec::new(
+            HistogramOpts::new(
+                "bgp_rib_outbound_prefix_limit_actor_duration_seconds",
+                "Wall-clock duration of real synchronous outbound prefix-limit work on the RIB actor, partitioned by complete apply or scheduled recovery batch.",
+            )
+            .buckets(RIB_ACTOR_DURATION_BUCKETS.to_vec()),
+            &["operation"],
+        )
+        .expect("valid metric definition");
+        for operation in OUTBOUND_PREFIX_LIMIT_ACTOR_OPERATIONS {
+            rib_outbound_prefix_limit_actor_duration_seconds.with_label_values(&[operation]);
+        }
 
         let update_groups = IntGauge::new(
             "bgp_update_groups",
@@ -1906,6 +1925,11 @@ impl BgpMetrics {
             ))
             .expect("metric not already registered");
         registry
+            .register(Box::new(
+                rib_outbound_prefix_limit_actor_duration_seconds.clone(),
+            ))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(update_groups.clone()))
             .expect("metric not already registered");
         registry
@@ -2257,6 +2281,7 @@ impl BgpMetrics {
             rib_policy_transition_in_progress,
             rib_policy_transition_last_duration_milliseconds,
             rib_policy_transition_actor_poll_duration_seconds,
+            rib_outbound_prefix_limit_actor_duration_seconds,
             update_groups,
             update_group_members,
             peer_update_group,
@@ -3610,6 +3635,20 @@ impl BgpMetrics {
             .observe(duration.as_secs_f64());
     }
 
+    /// Observe one real outbound prefix-limit apply batch on the RIB actor.
+    pub fn observe_rib_outbound_prefix_limit_apply(&self, duration: std::time::Duration) {
+        self.rib_outbound_prefix_limit_actor_duration_seconds
+            .with_label_values(&["apply"])
+            .observe(duration.as_secs_f64());
+    }
+
+    /// Observe one real outbound prefix-limit recovery batch on the RIB actor.
+    pub fn observe_rib_outbound_prefix_limit_recovery(&self, duration: std::time::Duration) {
+        self.rib_outbound_prefix_limit_actor_duration_seconds
+            .with_label_values(&["recovery"])
+            .observe(duration.as_secs_f64());
+    }
+
     /// Set how many entries are still awaiting replacement in an inbound
     /// Enhanced Route Refresh window.
     pub fn set_route_refresh_stale_entries(&self, peer: &str, afi_safi: &str, count: i64) {
@@ -4880,11 +4919,7 @@ mod tests {
                 (poll_kind, (histogram.sample_count(), buckets))
             })
             .collect();
-        let expected_buckets = [
-            0.001, 0.005, 0.010, 0.025, 0.050, 0.100, 0.200, 0.500, 1.0, 2.5, 5.0, 10.0, 30.0,
-        ]
-        .map(f64::to_bits)
-        .to_vec();
+        let expected_buckets = RIB_ACTOR_DURATION_BUCKETS.map(f64::to_bits).to_vec();
 
         assert_eq!(
             observed.keys().map(String::as_str).collect::<Vec<_>>(),
@@ -4893,6 +4928,49 @@ mod tests {
         for (poll_kind, (sample_count, buckets)) in observed {
             assert_eq!(sample_count, 1, "one sample for {poll_kind}");
             assert_eq!(buckets, expected_buckets, "custom buckets for {poll_kind}");
+        }
+    }
+
+    /// Load-bearing break: removing either closed-label initialization or
+    /// registry registration makes a fresh scrape omit the expected series.
+    #[test]
+    fn outbound_prefix_limit_actor_histogram_registers_closed_zeroed_labels() {
+        let m = BgpMetrics::new();
+        let family = m
+            .registry()
+            .gather()
+            .into_iter()
+            .find(|family| family.name() == "bgp_rib_outbound_prefix_limit_actor_duration_seconds")
+            .expect("outbound prefix-limit actor histogram is registered");
+        let observed: std::collections::BTreeMap<_, _> = family
+            .metric
+            .iter()
+            .map(|metric| {
+                let operation = metric
+                    .get_label()
+                    .iter()
+                    .find(|label| label.name() == "operation")
+                    .expect("operation label exists")
+                    .value()
+                    .to_owned();
+                let histogram = metric.get_histogram();
+                let buckets = histogram
+                    .get_bucket()
+                    .iter()
+                    .map(|bucket| bucket.upper_bound().to_bits())
+                    .collect::<Vec<_>>();
+                (operation, (histogram.sample_count(), buckets))
+            })
+            .collect();
+        let expected_buckets = RIB_ACTOR_DURATION_BUCKETS.map(f64::to_bits).to_vec();
+
+        assert_eq!(
+            observed.keys().map(String::as_str).collect::<Vec<_>>(),
+            OUTBOUND_PREFIX_LIMIT_ACTOR_OPERATIONS
+        );
+        for (operation, (sample_count, buckets)) in observed {
+            assert_eq!(sample_count, 0, "fresh {operation} series is zeroed");
+            assert_eq!(buckets, expected_buckets, "actor buckets for {operation}");
         }
     }
 
