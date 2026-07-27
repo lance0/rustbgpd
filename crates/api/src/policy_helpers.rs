@@ -8,10 +8,6 @@ use tonic::Status;
 use crate::peer_types::{PolicyAsPathPrependConfig, PolicyStatementDefinition};
 use crate::proto;
 
-#[allow(
-    clippy::result_large_err,
-    reason = "tonic::Status is the direct gRPC error type for policy validation"
-)]
 pub(crate) fn validate_policy_action(action: &str) -> Result<(), Status> {
     match action {
         "permit" | "deny" => Ok(()),
@@ -21,10 +17,6 @@ pub(crate) fn validate_policy_action(action: &str) -> Result<(), Status> {
     }
 }
 
-#[allow(
-    clippy::result_large_err,
-    reason = "tonic::Status is the direct gRPC error type for policy statement conversion"
-)]
 pub(crate) fn proto_statement_to_input(
     statement: proto::PolicyStatement,
 ) -> Result<PolicyStatementDefinition, Status> {
