@@ -7,6 +7,9 @@
 use std::collections::HashSet;
 use std::num::NonZeroU32;
 
+use rustbgpd_wire::RouteRefreshSubtype;
+
+use super::super::route_refresh::{FamilyReplayKind, FamilyReplayOutcome};
 use super::*;
 use crate::manager::outbound_prefix_limits::{BatchAdmission, admit_batch};
 use crate::update::{
@@ -16,6 +19,13 @@ use crate::update::{
 
 fn v4(octet: u8) -> Prefix {
     Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, octet), 32))
+}
+
+fn v6(segment: u16) -> Prefix {
+    Prefix::V6(Ipv6Prefix::new(
+        Ipv6Addr::new(0x2001, 0xdb8, 0, segment, 0, 0, 0, 1),
+        128,
+    ))
 }
 
 fn limit(n: u32) -> NonZeroU32 {
@@ -108,6 +118,14 @@ fn a_freed_prefix_reannounced_in_the_same_batch_retakes_its_slot() {
 // --- export seam ---
 
 fn register_peer(manager: &mut RibManager, peer: IpAddr) -> mpsc::Receiver<OutboundRouteUpdate> {
+    register_peer_with_families(manager, peer, &ipv4_sendable())
+}
+
+fn register_peer_with_families(
+    manager: &mut RibManager,
+    peer: IpAddr,
+    sendable_families: &[(Afi, Safi)],
+) -> mpsc::Receiver<OutboundRouteUpdate> {
     let (outbound_tx, mut outbound_rx) = mpsc::channel(64);
     manager.handle_update(RibUpdate::PeerUp {
         peer,
@@ -116,7 +134,7 @@ fn register_peer(manager: &mut RibManager, peer: IpAddr) -> mpsc::Receiver<Outbo
         peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx,
         export_policy: None,
-        sendable_families: ipv4_sendable(),
+        sendable_families: sendable_families.to_vec(),
         is_ebgp: false,
         route_reflector_client: false,
         orr_vantage: None,
@@ -128,7 +146,7 @@ fn register_peer(manager: &mut RibManager, peer: IpAddr) -> mpsc::Receiver<Outbo
         negotiated_llgr_families: vec![],
     });
     let eor = outbound_rx.try_recv().expect("registration end-of-rib");
-    assert_eq!(eor.end_of_rib, ipv4_sendable());
+    assert_eq!(eor.end_of_rib, sendable_families);
     outbound_rx
 }
 
@@ -193,6 +211,18 @@ fn source_routes(source: Ipv4Addr, octets: &[u8]) -> Vec<Route> {
                 Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, *octet), 32),
                 source,
             )
+        })
+        .collect()
+}
+
+fn source_v6_routes(source: Ipv6Addr, segments: &[u16]) -> Vec<Route> {
+    segments
+        .iter()
+        .map(|segment| {
+            let Prefix::V6(prefix) = v6(*segment) else {
+                unreachable!("v6 constructs an IPv6 prefix")
+            };
+            make_v6_route(prefix, source)
         })
         .collect()
 }
@@ -383,6 +413,11 @@ fn a_limited_group_member_blocks_alone() {
 
 /// Admission is per session generation: teardown reaps it on the same seam
 /// as the rest of the peer's outbound state.
+///
+/// Load-bearing mutation proof: removing
+/// `outbound_limit_control.reap_peer(peer)` from the `PeerDown` path leaves
+/// this generation's queued IPv4 recovery behind and makes the final
+/// empty-intent assertion red.
 #[test]
 fn peer_teardown_clears_admission_state() {
     let (_tx, rx) = mpsc::channel(1);
@@ -398,8 +433,15 @@ fn peer_teardown_clears_admission_state() {
         IpAddr::V4(source),
         source_routes(source, &[1, 2, 3]),
     );
-    drop(wire_prefixes(&mut outbound_rx));
+    let advertised = wire_prefixes(&mut outbound_rx);
     assert!(manager.outbound_prefix_limits.contains_key(&peer));
+    let admitted = *advertised.iter().next().expect("the cap admitted prefixes");
+    withdraw(&mut manager, IpAddr::V4(source), vec![(admitted, 0)]);
+    assert_eq!(
+        manager.outbound_limit_recovery_for(peer),
+        vec![Afi::Ipv4],
+        "the fixture must own pending recovery before teardown"
+    );
 
     manager.handle_update(RibUpdate::PeerDown {
         peer,
@@ -408,6 +450,11 @@ fn peer_teardown_clears_admission_state() {
     assert!(
         !manager.outbound_prefix_limits.contains_key(&peer),
         "a reconnecting generation must start with empty admission state"
+    );
+    assert_eq!(
+        manager.outbound_limit_recovery_for(peer),
+        vec![],
+        "PeerDown must reap the departing generation's recovery intent"
     );
 }
 
@@ -481,11 +528,38 @@ fn install(manager: &mut RibManager, txn: u64, config: OutboundPrefixLimitConfig
 }
 
 fn ipv4_row(manager: &RibManager, peer: IpAddr) -> OutboundPrefixLimitFamilyState {
+    family_row(manager, peer, "ipv4_unicast")
+}
+
+fn family_row(manager: &RibManager, peer: IpAddr, family: &str) -> OutboundPrefixLimitFamilyState {
     manager
         .outbound_prefix_limit_rows(peer)
         .into_iter()
-        .find(|row| row.family == "ipv4_unicast")
+        .find(|row| row.family == family)
         .expect("a registered peer reports both unicast families")
+}
+
+fn manager_with_queued_ipv4_recovery(
+    metrics: BgpMetrics,
+    peer_octet: u8,
+) -> (RibManager, IpAddr, mpsc::Receiver<OutboundRouteUpdate>) {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics);
+    manager.test_force_ungrouped = true;
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 113, 0, peer_octet));
+    let mut outbound_rx = register_peer(&mut manager, peer);
+    install(&mut manager, 1, limit_config(&[(peer, Some(1), None)], &[]));
+    let source = Ipv4Addr::new(192, 0, 2, peer_octet);
+    announce(
+        &mut manager,
+        IpAddr::V4(source),
+        source_routes(source, &[41, 42]),
+    );
+    assert_eq!(wire_prefixes(&mut outbound_rx).len(), 1);
+    assert!(ipv4_row(&manager, peer).blocking);
+    install(&mut manager, 2, limit_config(&[(peer, Some(2), None)], &[]));
+    assert_eq!(manager.outbound_limit_recovery_for(peer), vec![Afi::Ipv4]);
+    (manager, peer, outbound_rx)
 }
 
 /// Load-bearing break: removing either active-attempt observation leaves the
@@ -604,6 +678,491 @@ fn only_a_real_withheld_prefix_recovery_records_a_recovery_batch() {
         1,
         "an empty queue must not publish another batch"
     );
+}
+
+/// One resync turn may re-derive one live peer/family and no more. The
+/// remainder stays in peer-address order, and every completed slice commits
+/// advertised state, gauges, and one actor-duration sample before yielding.
+///
+/// Load-bearing breaks: restoring `mem::take` plus nested peer/family loops
+/// recovers every peer on the first turn; selecting from hash iteration loses
+/// the asserted order; bypassing the common outbound commit loses its
+/// per-slice Adj-RIB-Out and capacity-gauge truth.
+#[test]
+fn recovery_ticks_slice_peers_in_order_and_keep_each_slice_truthful() {
+    let metrics = BgpMetrics::new();
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    manager.test_force_ungrouped = true;
+    let peers = [
+        IpAddr::V4(Ipv4Addr::new(10, 113, 0, 1)),
+        IpAddr::V4(Ipv4Addr::new(10, 113, 0, 2)),
+        IpAddr::V4(Ipv4Addr::new(10, 113, 0, 3)),
+    ];
+    let mut outbound = peers
+        .into_iter()
+        .map(|peer| register_peer(&mut manager, peer))
+        .collect::<Vec<_>>();
+    install(
+        &mut manager,
+        1,
+        limit_config(
+            &[
+                (peers[0], Some(1), None),
+                (peers[1], Some(1), None),
+                (peers[2], Some(1), None),
+            ],
+            &[],
+        ),
+    );
+    let source = Ipv4Addr::new(192, 0, 2, 114);
+    announce(
+        &mut manager,
+        IpAddr::V4(source),
+        source_routes(source, &[11, 12]),
+    );
+    for receiver in &mut outbound {
+        assert_eq!(wire_prefixes(receiver).len(), 1);
+    }
+
+    install(
+        &mut manager,
+        2,
+        limit_config(
+            &[
+                (peers[0], Some(2), None),
+                (peers[1], Some(2), None),
+                (peers[2], Some(2), None),
+            ],
+            &[],
+        ),
+    );
+    for peer in peers {
+        assert_eq!(manager.outbound_limit_recovery_for(peer), vec![Afi::Ipv4]);
+    }
+
+    for completed in 0..peers.len() {
+        assert!(
+            manager.resync_dirty_peers_bounded(),
+            "one nonempty recovery slice reports actor work"
+        );
+        for (index, peer) in peers.into_iter().enumerate() {
+            let recovered = index <= completed;
+            assert_eq!(
+                manager.outbound_limit_recovery_for(peer),
+                if recovered { vec![] } else { vec![Afi::Ipv4] },
+                "the ordered remainder must begin after slice {completed}"
+            );
+            assert_eq!(
+                manager
+                    .adj_ribs_out
+                    .get(&peer)
+                    .map_or(0, |rib| rib.unicast_prefix_count(Afi::Ipv4)),
+                if recovered { 2 } else { 1 },
+                "Adj-RIB-Out must reflect exactly the slices completed so far"
+            );
+            let row = ipv4_row(&manager, peer);
+            assert_eq!(row.usage, if recovered { 2 } else { 1 });
+            assert_eq!(row.blocking, !recovered);
+            assert_eq!(
+                capacity_gauge(&metrics, "bgp_outbound_prefix_usage", peer, "ipv4_unicast"),
+                Some(if recovered { 2.0 } else { 1.0 })
+            );
+            assert_eq!(
+                capacity_gauge(
+                    &metrics,
+                    "bgp_outbound_prefix_blocking",
+                    peer,
+                    "ipv4_unicast"
+                ),
+                Some(if recovered { 0.0 } else { 1.0 })
+            );
+            assert_eq!(
+                wire_prefixes(&mut outbound[index]).len(),
+                if index == completed { 2 } else { 0 },
+                "only this turn's peer may receive a replay"
+            );
+        }
+        assert_eq!(
+            outbound_limit_actor_samples(&metrics)["recovery"],
+            u64::try_from(completed + 1).expect("three slices fit in u64"),
+            "each nonempty slice records exactly one recovery duration"
+        );
+    }
+    assert!(!manager.outbound_limit_recovery_pending());
+    assert!(!manager.resync_dirty_peers_bounded());
+}
+
+/// A stale queue head is discarded without spending the tick or disturbing
+/// either live sibling. The next live peer still completes, and its ordered
+/// successor remains queued.
+///
+/// Load-bearing break: returning immediately for a departed peer parks both
+/// siblings; replaying the whole remainder also touches the final sibling.
+#[test]
+fn a_departed_recovery_head_is_skipped_without_affecting_live_siblings() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    manager.test_force_ungrouped = true;
+    let peers = [
+        IpAddr::V4(Ipv4Addr::new(10, 113, 0, 1)),
+        IpAddr::V4(Ipv4Addr::new(10, 113, 0, 2)),
+        IpAddr::V4(Ipv4Addr::new(10, 113, 0, 3)),
+    ];
+    let mut outbound = peers
+        .into_iter()
+        .map(|peer| register_peer(&mut manager, peer))
+        .collect::<Vec<_>>();
+    install(
+        &mut manager,
+        1,
+        limit_config(
+            &[
+                (peers[0], Some(1), None),
+                (peers[1], Some(1), None),
+                (peers[2], Some(1), None),
+            ],
+            &[],
+        ),
+    );
+    let source = Ipv4Addr::new(192, 0, 2, 115);
+    announce(
+        &mut manager,
+        IpAddr::V4(source),
+        source_routes(source, &[21, 22]),
+    );
+    for receiver in &mut outbound {
+        assert_eq!(wire_prefixes(receiver).len(), 1);
+    }
+    install(
+        &mut manager,
+        2,
+        limit_config(
+            &[
+                (peers[0], Some(2), None),
+                (peers[1], Some(2), None),
+                (peers[2], Some(2), None),
+            ],
+            &[],
+        ),
+    );
+
+    manager.outbound_peers.remove(&peers[0]);
+    assert!(manager.drain_outbound_limit_recovery());
+    assert_eq!(manager.outbound_limit_recovery_for(peers[0]), vec![]);
+    assert_eq!(manager.outbound_limit_recovery_for(peers[1]), vec![]);
+    assert_eq!(
+        manager.outbound_limit_recovery_for(peers[2]),
+        vec![Afi::Ipv4]
+    );
+    assert_eq!(wire_prefixes(&mut outbound[0]), HashSet::new());
+    assert_eq!(wire_prefixes(&mut outbound[1]).len(), 2);
+    assert_eq!(wire_prefixes(&mut outbound[2]), HashSet::new());
+    assert_eq!(ipv4_row(&manager, peers[1]).usage, 2);
+    assert_eq!(ipv4_row(&manager, peers[2]).usage, 1);
+}
+
+/// Internal recovery is a family-only export replay, not a route-refresh
+/// protocol exchange. IPv4 recovery neither replays IPv6 nor emits `EoR`,
+/// `BoRR`, or `EoRR`, while both family latches and Adj-RIB-Out stay exact.
+///
+/// Load-bearing breaks: calling the public refresh response replays protocol
+/// markers; widening the family replays IPv6 and clears its blocking latch.
+#[test]
+fn ipv4_recovery_is_family_only_and_emits_no_refresh_or_eor_markers() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    manager.test_force_ungrouped = true;
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 113, 0, 4));
+    let mut outbound_rx = register_peer_with_families(&mut manager, peer, &dual_stack_sendable());
+    install(
+        &mut manager,
+        1,
+        limit_config(&[(peer, Some(1), Some(1))], &[]),
+    );
+    let source4 = Ipv4Addr::new(192, 0, 2, 116);
+    announce(
+        &mut manager,
+        IpAddr::V4(source4),
+        source_routes(source4, &[31, 32]),
+    );
+    let source6 = Ipv6Addr::new(0x2001, 0xdb8, 0, 116, 0, 0, 0, 1);
+    announce(
+        &mut manager,
+        IpAddr::V6(source6),
+        source_v6_routes(source6, &[31, 32]),
+    );
+    assert_eq!(wire_prefixes(&mut outbound_rx).len(), 2);
+    assert!(ipv4_row(&manager, peer).blocking);
+    assert!(family_row(&manager, peer, "ipv6_unicast").blocking);
+
+    install(
+        &mut manager,
+        2,
+        limit_config(&[(peer, Some(2), Some(2))], &[]),
+    );
+    assert_eq!(
+        manager.outbound_limit_recovery_for(peer),
+        vec![Afi::Ipv4, Afi::Ipv6],
+        "family order is deterministic"
+    );
+    assert!(manager.drain_outbound_limit_recovery());
+    assert_eq!(
+        manager.outbound_limit_recovery_for(peer),
+        vec![Afi::Ipv6],
+        "one turn must leave the sibling family queued"
+    );
+    let replay = outbound_rx.try_recv().expect("IPv4 recovery is enqueued");
+    assert!(
+        replay
+            .announce
+            .iter()
+            .all(|route| matches!(route.prefix, Prefix::V4(_))),
+        "the IPv4 slice must not replay IPv6"
+    );
+    assert_eq!(replay.announce.len(), 2);
+    assert!(replay.end_of_rib.is_empty(), "recovery is not an EoR");
+    assert!(
+        replay.refresh_markers.is_empty(),
+        "recovery is not a BoRR/EoRR exchange"
+    );
+    assert!(outbound_rx.try_recv().is_err());
+    assert_eq!(
+        manager
+            .adj_ribs_out
+            .get(&peer)
+            .map_or(0, |rib| rib.unicast_prefix_count(Afi::Ipv4)),
+        2
+    );
+    assert_eq!(
+        manager
+            .adj_ribs_out
+            .get(&peer)
+            .map_or(0, |rib| rib.unicast_prefix_count(Afi::Ipv6)),
+        1
+    );
+    assert!(!ipv4_row(&manager, peer).blocking);
+    assert!(
+        family_row(&manager, peer, "ipv6_unicast").blocking,
+        "the untouched IPv6 episode remains open"
+    );
+}
+
+/// Selection-held recovery remains internal, keeps its latch and queue entry,
+/// and does not arm a polling loop while the gate cannot run. Releasing the
+/// gate makes the same intent runnable without a second capacity event.
+///
+/// Load-bearing breaks: routing recovery through peer-refresh deferral
+/// populates `selection_deferred_refresh`; treating all queued intent as
+/// runnable spins the resync timer while the selection gate is held.
+#[test]
+fn selection_held_recovery_parks_without_protocol_state_or_timer_spin() {
+    let metrics = BgpMetrics::new();
+    let (manager, peer, mut outbound_rx) = manager_with_queued_ipv4_recovery(metrics.clone(), 5);
+    let waiter = IpAddr::V4(Ipv4Addr::new(10, 113, 1, 5));
+    let mut manager = manager.with_selection_deferral(SelectionDeferralConfig {
+        timeout: std::time::Duration::from_mins(1),
+        waiters: vec![SelectionDeferralWaiterConfig {
+            peer: waiter,
+            families: ipv4_sendable(),
+        }],
+    });
+    assert!(manager.selection_convergence_held((Afi::Ipv4, Safi::Unicast)));
+    assert!(!manager.resync_tick_pending());
+    assert_eq!(
+        manager.send_route_refresh_response_inner(
+            peer,
+            Afi::Ipv4,
+            Safi::Unicast,
+            FamilyReplayKind::PrefixLimitRecovery,
+        ),
+        FamilyReplayOutcome::Deferred
+    );
+    assert!(!manager.drain_outbound_limit_recovery());
+    assert_eq!(manager.outbound_limit_recovery_for(peer), vec![Afi::Ipv4]);
+    assert!(ipv4_row(&manager, peer).blocking);
+    assert!(
+        !manager.selection_deferred_refresh.contains_key(&peer),
+        "internal recovery must not become a deferred peer refresh"
+    );
+    assert!(!manager.pending_refresh.contains_key(&peer));
+    assert!(!manager.dirty_peers.contains(&peer));
+    assert_eq!(outbound_limit_actor_samples(&metrics)["recovery"], 0);
+    assert_eq!(
+        capacity_gauge(
+            &metrics,
+            "bgp_outbound_prefix_blocking",
+            peer,
+            "ipv4_unicast"
+        ),
+        Some(1.0)
+    );
+
+    manager.expire_selection_deferral();
+    drop(wire_prefixes(&mut outbound_rx));
+    assert!(!manager.selection_convergence_held((Afi::Ipv4, Safi::Unicast)));
+    assert!(
+        manager.resync_tick_pending(),
+        "gate release makes the retained recovery runnable"
+    );
+    assert!(manager.drain_outbound_limit_recovery());
+    assert_eq!(manager.outbound_limit_recovery_for(peer), vec![]);
+    assert_eq!(outbound_limit_actor_samples(&metrics)["recovery"], 1);
+}
+
+/// A full outbound channel is an internal recovery failure, not a generic
+/// refresh/dirty-resync handoff. The queue entry and blocking/gauge truth
+/// survive, and the ordinary retry can commit once capacity returns.
+///
+/// Load-bearing breaks: removing the replay outcome consumes the queue on
+/// failure; reusing peer-refresh failure handling populates `pending_refresh`
+/// and widens the retry into broad dirty-peer resync.
+#[test]
+fn backpressured_recovery_stays_internal_and_retries_transactionally() {
+    let metrics = BgpMetrics::new();
+    let (mut manager, peer, mut outbound_rx) =
+        manager_with_queued_ipv4_recovery(metrics.clone(), 6);
+    let outbound_tx = manager
+        .outbound_peers
+        .get(&peer)
+        .expect("peer stays registered")
+        .clone();
+    while outbound_tx.try_send(OutboundRouteUpdate::default()).is_ok() {}
+
+    assert!(!manager.drain_outbound_limit_recovery());
+    assert_eq!(manager.outbound_limit_recovery_for(peer), vec![Afi::Ipv4]);
+    assert!(manager.outbound_limit_recovery_runnable());
+    assert!(ipv4_row(&manager, peer).blocking);
+    assert_eq!(ipv4_row(&manager, peer).usage, 1);
+    assert_eq!(
+        capacity_gauge(
+            &metrics,
+            "bgp_outbound_prefix_blocking",
+            peer,
+            "ipv4_unicast"
+        ),
+        Some(1.0)
+    );
+    assert_eq!(
+        capacity_gauge(&metrics, "bgp_outbound_prefix_usage", peer, "ipv4_unicast"),
+        Some(1.0)
+    );
+    assert!(!manager.pending_refresh.contains_key(&peer));
+    assert!(!manager.dirty_peers.contains(&peer));
+    assert_eq!(outbound_limit_actor_samples(&metrics)["recovery"], 0);
+
+    drop(wire_prefixes(&mut outbound_rx));
+    assert!(manager.drain_outbound_limit_recovery());
+    assert_eq!(manager.outbound_limit_recovery_for(peer), vec![]);
+    assert_eq!(wire_prefixes(&mut outbound_rx).len(), 2);
+    assert_eq!(outbound_limit_actor_samples(&metrics)["recovery"], 1);
+}
+
+/// An RFC 5291 initial-advertisement gate parks recovery without lifting the
+/// gate. A real peer refresh still lifts it and emits normal RFC 2918/7313
+/// control markers; only then does retained internal recovery become runnable.
+///
+/// Load-bearing breaks: treating recovery as a peer refresh removes the ORF
+/// gate and emits control markers; suppressing markers globally breaks the
+/// asserted public refresh envelope.
+#[test]
+fn orf_pending_recovery_waits_for_a_normal_peer_refresh() {
+    let metrics = BgpMetrics::new();
+    let (mut manager, peer, mut outbound_rx) =
+        manager_with_queued_ipv4_recovery(metrics.clone(), 7);
+    let family = (Afi::Ipv4, Safi::Unicast);
+    manager
+        .peer_orf_pending
+        .entry(peer)
+        .or_default()
+        .insert(family);
+
+    assert!(!manager.resync_tick_pending());
+    assert_eq!(
+        manager.send_route_refresh_response_inner(
+            peer,
+            family.0,
+            family.1,
+            FamilyReplayKind::PrefixLimitRecovery,
+        ),
+        FamilyReplayOutcome::Deferred
+    );
+    assert!(!manager.drain_outbound_limit_recovery());
+    assert_eq!(manager.outbound_limit_recovery_for(peer), vec![Afi::Ipv4]);
+    assert!(
+        manager
+            .peer_orf_pending
+            .get(&peer)
+            .is_some_and(|pending| pending.contains(&family))
+    );
+    assert!(ipv4_row(&manager, peer).blocking);
+    assert!(!manager.pending_refresh.contains_key(&peer));
+    assert!(!manager.dirty_peers.contains(&peer));
+    assert_eq!(outbound_limit_actor_samples(&metrics)["recovery"], 0);
+
+    manager.send_route_refresh_response(peer, family.0, family.1);
+    let peer_refresh = outbound_rx.try_recv().expect("peer refresh is enqueued");
+    assert_eq!(peer_refresh.end_of_rib, vec![family]);
+    assert_eq!(
+        peer_refresh.refresh_markers,
+        vec![
+            (family.0, family.1, RouteRefreshSubtype::BoRR),
+            (family.0, family.1, RouteRefreshSubtype::EoRR),
+        ]
+    );
+    assert!(
+        !manager
+            .peer_orf_pending
+            .get(&peer)
+            .is_some_and(|pending| pending.contains(&family)),
+        "only the peer refresh lifts the ORF gate"
+    );
+    assert!(manager.resync_tick_pending());
+
+    assert!(manager.drain_outbound_limit_recovery());
+    let recovery = outbound_rx
+        .try_recv()
+        .expect("internal recovery is enqueued");
+    assert!(recovery.end_of_rib.is_empty());
+    assert!(recovery.refresh_markers.is_empty());
+    assert_eq!(manager.outbound_limit_recovery_for(peer), vec![]);
+    assert_eq!(outbound_limit_actor_samples(&metrics)["recovery"], 1);
+}
+
+/// A GR-deferred `EoR` belongs to peer-refresh/gate-release protocol state.
+/// Internal recovery commits its family without inspecting, consuming, or
+/// flushing that deferral.
+///
+/// Load-bearing break: sharing the peer-refresh epilogue removes
+/// `gr_deferred_eor` and emits or queues a genuine `EoR`.
+#[test]
+fn recovery_does_not_consume_or_flush_a_gr_deferred_eor() {
+    let metrics = BgpMetrics::new();
+    let (mut manager, peer, mut outbound_rx) =
+        manager_with_queued_ipv4_recovery(metrics.clone(), 8);
+    let family = (Afi::Ipv4, Safi::Unicast);
+    manager
+        .gr_deferred_eor
+        .entry(peer)
+        .or_default()
+        .insert(family);
+
+    assert!(manager.drain_outbound_limit_recovery());
+    let recovery = outbound_rx
+        .try_recv()
+        .expect("internal recovery is enqueued");
+    assert!(recovery.end_of_rib.is_empty());
+    assert!(recovery.refresh_markers.is_empty());
+    assert!(
+        manager
+            .gr_deferred_eor
+            .get(&peer)
+            .is_some_and(|families| families.contains(&family)),
+        "internal recovery must leave GR protocol deferral untouched"
+    );
+    assert!(!manager.pending_eor.contains_key(&peer));
+    assert_eq!(manager.outbound_limit_recovery_for(peer), vec![]);
+    assert_eq!(outbound_limit_actor_samples(&metrics)["recovery"], 1);
 }
 
 /// A dynamic child has no neighbor entry: it inherits its configured group,
@@ -1000,15 +1559,13 @@ async fn wire_prefixes_until(
 }
 
 /// A raise must put the withheld prefixes on the wire under the manager's
-/// own event loop, with nothing else happening on the daemon. Every other
-/// test here drains the recovery by calling `resync_dirty_peers_bounded`
-/// itself, which is precisely the drive a real quiescent daemon does not
-/// supply.
+/// own event loop, with nothing else happening on the daemon. The second
+/// peer needs a second timer tick, so this also proves that a sliced
+/// remainder re-arms the ordinary resync timer and eventually drains.
 ///
-/// Load-bearing break: scheduling the recovery without arming its own drive
-/// parks the intent forever, because the resync timer that drains it is
-/// armed only by unrelated dirty-peer state — the peer stays at the old cap
-/// while the gauges and logs report the new one.
+/// Load-bearing breaks: scheduling recovery without arming its own drive
+/// parks both peers; removing the post-slice re-arm recovers the first peer
+/// and parks the ordered remainder.
 #[tokio::test]
 async fn a_raise_delivers_the_withheld_prefixes_on_a_quiescent_daemon() {
     tokio::time::pause();
@@ -1017,36 +1574,48 @@ async fn a_raise_delivers_the_withheld_prefixes_on_a_quiescent_daemon() {
     manager.test_force_ungrouped = true;
     let handle = tokio::spawn(manager.run());
 
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 113, 0, 1));
-    install_over_channel(&tx, 1, limit_config(&[(peer, Some(2), None)], &[])).await;
+    let peers = [
+        IpAddr::V4(Ipv4Addr::new(10, 113, 0, 1)),
+        IpAddr::V4(Ipv4Addr::new(10, 113, 0, 2)),
+    ];
+    install_over_channel(
+        &tx,
+        1,
+        limit_config(&[(peers[0], Some(1), None), (peers[1], Some(1), None)], &[]),
+    )
+    .await;
 
-    let (outbound_tx, mut outbound_rx) = mpsc::channel(64);
-    tx.send(RibUpdate::PeerUp {
-        peer,
-        session_id: 0,
-        peer_asn: 65_000,
-        peer_router_id: Ipv4Addr::UNSPECIFIED,
-        outbound_tx,
-        export_policy: None,
-        sendable_families: ipv4_sendable(),
-        is_ebgp: false,
-        route_reflector_client: false,
-        orr_vantage: None,
-        per_client_best: false,
-        interpret_rfc1997: true,
-        add_path_send_families: vec![],
-        add_path_send_max: 0,
-        negotiated_orf_recv: vec![],
-        negotiated_llgr_families: vec![],
-    })
-    .await
-    .expect("the manager is running");
+    let mut outbound = Vec::new();
+    for peer in peers {
+        let (outbound_tx, outbound_rx) = mpsc::channel(64);
+        tx.send(RibUpdate::PeerUp {
+            peer,
+            session_id: 0,
+            peer_asn: 65_000,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            outbound_tx,
+            export_policy: None,
+            sendable_families: ipv4_sendable(),
+            is_ebgp: false,
+            route_reflector_client: false,
+            orr_vantage: None,
+            per_client_best: false,
+            interpret_rfc1997: true,
+            add_path_send_families: vec![],
+            add_path_send_max: 0,
+            negotiated_orf_recv: vec![],
+            negotiated_llgr_families: vec![],
+        })
+        .await
+        .expect("the manager is running");
+        outbound.push(outbound_rx);
+    }
 
     let source = Ipv4Addr::new(192, 0, 2, 113);
     tx.send(RibUpdate::RoutesReceived {
         peer: IpAddr::V4(source),
         session_id: 0,
-        announced: source_routes(source, &[1, 2, 3]),
+        announced: source_routes(source, &[1, 2]),
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
@@ -1056,29 +1625,33 @@ async fn a_raise_delivers_the_withheld_prefixes_on_a_quiescent_daemon() {
     .await
     .expect("the manager is running");
 
-    let admitted = tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        wire_prefixes_until(&mut outbound_rx, 2),
-    )
-    .await
-    .expect("the cap admits two prefixes");
-    let withheld = *[v4(1), v4(2), v4(3)]
-        .iter()
-        .find(|prefix| !admitted.contains(prefix))
-        .expect("one prefix is over the cap");
+    for receiver in &mut outbound {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            wire_prefixes_until(receiver, 1),
+        )
+        .await
+        .expect("the cap admits one prefix");
+    }
 
-    install_over_channel(&tx, 2, limit_config(&[(peer, Some(3), None)], &[])).await;
-
-    let recovered = tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        wire_prefixes_until(&mut outbound_rx, 3),
+    install_over_channel(
+        &tx,
+        2,
+        limit_config(&[(peers[0], Some(2), None), (peers[1], Some(2), None)], &[]),
     )
     .await;
-    assert!(
-        recovered.is_ok_and(|advertised| advertised.contains(&withheld)),
-        "a raise must deliver the withheld prefix without any unrelated peer \
-         happening to be dirty"
-    );
+
+    for (index, receiver) in outbound.iter_mut().enumerate() {
+        let recovered = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            wire_prefixes_until(receiver, 2),
+        )
+        .await;
+        assert!(
+            recovered.is_ok_and(|advertised| advertised.len() == 2),
+            "peer {index} must recover without unrelated dirty-peer work"
+        );
+    }
 
     drop(tx);
     handle.await.expect("the manager shuts down cleanly");

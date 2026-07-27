@@ -60,13 +60,16 @@ Every phase retains:
 - update-group count, member count, and every peer's group id;
 - every member's wire-side unique-prefix count and outbound-capacity gauges.
 
-The apply and recovery gates require exactly one new histogram sample. For one
-sample, the `_sum` delta is the exact complete synchronous actor duration for
-that operation. A later `/proc` `VmHWM` snapshot is not assumed to preserve an
-earlier maximum: concurrent accounting was observed to lower it during the
-100-member campaign. The published high-water observation is therefore the
-maximum across the independent sampler rows. `VmRSS` remains a point-in-time
-value.
+The apply gates require exactly one new histogram sample. Capacity recovery
+requires exactly one sample per grouped member, matching the bounded
+peer/family actor slices. The `_sum` delta is therefore total synchronous
+actor work, while the cumulative bucket deltas bound the slowest individual
+slice. The receipt separately measures operator-visible recovery wall time
+from the recovery SIGHUP until every member has the withheld tail. A later
+`/proc` `VmHWM` snapshot is not assumed to preserve an earlier maximum:
+concurrent accounting was observed to lower it during the 100-member
+campaign. The published high-water observation is therefore the maximum
+across the independent sampler rows. `VmRSS` remains a point-in-time value.
 
 ## Run
 
@@ -94,8 +97,10 @@ The campaign assertions are deliberately structural:
 - bypassing admission makes every candidate withheld wire-count check red;
 - splitting a member to a private path or another group makes the exact
   group-id/member inventory red;
-- suppressing recovery scheduling makes both the recovery histogram delta and
-  every member's final wire count red;
+- suppressing recovery scheduling makes both the exact one-sample-per-member
+  recovery histogram delta and every member's final wire count red;
+- collapsing the bounded slices back into one actor turn makes the recovery
+  sample-count assertion red;
 - replacing the production transaction with a no-op makes the histogram count
   delta red in both variants;
 - parsing `VmRSS` as `VmHWM` makes the strict parser fixture red.

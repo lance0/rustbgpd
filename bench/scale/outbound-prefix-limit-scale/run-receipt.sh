@@ -390,6 +390,11 @@ for summary_path in sorted(root.glob("*-*/summary.json")):
         "blocked_allocated_bytes": blocked["jemalloc_allocated_bytes"],
         "recovery_apply_seconds": value["recovery_apply_seconds"],
         "recovery_seconds": value["recovery_seconds"],
+        "recovery_wall_seconds": value["recovery_wall_seconds"],
+        "recovery_max_slice_bucket_lower_seconds":
+            value["recovery_max_slice_bucket_lower_seconds"],
+        "recovery_max_slice_bucket_upper_seconds":
+            value["recovery_max_slice_bucket_upper_seconds"],
         "recovered_allocated_bytes": recovered["jemalloc_allocated_bytes"],
         "recovered_vm_rss_kib": recovered["vm_rss_kib"],
         "recovered_vm_hwm_kib": recovered["vm_hwm_kib"],
