@@ -29,6 +29,15 @@
 //! joining iBGP RR client, no export policy, no Add-Path, and one negotiated
 //! IPv4 unicast family.
 //!
+//! `grouped_withdrawal_fanout` is the complementary route-server withdrawal
+//! shape. It pre-advertises 64 routes to one real update group, drains setup
+//! output, and times one production `RoutesReceived` withdrawal through direct
+//! manager dispatch, bounded route-chunk processing, Loc-RIB recompute, grouped
+//! distribution, commit, and enqueue at 8/64/256/1,000 members. Manager-channel
+//! dequeue, Tokio actor scheduling, receipt checks, and queue inspection remain
+//! outside accumulated time. Its synthetic, unregistered source uses the
+//! production legacy-producer `session_id = 0` compatibility branch.
+//!
 //! Gated behind `bench-internals`; run with:
 //!   cargo bench -p rustbgpd-transport --features bench-internals --bench fanout
 //!
@@ -64,6 +73,8 @@ const PEER_COUNTS: [usize; 4] = [1, 8, 64, 256];
 const IXP_PEER_COUNTS: [usize; 3] = [8, 64, 256];
 /// Route-server fleets retained for the family-gauge A/B receipt.
 const ADJ_RIB_OUT_GAUGE_PEER_COUNTS: [usize; 5] = [1, 8, 64, 256, 1_000];
+/// Route-server fleets for the production grouped-withdrawal measurement.
+const GROUPED_WITHDRAWAL_PEER_COUNTS: [usize; 4] = [8, 64, 256, 1_000];
 /// Loc-RIB sizes for the late RR-client initial-table join instrument.
 const INITIAL_TABLE_JOIN_ROUTE_COUNTS: [usize; 2] = [4_096, 65_536];
 /// Per-peer channel capacity — one pass of `CHANGED` announces fits without
@@ -309,6 +320,43 @@ struct AdjRibOutGaugeFanoutState {
     med: u32,
 }
 
+fn assert_unicast_only_envelope(update: &OutboundRouteUpdate) {
+    assert!(update.end_of_rib.is_empty());
+    assert!(update.refresh_markers.is_empty());
+    assert!(update.flowspec_announce.is_empty());
+    assert!(update.flowspec_withdraw.is_empty());
+    assert!(update.evpn_announce.is_empty());
+    assert!(update.evpn_withdraw.is_empty());
+    assert!(update.bgpls_announce.is_empty());
+    assert!(update.bgpls_withdraw.is_empty());
+    assert!(update.vpn_announce.is_empty());
+    assert!(update.vpn_withdraw.is_empty());
+    assert!(update.labeled_announce.is_empty());
+    assert!(update.labeled_withdraw.is_empty());
+    assert!(update.rtc_announce.is_empty());
+    assert!(update.rtc_withdraw.is_empty());
+    assert!(update.otc_blocked.is_empty());
+    assert!(!update.request_refresh_all_negotiated);
+}
+
+fn assert_real_transport_snapshot(update: &OutboundRouteUpdate) {
+    let snapshot = update
+        .exact_export_snapshot
+        .as_ref()
+        .expect("route-bearing benchmark envelope must retain an exact-export snapshot");
+    let evidence = fanout_bench_export_snapshot_evidence(snapshot.as_ref())
+        .expect("benchmark envelope must use the concrete transport-session snapshot");
+    assert_ne!(
+        evidence.owner_id, 0,
+        "the concrete transport snapshot must have a real session owner"
+    );
+    assert_eq!(
+        evidence.max_message_len,
+        usize::from(rustbgpd_wire::MAX_MESSAGE_LEN),
+        "the benchmark fleet must use classic-message session profiles"
+    );
+}
+
 fn drain_one_route_bearing_envelope_per_peer(
     receivers: &mut [mpsc::Receiver<OutboundRouteUpdate>],
 ) {
@@ -318,18 +366,7 @@ fn drain_one_route_bearing_envelope_per_peer(
             .expect("each changed-route pass enqueues one envelope per peer");
         assert_eq!(update.announce.len(), CHANGED);
         assert!(update.withdraw.is_empty());
-        assert!(update.flowspec_announce.is_empty());
-        assert!(update.flowspec_withdraw.is_empty());
-        assert!(update.evpn_announce.is_empty());
-        assert!(update.evpn_withdraw.is_empty());
-        assert!(update.bgpls_announce.is_empty());
-        assert!(update.bgpls_withdraw.is_empty());
-        assert!(update.vpn_announce.is_empty());
-        assert!(update.vpn_withdraw.is_empty());
-        assert!(update.labeled_announce.is_empty());
-        assert!(update.labeled_withdraw.is_empty());
-        assert!(update.rtc_announce.is_empty());
-        assert!(update.rtc_withdraw.is_empty());
+        assert_unicast_only_envelope(&update);
         assert!(
             update.exact_export_snapshot.is_some(),
             "route-bearing benchmark envelopes retain the real session snapshot"
@@ -339,6 +376,268 @@ fn drain_one_route_bearing_envelope_per_peer(
             "one changed-route pass must enqueue exactly one envelope per peer"
         );
     }
+}
+
+struct GroupedWithdrawalFanoutState {
+    manager: RibManager,
+    receivers: Vec<mpsc::Receiver<OutboundRouteUpdate>>,
+    source_peer: IpAddr,
+    routes: Vec<Route>,
+    withdrawals: Vec<(Prefix, u32)>,
+    expected_inventory: HashSet<(Prefix, u32)>,
+}
+
+fn drain_grouped_withdrawal_setup(
+    receivers: &mut [mpsc::Receiver<OutboundRouteUpdate>],
+    expected_inventory: &HashSet<(Prefix, u32)>,
+) {
+    for receiver in receivers {
+        let update = receiver
+            .try_recv()
+            .expect("pre-advertisement must enqueue one setup envelope per peer");
+        assert_eq!(
+            update.announce.len(),
+            expected_inventory.len(),
+            "setup must advertise every route exactly once"
+        );
+        let actual = update
+            .announce
+            .iter()
+            .map(|route| (route.prefix, route.path_id))
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            actual, *expected_inventory,
+            "setup must advertise the fixed withdrawal inventory"
+        );
+        assert!(update.withdraw.is_empty());
+        assert_unicast_only_envelope(&update);
+        assert_real_transport_snapshot(&update);
+        assert!(
+            receiver.try_recv().is_err(),
+            "setup must enqueue exactly one envelope per peer"
+        );
+    }
+}
+
+fn build_grouped_withdrawal_fanout(peers: usize) -> GroupedWithdrawalFanoutState {
+    let (manager, mut receivers, _changed) = build_ixp(peers, false);
+    let routes = changed_prefixes()
+        .into_iter()
+        .map(make_route)
+        .collect::<Vec<_>>();
+    let withdrawals = routes
+        .iter()
+        .map(|route| (route.prefix, route.path_id))
+        .collect::<Vec<_>>();
+    let expected_inventory = withdrawals.iter().copied().collect::<HashSet<_>>();
+    assert_eq!(expected_inventory.len(), CHANGED);
+    drain_grouped_withdrawal_setup(&mut receivers, &expected_inventory);
+    GroupedWithdrawalFanoutState {
+        manager,
+        receivers,
+        source_peer: routes
+            .first()
+            .expect("grouped-withdrawal fixture must contain routes")
+            .peer,
+        routes,
+        withdrawals,
+        expected_inventory,
+    }
+}
+
+fn assert_grouped_withdrawal_setup_receipt(receipt: AdjRibOutFanoutBenchReceipt, peers: usize) {
+    assert_eq!(
+        receipt.routes_received_dispatches, 1,
+        "setup must traverse one accepted production RoutesReceived dispatch"
+    );
+    assert_eq!(
+        receipt.routes_received_withdrawals, 0,
+        "setup must be a pure pre-advertisement"
+    );
+    assert_eq!(
+        receipt.update_groups, 1,
+        "setup must populate one production update group"
+    );
+    assert_eq!(receipt.grouped_peers, peers);
+    assert_eq!(
+        receipt.ungrouped_peers, 0,
+        "private fallback invalidates the grouped-withdrawal setup"
+    );
+    assert_eq!(
+        receipt.dirty_peers, 0,
+        "dirty resync invalidates the grouped-withdrawal setup"
+    );
+    assert_eq!(
+        receipt.grouped_unicast_routes, CHANGED,
+        "setup must populate the group-owned Adj-RIB-Out before withdrawal"
+    );
+    assert_eq!(
+        receipt.private_unicast_routes, 0,
+        "setup must not populate a private unicast Adj-RIB-Out"
+    );
+    assert_eq!(
+        receipt.exact_probe_batches, 1,
+        "one real exact probe batch must seed compatible grouped reuse"
+    );
+    assert_eq!(
+        receipt.exact_probe_candidates, CHANGED,
+        "every setup route must traverse the real exact encoder"
+    );
+    assert_eq!(
+        receipt.exact_probe_nonzero_encoded_lengths,
+        CHANGED * peers,
+        "every member must retain a nonzero real-encoder result per route"
+    );
+    assert_eq!(
+        receipt.exact_probe_cache_reuses,
+        CHANGED * peers.saturating_sub(1),
+        "every member after the first must reuse compatible exact lengths"
+    );
+    assert_eq!(
+        receipt.successful_commits, peers,
+        "every grouped member must commit the setup advertisement"
+    );
+    assert_eq!(
+        receipt.successful_enqueues, peers,
+        "every grouped member must enqueue the setup advertisement"
+    );
+    assert_eq!(receipt.family_gauge_writes, peers);
+    assert_eq!(receipt.last_family_gauge_write_mask, 0x01);
+    assert_eq!(
+        receipt.first_peer_family_values,
+        [
+            i64::try_from(CHANGED).expect("fixture size fits i64"),
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+        ],
+        "the first member's grouped IPv4-unicast gauge must reflect setup state"
+    );
+}
+
+fn assert_grouped_withdrawal_receipt(receipt: AdjRibOutFanoutBenchReceipt, peers: usize) {
+    assert_eq!(
+        receipt.routes_received_dispatches, 1,
+        "the timed pass must traverse one accepted production RoutesReceived dispatch"
+    );
+    assert_eq!(
+        receipt.routes_received_withdrawals, CHANGED,
+        "the production dispatch must carry the complete withdrawal inventory"
+    );
+    assert_eq!(
+        receipt.update_groups, 1,
+        "the fleet must remain one production update group"
+    );
+    assert_eq!(receipt.grouped_peers, peers);
+    assert_eq!(
+        receipt.ungrouped_peers, 0,
+        "private fallback invalidates the grouped-withdrawal shape"
+    );
+    assert_eq!(receipt.dirty_peers, 0, "dirty resync invalidates the shape");
+    assert_eq!(
+        receipt.grouped_unicast_routes, 0,
+        "the folded group-owned Adj-RIB-Out must contain no withdrawn route"
+    );
+    assert_eq!(
+        receipt.private_unicast_routes, 0,
+        "no private Adj-RIB-Out may retain or receive a withdrawn route"
+    );
+    assert_eq!(receipt.exact_probe_candidates, 0);
+    assert_eq!(receipt.exact_probe_nonzero_encoded_lengths, 0);
+    assert_eq!(receipt.exact_probe_cache_reuses, 0);
+    assert_eq!(
+        receipt.successful_commits, peers,
+        "every grouped member must commit one route-bearing withdrawal"
+    );
+    assert_eq!(
+        receipt.successful_enqueues, peers,
+        "every grouped member must enqueue one withdrawal envelope"
+    );
+    assert_eq!(receipt.family_gauge_writes, peers);
+    assert_eq!(receipt.last_family_gauge_write_mask, 0x01);
+    assert_eq!(
+        receipt.first_peer_family_values, [0; 7],
+        "the final folded Adj-RIB-Out gauges must be empty"
+    );
+}
+
+fn drain_grouped_withdrawals(
+    receivers: &mut [mpsc::Receiver<OutboundRouteUpdate>],
+    expected_inventory: &HashSet<(Prefix, u32)>,
+) {
+    for receiver in receivers {
+        let update = receiver
+            .try_recv()
+            .expect("every grouped member must receive one withdrawal envelope");
+        assert!(update.announce.is_empty());
+        assert!(update.next_hop_override.is_empty());
+        assert_eq!(
+            update.withdraw.len(),
+            expected_inventory.len(),
+            "withdrawal envelope must contain every route exactly once"
+        );
+        let actual = update.withdraw.iter().copied().collect::<HashSet<_>>();
+        assert_eq!(
+            actual, *expected_inventory,
+            "withdrawal envelope must match the pre-advertised inventory"
+        );
+        assert_unicast_only_envelope(&update);
+        assert_real_transport_snapshot(&update);
+        assert!(
+            receiver.try_recv().is_err(),
+            "one source withdrawal must enqueue exactly one envelope per peer"
+        );
+    }
+}
+
+fn bench_grouped_withdrawal_fanout(c: &mut Criterion) {
+    let mut group = c.benchmark_group("grouped_withdrawal_fanout");
+    group.sample_size(10);
+    for &peers in &GROUPED_WITHDRAWAL_PEER_COUNTS {
+        let shape = format!("{CHANGED}/{peers}");
+        group.bench_with_input(
+            BenchmarkId::new("homogeneous_route_server", &shape),
+            &peers,
+            |bench, &peers| {
+                let mut state = build_grouped_withdrawal_fanout(peers);
+                bench.iter_custom(|iterations| {
+                    let mut accumulated = Duration::ZERO;
+                    for _ in 0..iterations {
+                        assert_grouped_withdrawal_setup_receipt(
+                            state.manager.bench_adj_rib_out_fanout_receipt(),
+                            peers,
+                        );
+                        let withdrawn = state.withdrawals.clone();
+                        state.manager.bench_reset_adj_rib_out_fanout_receipt();
+                        let started = Instant::now();
+                        state
+                            .manager
+                            .bench_withdraw_loc_rib(state.source_peer, withdrawn);
+                        accumulated += started.elapsed();
+                        assert_grouped_withdrawal_receipt(
+                            state.manager.bench_adj_rib_out_fanout_receipt(),
+                            peers,
+                        );
+                        drain_grouped_withdrawals(&mut state.receivers, &state.expected_inventory);
+
+                        // Restore the identical pre-advertised inventory and
+                        // isolate its receipt before the next timed withdrawal.
+                        state.manager.bench_reset_adj_rib_out_fanout_receipt();
+                        state.manager.bench_seed_loc_rib(state.routes.clone());
+                        drain_grouped_withdrawal_setup(
+                            &mut state.receivers,
+                            &state.expected_inventory,
+                        );
+                    }
+                    accumulated
+                });
+            },
+        );
+    }
+    group.finish();
 }
 
 fn build_adj_rib_out_gauge_fanout(peers: usize) -> AdjRibOutGaugeFanoutState {
@@ -878,6 +1177,7 @@ criterion_group!(
     bench_fanout,
     bench_ixp_exact_export_fanout,
     bench_adj_rib_out_family_gauge,
+    bench_grouped_withdrawal_fanout,
     bench_initial_table_peer_join,
     bench_policy_regroup_resync,
     bench_ixp_policy_regroup_resync
