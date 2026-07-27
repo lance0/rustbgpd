@@ -47,6 +47,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`rbgp doctor` no longer fabricates a stuck-peer failure from missing
+  retained session history.** A failed event RPC or a peer absent from the
+  bounded fleet history reports explicit unknown evidence as a warning, and a
+  daemon-lifetime flap count is red only when retained history also proves a
+  recent session loss. Genuinely old retained transitions remain red.
+
 - **Outbound prefix-limit recovery now yields between peer/family replays.**
   A capacity raise or newly freed slot re-derives at most one live
   peer/family per RIB resync tick, retains the deterministic remainder, and
