@@ -12,6 +12,23 @@ use crate::adj_rib_out::AdjRibOut;
 use crate::route::{BgpLsFamily, FlowSpecKey, FlowSpecRoute, FlowSpecRouteKey};
 use crate::update::OutboundRouteUpdate;
 
+/// Why one family is being re-derived through the shared replay body.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum FamilyReplayKind {
+    /// A peer-requested RFC 2918/7313 response.
+    PeerRefresh { suppress_eor: bool },
+    /// Internal ADR-0113 capacity recovery.
+    PrefixLimitRecovery,
+}
+
+/// Whether the shared family replay reached the outbound commit boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum FamilyReplayOutcome {
+    Committed,
+    Deferred,
+    Failed,
+}
+
 impl RibManager {
     pub(super) fn update_peer_refresh_metrics(&self, peer: IpAddr) {
         if let Some(families) = self.refresh_in_progress.get(&peer) {
@@ -589,15 +606,23 @@ impl RibManager {
     /// Re-advertise the Loc-RIB for a given family to a peer, followed by `EoR`.
     /// Called when a peer sends ROUTE-REFRESH (RFC 2918).
     pub(super) fn send_route_refresh_response(&mut self, peer: IpAddr, afi: Afi, safi: Safi) {
-        self.send_route_refresh_response_inner(peer, afi, safi, false);
+        let _ = self.send_route_refresh_response_inner(
+            peer,
+            afi,
+            safi,
+            FamilyReplayKind::PeerRefresh {
+                suppress_eor: false,
+            },
+        );
     }
 
-    /// `suppress_eor` is set by the selection-deferral release path, which
-    /// has already queued/flushed the genuine convergence `EoR` for this
-    /// peer and family: without it a plain-refresh (RFC 2918) peer would
-    /// receive a second empty-UPDATE `EoR` from this response. An RFC 7313
-    /// peer is unaffected either way — transport substitutes the response's
-    /// own `end_of_rib` entry with the `EoRR` demarcation marker.
+    /// Re-derive one family through the common export and exact-export body.
+    ///
+    /// Only [`FamilyReplayKind::PeerRefresh`] participates in the protocol
+    /// state machine: selection-deferred refreshes, RFC 5291 gate release,
+    /// deferred GR `EoR`, RFC 2918 `EoR`, RFC 7313 markers, and generic refresh
+    /// retries. Prefix-limit recovery observes those gates but owns its own
+    /// queue and retry semantics.
     #[expect(
         clippy::too_many_lines,
         reason = "route-refresh replay keeps family staging, ORF gating, and EoR together"
@@ -607,34 +632,44 @@ impl RibManager {
         peer: IpAddr,
         afi: Afi,
         safi: Safi,
-        suppress_eor: bool,
-    ) {
+        replay_kind: FamilyReplayKind,
+    ) -> FamilyReplayOutcome {
         let family = (afi, safi);
-        if self.selection_convergence_held(family) {
-            self.selection_deferred_refresh
-                .entry(peer)
-                .or_default()
-                .insert(family);
-            debug!(%peer, ?afi, ?safi, "route-refresh response deferred behind RFC 4724 convergence gate");
-            return;
-        }
-        // RFC 5291 §6: a ROUTE-REFRESH (plain or ORF-carrying) for this family
-        // lifts the initial-advertisement gate, so this response is the first
-        // advertisement of the family — filtered through any installed ORF.
-        if let Some(pending) = self.peer_orf_pending.get_mut(&peer) {
-            pending.remove(&family);
-        }
-        // A GR restarter's EoR for this family may have been withheld at
-        // `PeerUp` (`send_initial_table`) because the family was ORF-gated:
-        // this refresh response IS the gated flood, so the deferred EoR must
-        // follow it — as a genuine EoR UPDATE, not this response's own
-        // `end_of_rib` entry, which transport substitutes with an EoRR
-        // demarcation when enhanced route refresh is negotiated. A restarter
-        // ends its RFC 4724 deferral on EoR, not on the RFC 7313 markers.
-        let deferred_eor = self
-            .gr_deferred_eor
-            .get(&peer)
-            .is_some_and(|families| families.contains(&family));
+        let (suppress_eor, deferred_eor) = match replay_kind {
+            FamilyReplayKind::PeerRefresh { suppress_eor } => {
+                if self.selection_convergence_held(family) {
+                    self.selection_deferred_refresh
+                        .entry(peer)
+                        .or_default()
+                        .insert(family);
+                    debug!(%peer, ?afi, ?safi, "route-refresh response deferred behind RFC 4724 convergence gate");
+                    return FamilyReplayOutcome::Deferred;
+                }
+                // RFC 5291 §6: a peer ROUTE-REFRESH lifts the initial-
+                // advertisement gate. Internal recovery may only observe it.
+                if let Some(pending) = self.peer_orf_pending.get_mut(&peer) {
+                    pending.remove(&family);
+                }
+                // A GR restarter's EoR may have been withheld at PeerUp while
+                // the ORF gate was active. Only the peer refresh that lifts
+                // that gate may consume and flush this protocol deferral.
+                let deferred_eor = self
+                    .gr_deferred_eor
+                    .get(&peer)
+                    .is_some_and(|families| families.contains(&family));
+                (suppress_eor, deferred_eor)
+            }
+            FamilyReplayKind::PrefixLimitRecovery => {
+                let orf_pending = self
+                    .peer_orf_pending
+                    .get(&peer)
+                    .is_some_and(|pending| pending.contains(&family));
+                if self.selection_convergence_held(family) || orf_pending {
+                    return FamilyReplayOutcome::Deferred;
+                }
+                (true, false)
+            }
+        };
         let orf_filter = self
             .peer_orf_filters
             .get(&peer)
@@ -1203,33 +1238,40 @@ impl RibManager {
             self.reconcile_peer_otc_blocked(peer, &all_prefixes, grouped_otc_blocked);
         }
 
-        if self.outbound_peers.contains_key(&peer) {
-            let mut group_prior = HashSet::new();
-            if member_of.is_some()
-                && let Some(routes) = self.grouped_advertised_routes(peer)
-            {
-                group_prior.extend(routes.into_iter().map(|route| {
+        if !self.outbound_peers.contains_key(&peer) {
+            return FamilyReplayOutcome::Failed;
+        }
+        let mut group_prior = HashSet::new();
+        if member_of.is_some()
+            && let Some(routes) = self.grouped_advertised_routes(peer)
+        {
+            group_prior.extend(
+                routes.into_iter().map(|route| {
                     crate::update::ExactExportKey::Unicast(route.prefix, route.path_id)
-                }));
-            }
-            if let Some(gid) = vpn_member_of
-                && let Some(group) = self.group_ribs.get(&gid)
-            {
-                let filter = self.member_rt_filter(peer);
-                let rejected = self.peer_unexportable.get(&peer);
-                group_prior.extend(group.table.iter_vpn().filter_map(|route| {
-                    let key = crate::update::ExactExportKey::Vpn(route.key());
-                    (route.peer != peer
-                        && crate::manager::update_groups::rt_passes(filter.as_ref(), route)
-                        && !rejected.is_some_and(|keys| keys.contains(&key)))
-                    .then_some(key)
-                }));
-            }
-            if !self.try_send_and_commit_outbound_update_with_group_prior_and_otc_scope(
-                peer,
-                nh_override_flags.into(),
-                announce.into(),
-                withdraw,
+                }),
+            );
+        }
+        if let Some(gid) = vpn_member_of
+            && let Some(group) = self.group_ribs.get(&gid)
+        {
+            let filter = self.member_rt_filter(peer);
+            let rejected = self.peer_unexportable.get(&peer);
+            group_prior.extend(group.table.iter_vpn().filter_map(|route| {
+                let key = crate::update::ExactExportKey::Vpn(route.key());
+                (route.peer != peer
+                    && crate::manager::update_groups::rt_passes(filter.as_ref(), route)
+                    && !rejected.is_some_and(|keys| keys.contains(&key)))
+                .then_some(key)
+            }));
+        }
+        let prior_blocking =
+            matches!(replay_kind, FamilyReplayKind::PrefixLimitRecovery).then(|| {
+                let blocking = self.outbound_blocking(peer, afi);
+                self.set_outbound_blocking(peer, afi, false);
+                blocking
+            });
+        let (end_of_rib, refresh_markers) = match replay_kind {
+            FamilyReplayKind::PeerRefresh { .. } => (
                 if deferred_eor || suppress_eor {
                     vec![]
                 } else {
@@ -1239,33 +1281,54 @@ impl RibManager {
                     (afi, safi, RouteRefreshSubtype::BoRR),
                     (afi, safi, RouteRefreshSubtype::EoRR),
                 ],
-                fs_announce,
-                fs_withdraw,
-                evpn_announce,
-                evpn_withdraw,
-                bgpls_announce,
-                bgpls_withdraw,
-                vpn_announce,
-                vpn_withdraw,
-                labeled_announce,
-                labeled_withdraw,
-                rtc_announce,
-                rtc_withdraw,
-                group_prior,
-                None,
-                member_of.is_none().then_some(&all_prefixes),
-            ) {
-                warn!(%peer, ?family, "outbound channel full during route refresh response");
-                self.metrics.record_outbound_route_drop(&peer.to_string());
-                self.pending_refresh.entry(peer).or_default().insert(family);
-                self.mark_outbound_dirty(peer);
-                return;
+            ),
+            FamilyReplayKind::PrefixLimitRecovery => (vec![], vec![]),
+        };
+        if !self.try_send_and_commit_outbound_update_with_group_prior_and_otc_scope(
+            peer,
+            nh_override_flags.into(),
+            announce.into(),
+            withdraw,
+            end_of_rib,
+            refresh_markers,
+            fs_announce,
+            fs_withdraw,
+            evpn_announce,
+            evpn_withdraw,
+            bgpls_announce,
+            bgpls_withdraw,
+            vpn_announce,
+            vpn_withdraw,
+            labeled_announce,
+            labeled_withdraw,
+            rtc_announce,
+            rtc_withdraw,
+            group_prior,
+            None,
+            member_of.is_none().then_some(&all_prefixes),
+        ) {
+            if let Some(blocking) = prior_blocking {
+                self.set_outbound_blocking(peer, afi, blocking);
             }
-            self.update_policy_filtered_routes_for_prefixes(
-                peer,
-                &all_prefixes,
-                &current_policy_filtered_routes,
-            );
+            self.metrics.record_outbound_route_drop(&peer.to_string());
+            match replay_kind {
+                FamilyReplayKind::PeerRefresh { .. } => {
+                    warn!(%peer, ?family, "outbound channel full during route refresh response");
+                    self.pending_refresh.entry(peer).or_default().insert(family);
+                    self.mark_outbound_dirty(peer);
+                }
+                FamilyReplayKind::PrefixLimitRecovery => {
+                    warn!(%peer, ?family, "outbound channel full during prefix-limit recovery");
+                }
+            }
+            return FamilyReplayOutcome::Failed;
+        }
+        self.update_policy_filtered_routes_for_prefixes(
+            peer,
+            &all_prefixes,
+            &current_policy_filtered_routes,
+        );
+        if matches!(replay_kind, FamilyReplayKind::PeerRefresh { .. }) {
             self.pending_refresh
                 .entry(peer)
                 .or_default()
@@ -1289,6 +1352,7 @@ impl RibManager {
                 }
             }
         }
+        FamilyReplayOutcome::Committed
     }
 
     /// Try to send any deferred `EoR` markers for a peer.

@@ -1612,32 +1612,37 @@ impl RibManager {
         }
     }
 
-    /// One bounded resync-timer tick: hand [`RESYNC_PEERS_PER_TICK`]-sized
-    /// slices of dirty peers to `distribute_changes` until the poll's
-    /// wall-clock budget elapses, withholding the remainder so the actor
-    /// yields between polls. Selection round-robins from
-    /// [`Self::dirty_resync_cursor`] and never re-attempts a peer within
-    /// the same tick, so peers whose sends keep failing cannot spin the
-    /// budget loop or monopolize successive ticks. Returns whether a
-    /// withheld (not-yet-attempted) backlog remains — distinct from peers
-    /// that stayed dirty because their send failed; those wait for the
-    /// ordinary retry interval.
-    ///
-    /// Safe to run partially: per-peer resync is idempotent — Adj-RIB-Out
-    /// state and the dirty flag are committed/cleared only after a
-    /// successful send, and withheld peers are not touched at all.
-    /// Whether the resync timer still has work: failed outbound sends, or an
-    /// ADR-0113 capacity recovery that [`Self::resync_dirty_peers_bounded`]
-    /// drains. Both arming and disarming go through this, so scheduling a
-    /// recovery guarantees it runs regardless of dirty-peer state.
+    /// Whether the resync timer still has runnable work: failed outbound
+    /// sends, or an ADR-0113 capacity recovery that is not selection/ORF
+    /// gated. Gate-blocked recovery remains queued without spinning the
+    /// timer; the gate-release message makes it runnable and the next event
+    /// loop turn arms this timer again.
     fn resync_tick_pending(&self) -> bool {
-        !self.dirty_peers.is_empty() || self.outbound_limit_recovery_pending()
+        !self.dirty_peers.is_empty() || self.outbound_limit_recovery_runnable()
     }
 
+    /// Run one bounded resync-timer tick. ADR-0113 recovery replays at most
+    /// one peer/family; dirty peers are handed to `distribute_changes` in
+    /// [`RESYNC_PEERS_PER_TICK`]-sized slices until the poll's wall-clock
+    /// budget elapses. Selection round-robins from
+    /// [`Self::dirty_resync_cursor`] and never re-attempts a peer within the
+    /// same tick.
+    ///
+    /// Returns `true` after a successful recovery slice or when dirty work
+    /// was withheld without being attempted. The caller uses that result only
+    /// when [`Self::resync_tick_pending`] still reports work, selecting the
+    /// short backlog interval. A final successful recovery may therefore
+    /// return `true` even though it drained the queue. `false` means no
+    /// recovery slice completed and any still-dirty peers already failed this
+    /// tick, so they wait for the ordinary retry interval.
+    ///
+    /// Safe to run partially: per-peer resync is idempotent — Adj-RIB-Out
+    /// state and the dirty flag are committed/cleared only after a successful
+    /// send, and withheld peers are not touched at all.
     fn resync_dirty_peers_bounded(&mut self) -> bool {
-        // ADR-0113 capacity recovery is family-scoped and already coalesced,
-        // so it runs to completion here rather than sharing the peer ring:
-        // at most one bounded re-derive per peer and limited family.
+        // ADR-0113 capacity recovery is family-scoped and already coalesced.
+        // One live peer/family is replayed per timer tick; any runnable
+        // remainder keeps `resync_tick_pending` true and re-arms the timer.
         let recovered = self.drain_outbound_limit_recovery();
         // Peers whose outbound channel is gone can never resync: drop them
         // before selecting the slice, so a backlog of dead sessions (e.g.

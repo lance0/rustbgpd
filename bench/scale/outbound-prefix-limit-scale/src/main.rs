@@ -865,12 +865,13 @@ fn assert_member_wire(
     }
 }
 
-fn assert_one_sample(
+fn assert_samples(
     checks: &mut Checks,
     phase: &str,
     operation: &str,
     before: Metrics,
     after: Metrics,
+    expected_count: f64,
 ) -> f64 {
     let (before_count, after_count, before_sum, after_sum) = match operation {
         "apply" => (
@@ -890,7 +891,7 @@ fn assert_one_sample(
     checks.eq(
         format!("{phase}.histogram.{operation}.count_delta"),
         after_count - before_count,
-        1.0,
+        expected_count,
     );
     let duration = after_sum - before_sum;
     checks.assert(
@@ -899,6 +900,47 @@ fn assert_one_sample(
         format!("seconds={duration:.9}"),
     );
     duration
+}
+
+fn histogram_max_bucket_bounds(
+    before: &str,
+    after: &str,
+    operation: &str,
+    expected_count: f64,
+) -> Result<(f64, f64), String> {
+    fn finite_buckets(scrape: &str, operation: &str) -> Vec<(f64, f64)> {
+        let mut buckets = labelled_samples(
+            scrape,
+            "bgp_rib_outbound_prefix_limit_actor_duration_seconds_bucket",
+        )
+        .into_iter()
+        .filter_map(|(labels, count)| {
+            (labels.get("operation").map(String::as_str) == Some(operation))
+                .then(|| labels.get("le")?.parse::<f64>().ok().map(|le| (le, count)))
+                .flatten()
+        })
+        .filter(|(le, _)| le.is_finite())
+        .collect::<Vec<_>>();
+        buckets.sort_by(|(left, _), (right, _)| left.total_cmp(right));
+        buckets
+    }
+
+    let before = finite_buckets(before, operation);
+    let after = finite_buckets(after, operation);
+    let mut lower = 0.0;
+    for (upper, after_count) in after {
+        let before_count = before
+            .iter()
+            .find_map(|(candidate, count)| (*candidate == upper).then_some(*count))
+            .ok_or_else(|| format!("missing baseline {operation} histogram bucket le={upper}"))?;
+        if after_count - before_count >= expected_count {
+            return Ok((lower, upper));
+        }
+        lower = upper;
+    }
+    Err(format!(
+        "{operation} histogram did not bound all {expected_count:.0} samples in a finite bucket"
+    ))
 }
 
 fn snapshot_json(label: &str, evidence: &Evidence) -> String {
@@ -1000,12 +1042,13 @@ async fn run(args: &Args) -> Result<ExitCode, String> {
     let _ = wait_for_metric(args, baseline.metrics, "apply").await?;
     tokio::time::sleep(SETTLE).await;
     let applied = collect(args, "applied").await?;
-    let apply_seconds = assert_one_sample(
+    let apply_seconds = assert_samples(
         &mut checks,
         "applied",
         "apply",
         baseline.metrics,
         applied.metrics,
+        1.0,
     );
     assert_group_inventory(&mut checks, args, &applied, "applied");
     assert_member_wire(&mut checks, &context, args.members, "applied", TABLE_ROUTES);
@@ -1078,12 +1121,15 @@ async fn run(args: &Args) -> Result<ExitCode, String> {
 
     fs::copy(&args.config_recover, &args.config_live)
         .map_err(|error| format!("stage recovery config: {error}"))?;
+    let recovery_wall_started = Instant::now();
     sighup(args.pid)?;
     let _ = wait_for_metric(args, blocked.metrics, "apply").await?;
     if args.variant == Variant::Candidate {
         let _ = wait_for_metric(args, blocked.metrics, "recovery").await?;
     }
     let recovered_wire = wait_for(|| all_member_counts(&context, args.members, TOTAL_ROUTES)).await;
+    let recovery_wall_seconds =
+        recovered_wire.map(|_| recovery_wall_started.elapsed().as_secs_f64());
     checks.assert(
         "recovered.every_member_received_withheld_tail",
         recovered_wire.is_some(),
@@ -1091,28 +1137,43 @@ async fn run(args: &Args) -> Result<ExitCode, String> {
     );
     tokio::time::sleep(SETTLE).await;
     let recovered = collect(args, "recovered").await?;
-    let recover_apply_seconds = assert_one_sample(
+    let recover_apply_seconds = assert_samples(
         &mut checks,
         "recovered",
         "apply",
         blocked.metrics,
         recovered.metrics,
+        1.0,
     );
-    let recovery_seconds = if args.variant == Variant::Candidate {
-        Some(assert_one_sample(
+    let (recovery_seconds, recovery_max_slice_bucket) = if args.variant == Variant::Candidate {
+        let expected_count = args.members as f64;
+        let seconds = assert_samples(
             &mut checks,
             "recovered",
             "recovery",
             blocked.metrics,
             recovered.metrics,
-        ))
+            expected_count,
+        );
+        let bounds = histogram_max_bucket_bounds(
+            &blocked.scrape,
+            &recovered.scrape,
+            "recovery",
+            expected_count,
+        )?;
+        checks.assert(
+            "recovered.histogram.recovery.max_slice_bucket",
+            bounds.0 < bounds.1 && bounds.1.is_finite(),
+            format!("seconds=({}, {}]", bounds.0, bounds.1),
+        );
+        (Some(seconds), Some(bounds))
     } else {
         checks.eq(
             "recovered.histogram.recovery.count_delta",
             recovered.metrics.recovery_count - blocked.metrics.recovery_count,
             0.0,
         );
-        None
+        (None, None)
     };
     assert_group_inventory(&mut checks, args, &recovered, "recovered");
     assert_member_wire(
@@ -1159,7 +1220,10 @@ async fn run(args: &Args) -> Result<ExitCode, String> {
         "{{\n  \"variant\":\"{}\",\n  \"members\":{},\n  \"table_routes\":{},\n  \
          \"withheld_routes\":{},\n  \"cold_convergence_seconds\":{:.6},\n  \
          \"apply_seconds\":{:.9},\n  \"recovery_apply_seconds\":{:.9},\n  \
-         \"recovery_seconds\":{},\n  \"snapshots\":{{\n    {},\n    {},\n    {},\n    {}\n  }},\n  \
+         \"recovery_seconds\":{},\n  \"recovery_wall_seconds\":{},\n  \
+         \"recovery_max_slice_bucket_lower_seconds\":{},\n  \
+         \"recovery_max_slice_bucket_upper_seconds\":{},\n  \
+         \"snapshots\":{{\n    {},\n    {},\n    {},\n    {}\n  }},\n  \
          \"checks_total\":{},\n  \"checks_failed\":{}\n}}\n",
         args.variant.as_str(),
         args.members,
@@ -1169,6 +1233,11 @@ async fn run(args: &Args) -> Result<ExitCode, String> {
         apply_seconds,
         recover_apply_seconds,
         recovery_seconds.map_or_else(|| "null".to_string(), |value| format!("{value:.9}")),
+        recovery_wall_seconds.map_or_else(|| "null".to_string(), |value| format!("{value:.9}")),
+        recovery_max_slice_bucket
+            .map_or_else(|| "null".to_string(), |(lower, _)| format!("{lower:.9}")),
+        recovery_max_slice_bucket
+            .map_or_else(|| "null".to_string(), |(_, upper)| format!("{upper:.9}")),
         snapshot_json("baseline", &baseline),
         snapshot_json("applied", &applied),
         snapshot_json("blocked", &blocked),
@@ -1278,6 +1347,31 @@ mod tests {
                 &[("operation", "apply")]
             ),
             Some(2.0)
+        );
+    }
+
+    /// Load-bearing mutation proof: selecting the first nonzero finite
+    /// histogram bucket, rather than the bucket containing all expected
+    /// samples, changes the first result away from `(0.2, 0.5)`. Accepting an
+    /// incomplete finite count makes the 101-sample error assertion red.
+    #[test]
+    fn recovery_max_bucket_bounds_every_slice_not_the_average() {
+        let before = "bgp_rib_outbound_prefix_limit_actor_duration_seconds_bucket{operation=\"recovery\",le=\"0.1\"} 7\n\
+                      bgp_rib_outbound_prefix_limit_actor_duration_seconds_bucket{operation=\"recovery\",le=\"0.2\"} 8\n\
+                      bgp_rib_outbound_prefix_limit_actor_duration_seconds_bucket{operation=\"recovery\",le=\"0.5\"} 9\n\
+                      bgp_rib_outbound_prefix_limit_actor_duration_seconds_bucket{operation=\"recovery\",le=\"+Inf\"} 9\n";
+        let after = "bgp_rib_outbound_prefix_limit_actor_duration_seconds_bucket{operation=\"recovery\",le=\"0.1\"} 97\n\
+                     bgp_rib_outbound_prefix_limit_actor_duration_seconds_bucket{operation=\"recovery\",le=\"0.2\"} 107\n\
+                     bgp_rib_outbound_prefix_limit_actor_duration_seconds_bucket{operation=\"recovery\",le=\"0.5\"} 109\n\
+                     bgp_rib_outbound_prefix_limit_actor_duration_seconds_bucket{operation=\"recovery\",le=\"+Inf\"} 109\n";
+        assert_eq!(
+            histogram_max_bucket_bounds(before, after, "recovery", 100.0)
+                .expect("all samples fit a finite bucket"),
+            (0.2, 0.5)
+        );
+        assert!(
+            histogram_max_bucket_bounds(before, after, "recovery", 101.0).is_err(),
+            "a missing recovery sample must not be hidden by the average"
         );
     }
 }
