@@ -58,7 +58,6 @@ fn input_statement_to_proto(statement: &PolicyStatementDefinition) -> proto::Pol
 }
 
 #[allow(
-    clippy::result_large_err,
     clippy::too_many_lines,
     reason = "peer-group conversion mirrors the complete protobuf definition"
 )]

@@ -302,10 +302,6 @@ impl RibService {
 
 /// Validate the requested unicast route-listing address family.
 /// 0 = UNSPECIFIED (treat as "any"), 1-2 = valid unicast families.
-#[allow(
-    clippy::result_large_err,
-    reason = "tonic::Status is the direct gRPC error type for validation helpers"
-)]
 fn validate_unicast_afi_safi(value: i32) -> Result<(), Status> {
     if value != 0
         && value != proto::AddressFamily::Ipv4Unicast as i32
@@ -320,10 +316,6 @@ fn validate_unicast_afi_safi(value: i32) -> Result<(), Status> {
 
 /// Validate the requested `FlowSpec` route-listing address family.
 /// 0 = UNSPECIFIED (treat as "any"), 3-4 = valid `FlowSpec` families.
-#[allow(
-    clippy::result_large_err,
-    reason = "tonic::Status is the direct gRPC error type for validation helpers"
-)]
 fn validate_flowspec_afi_safi(value: i32) -> Result<(), Status> {
     if value != 0
         && value != proto::AddressFamily::Ipv4Flowspec as i32
@@ -411,10 +403,6 @@ impl<'a> RouteFilterAttrs<'a> {
 }
 
 impl RouteFilters {
-    #[allow(
-        clippy::result_large_err,
-        reason = "tonic::Status keeps route-filter validation errors at the RPC boundary"
-    )]
     fn from_request(req: &proto::ListRoutesRequest) -> Result<Self, Status> {
         let prefix = if req.prefix_filter.is_empty() {
             if req.prefix_filter_length != 0 {
@@ -566,10 +554,6 @@ struct FibRouteFilters {
 }
 
 impl FibRouteFilters {
-    #[allow(
-        clippy::result_large_err,
-        reason = "tonic::Status keeps FIB route-filter validation errors at the RPC boundary"
-    )]
     fn from_request(req: &proto::ListFibRoutesRequest) -> Result<Self, Status> {
         let table_name = (!req.table_name.is_empty()).then(|| req.table_name.clone());
         let reason = (!req.reason.is_empty()).then(|| req.reason.clone());
@@ -727,10 +711,6 @@ const DEFAULT_ROUTE_PAGE_SIZE: usize = 100;
 
 /// Decode the pagination fields of a route-listing request: the resume
 /// cursor (from the opaque `page_token`) and the requested page size.
-#[allow(
-    clippy::result_large_err,
-    reason = "tonic::Status is the direct gRPC error type for validation helpers"
-)]
 fn parse_route_page_params(
     req: &proto::ListRoutesRequest,
     scope: RouteQueryScope,
@@ -882,10 +862,6 @@ fn encode_route_page_token(
     )
 }
 
-#[allow(
-    clippy::result_large_err,
-    reason = "tonic::Status is the direct gRPC error type for validation helpers"
-)]
 fn decode_route_page_token(token: &str) -> Result<RoutePageCursor, Status> {
     let invalid = || Status::invalid_argument("invalid page_token");
     let mut parts = token.split('|');
@@ -980,10 +956,6 @@ fn route_page_to_response(
     }
 }
 
-#[allow(
-    clippy::result_large_err,
-    reason = "tonic::Status is the direct gRPC error type for prefix parsing"
-)]
 fn parse_prefix_request(prefix: &str, prefix_length: u32) -> Result<Prefix, Status> {
     let addr: IpAddr = prefix
         .parse()
@@ -1010,10 +982,6 @@ fn parse_prefix_request(prefix: &str, prefix_length: u32) -> Result<Prefix, Stat
     })
 }
 
-#[allow(
-    clippy::result_large_err,
-    reason = "tonic::Status is the direct gRPC error type for event prefix filters"
-)]
 pub(crate) fn parse_route_event_prefix_filter(
     prefix: &str,
     prefix_length: u32,

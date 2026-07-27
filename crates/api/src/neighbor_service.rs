@@ -52,10 +52,6 @@ fn validate_update_group_comparison_scope(
 }
 
 /// Parse a list of family strings from the gRPC proto into `(Afi, Safi)` pairs.
-#[allow(
-    clippy::result_large_err,
-    reason = "tonic::Status is the standard gRPC error type"
-)]
 pub(crate) fn parse_families_proto(families: &[String]) -> Result<Vec<(Afi, Safi)>, Status> {
     if families.is_empty() {
         return Ok(vec![(Afi::Ipv4, Safi::Unicast)]);
@@ -374,10 +370,6 @@ pub(crate) fn family_to_string(afi: Afi, safi: Safi) -> String {
     }
 }
 
-#[allow(
-    clippy::result_large_err,
-    reason = "tonic::Status is the standard gRPC error type"
-)]
 pub(crate) fn parse_remove_private_as_proto(mode: &str) -> Result<RemovePrivateAs, Status> {
     match mode {
         "" => Ok(RemovePrivateAs::Disabled),
