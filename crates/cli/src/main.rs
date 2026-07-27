@@ -169,8 +169,12 @@ enum Command {
         longer: bool,
 
         /// Show why the best route was selected (requires --prefix)
-        #[arg(long, requires = "prefix")]
+        #[arg(long, requires = "prefix", conflicts_with = "count")]
         explain: bool,
+
+        /// Print only the number of matching best, received, or advertised routes
+        #[arg(long)]
+        count: bool,
 
         /// Scope --explain to a specific peer's Add-Path send view.
         /// When set, candidates are filtered by the peer's export
@@ -1130,10 +1134,13 @@ enum RibAction {
         /// Address family filter
         #[arg(short = 'a', long)]
         family: Option<String>,
+        /// Print only the number of matching received routes
+        #[arg(long)]
+        count: bool,
         /// Show the retained rejected routes with their reject reasons
         /// instead of the accepted Adj-RIB-In (the looking-glass
         /// filtered-route view; [policy.reject_retention])
-        #[arg(long)]
+        #[arg(long, conflicts_with = "count")]
         rejected: bool,
     },
     /// Show advertised routes to a neighbor
@@ -1144,8 +1151,11 @@ enum RibAction {
         /// Address family filter
         #[arg(short = 'a', long)]
         family: Option<String>,
-        /// Explain whether this exact prefix would be advertised to the peer
+        /// Print only the number of matching advertised routes
         #[arg(long)]
+        count: bool,
+        /// Explain whether this exact prefix would be advertised to the peer
+        #[arg(long, conflicts_with = "count")]
         explain: bool,
         /// Route Distinguisher ("asn:nn" or "ip:nn") - explain the
         /// VPNv4/VPNv6 export ladder for the (RD, prefix) identity,
@@ -1650,6 +1660,49 @@ fn reject_rib_status_filters(
     Ok(())
 }
 
+fn route_count_requested(parent_count: bool, view_count: bool) -> bool {
+    parent_count || view_count
+}
+
+fn validate_rib_count_action(command: &Command) -> Result<(), CliError> {
+    let Command::Rib { action, count, .. } = command else {
+        return Ok(());
+    };
+    match action {
+        None => Ok(()),
+        Some(RibAction::Received {
+            count: view_count,
+            rejected,
+            ..
+        }) => {
+            if route_count_requested(*count, *view_count) && *rejected {
+                Err(CliError::Argument(
+                    "--count cannot be combined with --rejected".into(),
+                ))
+            } else {
+                Ok(())
+            }
+        }
+        Some(RibAction::Advertised {
+            count: view_count,
+            explain,
+            ..
+        }) => {
+            if route_count_requested(*count, *view_count) && *explain {
+                Err(CliError::Argument(
+                    "--count cannot be combined with --explain".into(),
+                ))
+            } else {
+                Ok(())
+            }
+        }
+        Some(_) if *count => Err(CliError::Argument(
+            "--count is only valid for best, received, or advertised routes".into(),
+        )),
+        Some(_) => Ok(()),
+    }
+}
+
 fn reject_events_parent_filters_for_subcommand(
     subcommand: &str,
     address: &Option<String>,
@@ -2020,6 +2073,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
     }
 
     validate_neighbor_compare_action(&cli.command)?;
+    validate_rib_count_action(&cli.command)?;
     let connection = connect(&cli.addr, cli.token_file.as_deref()).await?;
     let json = cli.json;
 
@@ -2197,6 +2251,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
             prefix,
             longer,
             explain,
+            count,
             explain_peer,
             origin_asn,
             community,
@@ -2391,6 +2446,8 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                             json,
                         )
                         .await
+                    } else if count {
+                        commands::rib::count_best(connection, family_val, &filters, json).await
                     } else {
                         commands::rib::best(connection, family_val, &filters, json).await
                     }
@@ -2398,8 +2455,10 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                 Some(RibAction::Received {
                     address,
                     family: fam,
+                    count: count_received,
                     rejected,
                 }) => {
+                    let count = route_count_requested(count, count_received);
                     if explain {
                         return Err(CliError::Argument(
                             "--explain is only valid for the default best-routes view (rib --prefix X --explain)".into(),
@@ -2409,17 +2468,23 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                         return commands::rib::rejected(connection, &address, json).await;
                     }
                     let f = resolve_family(&fam.or(family))?;
-                    commands::rib::received(connection, &address, f, &filters, json).await
+                    if count {
+                        commands::rib::count_received(connection, &address, f, &filters, json).await
+                    } else {
+                        commands::rib::received(connection, &address, f, &filters, json).await
+                    }
                 }
                 Some(RibAction::Advertised {
                     address,
                     family: fam,
+                    count: count_advertised,
                     explain: explain_advertised,
                     rd,
                     labeled,
                     source_peer,
                     source_path_id,
                 }) => {
+                    let count = route_count_requested(count, count_advertised);
                     if explain {
                         return Err(CliError::Argument(
                             "--explain is only valid for the default best-routes view (rib --prefix X --explain)".into(),
@@ -2457,6 +2522,9 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                             json,
                         )
                         .await
+                    } else if count {
+                        commands::rib::count_advertised(connection, &address, f, &filters, json)
+                            .await
                     } else {
                         commands::rib::advertised(connection, &address, f, &filters, json).await
                     }
@@ -3036,6 +3104,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::spawn_mock_server;
     use clap::Parser;
 
     #[test]
@@ -3611,6 +3680,243 @@ mod tests {
         } else {
             panic!("expected Rib Received command");
         }
+    }
+
+    /// Load-bearing parser proof: removing either local flag, making
+    /// `--count` global, or dropping a conflict makes one of these accepted
+    /// shapes or rejection assertions red.
+    #[test]
+    fn rib_count_has_natural_view_scoped_placement_and_conflicts() {
+        let best = Cli::try_parse_from(["rbgp", "rib", "--count"]).unwrap();
+        assert!(matches!(
+            best.command,
+            Command::Rib {
+                action: None,
+                count: true,
+                ..
+            }
+        ));
+
+        for args in [
+            vec!["rbgp", "rib", "--count", "received", "192.0.2.1"],
+            vec!["rbgp", "rib", "received", "192.0.2.1", "--count"],
+            vec!["rbgp", "rib", "--count", "advertised", "192.0.2.2"],
+            vec!["rbgp", "rib", "advertised", "192.0.2.2", "--count"],
+        ] {
+            Cli::try_parse_from(args).expect("both natural count placements parse");
+        }
+        assert!(route_count_requested(true, false));
+        assert!(route_count_requested(false, true));
+        assert!(!route_count_requested(false, false));
+
+        assert!(
+            Cli::try_parse_from([
+                "rbgp",
+                "rib",
+                "--prefix",
+                "203.0.113.0/24",
+                "--count",
+                "--explain",
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "rbgp",
+                "rib",
+                "received",
+                "192.0.2.1",
+                "--count",
+                "--rejected",
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "rbgp",
+                "rib",
+                "advertised",
+                "192.0.2.2",
+                "--count",
+                "--explain",
+            ])
+            .is_err()
+        );
+
+        let parent_received = Cli::try_parse_from([
+            "rbgp",
+            "rib",
+            "--count",
+            "received",
+            "192.0.2.1",
+            "--rejected",
+        ])
+        .unwrap();
+        assert_eq!(
+            validate_rib_count_action(&parent_received.command)
+                .unwrap_err()
+                .to_string(),
+            "--count cannot be combined with --rejected"
+        );
+        let parent_advertised = Cli::try_parse_from([
+            "rbgp",
+            "rib",
+            "--prefix",
+            "203.0.113.0/24",
+            "--count",
+            "advertised",
+            "192.0.2.2",
+            "--explain",
+        ])
+        .unwrap();
+        assert_eq!(
+            validate_rib_count_action(&parent_advertised.command)
+                .unwrap_err()
+                .to_string(),
+            "--count cannot be combined with --explain"
+        );
+    }
+
+    /// Load-bearing scope proof: making the local flag global lets unsupported
+    /// local placements parse, while deleting a parent action guard makes its
+    /// validator assertion succeed unexpectedly.
+    #[test]
+    fn rib_count_is_rejected_by_unrelated_subcommands() {
+        for subcommand in ["blackholes", "fib", "bgpls", "vpn", "labeled", "rtc"] {
+            assert!(
+                Cli::try_parse_from(["rbgp", "rib", subcommand, "--count"]).is_err(),
+                "rib {subcommand} unexpectedly accepted --count"
+            );
+            let parent_form = Cli::try_parse_from(["rbgp", "rib", "--count", subcommand]).unwrap();
+            assert_eq!(
+                validate_rib_count_action(&parent_form.command)
+                    .unwrap_err()
+                    .to_string(),
+                "--count is only valid for best, received, or advertised routes"
+            );
+        }
+    }
+
+    /// Load-bearing preflight proof: bypassing the validator reaches the
+    /// deliberately unreachable transport instead of returning this argument
+    /// error for each unsupported RIB action class.
+    #[tokio::test]
+    async fn rib_parent_count_rejects_unrelated_actions_before_transport() {
+        for subcommand in ["blackholes", "fib", "bgpls", "vpn", "labeled", "rtc"] {
+            let cli = Cli::try_parse_from([
+                "rbgp",
+                "--addr",
+                "http://127.0.0.1:1",
+                "rib",
+                "--count",
+                subcommand,
+            ])
+            .unwrap();
+            assert_eq!(
+                run(cli, BINARY_NAME).await.unwrap_err().to_string(),
+                "--count is only valid for best, received, or advertised routes",
+                "rib {subcommand} did not fail before transport"
+            );
+        }
+    }
+
+    /// Load-bearing fail-closed proof: removing the pre-connect count
+    /// validator makes these commands reach AddPath/DeletePath and increments
+    /// the corresponding mutation counter.
+    #[tokio::test]
+    async fn rib_parent_count_never_reaches_route_mutation_rpcs() {
+        let server = spawn_mock_server(None).await;
+        let add = Cli::try_parse_from([
+            "rbgp",
+            "--addr",
+            &server.addr,
+            "rib",
+            "--count",
+            "add",
+            "203.0.113.0/24",
+            "--nexthop",
+            "192.0.2.1",
+        ])
+        .unwrap();
+        assert_eq!(
+            run(add, BINARY_NAME).await.unwrap_err().to_string(),
+            "--count is only valid for best, received, or advertised routes"
+        );
+        let delete = Cli::try_parse_from([
+            "rbgp",
+            "--addr",
+            &server.addr,
+            "rib",
+            "--count",
+            "delete",
+            "203.0.113.0/24",
+        ])
+        .unwrap();
+        assert_eq!(
+            run(delete, BINARY_NAME).await.unwrap_err().to_string(),
+            "--count is only valid for best, received, or advertised routes"
+        );
+        assert_eq!(
+            server
+                .state
+                .add_path_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        assert_eq!(
+            server
+                .state
+                .delete_path_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+    }
+
+    /// Load-bearing parent-conflict proof: bypassing the pre-connect
+    /// validator makes rejected-route or export-explain RPC evidence appear.
+    #[tokio::test]
+    async fn rib_parent_count_conflicts_before_rejected_or_explain_rpcs() {
+        let server = spawn_mock_server(None).await;
+        let received = Cli::try_parse_from([
+            "rbgp",
+            "--addr",
+            &server.addr,
+            "rib",
+            "--count",
+            "received",
+            "192.0.2.1",
+            "--rejected",
+        ])
+        .unwrap();
+        assert_eq!(
+            run(received, BINARY_NAME).await.unwrap_err().to_string(),
+            "--count cannot be combined with --rejected"
+        );
+        let advertised = Cli::try_parse_from([
+            "rbgp",
+            "--addr",
+            &server.addr,
+            "rib",
+            "--prefix",
+            "203.0.113.0/24",
+            "--count",
+            "advertised",
+            "192.0.2.2",
+            "--explain",
+        ])
+        .unwrap();
+        assert_eq!(
+            run(advertised, BINARY_NAME).await.unwrap_err().to_string(),
+            "--count cannot be combined with --explain"
+        );
+        assert_eq!(
+            server
+                .state
+                .list_rejected_route_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        assert!(server.state.last_explain_advertised.lock().await.is_none());
     }
 
     #[test]
