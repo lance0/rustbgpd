@@ -64,6 +64,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   daemon-lifetime flap count is red only when retained history also proves a
   recent session loss. Genuinely old retained transitions remain red.
 
+- **`rbgp diff advertised --deadline` now bounds the complete live-query
+  phase.** One aggregate budget starts after bounded local snapshot parsing
+  and covers neighbor discovery plus every advertised-route page; a stalled
+  RPC exits 2 without rendering a partial equality verdict. Command help now
+  describes MED absence/zero conflation as the runtime-detected compatibility
+  caveat for daemon responses without optional MED-presence markers, rather
+  than an unconditional limitation.
+
 - **Outbound prefix-limit recovery now yields between peer/family replays.**
   A capacity raise or newly freed slot re-derives at most one live
   peer/family per RIB resync tick, retains the deterministic remainder, and

@@ -13,10 +13,11 @@
 //! `ListAdvertisedRoutes`.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::future::Future;
 use std::io::{BufRead, BufReader, Read};
 use std::net::IpAddr;
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::connection::Connection;
 use crate::error::CliError;
@@ -28,6 +29,7 @@ use rustbgpctl::ribdiff::{
     PathAttrs, PeerId, RoutePath, RouteSet, SnapshotMeta, UnknownAttr, Verdict,
 };
 use serde::Deserialize;
+use tokio::time::Instant;
 
 /// Versioned identifier of the accepted NDJSON snapshot schema (the
 /// `schema` field of the header record).
@@ -113,7 +115,8 @@ pub struct AdvertisedDiffOpts {
     pub ignore_attributes: Vec<String>,
     /// Maximum detailed difference rows in human output.
     pub detail: usize,
-    /// Overall wall-clock budget in seconds.
+    /// Aggregate live-query wall-clock budget in seconds, started after
+    /// bounded local snapshot parsing.
     pub deadline_seconds: u64,
     /// Emit the full JSON report instead of the human summary.
     pub json: bool,
@@ -137,10 +140,48 @@ fn op(msg: String) -> CliError {
     CliError::Rpc(msg)
 }
 
+fn live_query_deadline(seconds: u64) -> Result<Instant, CliError> {
+    Instant::now()
+        .checked_add(Duration::from_secs(seconds))
+        .ok_or_else(|| {
+            op(format!(
+                "--deadline value {seconds} seconds exceeds the monotonic clock range; \
+                 refusing comparison"
+            ))
+        })
+}
+
+/// Await one live RPC inside the aggregate query budget. The same absolute
+/// deadline is passed to every call, so a slow neighbor lookup or earlier
+/// advertised-route page consumes time available to all later pages.
+async fn with_remaining_budget<T, F>(
+    deadline: Instant,
+    operation: &str,
+    query: F,
+) -> Result<T, CliError>
+where
+    F: Future<Output = Result<T, tonic::Status>>,
+{
+    if Instant::now() >= deadline {
+        return Err(op(format!(
+            "deadline expired while {operation}; refusing a partial comparison \
+             (raise --deadline)"
+        )));
+    }
+    tokio::time::timeout_at(deadline, query)
+        .await
+        .map_err(|_| {
+            op(format!(
+                "deadline expired while {operation}; refusing a partial comparison \
+                 (raise --deadline)"
+            ))
+        })?
+        .map_err(CliError::from)
+}
+
 /// Full pipeline; returns the rendered report and the exit code so tests
 /// can assert byte-identical output across runs.
 async fn run(connection: Connection, opts: &AdvertisedDiffOpts) -> Result<(String, i32), CliError> {
-    let deadline = Instant::now() + Duration::from_secs(opts.deadline_seconds);
     let ignored = validate_ignore_attributes(&opts.ignore_attributes)?;
     let family_filter = parse_family_filter(&opts.families)?;
     let peer_filter = parse_peer_filter(&opts.peers)?;
@@ -170,12 +211,19 @@ async fn run(connection: Connection, opts: &AdvertisedDiffOpts) -> Result<(Strin
         ));
     }
 
+    // Local snapshot parsing is independently bounded by max_input_bytes and
+    // max_routes. Start the operator-selected wall-clock budget only when the
+    // live query phase begins, then share this one cutoff across every RPC.
+    let deadline = live_query_deadline(opts.deadline_seconds)?;
     let mut neighbor_client =
         NeighborServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let neighbors = neighbor_client
-        .list_neighbors(ListNeighborsRequest {})
-        .await?
-        .into_inner();
+    let neighbors = with_remaining_budget(
+        deadline,
+        "listing daemon neighbors",
+        neighbor_client.list_neighbors(ListNeighborsRequest {}),
+    )
+    .await?
+    .into_inner();
     let mut neighbor_map: BTreeMap<IpAddr, (u32, Vec<String>)> = BTreeMap::new();
     for state in &neighbors.neighbors {
         if let Some(config) = &state.config
@@ -774,7 +822,7 @@ fn as_path_segment(asns: &[u32]) -> Vec<AsPathSegment> {
 ///   daemons and refuses the comparison;
 /// - the fetched route count must equal the server's `total_count`;
 /// - `--max-routes` is enforced before each page is buffered into the set;
-/// - the shared deadline is checked before every RPC.
+/// - every RPC await is bounded by the shared deadline.
 ///
 /// Returns whether any fetched route carried `med_attr` (a
 /// MED-absence-aware daemon); the MED-conflation caveat is dropped
@@ -806,16 +854,14 @@ async fn fetch_advertised_into(
     let mut expected_total: Option<u64> = None;
     let mut med_attr_seen = false;
     loop {
-        if Instant::now() >= deadline {
-            return Err(op(format!(
-                "deadline expired while fetching advertised routes for peer {peer_addr}; \
-                 refusing a partial comparison (raise --deadline)"
-            )));
-        }
-        let resp = client
-            .list_advertised_routes(req.clone())
-            .await?
-            .into_inner();
+        let operation = format!("fetching advertised routes for peer {peer_addr}");
+        let resp = with_remaining_budget(
+            deadline,
+            &operation,
+            client.list_advertised_routes(req.clone()),
+        )
+        .await?
+        .into_inner();
         match expected_total {
             None => expected_total = Some(resp.total_count),
             Some(total) if total != resp.total_count => {
@@ -1055,6 +1101,8 @@ mod tests {
 
     const PEER: &str = "192.0.2.1";
     const PEER_ASN: u32 = 64501;
+    const DEADLINE_TEST_SECONDS: u64 = 2;
+    const DEADLINE_TEST_OUTER_GUARD: Duration = Duration::from_secs(4);
 
     fn json_type(value: &serde_json::Value) -> &'static str {
         match value {
@@ -1334,6 +1382,22 @@ mod tests {
         run(connection, opts).await
     }
 
+    async fn wait_for_route_requests(
+        server: &crate::test_support::MockServerHandle,
+        expected: usize,
+    ) {
+        tokio::time::timeout(DEADLINE_TEST_OUTER_GUARD, async {
+            loop {
+                if server.state.list_route_requests.lock().await.len() >= expected {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("mock daemon did not receive route request {expected}"));
+    }
+
     fn prefix(i: usize) -> String {
         format!("10.{}.{}.0/24", i / 250, i % 250)
     }
@@ -1588,20 +1652,187 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deadline_expiry_exits_two() {
+    async fn zero_deadline_exits_two_before_starting_a_live_rpc() {
         let file = snapshot_file(&[
             header_line(),
             route_line("10.0.0.0/24", None),
             trailer_line(1),
         ]);
         let server = server_with_pages(vec![page(vec![live_route("10.0.0.0", 0)], "", 1)]).await;
-        let mut expired = opts(file.path());
-        expired.deadline_seconds = 0;
-        let err = run_against(&server, &expired).await.unwrap_err();
-        assert!(
-            err.to_string().contains("deadline expired"),
-            "unexpected error: {err}"
+        let connection = connect(&server.addr, None).await.unwrap();
+        let mut zero = opts(file.path());
+        zero.deadline_seconds = 0;
+
+        let code = advertised(connection, &zero).await;
+
+        assert_eq!(code, EXIT_INCOMPARABLE);
+        assert_eq!(
+            server
+                .state
+                .list_neighbors_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
         );
+    }
+
+    #[tokio::test]
+    async fn overflowing_deadline_exits_two_before_starting_a_live_rpc() {
+        let file = snapshot_file(&[
+            header_line(),
+            route_line("10.0.0.0/24", None),
+            trailer_line(1),
+        ]);
+        let server = server_with_pages(vec![page(vec![live_route("10.0.0.0", 0)], "", 1)]).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+        let mut overflowing = opts(file.path());
+        overflowing.deadline_seconds = u64::MAX;
+
+        let code = advertised(connection, &overflowing).await;
+
+        assert_eq!(code, EXIT_INCOMPARABLE);
+        assert_eq!(
+            server
+                .state
+                .list_neighbors_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn aggregate_deadline_gives_a_later_query_only_the_remaining_budget() {
+        let start = Instant::now();
+        let deadline = start.checked_add(Duration::from_secs(10)).unwrap();
+
+        with_remaining_budget(deadline, "running the earlier live query", async {
+            tokio::time::sleep(Duration::from_secs(7)).await;
+            Ok::<_, tonic::Status>(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(Instant::now() - start, Duration::from_secs(7));
+
+        let error = with_remaining_budget(deadline, "running the later live query", async {
+            tokio::time::sleep(Duration::from_secs(4)).await;
+            Ok::<_, tonic::Status>(())
+        })
+        .await
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("deadline expired while running the later live query"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(
+            Instant::now() - start,
+            Duration::from_secs(10),
+            "the later query must receive only the three seconds left by the earlier query"
+        );
+    }
+
+    #[tokio::test]
+    async fn delayed_list_neighbors_exits_two_within_deadline_guard() {
+        let file = snapshot_file(&[
+            header_line(),
+            route_line("10.0.0.0/24", None),
+            trailer_line(1),
+        ]);
+        let server = server_with_pages(vec![page(vec![live_route("10.0.0.0", 0)], "", 1)]).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+        let neighbors_gate = server.state.list_neighbors_response.lock().await;
+        let mut delayed = opts(file.path());
+        delayed.deadline_seconds = DEADLINE_TEST_SECONDS;
+
+        // Red proof: removing the ListNeighbors deadline wrapper leaves this
+        // RPC parked on the mock gate until the outer guard fails.
+        let code =
+            tokio::time::timeout(DEADLINE_TEST_OUTER_GUARD, advertised(connection, &delayed))
+                .await
+                .expect("ListNeighbors exceeded the aggregate deadline and outer guard");
+        drop(neighbors_gate);
+
+        assert_eq!(code, EXIT_INCOMPARABLE);
+        assert_eq!(
+            server
+                .state
+                .list_neighbors_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert!(server.state.list_route_requests.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn delayed_first_advertised_page_exits_two_within_deadline_guard() {
+        let file = snapshot_file(&[
+            header_line(),
+            route_line("10.0.0.0/24", None),
+            trailer_line(1),
+        ]);
+        let server = server_with_pages(vec![page(vec![live_route("10.0.0.0", 0)], "", 1)]).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+        let first_page_gate = server.state.list_route_pages.lock().await;
+        let mut delayed = opts(file.path());
+        delayed.deadline_seconds = DEADLINE_TEST_SECONDS;
+
+        // Red proof: removing the first-page deadline wrapper leaves this RPC
+        // parked on the mock gate until the outer guard fails.
+        let code =
+            tokio::time::timeout(DEADLINE_TEST_OUTER_GUARD, advertised(connection, &delayed))
+                .await
+                .expect("first advertised-route page exceeded the deadline and outer guard");
+        drop(first_page_gate);
+
+        assert_eq!(code, EXIT_INCOMPARABLE);
+        assert_eq!(server.state.list_route_requests.lock().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn delayed_later_advertised_page_exits_two_within_deadline_guard() {
+        let file = snapshot_file(&many_route_lines(2));
+        let server = server_with_pages(many_live_pages(2, 1)).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+        let first_page_gate = server.state.list_route_pages.lock().await;
+        let mut delayed = opts(file.path());
+        delayed.deadline_seconds = DEADLINE_TEST_SECONDS;
+
+        let diff_task = tokio::spawn(async move { advertised(connection, &delayed).await });
+        wait_for_route_requests(&server, 1).await;
+
+        // The server is already queued for page one. Queue this gate behind
+        // it, then release page one: FIFO mutex ordering lets page one return
+        // and deterministically parks page two.
+        let state = std::sync::Arc::clone(&server.state);
+        let (gate_acquired_tx, gate_acquired_rx) = tokio::sync::oneshot::channel();
+        let (gate_release_tx, gate_release_rx) = tokio::sync::oneshot::channel();
+        let later_page_gate = tokio::spawn(async move {
+            let guard = state.list_route_pages.lock().await;
+            let _ = gate_acquired_tx.send(());
+            let _ = gate_release_rx.await;
+            drop(guard);
+        });
+        drop(first_page_gate);
+        tokio::time::timeout(DEADLINE_TEST_OUTER_GUARD, gate_acquired_rx)
+            .await
+            .expect("later-page gate was not acquired")
+            .expect("later-page gate task exited early");
+        wait_for_route_requests(&server, 2).await;
+
+        // Red proof: removing the per-page wrapper lets the second RPC outlive
+        // the shared budget and makes this outer guard fail.
+        let code = tokio::time::timeout(DEADLINE_TEST_OUTER_GUARD, diff_task)
+            .await
+            .expect("later advertised-route page exceeded the deadline and outer guard")
+            .expect("diff task panicked");
+        let _ = gate_release_tx.send(());
+        later_page_gate
+            .await
+            .expect("later-page gate task panicked");
+
+        assert_eq!(code, EXIT_INCOMPARABLE);
+        assert_eq!(server.state.list_route_requests.lock().await.len(), 2);
     }
 
     #[tokio::test]

@@ -36,7 +36,7 @@ $ echo $?
 | `--max-routes <N>` | 4,000,000 | Maximum retained routes per side; exceeding refuses the comparison |
 | `--max-input-bytes <N>` | 1 GiB | Maximum snapshot bytes read; exceeding refuses the comparison |
 | `--detail <N>` | 20 | Maximum difference rows in human output (`--json` is always complete) |
-| `--deadline <SECS>` | 120 | Overall wall-clock budget; expiry refuses the comparison |
+| `--deadline <SECS>` | 120 | Aggregate live-query budget, started after bounded local snapshot parsing and shared by neighbor discovery plus every advertised-route page; expiry refuses the comparison |
 | `--json` | off | Full machine-readable report (`rbgp-ribdiff/1` schema) |
 
 Ignored-attribute choices and the live-source normalization notes are
@@ -87,6 +87,12 @@ Live-source limitations (also printed in every report):
   `total_count` (exit 2).
 - `--max-routes` and `--max-input-bytes` are enforced before buffering,
   on both sides (exit 2).
+- `--deadline` starts only after the bounded local snapshot parse completes.
+  One absolute cutoff then covers `ListNeighbors` and every
+  `ListAdvertisedRoutes` page across all requested peers; time spent in an
+  earlier RPC or page reduces what remains for every later one. Expiry, zero
+  budget, or a value outside the monotonic clock's range exits 2 without
+  rendering a partial equality verdict.
 - The aggregate equal verdict is refused when **any** requested peer or
   family is unavailable: a peer missing from the daemon, a snapshot/daemon
   ASN mismatch, or an explicitly requested family the peer does not
