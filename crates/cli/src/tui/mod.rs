@@ -13,7 +13,7 @@ use crossterm::terminal::{
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use crate::connection::Connection;
 use crate::error::CliError;
@@ -43,9 +43,16 @@ pub async fn run(connection: Connection, interval: u64) -> Result<(), CliError> 
 
     let (data_tx, mut data_rx) = mpsc::channel(4);
     let (event_tx, mut event_rx) = mpsc::channel(64);
+    let (event_watch_tx, event_watch_rx) = watch::channel(false);
 
-    let _fetcher =
-        data::spawn_fetcher(connection, Duration::from_secs(interval), data_tx, event_tx);
+    let _fetcher = data::spawn_fetcher(
+        connection,
+        Duration::from_secs(interval),
+        data_tx,
+        event_tx,
+        event_watch_rx,
+    );
+    let mut events_enabled = false;
 
     loop {
         terminal.draw(|f| ui::draw(f, &mut app, &theme))?;
@@ -65,6 +72,12 @@ pub async fn run(connection: Connection, interval: u64) -> Result<(), CliError> 
 
         while let Ok(route_event) = event_rx.try_recv() {
             app.on_route_event(route_event);
+        }
+
+        let should_watch_events = app.route_events_visible();
+        if should_watch_events != events_enabled {
+            events_enabled = should_watch_events;
+            let _ = event_watch_tx.send(events_enabled);
         }
     }
 
