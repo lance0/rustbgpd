@@ -27,6 +27,7 @@ use std::fmt::Write as _;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::Path;
 
+use crate::output;
 use rustbgpd_wire::constants::{attr_flags, attr_type};
 
 /// Snapshot emitted.
@@ -83,11 +84,20 @@ pub(crate) struct SnapRoute {
 /// Run the adapter: print the snapshot to stdout on success, an error to
 /// stderr on refusal, and return the exit code.
 pub fn from_mrt(opts: &FromMrtOpts<'_>) -> i32 {
-    match run(opts) {
-        Ok(snapshot) => {
-            print!("{snapshot}");
-            EXIT_OK
-        }
+    let result = run(opts);
+    let stdout = std::io::stdout();
+    emit_mrt_snapshot(result, &mut stdout.lock())
+}
+
+fn emit_mrt_snapshot(result: Result<String, String>, writer: &mut dyn std::io::Write) -> i32 {
+    match result {
+        Ok(snapshot) => match output::write_bytes(writer, snapshot.as_bytes()) {
+            Ok(()) => EXIT_OK,
+            Err(error) => {
+                output::report_write_error("MRT snapshot output", &error);
+                EXIT_REFUSED
+            }
+        },
         Err(e) => {
             eprintln!("Error: {e}");
             EXIT_REFUSED
@@ -647,6 +657,47 @@ mod tests {
             source: Some("m83-capture"),
             generation: 3,
         }
+    }
+
+    #[test]
+    fn raw_ndjson_emitter_preserves_exact_bytes() {
+        let snapshot = "{\"record\":\"header\"}\n{\"record\":\"trailer\",\"routes\":0}\n";
+        let mut bytes = Vec::new();
+        assert_eq!(
+            emit_mrt_snapshot(Ok(snapshot.to_string()), &mut bytes),
+            EXIT_OK
+        );
+        assert_eq!(bytes, snapshot.as_bytes());
+    }
+
+    struct FailAfter {
+        remaining: usize,
+    }
+
+    impl Write for FailAfter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if self.remaining == 0 {
+                return Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe));
+            }
+            let written = bytes.len().min(self.remaining);
+            self.remaining -= written;
+            Ok(written)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn partial_ndjson_broken_pipe_exits_two_without_unwinding() {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            emit_mrt_snapshot(
+                Ok("{\"record\":\"header\"}\n{\"record\":\"trailer\"}\n".to_string()),
+                &mut FailAfter { remaining: 7 },
+            )
+        }));
+        assert_eq!(result.expect("write failure must not panic"), EXIT_REFUSED);
     }
 
     #[test]

@@ -71,6 +71,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   remains in the bundle as a named failure instead of disappearing from the
   diagnostic inventory.
 
+- **`rbgp` JSON and NDJSON output now returns stdout write failures instead of
+  panicking.** Pretty, compact, raw, importer, advertised-diff, and MRT/BMP
+  snapshot output is fully serialized before writing, preserves its existing
+  bytes, and reports write or flush failures through each command's existing
+  nonzero exit contract. Normal Unix broken pipes remain quiet.
+
 - **`rbgp doctor` recognizes intentionally disabled peers.** For a current,
   non-stale snapshot, a retained `PeerDisabled` event makes the
   non-Established session verdict explicitly green unless a later retained

@@ -21,6 +21,7 @@ use std::time::Duration;
 
 use crate::connection::Connection;
 use crate::error::CliError;
+use crate::output;
 use crate::proto::neighbor_service_client::NeighborServiceClient;
 use crate::proto::rib_service_client::RibServiceClient;
 use crate::proto::{ListNeighborsRequest, ListRoutesRequest, Route};
@@ -124,11 +125,23 @@ pub struct AdvertisedDiffOpts {
 
 /// Run the diff, print its report, and return the process exit code.
 pub async fn advertised(connection: Connection, opts: &AdvertisedDiffOpts) -> i32 {
-    match run(connection, opts).await {
-        Ok((rendered, code)) => {
-            print!("{rendered}");
-            code
-        }
+    let result = run(connection, opts).await;
+    let stdout = std::io::stdout();
+    emit_advertised_result(result, &mut stdout.lock())
+}
+
+fn emit_advertised_result(
+    result: Result<(String, i32), CliError>,
+    writer: &mut dyn std::io::Write,
+) -> i32 {
+    match result {
+        Ok((rendered, code)) => match output::write_bytes(writer, rendered.as_bytes()) {
+            Ok(()) => code,
+            Err(error) => {
+                output::report_write_error("advertised diff output", &error);
+                EXIT_INCOMPARABLE
+            }
+        },
         Err(e) => {
             eprintln!("Error: {e}");
             EXIT_INCOMPARABLE
@@ -1103,6 +1116,35 @@ mod tests {
     const PEER_ASN: u32 = 64501;
     const DEADLINE_TEST_SECONDS: u64 = 2;
     const DEADLINE_TEST_OUTER_GUARD: Duration = Duration::from_secs(4);
+
+    #[test]
+    fn advertised_json_emitter_preserves_rendered_bytes_and_exit_code() {
+        let rendered = "{\n  \"verdict\": \"in_sync\"\n}\n".to_string();
+        let mut bytes = Vec::new();
+        let code = emit_advertised_result(Ok((rendered.clone(), EXIT_IN_SYNC)), &mut bytes);
+        assert_eq!(code, EXIT_IN_SYNC);
+        assert_eq!(bytes, rendered.as_bytes());
+    }
+
+    struct BrokenWriter;
+
+    impl Write for BrokenWriter {
+        fn write(&mut self, _bytes: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn advertised_json_write_failure_exits_two() {
+        assert_eq!(
+            emit_advertised_result(Ok(("{}\n".to_string(), EXIT_IN_SYNC)), &mut BrokenWriter,),
+            EXIT_INCOMPARABLE
+        );
+    }
 
     fn json_type(value: &serde_json::Value) -> &'static str {
         match value {

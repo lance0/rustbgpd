@@ -967,12 +967,18 @@ pub async fn events_watch(
 /// LAN-329 empty-state convention: JSON list output is never empty
 /// (`[]` parses where the non-empty NDJSON event lines also parse
 /// line-wise); human output names what was absent.
-fn print_empty_history(json: bool, what: &str) {
+fn write_empty_json_history(writer: &mut dyn std::io::Write) -> Result<(), CliError> {
+    output::write_serialized_json_line(writer, "[]")
+}
+
+fn print_empty_history(json: bool, what: &str) -> Result<(), CliError> {
     if json {
-        println!("[]");
+        let stdout = std::io::stdout();
+        write_empty_json_history(&mut stdout.lock())?;
     } else {
         println!("No {what} events recorded");
     }
+    Ok(())
 }
 
 pub async fn history(
@@ -999,7 +1005,7 @@ pub async fn history(
         .into_inner();
 
     if response.events.is_empty() {
-        print_empty_history(json, "route");
+        print_empty_history(json, "route")?;
         return Ok(());
     }
     for event in response.events {
@@ -1032,7 +1038,7 @@ pub async fn session_history(
         .into_inner();
 
     if response.events.is_empty() {
-        print_empty_history(json, "session");
+        print_empty_history(json, "session")?;
         return Ok(());
     }
     for event in response.events {
@@ -1065,7 +1071,7 @@ pub async fn policy_history(
         .into_inner();
 
     if response.events.is_empty() {
-        print_empty_history(json, "policy");
+        print_empty_history(json, "policy")?;
         return Ok(());
     }
     for event in response.events {
@@ -1102,7 +1108,7 @@ pub async fn evpn_history(
         .into_inner();
 
     if response.events.is_empty() {
-        print_empty_history(json, "EVPN");
+        print_empty_history(json, "EVPN")?;
         return Ok(());
     }
     for event in response.events {
@@ -1114,6 +1120,58 @@ pub async fn evpn_history(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_json_history_preserves_exact_bytes() {
+        let mut bytes = Vec::new();
+        write_empty_json_history(&mut bytes).unwrap();
+        assert_eq!(bytes, b"[]\n");
+    }
+
+    struct FailAfter {
+        remaining: usize,
+    }
+
+    impl std::io::Write for FailAfter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if self.remaining == 0 {
+                return Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe));
+            }
+            let written = bytes.len().min(self.remaining);
+            self.remaining -= written;
+            Ok(written)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn empty_json_history_partial_broken_pipe_returns_io_error() {
+        let error = write_empty_json_history(&mut FailAfter { remaining: 1 }).unwrap_err();
+        assert!(
+            matches!(error, CliError::Io(ref error) if error.kind() == std::io::ErrorKind::BrokenPipe)
+        );
+    }
+
+    struct FlushFailure;
+
+    impl std::io::Write for FlushFailure {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::Error::other("flush failed"))
+        }
+    }
+
+    #[test]
+    fn empty_json_history_flush_failure_returns_io_error() {
+        let error = write_empty_json_history(&mut FlushFailure).unwrap_err();
+        assert!(matches!(error, CliError::Io(_)));
+    }
 
     // Frozen reference: builds the `serde_json::Value` exactly as the pre-#515
     // code did (serde_json::json! base + per-payload object inserts; BTreeMap
