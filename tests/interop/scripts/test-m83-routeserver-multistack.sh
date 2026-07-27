@@ -297,6 +297,11 @@ def pdml(*packets):
 old_open = packet(1, 3, opening)
 target_open = packet(2, 7, opening)
 first = packet(3, 7, nlri("100.66.0.0"))
+# Load-bearing fixtures:
+# - removing tcp.stream scoping admits the other-stream prefix before EoR;
+# - treating post-EoR traffic as initial admits the same-stream live delta;
+# - weakening exact-set equality admits each missing/unexpected fixture;
+# - frame-only ordering cannot distinguish the same-frame EoR-before-prefix.
 other_stream_late = packet(4, 3, nlri("198.51.100.0"))
 second_and_eor = packet(5, 7, nlri("100.67.0.0"), eor)
 same_stream_live = packet(6, 7, nlri("192.0.2.0"))

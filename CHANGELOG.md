@@ -43,7 +43,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   RS-to-BIRD inventory on one TCP stream before End-of-RIB. Legal later
   deltas no longer look like an initial-table ordering failure, and any
   failed internal attempt retains its packet, event, inventory, and daemon
-  evidence for review.
+  evidence for review. The
+  [controlled 6+6 receipt](tests/interop/m83-eor-order-receipt.md) records the
+  exact revisions, retained-artifact digest, and load-bearing mutations.
 
 - **Convergence-marker page-generation fencing now follows accepted work.**
   Stale-session End-of-RIB/BoRR/EoRR and inactive EoRR markers no longer
