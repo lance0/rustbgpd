@@ -532,19 +532,22 @@ daemon does not crash on MRT failures.
 
 ### Peer max-prefix exceeded
 
-When a peer sends more prefixes than `max_prefixes`, the daemon sends a
-NOTIFICATION and tears down the session. Without negotiated Notification GR
-this is Cease/1 (Maximum Number of Prefixes Reached). With the RFC 8538 N-bit,
-the daemon sends outer Cease/9 (Hard Reset) whose data encapsulates the same
-Cease/1 reason and RFC 4486 data, preventing the over-limit routes from being
-retained as stale. By default the peer is not automatically re-enabled — use
-`rbgp neighbor <addr> enable` or the gRPC `EnableNeighbor` RPC to restart it.
+When a peer exceeds `max_prefixes`, `max_prefixes_ipv4`, or
+`max_prefixes_ipv6`, the daemon sends a NOTIFICATION and tears down the
+session. Without negotiated Notification GR this is Cease/1 (Maximum Number of
+Prefixes Reached). With the RFC 8538 N-bit, the daemon sends outer Cease/9
+(Hard Reset) whose data encapsulates the same Cease/1 reason and RFC 4486 data,
+preventing the over-limit routes from being retained as stale. By default the
+peer is not automatically re-enabled — use `rbgp neighbor <addr> enable` or the
+gRPC `EnableNeighbor` RPC to restart it.
 Setting the inheritable, non-zero `max_prefix_restart_seconds` opts that peer
 into exactly one restart attempt after the hold-down. A second breach creates a
-new hold-down; a failed attempt remains latched off until explicit enable.
+new hold-down. Failure to deliver the timed session `Start` command consumes
+that attempt and remains latched off until explicit enable; successful delivery
+removes the latch and returns the session to ordinary TCP/OPEN retry.
 Peers whose hold-downs expire together share one 500 ms command-delivery window,
 so a stalled session cannot multiply the restart delay across the due set.
-Delivery failure replaces `last_error` with the cause and the exact
+`Start` delivery failure replaces `last_error` with the cause and the exact
 `rbgp neighbor <addr> enable` recovery action.
 A live edit of `max_prefix_restart_seconds` while a countdown is armed
 reschedules the single pending attempt to now + the new duration; the
@@ -555,11 +558,29 @@ inherited by dynamic peers follow the same rules. Session-generation
 replacement, explicit disable, neighbor removal, and dynamic-range replacement
 cancel an existing countdown rather than carrying it into new policy.
 
-`rbgp neighbor <addr>` reports the effective current action (`shutdown` or
-`restart`), configured restart duration, live hold-down milliseconds, and the
-session actor's O(1) aggregate max-prefix-counted NLRI identity count plus
-unique IPv4- and IPv6-unicast prefix counts. Each count is paired with its
-effective finite limit and remaining headroom;
+Before an explicit enable, inspect the latch:
+
+```bash
+rbgp neighbor <addr>
+rbgp --json neighbor <addr>
+```
+
+Human output reports `Max-Prefix Action` (`shutdown` or `restart`), the
+configured `Max-Prefix Restart`, an active `Max-Prefix Hold-Down` countdown,
+and `Last Error`. The JSON equivalents are `max_prefix_action`,
+`max_prefix_restart_seconds`, `max_prefix_restart_remaining_millis`, and
+`last_error`. A configured timer has an armed attempt only while the remaining
+field is present: after `Start` delivery failure consumes its one chance, the
+effective action is `shutdown`, the countdown is absent, and explicit enable is
+required. Successful delivery clears the latch and hands recovery to ordinary
+TCP/OPEN retry; it does not mean that the session is already Established.
+Explicit enable clears the latch, including any armed countdown, and requests
+an immediate start (subject to strict BFD withholding).
+
+Neighbor detail also reports the session actor's O(1) aggregate
+max-prefix-counted NLRI identity count plus unique IPv4- and IPv6-unicast
+prefix counts. Each count is paired with its effective finite limit and
+remaining headroom;
 an absent limit is rendered as `unlimited` and remains absent (never zero) in
 JSON and gRPC. The aggregate includes all max-prefix-counted NLRI, while the
 family counts cover unicast only. If the session query times out, the snapshot
@@ -1688,7 +1709,10 @@ rbgp top -i 5     # 5s poll interval
 ```
 
 Shows sessions, prefix counts, message rates, RPKI VRP counts, and
-streaming route events in a terminal UI. Press `h` for keybindings.
+streaming route events in a terminal UI. The route-event subscription is
+opened only while the events panel is visible (`e`), and stale health or
+neighbor data is labeled while the last-good snapshot remains on screen.
+Press `h` for keybindings.
 
 ### Watch live events
 

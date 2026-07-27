@@ -31,7 +31,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   interval while moving the full Prometheus metrics scrape to a separate
   60-second cadence. It now retries transient global-metadata failures until
   the daemon identity is available and retains the last-good RPKI VRP count
-  through a transient metrics failure.
+  through a transient metrics failure. Route-event streaming is now opt-in
+  while its panel is visible, with cancellation and a two-second reconnect
+  backoff after either a clean or error end. Health and neighbor failures retain
+  explicitly stale last-good data without corrupting peer selection or
+  update-rate baselines. Scoped neighbor identities and the missing Description
+  heading are also shown consistently.
 
 - Resolving a retained neighbor roster now shares content-equal compiled
   `.rpol` sets within bounded 32-neighbor chunks. At the measured 1,000-peer,
@@ -46,11 +51,24 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   absent one.** Import explain and rejected-route reads return
   `DEADLINE_EXCEEDED` when their bounded session query times out; policy stats
   also fail honestly on timeout/session exit and reject an explicit unknown
-  peer instead of labeling the global export chain as that peer. No protobuf
-  fields or numbers changed.
+  peer instead of labeling the global export chain as that peer. A policy
+  stats RPC now gives all backend waits across explicit-peer validation,
+  export/import collection, and dataset status one shared 500 ms deadline;
+  fleet import reads use bounded per-RPC concurrency without parking the
+  peer-manager actor awaiting sessions, release outstanding collection when
+  the caller cancels, and return only a complete, sorted snapshot (never
+  partial rows). No protobuf fields or numbers changed.
 
 - **A stale outbound prefix-limit activation no longer discards a newer
   prepared change.** The newer transaction remains available to activate.
+
+- The M83 route-server receipt now checks its exact, snapshotted initial
+  RS-to-BIRD inventory on one TCP stream before End-of-RIB. Legal later
+  deltas no longer look like an initial-table ordering failure, and any
+  failed internal attempt retains its packet, event, inventory, and daemon
+  evidence for review. The
+  [controlled 6+6 receipt](tests/interop/m83-eor-order-receipt.md) records the
+  exact revisions, retained-artifact digest, and load-bearing mutations.
 
 - **Convergence-marker page-generation fencing now follows accepted work.**
   Stale-session End-of-RIB/BoRR/EoRR and inactive EoRR markers no longer

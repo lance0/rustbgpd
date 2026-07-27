@@ -34,10 +34,19 @@ irregular spacing points at the transport or the peer.
 
 ## 3. Match the teardown reason
 
-- **Cease / Maximum Number of Prefixes Reached** — the peer breached
-  `max_prefixes`. The session is *not* re-enabled automatically:
-  raise the ceiling (a hot-applied edit) or fix the peer, then
-  `rbgp neighbor 10.0.0.2 enable`.
+- **Cease / Maximum Number of Prefixes Reached** — the peer breached an
+  inbound `max_prefixes`, `max_prefixes_ipv4`, or `max_prefixes_ipv6`
+  ceiling. Inspect `rbgp neighbor 10.0.0.2` before enabling it: an
+  armed opt-in restart shows `Max-Prefix Action: restart` and a live
+  `Max-Prefix Hold-Down` countdown. Without
+  `max_prefix_restart_seconds` the default is an indefinite,
+  fail-closed latch. Failure to deliver the timed session `Start`
+  command consumes its one chance, returns the effective action to
+  `shutdown`, and puts the manual recovery in `Last Error`; successful
+  delivery clears the latch and returns the session to ordinary
+  TCP/OPEN retry. Fix the peer or raise the ceiling (a hot-applied
+  edit), then run `rbgp neighbor 10.0.0.2 enable` when an immediate
+  manual retry is intended (subject to strict BFD withholding).
 - **Hold-timer expiry** — keepalives aren't arriving: congestion, an
   overloaded peer, or an MTU/blackhole on large UPDATE bursts.
 - **Send-hold expiry (RFC 9687)** — the *peer* stopped draining its

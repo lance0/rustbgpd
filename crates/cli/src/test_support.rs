@@ -1,6 +1,8 @@
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::task::{Context, Poll};
 
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, oneshot};
@@ -27,11 +29,18 @@ use rustbgpd_api::proto::rib_service_server::RibServiceServer;
 pub(crate) struct MockState {
     pub(crate) bfd_calls: AtomicUsize,
     pub(crate) health_calls: AtomicUsize,
+    pub(crate) health_failures_remaining: AtomicUsize,
     pub(crate) metrics_calls: AtomicUsize,
     pub(crate) global_calls: AtomicUsize,
     pub(crate) metrics_failures_remaining: AtomicUsize,
     pub(crate) global_failures_remaining: AtomicUsize,
     pub(crate) list_neighbors_calls: AtomicUsize,
+    pub(crate) list_neighbors_failures_remaining: AtomicUsize,
+    pub(crate) watch_routes_calls: AtomicUsize,
+    pub(crate) watch_routes_active: AtomicUsize,
+    pub(crate) watch_routes_clean_end: AtomicBool,
+    pub(crate) watch_routes_failures_remaining: AtomicUsize,
+    pub(crate) watch_routes_terminations: AtomicUsize,
     pub(crate) list_session_events_calls: AtomicUsize,
     pub(crate) list_policy_events_calls: AtomicUsize,
     pub(crate) config_diff_calls: AtomicUsize,
@@ -133,6 +142,14 @@ pub(crate) struct MockState {
         Mutex<Option<server_proto::SetNeighborPeerGroupRequest>>,
     pub(crate) last_clear_neighbor_peer_group:
         Mutex<Option<server_proto::ClearNeighborPeerGroupRequest>>,
+}
+
+fn consume_failure(counter: &AtomicUsize) -> bool {
+    counter
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+            remaining.checked_sub(1)
+        })
+        .is_ok()
 }
 
 pub(crate) struct MockServerHandle {
@@ -668,6 +685,9 @@ impl rustbgpd_api::proto::control_service_server::ControlService for MockControl
         _request: Request<server_proto::HealthRequest>,
     ) -> Result<Response<server_proto::HealthResponse>, Status> {
         self.state.health_calls.fetch_add(1, Ordering::SeqCst);
+        if consume_failure(&self.state.health_failures_remaining) {
+            return Err(Status::unavailable("transient health failure"));
+        }
         Ok(Response::new(server_proto::HealthResponse {
             healthy: true,
             uptime_seconds: 42,
@@ -759,6 +779,9 @@ impl rustbgpd_api::proto::neighbor_service_server::NeighborService for MockNeigh
         self.state
             .list_neighbors_calls
             .fetch_add(1, Ordering::SeqCst);
+        if consume_failure(&self.state.list_neighbors_failures_remaining) {
+            return Err(Status::unavailable("transient neighbor-list failure"));
+        }
         Ok(Response::new(server_proto::ListNeighborsResponse {
             neighbors: self.state.list_neighbors_response.lock().await.clone(),
         }))
@@ -940,6 +963,34 @@ impl rustbgpd_api::proto::neighbor_service_server::NeighborService for MockNeigh
 
 struct MockRibService {
     state: Arc<MockState>,
+}
+
+struct MockWatchRoutesStream {
+    state: Arc<MockState>,
+    clean_end: bool,
+}
+
+impl Stream for MockWatchRoutesStream {
+    type Item = Result<server_proto::RouteEvent, Status>;
+
+    fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if self.clean_end {
+            Poll::Ready(None)
+        } else {
+            Poll::Pending
+        }
+    }
+}
+
+impl Drop for MockWatchRoutesStream {
+    fn drop(&mut self) {
+        self.state
+            .watch_routes_active
+            .fetch_sub(1, Ordering::SeqCst);
+        self.state
+            .watch_routes_terminations
+            .fetch_add(1, Ordering::SeqCst);
+    }
 }
 
 impl MockRibService {
@@ -1569,7 +1620,20 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
         &self,
         _request: Request<server_proto::WatchRoutesRequest>,
     ) -> Result<Response<Self::WatchRoutesStream>, Status> {
-        Err(Status::unimplemented("not used in CLI tests"))
+        self.state.watch_routes_calls.fetch_add(1, Ordering::SeqCst);
+        if consume_failure(&self.state.watch_routes_failures_remaining) {
+            self.state
+                .watch_routes_terminations
+                .fetch_add(1, Ordering::SeqCst);
+            return Err(Status::unavailable("transient route-watch failure"));
+        }
+        self.state
+            .watch_routes_active
+            .fetch_add(1, Ordering::SeqCst);
+        Ok(Response::new(Box::pin(MockWatchRoutesStream {
+            state: Arc::clone(&self.state),
+            clean_end: self.state.watch_routes_clean_end.load(Ordering::SeqCst),
+        })))
     }
 
     async fn watch_route_events(

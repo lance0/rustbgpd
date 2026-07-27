@@ -3,6 +3,7 @@ use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
+use futures::stream::{self, StreamExt};
 use rustbgpd_api::peer_types::{
     ConfigEvent, DynamicNeighborInfo, POLICY_EVENT_HISTORY_CAPACITY, PeerKey, PeerManagerCommand,
     PeerManagerNeighborConfig, PeerManagerReadinessQuery, PolicyDatasetStatusRow, PolicyEvent,
@@ -100,6 +101,11 @@ const RIB_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 /// peer-manager actor. The typed outcome prevents that timeout from
 /// masquerading as a missing session.
 const EXPLAIN_QUERY_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// Maximum number of session-side import-policy snapshots in flight per
+/// collector/RPC. The cap bounds each collector's memory/work while every
+/// query still shares the caller's single absolute deadline.
+const IMPORT_POLICY_QUERY_CONCURRENCY: usize = 64;
 
 pub(crate) enum InternalCommand {
     ReplaceConfigSnapshot {
@@ -1160,49 +1166,88 @@ impl PeerManager {
                             };
                             let _ = reply.send(result);
                         }
-                        PeerManagerCommand::QueryImportPolicyTermHits { peer, reply } => {
+                        PeerManagerCommand::QueryImportPolicyTermHits {
+                            peer,
+                            deadline,
+                            mut reply,
+                        } => {
                             // Read-only snapshot forwarded to each session
                             // task (the import chain and its counters live
-                            // there). Bounded per session like explain: a
-                            // wedged task cannot park the actor. Sessions
-                            // without an installed import chain are omitted;
-                            // timeout/task exit fail the snapshot honestly.
-                            let keys: Vec<_> = match peer {
-                                Some(address) => self
-                                    .unique_peer_key_for_address(address)
-                                    .into_iter()
-                                    .collect(),
-                                None => self.peers.keys().cloned().collect(),
+                            // there). Snapshot owned command senders and move
+                            // collection out of the actor immediately: the
+                            // actor does not await a wedged fleet. All sends
+                            // and replies share the RPC's absolute deadline,
+                            // and any failed session fails the complete
+                            // snapshot atomically.
+                            if deadline <= tokio::time::Instant::now() {
+                                let _ = reply.send(SessionQueryOutcome::TimedOut);
+                                continue;
+                            }
+                            // Do not clone a fleet of session senders for an
+                            // RPC that was cancelled while its command waited
+                            // in the manager queue.
+                            if reply.is_closed() {
+                                continue;
+                            }
+                            let targets: Vec<_> = if let Some(address) = peer {
+                                let Some(key) = self.unique_peer_key_for_address(address) else {
+                                    let _ = reply.send(SessionQueryOutcome::SessionGone);
+                                    continue;
+                                };
+                                let Some(managed) = self.peers.get(&key) else {
+                                    let _ = reply.send(SessionQueryOutcome::SessionGone);
+                                    continue;
+                                };
+                                vec![(key.address, managed.handle.commands_sender())]
+                            } else {
+                                self
+                                    .peers
+                                    .iter()
+                                    .map(|(key, managed)| {
+                                        (key.address, managed.handle.commands_sender())
+                                    })
+                                    .collect()
                             };
-                            let result = 'query: {
-                                let mut out = Vec::new();
-                                for key in keys {
-                                    let Some(managed) = self.peers.get(&key) else {
-                                        continue;
-                                    };
-                                    match managed
-                                        .handle
-                                        .query_import_policy_term_hits_timeout(
-                                            EXPLAIN_QUERY_TIMEOUT,
-                                        )
-                                        .await
-                                    {
-                                        SessionQueryOutcome::Reply(Some(snapshot)) => {
-                                            out.push((key.address, snapshot));
-                                        }
-                                        SessionQueryOutcome::Reply(None) => {}
-                                        SessionQueryOutcome::TimedOut => {
-                                            break 'query SessionQueryOutcome::TimedOut;
-                                        }
-                                        SessionQueryOutcome::SessionGone => {
-                                            break 'query SessionQueryOutcome::SessionGone;
+                            tokio::spawn(async move {
+                                let collection = async move {
+                                    let mut out = Vec::new();
+                                    let queries = stream::iter(targets)
+                                        .map(|(address, commands)| async move {
+                                            let outcome =
+                                                PeerHandle::query_import_policy_term_hits_with_deadline(
+                                                    commands, deadline,
+                                                )
+                                                .await;
+                                            (address, outcome)
+                                        })
+                                        .buffer_unordered(IMPORT_POLICY_QUERY_CONCURRENCY);
+                                    tokio::pin!(queries);
+                                    while let Some((address, outcome)) = queries.next().await {
+                                        match outcome {
+                                            SessionQueryOutcome::Reply(Some(snapshot)) => {
+                                                out.push((address, snapshot));
+                                            }
+                                            SessionQueryOutcome::Reply(None) => {}
+                                            SessionQueryOutcome::TimedOut => {
+                                                return SessionQueryOutcome::TimedOut;
+                                            }
+                                            SessionQueryOutcome::SessionGone => {
+                                                return SessionQueryOutcome::SessionGone;
+                                            }
                                         }
                                     }
-                                }
-                                out.sort_unstable_by_key(|(address, _)| *address);
-                                SessionQueryOutcome::Reply(out)
-                            };
-                            let _ = reply.send(result);
+                                    out.sort_unstable_by_key(|(address, _)| *address);
+                                    SessionQueryOutcome::Reply(out)
+                                };
+                                let result = tokio::select! {
+                                    biased;
+                                    // Dropping `collection` releases every
+                                    // target sender and in-flight reply future.
+                                    () = reply.closed() => return,
+                                    result = collection => result,
+                                };
+                                let _ = reply.send(result);
+                            });
                         }
                         PeerManagerCommand::GetPolicy { name, reply } => {
                             let _ = reply.send(named_policy_from_config(&self.current_config, &name));
