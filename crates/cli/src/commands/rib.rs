@@ -306,13 +306,17 @@ fn make_labeled_request(
     })
 }
 
-fn print_routes(routes: &[crate::proto::Route], json: bool) -> Result<(), CliError> {
+fn print_routes(
+    routes: &[crate::proto::Route],
+    show_age: bool,
+    json: bool,
+) -> Result<(), CliError> {
     if json {
         output::print_json_pretty(&JsonRoutes(routes))?;
     } else if routes.is_empty() {
         println!("No routes");
     } else {
-        output::print_route_table(routes);
+        output::print_route_table(routes, show_age);
     }
     Ok(())
 }
@@ -752,11 +756,14 @@ impl Serialize for JsonRouteRef<'_> {
         S: Serializer,
     {
         let route = self.route;
-        let mut len = 10;
+        let mut len = 12;
         if route.path_id != 0 {
             len += 1;
         }
         if !route.validation_state.is_empty() {
+            len += 1;
+        }
+        if !route.aspa_state.is_empty() {
             len += 1;
         }
         if route.stale {
@@ -786,6 +793,7 @@ impl Serialize for JsonRouteRef<'_> {
         map.serialize_entry("best", &route.best)?;
         map.serialize_entry("peer_address", &route.peer_address)?;
         map.serialize_entry("communities", &JsonCommunities(&route.communities))?;
+        map.serialize_entry("extended_communities", &route.extended_communities)?;
         map.serialize_entry("large_communities", &route.large_communities)?;
         if route.path_id != 0 {
             map.serialize_entry("path_id", &route.path_id)?;
@@ -793,6 +801,13 @@ impl Serialize for JsonRouteRef<'_> {
         if !route.validation_state.is_empty() {
             map.serialize_entry("validation_state", &route.validation_state)?;
         }
+        if !route.aspa_state.is_empty() {
+            map.serialize_entry("aspa_state", &route.aspa_state)?;
+        }
+        map.serialize_entry(
+            "received_at_epoch_seconds",
+            &route.received_at_epoch_seconds,
+        )?;
         if route.stale {
             map.serialize_entry("stale", &route.stale)?;
         }
@@ -1637,6 +1652,7 @@ pub async fn best(
     connection: Connection,
     family: Option<i32>,
     filters: &RouteFilterOpts,
+    show_age: bool,
     json: bool,
 ) -> Result<(), CliError> {
     let mut client =
@@ -1647,7 +1663,7 @@ pub async fn best(
         make_route_request(None, family, filters)?,
     )
     .await?;
-    print_routes(&routes, json)
+    print_routes(&routes, show_age, json)
 }
 
 pub async fn count_best(
@@ -1746,6 +1762,7 @@ pub async fn received(
     address: &str,
     family: Option<i32>,
     filters: &RouteFilterOpts,
+    show_age: bool,
     json: bool,
 ) -> Result<(), CliError> {
     let mut client =
@@ -1756,7 +1773,7 @@ pub async fn received(
         make_route_request(Some(address), family, filters)?,
     )
     .await?;
-    print_routes(&routes, json)
+    print_routes(&routes, show_age, json)
 }
 
 pub async fn count_received(
@@ -1918,6 +1935,7 @@ pub async fn advertised(
     address: &str,
     family: Option<i32>,
     filters: &RouteFilterOpts,
+    show_age: bool,
     json: bool,
 ) -> Result<(), CliError> {
     let mut client =
@@ -1928,7 +1946,7 @@ pub async fn advertised(
         make_route_request(Some(address), family, filters)?,
     )
     .await?;
-    print_routes(&routes, json)
+    print_routes(&routes, show_age, json)
 }
 
 pub async fn count_advertised(
@@ -2068,9 +2086,12 @@ mod tests {
                 .iter()
                 .map(|c| output::format_community(*c))
                 .collect(),
+            extended_communities: r.extended_communities.clone(),
             large_communities: r.large_communities.clone(),
             path_id: r.path_id,
             validation_state: r.validation_state.clone(),
+            aspa_state: r.aspa_state.clone(),
+            received_at_epoch_seconds: r.received_at_epoch_seconds,
         }
     }
 
@@ -2136,9 +2157,12 @@ mod tests {
             best: true,
             peer_address: "192.0.2.1".to_string(),
             communities: vec![rustbgpd_wire::COMMUNITY_NO_EXPORT, (64512_u32 << 16) | 100],
+            extended_communities: vec![0x0002_fc00_0000_0064, 0x4004_c000_0201_0032],
             large_communities: vec!["64512:1:100".to_string()],
             path_id,
             validation_state: validation_state.to_string(),
+            aspa_state: "valid".to_string(),
+            received_at_epoch_seconds: 1_750_000_000,
             ..Default::default()
         }
     }
@@ -2793,6 +2817,34 @@ mod tests {
         assert_eq!(direct, legacy);
     }
 
+    /// Load-bearing native-route fact proof: dropping the raw extended
+    /// communities or receive epoch, reordering the extended communities,
+    /// omitting the genuine ASPA `unknown` state, or emitting the empty
+    /// compatibility sentinel makes an exact assertion red.
+    #[test]
+    fn route_list_json_exposes_native_route_facts_without_collapsing_unknowns() {
+        let mut absent = route_for_json(0, "");
+        absent.extended_communities = vec![9, 3, 7];
+        absent.aspa_state.clear();
+        absent.received_at_epoch_seconds = 0;
+        let mut unknown = route_for_json(0, "");
+        unknown.extended_communities = vec![11, 5];
+        unknown.aspa_state = "unknown".to_string();
+        unknown.received_at_epoch_seconds = 42;
+
+        let value: serde_json::Value =
+            serde_json::to_value(JsonRoutes(&[absent, unknown])).unwrap();
+        assert_eq!(
+            value[0]["extended_communities"],
+            serde_json::json!([9, 3, 7])
+        );
+        assert!(value[0].get("aspa_state").is_none());
+        assert_eq!(value[0]["received_at_epoch_seconds"], 0);
+        assert_eq!(value[1]["extended_communities"], serde_json::json!([11, 5]));
+        assert_eq!(value[1]["aspa_state"], "unknown");
+        assert_eq!(value[1]["received_at_epoch_seconds"], 42);
+    }
+
     #[test]
     fn route_list_json_honors_med_absence_marker() {
         // MED-absence-aware daemon: `med_attr` present somewhere in
@@ -3284,9 +3336,16 @@ mod tests {
         }
 
         let connection = connect(&server.addr, None).await.unwrap();
-        received(connection, "192.0.2.1", None, &no_route_filters(), false)
-            .await
-            .unwrap();
+        received(
+            connection,
+            "192.0.2.1",
+            None,
+            &no_route_filters(),
+            false,
+            false,
+        )
+        .await
+        .unwrap();
 
         let requests = server.state.list_route_requests.lock().await;
         assert_eq!(requests.len(), 2, "one RPC per page");
@@ -3306,7 +3365,7 @@ mod tests {
         }
 
         let connection = connect(&server.addr, None).await.unwrap();
-        best(connection, None, &no_route_filters(), false)
+        best(connection, None, &no_route_filters(), false, false)
             .await
             .unwrap();
 

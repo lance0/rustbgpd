@@ -2,6 +2,7 @@ use serde::Serialize;
 
 use std::io::{self, Write};
 use std::net::IpAddr;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::error::CliError;
 use crate::proto;
@@ -474,11 +475,15 @@ pub struct JsonRoute {
     pub best: bool,
     pub peer_address: String,
     pub communities: Vec<String>,
+    pub extended_communities: Vec<u64>,
     pub large_communities: Vec<String>,
     #[serde(skip_serializing_if = "is_zero")]
     pub path_id: u32,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub validation_state: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub aspa_state: String,
+    pub received_at_epoch_seconds: u64,
 }
 
 #[derive(Serialize)]
@@ -812,11 +817,38 @@ fn format_med(med: u32, med_attr: Option<u32>, med_attr_supported: bool) -> Stri
 }
 
 /// Print route table with dynamic column widths and colored best marker.
-pub fn print_route_table(routes: &[proto::Route]) {
-    print!("{}", render_route_table(routes));
+pub fn print_route_table(routes: &[proto::Route], show_age: bool) {
+    print!(
+        "{}",
+        render_route_table_with_clock(routes, show_age, || {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+        })
+    );
 }
 
+fn render_route_table_with_clock<F>(routes: &[proto::Route], show_age: bool, clock: F) -> String
+where
+    F: FnOnce() -> u64,
+{
+    let now_epoch_seconds = if show_age { clock() } else { 0 };
+    render_route_table_at(routes, show_age, now_epoch_seconds)
+}
+
+#[cfg(test)]
 fn render_route_table(routes: &[proto::Route]) -> String {
+    render_route_table_with_clock(routes, false, || {
+        panic!("default route rendering must not read the clock")
+    })
+}
+
+fn render_route_table_at(
+    routes: &[proto::Route],
+    show_age: bool,
+    now_epoch_seconds: u64,
+) -> String {
     use std::fmt::Write as _;
 
     struct Row {
@@ -829,6 +861,7 @@ fn render_route_table(routes: &[proto::Route]) -> String {
         med: String,
         origin: String,
         path_id: String,
+        age: Option<String>,
     }
 
     // GR stale flag column ("S" = stale per RFC 4724, "L" = LLGR stale
@@ -878,6 +911,10 @@ fn render_route_table(routes: &[proto::Route]) -> String {
                 med: format_med(r.med, r.med_attr, med_attr_supported),
                 origin: format_origin(r.origin).to_string(),
                 path_id,
+                age: show_age.then(|| match r.received_at_epoch_seconds {
+                    0 => "-".to_string(),
+                    received_at => format_duration(now_epoch_seconds.saturating_sub(received_at)),
+                }),
             }
         })
         .collect();
@@ -908,30 +945,55 @@ fn render_route_table(routes: &[proto::Route]) -> String {
         .max()
         .unwrap_or(0)
         .max(6);
-
     let mut out = String::new();
     let header_pad = if any_stale { "    " } else { "   " };
-    let _ = writeln!(
-        out,
-        "{header_pad}{:<w_pfx$} {:<w_nh$} {:<w_asp$} {:>w_lp$} {:>w_med$}  {:<w_orig$} PathID",
-        "Prefix", "Next Hop", "AS Path", "LP", "MED", "Origin",
-    );
+    if show_age {
+        let _ = writeln!(
+            out,
+            "{header_pad}{:<w_pfx$} {:<w_nh$} {:<w_asp$} {:>w_lp$} {:>w_med$}  {:<w_orig$} {:<6} Age",
+            "Prefix", "Next Hop", "AS Path", "LP", "MED", "Origin", "PathID",
+        );
+    } else {
+        let _ = writeln!(
+            out,
+            "{header_pad}{:<w_pfx$} {:<w_nh$} {:<w_asp$} {:>w_lp$} {:>w_med$}  {:<w_orig$} PathID",
+            "Prefix", "Next Hop", "AS Path", "LP", "MED", "Origin",
+        );
+    }
 
     for row in &rows {
         let overhead = ansi_overhead(&row.marker_colored, row.marker_plain_len);
         let marker_width = row.marker_plain_len + overhead;
-        let _ = writeln!(
-            out,
-            "{:<marker_width$} {:<w_pfx$} {:<w_nh$} {:<w_asp$} {:>w_lp$} {:>w_med$}  {:<w_orig$} {}",
-            row.marker_colored,
-            row.prefix,
-            row.next_hop,
-            row.as_path,
-            row.lp,
-            row.med,
-            row.origin,
-            row.path_id,
-        );
+        if show_age {
+            let _ = writeln!(
+                out,
+                "{:<marker_width$} {:<w_pfx$} {:<w_nh$} {:<w_asp$} {:>w_lp$} {:>w_med$}  {:<w_orig$} {:<6} {}",
+                row.marker_colored,
+                row.prefix,
+                row.next_hop,
+                row.as_path,
+                row.lp,
+                row.med,
+                row.origin,
+                row.path_id,
+                row.age
+                    .as_deref()
+                    .expect("age is populated when the column is enabled"),
+            );
+        } else {
+            let _ = writeln!(
+                out,
+                "{:<marker_width$} {:<w_pfx$} {:<w_nh$} {:<w_asp$} {:>w_lp$} {:>w_med$}  {:<w_orig$} {}",
+                row.marker_colored,
+                row.prefix,
+                row.next_hop,
+                row.as_path,
+                row.lp,
+                row.med,
+                row.origin,
+                row.path_id,
+            );
+        }
     }
     out
 }
@@ -1875,15 +1937,45 @@ Neighbor    AS    State       Uptime   Rx Pfx Tx Pfx Description    MsgRcvd MsgS
         }
     }
 
-    /// Without any GR-stale route the table keeps its classic 2-char
-    /// marker column — unchanged from the pre-LAN-347 layout.
+    /// Load-bearing default-path proof: reading the injected clock panics;
+    /// enabling the age column unconditionally or changing existing spacing
+    /// makes this byte-for-byte golden red.
     #[test]
     fn route_table_no_stale_layout_unchanged() {
         owo_colors::set_override(false);
         let rendered = render_route_table(&[route_fixture(false, false)]);
-        let mut lines = rendered.lines();
-        assert!(lines.next().unwrap().starts_with("   Prefix"));
-        assert!(lines.next().unwrap().starts_with("*> 10.0.0.0/24"));
+        assert_eq!(
+            rendered,
+            concat!(
+                "   Prefix      Next Hop  AS Path  LP MED  Origin PathID\n",
+                "*> 10.0.0.0/24 192.0.2.1 65001   100   0  igp    \n",
+            )
+        );
+    }
+
+    /// Load-bearing age proof: treating epoch zero as a real timestamp,
+    /// subtracting without saturation, or bypassing the existing duration
+    /// formatter changes one exact row and makes this golden red.
+    #[test]
+    fn route_table_age_marks_unknown_old_and_future_timestamps() {
+        owo_colors::set_override(false);
+        let unknown = route_fixture(false, false);
+        let mut old = route_fixture(false, false);
+        old.prefix = "10.0.1.0".to_string();
+        old.received_at_epoch_seconds = 339;
+        let mut future = route_fixture(false, false);
+        future.prefix = "10.0.2.0".to_string();
+        future.received_at_epoch_seconds = 4_001;
+
+        assert_eq!(
+            render_route_table_at(&[unknown, old, future], true, 4_000),
+            concat!(
+                "   Prefix      Next Hop  AS Path  LP MED  Origin PathID Age\n",
+                "*> 10.0.0.0/24 192.0.2.1 65001   100   0  igp           -\n",
+                "*> 10.0.1.0/24 192.0.2.1 65001   100   0  igp           01:01:01\n",
+                "*> 10.0.2.0/24 192.0.2.1 65001   100   0  igp           00:00:00\n",
+            )
+        );
     }
 
     /// A GR-stale route widens the marker column with an "S" (stale,

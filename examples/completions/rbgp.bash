@@ -7687,7 +7687,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__rib)
-            opts="-a -p -l -c -s -j -h --family --prefix --longer --explain --count --explain-peer --origin-asn --community --large-community --addr --token-file --json --no-color --help received recv advertised sent blackholes fib bgpls bgp-ls vpn labeled rtc add delete help"
+            opts="-a -p -l -c -s -j -h --family --prefix --longer --explain --count --age --explain-peer --origin-asn --community --large-community --addr --token-file --json --no-color --help received recv advertised sent blackholes fib bgpls bgp-ls vpn labeled rtc add delete help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -7807,7 +7807,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__rib__subcmd__advertised)
-            opts="-a -s -j -h --family --count --explain --rd --labeled --source-peer --source-path-id --addr --token-file --json --no-color --help"
+            opts="-a -s -j -h --family --count --age --explain --rd --labeled --source-peer --source-path-id --addr --token-file --json --no-color --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -8223,7 +8223,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__rib__subcmd__received)
-            opts="-a -s -j -h --family --count --rejected --addr --token-file --json --no-color --help"
+            opts="-a -s -j -h --family --count --age --rejected --addr --token-file --json --no-color --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0

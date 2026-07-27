@@ -11,6 +11,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Native `rbgp rib` JSON now exposes raw ordered `extended_communities`,
+  `aspa_state` when the daemon supplies it, and
+  `received_at_epoch_seconds` (including the zero unknown sentinel) for best,
+  received, advertised, and embedded best-path-explain routes. Human best,
+  received, and advertised tables accept `--age` to append the original route
+  receive age without changing the default table.
+
 - `rbgp rib --count`, `rbgp rib received PEER --count`, and
   `rbgp rib advertised PEER --count` report the exact filtered route count
   without transferring a full route listing. Each count uses one view-correct

@@ -70,11 +70,14 @@ rbgp bfd show <addr>
 
 ```bash
 rbgp rib
+rbgp rib --age                              # append original receive age
 rbgp rib --count                            # best-route count only
 rbgp rib received <addr>
+rbgp rib received <addr> --age
 rbgp rib received <addr> --count
 rbgp rib recv <addr>                        # alias
 rbgp rib advertised <addr>
+rbgp rib advertised <addr> --age
 rbgp rib advertised <addr> --count
 rbgp rib sent <addr>                        # alias
 rbgp rib --prefix <prefix> --explain
@@ -116,6 +119,15 @@ route row, rendering `Total matching routes: N` or `{"total_count":N}` with
 `--json`. A filtered count still scans the matching backend view to compute the
 exact total; `--count` bounds response transfer, not server-side query work. It
 cannot be combined with the rejected-route or explain views.
+
+`--age` appends an `Age` column to the human best, received, or advertised
+route table. It is the age of the original RIB receive event, including in the
+advertised view; it is not the age of the advertisement. Unknown timestamps
+render as `-`, and future timestamps clamp to `00:00:00`. Because the daemon
+supplies an epoch timestamp and the CLI reads its local clock, running the CLI
+on another host can expose clock skew. `--age` cannot be combined with
+`--count`, rejected-route output, or either explain view. JSON is unchanged by
+the flag and always includes the raw `received_at_epoch_seconds` field.
 
 ### EVPN
 
