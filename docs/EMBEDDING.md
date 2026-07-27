@@ -73,7 +73,9 @@ Public surface (re-exported at crate root — `crates/wire/src/lib.rs`):
 - **EVPN** (`EvpnRoute`/`EvpnRouteKey`, Types 1–5; route keys implement `Ord`),
   **FlowSpec** (`FlowSpecRule`),
   **VPNv4/v6** (`vpn` module), **BGP-LS** (`bgpls` module), **ORF** (`orf` module),
-  **PMSI Tunnel**, **Route Distinguisher**.
+  **PMSI Tunnel**, **Route Distinguisher** (`Display`/`FromStr` for the three
+  structured RFC 4364 forms and the exact `0x<16-hex-digits>` display fallback
+  for unknown RD types).
 - **Well-known community constants** (`COMMUNITY_NO_EXPORT`, `COMMUNITY_BLACKHOLE`,
   `COMMUNITY_GRACEFUL_SHUTDOWN`, `COMMUNITY_LLGR_STALE`, ...).
 - **`DecodeError` / `EncodeError`** via `thiserror`.
@@ -123,6 +125,11 @@ carries the itemized list under "0.16.0 compatibility note"; diff exactly that
 list before you upgrade a consumer that asserts on acceptance or typed
 variants. Consumers comparing decoded values must also account for RFC 8092
 Large Community duplicate normalization, which keeps the first occurrence.
+Separately, `RouteDistinguisher::from_str` now accepts the displayed
+`0x<16-hex-digits>` fallback for unknown RD types and the non-exhaustive
+`RouteDistinguisherParseError` gains `InvalidHexFallback(String)`. That is an
+additive text-parser acceptance and API change, not a seventh binary
+wire-decode change.
 
 ---
 
@@ -301,7 +308,8 @@ and `policy` are later.**
    with its `PathsLimitFamily` entry type (experimental capability code 76),
    the `Ord` implementation on `EvpnRouteKey`, and `#[non_exhaustive]` across
    the registry-tracking enums. The prepared `0.16.0` is additive at the API
-   level with six decode-acceptance changes (§2.3).
+   level with six binary decode-acceptance changes plus the separate additive
+   Route Distinguisher text-parser change described in §2.3.
 
 2. **`rustbgpd-fsm` (published as `0.3.0`; `0.3.1` prepared).** The prepared
    `0.3.1` keeps the public API backward-compatible: `PeerConfig` gains
