@@ -451,6 +451,54 @@ log_format = "json"
     }
 
     #[tokio::test]
+    async fn delete_neighbor_matches_noncanonical_on_disk_spelling() {
+        // The delete path compares the config string against
+        // `IpAddr::to_string()`; a non-canonical on-disk spelling must
+        // still delete the same neighbor.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[neighbors]]
+address = "2001:DB8:0:0:0:0:0:1"
+remote_asn = 65002
+"#;
+        std::fs::write(&path, toml_str).unwrap();
+        let config = Config::load_toml_with_diagnostics(
+            &crate::test_support::tier_authorized_uds_test_config(toml_str),
+            "noncanonical spelling test",
+        )
+        .unwrap();
+
+        let (tx, rx) = mpsc::channel(16);
+        let persister = ConfigPersister::new(rx, path.clone(), config, None);
+        let handle = tokio::spawn(persister.run());
+
+        tx.send(ConfigMutation::DeleteNeighbor(
+            "2001:db8::1".parse().unwrap(),
+        ))
+        .await
+        .unwrap();
+        drop(tx);
+        handle.await.unwrap();
+
+        let reloaded: Config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(
+            reloaded.neighbors.is_empty(),
+            "delete must match the respelled neighbor: {:?}",
+            reloaded.neighbors
+        );
+    }
+
+    #[tokio::test]
     async fn add_then_delete_round_trips() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");

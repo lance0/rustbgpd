@@ -2930,7 +2930,7 @@ mod tests {
             ("confirm_journal.rs", include_str!("confirm_journal.rs"), 2),
             ("gnmi_set_bridge.rs", include_str!("gnmi_set_bridge.rs"), 2),
             ("main.rs", include_str!("main.rs"), 2),
-            ("policy_admin.rs", include_str!("policy_admin.rs"), 2),
+            ("policy_admin.rs", include_str!("policy_admin.rs"), 3),
         ];
 
         for (path, source, helper_count) in module_sources {

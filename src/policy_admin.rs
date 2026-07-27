@@ -931,6 +931,41 @@ remote_asn = 65002
     }
 
     #[test]
+    fn neighbor_lookup_matches_noncanonical_config_spelling() {
+        // The lookup compares the config string against
+        // `IpAddr::to_string()`; a non-canonical on-disk spelling must
+        // still resolve to the same neighbor.
+        let toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "127.0.0.1:9179"
+log_format = "json"
+
+[peer_groups.fabric]
+
+[[neighbors]]
+address = "2001:DB8:0:0:0:0:0:1"
+remote_asn = 65002
+peer_group = "fabric"
+"#;
+        let config = Config::load_toml_with_diagnostics(
+            &tier_authorized_uds_test_config(toml),
+            "noncanonical spelling test",
+        )
+        .unwrap();
+        let address: IpAddr = "2001:db8::1".parse().unwrap();
+        assert_eq!(
+            neighbor_peer_group_from_config(&config, address),
+            Some(Some("fabric".to_string()))
+        );
+        assert!(neighbor_policy_chains_from_config(&config, address).is_some());
+    }
+
+    #[test]
     fn neighbor_added_event_preserves_session_fields() {
         // Mutation-red for min_hold_time: deleting persistence projection
         // leaves the inserted neighbor at None instead of 30.
