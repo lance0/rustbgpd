@@ -58,10 +58,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Withdrawal-only outbound envelopes no longer run an empty exact-export
   announcement probe for every member. The immutable transport snapshot,
   rejection retirement, Adj-RIB-Out commit, gauges, and enqueue remain
-  unchanged. At a fixed 64-route grouped withdrawal, a controlled
-  immediate-parent A/B/B/A campaign improved the two-attempt mean by 6.80%,
-  8.41%, and 9.33% at 64, 256, and 1,000 members; the 8-member result is not
-  claimed. See
+  unchanged. In the fixed 64-route grouped-withdrawal manager-path benchmark,
+  a controlled immediate-parent A/B/B/A campaign improved the two-attempt mean
+  by 6.80%, 8.41%, and 9.33% at 64, 256, and 1,000 members; the 8-member result
+  is not claimed. See
   [`docs/perf/grouped-withdrawal-probe-skip-2026-07.md`](docs/perf/grouped-withdrawal-probe-skip-2026-07.md).
 
 ### Fixed
