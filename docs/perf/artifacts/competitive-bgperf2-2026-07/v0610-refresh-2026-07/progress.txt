@@ -1,0 +1,18 @@
+[2026-07-27 19:30:48] campaign start; event_history=on (harness default, RUSTBGPD_EVENT_HISTORY_OFF unset)
+[2026-07-27 19:30:48] rustbgpd source commit: d1877d4b823c0dad69a18f8658fe7af0bf7efedc
+[2026-07-27 19:30:48] matrix: targets [rustbgpd bird gobgp frr_c] x shapes [10x1000 2x10000 2x100000] x 3 runs
+[2026-07-27 19:30:48] phase0: rustbgpd image build (force, nocache) starting
+[2026-07-27 19:36:14] phase0: rustbgpd image built OK, digest sha256:b0e77db8ebf786dd725f4398fa39ef830878c853d0abcf6435194da963c76b10
+[2026-07-27 19:36:14] phase0: bgperf/bird present
+[2026-07-27 19:36:14] phase0: bgperf/gobgp present
+[2026-07-27 19:36:14] phase0: bgperf/frr_c present
+[2026-07-27 19:36:14] phase0: bgperf/bgpdump2 present
+[2026-07-27 19:36:14] phase0: complete; batch configs written
+[2026-07-27 19:36:59] run1: quiet-gate CONFIRMED load=0.60 1.38 1.37
+[2026-07-27 19:39:26] run1 complete rc=0
+[2026-07-27 19:39:56] run2: quiet-gate CONFIRMED load=0.50 1.04 1.23
+[2026-07-27 19:42:23] run2 complete rc=0
+[2026-07-27 19:43:54] run3: quiet-gate CONFIRMED load=0.60 1.06 1.20
+[2026-07-27 19:46:20] run3 complete rc=0
+[2026-07-27 19:46:20] medians written to <scratch>/bgperf2-medians.csv
+[2026-07-27 19:46:20] DONE

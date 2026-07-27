@@ -1,0 +1,5 @@
+name, target, version, peers, prefixes per peer, required, received, monitor (s), elapsed (s), prefix received (s), testers (s), total time, max cpu %, max mem (GB), min idle%, min free mem (GB), flags, date,cores,Mem (GB), tester errors, failed, MSG, filters
+rustbgpd,rustbgpd,rustbgpd 0.61.0,10,1000,9900,10000,0,2,1,1,8.28,6,0.037,99,101.044,,2026-07-27,64,125.29GB,5,0,,,
+bird,bird,2.18+branch.master.0ee9f93bd076,10,1000,9900,10000,1,2,1,1,9.2,2,0.009,99,101.08,,2026-07-27,64,125.29GB,90000,0,,,
+gobgp,gobgp,4.3.0,10,1000,9900,10000,1,3,1,2,10.29,140,0.036,96,101.109,,2026-07-27,64,125.29GB,0,0,,,
+frr_c,frr_c,FRRouting 10.7.0-dev-my-manual-build (46c31f7c5eec) on Linux(6.17.0-35-generic).,10,1000,9900,10000,0,3,2,1,9.23,3,0.027,99,101.097,,2026-07-27,64,125.29GB,0,0,,,

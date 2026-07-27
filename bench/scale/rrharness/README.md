@@ -34,7 +34,11 @@ compiling against `crates/rib`, `crates/wire`, and `crates/telemetry` on `main`.
   and whole-process RSS snapshots). This harness reports process RSS from
   `/proc` only; the per-component live-heap attribution table in that receipt
   is produced by the separate dhat/bgperf2 pass, not this harness.
-- The 2026-07-10 re-profile that produced LAN-348.
+- The 2026-07-10 re-profile.
+- The v0.61.0 `flood 1000 100000 20` baseline (cold staged 1.326 s,
+  213 MiB converged, manager-direct — **not** comparable to the
+  transport-harness scale-receipt headline), recorded in
+  [`docs/perf/ixp-matrix-2026-07.md`](../../../docs/perf/ixp-matrix-2026-07.md#1000-client-rr-cell--in-repo-manager-direct-harness).
 
 ## Build and run
 

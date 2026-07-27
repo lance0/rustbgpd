@@ -410,6 +410,130 @@ had a single-peer completion tail of 11.2 s (p95 of that reload:
 parse errors in every cell. Raw revalidation artifacts:
 [`artifacts/ixp-matrix-2026-07/revalidation-2026-07/`](artifacts/ixp-matrix-2026-07/revalidation-2026-07/).
 
+## v0.61.0 refresh (2026-07-27)
+
+A same-host, same-day rerun of the full three-stack matrix at
+`d1877d4b` — the `v0.61.0` tag plus five docs-only commits, verified
+code-identical to the tag — with every cell fresh, including the BIRD
+and OpenBGPD cells (which in both prior refreshes were code-identical
+carryovers). Same harness, same shapes, same protocol: 700 × 400,400,
+runs A and B, 4 reloads per S2 leg, 3 flapstorm rounds per S3 leg, one
+cell at a time behind the load gate with 5-minute cool-downs. All 12
+cells pass: 700/700 sessions, zero decode errors, zero survivor
+session flaps, delivered generation verified per reload.
+
+### S1 — cold convergence (four legs per daemon)
+
+| S1 metric | rustbgpd | BIRD 3.3.1 | OpenBGPD 9.1 |
+|---|---|---|---|
+| 700 sessions Established | **0.7 s** (all 4 legs) | 18.4–20.8 s | 66.7–155.7 s |
+| Full base-table delivery | **4.7–5.0 s** | 61.6–65.3 s | 338.8–422.1 s |
+
+rustbgpd holds its published band (0.6 s → 0.7 s is instrument
+granularity; delivery's lower edge slightly better). BIRD sits
+slightly above its published band (17.3–19.7 s established,
+59.0–62.1 s delivery; 3 of 4 delivery legs above it). OpenBGPD's
+spread exceeds its published band in **both** directions
+(vs 124.4–141.4 s / 396.1–417.3 s) — consistent with the startup
+variance this receipt already documented at anomaly (b), and with no
+wedge event this time.
+
+### S2 — reload stall and completion
+
+| Daemon | Run | stall p50 | stall p95 | worst observer | completion p50 | completion max |
+|---|---|---|---|---|---|---|
+| rustbgpd | A | 0.42–0.52 s | 0.50–0.86 s | 1.01 s | 1.29–1.34 s | 1.88 s |
+| rustbgpd | B | 0.42–0.73 s | 0.65–1.28 s | 1.39 s | 1.50–1.67 s | 2.73 s |
+| BIRD 3.3.1 | A | 1.74–2.68 s | 2.48–6.64 s | 9.93 s | 68.3–84.8 s | 93.4 s |
+| BIRD 3.3.1 | B | 1.81–2.24 s | 2.76–5.33 s | 8.31 s | 73.0–84.3 s | 92.0 s |
+| OpenBGPD 9.1 | A | 0.26–0.28 s | 0.31–0.33 s | 0.34 s | 246.8–252.5 s | 252.5 s |
+| OpenBGPD 9.1 | B | 0.24–0.28 s | 0.29–0.31 s | 0.32 s | 247.7–250.8 s | 250.8 s |
+| *control (churn only), p50* | A / B | 19.38 / 19.89 ms | 19.85 / 20.04 ms | 42.03 / 41.97 ms | — | — |
+
+Against the published headline (range over all 8 reloads): rustbgpd
+stall p50 **0.42–0.73 s** (published 0.43–0.84 s, both edges slightly
+better), worst single observer **1.39 s** (vs 1.85 s), completion p50
+**1.29–1.67 s** (vs 1.5–2.2 s; run A entirely below the published
+lower edge), completion worst **2.73 s** (vs 2.9 s). The known upward
+stall drift across consecutive reloads persists at lower absolute
+values (run B p50 0.42→0.73 s over 4 reloads — same shape as
+published). OpenBGPD stays within its bands. BIRD's stall band's upper
+edge is above its published range (p50 up to 2.68 s vs 2.29 s, worst
+observer 9.93 s vs 7.73 s) with completion in-band — same-day fresh
+runs; plain run-to-run variance is the simplest reading, consistent
+with the scheduler-contention honesty note above.
+
+### S3 — flapstorm
+
+| Daemon | Run | withdraw p50 | withdraw max | re-announce p50 | re-announce max | first_reann p50 |
+|---|---|---|---|---|---|---|
+| rustbgpd | A | 0.25–0.48 s | 0.48 s | **0.47–0.49 s** | 0.53 s | 0.22–0.23 s |
+| rustbgpd | B | 0.25–0.40 s | 0.44 s | **0.46–0.47 s** | 0.50 s | 0.21–0.22 s |
+| BIRD 3.3.1 | A | 0.38–0.55 s | 0.68 s | 2.69–3.35 s | 4.43 s | — |
+| BIRD 3.3.1 | B | 0.44–0.57 s | 0.75 s | 3.43–3.68 s | 4.17 s | — |
+| OpenBGPD 9.1 | A | 10.8–12.6 s | 12.6 s | 21.0–21.4 s | 21.4 s | — |
+| OpenBGPD 9.1 | B | 10.3–10.7 s | 10.7 s | 20.9–21.1 s | 21.1 s | — |
+
+rustbgpd's re-announce p50 of 0.46–0.49 s over both runs is an exact
+match of the published band; every other cell is within-band for all
+three daemons.
+
+### Memory — the published S2 settled rows are stale for rustbgpd
+
+| Daemon | S2 settled (A / B) | S2 peak (A / B) | S3 settled (A / B) | S3 peak (A / B) |
+|---|---|---|---|---|
+| rustbgpd | **412 / 410 MiB** | 590 / 577 MiB | 440 / 502 MiB | 552 / 502 MiB |
+| BIRD 3.3.1 | 425 / 417 MiB | 425 / 417 MiB | **337 / 292 MiB** | 337 / 292 MiB |
+| OpenBGPD 9.1 | 768 / 773 MiB | 975 / 974 MiB | 824 / 821 MiB | 974 / 974 MiB |
+
+rustbgpd's S2 settled RSS measures **412 / 410 MiB against the
+published 768 / 763 MiB — a ~46% reduction** — with peak now
+590 / 577 MiB against the published 1028 MiB transient, and a
+churn-only control RSS of 398 / 397 MiB. The attribution is the
+explain-cache default flip (the cache became opt-in after the
+published campaign), corroborated by the one-commit A/B receipt at a
+comparable 700-member shape (−373.5 MiB settled, −42.9%:
+[`explain-cache-opt-in-2026-07.md`](explain-cache-opt-in-2026-07.md)).
+
+That moves one published verdict: **"BIRD wins settled memory
+outright" no longer holds at the S2 shape in these runs** — rustbgpd
+edged BIRD in S2 settled RSS here (412/410 vs 425/417 MiB). This is a
+same-host pair of runs, not a universal memory win, and BIRD run A
+settled slightly above its own published band (425 vs 408/416 MiB) —
+while **BIRD's S3 settled advantage remains clear** (337/292 vs
+rustbgpd's 440/502 MiB). OpenBGPD's memory is unchanged.
+
+### 1000-client RR cell — in-repo manager-direct harness
+
+The refresh also ran the committed `bench/scale/rrharness` flood shape
+(`flood 1000 100000 20`) at the same commit: cold staged convergence
+**1.326 s**, RSS at convergence **213 MiB** (established: 20 MiB).
+After the 20 s sustained-churn window (16 fresh-100k blocks, manager
+busy fraction 0.992) the harness process ends at 1423 MiB — that
+figure is the **whole harness process** (manager + 1000 in-process
+consumers + retained flood state), not a daemon RSS, and should not be
+quoted next to any daemon memory number.
+
+**These numbers are not comparable to the published 1.82 s / 419 MiB
+scale-receipt headline** ([`scale-receipt-2026-07.md`](scale-receipt-2026-07.md)),
+which came from the out-of-repo transport harness — real
+`PeerSession`s, TCP, and a wire-decode convergence gauge. The in-repo
+harness is the manager-direct reconstruction (no transport; outbound
+channels drained by trivial consumers; staged-convergence gauge only).
+Treat 1.326 s staged / 213 MiB converged as the in-repo harness's own
+v0.61.0 baseline, nothing more. Folded CPU profile and stdout are in
+the refresh artifact set (`rr1000/`).
+
+### Refresh artifacts
+
+Per-cell harness output, RSS samples, status, daemon logs, the rr1000
+cell, the campaign timeline (`progress.txt`), and a checksum
+`MANIFEST` with a `verify.sh` re-checker are committed under
+[`artifacts/ixp-matrix-2026-07/v0610-refresh-2026-07/`](artifacts/ixp-matrix-2026-07/v0610-refresh-2026-07/).
+Scenario configs are regenerated from scratch per cell by the
+committed generators at this commit and are not duplicated in the
+refresh set.
+
 ## Raw artifacts
 
 Committed under
