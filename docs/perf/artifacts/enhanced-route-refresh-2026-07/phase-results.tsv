@@ -1,0 +1,9 @@
+phase	rib_prefixes	max_prefix_usage	refresh_stale	refresh_active	session_established_total	session_flaps_total	actor_begin_count	actor_begin_sum_seconds	actor_eorr_count	actor_eorr_sum_seconds	actor_timeout_count	actor_timeout_sum_seconds
+baseline	100000	100000	0	0	1	0	0	0	0	0	0	0
+first-borr	100000	100000	100000	1	1	0	1	0.005221659	0	0	0	0
+replay-one	100000	100000	99999	1	1	0	1	0.005221659	0	0	0	0
+duplicate-borr	100000	100000	100000	1	1	0	2	0.009319687	0	0	0	0
+eorr	0	0	0	0	1	0	2	0.009319687	1	0.135977525	0	0
+restored	100000	100000	0	0	1	0	2	0.009319687	1	0.135977525	0	0
+timeout-borr	100000	100000	100000	1	1	0	3	0.015691145	1	0.135977525	0	0
+timeout-complete	0	0	0	0	1	0	3	0.015691145	1	0.135977525	1	0.141277927
