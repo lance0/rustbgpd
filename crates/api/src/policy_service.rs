@@ -5,6 +5,7 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use rustbgpd_transport::{
     CachedOutcome, ImportExplainReply, LookupResult, RejectedRoutesReply, ResolvedMatch,
+    SessionQueryOutcome,
 };
 use rustbgpd_wire::{Afi, Ipv4Prefix, Ipv6Prefix, Prefix, Safi};
 use tokio::sync::{mpsc, oneshot};
@@ -404,6 +405,23 @@ async fn require_configured_neighbor(
     .await?
     .ok_or_else(|| Status::not_found(format!("neighbor {address} not found")))
     .map(|_| ())
+}
+
+/// Reject a policy read for an address that does not resolve to one unique
+/// managed peer. Unlike the mutation validator above, this includes accepted
+/// dynamic peers because their session-local policy state is queryable even
+/// though they do not have a `[[neighbors]]` row.
+async fn require_managed_peer_address(
+    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
+    address: IpAddr,
+) -> Result<(), Status> {
+    peer_manager_request(peer_mgr_tx, |reply| PeerManagerCommand::HasPeerAddress {
+        address,
+        reply,
+    })
+    .await?
+    .then_some(())
+    .ok_or_else(|| Status::not_found(format!("neighbor {address} not found")))
 }
 
 #[tonic::async_trait]
@@ -1019,9 +1037,18 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             })
             .await
             .map_err(|_| Status::internal("peer manager unavailable"))?;
-        let reply: Option<ImportExplainReply> = reply_rx
+        let reply = reply_rx
             .await
             .map_err(|_| Status::internal("peer manager dropped reply"))?;
+        let reply: Option<ImportExplainReply> = match reply {
+            SessionQueryOutcome::Reply(reply) => Some(reply),
+            SessionQueryOutcome::SessionGone => None,
+            SessionQueryOutcome::TimedOut => {
+                return Err(Status::deadline_exceeded(format!(
+                    "peer {address} did not answer the import-policy explain query in time"
+                )));
+            }
+        };
 
         // LAN-320 tri-state: the operator always gets a definite answer,
         // and it is the *honest* one. `None` (no live session for the
@@ -1102,9 +1129,18 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             })
             .await
             .map_err(|_| Status::internal("peer manager unavailable"))?;
-        let reply: Option<RejectedRoutesReply> = reply_rx
+        let reply = reply_rx
             .await
             .map_err(|_| Status::internal("peer manager dropped reply"))?;
+        let reply: Option<RejectedRoutesReply> = match reply {
+            SessionQueryOutcome::Reply(reply) => Some(reply),
+            SessionQueryOutcome::SessionGone => None,
+            SessionQueryOutcome::TimedOut => {
+                return Err(Status::deadline_exceeded(format!(
+                    "peer {address} did not answer the rejected-route query in time"
+                )));
+            }
+        };
 
         // LAN-472: no live session means the session-local retention
         // store is gone — honestly distinct from "nothing rejected",
@@ -1328,6 +1364,9 @@ impl proto::policy_service_server::PolicyService for PolicyService {
                 Status::invalid_argument(format!("invalid peer address {:?}", req.peer_address))
             })?)
         };
+        if let Some(peer) = peer {
+            require_managed_peer_address(&self.peer_mgr_tx, peer).await?;
+        }
         let term_stats = |terms: Vec<rustbgpd_policy::TermHitRow>| -> Vec<proto::PolicyTermStat> {
             terms
                 .into_iter()
@@ -1387,6 +1426,19 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             let chains = reply_rx
                 .await
                 .map_err(|_| Status::internal("peer manager dropped reply"))?;
+            let chains = match chains {
+                SessionQueryOutcome::Reply(chains) => chains,
+                SessionQueryOutcome::TimedOut => {
+                    return Err(Status::deadline_exceeded(
+                        "one or more peer sessions did not answer the import policy stats query in time",
+                    ));
+                }
+                SessionQueryOutcome::SessionGone => {
+                    return Err(Status::unavailable(
+                        "one or more peer sessions exited during the import policy stats query",
+                    ));
+                }
+            };
             out.extend(
                 chains
                     .into_iter()
@@ -1771,7 +1823,10 @@ mod tests {
             while let Some(cmd) = peer_rx.recv().await {
                 match cmd {
                     PeerManagerCommand::ExplainImportPolicy { reply: tx, .. } => {
-                        let _ = tx.send(reply.clone());
+                        let outcome = reply
+                            .clone()
+                            .map_or(SessionQueryOutcome::SessionGone, SessionQueryOutcome::Reply);
+                        let _ = tx.send(outcome);
                     }
                     _ => panic!("unexpected peer-manager command"),
                 }
@@ -1796,7 +1851,10 @@ mod tests {
             while let Some(cmd) = peer_rx.recv().await {
                 match cmd {
                     PeerManagerCommand::ListRejectedRoutes { reply: tx, .. } => {
-                        let _ = tx.send(reply.clone());
+                        let outcome = reply
+                            .clone()
+                            .map_or(SessionQueryOutcome::SessionGone, SessionQueryOutcome::Reply);
+                        let _ = tx.send(outcome);
                     }
                     _ => panic!("unexpected peer-manager command"),
                 }
@@ -1818,6 +1876,44 @@ mod tests {
             .await
             .expect_err("no session must be an error");
         assert_eq!(err.code(), tonic::Code::NotFound);
+    }
+
+    /// LAN-661 red proof: mapping a stalled live session back onto either
+    /// absence branch changes these statuses to `success/NO_SESSION` and
+    /// `NOT_FOUND`, respectively.
+    #[tokio::test]
+    async fn policy_query_timeouts_are_deadlines_not_absence() {
+        let (peer_tx, mut peer_rx) = mpsc::channel(8);
+        let svc = PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None);
+        tokio::spawn(async move {
+            while let Some(cmd) = peer_rx.recv().await {
+                match cmd {
+                    PeerManagerCommand::ExplainImportPolicy { reply, .. } => {
+                        let _ = reply.send(SessionQueryOutcome::TimedOut);
+                    }
+                    PeerManagerCommand::ListRejectedRoutes { reply, .. } => {
+                        let _ = reply.send(SessionQueryOutcome::TimedOut);
+                    }
+                    _ => panic!("unexpected peer-manager command"),
+                }
+            }
+        });
+
+        let explain =
+            PolicyServiceRpc::explain_import_policy(&svc, Request::new(explain_request()))
+                .await
+                .expect_err("stalled explain must fail");
+        assert_eq!(explain.code(), tonic::Code::DeadlineExceeded);
+
+        let rejected = PolicyServiceRpc::list_rejected_routes(
+            &svc,
+            Request::new(proto::ListRejectedRoutesRequest {
+                peer_address: "10.0.0.2".to_string(),
+            }),
+        )
+        .await
+        .expect_err("stalled rejected-route query must fail");
+        assert_eq!(rejected.code(), tonic::Code::DeadlineExceeded);
     }
 
     /// LAN-472: entries come back with the canonical reason token, the
@@ -2753,9 +2849,13 @@ policy customer-in(peer_lp: u32) {
         tokio::spawn(async move {
             while let Some(command) = peer_rx.recv().await {
                 match command {
+                    PeerManagerCommand::HasPeerAddress { address, reply } => {
+                        assert_eq!(address, "10.0.0.2".parse::<IpAddr>().unwrap());
+                        let _ = reply.send(true);
+                    }
                     PeerManagerCommand::QueryImportPolicyTermHits { peer, reply } => {
                         assert_eq!(peer, Some("10.0.0.2".parse().unwrap()));
-                        let _ = reply.send(vec![(
+                        let _ = reply.send(SessionQueryOutcome::Reply(vec![(
                             "10.0.0.2".parse().unwrap(),
                             rustbgpd_transport::ImportPolicyTermHits {
                                 generation: 3,
@@ -2770,7 +2870,7 @@ policy customer-in(peer_lp: u32) {
                                     hits: 9,
                                 }],
                             },
-                        )]);
+                        )]));
                     }
                     PeerManagerCommand::QueryPolicyDatasets { reply } => {
                         let _ = reply.send(vec![crate::peer_types::PolicyDatasetStatusRow {
@@ -2904,6 +3004,51 @@ policy customer-in(peer_lp: u32) {
         assert_eq!(chain.last_error, "", "no error since install");
     }
 
+    async fn import_stats_outcome(
+        outcome: SessionQueryOutcome<Vec<(IpAddr, rustbgpd_transport::ImportPolicyTermHits)>>,
+    ) -> Result<Response<proto::GetPolicyStatsResponse>, Status> {
+        let (peer_tx, mut peer_rx) = mpsc::channel::<PeerManagerCommand>(4);
+        tokio::spawn(async move {
+            let mut outcome = Some(outcome);
+            while let Some(command) = peer_rx.recv().await {
+                match command {
+                    PeerManagerCommand::HasPeerAddress { reply, .. } => {
+                        let _ = reply.send(true);
+                    }
+                    PeerManagerCommand::QueryImportPolicyTermHits { reply, .. } => {
+                        let _ = reply.send(outcome.take().expect("one stats query"));
+                    }
+                    _ => panic!("unexpected peer-manager command"),
+                }
+            }
+        });
+        let svc = PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None);
+        PolicyServiceRpc::get_policy_stats(
+            &svc,
+            Request::new(proto::GetPolicyStatsRequest {
+                peer_address: "10.0.0.2".to_string(),
+                direction: "import".to_string(),
+            }),
+        )
+        .await
+    }
+
+    /// LAN-661 red proof: treating timeout or task exit as a successful empty
+    /// snapshot (or swapping the two status mappings) changes at least one
+    /// asserted status. This pins the RPC half of the typed manager outcome.
+    #[tokio::test]
+    async fn get_policy_stats_import_failures_are_not_empty_successes() {
+        let timeout = import_stats_outcome(SessionQueryOutcome::TimedOut)
+            .await
+            .expect_err("a stalled selected session must fail the RPC");
+        assert_eq!(timeout.code(), tonic::Code::DeadlineExceeded);
+
+        let gone = import_stats_outcome(SessionQueryOutcome::SessionGone)
+            .await
+            .expect_err("a selected session that exits must fail the RPC");
+        assert_eq!(gone.code(), tonic::Code::Unavailable);
+    }
+
     /// `direction = "both"` returns the export block first, then the
     /// import block — one deterministic response, not two commands.
     #[tokio::test]
@@ -2951,5 +3096,64 @@ policy customer-in(peer_lp: u32) {
         .await
         .expect_err("bad peer literal is invalid");
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    /// LAN-661 red proof: deleting the managed-peer validation sends the
+    /// request to the RIB, which returns a global fallback labeled as the
+    /// nonexistent peer and makes this call succeed.
+    #[tokio::test]
+    async fn get_policy_stats_rejects_unknown_peer_before_rib_fallback() {
+        let (peer_tx, mut peer_rx) = mpsc::channel::<PeerManagerCommand>(4);
+        tokio::spawn(async move {
+            while let Some(command) = peer_rx.recv().await {
+                match command {
+                    PeerManagerCommand::HasPeerAddress { reply, .. } => {
+                        let _ = reply.send(false);
+                    }
+                    PeerManagerCommand::QueryPolicyDatasets { reply } => {
+                        let _ = reply.send(Vec::new());
+                    }
+                    _ => panic!("unexpected peer-manager command"),
+                }
+            }
+        });
+
+        let rib_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let rib_calls_task = Arc::clone(&rib_calls);
+        let (rib_tx, mut rib_rx) = mpsc::channel::<rustbgpd_rib::RibUpdate>(4);
+        tokio::spawn(async move {
+            while let Some(update) = rib_rx.recv().await {
+                let rustbgpd_rib::RibUpdate::QueryExportPolicyTermHits { peer, reply } = update
+                else {
+                    panic!("unexpected RIB query");
+                };
+                rib_calls_task.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let _ = reply.send(vec![rustbgpd_rib::update::ExportPolicyTermHits {
+                    peer,
+                    evals: 1,
+                    eval_errors: 0,
+                    last_error: None,
+                    terms: Vec::new(),
+                }]);
+            }
+        });
+
+        let svc =
+            PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None).with_rib_query(rib_tx);
+        let err = PolicyServiceRpc::get_policy_stats(
+            &svc,
+            Request::new(proto::GetPolicyStatsRequest {
+                peer_address: "192.0.2.99".to_string(),
+                direction: "export".to_string(),
+            }),
+        )
+        .await
+        .expect_err("unknown peer must not inherit the global export chain");
+        assert_eq!(err.code(), tonic::Code::NotFound);
+        assert_eq!(
+            rib_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "validation must reject before querying the RIB"
+        );
     }
 }

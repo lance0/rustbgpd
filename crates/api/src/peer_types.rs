@@ -8,7 +8,7 @@ use rustbgpd_fsm::SessionState;
 use rustbgpd_policy::PolicyChain;
 use rustbgpd_transport::{
     ImportExplainReply, ImportPolicyTermHits, NegotiatedSessionState, RejectedRoutesReply,
-    RemovePrivateAs, TcpAoInfoSnapshot, TcpAoKeyring, TransportAuthSecret,
+    RemovePrivateAs, SessionQueryOutcome, TcpAoInfoSnapshot, TcpAoKeyring, TransportAuthSecret,
 };
 use rustbgpd_wire::{Afi, BgpRole, Prefix, Safi};
 use tokio::net::TcpStream;
@@ -873,6 +873,14 @@ pub enum PeerManagerCommand {
         /// Reply channel returning the peer snapshot (None if not found).
         reply: oneshot::Sender<Option<PeerInfo>>,
     },
+    /// Check whether one unique managed peer owns an address without querying
+    /// its session task. This includes accepted dynamic peers.
+    HasPeerAddress {
+        /// Peer address to resolve.
+        address: IpAddr,
+        /// Reply channel; false also covers an ambiguous scoped address.
+        reply: oneshot::Sender<bool>,
+    },
     /// Start (enable) a previously disabled peer.
     EnablePeer {
         /// Peer identity to enable.
@@ -1071,9 +1079,8 @@ pub enum PeerManagerCommand {
         reply: oneshot::Sender<Vec<NamedPolicySnapshot>>,
     },
     /// ADR-0073: query a peer's per-session import-decision cache.
-    /// Side-effect-free. `reply` carries `None` when the peer has no
-    /// live session (its session-local cache is gone), which the
-    /// caller renders as a synthetic `NO_SESSION` (LAN-320).
+    /// Side-effect-free. The typed reply keeps a stalled live session
+    /// distinct from an exited session task (LAN-661).
     ExplainImportPolicy {
         /// Peer whose import-decision cache to consult.
         address: IpAddr,
@@ -1085,29 +1092,28 @@ pub enum PeerManagerCommand {
         prefix: Prefix,
         /// Optional Add-Path identifier; `None` = all paths.
         path_id: Option<u32>,
-        /// Reply channel; `None` = no live session for `address`.
-        reply: oneshot::Sender<Option<ImportExplainReply>>,
+        /// Reply channel carrying the bounded session-query outcome.
+        reply: oneshot::Sender<SessionQueryOutcome<ImportExplainReply>>,
     },
     /// LAN-472: list a peer's retained rejected routes with their
     /// reject reasons (the looking-glass filtered-route surface).
-    /// Side-effect-free. `reply` carries `None` when the peer has no
-    /// live session (its session-local retention store is gone).
+    /// Side-effect-free. The typed reply keeps timeout distinct from
+    /// an exited session task.
     ListRejectedRoutes {
         /// Peer whose retention store to consult.
         address: IpAddr,
-        /// Reply channel; `None` = no live session for `address`.
-        reply: oneshot::Sender<Option<RejectedRoutesReply>>,
+        /// Reply channel carrying the bounded session-query outcome.
+        reply: oneshot::Sender<SessionQueryOutcome<RejectedRoutesReply>>,
     },
     /// Snapshot the live import-chain per-term hit counters of peer
     /// sessions (ADR-0096 Decision 3.3, import direction). Read-only —
-    /// no counter moves. Peers without a live session or without an
-    /// installed import chain are omitted from the reply.
+    /// no counter moves. Peers without an installed import chain are
+    /// omitted from a successful reply; timeout/task exit remain explicit.
     QueryImportPolicyTermHits {
         /// Optional peer filter; `None` = every session.
         peer: Option<IpAddr>,
-        /// Reply channel: `(peer address, snapshot)` sorted by peer
-        /// address for deterministic output.
-        reply: oneshot::Sender<Vec<(IpAddr, ImportPolicyTermHits)>>,
+        /// Reply channel: successful rows are sorted by peer address.
+        reply: oneshot::Sender<SessionQueryOutcome<Vec<(IpAddr, ImportPolicyTermHits)>>>,
     },
     /// Query a single named policy definition.
     GetPolicy {
