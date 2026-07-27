@@ -2308,6 +2308,21 @@ impl RibManager {
                 }
                 results
             };
+            #[cfg(any(test, feature = "bench-internals"))]
+            {
+                self.adj_rib_out_commit_stats
+                    .exact_probe_nonzero_encoded_lengths = self
+                    .adj_rib_out_commit_stats
+                    .exact_probe_nonzero_encoded_lengths
+                    .saturating_add(
+                        probe_results
+                            .iter()
+                            .filter(|result| {
+                                result.as_ref().is_ok_and(|result| result.encoded_len > 0)
+                            })
+                            .count(),
+                    );
+            }
 
             // The common grouped path is deliberately keyless: when every
             // exact probe succeeds and there is no sparse rejection overlay,

@@ -76,6 +76,7 @@ struct PolicyTransitionStats {
 struct AdjRibOutCommitStats {
     exact_probe_batches: usize,
     exact_probe_candidates: usize,
+    exact_probe_nonzero_encoded_lengths: usize,
     exact_probe_cache_reuses: usize,
     successful_commits: usize,
     successful_enqueues: usize,

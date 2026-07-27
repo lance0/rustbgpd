@@ -2016,6 +2016,40 @@ pub fn fanout_bench_export_encoder() -> Arc<dyn ExactExportEncoder> {
     fanout_bench_encoder(false, false, Some(Ipv4Addr::new(10, 255, 255, 255)))
 }
 
+/// Concrete transport-session snapshot identity retained by a fanout benchmark
+/// envelope. `None` proves the envelope carries a permissive or foreign
+/// `ExactExportSnapshot` implementation instead of the live transport model.
+#[cfg(feature = "bench-internals")]
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FanoutBenchExportSnapshotEvidence {
+    /// Session owner that created the concrete transport encoder.
+    pub owner_id: u64,
+    /// Immutable profile generation used by both probe and live encode.
+    pub generation: u64,
+    /// Negotiated maximum BGP message size captured by the profile.
+    pub max_message_len: usize,
+}
+
+/// Downcast a benchmark envelope's opaque snapshot at the transport boundary.
+///
+/// This is intentionally narrower than exposing `SessionExportProfile`: the
+/// benchmark can prove the authoritative implementation, owner, generation,
+/// and negotiated ceiling without making the profile part of the crate API.
+#[cfg(feature = "bench-internals")]
+#[doc(hidden)]
+#[must_use]
+pub fn fanout_bench_export_snapshot_evidence(
+    snapshot: &dyn ExactExportSnapshot,
+) -> Option<FanoutBenchExportSnapshotEvidence> {
+    let profile = snapshot.as_any().downcast_ref::<SessionExportProfile>()?;
+    Some(FanoutBenchExportSnapshotEvidence {
+        owner_id: profile.owner_id(),
+        generation: profile.generation(),
+        max_message_len: profile.max_message_len(),
+    })
+}
+
 /// Build the authoritative exact-export encoder for one synthetic eBGP route-
 /// server client. The constructor derives the same wire-relevant eBGP/iBGP
 /// classification as a live negotiated session.
