@@ -11,7 +11,10 @@ use rustbgpd_wire::RouteRefreshSubtype;
 
 use super::super::route_refresh::{FamilyReplayKind, FamilyReplayOutcome};
 use super::*;
-use crate::manager::outbound_prefix_limits::{BatchAdmission, admit_batch};
+use crate::manager::outbound_prefix_limits::{
+    BatchAdmission, OutboundPrefixLimits, admit_batch,
+    assert_grouped_admitted_storage_is_family_typed,
+};
 use crate::update::{
     OutboundPrefixLimitConfig, OutboundPrefixLimitFamilyState, OutboundPrefixLimitPair,
     OutboundPrefixLimitViolation,
@@ -30,6 +33,48 @@ fn v6(segment: u16) -> Prefix {
 
 fn limit(n: u32) -> NonZeroU32 {
     NonZeroU32::new(n).expect("test limits are non-zero")
+}
+
+/// Structural proof plus exact mixed-AFI behavior for the compact retained
+/// inventory. Replacing either typed field with `HashSet<Prefix>` makes the
+/// witness fail to compile before this behavioral test can run.
+#[test]
+fn grouped_admitted_storage_is_family_typed_and_mixed_afi_exact() {
+    let mut limits = OutboundPrefixLimits::default();
+    assert_grouped_admitted_storage_is_family_typed(&limits);
+    limits.family_mut(Afi::Ipv4).expect("IPv4 is limited").limit = Some(limit(2));
+    limits.family_mut(Afi::Ipv6).expect("IPv6 is limited").limit = Some(limit(2));
+
+    limits.grouped_extend(Afi::Ipv4, [v4(1), v4(2), v4(2)]);
+    limits.grouped_extend(Afi::Ipv6, [v6(1), v6(2), v6(2)]);
+    assert_eq!(limits.grouped_len(Afi::Ipv4), 2);
+    assert_eq!(limits.grouped_len(Afi::Ipv6), 2);
+    for prefix in [v4(1), v4(2), v6(1), v6(2)] {
+        assert!(limits.grouped_contains(&prefix));
+        assert!(limits.admits_grouped(&prefix));
+    }
+    assert!(!limits.grouped_contains(&v4(3)));
+    assert!(!limits.grouped_contains(&v6(3)));
+    assert!(!limits.admits_grouped(&v4(3)));
+    assert!(!limits.admits_grouped(&v6(3)));
+
+    limits.grouped_remove(&v4(1));
+    assert_eq!(limits.grouped_len(Afi::Ipv4), 1);
+    assert_eq!(limits.grouped_len(Afi::Ipv6), 2);
+    assert!(!limits.grouped_contains(&v4(1)));
+    assert!(limits.grouped_contains(&v6(1)));
+
+    limits.grouped_clear(Afi::Ipv6);
+    assert_eq!(limits.grouped_len(Afi::Ipv4), 1);
+    assert_eq!(limits.grouped_len(Afi::Ipv6), 0);
+    assert!(limits.grouped_contains(&v4(2)));
+    assert!(!limits.grouped_contains(&v6(2)));
+
+    limits.family_mut(Afi::Ipv6).expect("IPv6 is limited").limit = None;
+    assert!(
+        limits.admits_grouped(&v6(3)),
+        "an unlimited family admits without retained inventory"
+    );
 }
 
 // --- pure batch admission ---
@@ -400,13 +445,15 @@ fn a_limited_group_member_blocks_alone() {
         2,
         "only the cap reaches the limited member"
     );
-    assert_eq!(
-        manager
-            .outbound_prefix_limits
-            .get(&limited)
-            .and_then(|limits| limits.family(Afi::Ipv4))
-            .map(|family| family.grouped_admitted.clone()),
-        Some(advertised),
+    let limits = manager
+        .outbound_prefix_limits
+        .get(&limited)
+        .expect("the limited member owns admission state");
+    assert_eq!(limits.grouped_len(Afi::Ipv4), advertised.len());
+    assert!(
+        advertised
+            .iter()
+            .all(|prefix| limits.grouped_contains(prefix)),
         "the member's bounded admitted set is its advertised projection"
     );
 }
@@ -1691,9 +1738,13 @@ fn a_grouped_member_materializes_and_carries_its_admitted_set() {
     let admitted = manager
         .outbound_prefix_limits
         .get(&member)
-        .and_then(|limits| limits.family(Afi::Ipv4))
-        .map(|family| family.grouped_admitted.clone());
-    assert_eq!(admitted, Some(advertised.clone()));
+        .expect("the newly limited member owns admission state");
+    assert_eq!(admitted.grouped_len(Afi::Ipv4), advertised.len());
+    assert!(
+        advertised
+            .iter()
+            .all(|prefix| admitted.grouped_contains(prefix))
+    );
     assert_eq!(ipv4_row(&manager, member).usage, 3);
 
     // Leaving the group hands ownership back to the private prefix index; the
@@ -1711,8 +1762,7 @@ fn a_grouped_member_materializes_and_carries_its_admitted_set() {
         manager
             .outbound_prefix_limits
             .get(&member)
-            .and_then(|limits| limits.family(Afi::Ipv4))
-            .is_some_and(|family| family.grouped_admitted.is_empty()),
+            .is_some_and(|limits| limits.grouped_len(Afi::Ipv4) == 0),
         "the private table is authoritative again, so the member set is released"
     );
 }

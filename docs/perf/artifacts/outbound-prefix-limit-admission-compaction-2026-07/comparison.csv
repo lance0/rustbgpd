@@ -1,0 +1,4 @@
+members,parent_apply_allocated_delta_bytes,candidate_apply_allocated_delta_bytes,candidate_to_parent_allocated_ratio,allocated_gate_candidate_le_50_percent_parent,parent_apply_rss_delta_kib,candidate_apply_rss_delta_kib,parent_apply_seconds,candidate_apply_seconds,parent_recovery_seconds,candidate_recovery_seconds,parent_recovery_wall_seconds,candidate_recovery_wall_seconds
+1,10059664,3161832,0.31430791326628804,True,7560,1000,0.020562114,0.01211113,0.369274958,0.279815701,1.500116357,1.405839337
+10,99983496,31500344,0.3150554367492811,True,99944,7320,0.222357119,0.148598562,2.676880191,2.705345022,3.831663663,3.930045798
+100,997022824,315423808,0.31636568432258877,True,959044,272128,2.064777307,1.523071596,26.998912601,27.107331697,29.285718989,29.314140243
