@@ -68,8 +68,9 @@
 #   40  wire large community 65002:2:2 verbatim
 #   41  wire OTC path attribute (type code 35) present on RS→BIRD
 #       announcements (value pinned as 65500 by assertion 18)
-#   42  EoR: exactly one RS→BIRD IPv4-unicast End-of-RIB follows the
-#       final NLRI-bearing UPDATE by (frame, BGP-PDU) order
+#   42  EoR: on the final RS→BIRD TCP stream, the exact snapshotted
+#       nonempty initial prefix set precedes one IPv4-unicast End-of-RIB
+#       (later live deltas do not redefine the initial update)
 #   --- withdraw propagation + reload stability ---
 #   43  BIRD withdraws 203.0.113.0/24 → gone on FRR
 #   44  BIRD withdraws 203.0.113.0/24 → gone on GoBGP
@@ -88,89 +89,260 @@
 #   bash tests/interop/scripts/test-m83-routeserver-multistack.sh
 
 check_ipv4_eor_order() {
-    python3 - "${1:?}" <<'PY'
+    python3 - "${1:?}" "${2:?}" "${3:?}" <<'PY'
+import ipaddress
 import sys
 import xml.etree.ElementTree as ET
 
 root = ET.parse(sys.argv[1]).getroot()
+expected_path = sys.argv[2]
+events_path = sys.argv[3]
+
+with open(expected_path, encoding="utf-8") as handle:
+    expected = [
+        str(ipaddress.ip_network(line.strip(), strict=False))
+        for line in handle
+        if line.strip()
+    ]
+if not expected:
+    raise SystemExit("expected initial-prefix inventory is empty")
+if len(expected) != len(set(expected)):
+    raise SystemExit("expected initial-prefix inventory contains duplicates")
+
+
+def nlri_prefixes(bgp):
+    prefixes = []
+    paired_fields = set()
+    for node in bgp.iter():
+        children = list(node)
+        addr_fields = [
+            field for field in children
+            if field.get("name") == "bgp.nlri_prefix"
+        ]
+        if not addr_fields:
+            continue
+        length_fields = [
+            field for field in children
+            if field.get("name") == "bgp.prefix_length"
+        ]
+        if len(length_fields) != 1:
+            continue
+        length = length_fields[0].get("show")
+        if length is None:
+            raise SystemExit("NLRI prefix length has no decoded value")
+        for field in addr_fields:
+            address = field.get("show")
+            if address is None:
+                raise SystemExit("NLRI prefix has no decoded value")
+            prefixes.append(
+                str(ipaddress.ip_network(f"{address}/{length}", strict=False))
+            )
+            paired_fields.add(id(field))
+
+    # Some synthetic fixtures and dissector versions expose the CIDR in the
+    # address field itself. Accept that representation, but never guess a mask.
+    for field in bgp.findall(".//field[@name='bgp.nlri_prefix']"):
+        if id(field) in paired_fields:
+            continue
+        value = field.get("show")
+        if value is None or "/" not in value:
+            raise SystemExit(
+                f"NLRI {value!r} has no associated bgp.prefix_length"
+            )
+        prefixes.append(str(ipaddress.ip_network(value, strict=False)))
+    return prefixes
+
+
+def is_ipv4_eor(bgp, prefixes):
+    withdrawn = bgp.find(
+        ".//field[@name='bgp.update.withdrawn_routes.length']"
+    )
+    attrs = bgp.find(
+        ".//field[@name='bgp.update.path_attributes.length']"
+    )
+    codes = bgp.findall(
+        ".//field[@name='bgp.update.path_attribute.type_code']"
+    )
+    return (
+        bgp.get("size") == "23"
+        and withdrawn is not None
+        and withdrawn.get("show") == "0"
+        and attrs is not None
+        and attrs.get("show") == "0"
+        and not codes
+        and not prefixes
+    )
+
+
 events = []
 for packet in root.findall("packet"):
     frame_field = packet.find(".//field[@name='frame.number']")
     if frame_field is None or frame_field.get("show") is None:
         raise SystemExit("packet missing frame.number")
     frame = int(frame_field.get("show"))
+    stream_field = packet.find(".//field[@name='tcp.stream']")
+    if stream_field is None or stream_field.get("show") is None:
+        raise SystemExit(f"BGP packet in frame {frame} missing tcp.stream")
+    stream = stream_field.get("show")
     for index, bgp in enumerate(packet.findall(".//proto[@name='bgp']"), 1):
         bgp_type = bgp.find(".//field[@name='bgp.type']")
         if bgp_type is not None:
-            events.append(((frame, index), bgp_type.get("show"), bgp))
+            prefixes = nlri_prefixes(bgp)
+            events.append({
+                "key": (frame, index),
+                "stream": stream,
+                "type": bgp_type.get("show"),
+                "prefixes": prefixes,
+                "eor": is_ipv4_eor(bgp, prefixes),
+            })
 
-opens = [key for key, bgp_type, _ in events if bgp_type == "1"]
+opens = [event for event in events if event["type"] == "1"]
 if not opens:
     raise SystemExit("no RS-to-BIRD OPEN in capture")
-last_open = max(opens)
+target_open = max(opens, key=lambda event: event["key"])
+target_stream = target_open["stream"]
+stream_events = [
+    event for event in events
+    if event["stream"] == target_stream
+    and event["key"] > target_open["key"]
+]
+eors = [event for event in stream_events if event["eor"]]
+first_eor_key = eors[0]["key"] if eors else None
 
-last_nlri = None
-eors = []
-for key, bgp_type, bgp in events:
-    if key <= last_open or bgp_type != "2":
-        continue
-    classic = bgp.findall(".//field[@name='bgp.nlri_prefix']")
-    if classic:
-        last_nlri = key
-    withdrawn = bgp.find(".//field[@name='bgp.update.withdrawn_routes.length']")
-    attrs = bgp.find(".//field[@name='bgp.update.path_attributes.length']")
-    codes = bgp.findall(".//field[@name='bgp.update.path_attribute.type_code']")
-    if (bgp.get("size") == "23"
-            and withdrawn is not None and withdrawn.get("show") == "0"
-            and attrs is not None and attrs.get("show") == "0"
-            and not codes and not classic):
-        eors.append(key)
+with open(events_path, "w", encoding="utf-8") as handle:
+    for event in events:
+        key = f"{event['key'][0]}.{event['key'][1]}"
+        target = " target" if event["stream"] == target_stream else ""
+        if event is target_open:
+            phase = " target-open"
+        elif event["stream"] != target_stream or event["key"] <= target_open["key"]:
+            phase = ""
+        elif first_eor_key is None or event["key"] < first_eor_key:
+            phase = " pre-eor"
+        elif event["key"] == first_eor_key:
+            phase = " eor"
+        else:
+            phase = " live"
+        if event["type"] == "1":
+            kind = "OPEN"
+        elif event["eor"]:
+            kind = "EOR"
+        elif event["prefixes"]:
+            kind = "UPDATE nlri=" + ",".join(event["prefixes"])
+        else:
+            kind = f"BGP type={event['type']}"
+        handle.write(
+            f"{key} stream={event['stream']}{target}{phase} {kind}\n"
+        )
 
-if last_nlri is None:
-    raise SystemExit(f"no IPv4 NLRI-bearing UPDATE after final OPEN {last_open}")
 if len(eors) != 1:
-    raise SystemExit(f"{len(eors)} exact IPv4 EoRs after final OPEN {last_open} (want 1)")
-if eors[0] <= last_nlri:
-    raise SystemExit(f"IPv4 EoR {eors[0]} not after final NLRI {last_nlri}")
-print(f"final OPEN {last_open}; final IPv4 NLRI {last_nlri} < EoR {eors[0]}")
+    raise SystemExit(
+        f"{len(eors)} exact IPv4 EoRs on final stream {target_stream} "
+        f"after OPEN {target_open['key']} (want 1)"
+    )
+
+eor = eors[0]
+observed = sorted({
+    prefix
+    for event in stream_events
+    if event["key"] < eor["key"]
+    for prefix in event["prefixes"]
+})
+expected = sorted(expected)
+if observed != expected:
+    missing = sorted(set(expected) - set(observed))
+    unexpected = sorted(set(observed) - set(expected))
+    raise SystemExit(
+        f"initial prefix set before EoR {eor['key']} on stream "
+        f"{target_stream} differs: missing={missing}, unexpected={unexpected}"
+    )
+print(
+    f"final stream {target_stream} OPEN {target_open['key']}; "
+    f"{len(expected)} expected initial prefixes precede EoR {eor['key']}"
+)
 PY
 }
 
 self_test_ipv4_eor_order() {
-    local valid reversed
+    local expected valid expected_after missing unexpected
+    expected=$(mktemp)
     valid=$(mktemp)
-    reversed=$(mktemp)
-    python3 - "$valid" "$reversed" <<'PY'
+    expected_after=$(mktemp)
+    missing=$(mktemp)
+    unexpected=$(mktemp)
+    printf '%s\n' 100.66.0.0/24 100.67.0.0/24 >"$expected"
+    python3 - "$valid" "$expected_after" "$missing" "$unexpected" <<'PY'
 from pathlib import Path
 import sys
 
 opening = """<proto name="bgp"><field name="bgp.type" show="1"/></proto>"""
-nlri = """<proto name="bgp"><field name="bgp.type" show="2"/>
-<field name="bgp.nlri_prefix" show="100.67.0.0"/></proto>"""
+def nlri(prefix, length=24):
+    return f"""<proto name="bgp"><field name="bgp.type" show="2"/>
+<field name="" showname="{prefix}/{length}">
+<field name="bgp.prefix_length" show="{length}"/>
+<field name="bgp.nlri_prefix" show="{prefix}"/></field></proto>"""
+
 eor = """<proto name="bgp" size="23"><field name="bgp.type" show="2"/>
 <field name="bgp.update.withdrawn_routes.length" show="0"/>
 <field name="bgp.update.path_attributes.length" show="0"/></proto>"""
 
-def pdml(first, second):
-    return f"""<pdml>
-<packet><proto name="frame"><field name="frame.number" show="1"/></proto>{opening}</packet>
-<packet><proto name="frame"><field name="frame.number" show="2"/></proto>{first}{second}</packet>
-</pdml>"""
+def packet(frame, stream, *messages):
+    return f"""<packet><proto name="frame"><field name="frame.number" show="{frame}"/></proto>
+<proto name="tcp"><field name="tcp.stream" show="{stream}"/></proto>
+{''.join(messages)}</packet>"""
 
-Path(sys.argv[1]).write_text(pdml(nlri, eor))
-Path(sys.argv[2]).write_text(pdml(eor, nlri))
+def pdml(*packets):
+    return "<pdml>" + "".join(packets) + "</pdml>"
+
+old_open = packet(1, 3, opening)
+target_open = packet(2, 7, opening)
+first = packet(3, 7, nlri("100.66.0.0"))
+other_stream_late = packet(4, 3, nlri("198.51.100.0"))
+second_and_eor = packet(5, 7, nlri("100.67.0.0"), eor)
+same_stream_live = packet(6, 7, nlri("192.0.2.0"))
+
+Path(sys.argv[1]).write_text(pdml(
+    old_open, target_open, first, second_and_eor,
+    same_stream_live, other_stream_late,
+))
+Path(sys.argv[2]).write_text(pdml(
+    target_open, first,
+    packet(4, 7, eor, nlri("100.67.0.0")),
+))
+Path(sys.argv[3]).write_text(pdml(
+    target_open, first, packet(4, 7, eor),
+))
+Path(sys.argv[4]).write_text(pdml(
+    target_open, first,
+    packet(4, 7, nlri("100.67.0.0"), nlri("203.0.113.0"), eor),
+))
 PY
-    if ! check_ipv4_eor_order "$valid" >/dev/null; then
-        rm -f "$valid" "$reversed"
+    local events
+    events=$(mktemp)
+    if ! check_ipv4_eor_order "$valid" "$expected" "$events" >/dev/null; then
+        rm -f "$expected" "$valid" "$expected_after" "$missing" "$unexpected" "$events"
         return 1
     fi
-    if check_ipv4_eor_order "$reversed" >/dev/null 2>&1; then
-        echo "ERROR: same-frame EoR-before-NLRI fixture passed" >&2
-        rm -f "$valid" "$reversed"
-        return 1
-    fi
-    rm -f "$valid" "$reversed"
-    echo "M83 IPv4 EoR tuple-order self-test passed"
+    local fixture diagnostic output
+    while read -r fixture diagnostic; do
+        if output=$(check_ipv4_eor_order \
+            "$fixture" "$expected" "$events" 2>&1); then
+            echo "ERROR: invalid EoR inventory fixture passed: $fixture" >&2
+            rm -f "$expected" "$valid" "$expected_after" "$missing" "$unexpected" "$events"
+            return 1
+        fi
+        if ! grep -qF "$diagnostic" <<<"$output"; then
+            echo "ERROR: invalid fixture failed for the wrong reason: $output" >&2
+            rm -f "$expected" "$valid" "$expected_after" "$missing" "$unexpected" "$events"
+            return 1
+        fi
+    done <<EOF
+$expected_after missing=['100.67.0.0/24']
+$missing missing=['100.67.0.0/24']
+$unexpected unexpected=['203.0.113.0/24']
+EOF
+    rm -f "$expected" "$valid" "$expected_after" "$missing" "$unexpected" "$events"
+    echo "M83 stream-scoped IPv4 EoR inventory self-test passed"
 }
 
 authoritative_established_snapshot() {
@@ -233,6 +405,14 @@ self_test_session_continuity() {
 }
 
 case "${1:-}" in
+    --check-eor-order)
+        if [ "$#" -ne 4 ]; then
+            echo "usage: $0 --check-eor-order PDML EXPECTED_PREFIXES EVENTS" >&2
+            exit 2
+        fi
+        check_ipv4_eor_order "$2" "$3" "$4"
+        exit
+        ;;
     --self-test-eor-order)
         self_test_ipv4_eor_order
         exit
@@ -260,6 +440,16 @@ RS_FRR_ADDR="10.83.3.1"
 BIRD_ADDR="10.83.1.2"
 GOBGP_ADDR="10.83.2.2"
 FRR_ADDR="10.83.3.2"
+
+M83_WORK_DIR=$(mktemp -d "${RUNNER_TEMP:-/tmp}/m83-work.XXXXXX")
+M83_EXPECTED_PREFIXES="$M83_WORK_DIR/expected-initial-prefixes.txt"
+M83_ADVERTISED_JSON="$M83_WORK_DIR/advertised-inventory.json"
+M83_ADVERTISED_PREFIXES="$M83_WORK_DIR/advertised-prefixes.txt"
+M83_FINAL_PDML="$M83_WORK_DIR/final-rs-to-bird.pdml"
+M83_STREAM_EVENTS="$M83_WORK_DIR/final-rs-to-bird-events.txt"
+M83_ARTIFACT_ROOT="${M83_ARTIFACT_ROOT:-${RUNNER_TEMP:-/tmp}/m83-failure-artifacts}"
+M83_CAPTURE_RUNNING=0
+M83_ARTIFACTS_COLLECTED=0
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -353,6 +543,60 @@ bird_tshark() {
     docker exec "$BIRD" tshark -r /tmp/m83.pcap "$@" 2>/dev/null
 }
 
+collect_failure_artifacts() {
+    [ "$M83_ARTIFACTS_COLLECTED" = "0" ] || return 0
+    M83_ARTIFACTS_COLLECTED=1
+
+    local artifact_dir
+    artifact_dir="$M83_ARTIFACT_ROOT/attempt-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+    mkdir -p "$artifact_dir"
+
+    # A failure may leave tshark live. Give it a bounded chance to flush the
+    # capture before copying the attempt evidence out of the containers.
+    if [ "$M83_CAPTURE_RUNNING" = "1" ]; then
+        docker exec "$BIRD" sh -c '
+            for file in /proc/[0-9]*/comm; do
+                [ "$(cat "$file" 2>/dev/null)" = tshark ] || continue
+                pid=${file#/proc/}; pid=${pid%/comm}
+                kill -INT "$pid" 2>/dev/null || true
+            done
+        ' >/dev/null 2>&1 || true
+        for _ in $(seq 1 5); do
+            docker exec "$BIRD" sh -c \
+                '! cat /proc/[0-9]*/comm 2>/dev/null | grep -qx tshark' \
+                >/dev/null 2>&1 && break
+            sleep 1
+        done
+    fi
+
+    cp -f "$M83_WORK_DIR"/* "$artifact_dir"/ 2>/dev/null || true
+    docker cp "$BIRD:/tmp/m83.pcap" "$artifact_dir/m83.pcap" 2>/dev/null || true
+    docker cp "$BIRD:/tmp/tshark.log" "$artifact_dir/tshark.log" 2>/dev/null || true
+    docker cp "$BIRD:/tmp/bird.log" "$artifact_dir/bird.log" 2>/dev/null || true
+    docker cp "$RUSTBGPD:/tmp/rustbgpd.log" \
+        "$artifact_dir/rustbgpd.log" 2>/dev/null || true
+    docker logs "$BIRD" >"$artifact_dir/bird-container.log" 2>&1 || true
+    docker logs "$RUSTBGPD" >"$artifact_dir/rustbgpd-container.log" 2>&1 || true
+    log "Retained failed-attempt evidence under $artifact_dir"
+}
+
+m83_on_exit() {
+    local exit_code=$?
+    set +e
+    if [ "$exit_code" -ne 0 ] || [ "${fail:-0}" -gt 0 ]; then
+        collect_failure_artifacts
+    fi
+    rm -rf "$M83_WORK_DIR"
+    if [ "${CLEANUP:-0}" = "1" ]; then
+        _cleanup_on_exit || true
+    fi
+    return "$exit_code"
+}
+
+# The shared cleanup trap cannot retain container-resident evidence because the
+# topology may already be gone. Collect first, then honor its opt-in cleanup.
+trap m83_on_exit EXIT INT TERM HUP
+
 # ---------------------------------------------------------------------------
 # Phase 0: bring the stacks up
 # ---------------------------------------------------------------------------
@@ -362,6 +606,7 @@ start_capture() {
     docker exec "$BIRD" sh -c 'rm -f /tmp/m83.pcap' || true
     docker exec -d "$BIRD" sh -c \
         'tshark -i eth1 -w /tmp/m83.pcap port 179 >/tmp/tshark.log 2>&1'
+    M83_CAPTURE_RUNNING=1
     sleep 2
 }
 
@@ -394,6 +639,7 @@ stop_capture() {
             if docker exec "$BIRD" test -s /tmp/m83.pcap \
                 && docker exec "$BIRD" tshark -r /tmp/m83.pcap -c 1 >/dev/null 2>&1; then
                 log "tshark capture $signaled terminated; pcap is nonempty and readable"
+                M83_CAPTURE_RUNNING=0
                 return 0
             fi
             fail "tshark terminated without a nonempty readable /tmp/m83.pcap"
@@ -806,33 +1052,92 @@ assert_wire() {
         fail "wire OTC attribute (type 35) missing"
     fi
 
-    # EoR ordering over the LAST BIRD session (bounced above over a
-    # full RS table, so the flood-then-EoR order is deterministic).
-    # PDML preserves multiple BGP PDUs within one frame; comparing the
-    # (frame number, PDU index) tuple prevents a coalesced EoR that
-    # precedes the final NLRI from passing on frame equality.
-    local pdml eor_order
-    pdml=$(mktemp)
+    # The final BIRD session is bounced over a snapshotted, quiesced
+    # Adj-RIB-Out. PDML preserves each BGP PDU and tcp.stream identity:
+    # the oracle requires that exact nonempty initial prefix set before
+    # the stream's EoR, while allowing legal live deltas after it.
+    local eor_order
     if bird_tshark \
         -Y "ip.src == ${RS_BIRD_ADDR} && ip.dst == ${BIRD_ADDR} && bgp" \
-        -T pdml >"$pdml" \
-        && eor_order=$(check_ipv4_eor_order "$pdml" 2>&1); then
-        ok "IPv4-unicast EoR follows the final table-flood NLRI by (frame,PDU): $eor_order"
+        -T pdml >"$M83_FINAL_PDML" \
+        && eor_order=$(check_ipv4_eor_order \
+            "$M83_FINAL_PDML" \
+            "$M83_EXPECTED_PREFIXES" \
+            "$M83_STREAM_EVENTS" 2>&1); then
+        ok "IPv4-unicast EoR follows the exact initial inventory on one TCP stream: $eor_order"
     else
         fail "EoR ordering check failed: ${eor_order:-PDML export failed}"
     fi
-    rm -f "$pdml"
 }
 
-# Bounce the BIRD session over the now-full RS table so the last
-# session in the capture has a deterministic flood-then-EoR order.
+quiesce_bird_origination() {
+    log "Quiescing BIRD member-route origination before the EoR probe..."
+    docker exec "$BIRD" birdc disable statics >/dev/null
+
+    local received=""
+    for _ in $(seq 1 30); do
+        received=$(rs_ctl rib received "$BIRD_ADDR" -a ipv4 -j) || received=""
+        if printf '%s\n' "$received" | jq -e '
+            type == "array" and length == 0
+        ' >/dev/null 2>&1; then
+            ok "BIRD source protocols are quiet and Adj-RIB-In is empty"
+            return 0
+        fi
+        sleep 2
+    done
+    fail "BIRD member-route inventory did not quiesce before the session bounce"
+    printf '%s\n' "$received" >&2
+    return 1
+}
+
+snapshot_bird_advertised_inventory() {
+    # This is the known route-server view after the BIRD-originated paths are
+    # quiesced: one GoBGP probe and two permitted FRR paths. It is deliberately
+    # nonempty and checked before it becomes the byte-level oracle input.
+    printf '%s\n' \
+        100.66.0.0/24 \
+        100.67.0.0/24 \
+        100.70.0.0/24 \
+        >"$M83_EXPECTED_PREFIXES"
+
+    local inventory="" exact=0
+    for _ in $(seq 1 30); do
+        inventory=$(rs_ctl rib advertised "$BIRD_ADDR" -a ipv4 -j) || inventory=""
+        if printf '%s\n' "$inventory" | jq -e 'type == "array"' >/dev/null 2>&1; then
+            printf '%s\n' "$inventory" >"$M83_ADVERTISED_JSON"
+            printf '%s\n' "$inventory" \
+                | jq -r 'sort_by(.prefix) | .[].prefix' \
+                >"$M83_ADVERTISED_PREFIXES"
+            if [ -s "$M83_ADVERTISED_PREFIXES" ] \
+                && cmp -s "$M83_EXPECTED_PREFIXES" "$M83_ADVERTISED_PREFIXES"; then
+                exact=1
+                break
+            fi
+        fi
+        sleep 2
+    done
+
+    if [ "$exact" = "1" ]; then
+        ok "snapshotted exact nonempty BIRD Adj-RIB-Out inventory (3 prefixes)"
+        return 0
+    fi
+    fail "BIRD Adj-RIB-Out does not match the known three-prefix initial inventory"
+    diff -u "$M83_EXPECTED_PREFIXES" "$M83_ADVERTISED_PREFIXES" >&2 || true
+    return 1
+}
+
+# Bounce the BIRD session over the quiesced, snapshotted RS table so the last
+# stream has a deterministic initial inventory followed by its EoR.
 bounce_bird_session() {
-    log "Bouncing the BIRD session over the full RS table (EoR ordering probe)..."
+    log "Bouncing the BIRD session over the snapshotted RS table (EoR ordering probe)..."
     docker exec "$BIRD" birdc restart routeserver >/dev/null 2>&1 || true
     wait_bird_established
-    wait_for "100.66.0.0/24 back on BIRD" 30 sh -c \
-        "docker exec $BIRD birdc show route all for 100.66.0.0/24 2>/dev/null | grep -q BGP.as_path" \
-        || true
+    local prefix
+    while IFS= read -r prefix; do
+        wait_for "$prefix back on BIRD" 30 sh -c \
+            "docker exec $BIRD birdc show route all for $prefix 2>/dev/null | grep -q BGP.as_path" \
+            || return 1
+    done <"$M83_EXPECTED_PREFIXES"
 }
 
 assert_withdraw_propagation() {
@@ -957,7 +1262,8 @@ main() {
     start_bird
     start_gobgpd
     patch_rs_config
-    start_rustbgpd "/usr/local/bin/rustbgpd /tmp/config.toml"
+    start_rustbgpd \
+        "/usr/local/bin/rustbgpd /tmp/config.toml >/tmp/rustbgpd.log 2>&1"
 
     test_rtr_vrps
     wait_bird_established
@@ -978,11 +1284,15 @@ main() {
     assert_runner_up_withdraw_converges
     assert_add_path_both
 
+    # Prove the independent withdraw path before quiescing the remaining
+    # BIRD-originated probes for the exact initial-table wire oracle.
+    assert_withdraw_propagation
+    quiesce_bird_origination
+    snapshot_bird_advertised_inventory
     bounce_bird_session
     stop_capture
     assert_wire
 
-    assert_withdraw_propagation
     assert_reload_stability
 
     print_summary

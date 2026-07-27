@@ -39,6 +39,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **A stale outbound prefix-limit activation no longer discards a newer
   prepared change.** The newer transaction remains available to activate.
 
+- The M83 route-server receipt now checks its exact, snapshotted initial
+  RS-to-BIRD inventory on one TCP stream before End-of-RIB. Legal later
+  deltas no longer look like an initial-table ordering failure, and any
+  failed internal attempt retains its packet, event, inventory, and daemon
+  evidence for review.
+
 - **Convergence-marker page-generation fencing now follows accepted work.**
   Stale-session End-of-RIB/BoRR/EoRR and inactive EoRR markers no longer
   invalidate paginated route queries, while accepted End-of-RIB, BoRR, EoRR,
