@@ -411,25 +411,33 @@ self_test_session_continuity() {
 
 self_test_signal_artifacts() {
     local script=${1:?}
-    local scratch status sentinel
+    local scratch status sentinel child_log
     scratch=$(mktemp -d)
+    child_log="$scratch/signal-child.log"
 
     # Keep this proof host-independent: artifact collection calls the exported
-    # stub instead of the Docker CLI while still exercising the production
-    # signal handler, work-directory copy, and cleanup ordering.
+    # stubs instead of requiring the interop-only Docker/grpcurl/jq toolchain,
+    # while still exercising the production signal handler, work-directory
+    # copy, and cleanup ordering.
     docker() { return 0; }
-    export -f docker
+    grpcurl() { return 0; }
+    jq() { return 0; }
+    export -f docker grpcurl jq
     set +e
     M83_ARTIFACT_ROOT="$scratch/artifacts" \
         RUNNER_TEMP="$scratch" \
-        bash "$script" --self-test-signal-child >/dev/null 2>&1
+        bash "$script" --self-test-signal-child >"$child_log" 2>&1
     status=$?
-    unset -f docker
+    unset -f docker grpcurl jq
 
     sentinel=$(find "$scratch/artifacts" -type f -name signal-sentinel -print -quit 2>/dev/null)
     if [ "$status" -ne 143 ] || [ -z "$sentinel" ] \
         || ! grep -qxF "preserve on TERM" "$sentinel"; then
         echo "ERROR: TERM handler status=$status sentinel=${sentinel:-missing}" >&2
+        if [ -s "$child_log" ]; then
+            echo "--- signal child output ---" >&2
+            sed -n '1,200p' "$child_log" >&2
+        fi
         rm -rf "$scratch"
         return 1
     fi
