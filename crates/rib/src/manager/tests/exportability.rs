@@ -601,7 +601,7 @@ fn post_otc_withdrawal_only_skips_exact_probe_and_keeps_snapshot() {
     let mut otc_blocked = route.clone();
     Arc::make_mut(&mut otc_blocked.attributes)
         .push(rustbgpd_wire::PathAttribute::OnlyToCustomer(64_512));
-    manager.adj_rib_out_commit_stats = Default::default();
+    manager.adj_rib_out_commit_stats = AdjRibOutCommitStats::default();
     let mut cache = crate::manager::distribution::SharedUnicastProbeCache::default();
     assert!(commit_shared_unicast_with_precommit(
         &mut manager,
