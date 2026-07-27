@@ -1,10 +1,13 @@
 # Grouped withdrawal fanout receipt (July 2026)
 
-Status: **UNMEASURED SCAFFOLD** (LAN-671). No timing result or performance
-conclusion is retained here yet. Populate the environment, commit, Criterion
-estimates, and artifact paths only after a host-fenced run passes every
-in-code correctness receipt. Any Criterion output collected before the
-pre-timer populated-state receipt landed is rejected and must be rerun.
+Status: **MEASURED BASELINE** (LAN-671) at exact commit
+`f55d6c5f1a300b0b2c5a8797469165eb1351e62c`. This is an absolute,
+measurement-only baseline. It has no optimization, control, before/after
+comparison, delta, regression, or end-to-end network claim.
+
+Only the post-preflight exact-commit Criterion archive described below is
+admissible. Earlier runs, including a distinct top-level Criterion output, are
+rejected.
 
 ## Measurement contract
 
@@ -63,35 +66,59 @@ Dropping or duplicating a withdrawal envelope fails the per-peer count or
 inventory check. Private/dirty fallback or a residual advertised prefix fails
 the membership or final folded Adj-RIB-Out receipt.
 
-## Deferred host-fenced run
+## Pinned environment and run
 
-Use one shared host lock and retain the Criterion output plus environment and
-preflight evidence before making any performance claim:
+- measured tree: `fe956c9dd60e366ee4870cb23c0c5779ce899026`;
+- rustc: `1.97.0 (2d8144b78 2026-07-07)`, commit
+  `2d8144b7880597b6e6d3dfd63a9a9efae3f533d3`;
+- cargo: `1.97.0`; Criterion: `0.8.2`;
+- kernel: Linux `6.17.0-35-generic`, `x86_64`;
+- CPU: AMD Ryzen Threadripper 7970X 32-Cores, 64 logical CPUs;
+- pin: logical CPU 63 (`taskset -c 63`);
+- scaling governor: `performance`; and
+- exact-commit preflight at `2026-07-27T08:03:21Z`: 1-minute load `1.15`
+  against a `2.0` maximum, zero competing benchmark processes, status `pass`.
+
+The host lock and preflight wrapped this command shape:
 
 ```bash
 source docs/perf/event-history-host-fence.sh
 event_history_acquire_host_lock
-PREFLIGHT=/path/to/new-preflight.tsv
+PREFLIGHT="$RUN/preflight.tsv"
 event_history_init_host_preflight_log "$PREFLIGHT"
-event_history_wait_for_idle grouped-withdrawal-before-bench "$PREFLIGHT"
+event_history_wait_for_idle grouped-withdrawal-f55d6c5f "$PREFLIGHT"
 
-taskset -c <isolated-cpu> \
+CRITERION_HOME="$CRITERION_OUT" taskset -c 63 \
   cargo bench -p rustbgpd-transport --features bench-internals --bench fanout \
   -- grouped_withdrawal_fanout --noplot
 ```
 
-Reject any run that loses its CPU/governor/load preflight or trips an in-code
-receipt. Record the exact command, git commit, rustc/Criterion versions, host,
-kernel, CPU pin, governor, samples, warmup and measurement duration, and raw
-artifact paths here.
+The run used Criterion linear sampling with 10 samples per fleet size. Passing
+completion also means every in-code correctness receipt above held on every
+timed iteration.
 
 ## Results
 
-Pending. Do not treat this scaffold as benchmark evidence.
+The estimate is Criterion's median point estimate; bounds are its bootstrap
+95% confidence interval. With 10 samples, retain the exact bounds and raw
+samples rather than interpreting small differences as stable effects.
 
-| Routes | Members | Estimate | 95% CI | Artifact |
-|-------:|--------:|---------:|-------:|----------|
-| 64 | 8 | pending | pending | pending |
-| 64 | 64 | pending | pending | pending |
-| 64 | 256 | pending | pending | pending |
-| 64 | 1,000 | pending | pending | pending |
+| Routes | Members | Median | 95% confidence interval |
+|-------:|--------:|-------:|------------------------:|
+| 64 | 8 | 61.914497 µs | 61.496437–62.056793 µs |
+| 64 | 64 | 169.058598 µs | 168.426092–170.919917 µs |
+| 64 | 256 | 558.397745 µs | 554.388080–559.376800 µs |
+| 64 | 1,000 | 2.194817 ms | 2.169139–2.222355 ms |
+
+The compact, sanitized evidence package is in
+[`artifacts/grouped-withdrawal-fanout-2026-07/`](artifacts/grouped-withdrawal-fanout-2026-07/README.md).
+It retains the exact estimates, all 40 `(iterations, total time)` samples,
+source-JSON hashes, preflight, environment, and package checksums without a
+hostname, absolute path, or process identifier.
+
+These values cover only the direct manager seam described in the measurement
+contract: a synthetic unregistered legacy source session and the production
+manager/update-group path through bounded-channel enqueue. They exclude
+manager-channel dequeue, Tokio scheduling, session-writer work, socket I/O,
+and network I/O. They must not be presented as full-pipeline or end-to-end
+latency.

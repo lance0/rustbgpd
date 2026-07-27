@@ -572,7 +572,11 @@ members, and committed/enqueued once per member. It then proves the timed update
 crossed the production dispatcher with all 64 withdrawals, every member
 received exactly one envelope containing the exact inventory, and the final
 group-owned and private unicast Adj-RIB-Out tables are empty. The measurement
-receipt remains explicitly unmeasured until a host-fenced run is retained in
+baseline at 64 routes records medians of 61.914497 µs, 169.058598 µs,
+558.397745 µs, and 2.194817 ms for 8, 64, 256, and 1,000 grouped members.
+It is an absolute measurement only, with no optimization, control, delta, or
+end-to-end network claim. Exact confidence intervals, samples, environment,
+preflight, and claim boundaries are retained in
 [`docs/perf/grouped-withdrawal-fanout-2026-07.md`](perf/grouped-withdrawal-fanout-2026-07.md).
 
 The `adj_rib_out_family_gauge` group is the allocation-sensitive steady-state
