@@ -612,6 +612,27 @@ impl PeerManager {
             // and keep the BFD desired session disabled until EnablePeer.
             self.set_bfd_peer_disabled(address, true);
         }
+        // Publish only after the new incarnation is authoritatively installed
+        // and registered. Any config snapshot update owned by this call and
+        // the BFD bookkeeping above are already complete. Reusing the existing
+        // admin events gives retained-history consumers an incarnation fence
+        // for delete/re-add and reconfigure without changing FSM behavior or
+        // the protobuf surface.
+        let current_enabled = self
+            .peers
+            .get(&peer_key)
+            .expect("newly installed peer must remain registered")
+            .enabled;
+        let (event_type, admin_state) = if current_enabled {
+            (SessionLifecycleEventType::PeerEnabled, "enabled")
+        } else {
+            (SessionLifecycleEventType::PeerDisabled, "disabled")
+        };
+        self.publish_peer_lifecycle_event(
+            &peer_key,
+            event_type,
+            format!("peer {peer_key} added administratively {admin_state}"),
+        );
         Ok(())
     }
 

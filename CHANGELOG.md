@@ -47,11 +47,30 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`rbgp doctor` recognizes intentionally disabled peers.** For a current,
+  non-stale snapshot, a retained `PeerDisabled` event makes the
+  non-Established session verdict explicitly green unless a later retained
+  `PeerEnabled` supersedes it; stale snapshots remain warnings. Slow-peer and
+  flap checks remain independent, unavailable history stays unknown, and
+  scoped link-local peers keep their `address%interface` identity. Every
+  successfully installed configured-peer incarnation now publishes its
+  current enabled or disabled state after installation—including bootstrap,
+  re-add, and reconfigure—so delete/re-add cannot inherit an old incarnation's
+  disabled verdict; failed adds publish nothing. No protobuf fields changed.
+
 - **`rbgp doctor` no longer fabricates a stuck-peer failure from missing
   retained session history.** A failed event RPC or a peer absent from the
   bounded fleet history reports explicit unknown evidence as a warning, and a
   daemon-lifetime flap count is red only when retained history also proves a
   recent session loss. Genuinely old retained transitions remain red.
+
+- **`rbgp diff advertised --deadline` now bounds the complete live-query
+  phase.** One aggregate budget starts after bounded local snapshot parsing
+  and covers neighbor discovery plus every advertised-route page; a stalled
+  RPC exits 2 without rendering a partial equality verdict. Command help now
+  describes MED absence/zero conflation as the runtime-detected compatibility
+  caveat for daemon responses without optional MED-presence markers, rather
+  than an unconditional limitation.
 
 - **Outbound prefix-limit recovery now yields between peer/family replays.**
   A capacity raise or newly freed slot re-derives at most one live
