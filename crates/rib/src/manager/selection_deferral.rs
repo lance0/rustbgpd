@@ -1254,11 +1254,13 @@ impl RibManager {
                     .peer_sendable_families
                     .get(&peer)
                     .is_some_and(|sendable| sendable.contains(&family));
-                self.send_route_refresh_response_inner(
+                let _ = self.send_route_refresh_response_inner(
                     peer,
                     family.0,
                     family.1,
-                    convergence_eor_queued,
+                    super::route_refresh::FamilyReplayKind::PeerRefresh {
+                        suppress_eor: convergence_eor_queued,
+                    },
                 );
             }
         }

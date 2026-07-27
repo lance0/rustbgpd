@@ -1625,18 +1625,19 @@ impl RibManager {
     /// Safe to run partially: per-peer resync is idempotent — Adj-RIB-Out
     /// state and the dirty flag are committed/cleared only after a
     /// successful send, and withheld peers are not touched at all.
-    /// Whether the resync timer still has work: failed outbound sends, or an
-    /// ADR-0113 capacity recovery that [`Self::resync_dirty_peers_bounded`]
-    /// drains. Both arming and disarming go through this, so scheduling a
-    /// recovery guarantees it runs regardless of dirty-peer state.
+    /// Whether the resync timer still has runnable work: failed outbound
+    /// sends, or an ADR-0113 capacity recovery that is not selection/ORF
+    /// gated. Gate-blocked recovery remains queued without spinning the
+    /// timer; the gate-release message makes it runnable and the next event
+    /// loop turn arms this timer again.
     fn resync_tick_pending(&self) -> bool {
-        !self.dirty_peers.is_empty() || self.outbound_limit_recovery_pending()
+        !self.dirty_peers.is_empty() || self.outbound_limit_recovery_runnable()
     }
 
     fn resync_dirty_peers_bounded(&mut self) -> bool {
-        // ADR-0113 capacity recovery is family-scoped and already coalesced,
-        // so it runs to completion here rather than sharing the peer ring:
-        // at most one bounded re-derive per peer and limited family.
+        // ADR-0113 capacity recovery is family-scoped and already coalesced.
+        // One live peer/family is replayed per timer tick; any runnable
+        // remainder keeps `resync_tick_pending` true and re-arms the timer.
         let recovered = self.drain_outbound_limit_recovery();
         // Peers whose outbound channel is gone can never resync: drop them
         // before selecting the slice, so a backlog of dead sessions (e.g.
