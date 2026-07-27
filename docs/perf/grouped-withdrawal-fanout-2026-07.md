@@ -71,7 +71,8 @@ the membership or final folded Adj-RIB-Out receipt.
 - measured tree: `fe956c9dd60e366ee4870cb23c0c5779ce899026`;
 - rustc: `1.97.0 (2d8144b78 2026-07-07)`, commit
   `2d8144b7880597b6e6d3dfd63a9a9efae3f533d3`;
-- cargo: `1.97.0`; Criterion: `0.8.2`;
+- cargo: `1.97.0`; Criterion: `0.8.2`, using its unmodified 3-second
+  warm-up and 5-second measurement-time defaults;
 - kernel: Linux `6.17.0-35-generic`, `x86_64`;
 - CPU: AMD Ryzen Threadripper 7970X 32-Cores, 64 logical CPUs;
 - pin: logical CPU 63 (`taskset -c 63`);
