@@ -23,22 +23,29 @@ reproducible receipt:
 
 - **Policy reload at IXP scale** (700 route-server clients × 400,400 routes,
   live churn, same harness / same host): new policy fully delivered to every
-  member in **1.5–2.2 s p50** vs BIRD 3.3.1's 77–86 s and OpenBGPD 9.1's
-  249–253 s — [IXP receipt matrix](docs/perf/ixp-matrix-2026-07.md)
+  member in **1.29–1.67 s p50** vs BIRD 3.3.1's 68–85 s and OpenBGPD 9.1's
+  247–253 s — [IXP receipt matrix](docs/perf/ixp-matrix-2026-07.md)
 - **Member-flap propagation** (50 members flap, 650 observers): re-announce
-  p50 **0.46–0.49 s** vs BIRD's 2.8–4.2 s and OpenBGPD's 21–22 s; withdraw
-  p50 0.28–0.48 s, also fastest — [same matrix](docs/perf/ixp-matrix-2026-07.md#s3--flapstorm-member-down--member-up-propagation)
+  p50 **0.46–0.49 s** vs BIRD's 2.7–3.7 s and OpenBGPD's 20.9–21.4 s;
+  withdraw p50 0.25–0.48 s, also fastest — [same matrix](docs/perf/ixp-matrix-2026-07.md#s3--flapstorm-member-down--member-up-propagation)
 - **Cold start**: full 400,400-route table delivered to all 700 members in
-  **4.9–5.1 s** vs 59.0–62.1 s (BIRD) and 396.1–417.3 s (OpenBGPD) —
+  **4.7–5.0 s** vs 61.6–65.3 s (BIRD) and 338.8–422.1 s (OpenBGPD) —
   [same matrix](docs/perf/ixp-matrix-2026-07.md#s1--cold-convergence)
 - **Route-reflector scale**: 1,000 RR clients × 100k routes converge on the
   wire in **1.82 s** at **419 MiB** whole-process RSS —
   [1000-peer scale receipt](docs/perf/scale-receipt-2026-07.md)
 - **The losses, stated plainly**: OpenBGPD holds a smaller reload stall
-  (p50 0.25–0.29 s vs rustbgpd's 0.43–0.84 s) and BIRD wins settled memory
-  outright (408/416 MiB vs rustbgpd's 768/763 MiB at the matrix shape) —
-  published in the [same receipt](docs/perf/ixp-matrix-2026-07.md#memory),
-  methodology and fairness protocol included
+  (p50 0.24–0.28 s vs rustbgpd's 0.42–0.73 s), and BIRD keeps the settled-RSS
+  win under flap churn (337/292 MiB vs rustbgpd's 440/502 MiB at S3).
+  rustbgpd edged BIRD in S2 settled RSS in these runs (412/410 vs
+  425/417 MiB) after the explain-cache default change — a same-host pair of
+  runs, not a universal memory win — published in the
+  [same receipt](docs/perf/ixp-matrix-2026-07.md#memory), methodology and
+  fairness protocol included
+
+All matrix figures above are from the v0.61.0 same-host refresh (2026-07-27);
+the original campaign, its bands, and both raw artifact sets are preserved in
+the receipt.
 
 **Status: public alpha.** Feature-complete for the initial programmable
 control-plane target and expanding toward cloud / AI-scale data-center
@@ -278,18 +285,23 @@ two independent campaign runs, losses published alongside wins:
 
 | KPI (700 clients × 400,400 routes, p50) | rustbgpd | BIRD 3.3.1 | OpenBGPD 9.1 |
 |---|---|---|---|
-| Sessions Established | **0.6 s** | 17.3–19.7 s | 124.4–141.4 s |
-| Cold start, full table to all members | **4.9–5.1 s** | 59.0–62.1 s | 396.1–417.3 s |
-| Reload: UPDATE stall | 0.43–0.84 s | 1.61–2.29 s | **0.25–0.29 s** |
-| Reload: new policy fully delivered | **1.5–2.2 s** | 77–86 s | 249–253 s |
-| Flapstorm: withdraw propagation | **0.28–0.48 s** | 0.45–0.61 s | 10.84–12.43 s |
-| Flapstorm: re-announce | **0.46–0.49 s** | 2.8–4.2 s | 21–22 s |
-| Settled RSS (S2, runs A/B) | 768 / 763 MiB | **408 / 416 MiB** | 769 / 767 MiB |
+| Sessions Established | **0.7 s** | 18.4–20.8 s | 66.7–155.7 s |
+| Cold start, full table to all members | **4.7–5.0 s** | 61.6–65.3 s | 338.8–422.1 s |
+| Reload: UPDATE stall | 0.42–0.73 s | 1.74–2.68 s | **0.24–0.28 s** |
+| Reload: new policy fully delivered | **1.29–1.67 s** | 68–85 s | 247–253 s |
+| Flapstorm: withdraw propagation | **0.25–0.48 s** | 0.38–0.57 s | 10.3–12.6 s |
+| Flapstorm: re-announce | **0.46–0.49 s** | 2.7–3.7 s | 20.9–21.4 s |
+| Settled RSS (S2, runs A/B) | **412 / 410 MiB** | 425 / 417 MiB | 768 / 773 MiB |
+| Settled RSS (S3, runs A/B) | 440 / 502 MiB | **337 / 292 MiB** | 824 / 821 MiB |
 
+Figures are the v0.61.0 same-host refresh (2026-07-27); the original
+campaign's tables and artifacts are preserved unchanged in the receipt.
 rustbgpd is the only daemon in the matrix holding both a sub-second median
-stall **and** single-digit-seconds completion; OpenBGPD has the smallest stall
-at every scale rung, and BIRD wins memory outright. The receipt includes the
-full method, configuration disclosure, honesty notes, raw artifacts — and a
+stall **and** single-digit-seconds completion; OpenBGPD has the smallest
+stall at every scale rung; the settled-memory picture is split — rustbgpd
+edged BIRD at S2 in these runs after the explain-cache default change,
+while BIRD's S3 advantage remains clear. The receipt includes the full
+method, configuration disclosure, honesty notes, raw artifacts — and a
 post-publication note where the receipt's own tables exposed a rustbgpd
 re-announce plateau that was root-caused, fixed, and rerun (9.5–9.8 s →
 0.46–0.49 s).
