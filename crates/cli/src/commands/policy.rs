@@ -161,6 +161,18 @@ pub fn check_local(
     coverage_min: Option<f64>,
     json: bool,
 ) -> i32 {
+    check_local_with_json_writer(path, roots, list_deps, coverage, coverage_min, json, None)
+}
+
+fn check_local_with_json_writer(
+    path: &str,
+    roots: &[String],
+    list_deps: bool,
+    coverage: bool,
+    coverage_min: Option<f64>,
+    json: bool,
+    json_writer: Option<&mut dyn std::io::Write>,
+) -> i32 {
     use std::io::IsTerminal;
     use std::path::PathBuf;
 
@@ -189,7 +201,7 @@ pub fn check_local(
     // --list-deps on a broken graph falls through to the compile
     // diagnostics below (exit 1).
     if list_deps && let Some(file) = &file {
-        return print_deps(path, file, json);
+        return print_deps(path, file, json, json_writer);
     }
     let want_coverage = coverage || coverage_min.is_some();
     let (tests, cov) = match &file {
@@ -202,13 +214,18 @@ pub fn check_local(
     };
 
     if json {
-        print_check_json(
+        if print_check_json(
             path,
             &diagnostics,
             tests.as_ref(),
             cov.as_ref(),
             file.as_ref(),
-        );
+            json_writer,
+        )
+        .is_err()
+        {
+            return 1;
+        }
     } else if !diagnostics.is_empty() {
         // Rendered excerpts already went to stderr above.
         eprintln!(
@@ -325,7 +342,8 @@ fn print_check_json(
     tests: Option<&rustbgpd_policy::rpol::TestReport>,
     cov: Option<&rustbgpd_policy::rpol::CoverageReport>,
     file: Option<&rustbgpd_policy::rpol::RpolFile>,
-) {
+    json_writer: Option<&mut dyn std::io::Write>,
+) -> Result<(), CliError> {
     #[derive(Serialize)]
     struct JsonFailure<'a> {
         name: &'a str,
@@ -423,13 +441,18 @@ fn print_check_json(
         }),
         coverage,
     };
-    let _ = output::print_json_pretty(&out);
+    print_policy_json(json_writer, &out)
 }
 
 /// `rbgp policy check --list-deps` output: the resolved module graph
 /// with content hashes, module 0 first (the main file), imports in
 /// declaration order. Always exit 0 — the graph compiled.
-fn print_deps(path: &str, file: &rustbgpd_policy::rpol::RpolFile, json: bool) -> i32 {
+fn print_deps(
+    path: &str,
+    file: &rustbgpd_policy::rpol::RpolFile,
+    json: bool,
+    json_writer: Option<&mut dyn std::io::Write>,
+) -> i32 {
     let modules = file.modules();
     if json {
         #[derive(Serialize)]
@@ -458,7 +481,7 @@ fn print_deps(path: &str, file: &rustbgpd_policy::rpol::RpolFile, json: bool) ->
                 })
                 .collect(),
         };
-        if output::print_json_pretty(&out).is_err() {
+        if print_policy_json(json_writer, &out).is_err() {
             return 1;
         }
         return 0;
@@ -475,6 +498,16 @@ fn print_deps(path: &str, file: &rustbgpd_policy::rpol::RpolFile, json: bool) ->
         }
     }
     0
+}
+
+fn print_policy_json<T: Serialize>(
+    writer: Option<&mut dyn std::io::Write>,
+    value: &T,
+) -> Result<(), CliError> {
+    match writer {
+        Some(writer) => output::write_json_pretty(writer, value),
+        None => output::print_json_pretty(value),
+    }
 }
 
 /// `rbgp policy fmt [--check] FILE...` — the canonical `.rpol`
@@ -1788,6 +1821,35 @@ mod tests {
         assert_eq!(
             check_local(tmp.path().to_str().unwrap(), &[], false, false, None, true),
             0
+        );
+    }
+
+    struct BrokenWriter;
+
+    impl Write for BrokenWriter {
+        fn write(&mut self, _bytes: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn check_local_json_write_failure_exits_one() {
+        let tmp = write_rpol("policy p { term t { accept } }");
+        assert_eq!(
+            check_local_with_json_writer(
+                tmp.path().to_str().unwrap(),
+                &[],
+                false,
+                false,
+                None,
+                true,
+                Some(&mut BrokenWriter),
+            ),
+            1
         );
     }
 

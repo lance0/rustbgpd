@@ -1,5 +1,6 @@
 use crate::connection::Connection;
 use crate::error::CliError;
+use crate::output;
 use crate::proto::config_service_client::ConfigServiceClient;
 use crate::proto::{
     AbortConfigTransactionRequest, ApplyConfigTransactionRequest, ConfigTransactionApplyResponse,
@@ -51,7 +52,7 @@ pub async fn diff(connection: Connection, from_file: &str, json: bool) -> Result
         .into_inner();
 
     if json {
-        println!("{}", resp.diff_json);
+        output::print_serialized_json_line(&resp.diff_json)?;
     } else {
         print!("{}", resp.human_text);
     }
@@ -415,8 +416,7 @@ fn validate_confirm_id(confirm_id: &str) -> Result<(), CliError> {
 }
 
 fn print_json(value: serde_json::Value) -> Result<(), CliError> {
-    println!("{}", serde_json::to_string_pretty(&value)?);
-    Ok(())
+    output::print_json_pretty(&value)
 }
 
 fn status_label(status: i32) -> &'static str {

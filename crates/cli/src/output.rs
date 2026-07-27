@@ -1,5 +1,6 @@
 use serde::Serialize;
 
+use std::io::{self, Write};
 use std::net::IpAddr;
 
 use crate::error::CliError;
@@ -965,17 +966,55 @@ pub fn print_next_step(json: bool, text: &str) {
     }
 }
 
-/// Print a pretty JSON value, returning a CLI error instead of panicking if
-/// serialization fails.
-pub fn print_json_pretty<T: Serialize>(value: &T) -> Result<(), CliError> {
-    println!("{}", serde_json::to_string_pretty(value)?);
+/// Write one complete JSON document and flush it. Broken pipes and every other
+/// write/flush failure are ordinary CLI I/O errors; serialization completes
+/// before this helper is called, so it can never be misclassified as I/O.
+fn write_line<W: Write + ?Sized>(writer: &mut W, bytes: &[u8]) -> Result<(), CliError> {
+    writer.write_all(bytes)?;
+    writer.write_all(b"\n")?;
+    writer.flush()?;
     Ok(())
+}
+
+pub(crate) fn write_json_pretty<W: Write + ?Sized, T: Serialize>(
+    writer: &mut W,
+    value: &T,
+) -> Result<(), CliError> {
+    let json = serde_json::to_string_pretty(value)?;
+    write_line(writer, json.as_bytes())
+}
+
+pub(crate) fn write_json_line<W: Write + ?Sized, T: Serialize>(
+    writer: &mut W,
+    value: &T,
+) -> Result<(), CliError> {
+    let json = serde_json::to_string(value)?;
+    write_line(writer, json.as_bytes())
+}
+
+pub(crate) fn write_serialized_json_line<W: Write + ?Sized>(
+    writer: &mut W,
+    json: &str,
+) -> Result<(), CliError> {
+    write_line(writer, json.as_bytes())
+}
+
+/// Print a pretty JSON value through locked stdout.
+pub fn print_json_pretty<T: Serialize>(value: &T) -> Result<(), CliError> {
+    let stdout = io::stdout();
+    write_json_pretty(&mut stdout.lock(), value)
 }
 
 /// Print a compact single-line JSON value for streaming commands.
 pub fn print_json_line<T: Serialize>(value: &T) -> Result<(), CliError> {
-    println!("{}", serde_json::to_string(value)?);
-    Ok(())
+    let stdout = io::stdout();
+    write_json_line(&mut stdout.lock(), value)
+}
+
+/// Print an already-serialized JSON value without parsing or reformatting it.
+pub fn print_serialized_json_line(json: &str) -> Result<(), CliError> {
+    let stdout = io::stdout();
+    write_serialized_json_line(&mut stdout.lock(), json)
 }
 
 /// Parse "prefix/length" or "prefix" (for host routes) into (IP, length).
@@ -1278,6 +1317,79 @@ mod tests {
 
         let err = print_json_pretty(&non_string_keyed_map).unwrap_err();
         assert!(matches!(err, CliError::Json(_)));
+    }
+
+    #[derive(Serialize)]
+    struct JsonWriterFixture {
+        ok: bool,
+        count: u8,
+    }
+
+    #[test]
+    fn json_writers_preserve_exact_bytes() {
+        let value = JsonWriterFixture { ok: true, count: 2 };
+        let mut pretty = Vec::new();
+        write_json_pretty(&mut pretty, &value).unwrap();
+        assert_eq!(pretty, b"{\n  \"ok\": true,\n  \"count\": 2\n}\n");
+
+        let mut compact = Vec::new();
+        write_json_line(&mut compact, &value).unwrap();
+        assert_eq!(compact, b"{\"ok\":true,\"count\":2}\n");
+
+        let mut serialized = Vec::new();
+        write_serialized_json_line(&mut serialized, "{\"compact\":true}").unwrap();
+        assert_eq!(serialized, b"{\"compact\":true}\n");
+    }
+
+    struct FailAfter {
+        remaining: usize,
+    }
+
+    impl Write for FailAfter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if self.remaining == 0 {
+                return Err(io::Error::from(io::ErrorKind::BrokenPipe));
+            }
+            let written = bytes.len().min(self.remaining);
+            self.remaining -= written;
+            Ok(written)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn partial_broken_pipe_returns_io_error_without_unwinding() {
+        let value = JsonWriterFixture { ok: true, count: 2 };
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            write_json_pretty(&mut FailAfter { remaining: 5 }, &value)
+        }));
+        let err = result.expect("writer failure must not panic").unwrap_err();
+        assert!(
+            matches!(err, CliError::Io(ref error) if error.kind() == io::ErrorKind::BrokenPipe)
+        );
+    }
+
+    struct FailFlush(Vec<u8>);
+
+    impl Write for FailFlush {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Err(io::Error::other("flush failed"))
+        }
+    }
+
+    #[test]
+    fn json_flush_failure_returns_io_error() {
+        let value = JsonWriterFixture { ok: true, count: 2 };
+        let err = write_json_line(&mut FailFlush(Vec::new()), &value).unwrap_err();
+        assert!(matches!(err, CliError::Io(_)));
     }
 
     #[test]
