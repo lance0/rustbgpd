@@ -18,6 +18,7 @@ struct MockExportConfig {
 struct MockExactExportEncoder {
     config: RwLock<MockExportConfig>,
     probed: Arc<Mutex<Vec<ExactExportKey>>>,
+    probe_batches: Arc<AtomicUsize>,
 }
 
 impl MockExactExportEncoder {
@@ -28,6 +29,7 @@ impl MockExactExportEncoder {
                 rejected: HashSet::new(),
             }),
             probed: Arc::new(Mutex::new(Vec::new())),
+            probe_batches: Arc::new(AtomicUsize::new(0)),
         })
     }
 
@@ -41,11 +43,16 @@ impl MockExactExportEncoder {
     fn probed(&self) -> Vec<ExactExportKey> {
         self.probed.lock().unwrap().clone()
     }
+
+    fn probe_batch_count(&self) -> usize {
+        self.probe_batches.load(Ordering::Relaxed)
+    }
 }
 
 struct MockExactExportSnapshot {
     config: MockExportConfig,
     probed: Arc<Mutex<Vec<ExactExportKey>>>,
+    probe_batches: Arc<AtomicUsize>,
 }
 
 impl ExactExportSnapshot for MockExactExportSnapshot {
@@ -76,6 +83,18 @@ impl ExactExportSnapshot for MockExactExportSnapshot {
         })
     }
 
+    fn probe_announcements(
+        &self,
+        candidates: &[ExactExportCandidate<'_>],
+    ) -> Vec<Result<ExactExportResult, ExactExportError>> {
+        self.probe_batches.fetch_add(1, Ordering::Relaxed);
+        candidates
+            .iter()
+            .copied()
+            .map(|candidate| self.probe_announcement(candidate))
+            .collect()
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -90,6 +109,7 @@ impl ExactExportEncoder for MockExactExportEncoder {
         Arc::new(MockExactExportSnapshot {
             config: self.config.read().unwrap().clone(),
             probed: Arc::clone(&self.probed),
+            probe_batches: Arc::clone(&self.probe_batches),
         })
     }
 }
@@ -551,6 +571,70 @@ async fn private_route_rejection_withdraws_once_then_recovers() {
     assert!(manager.adj_ribs_out[&peer].get(&route.prefix, 0).is_some());
 }
 
+#[test]
+fn post_otc_withdrawal_only_skips_exact_probe_and_keeps_snapshot() {
+    let peer = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 61));
+    let route = make_route(
+        Ipv4Prefix::new(Ipv4Addr::new(203, 0, 116, 0), 24),
+        Ipv4Addr::new(198, 51, 100, 61),
+    );
+    let key = ExactExportKey::Unicast(route.prefix, route.path_id);
+    let encoder = MockExactExportEncoder::accepting(61);
+    let mut manager = test_manager();
+    let mut rx = register_exact_target(&mut manager, peer, encoder.clone());
+
+    assert!(commit_batch(
+        &mut manager,
+        peer,
+        ExactBatch {
+            announce: vec![route.clone()],
+            ..ExactBatch::default()
+        }
+    ));
+    assert_eq!(rx.try_recv().unwrap().announce.len(), 1);
+    let initial_probe_batches = encoder.probe_batch_count();
+    assert!(manager.adj_ribs_out[&peer].get(&route.prefix, 0).is_some());
+
+    manager
+        .peer_local_roles
+        .insert(peer, Some(rustbgpd_wire::BgpRole::Customer));
+    let mut otc_blocked = route.clone();
+    Arc::make_mut(&mut otc_blocked.attributes)
+        .push(rustbgpd_wire::PathAttribute::OnlyToCustomer(64_512));
+    manager.adj_rib_out_commit_stats = AdjRibOutCommitStats::default();
+    let mut cache = crate::manager::distribution::SharedUnicastProbeCache::default();
+    assert!(commit_shared_unicast_with_precommit(
+        &mut manager,
+        peer,
+        vec![otc_blocked].into(),
+        vec![None].into(),
+        HashSet::from([key]),
+        &mut cache,
+        None,
+    ));
+
+    let withdrawn = rx.try_recv().unwrap();
+    let snapshot = withdrawn
+        .exact_export_snapshot
+        .as_ref()
+        .expect("post-OTC withdrawal retains the concrete snapshot");
+    assert_eq!((snapshot.owner_id(), snapshot.generation()), (1, 61));
+    assert!(withdrawn.announce.is_empty());
+    assert_eq!(withdrawn.withdraw, vec![(route.prefix, route.path_id)]);
+    assert_eq!(
+        encoder.probe_batch_count(),
+        initial_probe_batches,
+        "an announcement removed by OTC must not issue an empty exact batch"
+    );
+    assert_eq!(manager.adj_rib_out_commit_stats.exact_probe_batches, 0);
+    assert_eq!(manager.adj_rib_out_commit_stats.exact_probe_candidates, 0);
+    assert_eq!(manager.adj_rib_out_commit_stats.successful_commits, 1);
+    assert_eq!(manager.adj_rib_out_commit_stats.successful_enqueues, 1);
+    assert!(manager.adj_ribs_out[&peer].get(&route.prefix, 0).is_none());
+    assert!(!manager.peer_unexportable.contains_key(&peer));
+    assert!(rx.try_recv().is_err(), "the commit enqueues exactly once");
+}
+
 #[tokio::test]
 async fn every_route_family_is_probed_before_commit() {
     let peer = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2));
@@ -562,6 +646,10 @@ async fn every_route_family_is_probed_before_commit() {
     let vpn = make_vpn_rib_route(source, 41, 1041, 100);
     let labeled = make_labeled_rib_route(source, 42, 1042, 100);
     let rtc = make_rtc_rib_route(source, 43, 100);
+    let withdrawal = (
+        Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 2, 0), 24)),
+        0,
+    );
     let expected = HashSet::from([
         ExactExportKey::Unicast(unicast.prefix, unicast.path_id),
         ExactExportKey::FlowSpec(flowspec.selection_key()),
@@ -587,6 +675,7 @@ async fn every_route_family_is_probed_before_commit() {
         peer,
         ExactBatch {
             announce: vec![unicast],
+            withdraw: vec![withdrawal],
             flowspec_announce: vec![flowspec],
             evpn_announce: vec![evpn],
             bgpls_announce: vec![bgpls],
@@ -599,12 +688,18 @@ async fn every_route_family_is_probed_before_commit() {
 
     let update = rx.recv().await.unwrap();
     assert_eq!(update.announce.len(), 1);
+    assert_eq!(update.withdraw, vec![withdrawal]);
     assert_eq!(update.flowspec_announce.len(), 1);
     assert_eq!(update.evpn_announce.len(), 1);
     assert_eq!(update.bgpls_announce.len(), 1);
     assert_eq!(update.vpn_announce.len(), 1);
     assert_eq!(update.labeled_announce.len(), 1);
     assert_eq!(update.rtc_announce.len(), 1);
+    assert_eq!(
+        encoder.probe_batch_count(),
+        1,
+        "mixed announcements and withdrawals retain one nonempty exact batch"
+    );
     assert_eq!(
         encoder.probed().into_iter().collect::<HashSet<_>>(),
         expected

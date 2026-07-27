@@ -1,0 +1,5 @@
+phase	attempt	utc	load_1m	load_1m_max	governor	required_governor	competing_process_count	competing_processes	status
+parent-a	1	2026-07-27T09:11:15Z	0.37	2.0	performance	performance	0	none	pass
+head-a	1	2026-07-27T09:14:03Z	1.16	2.0	performance	performance	0	none	pass
+head-b	1	2026-07-27T09:16:50Z	1.12	2.0	performance	performance	0	none	pass
+parent-b	1	2026-07-27T09:17:31Z	1.12	2.0	performance	performance	0	none	pass
