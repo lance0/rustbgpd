@@ -1709,7 +1709,10 @@ rbgp top -i 5     # 5s poll interval
 ```
 
 Shows sessions, prefix counts, message rates, RPKI VRP counts, and
-streaming route events in a terminal UI. Press `h` for keybindings.
+streaming route events in a terminal UI. The route-event subscription is
+opened only while the events panel is visible (`e`), and stale health or
+neighbor data is labeled while the last-good snapshot remains on screen.
+Press `h` for keybindings.
 
 ### Watch live events
 

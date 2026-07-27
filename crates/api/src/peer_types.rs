@@ -1112,6 +1112,10 @@ pub enum PeerManagerCommand {
     QueryImportPolicyTermHits {
         /// Optional peer filter; `None` = every session.
         peer: Option<IpAddr>,
+        /// Absolute deadline shared by the fleet snapshot's asynchronous
+        /// waits. Every session send and reply uses this same instant, so
+        /// those waits do not multiply the timeout by peer count.
+        deadline: tokio::time::Instant,
         /// Reply channel: successful rows are sorted by peer address.
         reply: oneshot::Sender<SessionQueryOutcome<Vec<(IpAddr, ImportPolicyTermHits)>>>,
     },
