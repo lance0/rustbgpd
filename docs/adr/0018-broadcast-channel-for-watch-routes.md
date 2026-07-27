@@ -43,7 +43,10 @@ Use `tokio::sync::broadcast` with a capacity of 4096:
   zero receivers — the send returns `Err` which is ignored via `let _ =`).
 - Multiple subscribers are independent — one slow subscriber doesn't block others.
 - No subscriber lifecycle management in RibManager.
-- Lagged subscribers get a clear error instead of unbounded memory growth.
+- Lagged subscribers skip the missed events instead of causing unbounded
+  memory growth or blocking the sender. The legacy `WatchRoutes` response
+  shape has no in-band lag signal; the daemon records the loss in metrics and
+  logs.
 
 **Negative:**
 - Lagged subscribers lose events. For the monitoring use case this is acceptable
