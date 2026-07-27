@@ -1078,7 +1078,7 @@ _arguments "${_arguments_options[@]}" : \
 '--max-input-bytes=[Maximum snapshot bytes read; exceeding it refuses the comparison (exit 2)]:MAX_INPUT_BYTES:_default' \
 '*--ignore-attribute=[Attribute to exclude from comparison on both sides (origin, as_path, next_hop, med, local_pref, communities, extended_communities, large_communities, unknown); may be repeated]:IGNORE_ATTRIBUTE:_default' \
 '--detail=[Maximum detailed difference rows in human output (--json is always complete)]:DETAIL:_default' \
-'--deadline=[Overall wall-clock budget in seconds; expiry refuses the comparison (exit 2)]:DEADLINE:_default' \
+'--deadline=[Aggregate wall-clock budget for the live query phase, starting after bounded local snapshot parsing and shared by neighbor discovery and every advertised-route page; expiry refuses the comparison (exit 2)]:DEADLINE:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \

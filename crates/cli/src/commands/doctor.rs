@@ -116,12 +116,20 @@ struct Check {
 enum SessionHistoryEvidence {
     /// The history RPC failed, so even the bounded recent window is unknown.
     Unavailable,
-    /// The history RPC succeeded. Either timestamp may still be absent
-    /// because the 256-event fleet-wide window did not retain this peer.
+    /// The history RPC succeeded. Timestamps and administrative state may
+    /// still be absent because the 256-event fleet-wide window did not retain
+    /// this peer.
     Retained {
         last_transition_unix: Option<u64>,
         last_loss_unix: Option<u64>,
+        latest_admin_state: Option<RetainedAdminState>,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RetainedAdminState {
+    Enabled,
+    Disabled,
 }
 
 /// Records checks and prints them live (human mode) as they are produced.
@@ -607,6 +615,18 @@ fn peer_checks(
                 output::format_duration(uptime_seconds)
             ),
         });
+    } else if matches!(
+        session_evidence,
+        SessionHistoryEvidence::Retained {
+            latest_admin_state: Some(RetainedAdminState::Disabled),
+            ..
+        }
+    ) {
+        checks.push(Check {
+            name: format!("peer.{address}.session"),
+            status: CheckStatus::Ok,
+            detail: format!("peer {address} administratively disabled (state {state})"),
+        });
     } else {
         let (status, since) = match session_evidence {
             SessionHistoryEvidence::Retained {
@@ -707,6 +727,39 @@ fn last_loss_by_peer(events: &[serde_json::Value]) -> HashMap<String, u64> {
     last_event_by_peer(events, |event| {
         event.get("event_type").and_then(|v| v.as_str()) == Some("session_lost")
     })
+}
+
+/// Latest retained operator intent per peer.
+///
+/// The daemon returns the retained vector oldest-to-newest. Fold that order
+/// directly: lifecycle events are stamped only to whole seconds, and unrelated
+/// later FSM events must not erase the most recent enable/disable intent.
+fn latest_admin_state_by_peer(events: &[serde_json::Value]) -> HashMap<String, RetainedAdminState> {
+    let mut map = HashMap::new();
+    for event in events {
+        let state = match event.get("event_type").and_then(|v| v.as_str()) {
+            Some("peer_enabled") => RetainedAdminState::Enabled,
+            Some("peer_disabled") => RetainedAdminState::Disabled,
+            _ => continue,
+        };
+        let Some(peer) = event
+            .get("peer_address")
+            .and_then(|v| v.as_str())
+            .filter(|peer| !peer.is_empty())
+        else {
+            continue;
+        };
+        map.insert(peer.to_string(), state);
+    }
+    map
+}
+
+fn peer_identity(address: &str, interface: &str) -> String {
+    if interface.is_empty() {
+        address.to_string()
+    } else {
+        format!("{address}%{interface}")
+    }
 }
 
 fn last_event_by_peer(
@@ -1465,8 +1518,12 @@ pub(crate) async fn run(
                 }
             };
 
-            // peers/: neighbors + recent session/policy events, then the
-            // per-peer red/green checks.
+            // peers/: snapshot neighbors before querying event history. If an
+            // operator disables a peer between these RPCs, the older snapshot
+            // remains harmless; if the snapshot already shows the resulting
+            // non-Established state, the later history query includes the
+            // disable evidence.
+            let neighbor_snapshot = neighbor.list_neighbors(ListNeighborsRequest {}).await;
             let (session_events, session_history_available) = match events
                 .list_session_events(ListSessionEventsRequest {
                     neighbor_address: String::new(),
@@ -1525,11 +1582,12 @@ pub(crate) async fn run(
             sections
                 .entry("policy_events")
                 .or_insert_with(|| "collected".to_string());
-            match neighbor.list_neighbors(ListNeighborsRequest {}).await {
+            match neighbor_snapshot {
                 Ok(resp) => {
                     let neighbors = resp.into_inner();
                     let transitions = last_transition_by_peer(&session_events);
                     let losses = last_loss_by_peer(&session_events);
+                    let admin_states = latest_admin_state_by_peer(&session_events);
                     let snapshots: Vec<JsonNeighbor> = neighbors
                         .neighbors
                         .iter()
@@ -1565,11 +1623,9 @@ pub(crate) async fn run(
                         );
                     }
                     for n in &neighbors.neighbors {
-                        let address = n
-                            .config
-                            .as_ref()
-                            .map(|c| c.address.clone())
-                            .unwrap_or_default();
+                        let address = n.config.as_ref().map_or_else(String::new, |config| {
+                            peer_identity(&config.address, &config.interface)
+                        });
                         let check = rfc8212_policy_check(
                             &address,
                             n.rfc8212_import_policy,
@@ -1578,16 +1634,18 @@ pub(crate) async fn run(
                         reporter.record(check.name, check.status, check.detail);
                     }
                     for snapshot in &snapshots {
+                        let identity = peer_identity(&snapshot.address, &snapshot.interface);
                         let session_evidence = if session_history_available {
                             SessionHistoryEvidence::Retained {
-                                last_transition_unix: transitions.get(&snapshot.address).copied(),
-                                last_loss_unix: losses.get(&snapshot.address).copied(),
+                                last_transition_unix: transitions.get(&identity).copied(),
+                                last_loss_unix: losses.get(&identity).copied(),
+                                latest_admin_state: admin_states.get(&identity).copied(),
                             }
                         } else {
                             SessionHistoryEvidence::Unavailable
                         };
                         for check in peer_checks(
-                            &snapshot.address,
+                            &identity,
                             &snapshot.state,
                             snapshot.stale,
                             snapshot.slow_peer,
@@ -2075,9 +2133,18 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
         last_transition_unix: Option<u64>,
         last_loss_unix: Option<u64>,
     ) -> SessionHistoryEvidence {
+        retained_session_evidence_with_admin(last_transition_unix, last_loss_unix, None)
+    }
+
+    fn retained_session_evidence_with_admin(
+        last_transition_unix: Option<u64>,
+        last_loss_unix: Option<u64>,
+        latest_admin_state: Option<RetainedAdminState>,
+    ) -> SessionHistoryEvidence {
         SessionHistoryEvidence::Retained {
             last_transition_unix,
             last_loss_unix,
+            latest_admin_state,
         }
     }
 
@@ -2182,6 +2249,64 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
         assert!(checks[0].status == CheckStatus::Warn);
     }
 
+    /// LAN-668 destructive red proof: removing the retained disabled branch
+    /// makes the session assertion red. Slow-peer and flap checks remain
+    /// independently present instead of being swallowed by that verdict.
+    #[test]
+    fn administratively_disabled_peer_is_green_without_hiding_other_checks() {
+        let now = 1_000_000;
+        let checks = peer_checks(
+            "10.0.0.2",
+            "Idle",
+            false,
+            true,
+            0,
+            FLAP_REPORT_THRESHOLD,
+            retained_session_evidence_with_admin(
+                Some(1),
+                Some(now - 30),
+                Some(RetainedAdminState::Disabled),
+            ),
+            now,
+            "",
+        );
+
+        assert_eq!(checks.len(), 3);
+        assert_eq!(checks[0].status, CheckStatus::Ok);
+        assert!(
+            checks[0]
+                .detail
+                .contains("administratively disabled (state Idle)")
+        );
+        assert_eq!(checks[1].name, "peer.10.0.0.2.slow_peer");
+        assert_eq!(checks[1].status, CheckStatus::Warn);
+        assert_eq!(checks[2].name, "peer.10.0.0.2.flaps");
+        assert_eq!(checks[2].status, CheckStatus::Fail);
+        assert!(checks[2].detail.contains("session loss 00:00:30 ago"));
+    }
+
+    /// LAN-668 destructive red proof: a later retained `PeerEnabled` must
+    /// supersede disabled intent. Treating any historical disable as current
+    /// would incorrectly turn this genuinely old Active session green.
+    #[test]
+    fn enabled_peer_stuck_in_active_remains_red() {
+        let checks = peer_checks(
+            "10.0.0.2",
+            "Active",
+            false,
+            false,
+            0,
+            0,
+            retained_session_evidence_with_admin(Some(1), None, Some(RetainedAdminState::Enabled)),
+            1_000_000,
+            "",
+        );
+
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].status, CheckStatus::Fail);
+        assert!(checks[0].detail.contains("in Active"));
+    }
+
     /// Load-bearing mutation proof: changing the missing-timestamp branch
     /// back to `Fail` makes the status assertion red. The bounded fleet
     /// history cannot establish how long this peer has been in Connect.
@@ -2258,10 +2383,12 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             false,
             0,
             0,
-            SessionHistoryEvidence::Unavailable,
+            retained_session_evidence_with_admin(Some(1), None, Some(RetainedAdminState::Disabled)),
             1_000_000,
             "",
         );
+        // LAN-668 red proof: retained disabled intent must not turn a stale
+        // timeout placeholder green.
         assert!(checks[0].status == CheckStatus::Warn);
         assert!(checks[0].detail.contains("stale"));
     }
@@ -2370,6 +2497,53 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
         // A peer with only non-loss events must not acquire fabricated loss
         // evidence; treating all session events as losses makes this red.
         assert!(!losses.contains_key("10.0.0.3"));
+    }
+
+    #[test]
+    fn retained_admin_state_uses_vector_order_and_keeps_scoped_peers_distinct() {
+        let events = vec![
+            serde_json::json!({
+                "peer_address": "fe80::1%eth0",
+                "timestamp": "100",
+                "event_type": "peer_disabled"
+            }),
+            serde_json::json!({
+                "peer_address": "fe80::1%eth0",
+                "timestamp": "100",
+                "event_type": "peer_enabled"
+            }),
+            serde_json::json!({
+                "peer_address": "fe80::1%eth1",
+                "timestamp": "100",
+                "event_type": "peer_enabled"
+            }),
+            serde_json::json!({
+                "peer_address": "fe80::1%eth1",
+                "timestamp": "100",
+                "event_type": "peer_disabled"
+            }),
+            serde_json::json!({
+                "peer_address": "fe80::1%eth1",
+                "timestamp": "101",
+                "event_type": "session_state_changed"
+            }),
+        ];
+
+        let states = latest_admin_state_by_peer(&events);
+        // Equal-second events are resolved by retained vector order. Sorting
+        // or taking max by the second-resolution timestamp makes this red.
+        assert_eq!(
+            states.get("fe80::1%eth0"),
+            Some(&RetainedAdminState::Enabled)
+        );
+        // LAN-668 destructive red proof: replacing `PeerDisabled` above with
+        // a normal transition must make this disabled assertion red. A later
+        // FSM event must not erase retained operator intent.
+        assert_eq!(
+            states.get("fe80::1%eth1"),
+            Some(&RetainedAdminState::Disabled)
+        );
+        assert_eq!(peer_identity("fe80::1", "eth1"), "fe80::1%eth1");
     }
 
     // ---- first-deploy probes (LAN-482) --------------------------------
@@ -2730,16 +2904,30 @@ paths = ["x"]
             "[global]\nasn = 65000\nrouter_id = \"192.0.2.1\"\nruntime_state_dir = \"{}\"\n",
             state_dir.path().display()
         ));
-        let mut slow = neighbor("10.0.0.2", 6, FLAP_REPORT_THRESHOLD, "core peer");
+        let mut slow = neighbor(
+            "10.0.0.2",
+            rustbgpd_api::proto::SessionState::Idle as i32,
+            FLAP_REPORT_THRESHOLD,
+            "core peer",
+        );
         slow.slow_peer = true;
         *server.state.list_neighbors_response.lock().await = vec![slow];
-        *server.state.session_events.lock().await = vec![rustbgpd_api::proto::BgpEvent {
-            timestamp: now_unix_seconds().to_string(),
-            peer_address: "10.0.0.2".to_string(),
-            event_type: rustbgpd_api::proto::BgpEventType::SessionLost as i32,
-            summary: "recent session loss".to_string(),
-            ..Default::default()
-        }];
+        *server.state.session_events.lock().await = vec![
+            rustbgpd_api::proto::BgpEvent {
+                timestamp: now_unix_seconds().to_string(),
+                peer_address: "10.0.0.2".to_string(),
+                event_type: rustbgpd_api::proto::BgpEventType::SessionLost as i32,
+                summary: "recent session loss".to_string(),
+                ..Default::default()
+            },
+            rustbgpd_api::proto::BgpEvent {
+                timestamp: now_unix_seconds().to_string(),
+                peer_address: "10.0.0.2".to_string(),
+                event_type: rustbgpd_api::proto::BgpEventType::PeerDisabled as i32,
+                summary: "peer disabled after loss".to_string(),
+                ..Default::default()
+            },
+        ];
         *server.state.bfd_sessions.lock().await = vec![rustbgpd_api::proto::BfdSession {
             peer_address: "10.0.0.2".to_string(),
             state: rustbgpd_api::proto::BfdSessionState::Down as i32,
@@ -2764,7 +2952,8 @@ paths = ["x"]
         .await
         .unwrap();
         // The evidenced recent loss is an unconditional red input; the
-        // manifest assertion below is the load-bearing correlation proof.
+        // manifest assertion below is the load-bearing correlation proof even
+        // though the independent disabled session verdict is green.
         assert_eq!(code, 2);
 
         let files = extract_bundle(&bundle_path);
@@ -2839,8 +3028,18 @@ paths = ["x"]
                 && check["status"] == "warn"
                 && detail.contains(r#"bgp_peer_outbound_queue_depth{peer="10.0.0.2"}"#)
         }));
+        // LAN-668 destructive red proof: the retained disable affects only
+        // the session disposition; removing its Ok branch makes this red.
+        assert!(manifest["checks"].as_array().unwrap().iter().any(|check| {
+            check["name"] == "peer.10.0.0.2.session"
+                && check["status"] == "ok"
+                && check["detail"]
+                    .as_str()
+                    .is_some_and(|detail| detail.contains("administratively disabled"))
+        }));
         // Load-bearing mutation proof: dropping the event-type correlation,
-        // the loss map, or its handoff into `peer_checks` changes this
+        // the loss map, its handoff into `peer_checks`, or short-circuiting
+        // after the disabled session verdict changes this independently
         // evidenced recent-instability verdict away from red.
         assert!(manifest["checks"].as_array().unwrap().iter().any(|check| {
             check["name"] == "peer.10.0.0.2.flaps"
@@ -2894,6 +3093,83 @@ paths = ["x"]
         let detail = peer_session["detail"].as_str().unwrap();
         assert!(detail.contains("bounded 256-event fleet history"));
         assert!(!detail.contains("unavailable"));
+    }
+
+    /// LAN-668 bundle exit proof: retained operator intent must flow through
+    /// the real RPC projection and keep an intentionally disabled peer from
+    /// manufacturing the process-wide red exit code.
+    #[tokio::test]
+    async fn doctor_bundle_exits_green_for_scoped_administratively_disabled_peer() {
+        let server = spawn_mock_server(None).await;
+        let state_dir = tempfile::tempdir().unwrap();
+        *server.state.config_effective_toml.lock().await = Some(format!(
+            "[global]\nasn = 65000\nruntime_state_dir = \"{}\"\n",
+            state_dir.path().display()
+        ));
+        let mut disabled = neighbor(
+            "fe80::1",
+            rustbgpd_api::proto::SessionState::Idle as i32,
+            0,
+            "intentionally disabled",
+        );
+        disabled.config.as_mut().unwrap().interface = "eth0".to_string();
+        *server.state.list_neighbors_response.lock().await = vec![disabled];
+        *server.state.session_events.lock().await = vec![
+            rustbgpd_api::proto::BgpEvent {
+                timestamp: "1".to_string(),
+                peer_address: "fe80::1%eth0".to_string(),
+                event_type: rustbgpd_api::proto::BgpEventType::PeerDisabled as i32,
+                summary: "peer disabled".to_string(),
+                ..Default::default()
+            },
+            // A later ordinary FSM event must not erase the administrative
+            // state retained immediately above.
+            rustbgpd_api::proto::BgpEvent {
+                timestamp: "2".to_string(),
+                peer_address: "fe80::1%eth0".to_string(),
+                event_type: rustbgpd_api::proto::BgpEventType::SessionStateChanged as i32,
+                summary: "transitioned to Idle".to_string(),
+                ..Default::default()
+            },
+        ];
+        let connection = connect(&server.addr, None).await;
+        let dir = tempfile::tempdir().unwrap();
+        let bundle_path = dir.path().join("bundle.tar.gz");
+
+        let code = run(
+            connection,
+            &DoctorOptions {
+                output: Some(&bundle_path),
+                log_file: None,
+                daemon_address: &server.addr,
+                token_file_configured: false,
+                json: true,
+            },
+        )
+        .await
+        .unwrap();
+
+        // LAN-668 destructive red proof: replacing `PeerDisabled` above with
+        // a normal transition makes the retained admin evidence disappear,
+        // turning the ancient Idle transition and this bundle exit assertion
+        // red.
+        assert_eq!(code, 0, "an intentionally disabled peer must not exit red");
+        let files = extract_bundle(&bundle_path);
+        let manifest: serde_json::Value =
+            serde_json::from_str(find(&files, "manifest.json")).unwrap();
+        let peer_session = manifest["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "peer.fe80::1%eth0.session")
+            .expect("scoped disabled-peer session check");
+        assert_eq!(peer_session["status"], "ok");
+        assert!(
+            peer_session["detail"]
+                .as_str()
+                .unwrap()
+                .contains("administratively disabled (state Idle)")
+        );
     }
 
     #[tokio::test]
@@ -3138,13 +3414,29 @@ paths = ["x"]
         stuck.last_error =
             "sent NOTIFICATION 2/7 (Unsupported Capability)\ntoken=must-not-escape".to_string();
         *server.state.list_neighbors_response.lock().await = vec![stuck];
-        *server.state.session_events.lock().await = vec![rustbgpd_api::proto::BgpEvent {
-            timestamp: "1".to_string(),
-            peer_address: "10.0.0.9".to_string(),
-            event_type: rustbgpd_api::proto::BgpEventType::SessionStateChanged as i32,
-            summary: "old transition".to_string(),
-            ..Default::default()
-        }];
+        *server.state.session_events.lock().await = vec![
+            rustbgpd_api::proto::BgpEvent {
+                timestamp: "1".to_string(),
+                peer_address: "10.0.0.9".to_string(),
+                event_type: rustbgpd_api::proto::BgpEventType::PeerDisabled as i32,
+                summary: "old incarnation disabled".to_string(),
+                ..Default::default()
+            },
+            rustbgpd_api::proto::BgpEvent {
+                timestamp: "1".to_string(),
+                peer_address: "10.0.0.9".to_string(),
+                event_type: rustbgpd_api::proto::BgpEventType::PeerEnabled as i32,
+                summary: "replacement incarnation added enabled".to_string(),
+                ..Default::default()
+            },
+            rustbgpd_api::proto::BgpEvent {
+                timestamp: "1".to_string(),
+                peer_address: "10.0.0.9".to_string(),
+                event_type: rustbgpd_api::proto::BgpEventType::SessionStateChanged as i32,
+                summary: "old transition".to_string(),
+                ..Default::default()
+            },
+        ];
         let connection = connect(&server.addr, None).await;
         let dir = tempfile::tempdir().unwrap();
         let bundle_path = dir.path().join("bundle.tar.gz");
@@ -3161,6 +3453,10 @@ paths = ["x"]
         )
         .await
         .unwrap();
+        // LAN-668 delete/re-add red proof: deleting the replacement
+        // incarnation's `PeerEnabled` publication above leaves the old
+        // `PeerDisabled` current, fabricates a green session verdict, and
+        // makes this expected red exit assertion fail.
         assert_eq!(code, 2, "stuck peer must produce the red exit code");
 
         let files = extract_bundle(&bundle_path);
