@@ -36,9 +36,11 @@ its generic deny, and test both the exception and an unauthorized control.
 
 ## Path-hiding (RFC 7947 §2.3), both mitigations
 
-- **member-alpha** negotiates **Add-Path send**: it receives all candidate
-  paths and runs its own best-path selection. Preferred where the member
-  edge supports Add-Path receive — these peers stay update-group-shareable.
+- **member-alpha** negotiates **Add-Path send**: it receives up to the eight
+  best export-permitted candidates, subject to configured and negotiated
+  Paths-Limit, and runs its own best-path selection. Preferred where the
+  member edge supports Add-Path receive — these peers stay
+  update-group-shareable.
 - **member-beta** cannot do Add-Path, so it sets **`per_client_best = true`**
   (requires `route_server_client`): when its export policy denies the best
   path, the route server advertises the best *permitted* candidate instead
@@ -72,6 +74,7 @@ The explain output for a per-client-best member shows the ranked candidate
 ladder with per-candidate export-policy verdicts (which candidates were
 denied by which policy term, and which one was advertised).
 
-Members are managed dynamically via gRPC as they join and leave — see
+Members can be added atomically as they join — see
 `rbgp neighbor <addr> add --remote-asn <asn> --route-server-client \
---per-client-best --role rs`.
+--per-client-best --role rs --max-prefixes 50000 \
+--max-prefix-restart-seconds 30`.

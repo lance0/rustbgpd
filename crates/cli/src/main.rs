@@ -908,6 +908,12 @@ enum NeighborAction {
         /// Max prefix limit
         #[arg(long)]
         max_prefixes: Option<u32>,
+        /// Peer group to assign atomically when adding the neighbor
+        #[arg(long)]
+        peer_group: Option<String>,
+        /// Restart delay after a max-prefix teardown (must be greater than zero)
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+        max_prefix_restart_seconds: Option<u32>,
         /// Address families (comma-separated)
         #[arg(long, value_delimiter = ',')]
         families: Vec<String>,
@@ -2278,6 +2284,8 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                     min_hold_time,
                     send_hold_time,
                     max_prefixes,
+                    peer_group,
+                    max_prefix_restart_seconds,
                     families,
                     required_families,
                     route_server_client,
@@ -2300,6 +2308,8 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                         min_hold_time,
                         send_hold_time,
                         max_prefixes,
+                        peer_group,
+                        max_prefix_restart_seconds,
                         families,
                         required_families,
                         route_server_client,
@@ -3710,6 +3720,10 @@ mod tests {
             "--role",
             "provider",
             "--strict-role",
+            "--peer-group",
+            "rs-members",
+            "--max-prefix-restart-seconds",
+            "30",
         ])
         .unwrap();
         if let Command::Neighbor {
@@ -3719,6 +3733,8 @@ mod tests {
                     asn,
                     role,
                     strict_role,
+                    peer_group,
+                    max_prefix_restart_seconds,
                     ..
                 }),
             ..
@@ -3728,9 +3744,25 @@ mod tests {
             assert_eq!(asn, 65001);
             assert_eq!(role.as_deref(), Some("provider"));
             assert!(strict_role);
+            assert_eq!(peer_group.as_deref(), Some("rs-members"));
+            assert_eq!(max_prefix_restart_seconds, Some(30));
         } else {
             panic!("expected Neighbor Add command");
         }
+
+        assert!(
+            Cli::try_parse_from([
+                "rbgp",
+                "neighbor",
+                "10.0.0.1",
+                "add",
+                "--asn",
+                "65001",
+                "--max-prefix-restart-seconds",
+                "0",
+            ])
+            .is_err()
+        );
     }
 
     #[test]

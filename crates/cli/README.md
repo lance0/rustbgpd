@@ -53,7 +53,7 @@ rbgp config import <source> [--format bird|frr|gobgp] [--out <path>]
 rbgp neighbor
 rbgp summary                                # alias for neighbor list
 rbgp neighbor <addr>
-rbgp neighbor <addr> add --remote-asn <asn> [--role provider|rs|rs-client|customer|peer] [--strict-role] [--route-server-client] [--per-client-best]
+rbgp neighbor <addr> add --remote-asn <asn> [--peer-group <name>] [--max-prefix-restart-seconds <seconds>] [--role provider|rs|rs-client|customer|peer] [--strict-role] [--route-server-client] [--per-client-best]
 rbgp neighbor <addr> enable
 rbgp neighbor <addr> disable --reason "maintenance"
 rbgp neighbor <addr> softreset

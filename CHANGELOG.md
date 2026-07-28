@@ -11,6 +11,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Static `rbgp neighbor ADDR add` can atomically set a peer group and
+  max-prefix restart delay during route-server member onboarding.
+
 - Deferred initial dumps now honor negotiated per-family Add-Path send limits.
 
 - Unified event watches now reject category/type filters with no possible

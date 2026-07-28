@@ -6167,7 +6167,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__neighbor__subcmd__add)
-            opts="-s -j -h --asn --remote-asn --description --hold-time --min-hold-time --send-hold-time --max-prefixes --families --required-families --route-server-client --per-client-best --role --strict-role --add-path-receive --add-path-send --add-path-send-max --paths-limit-receive-max --addr --token-file --json --no-color --help"
+            opts="-s -j -h --asn --remote-asn --description --hold-time --min-hold-time --send-hold-time --max-prefixes --peer-group --max-prefix-restart-seconds --families --required-families --route-server-client --per-client-best --role --strict-role --add-path-receive --add-path-send --add-path-send-max --paths-limit-receive-max --addr --token-file --json --no-color --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -6198,6 +6198,14 @@ _rbgp() {
                     return 0
                     ;;
                 --max-prefixes)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --peer-group)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --max-prefix-restart-seconds)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;

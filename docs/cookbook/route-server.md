@@ -129,9 +129,10 @@ import_chain = [
 
 # --- Members ---
 
-# Add-Path-capable member: receives every candidate path and runs its own
-# best-path selection (the preferred path-hiding mitigation). These peers
-# stay update-group-shareable.
+# Add-Path-capable member: receives up to the eight best export-permitted
+# candidates, subject to configured and negotiated Paths-Limit, and runs
+# its own best-path selection (the preferred path-hiding mitigation).
+# These peers stay update-group-shareable.
 [[neighbors]]
 address = "198.51.100.2"
 remote_asn = 64501

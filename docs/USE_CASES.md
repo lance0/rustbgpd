@@ -186,8 +186,8 @@ IXP member C (AS 64503) ──┘
 **Key features for IXPs:**
 - **Transparent mode** — preserves original NEXT_HOP, no AS prepend (members
   peer directly via the exchange fabric)
-- **Add-Path send** — members see all candidate paths, not just the best,
-  enabling their own best-path selection
+- **Add-Path send** — members see multiple candidates up to configured and
+  negotiated limits, enabling their own best-path selection
 - **Per-client best-path** (`per_client_best`, RFC 7947 §2.3.2) — the
   path-hiding mitigation for members that cannot do Add-Path: when a
   member's export policy denies the best path, it receives the best
@@ -211,13 +211,9 @@ IXP member C (AS 64503) ──┘
 rbgp neighbor 198.51.100.10 add --remote-asn 64510 \
   --description "new-member" \
   --families ipv4_unicast,ipv6_unicast \
-  --max-prefixes 10000
-
-# Assign to a peer group for shared policy via gRPC
-grpcurl -plaintext -d '{
-  "address": "198.51.100.10",
-  "peer_group": "rs-members"
-}' localhost:50051 rustbgpd.v1.PeerGroupService/SetNeighborPeerGroup
+  --max-prefixes 10000 \
+  --peer-group rs-members \
+  --max-prefix-restart-seconds 30
 
 # Verify the session comes up
 rbgp neighbor 198.51.100.10
