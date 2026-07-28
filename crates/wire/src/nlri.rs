@@ -3,13 +3,13 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 
 use crate::error::DecodeError;
 
-#[cfg(feature = "codec-allocation-diagnostics")]
+#[cfg(any(test, feature = "codec-allocation-diagnostics"))]
 std::thread_local! {
     static DIRECT_IPV4_BODY_CODEC_CALLS: std::cell::Cell<[usize; 2]> =
         const { std::cell::Cell::new([0; 2]) };
 }
 
-#[cfg(feature = "codec-allocation-diagnostics")]
+#[cfg(any(test, feature = "codec-allocation-diagnostics"))]
 #[doc(hidden)]
 #[must_use]
 pub fn direct_ipv4_body_codec_calls(reset: bool) -> [usize; 2] {
@@ -20,9 +20,8 @@ pub fn direct_ipv4_body_codec_calls(reset: bool) -> [usize; 2] {
     calls
 }
 
-#[cfg(feature = "codec-allocation-diagnostics")]
-#[doc(hidden)]
-pub fn note_direct_ipv4_body_codec_call(encoder_call: bool) {
+#[cfg(any(test, feature = "codec-allocation-diagnostics"))]
+fn note_direct_ipv4_body_codec_call(encoder_call: bool) {
     let mut calls = DIRECT_IPV4_BODY_CODEC_CALLS.get();
     calls[usize::from(!encoder_call)] += 1;
     DIRECT_IPV4_BODY_CODEC_CALLS.set(calls);
@@ -100,9 +99,15 @@ impl fmt::Display for Ipv4Prefix {
 ///
 /// Returns `DecodeError` if a prefix length exceeds 32 or the buffer is
 /// truncated mid-prefix.
-pub fn decode_nlri(mut buf: &[u8]) -> Result<Vec<Ipv4Prefix>, DecodeError> {
-    let mut prefixes = Vec::new();
+pub fn decode_nlri(buf: &[u8]) -> Result<Vec<Ipv4Prefix>, DecodeError> {
+    decode_ipv4_nlri(buf, std::convert::identity)
+}
 
+fn decode_ipv4_nlri<T>(
+    mut buf: &[u8],
+    mut entry: impl FnMut(Ipv4Prefix) -> T,
+) -> Result<Vec<T>, DecodeError> {
+    let mut entries = Vec::new();
     while !buf.is_empty() {
         let field_start = buf;
         let prefix_len = buf[0];
@@ -135,19 +140,35 @@ pub fn decode_nlri(mut buf: &[u8]) -> Result<Vec<Ipv4Prefix>, DecodeError> {
         octets[..byte_count].copy_from_slice(&buf[..byte_count]);
         buf = &buf[byte_count..];
 
-        prefixes.push(Ipv4Prefix::new(Ipv4Addr::from(octets), prefix_len));
+        entries.push(entry(Ipv4Prefix::new(Ipv4Addr::from(octets), prefix_len)));
     }
+    Ok(entries)
+}
 
-    Ok(prefixes)
+pub(crate) fn decode_nlri_entries(buf: &[u8]) -> Result<Vec<Ipv4NlriEntry>, DecodeError> {
+    #[cfg(any(test, feature = "codec-allocation-diagnostics"))]
+    note_direct_ipv4_body_codec_call(false);
+    decode_ipv4_nlri(buf, |prefix| Ipv4NlriEntry { path_id: 0, prefix })
 }
 
 /// Encode a sequence of NLRI prefixes into wire format.
 pub fn encode_nlri(prefixes: &[Ipv4Prefix], buf: &mut Vec<u8>) {
     for prefix in prefixes {
-        buf.push(prefix.len);
-        let byte_count = usize::from(prefix.len.div_ceil(8));
-        let octets = prefix.addr.octets();
-        buf.extend_from_slice(&octets[..byte_count]);
+        encode_ipv4_prefix(*prefix, buf);
+    }
+}
+
+fn encode_ipv4_prefix(prefix: Ipv4Prefix, buf: &mut Vec<u8>) {
+    buf.push(prefix.len);
+    let byte_count = usize::from(prefix.len.div_ceil(8));
+    buf.extend_from_slice(&prefix.addr.octets()[..byte_count]);
+}
+
+pub(crate) fn encode_nlri_entries(entries: &[Ipv4NlriEntry], buf: &mut Vec<u8>) {
+    #[cfg(any(test, feature = "codec-allocation-diagnostics"))]
+    note_direct_ipv4_body_codec_call(true);
+    for entry in entries {
+        encode_ipv4_prefix(entry.prefix, buf);
     }
 }
 
@@ -486,6 +507,24 @@ mod tests {
         encode_nlri(&prefixes, &mut buf);
         let decoded = decode_nlri(&buf).unwrap();
         assert_eq!(decoded, prefixes);
+        let entries: Vec<_> = prefixes
+            .iter()
+            .enumerate()
+            .map(|(path_id, &prefix)| Ipv4NlriEntry {
+                path_id: u32::try_from(path_id + 1).unwrap(),
+                prefix,
+            })
+            .collect();
+        let mut direct = Vec::new();
+        encode_nlri_entries(&entries, &mut direct);
+        assert_eq!(direct, buf);
+        assert_eq!(
+            decode_nlri_entries(&direct).unwrap(),
+            prefixes
+                .into_iter()
+                .map(|prefix| Ipv4NlriEntry { path_id: 0, prefix })
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

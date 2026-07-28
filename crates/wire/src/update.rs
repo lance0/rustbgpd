@@ -2,7 +2,9 @@ use crate::attribute::PathAttribute;
 use crate::constants::{HEADER_LEN, MAX_MESSAGE_LEN};
 use crate::error::{DecodeError, EncodeError};
 use crate::header::{BgpHeader, MessageType};
-use crate::nlri::{Ipv4NlriEntry, Ipv4Prefix};
+use crate::nlri::Ipv4NlriEntry;
+#[cfg(test)]
+use crate::nlri::Ipv4Prefix;
 use crate::{Afi, Safi};
 use bytes::{Buf, BufMut, Bytes};
 /// How IPv4 unicast NLRI should be encoded in an outbound UPDATE.
@@ -135,10 +137,7 @@ impl UpdateMessage {
         let withdrawn = if add_path_ipv4 {
             crate::nlri::decode_nlri_addpath(&self.withdrawn_routes)?
         } else {
-            crate::nlri::decode_nlri(&self.withdrawn_routes)?
-                .into_iter()
-                .map(|prefix| Ipv4NlriEntry { path_id: 0, prefix })
-                .collect()
+            crate::nlri::decode_nlri_entries(&self.withdrawn_routes)?
         };
         let (attributes, bgpls_nlri_discarded) = crate::attribute::decode_path_attributes_counted(
             &self.path_attributes,
@@ -148,10 +147,7 @@ impl UpdateMessage {
         let announced = if add_path_ipv4 {
             crate::nlri::decode_nlri_addpath(&self.nlri)?
         } else {
-            crate::nlri::decode_nlri(&self.nlri)?
-                .into_iter()
-                .map(|prefix| Ipv4NlriEntry { path_id: 0, prefix })
-                .collect()
+            crate::nlri::decode_nlri_entries(&self.nlri)?
         };
         Ok(ParsedUpdate {
             withdrawn,
@@ -188,10 +184,7 @@ impl UpdateMessage {
         let withdrawn = if add_path_ipv4 {
             crate::nlri::decode_nlri_addpath(&self.withdrawn_routes)?
         } else {
-            crate::nlri::decode_nlri(&self.withdrawn_routes)?
-                .into_iter()
-                .map(|prefix| Ipv4NlriEntry { path_id: 0, prefix })
-                .collect()
+            crate::nlri::decode_nlri_entries(&self.withdrawn_routes)?
         };
         let decoded = crate::attribute::decode_path_attributes_revised(
             &self.path_attributes,
@@ -202,10 +195,7 @@ impl UpdateMessage {
         let announced = if add_path_ipv4 {
             crate::nlri::decode_nlri_addpath(&self.nlri)?
         } else {
-            crate::nlri::decode_nlri(&self.nlri)?
-                .into_iter()
-                .map(|prefix| Ipv4NlriEntry { path_id: 0, prefix })
-                .collect()
+            crate::nlri::decode_nlri_entries(&self.nlri)?
         };
         Ok(RevisedParsedUpdate {
             update: ParsedUpdate {
@@ -321,8 +311,7 @@ impl UpdateMessage {
             if add_path {
                 crate::nlri::encode_nlri_addpath(withdrawn, &mut withdrawn_buf);
             } else {
-                let prefixes: Vec<Ipv4Prefix> = withdrawn.iter().map(|e| e.prefix).collect();
-                crate::nlri::encode_nlri(&prefixes, &mut withdrawn_buf);
+                crate::nlri::encode_nlri_entries(withdrawn, &mut withdrawn_buf);
             }
         }
         let mut attrs_buf = Vec::new();
@@ -339,8 +328,7 @@ impl UpdateMessage {
             if add_path {
                 crate::nlri::encode_nlri_addpath(announced, &mut nlri_buf);
             } else {
-                let prefixes: Vec<Ipv4Prefix> = announced.iter().map(|e| e.prefix).collect();
-                crate::nlri::encode_nlri(&prefixes, &mut nlri_buf);
+                crate::nlri::encode_nlri_entries(announced, &mut nlri_buf);
             }
         }
         Ok(Self {
@@ -567,6 +555,7 @@ mod tests {
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::NextHop(std::net::Ipv4Addr::new(10, 0, 0, 1)),
         ];
+        let _ = crate::nlri::direct_ipv4_body_codec_calls(true);
         let msg = UpdateMessage::build(
             &announced,
             &withdrawn,
@@ -575,10 +564,18 @@ mod tests {
             false,
             Ipv4UnicastMode::Body,
         );
+        assert_eq!(crate::nlri::direct_ipv4_body_codec_calls(false), [2, 0]);
+        let _ = crate::nlri::direct_ipv4_body_codec_calls(true);
         let parsed = msg.parse(true, false, &[]).unwrap();
+        assert_eq!(crate::nlri::direct_ipv4_body_codec_calls(false), [0, 2]);
         assert_eq!(parsed.announced, announced);
         assert_eq!(parsed.withdrawn, withdrawn);
         assert_eq!(parsed.attributes, attrs);
+        let _ = crate::nlri::direct_ipv4_body_codec_calls(true);
+        let revised = msg.parse_revised(true, false, false, &[]).unwrap();
+        assert_eq!(crate::nlri::direct_ipv4_body_codec_calls(false), [0, 2]);
+        assert!(revised.malformed.is_empty());
+        assert_eq!(revised.update, parsed);
     }
     #[test]
     fn build_roundtrip_with_add_path() {
@@ -604,6 +601,7 @@ mod tests {
             }),
             PathAttribute::NextHop(std::net::Ipv4Addr::new(10, 0, 0, 1)),
         ];
+        let _ = crate::nlri::direct_ipv4_body_codec_calls(true);
         let msg = UpdateMessage::build(
             &announced,
             &withdrawn,
@@ -616,6 +614,10 @@ mod tests {
         assert_eq!(parsed.announced, announced);
         assert_eq!(parsed.withdrawn, withdrawn);
         assert_eq!(parsed.attributes, attrs);
+        let revised = msg.parse_revised(true, false, true, &[]).unwrap();
+        assert!(revised.malformed.is_empty());
+        assert_eq!(revised.update, parsed);
+        assert_eq!(crate::nlri::direct_ipv4_body_codec_calls(false), [0, 0]);
     }
     #[test]
     fn reject_message_too_long() {
@@ -662,6 +664,21 @@ mod tests {
             path_attributes: Bytes::new(),
             nlri: Bytes::from_static(&[33, 10, 0, 0, 0]), // prefix length 33
         };
-        assert!(msg.parse_revised(true, false, false, &[]).is_err());
+        let expected = crate::nlri::decode_nlri(&msg.nlri).unwrap_err();
+        assert_eq!(msg.parse(true, false, &[]).unwrap_err(), expected);
+        assert_eq!(
+            msg.parse_revised(true, false, false, &[]).unwrap_err(),
+            expected
+        );
+        let msg = UpdateMessage {
+            nlri: Bytes::from_static(&[24, 10, 0]),
+            ..msg
+        };
+        let expected = crate::nlri::decode_nlri(&msg.nlri).unwrap_err();
+        assert_eq!(msg.parse(true, false, &[]).unwrap_err(), expected);
+        assert_eq!(
+            msg.parse_revised(true, false, false, &[]).unwrap_err(),
+            expected
+        );
     }
 }
