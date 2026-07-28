@@ -1,0 +1,2 @@
+bench/compare-criterion.sh --base e49d1c87 --head e49d1c87 --core 8 --attempts 6 --require-performance --package rustbgpd-policy --bench policy_eval --filter policy_chain_eval
+bench/compare-criterion.sh --base 9a7b6461 --head e49d1c87 --core 8 --attempts 6 --require-performance --package rustbgpd-policy --bench policy_eval --filter policy_chain_eval
