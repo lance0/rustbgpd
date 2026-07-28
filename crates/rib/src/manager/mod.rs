@@ -603,6 +603,10 @@ pub struct RibManager {
     /// Test/benchmark-only evidence from the authoritative outbound commit.
     #[cfg(any(test, feature = "bench-internals"))]
     adj_rib_out_commit_stats: AdjRibOutCommitStats,
+    #[cfg(feature = "bench-internals")]
+    vpn_query_bench_receipts: Option<mpsc::Sender<(u64, usize, usize, u64)>>,
+    #[cfg(feature = "bench-internals")]
+    vpn_query_bench_dispatches: u64,
 }
 
 /// Bound on `live_sessions` entries per peer address. The RFC 4271 §6.8
@@ -1302,6 +1306,10 @@ impl RibManager {
             policy_transition_stats: PolicyTransitionStats::default(),
             #[cfg(any(test, feature = "bench-internals"))]
             adj_rib_out_commit_stats: AdjRibOutCommitStats::default(),
+            #[cfg(feature = "bench-internals")]
+            vpn_query_bench_receipts: None,
+            #[cfg(feature = "bench-internals")]
+            vpn_query_bench_dispatches: 0,
             vrp_table: None,
             aspa_table: None,
             route_events_tx,
@@ -1330,6 +1338,17 @@ impl RibManager {
             route_page_advertised_version: Some(initial_route_page_version()),
             test_ingest_stall,
         }
+    }
+
+    /// Arm bounded benchmark receipts for the real VPN snapshot query arm.
+    #[cfg(feature = "bench-internals")]
+    #[must_use]
+    pub fn with_vpn_query_bench_receipts(
+        mut self,
+        receipts: mpsc::Sender<(u64, usize, usize, u64)>,
+    ) -> Self {
+        self.vpn_query_bench_receipts = Some(receipts);
+        self
     }
 
     /// Install the dedicated type-narrow RIB readiness-query receiver.
@@ -2517,9 +2536,24 @@ impl RibManager {
                 let _ = reply.send(routes);
             }
             RibUpdate::QueryVpnRoutes { reply } => {
+                #[cfg(feature = "bench-internals")]
+                let started = std::time::Instant::now();
                 let routes: Vec<crate::route::VpnRibRoute> =
                     self.loc_rib.iter_vpn().cloned().collect();
+                #[cfg(feature = "bench-internals")]
+                let (rows, capacity) = (routes.len(), routes.capacity());
                 let _ = reply.send(routes);
+                #[cfg(feature = "bench-internals")]
+                if let Some(receipts) = &self.vpn_query_bench_receipts {
+                    self.vpn_query_bench_dispatches =
+                        self.vpn_query_bench_dispatches.saturating_add(1);
+                    let _ = receipts.try_send((
+                        u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                        rows,
+                        capacity,
+                        self.vpn_query_bench_dispatches,
+                    ));
+                }
             }
             RibUpdate::QueryRtcRoutes { reply } => {
                 let routes: Vec<crate::route::RtcRibRoute> =

@@ -2,6 +2,8 @@
 
 use std::net::IpAddr;
 use std::pin::Pin;
+#[cfg(feature = "bench-internals")]
+use std::time::Instant;
 
 use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, oneshot};
@@ -124,6 +126,14 @@ pub type FibTableControlFuture = Pin<
 pub type FibTableControlFn =
     std::sync::Arc<dyn Fn(FibTableControlRequest) -> FibTableControlFuture + Send + Sync + 'static>;
 
+/// Benchmark-only receipt for work performed after the RIB actor snapshot.
+#[cfg(feature = "bench-internals")]
+#[derive(Debug, Clone, Copy)]
+pub struct VpnQueryServiceReceipt {
+    pub post_actor_ns: u64,
+    pub returned_rows: usize,
+}
+
 /// gRPC service for querying the RIB (received, best, advertised routes).
 pub struct RibService {
     rib_tx: mpsc::Sender<RibUpdate>,
@@ -137,6 +147,8 @@ pub struct RibService {
     /// it (tests, or a build without FIB control) — the mutating RPCs then
     /// return `FAILED_PRECONDITION`.
     fib_table_control: Option<FibTableControlFn>,
+    #[cfg(feature = "bench-internals")]
+    vpn_query_bench_receipts: Option<mpsc::Sender<VpnQueryServiceReceipt>>,
 }
 
 impl RibService {
@@ -151,6 +163,8 @@ impl RibService {
             // Fail closed: callers opt into mutations via `with_fib_table_control`.
             access_mode: crate::server::AccessMode::ReadOnly,
             fib_table_control: None,
+            #[cfg(feature = "bench-internals")]
+            vpn_query_bench_receipts: None,
         }
     }
 
@@ -184,7 +198,20 @@ impl RibService {
             metrics,
             access_mode: crate::server::AccessMode::ReadOnly,
             fib_table_control: None,
+            #[cfg(feature = "bench-internals")]
+            vpn_query_bench_receipts: None,
         }
+    }
+
+    /// Arm bounded benchmark receipts for VPN query post-actor work.
+    #[cfg(feature = "bench-internals")]
+    #[must_use]
+    pub fn with_vpn_query_bench_receipts(
+        mut self,
+        receipts: mpsc::Sender<VpnQueryServiceReceipt>,
+    ) -> Self {
+        self.vpn_query_bench_receipts = Some(receipts);
+        self
     }
 
     /// Attach the per-listener access mode and the daemon FIB-table CRUD hook,
@@ -1885,8 +1912,10 @@ impl proto::rib_service_server::RibService for RibService {
             .await
             .map_err(|_| Status::internal("RIB manager dropped reply"))?;
 
+        #[cfg(feature = "bench-internals")]
+        let post_actor_started = Instant::now();
         let family_filter = req.afi_safi;
-        let routes = all_routes
+        let routes: Vec<_> = all_routes
             .iter()
             .filter(|route| {
                 if !family_filter.is_empty() && vpn_family_label(route) != family_filter {
@@ -1899,6 +1928,15 @@ impl proto::rib_service_server::RibService for RibService {
             })
             .map(vpn_route_to_proto)
             .collect();
+        #[cfg(feature = "bench-internals")]
+        if let Some(receipts) = &self.vpn_query_bench_receipts {
+            let post_actor_ns =
+                u64::try_from(post_actor_started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+            let _ = receipts.try_send(VpnQueryServiceReceipt {
+                post_actor_ns,
+                returned_rows: routes.len(),
+            });
+        }
 
         Ok(Response::new(proto::ListVpnRoutesResponse { routes }))
     }

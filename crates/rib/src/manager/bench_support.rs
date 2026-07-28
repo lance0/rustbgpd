@@ -132,7 +132,7 @@ impl RibManager {
     ///
     /// The caller constructs the bounded channel and authoritative encoder
     /// before starting its timer, then inspects the receiver after registration
-    /// to prove the timed call sent the expected route inventory and EoR. This
+    /// to prove the timed call sent the expected route inventory and `EoR`. This
     /// keeps Loc-RIB fixture construction, channel allocation, and encoder
     /// construction outside an initial-table join measurement while still
     /// driving the same `PeerUp` registration, first update-group construction,
@@ -425,7 +425,11 @@ impl RibManager {
                 .values()
                 .map(|group| group.table.len())
                 .sum(),
-            private_unicast_routes: self.adj_ribs_out.values().map(|rib| rib.len()).sum(),
+            private_unicast_routes: self
+                .adj_ribs_out
+                .values()
+                .map(super::super::adj_rib_out::AdjRibOut::len)
+                .sum(),
             routes_received_dispatches: stats.routes_received_dispatches,
             routes_received_withdrawals: stats.routes_received_withdrawals,
             exact_probe_batches: stats.exact_probe_batches,

@@ -1,0 +1,71 @@
+# VPN RIB query occupancy method
+
+This instrument measures the existing `ListVpnRoutes` path without changing its
+API or optimizing it. It exists to separate the RIB actor's full-table snapshot
+cost from the service's filtering and protobuf conversion cost before any
+production change is proposed.
+
+## Shape
+
+- 16 peers: `10.0.0.1` through `10.0.0.16`.
+- VPNv4 `/32` routes are assigned round-robin to peers.
+- Every route has a unique RD-plus-prefix key, one MPLS label, shared realistic
+  path attributes, and route target `65000:100`.
+- Seeding uses the primary actor channel in batches no larger than 4096.
+- A `QueryLocRibCount` sent on that same primary channel is the FIFO ingest
+  barrier. Its unicast count is intentionally ignored.
+- Both samples call the actual `RibService::list_vpn_routes` method through the
+  priority query channel. The first is unfiltered; the second uses
+  `peer_filter = 10.0.0.1` and an empty `afi_safi`.
+
+The supported campaign sizes are 10,000, 100,000, and 1,000,000 routes. The
+per-commit gate runs only the exact 256-route smoke shape; it does not publish a
+performance claim.
+
+## Timings and occupancy
+
+`actor_handler_ns` begins at the production `QueryVpnRoutes` match arm and ends
+after the snapshot reply is sent. `actor_rows` and `actor_capacity` describe the
+actual `Vec<VpnRibRoute>` allocated there.
+
+`service_method_ns` is measured outside the service across the trait method call
+and await. `post_actor_ns` covers only the service's post-reply filter, mapping,
+and collection. Benchmark receipts use bounded persistent channels compiled
+only by `bench-internals`; an unarmed production/default build is unchanged.
+
+The timing executable installs the workspace `tikv-jemallocator` directly.
+Receipts identify allocator and mode so results from a different build cannot
+be silently compared.
+
+Semantic checksums are calculated after the timed method returns. They are
+order-independent and cover RD, prefix, peer, and label. No sorting or hashing
+is added to the service path.
+
+## Commands
+
+Run the exact smoke and its corruption proofs:
+
+```console
+bash bench/tests/test-vpn-query-receipt.sh
+```
+
+Produce one campaign receipt without committing it:
+
+```console
+cargo bench -p rustbgpd-api --bench vpn_query --features bench-internals -- \
+  measure 10000 /tmp/vpn-query-10000.json
+```
+
+Repeat for 100,000 and 1,000,000 only on an otherwise idle host. This slice
+defines the instrument and gate; it does not run or publish that campaign.
+
+## Load-bearing failures
+
+- Replacing the actor snapshot collection with `Vec::new()` breaks exact row
+  counts and semantic checksums.
+- Removing the peer predicate changes 16 filtered rows to 256.
+- Bypassing or zeroing any timing breaks the nonzero decomposition assertions.
+- Changing the timing binary away from the declared allocator makes the
+  allocator identity false and must be rejected during review.
+- Corrupting either row counts or checksums makes the shell verifier fail; the
+  gate proves both mutations explicitly.
