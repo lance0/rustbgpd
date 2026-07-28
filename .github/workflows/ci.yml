@@ -128,12 +128,14 @@ jobs:
         run: |
           set -euo pipefail
           cargo fmt --manifest-path bench/scale/rrharness/Cargo.toml -- --check
+          cargo fmt --manifest-path bench/scale/rrtransport/Cargo.toml -- --check
           cargo fmt --manifest-path bench/scale/reloadstall/Cargo.toml -- --check
           cargo fmt --manifest-path bench/scale/outbound-prefix-limits/Cargo.toml -- --check
           cargo fmt --manifest-path bench/scale/config-persistence/Cargo.toml -- --check
           cargo fmt --manifest-path bench/scale/enhanced-route-refresh/Cargo.toml -- --check
           cargo fmt --manifest-path bench/scale/outbound-prefix-limit-scale/Cargo.toml -- --check
           cargo test --manifest-path bench/scale/rrharness/Cargo.toml --locked
+          cargo test --manifest-path bench/scale/rrtransport/Cargo.toml --locked
           cargo test --manifest-path bench/scale/reloadstall/Cargo.toml --locked
           cargo test --manifest-path bench/scale/outbound-prefix-limits/Cargo.toml --locked
           cargo test --manifest-path bench/scale/config-persistence/Cargo.toml --locked
@@ -141,6 +143,9 @@ jobs:
           cargo test --manifest-path bench/scale/outbound-prefix-limit-scale/Cargo.toml --locked
           cargo clippy --manifest-path bench/scale/outbound-prefix-limits/Cargo.toml \
             --locked --all-targets -- -D warnings
+          cargo clippy --manifest-path bench/scale/rrtransport/Cargo.toml \
+            --locked --all-targets -- -D warnings
+          cargo run --manifest-path bench/scale/rrtransport/Cargo.toml --locked -- smoke
           cargo clippy --manifest-path bench/scale/config-persistence/Cargo.toml \
             --locked --all-targets -- -D warnings
           cargo clippy --manifest-path bench/scale/enhanced-route-refresh/Cargo.toml \
