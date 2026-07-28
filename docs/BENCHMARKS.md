@@ -437,9 +437,25 @@ checksums are retained under
 "Typical" = Origin, AS_PATH (3 ASNs), NextHop, LocalPref, MED, Communities (2).
 The rich fixture includes 128 standard communities, forcing the
 extended-length attribute header. The dedicated `as_set_revised` row exercises
-the RFC 7606 revised decoder; the typical and rich decode rows still call the
-legacy attribute decoder. These rows used the same pinned contract and
-benchmark-code commit as the production UPDATE table.
+the RFC 7606 revised decoder. The legacy `attr_decode/rich/11` row remains a
+control, while `attr_decode_revised/typical/6` and
+`attr_decode_revised/rich/11` directly cover the live revised attribute
+decoder with the same encoded typical and rich fixtures.
+
+Before Criterion times either revised row, a preflight requires the exact
+fixture count and ordered decoded attributes, no malformed-attribute recovery,
+and zero discarded BGP-LS NLRI. The timed closure contains only
+`decode_path_attributes_revised(...).unwrap()`. Run just these structural
+coverage rows with:
+
+```console
+cargo bench -p rustbgpd-wire --bench codec -- \
+  '^attr_decode_revised/(typical/6|rich/11)$'
+```
+
+No timing or performance conclusion is implied by adding these rows. The
+existing measured rows used the pinned contract and benchmark-code commit
+stated above.
 
 ### Validation
 
