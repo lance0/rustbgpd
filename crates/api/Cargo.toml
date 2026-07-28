@@ -54,8 +54,14 @@ criterion.workspace = true
 rcgen.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+tikv-jemallocator.workspace = true
 
 [[bench]]
 name = "event_history_producer"
+harness = false
+required-features = ["bench-internals"]
+
+[[bench]]
+name = "vpn_query"
 harness = false
 required-features = ["bench-internals"]

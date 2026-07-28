@@ -13,7 +13,7 @@
 # timing it happens to produce is meaningless and is not reported.
 #
 # The target list comes from `cargo metadata`, so a bench target is covered the
-# day it lands rather than when someone remembers to register it here. The two
+# day it lands rather than when someone remembers to register it here. The three
 # non-criterion harnesses are excluded by name; renaming one drops its
 # exclusion and this script then fails loudly instead of skipping it silently.
 
@@ -29,7 +29,10 @@ cd "$(dirname "$0")/.."
 #                        harness's own `--smoke` bound.
 #   route_paging         CSV receipt harness; one complete traversal per
 #                        process, driven by --route-count/--output.
-EXCLUDED=(snapshot_allocation route_paging)
+#   vpn_query            needs a `smoke|measure` mode plus an output path. CI
+#                        exercises its fixed-shape smoke and verifier
+#                        separately through test-vpn-query-receipt.sh.
+EXCLUDED=(snapshot_allocation route_paging vpn_query)
 
 mapfile -t targets < <(
   cargo metadata --no-deps --format-version 1 | python3 -c '
