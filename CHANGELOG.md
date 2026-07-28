@@ -23,8 +23,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   start, with the family named in the error, while a family with no
   sessions is never opened and cannot fail startup.
 
-- Stale `PeerOrfUpdate`, `PeerSlowState`, `SetPeerPolicyContext`, and
-  `RouteRefreshRequest` messages no longer restart advertised-route page cursors.
+- Stale `PeerAddPathLimits`, `PeerDown`, `PeerGracefulRestart`, `PeerOrfUpdate`, `PeerSlowState`,
+  `SetPeerPolicyContext`, and `RouteRefreshRequest` messages no longer restart route-page cursors.
 
 - `rbgp top` now distinguishes unavailable optional global/RPKI telemetry from
   a stale retained VRP count without reporting a core disconnect, and clears a

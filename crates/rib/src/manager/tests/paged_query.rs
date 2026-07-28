@@ -165,11 +165,22 @@ fn peer_up_direct_with_negotiated_orf(
     peer: IpAddr,
     negotiated_orf_recv: Vec<(Afi, Safi)>,
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
+    peer_up_direct_with_options(manager, peer, 0, vec![], 0, negotiated_orf_recv)
+}
+
+fn peer_up_direct_with_options(
+    manager: &mut RibManager,
+    peer: IpAddr,
+    session_id: u64,
+    add_path_send_families: Vec<(Afi, Safi)>,
+    add_path_send_max: u32,
+    negotiated_orf_recv: Vec<(Afi, Safi)>,
+) -> mpsc::Receiver<OutboundRouteUpdate> {
     let (outbound_tx, outbound_rx) = mpsc::channel(64);
     manager.handle_update(RibUpdate::PeerUp {
         per_client_best: false,
         interpret_rfc1997: true,
-        session_id: 0,
+        session_id,
         peer,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -179,8 +190,8 @@ fn peer_up_direct_with_negotiated_orf(
         is_ebgp: false,
         route_reflector_client: false,
         orr_vantage: None,
-        add_path_send_families: vec![],
-        add_path_send_max: 0,
+        add_path_send_families,
+        add_path_send_max,
         negotiated_orf_recv,
         negotiated_llgr_families: vec![],
     });
@@ -193,9 +204,14 @@ fn receive_direct(
     announced: Vec<Route>,
     withdrawn: Vec<(Prefix, u32)>,
 ) {
+    let session_id = manager
+        .outbound_session_ids
+        .get(&peer)
+        .copied()
+        .unwrap_or(0);
     manager.handle_update(RibUpdate::RoutesReceived {
         peer,
-        session_id: 0,
+        session_id,
         announced,
         withdrawn,
         flowspec_announced: vec![],
@@ -1416,6 +1432,277 @@ fn assert_each_route_page_version_advanced_once(
         assert_eq!(after.epoch, before.epoch);
         assert_eq!(after.generation, before.generation + 1);
     }
+}
+
+fn drain_outbound(rx: &mut mpsc::Receiver<OutboundRouteUpdate>) -> Vec<OutboundRouteUpdate> {
+    std::iter::from_fn(|| rx.try_recv().ok()).collect()
+}
+
+fn best_peer(manager: &RibManager, prefix: Ipv4Prefix) -> IpAddr {
+    manager.loc_rib.get(&Prefix::V4(prefix)).unwrap().peer
+}
+
+fn peer_graceful_restart(peer: IpAddr, session_id: u64) -> RibUpdate {
+    RibUpdate::PeerGracefulRestart {
+        peer,
+        session_id,
+        restart_time: 90,
+        stale_routes_time: 120,
+        gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_llgr_capable: false,
+        peer_llgr_families: vec![],
+        llgr_stale_time: 0,
+    }
+}
+
+fn add_path_page_fixture() -> (
+    RibManager,
+    IpAddr,
+    Ipv4Prefix,
+    mpsc::Receiver<OutboundRouteUpdate>,
+) {
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+    for (octet, local_pref) in [(11, 200), (12, 100)] {
+        let source = Ipv4Addr::new(10, 0, 0, octet);
+        receive_direct(
+            &mut manager,
+            IpAddr::V4(source),
+            vec![make_multipath_route(
+                prefix,
+                source,
+                vec![65000 + u32::from(octet)],
+                local_pref,
+            )],
+            vec![],
+        );
+    }
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 99));
+    let mut target_rx = peer_up_direct_with_options(
+        &mut manager,
+        target,
+        0,
+        vec![(Afi::Ipv4, Safi::Unicast)],
+        1,
+        vec![],
+    );
+    let _ = drain_outbound(&mut target_rx);
+    (manager, target, prefix, target_rx)
+}
+
+struct LifecyclePageFixture {
+    manager: RibManager,
+    departing: IpAddr,
+    fallback: IpAddr,
+    shared: Ipv4Prefix,
+    departing_rx: Vec<mpsc::Receiver<OutboundRouteUpdate>>,
+    _fallback_rx: mpsc::Receiver<OutboundRouteUpdate>,
+    target_rx: mpsc::Receiver<OutboundRouteUpdate>,
+}
+
+fn lifecycle_page_fixture(collision: bool) -> LifecyclePageFixture {
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let departing_v4 = Ipv4Addr::new(10, 0, 0, 11);
+    let fallback_v4 = Ipv4Addr::new(10, 0, 0, 12);
+    let departing = IpAddr::V4(departing_v4);
+    let fallback = IpAddr::V4(fallback_v4);
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 99));
+    let shared = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let mut departing_rx = vec![peer_up_direct(&mut manager, departing)];
+    if collision {
+        departing_rx.push(peer_up_direct_with_options(
+            &mut manager,
+            departing,
+            1,
+            vec![],
+            0,
+            vec![],
+        ));
+    }
+    let mut fallback_rx = peer_up_direct(&mut manager, fallback);
+    let mut target_rx = peer_up_direct(&mut manager, target);
+    for rx in &mut departing_rx {
+        let _ = drain_outbound(rx);
+    }
+    let _ = drain_outbound(&mut fallback_rx);
+    let _ = drain_outbound(&mut target_rx);
+    receive_direct(
+        &mut manager,
+        departing,
+        vec![make_multipath_route(shared, departing_v4, vec![65100], 200)],
+        vec![],
+    );
+    receive_direct(
+        &mut manager,
+        fallback,
+        vec![make_multipath_route(shared, fallback_v4, vec![65200], 100)],
+        vec![],
+    );
+    for rx in &mut departing_rx {
+        let _ = drain_outbound(rx);
+    }
+    let _ = drain_outbound(&mut fallback_rx);
+    let _ = drain_outbound(&mut target_rx);
+    let live_session_count = departing_rx.iter().filter(|rx| !rx.is_closed()).count();
+    assert_eq!(live_session_count, if collision { 2 } else { 1 });
+    if collision {
+        let sessions = &manager.live_sessions[&departing];
+        assert_eq!((sessions[0].session_id, sessions[1].session_id), (0, 1));
+        assert_eq!(manager.outbound_session_ids[&departing], 1);
+    }
+    LifecyclePageFixture {
+        manager,
+        departing,
+        fallback,
+        shared,
+        departing_rx,
+        _fallback_rx: fallback_rx,
+        target_rx,
+    }
+}
+
+#[test]
+fn stale_peer_add_path_limits_leave_all_page_versions_unchanged() {
+    let (mut manager, target, _prefix, mut target_rx) = add_path_page_fixture();
+    let before = route_page_versions(&manager);
+
+    manager.handle_update(RibUpdate::PeerAddPathLimits {
+        peer: target,
+        session_id: 1,
+        limits: vec![((Afi::Ipv4, Safi::Unicast), 2)],
+    });
+
+    assert_eq!(route_page_versions(&manager), before);
+    assert!(drain_outbound(&mut target_rx).is_empty());
+}
+
+#[test]
+fn accepted_peer_add_path_limits_advance_advertised_after_two_path_replay() {
+    let (mut manager, target, prefix, mut target_rx) = add_path_page_fixture();
+    let before = route_page_versions(&manager);
+
+    manager.handle_update(RibUpdate::PeerAddPathLimits {
+        peer: target,
+        session_id: 0,
+        limits: vec![((Afi::Ipv4, Safi::Unicast), 2)],
+    });
+
+    let after = route_page_versions(&manager);
+    assert_eq!((after[0], after[1]), (before[0], before[1]));
+    assert_ne!(after[2], before[2]);
+    let mut replayed_ids: Vec<_> = drain_outbound(&mut target_rx)
+        .iter()
+        .flat_map(|update| update.announce.iter())
+        .filter(|route| route.prefix == Prefix::V4(prefix))
+        .map(|route| route.path_id)
+        .collect();
+    replayed_ids.sort_unstable();
+    assert_eq!(
+        replayed_ids,
+        vec![1, 2],
+        "effective limit replays two real paths"
+    );
+}
+
+#[test]
+fn stale_peer_down_leaves_real_route_state_and_page_versions_unchanged() {
+    let mut fixture = lifecycle_page_fixture(true);
+    let before = route_page_versions(&fixture.manager);
+
+    fixture.manager.handle_update(RibUpdate::PeerDown {
+        peer: fixture.departing,
+        session_id: 0,
+    });
+
+    assert_eq!(route_page_versions(&fixture.manager), before);
+    assert_eq!(fixture.manager.ribs[&fixture.departing].len(), 1);
+    assert_eq!(
+        best_peer(&fixture.manager, fixture.shared),
+        fixture.departing
+    );
+    assert_eq!(fixture.manager.outbound_session_ids[&fixture.departing], 1);
+    assert!(!fixture.departing_rx[1].is_closed());
+    assert!(drain_outbound(&mut fixture.target_rx).is_empty());
+}
+
+#[test]
+fn accepted_peer_down_advances_all_with_route_removal_and_fallback() {
+    let mut fixture = lifecycle_page_fixture(false);
+    let before = route_page_versions(&fixture.manager);
+
+    fixture.manager.handle_update(RibUpdate::PeerDown {
+        peer: fixture.departing,
+        session_id: 0,
+    });
+
+    let after = route_page_versions(&fixture.manager);
+    assert!((0..3).all(|index| before[index] != after[index]));
+    assert!(!fixture.manager.ribs.contains_key(&fixture.departing));
+    let updates = drain_outbound(&mut fixture.target_rx);
+    assert!(
+        updates
+            .iter()
+            .flat_map(|update| update.announce.iter())
+            .any(|route| {
+                route.prefix == Prefix::V4(fixture.shared) && route.peer == fixture.fallback
+            })
+    );
+}
+
+#[test]
+fn stale_peer_graceful_restart_leaves_real_route_state_and_page_versions_unchanged() {
+    let mut fixture = lifecycle_page_fixture(true);
+    let before = route_page_versions(&fixture.manager);
+
+    fixture
+        .manager
+        .handle_update(peer_graceful_restart(fixture.departing, 0));
+
+    assert_eq!(route_page_versions(&fixture.manager), before);
+    assert!(
+        fixture.manager.ribs[&fixture.departing]
+            .iter()
+            .all(|route| !route.is_stale)
+    );
+    assert_eq!(
+        best_peer(&fixture.manager, fixture.shared),
+        fixture.departing
+    );
+    assert_eq!(fixture.manager.outbound_session_ids[&fixture.departing], 1);
+    assert!(!fixture.departing_rx[1].is_closed());
+    assert!(drain_outbound(&mut fixture.target_rx).is_empty());
+}
+
+#[test]
+fn accepted_peer_graceful_restart_advances_all_and_advertises_live_fallback() {
+    let mut fixture = lifecycle_page_fixture(false);
+    let before = route_page_versions(&fixture.manager);
+
+    fixture
+        .manager
+        .handle_update(peer_graceful_restart(fixture.departing, 0));
+
+    let after = route_page_versions(&fixture.manager);
+    assert!((0..3).all(|index| before[index] != after[index]));
+    assert!(
+        fixture.manager.ribs[&fixture.departing]
+            .iter()
+            .any(|route| route.prefix == Prefix::V4(fixture.shared) && route.is_stale)
+    );
+    assert_eq!(
+        best_peer(&fixture.manager, fixture.shared),
+        fixture.fallback
+    );
+    assert!(
+        drain_outbound(&mut fixture.target_rx)
+            .iter()
+            .flat_map(|update| update.announce.iter())
+            .any(|route| {
+                route.prefix == Prefix::V4(fixture.shared) && route.peer == fixture.fallback
+            })
+    );
 }
 
 #[test]
