@@ -1,0 +1,17 @@
+[package]
+name = "rrtransport"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+anyhow = "1"
+rustbgpd-evpn-load = { path = "../../evpn-load" }
+rustbgpd-fsm = { path = "../../../crates/fsm" }
+rustbgpd-rib = { path = "../../../crates/rib" }
+rustbgpd-telemetry = { path = "../../../crates/telemetry" }
+rustbgpd-transport = { path = "../../../crates/transport" }
+rustbgpd-wire = { path = "../../../crates/wire" }
+tokio = { version = "1", features = ["full"] }
+
+[workspace]
