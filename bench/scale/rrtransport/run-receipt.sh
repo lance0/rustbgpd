@@ -57,7 +57,7 @@ check_seam() {
   if ! grep -Fq "$outer" "$script" || ! grep -Fq "$verify_call" "$script" ||
     ! grep -Fq "$verify_body" "$script" || ! grep -Fq "$checksums_call" "$script" ||
     ! grep -Fq "$checksums_body" "$script" || ! grep -Fq "$classifier_call" "$script"; then
-    echo "runner lacks production verifier/checksum seam" >&2
+    echo "runner lacks production verifier/checksum/classifier seam" >&2
     return 1
   fi
 }
