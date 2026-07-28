@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr};
 
 use rustbgpd_policy::PolicyChain;
+use rustbgpd_telemetry::metrics::StaleSessionMessageKind;
 use rustbgpd_wire::{EvpnRouteKey, Prefix, Safi};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
@@ -169,14 +170,14 @@ impl RibManager {
     /// Discards are logged at INFO (same shape as the stale-teardown
     /// discard) and counted in
     /// `bgp_rib_stale_session_message_ignored_total{peer,kind}`.
-    /// `kind` is bounded: `routes`, `eor`, `refresh`, `orf`,
-    /// `policy_context`.
+    /// `kind` is bounded: `routes`, `bgpls`, `vpn`, `labeled`, `rtc`,
+    /// `eor`, `refresh`, `orf`, `policy_context`, `slow_peer`.
     pub(super) fn stale_session_message(
         &self,
         peer: IpAddr,
         session_id: u64,
         event: &'static str,
-        kind: &'static str,
+        kind: StaleSessionMessageKind,
     ) -> bool {
         let Some(&registered) = self.outbound_session_ids.get(&peer) else {
             return false;

@@ -93,6 +93,52 @@ const RIB_ACTOR_DURATION_BUCKETS: [f64; 13] = [
 /// Closed operation labels for outbound prefix-limit actor work.
 const OUTBOUND_PREFIX_LIMIT_ACTOR_OPERATIONS: [&str; 2] = ["apply", "recovery"];
 
+/// Closed label vocabulary for stale session-scoped RIB messages.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StaleSessionMessageKind {
+    Routes,
+    BgpLs,
+    Vpn,
+    Labeled,
+    Rtc,
+    Eor,
+    Refresh,
+    Orf,
+    PolicyContext,
+    SlowPeer,
+}
+
+impl StaleSessionMessageKind {
+    pub const ALL: [Self; 10] = [
+        Self::Routes,
+        Self::BgpLs,
+        Self::Vpn,
+        Self::Labeled,
+        Self::Rtc,
+        Self::Eor,
+        Self::Refresh,
+        Self::Orf,
+        Self::PolicyContext,
+        Self::SlowPeer,
+    ];
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Routes => "routes",
+            Self::BgpLs => "bgpls",
+            Self::Vpn => "vpn",
+            Self::Labeled => "labeled",
+            Self::Rtc => "rtc",
+            Self::Eor => "eor",
+            Self::Refresh => "refresh",
+            Self::Orf => "orf",
+            Self::PolicyContext => "policy_context",
+            Self::SlowPeer => "slow_peer",
+        }
+    }
+}
+
 /// One memoized `bgp_policy_routes_total` child handle.
 ///
 /// `record_policy_routes` fires once per route × policy evaluation —
@@ -835,16 +881,23 @@ impl BgpMetrics {
         let rib_stale_session_message_ignored = IntCounterVec::new(
             Opts::new(
                 "bgp_rib_stale_session_message_ignored_total",
-                "Session-scoped RIB messages (RoutesReceived, including \
-                 BGP-LS, VPN, labeled-unicast, and RT-Constrain families; \
+                format!(
+                    "Session-scoped RIB messages (the combined unicast / FlowSpec / EVPN \
+                 RoutesReceived envelope; separate BGP-LS, VPN, labeled-unicast, and \
+                 RT-Constrain route-message variants; \
                  End-of-RIB; route-refresh begin/end/request; ORF updates; \
                  or policy context / PeerSlowState slow-peer updates) discarded \
                  because their session id did not match the registered \
                  session for the peer — a message from a superseded session \
                  (collision loser) queued behind the replacement's PeerUp. \
                  The registered session's state is untouched. `kind` is one \
-                 of: routes, bgpls, vpn, labeled, rtc, eor, refresh, orf, \
-                 policy_context, slow_peer.",
+                 of: {}.",
+                    StaleSessionMessageKind::ALL
+                        .iter()
+                        .map(|kind| kind.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
             ),
             &["peer", "kind"],
         )
@@ -3181,34 +3234,20 @@ impl BgpMetrics {
             .inc();
     }
 
-    /// Record a session-scoped RIB message (routes, including BGP-LS, VPN,
-    /// labeled-unicast, and RT-Constrain families; End-of-RIB; route-refresh
-    /// begin/end/request; ORF update; policy context update; or slow-peer
-    /// state) discarded because its session id did not match the registered
-    /// session for the peer (a message from a superseded session).
+    /// Record a session-scoped RIB message (the combined unicast / `FlowSpec` /
+    /// EVPN routes envelope; separate BGP-LS, VPN, labeled-unicast, and
+    /// RT-Constrain route variants; End-of-RIB; route-refresh
+    /// begin/end/request; ORF update; policy context update; or slow-peer state)
+    /// discarded because its session id did not match the registered session
+    /// for the peer (a message from a superseded session).
     ///
-    /// `kind` is bounded: `"routes"`, `"bgpls"`, `"vpn"`, `"labeled"`,
-    /// `"rtc"`, `"eor"`, `"refresh"`, `"orf"`, `"policy_context"`, or
-    /// `"slow_peer"`.
-    pub fn record_rib_stale_session_message_ignored(&self, peer: &str, kind: &str) {
-        debug_assert!(
-            matches!(
-                kind,
-                "routes"
-                    | "bgpls"
-                    | "vpn"
-                    | "labeled"
-                    | "rtc"
-                    | "eor"
-                    | "refresh"
-                    | "orf"
-                    | "policy_context"
-                    | "slow_peer"
-            ),
-            "unbounded stale-session-message kind label: {kind:?}"
-        );
+    pub fn record_rib_stale_session_message_ignored(
+        &self,
+        peer: &str,
+        kind: StaleSessionMessageKind,
+    ) {
         self.rib_stale_session_message_ignored
-            .with_label_values(&[peer, kind])
+            .with_label_values(&[peer, kind.as_str()])
             .inc();
     }
 
@@ -5707,14 +5746,10 @@ mod tests {
         m.record_rib_outbound_registration_replaced("10.0.0.1");
         m.record_rib_outbound_registration_replaced("10.0.0.1");
         m.record_rib_stale_peer_down_ignored("10.0.0.1");
-        m.record_rib_stale_session_message_ignored("10.0.0.1", "routes");
-        m.record_rib_stale_session_message_ignored("10.0.0.1", "routes");
-        m.record_rib_stale_session_message_ignored("10.0.0.1", "eor");
-        m.record_rib_stale_session_message_ignored("10.0.0.1", "policy_context");
-        m.record_rib_stale_session_message_ignored("10.0.0.1", "slow_peer");
-        for kind in ["bgpls", "vpn", "labeled", "rtc"] {
+        for kind in StaleSessionMessageKind::ALL {
             m.record_rib_stale_session_message_ignored("10.0.0.1", kind);
         }
+        m.record_rib_stale_session_message_ignored("10.0.0.1", StaleSessionMessageKind::Routes);
         m.record_rib_outbound_registration_failover("10.0.0.1");
         m.record_rib_dirty_resync("still_dirty");
         m.record_rib_dirty_resync("cleared");
@@ -5757,15 +5792,6 @@ mod tests {
                 .get(),
             1
         );
-        for kind in ["bgpls", "vpn", "labeled", "rtc"] {
-            assert_eq!(
-                m.rib_stale_session_message_ignored
-                    .with_label_values(&["10.0.0.1", kind])
-                    .get(),
-                1,
-                "live stale-session kind {kind} is recorded"
-            );
-        }
         let help = m
             .registry()
             .gather()
@@ -5774,15 +5800,14 @@ mod tests {
             .expect("stale-session metric is registered")
             .help()
             .to_owned();
-        let (_, kind_help) = help
-            .split_once("`kind` is one of:")
-            .expect("metric HELP names the bounded kind inventory");
-        for kind in ["bgpls", "vpn", "labeled", "rtc"] {
-            assert!(
-                kind_help.contains(kind),
-                "metric HELP omits live stale-session kind {kind}"
-            );
-        }
+        assert!(help.ends_with(&format!(
+            "`kind` is one of: {}.",
+            StaleSessionMessageKind::ALL
+                .iter()
+                .map(|kind| kind.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
         assert_eq!(
             m.rib_outbound_registration_failover
                 .with_label_values(&["10.0.0.1"])
@@ -5795,6 +5820,48 @@ mod tests {
         );
         assert_eq!(m.rib_dirty_resync.with_label_values(&["cleared"]).get(), 1);
         assert_eq!(m.rib_ingest_channel_depth.get(), 17);
+    }
+
+    fn repo_doc(path: &str) -> String {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("telemetry crate is under the repository root");
+        std::fs::read_to_string(root.join(path)).expect("repository document is readable")
+    }
+
+    #[test]
+    fn stale_session_message_kinds_match_operations_inventory() {
+        let operations = repo_doc("docs/OPERATIONS.md");
+        let row = operations
+            .lines()
+            .find(|line| {
+                line.starts_with("| `bgp_rib_stale_session_message_ignored_total{peer,kind}` |")
+            })
+            .expect("stale-session metric row exists");
+        let inventory = StaleSessionMessageKind::ALL
+            .iter()
+            .map(|kind| format!("`{}`", kind.as_str()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        assert!(row.contains(&format!("`kind` labels: {inventory}.")));
+    }
+
+    #[test]
+    fn stale_session_message_kinds_match_roadmap_inventory() {
+        let roadmap = repo_doc("ROADMAP.md");
+        let paragraph = roadmap
+            .split("\n\n")
+            .find(|text| {
+                text.contains("`bgp_rib_stale_session_message_ignored_total{peer,kind}` counter")
+            })
+            .expect("stale-session metric paragraph exists");
+        let inventory = StaleSessionMessageKind::ALL
+            .iter()
+            .map(|kind| kind.as_str())
+            .collect::<Vec<_>>()
+            .join("/");
+        assert!(paragraph.contains(&format!("`kind` ∈ {inventory})")));
     }
 
     /// Populate every peer-labeled family for `peer` through the public
@@ -5835,7 +5902,7 @@ mod tests {
         );
         m.record_rib_outbound_registration_replaced(peer);
         m.record_rib_stale_peer_down_ignored(peer);
-        m.record_rib_stale_session_message_ignored(peer, "routes");
+        m.record_rib_stale_session_message_ignored(peer, StaleSessionMessageKind::Routes);
         m.record_rib_outbound_registration_failover(peer);
         m.record_as_path_loop_detected(peer, 3);
         m.record_rr_loop_detected(peer);

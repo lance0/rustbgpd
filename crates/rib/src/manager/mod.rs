@@ -26,6 +26,10 @@ use std::sync::Arc;
 use rustbgpd_policy::PolicyChain;
 use rustbgpd_rpki::VrpTable;
 use rustbgpd_telemetry::BgpMetrics;
+use rustbgpd_telemetry::metrics::StaleSessionMessageKind as Kind;
+use rustbgpd_telemetry::metrics::StaleSessionMessageKind::{
+    BgpLs, Eor, Labeled, Orf, PolicyContext, Refresh, Routes, Rtc, Vpn,
+};
 use rustbgpd_wire::{Afi, BgpRole, Prefix, Safi};
 use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, info, warn};
@@ -1881,7 +1885,7 @@ impl RibManager {
                 evpn_announced,
                 evpn_withdrawn,
             } => {
-                if !self.stale_session_message(peer, session_id, "RoutesReceived", "routes") {
+                if !self.stale_session_message(peer, session_id, "RoutesReceived", Routes) {
                     #[cfg(any(test, feature = "bench-internals"))]
                     {
                         self.adj_rib_out_commit_stats.routes_received_dispatches = self
@@ -1910,7 +1914,7 @@ impl RibManager {
                 announced,
                 withdrawn,
             } => {
-                if !self.stale_session_message(peer, session_id, "BgpLsRoutesReceived", "bgpls") {
+                if !self.stale_session_message(peer, session_id, "BgpLsRoutesReceived", BgpLs) {
                     let retired = withdrawn
                         .iter()
                         .cloned()
@@ -1926,7 +1930,7 @@ impl RibManager {
                 announced,
                 withdrawn,
             } => {
-                if !self.stale_session_message(peer, session_id, "VpnRoutesReceived", "vpn") {
+                if !self.stale_session_message(peer, session_id, "VpnRoutesReceived", Vpn) {
                     let retired = withdrawn
                         .iter()
                         .cloned()
@@ -1942,8 +1946,7 @@ impl RibManager {
                 announced,
                 withdrawn,
             } => {
-                if !self.stale_session_message(peer, session_id, "LabeledRoutesReceived", "labeled")
-                {
+                if !self.stale_session_message(peer, session_id, "LabeledRoutesReceived", Labeled) {
                     let retired = withdrawn
                         .iter()
                         .copied()
@@ -1959,7 +1962,7 @@ impl RibManager {
                 announced,
                 withdrawn,
             } => {
-                if !self.stale_session_message(peer, session_id, "RtcRoutesReceived", "rtc") {
+                if !self.stale_session_message(peer, session_id, "RtcRoutesReceived", Rtc) {
                     let retired = withdrawn
                         .iter()
                         .cloned()
@@ -2097,7 +2100,7 @@ impl RibManager {
                 entries,
                 reply,
             } => {
-                if self.stale_session_message(peer, session_id, "PeerOrfUpdate", "orf") {
+                if self.stale_session_message(peer, session_id, "PeerOrfUpdate", Orf) {
                     let _ = reply.send(Err(format!(
                         "stale ORF update from superseded session {session_id} discarded"
                     )));
@@ -2111,7 +2114,7 @@ impl RibManager {
                 session_id,
                 slow,
             } => {
-                if !self.stale_session_message(peer, session_id, "PeerSlowState", "slow_peer") {
+                if !self.stale_session_message(peer, session_id, "PeerSlowState", Kind::SlowPeer) {
                     self.advance_advertised_pages();
                     self.handle_peer_slow_state(peer, slow);
                 }
@@ -2125,7 +2128,7 @@ impl RibManager {
                     peer,
                     session_id,
                     "SetPeerPolicyContext",
-                    "policy_context",
+                    PolicyContext,
                 ) {
                     self.advance_advertised_pages();
                     self.handle_set_peer_policy_context(peer, peer_group);
@@ -2387,7 +2390,7 @@ impl RibManager {
                 afi,
                 safi,
             } => {
-                if !self.stale_session_message(peer, session_id, "EndOfRib", "eor") {
+                if !self.stale_session_message(peer, session_id, "EndOfRib", Eor) {
                     self.advance_all_route_pages();
                     let selection_transition =
                         self.selection_deferral_end_of_rib(peer, session_id, (afi, safi));
@@ -2406,7 +2409,7 @@ impl RibManager {
                 afi,
                 safi,
             } => {
-                if !self.stale_session_message(peer, session_id, "RouteRefreshRequest", "refresh") {
+                if !self.stale_session_message(peer, session_id, "RouteRefreshRequest", Refresh) {
                     self.advance_advertised_pages();
                     self.handle_route_refresh_request(peer, afi, safi);
                 }
@@ -2417,7 +2420,7 @@ impl RibManager {
                 afi,
                 safi,
             } => {
-                if !self.stale_session_message(peer, session_id, "BeginRouteRefresh", "refresh") {
+                if !self.stale_session_message(peer, session_id, "BeginRouteRefresh", Refresh) {
                     self.advance_all_route_pages();
                     self.handle_begin_route_refresh(peer, afi, safi);
                     if let Some(transition) =
@@ -2436,7 +2439,7 @@ impl RibManager {
                 afi,
                 safi,
             } => {
-                if !self.stale_session_message(peer, session_id, "EndRouteRefresh", "refresh") {
+                if !self.stale_session_message(peer, session_id, "EndRouteRefresh", Refresh) {
                     self.handle_end_route_refresh(peer, afi, safi);
                     if let Some(transition) =
                         self.selection_deferral_end_route_refresh(peer, session_id, (afi, safi))
@@ -2454,7 +2457,7 @@ impl RibManager {
                 afi,
                 safi,
             } => {
-                if !self.stale_session_message(peer, session_id, "RouteRefreshTimeout", "refresh") {
+                if !self.stale_session_message(peer, session_id, "RouteRefreshTimeout", Refresh) {
                     self.finish_route_refresh(peer, afi, safi, true);
                 }
             }

@@ -1109,7 +1109,8 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
   `session_id`; the RIB manager drops any whose id doesn't match the
   active registration (INFO log + the
   `bgp_rib_stale_session_message_ignored_total{peer,kind}` counter,
-  `kind` ∈ routes/eor/refresh/orf/policy_context). A message for a peer
+  `kind` ∈ routes/bgpls/vpn/labeled/rtc/eor/refresh/orf/policy_context/slow_peer).
+  Later family-specific route envelopes and `PeerSlowState` expanded the original six-message fence without changing its session-identity rule. A message for a peer
   with no registration keeps accept-all, mirroring the teardown rule.
   `SetPeerPolicyContext` now carries the same transport `session_id` and
   is dropped on a non-matching id; the pre-existing symmetric-failover
