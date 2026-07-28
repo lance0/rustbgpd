@@ -169,7 +169,8 @@ landing, tracked here for visibility)
   `allow` / `suppress` action in `DataplaneReport`, but still does
   not mutate kernel filters.
 - [x] **Gate 8b multi-homing enforcement — end-to-end wired,
-  opt-in by config, validated on a real kernel.** Closes the loop
+  default-on since v0.23.0 with explicit opt-out, validated on a real
+  kernel.** Closes the loop
   from DF election to kernel split-horizon. The per-port
   `bridge link set ... flood off mcast_flood off bcast_flood off`
   triplet on the CE-facing bridge port is the chosen primitive
@@ -188,12 +189,11 @@ landing, tracked here for visibility)
   the `IFLA_BRPORT_*_FLOOD` triplet; the reconcile actor emits
   the diff each pass, with per-port `last_bum_plan` updates
   gated on apply success so failed ports keep retrying. Top-level
-  `apply_bum_enforcement: bool` TOML field on `Config` (default
-  `false`) is the operator-facing opt-in; with the flag off, the
-  resolved plan still flows through `DataplaneReport.bum_enforcement`
-  for visibility. Hot reload still requires a daemon restart for
-  this field — promoting it to SIGHUP-reloadable rides with the
-  next config-shape pass. **Validated against a real kernel via
+  `apply_bum_enforcement: bool` TOML field on `Config` defaults
+  `true` since v0.23.0; explicit `false` retains the prior
+  observe-only posture, with the resolved plan still flowing through
+  `DataplaneReport.bum_enforcement` for visibility. Changing the field
+  remains restart-required. **Validated against a real kernel via
   the Docker harness at `crates/evpn-linux/tests/docker/`** —
   spike + Rust netlink round-trip both green, confirming the
   `RTM_NEWLINK + IFLA_LINKINFO + IFLA_INFO_PORT_DATA +
@@ -201,9 +201,9 @@ landing, tracked here for visibility)
   triplet on the kernel-side bridge port. **The harness is wired
   into PR-CI** (`evpn_bum_filter_kernel` job in
   `.github/workflows/ci.yml`), so a netlink-attribute encoding
-  regression can't slip past review. The remaining soak question
-  (slice 1 below) is "does it stay correct under sustained
-  churn?", not "does it work?".
+  regression can't slip past review. Gate 8b's 2026-05-16 MAC-churn
+  soak and M37's 2026-05-19 local-origination soak both passed before
+  the default flipped.
 - [x] **Per-ESI label allocator landed** (`crates/evpn/src/label_allocator.rs`).
   `EsiLabelAllocator` with stable `(ESI -> label)` assignments,
   free-list reuse, and synth-first strategy so operators on the
