@@ -18,10 +18,12 @@ use rustbgpd_wire::{
     Prefix, RpkiValidation, Safi,
 };
 use tokio::net::TcpListener;
-use tokio::sync::{mpsc, mpsc::error::TryRecvError, oneshot};
+use tokio::sync::{mpsc, oneshot};
 
 use super::{
-    rr1000_support::{assert_established, is_eor, rss_kib, shutdown},
+    rr1000_support::{
+        assert_established, is_eor, rss_kib, send_before, shutdown, start_after_keepalives,
+    },
     transport_config,
 };
 
@@ -182,11 +184,7 @@ async fn collect(
     ready
         .send(())
         .map_err(|_| anyhow::anyhow!("ready dropped"))?;
-    let t0 = tokio::time::timeout_at(deadline, start).await??;
-    ensure!(
-        matches!(rx.try_recv(), Err(TryRecvError::Empty)),
-        "duplicate pre-T0 UPDATE/EoR"
-    );
+    let t0 = start_after_keepalives(&mut rx, start, deadline).await?;
     let mut row = WireRow {
         peer,
         messages: 0,
@@ -374,8 +372,9 @@ pub async fn run(output: &str, tiny: bool) -> Result<()> {
             ..(source_index + 1) * shape.prefixes / SOURCES)
             .map(|index| route(value(index), peer))
             .collect();
-        rib_tx
-            .send(RibUpdate::RoutesReceived {
+        send_before(
+            &rib_tx,
+            RibUpdate::RoutesReceived {
                 peer: IpAddr::V4(peer),
                 session_id: 0,
                 announced,
@@ -384,8 +383,10 @@ pub async fn run(output: &str, tiny: bool) -> Result<()> {
                 flowspec_withdrawn: vec![],
                 evpn_announced: vec![],
                 evpn_withdrawn: vec![],
-            })
-            .await?;
+            },
+            run_deadline,
+        )
+        .await?;
     }
     let injection_ms = t0.elapsed().as_millis();
     let staged = loop {
@@ -436,7 +437,7 @@ pub async fn run(output: &str, tiny: bool) -> Result<()> {
         )?;
     }
     fs::write(output.join("phase.json"), format!(
-        "{{\"schema\":1,\"shape\":\"{}\",\"shape_digest\":\"{}\",\"sessions\":{},\"established_before\":{},\"established_after\":{},\"prefixes\":{},\"sources\":{SOURCES},\"workers\":{WORKERS},\"groups\":1,\"initial_eors\":{},\"injection_ms\":{injection_ms},\"staged_ms\":{staged_ms},\"wire_ms\":{wire_ms},\"established_rss_kib\":{},\"established_vmhwm_kib\":{},\"staged_rss_kib\":{},\"staged_vmhwm_kib\":{},\"wire_rss_kib\":{},\"wire_vmhwm_kib\":{}}}\n",
+        "{{\"schema\":1,\"shape\":\"{}\",\"shape_digest\":\"{}\",\"wire_completion\":\"first_exact_bitmap\",\"sessions\":{},\"established_before\":{},\"established_after\":{},\"prefixes\":{},\"sources\":{SOURCES},\"workers\":{WORKERS},\"groups\":1,\"initial_eors\":{},\"injection_ms\":{injection_ms},\"staged_ms\":{staged_ms},\"wire_ms\":{wire_ms},\"established_rss_kib\":{},\"established_vmhwm_kib\":{},\"staged_rss_kib\":{},\"staged_vmhwm_kib\":{},\"wire_rss_kib\":{},\"wire_vmhwm_kib\":{}}}\n",
         shape.name, shape.digest, shape.peers, shape.peers, shape.peers, shape.prefixes, shape.peers,
         established_rss.0, established_rss.1, staged_rss.0, staged_rss.1, wire_rss.0, wire_rss.1))?;
     shutdown(sessions, run_deadline).await?;

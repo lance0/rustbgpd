@@ -37,6 +37,13 @@ decode failures, incomplete sessions, and more than one update group. It counts
 decoded NLRI, not UPDATE messages. One aggregate 120-second deadline covers
 setup, convergence, validation, and shutdown.
 
+Wire completion is explicitly `first_exact_bitmap`: a peer completes when its
+bitmap first covers the fixed expected prefix set with exact decoded-NLRI
+cardinality. Duplicate, withdrawal, outside-set, decode-failure, and message
+counters describe input observed through that boundary only. The instrument
+does not claim a trailing quiet period, writer flush, refresh pass, teardown
+marker, or absence of later UPDATEs.
+
 Run the three-attempt campaign only through:
 
 ```text

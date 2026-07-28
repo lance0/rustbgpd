@@ -1,9 +1,10 @@
 use std::fs;
 
-use anyhow::{Context, Result};
+use anyhow::{ensure, Context, Result};
 use rustbgpd_fsm::SessionState;
 use rustbgpd_transport::PeerHandle;
-use rustbgpd_wire::UpdateMessage;
+use rustbgpd_wire::{Message, UpdateMessage};
+use tokio::sync::{mpsc, oneshot};
 
 pub fn runtime(workers: usize) -> Result<tokio::runtime::Runtime> {
     Ok(tokio::runtime::Builder::new_multi_thread()
@@ -16,6 +17,34 @@ pub fn is_eor(update: &UpdateMessage) -> bool {
     update.withdrawn_routes.is_empty()
         && update.path_attributes.is_empty()
         && update.nlri.is_empty()
+}
+
+pub async fn send_before<T>(
+    sender: &mpsc::Sender<T>,
+    update: T,
+    deadline: tokio::time::Instant,
+) -> Result<()> {
+    tokio::time::timeout_at(deadline, sender.send(update))
+        .await?
+        .map_err(|_| anyhow::anyhow!("injection channel closed"))?;
+    Ok(())
+}
+
+pub async fn start_after_keepalives(
+    receiver: &mut mpsc::Receiver<Message>,
+    start: oneshot::Receiver<std::time::Instant>,
+    deadline: tokio::time::Instant,
+) -> Result<std::time::Instant> {
+    let started = tokio::time::timeout_at(deadline, start).await??;
+    loop {
+        match receiver.try_recv() {
+            Ok(Message::Keepalive) => {}
+            Err(mpsc::error::TryRecvError::Empty) => return Ok(started),
+            Ok(_) | Err(mpsc::error::TryRecvError::Disconnected) => {
+                ensure!(false, "non-KEEPALIVE message queued before T0")
+            }
+        }
+    }
 }
 
 pub fn rss_kib() -> Result<(u64, u64)> {
@@ -59,4 +88,23 @@ pub async fn shutdown(sessions: Vec<PeerHandle>, deadline: tokio::time::Instant)
         let _ = tokio::time::timeout_at(deadline, task).await???;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn full_injection_channel_obeys_absolute_deadline() {
+        let (sender, _receiver) = mpsc::channel(1);
+        sender.send(1_u8).await.unwrap();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(10);
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            send_before(&sender, 2_u8, deadline),
+        )
+        .await
+        .expect("injection helper ignored its deadline");
+        assert!(result.is_err());
+    }
 }
