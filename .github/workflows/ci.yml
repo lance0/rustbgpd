@@ -146,6 +146,9 @@ jobs:
           cargo clippy --manifest-path bench/scale/rrtransport/Cargo.toml \
             --locked --all-targets -- -D warnings
           cargo run --manifest-path bench/scale/rrtransport/Cargo.toml --locked -- smoke
+          rrtransport_receipt=$(mktemp -d)
+          bench/scale/rrtransport/run-receipt.sh --real-smoke "$rrtransport_receipt"
+          bash bench/tests/test-rrtransport-receipt.sh
           cargo clippy --manifest-path bench/scale/config-persistence/Cargo.toml \
             --locked --all-targets -- -D warnings
           cargo clippy --manifest-path bench/scale/enhanced-route-refresh/Cargo.toml \
@@ -160,12 +163,16 @@ jobs:
           bash -n bench/scale/config-persistence/run-receipt.sh
           bash -n bench/scale/enhanced-route-refresh/run-receipt.sh
           bash -n bench/scale/outbound-prefix-limit-scale/run-receipt.sh
+          bash -n bench/scale/rrtransport/run-receipt.sh
+          bash -n bench/tests/test-rrtransport-receipt.sh
           bash -n bench/tests/test-route-server-1000-receipt.sh
           shellcheck bench/scale/route-server-1000/run-receipt.sh \
             bench/scale/outbound-prefix-limits/run-receipt.sh \
             bench/scale/config-persistence/run-receipt.sh \
             bench/scale/enhanced-route-refresh/run-receipt.sh \
             bench/scale/outbound-prefix-limit-scale/run-receipt.sh \
+            bench/scale/rrtransport/run-receipt.sh \
+            bench/tests/test-rrtransport-receipt.sh \
             bench/tests/test-route-server-1000-receipt.sh
           bash bench/tests/test-route-server-1000-receipt.sh
           bash -n bench/scale/compare-rrharness.sh
