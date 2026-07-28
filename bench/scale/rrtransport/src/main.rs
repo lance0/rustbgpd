@@ -443,7 +443,7 @@ fn main() -> Result<()> {
             rr1000_support::runtime(12)?.block_on(rr1000::run(output, true))
         }
         _ => bail!(
-            "usage: rrtransport smoke | rrtransport rr1000 <output-dir> | rrtiny <output-dir>"
+            "usage: rrtransport smoke | rrtransport rr1000 <output-dir> | rrtransport rrtiny <output-dir>"
         ),
     }
 }
