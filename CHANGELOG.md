@@ -9,6 +9,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- An IPv4-only BFD configuration no longer prevents the daemon from
+  starting on hosts without IPv6 support (e.g. `ipv6.disable=1`). BFD
+  sockets are now opened only for the address families that actually have
+  configured sessions, and fail-closed startup applies per family: a
+  family with sessions that cannot open its sockets still refuses to
+  start, with the family named in the error, while a family with no
+  sessions is never opened and cannot fail startup.
+
 ## [0.61.0] — 2026-07-27
 
 > **Release framing.** This is the policy-safety line. RFC 8212

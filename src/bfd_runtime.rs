@@ -187,6 +187,21 @@ impl BfdRuntimeConfig {
         !self.sessions.is_empty()
     }
 
+    /// Whether any configured session targets an IPv4 peer. Sockets are opened
+    /// only for families with at least one session, so a family that is absent
+    /// on the host (e.g. `ipv6.disable=1`) cannot fail startup unless a
+    /// session actually needs it.
+    #[must_use]
+    pub fn needs_ipv4(&self) -> bool {
+        self.sessions.iter().any(|s| s.peer.is_ipv4())
+    }
+
+    /// Whether any configured session targets an IPv6 peer. See [`Self::needs_ipv4`].
+    #[must_use]
+    pub fn needs_ipv6(&self) -> bool {
+        self.sessions.iter().any(|s| s.peer.is_ipv6())
+    }
+
     /// Resolve the BFD session set from the daemon config: every static
     /// neighbor whose own `bfd` (or inherited peer-group `bfd`) names a defined
     /// profile. Config validation has already checked the profile references.
@@ -414,41 +429,56 @@ mod linux {
         }
     }
 
-    /// Sockets owned by one BFD actor. Opening them before spawning the task
-    /// makes socket acquisition part of daemon startup instead of an
-    /// eventually logged background failure.
-    struct RuntimeSockets {
-        rx_v4: AsyncFd<std::net::UdpSocket>,
-        rx_v6: AsyncFd<std::net::UdpSocket>,
-        tx_v4: UdpSocket,
-        tx_v6: UdpSocket,
+    /// The receive + transmit socket pair for one address family. Opening them
+    /// before spawning the task makes socket acquisition part of daemon
+    /// startup instead of an eventually logged background failure.
+    struct FamilySockets {
+        rx: AsyncFd<std::net::UdpSocket>,
+        tx: UdpSocket,
     }
 
-    impl RuntimeSockets {
-        fn open() -> std::io::Result<Self> {
-            let rx_v4 = AsyncFd::new(rx_socket(false)?)?;
-            let rx_v6 = AsyncFd::new(rx_socket(true)?)?;
-            let tx_v4 = UdpSocket::from_std(tx_socket(false)?)?;
-            let tx_v6 = UdpSocket::from_std(tx_socket(true)?)?;
+    impl FamilySockets {
+        fn open(v6: bool) -> std::io::Result<Self> {
             Ok(Self {
-                rx_v4,
-                rx_v6,
-                tx_v4,
-                tx_v6,
+                rx: AsyncFd::new(rx_socket(v6)?)?,
+                tx: UdpSocket::from_std(tx_socket(v6)?)?,
             })
         }
     }
 
+    /// Sockets owned by one BFD actor, per address family. A family with no
+    /// configured session is never opened (`None`), so a host without that
+    /// family (e.g. `ipv6.disable=1`) cannot fail startup unless a session
+    /// actually needs it.
+    struct RuntimeSockets {
+        v4: Option<FamilySockets>,
+        v6: Option<FamilySockets>,
+    }
+
+    /// Open sockets for exactly the families that have configured sessions.
+    /// A family that has sessions and cannot open its sockets fails startup
+    /// with the family named; a family with zero sessions is skipped entirely.
     fn prepare_runtime_sockets(
-        enabled: bool,
-        opener: impl FnOnce() -> std::io::Result<RuntimeSockets>,
+        needs_v4: bool,
+        needs_v6: bool,
+        opener: impl Fn(bool) -> std::io::Result<FamilySockets>,
     ) -> std::io::Result<Option<RuntimeSockets>> {
-        if !enabled {
+        if !needs_v4 && !needs_v6 {
             return Ok(None);
         }
-        opener().map(Some).map_err(|error| {
-            std::io::Error::new(error.kind(), format!("BFD socket startup failed: {error}"))
-        })
+        let open = |v6: bool| {
+            let family = if v6 { "IPv6" } else { "IPv4" };
+            opener(v6).map_err(|error| {
+                std::io::Error::new(
+                    error.kind(),
+                    format!("BFD {family} socket startup failed: {error}"),
+                )
+            })
+        };
+        Ok(Some(RuntimeSockets {
+            v4: needs_v4.then(|| open(false)).transpose()?,
+            v6: needs_v6.then(|| open(true)).transpose()?,
+        }))
     }
 
     /// Spawn the BFD actor. Returns `None` when the initial desired set is
@@ -456,9 +486,11 @@ mod linux {
     /// restart-required, so the actor's existence is fixed at startup; the
     /// `desired_rx` watch then drives enable/disable/strict among that set.
     ///
-    /// All receive and transmit sockets are opened synchronously before the
-    /// actor task is spawned. A configured runtime therefore returns an error
-    /// to daemon startup instead of letting BGP serve without BFD coupling.
+    /// Receive and transmit sockets are opened synchronously before the actor
+    /// task is spawned, for exactly the address families that have configured
+    /// sessions. A family that has sessions and cannot open its sockets
+    /// returns an error to daemon startup instead of letting BGP serve
+    /// without BFD coupling; a family with no sessions is never opened.
     pub fn spawn(
         desired_rx: watch::Receiver<BfdRuntimeConfig>,
         metrics: BgpMetrics,
@@ -467,8 +499,11 @@ mod linux {
         state_change_tx: BfdStateChangeSender,
         shutdown: CancellationToken,
     ) -> std::io::Result<Option<BfdRuntimeHandle>> {
-        let Some(sockets) =
-            prepare_runtime_sockets(desired_rx.borrow().enabled(), RuntimeSockets::open)?
+        let (needs_v4, needs_v6) = {
+            let desired = desired_rx.borrow();
+            (desired.needs_ipv4(), desired.needs_ipv6())
+        };
+        let Some(sockets) = prepare_runtime_sockets(needs_v4, needs_v6, FamilySockets::open)?
         else {
             return Ok(None);
         };
@@ -552,8 +587,11 @@ mod linux {
         /// session, not the source address).
         by_discriminator: HashMap<u32, IpAddr>,
         timers: BinaryHeap<Reverse<Deadline>>,
-        tx_v4: UdpSocket,
-        tx_v6: UdpSocket,
+        /// Transmit socket per family; `None` when the family had no
+        /// configured session at startup (the session set is restart-required,
+        /// so a session can never appear in an unopened family).
+        tx_v4: Option<UdpSocket>,
+        tx_v6: Option<UdpSocket>,
         /// Broadcast sink for session state transitions (ADR-0067 step 3b) —
         /// lossy, feeds the operator event stream.
         event_tx: broadcast::Sender<BfdRuntimeEvent>,
@@ -573,12 +611,15 @@ mod linux {
         state_change_tx: &BfdStateChangeSender,
         shutdown: &CancellationToken,
     ) {
-        let RuntimeSockets {
-            rx_v4,
-            rx_v6,
-            tx_v4,
-            tx_v6,
-        } = sockets;
+        let RuntimeSockets { v4, v6 } = sockets;
+        let (rx_v4, tx_v4) = match v4 {
+            Some(f) => (Some(f.rx), Some(f.tx)),
+            None => (None, None),
+        };
+        let (rx_v6, tx_v6) = match v6 {
+            Some(f) => (Some(f.rx), Some(f.tx)),
+            None => (None, None),
+        };
         let mut actor = Actor {
             sessions: BTreeMap::new(),
             discriminators: DiscriminatorAllocator::new(),
@@ -626,7 +667,7 @@ mod linux {
                 () = sleep => {
                     actor.fire_due_timers(metrics, status_tx).await;
                 }
-                guard = rx_v4.readable() => {
+                guard = readable_or_pending(rx_v4.as_ref()) => {
                     if let Ok(mut g) = guard {
                         let (pkts, drained) = drain_socket(g.get_inner().as_raw_fd(), RECV_BUDGET);
                         if drained {
@@ -637,7 +678,7 @@ mod linux {
                         }
                     }
                 }
-                guard = rx_v6.readable() => {
+                guard = readable_or_pending(rx_v6.as_ref()) => {
                     if let Ok(mut g) = guard {
                         let (pkts, drained) = drain_socket(g.get_inner().as_raw_fd(), RECV_BUDGET);
                         if drained {
@@ -649,6 +690,18 @@ mod linux {
                     }
                 }
             }
+        }
+    }
+
+    /// Await readability of a receive socket, or pend forever when the family
+    /// was not opened (no configured session) — so an absent family simply
+    /// never fires its `select!` arm.
+    async fn readable_or_pending(
+        rx: Option<&AsyncFd<std::net::UdpSocket>>,
+    ) -> std::io::Result<tokio::io::unix::AsyncFdReadyGuard<'_, std::net::UdpSocket>> {
+        match rx {
+            Some(fd) => fd.readable().await,
+            None => std::future::pending().await,
         }
     }
 
@@ -965,9 +1018,16 @@ mod linux {
             let bytes = pkt.encode();
             let dst = SocketAddr::new(peer, BFD_CONTROL_PORT);
             let sock = if peer.is_ipv4() {
-                &self.tx_v4
+                self.tx_v4.as_ref()
             } else {
-                &self.tx_v6
+                self.tx_v6.as_ref()
+            };
+            let Some(sock) = sock else {
+                // Unreachable while the restart-required session set holds (a
+                // session's family always had its sockets opened at startup);
+                // degrade to a logged non-send rather than a panic.
+                warn!(peer = %peer, "BFD transmit skipped: no socket for the peer's address family");
+                return;
             };
             if let Err(e) = sock.send_to(&bytes, dst).await {
                 debug!(peer = %peer, error = %e, "BFD transmit failed");
@@ -1209,10 +1269,38 @@ mod linux {
 
     #[cfg(test)]
     mod unit {
-        use super::{Deadline, enable_recv_ttl, kind_key, prepare_runtime_sockets, rx_socket_with};
+        use super::{
+            Deadline, FamilySockets, enable_recv_ttl, kind_key, prepare_runtime_sockets,
+            rx_socket_with,
+        };
         use rustbgpd_bfd::TimerKind;
         use std::net::IpAddr;
+        use tokio::io::unix::AsyncFd;
         use tokio::time::Instant;
+
+        /// Open a real loopback socket pair for one family on ephemeral ports
+        /// (never the BFD control port — these tests must not collide with a
+        /// running daemon or each other).
+        fn loopback_family_sockets(v6: bool) -> std::io::Result<FamilySockets> {
+            let addr = if v6 { "[::1]:0" } else { "127.0.0.1:0" };
+            let rx = std::net::UdpSocket::bind(addr)?;
+            rx.set_nonblocking(true)?;
+            let tx = std::net::UdpSocket::bind(addr)?;
+            tx.set_nonblocking(true)?;
+            Ok(FamilySockets {
+                rx: AsyncFd::new(rx)?,
+                tx: tokio::net::UdpSocket::from_std(tx)?,
+            })
+        }
+
+        /// Current-thread runtime whose reactor backs `AsyncFd`/`UdpSocket`
+        /// registration in the tests that open real sockets.
+        fn io_runtime() -> tokio::runtime::Runtime {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_io()
+                .build()
+                .expect("build runtime")
+        }
 
         fn deadline(at: Instant, peer: &str, kind: TimerKind, epoch: u64) -> Deadline {
             Deadline {
@@ -1251,7 +1339,7 @@ mod linux {
             // Load-bearing proof: changing `prepare_runtime_sockets` back to
             // the old log-and-continue behavior (`Err(_) => Ok(None)`) makes
             // this assertion red.
-            let result = prepare_runtime_sockets(true, || {
+            let result = prepare_runtime_sockets(true, false, |_v6| {
                 Err(std::io::Error::new(
                     std::io::ErrorKind::AddrInUse,
                     "injected UDP/3784 collision",
@@ -1263,18 +1351,80 @@ mod linux {
             assert_eq!(error.kind(), std::io::ErrorKind::AddrInUse);
             assert_eq!(
                 error.to_string(),
-                "BFD socket startup failed: injected UDP/3784 collision"
+                "BFD IPv4 socket startup failed: injected UDP/3784 collision"
             );
         }
 
         #[test]
         fn disabled_startup_does_not_open_sockets() {
-            // Load-bearing proof: removing the `!enabled` early return makes
+            // Load-bearing proof: removing the no-family early return makes
             // the injected opener panic and this test red.
-            let result = prepare_runtime_sockets(false, || {
+            let result = prepare_runtime_sockets(false, false, |_v6| {
                 panic!("disabled BFD startup attempted to open sockets")
             });
             assert!(matches!(result, Ok(None)));
+        }
+
+        #[test]
+        fn ipv4_only_startup_skips_the_ipv6_family() {
+            // Load-bearing proof: family-blind socket opening (open both
+            // families whenever any session exists) hits the EAFNOSUPPORT arm
+            // and turns an IPv4-only startup into a boot failure — exactly the
+            // ipv6.disable=1 regression this test pins.
+            let rt = io_runtime();
+            let _guard = rt.enter();
+            let result = prepare_runtime_sockets(true, false, |v6| {
+                if v6 {
+                    Err(std::io::Error::from_raw_os_error(libc::EAFNOSUPPORT))
+                } else {
+                    loopback_family_sockets(false)
+                }
+            });
+            let sockets = result
+                .expect("IPv4-only startup must not require IPv6")
+                .expect("a configured family opens sockets");
+            assert!(sockets.v4.is_some(), "the configured family is opened");
+            assert!(
+                sockets.v6.is_none(),
+                "a family with no sessions stays closed"
+            );
+        }
+
+        #[test]
+        fn ipv6_session_startup_failure_is_fatal_and_names_the_family() {
+            // A family that HAS sessions still fails closed, and the error
+            // names the family so the operator knows which one to fix.
+            let result = prepare_runtime_sockets(false, true, |v6| {
+                assert!(v6, "IPv6-only startup must not open IPv4 sockets");
+                Err(std::io::Error::from_raw_os_error(libc::EAFNOSUPPORT))
+            });
+            let Err(error) = result else {
+                panic!("a family with sessions must fail closed");
+            };
+            assert!(
+                error
+                    .to_string()
+                    .starts_with("BFD IPv6 socket startup failed:"),
+                "error must name the failing family: {error}"
+            );
+        }
+
+        #[test]
+        fn mixed_config_opens_both_families() {
+            // Real sockets on loopback ephemeral ports; skip (not fail) when
+            // the host has no usable IPv6, mirroring the busy-UDP-port
+            // anticipation in the flood test.
+            if std::net::UdpSocket::bind("[::1]:0").is_err() {
+                eprintln!("skipping: host has no usable IPv6 loopback");
+                return;
+            }
+            let rt = io_runtime();
+            let _guard = rt.enter();
+            let sockets = prepare_runtime_sockets(true, true, loopback_family_sockets)
+                .expect("both families open")
+                .expect("configured families open sockets");
+            assert!(sockets.v4.is_some());
+            assert!(sockets.v6.is_some());
         }
 
         #[test]
@@ -1581,6 +1731,50 @@ remote_asn = 65002
         let rc = BfdRuntimeConfig::from_config(&config);
         assert!(rc.sessions.is_empty());
         assert!(!rc.enabled());
+    }
+
+    #[test]
+    fn reload_cannot_introduce_a_session_in_an_unopened_family() {
+        // The actor opens sockets only for address families that have
+        // configured sessions at startup. That is sound because BFD config is
+        // restart-required: `pin_bfd_startup_only_runtime` (applied on every
+        // reload) pins the effective session set to the live snapshot, so the
+        // `desired_rx` watch can never introduce a session whose family had no
+        // socket opened. This test pins that seam: a reload adding the first
+        // IPv6 session to an IPv4-only runtime must not widen the family set.
+        let profiles = r#"
+[[bfd_profiles]]
+name = "p"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+bfd = { profile = "p" }
+"#;
+        let live = config_with(profiles);
+        let mut candidate = config_with(&format!(
+            r#"{profiles}
+[[neighbors]]
+address = "2001:db8::2"
+remote_asn = 65003
+bfd = {{ profile = "p" }}
+"#
+        ));
+        let candidate_families = BfdRuntimeConfig::from_config(&candidate);
+        assert!(
+            candidate_families.needs_ipv6(),
+            "candidate must genuinely ask for a new family"
+        );
+        assert!(
+            crate::config::pin_bfd_startup_only_runtime(&mut candidate, &live),
+            "a BFD-attachment change must be classified restart-required"
+        );
+        let rc = BfdRuntimeConfig::from_config(&candidate);
+        assert!(rc.needs_ipv4());
+        assert!(
+            !rc.needs_ipv6(),
+            "pinned reload must not add a session in a family with no socket"
+        );
     }
 
     mod state_change_channel {
