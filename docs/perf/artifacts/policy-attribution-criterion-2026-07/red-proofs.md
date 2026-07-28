@@ -24,6 +24,7 @@ python3 docs/perf/artifacts/policy-attribution-criterion-2026-07/verify.py
 | Missing measurement | Deleted control `/1` attempt 1 from the TSV | `policy attribution receipt error: missing or extra attempt/row data` |
 | Corrupted measurement | Changed one TSV delta while leaving both medians unchanged | `policy attribution receipt error: corrupted estimate delta: ('control', 'policy_chain_eval/1', 1)` |
 | Claim/control agreement | Changed `/1` verdict from `inconclusive` to `supported` | `policy attribution receipt error: claim/verdict mismatch for policy_chain_eval/1: expected inconclusive, got supported` |
+| Public claim surface | Changed the `docs/RECEIPTS.md` controlled-negative row to claim a measured CPU win, then ran the exact CI verifier command | `policy attribution receipt error: RECEIPTS policy-attribution row drift` |
 | Checksummed evidence | Added one line to `commands.txt`, then ran `sha256sum -c SHA256SUMS` from this directory | `commands.txt: FAILED` and `sha256sum: WARNING: 1 computed checksum did NOT match` |
 
 The clean verifier and checksum results after restoration are retained in

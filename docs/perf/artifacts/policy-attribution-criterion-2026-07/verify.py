@@ -99,6 +99,7 @@ expected_keys = {
 if set(observed) != expected_keys:
     fail("missing or extra attempt/row data")
 
+derived_verdicts = {}
 for row, verdict in manifest["rows"].items():
     control = [observed[("control", row, attempt)] for attempt in range(1, 7)]
     isolated = [observed[("isolated", row, attempt)] for attempt in range(1, 7)]
@@ -107,7 +108,57 @@ for row, verdict in manifest["rows"].items():
         and statistics.stdev(isolated) < statistics.stdev(control)
     )
     expected = "supported" if supported else "inconclusive"
+    derived_verdicts[row] = expected
     if verdict != expected:
         fail(f"claim/verdict mismatch for {row}: expected {expected}, got {verdict}")
 
-print("policy attribution receipt: OK (0 supported, 4 inconclusive)")
+supported_count = sum(verdict == "supported" for verdict in derived_verdicts.values())
+inconclusive_count = len(derived_verdicts) - supported_count
+if (supported_count, inconclusive_count) != (0, 4):
+    fail("measured public contract is not 0 supported / 4 inconclusive")
+
+repo = ROOT.parents[3]
+receipt = (repo / "docs/perf/policy-attribution-criterion-2026-07.md").read_text()
+for row in ROWS:
+    matching = [line for line in receipt.splitlines() if line.startswith(f"| `{row}` |")]
+    if len(matching) != 1 or not matching[0].endswith("| inconclusive; no claim |"):
+        fail(f"public receipt verdict drift for {row}")
+receipt_conclusion = (
+    "This controlled run therefore does not substantiate attribution of a measured\n"
+    "CPU gain at these four shapes. It makes no claim about convergence, reload\n"
+    "latency, throughput, or end-to-end daemon performance."
+)
+if receipt.count(receipt_conclusion) != 1:
+    fail("public receipt conclusion drift")
+
+receipts_row = (
+    "| Policy-attribution Criterion control | Six-attempt same-SHA and isolated "
+    "`Arc<str>` attribution measurements grade all four exact rows inconclusive: "
+    f"{supported_count} supported, {inconclusive_count} inconclusive. This controlled "
+    "negative evidence makes no CPU or end-to-end claim | "
+    "[`perf/policy-attribution-criterion-2026-07.md`]"
+    "(perf/policy-attribution-criterion-2026-07.md), "
+    "[`artifacts`](perf/artifacts/policy-attribution-criterion-2026-07/README.md) |"
+)
+receipts = (repo / "docs/RECEIPTS.md").read_text()
+if receipts.splitlines().count(receipts_row) != 1:
+    fail("RECEIPTS policy-attribution row drift")
+
+operational_row = (
+    "| Policy-attribution Criterion control | Pinned same-SHA plus isolated "
+    "six-attempt receipt | Four exact `policy_chain_eval` rows were graded against "
+    f"fresh controls: {supported_count} supported, {inconclusive_count} inconclusive. "
+    "This controlled negative evidence makes no CPU or end-to-end claim. See "
+    "[`perf/policy-attribution-criterion-2026-07.md`]"
+    "(perf/policy-attribution-criterion-2026-07.md) and its "
+    "[checksummed artifacts]"
+    "(perf/artifacts/policy-attribution-criterion-2026-07/README.md). |"
+)
+operational = (repo / "docs/OPERATIONAL_PROOF.md").read_text()
+if operational.splitlines().count(operational_row) != 1:
+    fail("OPERATIONAL_PROOF policy-attribution row drift")
+
+print(
+    "policy attribution receipt: OK "
+    f"({supported_count} supported, {inconclusive_count} inconclusive)"
+)
