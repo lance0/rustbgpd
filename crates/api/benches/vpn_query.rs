@@ -172,24 +172,60 @@ async fn run(routes: usize, output: &str, timeout: Duration) {
         PathAttribute::LocalPref(100),
         PathAttribute::ExtendedCommunities(vec![ExtendedCommunity::new(0x0002_fde8_0000_0064)]),
     ]);
-    for start in (0..routes).step_by(BATCH) {
-        let end = (start + BATCH).min(routes);
-        primary_tx
-            .send(RibUpdate::VpnRoutesReceived {
-                peer: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+    let setup_deadline = tokio::time::Instant::now() + timeout;
+    for peer_index in 0..PEERS {
+        let peer = IpAddr::V4(Ipv4Addr::new(
+            10,
+            0,
+            0,
+            u8::try_from(peer_index + 1).unwrap(),
+        ));
+        let mut indices = (peer_index..routes).step_by(PEERS);
+        loop {
+            let announced: Vec<_> = indices
+                .by_ref()
+                .take(BATCH)
+                .map(|index| route(index, &attributes))
+                .collect();
+            if announced.is_empty() {
+                break;
+            }
+            let update = RibUpdate::VpnRoutesReceived {
+                peer,
                 session_id: 0,
-                announced: (start..end).map(|i| route(i, &attributes)).collect(),
+                announced,
                 withdrawn: Vec::new(),
-            })
-            .await
-            .unwrap();
+            };
+            let RibUpdate::VpnRoutesReceived {
+                peer: envelope_peer,
+                announced,
+                ..
+            } = &update
+            else {
+                unreachable!("constructed VPN seed update changed variant");
+            };
+            assert!(
+                announced.iter().all(|route| route.peer == *envelope_peer),
+                "VPN seed route ownership differs from its update envelope"
+            );
+            tokio::time::timeout_at(setup_deadline, primary_tx.send(update))
+                .await
+                .expect("VPN RIB seed send exceeded the setup deadline")
+                .expect("VPN RIB primary channel closed during setup");
+        }
     }
     let (barrier_tx, barrier_rx) = oneshot::channel();
-    primary_tx
-        .send(RibUpdate::QueryLocRibCount { reply: barrier_tx })
+    tokio::time::timeout_at(
+        setup_deadline,
+        primary_tx.send(RibUpdate::QueryLocRibCount { reply: barrier_tx }),
+    )
+    .await
+    .expect("VPN RIB setup barrier send exceeded the setup deadline")
+    .expect("VPN RIB primary channel closed before the setup barrier");
+    let _ = tokio::time::timeout_at(setup_deadline, barrier_rx)
         .await
-        .unwrap();
-    let _ = barrier_rx.await.unwrap();
+        .expect("VPN RIB setup barrier reply exceeded the setup deadline")
+        .expect("VPN RIB manager dropped the setup barrier reply");
 
     let (service_tx, mut service_rx) = mpsc::channel(4);
     let service = RibService::new(query_tx).with_vpn_query_bench_receipts(service_tx);

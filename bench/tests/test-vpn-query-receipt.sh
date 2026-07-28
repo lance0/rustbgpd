@@ -53,8 +53,8 @@ assert peer_rows["actor_rows"] == 256
 assert peer_rows["returned_rows"] == 16
 assert all_rows["dispatch"] == 1
 assert peer_rows["dispatch"] == 2
-assert all_rows["checksum"] != 0
-assert peer_rows["checksum"] != 0
+assert all_rows["checksum"] == 5102335214269610730
+assert peer_rows["checksum"] == 7341237881033179096
 for query in (all_rows, peer_rows):
     assert query["actor_handler_ns"] > 0
     assert query["service_method_ns"] > 0
@@ -73,7 +73,7 @@ bad_rows = json.loads(json.dumps(doc))
 bad_rows["queries"]["peer_10_0_0_1"]["returned_rows"] = 15
 json.dump(bad_rows, open(sys.argv[2], "w", encoding="utf-8"))
 bad_checksum = json.loads(json.dumps(doc))
-bad_checksum["queries"]["all"]["checksum"] = 0
+bad_checksum["queries"]["all"]["checksum"] = 5102335214269610731
 json.dump(bad_checksum, open(sys.argv[3], "w", encoding="utf-8"))
 PY
 

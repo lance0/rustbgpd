@@ -11,7 +11,9 @@ production change is proposed.
 - VPNv4 `/32` routes are assigned round-robin to peers.
 - Every route has a unique RD-plus-prefix key, one MPLS label, shared realistic
   path attributes, and route target `65000:100`.
-- Seeding uses the primary actor channel in batches no larger than 4096.
+- Each peer is seeded in its own primary-channel updates, with batches no
+  larger than 4096. Before every send, the harness asserts that each announced
+  route belongs to the update's actual envelope peer.
 - A `QueryLocRibCount` sent on that same primary channel is the FIFO ingest
   barrier. Its unicast count is intentionally ignored.
 - Both samples call the actual `RibService::list_vpn_routes` method through the
@@ -35,10 +37,11 @@ publication of their respective receipts. Benchmark receipts use bounded
 persistent channels compiled only by `bench-internals`; an unarmed
 production/default build is unchanged.
 
-Each query has one absolute deadline shared by the service call and both receipt
-awaits: 10 seconds in the exact smoke and 120 seconds in campaign mode. Receipt
-publication failure therefore makes the smoke fail in bounded time instead of
-hanging.
+Setup has one absolute deadline shared by all seed sends and the FIFO barrier
+send and receive. Each query then has its own absolute deadline shared by the
+service call and both receipt awaits: 10 seconds in the exact smoke and 120
+seconds in campaign mode. A stalled actor or receipt publication failure
+therefore makes the smoke fail in bounded time instead of hanging.
 
 The timing executable installs the workspace `tikv-jemallocator` directly.
 The mechanics gate parses only the supplied benchmark source and requires its
@@ -72,6 +75,10 @@ defines the instrument and gate; it does not run or publish that campaign.
 
 - Replacing the actor snapshot collection with `Vec::new()` breaks exact row
   counts and semantic checksums.
+- Giving a seed update the wrong envelope peer fails its ownership assertion
+  before the update is sent to the actor.
+- Stalling the manager during setup fails at the internal aggregate setup
+  deadline.
 - Removing the peer predicate changes 16 filtered rows to 256.
 - Selecting a different peer while preserving the filtered count breaks the
   explicit assertion that every returned row belongs to `10.0.0.1`.
@@ -80,5 +87,5 @@ defines the instrument and gate; it does not run or publish that campaign.
   fail.
 - Removing actor or service receipt publication fails at the shared absolute
   deadline instead of hanging.
-- Corrupting either row counts or checksums makes the shell verifier fail; the
-  gate proves both mutations explicitly.
+- Corrupting either row counts or the exact deterministic smoke checksums makes
+  the shell verifier fail; its checksum mutation remains nonzero.
