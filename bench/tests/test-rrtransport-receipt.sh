@@ -63,12 +63,18 @@ grep -q '"root_failure":"rss_ceiling"' "$tmp/rss-over/failure.json"
 expect_red changed-head mutate -c 'import json,pathlib,sys;p=pathlib.Path(sys.argv[1])/"provenance.json";d=json.loads(p.read_text());d["head_after"]="changed";p.write_text(json.dumps(d))'
 expect_red changed-hash mutate -c 'import pathlib,sys;(pathlib.Path(sys.argv[1])/"source.snapshot").write_bytes(b"changed")'
 "$runner" --check-seam "$runner"
+[[ $("$runner" --classify-child-exe /expected /expected R) == sample ]]
+[[ $("$runner" --classify-child-exe /expected /foreign R) == reject ]]
+[[ $("$runner" --classify-child-exe /expected "" R) == reject ]]
+[[ $("$runner" --classify-child-exe /expected "" Z) == exited ]]
+[[ $("$runner" --classify-child-exe /expected "" absent) == exited ]]
 for seam in \
   "timeout -k 10 1200 \"\$script\" --campaign-inner \"\$output\"" \
   "full_verify \"\$receipt\"" \
   "python3 \"\$verifier\" \"\$receipt\" --full | tee \"\$receipt/verifier.txt\"" \
   "full_checksums \"\$receipt\"" \
-  "sha256sum -c SHA256SUMS --strict"; do
+  "sha256sum -c SHA256SUMS --strict" \
+  "classification=\$(classify_child_exe \"\$binary\" \"\$child_exe\" \"\$child_state\")"; do
   cp "$runner" "$tmp/runner"
   grep -Fv "$seam" "$tmp/runner" >"$tmp/mutated"
   mv "$tmp/mutated" "$tmp/runner"
