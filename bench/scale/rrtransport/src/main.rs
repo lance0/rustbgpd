@@ -442,6 +442,8 @@ fn main() -> Result<()> {
         [mode, output] if mode == "rrtiny" => {
             rr1000_support::runtime(12)?.block_on(rr1000::run(output, true))
         }
-        _ => bail!("usage: rrtransport smoke | rrtransport rr1000 <output-dir>"),
+        _ => bail!(
+            "usage: rrtransport smoke | rrtransport rr1000 <output-dir> | rrtiny <output-dir>"
+        ),
     }
 }

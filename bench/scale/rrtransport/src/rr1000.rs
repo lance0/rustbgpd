@@ -1,11 +1,9 @@
-use std::collections::{HashMap, HashSet};
-use std::fs::{self, File};
-use std::io::{BufWriter, Write};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::path::Path;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-
+use super::{
+    rr1000_support::{
+        assert_established, is_eor, rss_kib, send_before, shutdown, start_after_keepalives,
+    },
+    transport_config,
+};
 use anyhow::{bail, ensure, Context, Result};
 use rustbgpd_evpn_load::{establish_on, PeerConfig as StubConfig};
 use rustbgpd_rib::route::{Route, RouteOrigin};
@@ -17,16 +15,15 @@ use rustbgpd_wire::{
     Afi, AsPath, AspaValidation, AspaValidationContext, Ipv4Prefix, Message, Origin, PathAttribute,
     Prefix, RpkiValidation, Safi,
 };
+use std::collections::{HashMap, HashSet};
+use std::fs::{self, File};
+use std::io::{BufWriter, Write};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::path::Path;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
-
-use super::{
-    rr1000_support::{
-        assert_established, is_eor, rss_kib, send_before, shutdown, start_after_keepalives,
-    },
-    transport_config,
-};
-
 const PEERS: usize = 1000;
 const PREFIXES: usize = 100_000;
 const SOURCES: usize = 4;
@@ -38,7 +35,6 @@ const SHAPE_DIGEST: &str = "109e38772e3bd819";
 const BITMAP_DIGEST: &str = "7c50a897bc4a4e51";
 const TINY_SHAPE: &str =
     "rrtiny-v1:peers=4;prefixes=100;sources=4;workers=12;afi=ipv4-unicast;role=ibgp-rr";
-
 #[derive(Clone, Copy)]
 struct Shape {
     peers: usize,
@@ -47,24 +43,23 @@ struct Shape {
     digest: &'static str,
     bitmap_digest: &'static str,
 }
-
 struct Bitmap {
     words: Vec<u64>,
     limit: usize,
+    covered: usize,
     duplicates: usize,
     outside: usize,
 }
-
 impl Bitmap {
     fn new(limit: usize) -> Self {
         Self {
             words: vec![0; limit.div_ceil(64)],
             limit,
+            covered: 0,
             duplicates: 0,
             outside: 0,
         }
     }
-
     fn observe(&mut self, value: Ipv4Prefix) {
         let octets = value.addr.octets();
         let index = usize::from(octets[0].saturating_sub(10)) * 65_536
@@ -81,17 +76,14 @@ impl Bitmap {
         let mask = 1_u64 << (index % 64);
         if self.words[index / 64] & mask != 0 {
             self.duplicates += 1;
+        } else {
+            self.covered += 1;
         }
         self.words[index / 64] |= mask;
     }
-
     fn coverage(&self) -> usize {
-        self.words
-            .iter()
-            .map(|word| word.count_ones() as usize)
-            .sum()
+        self.covered
     }
-
     fn digest(&self) -> u64 {
         self.words
             .iter()
@@ -101,7 +93,6 @@ impl Bitmap {
             })
     }
 }
-
 struct WireRow {
     peer: IpAddr,
     messages: usize,
@@ -126,7 +117,6 @@ fn value(index: usize) -> Ipv4Prefix {
 fn source(index: usize) -> Ipv4Addr {
     Ipv4Addr::new(127, 200, 0, u8::try_from(index + 1).unwrap())
 }
-
 fn peer_ip(index: usize) -> Ipv4Addr {
     Ipv4Addr::new(
         127,
@@ -135,7 +125,6 @@ fn peer_ip(index: usize) -> Ipv4Addr {
         1,
     )
 }
-
 fn route(prefix: Ipv4Prefix, peer: Ipv4Addr) -> Route {
     Route {
         prefix: Prefix::V4(prefix),
@@ -160,7 +149,6 @@ fn route(prefix: Ipv4Prefix, peer: Ipv4Addr) -> Route {
         aspa_context: AspaValidationContext::default(),
     }
 }
-
 async fn collect(
     peer: IpAddr,
     mut rx: mpsc::Receiver<Message>,
@@ -224,7 +212,6 @@ async fn collect(
     row.wire_ms = t0.elapsed().as_millis();
     Ok(row)
 }
-
 async fn counts(query: &mpsc::Sender<RibUpdate>) -> Result<HashMap<IpAddr, u64>> {
     let (reply, receive) = oneshot::channel();
     query
@@ -242,7 +229,6 @@ async fn counts(query: &mpsc::Sender<RibUpdate>) -> Result<HashMap<IpAddr, u64>>
         })
         .collect())
 }
-
 async fn group(query: &mpsc::Sender<RibUpdate>, peer: IpAddr) -> Result<String> {
     let (reply, receive) = oneshot::channel();
     query
@@ -250,7 +236,6 @@ async fn group(query: &mpsc::Sender<RibUpdate>, peer: IpAddr) -> Result<String> 
         .await?;
     Ok(receive.await?)
 }
-
 pub async fn run(output: &str, tiny: bool) -> Result<()> {
     let shape = if tiny {
         Shape {
@@ -446,4 +431,16 @@ pub async fn run(output: &str, tiny: bool) -> Result<()> {
     manager_task.abort();
     let _ = manager_task.await;
     Ok(())
+}
+
+#[cfg(test)]
+#[test]
+fn bitmap_coverage_counts_only_unique_in_range_prefixes() {
+    let mut bitmap = Bitmap::new(2);
+    bitmap.observe(value(0));
+    assert_eq!(bitmap.coverage(), 1);
+    bitmap.observe(value(0));
+    assert_eq!((bitmap.coverage(), bitmap.duplicates), (1, 1));
+    bitmap.observe(Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24));
+    assert_eq!((bitmap.coverage(), bitmap.outside), (1, 1));
 }

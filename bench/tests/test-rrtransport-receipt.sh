@@ -48,8 +48,8 @@ expect_red() {
 mutate() { python3 "$@"; }
 
 "$runner" --verify-fixture "$fixture" "$tmp/accepted"
-expect_red omitted-route mutate -c 'import pathlib,sys;p=pathlib.Path(sys.argv[1])/"per-peer.tsv";s=p.read_text();p.write_text(s.replace("\t100000\t100000\t391", "\t99999\t99999\t391",1))'
-expect_red message-count mutate -c 'import pathlib,sys;p=pathlib.Path(sys.argv[1])/"per-peer.tsv";s=p.read_text();p.write_text(s.replace("\t100000\t391", "\t391\t391"))'
+expect_red staged-count mutate -c 'import pathlib,sys;p=pathlib.Path(sys.argv[1])/"per-peer.tsv";r=p.read_text().splitlines();h=r[0].split("\t").index("staged");x=r[1].split("\t");x[h]="99999";r[1]="\t".join(x);p.write_text("\n".join(r)+"\n")'
+expect_red nlri-count mutate -c 'import pathlib,sys;p=pathlib.Path(sys.argv[1])/"per-peer.tsv";r=p.read_text().splitlines();h=r[0].split("\t").index("nlri");x=r[1].split("\t");x[h]="99999";r[1]="\t".join(x);p.write_text("\n".join(r)+"\n")'
 expect_red corrupt-prefix mutate -c 'import pathlib,sys;p=pathlib.Path(sys.argv[1])/"per-peer.tsv";s=p.read_text();p.write_text(s.replace("7c50a897bc4a4e51","0000000000000000",1))'
 expect_red staged-is-wire mutate -c 'import json,pathlib,sys;p=pathlib.Path(sys.argv[1])/"phase.json";d=json.loads(p.read_text());d["wire_ms"]=2;p.write_text(json.dumps(d))'
 expect_red group-key mutate -c 'import json,pathlib,sys;p=pathlib.Path(sys.argv[1])/"phase.json";d=json.loads(p.read_text());d["groups"]=2;p.write_text(json.dumps(d))'
