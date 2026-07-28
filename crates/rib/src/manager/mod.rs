@@ -7,6 +7,7 @@ mod graceful_restart;
 mod helpers;
 mod outbound_prefix_limits;
 mod peer_lifecycle;
+use peer_lifecycle::SessionTeardownDisposition;
 mod route_refresh;
 mod selection_deferral;
 mod update_groups;
@@ -590,6 +591,8 @@ pub struct RibManager {
     test_force_exact_export_slow_path: bool,
     #[cfg(test)]
     test_exact_export_fast_path_hits: u64,
+    #[cfg(test)]
+    test_exact_export_full_prune_calls: u64,
     /// Test/benchmark-only evidence for the explicit clean policy transition.
     #[cfg(any(test, feature = "bench-internals"))]
     policy_transition_stats: PolicyTransitionStats,
@@ -1289,6 +1292,8 @@ impl RibManager {
             test_force_exact_export_slow_path: false,
             #[cfg(test)]
             test_exact_export_fast_path_hits: 0,
+            #[cfg(test)]
+            test_exact_export_full_prune_calls: 0,
             #[cfg(any(test, feature = "bench-internals"))]
             policy_transition_stats: PolicyTransitionStats::default(),
             #[cfg(any(test, feature = "bench-internals"))]
@@ -1966,9 +1971,16 @@ impl RibManager {
             }
             RibUpdate::PeerDown { peer, session_id } => {
                 let page_versions = self.route_page_versions_snapshot();
-                if self.handle_peer_down(peer, session_id) {
-                    self.prune_exact_export_rejections();
-                    self.ensure_all_route_pages_advanced(page_versions);
+                match self.handle_peer_down(peer, session_id) {
+                    SessionTeardownDisposition::DiscardStale => {}
+                    SessionTeardownDisposition::FailOver => {
+                        self.ensure_all_route_pages_advanced(page_versions);
+                    }
+                    SessionTeardownDisposition::NoRegistration
+                    | SessionTeardownDisposition::TeardownActive => {
+                        self.prune_exact_export_rejections();
+                        self.ensure_all_route_pages_advanced(page_versions);
+                    }
                 }
             }
             RibUpdate::PeerDeleted { peer } => self.handle_peer_deleted(peer),
@@ -2551,6 +2563,10 @@ impl RibManager {
     /// infrequent bulk lifecycle sweeps; the UPDATE hot path uses targeted
     /// withdrawal cleanup instead.
     fn prune_exact_export_rejections(&mut self) {
+        #[cfg(test)]
+        {
+            self.test_exact_export_full_prune_calls += 1;
+        }
         if self.peer_unexportable.is_empty() {
             return;
         }

@@ -7,7 +7,10 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use super::helpers::prefix_family;
-use super::{LiveSessionRecord, MAX_LIVE_SESSIONS_PER_PEER, PolicyFilteredRouteKey, RibManager};
+use super::{
+    ExactExportKey, LiveSessionRecord, MAX_LIVE_SESSIONS_PER_PEER, PolicyFilteredRouteKey,
+    RibManager,
+};
 use crate::adj_rib_out::AdjRibOut;
 use crate::update::OutboundRouteUpdate;
 
@@ -51,19 +54,23 @@ impl RibManager {
     /// collision interleaving: the loser's `PeerUp` replaced the winner's
     /// registration before the loser went down) fails the registration
     /// over to the survivor instead of tearing the peer down.
-    pub(super) fn handle_peer_down(&mut self, peer: IpAddr, session_id: u64) -> bool {
-        match self.classify_session_teardown(peer, session_id, "PeerDown") {
-            SessionTeardownDisposition::DiscardStale => false,
+    pub(super) fn handle_peer_down(
+        &mut self,
+        peer: IpAddr,
+        session_id: u64,
+    ) -> SessionTeardownDisposition {
+        let disposition = self.classify_session_teardown(peer, session_id, "PeerDown");
+        match disposition {
+            SessionTeardownDisposition::DiscardStale => {}
             SessionTeardownDisposition::FailOver => {
                 self.fail_over_registration(peer, session_id, "PeerDown");
-                true
             }
             SessionTeardownDisposition::NoRegistration
             | SessionTeardownDisposition::TeardownActive => {
                 self.peer_down_teardown(peer);
-                true
             }
         }
+        disposition
     }
 
     /// The session-identity dispatch shared by `handle_peer_down` and
@@ -397,6 +404,28 @@ impl RibManager {
         if !rtc_affected.is_empty() {
             self.recompute_rtc_keys(&rtc_affected);
         }
+        self.retire_exact_export_rejections(
+            rib.iter()
+                .map(|route| ExactExportKey::Unicast(route.prefix, route.path_id))
+                .chain(
+                    rib.iter_flowspec()
+                        .map(|route| ExactExportKey::FlowSpec(route.selection_key())),
+                )
+                .chain(
+                    rib.iter_evpn()
+                        .map(|route| ExactExportKey::Evpn(route.key())),
+                )
+                .chain(
+                    rib.iter_bgpls()
+                        .map(|route| ExactExportKey::BgpLs(route.key())),
+                )
+                .chain(rib.iter_vpn().map(|route| ExactExportKey::Vpn(route.key())))
+                .chain(
+                    rib.iter_labeled()
+                        .map(|route| ExactExportKey::Labeled(route.key())),
+                )
+                .chain(rib.iter_rtc().map(|route| ExactExportKey::Rtc(route.key()))),
+        );
         // The removed Adj-RIB-In held the peer's route bodies; dropping it
         // releases their attribute Arcs. Sweep the global intern table now
         // (after the recomputes above dropped any Loc-RIB selected-route
