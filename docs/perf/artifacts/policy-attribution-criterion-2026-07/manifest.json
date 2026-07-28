@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "control_sha": "e49d1c87d64cd1e9ca5e8c9d4f2be021be8ecf14",
+  "isolated_base_sha": "9a7b64615fd0a81572fc75e938dd2084890fecbe",
+  "isolated_head_sha": "e49d1c87d64cd1e9ca5e8c9d4f2be021be8ecf14",
+  "attempts": 6,
+  "order": ["base-first", "head-first", "base-first", "head-first", "base-first", "head-first"],
+  "rows": {
+    "policy_chain_eval/1": "inconclusive",
+    "policy_chain_eval/8": "inconclusive",
+    "policy_chain_eval/32": "inconclusive",
+    "policy_chain_eval/early_deny": "inconclusive"
+  }
+}

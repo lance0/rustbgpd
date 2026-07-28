@@ -1,0 +1,3 @@
+policy attribution receipt: OK (0 supported, 4 inconclusive)
+red proofs: 14 independent mutations failed closed and were restored
+checksum verification: all retained files OK

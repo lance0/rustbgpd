@@ -220,6 +220,12 @@ jobs:
               --from-derivative "$derivative" \
               --check "$receipt/dhat/$variant.memory.tsv"
           done
+      - name: Verify policy-attribution Criterion receipt
+        run: |
+          set -euo pipefail
+          receipt=docs/perf/artifacts/policy-attribution-criterion-2026-07
+          python3 "$receipt/verify.py"
+          (cd "$receipt" && sha256sum -c SHA256SUMS)
       - name: Check event-history producer fail-closed measurement tooling
         run: |
           set -euo pipefail
