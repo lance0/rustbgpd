@@ -486,8 +486,8 @@ mod tests {
         };
 
         let peer = tokio::spawn(establish_on(listener, cfg));
-        let stream = TcpStream::connect(actual).await.unwrap();
-        drop(stream);
+        let mut stream = TcpStream::connect(actual).await.unwrap();
+        stream.shutdown().await.unwrap();
 
         assert!(matches!(
             peer.await.unwrap(),
