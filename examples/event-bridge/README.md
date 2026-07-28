@@ -28,6 +28,11 @@ operator's preferred sink. The patterns to preserve are:
 
 ## Build + run
 
+The plaintext TCP command below requires an explicitly configured, suitable
+`[global.telemetry.grpc_tcp]` listener. The default API listener is a Unix
+domain socket, but this reference bridge does not implement UDS, bearer-token,
+or mTLS client transports.
+
 ```sh
 cargo run --release -p event-bridge -- \
     --addr http://127.0.0.1:50051 \

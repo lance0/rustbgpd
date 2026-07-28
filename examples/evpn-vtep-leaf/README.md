@@ -37,12 +37,14 @@ see [`../rr-evpn-fabric/`](../rr-evpn-fabric/).
 ```bash
 # Validate the schema, RD/RT parsing, VTEP-IP unicast check, and
 # uniqueness invariants without starting the daemon.
-rustbgpd --check examples/evpn-vtep-leaf/config.toml
+rustbgpd --check --strict examples/evpn-vtep-leaf/config.toml
 
 # Preview against another config.
 rustbgpd --diff examples/rr-evpn-fabric/config.toml \
                 examples/evpn-vtep-leaf/config.toml
 ```
+
+The starter config is expected to pass strict validation without warnings.
 
 Most `[[evpn_instances]]` edits now **hot-apply** at runtime via the
 ADR-0063 EVPN runtime coordinator — through both SIGHUP file-driven reload

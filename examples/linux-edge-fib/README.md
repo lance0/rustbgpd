@@ -8,8 +8,10 @@ dedicated Linux route table. It does not write the main table.
 ## Validate
 
 ```bash
-rustbgpd --check examples/linux-edge-fib/config.toml
+rustbgpd --check --strict examples/linux-edge-fib/config.toml
 ```
+
+The starter config is expected to pass strict validation without warnings.
 
 ## Kernel Setup
 
@@ -32,7 +34,7 @@ At runtime this example needs enough privilege for the configured surfaces:
 binding TCP/179 requires root or `CAP_NET_BIND_SERVICE`, and programming
 `[[fib_tables]]` routes requires `CAP_NET_ADMIN`. The daemon user must also be
 able to write `runtime_state_dir` and the UDS parent directory so the socket and
-FIB ownership receipts can be created. `rustbgpd --check` validates the TOML
+FIB ownership receipts can be created. `rustbgpd --check --strict` validates the TOML
 shape but does not prove those runtime capabilities or filesystem permissions
 are present.
 

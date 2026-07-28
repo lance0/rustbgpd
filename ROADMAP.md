@@ -88,9 +88,10 @@ want an API-first BGP daemon with memory safety and predictable performance.
 One prioritized, forward-looking list. Items are grouped **Immediate** (audited
 correctness and release work), **Next** (committed near-term), **Later**
 (planned, not yet scheduled), and **Maybe / demand-shaped** (deferred until
-operator signal). The current priority call is to finish the transaction
-surface and improve operational proof. Protocol breadth and additional
-performance work stay measurement- or demand-shaped.
+operator signal). The current priority is operational proof: external
+IXP/route-server or route-reflector pilots, with reproducible interop, soak,
+and failure-recovery evidence. Protocol breadth and additional performance
+work stay measurement- or demand-shaped.
 
 Prioritization is **technical-merit first, pilot-aware second**: lead with work
 that deepens rustbgpd's existing identity (a programmable BGP control plane),
@@ -1283,14 +1284,12 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
   RSS climbed 301→555 and 295→639 MiB (two runs) and never returned
   memory — an empty post-teardown daemon held ~500 MiB. The same workload
   on the existing `jemalloc` cargo feature oscillated 270–330 MiB and
-  ended at 229 (background decay returns memory mid-run). Two options on
-  the table, both packaging decisions — not RIB work:
-  - make `jemalloc` the default release/container build (also adds the
-    `jemalloc_*` allocated/active/resident gauges to `/metrics` for free);
-  - or keep stock glibc and document `MALLOC_ARENA_MAX=2` for
-    RSS-sensitive deployments (cheap A/B on a receipt cell first).
-  Either way, the published receipts' RSS honesty notes can then cite the
-  allocator attribution instead of an open question.
+  ended at 229 (background decay returns memory mid-run). Release containers
+  and tarballs have used `jemalloc` since v0.50.0+. Since v0.60.0 it is also
+  the default Cargo allocator feature for plain builds and exposes the
+  `jemalloc_*` allocated/active/resident gauges. Stock glibc remains available
+  with `--no-default-features` for explicit comparison or deployments that
+  prefer the system allocator.
 - **Performance — remaining items.** The scale & memory sprint shipped
   (inlined `SmallVec<[u32; 1]>` Adj-RIB-In prefix index, FxHash route maps,
   coalesced multi-chunk initial-load distribution; #306/#308/#309), as did the
@@ -1402,10 +1401,10 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
     `CachedPolicyContext`, deliberately narrower than a raw
     `Arc<Vec<PathAttribute>>` because explain does not need unrelated
     attributes. Further storage changes are measurement-gated.
-  - Wire codec NLRI allocation cleanup: remove the non-AddPath IPv4 body-NLRI
-    decode-then-map temporary `Vec` in `Update::parse` / build paths if codec
-    benches show a clear win at bulk sizes. Low blast radius, but gate on
-    `update_parse` / `update_build` and decode/proptest coverage.
+  - Wire codec body-NLRI allocation cleanup: LAN-679 measured the proposed
+    non-AddPath IPv4 decode/build rewrite and declined it because it did not
+    produce a meaningful win. Do not revisit without a new profile identifying
+    this allocation as hot and a concrete, separately testable hypothesis.
   - Wire community storage: investigate `SmallVec` for standard / extended /
     large community attribute payloads only if `size_of::<PathAttribute>` does
     not grow and codec / `memory_profile` runs show a real transient-allocation

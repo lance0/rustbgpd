@@ -106,6 +106,7 @@ releases rather than carried forward from older measurements.
 | Next-hop set/self | Yes | Yes | set_next_hop = "self" or IP |
 | Named policy definitions | Yes | Yes | TOML definitions with configurable default_action |
 | Policy chaining | Yes | Yes | GoBGP-style: permit=continue, deny=stop, implicit permit |
+| Default eBGP policy (RFC 8212) | No | Opt-in | GoBGP v4.7.0 defaults unmatched import/export policy to `accept-route`; rustbgpd requires explicit `ebgp_requires_policy = true` |
 | Scriptable policy language | No | Yes | `.rpol` (ADR-0096): typed + compiled, named prefix/community sets as indexed matchers, parameterized policies, `apply()` composition, in-language unit tests via `rbgp policy check`; route-for-route parity vs FRR route-maps proven in M80 |
 | Policy dry-run against the live RIB | No | Yes | `rbgp policy test` / `TestPolicy` RPC — a candidate `.rpol` policy evaluated read-only over an Adj-RIB-In / Loc-RIB snapshot: counts, per-term hits, before/after diffs |
 | Live per-term policy hit counters | No | Yes | `rbgp policy stats --direction import\|export\|both` / `GetPolicyStats` — since-chain-install counters on installed import and export chains; import rows also carry the session-local policy generation |
@@ -170,7 +171,7 @@ releases rather than carried forward from older measurements.
 | Config formats | TOML/YAML/JSON/HCL | TOML | |
 | Config reload (SIGHUP) | Yes | Yes | Neighbor diff + reconcile; global changes require restart. Measured at route-server scale: sub-second UPDATE stall and ~1.6 s full re-advertisement at 700 clients x 400k routes (docs/perf/reload-stall-2026-07.md) |
 | Config persistence | No | Yes | gRPC mutations atomically persisted to TOML |
-| Prefix limits | Yes | Yes | Cease/1 enforcement |
+| Prefix limits | Yes | Yes | rustbgpd inbound limits are per-family and tear down with Cease/1, latch the peer, and optionally make one generation-fenced restart attempt after a configured hold-down. Outbound per-family limits keep the session Established and withhold net-new advertisements without withdrawals or NOTIFICATION |
 | Embeddable library | Yes (Go) | No | Wire crate is standalone |
 | CLI tool | Yes (gobgp) | Yes | `rbgp` wraps gRPC API |
 | Live TUI dashboard | No | Yes | `rbgp top` — sessions, prefix counts, message rates, route events |
