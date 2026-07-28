@@ -1075,6 +1075,7 @@ mod bgpls;
 mod bmp;
 mod events_metrics;
 mod evpn;
+mod exact_export_lifecycle;
 mod explain_mrt;
 mod export_explain;
 mod exportability;
