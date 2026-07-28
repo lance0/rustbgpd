@@ -2017,33 +2017,42 @@ impl RibManager {
                 // suppresses duplicate delivery; this is not a runtime cap
                 // reconfiguration surface (a decrease requires a new session
                 // so excess advertised path IDs are withdrawn by teardown).
+                let Some(send_families) = self
+                    .newest_live_session_mut(peer, session_id)
+                    .map(|record| record.add_path_send_families.clone())
+                else {
+                    return;
+                };
+                let mut rejected_families = Vec::new();
+                let new_limits: HashMap<_, _> = limits
+                    .into_iter()
+                    .filter(|(family, _)| {
+                        let accepted = send_families.contains(family);
+                        if !accepted {
+                            rejected_families.push(*family);
+                        }
+                        accepted
+                    })
+                    .collect();
+                if !rejected_families.is_empty() {
+                    rejected_families.sort_by_key(|(afi, safi)| (*afi as u16, *safi as u8));
+                    rejected_families.dedup();
+                    warn!(
+                        %peer,
+                        ?rejected_families,
+                        "ignoring Paths-Limit entries outside the negotiated Add-Path send families"
+                    );
+                }
+                // Stage the immutable negotiated map before registration. A
+                // deferred initial dump installs this record later; a stale
+                // superseded session cannot mutate the newest record.
+                self.newest_live_session_mut(peer, session_id)
+                    .expect("newest live session checked above")
+                    .add_path_send_limits
+                    .clone_from(&new_limits);
+
                 if self.outbound_session_ids.get(&peer).copied() == Some(session_id) {
                     let page_versions = self.route_page_versions_snapshot();
-                    let send_families = self
-                        .peer_add_path_send_families
-                        .get(&peer)
-                        .cloned()
-                        .unwrap_or_default();
-                    let mut rejected_families = Vec::new();
-                    let new_limits: HashMap<_, _> = limits
-                        .into_iter()
-                        .filter(|(family, _)| {
-                            let accepted = send_families.contains(family);
-                            if !accepted {
-                                rejected_families.push(*family);
-                            }
-                            accepted
-                        })
-                        .collect();
-                    if !rejected_families.is_empty() {
-                        rejected_families.sort_by_key(|(afi, safi)| (*afi as u16, *safi as u8));
-                        rejected_families.dedup();
-                        warn!(
-                            %peer,
-                            ?rejected_families,
-                            "ignoring Paths-Limit entries outside the negotiated Add-Path send families"
-                        );
-                    }
                     let scalar_limit = self.peer_add_path_send_max.get(&peer).copied().unwrap_or(0);
                     let effective_limit_changed = self
                         .peer_add_path_send_families
@@ -2060,15 +2069,6 @@ impl RibManager {
                                 old != new
                             })
                         });
-                    // Mirror the accepted map into the live-session record —
-                    // the single registration truth an outbound failover
-                    // replays from. Without this, a collision failback would
-                    // permanently clamp every family to the scalar limit.
-                    if let Some(record) = self.live_sessions.get_mut(&peer).and_then(|sessions| {
-                        sessions.iter_mut().find(|s| s.session_id == session_id)
-                    }) {
-                        record.add_path_send_limits.clone_from(&new_limits);
-                    }
                     self.peer_add_path_send_limits.insert(peer, new_limits);
                     if effective_limit_changed {
                         self.send_initial_table(peer);

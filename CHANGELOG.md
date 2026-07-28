@@ -11,6 +11,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Deferred initial dumps now honor negotiated per-family Add-Path send limits.
+
 - Unified event watches now reject category/type filters with no possible
   intersection before subscribing or connecting, while preserving distinct
   live-source and durable-outbox lag semantics.

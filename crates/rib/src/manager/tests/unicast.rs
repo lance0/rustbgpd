@@ -80,6 +80,181 @@ fn drain_unicast_state(
     state
 }
 
+async fn seed_three_dual_stack_candidates(
+    tx: &mpsc::Sender<RibUpdate>,
+) -> (Ipv4Prefix, Ipv6Prefix) {
+    fn received(route: Route) -> RibUpdate {
+        RibUpdate::RoutesReceived {
+            session_id: 0,
+            peer: route.peer,
+            announced: vec![route],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+        }
+    }
+
+    let v4 = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let v6 = Ipv6Prefix::new("2001:db8:700::".parse().unwrap(), 48);
+    for host in 1..=3 {
+        let v4_route = make_route(v4, Ipv4Addr::new(10, 0, 0, host));
+        tx.send(received(v4_route)).await.unwrap();
+        let v6_route = make_v6_route(v6, format!("2001:db8:700::{host}").parse().unwrap());
+        tx.send(received(v6_route)).await.unwrap();
+    }
+    let (reply, result) = oneshot::channel();
+    tx.send(RibUpdate::QueryLocRibCount { reply })
+        .await
+        .unwrap();
+    assert_eq!(result.await.unwrap(), 2);
+    (v4, v6)
+}
+
+fn dual_stack_add_path_peer_up(
+    peer: IpAddr,
+    session_id: u64,
+    outbound_tx: mpsc::Sender<OutboundRouteUpdate>,
+) -> RibUpdate {
+    RibUpdate::PeerUp {
+        peer,
+        session_id,
+        peer_asn: 65100,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx,
+        export_policy: None,
+        sendable_families: dual_stack_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        per_client_best: false,
+        interpret_rfc1997: true,
+        add_path_send_families: dual_stack_sendable(),
+        add_path_send_max: 1,
+        negotiated_orf_recv: vec![],
+        negotiated_llgr_families: vec![],
+    }
+}
+
+async fn receive_dual_stack_dump(
+    rx: &mut mpsc::Receiver<OutboundRouteUpdate>,
+) -> HashMap<(Prefix, u32), Route> {
+    let mut state = HashMap::new();
+    let mut eor = HashSet::new();
+    while eor.len() < 2 {
+        let update = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("deferred initial dump should complete")
+            .expect("outbound channel should stay open");
+        for route in update.announce.iter() {
+            state.insert((route.prefix, route.path_id), route.clone());
+        }
+        for withdrawn in update.withdraw {
+            state.remove(&withdrawn);
+        }
+        eor.extend(update.end_of_rib);
+    }
+    state
+}
+
+fn path_count(state: &HashMap<(Prefix, u32), Route>, prefix: Prefix) -> usize {
+    state
+        .keys()
+        .filter(|(candidate, _)| *candidate == prefix)
+        .count()
+}
+
+/// Restoring the `outbound_session_ids`-only acceptance guard makes the IPv6
+/// assertion red: the deferred first dump falls back to the scalar limit.
+#[tokio::test]
+async fn deferred_registration_stages_current_session_paths_limit() {
+    let (tx, rx) = mpsc::channel(64);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    manager.initial_dump_defer_min_routes = 0;
+    let handle = tokio::spawn(manager.run());
+    let (v4, v6) = seed_three_dual_stack_candidates(&tx).await;
+    let peer: IpAddr = "192.0.2.70".parse().unwrap();
+    let (out_tx, mut out_rx) = mpsc::channel(32);
+
+    tx.try_send(dual_stack_add_path_peer_up(peer, 7, out_tx))
+        .unwrap();
+    tx.try_send(RibUpdate::PeerAddPathLimits {
+        peer,
+        session_id: 7,
+        limits: vec![
+            ((Afi::Ipv4, Safi::Unicast), 1),
+            ((Afi::Ipv6, Safi::Unicast), 2),
+        ],
+    })
+    .unwrap();
+
+    let initial = receive_dual_stack_dump(&mut out_rx).await;
+    assert_eq!(path_count(&initial, Prefix::V4(v4)), 1);
+    assert_eq!(path_count(&initial, Prefix::V6(v6)), 2);
+    assert!(out_rx.try_recv().is_err(), "the first dump must run once");
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// Weakening newest-record ownership to ignore session identity makes the
+/// IPv6 assertions red: a superseded session stages its limit into the winner.
+#[tokio::test]
+async fn deferred_registration_rejects_superseded_session_paths_limit() {
+    let (tx, rx) = mpsc::channel(64);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    manager.initial_dump_defer_min_routes = 0;
+    let handle = tokio::spawn(manager.run());
+    let (v4, v6) = seed_three_dual_stack_candidates(&tx).await;
+    let peer: IpAddr = "192.0.2.71".parse().unwrap();
+    let (old_tx, mut old_rx) = mpsc::channel(32);
+    let (new_tx, mut new_rx) = mpsc::channel(32);
+
+    tx.try_send(dual_stack_add_path_peer_up(peer, 7, old_tx))
+        .unwrap();
+    tx.try_send(dual_stack_add_path_peer_up(peer, 8, new_tx))
+        .unwrap();
+    tx.try_send(RibUpdate::PeerAddPathLimits {
+        peer,
+        session_id: 8,
+        limits: vec![
+            ((Afi::Ipv4, Safi::Unicast), 1),
+            ((Afi::Ipv6, Safi::Unicast), 1),
+        ],
+    })
+    .unwrap();
+    tx.try_send(RibUpdate::PeerAddPathLimits {
+        peer,
+        session_id: 7,
+        limits: vec![((Afi::Ipv6, Safi::Unicast), 2)],
+    })
+    .unwrap();
+
+    let initial = receive_dual_stack_dump(&mut new_rx).await;
+    assert_eq!(path_count(&initial, Prefix::V4(v4)), 1);
+    assert_eq!(path_count(&initial, Prefix::V6(v6)), 1);
+    assert!(
+        old_rx.try_recv().is_err(),
+        "superseded session emitted a dump"
+    );
+
+    for (afi, safi) in dual_stack_sendable() {
+        tx.send(RibUpdate::RouteRefreshRequest {
+            peer,
+            session_id: 8,
+            afi,
+            safi,
+        })
+        .await
+        .unwrap();
+    }
+    let refreshed = receive_dual_stack_dump(&mut new_rx).await;
+    assert_eq!(path_count(&refreshed, Prefix::V4(v4)), 1);
+    assert_eq!(path_count(&refreshed, Prefix::V6(v6)), 1);
+    drop(tx);
+    handle.await.unwrap();
+}
+
 /// Operator-triggered outbound refresh is a one-peer replay of the exact
 /// currently exportable inventory. Removing the force insertion makes the
 /// target announcement assertion time out (ordinary equality suppression wins);
