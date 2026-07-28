@@ -1729,8 +1729,14 @@ rbgp top -i 5     # 5s poll interval
 
 Shows sessions, prefix counts, message rates, RPKI VRP counts, and
 streaming route events in a terminal UI. The route-event subscription is
-opened only while the events panel is visible (`e`), and stale health or
-neighbor data is labeled while the last-good snapshot remains on screen.
+opened only while the events panel is visible (`e`). Global identity is retried
+on each normal poll until the first successful fetch, then cached; the
+Prometheus metrics scrape runs on a separate 60-second cadence. Before either
+optional source succeeds, the status line reports `global unavailable` or
+`RPKI unavailable` without marking the core connection disconnected. A failed
+metrics scrape retains a known VRP count and labels it stale; a successful
+scrape with no RPKI family clears the count. Stale health or neighbor data is
+likewise labeled while the last-good snapshot remains on screen.
 Press `h` for keybindings.
 
 ### Watch live events

@@ -77,12 +77,14 @@ pub(crate) fn neighbor_key(neighbor: &NeighborState) -> Option<String> {
 
 pub struct App {
     pub global: Option<GlobalState>,
+    pub global_freshness: Option<Freshness>,
     pub health: Option<HealthResponse>,
     pub health_fresh: bool,
     pub neighbors: Vec<NeighborState>,
     pub neighbors_freshness: Option<Freshness>,
     pub route_events: VecDeque<RouteEventEntry>,
     pub rpki_vrp_count: Option<u64>,
+    pub metrics_freshness: Option<Freshness>,
 
     prev_counters: HashMap<String, PeerCounters>,
     pub peer_rates: HashMap<String, PeerRates>,
@@ -105,12 +107,14 @@ impl App {
     pub fn new() -> Self {
         Self {
             global: None,
+            global_freshness: None,
             health: None,
             health_fresh: false,
             neighbors: Vec::new(),
             neighbors_freshness: None,
             route_events: VecDeque::new(),
             rpki_vrp_count: None,
+            metrics_freshness: None,
             prev_counters: HashMap::new(),
             peer_rates: HashMap::new(),
             last_rate_calc: Instant::now(),
@@ -201,6 +205,8 @@ impl App {
         self.last_poll = now;
         self.health_fresh = snapshot.health_fresh;
         self.neighbors_freshness = Some(snapshot.neighbors_freshness);
+        self.global_freshness = Some(snapshot.global_freshness);
+        self.metrics_freshness = Some(snapshot.metrics_freshness);
 
         if snapshot.health_fresh {
             self.health = snapshot.health;
@@ -409,6 +415,7 @@ mod tests {
     fn snapshot(neighbors: Vec<NeighborState>) -> DataSnapshot {
         DataSnapshot {
             global: None,
+            global_freshness: Freshness::Unavailable,
             health: Some(HealthResponse {
                 healthy: true,
                 uptime_seconds: 1,
@@ -420,6 +427,7 @@ mod tests {
             neighbors,
             neighbors_freshness: Freshness::Fresh,
             rpki_vrp_count: None,
+            metrics_freshness: Freshness::Unavailable,
             error: None,
         }
     }

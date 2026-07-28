@@ -26,6 +26,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Stale `PeerOrfUpdate`, `PeerSlowState`, `SetPeerPolicyContext`, and
   `RouteRefreshRequest` messages no longer restart advertised-route page cursors.
 
+- `rbgp top` now distinguishes unavailable optional global/RPKI telemetry from
+  a stale retained VRP count without reporting a core disconnect, and clears a
+  previous count after a successful metrics scrape with no RPKI family.
+
 ## [0.61.0] — 2026-07-27
 
 > **Release framing.** This is the policy-safety line. RFC 8212

@@ -95,8 +95,23 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     if !app.health_fresh && app.health.is_some() {
         stale.push("health");
     }
+    if app.metrics_freshness == Some(Freshness::Stale) && app.rpki_vrp_count.is_some() {
+        stale.push("RPKI");
+    }
     if app.neighbors_freshness == Some(Freshness::Stale) {
         stale.push("neighbors");
+    }
+    if app.global_freshness == Some(Freshness::Unavailable) {
+        status_line.push(Span::styled(
+            "global unavailable | ",
+            Style::default().fg(theme.error),
+        ));
+    }
+    if app.metrics_freshness == Some(Freshness::Unavailable) {
+        status_line.push(Span::styled(
+            "RPKI unavailable | ",
+            Style::default().fg(theme.error),
+        ));
     }
     if app.neighbors_freshness == Some(Freshness::Unavailable) {
         status_line.push(Span::styled(
@@ -539,7 +554,8 @@ fn format_number(n: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proto::{NeighborConfig, NeighborState};
+    use crate::proto::{GlobalState, HealthResponse, NeighborConfig, NeighborState};
+    use crate::tui::data::DataSnapshot;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -553,10 +569,46 @@ mod tests {
         assert_eq!(format_number(1234567), "1,234,567");
     }
 
-    fn rendered_peer_table(with_neighbor: bool, freshness: Freshness) -> String {
+    fn snapshot(neighbors: Vec<NeighborState>, freshness: Freshness) -> DataSnapshot {
+        DataSnapshot {
+            global: Some(GlobalState {
+                asn: 65001,
+                router_id: "10.0.0.1".into(),
+                ..Default::default()
+            }),
+            global_freshness: Freshness::Fresh,
+            health: Some(HealthResponse {
+                healthy: true,
+                ..Default::default()
+            }),
+            health_fresh: true,
+            neighbors,
+            neighbors_freshness: freshness,
+            rpki_vrp_count: None,
+            metrics_freshness: Freshness::Fresh,
+            error: None,
+        }
+    }
+
+    fn rendered_snapshot(snapshot: DataSnapshot) -> String {
         let mut app = App::new();
-        if with_neighbor {
-            app.neighbors = vec![NeighborState {
+        app.on_data(snapshot);
+        let mut terminal = Terminal::new(TestBackend::new(130, 8)).unwrap();
+        terminal
+            .draw(|frame| draw(frame, &mut app, &Theme::default()))
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    fn rendered_peer_table(with_neighbor: bool, freshness: Freshness) -> String {
+        let neighbors = if with_neighbor {
+            vec![NeighborState {
                 config: Some(NeighborConfig {
                     address: "fe80::1".into(),
                     interface: "eth0".into(),
@@ -565,9 +617,15 @@ mod tests {
                     ..Default::default()
                 }),
                 ..Default::default()
-            }];
+            }]
+        } else {
+            Vec::new()
+        };
+        let mut app = App::new();
+        app.on_data(snapshot(neighbors, Freshness::Fresh));
+        if freshness != Freshness::Fresh {
+            app.on_data(snapshot(Vec::new(), freshness));
         }
-        app.neighbors_freshness = Some(freshness);
         let mut terminal = Terminal::new(TestBackend::new(130, 8)).unwrap();
         terminal
             .draw(|frame| draw(frame, &mut app, &Theme::default()))
@@ -607,5 +665,58 @@ mod tests {
         let rendered = rendered_peer_table(false, Freshness::Unavailable);
         assert!(rendered.contains("neighbors unavailable"));
         assert!(!rendered.contains("stale: neighbors"));
+    }
+
+    #[test]
+    fn header_labels_global_unavailable_without_disconnect() {
+        let mut data = snapshot(Vec::new(), Freshness::Unavailable);
+        data.global = None;
+        data.global_freshness = Freshness::Unavailable;
+
+        let rendered = rendered_snapshot(data);
+
+        assert!(rendered.contains("global unavailable"));
+        assert!(rendered.contains("connected"));
+    }
+
+    #[test]
+    fn header_labels_initial_rpki_failure_without_disconnect() {
+        let mut data = snapshot(Vec::new(), Freshness::Unavailable);
+        data.metrics_freshness = Freshness::Unavailable;
+
+        let rendered = rendered_snapshot(data);
+
+        assert!(rendered.contains("RPKI unavailable"));
+        assert!(rendered.contains("connected"));
+    }
+
+    #[test]
+    fn header_labels_retained_rpki_count_as_stale_without_disconnect() {
+        let mut data = snapshot(Vec::new(), Freshness::Unavailable);
+        data.rpki_vrp_count = Some(15);
+        data.metrics_freshness = Freshness::Stale;
+
+        let rendered = rendered_snapshot(data);
+
+        assert!(rendered.contains("VRPs 15"));
+        assert!(rendered.contains("stale: RPKI"));
+        assert!(rendered.contains("connected"));
+    }
+
+    #[test]
+    fn header_is_quiet_after_success_without_rpki_family() {
+        let data = snapshot(Vec::new(), Freshness::Unavailable);
+        let rendered = rendered_snapshot(data);
+
+        assert!(!rendered.contains("RPKI unavailable"));
+        assert!(!rendered.contains("stale: RPKI"));
+        assert!(!rendered.contains("VRPs"));
+        assert!(rendered.contains("connected"));
+
+        let mut data = snapshot(Vec::new(), Freshness::Unavailable);
+        data.metrics_freshness = Freshness::Stale;
+        let rendered = rendered_snapshot(data);
+        assert!(!rendered.contains("RPKI"));
+        assert!(!rendered.contains("VRPs"));
     }
 }
