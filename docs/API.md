@@ -817,7 +817,10 @@ from the per-session import-decision cache (ADR-0073). Side-effect-free —
 no RIB touch, no counter movement. Omit `path_id` to return every matching
 path. The cache is **opt-in**: without `[policy.explain] enabled = true`
 on the daemon the outcome is `CACHE_DISABLED`, which is deliberately
-distinct from `NOT_SEEN`.
+distinct from `NOT_SEEN`. If the peer has no current session actor, the
+outcome is `NO_SESSION`; this is also distinct from a session that answered
+without a cached decision. `CACHE_DISABLED` and `NO_SESSION` are normal
+explain outcomes, not transport errors.
 
 ```bash
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
@@ -1111,8 +1114,8 @@ they would carry on the wire; everything else stays at `advertised_path_id =
 so the operator can read advertisement intent without cross-referencing the
 peer config. Empty `peer_address` returns the v0.7.0 global Loc-RIB view
 unchanged. Unknown `peer_address` → `NOT_FOUND`. Import explain is available via
-`PolicyService.ExplainImportPolicy` (ADR-0073); exact per-statement
-attribution within a matched policy remains deferred.
+`PolicyService.ExplainImportPolicy` (ADR-0073), including structured
+statement/term traces for matched policies.
 
 ### Address family filtering
 

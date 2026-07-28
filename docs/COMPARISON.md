@@ -135,6 +135,22 @@ IPv4/IPv6 `Prefix` routes.
 | In-language policy unit tests | Yes | No | No | No | No |
 | Policy dry-run against the live RIB | Yes | No | No | No | No |
 | Live per-term policy hit counters | Yes | No | No | No | No |
+| RFC 8212 default eBGP policy | Opt-in | Profile-dependent[^rfc8212-frr] | Yes[^rfc8212-bird] | No[^rfc8212-gobgp] | Yes[^rfc8212-openbgpd] |
+
+[^rfc8212-frr]: [FRR latest](https://docs.frrouting.org/en/latest/bgp.html#require-policy-on-ebgp)
+    documents `bgp ebgp-requires-policy` as enabled by default in the
+    traditional profile and disabled by default in the datacenter profile.
+[^rfc8212-bird]: BIRD [3.3.1](https://bird.nic.cz/doc/bird-3.3.1.html) and
+    [2.19.0](https://bird.nic.cz/doc/bird-2.19.0.html) require explicit import
+    and export policy for external BGP; this claim is limited to those release
+    lines.
+[^rfc8212-gobgp]: GoBGP
+    [v4.7.0 policy documentation](https://raw.githubusercontent.com/osrg/gobgp/v4.7.0/docs/sources/policy.md)
+    says unmatched import and export policy defaults to `accept-route`.
+[^rfc8212-openbgpd]: The
+    [OpenBSD-current `bgpd.conf(5)` filter documentation](https://man.openbsd.org/bgpd.conf#FILTER)
+    says BGP UPDATEs are blocked by default and the default filter action is
+    deny.
 
 ## Security
 

@@ -79,7 +79,11 @@ Rationale: GoBGP's protos carry Go-specific patterns and years of accumulated fe
 
 ### Service Architecture
 
-Eleven separate gRPC services (Global, Config, Neighbor, Policy, PeerGroup, Rib, Bfd, Event, Injection, Control, Evpn), not one. This forces API boundary clarity, prevents god-service creep, enables permission scoping (for example, read-only listeners for monitoring), and mirrors internal architecture.
+Eleven native `rustbgpd.v1` gRPC services (Global, Config, Neighbor, Policy,
+PeerGroup, Rib, Bfd, Event, Injection, Control, Evpn), plus the separate
+`gnmi.gNMI` service, not one god service. This forces API boundary clarity,
+enables permission scoping (for example, read-only listeners for monitoring),
+and mirrors internal architecture.
 
 ```protobuf
 // Abridged — proto/rustbgpd.proto is authoritative; NeighborService has

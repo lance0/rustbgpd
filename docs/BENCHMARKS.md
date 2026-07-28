@@ -1337,7 +1337,6 @@ during churn, so they are larger than the steady-state route count.
 Measurement environment: AMD Ryzen 9 7950X (64 logical cores), 125 GB
 RAM, Linux 6.17, Docker 27.x, containerlab. Single
 `rustbgpd:dev` container per node, all four nodes on the same host.
-Numbers reproduce within ±10% across runs.
 
 **Notes on methodology:**
 
