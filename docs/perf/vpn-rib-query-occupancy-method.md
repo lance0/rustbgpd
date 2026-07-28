@@ -29,13 +29,22 @@ after the snapshot reply is sent. `actor_rows` and `actor_capacity` describe the
 actual `Vec<VpnRibRoute>` allocated there.
 
 `service_method_ns` is measured outside the service across the trait method call
-and await. `post_actor_ns` covers only the service's post-reply filter, mapping,
-and collection. Benchmark receipts use bounded persistent channels compiled
-only by `bench-internals`; an unarmed production/default build is unchanged.
+and await. It includes the bounded benchmark-only service receipt `try_send`
+before the trait method returns. `actor_handler_ns` and `post_actor_ns` exclude
+publication of their respective receipts. Benchmark receipts use bounded
+persistent channels compiled only by `bench-internals`; an unarmed
+production/default build is unchanged.
+
+Each query has one absolute deadline shared by the service call and both receipt
+awaits: 10 seconds in the exact smoke and 120 seconds in campaign mode. Receipt
+publication failure therefore makes the smoke fail in bounded time instead of
+hanging.
 
 The timing executable installs the workspace `tikv-jemallocator` directly.
-Receipts identify allocator and mode so results from a different build cannot
-be silently compared.
+The mechanics gate parses only the supplied benchmark source and requires its
+`#[global_allocator]` attribute immediately before the `tikv-jemallocator`
+static. Receipts identify allocator and mode so results from a different build
+cannot be silently compared.
 
 Semantic checksums are calculated after the timed method returns. They are
 order-independent and cover RD, prefix, peer, and label. No sorting or hashing
@@ -64,8 +73,12 @@ defines the instrument and gate; it does not run or publish that campaign.
 - Replacing the actor snapshot collection with `Vec::new()` breaks exact row
   counts and semantic checksums.
 - Removing the peer predicate changes 16 filtered rows to 256.
+- Selecting a different peer while preserving the filtered count breaks the
+  explicit assertion that every returned row belongs to `10.0.0.1`.
 - Bypassing or zeroing any timing breaks the nonzero decomposition assertions.
-- Changing the timing binary away from the declared allocator makes the
-  allocator identity false and must be rejected during review.
+- Removing only `#[global_allocator]` makes the structural allocator seam check
+  fail.
+- Removing actor or service receipt publication fails at the shared absolute
+  deadline instead of hanging.
 - Corrupting either row counts or checksums makes the shell verifier fail; the
   gate proves both mutations explicitly.

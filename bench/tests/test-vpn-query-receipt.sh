@@ -6,6 +6,30 @@ tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT
 
 receipt="$tmp_dir/receipt.json"
+bench_source="$repo_root/crates/api/benches/vpn_query.rs"
+
+check_allocator_seam() {
+  python3 - "$1" <<'PY'
+import pathlib
+import sys
+
+lines = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
+needle = "static ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;"
+matches = [index for index, line in enumerate(lines) if line.strip() == needle]
+assert len(matches) == 1
+index = matches[0]
+assert index > 0
+assert lines[index - 1].strip() == "#[global_allocator]"
+PY
+}
+
+check_allocator_seam "$bench_source"
+sed '/^#\[global_allocator\]$/d' "$bench_source" >"$tmp_dir/no-global-allocator.rs"
+if check_allocator_seam "$tmp_dir/no-global-allocator.rs" >/dev/null 2>&1; then
+  echo "bench source without global allocator unexpectedly passed" >&2
+  exit 1
+fi
+
 cargo bench --manifest-path "$repo_root/Cargo.toml" -p rustbgpd-api \
   --bench vpn_query --features bench-internals -- smoke "$receipt"
 

@@ -2,7 +2,7 @@
 
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rustbgpd_api::proto;
 use rustbgpd_api::proto::rib_service_server::RibService as RibServiceTrait;
@@ -90,19 +90,40 @@ async fn query(
     actor_rx: &mut mpsc::Receiver<(u64, usize, usize, u64)>,
     service_rx: &mut mpsc::Receiver<VpnQueryServiceReceipt>,
     peer_filter: &str,
+    timeout: Duration,
 ) -> QueryReceipt {
+    let deadline = tokio::time::Instant::now() + timeout;
     let started = Instant::now();
-    let response = service
-        .list_vpn_routes(Request::new(proto::ListVpnRoutesRequest {
+    let response = tokio::time::timeout_at(
+        deadline,
+        service.list_vpn_routes(Request::new(proto::ListVpnRoutesRequest {
             afi_safi: String::new(),
             peer_filter: peer_filter.to_string(),
-        }))
-        .await
-        .unwrap()
-        .into_inner();
+        })),
+    )
+    .await
+    .expect("VPN RIB service query exceeded its absolute deadline")
+    .unwrap()
+    .into_inner();
     let service_method_ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
-    let (actor_ns, actor_rows, actor_capacity, dispatch) = actor_rx.recv().await.unwrap();
-    let service_receipt = service_rx.recv().await.unwrap();
+    if !peer_filter.is_empty() {
+        assert!(
+            response
+                .routes
+                .iter()
+                .all(|route| route.peer_address == peer_filter),
+            "filtered VPN query returned a route from another peer"
+        );
+    }
+    let (actor_ns, actor_rows, actor_capacity, dispatch) =
+        tokio::time::timeout_at(deadline, actor_rx.recv())
+            .await
+            .expect("VPN RIB actor receipt exceeded the query deadline")
+            .expect("VPN RIB actor receipt channel closed");
+    let service_receipt = tokio::time::timeout_at(deadline, service_rx.recv())
+        .await
+        .expect("VPN RIB service receipt exceeded the query deadline")
+        .expect("VPN RIB service receipt channel closed");
     assert_eq!(service_receipt.returned_rows, response.routes.len());
     let checksum = response.routes.iter().fold(0_u64, |sum, row| {
         sum.wrapping_add(semantic_hash(
@@ -136,7 +157,7 @@ fn verify(receipt: &QueryReceipt, routes: usize, filtered: bool, dispatch: u64) 
     assert!(receipt.post_actor_ns > 0);
 }
 
-async fn run(routes: usize, output: &str) {
+async fn run(routes: usize, output: &str, timeout: Duration) {
     let (primary_tx, primary_rx) = mpsc::channel(32);
     let (query_tx, query_rx) = mpsc::channel(8);
     let (actor_tx, mut actor_rx) = mpsc::channel(4);
@@ -172,8 +193,15 @@ async fn run(routes: usize, output: &str) {
 
     let (service_tx, mut service_rx) = mpsc::channel(4);
     let service = RibService::new(query_tx).with_vpn_query_bench_receipts(service_tx);
-    let all = query(&service, &mut actor_rx, &mut service_rx, "").await;
-    let filtered = query(&service, &mut actor_rx, &mut service_rx, "10.0.0.1").await;
+    let all = query(&service, &mut actor_rx, &mut service_rx, "", timeout).await;
+    let filtered = query(
+        &service,
+        &mut actor_rx,
+        &mut service_rx,
+        "10.0.0.1",
+        timeout,
+    )
+    .await;
     verify(&all, routes, false, 1);
     verify(&filtered, routes, true, 2);
 
@@ -212,12 +240,14 @@ fn receipt_json(value: &QueryReceipt) -> serde_json::Value {
 
 fn main() {
     let args: Vec<_> = std::env::args().filter(|arg| arg != "--bench").collect();
-    let (routes, output) = match args.as_slice() {
-        [_, mode, output] if mode == "smoke" => (SMOKE_ROUTES, output.as_str()),
+    let (routes, output, timeout) = match args.as_slice() {
+        [_, mode, output] if mode == "smoke" => {
+            (SMOKE_ROUTES, output.as_str(), Duration::from_secs(10))
+        }
         [_, mode, count, output] if mode == "measure" => {
             let routes = count.parse::<usize>().unwrap();
             assert!([10_000, 100_000, 1_000_000].contains(&routes));
-            (routes, output.as_str())
+            (routes, output.as_str(), Duration::from_secs(120))
         }
         _ => {
             panic!("usage: vpn_query smoke OUTPUT | vpn_query measure 10000|100000|1000000 OUTPUT")
@@ -227,5 +257,5 @@ fn main() {
         .enable_all()
         .build()
         .unwrap()
-        .block_on(run(routes, output));
+        .block_on(run(routes, output, timeout));
 }
