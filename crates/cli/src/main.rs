@@ -2151,6 +2151,19 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
     validate_neighbor_compare_action(&cli.command)?;
     validate_rib_count_action(&cli.command)?;
     validate_rib_age_action(&cli.command)?;
+    if let Command::Events {
+        action:
+            Some(EventsAction::Watch {
+                categories,
+                event_types,
+                from_event_id,
+                ..
+            }),
+        ..
+    } = &cli.command
+    {
+        commands::watch::validate_events_watch_filter(categories, event_types, *from_event_id)?;
+    }
     let connection = connect(&cli.addr, cli.token_file.as_deref()).await?;
     let json = cli.json;
 
@@ -4844,6 +4857,35 @@ mod tests {
                 ..
             } if categories == &vec!["policy".to_string()] && event_types == &vec!["policy_changed".to_string()]
         ));
+    }
+
+    #[tokio::test]
+    async fn events_watch_rejects_impossible_filters_before_connect() {
+        for tail in [
+            "--category session --type added",
+            "--from-event-id 0 --category session --type added",
+            "--category session --type otc_route_blocked",
+        ] {
+            let args = format!("rbgp --addr http://127.0.0.1:1 events watch {tail}");
+            let cli = Cli::try_parse_from(args.split_whitespace()).unwrap();
+            assert!(
+                run(cli, BINARY_NAME)
+                    .await
+                    .unwrap_err()
+                    .to_string()
+                    .contains("no possible intersection"),
+                "{tail} reached transport"
+            );
+        }
+        let args = "rbgp --addr http://127.0.0.1:1 events watch \
+                    --category route,session --type added";
+        let err = run(
+            Cli::try_parse_from(args.split_whitespace()).unwrap(),
+            BINARY_NAME,
+        )
+        .await
+        .unwrap_err();
+        assert!(!err.to_string().contains("no possible intersection"));
     }
 
     #[test]

@@ -11,6 +11,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Unified event watches now reject category/type filters with no possible
+  intersection before subscribing or connecting, while preserving distinct
+  live-source and durable-outbox lag semantics.
+
 - An IPv4-only BFD configuration no longer prevents the daemon from
   starting on hosts without IPv6 support (e.g. `ipv6.disable=1`). BFD
   sockets are now opened only for the address families that actually have

@@ -675,6 +675,7 @@ pub(super) fn parse_watch_events_filter(
 ) -> Result<WatchEventsFilter, Status> {
     let categories = parse_category_filter(&req.categories)?;
     let event_types = parse_event_type_filter(&req.event_types)?;
+    validate_live_category_event_types(&categories, &event_types)?;
     let afi = route_event_afi_filter(req.afi_safi)?;
     let prefix = parse_route_event_prefix_filter(&req.prefix, req.prefix_length, afi)?;
     let peer = if req.neighbor_address.is_empty() {
@@ -694,6 +695,70 @@ pub(super) fn parse_watch_events_filter(
         afi,
         prefix,
     })
+}
+
+fn validate_live_category_event_types(
+    categories: &BTreeSet<i32>,
+    event_types: &BTreeSet<i32>,
+) -> Result<(), Status> {
+    if event_types.is_empty() {
+        return Ok(());
+    }
+    let categories = categories.iter().fold(0, |mask, value| {
+        mask | category_mask(proto::EventCategory::try_from(*value).expect("parsed category"))
+    });
+    let categories = if categories == 0 { 0x3f } else { categories };
+    let event_types = event_types.iter().fold(0, |mask, value| {
+        mask | live_event_type_mask(proto::BgpEventType::try_from(*value).expect("parsed type"))
+    });
+    if categories & event_types != 0 {
+        Ok(())
+    } else {
+        Err(Status::invalid_argument(
+            "event category/type filters have no possible intersection for WatchEvents",
+        ))
+    }
+}
+
+fn category_mask(category: proto::EventCategory) -> u8 {
+    match category {
+        proto::EventCategory::Unspecified => 0,
+        proto::EventCategory::Route => 1,
+        proto::EventCategory::Session => 2,
+        proto::EventCategory::Policy => 4,
+        proto::EventCategory::Dataplane => 8,
+        proto::EventCategory::Evpn => 16,
+        proto::EventCategory::Bfd => 32,
+    }
+}
+
+fn live_event_type_mask(event_type: proto::BgpEventType) -> u8 {
+    match event_type {
+        proto::BgpEventType::Unspecified | proto::BgpEventType::OtcRouteBlocked => 0,
+        proto::BgpEventType::RouteAdded
+        | proto::BgpEventType::RouteWithdrawn
+        | proto::BgpEventType::RouteBestChanged
+        | proto::BgpEventType::RoutePolicyFiltered => 1,
+        proto::BgpEventType::SessionStateChanged
+        | proto::BgpEventType::SessionEstablished
+        | proto::BgpEventType::SessionLost
+        | proto::BgpEventType::PeerEnabled
+        | proto::BgpEventType::PeerDisabled
+        | proto::BgpEventType::NotificationSent
+        | proto::BgpEventType::NotificationReceived => 2,
+        proto::BgpEventType::PolicyChanged => 4,
+        proto::BgpEventType::DataplaneStatusChanged
+        | proto::BgpEventType::DataplaneRouteInstalled
+        | proto::BgpEventType::DataplaneRouteWithdrawn
+        | proto::BgpEventType::DataplaneRouteFailed => 8,
+        proto::BgpEventType::EvpnRouteAdded
+        | proto::BgpEventType::EvpnRouteWithdrawn
+        | proto::BgpEventType::EvpnRouteBestChanged => 16,
+        proto::BgpEventType::BfdSessionUp
+        | proto::BgpEventType::BfdSessionDown
+        | proto::BgpEventType::BfdSessionStateChanged => 32,
+        proto::BgpEventType::StreamLagged => 1 | 2 | 8 | 16 | 32,
+    }
 }
 
 pub(super) fn parse_list_session_events_filter(
@@ -758,4 +823,30 @@ pub(super) fn parse_list_evpn_events_filter(
         rd: parse_evpn_rd_filter(&req.rd_filter)?,
         limit: req.limit as usize,
     })
+}
+
+#[cfg(test)]
+mod compatibility_tests {
+    use super::*;
+
+    #[test]
+    fn live_event_type_matrix_is_exhaustive() {
+        for raw in 0..=100 {
+            let Ok(event_type) = proto::BgpEventType::try_from(raw) else {
+                continue;
+            };
+            let expected = match raw {
+                1..=4 => 1,
+                10..=14 | 20..=21 => 2,
+                22 => 4,
+                30..=33 => 8,
+                40..=42 => 16,
+                50..=52 => 32,
+                100 => 1 | 2 | 8 | 16 | 32,
+                0 | 23 => 0,
+                _ => unreachable!("known enum value covered"),
+            };
+            assert_eq!(live_event_type_mask(event_type), expected, "{event_type:?}");
+        }
+    }
 }

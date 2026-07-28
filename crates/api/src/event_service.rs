@@ -793,6 +793,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn incompatible_live_filter_fails_before_subscribing() {
+        let (rib_tx, route_events) = spawn_fake_rib();
+        let (peer_tx, session_events, _) = spawn_fake_peer_manager();
+        let service = EventService::new(rib_tx, peer_tx);
+        let request = proto::WatchEventsRequest {
+            categories: vec![proto::EventCategory::Session as i32],
+            event_types: vec![proto::BgpEventType::RouteAdded as i32],
+            ..Default::default()
+        };
+        let Err(status) = service.watch_events(Request::new(request)).await else {
+            panic!("incompatible filter accepted");
+        };
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert_eq!(route_events.receiver_count(), 0);
+        assert_eq!(session_events.receiver_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn mixed_live_filter_subscribes_only_to_intersection() {
+        let (rib_tx, route_events) = spawn_fake_rib();
+        let (peer_tx, session_events, _) = spawn_fake_peer_manager();
+        let service = EventService::new(rib_tx, peer_tx);
+        let response = service
+            .watch_events(Request::new(proto::WatchEventsRequest {
+                categories: vec![
+                    proto::EventCategory::Route as i32,
+                    proto::EventCategory::Session as i32,
+                ],
+                event_types: vec![proto::BgpEventType::RouteAdded as i32],
+                ..Default::default()
+            }))
+            .await
+            .unwrap();
+        assert_eq!(route_events.receiver_count(), 1);
+        assert_eq!(session_events.receiver_count(), 0);
+        drop(response);
+    }
+
+    #[tokio::test]
     async fn evpn_event_bridge_emits_bgp_event() {
         let (rib_tx, evpn_events_tx) = spawn_fake_evpn_rib();
         let (peer_tx, _, _) = spawn_fake_peer_manager();
@@ -2181,7 +2220,11 @@ mod tests {
         let service = EventService::new(rib_tx, peer_tx);
 
         match service
-            .subscribe_from_event(Request::new(proto::SubscribeFromEventRequest::default()))
+            .subscribe_from_event(Request::new(proto::SubscribeFromEventRequest {
+                categories: vec![proto::EventCategory::Session as i32],
+                event_types: vec![proto::BgpEventType::OtcRouteBlocked as i32],
+                ..Default::default()
+            }))
             .await
         {
             Ok(_) => panic!("subscribe_from_event must error when EHM is None"),

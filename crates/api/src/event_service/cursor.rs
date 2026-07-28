@@ -73,6 +73,7 @@ impl ProtoFilter {
     pub(crate) fn from_request(req: &proto::SubscribeFromEventRequest) -> Result<Self, Status> {
         let categories = parse_categories(&req.categories)?;
         let event_types = parse_event_types(&req.event_types)?;
+        validate_durable_category_event_types(&categories, &event_types)?;
         let neighbor = if req.neighbor_address.is_empty() {
             None
         } else {
@@ -165,6 +166,70 @@ impl ProtoFilter {
             return false;
         };
         self.event_types.contains(&t)
+    }
+}
+
+fn validate_durable_category_event_types(
+    categories: &[proto::EventCategory],
+    event_types: &[proto::BgpEventType],
+) -> Result<(), Status> {
+    if event_types.is_empty() {
+        return Ok(());
+    }
+    let categories = categories
+        .iter()
+        .fold(0, |mask, category| mask | category_mask(*category));
+    let categories = if categories == 0 { 0x3f } else { categories };
+    let event_types = event_types.iter().fold(0, |mask, event_type| {
+        mask | durable_event_type_mask(*event_type)
+    });
+    if categories & event_types != 0 {
+        Ok(())
+    } else {
+        Err(Status::invalid_argument(
+            "event category/type filters have no possible intersection for SubscribeFromEvent",
+        ))
+    }
+}
+
+fn category_mask(category: proto::EventCategory) -> u8 {
+    match category {
+        proto::EventCategory::Unspecified => 0,
+        proto::EventCategory::Route => 1,
+        proto::EventCategory::Session => 2,
+        proto::EventCategory::Policy => 4,
+        proto::EventCategory::Dataplane => 8,
+        proto::EventCategory::Evpn => 16,
+        proto::EventCategory::Bfd => 32,
+    }
+}
+
+fn durable_event_type_mask(event_type: proto::BgpEventType) -> u8 {
+    match event_type {
+        proto::BgpEventType::Unspecified => 0,
+        proto::BgpEventType::RouteAdded
+        | proto::BgpEventType::RouteWithdrawn
+        | proto::BgpEventType::RouteBestChanged
+        | proto::BgpEventType::RoutePolicyFiltered => 1,
+        proto::BgpEventType::SessionStateChanged
+        | proto::BgpEventType::SessionEstablished
+        | proto::BgpEventType::SessionLost
+        | proto::BgpEventType::PeerEnabled
+        | proto::BgpEventType::PeerDisabled
+        | proto::BgpEventType::NotificationSent
+        | proto::BgpEventType::NotificationReceived => 2,
+        proto::BgpEventType::PolicyChanged | proto::BgpEventType::OtcRouteBlocked => 4,
+        proto::BgpEventType::DataplaneStatusChanged
+        | proto::BgpEventType::DataplaneRouteInstalled
+        | proto::BgpEventType::DataplaneRouteWithdrawn
+        | proto::BgpEventType::DataplaneRouteFailed => 8,
+        proto::BgpEventType::EvpnRouteAdded
+        | proto::BgpEventType::EvpnRouteWithdrawn
+        | proto::BgpEventType::EvpnRouteBestChanged => 16,
+        proto::BgpEventType::BfdSessionUp
+        | proto::BgpEventType::BfdSessionDown
+        | proto::BgpEventType::BfdSessionStateChanged => 32,
+        proto::BgpEventType::StreamLagged => 0x3f,
     }
 }
 
@@ -445,6 +510,18 @@ async fn run_drain(
 pub(crate) type SubscribeFromEventStream =
     Pin<Box<dyn Stream<Item = Result<proto::BgpEvent, Status>> + Send + 'static>>;
 
+fn parse_filter_when_available(
+    pass_through: bool,
+    request: &proto::SubscribeFromEventRequest,
+) -> Result<ProtoFilter, Status> {
+    if pass_through {
+        return Err(Status::failed_precondition(
+            "event history in pass-through mode; durable cursor unavailable",
+        ));
+    }
+    ProtoFilter::from_request(request)
+}
+
 /// Public entry point called by the tonic handler. Performs the
 /// availability checks, the subscribe, and spawns the drain task.
 /// Non-async because the underlying handle's `subscribe_from_event`
@@ -455,12 +532,7 @@ pub(crate) fn subscribe(
     request: &proto::SubscribeFromEventRequest,
     metrics: BgpMetrics,
 ) -> Result<SubscribeFromEventStream, Status> {
-    if handle.state().pass_through() {
-        return Err(Status::failed_precondition(
-            "event history in pass-through mode; durable cursor unavailable",
-        ));
-    }
-    let filter = ProtoFilter::from_request(request)?;
+    let filter = parse_filter_when_available(handle.state().pass_through(), request)?;
     let cursor = request.from_event_id;
 
     let subscribe_req = SubscribeRequest {
@@ -527,5 +599,56 @@ mod tests {
         })
         .unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn durable_event_type_matrix_is_exhaustive() {
+        for raw in 0..=100 {
+            let Ok(event_type) = proto::BgpEventType::try_from(raw) else {
+                continue;
+            };
+            let expected = match raw {
+                1..=4 => 1,
+                10..=14 | 20..=21 => 2,
+                22..=23 => 4,
+                30..=33 => 8,
+                40..=42 => 16,
+                50..=52 => 32,
+                100 => 0x3f,
+                0 => 0,
+                _ => unreachable!("known enum value covered"),
+            };
+            assert_eq!(
+                durable_event_type_mask(event_type),
+                expected,
+                "{event_type:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn availability_precedes_impossible_filter_validation() {
+        let request = proto::SubscribeFromEventRequest {
+            categories: vec![proto::EventCategory::Session as i32],
+            event_types: vec![proto::BgpEventType::OtcRouteBlocked as i32],
+            ..Default::default()
+        };
+        let unavailable = parse_filter_when_available(true, &request).unwrap_err();
+        assert_eq!(unavailable.code(), tonic::Code::FailedPrecondition);
+        let available = parse_filter_when_available(false, &request).unwrap_err();
+        assert_eq!(available.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn durable_mixed_sets_accept_any_intersection() {
+        let request = proto::SubscribeFromEventRequest {
+            categories: vec![
+                proto::EventCategory::Route as i32,
+                proto::EventCategory::Session as i32,
+            ],
+            event_types: vec![proto::BgpEventType::RouteAdded as i32],
+            ..Default::default()
+        };
+        ProtoFilter::from_request(&request).expect("one compatible category/type pair is enough");
     }
 }
