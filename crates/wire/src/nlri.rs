@@ -3,6 +3,31 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 
 use crate::error::DecodeError;
 
+#[cfg(feature = "codec-allocation-diagnostics")]
+std::thread_local! {
+    static DIRECT_IPV4_BODY_CODEC_CALLS: std::cell::Cell<[usize; 2]> =
+        const { std::cell::Cell::new([0; 2]) };
+}
+
+#[cfg(feature = "codec-allocation-diagnostics")]
+#[doc(hidden)]
+#[must_use]
+pub fn direct_ipv4_body_codec_calls(reset: bool) -> [usize; 2] {
+    let calls = DIRECT_IPV4_BODY_CODEC_CALLS.get();
+    if reset {
+        DIRECT_IPV4_BODY_CODEC_CALLS.set([0; 2]);
+    }
+    calls
+}
+
+#[cfg(feature = "codec-allocation-diagnostics")]
+#[doc(hidden)]
+pub fn note_direct_ipv4_body_codec_call(encoder_call: bool) {
+    let mut calls = DIRECT_IPV4_BODY_CODEC_CALLS.get();
+    calls[usize::from(!encoder_call)] += 1;
+    DIRECT_IPV4_BODY_CODEC_CALLS.set(calls);
+}
+
 /// An IPv4 NLRI entry with an optional Add-Path path ID (RFC 7911).
 ///
 /// For non-Add-Path peers, `path_id` is always 0.

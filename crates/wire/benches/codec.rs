@@ -9,21 +9,24 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 #[cfg(not(feature = "codec-allocation-diagnostics"))]
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
+use bytes::Bytes;
 use rustbgpd_wire::attribute::decode_path_attributes_revised;
 use rustbgpd_wire::attribute::{decode_path_attributes, encode_path_attributes};
+#[cfg(feature = "codec-allocation-diagnostics")]
+use rustbgpd_wire::nlri::direct_ipv4_body_codec_calls;
 #[cfg(not(feature = "codec-allocation-diagnostics"))]
 use rustbgpd_wire::nlri::{decode_nlri, encode_nlri};
 use rustbgpd_wire::validate::validate_update_attributes;
 #[cfg(not(feature = "codec-allocation-diagnostics"))]
 use rustbgpd_wire::{
-    Afi, ErrorDisposition, Ipv4NlriEntry, Ipv4Prefix, Ipv4UnicastMode, Ipv6Prefix, MpReachNlri,
-    MpUnreachNlri, NlriEntry, Prefix, Safi, UpdateMessage,
+    Afi, ErrorDisposition, Ipv6Prefix, MpReachNlri, MpUnreachNlri, NlriEntry, Prefix, Safi,
 };
 use rustbgpd_wire::{
-    Aggregator, AsPath, AsPathSegment, ExtendedCommunity, LargeCommunity, Origin, PathAttribute,
+    Aggregator, AsPath, AsPathSegment, EXTENDED_MAX_MESSAGE_LEN, EncodeError, ExtendedCommunity,
+    Ipv4NlriEntry, Ipv4Prefix, Ipv4UnicastMode, LargeCommunity, MAX_MESSAGE_LEN, Origin,
+    PathAttribute, RawAttribute, UpdateMessage,
 };
 
-#[cfg(not(feature = "codec-allocation-diagnostics"))]
 fn generate_ipv4_prefixes(count: usize) -> Vec<Ipv4Prefix> {
     (0..count)
         .map(|i| {
@@ -45,6 +48,113 @@ fn typical_attributes() -> Vec<PathAttribute> {
         PathAttribute::Med(50),
         PathAttribute::Communities(vec![0xFFFF_0001, 0xFFFF_0002]),
     ]
+}
+
+type BodyExpectation = (usize, usize, u64, usize, u64);
+#[rustfmt::skip]
+const BODY_EXPECTATIONS: [BodyExpectation; 3] = [
+    (1, 80, 0x1935_2704_3569_e69c, 4_180, 0x53f7_6c18_47c2_79ad),
+    (100, 476, 0x060a_e42b_a603_fb21, 4_576, 0x51e2_379e_cfb1_9ab8),
+    (1_000, 4_076, 0xd4ec_2208_27f1_c43c, 8_176, 0xe441_4b38_d6c5_b18d),
+];
+
+struct BodyFixture {
+    shape: &'static str,
+    announced: Vec<Ipv4NlriEntry>,
+    withdrawn: Vec<Ipv4NlriEntry>,
+    attributes: Vec<PathAttribute>,
+    update: UpdateMessage,
+    #[cfg(feature = "codec-allocation-diagnostics")]
+    digest: u64,
+}
+
+impl BodyFixture {
+    fn new(shape: &'static str, expectation: BodyExpectation) -> Self {
+        let (routes, standard_len, standard_digest, extended_len, extended_digest) = expectation;
+        let mut entries: Vec<_> = generate_ipv4_prefixes(routes)
+            .into_iter()
+            .map(|prefix| Ipv4NlriEntry { path_id: 0, prefix })
+            .collect();
+        let withdrawn = entries.split_off(routes.div_ceil(2));
+        let announced = entries;
+        let mut attributes = typical_attributes();
+        if shape == "extended" {
+            attributes.push(PathAttribute::Unknown(RawAttribute {
+                flags: 0xf0,
+                type_code: 99,
+                data: Bytes::from(vec![0x5a; 4_096]),
+            }));
+        }
+        let update = UpdateMessage::try_build(
+            &announced,
+            &withdrawn,
+            &attributes,
+            true,
+            false,
+            Ipv4UnicastMode::Body,
+        )
+        .expect("body fixture attributes must encode");
+        let (expected_len, expected_digest) = if shape == "standard" {
+            (standard_len, standard_digest)
+        } else {
+            (extended_len, extended_digest)
+        };
+        assert_eq!(update.encoded_len(), expected_len);
+        let mut full_wire = Vec::with_capacity(expected_len);
+        if shape == "extended" {
+            assert!(
+                matches!(update.encode_with_limit(&mut full_wire, MAX_MESSAGE_LEN),
+                    Err(EncodeError::MessageTooLong { size }) if size == expected_len)
+            );
+        }
+        let limit = if shape == "extended" {
+            EXTENDED_MAX_MESSAGE_LEN
+        } else {
+            MAX_MESSAGE_LEN
+        };
+        update.encode_with_limit(&mut full_wire, limit).unwrap();
+        let digest = fnv1a64(&full_wire);
+        assert_eq!((full_wire.len(), digest), (expected_len, expected_digest));
+        let fixture = Self {
+            shape,
+            announced,
+            withdrawn,
+            attributes,
+            update,
+            #[cfg(feature = "codec-allocation-diagnostics")]
+            digest,
+        };
+        assert_body_decoded(&fixture, false);
+        fixture
+    }
+
+    fn route_count(&self) -> usize {
+        self.announced.len() + self.withdrawn.len()
+    }
+}
+
+fn build_body(fixture: &BodyFixture, add_path: bool) -> UpdateMessage {
+    UpdateMessage::try_build(
+        &fixture.announced,
+        &fixture.withdrawn,
+        &fixture.attributes,
+        true,
+        add_path,
+        Ipv4UnicastMode::Body,
+    )
+    .unwrap()
+}
+
+fn assert_body_decoded(fixture: &BodyFixture, add_path: bool) {
+    let decoded = fixture
+        .update
+        .parse_revised(true, false, add_path, &[])
+        .unwrap();
+    assert!(decoded.malformed.is_empty());
+    assert_eq!(decoded.update.announced, fixture.announced);
+    assert_eq!(decoded.update.withdrawn, fixture.withdrawn);
+    assert_eq!(decoded.update.attributes, fixture.attributes);
+    assert_eq!(decoded.update.bgpls_nlri_discarded, 0);
 }
 
 /// A wider attribute set than [`typical_attributes`]: multi-segment
@@ -216,6 +326,22 @@ fn assert_ipv6_mp_add_path_update(
 }
 
 #[cfg(not(feature = "codec-allocation-diagnostics"))]
+fn ipv4_body_add_path_update() -> BodyFixture {
+    let mut fixture = BodyFixture::new("standard", BODY_EXPECTATIONS[1]);
+    for (index, entry) in fixture
+        .announced
+        .iter_mut()
+        .chain(&mut fixture.withdrawn)
+        .enumerate()
+    {
+        entry.path_id = u32::try_from(index + 1).unwrap();
+    }
+    fixture.update = build_body(&fixture, true);
+    assert_body_decoded(&fixture, true);
+    fixture
+}
+
+#[cfg(not(feature = "codec-allocation-diagnostics"))]
 fn bench_nlri_decode(c: &mut Criterion) {
     let mut group = c.benchmark_group("nlri_decode");
     for count in [1, 10, 100, 500] {
@@ -276,6 +402,54 @@ fn bench_update_build(c: &mut Criterion) {
     assert_ipv6_mp_add_path_update(&msg, &attrs, announced, withdrawn, next_hop);
     group.bench_function("ipv6_mp_add_path", |b| {
         b.iter(|| UpdateMessage::build(&[], &[], &attrs, true, true, Ipv4UnicastMode::Body));
+    });
+    group.finish();
+}
+
+#[cfg(not(feature = "codec-allocation-diagnostics"))]
+fn bench_update_body(c: &mut Criterion) {
+    let fixtures: Vec<_> = BODY_EXPECTATIONS
+        .into_iter()
+        .flat_map(|expectation| {
+            ["standard", "extended"].map(|shape| BodyFixture::new(shape, expectation))
+        })
+        .collect();
+    let add_path = ipv4_body_add_path_update();
+    let mut group = c.benchmark_group("update_body_build");
+    for fixture in &fixtures {
+        group.bench_with_input(
+            BenchmarkId::new(fixture.shape, fixture.route_count()),
+            fixture,
+            |b, fixture| b.iter(|| build_body(fixture, false)),
+        );
+    }
+    group.bench_function("add_path_body", |b| {
+        b.iter(|| build_body(&add_path, true));
+    });
+    group.finish();
+
+    let mut group = c.benchmark_group("update_body_parse_revised");
+    for fixture in &fixtures {
+        group.bench_with_input(
+            BenchmarkId::new(fixture.shape, fixture.route_count()),
+            fixture,
+            |b, fixture| {
+                b.iter(|| {
+                    fixture
+                        .update
+                        .parse_revised(true, false, false, &[])
+                        .unwrap()
+                });
+            },
+        );
+    }
+    group.bench_function("add_path_body", |b| {
+        b.iter(|| {
+            add_path
+                .update
+                .parse_revised(true, false, true, &[])
+                .unwrap()
+        });
     });
     group.finish();
 }
@@ -596,7 +770,6 @@ impl DiagnosticRow {
     }
 }
 
-#[cfg(feature = "codec-allocation-diagnostics")]
 fn fnv1a64(bytes: &[u8]) -> u64 {
     let mut digest = 0xcbf2_9ce4_8422_2325_u64;
     for byte in bytes {
@@ -757,7 +930,76 @@ fn run_attr_decode_revised_diagnostic() -> DiagnosticRow {
 }
 
 #[cfg(feature = "codec-allocation-diagnostics")]
+fn run_body_diagnostic(fixture: &BodyFixture, build: bool) {
+    assert_eq!(fixture.route_count(), 1_000);
+    assert_eq!(
+        (fixture.announced.len(), fixture.withdrawn.len()),
+        (500, 500)
+    );
+    let _ = direct_ipv4_body_codec_calls(true);
+    ALLOCATOR.reset();
+    for _ in 0..DIAGNOSTIC_OPERATIONS {
+        ALLOCATOR.enable();
+        if build {
+            let update = build_body(fixture, false);
+            ALLOCATOR.disable();
+            assert_eq!(update, fixture.update);
+        } else {
+            let decoded = fixture
+                .update
+                .parse_revised(true, false, false, &[])
+                .expect("measured revised body parse must succeed");
+            ALLOCATOR.disable();
+            assert!(decoded.malformed.is_empty());
+            assert_eq!(decoded.update.announced, fixture.announced);
+            assert_eq!(decoded.update.withdrawn, fixture.withdrawn);
+            assert_eq!(decoded.update.attributes, fixture.attributes);
+            assert_eq!(decoded.update.bgpls_nlri_discarded, 0);
+        }
+    }
+    let allocation = ALLOCATOR.receipt();
+    let direct = direct_ipv4_body_codec_calls(false);
+    let calls = match std::env::var("RUSTBGPD_WIRE_EXPECT_DIRECT_IPV4_BODY_CODEC").as_deref() {
+        Ok("optimized") => DIAGNOSTIC_OPERATIONS * 2,
+        Ok("baseline") | Err(std::env::VarError::NotPresent) => 0,
+        other => panic!("expected direct codec mode baseline or optimized, got {other:?}"),
+    };
+    assert_eq!(direct, if build { [calls, 0] } else { [0, calls] });
+    println!(
+        concat!(
+            "{{\"schema_version\":1,\"benchmark\":\"{}/{}/1000\",\"operations\":{},",
+            "\"fixture_routes\":1000,\"fixture_announced_routes\":500,",
+            "\"fixture_withdrawn_routes\":500,\"fixture_attributes\":{},",
+            "\"fixture_len_bytes\":{},\"full_wire_digest\":\"fnv1a64:{:016x}\",",
+            "\"alloc_calls\":{},\"alloc_zeroed_calls\":{},\"realloc_calls\":{},",
+            "\"allocation_calls\":{},\"requested_bytes\":{},",
+            "\"direct_encoder_calls\":{},\"direct_decoder_calls\":{}}}"
+        ),
+        if build { "build" } else { "parse_revised" },
+        fixture.shape,
+        DIAGNOSTIC_OPERATIONS,
+        fixture.attributes.len(),
+        fixture.update.encoded_len(),
+        fixture.digest,
+        allocation.alloc_calls,
+        allocation.alloc_zeroed_calls,
+        allocation.realloc_calls,
+        allocation.allocation_calls,
+        allocation.requested_bytes,
+        direct[0],
+        direct[1],
+    );
+}
+
+#[cfg(feature = "codec-allocation-diagnostics")]
 fn main() {
+    let expectation = BODY_EXPECTATIONS[2];
+    let standard = BodyFixture::new("standard", expectation);
+    let extended = BodyFixture::new("extended", expectation);
+    run_body_diagnostic(&standard, true);
+    run_body_diagnostic(&extended, true);
+    run_body_diagnostic(&standard, false);
+    run_body_diagnostic(&extended, false);
     let attr_encode = run_attr_encode_diagnostic();
     let attr_decode_revised = run_attr_decode_revised_diagnostic();
     let validate_update = run_validate_update_diagnostic();
@@ -780,6 +1022,7 @@ criterion_group!(
     bench_nlri_decode,
     bench_nlri_encode,
     bench_update_build,
+    bench_update_body,
     bench_update_parse,
     bench_update_parse_revised,
     bench_attr_decode,
