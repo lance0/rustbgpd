@@ -30,8 +30,19 @@ classify_rss() {
   fi
 }
 
+classify_child_exe() {
+  local expected=$1 actual=$2 state=$3
+  if [[ $actual == "$expected" ]]; then
+    echo sample
+  elif [[ -z $actual && ($state == Z || $state == absent) ]]; then
+    echo exited
+  else
+    echo reject
+  fi
+}
+
 check_seam() {
-  local script=$1 outer verify_call verify_body checksums_call checksums_body
+  local script=$1 outer verify_call verify_body checksums_call checksums_body classifier_call
   outer="timeout -k 10 1200 \"\$scr"
   outer+="ipt\" --campaign-inner \"\$output\""
   verify_call="full_ver"
@@ -42,10 +53,11 @@ check_seam() {
   checksums_call+="sums \"\$receipt\""
   checksums_body="sha256sum -c SHA"
   checksums_body+="256SUMS --strict"
+  classifier_call="classification=\$(classify_child_exe \"\$binary\" \"\$child_exe\" \"\$child_state\")"
   if ! grep -Fq "$outer" "$script" || ! grep -Fq "$verify_call" "$script" ||
     ! grep -Fq "$verify_body" "$script" || ! grep -Fq "$checksums_call" "$script" ||
-    ! grep -Fq "$checksums_body" "$script"; then
-    echo "runner lacks production verifier/checksum seam" >&2
+    ! grep -Fq "$checksums_body" "$script" || ! grep -Fq "$classifier_call" "$script"; then
+    echo "runner lacks production verifier/checksum/classifier seam" >&2
     return 1
   fi
 }
@@ -127,6 +139,11 @@ case ${1:-} in
   --classify-rss)
     [[ $# == 3 ]] || exit 2
     classify_rss "$2" "$3"
+    exit
+    ;;
+  --classify-child-exe)
+    [[ $# == 4 ]] || exit 2
+    classify_child_exe "$2" "$3" "$4"
     exit
     ;;
   --verify-fixture)
@@ -233,7 +250,12 @@ for run in 1 2 3; do
   while kill -0 "$pid" 2>/dev/null; do
     child=$(pgrep -P "$pid" -n || true)
     [[ -n $child ]] || { sleep 0.05; continue; }
-    [[ $(readlink -f "/proc/$child/exe") == "$binary" ]] || { echo "sampler child executable mismatch" >&2; exit 1; }
+    child_exe=$(readlink -f "/proc/$child/exe" 2>/dev/null || true)
+    child_state=$(awk '$1=="State:" {print substr($2,1,1)}' "/proc/$child/status" 2>/dev/null || true)
+    [[ -n $child_state ]] || child_state=absent
+    classification=$(classify_child_exe "$binary" "$child_exe" "$child_state")
+    [[ $classification == exited ]] && break
+    [[ $classification == sample ]] || { echo "sampler child executable mismatch" >&2; exit 1; }
     rss=$(awk '/VmRSS:/ {print $2}' "/proc/$child/status" 2>/dev/null || echo 0)
     (( rss > max_rss )) && max_rss=$rss
     printf 'sample\t%s\n' "$rss" >>"$receipt/rss.tsv"
