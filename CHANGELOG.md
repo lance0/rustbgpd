@@ -19,6 +19,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   start, with the family named in the error, while a family with no
   sessions is never opened and cannot fail startup.
 
+- Stale `PeerOrfUpdate`, `PeerSlowState`, `SetPeerPolicyContext`, and
+  `RouteRefreshRequest` messages no longer restart advertised-route page cursors.
+
 ## [0.61.0] — 2026-07-27
 
 > **Release framing.** This is the policy-safety line. RFC 8212

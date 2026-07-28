@@ -2978,7 +2978,7 @@ impl RibManager {
         if !key_stable {
             self.mark_outbound_dirty(peer);
         }
-        self.distribute_changes(&HashSet::new(), &HashSet::new());
+        self.distribute_changes_after_advertised_page_advance(&HashSet::new(), &HashSet::new());
     }
 
     /// The fingerprint itself: disqualifiers first (design §1), then
