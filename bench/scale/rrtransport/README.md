@@ -5,6 +5,8 @@ route-reflector transport path. It starts a production `RibManager`, two
 production transport sessions over TCP loopback, and the existing
 `rustbgpd-evpn-load` peer handshake/decoder. Four synthetic ingress sources
 inject exactly 100 unique IPv4 `/24` routes through `RibUpdate::RoutesReceived`.
+Each target listener remains bound while its actual ephemeral address is given
+to rustbgpd, then that exact socket is transferred into the peer handshake.
 
 The smoke preloads the RIB before registering either target session, then
 asserts one shared update group, exact staged Adj-RIB-Out counts, and exact

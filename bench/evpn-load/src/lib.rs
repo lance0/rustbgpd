@@ -132,11 +132,27 @@ pub struct PeerHandle {
 ///
 /// Returns a [`PeerError`] if bind/accept, OPEN exchange, or initial
 /// KEEPALIVE fails.
-#[expect(clippy::too_many_lines, reason = "reader task body is the bulk")]
 pub async fn establish(cfg: PeerConfig) -> Result<PeerHandle, PeerError> {
     validate_hold_time(cfg.hold_time)?;
     let listener = TcpListener::bind(cfg.listen).await?;
-    tracing::info!(listen = %cfg.listen, "evpn-load peer listening for BGP session");
+    establish_on(listener, cfg).await
+}
+
+/// Establish a synthetic peer on an already-bound listener.
+///
+/// The supplied listener is authoritative; `cfg.listen` remains descriptive
+/// input and is never rebound. This lets callers reserve an ephemeral address,
+/// publish its actual port, and transfer the exact socket into the handshake.
+///
+/// # Errors
+///
+/// Returns a [`PeerError`] if local-address inspection, accept, OPEN exchange,
+/// or initial KEEPALIVE fails.
+#[expect(clippy::too_many_lines, reason = "reader task body is the bulk")]
+pub async fn establish_on(listener: TcpListener, cfg: PeerConfig) -> Result<PeerHandle, PeerError> {
+    validate_hold_time(cfg.hold_time)?;
+    let listen = listener.local_addr()?;
+    tracing::info!(%listen, "evpn-load peer listening for BGP session");
     let (mut stream, remote) = listener.accept().await?;
     tracing::info!(%remote, "evpn-load peer accepted inbound BGP connection");
     drop(listener);
@@ -453,5 +469,29 @@ mod tests {
             Err(PeerError::InvalidHoldTime(2))
         ));
         assert!(validate_hold_time(3).is_ok());
+    }
+
+    #[tokio::test]
+    async fn establish_on_accepts_the_supplied_ephemeral_listener() {
+        let configured: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let listener = TcpListener::bind(configured).await.unwrap();
+        let actual = listener.local_addr().unwrap();
+        assert_ne!(actual, configured);
+        let cfg = PeerConfig {
+            listen: configured,
+            local_as: 64512,
+            router_id: Ipv4Addr::LOCALHOST,
+            hold_time: 30,
+            families: vec![(Afi::Ipv4, Safi::Unicast)],
+        };
+
+        let peer = tokio::spawn(establish_on(listener, cfg));
+        let mut stream = TcpStream::connect(actual).await.unwrap();
+        stream.shutdown().await.unwrap();
+
+        assert!(matches!(
+            peer.await.unwrap(),
+            Err(PeerError::PrematureClose)
+        ));
     }
 }

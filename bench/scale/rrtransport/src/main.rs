@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, ensure, Context, Result};
-use rustbgpd_evpn_load::{establish, PeerConfig as StubConfig};
+use rustbgpd_evpn_load::{establish_on, PeerConfig as StubConfig};
 use rustbgpd_fsm::{PeerConfig, SessionState};
 use rustbgpd_rib::route::{Route, RouteOrigin};
 use rustbgpd_rib::update::RibUpdate;
@@ -71,13 +71,6 @@ fn route(prefix: Ipv4Prefix, source: Ipv4Addr) -> Route {
         aspa_state: AspaValidation::Unknown,
         aspa_context: AspaValidationContext::default(),
     }
-}
-
-async fn free_listener(ip: Ipv4Addr) -> Result<SocketAddr> {
-    let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(ip), 0)).await?;
-    let address = listener.local_addr()?;
-    drop(listener);
-    Ok(address)
 }
 
 fn transport_config(remote: SocketAddr) -> TransportConfig {
@@ -322,21 +315,22 @@ async fn smoke() -> Result<()> {
             .await?;
     }
 
-    let addresses = [
-        free_listener(Ipv4Addr::new(127, 0, 0, 2)).await?,
-        free_listener(Ipv4Addr::new(127, 0, 0, 3)).await?,
+    let listeners = [
+        TcpListener::bind((Ipv4Addr::new(127, 0, 0, 2), 0)).await?,
+        TcpListener::bind((Ipv4Addr::new(127, 0, 0, 3), 0)).await?,
     ];
+    let addresses = [listeners[0].local_addr()?, listeners[1].local_addr()?];
     let mut stub_tasks = Vec::new();
     let mut sessions = Vec::new();
-    for (index, address) in addresses.into_iter().enumerate() {
+    for (index, (listener, address)) in listeners.into_iter().zip(addresses).enumerate() {
         let stub_config = StubConfig {
-            listen: address,
+            listen: SocketAddr::new(address.ip(), 0),
             local_as: 64512,
             router_id: Ipv4Addr::new(127, 0, 1, u8::try_from(index + 1).unwrap()),
             hold_time: 30,
             families: vec![(Afi::Ipv4, Safi::Unicast)],
         };
-        stub_tasks.push(tokio::spawn(establish(stub_config)));
+        stub_tasks.push(tokio::spawn(establish_on(listener, stub_config)));
         let session = PeerHandle::spawn(
             transport_config(address),
             metrics.clone(),
