@@ -878,6 +878,8 @@ pub struct AddNeighborOpts {
     pub min_hold_time: Option<u32>,
     pub send_hold_time: Option<u32>,
     pub max_prefixes: Option<u32>,
+    pub peer_group: Option<String>,
+    pub max_prefix_restart_seconds: Option<u32>,
     pub families: Vec<String>,
     pub required_families: Vec<String>,
     pub route_server_client: bool,
@@ -912,7 +914,7 @@ pub async fn add(
                 max_prefixes: opts.max_prefixes.unwrap_or(0),
                 families: opts.families,
                 required_families: opts.required_families,
-                peer_group: String::new(),
+                peer_group: opts.peer_group.unwrap_or_default(),
                 remove_private_as: String::new(),
                 route_server_client: opts.route_server_client,
                 per_client_best: opts.per_client_best,
@@ -922,7 +924,7 @@ pub async fn add(
                 add_path_send: opts.add_path_send,
                 add_path_send_max: opts.add_path_send_max,
                 paths_limit_receive_max: u32::from(opts.paths_limit_receive_max),
-                max_prefix_restart_seconds: None,
+                max_prefix_restart_seconds: opts.max_prefix_restart_seconds,
             }),
         })
         .await?;
@@ -1474,6 +1476,8 @@ mod tests {
                 hold_time: Some(90),
                 send_hold_time: Some(480),
                 max_prefixes: Some(1000),
+                peer_group: Some("rs-members".to_string()),
+                max_prefix_restart_seconds: Some(30),
                 families: vec!["ipv4_unicast".to_string(), "ipv6_unicast".to_string()],
                 required_families: vec!["ipv6_unicast".to_string()],
                 route_server_client: true,
@@ -1501,6 +1505,41 @@ mod tests {
         assert_eq!(request.remote_asn, 65002);
         assert_eq!(request.min_hold_time, Some(30));
         assert_eq!(request.required_families, vec!["ipv6_unicast"]);
+        assert_eq!(request.peer_group, "rs-members");
+        assert_eq!(request.max_prefix_restart_seconds, Some(30));
+
+        let connection = connect(&server.addr, None).await.unwrap();
+        add(
+            connection,
+            "10.0.0.3",
+            AddNeighborOpts {
+                min_hold_time: None,
+                asn: 65003,
+                description: None,
+                hold_time: None,
+                send_hold_time: None,
+                max_prefixes: None,
+                peer_group: None,
+                max_prefix_restart_seconds: None,
+                families: Vec::new(),
+                required_families: Vec::new(),
+                route_server_client: false,
+                per_client_best: false,
+                role: None,
+                strict_role: false,
+                add_path_receive: false,
+                add_path_send: false,
+                add_path_send_max: 0,
+                paths_limit_receive_max: 0,
+            },
+            true,
+        )
+        .await
+        .unwrap();
+
+        let request = server.state.last_add_neighbor.lock().await.clone().unwrap();
+        assert_eq!(request.peer_group, "");
+        assert_eq!(request.max_prefix_restart_seconds, None);
     }
 
     /// The zero-peer human output must say what happened AND hand the

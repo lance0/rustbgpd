@@ -305,6 +305,8 @@ _arguments "${_arguments_options[@]}" : \
 '--min-hold-time=[Minimum hold time accepted from the peer (3..=65535)]:MIN_HOLD_TIME:_default' \
 '--send-hold-time=[RFC 9687 send hold time in seconds (0 disables; must exceed the hold time; default\: max(480, 2 x hold time))]:SEND_HOLD_TIME:_default' \
 '--max-prefixes=[Max prefix limit]:MAX_PREFIXES:_default' \
+'--peer-group=[Peer group to assign atomically when adding the neighbor]:PEER_GROUP:_default' \
+'--max-prefix-restart-seconds=[Restart delay after a max-prefix teardown (must be greater than zero)]:MAX_PREFIX_RESTART_SECONDS:_default' \
 '*--families=[Address families (comma-separated)]:FAMILIES:_default' \
 '*--required-families=[Families that must be negotiated (comma-separated)]:REQUIRED_FAMILIES:_default' \
 '--role=[Local BGP Role for RFC 9234 route-leak protection]:ROLE:_default' \
@@ -468,6 +470,8 @@ _arguments "${_arguments_options[@]}" : \
 '--min-hold-time=[Minimum hold time accepted from the peer (3..=65535)]:MIN_HOLD_TIME:_default' \
 '--send-hold-time=[RFC 9687 send hold time in seconds (0 disables; must exceed the hold time; default\: max(480, 2 x hold time))]:SEND_HOLD_TIME:_default' \
 '--max-prefixes=[Max prefix limit]:MAX_PREFIXES:_default' \
+'--peer-group=[Peer group to assign atomically when adding the neighbor]:PEER_GROUP:_default' \
+'--max-prefix-restart-seconds=[Restart delay after a max-prefix teardown (must be greater than zero)]:MAX_PREFIX_RESTART_SECONDS:_default' \
 '*--families=[Address families (comma-separated)]:FAMILIES:_default' \
 '*--required-families=[Families that must be negotiated (comma-separated)]:REQUIRED_FAMILIES:_default' \
 '--role=[Local BGP Role for RFC 9234 route-leak protection]:ROLE:_default' \

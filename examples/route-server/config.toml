@@ -10,8 +10,9 @@
 #   special-purpose prefix snapshot — see hygiene.rpol)
 #
 # Path-hiding mitigation (RFC 7947 §2.3.2), both flavors:
-# - member-alpha negotiates Add-Path send: it sees all candidate paths
-#   and runs its own selection (the preferred mitigation);
+# - member-alpha negotiates Add-Path send: it sees up to the eight best
+#   export-permitted candidates, subject to configured and negotiated
+#   Paths-Limit, and runs its own selection (the preferred mitigation);
 # - member-beta cannot do Add-Path, so it opts into per_client_best:
 #   when its export policy denies the best path, the route server
 #   advertises the best *permitted* candidate instead of hiding the
@@ -142,8 +143,9 @@ enabled = false
 
 # --- IXP member peers ---
 
-# Add-Path-capable member: sees all candidate paths (preferred
-# path-hiding mitigation) and stays update-group-shareable.
+# Add-Path-capable member: sees up to the eight best export-permitted
+# candidates, subject to configured and negotiated Paths-Limit (preferred
+# path-hiding mitigation), and stays update-group-shareable.
 [[neighbors]]
 address = "198.51.100.2"
 remote_asn = 64501
