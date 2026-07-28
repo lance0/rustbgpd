@@ -65,7 +65,9 @@ expect_red changed-hash mutate -c 'import pathlib,sys;(pathlib.Path(sys.argv[1])
 "$runner" --check-seam "$runner"
 [[ $("$runner" --classify-child-exe /expected /expected R) == sample ]]
 [[ $("$runner" --classify-child-exe /expected /foreign R) == reject ]]
+[[ $("$runner" --classify-child-exe /expected /foreign X) == reject ]]
 [[ $("$runner" --classify-child-exe /expected "" R) == reject ]]
+[[ $("$runner" --classify-child-exe /expected "" X) == exited ]]
 [[ $("$runner" --classify-child-exe /expected "" Z) == exited ]]
 [[ $("$runner" --classify-child-exe /expected "" absent) == exited ]]
 for seam in \
@@ -74,7 +76,8 @@ for seam in \
   "python3 \"\$verifier\" \"\$receipt\" --full | tee \"\$receipt/verifier.txt\"" \
   "full_checksums \"\$receipt\"" \
   "sha256sum -c SHA256SUMS --strict" \
-  "classification=\$(classify_child_exe \"\$binary\" \"\$child_exe\" \"\$child_state\")"; do
+  "classification=\$(classify_child_exe \"\$binary\" \"\$child_exe\" \"\$child_state\")" \
+  "if ! wait \"\$pid\"; then echo \"rr1000 attempt failed\" >&2; pid=; exit 1; fi"; do
   cp "$runner" "$tmp/runner"
   grep -Fv "$seam" "$tmp/runner" >"$tmp/mutated"
   mv "$tmp/mutated" "$tmp/runner"
