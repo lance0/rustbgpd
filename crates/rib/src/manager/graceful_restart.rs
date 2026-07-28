@@ -29,7 +29,7 @@ impl RibManager {
         peer_llgr_capable: bool,
         peer_llgr_families: Vec<rustbgpd_wire::LlgrFamily>,
         llgr_stale_time: u32,
-    ) {
+    ) -> bool {
         // Same session-identity dispatch as `handle_peer_down`: a GR-down
         // from a superseded session (RFC 4271 §6.8 collision loser
         // processed after the winner's `PeerUp`) must not mark the
@@ -45,10 +45,10 @@ impl RibManager {
         // exactly as before stamping.
         use super::peer_lifecycle::SessionTeardownDisposition;
         match self.classify_session_teardown(peer, session_id, "PeerGracefulRestart") {
-            SessionTeardownDisposition::DiscardStale => return,
+            SessionTeardownDisposition::DiscardStale => return false,
             SessionTeardownDisposition::FailOver => {
                 self.fail_over_registration(peer, session_id, "PeerGracefulRestart");
-                return;
+                return true;
             }
             SessionTeardownDisposition::NoRegistration
             | SessionTeardownDisposition::TeardownActive => {}
@@ -299,6 +299,7 @@ impl RibManager {
         });
         self.metrics
             .set_gr_stale_routes(&peer_label, gauge_val(stale_count));
+        true
     }
 
     pub(super) fn handle_rpki_cache_update(&mut self, table: Arc<VrpTable>) {

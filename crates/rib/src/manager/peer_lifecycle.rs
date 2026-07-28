@@ -51,14 +51,18 @@ impl RibManager {
     /// collision interleaving: the loser's `PeerUp` replaced the winner's
     /// registration before the loser went down) fails the registration
     /// over to the survivor instead of tearing the peer down.
-    pub(super) fn handle_peer_down(&mut self, peer: IpAddr, session_id: u64) {
+    pub(super) fn handle_peer_down(&mut self, peer: IpAddr, session_id: u64) -> bool {
         match self.classify_session_teardown(peer, session_id, "PeerDown") {
-            SessionTeardownDisposition::DiscardStale => {}
+            SessionTeardownDisposition::DiscardStale => false,
             SessionTeardownDisposition::FailOver => {
                 self.fail_over_registration(peer, session_id, "PeerDown");
+                true
             }
             SessionTeardownDisposition::NoRegistration
-            | SessionTeardownDisposition::TeardownActive => self.peer_down_teardown(peer),
+            | SessionTeardownDisposition::TeardownActive => {
+                self.peer_down_teardown(peer);
+                true
+            }
         }
     }
 

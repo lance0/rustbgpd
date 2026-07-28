@@ -1520,6 +1520,31 @@ impl RibManager {
         self.advance_advertised_pages();
     }
 
+    fn route_page_versions_snapshot(&self) -> [Option<RoutePageVersion>; 3] {
+        [
+            self.route_page_received_version,
+            self.route_page_best_version,
+            self.route_page_advertised_version,
+        ]
+    }
+
+    fn ensure_advertised_pages_advanced(&mut self, snapshot: [Option<RoutePageVersion>; 3]) {
+        // Cover untouched scopes; synchronous internal distribution passes remain uncoalesced.
+        if self.route_page_advertised_version == snapshot[2] {
+            self.advance_advertised_pages();
+        }
+    }
+
+    fn ensure_all_route_pages_advanced(&mut self, snapshot: [Option<RoutePageVersion>; 3]) {
+        if self.route_page_received_version == snapshot[0] {
+            self.advance_received_pages();
+        }
+        if self.route_page_best_version == snapshot[1] {
+            self.advance_best_pages();
+        }
+        self.ensure_advertised_pages_advanced(snapshot);
+    }
+
     fn route_page_version(
         &self,
         scope: RouteQueryScope,
@@ -1538,17 +1563,14 @@ impl RibManager {
             // transition whose `Finalize` flips group memberships and export
             // overlays; general queries stay fenced out until it is terminal,
             // so advancing here at acceptance covers the whole transaction.
-            RibUpdate::PeerAddPathLimits { .. }
-            | RibUpdate::ReplacePeerExportPolicy { .. }
+            RibUpdate::ReplacePeerExportPolicy { .. }
             | RibUpdate::ReplacePeerExportPolicies { .. }
             | RibUpdate::ApplyOutboundPrefixLimits { .. }
             | RibUpdate::RefreshPeerOutbound { .. } => self.advance_advertised_pages(),
             RibUpdate::PeerUp { .. }
-            | RibUpdate::PeerDown { .. }
             | RibUpdate::PeerDeleted { .. }
             | RibUpdate::InjectRoute { .. }
             | RibUpdate::WithdrawInjected { .. }
-            | RibUpdate::PeerGracefulRestart { .. }
             | RibUpdate::RpkiCacheUpdate { .. }
             | RibUpdate::AspaTableUpdate { .. } => self.advance_all_route_pages(),
             _ => {}
@@ -1943,8 +1965,11 @@ impl RibManager {
                 }
             }
             RibUpdate::PeerDown { peer, session_id } => {
-                self.handle_peer_down(peer, session_id);
-                self.prune_exact_export_rejections();
+                let page_versions = self.route_page_versions_snapshot();
+                if self.handle_peer_down(peer, session_id) {
+                    self.prune_exact_export_rejections();
+                    self.ensure_all_route_pages_advanced(page_versions);
+                }
             }
             RibUpdate::PeerDeleted { peer } => self.handle_peer_deleted(peer),
             RibUpdate::PeerUp {
@@ -1993,6 +2018,7 @@ impl RibManager {
                 // reconfiguration surface (a decrease requires a new session
                 // so excess advertised path IDs are withdrawn by teardown).
                 if self.outbound_session_ids.get(&peer).copied() == Some(session_id) {
+                    let page_versions = self.route_page_versions_snapshot();
                     let send_families = self
                         .peer_add_path_send_families
                         .get(&peer)
@@ -2047,6 +2073,7 @@ impl RibManager {
                     if effective_limit_changed {
                         self.send_initial_table(peer);
                     }
+                    self.ensure_advertised_pages_advanced(page_versions);
                 }
             }
             RibUpdate::PeerOrfUpdate {
@@ -2428,16 +2455,21 @@ impl RibManager {
                 peer_llgr_capable,
                 peer_llgr_families,
                 llgr_stale_time,
-            } => self.handle_peer_graceful_restart(
-                peer,
-                session_id,
-                restart_time,
-                stale_routes_time,
-                gr_families,
-                peer_llgr_capable,
-                peer_llgr_families,
-                llgr_stale_time,
-            ),
+            } => {
+                let page_versions = self.route_page_versions_snapshot();
+                if self.handle_peer_graceful_restart(
+                    peer,
+                    session_id,
+                    restart_time,
+                    stale_routes_time,
+                    gr_families,
+                    peer_llgr_capable,
+                    peer_llgr_families,
+                    llgr_stale_time,
+                ) {
+                    self.ensure_all_route_pages_advanced(page_versions);
+                }
+            }
             RibUpdate::RpkiCacheUpdate { table } => self.handle_rpki_cache_update(table),
             RibUpdate::AspaTableUpdate { table } => self.handle_aspa_cache_update(table),
             RibUpdate::InjectFlowSpec { route, reply } => self.handle_inject_flowspec(route, reply),
