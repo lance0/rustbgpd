@@ -672,13 +672,15 @@ for the architectural record.
   aliasing receive-side projection
   (`crates/evpn/src/aliasing.rs`), RFC 7432 §8.4 receive-side
   EAD-per-ES mass-withdraw filtering
-  (`crates/evpn/src/mass_withdraw.rs`), and opt-in kernel BUM-port
-  enforcement (RFC 7432 §8.5) via `apply_bum_enforcement`. The
+  (`crates/evpn/src/mass_withdraw.rs`), and kernel BUM-port
+  enforcement (RFC 7432 §8.5) via `apply_bum_enforcement`, default-on
+  since v0.23.0 with explicit `false` as the observe-only opt-out. The
   enforcement primitive flips `flood off / mcast_flood off /
   bcast_flood off` on the kernel bridge port — validated end-to-end
   by `evpn_bum_filter_kernel` in CI under a Docker harness with
-  `CAP_NET_ADMIN + CAP_SYS_ADMIN`. Production-default enforcement
-  awaits the 24 h churn soak.
+  `CAP_NET_ADMIN + CAP_SYS_ADMIN`. The 2026-05-16 Gate 8b and
+  2026-05-19 M37 24 h soaks passed before the default flipped;
+  changing the setting remains restart-required.
 - **Gate 9 slice 6 — symmetric Interface-less IRB datapath
   landed.** Foundation
   (ADR-0058 + `[[evpn_ip_vrfs]]` config schema) landed, then
