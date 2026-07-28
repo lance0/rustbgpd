@@ -1483,11 +1483,43 @@ Dataplane summary and per-route FIB apply events remain live on `WatchEvents`
 and are also replayable through `SubscribeFromEvent` when event history is
 enabled. When event history is disabled or unavailable, the RPC returns
 `FAILED_PRECONDITION`; legacy live and `List*Events` RPCs are unaffected.
+That availability result takes precedence over filter validation.
 
-Filters compose
-AND-wise across category, type, peer, family, and exact prefix. Repeated
-category and type filters are OR-matched within their own dimension. Route
-events are sourced from the same structured RIB broadcast as `WatchRoutes`,
+Filters compose AND-wise across category, type, peer, family, and exact prefix.
+Repeated categories are ORed, repeated types are ORed, and the two dimensions
+are ANDed. A request is accepted when any selected category/type pair is real;
+no intersection returns `INVALID_ARGUMENT`. An empty category or type dimension
+is a wildcard for compatibility validation (the live default/opt-in selection
+rules below still apply).
+
+Synthetic `BGP_EVENT_TYPE_STREAM_LAGGED` control frames bypass ordinary
+category, type, peer, family, and prefix filters after compatibility validation.
+
+Live `WatchEvents` compatibility:
+
+| Category | Compatible event types |
+|----------|------------------------|
+| Route | `BGP_EVENT_TYPE_ROUTE_ADDED`, `BGP_EVENT_TYPE_ROUTE_WITHDRAWN`, `BGP_EVENT_TYPE_ROUTE_BEST_CHANGED`, `BGP_EVENT_TYPE_ROUTE_POLICY_FILTERED`, `BGP_EVENT_TYPE_STREAM_LAGGED` |
+| Session | `BGP_EVENT_TYPE_SESSION_STATE_CHANGED`, `BGP_EVENT_TYPE_SESSION_ESTABLISHED`, `BGP_EVENT_TYPE_SESSION_LOST`, `BGP_EVENT_TYPE_PEER_ENABLED`, `BGP_EVENT_TYPE_PEER_DISABLED`, `BGP_EVENT_TYPE_NOTIFICATION_SENT`, `BGP_EVENT_TYPE_NOTIFICATION_RECEIVED`, `BGP_EVENT_TYPE_STREAM_LAGGED` |
+| Policy | `BGP_EVENT_TYPE_POLICY_CHANGED` (never `BGP_EVENT_TYPE_STREAM_LAGGED`) |
+| Dataplane | `BGP_EVENT_TYPE_DATAPLANE_STATUS_CHANGED`, `BGP_EVENT_TYPE_DATAPLANE_ROUTE_INSTALLED`, `BGP_EVENT_TYPE_DATAPLANE_ROUTE_WITHDRAWN`, `BGP_EVENT_TYPE_DATAPLANE_ROUTE_FAILED`, plus `BGP_EVENT_TYPE_STREAM_LAGGED` only for the per-route source (not the peerless summary source) |
+| EVPN | `BGP_EVENT_TYPE_EVPN_ROUTE_ADDED`, `BGP_EVENT_TYPE_EVPN_ROUTE_WITHDRAWN`, `BGP_EVENT_TYPE_EVPN_ROUTE_BEST_CHANGED`, `BGP_EVENT_TYPE_STREAM_LAGGED` |
+| BFD | `BGP_EVENT_TYPE_BFD_SESSION_UP`, `BGP_EVENT_TYPE_BFD_SESSION_DOWN`, `BGP_EVENT_TYPE_BFD_SESSION_STATE_CHANGED`, `BGP_EVENT_TYPE_STREAM_LAGGED` |
+
+Durable `SubscribeFromEvent` compatibility:
+
+| Category | Compatible event types |
+|----------|------------------------|
+| Route | `BGP_EVENT_TYPE_ROUTE_ADDED`, `BGP_EVENT_TYPE_ROUTE_WITHDRAWN`, `BGP_EVENT_TYPE_ROUTE_BEST_CHANGED`, `BGP_EVENT_TYPE_ROUTE_POLICY_FILTERED`, global `BGP_EVENT_TYPE_STREAM_LAGGED` |
+| Session | `BGP_EVENT_TYPE_SESSION_STATE_CHANGED`, `BGP_EVENT_TYPE_SESSION_ESTABLISHED`, `BGP_EVENT_TYPE_SESSION_LOST`, `BGP_EVENT_TYPE_PEER_ENABLED`, `BGP_EVENT_TYPE_PEER_DISABLED`, `BGP_EVENT_TYPE_NOTIFICATION_SENT`, `BGP_EVENT_TYPE_NOTIFICATION_RECEIVED`, global `BGP_EVENT_TYPE_STREAM_LAGGED` |
+| Policy | `BGP_EVENT_TYPE_POLICY_CHANGED`, `BGP_EVENT_TYPE_OTC_ROUTE_BLOCKED`, global `BGP_EVENT_TYPE_STREAM_LAGGED` |
+| Dataplane | `BGP_EVENT_TYPE_DATAPLANE_STATUS_CHANGED`, `BGP_EVENT_TYPE_DATAPLANE_ROUTE_INSTALLED`, `BGP_EVENT_TYPE_DATAPLANE_ROUTE_WITHDRAWN`, `BGP_EVENT_TYPE_DATAPLANE_ROUTE_FAILED`, global `BGP_EVENT_TYPE_STREAM_LAGGED` |
+| EVPN | `BGP_EVENT_TYPE_EVPN_ROUTE_ADDED`, `BGP_EVENT_TYPE_EVPN_ROUTE_WITHDRAWN`, `BGP_EVENT_TYPE_EVPN_ROUTE_BEST_CHANGED`, global `BGP_EVENT_TYPE_STREAM_LAGGED` |
+| BFD | `BGP_EVENT_TYPE_BFD_SESSION_UP`, `BGP_EVENT_TYPE_BFD_SESSION_DOWN`, `BGP_EVENT_TYPE_BFD_SESSION_STATE_CHANGED`, global `BGP_EVENT_TYPE_STREAM_LAGGED` |
+
+`OTC_ROUTE_BLOCKED` is durable Policy only. Durable `STREAM_LAGGED` describes a
+global committed-stream gap and is therefore compatible with every category.
+Route events are sourced from the same structured RIB broadcast as `WatchRoutes`,
 including export-policy denial events (`route_policy_filtered`) for unicast
 routes present in Loc-RIB but filtered from an outbound peer;
 session events are sourced from the peer manager's session broadcast and cover
@@ -1516,10 +1548,9 @@ with empty categories selects the corresponding opt-in stream, and
 state-change lifecycle events over
 a bounded channel that is separate from the lossless TCP collision-coordination
 path, so high churn can drop observability events without risking collision
-handling. If a subscriber falls behind any subscribed bounded source, the stream
-emits a `stream_lagged` warning event with the source category and missed
-count; lag warnings are delivered for subscribed source categories even when
-the request's event-type filter is otherwise restrictive. Prefix and family
+handling. Live lag warnings emit for route, session, per-route dataplane, EVPN,
+and BFD sources, but not policy or peerless dataplane; durable lag is global.
+Prefix and family
 filters match unicast route events and per-route FIB dataplane events; session,
 policy, EVPN, BFD, and peerless dataplane summary events do not match requests
 that set `prefix` or `afi_safi`. Peer filters match route, session, EVPN, BFD,
@@ -1571,8 +1602,10 @@ Slow live-stream consumers do not block the daemon. If a `WatchEvents`,
 `WatchRouteEvents`, or `WatchRoutes` subscriber falls behind the bounded
 broadcast channel, missed events are skipped and
 `bgp_event_stream_lagged_total{service,source}` records the missed count.
-`WatchRouteEvents` and `WatchEvents` also emit an in-band `stream_lagged`
-warning to the affected subscriber. Use
+`WatchRouteEvents` emits an in-band `stream_lagged` warning; `WatchEvents`
+emits one for route, session, per-route dataplane, EVPN, and BFD sources.
+Policy and peerless dataplane lag is metric-only and discarded without an
+in-band warning. Use
 `bgp_event_stream_subscribers{service,source}` to see active stream readers and
 `bgp_route_event_history_depth` /
 `bgp_route_event_history_capacity` to understand how much recent unicast route
@@ -1610,7 +1643,7 @@ Stream health event types:
 
 | Type | Meaning |
 |------|---------|
-| `BGP_EVENT_TYPE_STREAM_LAGGED` | This subscriber missed one or more route or session events from a bounded source stream. See `StreamLagEvent.source_category` and `missed_count`. |
+| `BGP_EVENT_TYPE_STREAM_LAGGED` | Live: source-scoped route, session, per-route dataplane, EVPN, or BFD loss. Durable: a global outbox gap compatible with every category. |
 
 Policy event types:
 

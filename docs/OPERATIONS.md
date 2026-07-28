@@ -824,7 +824,7 @@ signal.
 
 | Metric | What it tells you |
 |--------|-------------------|
-| `bgp_event_stream_lagged_total{service,source}` | Events skipped because a live stream subscriber fell behind the bounded broadcast channel. `service` is `watch_events`, `watch_route_events`, or `watch_routes`; `source` is `route`, `session`, `evpn`, `dataplane`, or `dataplane_route` where applicable |
+| `bgp_event_stream_lagged_total{service,source}` | Events skipped because a live stream subscriber fell behind the bounded broadcast channel. `service` is `watch_events`, `watch_route_events`, or `watch_routes`; `source` is `route`, `session`, `policy`, `evpn`, `dataplane`, `dataplane_route`, or `bfd` where applicable |
 | `bgp_event_stream_subscribers{service,source}` | Current live stream subscriber count by service/source |
 | `bgp_route_event_history_depth` | Current number of unicast route events retained for `ListRouteEvents` / `rbgp events` history queries |
 | `bgp_route_event_history_capacity` | Fixed capacity of the bounded unicast route-event history ring |
@@ -1786,14 +1786,24 @@ config-file persistence is separate. Session state-change events use a bounded
 observability channel separate from the lossless TCP collision-coordination
 path, so a saturated watch stream can miss lifecycle events without blocking
 BGP collision handling. If the client falls behind a bounded route, session,
-policy, EVPN, dataplane, or BFD source stream, `events watch` prints a
+EVPN, per-route dataplane, or BFD source stream, `events watch` prints a
 `stream_lagged` warning with the missed count; treat subsequent output as a
-live tail after a gap. Use `--backfill N`
+live tail after a gap. Policy and peerless dataplane lag is metric-only, with
+no in-band warning. Use `--backfill N`
 to print recent matching route history before the live tail starts. Backfill
 is route-history only; session, policy, EVPN, dataplane, and BFD events are not
-backfilled through the live stream command. Per-route FIB dataplane events are
-live-only; use `rbgp rib fib` for the current route ownership snapshot
-after a reconnect.
+backfilled from process-local history through the live stream command. When
+EHM is enabled, those categories — including per-route FIB dataplane events —
+can instead be replayed durably with `SubscribeFromEvent` or
+`rbgp events watch --from-event-id <N>`. Use `rbgp rib fib` for the current
+route ownership snapshot after a reconnect.
+
+Category/type values are ORed within each dimension and ANDed across them. The
+CLI rejects impossible combinations locally before connecting. On the server,
+a missing EHM or an EHM in pass-through mode returns `FAILED_PRECONDITION`
+before category/type parsing. Durable lag is global for every category; OTC is
+durable-policy only.
+
 Backfilled route events use the same output shape as live route events, but
 the command still prints a history block followed by the live tail rather than
 merging the two by wall-clock timestamp.

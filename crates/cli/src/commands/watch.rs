@@ -805,6 +805,132 @@ fn validate_event_filter_categories(
     Ok(())
 }
 
+pub fn validate_events_watch_filter(
+    categories: &[String],
+    event_types: &[String],
+    from_event_id: Option<u64>,
+) -> Result<(), CliError> {
+    let categories = categories
+        .iter()
+        .map(String::as_str)
+        .map(parse_event_category)
+        .collect::<Result<Vec<_>, _>>()?;
+    let event_types = event_types
+        .iter()
+        .map(String::as_str)
+        .map(parse_bgp_event_type)
+        .collect::<Result<Vec<_>, _>>()?;
+    validate_category_event_types(
+        &categories,
+        &event_types,
+        from_event_id.is_some() || event_types.contains(&(BgpEventType::OtcRouteBlocked as i32)),
+    )
+}
+
+fn validate_category_event_types(
+    categories: &[i32],
+    event_types: &[i32],
+    durable: bool,
+) -> Result<(), CliError> {
+    if event_types.is_empty() {
+        return Ok(());
+    }
+    let categories = categories.iter().fold(0, |mask, value| {
+        mask | category_mask(EventCategory::try_from(*value).expect("parsed category"))
+    });
+    let categories = if categories == 0 { 0x3f } else { categories };
+    let event_types = event_types.iter().fold(0, |mask, value| {
+        let event_type = BgpEventType::try_from(*value).expect("parsed event type");
+        mask | if durable {
+            durable_event_type_mask(event_type)
+        } else {
+            live_event_type_mask(event_type)
+        }
+    });
+    if categories & event_types != 0 {
+        Ok(())
+    } else {
+        let surface = if durable {
+            "durable SubscribeFromEvent"
+        } else {
+            "live WatchEvents"
+        };
+        Err(CliError::Argument(format!(
+            "event category/type filters have no possible intersection for the {surface} stream"
+        )))
+    }
+}
+
+fn category_mask(category: EventCategory) -> u8 {
+    match category {
+        EventCategory::Unspecified => 0,
+        EventCategory::Route => 1,
+        EventCategory::Session => 2,
+        EventCategory::Policy => 4,
+        EventCategory::Dataplane => 8,
+        EventCategory::Evpn => 16,
+        EventCategory::Bfd => 32,
+    }
+}
+
+fn live_event_type_mask(event_type: BgpEventType) -> u8 {
+    match event_type {
+        BgpEventType::Unspecified | BgpEventType::OtcRouteBlocked => 0,
+        BgpEventType::RouteAdded
+        | BgpEventType::RouteWithdrawn
+        | BgpEventType::RouteBestChanged
+        | BgpEventType::RoutePolicyFiltered => 1,
+        BgpEventType::SessionStateChanged
+        | BgpEventType::SessionEstablished
+        | BgpEventType::SessionLost
+        | BgpEventType::PeerEnabled
+        | BgpEventType::PeerDisabled
+        | BgpEventType::NotificationSent
+        | BgpEventType::NotificationReceived => 2,
+        BgpEventType::PolicyChanged => 4,
+        BgpEventType::DataplaneStatusChanged
+        | BgpEventType::DataplaneRouteInstalled
+        | BgpEventType::DataplaneRouteWithdrawn
+        | BgpEventType::DataplaneRouteFailed => 8,
+        BgpEventType::EvpnRouteAdded
+        | BgpEventType::EvpnRouteWithdrawn
+        | BgpEventType::EvpnRouteBestChanged => 16,
+        BgpEventType::BfdSessionUp
+        | BgpEventType::BfdSessionDown
+        | BgpEventType::BfdSessionStateChanged => 32,
+        BgpEventType::StreamLagged => 1 | 2 | 8 | 16 | 32,
+    }
+}
+
+fn durable_event_type_mask(event_type: BgpEventType) -> u8 {
+    match event_type {
+        BgpEventType::Unspecified => 0,
+        BgpEventType::RouteAdded
+        | BgpEventType::RouteWithdrawn
+        | BgpEventType::RouteBestChanged
+        | BgpEventType::RoutePolicyFiltered => 1,
+        BgpEventType::SessionStateChanged
+        | BgpEventType::SessionEstablished
+        | BgpEventType::SessionLost
+        | BgpEventType::PeerEnabled
+        | BgpEventType::PeerDisabled
+        | BgpEventType::NotificationSent
+        | BgpEventType::NotificationReceived => 2,
+        BgpEventType::PolicyChanged | BgpEventType::OtcRouteBlocked => 4,
+        BgpEventType::DataplaneStatusChanged
+        | BgpEventType::DataplaneRouteInstalled
+        | BgpEventType::DataplaneRouteWithdrawn
+        | BgpEventType::DataplaneRouteFailed => 8,
+        BgpEventType::EvpnRouteAdded
+        | BgpEventType::EvpnRouteWithdrawn
+        | BgpEventType::EvpnRouteBestChanged => 16,
+        BgpEventType::BfdSessionUp
+        | BgpEventType::BfdSessionDown
+        | BgpEventType::BfdSessionStateChanged => 32,
+        BgpEventType::StreamLagged => 0x3f,
+    }
+}
+
 pub async fn run(
     connection: Connection,
     neighbor: Option<String>,
@@ -831,6 +957,11 @@ pub async fn events_watch(
     connection: Connection,
     options: EventsWatchOptions,
 ) -> Result<(), CliError> {
+    validate_events_watch_filter(
+        &options.categories,
+        &options.event_types,
+        options.from_event_id,
+    )?;
     let EventsWatchOptions {
         categories,
         neighbor,
@@ -848,7 +979,6 @@ pub async fn events_watch(
         .map(parse_event_category)
         .collect::<Result<Vec<_>, _>>()?;
     validate_event_filter_categories(&categories, &neighbor, family, &prefix)?;
-
     let event_types = event_types
         .iter()
         .map(String::as_str)
@@ -2553,6 +2683,34 @@ mod tests {
             BgpEventType::PolicyChanged as i32,
         ];
         validate_route_only_filters(&[], &event_types, None, Some("203.0.113.0/24")).unwrap();
+    }
+
+    #[test]
+    fn unified_filter_live_and_durable_matrices_are_exhaustive() {
+        for raw in 0..=100 {
+            let Ok(event_type) = BgpEventType::try_from(raw) else {
+                continue;
+            };
+            let (live, durable) = match raw {
+                1..=4 => (1, 1),
+                10..=14 | 20..=21 => (2, 2),
+                22 => (4, 4),
+                23 => (0, 4),
+                30..=33 => (8, 8),
+                40..=42 => (16, 16),
+                50..=52 => (32, 32),
+                100 => (1 | 2 | 8 | 16 | 32, 0x3f),
+                0 => (0, 0),
+                _ => unreachable!("known enum value covered"),
+            };
+            assert_eq!(live_event_type_mask(event_type), live);
+            assert_eq!(durable_event_type_mask(event_type), durable);
+        }
+        let policy = [EventCategory::Policy as i32];
+        assert!(validate_category_event_types(&policy, &[22, 100], false).is_ok());
+        assert!(validate_category_event_types(&[1, 2], &[1], false).is_ok());
+        assert!(validate_category_event_types(&policy, &[100], false).is_err());
+        assert!(validate_category_event_types(&[2], &[23], true).is_err());
     }
 
     #[test]
