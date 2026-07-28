@@ -20,3 +20,38 @@ Run from the repository root:
 ```text
 cargo run --manifest-path bench/scale/rrtransport/Cargo.toml --locked -- smoke
 ```
+
+## Fixed scale instrument
+
+`rrtransport rr1000 <output-dir>` is the measurement-only real-transport
+instrument. Its shape is intentionally not configurable: 1,000 uniform
+IPv4-unicast iBGP route-reflector clients, 100,000 distinct `/24` routes from
+four sources, and a 12-worker Tokio runtime. Every listener is retained through
+accept. All sessions establish against an empty RIB and drain exactly one empty
+initial EoR before T0. The receipt reports injection-finished, exact staged
+Adj-RIB-Out convergence, and exact decoded wire convergence separately.
+
+Wire classification retains one expected table and a 100,000-bit bitmap per
+client. It rejects missing or outside prefixes, duplicates, withdrawals,
+decode failures, incomplete sessions, and more than one update group. It counts
+decoded NLRI, not UPDATE messages. One aggregate 120-second deadline covers
+setup, convergence, validation, and shutdown.
+
+Run the three-attempt campaign only through:
+
+```text
+bench/scale/rrtransport/run-receipt.sh /absolute/output/outside/the/repository
+```
+
+The runner requires 4,096 file descriptors, 16 GiB available RAM, performance
+CPU governors, a quiet host, no competing BGP daemon, and a clean source tree.
+It owns a host lock, enforces a 2 GiB whole-process RSS ceiling, a 300-second
+per-run guard, and a 20-minute campaign guard. Each run retains phase and
+per-peer evidence, phase-local VmRSS/VmHWM, an independent sampler maximum,
+logs, source/binary provenance, verifier output, and checksums. Results are not
+comparable to the historical unavailable scratch harness and must not be
+published as an A/B.
+
+CI never runs the scale shape. It runs the original smoke, a 4×100 real-TCP
+fixture through the same scale collector/verifier/RSS seams, and destructive
+parser/mechanics fixtures.

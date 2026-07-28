@@ -21,6 +21,9 @@ use rustbgpd_wire::{
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
 
+mod rr1000;
+mod rr1000_support;
+
 const PEERS: usize = 2;
 const PREFIXES: usize = 100;
 const SOURCES: usize = 4;
@@ -428,14 +431,17 @@ async fn smoke() -> Result<()> {
     Ok(())
 }
 
-#[tokio::main(flavor = "multi_thread", worker_threads = 4)]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     ensure!(cfg!(target_os = "linux"), "rrtransport requires Linux");
-    let mut args = std::env::args();
-    let _program = args.next();
-    ensure!(
-        args.next().as_deref() == Some("smoke") && args.next().is_none(),
-        "usage: rrtransport smoke"
-    );
-    smoke().await
+    let args = std::env::args().skip(1).collect::<Vec<_>>();
+    match args.as_slice() {
+        [mode] if mode == "smoke" => rr1000_support::runtime(4)?.block_on(smoke()),
+        [mode, output] if mode == "rr1000" => {
+            rr1000_support::runtime(12)?.block_on(rr1000::run(output, false))
+        }
+        [mode, output] if mode == "rrtiny" => {
+            rr1000_support::runtime(12)?.block_on(rr1000::run(output, true))
+        }
+        _ => bail!("usage: rrtransport smoke | rrtransport rr1000 <output-dir>"),
+    }
 }
