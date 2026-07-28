@@ -903,7 +903,9 @@ pub struct MalformedAttribute {
 /// cleanly plus the malformations recovered per RFC 7606.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RevisedAttributeDecode {
-    /// Attributes that decoded cleanly (malformed ones are omitted).
+    /// Attributes that decoded successfully. An attribute that fails validation
+    /// may be retained here for observation alongside its treat-as-withdraw
+    /// disposition.
     pub attributes: Vec<PathAttribute>,
     /// BGP-LS NLRIs dropped for out-of-order descriptor TLVs (RFC 9552).
     pub bgpls_nlri_discarded: u32,

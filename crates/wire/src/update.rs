@@ -50,8 +50,9 @@ pub struct ParsedUpdate {
 /// parts plus the malformed attributes recovered per RFC 7606.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RevisedParsedUpdate {
-    /// The parsed UPDATE. Malformed attributes are omitted from
-    /// `update.attributes`.
+    /// The parsed UPDATE. A successfully decoded attribute that fails
+    /// validation may be retained in `update.attributes` for observation
+    /// alongside its treat-as-withdraw disposition.
     pub update: ParsedUpdate,
     /// Malformed attributes recovered without aborting the parse, each with
     /// its RFC 7606 disposition. Empty means the UPDATE decoded cleanly.
@@ -163,8 +164,9 @@ impl UpdateMessage {
     /// Parse the raw UPDATE with RFC 7606 revised error handling.
     ///
     /// Like [`parse()`](Self::parse), but a malformed path attribute does not
-    /// abort the parse: it is omitted from `update.attributes` and recorded in
-    /// `malformed` with its RFC 7606 disposition (see
+    /// abort the parse: it is recorded in `malformed` with its RFC 7606
+    /// disposition and, if decoding succeeded before validation failed, may
+    /// also be retained in `update.attributes` for observation (see
     /// [`crate::attribute::decode_path_attributes_revised`]). The caller
     /// applies the strongest recorded disposition (§3 (h)).
     ///
