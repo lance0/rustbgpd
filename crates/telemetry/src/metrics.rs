@@ -835,14 +835,16 @@ impl BgpMetrics {
         let rib_stale_session_message_ignored = IntCounterVec::new(
             Opts::new(
                 "bgp_rib_stale_session_message_ignored_total",
-                "Session-scoped RIB messages (RoutesReceived, End-of-RIB, \
-                 route-refresh begin/end/request, ORF updates, or policy \
-                 context updates) discarded \
+                "Session-scoped RIB messages (RoutesReceived, including \
+                 BGP-LS, VPN, labeled-unicast, and RT-Constrain families; \
+                 End-of-RIB; route-refresh begin/end/request; ORF updates; \
+                 or policy context / PeerSlowState slow-peer updates) discarded \
                  because their session id did not match the registered \
                  session for the peer — a message from a superseded session \
                  (collision loser) queued behind the replacement's PeerUp. \
                  The registered session's state is untouched. `kind` is one \
-                 of: routes, eor, refresh, orf, policy_context.",
+                 of: routes, bgpls, vpn, labeled, rtc, eor, refresh, orf, \
+                 policy_context, slow_peer.",
             ),
             &["peer", "kind"],
         )
@@ -3179,19 +3181,29 @@ impl BgpMetrics {
             .inc();
     }
 
-    /// Record a session-scoped RIB message (routes, End-of-RIB,
-    /// route-refresh begin/end/request, ORF update, or policy context
-    /// update) discarded because its session id did not match the
-    /// registered session for the peer (a message from a superseded
-    /// session).
+    /// Record a session-scoped RIB message (routes, including BGP-LS, VPN,
+    /// labeled-unicast, and RT-Constrain families; End-of-RIB; route-refresh
+    /// begin/end/request; ORF update; policy context update; or slow-peer
+    /// state) discarded because its session id did not match the registered
+    /// session for the peer (a message from a superseded session).
     ///
-    /// `kind` is bounded: `"routes"`, `"eor"`, `"refresh"`, `"orf"`,
-    /// or `"policy_context"`.
+    /// `kind` is bounded: `"routes"`, `"bgpls"`, `"vpn"`, `"labeled"`,
+    /// `"rtc"`, `"eor"`, `"refresh"`, `"orf"`, `"policy_context"`, or
+    /// `"slow_peer"`.
     pub fn record_rib_stale_session_message_ignored(&self, peer: &str, kind: &str) {
         debug_assert!(
             matches!(
                 kind,
-                "routes" | "eor" | "refresh" | "orf" | "policy_context"
+                "routes"
+                    | "bgpls"
+                    | "vpn"
+                    | "labeled"
+                    | "rtc"
+                    | "eor"
+                    | "refresh"
+                    | "orf"
+                    | "policy_context"
+                    | "slow_peer"
             ),
             "unbounded stale-session-message kind label: {kind:?}"
         );
@@ -5699,6 +5711,10 @@ mod tests {
         m.record_rib_stale_session_message_ignored("10.0.0.1", "routes");
         m.record_rib_stale_session_message_ignored("10.0.0.1", "eor");
         m.record_rib_stale_session_message_ignored("10.0.0.1", "policy_context");
+        m.record_rib_stale_session_message_ignored("10.0.0.1", "slow_peer");
+        for kind in ["bgpls", "vpn", "labeled", "rtc"] {
+            m.record_rib_stale_session_message_ignored("10.0.0.1", kind);
+        }
         m.record_rib_outbound_registration_failover("10.0.0.1");
         m.record_rib_dirty_resync("still_dirty");
         m.record_rib_dirty_resync("cleared");
@@ -5735,6 +5751,38 @@ mod tests {
                 .get(),
             1
         );
+        assert_eq!(
+            m.rib_stale_session_message_ignored
+                .with_label_values(&["10.0.0.1", "slow_peer"])
+                .get(),
+            1
+        );
+        for kind in ["bgpls", "vpn", "labeled", "rtc"] {
+            assert_eq!(
+                m.rib_stale_session_message_ignored
+                    .with_label_values(&["10.0.0.1", kind])
+                    .get(),
+                1,
+                "live stale-session kind {kind} is recorded"
+            );
+        }
+        let help = m
+            .registry()
+            .gather()
+            .into_iter()
+            .find(|family| family.name() == "bgp_rib_stale_session_message_ignored_total")
+            .expect("stale-session metric is registered")
+            .help()
+            .to_owned();
+        let (_, kind_help) = help
+            .split_once("`kind` is one of:")
+            .expect("metric HELP names the bounded kind inventory");
+        for kind in ["bgpls", "vpn", "labeled", "rtc"] {
+            assert!(
+                kind_help.contains(kind),
+                "metric HELP omits live stale-session kind {kind}"
+            );
+        }
         assert_eq!(
             m.rib_outbound_registration_failover
                 .with_label_values(&["10.0.0.1"])

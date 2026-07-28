@@ -157,6 +157,14 @@ fn direct_advertised_snapshot(manager: &mut RibManager, peer: IpAddr) -> Vec<Rou
 }
 
 fn peer_up_direct(manager: &mut RibManager, peer: IpAddr) -> mpsc::Receiver<OutboundRouteUpdate> {
+    peer_up_direct_with_negotiated_orf(manager, peer, vec![])
+}
+
+fn peer_up_direct_with_negotiated_orf(
+    manager: &mut RibManager,
+    peer: IpAddr,
+    negotiated_orf_recv: Vec<(Afi, Safi)>,
+) -> mpsc::Receiver<OutboundRouteUpdate> {
     let (outbound_tx, outbound_rx) = mpsc::channel(64);
     manager.handle_update(RibUpdate::PeerUp {
         per_client_best: false,
@@ -173,7 +181,7 @@ fn peer_up_direct(manager: &mut RibManager, peer: IpAddr) -> mpsc::Receiver<Outb
         orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
-        negotiated_orf_recv: vec![],
+        negotiated_orf_recv,
         negotiated_llgr_families: vec![],
     });
     outbound_rx
@@ -1391,6 +1399,15 @@ fn route_page_versions(manager: &RibManager) -> [RoutePageVersion; 3] {
     ]
 }
 
+fn assert_only_advertised_page_version_advanced_once(
+    before: [RoutePageVersion; 3],
+    after: [RoutePageVersion; 3],
+) {
+    assert_eq!(after[..2], before[..2], "received/best versions changed");
+    assert_eq!(after[2].epoch, before[2].epoch);
+    assert_eq!(after[2].generation, before[2].generation + 1);
+}
+
 fn assert_each_route_page_version_advanced_once(
     before: [RoutePageVersion; 3],
     after: [RoutePageVersion; 3],
@@ -1399,6 +1416,224 @@ fn assert_each_route_page_version_advanced_once(
         assert_eq!(after.epoch, before.epoch);
         assert_eq!(after.generation, before.generation + 1);
     }
+}
+
+#[test]
+fn stale_peer_orf_update_does_not_advance_advertised_page_version() {
+    let (mut manager, peer) = refresh_test_manager();
+    let before = route_page_versions(&manager);
+    let (reply, _response) = oneshot::channel();
+
+    manager.handle_update(RibUpdate::PeerOrfUpdate {
+        peer,
+        session_id: 1,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+        when: WhenToRefresh::Defer,
+        entries: vec![],
+        reply,
+    });
+
+    assert_eq!(
+        route_page_versions(&manager),
+        before,
+        "a stale PeerOrfUpdate must not advance the advertised-page generation"
+    );
+}
+
+#[test]
+fn accepted_peer_orf_update_advances_advertised_page_version_once() {
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source_v4 = Ipv4Addr::new(192, 0, 2, 1);
+    let route = make_route(
+        Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24),
+        source_v4,
+    );
+    receive_direct(
+        &mut manager,
+        IpAddr::V4(source_v4),
+        vec![route.clone()],
+        vec![],
+    );
+    let mut outbound_rx =
+        peer_up_direct_with_negotiated_orf(&mut manager, peer, vec![(Afi::Ipv4, Safi::Unicast)]);
+    assert!(
+        manager.grouped_member_of(peer).is_none(),
+        "an ORF-capable peer must remain outside update groups"
+    );
+    let initial = outbound_rx.try_recv().expect("initial EoR remains live");
+    assert!(
+        initial.announce.is_empty(),
+        "ORF gate blocks the initial route"
+    );
+    let before = route_page_versions(&manager);
+    let (reply, mut response) = oneshot::channel();
+
+    manager.handle_update(RibUpdate::PeerOrfUpdate {
+        peer,
+        session_id: 0,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+        when: WhenToRefresh::Immediate,
+        entries: vec![],
+        reply,
+    });
+
+    assert_eq!(
+        response
+            .try_recv()
+            .expect("ORF update replies synchronously"),
+        Ok(())
+    );
+    let forced = outbound_rx
+        .try_recv()
+        .expect("Immediate ORF performs a forced distribution");
+    assert!(
+        forced
+            .announce
+            .iter()
+            .any(|announced| announced.prefix == route.prefix),
+        "forced distribution advertises the route admitted after the ORF gate lifts"
+    );
+    assert_only_advertised_page_version_advanced_once(before, route_page_versions(&manager));
+}
+
+#[test]
+fn stale_peer_slow_state_does_not_advance_advertised_page_version() {
+    let (mut manager, peer) = refresh_test_manager();
+    let before = route_page_versions(&manager);
+
+    manager.handle_update(RibUpdate::PeerSlowState {
+        peer,
+        session_id: 1,
+        slow: true,
+    });
+
+    assert_eq!(
+        route_page_versions(&manager),
+        before,
+        "a stale PeerSlowState must not advance the advertised-page generation"
+    );
+}
+
+#[test]
+fn accepted_peer_slow_state_advances_advertised_page_version_once() {
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let group_mate = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let mut peer_rx = peer_up_direct(&mut manager, peer);
+    let mut mate_rx = peer_up_direct(&mut manager, group_mate);
+    peer_rx
+        .try_recv()
+        .expect("peer outbound receiver remains live");
+    mate_rx
+        .try_recv()
+        .expect("group-mate outbound receiver remains live");
+    let original_group = manager
+        .grouped_member_of(peer)
+        .expect("peer starts grouped");
+    assert_eq!(manager.grouped_member_of(group_mate), Some(original_group));
+    let mate_advertised = sorted_keys(&direct_advertised_snapshot(&mut manager, group_mate));
+    let before = route_page_versions(&manager);
+
+    manager.handle_update(RibUpdate::PeerSlowState {
+        peer,
+        session_id: 0,
+        slow: true,
+    });
+
+    assert!(matches!(
+        manager.update_groups.membership(peer),
+        Some(crate::manager::update_groups::GroupMembership::SlowPeer)
+    ));
+    assert_eq!(
+        manager.grouped_member_of(group_mate),
+        Some(original_group),
+        "the group-mate stays in its original group"
+    );
+    assert_eq!(
+        sorted_keys(&direct_advertised_snapshot(&mut manager, group_mate)),
+        mate_advertised,
+        "the group-mate's advertised view is unchanged"
+    );
+    assert!(matches!(
+        peer_rx.try_recv(),
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+    ));
+    assert!(matches!(
+        mate_rx.try_recv(),
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+    ));
+    assert_only_advertised_page_version_advanced_once(before, route_page_versions(&manager));
+}
+
+#[test]
+fn stale_peer_policy_context_does_not_advance_advertised_page_version() {
+    let (mut manager, peer) = refresh_test_manager();
+    let before = route_page_versions(&manager);
+
+    manager.handle_update(RibUpdate::SetPeerPolicyContext {
+        peer,
+        session_id: 1,
+        peer_group: Some("stale".to_string()),
+    });
+
+    assert_eq!(
+        route_page_versions(&manager),
+        before,
+        "a stale SetPeerPolicyContext must not advance the advertised-page generation"
+    );
+}
+
+#[test]
+fn accepted_peer_policy_context_advances_advertised_page_version_once() {
+    let (mut manager, peer) = refresh_test_manager();
+    let before = route_page_versions(&manager);
+
+    manager.handle_update(RibUpdate::SetPeerPolicyContext {
+        peer,
+        session_id: 0,
+        peer_group: Some("active".to_string()),
+    });
+
+    assert_only_advertised_page_version_advanced_once(before, route_page_versions(&manager));
+}
+
+#[test]
+fn stale_route_refresh_request_does_not_advance_advertised_page_version() {
+    let (mut manager, peer) = refresh_test_manager();
+    let before = route_page_versions(&manager);
+
+    manager.handle_update(RibUpdate::RouteRefreshRequest {
+        peer,
+        session_id: 1,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    });
+
+    assert_eq!(
+        route_page_versions(&manager),
+        before,
+        "a stale RouteRefreshRequest must not advance the advertised-page generation"
+    );
+}
+
+#[test]
+fn accepted_route_refresh_request_advances_advertised_page_version_once() {
+    let (mut manager, peer) = refresh_test_manager();
+    let before = route_page_versions(&manager);
+
+    manager.handle_update(RibUpdate::RouteRefreshRequest {
+        peer,
+        session_id: 0,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    });
+
+    assert_only_advertised_page_version_advanced_once(before, route_page_versions(&manager));
 }
 
 #[test]

@@ -3098,7 +3098,7 @@ impl RibManager {
                 self.mark_outbound_dirty(peer);
             }
             self.force_outbound_peers.insert(peer);
-            self.distribute_changes(&HashSet::new(), &HashSet::new());
+            self.distribute_changes_after_advertised_page_advance(&HashSet::new(), &HashSet::new());
         }
         let _ = reply.send(Ok(()));
     }
@@ -3572,7 +3572,7 @@ impl RibManager {
         best_changed: &HashSet<Prefix>,
         all_affected: &HashSet<Prefix>,
     ) {
-        self.distribute_changes_inner(best_changed, all_affected, true);
+        self.distribute_changes_inner(best_changed, all_affected, true, false);
     }
 
     pub(super) fn distribute_changes(
@@ -3580,7 +3580,15 @@ impl RibManager {
         best_changed: &HashSet<Prefix>,
         all_affected: &HashSet<Prefix>,
     ) {
-        self.distribute_changes_inner(best_changed, all_affected, false);
+        self.distribute_changes_inner(best_changed, all_affected, false, false);
+    }
+
+    pub(super) fn distribute_changes_after_advertised_page_advance(
+        &mut self,
+        best_changed: &HashSet<Prefix>,
+        all_affected: &HashSet<Prefix>,
+    ) {
+        self.distribute_changes_inner(best_changed, all_affected, false, true);
     }
 
     fn clone_distribution_metrics(
@@ -3605,6 +3613,7 @@ impl RibManager {
         best_changed: &HashSet<Prefix>,
         all_affected: &HashSet<Prefix>,
         service_ingest_readiness: bool,
+        advertised_generation_already_advanced: bool,
     ) {
         self.record_deferred_unicast(best_changed);
         self.record_deferred_unicast(all_affected);
@@ -3629,7 +3638,9 @@ impl RibManager {
         // Group-table commits and member-local exact-export overlay changes
         // happen below. Invalidate every advertised continuation up front;
         // conservative invalidation is safe even if a later send fails.
-        self.advance_advertised_pages();
+        if !advertised_generation_already_advanced {
+            self.advance_advertised_pages();
+        }
 
         let peers: Vec<IpAddr> = self.outbound_peers.keys().copied().collect();
         // Pass-scoped export memo: shares post-modification attribute

@@ -1539,14 +1539,10 @@ impl RibManager {
             // overlays; general queries stay fenced out until it is terminal,
             // so advancing here at acceptance covers the whole transaction.
             RibUpdate::PeerAddPathLimits { .. }
-            | RibUpdate::PeerOrfUpdate { .. }
-            | RibUpdate::PeerSlowState { .. }
-            | RibUpdate::SetPeerPolicyContext { .. }
             | RibUpdate::ReplacePeerExportPolicy { .. }
             | RibUpdate::ReplacePeerExportPolicies { .. }
             | RibUpdate::ApplyOutboundPrefixLimits { .. }
-            | RibUpdate::RefreshPeerOutbound { .. }
-            | RibUpdate::RouteRefreshRequest { .. } => self.advance_advertised_pages(),
+            | RibUpdate::RefreshPeerOutbound { .. } => self.advance_advertised_pages(),
             RibUpdate::PeerUp { .. }
             | RibUpdate::PeerDown { .. }
             | RibUpdate::PeerDeleted { .. }
@@ -2067,6 +2063,7 @@ impl RibManager {
                         "stale ORF update from superseded session {session_id} discarded"
                     )));
                 } else {
+                    self.advance_advertised_pages();
                     self.handle_peer_orf_update(peer, afi, safi, when, &entries, reply);
                 }
             }
@@ -2076,6 +2073,7 @@ impl RibManager {
                 slow,
             } => {
                 if !self.stale_session_message(peer, session_id, "PeerSlowState", "slow_peer") {
+                    self.advance_advertised_pages();
                     self.handle_peer_slow_state(peer, slow);
                 }
             }
@@ -2090,6 +2088,7 @@ impl RibManager {
                     "SetPeerPolicyContext",
                     "policy_context",
                 ) {
+                    self.advance_advertised_pages();
                     self.handle_set_peer_policy_context(peer, peer_group);
                 }
             }
@@ -2369,6 +2368,7 @@ impl RibManager {
                 safi,
             } => {
                 if !self.stale_session_message(peer, session_id, "RouteRefreshRequest", "refresh") {
+                    self.advance_advertised_pages();
                     self.handle_route_refresh_request(peer, afi, safi);
                 }
             }
