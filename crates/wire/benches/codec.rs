@@ -389,6 +389,45 @@ fn bench_attr_decode(c: &mut Criterion) {
 }
 
 #[cfg(not(feature = "codec-allocation-diagnostics"))]
+fn bench_attr_decode_revised(c: &mut Criterion) {
+    let mut group = c.benchmark_group("attr_decode_revised");
+
+    let typical = typical_attributes();
+    assert_eq!(
+        typical.len(),
+        6,
+        "typical fixture must retain six attributes"
+    );
+    let mut typical_buf = Vec::new();
+    encode_path_attributes(&typical, &mut typical_buf, true, false).unwrap();
+    let decoded = decode_path_attributes_revised(&typical_buf, true, false, &[]).unwrap();
+    assert_eq!(decoded.attributes, typical);
+    assert!(decoded.malformed.is_empty());
+    assert_eq!(decoded.bgpls_nlri_discarded, 0);
+    group.bench_with_input(
+        BenchmarkId::new("typical", typical.len()),
+        &typical_buf,
+        |b, buf| {
+            b.iter(|| decode_path_attributes_revised(buf, true, false, &[]).unwrap());
+        },
+    );
+
+    let rich = rich_attributes();
+    assert_eq!(rich.len(), 11, "rich fixture must retain eleven attributes");
+    let mut rich_buf = Vec::new();
+    encode_path_attributes(&rich, &mut rich_buf, true, false).unwrap();
+    let decoded = decode_path_attributes_revised(&rich_buf, true, false, &[]).unwrap();
+    assert_eq!(decoded.attributes, rich);
+    assert!(decoded.malformed.is_empty());
+    assert_eq!(decoded.bgpls_nlri_discarded, 0);
+    group.bench_with_input(BenchmarkId::new("rich", rich.len()), &rich_buf, |b, buf| {
+        b.iter(|| decode_path_attributes_revised(buf, true, false, &[]).unwrap());
+    });
+
+    group.finish();
+}
+
+#[cfg(not(feature = "codec-allocation-diagnostics"))]
 fn bench_attr_encode(c: &mut Criterion) {
     let mut group = c.benchmark_group("attr_encode");
 
@@ -783,6 +822,7 @@ criterion_group!(
     bench_update_parse,
     bench_update_parse_revised,
     bench_attr_decode,
+    bench_attr_decode_revised,
     bench_attr_encode,
     bench_validate_update,
 );
