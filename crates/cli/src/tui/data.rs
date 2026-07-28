@@ -17,11 +17,13 @@ use crate::proto::{
 
 pub struct DataSnapshot {
     pub global: Option<GlobalState>,
+    pub global_freshness: Freshness,
     pub health: Option<HealthResponse>,
     pub health_fresh: bool,
     pub neighbors: Vec<NeighborState>,
     pub neighbors_freshness: Freshness,
     pub rpki_vrp_count: Option<u64>,
+    pub metrics_freshness: Freshness,
     pub error: Option<String>,
 }
 
@@ -70,6 +72,7 @@ struct FetcherState {
     health: Option<HealthResponse>,
     neighbors: Option<Vec<NeighborState>>,
     rpki_vrp_count: Option<u64>,
+    metrics_freshness: Freshness,
     next_metrics_poll: Instant,
 }
 
@@ -80,6 +83,7 @@ impl FetcherState {
             health: None,
             neighbors: None,
             rpki_vrp_count: None,
+            metrics_freshness: Freshness::Unavailable,
             next_metrics_poll: Instant::now(),
         }
     }
@@ -110,13 +114,20 @@ pub(super) fn spawn_fetcher(
 async fn poll_once(connection: &Connection, state: &mut FetcherState) -> DataSnapshot {
     let mut error = None;
 
-    if state.global.is_none() {
+    let global_freshness = if state.global.is_some() {
+        Freshness::Fresh
+    } else {
         let mut client =
             GlobalServiceClient::with_interceptor(connection.channel(), connection.interceptor());
         if let Ok(response) = client.get_global(GetGlobalRequest {}).await {
             state.global = Some(response.into_inner());
         }
-    }
+        if state.global.is_some() {
+            Freshness::Fresh
+        } else {
+            Freshness::Unavailable
+        }
+    };
 
     let (health, health_fresh) = {
         let mut client =
@@ -160,18 +171,28 @@ async fn poll_once(connection: &Connection, state: &mut FetcherState) -> DataSna
         state.next_metrics_poll = now + METRICS_POLL_INTERVAL;
         let mut client =
             ControlServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-        if let Ok(response) = client.get_metrics(MetricsRequest {}).await {
-            state.rpki_vrp_count = parse_vrp_count(&response.into_inner().prometheus_text);
+        match client.get_metrics(MetricsRequest {}).await {
+            Ok(response) => {
+                state.rpki_vrp_count = parse_vrp_count(&response.into_inner().prometheus_text);
+                state.metrics_freshness = Freshness::Fresh;
+            }
+            Err(_) => {
+                if state.metrics_freshness != Freshness::Unavailable {
+                    state.metrics_freshness = Freshness::Stale;
+                }
+            }
         }
     }
 
     DataSnapshot {
         global: state.global.clone(),
+        global_freshness,
         health,
         health_fresh,
         neighbors,
         neighbors_freshness,
         rpki_vrp_count: state.rpki_vrp_count,
+        metrics_freshness: state.metrics_freshness,
         error,
     }
 }
@@ -345,15 +366,37 @@ mod tests {
 
         let first = poll_once(&connection, &mut state).await;
         assert!(first.global.is_none());
+        assert_eq!(first.global_freshness, Freshness::Unavailable);
+        assert!(first.error.is_none());
 
         tokio::time::advance(Duration::from_secs(2)).await;
         let second = poll_once(&connection, &mut state).await;
         assert_eq!(second.global.as_ref().map(|global| global.asn), Some(65001));
+        assert_eq!(second.global_freshness, Freshness::Fresh);
 
         tokio::time::advance(Duration::from_secs(2)).await;
         let third = poll_once(&connection, &mut state).await;
         assert_eq!(third.global.as_ref().map(|global| global.asn), Some(65001));
+        assert_eq!(third.global_freshness, Freshness::Fresh);
         assert_eq!(server.state.global_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn initial_metrics_failure_is_unavailable_without_disconnect() {
+        let server = spawn_mock_server(None).await;
+        server
+            .state
+            .metrics_failures_remaining
+            .store(1, Ordering::SeqCst);
+        let connection = connect(&server.addr, None).await.unwrap();
+        let mut state = FetcherState::new();
+
+        let snapshot = poll_once(&connection, &mut state).await;
+
+        assert_eq!(snapshot.rpki_vrp_count, None);
+        assert_eq!(snapshot.metrics_freshness, Freshness::Unavailable);
+        assert!(snapshot.error.is_none());
+        assert_eq!(server.state.metrics_calls.load(Ordering::SeqCst), 1);
     }
 
     /// Red proof: clearing the cached VRP value on a failed slow scrape makes
@@ -369,6 +412,7 @@ mod tests {
 
         let first = poll_once(&connection, &mut state).await;
         assert_eq!(first.rpki_vrp_count, Some(15));
+        assert_eq!(first.metrics_freshness, Freshness::Fresh);
 
         server
             .state
@@ -378,6 +422,29 @@ mod tests {
         let second = poll_once(&connection, &mut state).await;
 
         assert_eq!(second.rpki_vrp_count, Some(15));
+        assert_eq!(second.metrics_freshness, Freshness::Stale);
+        assert!(second.error.is_none());
+        assert_eq!(server.state.metrics_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn successful_metrics_without_rpki_family_clears_last_good_count() {
+        let server = spawn_mock_server(None).await;
+        *server.state.metrics_text.lock().await = Some(
+            "bgp_rpki_vrp_count{af=\"ipv4\"} 12\nbgp_rpki_vrp_count{af=\"ipv6\"} 3\n".to_string(),
+        );
+        let connection = connect(&server.addr, None).await.unwrap();
+        let mut state = FetcherState::new();
+
+        let first = poll_once(&connection, &mut state).await;
+        assert_eq!(first.rpki_vrp_count, Some(15));
+        *server.state.metrics_text.lock().await = Some("# HELP other_metric 1\n".to_string());
+        tokio::time::advance(METRICS_POLL_INTERVAL).await;
+        let second = poll_once(&connection, &mut state).await;
+
+        assert_eq!(second.rpki_vrp_count, None);
+        assert_eq!(second.metrics_freshness, Freshness::Fresh);
+        assert!(second.error.is_none());
         assert_eq!(server.state.metrics_calls.load(Ordering::SeqCst), 2);
     }
 
