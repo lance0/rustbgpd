@@ -681,6 +681,18 @@ impl RibManager {
         self.register_active_session(peer, ActiveSessionRegistration::PeerUp);
     }
 
+    /// Resolve Paths-Limit against only the newest live session.
+    pub(super) fn newest_live_session_mut(
+        &mut self,
+        peer: IpAddr,
+        session_id: u64,
+    ) -> Option<&mut LiveSessionRecord> {
+        self.live_sessions
+            .get_mut(&peer)
+            .and_then(|sessions| sessions.last_mut())
+            .filter(|record| record.session_id == session_id)
+    }
+
     /// Register the most recent live session (the last `live_sessions`
     /// entry) as the peer's active outbound registration and send it the
     /// initial table dump. Shared by `handle_peer_up` and collision failback;
