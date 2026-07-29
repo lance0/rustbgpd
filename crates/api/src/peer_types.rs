@@ -644,6 +644,13 @@ pub enum PeerManagerCommand {
         /// Reply channel for success/failure.
         reply: oneshot::Sender<Result<(), PeerLifecycleError>>,
     },
+    /// Create a runtime peer from a presence-preserving raw specification.
+    RuntimeCreatePeer {
+        /// Raw create intent; the actor rejects non-presence-aware variants.
+        spec: NeighborCreateSpec,
+        /// Reply channel for success/failure.
+        reply: oneshot::Sender<Result<(), PeerLifecycleError>>,
+    },
     /// Remove an existing peer by address.
     DeletePeer {
         /// Peer identity to remove.
@@ -1617,6 +1624,69 @@ pub struct PolicyChainAssignment {
     pub export_policy_names: Vec<String>,
 }
 
+/// Atomic Add-Path override carried by a presence-aware neighbor create.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NeighborCreateAddPath {
+    /// Enable Add-Path receive.
+    pub receive: bool,
+    /// Enable Add-Path send.
+    pub send: bool,
+    /// Maximum paths to advertise (`None` keeps the config model's default).
+    pub send_max: Option<u32>,
+    /// Paths-Limit receive preference (`None` disables it).
+    pub receive_max: Option<u16>,
+}
+
+/// Raw, presence-preserving runtime neighbor-create intent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PresenceAwareNeighborCreate {
+    /// Remote peer IP address.
+    pub address: IpAddr,
+    /// Optional interface for an IPv6 link-local peer.
+    pub interface: Option<String>,
+    /// Remote autonomous system number.
+    pub remote_asn: u32,
+    /// Optional operator description.
+    pub description: Option<String>,
+    /// Optional peer-group reference.
+    pub peer_group: Option<String>,
+    /// Explicit hold-time override.
+    pub hold_time: Option<u16>,
+    /// Explicit minimum hold-time override.
+    pub min_hold_time: Option<u16>,
+    /// Explicit send-hold-time override, including zero.
+    pub send_hold_time: Option<u32>,
+    /// Explicit aggregate max-prefix override.
+    pub max_prefixes: Option<u32>,
+    /// Explicit max-prefix restart override.
+    pub max_prefix_restart_seconds: Option<u32>,
+    /// Explicit private-AS removal mode.
+    pub remove_private_as: Option<String>,
+    /// Explicit local BGP role.
+    pub local_role: Option<BgpRole>,
+    /// Masked family replacement; absence inherits.
+    pub families: Option<Vec<(Afi, Safi)>>,
+    /// Masked required-family replacement; absence inherits.
+    pub required_families: Option<Vec<(Afi, Safi)>>,
+    /// Masked route-server-client override, preserving false.
+    pub route_server_client: Option<bool>,
+    /// Masked per-client-best override, preserving false.
+    pub per_client_best: Option<bool>,
+    /// Masked strict-role override, preserving false.
+    pub strict_role: Option<bool>,
+    /// Atomic masked Add-Path override.
+    pub add_path: Option<NeighborCreateAddPath>,
+}
+
+/// Internal compatibility discriminator for runtime neighbor creation.
+#[derive(Clone)]
+pub enum NeighborCreateSpec {
+    /// Existing resolved legacy payload.
+    Legacy(Box<PeerManagerNeighborConfig>),
+    /// Raw presence-aware payload.
+    PresenceAware(Box<PresenceAwareNeighborCreate>),
+}
+
 /// Configuration for adding a peer dynamically.
 #[derive(Clone)]
 #[expect(
@@ -1881,6 +1951,14 @@ pub enum ConfigEvent {
         /// Optional persistence acknowledgement. Runtime CRUD paths hold the
         /// shared runtime-config lock until this fires, so SIGHUP cannot read a
         /// stale TOML between runtime mutation and on-disk commit.
+        ack: Option<ConfigPersistAck>,
+    },
+    /// A presence-aware neighbor create whose raw intent must reach disk and
+    /// the peer-manager actor unchanged.
+    PresenceAwareNeighborAdded {
+        /// Compatibility-discriminated create specification.
+        spec: NeighborCreateSpec,
+        /// Optional two-phase persistence acknowledgement.
         ack: Option<ConfigPersistAck>,
     },
     /// A neighbor was successfully deleted at runtime.

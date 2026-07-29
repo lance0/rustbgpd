@@ -1,5 +1,6 @@
 //! gRPC neighbor service — add, remove, enable, disable, and list BGP peers.
 
+use std::collections::BTreeSet;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -10,8 +11,10 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 use tonic::{Request, Response, Status};
 
 use crate::peer_types::{
-    ConfigEvent, DynamicRangeError, OutboundRefreshError, PeerInfo, PeerKey, PeerLifecycleError,
-    PeerManagerCommand, PeerManagerNeighborConfig, RemovedDynamicRange, Rfc8212PolicyStatus,
+    ConfigEvent, DynamicRangeError, NeighborCreateAddPath, NeighborCreateSpec,
+    OutboundRefreshError, PeerInfo, PeerKey, PeerLifecycleError, PeerManagerCommand,
+    PeerManagerNeighborConfig, PresenceAwareNeighborCreate, RemovedDynamicRange,
+    Rfc8212PolicyStatus,
 };
 use crate::proto;
 use crate::server::{
@@ -133,6 +136,35 @@ impl NeighborService {
             runtime_config_lock,
             config_mutation_gate,
         }
+    }
+
+    async fn add_presence_aware_neighbor(
+        &self,
+        intent: proto::NeighborCreateIntent,
+    ) -> Result<Response<proto::AddNeighborResponse>, Status> {
+        let spec = parse_presence_aware_create(intent)?;
+        let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
+        let peer_mgr_tx = self.peer_mgr_tx.clone();
+        let runtime_config_lock = self.runtime_config_lock.clone();
+        let config_mutation_gate = self.config_mutation_gate.clone();
+        let persisted_spec = spec.clone();
+        let join = tokio::spawn(async move {
+            let _guard = runtime_config_lock.lock().await;
+            check_config_mutation_gate(&config_mutation_gate, "NeighborService.AddNeighbor")
+                .await?;
+            persist_then_apply(
+                persist_permit,
+                |ack| ConfigEvent::PresenceAwareNeighborAdded {
+                    spec: persisted_spec,
+                    ack: Some(ack),
+                },
+                || add_presence_aware_peer(&peer_mgr_tx, spec),
+            )
+            .await
+        });
+        join.await
+            .map_err(|_| Status::internal("neighbor add task did not complete"))??;
+        Ok(Response::new(proto::AddNeighborResponse {}))
     }
 }
 
@@ -334,6 +366,24 @@ async fn add_static_peer(
         .map_err(peer_lifecycle_error_status)
 }
 
+async fn add_presence_aware_peer(
+    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
+    spec: NeighborCreateSpec,
+) -> Result<(), Status> {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    peer_mgr_tx
+        .send(PeerManagerCommand::RuntimeCreatePeer {
+            spec,
+            reply: reply_tx,
+        })
+        .await
+        .map_err(|_| Status::internal("peer manager unavailable"))?;
+    reply_rx
+        .await
+        .map_err(|_| Status::internal("peer manager dropped reply"))?
+        .map_err(peer_lifecycle_error_status)
+}
+
 async fn delete_static_peer(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
     peer: PeerKey,
@@ -431,6 +481,201 @@ fn parse_bgp_role_proto(role: &str) -> Result<Option<BgpRole>, Status> {
             "unknown BGP role {other:?}, expected provider, rs, rs-client, customer, or peer"
         ))),
     }
+}
+
+const CREATE_OVERRIDE_PATHS: [&str; 9] = [
+    "families",
+    "required_families",
+    "route_server_client",
+    "per_client_best",
+    "strict_role",
+    "add_path_receive",
+    "add_path_send",
+    "add_path_send_max",
+    "paths_limit_receive_max",
+];
+const CREATE_ADD_PATH_PATHS: [&str; 4] = [
+    "add_path_receive",
+    "add_path_send",
+    "add_path_send_max",
+    "paths_limit_receive_max",
+];
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "the closed mask parser keeps all presence checks in one auditable gate"
+)]
+fn parse_presence_aware_create(
+    intent: proto::NeighborCreateIntent,
+) -> Result<NeighborCreateSpec, Status> {
+    let config = intent
+        .config
+        .ok_or_else(|| Status::invalid_argument("intent.config is required"))?;
+    let mask = intent
+        .override_mask
+        .ok_or_else(|| Status::invalid_argument("intent.override_mask is required"))?;
+    let mut selected = BTreeSet::new();
+    for path in &mask.paths {
+        if path == "*" || path.contains('.') {
+            return Err(Status::invalid_argument(format!(
+                "override_mask path {path:?} must be a top-level field"
+            )));
+        }
+        if !CREATE_OVERRIDE_PATHS.contains(&path.as_str()) {
+            return Err(Status::invalid_argument(format!(
+                "override_mask path {path:?} is not supported"
+            )));
+        }
+        if !selected.insert(path.as_str()) {
+            return Err(Status::invalid_argument(format!(
+                "override_mask path {path:?} appears more than once"
+            )));
+        }
+    }
+
+    let contradictory = [
+        ("families", !config.families.is_empty()),
+        ("required_families", !config.required_families.is_empty()),
+        ("route_server_client", config.route_server_client),
+        ("per_client_best", config.per_client_best),
+        ("strict_role", config.strict_role),
+        ("add_path_receive", config.add_path_receive),
+        ("add_path_send", config.add_path_send),
+        ("add_path_send_max", config.add_path_send_max != 0),
+        (
+            "paths_limit_receive_max",
+            config.paths_limit_receive_max != 0,
+        ),
+    ];
+    for (path, non_default) in contradictory {
+        if non_default && !selected.contains(path) {
+            return Err(Status::invalid_argument(format!(
+                "{path} has a value but is absent from override_mask"
+            )));
+        }
+    }
+    let add_path_count = CREATE_ADD_PATH_PATHS
+        .iter()
+        .filter(|path| selected.contains(**path))
+        .count();
+    if add_path_count != 0 && add_path_count != CREATE_ADD_PATH_PATHS.len() {
+        return Err(Status::invalid_argument(
+            "Add-Path override requires all four Add-Path mask paths",
+        ));
+    }
+    if selected.contains("families") && config.families.is_empty() {
+        return Err(Status::invalid_argument(
+            "masked families must contain at least one family",
+        ));
+    }
+    if selected.contains("required_families") && config.required_families.is_empty() {
+        return Err(Status::invalid_argument(
+            "masked required_families must contain at least one family",
+        ));
+    }
+
+    let address: IpAddr = config
+        .address
+        .parse()
+        .map_err(|error| Status::invalid_argument(format!("invalid address: {error}")))?;
+    if config.remote_asn == 0 {
+        return Err(Status::invalid_argument("remote_asn must be > 0"));
+    }
+    let interface = (!config.interface.trim().is_empty()).then(|| config.interface.clone());
+    match (is_ipv6_link_local(address), interface.as_ref()) {
+        (true, None) => {
+            return Err(Status::invalid_argument(
+                "interface is required for IPv6 link-local neighbors",
+            ));
+        }
+        (false, Some(_)) => {
+            return Err(Status::invalid_argument(
+                "interface is only valid for IPv6 link-local neighbors",
+            ));
+        }
+        _ => {}
+    }
+    if config.hold_time > 0 && config.hold_time < 3 {
+        return Err(Status::invalid_argument("hold_time must be 0 or >= 3"));
+    }
+    let hold_time = (config.hold_time > 0)
+        .then(|| u16::try_from(config.hold_time))
+        .transpose()
+        .map_err(|_| Status::invalid_argument("hold_time exceeds u16 range"))?;
+    let min_hold_time = config
+        .min_hold_time
+        .map(u16::try_from)
+        .transpose()
+        .map_err(|_| Status::invalid_argument("min_hold_time exceeds u16 range"))?;
+    if min_hold_time.is_some_and(|minimum| minimum < 3) {
+        return Err(Status::invalid_argument(
+            "min_hold_time must be between 3 and 65535",
+        ));
+    }
+    if config.max_prefix_restart_seconds == Some(0) {
+        return Err(Status::invalid_argument(
+            "max_prefix_restart_seconds must be greater than zero when set",
+        ));
+    }
+    let remove_private_as = if config.remove_private_as.is_empty() {
+        None
+    } else {
+        parse_remove_private_as_proto(&config.remove_private_as)?;
+        Some(config.remove_private_as)
+    };
+    let local_role = parse_bgp_role_proto(&config.role)?;
+    let families = selected
+        .contains("families")
+        .then(|| parse_families_proto(&config.families))
+        .transpose()?;
+    let required_families = selected
+        .contains("required_families")
+        .then(|| parse_families_proto(&config.required_families))
+        .transpose()?;
+    let add_path = if add_path_count == 0 {
+        None
+    } else {
+        Some(NeighborCreateAddPath {
+            receive: config.add_path_receive,
+            send: config.add_path_send,
+            send_max: (config.add_path_send_max > 0).then_some(config.add_path_send_max),
+            receive_max: (config.paths_limit_receive_max > 0)
+                .then(|| u16::try_from(config.paths_limit_receive_max))
+                .transpose()
+                .map_err(|_| {
+                    Status::invalid_argument("paths_limit_receive_max must be <= 65535")
+                })?,
+        })
+    };
+
+    Ok(NeighborCreateSpec::PresenceAware(Box::new(
+        PresenceAwareNeighborCreate {
+            address,
+            interface,
+            remote_asn: config.remote_asn,
+            description: (!config.description.trim().is_empty()).then_some(config.description),
+            peer_group: (!config.peer_group.trim().is_empty()).then_some(config.peer_group),
+            hold_time,
+            min_hold_time,
+            send_hold_time: config.send_hold_time,
+            max_prefixes: (config.max_prefixes > 0).then_some(config.max_prefixes),
+            max_prefix_restart_seconds: config.max_prefix_restart_seconds,
+            remove_private_as,
+            local_role,
+            families,
+            required_families,
+            route_server_client: selected
+                .contains("route_server_client")
+                .then_some(config.route_server_client),
+            per_client_best: selected
+                .contains("per_client_best")
+                .then_some(config.per_client_best),
+            strict_role: selected
+                .contains("strict_role")
+                .then_some(config.strict_role),
+            add_path,
+        },
+    )))
 }
 
 #[expect(
@@ -797,9 +1042,15 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             return Err(status);
         }
         let req = request.into_inner();
-        let config = req
-            .config
-            .ok_or_else(|| Status::invalid_argument("config is required"))?;
+        let config = match (req.config, req.intent) {
+            (Some(config), None) => config,
+            (None, Some(intent)) => return self.add_presence_aware_neighbor(intent).await,
+            (Some(_), Some(_)) | (None, None) => {
+                return Err(Status::invalid_argument(
+                    "exactly one of config or intent is required",
+                ));
+            }
+        };
 
         let address: IpAddr = config
             .address
@@ -1515,6 +1766,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
 mod tests {
     use super::*;
     use crate::test_support::peer_info;
+    use prost::Message;
     use proto::neighbor_service_server::NeighborService as _;
     use tokio::sync::mpsc::error::TryRecvError;
 
@@ -1522,6 +1774,224 @@ mod tests {
         let (tx, _rx) = mpsc::channel(16);
         let (rib_tx, _rib_rx) = mpsc::channel(16);
         NeighborService::new(65001, AccessMode::ReadWrite, tx, rib_tx, None)
+    }
+
+    fn intent_request(
+        config: Option<proto::NeighborConfig>,
+        paths: Option<Vec<&str>>,
+    ) -> proto::AddNeighborRequest {
+        proto::AddNeighborRequest {
+            config: None,
+            intent: Some(proto::NeighborCreateIntent {
+                config,
+                override_mask: paths.map(|paths| prost_types::FieldMask {
+                    paths: paths.into_iter().map(str::to_string).collect(),
+                }),
+            }),
+        }
+    }
+
+    #[derive(Clone, PartialEq, Message)]
+    struct FrozenAddNeighborRequest {
+        #[prost(message, optional, tag = "1")]
+        config: Option<FrozenNeighborConfig>,
+    }
+
+    #[derive(Clone, PartialEq, Message)]
+    struct FrozenNeighborConfig {}
+
+    #[test]
+    fn frozen_legacy_decoder_skips_presence_wrapper_and_sees_config_absent() {
+        let request = intent_request(
+            Some(proto::NeighborConfig {
+                address: "10.0.0.9".into(),
+                remote_asn: 65009,
+                ..Default::default()
+            }),
+            Some(Vec::new()),
+        );
+        let bytes = request.encode_to_vec();
+        let frozen = FrozenAddNeighborRequest::decode(bytes.as_slice()).unwrap();
+        assert!(frozen.config.is_none());
+
+        let source = include_str!("../../../proto/rustbgpd.proto");
+        let request_body = source
+            .split_once("message AddNeighborRequest {")
+            .unwrap()
+            .1
+            .split_once('}')
+            .unwrap()
+            .0;
+        assert!(request_body.contains("NeighborConfig config = 1;"));
+        assert!(request_body.contains("NeighborCreateIntent intent = 2;"));
+        assert!(
+            !request_body
+                .lines()
+                .any(|line| line.trim_start().starts_with("oneof "))
+        );
+    }
+
+    #[tokio::test]
+    async fn create_envelope_rejects_both_neither_and_missing_inner_parts_before_mutation() {
+        let (peer_tx, mut peer_rx) = mpsc::channel(4);
+        let (rib_tx, _rib_rx) = mpsc::channel(1);
+        let (config_tx, mut config_rx) = mpsc::channel(4);
+        let svc = NeighborService::new(
+            65001,
+            AccessMode::ReadWrite,
+            peer_tx,
+            rib_tx,
+            Some(config_tx),
+        );
+        let config = proto::NeighborConfig {
+            address: "10.0.0.9".into(),
+            remote_asn: 65009,
+            ..Default::default()
+        };
+        let requests = [
+            proto::AddNeighborRequest {
+                config: Some(config.clone()),
+                intent: Some(proto::NeighborCreateIntent {
+                    config: Some(config.clone()),
+                    override_mask: Some(prost_types::FieldMask::default()),
+                }),
+            },
+            proto::AddNeighborRequest::default(),
+            intent_request(None, Some(Vec::new())),
+            intent_request(Some(config), None),
+        ];
+        for request in requests {
+            let error = svc.add_neighbor(Request::new(request)).await.unwrap_err();
+            assert_eq!(error.code(), tonic::Code::InvalidArgument);
+            assert!(matches!(peer_rx.try_recv(), Err(TryRecvError::Empty)));
+            assert!(matches!(config_rx.try_recv(), Err(TryRecvError::Empty)));
+        }
+    }
+
+    #[test]
+    fn create_mask_is_closed_atomic_and_authoritative() {
+        assert_eq!(
+            CREATE_OVERRIDE_PATHS,
+            [
+                "families",
+                "required_families",
+                "route_server_client",
+                "per_client_best",
+                "strict_role",
+                "add_path_receive",
+                "add_path_send",
+                "add_path_send_max",
+                "paths_limit_receive_max",
+            ]
+        );
+        let base = proto::NeighborConfig {
+            address: "10.0.0.9".into(),
+            remote_asn: 65009,
+            ..Default::default()
+        };
+        for paths in [
+            vec!["unknown"],
+            vec!["*"],
+            vec!["families.child"],
+            vec!["families", "families"],
+            vec!["add_path_receive"],
+        ] {
+            let intent = intent_request(Some(base.clone()), Some(paths))
+                .intent
+                .unwrap();
+            assert!(parse_presence_aware_create(intent).is_err());
+        }
+        for path in ["families", "required_families"] {
+            let intent = intent_request(Some(base.clone()), Some(vec![path]))
+                .intent
+                .unwrap();
+            assert!(parse_presence_aware_create(intent).is_err());
+        }
+        for (families, required_families) in [
+            (vec!["ipv4_unicast".into()], Vec::new()),
+            (Vec::new(), vec!["ipv4_unicast".into()]),
+        ] {
+            let config = proto::NeighborConfig {
+                families,
+                required_families,
+                ..base.clone()
+            };
+            let intent = intent_request(Some(config), Some(Vec::new()))
+                .intent
+                .unwrap();
+            assert!(parse_presence_aware_create(intent).is_err());
+        }
+        let mut contradictory = base;
+        contradictory.route_server_client = true;
+        let intent = intent_request(Some(contradictory), Some(Vec::new()))
+            .intent
+            .unwrap();
+        assert!(parse_presence_aware_create(intent).is_err());
+    }
+
+    #[test]
+    fn create_mask_preserves_false_replacements_and_atomic_add_path_disable() {
+        let config = proto::NeighborConfig {
+            address: "10.0.0.9".into(),
+            remote_asn: 65009,
+            families: vec!["ipv6_unicast".into()],
+            required_families: vec!["ipv6_unicast".into()],
+            ..Default::default()
+        };
+        let intent = intent_request(
+            Some(config),
+            Some(vec![
+                "families",
+                "required_families",
+                "route_server_client",
+                "per_client_best",
+                "strict_role",
+                "add_path_receive",
+                "add_path_send",
+                "add_path_send_max",
+                "paths_limit_receive_max",
+            ]),
+        )
+        .intent
+        .unwrap();
+        let NeighborCreateSpec::PresenceAware(raw) = parse_presence_aware_create(intent).unwrap()
+        else {
+            panic!("presence-aware parser returned legacy")
+        };
+        assert_eq!(raw.families, Some(vec![(Afi::Ipv6, Safi::Unicast)]));
+        assert_eq!(
+            raw.required_families,
+            Some(vec![(Afi::Ipv6, Safi::Unicast)])
+        );
+        assert_eq!(raw.route_server_client, Some(false));
+        assert_eq!(raw.per_client_best, Some(false));
+        assert_eq!(raw.strict_role, Some(false));
+        assert_eq!(
+            raw.add_path,
+            Some(NeighborCreateAddPath {
+                receive: false,
+                send: false,
+                send_max: None,
+                receive_max: None,
+            })
+        );
+    }
+
+    #[test]
+    fn adr_index_reports_server_implementation_and_cli_boundary() {
+        let index = include_str!("../../../docs/adr/README.md");
+        assert!(index.contains(
+            "| [0118](0118-presence-preserving-runtime-neighbor-create.md) | \
+             Presence-preserving runtime neighbor creation | \
+             Accepted (server implemented; bundled CLI pending) | 2026-07-29 |"
+        ));
+        let adr =
+            include_str!("../../../docs/adr/0118-presence-preserving-runtime-neighbor-create.md");
+        assert!(
+            adr.lines().any(
+                |line| line == "**Status:** Accepted (server implemented; bundled CLI pending)"
+            )
+        );
     }
 
     #[tokio::test]
@@ -1744,6 +2214,7 @@ mod tests {
                 remove_private_as: String::new(),
                 ..Default::default()
             }),
+            intent: None,
         });
         let err = svc.add_neighbor(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
@@ -1766,6 +2237,7 @@ mod tests {
                 remove_private_as: String::new(),
                 ..Default::default()
             }),
+            intent: None,
         });
         let err = svc.add_neighbor(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
@@ -1786,6 +2258,7 @@ mod tests {
                 required_families: vec!["ipv6_unicast".into()],
                 ..Default::default()
             }),
+            intent: None,
         });
         let err = svc.add_neighbor(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
@@ -1807,6 +2280,7 @@ mod tests {
                     send_hold_time: Some(send_hold_time),
                     ..Default::default()
                 }),
+                intent: None,
             });
             let err = svc.add_neighbor(req).await.unwrap_err();
             assert_eq!(err.code(), tonic::Code::InvalidArgument);
@@ -1834,6 +2308,7 @@ mod tests {
                     send_hold_time: Some(0),
                     ..Default::default()
                 }),
+                intent: None,
             }))
             .await
         });
@@ -1860,6 +2335,7 @@ mod tests {
                     min_hold_time: Some(2),
                     ..Default::default()
                 }),
+                intent: None,
             }))
             .await
             .unwrap_err();
@@ -1880,6 +2356,7 @@ mod tests {
                     min_hold_time: Some(100),
                     ..Default::default()
                 }),
+                intent: None,
             }))
             .await
         });
@@ -1910,6 +2387,7 @@ mod tests {
                 remove_private_as: String::new(),
                 ..Default::default()
             }),
+            intent: None,
         });
         let err = svc.add_neighbor(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
@@ -1932,6 +2410,7 @@ mod tests {
                 remove_private_as: String::new(),
                 ..Default::default()
             }),
+            intent: None,
         });
         let err = svc.add_neighbor(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
@@ -1956,6 +2435,7 @@ mod tests {
                 remove_private_as: String::new(),
                 ..Default::default()
             }),
+            intent: None,
         });
         let err = svc.add_neighbor(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::PermissionDenied);
@@ -3319,6 +3799,7 @@ mod tests {
                     remove_private_as: String::new(),
                     ..Default::default()
                 }),
+                intent: None,
             }))
             .await
         });
@@ -3363,6 +3844,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn presence_create_stages_identical_raw_spec_before_actor_apply_and_commit() {
+        let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(4);
+        let (rib_tx, _rib_rx) = mpsc::channel(1);
+        let (config_tx, mut config_rx) = mpsc::channel(4);
+        let svc = NeighborService::new(
+            65001,
+            AccessMode::ReadWrite,
+            peer_mgr_tx,
+            rib_tx,
+            Some(config_tx),
+        );
+        let request = intent_request(
+            Some(proto::NeighborConfig {
+                address: "10.0.0.9".into(),
+                remote_asn: 65009,
+                peer_group: "ix-members".into(),
+                ..Default::default()
+            }),
+            Some(Vec::new()),
+        );
+        let mut call = tokio::spawn(async move { svc.add_neighbor(Request::new(request)).await });
+
+        let (persisted, ack) = match config_rx.recv().await.unwrap() {
+            ConfigEvent::PresenceAwareNeighborAdded { spec, ack } => (spec, ack.unwrap()),
+            _ => panic!("expected PresenceAwareNeighborAdded"),
+        };
+        assert!(
+            matches!(peer_mgr_rx.try_recv(), Err(TryRecvError::Empty)),
+            "the actor command must wait for the persistence stage acknowledgement"
+        );
+        let staged = tokio::spawn(ack.accept());
+
+        match peer_mgr_rx.recv().await.unwrap() {
+            PeerManagerCommand::RuntimeCreatePeer { spec, reply } => {
+                let (
+                    NeighborCreateSpec::PresenceAware(persisted),
+                    NeighborCreateSpec::PresenceAware(applied),
+                ) = (persisted, spec)
+                else {
+                    panic!("both ownership boundaries must carry raw presence-aware intent")
+                };
+                assert_eq!(applied, persisted);
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(20), &mut call)
+                        .await
+                        .is_err(),
+                    "the RPC must wait for actor apply and persistence commit"
+                );
+                reply.send(Ok(())).unwrap();
+            }
+            _ => panic!("expected RuntimeCreatePeer"),
+        }
+        assert!(staged.await.unwrap());
+        call.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
     async fn add_neighbor_persist_failure_creates_no_peer() {
         let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(16);
         let (rib_tx, _rib_rx) = mpsc::channel(16);
@@ -3389,6 +3927,7 @@ mod tests {
                     remove_private_as: String::new(),
                     ..Default::default()
                 }),
+                intent: None,
             }))
             .await
         });
@@ -3543,6 +4082,7 @@ mod tests {
                 remove_private_as: String::new(),
                 ..Default::default()
             }),
+            intent: None,
         });
         let err = svc.add_neighbor(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::Unavailable);
@@ -3588,6 +4128,7 @@ mod tests {
                 remove_private_as: "bogus".into(),
                 ..Default::default()
             }),
+            intent: None,
         });
         let err = svc.add_neighbor(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
@@ -3610,6 +4151,7 @@ mod tests {
                 remove_private_as: "all".into(),
                 ..Default::default()
             }),
+            intent: None,
         });
         let err = svc.add_neighbor(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
@@ -3633,6 +4175,7 @@ mod tests {
                 route_server_client: true,
                 ..Default::default()
             }),
+            intent: None,
         });
         let err = svc.add_neighbor(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
@@ -3656,6 +4199,7 @@ mod tests {
                 role: "peer".into(),
                 ..Default::default()
             }),
+            intent: None,
         });
         let err = svc.add_neighbor(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
@@ -3679,6 +4223,7 @@ mod tests {
                 strict_role: true,
                 ..Default::default()
             }),
+            intent: None,
         });
         let err = svc.add_neighbor(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);

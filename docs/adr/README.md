@@ -126,7 +126,7 @@ consequences so future contributors understand *why*, not just *what*.
 | [0115](0115-lean-daemon-build-flavors.md) | Lean daemon build flavors | Accepted (no additional flavor) | 2026-07-22 |
 | [0116](0116-rfc-9857-sr-policy-state.md) | RFC 9857 SR Policy state in BGP-LS | Accepted (feature implementation demand-gated) | 2026-07-22 |
 | [0117](0117-authenticated-single-hop-bfd-decision.md) | Authenticated single-hop BFD | Accepted (implementation NO-GO; evidence-gated) | 2026-07-22 |
-| [0118](0118-presence-preserving-runtime-neighbor-create.md) | Presence-preserving runtime neighbor creation | Accepted (implementation pending) | 2026-07-29 |
+| [0118](0118-presence-preserving-runtime-neighbor-create.md) | Presence-preserving runtime neighbor creation | Accepted (server implemented; bundled CLI pending) | 2026-07-29 |
 
 ## Template
 

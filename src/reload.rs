@@ -709,6 +709,7 @@ fn take_config_event_ack(event: &mut ConfigEvent) -> Option<ConfigPersistAck> {
     match event {
         ConfigEvent::FibTablesReplaced { ack, .. }
         | ConfigEvent::NeighborAdded { ack, .. }
+        | ConfigEvent::PresenceAwareNeighborAdded { ack, .. }
         | ConfigEvent::NeighborDeleted { ack, .. }
         | ConfigEvent::DynamicNeighborAdded { ack, .. }
         | ConfigEvent::DynamicNeighborDeleted { ack, .. }

@@ -2882,6 +2882,8 @@ dependencies = [
  "nix 0.31.3",
  "owo-colors",
  "prost",
+ "prost-types",
+ "protoc-bin-vendored",
  "ratatui",
  "rustbgpd-api",
  "rustbgpd-bmp",
