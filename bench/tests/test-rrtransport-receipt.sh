@@ -6,6 +6,46 @@ runner="$root/bench/scale/rrtransport/run-receipt.sh"
 verifier="$root/bench/scale/rrtransport/verify_receipt.py"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
+mutate() { python3 "$@"; }
+
+parent_validation_mutation_proof() {
+  local mutated="$tmp/no-parent-gate-validation"
+  local fixture_dir="$tmp/no-parent-validation-fixture"
+  local stdout="$tmp/no-parent-validation.stdout"
+  local stderr="$tmp/no-parent-validation.stderr"
+  local status
+  cp "$runner" "$mutated"
+  # Replace validation with a deliberate bypass that preserves the value its
+  # success path supplies. An unset-variable crash is not proof.
+  # shellcheck disable=SC2016 # Exact production source text for destructive proof.
+  mutate -c 'import pathlib,sys;p=pathlib.Path(sys.argv[1]);s=p.read_text();seam='\''  validate_tiny_gate_identity "$supervisor" "$expected" "$ready_pid" "$ready_exe" ||\n    identity_status=$?\n'\'';replacement='\''  tiny_validated_rss=1\n'\'';assert s.count(seam)==1;p.write_text(s.replace(seam,replacement,1))' \
+    "$mutated"
+  chmod +x "$mutated"
+  if "$mutated" --startup-gate-fixture stable-wrong "$fixture_dir" \
+    >"$stdout" 2>"$stderr"; then
+    echo "parent-validation bypass unexpectedly succeeded" >&2
+    return 1
+  else
+    status=$?
+  fi
+  if [[ $status != 1 ]] ||
+    ! grep -Fxq "stable wrong executable was released" "$stderr" ||
+    grep -Fq "unbound variable" "$stderr" ||
+    [[ ! -s $fixture_dir/gate/go || $(<"$fixture_dir/gate/go") != go ]] ||
+    ! grep -Fq "startup_gate resolution=release" "$fixture_dir/receipt/harness.log"; then
+    echo "parent-validation bypass failed without proving wrong-target release" >&2
+    cat "$stderr" >&2
+    return 1
+  fi
+  echo "PASS: parent-validation bypass released wrong target and published Go"
+}
+
+if [[ ${1:-} == --parent-validation-proof ]]; then
+  [[ $# == 1 ]] || exit 2
+  parent_validation_mutation_proof
+  exit
+fi
+
 fixture="$tmp/fixture"
 mkdir -p "$fixture"
 
@@ -45,7 +85,6 @@ expect_red() {
     exit 1
   fi
 }
-mutate() { python3 "$@"; }
 
 "$runner" --verify-fixture "$fixture" "$tmp/accepted"
 expect_red staged-count mutate -c 'import pathlib,sys;p=pathlib.Path(sys.argv[1])/"per-peer.tsv";r=p.read_text().splitlines();h=r[0].split("\t").index("staged");x=r[1].split("\t");x[h]="99999";r[1]="\t".join(x);p.write_text("\n".join(r)+"\n")'
@@ -176,6 +215,35 @@ diagnostic_line=$(grep -nF "resolution=reject reason=foreign_executable" \
 after_line=$(grep -nF harness-after "$tmp/control-rejected/harness.log" | cut -d: -f1)
 (( before_line < diagnostic_line && diagnostic_line < after_line ))
 grep -Fq '"root_failure":"rss_ceiling"' "$tmp/control-rss/failure.json"
+
+"$runner" --startup-gate-fixture delayed-expected "$tmp/startup-delayed"
+grep -Fq "startup_gate resolution=release" "$tmp/startup-delayed/receipt/harness.log"
+[[ -s $tmp/startup-delayed/receipt/phase.json ]]
+"$runner" --startup-gate-fixture stable-wrong "$tmp/startup-wrong" \
+  2>"$tmp/startup-wrong.stderr"
+grep -Fq "startup_gate_failure reason=identity_rejected child_status=" \
+  "$tmp/startup-wrong.stderr"
+[[ ! -e $tmp/startup-wrong/gate/go ]]
+"$runner" --startup-gate-fixture pre-ready-exit "$tmp/startup-pre-exit" \
+  2>"$tmp/startup-pre-exit.stderr"
+grep -Fq "startup_gate_failure reason=pre_ready_exit child_status=37" \
+  "$tmp/startup-pre-exit.stderr"
+grep -Fq "pre-ready fixture diagnostic" "$tmp/startup-pre-exit.stderr"
+[[ $(<"$tmp/startup-pre-exit/child.status") == 37 ]]
+[[ ! -e $tmp/startup-pre-exit/gate/go ]]
+
+parent_validation_mutation_proof
+
+cp "$runner" "$tmp/legacy-wait-exe"
+# shellcheck disable=SC2016 # Exact production source text for destructive proof.
+mutate -c 'import pathlib,sys;p=pathlib.Path(sys.argv[1]);s=p.read_text();seam='\''  await_tiny_startup_gate "$pid" "$tiny_expected" "$tiny_ready" "$tiny_go" "$receipt"\n'\'';replacement='\''  wait_exe "$pid" "$tiny_expected"\n'\'';assert s.count(seam)==1;p.write_text(s.replace(seam,replacement,1))' \
+  "$tmp/legacy-wait-exe"
+chmod +x "$tmp/legacy-wait-exe"
+if "$tmp/legacy-wait-exe" --startup-gate-fixture delayed-expected \
+  "$tmp/legacy-wait-fixture" >"$tmp/legacy-wait.stdout" 2>"$tmp/legacy-wait.stderr"; then
+  echo "false green startup gate: legacy wait_exe polling" >&2
+  exit 1
+fi
 
 for seam in \
   "timeout -k 10 1200 \"\$script\" --campaign-inner \"\$output\"" \
