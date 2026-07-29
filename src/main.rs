@@ -1999,6 +1999,17 @@ async fn trigger_import_validation_refresh(
     }
 }
 
+fn zero_static_peer_summary(dynamic_range_count: usize) -> String {
+    if dynamic_range_count == 0 {
+        "0 configured static neighbors; 0 dynamic-neighbor acceptance ranges".to_string()
+    } else {
+        format!(
+            "0 configured static neighbors; {dynamic_range_count} dynamic-neighbor acceptance range{} (dynamic-only)",
+            if dynamic_range_count == 1 { "" } else { "s" }
+        )
+    }
+}
+
 fn print_startup_banner(config: &Config, grpc_listeners: &[GrpcListenerConfig]) {
     let ebgp = config
         .neighbors
@@ -2027,7 +2038,7 @@ fn print_startup_banner(config: &Config, grpc_listeners: &[GrpcListenerConfig]) 
         peer_parts.push(format!("{ibgp} iBGP"));
     }
     let peer_summary = if peer_parts.is_empty() {
-        "0 peers (dynamic-only)".to_string()
+        zero_static_peer_summary(config.dynamic_neighbors.len())
     } else {
         format!(
             "{} peers ({})",
@@ -2968,6 +2979,7 @@ async fn run<T>(
         asn = config.global.asn,
         router_id = %config.global.router_id,
         neighbors = config.neighbors.len(),
+        dynamic_neighbor_ranges = config.dynamic_neighbors.len(),
         "starting rustbgpd"
     );
     // The same set `--check` frames, logged here because this is the first
@@ -5446,6 +5458,21 @@ mod tests {
         assert_tier_authorized_test_config(&config);
         std::fs::remove_file(&path).ok();
         config
+    }
+
+    /// Load-bearing startup truth proof: collapsing either zero-static case
+    /// back to the old "dynamic-only" label makes an exact summary red, and
+    /// counting ranges as peers breaks the dormant-range wording.
+    #[test]
+    fn startup_peer_summary_distinguishes_unconfigured_from_dynamic_only() {
+        assert_eq!(
+            zero_static_peer_summary(0),
+            "0 configured static neighbors; 0 dynamic-neighbor acceptance ranges"
+        );
+        assert_eq!(
+            zero_static_peer_summary(2),
+            "0 configured static neighbors; 2 dynamic-neighbor acceptance ranges (dynamic-only)"
+        );
     }
 
     #[test]

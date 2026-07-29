@@ -27,6 +27,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Dormant dynamic-neighbor acceptance is now visible without being mistaken for
+  active peers: startup reports configured range counts, empty human
+  `rbgp neighbor list` distinguishes configured ranges from a first deploy
+  while JSON remains exactly `[]`, and `rbgp doctor` records redacted range
+  inventory or explicit unavailable evidence in its support bundle.
+
 - RFC 8212 diagnostics now include dynamic eBGP ranges, peer groups, and `any AS`.
 
 - Dynamic-neighbor ranges now validate inherited route-reflector, ORR,

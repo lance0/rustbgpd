@@ -1402,6 +1402,7 @@ rustbgpd-doctor-<ts>/
 ├── manifest.json            # versions, redaction note, per-section collected/partial/unavailable status, check results
 ├── config/effective.toml    # the daemon's GetEffectiveConfig dump (defaults materialized, secrets <redacted>)
 ├── peers/bfd.json           # BFD state/diagnostic/strict plus remote-AdminDown bool or null when unknown
+├── peers/dynamic-neighbors.json # configured acceptance ranges; descriptions scrubbed client-side
 ├── peers/neighbors.json     # per-peer state, counters, flap/slow-peer status
 ├── peers/events.json        # recent session + policy events (free text scrubbed)
 ├── logs/tail-1000.jsonl     # only with --log-file; see below
@@ -1412,6 +1413,13 @@ rustbgpd-doctor-<ts>/
 `session_events` and `policy_events` are reported independently in the
 manifest. A failed history RPC marks only its source `partial`; the bundle
 keeps the successful peer, BFD, and other event-history evidence.
+Dynamic-neighbor range inventory is likewise independent evidence. With no
+active neighbor sessions, doctor distinguishes zero configured ranges from
+configured ranges waiting for a future inbound connection. Zero-and-zero keeps
+the existing yellow first-deploy warning; dormant configured ranges are
+inventory evidence, not a health failure. If `ListDynamicNeighbors` fails, the
+manifest records the inventory as `unavailable` and the check stays yellow
+instead of fabricating a zero-range result.
 
 Exit codes: `0` no checks red (green and yellow warnings may be present), `1`
 error, `2` bundle written but one or more checks are red. A down-daemon run produces a
@@ -1553,6 +1561,11 @@ object, and optional `effective_retention_time_seconds`. Scalar presence is
 meaningful: a negotiated hold or Restart Time of zero and
 `four_octet_as = false` are explicit values, not missing data.
 
+At startup, the topology banner reports configured static neighbors separately
+from dynamic-neighbor acceptance ranges. A dynamic-only configuration reports
+the range count; zero static neighbors and zero ranges is identified as
+unconfigured rather than mislabeled dynamic-only.
+
 ### Add a peer at runtime
 
 ```bash
@@ -1592,6 +1605,12 @@ peer's OPEN. Changes persist to the TOML file (atomic write) before the RPC
 returns and survive a restart.
 The live mutation path is serialized with SIGHUP reload, so a reload cannot
 drop an accepted-but-not-yet-persisted range.
+
+When `rbgp neighbor list` has no live neighbor rows, human output queries the
+range inventory and distinguishes an unconfigured daemon from configured
+ranges that have not accepted a peer yet. JSON compatibility is unchanged:
+the same empty live-neighbor result is exactly `[]`, with no range lookup or
+extra inventory fields; use `rbgp dynamic-neighbor list -j` for range JSON.
 
 ### Soft reset (re-evaluate import policy)
 

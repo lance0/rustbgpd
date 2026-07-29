@@ -37,6 +37,7 @@ pub(crate) struct MockState {
     pub(crate) global_failures_remaining: AtomicUsize,
     pub(crate) list_neighbors_calls: AtomicUsize,
     pub(crate) list_neighbors_failures_remaining: AtomicUsize,
+    pub(crate) list_dynamic_neighbors_calls: AtomicUsize,
     pub(crate) watch_routes_calls: AtomicUsize,
     pub(crate) watch_routes_active: AtomicUsize,
     pub(crate) watch_routes_clean_end: AtomicBool,
@@ -106,6 +107,8 @@ pub(crate) struct MockState {
     // Canned ListNeighbors response — drives `rbgp diff` peer-availability
     // gating. Empty = no neighbors configured on the daemon.
     pub(crate) list_neighbors_response: Mutex<Vec<server_proto::NeighborState>>,
+    pub(crate) list_dynamic_neighbors_response: Mutex<Vec<server_proto::DynamicNeighborRange>>,
+    pub(crate) list_dynamic_neighbors_error: Mutex<Option<(Code, String)>>,
     pub(crate) last_list_fib: Mutex<Option<server_proto::ListFibRoutesRequest>>,
     pub(crate) last_list_bgpls: Mutex<Option<server_proto::ListBgpLsRequest>>,
     // Canned ListBgpLsRoutes response — when set, served verbatim so the
@@ -985,8 +988,20 @@ impl rustbgpd_api::proto::neighbor_service_server::NeighborService for MockNeigh
         &self,
         _request: Request<server_proto::ListDynamicNeighborsRequest>,
     ) -> Result<Response<server_proto::ListDynamicNeighborsResponse>, Status> {
+        self.state
+            .list_dynamic_neighbors_calls
+            .fetch_add(1, Ordering::SeqCst);
+        if let Some((code, message)) = self.state.list_dynamic_neighbors_error.lock().await.clone()
+        {
+            return Err(Status::new(code, message));
+        }
         Ok(Response::new(server_proto::ListDynamicNeighborsResponse {
-            ranges: Vec::new(),
+            ranges: self
+                .state
+                .list_dynamic_neighbors_response
+                .lock()
+                .await
+                .clone(),
         }))
     }
 

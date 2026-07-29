@@ -8,8 +8,8 @@ use crate::output::{
 use crate::proto::neighbor_service_client::NeighborServiceClient;
 use crate::proto::{
     AddNeighborRequest, DeleteNeighborRequest, DisableNeighborRequest, EnableNeighborRequest,
-    GetNeighborStateRequest, ListNeighborsRequest, NeighborConfig, NeighborCreateIntent,
-    RefreshOutboundRequest, SetGracefulShutdownRequest, SoftResetInRequest,
+    GetNeighborStateRequest, ListDynamicNeighborsRequest, ListNeighborsRequest, NeighborConfig,
+    NeighborCreateIntent, RefreshOutboundRequest, SetGracefulShutdownRequest, SoftResetInRequest,
 };
 
 pub(super) fn bare_ip_rpc_address(address: &str) -> &str {
@@ -72,7 +72,16 @@ fn json_neighbor(n: &crate::proto::NeighborState) -> JsonNeighbor {
     }
 }
 
-pub async fn list(connection: Connection, json: bool, wide: bool) -> Result<(), CliError> {
+enum NeighborListView {
+    Json(Vec<JsonNeighbor>),
+    Empty(String),
+    Table(Vec<crate::proto::NeighborState>),
+}
+
+async fn neighbor_list_view(
+    connection: Connection,
+    json: bool,
+) -> Result<NeighborListView, CliError> {
     let mut client =
         NeighborServiceClient::with_interceptor(connection.channel(), connection.interceptor());
     let resp = client
@@ -81,14 +90,30 @@ pub async fn list(connection: Connection, json: bool, wide: bool) -> Result<(), 
         .into_inner();
 
     if json {
+        let out: Vec<JsonNeighbor> = resp.neighbors.iter().map(json_neighbor).collect();
+        Ok(NeighborListView::Json(out))
+    } else if resp.neighbors.is_empty() {
+        let dynamic_range_count = client
+            .list_dynamic_neighbors(ListDynamicNeighborsRequest {})
+            .await?
+            .into_inner()
+            .ranges
+            .len();
+        Ok(NeighborListView::Empty(empty_neighbor_list_message(
+            dynamic_range_count,
+        )))
+    } else {
+        Ok(NeighborListView::Table(resp.neighbors))
+    }
+}
+
+pub async fn list(connection: Connection, json: bool, wide: bool) -> Result<(), CliError> {
+    match neighbor_list_view(connection, json).await? {
         // `--wide` is display-only: JSON is unaffected by it and may omit
         // optional false healthy-state fields.
-        let out: Vec<JsonNeighbor> = resp.neighbors.iter().map(json_neighbor).collect();
-        output::print_json_pretty(&out)?;
-    } else if resp.neighbors.is_empty() {
-        println!("{EMPTY_NEIGHBOR_LIST}");
-    } else {
-        output::print_neighbor_table(&resp.neighbors, wide);
+        NeighborListView::Json(out) => output::print_json_pretty(&out)?,
+        NeighborListView::Empty(message) => println!("{message}"),
+        NeighborListView::Table(neighbors) => output::print_neighbor_table(&neighbors, wide),
     }
     Ok(())
 }
@@ -97,6 +122,16 @@ pub async fn list(connection: Connection, json: bool, wide: bool) -> Result<(), 
 /// changes it.
 const EMPTY_NEIGHBOR_LIST: &str =
     "no neighbors configured — add one: rbgp neighbor <addr> add --remote-asn <asn>";
+
+fn empty_neighbor_list_message(dynamic_range_count: usize) -> String {
+    match dynamic_range_count {
+        0 => EMPTY_NEIGHBOR_LIST.to_string(),
+        1 => "no active neighbors; 1 dynamic-neighbor acceptance range configured".to_string(),
+        count => {
+            format!("no active neighbors; {count} dynamic-neighbor acceptance ranges configured")
+        }
+    }
+}
 
 fn json_update_group_comparison(
     primary_neighbor: &str,
@@ -1730,17 +1765,97 @@ mod tests {
         );
     }
 
-    /// The zero-peer human output must say what happened AND hand the
-    /// operator the exact next command; `-j` mode bypasses it entirely
-    /// and serializes the empty list as `[]`.
-    #[test]
-    fn empty_state_names_the_add_command_and_json_stays_pure() {
+    /// Load-bearing human empty-state proof: removing the conditional range
+    /// query leaves its counter at zero; treating zero ranges as dormant
+    /// changes the exact first-deploy guidance.
+    #[tokio::test]
+    async fn empty_human_neighbor_list_distinguishes_zero_ranges() {
+        let server = spawn_mock_server(None).await;
+        let view = neighbor_list_view(connect(&server.addr, None).await.unwrap(), false)
+            .await
+            .unwrap();
         assert_eq!(
-            EMPTY_NEIGHBOR_LIST,
+            server
+                .state
+                .list_dynamic_neighbors_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        let NeighborListView::Empty(message) = view else {
+            panic!("empty human result must render the empty-state message")
+        };
+        assert_eq!(
+            message,
             "no neighbors configured — add one: rbgp neighbor <addr> add --remote-asn <asn>"
         );
-        let json = serde_json::to_string_pretty(&Vec::<crate::output::JsonNeighbor>::new())
-            .expect("serialize");
+    }
+
+    /// Load-bearing dormant-range proof: deleting the range RPC or ignoring
+    /// its result emits first-deploy guidance for an already configured
+    /// dynamic-only daemon.
+    #[tokio::test]
+    async fn empty_human_neighbor_list_reports_dormant_dynamic_ranges() {
+        let server = spawn_mock_server(None).await;
+        *server.state.list_dynamic_neighbors_response.lock().await = vec![
+            rustbgpd_api::proto::DynamicNeighborRange {
+                prefix: "192.0.2.0/24".to_string(),
+                peer_group: "edge".to_string(),
+                remote_asn: 65002,
+                description: String::new(),
+            },
+            rustbgpd_api::proto::DynamicNeighborRange {
+                prefix: "198.51.100.0/24".to_string(),
+                peer_group: "edge".to_string(),
+                remote_asn: 65003,
+                description: String::new(),
+            },
+        ];
+        let view = neighbor_list_view(connect(&server.addr, None).await.unwrap(), false)
+            .await
+            .unwrap();
+        assert_eq!(
+            server
+                .state
+                .list_dynamic_neighbors_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        let NeighborListView::Empty(message) = view else {
+            panic!("dormant human result must render the empty-state message")
+        };
+        assert_eq!(
+            message,
+            "no active neighbors; 2 dynamic-neighbor acceptance ranges configured"
+        );
+    }
+
+    /// Load-bearing JSON compatibility proof: moving the range query before
+    /// JSON dispatch increments the counter, while any appended human context
+    /// changes the pinned empty payload away from `[]`.
+    #[tokio::test]
+    async fn empty_json_neighbor_list_stays_exact_and_skips_range_rpc() {
+        let server = spawn_mock_server(None).await;
+        *server.state.list_dynamic_neighbors_response.lock().await =
+            vec![rustbgpd_api::proto::DynamicNeighborRange {
+                prefix: "192.0.2.0/24".to_string(),
+                peer_group: "edge".to_string(),
+                remote_asn: 65002,
+                description: String::new(),
+            }];
+        let view = neighbor_list_view(connect(&server.addr, None).await.unwrap(), true)
+            .await
+            .unwrap();
+        assert_eq!(
+            server
+                .state
+                .list_dynamic_neighbors_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        let NeighborListView::Json(neighbors) = view else {
+            panic!("JSON result must bypass human empty-state rendering")
+        };
+        let json = serde_json::to_string_pretty(&neighbors).expect("serialize");
         assert_eq!(json, "[]");
     }
 
