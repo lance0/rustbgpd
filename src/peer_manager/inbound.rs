@@ -346,6 +346,7 @@ impl PeerManager {
             if let Some(range) = self.match_dynamic_range(peer_ip) {
                 // Check dynamic peer limit
                 if self.dynamic_peer_count >= self.dynamic_neighbor_limit as usize {
+                    self.metrics.record_dynamic_neighbor_limit_rejection();
                     warn!(
                         %peer_ip,
                         limit = self.dynamic_neighbor_limit,
@@ -537,6 +538,7 @@ impl PeerManager {
                 self.register_session(session_id, &peer_key);
                 self.sync_owned_session_metrics(&peer_key).await;
                 self.dynamic_peer_count += 1;
+                self.refresh_dynamic_neighbor_capacity_metrics();
                 // ADR-0112: the accepted child carries the range's pinned
                 // external classification and its resolved chains.
                 self.refresh_rfc8212_policy_metrics(&peer_key);

@@ -4382,6 +4382,7 @@ fn insert_test_dynamic_managed_peer(
     );
     mgr.register_session(session_id, &peer_key);
     mgr.dynamic_peer_count += 1;
+    mgr.refresh_dynamic_neighbor_capacity_metrics();
 }
 
 #[tokio::test]
@@ -4481,6 +4482,8 @@ async fn rollback_reap_keeps_dynamic_peer_for_host_bit_range_prefix() {
 /// Load-bearing dynamic lifecycle proof: removing the latch cleanup from the
 /// authoritative rollback reap leaves a stale error keyed to the address, so a
 /// future dynamic accept at that address can inherit state from a dead peer.
+/// Removing the rollback capacity refresh leaves the process-global used gauge
+/// pinned at one after the same authoritative reap.
 #[tokio::test]
 async fn rollback_reap_clears_dynamic_max_prefix_latch() {
     let mut mgr = dynamic_test_manager();
@@ -4507,6 +4510,7 @@ async fn rollback_reap_clears_dynamic_max_prefix_latch() {
         "max-prefix limit exceeded: 501 accepted, bound 500".to_string(),
         None,
     );
+    assert_dynamic_neighbor_capacity(&mgr.metrics, 1.0, 100.0, 99.0, 0.0);
 
     assert_eq!(
         mgr.reap_dynamic_peers_not_allowed_by_current_ranges().await,
@@ -4517,6 +4521,7 @@ async fn rollback_reap_clears_dynamic_max_prefix_latch() {
         !mgr.max_prefix_latches.contains_key(&key(peer_addr)),
         "authoritative dynamic removal must reap its manager-owned latch"
     );
+    assert_dynamic_neighbor_capacity(&mgr.metrics, 0.0, 100.0, 100.0, 0.0);
 }
 
 /// Load-bearing transaction-bounce proof: removing the pre-filter policy sync
@@ -6373,7 +6378,9 @@ async fn inbound_replace_preserves_old_primary_terminal_breach() {
 
 /// Load-bearing dynamic-retirement proof: the actor emits max-prefix only from
 /// Shutdown after an older `BackToIdle` was queued. Removing the retirement
-/// barrier auto-removes the peer and leaves no explicit-Enable recovery target.
+/// barrier auto-removes the peer and leaves no explicit-Enable recovery target;
+/// decrementing or refreshing the slot on the retained branch loses its
+/// process-global capacity ownership.
 #[tokio::test]
 async fn dynamic_back_to_idle_retains_recovery_target_for_late_terminal_breach() {
     let mut mgr = test_peer_manager();
@@ -6396,6 +6403,8 @@ async fn dynamic_back_to_idle_retains_recovery_target_for_late_terminal_breach()
     );
     mgr.peers.get_mut(&key(addr)).unwrap().is_dynamic = true;
     mgr.dynamic_peer_count = 1;
+    mgr.refresh_dynamic_neighbor_capacity_metrics();
+    assert_dynamic_neighbor_capacity(&mgr.metrics, 1.0, 100.0, 99.0, 0.0);
     mgr.session_notify_tx
         .send(SessionNotification::BackToIdle {
             session_id: 1,
@@ -6416,6 +6425,7 @@ async fn dynamic_back_to_idle_retains_recovery_target_for_late_terminal_breach()
     assert!(mgr.retiring_sessions.is_empty());
     assert!(mgr.peer_key_for_session(1).is_none());
     assert_eq!(mgr.peer_key_for_session(2), Some(key(addr)));
+    assert_dynamic_neighbor_capacity(&mgr.metrics, 1.0, 100.0, 99.0, 0.0);
 
     mgr.enable_peer(key(addr)).await.unwrap();
     assert!(mgr.peers.get(&key(addr)).unwrap().enabled);
@@ -7021,6 +7031,45 @@ fn peer_metric_series_count(metrics: &BgpMetrics, peer: &str) -> usize {
                 .any(|label| label.name() == "peer" && label.value() == peer)
         })
         .count()
+}
+
+fn process_global_metric(metrics: &BgpMetrics, family_name: &str) -> Option<f64> {
+    metrics
+        .registry()
+        .gather()
+        .into_iter()
+        .find(|family| family.name() == family_name)
+        .map(|family| {
+            assert_eq!(family.get_metric().len(), 1, "{family_name} series count");
+            let metric = &family.get_metric()[0];
+            assert!(
+                metric.get_label().is_empty(),
+                "{family_name} must remain label-free"
+            );
+            if family_name.ends_with("_total") {
+                metric.get_counter().value()
+            } else {
+                metric.get_gauge().value()
+            }
+        })
+}
+
+fn assert_dynamic_neighbor_capacity(
+    metrics: &BgpMetrics,
+    used: f64,
+    limit: f64,
+    headroom: f64,
+    rejections: f64,
+) {
+    assert_eq!(
+        (
+            process_global_metric(metrics, "bgp_dynamic_neighbor_slots_used"),
+            process_global_metric(metrics, "bgp_dynamic_neighbor_slots_limit"),
+            process_global_metric(metrics, "bgp_dynamic_neighbor_slots_headroom"),
+            process_global_metric(metrics, "bgp_dynamic_neighbor_limit_rejections_total"),
+        ),
+        (Some(used), Some(limit), Some(headroom), Some(rejections))
+    );
 }
 
 fn peer_identity_gauge(
@@ -17503,11 +17552,15 @@ async fn inbound_during_established_dropped() {
     handle.await.unwrap();
 }
 
+/// Load-bearing capacity telemetry proof: removing the constructor seed, the
+/// successful-accept refresh, or the ordinary `BackToIdle` removal refresh
+/// breaks the exact 0 → 1 → 0 process-global gauge sequence.
 #[tokio::test]
 async fn dynamic_inbound_peer_is_created_and_removed_on_back_to_idle() {
     let (_tx, rx) = mpsc::channel(16);
     let (rib_tx, _rib_rx) = mpsc::channel(64);
     let metrics = BgpMetrics::new();
+    let metrics_view = metrics.clone();
     let mut mgr = PeerManager::new_with_config(
         rx,
         mpsc::unbounded_channel().1,
@@ -17521,6 +17574,7 @@ async fn dynamic_inbound_peer_is_created_and_removed_on_back_to_idle() {
         None,
         make_dynamic_manager_config(),
     );
+    assert_dynamic_neighbor_capacity(&metrics_view, 0.0, 100.0, 100.0, 0.0);
     mgr.tcp_ao_rotation = TcpAoRotationStatus {
         desired: rustbgpd_transport::TcpAoRotationGeneration::STARTUP
             .next()
@@ -17544,6 +17598,7 @@ async fn dynamic_inbound_peer_is_created_and_removed_on_back_to_idle() {
         mgr.dynamic_peer_count, 1,
         "dynamic peer count should increment"
     );
+    assert_dynamic_neighbor_capacity(&metrics_view, 1.0, 100.0, 99.0, 0.0);
     let info = mgr.get_peer_info(&key(peer_addr)).await.unwrap();
     assert!(info.is_dynamic, "peer should be marked dynamic");
     assert_eq!(info.peer_group.as_deref(), Some("ix-members"));
@@ -17575,8 +17630,60 @@ async fn dynamic_inbound_peer_is_created_and_removed_on_back_to_idle() {
         "dynamic peer should be removed when it goes idle"
     );
     assert!(mgr.peers.is_empty(), "dynamic peer table should be empty");
+    assert_dynamic_neighbor_capacity(&metrics_view, 0.0, 100.0, 100.0, 0.0);
 
     drop(client_stream);
+}
+
+/// Load-bearing saturated-drop proof: removing the rejection increment leaves
+/// the counter at zero; mutating capacity or installing the rejected peer
+/// breaks the unchanged gauge and peer-table assertions.
+#[tokio::test]
+async fn saturated_dynamic_neighbor_accept_counts_rejection_without_consuming_capacity() {
+    let (_tx, rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let metrics = BgpMetrics::new();
+    let metrics_view = metrics.clone();
+    let mut config = make_dynamic_manager_config();
+    config.global.dynamic_neighbor_limit = Some(1);
+    let mut mgr = PeerManager::new_with_config(
+        rx,
+        mpsc::unbounded_channel().1,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        metrics,
+        rib_tx,
+        None,
+        None,
+        config,
+    );
+
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let listener_addr = listener.local_addr().unwrap();
+    let client = tokio::spawn(async move { TcpStream::connect(listener_addr).await.unwrap() });
+    let (first_stream, first_addr) = listener.accept().await.unwrap();
+    let first_client = client.await.unwrap();
+    mgr.handle_inbound(first_stream, first_addr, None, None)
+        .await;
+    assert_dynamic_neighbor_capacity(&metrics_view, 1.0, 1.0, 0.0, 0.0);
+
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let listener_addr = listener.local_addr().unwrap();
+    let client = tokio::spawn(async move { TcpStream::connect(listener_addr).await.unwrap() });
+    let (rejected_stream, _) = listener.accept().await.unwrap();
+    let rejected_client = client.await.unwrap();
+    let rejected_addr = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2));
+    mgr.handle_inbound(rejected_stream, sock(rejected_addr), None, None)
+        .await;
+
+    assert_dynamic_neighbor_capacity(&metrics_view, 1.0, 1.0, 0.0, 1.0);
+    assert_eq!(mgr.dynamic_peer_count, 1);
+    assert_eq!(mgr.peers.len(), 1);
+    assert!(!mgr.peers.contains_key(&key(rejected_addr)));
+    drop(first_client);
+    drop(rejected_client);
 }
 
 #[tokio::test]

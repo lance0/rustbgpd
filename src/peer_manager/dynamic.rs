@@ -445,6 +445,7 @@ impl PeerManager {
             self.reap_deleted_peer_metric_series_for_key(&peer_key)
                 .await;
             self.dynamic_peer_count = self.dynamic_peer_count.saturating_sub(1);
+            self.refresh_dynamic_neighbor_capacity_metrics();
             removed += 1;
             info!(
                 peer = %peer_key,

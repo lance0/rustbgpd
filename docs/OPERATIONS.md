@@ -691,11 +691,24 @@ the same 200 ms core-actor deadline as `/readyz`.
 
 ### Routing
 
+Dynamic-neighbor admission capacity is process-global and deliberately
+label-free. The three slot gauges are materialized when `PeerManager` starts:
+`used` counts accepted dynamic peers that still own a slot, `limit` mirrors
+`global.dynamic_neighbor_limit`, and `headroom` is the saturating difference.
+Ordinary Idle removal and config-rollback reaping return a slot; a terminal
+max-prefix peer retained disabled for explicit recovery still owns one.
+`bgp_dynamic_neighbor_limit_rejections_total` increments only when a matching
+inbound dynamic connection is dropped because all slots are occupied.
+
 | Metric | What it tells you |
 |--------|-------------------|
 | `bgp_rib_loc_prefixes{afi_safi}` | Loc-RIB size (best paths) per AFI/SAFI |
 | `bgp_rib_prefixes{peer,afi_safi}` | Adj-RIB-In size per peer + AFI/SAFI (received) |
 | `bgp_rib_adj_out_prefixes{peer,afi_safi}` | Adj-RIB-Out size per peer + AFI/SAFI (advertised) |
+| `bgp_dynamic_neighbor_slots_used` | Dynamic peers currently consuming the process-global admission limit, including retained disabled max-prefix recovery targets |
+| `bgp_dynamic_neighbor_slots_limit` | Effective process-global `dynamic_neighbor_limit` |
+| `bgp_dynamic_neighbor_slots_headroom` | Saturating `limit - used`; zero means the next matching dynamic inbound is rejected |
+| `bgp_dynamic_neighbor_limit_rejections_total` | Matching inbound dynamic connections rejected because the slot limit was already full |
 | `bgp_max_prefix_usage{peer,scope}` | Live session-actor max-prefix enforcement count for `aggregate`, `ipv4_unicast`, or `ipv6_unicast`; series are absent while the session is down |
 | `bgp_max_prefix_limit{peer,scope}` | Effective finite bound for the same scope; absent means unlimited, never zero |
 | `bgp_max_prefix_headroom{peer,scope}` | Saturating `limit - usage` for a finite scope; absent when unlimited or disconnected |
