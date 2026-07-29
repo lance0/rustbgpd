@@ -1,7 +1,11 @@
 //! Occupancy and timing receipt for the production VPN RIB query path.
 
+#[cfg(feature = "vpn-query-allocation")]
+use std::alloc::{GlobalAlloc, Layout};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
+#[cfg(feature = "vpn-query-allocation")]
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rustbgpd_api::proto;
@@ -17,8 +21,87 @@ use serde_json::json;
 use tokio::sync::{mpsc, oneshot};
 use tonic::Request;
 
+#[cfg(not(feature = "vpn-query-allocation"))]
 #[global_allocator]
 static ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+#[cfg(feature = "vpn-query-allocation")]
+struct TrackingAllocator {
+    inner: tikv_jemallocator::Jemalloc,
+    enabled: AtomicBool,
+    live: AtomicUsize,
+    peak: AtomicUsize,
+}
+
+#[cfg(feature = "vpn-query-allocation")]
+impl TrackingAllocator {
+    const fn new() -> Self {
+        Self {
+            inner: tikv_jemallocator::Jemalloc,
+            enabled: AtomicBool::new(false),
+            live: AtomicUsize::new(0),
+            peak: AtomicUsize::new(0),
+        }
+    }
+
+    fn begin(&self) {
+        let live = self.live.load(Ordering::Relaxed);
+        self.peak.store(live, Ordering::Relaxed);
+        self.enabled.store(true, Ordering::Relaxed);
+    }
+
+    fn end(&self) -> usize {
+        self.enabled.store(false, Ordering::Relaxed);
+        self.peak.load(Ordering::Relaxed)
+    }
+
+    fn add(&self, bytes: usize) {
+        let live = self.live.fetch_add(bytes, Ordering::Relaxed) + bytes;
+        if self.enabled.load(Ordering::Relaxed) {
+            self.peak.fetch_max(live, Ordering::Relaxed);
+        }
+    }
+}
+
+#[cfg(feature = "vpn-query-allocation")]
+// SAFETY: all operations are forwarded unchanged to one jemalloc instance;
+// atomic accounting does not alter pointer or layout contracts.
+unsafe impl GlobalAlloc for TrackingAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let ptr = unsafe { self.inner.alloc(layout) };
+        if !ptr.is_null() {
+            self.add(layout.size());
+        }
+        ptr
+    }
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        let ptr = unsafe { self.inner.alloc_zeroed(layout) };
+        if !ptr.is_null() {
+            self.add(layout.size());
+        }
+        ptr
+    }
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        let resized = unsafe { self.inner.realloc(ptr, layout, new_size) };
+        if !resized.is_null() {
+            if new_size >= layout.size() {
+                self.add(new_size - layout.size());
+            } else {
+                self.live
+                    .fetch_sub(layout.size() - new_size, Ordering::Relaxed);
+            }
+        }
+        resized
+    }
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        unsafe { self.inner.dealloc(ptr, layout) };
+        self.live.fetch_sub(layout.size(), Ordering::Relaxed);
+    }
+}
+
+#[cfg(feature = "vpn-query-allocation")]
+#[global_allocator]
+static ALLOCATOR: TrackingAllocator = TrackingAllocator::new();
 
 const PEERS: usize = 16;
 const SMOKE_ROUTES: usize = 256;
@@ -136,7 +219,9 @@ async fn query(
     QueryReceipt {
         actor_ns,
         service_method_ns,
-        post_actor_ns: service_receipt.post_actor_ns,
+        post_actor_ns: service_method_ns
+            .checked_sub(actor_ns)
+            .expect("service_method_ns underflowed actor_handler_ns"),
         actor_rows,
         actor_capacity,
         returned_rows: service_receipt.returned_rows,
@@ -157,7 +242,7 @@ fn verify(receipt: &QueryReceipt, routes: usize, filtered: bool, dispatch: u64) 
     assert!(receipt.post_actor_ns > 0);
 }
 
-async fn run(routes: usize, output: &str, timeout: Duration) {
+async fn run(routes: usize, case: &str, output: &str, timeout: Duration) {
     let (primary_tx, primary_rx) = mpsc::channel(32);
     let (query_tx, query_rx) = mpsc::channel(8);
     let (actor_tx, mut actor_rx) = mpsc::channel(4);
@@ -229,18 +314,18 @@ async fn run(routes: usize, output: &str, timeout: Duration) {
 
     let (service_tx, mut service_rx) = mpsc::channel(4);
     let service = RibService::new(query_tx).with_vpn_query_bench_receipts(service_tx);
-    let all = query(&service, &mut actor_rx, &mut service_rx, "", timeout).await;
-    let filtered = query(
+    #[cfg(feature = "vpn-query-allocation")]
+    ALLOCATOR.begin();
+    let filtered = case == "F";
+    let receipt = query(
         &service,
         &mut actor_rx,
         &mut service_rx,
-        "10.0.0.1",
+        if filtered { "10.0.0.1" } else { "" },
         timeout,
     )
     .await;
-    verify(&all, routes, false, 1);
-    verify(&filtered, routes, true, 2);
-
+    verify(&receipt, routes, filtered, 1);
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -248,17 +333,39 @@ async fn run(routes: usize, output: &str, timeout: Duration) {
     let document = json!({
         "schema": 1,
         "allocator": "tikv-jemallocator",
-        "mode": "timing",
+        "mode": if cfg!(feature = "vpn-query-allocation") { "allocation" } else { "timing" },
         "timestamp_unix": timestamp,
         "routes": routes,
         "peers": PEERS,
-        "queries": {
-            "all": receipt_json(&all),
-            "peer_10_0_0_1": receipt_json(&filtered),
-        }
+        "case": case,
+        "query": receipt_json(&receipt),
+        "peak_live_requested_bytes": peak_live_requested(),
+        "vmrss_bytes": read_status_kib("VmRSS").map(|value| value * 1024),
+        "vmhwm_bytes": read_status_kib("VmHWM").map(|value| value * 1024),
     });
     std::fs::write(output, serde_json::to_vec_pretty(&document).unwrap()).unwrap();
     manager_task.abort();
+}
+
+#[cfg(feature = "vpn-query-allocation")]
+fn peak_live_requested() -> Option<usize> {
+    Some(ALLOCATOR.end())
+}
+
+#[cfg(not(feature = "vpn-query-allocation"))]
+fn peak_live_requested() -> Option<usize> {
+    None
+}
+
+fn read_status_kib(field: &str) -> Option<u64> {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()?
+        .lines()
+        .find(|line| line.starts_with(field))?
+        .split_whitespace()
+        .nth(1)?
+        .parse()
+        .ok()
 }
 
 fn receipt_json(value: &QueryReceipt) -> serde_json::Value {
@@ -276,22 +383,32 @@ fn receipt_json(value: &QueryReceipt) -> serde_json::Value {
 
 fn main() {
     let args: Vec<_> = std::env::args().filter(|arg| arg != "--bench").collect();
-    let (routes, output, timeout) = match args.as_slice() {
-        [_, mode, output] if mode == "smoke" => {
-            (SMOKE_ROUTES, output.as_str(), Duration::from_secs(10))
-        }
-        [_, mode, count, output] if mode == "measure" => {
+    let (routes, case, output, timeout) = match args.as_slice() {
+        [_, mode, case, output] if mode == "smoke" && (case == "U" || case == "F") => (
+            SMOKE_ROUTES,
+            case.as_str(),
+            output.as_str(),
+            Duration::from_secs(10),
+        ),
+        [_, mode, count, case, output] if mode == "cell" && (case == "U" || case == "F") => {
             let routes = count.parse::<usize>().unwrap();
             assert!([10_000, 100_000, 1_000_000].contains(&routes));
-            (routes, output.as_str(), Duration::from_secs(120))
+            (
+                routes,
+                case.as_str(),
+                output.as_str(),
+                Duration::from_secs(120),
+            )
         }
         _ => {
-            panic!("usage: vpn_query smoke OUTPUT | vpn_query measure 10000|100000|1000000 OUTPUT")
+            panic!(
+                "usage: vpn_query smoke U|F OUTPUT | vpn_query cell 10000|100000|1000000 U|F OUTPUT"
+            )
         }
     };
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .unwrap()
-        .block_on(run(routes, output, timeout));
+        .block_on(run(routes, case, output, timeout));
 }

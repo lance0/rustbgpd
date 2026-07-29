@@ -159,3 +159,17 @@ event_history_wait_for_idle() {
         sleep "$poll_seconds"
     done
 }
+
+# VPN query campaigns deliberately share the same machine-wide lock and idle
+# policy as other retained performance work.
+vpn_query_acquire_host_lock() {
+    event_history_acquire_host_lock
+}
+
+vpn_query_init_host_preflight_log() {
+    event_history_init_host_preflight_log "$@"
+}
+
+vpn_query_wait_for_idle() {
+    event_history_wait_for_idle "$@"
+}

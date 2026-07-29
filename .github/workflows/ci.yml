@@ -167,6 +167,8 @@ jobs:
           bash -n bench/tests/test-rrtransport-receipt.sh
           bash -n bench/tests/test-route-server-1000-receipt.sh
           bash -n bench/tests/test-vpn-query-receipt.sh
+          bash -n bench/tests/test-vpn-query-campaign.sh
+          bash -n bench/run-vpn-query-campaign.sh
           shellcheck bench/scale/route-server-1000/run-receipt.sh \
             bench/scale/outbound-prefix-limits/run-receipt.sh \
             bench/scale/config-persistence/run-receipt.sh \
@@ -176,8 +178,11 @@ jobs:
             bench/tests/test-rrtransport-receipt.sh \
             bench/tests/test-route-server-1000-receipt.sh
           shellcheck bench/tests/test-vpn-query-receipt.sh
+          shellcheck bench/tests/test-vpn-query-campaign.sh \
+            bench/run-vpn-query-campaign.sh
           bash bench/tests/test-route-server-1000-receipt.sh
           bash bench/tests/test-vpn-query-receipt.sh
+          bash bench/tests/test-vpn-query-campaign.sh
           bash -n bench/scale/compare-rrharness.sh
           bash bench/tests/test-rrharness-driver.sh
           python3 -m unittest discover \

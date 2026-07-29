@@ -1,91 +1,86 @@
-# VPN RIB query occupancy method
+# VPN RIB query occupancy campaign
 
-This instrument measures the existing `ListVpnRoutes` path without changing its
-API or optimizing it. It exists to separate the RIB actor's full-table snapshot
-cost from the service's filtering and protobuf conversion cost before any
-production change is proposed.
+This retained campaign measures the existing `ListVpnRoutes` path. It neither
+changes that API nor proposes a redesign. The per-commit gate is only a
+256-route executable smoke plus corruption fixtures; CI never runs or publishes
+the campaign.
 
-## Shape
+## Executable shape
 
-- 16 peers: `10.0.0.1` through `10.0.0.16`.
-- VPNv4 `/32` routes are assigned round-robin to peers.
-- Every route has a unique RD-plus-prefix key, one MPLS label, shared realistic
-  path attributes, and route target `65000:100`.
-- Each peer is seeded in its own primary-channel updates, with batches no
-  larger than 4096. Before every send, the harness asserts that each announced
-  route belongs to the update's actual envelope peer.
-- A `QueryLocRibCount` sent on that same primary channel is the FIFO ingest
-  barrier. Its unicast count is intentionally ignored.
-- Both samples call the actual `RibService::list_vpn_routes` method through the
-  priority query channel. The first is unfiltered; the second uses
-  `peer_filter = 10.0.0.1` and an empty `afi_safi`.
+The harness seeds VPNv4 `/32` routes across 16 peers and uses the production
+priority query channel and `RibService::list_vpn_routes`. `U` is unfiltered;
+`F` filters exactly `10.0.0.1`. Every process measures exactly one case and
+writes one receipt. Semantic checksums cover RD, prefix, peer, and label.
 
-The supported campaign sizes are 10,000, 100,000, and 1,000,000 routes. The
-per-commit gate runs only the exact 256-route smoke shape; it does not publish a
-performance claim.
+Two separately compiled executables prevent allocation instrumentation from
+contaminating timing:
 
-## Timings and occupancy
+- `vpn_query_timing` uses bare jemalloc and emits timing evidence.
+- `vpn_query_allocation` wraps jemalloc with absolute live-requested-byte
+  accounting. `peak_live_requested_bytes > 8 GiB` is capacity-censored.
+  `/proc` `VmRSS` and `VmHWM` are recorded only as observations and never drive
+  classification.
 
-`actor_handler_ns` begins at the production `QueryVpnRoutes` match arm and ends
-after the snapshot reply is sent. `actor_rows` and `actor_capacity` describe the
-actual `Vec<VpnRibRoute>` allocated there.
+The driver builds each executable once, copies it into the campaign directory,
+records SHA-256, commit, and `rustc` provenance, then refuses missing, changed,
+or corrupt binaries. It acquires the shared retained-performance host lock and
+requires the same load, CPU-governor, and competing-process fence before build
+and every process.
 
-`service_method_ns` is measured outside the service across the trait method call
-and await. It includes the bounded benchmark-only service receipt `try_send`
-before the trait method returns. `actor_handler_ns` and `post_actor_ns` exclude
-publication of their respective receipts. Benchmark receipts use bounded
-persistent channels compiled only by `bench-internals`; an unarmed
-production/default build is unchanged.
+## Fixed campaign
 
-Setup has one absolute deadline shared by all seed sends and the FIFO barrier
-send and receive. Each query then has its own absolute deadline shared by the
-service call and both receipt awaits: 10 seconds in the exact smoke and 120
-seconds in campaign mode. A stalled actor or receipt publication failure
-therefore makes the smoke fail in bounded time instead of hanging.
+For each size `10,000`, `100,000`, and `1,000,000`, the driver launches 16 fresh
+timing processes in this immutable order:
 
-The timing executable installs the workspace `tikv-jemallocator` directly.
-The mechanics gate parses only the supplied benchmark source and requires its
-`#[global_allocator]` attribute immediately before the `tikv-jemallocator`
-static. Receipts identify allocator and mode so results from a different build
-cannot be silently compared.
+`U1,F1,U2,F2,U3,F3,U4,F4,U5,F5,U6,F6,U7,F7,U8,F8`
 
-Semantic checksums are calculated after the timed method returns. They are
-order-independent and cover RD, prefix, peer, and label. No sorting or hashing
-is added to the service path.
+That is exactly 48 uniquely numbered receipts. Selective reruns, randomization,
+reordering, missing receipts, and dual-case receipts are invalid.
+
+Within each cell, pairs are repetitions `(1,2)`, `(3,4)`, `(5,6)`, and `(7,8)`.
+For actor-handler values `a,b`, `pair_noise = abs(a-b) / ((a+b)/2)` and cell
+noise is the maximum of those four values. The noise ceiling is 5% at 10k and
+100k and 10% at 1M.
+
+`service_method_ns` encloses the trait call. The retained decomposition is
+computed with `service_method_ns.checked_sub(actor_handler_ns)`; underflow or
+missing evidence fails closed. A zero post-actor duration is valid.
+
+Classifier precedence is exact:
+
+1. `capacity_censored`
+2. `inconclusive` (cell noise above its size-specific ceiling)
+3. `instrumentation_suspect` (filtered/unfiltered actor medians disagree by
+   more than `max(cell noise, 5%)`, or actor medians decrease with size)
+4. `urgent` (worst actor handler above 200 ms)
+5. `design_followup` (worst actor handler above 25 ms)
+6. `no_redesign`
 
 ## Commands
 
-Run the exact smoke and its corruption proofs:
+Run the bounded mechanics and 256-route executable smoke:
 
 ```console
+bash bench/tests/test-vpn-query-campaign.sh
 bash bench/tests/test-vpn-query-receipt.sh
 ```
 
-Produce one campaign receipt without committing it:
+An operator may run the full retained campaign on a dedicated host:
 
 ```console
-cargo bench -p rustbgpd-api --bench vpn_query --features bench-internals -- \
-  measure 10000 /tmp/vpn-query-10000.json
+bench/run-vpn-query-campaign.sh /uncommitted/output-directory
 ```
 
-Repeat for 100,000 and 1,000,000 only on an otherwise idle host. This slice
-defines the instrument and gate; it does not run or publish that campaign.
+The output is intentionally not a committed result. A valid campaign is checked
+with:
 
-## Load-bearing failures
+```console
+python3 bench/verify-vpn-query-campaign.py /uncommitted/output-directory
+```
 
-- Replacing the actor snapshot collection with `Vec::new()` breaks exact row
-  counts and semantic checksums.
-- Giving a seed update the wrong envelope peer fails its ownership assertion
-  before the update is sent to the actor.
-- Stalling the manager during setup fails at the internal aggregate setup
-  deadline.
-- Removing the peer predicate changes 16 filtered rows to 256.
-- Selecting a different peer while preserving the filtered count breaks the
-  explicit assertion that every returned row belongs to `10.0.0.1`.
-- Bypassing or zeroing any timing breaks the nonzero decomposition assertions.
-- Removing only `#[global_allocator]` makes the structural allocator seam check
-  fail.
-- Removing actor or service receipt publication fails at the shared absolute
-  deadline instead of hanging.
-- Corrupting either row counts or the exact deterministic smoke checksums makes
-  the shell verifier fail; its checksum mutation remains nonzero.
+## Load-bearing gates
+
+The tests demonstrate red outcomes for fixed-order mutation, receipt
+count/order/pair drift, a dual-case receipt, timing underflow, binary corruption,
+row/checksum corruption, and removal of the allocator seam. These are executable
+mutation proofs, not prose-only claims.

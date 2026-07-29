@@ -16,6 +16,7 @@ readme = "README.md"
 # event-history producer benchmark. Normal API and daemon builds do not compile
 # that surface.
 bench-internals = ["rustbgpd-rib/bench-internals"]
+vpn-query-allocation = []
 
 [dependencies]
 rustbgpd-wire.workspace = true
@@ -62,6 +63,13 @@ harness = false
 required-features = ["bench-internals"]
 
 [[bench]]
-name = "vpn_query"
+name = "vpn_query_timing"
 harness = false
 required-features = ["bench-internals"]
+path = "benches/vpn_query.rs"
+
+[[bench]]
+name = "vpn_query_allocation"
+harness = false
+required-features = ["bench-internals", "vpn-query-allocation"]
+path = "benches/vpn_query.rs"

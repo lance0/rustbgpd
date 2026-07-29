@@ -29,10 +29,9 @@ cd "$(dirname "$0")/.."
 #                        harness's own `--smoke` bound.
 #   route_paging         CSV receipt harness; one complete traversal per
 #                        process, driven by --route-count/--output.
-#   vpn_query            needs a `smoke|measure` mode plus an output path. CI
-#                        exercises its fixed-shape smoke and verifier
-#                        separately through test-vpn-query-receipt.sh.
-EXCLUDED=(snapshot_allocation route_paging vpn_query)
+#   vpn_query_*          are one-cell timing/allocation executables. CI runs
+#                        their exact 256-route smoke separately.
+EXCLUDED=(snapshot_allocation route_paging vpn_query_timing vpn_query_allocation)
 
 mapfile -t targets < <(
   cargo metadata --no-deps --format-version 1 | python3 -c '

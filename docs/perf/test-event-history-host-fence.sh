@@ -38,4 +38,8 @@ snapshot=$(event_history_competing_process_snapshot)
 [[ "$snapshot" != *'101 '* ]]
 [[ "$snapshot" == *'event_history_'* ]]
 
+declare -F vpn_query_acquire_host_lock >/dev/null
+declare -F vpn_query_init_host_preflight_log >/dev/null
+declare -F vpn_query_wait_for_idle >/dev/null
+
 printf '%s\n' 'event-history producer host-fence adversarial probes passed'
