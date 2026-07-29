@@ -1985,6 +1985,13 @@ mod tests {
              Presence-preserving runtime neighbor creation | \
              Accepted (server implemented; bundled CLI pending) | 2026-07-29 |"
         ));
+        let adr =
+            include_str!("../../../docs/adr/0118-presence-preserving-runtime-neighbor-create.md");
+        assert!(
+            adr.lines().any(
+                |line| line == "**Status:** Accepted (server implemented; bundled CLI pending)"
+            )
+        );
     }
 
     #[tokio::test]

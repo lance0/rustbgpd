@@ -1,6 +1,6 @@
 # ADR-0118: Presence-preserving runtime neighbor creation
 
-**Status:** Server implemented; bundled CLI pending
+**Status:** Accepted (server implemented; bundled CLI pending)
 **Date:** 2026-07-29
 
 > **Server tranche shipped.** The daemon accepts and preserves the
