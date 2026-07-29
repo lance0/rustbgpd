@@ -125,6 +125,7 @@ pub(crate) struct MockState {
     // not_seen / cache_disabled / no_session CLI pins.
     pub(crate) explain_import_synthetic_outcome: Mutex<Option<server_proto::ImportExplainOutcome>>,
     pub(crate) last_test_policy: Mutex<Option<server_proto::TestPolicyRequest>>,
+    pub(crate) last_get_policy_stats: Mutex<Option<server_proto::GetPolicyStatsRequest>>,
     pub(crate) last_set_neighbor_set: Mutex<Option<server_proto::SetNeighborSetRequest>>,
     pub(crate) last_delete_neighbor_set: Mutex<Option<server_proto::DeleteNeighborSetRequest>>,
     pub(crate) last_add_dynamic_neighbor: Mutex<Option<server_proto::AddDynamicNeighborRequest>>,
@@ -136,6 +137,8 @@ pub(crate) struct MockState {
         Mutex<Option<server_proto::SetGlobalImportChainRequest>>,
     pub(crate) last_set_global_export_chain:
         Mutex<Option<server_proto::SetGlobalExportChainRequest>>,
+    pub(crate) last_get_neighbor_policy_chains:
+        Mutex<Option<server_proto::GetNeighborPolicyChainsRequest>>,
     pub(crate) last_set_neighbor_import_chain:
         Mutex<Option<server_proto::SetNeighborImportChainRequest>>,
     pub(crate) last_set_neighbor_export_chain:
@@ -1979,8 +1982,10 @@ impl rustbgpd_api::proto::policy_service_server::PolicyService for MockPolicySer
         &self,
         request: Request<server_proto::GetNeighborPolicyChainsRequest>,
     ) -> Result<Response<server_proto::NeighborPolicyChains>, Status> {
+        let request = request.into_inner();
+        *self.state.last_get_neighbor_policy_chains.lock().await = Some(request.clone());
         Ok(Response::new(server_proto::NeighborPolicyChains {
-            address: request.into_inner().address,
+            address: request.address,
             import_policy_names: vec!["n-import".to_string()],
             export_policy_names: vec!["n-export".to_string()],
         }))
@@ -2155,8 +2160,16 @@ impl rustbgpd_api::proto::policy_service_server::PolicyService for MockPolicySer
         request: Request<server_proto::GetPolicyStatsRequest>,
     ) -> Result<Response<server_proto::GetPolicyStatsResponse>, Status> {
         let req = request.into_inner();
+        *self.state.last_get_policy_stats.lock().await = Some(req.clone());
+        let peer_address = if req.peer_address.is_empty() {
+            "10.0.0.2".to_string()
+        } else {
+            req.peer_address
+                .parse::<std::net::IpAddr>()
+                .map_or_else(|_| req.peer_address.clone(), |address| address.to_string())
+        };
         let export_chain = server_proto::PolicyChainStats {
-            peer_address: "10.0.0.2".to_string(),
+            peer_address: peer_address.clone(),
             direction: "export".to_string(),
             routes_evaluated: 7,
             policy_generation: 0,
@@ -2180,7 +2193,7 @@ impl rustbgpd_api::proto::policy_service_server::PolicyService for MockPolicySer
             ],
         };
         let import_chain = server_proto::PolicyChainStats {
-            peer_address: "10.0.0.2".to_string(),
+            peer_address,
             direction: "import".to_string(),
             routes_evaluated: 11,
             policy_generation: 3,

@@ -12,6 +12,19 @@ use crate::proto::{
     SetGracefulShutdownRequest, SoftResetInRequest,
 };
 
+pub(super) fn bare_ip_rpc_address(address: &str) -> &str {
+    let Some((bare, zone)) = address.split_once('%') else {
+        return address;
+    };
+    if zone.is_empty() || zone.contains('%') {
+        return address;
+    }
+    match bare.parse::<std::net::Ipv6Addr>() {
+        Ok(ip) if ip.is_unicast_link_local() => bare,
+        _ => address,
+    }
+}
+
 fn split_scoped_address(address: &str) -> (String, String) {
     address.rsplit_once('%').map_or_else(
         || (address.to_string(), String::new()),
@@ -1114,6 +1127,25 @@ mod tests {
     use super::*;
     use crate::connection::connect;
     use crate::test_support::spawn_mock_server;
+
+    #[test]
+    fn bare_ip_rpc_address_strips_only_one_valid_link_local_zone() {
+        let cases = [
+            ("fe80::1%eth0", "fe80::1"),
+            ("febf::abcd%swp1", "febf::abcd"),
+            ("FE80::1%Ethernet1", "FE80::1"),
+            ("fe80::1", "fe80::1"),
+            ("fe80::gg%eth0", "fe80::gg%eth0"),
+            ("fe80::1%", "fe80::1%"),
+            ("fe80::1%eth0%extra", "fe80::1%eth0%extra"),
+            ("192.0.2.1%eth0", "192.0.2.1%eth0"),
+            ("2001:db8::1%eth0", "2001:db8::1%eth0"),
+            ("ff02::1%eth0", "ff02::1%eth0"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(bare_ip_rpc_address(input), expected, "input {input:?}");
+        }
+    }
 
     /// ADR-0112 rolling-version contract. Zero is what an older daemon leaves
     /// behind and a future variant is what a newer one may send; both must
