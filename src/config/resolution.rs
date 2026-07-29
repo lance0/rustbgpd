@@ -1203,7 +1203,7 @@ pub(crate) fn reserved_rfc8212_deny_chain(name: &str) -> PolicyChain {
 /// rebuilding from compiled content, and it could not: the reserved deny
 /// replaces the whole direction, so there is no operator policy or implicit
 /// tail left to tell apart. It is an identity test against the one chain
-/// [`reserved_rfc8212_deny_chain`] builds, and [`Config::validate`] refuses
+/// `reserved_rfc8212_deny_chain` builds, and `Config::validate` refuses
 /// both reserved names to operator policies, so nothing configurable compares
 /// equal to it.
 #[must_use]
