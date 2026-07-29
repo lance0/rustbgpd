@@ -37,7 +37,8 @@ A new `rustbgpd-mrt` crate with four modules:
 - **`manager.rs`** -- `MrtManager` with `tokio::select!` over a periodic
   interval timer and a trigger channel for on-demand dumps. Queries the
   RIB via `QueryMrtSnapshot`, encodes via `spawn_blocking`, writes
-  atomically.
+  atomically. Missed periodic ticks use `Skip`: a delayed dump does not
+  trigger a burst of back-to-back full-table snapshots.
 
 - **`types.rs`** -- `MrtWriterConfig` and re-exports of `MrtPeerEntry`
   and `MrtSnapshotData` from the rib crate.
@@ -90,6 +91,11 @@ RIB state.
   "rib").
 - **SIGHUP:** MRT config changes logged as warning, require restart
   (same as other global config).
+- **Failure and cancellation:** output preparation precedes
+  `QueryMrtSnapshot`; all dump failures remain non-fatal. Cancellation observed
+  while awaiting the reply prevents encode/publication, and a request already
+  canceled when the actor handles it skips materialization. A synchronous
+  snapshot clone already running is not interruptible.
 
 ### What is not included
 
