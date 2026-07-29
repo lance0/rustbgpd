@@ -75,6 +75,10 @@ rbgp bfd
 rbgp bfd show <addr>
 ```
 
+`dynamic-neighbor add` requires its peer group to exist first. The
+[Quickstart operating example](../../docs/QUICKSTART.md#5-operate) creates the
+passwordless `ix-members` group from ordinary JSON before adding the range.
+
 ### Routes, Policy, and Dataplane
 
 ```bash
