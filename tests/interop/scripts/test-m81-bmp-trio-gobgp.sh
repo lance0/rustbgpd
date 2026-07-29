@@ -128,6 +128,8 @@
 # does not emit per-counter stats entries); stats are pinned at byte
 # level (30/31) instead.
 #
+# Self-test: bash tests/interop/scripts/test-m81-bmp-trio-gobgp.sh
+#   --self-test-startup-diagnostics
 # Prerequisites:
 #   - docker build --target dev -t rustbgpd:dev .
 #   - docker build -t gobgp:interop -f tests/interop/Dockerfile.gobgp tests/interop
@@ -139,7 +141,17 @@ TOPO="m81-bmp-trio-gobgp"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 INTEROP_TEST_OPERATOR_AUTH=1
 export INTEROP_TEST_OPERATOR_AUTH
-source "$SCRIPT_DIR/test-lib.sh"
+if [ "${1:-}" = "--self-test-startup-diagnostics" ]; then
+    set -euo pipefail
+    log() { printf 'TEST %s\n' "$*"; }
+    ok() { printf 'PASS %s\n' "$*"; }
+    fail() { printf 'FAIL %s\n' "$*" >&2; }
+    RUSTBGPD="fixture-rustbgpd"
+    GRPC_ADDR="fixture-grpc"
+else
+    # shellcheck source=tests/interop/scripts/test-lib.sh
+    source "$SCRIPT_DIR/test-lib.sh"
+fi
 
 PE1="clab-${TOPO}-gobgp-pe1"
 PE2="clab-${TOPO}-gobgp-pe2"
@@ -184,8 +196,57 @@ gobgp() {
     docker exec "$container" gobgp "$@" 2>/dev/null
 }
 
+dump_m81_startup_diagnostics() {
+    local container=${1:?} rr_peer=${2:?} rustbgpd_peer=${3:?}
+
+    printf '%s\n' \
+        '--- M81 startup diagnostics: gobgpd log (/tmp/gobgpd.log; tail 120) ---' >&2
+    timeout 5 docker exec "$container" sh -c \
+        'tail -n 120 /tmp/gobgpd.log' 2>&1 | head -n 120 >&2 || true
+
+    printf '%s\n' '--- M81 startup diagnostics: gobgpd process ---' >&2
+    # shellcheck disable=SC2016
+    timeout 5 docker exec "$container" sh -c '
+        for p in /proc/[0-9]*; do
+            [ "$(cat "$p/comm" 2>/dev/null)" = "gobgpd" ] || continue
+            printf "pid=%s cmd=" "${p#/proc/}"
+            tr "\0" " " <"$p/cmdline" 2>/dev/null || true
+            printf "\n"
+        done
+    ' 2>&1 | head -n 40 >&2 || true
+
+    printf '%s\n' \
+        '--- M81 startup diagnostics: gobgp neighbor (stderr unsuppressed) ---' >&2
+    timeout 5 docker exec "$container" gobgp neighbor 2>&1 | head -n 120 >&2 || true
+
+    printf '%s\n' '--- M81 startup diagnostics: peer eth1 address ---' >&2
+    timeout 5 docker exec "$container" ip -brief address show dev eth1 \
+        2>&1 | head -n 40 >&2 || true
+
+    printf '%s\n' '--- M81 startup diagnostics: peer eth1 link ---' >&2
+    timeout 5 docker exec "$container" ip -details link show dev eth1 \
+        2>&1 | head -n 80 >&2 || true
+
+    printf '%s\n' \
+        '--- M81 startup diagnostics: peer route to RR + table ---' >&2
+    # shellcheck disable=SC2016
+    timeout 5 docker exec "$container" sh -c \
+        'ip route get "$1"; ip route show' sh "$rr_peer" \
+        2>&1 | head -n 120 >&2 || true
+
+    printf '%s\n' '--- M81 startup diagnostics: rustbgpd log (tail 120) ---' >&2
+    timeout 5 docker logs --tail 120 "$RUSTBGPD" \
+        2>&1 | head -n 120 >&2 || true
+
+    printf '%s\n' \
+        '--- M81 startup diagnostics: rustbgpd neighbor snapshot ---' >&2
+    grpcurl_call -max-time 5 -d "{\"address\":\"$rustbgpd_peer\"}" \
+        "$GRPC_ADDR" rustbgpd.v1.NeighborService/GetNeighborState \
+        2>&1 | head -n 160 >&2 || true
+}
+
 wait_gobgp_established() {
-    local container=${1:?} peer=${2:?} label=${3:?}
+    local container=${1:?} peer=${2:?} label=${3:?} rustbgpd_peer=${4:?}
     log "Waiting for $label session to $peer..."
     for i in $(seq 1 45); do
         if gobgp "$container" neighbor 2>/dev/null | grep -F -- "$peer" \
@@ -196,6 +257,7 @@ wait_gobgp_established() {
         sleep 2
     done
     fail "$label session did not reach Established within 90s"
+    dump_m81_startup_diagnostics "$container" "$peer" "$rustbgpd_peer"
     return 1
 }
 
@@ -577,8 +639,8 @@ main() {
     start_gobgpd "$PE1"
     start_gobgpd "$PE2"
 
-    wait_gobgp_established "$PE1" "10.0.0.1" "pe1" || exit 1
-    wait_gobgp_established "$PE2" "10.0.1.1" "pe2" || exit 1
+    wait_gobgp_established "$PE1" "10.0.0.1" "pe1" "$PE1_ADDR" || exit 1
+    wait_gobgp_established "$PE2" "10.0.1.1" "pe2" "$PE2_ADDR" || exit 1
 
     test_initiation_and_peerups
     test_route_streams
@@ -593,4 +655,76 @@ main() {
     print_summary
 }
 
-main "$@"
+self_test_startup_diagnostics() {
+    local output status needle
+    local -a expected=(
+        "FAIL pe-test session did not reach Established within 90s"
+        "--- M81 startup diagnostics: gobgpd log (/tmp/gobgpd.log; tail 120) ---"
+        "--- M81 startup diagnostics: gobgpd process ---"
+        "--- M81 startup diagnostics: gobgp neighbor (stderr unsuppressed) ---"
+        "--- M81 startup diagnostics: peer eth1 address ---"
+        "--- M81 startup diagnostics: peer eth1 link ---"
+        "--- M81 startup diagnostics: peer route to RR + table ---"
+        "--- M81 startup diagnostics: rustbgpd log (tail 120) ---"
+        "--- M81 startup diagnostics: rustbgpd neighbor snapshot ---"
+        "fixture gobgpd log" "fixture gobgpd process"
+        "fixture gobgp neighbor" "fixture peer address"
+        "fixture peer link" "fixture peer routes"
+        "fixture rustbgpd log" "fixture rustbgpd neighbor"
+    )
+
+    seq() { printf '1\n'; }
+    sleep() { :; }
+    gobgp() { return 1; }
+    timeout() { shift; "$@"; }
+    docker() {
+        case "$*" in
+            *"/tmp/gobgpd.log"*) printf 'fixture gobgpd log\n' ;;
+            *"/proc/"*) printf 'fixture gobgpd process\n' ;;
+            *"gobgp neighbor"*) printf 'fixture gobgp neighbor\n' ;;
+            *"ip -brief"*) printf 'fixture peer address\n' ;;
+            *"ip -details link"*) printf 'fixture peer link\n' ;;
+            *"ip route get"*) printf 'fixture peer routes\n' ;;
+            *"logs --tail 120"*) printf 'fixture rustbgpd log\n' ;;
+            *) return 1 ;;
+        esac
+    }
+    grpcurl_call() { printf 'fixture rustbgpd neighbor\n'; }
+
+    set +e
+    output=$(wait_gobgp_established fixture-pe 10.0.0.1 pe-test 10.0.0.2 2>&1)
+    status=$?
+    set -e
+    [ "$status" -eq 1 ] || {
+        printf 'self-test expected status 1, got %s\n' "$status" >&2
+        return 1
+    }
+    for needle in "${expected[@]}"; do
+        [[ "$output" == *"$needle"* ]] || {
+            printf 'self-test missing %q in:\n%s\n' "$needle" "$output" >&2
+            return 1
+        }
+    done
+
+    docker() { return 127; }
+    grpcurl_call() { return 127; }
+    set +e
+    output=$(wait_gobgp_established fixture-pe 10.0.0.1 pe-test 10.0.0.2 2>&1)
+    status=$?
+    set -e
+    if [ "$status" -ne 1 ] \
+        || [[ "$output" != *"${expected[0]}"* ]] \
+        || [[ "$output" != *"${expected[8]}"* ]]; then
+        printf 'unavailable-tools self-test masked the primary failure:\n%s\n' \
+            "$output" >&2
+        return 1
+    fi
+
+    printf 'M81 startup diagnostic self-test passed\n'
+}
+
+if [ "${1:-}" = "--self-test-startup-diagnostics" ]; then
+    self_test_startup_diagnostics
+else
+    main "$@"
+fi
