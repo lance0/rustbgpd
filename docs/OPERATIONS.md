@@ -533,9 +533,19 @@ reconnect; use the durable event cursor for gap-free history).
 
 ### MRT dump failure
 
-If the output directory is not writable, the MRT manager logs an error and
-skips that dump cycle. Periodic dumps continue on the next interval. The
-daemon does not crash on MRT failures.
+The output directory is created lazily when a dump is due. If it cannot be
+prepared as a directory, the manager fails that dump before requesting a
+full-table RIB snapshot. If the directory is not writable, or encode/write
+fails later, a periodic dump logs the error and skips that cycle. An on-demand
+`TriggerMrtDump` failure is returned to its caller while the RPC remains
+connected; only write failures also emit a manager error log. Periodic dumps
+continue on the next interval without replaying missed intervals in a catch-up
+burst. The daemon does not crash on MRT failures.
+
+If an on-demand request is already canceled when the RIB actor handles it, the
+actor skips route materialization. Cancellation observed while the manager
+awaits the RIB reply prevents encode and file publication. Snapshot cloning is
+synchronous actor work: a clone already running cannot be interrupted.
 
 ### Peer max-prefix exceeded
 

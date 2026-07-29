@@ -8,6 +8,15 @@ use tracing::{debug, info};
 
 use crate::types::MrtWriterConfig;
 
+/// Ensure the configured output path exists as a directory.
+///
+/// The manager calls this before asking the RIB actor to materialize a
+/// snapshot. `write_dump` repeats the check so direct library callers retain
+/// the same lazy-directory-creation contract.
+pub(crate) fn prepare_output_dir(config: &MrtWriterConfig) -> std::io::Result<()> {
+    std::fs::create_dir_all(&config.output_dir)
+}
+
 /// Write MRT data to a file using atomic rename.
 ///
 /// Returns the final file path on success.
@@ -17,7 +26,7 @@ use crate::types::MrtWriterConfig;
 /// Returns an error if the output directory cannot be created or the file
 /// cannot be written.
 pub fn write_dump(config: &MrtWriterConfig, data: &[u8]) -> std::io::Result<PathBuf> {
-    std::fs::create_dir_all(&config.output_dir)?;
+    prepare_output_dir(config)?;
 
     let now = Utc::now();
     let timestamp = now.format("%Y%m%d.%H%M%S");

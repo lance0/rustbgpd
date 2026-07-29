@@ -9,6 +9,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- **MRT dump work is bounded after delays, impossible output paths, and
+  canceled requests.** Export skips missed ticks, preflights its output path
+  before cloning the RIB, and prevents encode/publication when cancellation is
+  observed while awaiting the RIB reply. A request already canceled when the
+  actor handles it skips materialization; a synchronous clone already running
+  is not interruptible. Failures remain non-fatal and on-time bytes unchanged.
+
 ### Added
 
 - The shipped Prometheus rule pack now pages on outbound BGP work dropped

@@ -1,5 +1,15 @@
 use super::*;
 
+#[test]
+fn canceled_mrt_snapshot_skips_builder_before_route_clone() {
+    let (reply, receiver) = oneshot::channel();
+    drop(receiver);
+
+    send_mrt_snapshot(reply, || {
+        panic!("closed MRT query must not materialize the snapshot")
+    });
+}
+
 #[tokio::test]
 async fn warm_mrt_snapshot_rejects_session_generation_change_at_rib_fence() {
     let (tx, rx) = mpsc::channel(64);

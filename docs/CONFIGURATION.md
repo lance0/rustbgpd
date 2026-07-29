@@ -2898,7 +2898,7 @@ file_prefix = "rib"         # filename prefix (default "rib")
 
 | Field           | Type    | Required | Default  | Description                              |
 |-----------------|---------|----------|----------|------------------------------------------|
-| `output_dir`    | string  | yes      | --       | Directory for MRT dump files (must exist and be writable) |
+| `output_dir`    | string  | yes      | --       | Directory for MRT dump files (created lazily; must be writable) |
 | `dump_interval` | u64     | no       | 7200     | Seconds between periodic dumps (must be > 0) |
 | `compress`      | bool    | no       | false    | Compress output files with gzip           |
 | `file_prefix`   | string  | no       | `"rib"`  | Filename prefix for dump files            |
@@ -2933,6 +2933,11 @@ IPv4-with-IPv6-NH `MP_REACH_NLRI`).
 
 Peer metadata is retained during Graceful Restart and LLGR transitions, so
 dumps taken during a peer restart window still include correct peer entries.
+
+The output directory is created lazily and prepared before a full RIB snapshot,
+so an impossible path does not incur full-table materialization. Later failures
+remain non-fatal. Delayed dumps skip missed intervals rather than replaying a
+catch-up burst.
 
 When MRT is not configured, no timer or manager task is spawned — zero
 overhead.

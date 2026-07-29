@@ -53,6 +53,23 @@ use helpers::{
 };
 pub use selection_deferral::{SelectionDeferralConfig, SelectionDeferralWaiterConfig};
 
+fn send_mrt_snapshot(
+    reply: tokio::sync::oneshot::Sender<MrtSnapshotData>,
+    build: impl FnOnce() -> MrtSnapshotData,
+) {
+    // A canceled on-demand dump drops this receiver while the query waits in
+    // the actor mailbox. Check before cloning any peer or route state.
+    if reply.is_closed() {
+        debug!("MRT snapshot query canceled before materialization");
+        return;
+    }
+
+    let snapshot = build();
+    if reply.send(snapshot).is_err() {
+        warn!("MRT snapshot query caller dropped before receiving response");
+    }
+}
+
 #[cfg(any(test, feature = "bench-internals"))]
 #[derive(Clone, Copy, Debug, Default)]
 struct PolicyTransitionStats {
@@ -4911,40 +4928,39 @@ impl RibManager {
     }
 
     fn handle_query_mrt_snapshot(&mut self, reply: tokio::sync::oneshot::Sender<MrtSnapshotData>) {
-        let peers: Vec<MrtPeerEntry> = self
-            .peer_asn
-            .iter()
-            .map(|(&addr, &asn)| MrtPeerEntry {
-                peer_addr: addr,
-                peer_bgp_id: self
-                    .peer_bgp_id
-                    .get(&addr)
-                    .copied()
-                    .unwrap_or(Ipv4Addr::UNSPECIFIED),
-                peer_asn: asn,
-            })
-            .collect();
+        send_mrt_snapshot(reply, || {
+            let peers: Vec<MrtPeerEntry> = self
+                .peer_asn
+                .iter()
+                .map(|(&addr, &asn)| MrtPeerEntry {
+                    peer_addr: addr,
+                    peer_bgp_id: self
+                        .peer_bgp_id
+                        .get(&addr)
+                        .copied()
+                        .unwrap_or(Ipv4Addr::UNSPECIFIED),
+                    peer_asn: asn,
+                })
+                .collect();
 
-        let routes: Vec<_> = self
-            .ribs
-            .values()
-            .flat_map(|rib| rib.iter().cloned())
-            .collect();
+            let routes: Vec<_> = self
+                .ribs
+                .values()
+                .flat_map(|rib| rib.iter().cloned())
+                .collect();
 
-        let evpn_routes: Vec<_> = self
-            .ribs
-            .values()
-            .flat_map(|rib| rib.iter_evpn().cloned())
-            .collect();
+            let evpn_routes: Vec<_> = self
+                .ribs
+                .values()
+                .flat_map(|rib| rib.iter_evpn().cloned())
+                .collect();
 
-        let snapshot = MrtSnapshotData {
-            peers,
-            routes,
-            evpn_routes,
-        };
-        if reply.send(snapshot).is_err() {
-            warn!("MRT snapshot query caller dropped before receiving response");
-        }
+            MrtSnapshotData {
+                peers,
+                routes,
+                evpn_routes,
+            }
+        });
     }
 
     fn handle_query_warm_mrt_snapshot(
