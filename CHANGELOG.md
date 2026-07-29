@@ -11,6 +11,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Four label-free process-global metrics now expose dynamic-neighbor slots
+  used, configured limit, remaining headroom, and admission-limit rejections
+  across accept, ordinary removal, rollback reap, and retained-disabled
+  max-prefix recovery lifecycles.
+
 - `NeighborService.AddNeighbor` now accepts an additive presence-aware wrapper
   that preserves peer-group inheritance and explicit masked `false`, family
   replacement, and Add-Path disable intent across persistence, live apply, and

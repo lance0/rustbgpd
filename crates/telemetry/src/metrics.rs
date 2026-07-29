@@ -201,6 +201,12 @@ pub struct BgpMetrics {
     peer_session_established: IntGaugeVec,
     stale_timer_events: IntCounterVec,
 
+    // ── Dynamic-neighbor capacity ─────────────────────────────────
+    dynamic_neighbor_slots_used: IntGauge,
+    dynamic_neighbor_slots_limit: IntGauge,
+    dynamic_neighbor_slots_headroom: IntGauge,
+    dynamic_neighbor_limit_rejections: IntCounter,
+
     // ── BFD (RFC 5880, ADR-0067) ───────────────────────────────────
     bfd_session_up: IntGaugeVec,
     bfd_session_flaps_total: IntCounterVec,
@@ -508,6 +514,30 @@ impl BgpMetrics {
                 "FSM timer-expired events that arrived in a state where the corresponding timer should not be running. Non-zero values point at a daemon-side timer-management bug; the FSM ignores these events rather than tearing the session down.",
             ),
             &["peer", "state", "timer"],
+        )
+        .expect("valid metric definition");
+
+        let dynamic_neighbor_slots_used = IntGauge::new(
+            "bgp_dynamic_neighbor_slots_used",
+            "Dynamic neighbors currently consuming process-global admission slots, including disabled max-prefix recovery targets.",
+        )
+        .expect("valid metric definition");
+
+        let dynamic_neighbor_slots_limit = IntGauge::new(
+            "bgp_dynamic_neighbor_slots_limit",
+            "Configured process-global dynamic-neighbor admission limit.",
+        )
+        .expect("valid metric definition");
+
+        let dynamic_neighbor_slots_headroom = IntGauge::new(
+            "bgp_dynamic_neighbor_slots_headroom",
+            "Remaining process-global dynamic-neighbor admission slots before the configured limit.",
+        )
+        .expect("valid metric definition");
+
+        let dynamic_neighbor_limit_rejections = IntCounter::new(
+            "bgp_dynamic_neighbor_limit_rejections_total",
+            "Inbound dynamic-neighbor connections dropped because the process-global admission limit was reached.",
         )
         .expect("valid metric definition");
 
@@ -1872,6 +1902,18 @@ impl BgpMetrics {
             .register(Box::new(stale_timer_events.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(dynamic_neighbor_slots_used.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(dynamic_neighbor_slots_limit.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(dynamic_neighbor_slots_headroom.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(dynamic_neighbor_limit_rejections.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(notifications_sent.clone()))
             .expect("metric not already registered");
         registry
@@ -2330,6 +2372,10 @@ impl BgpMetrics {
             peer_admin_enabled,
             peer_session_established,
             stale_timer_events,
+            dynamic_neighbor_slots_used,
+            dynamic_neighbor_slots_limit,
+            dynamic_neighbor_slots_headroom,
+            dynamic_neighbor_limit_rejections,
             bfd_session_up,
             bfd_session_flaps_total,
             gnmi_dialout_connected,
@@ -2486,6 +2532,21 @@ impl BgpMetrics {
     #[must_use]
     pub fn registry(&self) -> &Registry {
         &self.registry
+    }
+
+    /// Publish the authoritative process-global dynamic-neighbor slot state.
+    pub fn set_dynamic_neighbor_capacity(&self, used: usize, limit: u32) {
+        let used = i64::try_from(used).unwrap_or(i64::MAX);
+        self.dynamic_neighbor_slots_used.set(used);
+        self.dynamic_neighbor_slots_limit.set(i64::from(limit));
+        self.dynamic_neighbor_slots_headroom.set(i64::from(
+            limit.saturating_sub(u32::try_from(used).unwrap_or(u32::MAX)),
+        ));
+    }
+
+    /// Record an inbound dynamic-neighbor drop caused by slot saturation.
+    pub fn record_dynamic_neighbor_limit_rejection(&self) {
+        self.dynamic_neighbor_limit_rejections.inc();
     }
 
     // ── Per-peer series reaping ────────────────────────────────────
@@ -4449,6 +4510,52 @@ mod tests {
         let text = gather_text(&m);
         // Dynamic peer-label vectors remain absent until observed.
         assert!(!text.contains("bgp_session_state_transitions_total"));
+    }
+
+    /// Load-bearing registration proof: removing any one scalar metric makes
+    /// its required process-global family disappear from the gathered surface.
+    #[test]
+    fn dynamic_neighbor_capacity_metric_families_are_process_global() {
+        let metrics = BgpMetrics::new();
+        let families = metrics.registry().gather();
+        for name in [
+            "bgp_dynamic_neighbor_slots_used",
+            "bgp_dynamic_neighbor_slots_limit",
+            "bgp_dynamic_neighbor_slots_headroom",
+            "bgp_dynamic_neighbor_limit_rejections_total",
+        ] {
+            let family = families
+                .iter()
+                .find(|family| family.name() == name)
+                .unwrap_or_else(|| panic!("{name} must be registered"));
+            assert_eq!(family.get_metric().len(), 1, "{name} has one global series");
+            assert!(
+                family.get_metric()[0].get_label().is_empty(),
+                "{name} must remain label-free"
+            );
+        }
+    }
+
+    /// Load-bearing telemetry API proof: removing the setter, saturating
+    /// headroom calculation, or rejection increment breaks an exact scalar.
+    #[test]
+    fn dynamic_neighbor_capacity_metrics_publish_values_and_rejections() {
+        let metrics = BgpMetrics::new();
+        metrics.set_dynamic_neighbor_capacity(3, 5);
+        metrics.record_dynamic_neighbor_limit_rejection();
+        metrics.record_dynamic_neighbor_limit_rejection();
+
+        assert_eq!(metrics.dynamic_neighbor_slots_used.get(), 3);
+        assert_eq!(metrics.dynamic_neighbor_slots_limit.get(), 5);
+        assert_eq!(metrics.dynamic_neighbor_slots_headroom.get(), 2);
+        assert_eq!(metrics.dynamic_neighbor_limit_rejections.get(), 2);
+
+        metrics.set_dynamic_neighbor_capacity(6, 5);
+        assert_eq!(
+            metrics.dynamic_neighbor_slots_headroom.get(),
+            0,
+            "headroom saturates instead of reporting a negative capacity"
+        );
     }
 
     #[test]

@@ -573,6 +573,10 @@ impl PeerManager {
         for handle in current_config.policy.dataset_bindings.handles() {
             metrics.record_policy_dataset_loaded(handle.name());
         }
+        metrics.set_dynamic_neighbor_capacity(
+            0,
+            Config::effective_dynamic_neighbor_limit(&current_config),
+        );
         Self {
             peers: HashMap::new(),
             max_prefix_latches: HashMap::new(),
@@ -661,6 +665,11 @@ impl PeerManager {
         // remains visibly outside the peer-manager allocated range.
         self.next_session_id = self.next_session_id.wrapping_add(1).max(1);
         id
+    }
+
+    pub(super) fn refresh_dynamic_neighbor_capacity_metrics(&self) {
+        self.metrics
+            .set_dynamic_neighbor_capacity(self.dynamic_peer_count, self.dynamic_neighbor_limit);
     }
 
     pub(super) fn register_session(&mut self, session_id: u64, peer: &PeerKey) {
