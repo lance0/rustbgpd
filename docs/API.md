@@ -388,6 +388,14 @@ blocking. The list is empty from a daemon that does not expose it and from
 a peer with no outbound registration; a registered peer always reports
 both unicast families.
 
+`NeighborState.effective_posture` is a read-only snapshot of the resolved
+running neighbor posture: NEXT_HOP ownership enforcement, RFC 1997
+interpretation, route-server control-community handling, and the optional ORR
+vantage. The containing message is always present from a current daemon, so
+explicit `false` remains distinguishable from an older daemon that omitted the
+field. Clients must render an absent message, `UNSPECIFIED`, and unrecognized
+future ownership modes as unknown rather than disabled.
+
 ---
 
 ## ConfigService

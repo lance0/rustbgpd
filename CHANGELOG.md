@@ -11,6 +11,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Neighbor detail now reports one presence-aware Effective Posture object for
+  resolved NEXT_HOP ownership, RFC 1997 interpretation, route-server control
+  communities, and ORR vantage across static and accepted dynamic peers.
+
 - Four label-free process-global metrics now expose dynamic-neighbor slots
   used, configured limit, remaining headroom, and admission-limit rejections
   across accept, ordinary removal, rollback reap, and retained-disabled

@@ -946,6 +946,17 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
         // RIB-owned (ADR-0113); the outbound query fills it in for callers
         // that issue one.
         outbound_prefix_limits: Vec::new(),
+        effective_posture: Some(proto::EffectiveNeighborPosture {
+            next_hop_ownership: if info.next_hop_ownership_strict_peer {
+                proto::NextHopOwnershipMode::StrictPeer
+            } else {
+                proto::NextHopOwnershipMode::Disabled
+            }
+            .into(),
+            interpret_rfc1997: info.interpret_rfc1997,
+            rs_control_communities: info.rs_control_communities,
+            orr_vantage: info.orr_vantage.map(|vantage| vantage.to_string()),
+        }),
     }
 }
 
@@ -2049,6 +2060,10 @@ mod tests {
         assert!(source.contains("optional uint32 outbound_max_message_bytes = 9;"));
         assert!(source.contains("Rfc8212PolicyStatus rfc8212_import_policy = 51;"));
         assert!(source.contains("Rfc8212PolicyStatus rfc8212_export_policy = 52;"));
+        assert!(source.contains("EffectiveNeighborPosture effective_posture = 54;"));
+        assert!(source.contains("NEXT_HOP_OWNERSHIP_MODE_UNSPECIFIED = 0;"));
+        assert!(source.contains("NEXT_HOP_OWNERSHIP_MODE_DISABLED = 1;"));
+        assert!(source.contains("NEXT_HOP_OWNERSHIP_MODE_STRICT_PEER = 2;"));
     }
 
     /// Load-bearing proof for the ADR-0112 rolling-version contract:
@@ -3402,6 +3417,42 @@ mod tests {
             peer_info_to_proto(&info).graceful_shutdown_advertise_intent,
             Some(true)
         );
+    }
+
+    /// Load-bearing: omitting the nested assignment loses all four resolved
+    /// values, while flattening the booleans would lose the current-false vs
+    /// older-daemon-absence distinction.
+    #[test]
+    fn peer_info_to_proto_preserves_effective_neighbor_posture() {
+        let mut disabled = peer_info("10.0.0.1".parse().unwrap());
+        disabled.interpret_rfc1997 = false;
+        let posture = peer_info_to_proto(&disabled)
+            .effective_posture
+            .expect("current daemon reports an all-false posture");
+        assert_eq!(
+            posture.next_hop_ownership,
+            proto::NextHopOwnershipMode::Disabled as i32
+        );
+        assert_ne!(posture.next_hop_ownership, 0);
+        assert!(!posture.interpret_rfc1997);
+        assert!(!posture.rs_control_communities);
+        assert!(posture.orr_vantage.is_none());
+
+        let mut enabled = peer_info("10.0.0.2".parse().unwrap());
+        enabled.next_hop_ownership_strict_peer = true;
+        enabled.interpret_rfc1997 = true;
+        enabled.rs_control_communities = true;
+        enabled.orr_vantage = Some("192.0.2.7".parse().unwrap());
+        let posture = peer_info_to_proto(&enabled)
+            .effective_posture
+            .expect("current daemon always reports resolved posture");
+        assert_eq!(
+            proto::NextHopOwnershipMode::try_from(posture.next_hop_ownership).unwrap(),
+            proto::NextHopOwnershipMode::StrictPeer
+        );
+        assert!(posture.interpret_rfc1997);
+        assert!(posture.rs_control_communities);
+        assert_eq!(posture.orr_vantage.as_deref(), Some("192.0.2.7"));
     }
 
     /// Load-bearing: omitting any mapping at the API boundary leaves the

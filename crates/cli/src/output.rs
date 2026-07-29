@@ -303,6 +303,10 @@ pub struct JsonNeighborDetail {
     pub route_server_client: bool,
     #[serde(skip_serializing_if = "is_false")]
     pub per_client_best: bool,
+    /// Resolved running posture. `None` means the daemon predates this
+    /// projection; false booleans inside a present object remain explicit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effective_posture: Option<JsonEffectiveNeighborPosture>,
     /// Effective live unicast distribution mode, or `unknown` while down.
     pub distribution_mode: String,
     #[serde(skip_serializing_if = "String::is_empty")]
@@ -340,6 +344,15 @@ pub struct JsonNeighborDetail {
     /// ADR-0113 outbound unicast capacity, one row per limited family.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub outbound_prefix_limits: Vec<JsonOutboundPrefixLimit>,
+}
+
+#[derive(Serialize)]
+pub struct JsonEffectiveNeighborPosture {
+    pub next_hop_ownership: String,
+    pub interpret_rfc1997: bool,
+    pub rs_control_communities: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub orr_vantage: Option<String>,
 }
 
 /// One unicast family's outbound prefix capacity. `limit`/`headroom` are
@@ -1201,6 +1214,11 @@ mod tests {
         assert_json_shape(value, contract, contract_id);
         for nested in contract["nested_json_contracts"].as_array().unwrap() {
             match nested["path"].as_str().unwrap() {
+                "effective_posture" => {
+                    if let Some(posture) = value.get("effective_posture") {
+                        assert_json_shape(posture, nested, contract_id);
+                    }
+                }
                 "negotiated_session" => {
                     assert_json_shape(&value["negotiated_session"], nested, contract_id);
                 }
@@ -1601,6 +1619,12 @@ mod tests {
             route_reflector_client: false,
             route_server_client: true,
             per_client_best: true,
+            effective_posture: Some(JsonEffectiveNeighborPosture {
+                next_hop_ownership: "strict_peer".to_string(),
+                interpret_rfc1997: false,
+                rs_control_communities: true,
+                orr_vantage: Some("192.0.2.7".to_string()),
+            }),
             distribution_mode: "add-path".to_string(),
             role: "rs".to_string(),
             strict_role: true,
@@ -1672,6 +1696,13 @@ mod tests {
         assert_eq!(value["rfc8212_export_policy"], "present");
         assert_eq!(value["min_hold_time"], 30);
         assert_eq!(value["route_server_client"], true);
+        assert_eq!(
+            value["effective_posture"]["next_hop_ownership"],
+            "strict_peer"
+        );
+        assert_eq!(value["effective_posture"]["interpret_rfc1997"], false);
+        assert_eq!(value["effective_posture"]["rs_control_communities"], true);
+        assert_eq!(value["effective_posture"]["orr_vantage"], "192.0.2.7");
         assert_eq!(value["role"], "rs");
         assert_eq!(value["strict_role"], true);
         assert_eq!(value["remote_role"], "rs-client");
@@ -1813,6 +1844,14 @@ mod tests {
         let value = serde_json::to_value(&detail).expect("JSON serialize");
         assert_eq!(value["graceful_shutdown_advertise_intent"], false);
         detail.graceful_shutdown_advertise_intent = None;
+        detail.effective_posture = None;
+        let value = serde_json::to_value(&detail).expect("JSON serialize");
+        // Load-bearing: the nested shape is conditional on the optional
+        // top-level field. Unconditionally indexing `effective_posture` makes
+        // this inventory check panic against a valid rolling-upgrade payload.
+        assert_inventory_json_contract(&value, "neighbor-detail-v1");
+        assert!(value.get("effective_posture").is_none());
+
         detail.effective_max_prefixes = None;
         detail.max_prefix_headroom = None;
         detail.negotiation_available = None;

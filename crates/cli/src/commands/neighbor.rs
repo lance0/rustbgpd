@@ -1,9 +1,9 @@
 use crate::connection::Connection;
 use crate::error::CliError;
 use crate::output::{
-    self, JsonNegotiatedGracefulRestart, JsonNegotiatedSession, JsonNeighbor, JsonNeighborDetail,
-    JsonOutboundPrefixLimit, JsonPathsLimit, JsonSelectionDeferralFamily, JsonTcpAoKeyState,
-    JsonTcpAoState, JsonUpdateGroupComparison,
+    self, JsonEffectiveNeighborPosture, JsonNegotiatedGracefulRestart, JsonNegotiatedSession,
+    JsonNeighbor, JsonNeighborDetail, JsonOutboundPrefixLimit, JsonPathsLimit,
+    JsonSelectionDeferralFamily, JsonTcpAoKeyState, JsonTcpAoState, JsonUpdateGroupComparison,
 };
 use crate::proto::neighbor_service_client::NeighborServiceClient;
 use crate::proto::{
@@ -209,6 +209,52 @@ fn render_update_group_comparison(value: &JsonUpdateGroupComparison) -> String {
     output
 }
 
+#[cfg(test)]
+std::thread_local! {
+    static NEIGHBOR_SHOW_CAPTURE: std::cell::RefCell<Option<Vec<u8>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn begin_neighbor_show_capture() {
+    NEIGHBOR_SHOW_CAPTURE.with(|slot| {
+        assert!(slot.replace(Some(Vec::new())).is_none());
+    });
+}
+
+#[cfg(test)]
+fn take_neighbor_show_capture() -> Vec<u8> {
+    NEIGHBOR_SHOW_CAPTURE.with(|slot| slot.replace(None).expect("neighbor show capture is active"))
+}
+
+fn emit_neighbor_detail_json(value: &JsonNeighborDetail) -> Result<(), CliError> {
+    #[cfg(test)]
+    if let Some(result) = NEIGHBOR_SHOW_CAPTURE.with(|slot| {
+        slot.borrow_mut()
+            .as_mut()
+            .map(|bytes| output::write_json_pretty(bytes, value))
+    }) {
+        return result;
+    }
+    output::print_json_pretty(value)
+}
+
+fn emit_effective_posture_human(value: &str) -> Result<(), CliError> {
+    #[cfg(test)]
+    if NEIGHBOR_SHOW_CAPTURE.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let Some(bytes) = slot.as_mut() else {
+            return false;
+        };
+        bytes.extend_from_slice(value.as_bytes());
+        true
+    }) {
+        return Ok(());
+    }
+    print!("{value}");
+    Ok(())
+}
+
 pub async fn show(
     connection: Connection,
     address: &str,
@@ -321,6 +367,7 @@ pub async fn show(
             route_reflector_client: n.route_reflector_client,
             route_server_client: cfg.map(|c| c.route_server_client).unwrap_or(false),
             per_client_best: cfg.map(|c| c.per_client_best).unwrap_or(false),
+            effective_posture: json_effective_posture(n.effective_posture.as_ref()),
             distribution_mode: distribution_mode.to_string(),
             add_path_receive: cfg.map(|c| c.add_path_receive).unwrap_or(false),
             add_path_send: cfg.map(|c| c.add_path_send).unwrap_or(false),
@@ -381,7 +428,7 @@ pub async fn show(
                 })
                 .collect(),
         };
-        output::print_json_pretty(&out)?;
+        emit_neighbor_detail_json(&out)?;
     } else {
         println!(
             "Neighbor:              {}",
@@ -480,6 +527,7 @@ pub async fn show(
         if cfg.map(|c| c.per_client_best).unwrap_or(false) {
             println!("Per-Client Best:       true");
         }
+        emit_effective_posture_human(&render_effective_posture(n.effective_posture.as_ref()))?;
         println!("Distribution Mode:     {distribution_mode}");
         let role = cfg.map(|c| c.role.as_str()).unwrap_or("");
         if !role.is_empty() {
@@ -826,6 +874,42 @@ fn authentication_label(value: i32) -> &'static str {
         Ok(crate::proto::AuthenticationMode::Plaintext) => "plaintext",
         Ok(crate::proto::AuthenticationMode::Unspecified) | Err(_) => "unknown",
     }
+}
+
+fn next_hop_ownership_label(value: i32) -> &'static str {
+    match crate::proto::NextHopOwnershipMode::try_from(value) {
+        Ok(crate::proto::NextHopOwnershipMode::Disabled) => "disabled",
+        Ok(crate::proto::NextHopOwnershipMode::StrictPeer) => "strict_peer",
+        Ok(crate::proto::NextHopOwnershipMode::Unspecified) | Err(_) => "unknown",
+    }
+}
+
+fn json_effective_posture(
+    posture: Option<&crate::proto::EffectiveNeighborPosture>,
+) -> Option<JsonEffectiveNeighborPosture> {
+    posture.map(|posture| JsonEffectiveNeighborPosture {
+        next_hop_ownership: next_hop_ownership_label(posture.next_hop_ownership).to_string(),
+        interpret_rfc1997: posture.interpret_rfc1997,
+        rs_control_communities: posture.rs_control_communities,
+        orr_vantage: posture.orr_vantage.clone(),
+    })
+}
+
+fn render_effective_posture(posture: Option<&crate::proto::EffectiveNeighborPosture>) -> String {
+    let Some(posture) = posture else {
+        return "Effective Posture:     unknown (not exposed by daemon)\n".to_string();
+    };
+    format!(
+        "Effective Posture:\n\
+           NEXT_HOP Ownership:    {}\n\
+           Interpret RFC 1997:    {}\n\
+           RS Control Communities: {}\n\
+           ORR Vantage:           {}\n",
+        next_hop_ownership_label(posture.next_hop_ownership),
+        posture.interpret_rfc1997,
+        posture.rs_control_communities,
+        posture.orr_vantage.as_deref().unwrap_or("none"),
+    )
 }
 
 fn graceful_shutdown_advertise_intent_label(value: Option<bool>) -> &'static str {
@@ -1374,6 +1458,85 @@ mod tests {
             "disabled"
         );
         assert_eq!(graceful_shutdown_advertise_intent_label(None), "unknown");
+    }
+
+    /// Load-bearing production-wiring proof: removing either `show` emitter,
+    /// replacing its JSON field with `None`, or collapsing old-daemon absence
+    /// changes the captured operator output.
+    #[tokio::test]
+    async fn show_effective_posture_output_is_presence_aware() {
+        let server = spawn_mock_server(None).await;
+        let posture = rustbgpd_api::proto::EffectiveNeighborPosture {
+            next_hop_ownership: crate::proto::NextHopOwnershipMode::StrictPeer.into(),
+            interpret_rfc1997: false,
+            rs_control_communities: true,
+            orr_vantage: Some("192.0.2.7".to_string()),
+        };
+        *server.state.neighbor_effective_posture.lock().await = Some(posture);
+
+        begin_neighbor_show_capture();
+        show(
+            connect(&server.addr, None).await.unwrap(),
+            "10.0.0.2",
+            None,
+            true,
+        )
+        .await
+        .unwrap();
+        let json: serde_json::Value =
+            serde_json::from_slice(&take_neighbor_show_capture()).unwrap();
+        let posture = &json["effective_posture"];
+        assert_eq!(posture["next_hop_ownership"], "strict_peer");
+        assert_eq!(posture["interpret_rfc1997"], false);
+        assert_eq!(posture["rs_control_communities"], true);
+        assert_eq!(posture["orr_vantage"], "192.0.2.7");
+
+        begin_neighbor_show_capture();
+        show(
+            connect(&server.addr, None).await.unwrap(),
+            "10.0.0.2",
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            String::from_utf8(take_neighbor_show_capture()).unwrap(),
+            "Effective Posture:\n\
+               NEXT_HOP Ownership:    strict_peer\n\
+               Interpret RFC 1997:    false\n\
+               RS Control Communities: true\n\
+               ORR Vantage:           192.0.2.7\n"
+        );
+
+        *server.state.neighbor_effective_posture.lock().await = None;
+        begin_neighbor_show_capture();
+        show(
+            connect(&server.addr, None).await.unwrap(),
+            "10.0.0.2",
+            None,
+            true,
+        )
+        .await
+        .unwrap();
+        let json: serde_json::Value =
+            serde_json::from_slice(&take_neighbor_show_capture()).unwrap();
+        assert!(json.get("effective_posture").is_none());
+
+        begin_neighbor_show_capture();
+        show(
+            connect(&server.addr, None).await.unwrap(),
+            "10.0.0.2",
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            String::from_utf8(take_neighbor_show_capture()).unwrap(),
+            "Effective Posture:     unknown (not exposed by daemon)\n"
+        );
+        assert_eq!(next_hop_ownership_label(i32::MAX), "unknown");
     }
 
     /// Load-bearing: returning the raw protobuf string makes both old-daemon
