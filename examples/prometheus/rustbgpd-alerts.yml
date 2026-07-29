@@ -82,15 +82,16 @@ groups:
             remote receiver before the backlog reaches its bound.
 
       - alert: BgpPeerAdjRibInEmpty
-        # Established (established > flaps) but zero prefixes in
-        # Adj-RIB-In across all families (afi_safi="all" is the
-        # aggregate series). Session and RIB metrics share one `peer`
-        # label format, so the join needs no label rewrite. Expected
-        # for send-only peers — silence or drop this rule for those.
+        # At least one current scoped session is Established, but the
+        # peer-level Adj-RIB-In is empty across all families
+        # (afi_safi="all" is the aggregate series). Aggregating the
+        # session gauge by peer handles link-local siblings while the
+        # join preserves native labels from the RIB series. Expected for
+        # send-only peers — silence or drop this rule for those.
         expr: >-
           bgp_rib_prefixes{afi_safi="all"} == 0
           and on (instance, peer)
-          (bgp_session_established_total > bgp_session_flaps_total)
+          max by (instance, peer) (bgp_peer_session_established) == 1
         for: 10m
         labels:
           severity: warning

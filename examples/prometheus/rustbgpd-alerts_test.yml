@@ -44,7 +44,7 @@ tests:
   # ── Session rules ─────────────────────────────────────────────
   # Every series carries the bare neighbor address in `peer`, matching
   # the daemon's real export, so the session/RIB join needs no rewrite.
-  # 192.0.2.1 — flapped down and stayed down (established == flaps)
+  # 192.0.2.1 — flapped down and stayed down (stale counters say up)
   # 192.0.2.2 — Established, empty Adj-RIB-In
   # 192.0.2.3 — flapping continuously
   # 192.0.2.4 — Established with prefixes (healthy)
@@ -57,6 +57,10 @@ tests:
       - series: 'bgp_session_flaps_total{peer="192.0.2.1", instance="edge1:9179"}'
         values: "1x30"
       - series: 'bgp_session_established_total{peer="192.0.2.1", instance="edge1:9179"}'
+        values: "2x30"
+      - series: 'bgp_rib_prefixes{peer="192.0.2.1", afi_safi="all", instance="edge1:9179"}'
+        values: "0x30"
+      - series: 'bgp_peer_session_established{peer="192.0.2.2", interface="", instance="edge1:9179"}'
         values: "1x30"
       - series: 'bgp_session_flaps_total{peer="192.0.2.2", instance="edge1:9179"}'
         values: "0x30"
@@ -66,6 +70,8 @@ tests:
         values: "0x30"
       # An IPv6 peer alongside the IPv4 ones — pins that the join
       # matches for both address families.
+      - series: 'bgp_peer_session_established{peer="2001:db8::2", interface="", instance="edge1:9179"}'
+        values: "1x30"
       - series: 'bgp_session_flaps_total{peer="2001:db8::2", instance="edge1:9179"}'
         values: "0x30"
       - series: 'bgp_session_established_total{peer="2001:db8::2", instance="edge1:9179"}'
@@ -76,10 +82,26 @@ tests:
         values: "0+1x30"
       - series: 'bgp_session_flaps_total{peer="192.0.2.4", instance="edge1:9179"}'
         values: "0x30"
+      - series: 'bgp_peer_session_established{peer="192.0.2.4", interface="", instance="edge1:9179"}'
+        values: "1x30"
       - series: 'bgp_session_established_total{peer="192.0.2.4", instance="edge1:9179"}'
         values: "1x30"
       - series: 'bgp_rib_prefixes{peer="192.0.2.4", afi_safi="all", instance="edge1:9179"}'
         values: "100x30"
+      # One Established scoped sibling makes the peer currently up.
+      - series: 'bgp_peer_session_established{peer="fe80::1", interface="eth0", instance="edge1:9179"}'
+        values: "0x30"
+      - series: 'bgp_peer_session_established{peer="fe80::1", interface="eth1", instance="edge1:9179"}'
+        values: "1x30"
+      - series: 'bgp_rib_prefixes{peer="fe80::1", afi_safi="all", instance="edge1:9179"}'
+        values: "0x30"
+      # All scoped siblings down must not fabricate a peer-level alert.
+      - series: 'bgp_peer_session_established{peer="fe80::2", interface="eth0", instance="edge1:9179"}'
+        values: "0x30"
+      - series: 'bgp_peer_session_established{peer="fe80::2", interface="eth1", instance="edge1:9179"}'
+        values: "0x30"
+      - series: 'bgp_rib_prefixes{peer="fe80::2", afi_safi="all", instance="edge1:9179"}'
+        values: "0x30"
     alert_rule_test:
       # Pending, not yet firing (for: 2m).
       - eval_time: 1m
@@ -115,8 +137,8 @@ tests:
       - eval_time: 5m
         alertname: BgpPeerAdjRibInEmpty
         exp_alerts: []
-      # Established-but-empty peers fire (v4 and v6); the one with
-      # prefixes doesn't, nor does the down peer (guard is false).
+      # Established-but-empty peers fire (v4, v6, and a scoped sibling);
+      # the one with prefixes and currently down peers do not.
       - eval_time: 12m
         alertname: BgpPeerAdjRibInEmpty
         exp_alerts:
@@ -140,6 +162,17 @@ tests:
               summary: "No prefixes from 2001:db8::2"
               description: >-
                 The session to 2001:db8::2 on edge1:9179 is Established
+                but its Adj-RIB-In has held zero prefixes for 10
+                minutes.
+          - exp_labels:
+              severity: warning
+              peer: fe80::1
+              afi_safi: all
+              instance: edge1:9179
+            exp_annotations:
+              summary: "No prefixes from fe80::1"
+              description: >-
+                The session to fe80::1 on edge1:9179 is Established
                 but its Adj-RIB-In has held zero prefixes for 10
                 minutes.
 
