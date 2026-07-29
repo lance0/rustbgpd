@@ -48,6 +48,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- SIGHUP now pins every daemon-wide restart-required `[global]`, `[rpki]`,
+  `[bmp]`, and `[mrt]` value to the running startup snapshot while preserving
+  edited desired values for the next restart, preventing later runtime-added
+  peers from resolving against an ASN or router ID the daemon never adopted.
+
 - The shipped empty Adj-RIB-In alert now checks the current per-session
   Established gauge instead of inferring state from lifetime counters, and
   correctly aggregates scoped siblings to peer identity before joining the
