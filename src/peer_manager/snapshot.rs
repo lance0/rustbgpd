@@ -2,7 +2,8 @@ use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
 
 use rustbgpd_api::peer_types::{
-    PeerInfo, PeerKey, Rfc8212PolicyStatus, WarmCheckpointCapture, WarmCheckpointSession,
+    DynamicRangeTarget, PeerInfo, PeerKey, Rfc8212PolicyStatus, WarmCheckpointCapture,
+    WarmCheckpointSession,
 };
 use rustbgpd_bmp::{BmpEvent, BmpPeerInfo, BmpPeerType};
 use rustbgpd_fsm::SessionState;
@@ -13,6 +14,17 @@ use tracing::warn;
 use crate::config::{RFC8212_MISSING_EXPORT_POLICY, RFC8212_MISSING_IMPORT_POLICY};
 
 use super::{ManagedPeer, PEER_QUERY_TIMEOUT, PeerManager};
+
+fn accepted_dynamic_range_snapshot(managed: &ManagedPeer) -> Option<DynamicRangeTarget> {
+    managed
+        .accepted_dynamic_range
+        .as_ref()
+        .map(|range| DynamicRangeTarget {
+            addr: range.addr,
+            prefix_len: range.prefix_len,
+            peer_group: range.peer_group.clone(),
+        })
+}
 
 /// Build a `PeerInfo` snapshot from config + an optional fresh
 /// `PeerSessionState`. `session_state = None` means the bounded
@@ -119,6 +131,7 @@ pub(super) fn build_peer_info(
         tcp_ao_info: session_state.and_then(|s| s.tcp_ao_info.as_deref().cloned()),
         tcp_ao_rotation: managed.tcp_ao_rotation.clone(),
         is_dynamic: managed.is_dynamic,
+        accepted_dynamic_range: accepted_dynamic_range_snapshot(managed),
         stale,
         slow_peer: session_state.is_some_and(|s| s.slow_peer),
         rfc8212_import_policy,

@@ -1292,6 +1292,11 @@ When `remote_asn = 0`, the accepted peer keeps the configured range as
 accept-any, but the ephemeral peer's session state uses the ASN learned from the
 peer's OPEN. Peer snapshots, gRPC state, BMP peer state, and RIB peer-up
 metadata therefore report the learned ASN rather than the sentinel `0`.
+For operator attribution, live dynamic-peer snapshots also retain the
+canonical prefix and peer group that accepted the connection. That captured
+provenance does not change if a more-specific range is later removed while the
+session remains established; it is not recomputed from the current
+longest-prefix matcher.
 
 ```toml
 [global]

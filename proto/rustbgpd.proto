@@ -602,6 +602,14 @@ message NeighborState {
   // distinguishes an older daemon from a current daemon whose boolean values
   // are explicitly false.
   EffectiveNeighborPosture effective_posture = 54;
+  // Canonical range and peer group captured when this dynamic peer was
+  // accepted. Absent for static peers and when reading an older daemon.
+  AcceptedDynamicNeighborRange accepted_dynamic_range = 55;
+}
+
+message AcceptedDynamicNeighborRange {
+  string prefix = 1;
+  string peer_group = 2;
 }
 
 // Read-only resolved posture copied from the peer's running transport config.

@@ -92,6 +92,7 @@ pub(crate) fn peer_info(address: IpAddr) -> PeerInfo {
         tcp_ao_info: None,
         tcp_ao_rotation: rustbgpd_transport::TcpAoRotationStatus::default(),
         is_dynamic: false,
+        accepted_dynamic_range: None,
         stale: false,
         slow_peer: false,
         rfc8212_import_policy: Rfc8212PolicyStatus::NotRequired,

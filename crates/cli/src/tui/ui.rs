@@ -8,7 +8,7 @@ use crate::commands::neighbor::{
     negotiated_families_label, negotiation_status_label, next_hop_ownership_label,
     optional_seconds_label, rfc8212_policy_status_label,
 };
-use crate::output::{format_duration, format_state_with_stale};
+use crate::output::{format_duration, format_state_with_stale, neighbor_source_label};
 use crate::tui::app::{App, SortColumn, View, neighbor_key};
 use crate::tui::data::Freshness;
 use crate::tui::theme::Theme;
@@ -442,6 +442,7 @@ fn draw_peer_detail(f: &mut Frame, app: &mut App, address: &str, theme: &Theme) 
                 .unwrap_or_default(),
             text,
         ),
+        row("Source:", neighbor_source_label(neighbor), text),
         row(
             "State:",
             state_label.to_string(),
@@ -810,6 +811,11 @@ mod tests {
             flap_count: 3,
             route_reflector_client: true,
             slow_peer: true,
+            is_dynamic: true,
+            accepted_dynamic_range: Some(crate::proto::AcceptedDynamicNeighborRange {
+                prefix: "192.0.2.0/24".into(),
+                peer_group: "edge-clients".into(),
+            }),
             update_group: "group:7".into(),
             negotiation_available: Some(true),
             negotiated_session: Some(crate::proto::NegotiatedSessionState {
@@ -888,6 +894,7 @@ mod tests {
             ("Negotiated Hold Time:", "30s"),
             ("Configured Families:", "ipv4_unicast, ipv6_unicast"),
             ("Negotiated Families:", "ipv4_unicast"),
+            ("Source:", "dynamic (192.0.2.0/24, group edge-clients)"),
             ("Peer Group:", "edge-clients"),
             ("Update Group:", "group:7"),
             ("RR Client:", "true"),

@@ -874,6 +874,12 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
         flap_count: info.flap_count,
         last_error: info.last_error.clone(),
         is_dynamic: info.is_dynamic,
+        accepted_dynamic_range: info.accepted_dynamic_range.as_ref().map(|range| {
+            proto::AcceptedDynamicNeighborRange {
+                prefix: format!("{}/{}", range.addr, range.prefix_len),
+                peer_group: range.peer_group.clone(),
+            }
+        }),
         stale: info.stale,
         local_role: bgp_role_to_string(info.local_role),
         remote_role: bgp_role_to_string(info.remote_role),
@@ -2066,6 +2072,10 @@ mod tests {
         assert!(source.contains("Rfc8212PolicyStatus rfc8212_import_policy = 51;"));
         assert!(source.contains("Rfc8212PolicyStatus rfc8212_export_policy = 52;"));
         assert!(source.contains("EffectiveNeighborPosture effective_posture = 54;"));
+        assert!(source.contains("AcceptedDynamicNeighborRange accepted_dynamic_range = 55;"));
+        assert!(source.contains("message AcceptedDynamicNeighborRange {"));
+        assert!(source.contains("string prefix = 1;"));
+        assert!(source.contains("string peer_group = 2;"));
         assert!(source.contains("NEXT_HOP_OWNERSHIP_MODE_UNSPECIFIED = 0;"));
         assert!(source.contains("NEXT_HOP_OWNERSHIP_MODE_DISABLED = 1;"));
         assert!(source.contains("NEXT_HOP_OWNERSHIP_MODE_STRICT_PEER = 2;"));
@@ -3443,6 +3453,37 @@ mod tests {
         assert_eq!(state.messages_received, 4321);
         assert_eq!(state.messages_sent, 1234);
         assert!(state.route_reflector_client);
+    }
+
+    /// Load-bearing provenance proof: removing the converter projection makes
+    /// the dynamic half lose its exact prefix/group, while inventing
+    /// provenance for static peers makes the static half fail.
+    #[test]
+    fn peer_info_to_proto_preserves_captured_dynamic_provenance_only() {
+        let mut dynamic = peer_info("10.0.0.42".parse().unwrap());
+        dynamic.is_dynamic = true;
+        dynamic.accepted_dynamic_range = Some(crate::peer_types::DynamicRangeTarget {
+            addr: "10.0.0.0".parse().unwrap(),
+            prefix_len: 24,
+            peer_group: "narrow-members".to_string(),
+        });
+        let state = peer_info_to_proto(&dynamic);
+        assert!(state.is_dynamic);
+        assert_eq!(
+            state.accepted_dynamic_range,
+            Some(proto::AcceptedDynamicNeighborRange {
+                prefix: "10.0.0.0/24".to_string(),
+                peer_group: "narrow-members".to_string(),
+            })
+        );
+
+        let static_peer = peer_info("192.0.2.1".parse().unwrap());
+        assert!(!peer_info_to_proto(&static_peer).is_dynamic);
+        assert!(
+            peer_info_to_proto(&static_peer)
+                .accepted_dynamic_range
+                .is_none()
+        );
     }
 
     /// Load-bearing: collapsing proto presence or hard-coding either value

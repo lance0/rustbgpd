@@ -220,8 +220,38 @@ pub struct JsonNeighbor {
     pub messages_sent: u64,
     pub flap_count: u64,
     pub last_error: String,
+    pub is_dynamic: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accepted_dynamic_range: Option<JsonAcceptedDynamicRange>,
     pub route_reflector_client: bool,
     pub description: String,
+}
+
+#[derive(Serialize)]
+pub struct JsonAcceptedDynamicRange {
+    pub prefix: String,
+    pub peer_group: String,
+}
+
+pub fn json_accepted_dynamic_range(
+    range: Option<&proto::AcceptedDynamicNeighborRange>,
+) -> Option<JsonAcceptedDynamicRange> {
+    range.map(|range| JsonAcceptedDynamicRange {
+        prefix: range.prefix.clone(),
+        peer_group: range.peer_group.clone(),
+    })
+}
+
+/// Describe whether a live peer was statically configured or dynamically
+/// accepted, retaining an explicit rolling-upgrade fallback for older daemons.
+pub fn neighbor_source_label(neighbor: &proto::NeighborState) -> String {
+    if !neighbor.is_dynamic {
+        "static".to_string()
+    } else if let Some(range) = neighbor.accepted_dynamic_range.as_ref() {
+        format!("dynamic ({}, group {})", range.prefix, range.peer_group)
+    } else {
+        "dynamic (range unavailable)".to_string()
+    }
 }
 
 #[derive(Serialize)]
@@ -256,6 +286,9 @@ pub struct JsonNeighborDetail {
     pub messages_sent: u64,
     pub flap_count: u64,
     pub last_error: String,
+    pub is_dynamic: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accepted_dynamic_range: Option<JsonAcceptedDynamicRange>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effective_max_prefixes: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -638,8 +671,8 @@ fn ansi_overhead(colored: &str, plain_len: usize) -> usize {
 }
 
 /// Print neighbor table with dynamic column widths and colored state.
-/// `wide` appends the classic operator columns (MsgRcvd, MsgSent,
-/// Flaps, RRC), a compact slow-peer marker, and the overloaded
+/// `wide` appends the captured peer source, classic operator columns
+/// (MsgRcvd, MsgSent, Flaps, RRC), a compact slow-peer marker, and the overloaded
 /// `State/PfxRcd` — prefixes-received count when Established, state name
 /// otherwise — as the last column.
 pub fn print_neighbor_table(neighbors: &[proto::NeighborState], wide: bool) {
@@ -665,6 +698,7 @@ fn render_neighbor_table(neighbors: &[proto::NeighborState], wide: bool) -> Stri
         flaps: String,
         rrc: String,
         slow: String,
+        source: String,
         state_pfx: String,
     }
 
@@ -715,6 +749,11 @@ fn render_neighbor_table(neighbors: &[proto::NeighborState], wide: bool) -> Stri
                 flaps,
                 rrc,
                 slow,
+                source: if wide {
+                    neighbor_source_label(n)
+                } else {
+                    String::new()
+                },
                 state_pfx,
             }
         })
@@ -773,11 +812,17 @@ fn render_neighbor_table(neighbors: &[proto::NeighborState], wide: bool) -> Stri
         .unwrap_or(0)
         .max(7); // "MsgSent"
     let w_fl = rows.iter().map(|r| r.flaps.len()).max().unwrap_or(0).max(5); // "Flaps"
+    let w_source = rows
+        .iter()
+        .map(|r| r.source.len())
+        .max()
+        .unwrap_or(0)
+        .max(6); // "Source"
 
     let _ = writeln!(
         out,
         "{:<w_addr$} {:<w_asn$} {:<w_state$} {:<w_uptime$} {:>w_rx$} {:>w_tx$} \
-         {:<w_desc$} {:>w_mr$} {:>w_ms$} {:>w_fl$} {:<3} {:<4} State/PfxRcd",
+         {:<w_desc$} {:<w_source$} {:>w_mr$} {:>w_ms$} {:>w_fl$} {:<3} {:<4} State/PfxRcd",
         "Neighbor",
         "AS",
         "State",
@@ -785,6 +830,7 @@ fn render_neighbor_table(neighbors: &[proto::NeighborState], wide: bool) -> Stri
         "Rx Pfx",
         "Tx Pfx",
         "Description",
+        "Source",
         "MsgRcvd",
         "MsgSent",
         "Flaps",
@@ -798,7 +844,7 @@ fn render_neighbor_table(neighbors: &[proto::NeighborState], wide: bool) -> Stri
         let _ = writeln!(
             out,
             "{:<w_addr$} {:<w_asn$} {:<padded_state$} {:<w_uptime$} {:>w_rx$} {:>w_tx$} \
-             {:<w_desc$} {:>w_mr$} {:>w_ms$} {:>w_fl$} {:<3} {:<4} {}",
+             {:<w_desc$} {:<w_source$} {:>w_mr$} {:>w_ms$} {:>w_fl$} {:<3} {:<4} {}",
             row.addr,
             row.asn,
             row.state_colored,
@@ -806,6 +852,7 @@ fn render_neighbor_table(neighbors: &[proto::NeighborState], wide: bool) -> Stri
             row.rx,
             row.tx,
             row.desc,
+            row.source,
             row.msg_rcvd,
             row.msg_sent,
             row.flaps,
@@ -1214,6 +1261,11 @@ mod tests {
         assert_json_shape(value, contract, contract_id);
         for nested in contract["nested_json_contracts"].as_array().unwrap() {
             match nested["path"].as_str().unwrap() {
+                "accepted_dynamic_range" => {
+                    if let Some(range) = value.get("accepted_dynamic_range") {
+                        assert_json_shape(range, nested, contract_id);
+                    }
+                }
                 "effective_posture" => {
                     if let Some(posture) = value.get("effective_posture") {
                         assert_json_shape(posture, nested, contract_id);
@@ -1554,6 +1606,11 @@ mod tests {
             messages_sent: 21,
             flap_count: 7,
             last_error: String::new(),
+            is_dynamic: true,
+            accepted_dynamic_range: Some(JsonAcceptedDynamicRange {
+                prefix: "10.0.0.0/24".to_string(),
+                peer_group: "rs-clients".to_string(),
+            }),
             effective_max_prefixes: Some(20),
             effective_max_prefixes_ipv4: Some(10),
             effective_max_prefixes_ipv6: None,
@@ -1690,6 +1747,9 @@ mod tests {
         assert_inventory_json_contract(&value, "neighbor-detail-v1");
 
         assert_eq!(value["peer_group"], "rs-clients");
+        assert_eq!(value["is_dynamic"], true);
+        assert_eq!(value["accepted_dynamic_range"]["prefix"], "10.0.0.0/24");
+        assert_eq!(value["accepted_dynamic_range"]["peer_group"], "rs-clients");
         // ADR-0112: the two directions are independent JSON fields. Collapsing
         // them into one "policy present" value drops the half that is denied.
         assert_eq!(value["rfc8212_import_policy"], "missing");
@@ -1856,12 +1916,16 @@ mod tests {
         detail.max_prefix_headroom = None;
         detail.negotiation_available = None;
         detail.negotiated_session = None;
+        detail.is_dynamic = false;
+        detail.accepted_dynamic_range = None;
         let value = serde_json::to_value(&detail).expect("JSON serialize");
         assert!(value.get("graceful_shutdown_advertise_intent").is_none());
         assert!(value.get("effective_max_prefixes").is_none());
         assert!(value.get("max_prefix_headroom").is_none());
         assert!(value.get("negotiation_available").is_none());
         assert!(value.get("negotiated_session").is_none());
+        assert_eq!(value["is_dynamic"], false);
+        assert!(value.get("accepted_dynamic_range").is_none());
     }
 
     fn table_fixture() -> Vec<proto::NeighborState> {
@@ -1882,6 +1946,11 @@ mod tests {
                 flap_count: 2,
                 route_reflector_client: true,
                 slow_peer: true,
+                is_dynamic: true,
+                accepted_dynamic_range: Some(proto::AcceptedDynamicNeighborRange {
+                    prefix: "10.0.0.0/24".to_string(),
+                    peer_group: "core-members".to_string(),
+                }),
                 ..Default::default()
             },
             proto::NeighborState {
@@ -1921,6 +1990,37 @@ mod tests {
         assert!(!value.to_string().contains("group:"));
     }
 
+    /// Load-bearing rolling-compatibility proof: ignoring `is_dynamic`,
+    /// synthesizing a range from current config, or collapsing absent
+    /// provenance into `static` changes one of these exact labels.
+    #[test]
+    fn neighbor_source_label_distinguishes_static_captured_and_unavailable() {
+        let static_peer = proto::NeighborState::default();
+        assert_eq!(neighbor_source_label(&static_peer), "static");
+
+        let dynamic_peer = proto::NeighborState {
+            is_dynamic: true,
+            accepted_dynamic_range: Some(proto::AcceptedDynamicNeighborRange {
+                prefix: "10.0.0.0/24".to_string(),
+                peer_group: "ix-members".to_string(),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            neighbor_source_label(&dynamic_peer),
+            "dynamic (10.0.0.0/24, group ix-members)"
+        );
+
+        let older_daemon = proto::NeighborState {
+            is_dynamic: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            neighbor_source_label(&older_daemon),
+            "dynamic (range unavailable)"
+        );
+    }
+
     /// Pins the default table byte-for-byte: `--wide` must not change
     /// the zero-flag output existing operators and scripts see.
     #[test]
@@ -1934,7 +2034,7 @@ Neighbor    AS    State       Uptime   Rx Pfx Tx Pfx  Description
     }
 
     /// Golden wide table: default columns unchanged and in order, then
-    /// MsgRcvd/MsgSent/Flaps/RRC, a compact slow-peer marker, and the
+    /// captured source, MsgRcvd/MsgSent/Flaps/RRC, a compact slow-peer marker, and the
     /// overloaded State/PfxRcd last (prefix count when Established, state
     /// name otherwise). Load-bearing: removing the `n.slow_peer` projection
     /// drops the `!` from the first row and makes this golden red.
@@ -1942,9 +2042,9 @@ Neighbor    AS    State       Uptime   Rx Pfx Tx Pfx  Description
     fn neighbor_table_wide_golden() {
         owo_colors::set_override(false);
         let expected = "\
-Neighbor    AS    State       Uptime   Rx Pfx Tx Pfx Description    MsgRcvd MsgSent Flaps RRC Slow State/PfxRcd
-10.0.0.1    64512 Established 01:01:40    100      5 core-rr-client    1234     567     2 *   !    100
-2001:db8::2 65001 Idle        00:00:00      0      0                      0       0     9          Idle\n";
+Neighbor    AS    State       Uptime   Rx Pfx Tx Pfx Description    Source                                    MsgRcvd MsgSent Flaps RRC Slow State/PfxRcd
+10.0.0.1    64512 Established 01:01:40    100      5 core-rr-client dynamic (10.0.0.0/24, group core-members)    1234     567     2 *   !    100
+2001:db8::2 65001 Idle        00:00:00      0      0                static                                          0       0     9          Idle\n";
         assert_eq!(render_neighbor_table(&table_fixture(), true), expected);
     }
 

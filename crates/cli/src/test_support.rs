@@ -88,6 +88,9 @@ pub(crate) struct MockState {
     pub(crate) last_get_neighbor_state: Mutex<Option<server_proto::GetNeighborStateRequest>>,
     pub(crate) neighbor_comparison: Mutex<Option<server_proto::UpdateGroupComparison>>,
     pub(crate) neighbor_effective_posture: Mutex<Option<server_proto::EffectiveNeighborPosture>>,
+    pub(crate) neighbor_is_dynamic: AtomicBool,
+    pub(crate) neighbor_accepted_dynamic_range:
+        Mutex<Option<server_proto::AcceptedDynamicNeighborRange>>,
     pub(crate) last_softreset: Mutex<Option<server_proto::SoftResetInRequest>>,
     pub(crate) last_refresh_outbound: Mutex<Option<server_proto::RefreshOutboundRequest>>,
     pub(crate) refresh_outbound_calls: AtomicUsize,
@@ -875,7 +878,13 @@ impl rustbgpd_api::proto::neighbor_service_server::NeighborService for MockNeigh
             authentication: server_proto::AuthenticationMode::TcpAo.into(),
             tcp_ao_health: server_proto::TcpAoHealth::Unavailable.into(),
             tcp_ao: None,
-            is_dynamic: false,
+            is_dynamic: self.state.neighbor_is_dynamic.load(Ordering::SeqCst),
+            accepted_dynamic_range: self
+                .state
+                .neighbor_accepted_dynamic_range
+                .lock()
+                .await
+                .clone(),
             stale: false,
             local_role: "rs".to_string(),
             remote_role: "rs-client".to_string(),
