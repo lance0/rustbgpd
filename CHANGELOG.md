@@ -20,6 +20,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   across accept, ordinary removal, rollback reap, and retained-disabled
   max-prefix recovery lifecycles.
 
+- Shipped Prometheus rules now warn when dynamic-neighbor admission slots remain
+  at least 80% occupied for ten minutes and page when the full limit rejects a
+  matching inbound connection.
+
 - `NeighborService.AddNeighbor` now accepts an additive presence-aware wrapper
   that preserves peer-group inheritance and explicit masked `false`, family
   replacement, and Add-Path disable intent across persistence, live apply, and

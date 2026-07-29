@@ -286,6 +286,80 @@ tests:
                 bgp_max_prefix_headroom and eventually trigger Cease / Maximum
                 Number of Prefixes Reached.
 
+  # ── Dynamic-neighbor admission capacity ──────────────────────
+  # Load-bearing: the exact 79%/80% boundary and pending/firing observations
+  # pin the ratio and ten-minute hold. The zero-limit control proves the
+  # warning fails closed. The rejection pair pins increase, its 10m range,
+  # and the > 0 boundary; deleting either alert makes its firing case red.
+  - interval: 1m
+    input_series:
+      - series: 'bgp_dynamic_neighbor_slots_used{instance="edge1:9179"}'
+        values: "80x13"
+      - series: 'bgp_dynamic_neighbor_slots_limit{instance="edge1:9179"}'
+        values: "100x13"
+      - series: 'bgp_dynamic_neighbor_slots_used{instance="edge2:9179"}'
+        values: "79x13"
+      - series: 'bgp_dynamic_neighbor_slots_limit{instance="edge2:9179"}'
+        values: "100x13"
+      - series: 'bgp_dynamic_neighbor_slots_used{instance="edge3:9179"}'
+        values: "1x13"
+      - series: 'bgp_dynamic_neighbor_slots_limit{instance="edge3:9179"}'
+        values: "0x13"
+      - series: 'bgp_dynamic_neighbor_limit_rejections_total{instance="edge1:9179"}'
+        values: "0 0 0 1 1 1 1 1 1 1 1 1 1"
+      - series: 'bgp_dynamic_neighbor_limit_rejections_total{instance="edge2:9179"}'
+        values: "4x13"
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: BgpDynamicNeighborSlotsNearLimit
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: BgpDynamicNeighborSlotsNearLimit
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: edge1:9179
+            exp_annotations:
+              summary: "Dynamic-neighbor admission slots are nearly exhausted"
+              description: >-
+                Dynamic-neighbor admission-slot usage on edge1:9179 has
+                remained at or above 80% of its process-global limit for
+                10 minutes. Inspect bgp_dynamic_neighbor_slots_headroom before
+                new matching inbound sessions are rejected.
+      - eval_time: 2m
+        alertname: BgpDynamicNeighborLimitRejected
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: BgpDynamicNeighborLimitRejected
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              instance: edge1:9179
+            exp_annotations:
+              summary: "Dynamic-neighbor admission rejected"
+              description: >-
+                Dynamic-neighbor admission on edge1:9179 rejected 1 matching
+                inbound connection(s) in the last 10 minutes because the
+                process-global slot limit was full.
+      # The t=3m increment is outside [5m] at t=9m but remains inside [10m].
+      - eval_time: 9m
+        alertname: BgpDynamicNeighborLimitRejected
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              instance: edge1:9179
+            exp_annotations:
+              summary: "Dynamic-neighbor admission rejected"
+              description: >-
+                Dynamic-neighbor admission on edge1:9179 rejected 1 matching
+                inbound connection(s) in the last 10 minutes because the
+                process-global slot limit was full.
+      # Prometheus ranges are left-open: at 12m, [10m] excludes the t=2m
+      # zero sample needed to observe the increment at t=3m; [11m] includes it.
+      - eval_time: 12m
+        alertname: BgpDynamicNeighborLimitRejected
+        exp_alerts: []
+
   # ── BgpPeerSlow ───────────────────────────────────────────────
   # Load-bearing: reverting `== 1`, shortening/lengthening `for: 5m`,
   # or aggregating away the endpoint makes one of these exact boundary

@@ -135,6 +135,38 @@ groups:
             bgp_max_prefix_headroom and eventually trigger Cease / Maximum
             Number of Prefixes Reached.
 
+      - alert: BgpDynamicNeighborSlotsNearLimit
+        # Both gauges are process-global and label-free before scrape labels.
+        # Require a positive configured limit explicitly so an absent or zero
+        # limit cannot produce a capacity warning.
+        expr: >-
+          bgp_dynamic_neighbor_slots_used
+          / bgp_dynamic_neighbor_slots_limit >= 0.8
+          and bgp_dynamic_neighbor_slots_limit > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Dynamic-neighbor admission slots are nearly exhausted"
+          description: >-
+            Dynamic-neighbor admission-slot usage on {{ $labels.instance }}
+            has remained at or above 80% of its process-global limit for
+            10 minutes. Inspect bgp_dynamic_neighbor_slots_headroom before
+            new matching inbound sessions are rejected.
+
+      - alert: BgpDynamicNeighborLimitRejected
+        expr: increase(bgp_dynamic_neighbor_limit_rejections_total[10m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Dynamic-neighbor admission rejected"
+          description: >-
+            Dynamic-neighbor admission on {{ $labels.instance }} rejected
+            {{ $value | printf "%.0f" }} matching inbound connection(s) in
+            the last 10 minutes because the process-global slot limit was
+            full.
+
       - alert: BgpRfc8212MissingImportPolicy
         expr: bgp_rfc8212_missing_import_policy == 1
         for: 5m
