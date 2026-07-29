@@ -1106,6 +1106,48 @@ fn load_tier_test_toml(source: &str, source_name: &str) -> Config {
     config
 }
 
+/// Keep daemon-wide, startup-owned state honest across SIGHUP.
+///
+/// These fields have no live reconciler. Advancing any of them in the runtime
+/// snapshot would make later consumers (notably a runtime-added peer resolved
+/// from that snapshot) observe an identity or subsystem configuration that the
+/// running daemon never adopted. Fields with dedicated pinning or hot-apply
+/// paths remain owned by those paths below.
+fn pin_unreconciled_daemon_runtime_fields(new_config: &mut Config, current: &Config) {
+    new_config.global.asn = current.global.asn;
+    new_config
+        .global
+        .router_id
+        .clone_from(&current.global.router_id);
+    new_config.global.listen_port = current.global.listen_port;
+    new_config
+        .global
+        .cluster_id
+        .clone_from(&current.global.cluster_id);
+    new_config.global.worker_threads = current.global.worker_threads;
+    new_config.global.multipath_relax = current.global.multipath_relax;
+    new_config.global.link_bandwidth_weighted = current.global.link_bandwidth_weighted;
+    new_config.global.warm_cache_checkpoint_on_shutdown =
+        current.global.warm_cache_checkpoint_on_shutdown;
+    new_config
+        .global
+        .runtime_state_dir
+        .clone_from(&current.global.runtime_state_dir);
+    new_config
+        .global
+        .telemetry
+        .prometheus_addr
+        .clone_from(&current.global.telemetry.prometheus_addr);
+    new_config
+        .global
+        .telemetry
+        .log_format
+        .clone_from(&current.global.telemetry.log_format);
+    new_config.rpki.clone_from(&current.rpki);
+    new_config.bmp.clone_from(&current.bmp);
+    new_config.mrt.clone_from(&current.mrt);
+}
+
 #[cfg(test)]
 pub(crate) async fn reload_config(
     config_path: &str,
@@ -1222,9 +1264,15 @@ pub(crate) async fn reload_config_with_tcp_ao(
         new_config.global.telemetry.grpc_uds = live_grpc_uds.cloned();
     }
 
-    // Compile the immutable TCP-AO candidate before pinning, but do not touch
-    // a socket or session yet. The fully pinned runtime candidate must pass
-    // validation below before the first external mutation.
+    // Pin the remaining startup-owned daemon inventory before validation or
+    // any external apply. The desired snapshot still carries the edited TOML
+    // so restart intent is preserved and the same drift remains visible on
+    // every reload.
+    pin_unreconciled_daemon_runtime_fields(&mut new_config, current);
+
+    // Compile the immutable TCP-AO candidate before TCP-AO inventory pinning,
+    // but do not touch a socket or session yet. The fully pinned runtime
+    // candidate must pass validation below before the first external mutation.
     let tcp_ao_rotation_plan = if let Some(listener) = tcp_ao_listener {
         match prepare_tcp_ao_rotation_plan(current, &new_config, &listener.status()) {
             Ok(plan) => plan,
@@ -1416,7 +1464,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
 
     if let Some(apply) = evpn_runtime_apply {
         let attempt = apply
-            .apply_config_if_changed(&desired_config, evpn_runtime_changed)
+            .apply_config_if_changed(&new_config, evpn_runtime_changed)
             .await;
         match attempt.result {
             Ok(Some(result)) => {
@@ -3365,6 +3413,109 @@ local_vtep_ip = "10.0.0.1"
         std::fs::remove_file(&path).ok();
     }
 
+    /// A restart-required daemon identity edit must not leak into a concurrent
+    /// hot EVPN apply. Auto-derived route targets consume the local ASN, so the
+    /// coordinator must resolve the candidate from the pinned runtime snapshot
+    /// while the raw edit remains visible in the desired snapshot.
+    #[tokio::test]
+    async fn reload_evpn_auto_derived_rt_uses_pinned_runtime_asn() {
+        let path = unique_temp_path("reload-evpn-pinned-asn");
+        std::fs::write(
+            &path,
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.1"
+"#,
+        )
+        .unwrap();
+        let initial = load_config_from_toml(
+            "reload-evpn-pinned-asn-startup",
+            &std::fs::read_to_string(&path).unwrap(),
+        );
+        let live_grpc_tcp = initial.global.telemetry.grpc_tcp.clone();
+        let live_grpc_uds = initial.global.telemetry.grpc_uds.clone();
+        let (apply, coordinator) = evpn_reload_apply(&initial, Ok(()));
+
+        std::fs::write(
+            &path,
+            r#"
+[global]
+asn = 65100
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.1"
+
+[[evpn_instances]]
+vni = 200
+rd = "65000:200"
+auto_derive_route_target = true
+local_vtep_ip = "10.0.0.1"
+"#,
+        )
+        .unwrap();
+
+        let (peer_mgr_tx, _peer_mgr_rx) = mpsc::channel(8);
+        let returned = reload_config(
+            path.to_str().unwrap(),
+            &initial,
+            live_grpc_tcp.as_ref(),
+            live_grpc_uds.as_ref(),
+            &peer_mgr_tx,
+            None,
+            Some(&apply),
+        )
+        .await
+        .expect("combined ASN and EVPN edit should retain both snapshots");
+
+        assert_eq!(
+            returned.global.asn, 65001,
+            "runtime identity must retain the startup ASN"
+        );
+        assert_eq!(
+            returned.desired.global.asn, 65100,
+            "the restart-required ASN edit must remain visible as desired drift"
+        );
+
+        let added = rustbgpd_evpn::EvpnInstanceId::new(200).unwrap();
+        let coordinator = coordinator.lock().unwrap();
+        let instance = coordinator
+            .model()
+            .instances()
+            .get(added)
+            .expect("the concurrent hot EVPN addition must commit");
+        let route_targets = instance
+            .route_targets
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            route_targets,
+            ["65001:268435656"],
+            "auto-derived route targets must use the pinned startup ASN"
+        );
+
+        std::fs::remove_file(&path).ok();
+    }
+
     #[tokio::test]
     #[expect(
         clippy::too_many_lines,
@@ -4868,6 +5019,12 @@ hold_time = 90
             PeerManagerCommand::SetFibTablesSnapshot { tables, .. } => {
                 format!("SetFibTablesSnapshot({})", tables.len())
             }
+            PeerManagerCommand::SetHonorGracefulShutdown { enabled, .. } => {
+                format!("SetHonorGracefulShutdown({enabled})")
+            }
+            PeerManagerCommand::SetHonorBlackhole { enabled, .. } => {
+                format!("SetHonorBlackhole({enabled})")
+            }
             _ => "Other".to_string(),
         }
     }
@@ -4920,6 +5077,10 @@ hold_time = 90
                     PeerManagerCommand::SetFibTablesSnapshot { reply, .. }
                     | PeerManagerCommand::SyncExplainConfig { reply, .. } => {
                         let _ = reply.send(());
+                    }
+                    PeerManagerCommand::SetHonorGracefulShutdown { reply, .. }
+                    | PeerManagerCommand::SetHonorBlackhole { reply, .. } => {
+                        let _ = reply.send(Ok(()));
                     }
                     _ => {}
                 }
@@ -5737,6 +5898,123 @@ tcp_ao = [
                 returned.desired.global.dynamic_neighbor_limit,
                 Some(17),
                 "the unapplied edit must remain observable as desired drift"
+            );
+        }
+    }
+
+    /// Daemon-wide identity and subsystem owners are created once at startup.
+    /// A reload must retain that runtime identity while preserving the edited
+    /// desired snapshot, including on a repeated identical SIGHUP. The
+    /// runtime-added-neighbor assertion exercises the later consumer that made
+    /// an unpinned ASN/router ID a live split-brain rather than mere metadata.
+    #[tokio::test]
+    async fn reload_pins_daemon_wide_inventory_but_hot_applies_honor_knobs() {
+        let desired = r#"
+[global]
+asn = 65100
+router_id = "10.0.0.9"
+listen_port = 1179
+cluster_id = "10.0.0.8"
+worker_threads = 2
+honor_graceful_shutdown = true
+honor_blackhole = true
+multipath_relax = true
+link_bandwidth_weighted = true
+warm_cache_checkpoint_on_shutdown = true
+runtime_state_dir = "/tmp/rustbgpd-reload-edited"
+
+[global.telemetry]
+prometheus_addr = "127.0.0.1:19179"
+log_format = "plain"
+
+[rpki]
+[[rpki.cache_servers]]
+address = "127.0.0.1:3323"
+
+[bmp]
+sys_name = "reload-edited"
+[[bmp.collectors]]
+address = "127.0.0.1:5000"
+
+[mrt]
+output_dir = "/tmp/rustbgpd-reload-mrt"
+dump_interval = 60
+compress = true
+file_prefix = "edited"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+hold_time = 90
+"#;
+        let startup = load_config_from_toml("daemon-pin-startup", baseline_toml());
+        let declared = load_config_from_toml("daemon-pin-desired", desired);
+        let (outcomes, tags) = drive_reloads(baseline_toml(), desired, 2).await;
+
+        assert_eq!(
+            tags,
+            vec!["SetHonorGracefulShutdown(true)", "SetHonorBlackhole(true)"],
+            "the two explicitly hot-applied global knobs must remain live while startup-owned \
+             fields are pinned"
+        );
+
+        for outcome in outcomes {
+            let reloaded = outcome.expect("daemon-wide restart-only reload must return snapshots");
+            let runtime = &reloaded.runtime;
+            assert_eq!(runtime.global.asn, startup.global.asn);
+            assert_eq!(runtime.global.router_id, startup.global.router_id);
+            assert_eq!(runtime.global.listen_port, startup.global.listen_port);
+            assert_eq!(runtime.global.cluster_id, startup.global.cluster_id);
+            assert_eq!(runtime.global.worker_threads, startup.global.worker_threads);
+            assert_eq!(
+                runtime.global.multipath_relax,
+                startup.global.multipath_relax
+            );
+            assert_eq!(
+                runtime.global.link_bandwidth_weighted,
+                startup.global.link_bandwidth_weighted
+            );
+            assert_eq!(
+                runtime.global.warm_cache_checkpoint_on_shutdown,
+                startup.global.warm_cache_checkpoint_on_shutdown
+            );
+            assert_eq!(
+                runtime.global.runtime_state_dir,
+                startup.global.runtime_state_dir
+            );
+            assert_eq!(
+                runtime.global.telemetry.prometheus_addr,
+                startup.global.telemetry.prometheus_addr
+            );
+            assert_eq!(
+                runtime.global.telemetry.log_format,
+                startup.global.telemetry.log_format
+            );
+            assert_eq!(runtime.rpki, startup.rpki);
+            assert_eq!(runtime.bmp, startup.bmp);
+            assert_eq!(runtime.mrt, startup.mrt);
+            assert!(runtime.global.honor_graceful_shutdown);
+            assert!(runtime.global.honor_blackhole);
+
+            assert_eq!(reloaded.desired.global, declared.global);
+            assert_eq!(reloaded.desired.rpki, declared.rpki);
+            assert_eq!(reloaded.desired.bmp, declared.bmp);
+            assert_eq!(reloaded.desired.mrt, declared.mrt);
+
+            let mut runtime_added = runtime.neighbors[0].clone();
+            runtime_added.address = "10.0.0.3".to_string();
+            runtime_added.remote_asn = 65003;
+            let resolved = runtime
+                .resolve_neighbor(&runtime_added)
+                .expect("runtime-added peer must resolve from the pinned snapshot");
+            assert_eq!(resolved.transport_config.peer.local_asn, startup.global.asn);
+            assert_eq!(
+                resolved.transport_config.peer.local_router_id,
+                startup
+                    .global
+                    .router_id
+                    .parse::<std::net::Ipv4Addr>()
+                    .unwrap()
             );
         }
     }
