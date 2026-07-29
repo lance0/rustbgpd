@@ -2029,6 +2029,8 @@ pub struct FanoutBenchExportSnapshotEvidence {
     pub generation: u64,
     /// Negotiated maximum BGP message size captured by the profile.
     pub max_message_len: usize,
+    /// Whether IPv4-unicast NLRI is encoded with an Add-Path path identifier.
+    pub add_path_ipv4_unicast: bool,
 }
 
 /// Downcast a benchmark envelope's opaque snapshot at the transport boundary.
@@ -2047,6 +2049,7 @@ pub fn fanout_bench_export_snapshot_evidence(
         owner_id: profile.owner_id(),
         generation: profile.generation(),
         max_message_len: profile.max_message_len(),
+        add_path_ipv4_unicast: profile.add_path_send((Afi::Ipv4, Safi::Unicast)),
     })
 }
 
@@ -2058,6 +2061,35 @@ pub fn fanout_bench_export_snapshot_evidence(
 #[must_use]
 pub fn fanout_bench_route_server_export_encoder(remote_asn: u32) -> Arc<dyn ExactExportEncoder> {
     fanout_bench_encoder(remote_asn != 64_512, true, None)
+}
+
+/// Build the authoritative encoder for the Add-Path staging benchmark.
+#[cfg(feature = "bench-internals")]
+#[doc(hidden)]
+#[must_use]
+pub fn fanout_bench_add_path_export_encoder() -> Arc<dyn ExactExportEncoder> {
+    let mut profile = SessionExportProfile {
+        owner_id: 0,
+        generation: 0,
+        local_asn: 64_512,
+        local_router_id: Ipv4Addr::new(10, 255, 255, 255),
+        local_role: None,
+        route_server_client: false,
+        remove_private_as: RemovePrivateAs::Disabled,
+        cluster_id: Some(Ipv4Addr::new(10, 255, 255, 255)),
+        configured_local_ipv6_nexthop: None,
+        is_ebgp: false,
+        four_octet_as: true,
+        extended_messages: false,
+        extended_nexthop_ipv4: false,
+        add_path_send_families: Arc::from(Vec::new()),
+        peer_llgr_families: Arc::from(Vec::new()),
+        local_addr: Some(IpAddr::V4(Ipv4Addr::new(10, 255, 255, 255))),
+        scoped_link_local_peer: false,
+        advertise_graceful_shutdown: false,
+    };
+    profile.add_path_send_families = Arc::from(vec![(Afi::Ipv4, Safi::Unicast)]);
+    Arc::new(SessionExportEncoder::new(profile))
 }
 
 #[cfg(feature = "bench-internals")]
