@@ -82,6 +82,8 @@ pub struct App {
     pub health_fresh: bool,
     pub neighbors: Vec<NeighborState>,
     pub neighbors_freshness: Option<Freshness>,
+    pub dynamic_range_count: Option<usize>,
+    pub dynamic_ranges_freshness: Option<Freshness>,
     pub route_events: VecDeque<RouteEventEntry>,
     pub rpki_vrp_count: Option<u64>,
     pub metrics_freshness: Option<Freshness>,
@@ -112,6 +114,8 @@ impl App {
             health_fresh: false,
             neighbors: Vec::new(),
             neighbors_freshness: None,
+            dynamic_range_count: None,
+            dynamic_ranges_freshness: None,
             route_events: VecDeque::new(),
             rpki_vrp_count: None,
             metrics_freshness: None,
@@ -205,6 +209,8 @@ impl App {
         self.last_poll = now;
         self.health_fresh = snapshot.health_fresh;
         self.neighbors_freshness = Some(snapshot.neighbors_freshness);
+        self.dynamic_range_count = snapshot.dynamic_range_count;
+        self.dynamic_ranges_freshness = Some(snapshot.dynamic_ranges_freshness);
         self.global_freshness = Some(snapshot.global_freshness);
         self.metrics_freshness = Some(snapshot.metrics_freshness);
 
@@ -426,6 +432,8 @@ mod tests {
             health_fresh: true,
             neighbors,
             neighbors_freshness: Freshness::Fresh,
+            dynamic_range_count: Some(0),
+            dynamic_ranges_freshness: Freshness::Fresh,
             rpki_vrp_count: None,
             metrics_freshness: Freshness::Unavailable,
             error: None,
@@ -567,6 +575,22 @@ mod tests {
             start + std::time::Duration::from_secs(3),
         );
         assert_eq!(app.peer_update_rate("198.51.100.1"), 10.0);
+    }
+
+    /// Red proof: moving range-state updates below the freshness guard leaves
+    /// an empty retained roster showing the prior range posture.
+    #[test]
+    fn stale_roster_snapshot_still_updates_dynamic_range_posture() {
+        let mut app = App::new();
+        let mut data = snapshot(Vec::new());
+        data.neighbors_freshness = Freshness::Stale;
+        data.dynamic_range_count = Some(3);
+        data.dynamic_ranges_freshness = Freshness::Stale;
+
+        app.on_data(data);
+
+        assert_eq!(app.dynamic_range_count, Some(3));
+        assert_eq!(app.dynamic_ranges_freshness, Some(Freshness::Stale));
     }
 
     /// Red proof: removing fresh-roster pruning retains both departed-peer maps.

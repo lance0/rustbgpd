@@ -1792,6 +1792,11 @@ optional source succeeds, the status line reports `global unavailable` or
 metrics scrape retains a known VRP count and labels it stale; a successful
 scrape with no RPKI family clears the count. Stale health or neighbor data is
 likewise labeled while the last-good snapshot remains on screen.
+When the peer roster is empty, the dashboard fetches dynamic-neighbor range
+inventory immediately and then every 60 seconds while it remains empty. It
+distinguishes configured dormant ranges, a proven unconfigured daemon, an
+initially unavailable inventory, and a retained stale count; failure of this
+optional inventory does not mark the core connection disconnected.
 Press `h` for keybindings.
 
 ### Watch live events
