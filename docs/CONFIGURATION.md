@@ -730,11 +730,13 @@ dynamic-only deployment where peers are added at runtime via gRPC.
 
 The server-side presence-aware `AddNeighborRequest.intent` carrier persists the
 same raw `[[neighbors]]` intent described here, then resolves it against the
-current peer-group before starting the session. Omitted inheritable fields stay
-absent on disk and in the actor snapshot; masked `false`, non-empty family
-replacement, and an atomic disabled Add-Path block remain explicit across
-restart. Wrapper-only requests require an inner config and FieldMask, and the
-server rejects both/neither carriers and invalid masks before mutation.
+current peer-group before starting the session. Omitted inheritable fields
+retain their unset/inherit semantics across canonical persistence and in the
+actor snapshot; canonical TOML may render empty-list sentinels such as
+`families = []`. Masked `false`, non-empty family replacement, and an atomic
+disabled Add-Path block remain explicit across restart. Wrapper-only requests
+require an inner config and FieldMask, and the server rejects both/neither
+carriers and invalid masks before mutation.
 
 The bundled `rbgp neighbor add` command still sends legacy
 `AddNeighborRequest.config` in this tranche. Its historical empty-family and
