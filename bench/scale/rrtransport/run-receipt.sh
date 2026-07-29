@@ -34,7 +34,7 @@ classify_child_exe() {
   local expected=$1 actual=$2 state=$3
   if [[ $actual == "$expected" ]]; then
     echo sample
-  elif [[ -z $actual && ($state == Z || $state == absent) ]]; then
+  elif [[ -z $actual && ($state == X || $state == Z || $state == absent) ]]; then
     echo exited
   else
     echo reject
@@ -42,7 +42,7 @@ classify_child_exe() {
 }
 
 check_seam() {
-  local script=$1 outer verify_call verify_body checksums_call checksums_body classifier_call
+  local script=$1 outer verify_call verify_body checksums_call checksums_body classifier_call supervisor_wait
   outer="timeout -k 10 1200 \"\$scr"
   outer+="ipt\" --campaign-inner \"\$output\""
   verify_call="full_ver"
@@ -54,10 +54,12 @@ check_seam() {
   checksums_body="sha256sum -c SHA"
   checksums_body+="256SUMS --strict"
   classifier_call="classification=\$(classify_child_exe \"\$binary\" \"\$child_exe\" \"\$child_state\")"
+  supervisor_wait="if ! wait \"\$pid\"; then echo \"rr1000 attempt failed\" >&2; pid=; exit 1; fi"
   if ! grep -Fq "$outer" "$script" || ! grep -Fq "$verify_call" "$script" ||
     ! grep -Fq "$verify_body" "$script" || ! grep -Fq "$checksums_call" "$script" ||
-    ! grep -Fq "$checksums_body" "$script" || ! grep -Fq "$classifier_call" "$script"; then
-    echo "runner lacks production verifier/checksum/classifier seam" >&2
+    ! grep -Fq "$checksums_body" "$script" || ! grep -Fq "$classifier_call" "$script" ||
+    ! grep -Fq "$supervisor_wait" "$script"; then
+    echo "runner lacks production verifier/checksum/classifier/supervisor seam" >&2
     return 1
   fi
 }
