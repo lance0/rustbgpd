@@ -25,6 +25,25 @@ pub(super) fn bare_ip_rpc_address(address: &str) -> &str {
     }
 }
 
+pub(super) fn restore_matching_scoped_address(requested: Option<&str>, response: &mut String) {
+    let Some(address) = requested else {
+        return;
+    };
+    let bare = bare_ip_rpc_address(address);
+    if bare == address {
+        return;
+    }
+    if matches!(
+        (
+            bare.parse::<std::net::IpAddr>(),
+            response.parse::<std::net::IpAddr>(),
+        ),
+        (Ok(requested_ip), Ok(response_ip)) if requested_ip == response_ip
+    ) {
+        address.clone_into(response);
+    }
+}
+
 fn split_scoped_address(address: &str) -> (String, String) {
     address.rsplit_once('%').map_or_else(
         || (address.to_string(), String::new()),
@@ -1145,6 +1164,27 @@ mod tests {
         for (input, expected) in cases {
             assert_eq!(bare_ip_rpc_address(input), expected, "input {input:?}");
         }
+    }
+
+    #[test]
+    fn scoped_output_restores_matching_filtered_identity() {
+        let mut canonical = "fe80::9".to_string();
+        restore_matching_scoped_address(Some("fe80:0:0:0:0:0:0:9%eth0"), &mut canonical);
+        assert_eq!(canonical, "fe80:0:0:0:0:0:0:9%eth0");
+    }
+
+    #[test]
+    fn scoped_output_leaves_unrelated_rows_unchanged() {
+        let mut unrelated = "fe80::10".to_string();
+        restore_matching_scoped_address(Some("fe80::9%eth0"), &mut unrelated);
+        assert_eq!(unrelated, "fe80::10");
+    }
+
+    #[test]
+    fn scoped_output_leaves_unfiltered_rows_unchanged() {
+        let mut unfiltered = "fe80::9".to_string();
+        restore_matching_scoped_address(None, &mut unfiltered);
+        assert_eq!(unfiltered, "fe80::9");
     }
 
     /// ADR-0112 rolling-version contract. Zero is what an older daemon leaves

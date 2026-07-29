@@ -104,6 +104,7 @@ pub(crate) struct MockState {
     // Canned ListNeighbors response — drives `rbgp diff` peer-availability
     // gating. Empty = no neighbors configured on the daemon.
     pub(crate) list_neighbors_response: Mutex<Vec<server_proto::NeighborState>>,
+    pub(crate) last_list_fib: Mutex<Option<server_proto::ListFibRoutesRequest>>,
     pub(crate) last_list_bgpls: Mutex<Option<server_proto::ListBgpLsRequest>>,
     // Canned ListBgpLsRoutes response — when set, served verbatim so the
     // decode-ceiling tests can push multi-MiB listings through loopback.
@@ -111,6 +112,8 @@ pub(crate) struct MockState {
     pub(crate) last_list_vpn: Mutex<Option<server_proto::ListVpnRoutesRequest>>,
     pub(crate) last_list_labeled: Mutex<Option<server_proto::ListLabeledRoutesRequest>>,
     pub(crate) last_list_rtc: Mutex<Option<server_proto::ListRtcRoutesRequest>>,
+    pub(crate) last_list_evpn: Mutex<Option<server_proto::ListEvpnRequest>>,
+    pub(crate) last_list_rejected: Mutex<Option<server_proto::ListRejectedRoutesRequest>>,
     pub(crate) last_list_topology_nodes: Mutex<Option<server_proto::ListTopologyNodesRequest>>,
     pub(crate) last_list_topology_links: Mutex<Option<server_proto::ListTopologyLinksRequest>>,
     pub(crate) last_list_orr_status: Mutex<Option<server_proto::ListOrrStatusRequest>>,
@@ -166,6 +169,12 @@ fn consume_failure(counter: &AtomicUsize) -> bool {
             remaining.checked_sub(1)
         })
         .is_ok()
+}
+
+fn canonical_ip_or_original(address: &str) -> String {
+    address
+        .parse::<std::net::IpAddr>()
+        .map_or_else(|_| address.to_string(), |address| address.to_string())
 }
 
 pub(crate) struct MockServerHandle {
@@ -1426,6 +1435,7 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
     ) -> Result<Response<server_proto::ExplainBestPathResponse>, Status> {
         let req = request.into_inner();
         *self.state.last_explain_best_path.lock().await = Some(req.clone());
+        let response_peer = canonical_ip_or_original(&req.peer_address);
         Ok(Response::new(server_proto::ExplainBestPathResponse {
             prefix: "203.0.113.0".to_string(),
             prefix_length: 24,
@@ -1450,7 +1460,7 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
                 vs_best_detail: "local_pref 100 < 200".to_string(),
                 multipath: "none".to_string(),
             }],
-            peer_address: req.peer_address,
+            peer_address: response_peer,
             add_path_send_max: 0,
             best_reason: "higher_local_pref".to_string(),
             best_reason_detail: "local_pref 200 > 100".to_string(),
@@ -1461,16 +1471,29 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
         &self,
         request: Request<server_proto::ExplainAdvertisedRouteRequest>,
     ) -> Result<Response<server_proto::ExplainAdvertisedRouteResponse>, Status> {
-        *self.state.last_explain_advertised.lock().await = Some(request.into_inner());
+        let req = request.into_inner();
+        *self.state.last_explain_advertised.lock().await = Some(req.clone());
+        let response_peer = canonical_ip_or_original(&req.peer_address);
+        let response_source = req
+            .source
+            .as_ref()
+            .map(|source| server_proto::RouteSourceIdentity {
+                peer_address: canonical_ip_or_original(&source.peer_address),
+                path_id: source.path_id,
+            });
+        let route_peer_address = response_source.as_ref().map_or_else(
+            || "198.51.100.2".to_string(),
+            |source| source.peer_address.clone(),
+        );
         Ok(Response::new(
             server_proto::ExplainAdvertisedRouteResponse {
                 decision: server_proto::ExplainDecision::Advertise as i32,
-                peer_address: "192.0.2.1".to_string(),
+                peer_address: response_peer,
                 prefix: "203.0.113.0".to_string(),
                 prefix_length: 24,
                 next_hop: "198.51.100.1".to_string(),
                 path_id: 0,
-                route_peer_address: "198.51.100.2".to_string(),
+                route_peer_address,
                 route_type: "external".to_string(),
                 reasons: vec![server_proto::ExplainReason {
                     code: "policy_permitted".to_string(),
@@ -1518,7 +1541,7 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
                 update_group_id: Some(1),
                 already_advertised: true,
                 rd: String::new(),
-                source: None,
+                source: response_source,
             },
         ))
     }
@@ -1534,12 +1557,23 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
 
     async fn list_fib_routes(
         &self,
-        _request: Request<server_proto::ListFibRoutesRequest>,
+        request: Request<server_proto::ListFibRoutesRequest>,
     ) -> Result<Response<server_proto::ListFibRoutesResponse>, Status> {
+        let request = request.into_inner();
+        *self.state.last_list_fib.lock().await = Some(request.clone());
+        let routes = if request.peer_address.is_empty() {
+            Vec::new()
+        } else {
+            vec![server_proto::FibRouteStatus {
+                peer_address: canonical_ip_or_original(&request.peer_address),
+                ..Default::default()
+            }]
+        };
+        let total_count = routes.len() as u64;
         Ok(Response::new(server_proto::ListFibRoutesResponse {
-            routes: vec![],
+            routes,
             next_page_token: String::new(),
-            total_count: 0,
+            total_count,
         }))
     }
 
@@ -1547,7 +1581,8 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
         &self,
         request: Request<server_proto::ListBgpLsRequest>,
     ) -> Result<Response<server_proto::ListBgpLsResponse>, Status> {
-        *self.state.last_list_bgpls.lock().await = Some(request.into_inner());
+        let request = request.into_inner();
+        *self.state.last_list_bgpls.lock().await = Some(request.clone());
         if let Some(canned) = self.state.list_bgpls_response.lock().await.clone() {
             return Ok(Response::new(canned));
         }
@@ -1561,7 +1596,11 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
                 payload: vec![0x01, 0x02, 0x03],
                 descriptor: vec![0x04, 0x05],
                 next_hop: "192.0.2.1".to_string(),
-                peer_address: "198.51.100.1".to_string(),
+                peer_address: if request.peer_filter.is_empty() {
+                    "198.51.100.1".to_string()
+                } else {
+                    canonical_ip_or_original(&request.peer_filter)
+                },
                 as_path: vec![64512],
                 communities: vec![],
                 extended_communities: vec![],
@@ -1577,7 +1616,8 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
         &self,
         request: Request<server_proto::ListVpnRoutesRequest>,
     ) -> Result<Response<server_proto::ListVpnRoutesResponse>, Status> {
-        *self.state.last_list_vpn.lock().await = Some(request.into_inner());
+        let request = request.into_inner();
+        *self.state.last_list_vpn.lock().await = Some(request.clone());
         Ok(Response::new(server_proto::ListVpnRoutesResponse {
             routes: vec![server_proto::VpnRouteEntry {
                 afi_safi: "l3vpn_ipv4_unicast".to_string(),
@@ -1586,7 +1626,11 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
                 prefix: "10.1.0.0/24".to_string(),
                 labels: vec![24017],
                 next_hop: "192.0.2.1".to_string(),
-                peer_address: "198.51.100.1".to_string(),
+                peer_address: if request.peer_filter.is_empty() {
+                    "198.51.100.1".to_string()
+                } else {
+                    canonical_ip_or_original(&request.peer_filter)
+                },
                 as_path: vec![64512],
                 communities: vec![],
                 extended_communities: vec!["RT:65000:1".to_string()],
@@ -1601,14 +1645,19 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
         &self,
         request: Request<server_proto::ListLabeledRoutesRequest>,
     ) -> Result<Response<server_proto::ListLabeledRoutesResponse>, Status> {
-        *self.state.last_list_labeled.lock().await = Some(request.into_inner());
+        let request = request.into_inner();
+        *self.state.last_list_labeled.lock().await = Some(request.clone());
         Ok(Response::new(server_proto::ListLabeledRoutesResponse {
             routes: vec![server_proto::LabeledRouteEntry {
                 afi_safi: "ipv4_labeled_unicast".to_string(),
                 prefix: "10.1.0.0/24".to_string(),
                 labels: vec![100],
                 next_hop: "192.0.2.1".to_string(),
-                peer_address: "198.51.100.1".to_string(),
+                peer_address: if request.peer_filter.is_empty() {
+                    "198.51.100.1".to_string()
+                } else {
+                    canonical_ip_or_original(&request.peer_filter)
+                },
                 as_path: vec![64512],
                 communities: vec![],
                 extended_communities: vec![],
@@ -1623,7 +1672,8 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
         &self,
         request: Request<server_proto::ListRtcRoutesRequest>,
     ) -> Result<Response<server_proto::ListRtcRoutesResponse>, Status> {
-        *self.state.last_list_rtc.lock().await = Some(request.into_inner());
+        let request = request.into_inner();
+        *self.state.last_list_rtc.lock().await = Some(request.clone());
         Ok(Response::new(server_proto::ListRtcRoutesResponse {
             routes: vec![
                 server_proto::RtcRouteEntry {
@@ -1645,7 +1695,11 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
                     route_target: "RT:65001:100".to_string(),
                     prefix_len: 96,
                     next_hop: "192.0.2.1".to_string(),
-                    peer_address: "198.51.100.1".to_string(),
+                    peer_address: if request.peer_filter.is_empty() {
+                        "198.51.100.1".to_string()
+                    } else {
+                        canonical_ip_or_original(&request.peer_filter)
+                    },
                     as_path: vec![64512],
                     communities: vec![],
                     stale: false,
@@ -1766,13 +1820,21 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
         &self,
         request: Request<server_proto::ListEvpnRequest>,
     ) -> Result<Response<server_proto::ListEvpnResponse>, Status> {
-        let filter = request.into_inner().route_type_filter;
+        let request = request.into_inner();
+        *self.state.last_list_evpn.lock().await = Some(request.clone());
+        let filter = request.route_type_filter;
         let mut routes = Vec::new();
         if filter == 0 || filter == 2 {
             routes.push(mock_evpn_route(2));
         }
         if filter == 0 || filter == 3 {
             routes.push(mock_evpn_route(3));
+        }
+        if !request.peer_filter.is_empty() {
+            let peer = canonical_ip_or_original(&request.peer_filter);
+            for route in &mut routes {
+                route.peer_address.clone_from(&peer);
+            }
         }
         Ok(Response::new(server_proto::ListEvpnResponse { routes }))
     }
@@ -2039,8 +2101,9 @@ impl rustbgpd_api::proto::policy_service_server::PolicyService for MockPolicySer
             .list_rejected_route_calls
             .fetch_add(1, Ordering::SeqCst);
         let req = request.into_inner();
+        *self.state.last_list_rejected.lock().await = Some(req.clone());
         Ok(Response::new(server_proto::ListRejectedRoutesResponse {
-            peer_address: req.peer_address,
+            peer_address: canonical_ip_or_original(&req.peer_address),
             retention_enabled: true,
             capacity: 1024,
             routes: Vec::new(),

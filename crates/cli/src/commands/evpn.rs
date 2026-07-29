@@ -1,3 +1,4 @@
+use crate::commands::neighbor::{bare_ip_rpc_address, restore_matching_scoped_address};
 use crate::connection::Connection;
 use crate::error::CliError;
 use crate::output;
@@ -41,14 +42,21 @@ pub async fn list(
     json: bool,
 ) -> Result<(), CliError> {
     let mut client = connection.rib_listing_client();
-    let resp = client
+    let mut resp = client
         .list_evpn_routes(ListEvpnRequest {
             route_type_filter: route_type.unwrap_or(0),
-            peer_filter: peer.unwrap_or_default(),
+            peer_filter: peer
+                .as_deref()
+                .map(bare_ip_rpc_address)
+                .unwrap_or_default()
+                .to_string(),
             rd_filter: rd.unwrap_or_default(),
         })
         .await?
         .into_inner();
+    for route in &mut resp.routes {
+        restore_matching_scoped_address(peer.as_deref(), &mut route.peer_address);
+    }
 
     if json {
         let out: Vec<serde_json::Value> = resp
@@ -1220,6 +1228,7 @@ mod tests {
 
     use crate::proto::ListEvpnInstancesRequest;
     use crate::proto::evpn_service_client::EvpnServiceClient;
+    use crate::test_support::spawn_mock_server;
 
     /// Build a realistic `EvpnInstanceTable` covering the field surface
     /// operators actually use: minimal instance, instance with bridge,
@@ -1255,6 +1264,33 @@ mod tests {
         )
         .unwrap();
         t
+    }
+
+    #[tokio::test]
+    async fn list_scoped_peer_sends_bare_filter() {
+        let server = spawn_mock_server(None).await;
+        let connection = crate::connection::connect(&server.addr, None)
+            .await
+            .unwrap();
+
+        super::list(
+            connection,
+            Some(2),
+            Some("fe80:0:0:0:0:0:0:2%eth0".to_string()),
+            None,
+            true,
+        )
+        .await
+        .unwrap();
+
+        let request = server
+            .state
+            .last_list_evpn
+            .lock()
+            .await
+            .clone()
+            .expect("EVPN request captured");
+        assert_eq!(request.peer_filter, "fe80:0:0:0:0:0:0:2");
     }
 
     fn unique_uds_path() -> (TempDir, PathBuf) {

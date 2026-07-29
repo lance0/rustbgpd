@@ -15,6 +15,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   policy-inspection day-two CLI commands: valid `%interface` zones stay visible
   in operator output but are omitted from bare-address RPC fields.
 
+- Scoped IPv6 link-local filters now work across received, advertised, FIB,
+  BGP-LS, VPN, labeled-unicast, RTC, EVPN, explain, retained-rejected, and
+  Adj-RIB-Out diff queries while preserving matching operator-visible scope.
+
 - `rbgp peer-group set` can now create a missing passwordless peer group from
   ordinary JSON that omits both MD5 fields. The same omission still preserves
   an existing group's secret, explicit `has_md5_password = true` still requires

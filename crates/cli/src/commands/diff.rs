@@ -19,6 +19,7 @@ use std::net::IpAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use crate::commands::neighbor::bare_ip_rpc_address;
 use crate::connection::Connection;
 use crate::error::CliError;
 use crate::output;
@@ -210,12 +211,13 @@ async fn run(connection: Connection, opts: &AdvertisedDiffOpts) -> Result<(Strin
             opts.against.display()
         ))
     })?;
-    let mut snapshot = parse_snapshot(file, opts, &family_filter, &peer_filter, &ignored)?;
+    let mut snapshot =
+        parse_snapshot(file, opts, &family_filter, &peer_filter.addresses, &ignored)?;
 
-    let requested: BTreeSet<IpAddr> = if peer_filter.is_empty() {
+    let requested: BTreeSet<IpAddr> = if peer_filter.addresses.is_empty() {
         snapshot.peers.keys().copied().collect()
     } else {
-        peer_filter
+        peer_filter.addresses
     };
     if requested.is_empty() {
         return Err(op(
@@ -240,7 +242,7 @@ async fn run(connection: Connection, opts: &AdvertisedDiffOpts) -> Result<(Strin
     let mut neighbor_map: BTreeMap<IpAddr, (u32, Vec<String>)> = BTreeMap::new();
     for state in &neighbors.neighbors {
         if let Some(config) = &state.config
-            && let Ok(addr) = config.address.parse::<IpAddr>()
+            && let Ok(addr) = bare_ip_rpc_address(&config.address).parse::<IpAddr>()
         {
             neighbor_map.insert(addr, (config.remote_asn, config.families.clone()));
         }
@@ -276,10 +278,14 @@ async fn run(connection: Connection, opts: &AdvertisedDiffOpts) -> Result<(Strin
     // per side, never both full sides; finer within-peer page-by-page
     // release only if a single peer's full table ever hurts.
     for peer_addr in &requested {
+        let peer_display = peer_filter
+            .scoped_labels
+            .get(peer_addr)
+            .map_or_else(|| peer_addr.to_string(), Clone::clone);
         let snapshot_bucket = snapshot.peers.remove(peer_addr);
         let Some((remote_asn, configured_families)) = neighbor_map.get(peer_addr) else {
             report.incomparable_reasons.push(format!(
-                "peer {peer_addr}: not configured on the daemon; equality refused"
+                "peer {peer_display}: not configured on the daemon; equality refused"
             ));
             continue;
         };
@@ -287,7 +293,7 @@ async fn run(connection: Connection, opts: &AdvertisedDiffOpts) -> Result<(Strin
             && bucket.asn != *remote_asn
         {
             report.incomparable_reasons.push(format!(
-                "peer {peer_addr}: ASN mismatch (snapshot {} vs daemon {remote_asn}); \
+                "peer {peer_display}: ASN mismatch (snapshot {} vs daemon {remote_asn}); \
                  equality refused",
                 bucket.asn
             ));
@@ -298,7 +304,7 @@ async fn run(connection: Connection, opts: &AdvertisedDiffOpts) -> Result<(Strin
             let name = family_name(*family);
             if !configured_families.iter().any(|f| f == name) {
                 report.incomparable_reasons.push(format!(
-                    "peer {peer_addr}: requested family {name} is not configured; \
+                    "peer {peer_display}: requested family {name} is not configured; \
                      equality refused"
                 ));
                 family_unavailable = true;
@@ -350,7 +356,7 @@ async fn run(connection: Connection, opts: &AdvertisedDiffOpts) -> Result<(Strin
             peer_report
                 .incomparable_reasons
                 .into_iter()
-                .map(|r| format!("peer {peer_addr}: {r}")),
+                .map(|r| format!("peer {peer_display}: {r}")),
         );
         report.summaries.extend(peer_report.summaries);
         report.entries.extend(peer_report.entries);
@@ -370,9 +376,15 @@ async fn run(connection: Connection, opts: &AdvertisedDiffOpts) -> Result<(Strin
     };
     let notes = live_source_notes(med_attr_seen);
     let rendered = if opts.json {
-        render_json(&report, &ignored, &notes)?
+        render_json(&report, &ignored, &notes, &peer_filter.scoped_labels)?
     } else {
-        render_human(&report, &ignored, &notes, opts.detail)
+        render_human(
+            &report,
+            &ignored,
+            &notes,
+            opts.detail,
+            &peer_filter.scoped_labels,
+        )
     };
     Ok((rendered, code))
 }
@@ -419,14 +431,39 @@ fn parse_family_filter(families: &[String]) -> Result<Vec<FamilyId>, CliError> {
     Ok(parsed)
 }
 
-fn parse_peer_filter(peers: &[String]) -> Result<BTreeSet<IpAddr>, CliError> {
-    peers
-        .iter()
-        .map(|p| {
-            p.parse::<IpAddr>()
-                .map_err(|e| CliError::Argument(format!("invalid --peer address {p:?}: {e}")))
-        })
-        .collect()
+struct ParsedPeerFilter {
+    addresses: BTreeSet<IpAddr>,
+    scoped_labels: BTreeMap<IpAddr, String>,
+}
+
+fn parse_peer_filter(peers: &[String]) -> Result<ParsedPeerFilter, CliError> {
+    let mut addresses = BTreeSet::new();
+    let mut scoped_labels: BTreeMap<IpAddr, String> = BTreeMap::new();
+    for peer in peers {
+        let bare = bare_ip_rpc_address(peer);
+        let address = bare
+            .parse::<IpAddr>()
+            .map_err(|e| CliError::Argument(format!("invalid --peer address {peer:?}: {e}")))?;
+        addresses.insert(address);
+        if bare != peer {
+            if let Some(existing) = scoped_labels.get(&address) {
+                let existing_zone = existing.split_once('%').map(|(_, zone)| zone);
+                let requested_zone = peer.split_once('%').map(|(_, zone)| zone);
+                if existing_zone != requested_zone {
+                    return Err(CliError::Argument(format!(
+                        "conflicting --peer scopes for {address}: {existing:?} and {peer:?}; \
+                         specify only one scope per link-local address"
+                    )));
+                }
+            } else {
+                scoped_labels.insert(address, peer.to_string());
+            }
+        }
+    }
+    Ok(ParsedPeerFilter {
+        addresses,
+        scoped_labels,
+    })
 }
 
 fn family_name(family: FamilyId) -> &'static str {
@@ -997,8 +1034,29 @@ fn render_json(
     report: &DiffReport,
     ignored: &[String],
     notes: &[&str],
+    scoped_peer_labels: &BTreeMap<IpAddr, String>,
 ) -> Result<String, CliError> {
     let mut value = serde_json::to_value(report)?;
+    for (serialized, summary) in value["summaries"]
+        .as_array_mut()
+        .expect("DiffReport summaries serialize to an array")
+        .iter_mut()
+        .zip(&report.summaries)
+    {
+        if let Some(scoped) = scoped_peer_labels.get(&summary.peer.address) {
+            serialized["peer"]["address"] = serde_json::json!(scoped);
+        }
+    }
+    for (serialized, entry) in value["entries"]
+        .as_array_mut()
+        .expect("DiffReport entries serialize to an array")
+        .iter_mut()
+        .zip(&report.entries)
+    {
+        if let Some(scoped) = scoped_peer_labels.get(&entry.peer.address) {
+            serialized["peer"]["address"] = serde_json::json!(scoped);
+        }
+    }
     let object = value
         .as_object_mut()
         .expect("DiffReport serializes to an object");
@@ -1007,7 +1065,13 @@ fn render_json(
     Ok(format!("{}\n", serde_json::to_string_pretty(&value)?))
 }
 
-fn render_human(report: &DiffReport, ignored: &[String], notes: &[&str], detail: usize) -> String {
+fn render_human(
+    report: &DiffReport,
+    ignored: &[String],
+    notes: &[&str],
+    detail: usize,
+    scoped_peer_labels: &BTreeMap<IpAddr, String>,
+) -> String {
     use std::fmt::Write;
 
     let mut out = String::new();
@@ -1042,11 +1106,14 @@ fn render_human(report: &DiffReport, ignored: &[String], notes: &[&str], detail:
     if !report.summaries.is_empty() {
         out.push_str("per-peer summary:\n");
         for s in &report.summaries {
+            let peer = scoped_peer_labels
+                .get(&s.peer.address)
+                .map_or_else(|| s.peer.address.to_string(), Clone::clone);
             let _ = writeln!(
                 out,
                 "  {} AS{} {}: matched {}, incumbent-only {}, rustbgpd-only {}, \
                  attribute-changed {}, multiplicity-changed {}",
-                s.peer.address,
+                peer,
                 s.peer.asn,
                 family_name(s.family),
                 s.matched,
@@ -1065,6 +1132,9 @@ fn render_human(report: &DiffReport, ignored: &[String], notes: &[&str], detail:
             report.entries.len()
         );
         for entry in report.entries.iter().take(detail) {
+            let peer = scoped_peer_labels
+                .get(&entry.peer.address)
+                .map_or_else(|| entry.peer.address.to_string(), Clone::clone);
             let marker = match entry.class {
                 DiffClass::IncumbentOnly => "-",
                 DiffClass::RustbgpdOnly => "+",
@@ -1088,7 +1158,7 @@ fn render_human(report: &DiffReport, ignored: &[String], notes: &[&str], detail:
             let _ = writeln!(
                 out,
                 "  {marker} {} {} {} [{class}]{detail_text}",
-                entry.peer.address,
+                peer,
                 family_name(entry.family),
                 nlri_str(&entry.nlri)
             );
@@ -2622,6 +2692,72 @@ mod tests {
             assert_eq!(code, EXIT_DIVERGENT, "output was:\n{rendered}");
             assert!(rendered.contains("med: 51 -> 999"));
         }
+    }
+
+    #[tokio::test]
+    async fn scoped_peer_filter_queries_bare_adj_rib_out_address() {
+        let route = serde_json::json!({
+            "record": "route",
+            "peer": "fe80::2",
+            "peer_asn": PEER_ASN,
+            "prefix": "10.0.0.0/24",
+            "origin": 0,
+            "as_path": [65001],
+            "next_hop": "192.0.2.254",
+            "communities": ["64501:100"],
+        })
+        .to_string();
+        let file = snapshot_file(&[header_line(), route, trailer_line(1)]);
+        let server = spawn_mock_server(None).await;
+        *server.state.list_neighbors_response.lock().await =
+            vec![neighbor("fe80::2%eth0", PEER_ASN)];
+        *server.state.list_route_pages.lock().await =
+            vec![page(vec![live_route("10.0.0.0", 0)], "", 1)];
+        let mut filtered = opts(file.path());
+        filtered.peers = vec!["fe80:0:0:0:0:0:0:2%eth0".to_string()];
+
+        let (rendered, code) = run_against(&server, &filtered).await.unwrap();
+        assert_eq!(code, EXIT_IN_SYNC, "output was:\n{rendered}");
+        assert!(
+            rendered.contains("fe80:0:0:0:0:0:0:2%eth0 AS64501"),
+            "output was:\n{rendered}"
+        );
+
+        *server.state.list_route_pages.lock().await =
+            vec![page(vec![live_route("10.0.0.0", 0)], "", 1)];
+        filtered.json = true;
+        let (rendered, code) = run_against(&server, &filtered).await.unwrap();
+        assert_eq!(code, EXIT_IN_SYNC, "output was:\n{rendered}");
+        let report: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+        assert_eq!(
+            report["summaries"][0]["peer"]["address"],
+            "fe80:0:0:0:0:0:0:2%eth0"
+        );
+
+        let requests = server.state.list_route_requests.lock().await;
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].neighbor_address, "fe80::2");
+        assert_eq!(requests[1].neighbor_address, "fe80::2");
+    }
+
+    /// Red proof: removing the scope-conflict check in `parse_peer_filter`
+    /// makes this return `Ok` and silently assigns the first scope to both
+    /// filters.
+    #[test]
+    fn scoped_peer_filter_rejects_conflicting_labels_for_one_address() {
+        let result = parse_peer_filter(&[
+            "fe80::2%eth0".to_string(),
+            "fe80:0:0:0:0:0:0:2%eth1".to_string(),
+        ]);
+
+        let Err(error) = result else {
+            panic!("conflicting scopes must be rejected");
+        };
+        assert_eq!(
+            error.to_string(),
+            "conflicting --peer scopes for fe80::2: \"fe80::2%eth0\" and \
+             \"fe80:0:0:0:0:0:0:2%eth1\"; specify only one scope per link-local address"
+        );
     }
 
     #[tokio::test]
