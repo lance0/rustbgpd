@@ -1612,6 +1612,9 @@ unauthorized next hop — and it is fail-closed:
 
 - classic IPv4 `NEXT_HOP`, IPv6 global, and RFC 8950 IPv4-over-IPv6 forms
   must equal the session address exactly;
+- address-family differences are literal mismatches: for example, an IPv6
+  `MP_REACH_NLRI` next hop on an IPv4 session is always foreign. Use same-AF
+  sessions when applying `strict_peer` to both IPv4 and IPv6 unicast;
 - a global + link-local next-hop pair is always rejected: the session maps
   to one address, so the companion is unverifiable (never silently ignored);
 - a link-local next hop is only accepted from a scoped link-local session

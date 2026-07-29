@@ -138,13 +138,13 @@ address = "198.51.100.2"
 remote_asn = 64501
 description = "member-alpha"
 hold_time = 90
-families = ["ipv4_unicast", "ipv6_unicast"]
+families = ["ipv4_unicast"]
 route_server_client = true     # transparent: no AS prepend, NEXT_HOP preserved
 role = "route_server"          # RFC 9234: attach OTC on egress
 # RFC 7948 §4.8 / ADR-0107: reject announcements whose NEXT_HOP is not the
 # member's own session address (pre-policy, fail-closed). Leave unset for
 # members that legitimately announce another connection's next hop in the
-# same AS — the broader ownership modes are not shipped yet.
+# same AS. Use a separate IPv6 session to apply strict_peer to IPv6 unicast.
 next_hop_ownership = "strict_peer"
 max_prefixes = 50000
 
