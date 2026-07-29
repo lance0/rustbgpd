@@ -75,6 +75,6 @@ ladder with per-candidate export-policy verdicts (which candidates were
 denied by which policy term, and which one was advertised).
 
 Members can be added atomically as they join — see
-`rbgp neighbor <addr> add --remote-asn <asn> --route-server-client \
---per-client-best --role rs --max-prefixes 50000 \
+`rbgp neighbor 198.51.100.4 add --remote-asn 64503 --route-server-client \
+--per-client-best --role rs --families ipv4_unicast,ipv6_unicast --max-prefixes 50000 \
 --max-prefix-restart-seconds 30`.

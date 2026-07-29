@@ -931,7 +931,7 @@ enum NeighborAction {
         #[arg(long, value_name = "ROLE")]
         role: Option<String>,
         /// Require the peer to advertise a compatible BGP Role capability
-        #[arg(long)]
+        #[arg(long, requires = "role")]
         strict_role: bool,
         /// Enable Add-Path receive
         #[arg(long)]
@@ -3763,6 +3763,119 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn test_neighbor_add_requires_role_for_strict_role() {
+        let error = match Cli::try_parse_from([
+            "rbgp",
+            "neighbor",
+            "10.0.0.1",
+            "add",
+            "--asn",
+            "65001",
+            "--strict-role",
+        ]) {
+            Ok(_) => panic!("strict role without a role must fail"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+        assert!(error.to_string().contains("--role"));
+    }
+
+    #[test]
+    fn test_neighbor_add_role_strict_role_without_family_flags() {
+        let cli = Cli::try_parse_from([
+            "rbgp",
+            "neighbor",
+            "10.0.0.1",
+            "add",
+            "--asn",
+            "65001",
+            "--role",
+            "provider",
+            "--strict-role",
+        ])
+        .unwrap();
+        let Command::Neighbor {
+            action: Some(NeighborAction::Add {
+                role, strict_role, ..
+            }),
+            ..
+        } = cli.command
+        else {
+            panic!("expected Neighbor Add command");
+        };
+        assert_eq!(role.as_deref(), Some("provider"));
+        assert!(strict_role);
+    }
+
+    #[test]
+    fn test_neighbor_add_required_ipv4_without_families() {
+        let cli = Cli::try_parse_from([
+            "rbgp",
+            "neighbor",
+            "10.0.0.1",
+            "add",
+            "--asn",
+            "65001",
+            "--required-families",
+            "ipv4_unicast",
+        ])
+        .unwrap();
+        let Command::Neighbor {
+            action:
+                Some(NeighborAction::Add {
+                    families,
+                    required_families,
+                    ..
+                }),
+            ..
+        } = cli.command
+        else {
+            panic!("expected Neighbor Add command");
+        };
+        assert!(families.is_empty());
+        assert_eq!(required_families, ["ipv4_unicast"]);
+    }
+
+    #[test]
+    fn test_parse_route_server_documented_neighbor_add() {
+        let readme = include_str!("../../../examples/route-server/README.md");
+        let marker = "`rbgp neighbor 198.51.100.4 add";
+        let start = readme.find(marker).unwrap() + 1;
+        let end = start + readme[start..].find('`').unwrap();
+        let documented = readme[start..end].replace("\\\n", " ");
+        let cli = Cli::try_parse_from(documented.split_whitespace()).unwrap();
+        let Command::Neighbor {
+            address: Some(address),
+            action:
+                Some(NeighborAction::Add {
+                    asn,
+                    families,
+                    max_prefixes,
+                    max_prefix_restart_seconds,
+                    per_client_best,
+                    role,
+                    route_server_client,
+                    ..
+                }),
+            ..
+        } = cli.command
+        else {
+            panic!("expected Neighbor Add command");
+        };
+        assert_eq!(address, "198.51.100.4");
+        assert_eq!(asn, 64503);
+        assert_eq!(families, ["ipv4_unicast", "ipv6_unicast"]);
+        assert_eq!(max_prefixes, Some(50_000));
+        assert_eq!(max_prefix_restart_seconds, Some(30));
+        assert!(route_server_client);
+        assert!(per_client_best);
+        assert_eq!(role.as_deref(), Some("rs"));
     }
 
     #[test]
