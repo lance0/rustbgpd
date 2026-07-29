@@ -99,6 +99,9 @@ pub struct App {
     pub show_help: bool,
     pub show_events: bool,
     pub should_quit: bool,
+    pub detail_scroll: usize,
+    pub detail_max_scroll: usize,
+    pub detail_page_height: usize,
 
     pub connected: bool,
     pub last_error: Option<String>,
@@ -129,6 +132,9 @@ impl App {
             show_help: false,
             show_events: false,
             should_quit: false,
+            detail_scroll: 0,
+            detail_max_scroll: 0,
+            detail_page_height: 0,
             connected: false,
             last_error: None,
             last_poll: Instant::now(),
@@ -165,6 +171,7 @@ impl App {
                 if let Some(i) = self.peer_table_state.selected()
                     && let Some(address) = self.neighbors.get(i).and_then(neighbor_key)
                 {
+                    self.reset_detail_scroll();
                     self.view = View::PeerDetail(address);
                 }
             }
@@ -175,9 +182,43 @@ impl App {
     fn handle_detail_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Char('q') => self.should_quit = true,
-            KeyCode::Esc | KeyCode::Backspace => self.view = View::PeerTable,
+            KeyCode::Esc | KeyCode::Backspace => self.return_to_table(),
+            KeyCode::Char('j') | KeyCode::Down => self.scroll_detail_by(1),
+            KeyCode::Char('k') | KeyCode::Up => self.scroll_detail_up(1),
+            KeyCode::PageDown => self.scroll_detail_by(self.detail_page_height.max(1)),
+            KeyCode::PageUp => self.scroll_detail_up(self.detail_page_height.max(1)),
+            KeyCode::Home => self.detail_scroll = 0,
+            KeyCode::End => self.detail_scroll = self.detail_max_scroll,
             _ => {}
         }
+    }
+
+    fn scroll_detail_by(&mut self, rows: usize) {
+        self.detail_scroll = self
+            .detail_scroll
+            .saturating_add(rows)
+            .min(self.detail_max_scroll);
+    }
+
+    fn scroll_detail_up(&mut self, rows: usize) {
+        self.detail_scroll = self.detail_scroll.saturating_sub(rows);
+    }
+
+    fn reset_detail_scroll(&mut self) {
+        self.detail_scroll = 0;
+        self.detail_max_scroll = 0;
+        self.detail_page_height = 0;
+    }
+
+    pub(crate) fn return_to_table(&mut self) {
+        self.view = View::PeerTable;
+        self.reset_detail_scroll();
+    }
+
+    pub(crate) fn set_detail_layout(&mut self, logical_rows: usize, page_height: usize) {
+        self.detail_page_height = page_height;
+        self.detail_max_scroll = logical_rows.saturating_sub(page_height);
+        self.detail_scroll = self.detail_scroll.min(self.detail_max_scroll);
     }
 
     fn select_next(&mut self) {
@@ -278,9 +319,15 @@ impl App {
         if self.neighbors.is_empty() {
             self.peer_table_state.select(None);
             if matches!(self.view, View::PeerDetail(_)) {
-                self.view = View::PeerTable;
+                self.return_to_table();
             }
             return;
+        }
+
+        if let View::PeerDetail(address) = &self.view
+            && !current_keys.contains(address)
+        {
+            self.return_to_table();
         }
 
         let selected_idx = selected_addr
@@ -622,5 +669,72 @@ mod tests {
         assert!(app.peer_rates.contains_key("198.51.100.1"));
         assert!(!app.prev_counters.contains_key("198.51.100.2"));
         assert!(!app.peer_rates.contains_key("198.51.100.2"));
+    }
+
+    /// Mutation receipt: changing the production `PageDown` delta from the
+    /// reported page height to one row makes the first page assertion fail
+    /// while the test still compiles.
+    #[test]
+    fn detail_scroll_keys_clamp_and_all_detail_exits_reset() {
+        let mut app = App::new();
+        app.on_data(snapshot(vec![
+            neighbor("198.51.100.1", 10),
+            neighbor("198.51.100.2", 20),
+        ]));
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.view, View::PeerDetail("198.51.100.1".into()));
+
+        app.set_detail_layout(30, 5);
+        app.on_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        assert_eq!(app.detail_scroll, 5);
+        app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.detail_scroll, 7);
+        app.on_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(app.detail_scroll, 5);
+        app.on_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+        assert_eq!(app.detail_scroll, 0);
+        app.on_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        assert_eq!(app.detail_scroll, 25);
+        app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.detail_scroll, 25);
+        app.on_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(app.detail_scroll, 0);
+
+        app.on_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        app.set_detail_layout(4, 5);
+        assert_eq!(app.detail_max_scroll, 0);
+        assert_eq!(app.detail_scroll, 0, "content shrink clamps the offset");
+
+        app.set_detail_layout(30, 5);
+        app.on_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.view, View::PeerTable);
+        assert_eq!(
+            (
+                app.detail_scroll,
+                app.detail_max_scroll,
+                app.detail_page_height
+            ),
+            (0, 0, 0)
+        );
+
+        app.detail_scroll = 9;
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.detail_scroll, 0, "enter starts at the first row");
+        app.set_detail_layout(30, 5);
+        app.on_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(app.view, View::PeerTable);
+        assert_eq!(app.detail_scroll, 0);
+
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.set_detail_layout(30, 5);
+        app.on_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        app.on_data(snapshot(vec![neighbor("198.51.100.2", 30)]));
+        assert_eq!(app.view, View::PeerTable);
+        assert_eq!(app.detail_scroll, 0, "peer disappearance resets detail");
     }
 }
