@@ -738,11 +738,11 @@ disabled Add-Path block remain explicit across restart. Wrapper-only requests
 require an inner config and FieldMask, and the server rejects both/neither
 carriers and invalid masks before mutation.
 
-The bundled `rbgp neighbor add` command still sends legacy
-`AddNeighborRequest.config` in this tranche. Its historical empty-family and
-implicit-boolean behavior is unchanged; use a direct gRPC wrapper client only
-when presence-preserving creation is required. There is no automatic fallback
-from wrapper to legacy.
+The bundled `rbgp neighbor add` command sends only the presence-aware wrapper,
+including an empty mask when every inheritable option is omitted. Its explicit
+`--no-route-server-client`, `--no-per-client-best`, `--no-strict-role`, and
+`--no-add-path` forms preserve false overrides; any Add-Path option selects the
+complete atomic block. There is no probe or automatic legacy fallback.
 
 | Field                  | Type     | Required | Default | Description                                      |
 |------------------------|----------|----------|---------|--------------------------------------------------|

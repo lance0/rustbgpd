@@ -8,8 +8,8 @@ use crate::output::{
 use crate::proto::neighbor_service_client::NeighborServiceClient;
 use crate::proto::{
     AddNeighborRequest, DeleteNeighborRequest, DisableNeighborRequest, EnableNeighborRequest,
-    GetNeighborStateRequest, ListNeighborsRequest, NeighborConfig, RefreshOutboundRequest,
-    SetGracefulShutdownRequest, SoftResetInRequest,
+    GetNeighborStateRequest, ListNeighborsRequest, NeighborConfig, NeighborCreateIntent,
+    RefreshOutboundRequest, SetGracefulShutdownRequest, SoftResetInRequest,
 };
 
 pub(super) fn bare_ip_rpc_address(address: &str) -> &str {
@@ -914,29 +914,60 @@ pub struct AddNeighborOpts {
     pub max_prefix_restart_seconds: Option<u32>,
     pub families: Vec<String>,
     pub required_families: Vec<String>,
-    pub route_server_client: bool,
-    pub per_client_best: bool,
+    pub route_server_client: Option<bool>,
+    pub per_client_best: Option<bool>,
     pub role: Option<String>,
-    pub strict_role: bool,
-    pub add_path_receive: bool,
-    pub add_path_send: bool,
-    pub add_path_send_max: u32,
+    pub strict_role: Option<bool>,
+    pub add_path: Option<AddPathOpts>,
+}
+
+pub struct AddPathOpts {
+    pub receive: bool,
+    pub send: bool,
+    pub send_max: u32,
     pub paths_limit_receive_max: u16,
 }
 
-pub async fn add(
-    connection: Connection,
-    address: &str,
-    opts: AddNeighborOpts,
-    json: bool,
-) -> Result<(), CliError> {
-    let mut client =
-        NeighborServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let (address_only, interface) = split_scoped_address(address);
-    client
-        .add_neighbor(AddNeighborRequest {
+fn add_neighbor_request(address: &str, opts: AddNeighborOpts) -> AddNeighborRequest {
+    let (address, interface) = split_scoped_address(address);
+    let mut override_paths = Vec::new();
+    if !opts.families.is_empty() {
+        override_paths.push("families".to_string());
+    }
+    if !opts.required_families.is_empty() {
+        override_paths.push("required_families".to_string());
+    }
+    if opts.route_server_client.is_some() {
+        override_paths.push("route_server_client".to_string());
+    }
+    if opts.per_client_best.is_some() {
+        override_paths.push("per_client_best".to_string());
+    }
+    if opts.strict_role.is_some() {
+        override_paths.push("strict_role".to_string());
+    }
+    if opts.add_path.is_some() {
+        override_paths.extend(
+            [
+                "add_path_receive",
+                "add_path_send",
+                "add_path_send_max",
+                "paths_limit_receive_max",
+            ]
+            .map(str::to_string),
+        );
+    }
+    let add_path = opts.add_path.unwrap_or(AddPathOpts {
+        receive: false,
+        send: false,
+        send_max: 0,
+        paths_limit_receive_max: 0,
+    });
+    AddNeighborRequest {
+        config: None,
+        intent: Some(NeighborCreateIntent {
             config: Some(NeighborConfig {
-                address: address_only,
+                address,
                 interface,
                 remote_asn: opts.asn,
                 description: opts.description.unwrap_or_default(),
@@ -948,19 +979,45 @@ pub async fn add(
                 required_families: opts.required_families,
                 peer_group: opts.peer_group.unwrap_or_default(),
                 remove_private_as: String::new(),
-                route_server_client: opts.route_server_client,
-                per_client_best: opts.per_client_best,
+                route_server_client: opts.route_server_client.unwrap_or(false),
+                per_client_best: opts.per_client_best.unwrap_or(false),
                 role: opts.role.unwrap_or_default(),
-                strict_role: opts.strict_role,
-                add_path_receive: opts.add_path_receive,
-                add_path_send: opts.add_path_send,
-                add_path_send_max: opts.add_path_send_max,
-                paths_limit_receive_max: u32::from(opts.paths_limit_receive_max),
+                strict_role: opts.strict_role.unwrap_or(false),
+                add_path_receive: add_path.receive,
+                add_path_send: add_path.send,
+                add_path_send_max: add_path.send_max,
+                paths_limit_receive_max: u32::from(add_path.paths_limit_receive_max),
                 max_prefix_restart_seconds: opts.max_prefix_restart_seconds,
             }),
-            intent: None,
-        })
-        .await?;
+            override_mask: Some(prost_types::FieldMask {
+                paths: override_paths,
+            }),
+        }),
+    }
+}
+
+pub async fn add(
+    connection: Connection,
+    address: &str,
+    opts: AddNeighborOpts,
+    json: bool,
+) -> Result<(), CliError> {
+    let mut client =
+        NeighborServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    if let Err(status) = client
+        .add_neighbor(add_neighbor_request(address, opts))
+        .await
+    {
+        if status.code() == tonic::Code::InvalidArgument && status.message() == "config is required"
+        {
+            return Err(CliError::Rpc(
+                "daemon does not support presence-aware neighbor creation; \
+                 upgrade rustbgpd before adding this neighbor"
+                    .into(),
+            ));
+        }
+        return Err(status.into());
+    }
     output::print_result(
         json,
         "add_neighbor",
@@ -1532,93 +1589,145 @@ mod tests {
         assert_eq!(normalized_effective_send(&row(0, Some(0))), (true, 0));
     }
 
+    fn base_add_opts() -> AddNeighborOpts {
+        AddNeighborOpts {
+            asn: 65002,
+            description: None,
+            hold_time: None,
+            min_hold_time: None,
+            send_hold_time: None,
+            max_prefixes: None,
+            peer_group: None,
+            max_prefix_restart_seconds: None,
+            families: Vec::new(),
+            required_families: Vec::new(),
+            route_server_client: None,
+            per_client_best: None,
+            role: None,
+            strict_role: None,
+            add_path: None,
+        }
+    }
+
     #[tokio::test]
-    async fn add_sends_route_server_and_add_path_fields() {
-        // Mutation-red for min_hold_time: removing the request assignment
-        // makes the captured request carry None instead of 30.
+    async fn add_always_sends_wrapper_only_with_a_present_empty_mask() {
+        // Load-bearing: restoring legacy config, dual-carrier transmission,
+        // or an absent mask changes the captured request and makes this red.
         let server = spawn_mock_server(None).await;
         let connection = connect(&server.addr, None).await.unwrap();
-
-        add(
-            connection,
-            "10.0.0.2",
-            AddNeighborOpts {
-                min_hold_time: Some(30),
-                asn: 65002,
-                description: Some("peer-2".to_string()),
-                hold_time: Some(90),
-                send_hold_time: Some(480),
-                max_prefixes: Some(1000),
-                peer_group: Some("rs-members".to_string()),
-                max_prefix_restart_seconds: Some(30),
-                families: vec!["ipv4_unicast".to_string(), "ipv6_unicast".to_string()],
-                required_families: vec!["ipv6_unicast".to_string()],
-                route_server_client: true,
-                per_client_best: false,
-                role: Some("rs".to_string()),
-                strict_role: true,
-                add_path_receive: true,
-                add_path_send: true,
-                add_path_send_max: 4,
-                paths_limit_receive_max: 3,
-            },
-            true,
-        )
-        .await
-        .unwrap();
-
+        add(connection, "fe80::2%eth0", base_add_opts(), true)
+            .await
+            .unwrap();
         let request = server.state.last_add_neighbor.lock().await.clone().unwrap();
-        assert!(request.config.is_some());
-        assert!(request.intent.is_none());
-        let config = request.config.unwrap();
-        assert!(config.route_server_client);
-        assert_eq!(config.role, "rs");
-        assert!(config.strict_role);
-        assert!(config.add_path_receive);
-        assert!(config.add_path_send);
-        assert_eq!(config.add_path_send_max, 4);
-        assert_eq!(config.paths_limit_receive_max, 3);
+        assert!(request.config.is_none());
+        let intent = request.intent.unwrap();
+        assert_eq!(intent.override_mask.unwrap().paths, Vec::<String>::new());
+        let config = intent.config.unwrap();
+        assert_eq!(config.address, "fe80::2");
+        assert_eq!(config.interface, "eth0");
         assert_eq!(config.remote_asn, 65002);
-        assert_eq!(config.min_hold_time, Some(30));
-        assert_eq!(config.required_families, vec!["ipv6_unicast"]);
-        assert_eq!(config.peer_group, "rs-members");
-        assert_eq!(config.max_prefix_restart_seconds, Some(30));
+        assert!(config.families.is_empty());
+        assert!(!config.route_server_client);
+        assert!(!config.add_path_receive);
+        assert_eq!(
+            server
+                .state
+                .add_neighbor_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+    }
 
-        let connection = connect(&server.addr, None).await.unwrap();
-        add(
-            connection,
-            "10.0.0.3",
-            AddNeighborOpts {
-                min_hold_time: None,
-                asn: 65003,
-                description: None,
-                hold_time: None,
-                send_hold_time: None,
-                max_prefixes: None,
-                peer_group: None,
-                max_prefix_restart_seconds: None,
-                families: Vec::new(),
-                required_families: Vec::new(),
-                route_server_client: false,
-                per_client_best: false,
-                role: None,
-                strict_role: false,
-                add_path_receive: false,
-                add_path_send: false,
-                add_path_send_max: 0,
-                paths_limit_receive_max: 0,
-            },
+    #[test]
+    fn add_masks_only_nonempty_families_and_exact_standalone_values() {
+        // Load-bearing: selecting an empty family field, omitting a nonempty
+        // one, or losing explicit false makes an exact assertion red.
+        let mut families = base_add_opts();
+        families.families = vec!["ipv4_unicast".into()];
+        families.required_families = vec!["ipv4_unicast".into()];
+        let intent = add_neighbor_request("10.0.0.2", families).intent.unwrap();
+        assert_eq!(
+            intent.override_mask.unwrap().paths,
+            ["families", "required_families"]
+        );
+
+        for field in ["route_server_client", "per_client_best", "strict_role"] {
+            for value in [false, true] {
+                let mut opts = base_add_opts();
+                match field {
+                    "route_server_client" => opts.route_server_client = Some(value),
+                    "per_client_best" => opts.per_client_best = Some(value),
+                    "strict_role" => opts.strict_role = Some(value),
+                    _ => unreachable!(),
+                }
+                let intent = add_neighbor_request("10.0.0.2", opts).intent.unwrap();
+                assert_eq!(intent.override_mask.unwrap().paths, [field]);
+                let config = intent.config.unwrap();
+                let actual = match field {
+                    "route_server_client" => config.route_server_client,
+                    "per_client_best" => config.per_client_best,
+                    "strict_role" => config.strict_role,
+                    _ => unreachable!(),
+                };
+                assert_eq!(actual, value, "{field} did not preserve {value}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn add_maps_only_the_exact_old_server_error_without_retrying() {
+        // Load-bearing: changing the exact message match, adding a fallback,
+        // or issuing a mutation probe changes the error/call/request evidence.
+        let old = spawn_mock_server(None).await;
+        *old.state.add_neighbor_error.lock().await =
+            Some((tonic::Code::InvalidArgument, "config is required".into()));
+        let error = add(
+            connect(&old.addr, None).await.unwrap(),
+            "10.0.0.2",
+            base_add_opts(),
             true,
         )
         .await
-        .unwrap();
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "daemon does not support presence-aware neighbor creation; \
+             upgrade rustbgpd before adding this neighbor"
+        );
+        assert_eq!(
+            old.state
+                .add_neighbor_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        let captured = old.state.last_add_neighbor.lock().await.clone().unwrap();
+        assert!(captured.config.is_none());
+        assert!(captured.intent.is_some());
 
-        let request = server.state.last_add_neighbor.lock().await.clone().unwrap();
-        assert!(request.config.is_some());
-        assert!(request.intent.is_none());
-        let config = request.config.unwrap();
-        assert_eq!(config.peer_group, "");
-        assert_eq!(config.max_prefix_restart_seconds, None);
+        let current = spawn_mock_server(None).await;
+        *current.state.add_neighbor_error.lock().await = Some((
+            tonic::Code::InvalidArgument,
+            "effective per_client_best requires route_server_client".into(),
+        ));
+        let error = add(
+            connect(&current.addr, None).await.unwrap(),
+            "10.0.0.2",
+            base_add_opts(),
+            true,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "invalid argument: effective per_client_best requires route_server_client"
+        );
+        assert_eq!(
+            current
+                .state
+                .add_neighbor_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
     }
 
     /// The zero-peer human output must say what happened AND hand the

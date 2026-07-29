@@ -1,11 +1,11 @@
 # ADR-0118: Presence-preserving runtime neighbor creation
 
-**Status:** Accepted (server implemented; bundled CLI pending)
+**Status:** Accepted — fully shipped
 **Date:** 2026-07-29
 
-> **Server tranche shipped.** The daemon accepts and preserves the
-> presence-aware wrapper. The bundled CLI deliberately remains on the legacy
-> carrier until its explicit negative forms and compatibility diagnostics land.
+> **Server and CLI tranches shipped.** The daemon preserves the wrapper and
+> `rbgp neighbor add` sends it exclusively with explicit negative forms and a
+> fail-closed old-server diagnostic.
 
 ## Context
 
@@ -246,8 +246,7 @@ runtime/persistence snapshot seam.
 
 ### CLI construction
 
-Once implemented, `rbgp neighbor add` always sends the wrapper, even when its
-mask is empty.
+`rbgp neighbor add` always sends the wrapper, even when its mask is empty.
 
 - A non-empty `--families` or `--required-families` argument adds the
   corresponding path.
@@ -308,9 +307,8 @@ tri-state.
 
 ## Exclusions and documentation fence
 
-This server tranche does not implement:
+This decision does not implement:
 
-- bundled CLI wrapper construction or explicit negative forms;
 - a new service, package, or v2 RPC;
 - a `oneof` migration for the legacy field;
 - automatic legacy fallback;
@@ -318,5 +316,5 @@ This server tranche does not implement:
 - one-off fixes for individual route-server or route-reflector flags.
 
 The API/configuration docs and v1 stable-surface digest describe the reviewed
-additive server graph. CLI help and examples remain legacy until the client
-tranche lands; ROADMAP state is intentionally unchanged.
+additive graph. CLI help, completions, and examples describe the shipped
+presence-aware client; ROADMAP state is intentionally unchanged.

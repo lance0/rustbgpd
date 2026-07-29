@@ -921,30 +921,45 @@ enum NeighborAction {
         #[arg(long, value_delimiter = ',')]
         required_families: Vec<String>,
         /// Enable transparent route-server client mode (eBGP only)
-        #[arg(long)]
+        #[arg(long, conflicts_with = "no_route_server_client")]
         route_server_client: bool,
+        /// Explicitly disable inherited transparent route-server client mode
+        #[arg(long)]
+        no_route_server_client: bool,
         /// RFC 7947 per-client best-path (path-hiding mitigation);
-        /// requires --route-server-client
-        #[arg(long, requires = "route_server_client")]
+        /// effective route-server-client mode is validated by the daemon
+        #[arg(
+            long,
+            conflicts_with_all = ["no_per_client_best", "no_route_server_client"]
+        )]
         per_client_best: bool,
+        /// Explicitly disable inherited per-client best-path
+        #[arg(long)]
+        no_per_client_best: bool,
         /// Local BGP Role for RFC 9234 route-leak protection
         #[arg(long, value_name = "ROLE")]
         role: Option<String>,
         /// Require the peer to advertise a compatible BGP Role capability
-        #[arg(long, requires = "role")]
+        #[arg(long, conflicts_with = "no_strict_role")]
         strict_role: bool,
-        /// Enable Add-Path receive
+        /// Explicitly disable inherited strict-role enforcement
         #[arg(long)]
+        no_strict_role: bool,
+        /// Enable Add-Path receive
+        #[arg(long, conflicts_with = "no_add_path")]
         add_path_receive: bool,
         /// Enable Add-Path send
-        #[arg(long)]
+        #[arg(long, conflicts_with = "no_add_path")]
         add_path_send: bool,
         /// Max paths per prefix for Add-Path send
-        #[arg(long, default_value = "0")]
-        add_path_send_max: u32,
+        #[arg(long, conflicts_with = "no_add_path")]
+        add_path_send_max: Option<u32>,
         /// Experimental Paths-Limit preference for Add-Path receive families
-        #[arg(long, default_value = "0", requires = "add_path_receive")]
-        paths_limit_receive_max: u16,
+        #[arg(long, conflicts_with = "no_add_path")]
+        paths_limit_receive_max: Option<u16>,
+        /// Explicitly disable the complete inherited Add-Path block
+        #[arg(long)]
+        no_add_path: bool,
     },
     /// Delete this neighbor
     Delete,
@@ -2289,15 +2304,30 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                     families,
                     required_families,
                     route_server_client,
+                    no_route_server_client,
                     per_client_best,
+                    no_per_client_best,
                     role,
                     strict_role,
+                    no_strict_role,
                     add_path_receive,
                     add_path_send,
                     add_path_send_max,
                     paths_limit_receive_max,
+                    no_add_path,
                 }),
             ) => {
+                let add_path = (no_add_path
+                    || add_path_receive
+                    || add_path_send
+                    || add_path_send_max.is_some()
+                    || paths_limit_receive_max.is_some())
+                .then_some(commands::neighbor::AddPathOpts {
+                    receive: add_path_receive,
+                    send: add_path_send,
+                    send_max: add_path_send_max.unwrap_or(0),
+                    paths_limit_receive_max: paths_limit_receive_max.unwrap_or(0),
+                });
                 commands::neighbor::add(
                     connection,
                     &addr,
@@ -2312,14 +2342,17 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                         max_prefix_restart_seconds,
                         families,
                         required_families,
-                        route_server_client,
-                        per_client_best,
+                        route_server_client: route_server_client
+                            .then_some(true)
+                            .or_else(|| no_route_server_client.then_some(false)),
+                        per_client_best: per_client_best
+                            .then_some(true)
+                            .or_else(|| no_per_client_best.then_some(false)),
                         role,
-                        strict_role,
-                        add_path_receive,
-                        add_path_send,
-                        add_path_send_max,
-                        paths_limit_receive_max,
+                        strict_role: strict_role
+                            .then_some(true)
+                            .or_else(|| no_strict_role.then_some(false)),
+                        add_path,
                     },
                     json,
                 )
@@ -3478,6 +3511,28 @@ mod tests {
     }
 
     #[test]
+    fn generated_completions_include_presence_negative_flags() {
+        // Load-bearing: omitting a negative flag from Clap removes it from at
+        // least one generated release completion and makes this fence red.
+        for shell in [Shell::Bash, Shell::Zsh, Shell::Fish] {
+            let mut generated = Vec::new();
+            generate_completions(shell, BINARY_NAME, &mut generated);
+            let generated = String::from_utf8(generated).unwrap();
+            for flag in [
+                "--no-route-server-client",
+                "--no-per-client-best",
+                "--no-strict-role",
+                "--no-add-path",
+            ] {
+                assert!(
+                    generated.contains(flag.trim_start_matches("--")),
+                    "{shell} completion does not contain {flag}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn test_man_page_is_roff_and_covers_nested_subcommands() {
         let mut output = Vec::new();
         generate_man(BINARY_NAME, &mut output).unwrap();
@@ -3766,8 +3821,10 @@ mod tests {
     }
 
     #[test]
-    fn test_neighbor_add_requires_role_for_strict_role() {
-        let error = match Cli::try_parse_from([
+    fn test_neighbor_add_allows_inherited_prerequisites_and_explicit_disables() {
+        // Load-bearing: restoring either client-side `requires` check rejects
+        // an override whose prerequisite is inherited and makes this red.
+        let inherited = Cli::try_parse_from([
             "rbgp",
             "neighbor",
             "10.0.0.1",
@@ -3775,15 +3832,134 @@ mod tests {
             "--asn",
             "65001",
             "--strict-role",
-        ]) {
-            Ok(_) => panic!("strict role without a role must fail"),
-            Err(error) => error,
+            "--per-client-best",
+        ])
+        .unwrap();
+        let Command::Neighbor {
+            action:
+                Some(NeighborAction::Add {
+                    role,
+                    strict_role,
+                    route_server_client,
+                    per_client_best,
+                    ..
+                }),
+            ..
+        } = inherited.command
+        else {
+            panic!("expected Neighbor Add command");
         };
+        assert!(role.is_none());
+        assert!(strict_role);
+        assert!(!route_server_client);
+        assert!(per_client_best);
+
+        // These cross-field combinations are intentional, not opposing pairs.
+        Cli::try_parse_from([
+            "rbgp",
+            "neighbor",
+            "10.0.0.2",
+            "add",
+            "--asn",
+            "65002",
+            "--route-server-client",
+            "--no-per-client-best",
+            "--role",
+            "rs",
+            "--no-strict-role",
+        ])
+        .unwrap();
+    }
+
+    #[test]
+    fn test_neighbor_add_rejects_opposing_and_forbidden_flags() {
+        // Load-bearing: removing any conflict admits one contradictory intent.
+        let cases: &[&[&str]] = &[
+            &["--route-server-client", "--no-route-server-client"],
+            &["--per-client-best", "--no-per-client-best"],
+            &["--strict-role", "--no-strict-role"],
+            &["--per-client-best", "--no-route-server-client"],
+            &["--no-add-path", "--add-path-receive"],
+            &["--no-add-path", "--add-path-send"],
+            &["--no-add-path", "--add-path-send-max", "0"],
+            &["--no-add-path", "--paths-limit-receive-max", "0"],
+        ];
+        for conflicting in cases {
+            let mut args = vec!["rbgp", "neighbor", "10.0.0.1", "add", "--asn", "65001"];
+            args.extend_from_slice(conflicting);
+            let error = match Cli::try_parse_from(args) {
+                Ok(_) => panic!("conflicting flags parsed: {conflicting:?}"),
+                Err(error) => error,
+            };
+            assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::ArgumentConflict,
+                "conflict was not enforced for {conflicting:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_neighbor_add_every_add_path_form_emits_atomic_intent() {
+        // Load-bearing: failing to lift any individual occurrence into an
+        // Add-Path block, or treating --no-add-path as omission, makes its
+        // complete quartet/value assertion red.
+        let server = spawn_mock_server(None).await;
+        type AddPathCase<'a> = (&'a [&'a str], (bool, bool, u32, u32));
+        let cases: &[AddPathCase<'_>] = &[
+            (&["--add-path-receive"], (true, false, 0, 0)),
+            (&["--add-path-send"], (false, true, 0, 0)),
+            (&["--add-path-send-max", "0"], (false, false, 0, 0)),
+            (&["--paths-limit-receive-max", "0"], (false, false, 0, 0)),
+            (&["--no-add-path"], (false, false, 0, 0)),
+        ];
+        for (flags, expected) in cases {
+            let mut args = vec![
+                "rbgp",
+                "--addr",
+                server.addr.as_str(),
+                "neighbor",
+                "10.0.0.1",
+                "add",
+                "--asn",
+                "65001",
+            ];
+            args.extend_from_slice(flags);
+            run(Cli::try_parse_from(args).unwrap(), BINARY_NAME)
+                .await
+                .unwrap();
+            let request = server.state.last_add_neighbor.lock().await.clone().unwrap();
+            assert!(request.config.is_none());
+            let intent = request.intent.unwrap();
+            assert_eq!(
+                intent.override_mask.unwrap().paths,
+                [
+                    "add_path_receive",
+                    "add_path_send",
+                    "add_path_send_max",
+                    "paths_limit_receive_max"
+                ],
+                "wrong mask for {flags:?}"
+            );
+            let config = intent.config.unwrap();
+            assert_eq!(
+                (
+                    config.add_path_receive,
+                    config.add_path_send,
+                    config.add_path_send_max,
+                    config.paths_limit_receive_max,
+                ),
+                *expected,
+                "wrong Add-Path tuple for {flags:?}"
+            );
+        }
         assert_eq!(
-            error.kind(),
-            clap::error::ErrorKind::MissingRequiredArgument
+            server
+                .state
+                .add_neighbor_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            cases.len()
         );
-        assert!(error.to_string().contains("--role"));
     }
 
     #[test]
@@ -3900,6 +4076,36 @@ mod tests {
             }
         }
         panic!("documented command never terminated: {marker}");
+    }
+
+    #[test]
+    fn test_parse_rr_pair_day2_documented_neighbor_add() {
+        // Load-bearing: this documented inheritance command must keep parsing
+        // without materializing any route-reflector settings in the CLI.
+        let runbook = include_str!("../../../docs/cookbook/rr-pair-day2.md");
+        let documented =
+            documented_continued_command(runbook, "rbgp neighbor 10.0.0.42 add --remote-asn 65000");
+        let cli = Cli::try_parse_from(documented.split_whitespace()).unwrap();
+        let Command::Neighbor {
+            address: Some(address),
+            action:
+                Some(NeighborAction::Add {
+                    asn,
+                    description,
+                    peer_group,
+                    families,
+                    ..
+                }),
+            ..
+        } = cli.command
+        else {
+            panic!("expected Neighbor Add command");
+        };
+        assert_eq!(address, "10.0.0.42");
+        assert_eq!(asn, 65000);
+        assert_eq!(description.as_deref(), Some("new-client"));
+        assert_eq!(peer_group.as_deref(), Some("rr-clients"));
+        assert!(families.is_empty());
     }
 
     #[test]

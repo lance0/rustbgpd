@@ -15,8 +15,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   that preserves peer-group inheritance and explicit masked `false`, family
   replacement, and Add-Path disable intent across persistence, live apply, and
   restart. Legacy field 1 behavior is unchanged, exactly one carrier is
-  required, and malformed masks fail before mutation. The bundled CLI remains
-  legacy-only pending its explicit negative forms and old-server diagnostics.
+  required, and malformed masks fail before mutation. `rbgp neighbor add` now
+  sends only that wrapper, exposes explicit negative boolean/Add-Path forms,
+  leaves effective prerequisite validation to the server, and fails old-server
+  creation once with an upgrade diagnostic rather than downgrading.
 
 ### Fixed
 

@@ -188,10 +188,14 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subc
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from add" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from add" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from add" -l route-server-client -d 'Enable transparent route-server client mode (eBGP only)'
-complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from add" -l per-client-best -d 'RFC 7947 per-client best-path (path-hiding mitigation); requires --route-server-client'
+complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from add" -l no-route-server-client -d 'Explicitly disable inherited transparent route-server client mode'
+complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from add" -l per-client-best -d 'RFC 7947 per-client best-path (path-hiding mitigation); effective route-server-client mode is validated by the daemon'
+complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from add" -l no-per-client-best -d 'Explicitly disable inherited per-client best-path'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from add" -l strict-role -d 'Require the peer to advertise a compatible BGP Role capability'
+complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from add" -l no-strict-role -d 'Explicitly disable inherited strict-role enforcement'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from add" -l add-path-receive -d 'Enable Add-Path receive'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from add" -l add-path-send -d 'Enable Add-Path send'
+complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from add" -l no-add-path -d 'Explicitly disable the complete inherited Add-Path block'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from add" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from add" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from add" -s h -l help -d 'Print help (see more with \'--help\')'
@@ -259,10 +263,14 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subco
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from add" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from add" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from add" -l route-server-client -d 'Enable transparent route-server client mode (eBGP only)'
-complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from add" -l per-client-best -d 'RFC 7947 per-client best-path (path-hiding mitigation); requires --route-server-client'
+complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from add" -l no-route-server-client -d 'Explicitly disable inherited transparent route-server client mode'
+complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from add" -l per-client-best -d 'RFC 7947 per-client best-path (path-hiding mitigation); effective route-server-client mode is validated by the daemon'
+complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from add" -l no-per-client-best -d 'Explicitly disable inherited per-client best-path'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from add" -l strict-role -d 'Require the peer to advertise a compatible BGP Role capability'
+complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from add" -l no-strict-role -d 'Explicitly disable inherited strict-role enforcement'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from add" -l add-path-receive -d 'Enable Add-Path receive'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from add" -l add-path-send -d 'Enable Add-Path send'
+complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from add" -l no-add-path -d 'Explicitly disable the complete inherited Add-Path block'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from add" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from add" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from add" -s h -l help -d 'Print help (see more with \'--help\')'

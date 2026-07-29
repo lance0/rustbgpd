@@ -689,9 +689,11 @@ returns `INVALID_ARGUMENT` before persistence or runtime mutation. An old
 server skips wrapper field 2 and rejects the request because legacy field 1 is
 absent; clients must not retry or send both.
 
-The bundled `rbgp neighbor add` command remains legacy-only in this server
-tranche. Direct gRPC clients may use the wrapper now; CLI wrapper construction,
-explicit `--no-*` forms, and old-server error wording remain pending.
+The bundled `rbgp neighbor add` command always sends `intent` only, with a
+present mask even when no overrides are selected. It never sends both carriers
+or retries legacy config. An old server's exact `config is required` response
+becomes `daemon does not support presence-aware neighbor creation; upgrade
+rustbgpd before adding this neighbor`; other errors remain unchanged.
 
 The create override mask has a closed top-level path set:
 `families`, `required_families`, `route_server_client`, `per_client_best`,
@@ -701,6 +703,12 @@ Add-Path paths are rejected. The four Add-Path paths are one atomic block.
 Masked booleans preserve explicit `false`; masked family lists replace
 inherited lists and must be non-empty. Values outside the mask must retain
 their protobuf defaults.
+
+CLI positive/negative pairs are mutually exclusive:
+`--[no-]route-server-client`, `--[no-]per-client-best`, and
+`--[no-]strict-role`. Any Add-Path option selects the quartet; explicit numeric
+zero remains an override, and `--no-add-path` emits the all-disabled tuple.
+Effective inherited prerequisites are validated by the server.
 
 Unmasked fields stay absent in the persisted neighbor and inherit through the
 normal config resolver. This includes peer-group TTL security, Graceful
