@@ -3280,11 +3280,11 @@ impl RibManager {
     ///    iff any candidate exists" invariant cheaply — few candidates).
     /// 2. The announcing peer OWNS the current best → full rescan: the
     ///    best itself may have been replaced (payload change, possibly now
-    ///    losing to another candidate), and same-peer Add-Path candidates
-    ///    are the only ones that can TIE it (`best_path_cmp` is a total
-    ///    order whose final step compares peer addresses), which only the
-    ///    full enumeration + `LocRib::recompute` payload arbitration
-    ///    resolves.
+    ///    losing to another candidate). `best_path_cmp` now totally orders
+    ///    distinct same-peer Add-Path candidates by their inbound path ID,
+    ///    but a replacement with the same peer/path identity still compares
+    ///    equal; only full enumeration + `LocRib::recompute` payload
+    ///    arbitration resolves that case.
     /// 3. The current best's own Adj-RIB-In entry is missing → full rescan
     ///    (defensive; unreachable while every mutation seam recomputes its
     ///    affected set).
@@ -3297,15 +3297,16 @@ impl RibManager {
     /// 5. The challenger strictly BEATS the rib-resident best → install it
     ///    directly, no rescan: it beats the old minimum, hence every
     ///    untouched candidate, and its own peer's other candidates by
-    ///    construction (within-peer ties resolve to the same first-in-
-    ///    `iter_prefix`-order object a full scan would pick, cross-peer
-    ///    ties are impossible) — so it IS the full scan's winner.
+    ///    construction. Distinct unicast candidates are totally ordered
+    ///    through peer address and, within one peer, inbound path ID, so
+    ///    there is no iteration-order tie — it IS the full scan's winner.
     ///    `LocRib::recompute` over the singleton keeps the change
     ///    detection identical. Only taken with the BMP Loc-RIB tap off:
     ///    BMP path-marking needs the runner-up, which requires the full
     ///    candidate enumeration anyway.
-    /// 6. Challenger ties the best → unreachable cross-peer (case 2 covers
-    ///    same-peer) → conservative full rescan.
+    /// 6. Challenger ties the best → only possible for the same peer/path
+    ///    identity (case 2 covers that owner) and unreachable cross-peer →
+    ///    conservative full rescan.
     pub(super) fn recompute_best_after_announce(
         &mut self,
         peer: IpAddr,

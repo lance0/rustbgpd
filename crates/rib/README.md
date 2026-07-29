@@ -17,7 +17,8 @@ Single-task ownership — `RibManager` runs as one tokio task with no
   per-prefix Add-Path support
 - **Loc-RIB** — best-path selection per RFC 4271 section 9.1.2 with
   extensions: RPKI validation (step 0.5), stale demotion (step 0),
-  deterministic MED (always-compare), route reflector tiebreakers
+  deterministic MED (always-compare), route reflector tiebreakers, and a
+  deterministic same-peer unicast Add-Path identity tie after all BGP criteria
 - **Adj-RIB-Out** — per-peer outbound route tracking with split horizon,
   iBGP suppression, route reflector reflection rules
 - **Outbound prefix limits** — per-peer, per-family Adj-RIB-Out prefix

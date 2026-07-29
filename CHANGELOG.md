@@ -75,6 +75,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   collector cannot be reached by the `rbgp` process. The authoritative BGP
   listener and daemon-side RPKI VRP checks keep their existing semantics.
 
+- Equal unicast routes learned from one Add-Path peer now rank deterministically
+  by inbound path identifier after every BGP decision criterion. Reverse
+  arrival order no longer changes the unicast Loc-RIB winner or outbound
+  unicast Add-Path ranks, and best-path explain reports the identity-only
+  `lower_path_id` tie truthfully.
+
 - The shipped empty Adj-RIB-In alert now checks the current per-session
   Established gauge instead of inferring state from lifetime counters, and
   correctly aggregates scoped siblings to peer identity before joining the

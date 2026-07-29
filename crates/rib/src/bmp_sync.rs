@@ -65,6 +65,7 @@ pub fn path_marking_reason_code(reason: BestPathReason) -> Option<u16> {
         | BestPathReason::RpkiPreference
         | BestPathReason::AspaPreference
         | BestPathReason::ShorterClusterList
+        | BestPathReason::LowerPathId
         | BestPathReason::EvpnMacMobility => None,
     }
 }
@@ -815,6 +816,7 @@ mod tests {
             (R::RpkiPreference, None),
             (R::AspaPreference, None),
             (R::ShorterClusterList, None),
+            (R::LowerPathId, None),
             (R::EvpnMacMobility, None),
         ];
         for (reason, expected) in cases {
@@ -828,6 +830,7 @@ mod tests {
         // bmp crate cannot silently shift the wire values.
         assert_eq!(path_marking_reason_code(R::HigherLocalPref), Some(0x0003));
         assert_eq!(path_marking_reason_code(R::LowerPeerAddress), Some(0x000A));
+        assert_eq!(path_marking_reason_code(R::LowerPathId), None);
     }
 
     /// path-marking-05 §3.1: Loc-RIB payloads always carry Best

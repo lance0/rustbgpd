@@ -2045,6 +2045,8 @@ message ExplainBestPathRequest {
 
 message BestPathCandidate {
   Route route = 1;
+  // Decisive best-path step in stable snake_case vocabulary, including
+  // lower_path_id when otherwise-equal routes came from one Add-Path peer.
   string vs_best_reason = 2;
   string vs_best_ordering = 3;
   // Compared values behind vs_best_reason, candidate's value first,
@@ -2103,10 +2105,10 @@ message ExplainBestPathResponse {
   // (stale_preference, rpki_preference, aspa_preference,
   // higher_local_pref, shorter_as_path, lower_origin, lower_med,
   // ebgp_over_ibgp, shorter_cluster_list, lower_originator_id,
-  // lower_peer_address). "only_path" when the prefix has exactly one
-  // path (trivial winner, no competing candidates). A prefix with no
-  // paths at all is NOT_FOUND at the RPC layer, so this field is never
-  // empty on a successful response.
+  // lower_peer_address, lower_path_id). "only_path" when the prefix has
+  // exactly one path (trivial winner, no competing candidates). A prefix
+  // with no paths at all is NOT_FOUND at the RPC layer, so this field is
+  // never empty on a successful response.
   string best_reason = 7;
   // Compared values behind best_reason, winner's value first
   // (e.g. "local_pref 200 > 100"). Empty when best_reason is

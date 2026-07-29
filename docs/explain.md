@@ -30,7 +30,8 @@ translates the usual show-commands into these.
 Why did this path win? Every losing candidate is annotated with the
 decisive comparison step (`only_path`, `higher_local_pref`,
 `shorter_as_path`, `lower_origin`, `lower_med`, ... down to
-`lower_peer_address`) and the compared values behind it, plus its
+`lower_peer_address` and the same-peer Add-Path identity tie
+`lower_path_id`) and the compared values behind it, plus its
 equal-cost multipath classification:
 
 ```console

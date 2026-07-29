@@ -67,8 +67,13 @@ pub enum BestPathReason {
     ShorterClusterList,
     /// Step 5.6: lower `ORIGINATOR_ID` wins (RFC 4456).
     LowerOriginatorId,
-    /// Step 6: lower peer address (final tiebreaker).
+    /// Step 6: lower peer address.
     LowerPeerAddress,
+    /// Step 6.1: lower inbound Add-Path identifier as a deterministic
+    /// same-peer route-identity tiebreaker. RFC 7911 gives the identifier
+    /// no preference semantics; it is considered only after every BGP
+    /// decision criterion and the peer address tie.
+    LowerPathId,
     /// EVPN Type 2 only: higher MAC Mobility sequence number wins, with
     /// sticky-MAC preservation (RFC 7432 §15.1).
     EvpnMacMobility,
@@ -92,6 +97,7 @@ impl BestPathReason {
             Self::ShorterClusterList => "shorter_cluster_list",
             Self::LowerOriginatorId => "lower_originator_id",
             Self::LowerPeerAddress => "lower_peer_address",
+            Self::LowerPathId => "lower_path_id",
             Self::EvpnMacMobility => "evpn_mac_mobility",
         }
     }
@@ -162,7 +168,12 @@ pub fn best_path_cmp_with_reason(a: &Route, b: &Route) -> (Ordering, BestPathRea
         }
     }
 
-    (a.peer.cmp(&b.peer), BestPathReason::LowerPeerAddress)
+    let cmp = a.peer.cmp(&b.peer);
+    if cmp != Ordering::Equal {
+        return (cmp, BestPathReason::LowerPeerAddress);
+    }
+
+    (a.path_id.cmp(&b.path_id), BestPathReason::LowerPathId)
 }
 
 /// Compare two routes under RFC 9107 ORR and return the decisive reason.
@@ -170,9 +181,9 @@ pub fn best_path_cmp_with_reason(a: &Route, b: &Route) -> (Ordering, BestPathRea
 /// Same ordering as [`best_path_cmp_orr`], derived by composition rather
 /// than a third hand-maintained ladder: the plain reason ladder decides
 /// unless its decisive step is one of the tiebreakers *below* the ORR
-/// interior-cost step (`CLUSTER_LIST`, `ORIGINATOR_ID`, peer address) —
-/// in that case the vantage cost gets first shot and, when decisive,
-/// yields [`BestPathReason::OrrInteriorCost`].
+/// interior-cost step (`CLUSTER_LIST`, `ORIGINATOR_ID`, peer address,
+/// inbound Add-Path identifier) — in that case the vantage cost gets first
+/// shot and, when decisive, yields [`BestPathReason::OrrInteriorCost`].
 #[must_use]
 pub fn best_path_cmp_orr_with_reason(
     a: &Route,
@@ -186,6 +197,7 @@ pub fn best_path_cmp_orr_with_reason(
         BestPathReason::ShorterClusterList
             | BestPathReason::LowerOriginatorId
             | BestPathReason::LowerPeerAddress
+            | BestPathReason::LowerPathId
     );
     if ord != Ordering::Equal && !below_orr_step {
         return (ord, reason);
@@ -310,6 +322,14 @@ pub fn best_path_reason_detail(reason: BestPathReason, a: &Route, b: &Route) -> 
                 b.peer
             )
         }
+        BestPathReason::LowerPathId => {
+            format!(
+                "path_id {} {} {}",
+                a.path_id,
+                cmp_symbol(&a.path_id, &b.path_id),
+                b.path_id
+            )
+        }
         // Not produced by the unicast ladder; EVPN MAC mobility carries
         // its sequence in EVPN-specific route state, not on `Route`.
         BestPathReason::EvpnMacMobility => "mac_mobility_sequence".to_string(),
@@ -378,6 +398,9 @@ pub fn multipath_eligibility(best: &Route, other: &Route) -> MultipathEligibilit
 ///    5.5. Shortest `CLUSTER_LIST` length (RFC 4456 §9)
 ///    5.6. Lowest `ORIGINATOR_ID` (RFC 4456 §9) — only when both present
 /// 6. Lowest peer address (tiebreaker)
+///    Final identity tie: lowest inbound Add-Path identifier
+///    (deterministic same-peer route identity only; RFC 7911 assigns no
+///    preference semantics).
 #[must_use]
 pub fn best_path_cmp(a: &Route, b: &Route) -> Ordering {
     cmp_chain(a, b, None)
@@ -486,8 +509,10 @@ fn cmp_chain(a: &Route, b: &Route, orr_costs: Option<(Option<u64>, Option<u64>)>
         }
     }
 
-    // 6. Lowest peer address (final tiebreaker)
-    a.peer.cmp(&b.peer)
+    // 6. Lowest peer address, then inbound Add-Path identifier. The
+    // identifier has no preference semantics (RFC 7911 §2); this last
+    // comparison only makes distinct same-peer routes a total order.
+    a.peer.cmp(&b.peer).then_with(|| a.path_id.cmp(&b.path_id))
 }
 
 /// Whether `other` is co-installable with the best route `best` as an
@@ -498,9 +523,10 @@ fn cmp_chain(a: &Route, b: &Route, orr_costs: Option<(Option<u64>, Option<u64>)>
 /// `AS_PATH`, `ORIGIN`, `MED` — **and** are the same eBGP/iBGP class (a group is
 /// never mixed; forwarding across an eBGP and an iBGP path at once is not a
 /// thing operators expect). The tiebreakers `best_path_cmp` applies below this
-/// point (`CLUSTER_LIST` length, `ORIGINATOR_ID`, peer address) are deliberately
-/// *not* compared: those exist precisely to pick one winner among otherwise
-/// co-equal paths, which are exactly the paths we want to bundle.
+/// point (`CLUSTER_LIST` length, `ORIGINATOR_ID`, peer address, inbound Add-Path
+/// identifier) are deliberately *not* compared: those exist precisely to pick
+/// one winner among otherwise co-equal paths, which are exactly the paths we
+/// want to bundle.
 ///
 /// `AS_PATH` is compared for **full equality** (not just length) — the
 /// conservative `maximum-paths` default (matches FRR without
@@ -1018,6 +1044,10 @@ mod tests {
         assert_eq!(best_path_cmp(&fresh, &llgr), Ordering::Less);
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the table intentionally exercises every decisive reason in one agreement loop"
+    )]
     #[test]
     fn with_reason_ordering_matches_plain_cmp_at_every_step() {
         // best_path_cmp_with_reason(..).0 must equal best_path_cmp(..) at
@@ -1101,6 +1131,20 @@ mod tests {
                 base_route(p2),
                 BestPathReason::LowerPeerAddress,
             ),
+            (
+                "path_id",
+                {
+                    let mut route = base_route(p1);
+                    route.path_id = 9;
+                    route
+                },
+                {
+                    let mut route = base_route(p1);
+                    route.path_id = 7;
+                    route
+                },
+                BestPathReason::LowerPathId,
+            ),
         ];
 
         for (label, a, b, expected) in cases {
@@ -1158,6 +1202,34 @@ mod tests {
         assert_eq!(
             best_path_cmp_orr(&a, &b, Some(10), Some(5)),
             Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn orr_cost_precedes_same_peer_path_id_identity_tie() {
+        let mut lower_path_id = base_route(Ipv4Addr::new(1, 0, 0, 1));
+        lower_path_id.path_id = 7;
+        let mut higher_path_id = lower_path_id.clone();
+        higher_path_id.path_id = 9;
+
+        assert_eq!(
+            best_path_cmp_orr(&lower_path_id, &higher_path_id, Some(20), Some(10)),
+            Ordering::Greater,
+            "ORR interior cost remains a real decision criterion above route identity"
+        );
+        assert_eq!(
+            best_path_cmp_orr_with_reason(&lower_path_id, &higher_path_id, Some(20), Some(10)),
+            (Ordering::Greater, BestPathReason::OrrInteriorCost),
+            "the explain ladder must put ORR cost above route identity too"
+        );
+        assert_eq!(
+            best_path_cmp_orr(&lower_path_id, &higher_path_id, Some(10), Some(10)),
+            Ordering::Less,
+            "equal ORR costs fall through to deterministic route identity"
+        );
+        assert_eq!(
+            best_path_cmp_orr_with_reason(&lower_path_id, &higher_path_id, Some(10), Some(10)),
+            (Ordering::Less, BestPathReason::LowerPathId)
         );
     }
 
@@ -1383,6 +1455,15 @@ mod tests {
                 &base_route(p1)
             ),
             "peer 1.0.0.2 > 1.0.0.1"
+        );
+
+        let mut path_9 = base_route(p1);
+        path_9.path_id = 9;
+        let mut path_7 = path_9.clone();
+        path_7.path_id = 7;
+        assert_eq!(
+            best_path_reason_detail(BestPathReason::LowerPathId, &path_9, &path_7),
+            "path_id 9 > 7"
         );
     }
 
