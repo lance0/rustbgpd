@@ -48,6 +48,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The shipped empty Adj-RIB-In alert now checks the current per-session
+  Established gauge instead of inferring state from lifetime counters, and
+  correctly aggregates scoped siblings to peer identity before joining the
+  peer-level RIB series.
+
 - An empty `rbgp top` roster now distinguishes configured dormant
   dynamic-neighbor ranges, a proven unconfigured daemon, unavailable inventory,
   and a retained stale count without marking the core connection disconnected.
