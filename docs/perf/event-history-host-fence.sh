@@ -76,6 +76,7 @@ event_history_competing_process_snapshot() {
              $2 == "rustbgpd" ||
              $2 ~ /^rrharness($|-)/ || $2 ~ /^reloadstall($|-)/ ||
              $2 ~ /^route_paging($|-)/ || $2 ~ /^rib_nlri_build/ ||
+             $2 ~ /^vpn_query_timi/ || $2 ~ /^vpn_query_allo/ ||
              $2 ~ /^nlri_build($|-)/ || $2 ~ /^event_history_/ ||
              $2 ~ /^codec($|-)/ || $2 ~ /^fanout($|-)/ ||
              $2 ~ /^inbound_attrs/ || $2 ~ /^rib_ops($|-)/ ||
@@ -158,4 +159,18 @@ event_history_wait_for_idle() {
         fi
         sleep "$poll_seconds"
     done
+}
+
+# VPN query campaigns deliberately share the same machine-wide lock and idle
+# policy as other retained performance work.
+vpn_query_acquire_host_lock() {
+    event_history_acquire_host_lock
+}
+
+vpn_query_init_host_preflight_log() {
+    event_history_init_host_preflight_log "$@"
+}
+
+vpn_query_wait_for_idle() {
+    event_history_wait_for_idle "$@"
 }

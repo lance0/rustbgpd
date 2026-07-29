@@ -28,14 +28,20 @@ ps() {
         '113 evpn-tester /repo/bench/evpn-load/target/release/evpn-tester' \
         '114 evpn-monitor /repo/bench/evpn-load/target/release/evpn-monitor' \
         '115 python3 python3 bgperf2.py --bench-name another-run bench' \
-        '116 sleep sleep 30'
+        '116 vpn_query_timi /repo/target/release/deps/vpn_query_timing-91a' \
+        '117 vpn_query_allo /repo/target/release/deps/vpn_query_allocation-91a' \
+        '118 sleep sleep 30'
 }
 
 snapshot=$(event_history_competing_process_snapshot)
-[[ $(wc -l <<<"$snapshot") -eq 15 ]]
+[[ $(wc -l <<<"$snapshot") -eq 17 ]]
 [[ "$snapshot" != *'sleep 30'* ]]
 [[ "$snapshot" != *'/repo/'* ]]
 [[ "$snapshot" != *'101 '* ]]
 [[ "$snapshot" == *'event_history_'* ]]
+
+declare -F vpn_query_acquire_host_lock >/dev/null
+declare -F vpn_query_init_host_preflight_log >/dev/null
+declare -F vpn_query_wait_for_idle >/dev/null
 
 printf '%s\n' 'event-history producer host-fence adversarial probes passed'
