@@ -238,6 +238,10 @@ class VerifyCampaign(unittest.TestCase):
 
         self.tearDown()
         self.setUp()
+        full_receipts = {
+            ordinal: (self.root / "attempt-1" / "timing" / f"{ordinal:02d}.json").read_text()
+            for ordinal in range(11, 49)
+        }
         for ordinal in range(11, 49):
             (self.root / "attempt-1" / "timing" / f"{ordinal:02d}.json").unlink()
         censor = {
@@ -264,6 +268,15 @@ class VerifyCampaign(unittest.TestCase):
         (self.root / "host-preflight.tsv").write_text("\n".join(kept) + "\n")
         self.assertEqual(VERIFY.verify(self.root)["classification"],
                          "capacity_censored")
+        for ordinal in range(11, 50):
+            content = full_receipts.get(ordinal, full_receipts[48])
+            (self.root / "attempt-1" / "timing" / f"{ordinal:02d}.json").write_text(content)
+        self.mutate("censor.json", lambda d: d.update(ordinal=50))
+        with self.assertRaises(VERIFY.Invalid):
+            VERIFY.verify(self.root)
+        self.mutate("censor.json", lambda d: d.update(ordinal=11))
+        for ordinal in range(11, 50):
+            (self.root / "attempt-1" / "timing" / f"{ordinal:02d}.json").unlink()
         (self.root / "attempt-2").mkdir()
         with self.assertRaises(VERIFY.Invalid):
             VERIFY.verify(self.root)

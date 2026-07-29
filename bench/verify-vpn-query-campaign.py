@@ -201,6 +201,8 @@ def verify(directory):
     for attempt in range(1, censor_attempt + 1):
         receipt_paths = sorted((directory / f"attempt-{attempt}" / "timing").glob("*.json"))
         if censor and censor_attempt == attempt:
+            require(len(receipt_paths) <= 48,
+                    "censor timing prefix exceeds fixed 48-cell shape")
             for path, completed in zip(receipt_paths, expected_cells()):
                 verify_receipt(load(path), completed, manifest, attempt)
             expected_phases.update(

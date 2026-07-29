@@ -19,7 +19,9 @@ contaminating timing:
 - `vpn_query_allocation` wraps jemalloc with absolute live-requested-byte
   accounting. `peak_live_requested_bytes > 8 GiB` is capacity-censored.
   `/proc` `VmRSS` and `VmHWM` are recorded only as observations and never drive
-  classification.
+  classification. Its allocator forwarding and bookkeeping are serialized by
+  a no-allocation spin lock, so this mode is diagnostic; its timings are not
+  performance results.
 
 The driver builds each executable once, copies it into the campaign directory,
 records SHA-256, commit, and `rustc` provenance, then refuses missing, changed,

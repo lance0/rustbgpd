@@ -25,6 +25,16 @@ PY
 }
 
 check_allocator_seam "$bench_source"
+python3 - "$bench_source" <<'PY'
+import pathlib, sys
+source = pathlib.Path(sys.argv[1]).read_text()
+for contract in (
+    "compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)",
+    "locked.store(false, Ordering::Release)",
+):
+    assert contract in source, contract
+assert source.count("let _guard = self.guard();") == 6
+PY
 sed '/^#\[global_allocator\]$/d' "$bench_source" >"$tmp_dir/no-global-allocator.rs"
 if check_allocator_seam "$tmp_dir/no-global-allocator.rs" >/dev/null 2>&1; then
   echo "bench source without global allocator unexpectedly passed" >&2

@@ -28,6 +28,7 @@ static ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 #[cfg(feature = "vpn-query-allocation")]
 struct TrackingAllocator {
     inner: tikv_jemallocator::Jemalloc,
+    locked: AtomicBool,
     enabled: AtomicBool,
     live: AtomicUsize,
     peak: AtomicUsize,
@@ -38,6 +39,7 @@ impl TrackingAllocator {
     const fn new() -> Self {
         Self {
             inner: tikv_jemallocator::Jemalloc,
+            locked: AtomicBool::new(false),
             enabled: AtomicBool::new(false),
             live: AtomicUsize::new(0),
             peak: AtomicUsize::new(0),
@@ -45,14 +47,27 @@ impl TrackingAllocator {
     }
 
     fn begin(&self) {
+        let _guard = self.guard();
         let live = self.live.load(Ordering::Relaxed);
         self.peak.store(live, Ordering::Relaxed);
         self.enabled.store(true, Ordering::Relaxed);
     }
 
     fn end(&self) -> usize {
+        let _guard = self.guard();
         self.enabled.store(false, Ordering::Relaxed);
         self.peak.load(Ordering::Relaxed)
+    }
+
+    fn guard(&self) -> AllocationGuard<'_> {
+        while self
+            .locked
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            std::hint::spin_loop();
+        }
+        AllocationGuard(self)
     }
 
     fn add(&self, bytes: usize) {
@@ -64,10 +79,21 @@ impl TrackingAllocator {
 }
 
 #[cfg(feature = "vpn-query-allocation")]
+struct AllocationGuard<'a>(&'a TrackingAllocator);
+
+#[cfg(feature = "vpn-query-allocation")]
+impl Drop for AllocationGuard<'_> {
+    fn drop(&mut self) {
+        self.0.locked.store(false, Ordering::Release);
+    }
+}
+
+#[cfg(feature = "vpn-query-allocation")]
 // SAFETY: all operations are forwarded unchanged to one jemalloc instance;
 // atomic accounting does not alter pointer or layout contracts.
 unsafe impl GlobalAlloc for TrackingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let _guard = self.guard();
         let ptr = unsafe { self.inner.alloc(layout) };
         if !ptr.is_null() {
             self.add(layout.size());
@@ -75,6 +101,7 @@ unsafe impl GlobalAlloc for TrackingAllocator {
         ptr
     }
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        let _guard = self.guard();
         let ptr = unsafe { self.inner.alloc_zeroed(layout) };
         if !ptr.is_null() {
             self.add(layout.size());
@@ -82,6 +109,7 @@ unsafe impl GlobalAlloc for TrackingAllocator {
         ptr
     }
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        let _guard = self.guard();
         let resized = unsafe { self.inner.realloc(ptr, layout, new_size) };
         if !resized.is_null() {
             if new_size >= layout.size() {
@@ -94,6 +122,7 @@ unsafe impl GlobalAlloc for TrackingAllocator {
         resized
     }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        let _guard = self.guard();
         unsafe { self.inner.dealloc(ptr, layout) };
         self.live.fetch_sub(layout.size(), Ordering::Relaxed);
     }

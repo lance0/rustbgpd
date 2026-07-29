@@ -3,7 +3,9 @@
 set -euo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+# shellcheck source-path=SCRIPTDIR/..
 # shellcheck source=docs/perf/event-history-host-fence.sh
+# shellcheck disable=SC1091 # Exact CI invocation does not pass the sourced file as an input.
 source "$root/docs/perf/event-history-host-fence.sh"
 
 smoke=0
