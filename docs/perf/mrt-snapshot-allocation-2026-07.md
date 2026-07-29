@@ -225,6 +225,14 @@ silently replace one side. Compute the paired median within each block before
 the four-block decision, and retain that campaign in its own comparison
 artifact/schema extension.
 
+```bash
+python3 bench/tests/test_verify_mrt_growth_campaign.py
+python3 bench/verify-mrt-growth-campaign.py comparison.jsonl
+```
+
+The closed 32-row contract pins both shapes in four ABBA blocks, source/tree, binaries, one harness, seven timings, decoded byte identity, allocations, growth, slack, and peak overhead.
+Control and `--candidate` diagnostics assert their declared path before emitting it; any drift or threshold miss is red. Attested raw rows use schema 2; the retained control remains schema 1.
+
 Acquire the repository's shared benchmark/soak host lock before building or
 running the control or either future revision. For every retained phase, record
 UTC time, logical CPU affinity, CPU governor, one-minute load, toolchain, kernel,

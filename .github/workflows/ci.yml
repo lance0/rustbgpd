@@ -190,6 +190,7 @@ jobs:
           python3 bench/scale/rebaseline/test_classifiers.py
           python3 bench/scale/rebaseline/test_parse_rrharness.py
           python3 bench/scale/rebaseline/test_validate_lan395_criterion.py
+          python3 bench/tests/test_verify_mrt_growth_campaign.py
           (
             cd docs/perf/artifacts/enhanced-route-refresh-2026-07
             sha256sum -c SHA256SUMS

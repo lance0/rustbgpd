@@ -276,6 +276,7 @@ fn prove_shape_contract() {
 #[derive(Debug)]
 struct Args {
     mode: Mode,
+    candidate: bool,
     smoke: bool,
     shape: Option<Shape>,
     commit: String,
@@ -286,6 +287,7 @@ impl Args {
     fn parse() -> AnyResult<Self> {
         let mut raw = std::env::args().skip(1);
         let mut mode = None;
+        let mut candidate = false;
         let mut smoke = false;
         let mut shape = None;
         let mut commit = None;
@@ -298,6 +300,7 @@ impl Args {
                 "timing" | "diagnostic" if mode.is_none() => {
                     mode = Some(Mode::parse(&argument)?);
                 }
+                "--candidate" => candidate = true,
                 "--smoke" => smoke = true,
                 "--shape" => {
                     shape = Some(Shape::parse(
@@ -319,7 +322,7 @@ impl Args {
                 }
                 "--help" | "-h" => {
                     println!(
-                        "snapshot_allocation <timing|diagnostic> [--smoke] \
+                        "snapshot_allocation <timing|diagnostic> [--candidate] [--smoke] \
                          [--shape <ixp-700|dual-full-feed>] [--commit SHA] \
                          [--output FILE]"
                     );
@@ -333,6 +336,7 @@ impl Args {
         let commit = validate_retention_args(smoke, commit, output.is_some())?;
         Ok(Self {
             mode,
+            candidate,
             smoke,
             shape,
             commit,
@@ -381,6 +385,16 @@ fn prove_commit_contract() {
     assert!(validate_retention_args(false, Some(exact.to_string()), true).is_ok());
     assert!(validate_retention_args(false, Some("main".to_string()), true).is_err());
     assert!(validate_retention_args(false, Some(exact.to_string()), false).is_err());
+    assert!(growth_path_assertion(false, 0, 1).is_none());
+    assert!(growth_path_assertion(true, 65, 1).is_none());
+}
+
+fn growth_path_assertion(candidate: bool, misses: u64, paths: u64) -> Option<&'static str> {
+    ((candidate && misses <= 64) || (!candidate && misses >= paths)).then_some(if candidate {
+        "bounded-growth-observed"
+    } else {
+        "ordinary-unbounded-observed"
+    })
 }
 
 fn invalid(message: impl Into<String>) -> Box<dyn Error> {
@@ -588,10 +602,6 @@ fn encode(fixture: &Fixture, mode: Mode, fixed_originated_time: u32) -> AnyResul
                     allocator.peak_live_overhead_bytes,
                     allocator.peak_live_delta_bytes.saturating_sub(bytes.len()),
                     "reported peak overhead must exclude the retained output length",
-                );
-                assert!(
-                    diagnostics.ordinary_output_growth_reservations >= fixture.routes.len() as u64,
-                    "ordinary output-growth probe must execute at least once per encoded path"
                 );
                 Ok(EncodedSample {
                     bytes,
@@ -884,6 +894,7 @@ struct ReceiptRow<'a> {
     semantic_sha256: String,
     allocator: Option<AllocatorReceipt>,
     growth: Option<GrowthReceipt>,
+    growth_path_assertion: Option<&'static str>,
 }
 
 #[cfg(feature = "snapshot-allocation-diagnostics")]
@@ -1014,9 +1025,21 @@ fn run_shape(args: &Args, shape: Shape, output: &mut dyn Write) -> AnyResult<()>
         if args.mode == Mode::Diagnostic && raw_sha256 != first_raw {
             return Err(invalid("fixed-time diagnostic bytes are not deterministic"));
         }
+        let growth_path_assertion = encoded.growth.as_ref().map(|growth| {
+            growth_path_assertion(
+                args.candidate,
+                growth.top_level_unbounded_capacity_misses,
+                fixture.routes.len() as u64,
+            )
+            .expect("diagnostic growth path must match the declared variant")
+        });
         let row = ReceiptRow {
-            schema_version: 1,
-            variant: "control",
+            schema_version: 2,
+            variant: if args.candidate {
+                "candidate"
+            } else {
+                "control"
+            },
             commit: &args.commit,
             mode: args.mode.as_str(),
             shape: shape.as_str(),
@@ -1034,6 +1057,7 @@ fn run_shape(args: &Args, shape: Shape, output: &mut dyn Write) -> AnyResult<()>
             semantic_sha256: validation.semantic_sha256,
             allocator: encoded.allocator,
             growth: encoded.growth,
+            growth_path_assertion,
         };
         serde_json::to_writer(&mut *output, &row)?;
         output.write_all(b"\n")?;
