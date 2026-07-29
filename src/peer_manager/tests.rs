@@ -19612,6 +19612,10 @@ impl PersistenceRig {
     /// Not `async`: everything here is either synchronous or a `tokio::spawn`,
     /// which only needs the caller's runtime, so the rig is fully wired the
     /// moment this returns.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the integration rig setup is intentionally centralized"
+    )]
     fn start() -> Self {
         let dir = tempfile::tempdir().expect("temp config dir");
         let config_path = dir.path().join("config.toml");
@@ -19626,6 +19630,26 @@ listen_port = 179
 
 [global.telemetry]
 log_format = "json"
+
+[peer_groups.ix-members]
+families = ["ipv4_unicast", "ipv6_unicast"]
+route_server_client = true
+per_client_best = true
+ttl_security = true
+graceful_restart = false
+role = "route_server"
+strict_role = true
+
+[peer_groups.ix-members.add_path]
+receive = true
+send = true
+send_max = 4
+receive_max = 8
+
+[peer_groups.rr-clients]
+families = ["ipv6_unicast"]
+route_reflector_client = true
+graceful_restart = false
 
 [[neighbors]]
 address = "10.0.0.2"
@@ -19657,6 +19681,7 @@ hold_time = 90
         );
         let (event_tx, event_rx) = mpsc::channel::<ConfigEvent>(8);
         let (_replace_tx, replace_rx) = mpsc::unbounded_channel::<Box<Config>>();
+        let actor_config = config.clone();
         tokio::spawn(crate::reload::run_config_bridge(
             event_rx,
             replace_rx,
@@ -19677,6 +19702,7 @@ hold_time = 90
             rib_tx.clone(),
             None,
         );
+        mgr.current_config = actor_config;
         let peer_addr: IpAddr = Self::PEER.parse().unwrap();
         insert_test_managed_peer_with_asn(
             &mut mgr,
@@ -19802,6 +19828,7 @@ hold_time = 90
                         hold_time: 90,
                         ..Default::default()
                     }),
+                    intent: None,
                 },
             )),
         )
@@ -19809,6 +19836,321 @@ hold_time = 90
         .expect("add_neighbor must answer, not hang")
         .map(|_| ())
     }
+
+    #[expect(
+        clippy::default_trait_access,
+        reason = "the API crate does not re-export prost_types::FieldMask"
+    )]
+    async fn add_presence_neighbor(
+        &self,
+        config: rustbgpd_api::proto::NeighborConfig,
+        paths: &[&str],
+    ) -> Result<(), tonic::Status> {
+        use rustbgpd_api::proto::neighbor_service_server::NeighborService as _;
+
+        let mut intent = rustbgpd_api::proto::NeighborCreateIntent {
+            config: Some(config),
+            override_mask: Some(Default::default()),
+        };
+        intent.override_mask.as_mut().unwrap().paths =
+            paths.iter().map(|path| (*path).to_string()).collect();
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            self.service.add_neighbor(tonic::Request::new(
+                rustbgpd_api::proto::AddNeighborRequest {
+                    config: None,
+                    intent: Some(intent),
+                },
+            )),
+        )
+        .await
+        .expect("presence-aware add must answer, not hang")
+        .map(|_| ())
+    }
+
+    async fn session_history(&self) -> Vec<rustbgpd_api::peer_types::SessionLifecycleEvent> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.peer_mgr_tx
+            .send(PeerManagerCommand::QuerySessionEventHistory {
+                peer: None,
+                event_types: BTreeSet::new(),
+                limit: 0,
+                reply: reply_tx,
+            })
+            .await
+            .unwrap();
+        reply_rx.await.unwrap()
+    }
+
+    async fn runtime_config(&self) -> Config {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.peer_mgr_tx
+            .send(PeerManagerCommand::RuntimeConfigSnapshot { reply: reply_tx })
+            .await
+            .unwrap();
+        let snapshot = reply_rx.await.unwrap().unwrap();
+        Config::load_toml_with_diagnostics(&snapshot.toml, "actor runtime snapshot").unwrap()
+    }
+}
+
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one scenario verifies raw, resolved, persisted, actor, and reload parity"
+)]
+async fn presence_create_preserves_raw_inheritance_over_disk_actor_and_reload() {
+    const INHERITED: &str = "10.0.0.9";
+    const MASKED: &str = "10.0.0.10";
+    const IPV6_DEFAULT: &str = "2001:db8::9";
+    const RR_CLIENT: &str = "10.0.0.14";
+    let rig = PersistenceRig::start();
+    assert!(
+        Config::load_with_diagnostics(rig.config_path.to_str().unwrap())
+            .unwrap()
+            .peer_groups
+            .contains_key("ix-members")
+    );
+    assert!(
+        rig.runtime_config()
+            .await
+            .peer_groups
+            .contains_key("ix-members")
+    );
+
+    rig.add_presence_neighbor(
+        rustbgpd_api::proto::NeighborConfig {
+            address: INHERITED.into(),
+            remote_asn: 65009,
+            peer_group: "ix-members".into(),
+            ..Default::default()
+        },
+        &[],
+    )
+    .await
+    .unwrap();
+    let inherited = rig.peer(INHERITED).await.unwrap();
+    assert_eq!(
+        inherited.families,
+        vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)]
+    );
+    assert!(inherited.route_server_client && inherited.per_client_best);
+    assert_eq!(
+        inherited.local_role,
+        Some(rustbgpd_wire::BgpRole::RouteServer)
+    );
+    assert!(inherited.strict_role && inherited.add_path_receive && inherited.add_path_send);
+    assert_eq!(inherited.add_path_send_max, 4);
+    assert_eq!(inherited.paths_limit_receive_max, 8);
+
+    rig.add_presence_neighbor(
+        rustbgpd_api::proto::NeighborConfig {
+            address: MASKED.into(),
+            remote_asn: 65010,
+            peer_group: "ix-members".into(),
+            families: vec!["ipv6_unicast".into()],
+            ..Default::default()
+        },
+        &[
+            "families",
+            "route_server_client",
+            "per_client_best",
+            "strict_role",
+            "add_path_receive",
+            "add_path_send",
+            "add_path_send_max",
+            "paths_limit_receive_max",
+        ],
+    )
+    .await
+    .unwrap();
+    let masked = rig.peer(MASKED).await.unwrap();
+    assert_eq!(masked.families, vec![(Afi::Ipv6, Safi::Unicast)]);
+    assert!(!masked.route_server_client && !masked.per_client_best && !masked.strict_role);
+    assert!(!masked.add_path_receive && !masked.add_path_send);
+
+    rig.add_presence_neighbor(
+        rustbgpd_api::proto::NeighborConfig {
+            address: IPV6_DEFAULT.into(),
+            remote_asn: 65011,
+            ..Default::default()
+        },
+        &[],
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        rig.peer(IPV6_DEFAULT).await.unwrap().families,
+        vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)],
+        "presence-aware IPv6 omission must reach the resolver, not legacy IPv4 materialization"
+    );
+    rig.add_presence_neighbor(
+        rustbgpd_api::proto::NeighborConfig {
+            address: RR_CLIENT.into(),
+            remote_asn: 65001,
+            peer_group: "rr-clients".into(),
+            ..Default::default()
+        },
+        &[],
+    )
+    .await
+    .unwrap();
+    let rr = rig.peer(RR_CLIENT).await.unwrap();
+    assert!(rr.route_reflector_client);
+    assert_eq!(rr.families, vec![(Afi::Ipv6, Safi::Unicast)]);
+
+    let disk = Config::load_with_diagnostics(rig.config_path.to_str().unwrap()).unwrap();
+    let actor = rig.runtime_config().await;
+    for snapshot in [&disk, &actor] {
+        let raw = snapshot
+            .neighbors
+            .iter()
+            .find(|neighbor| neighbor.address == INHERITED)
+            .unwrap();
+        assert!(raw.families.is_empty());
+        assert_eq!(raw.route_server_client, None);
+        assert_eq!(raw.per_client_best, None);
+        assert_eq!(raw.ttl_security, None);
+        assert_eq!(raw.graceful_restart, None);
+        assert_eq!(raw.role, None);
+        assert_eq!(raw.strict_role, None);
+        assert_eq!(raw.add_path, None);
+        let effective = snapshot.resolve_neighbor(raw).unwrap();
+        assert!(effective.transport_config.ttl_security);
+        assert!(!effective.transport_config.peer.graceful_restart);
+
+        let raw = snapshot
+            .neighbors
+            .iter()
+            .find(|neighbor| neighbor.address == MASKED)
+            .unwrap();
+        assert_eq!(raw.families, vec!["ipv6_unicast"]);
+        assert_eq!(raw.route_server_client, Some(false));
+        assert_eq!(raw.per_client_best, Some(false));
+        assert_eq!(raw.strict_role, Some(false));
+        let add_path = raw.add_path.as_ref().unwrap();
+        assert!(!add_path.receive && !add_path.send);
+        let effective = snapshot.resolve_neighbor(raw).unwrap();
+        assert!(!effective.transport_config.peer.add_path_receive);
+        assert!(!effective.transport_config.peer.add_path_send);
+
+        let raw = snapshot
+            .neighbors
+            .iter()
+            .find(|neighbor| neighbor.address == RR_CLIENT)
+            .unwrap();
+        assert!(raw.families.is_empty());
+        assert_eq!(raw.route_reflector_client, None);
+        assert_eq!(raw.graceful_restart, None);
+        let effective = snapshot.resolve_neighbor(raw).unwrap();
+        assert!(effective.transport_config.route_reflector_client);
+        assert_eq!(
+            effective.transport_config.cluster_id,
+            Some(Ipv4Addr::new(10, 0, 0, 1))
+        );
+        assert!(!effective.transport_config.peer.graceful_restart);
+    }
+}
+
+#[tokio::test]
+async fn presence_create_rejections_leave_no_disk_history_or_live_half_state() {
+    let rig = PersistenceRig::start();
+    let config_before = rig.config_bytes();
+    let history_before = rig.session_history().await;
+
+    let actor_error = rig
+        .add_presence_neighbor(
+            rustbgpd_api::proto::NeighborConfig {
+                address: PersistenceRig::PEER.into(),
+                remote_asn: 65002,
+                ..Default::default()
+            },
+            &[],
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(actor_error.code(), tonic::Code::AlreadyExists);
+    assert_eq!(rig.config_bytes(), config_before);
+    assert_eq!(rig.session_history().await, history_before);
+    assert!(rig.peer(PersistenceRig::PEER).await.is_some());
+
+    let effective_error = rig
+        .add_presence_neighbor(
+            rustbgpd_api::proto::NeighborConfig {
+                address: "10.0.0.12".into(),
+                remote_asn: 65012,
+                peer_group: "ix-members".into(),
+                ..Default::default()
+            },
+            &["route_server_client"],
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(effective_error.code(), tonic::Code::InvalidArgument);
+    assert!(
+        effective_error.message().contains("per_client_best"),
+        "{effective_error}"
+    );
+    assert!(rig.peer("10.0.0.12").await.is_none());
+    assert_eq!(rig.config_bytes(), config_before);
+    assert_eq!(rig.session_history().await, history_before);
+
+    if !rig.seal_config_dir() {
+        return;
+    }
+    let persistence_error = rig
+        .add_presence_neighbor(
+            rustbgpd_api::proto::NeighborConfig {
+                address: "10.0.0.13".into(),
+                remote_asn: 65013,
+                peer_group: "ix-members".into(),
+                ..Default::default()
+            },
+            &[],
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        persistence_error.code(),
+        tonic::Code::FailedPrecondition,
+        "{persistence_error}"
+    );
+    assert!(rig.peer("10.0.0.13").await.is_none());
+    assert_eq!(rig.config_bytes(), config_before);
+    assert_eq!(rig.session_history().await, history_before);
+    rig.unseal_config_dir();
+    assert!(!rig.staged_temp_path().exists());
+}
+
+#[test]
+fn presence_create_policy_event_keeps_the_legacy_neighbor_sentinel() {
+    let raw = rustbgpd_api::peer_types::PresenceAwareNeighborCreate {
+        address: "10.0.0.9".parse().unwrap(),
+        interface: None,
+        remote_asn: 65009,
+        description: None,
+        peer_group: None,
+        hold_time: None,
+        min_hold_time: None,
+        send_hold_time: None,
+        max_prefixes: None,
+        max_prefix_restart_seconds: None,
+        remove_private_as: None,
+        local_role: None,
+        families: None,
+        required_families: None,
+        route_server_client: None,
+        per_client_best: None,
+        strict_role: None,
+        add_path: None,
+    };
+    let event = ConfigEvent::PresenceAwareNeighborAdded {
+        spec: rustbgpd_api::peer_types::NeighborCreateSpec::PresenceAware(Box::new(raw)),
+        ack: None,
+    };
+    assert_eq!(
+        PeerManager::policy_event_details(&event),
+        ("change", "neighbor", String::new(), None)
+    );
 }
 
 /// A `DeleteNeighbor` that cannot persist must return without touching the

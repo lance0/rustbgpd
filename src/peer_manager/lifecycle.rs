@@ -1,8 +1,9 @@
 use std::collections::BTreeSet;
 
 use rustbgpd_api::peer_types::{
-    ConfigEvent, DynamicPeerBounceOutcome, DynamicRangeTarget, OutboundRefreshError, PeerKey,
-    PeerLifecycleError, PeerManagerNeighborConfig, SessionLifecycleEventType, SetGshutError,
+    ConfigEvent, DynamicPeerBounceOutcome, DynamicRangeTarget, NeighborCreateSpec,
+    OutboundRefreshError, PeerKey, PeerLifecycleError, PeerManagerNeighborConfig,
+    SessionLifecycleEventType, SetGshutError,
 };
 use rustbgpd_rib::{RibCommandError, RibUpdate};
 use rustbgpd_transport::{PeerCommand, PeerCommandError};
@@ -482,6 +483,52 @@ impl PeerManager {
     ) -> Result<(), PeerLifecycleError> {
         self.add_peer_with_admin_state(config, sync_config_snapshot, true)
             .await
+    }
+
+    pub(super) async fn runtime_create_peer(
+        &mut self,
+        spec: NeighborCreateSpec,
+    ) -> Result<(), PeerLifecycleError> {
+        let NeighborCreateSpec::PresenceAware(raw) = &spec else {
+            return Err(PeerLifecycleError::Invalid(
+                "runtime create requires a presence-aware neighbor spec".to_string(),
+            ));
+        };
+        let peer = PeerKey::new(raw.address, raw.interface.clone());
+        if self.peers.contains_key(&peer) {
+            return Err(PeerLifecycleError::AlreadyExists(peer));
+        }
+
+        let mut next_config = self.current_config.clone();
+        apply_config_event(
+            &mut next_config,
+            &ConfigEvent::PresenceAwareNeighborAdded { spec, ack: None },
+        )
+        .map_err(|error| PeerLifecycleError::Invalid(error.to_string()))?;
+        let neighbor = next_config
+            .neighbors
+            .iter()
+            .find(|neighbor| {
+                neighbor.address == peer.address.to_string() && neighbor.interface == peer.interface
+            })
+            .ok_or_else(|| {
+                PeerLifecycleError::Internal(format!(
+                    "presence-aware neighbor {peer} missing after snapshot update"
+                ))
+            })?;
+        let resolved = next_config
+            .resolve_neighbor(neighbor)
+            .map_err(|error| PeerLifecycleError::Invalid(error.to_string()))?;
+        let config = Self::peer_manager_config_from_resolved(resolved, false);
+
+        let previous_config = std::mem::replace(&mut self.current_config, next_config);
+        match self.add_peer(config, false).await {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.current_config = previous_config;
+                Err(error)
+            }
+        }
     }
 
     #[expect(

@@ -27,6 +27,7 @@ path = "src/main.rs"
 tonic.workspace = true
 tonic-prost.workspace = true
 prost.workspace = true
+prost-types.workspace = true
 tokio.workspace = true
 clap.workspace = true
 clap_complete.workspace = true

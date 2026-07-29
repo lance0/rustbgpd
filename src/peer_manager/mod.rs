@@ -844,6 +844,10 @@ impl PeerManager {
                             let result = self.add_peer(config, sync_config_snapshot).await;
                             let _ = reply.send(result);
                         }
+                        PeerManagerCommand::RuntimeCreatePeer { spec, reply } => {
+                            let result = self.runtime_create_peer(spec).await;
+                            let _ = reply.send(result);
+                        }
                         PeerManagerCommand::DeletePeer { peer, sync_config_snapshot, reply } => {
                             let result = self.delete_peer(peer, sync_config_snapshot).await;
                             let _ = reply.send(result);

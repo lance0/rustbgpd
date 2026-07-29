@@ -958,6 +958,7 @@ pub async fn add(
                 paths_limit_receive_max: u32::from(opts.paths_limit_receive_max),
                 max_prefix_restart_seconds: opts.max_prefix_restart_seconds,
             }),
+            intent: None,
         })
         .await?;
     output::print_result(

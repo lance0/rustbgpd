@@ -5,8 +5,8 @@ use std::net::IpAddr;
 use rustbgpd_api::peer_types::{
     AddPathDefinition, CatalogMutationError, ConfigEvent, FibTableSnapshot,
     NamedNeighborSetSnapshot, NamedPeerGroupSnapshot, NamedPolicyDefinition, NamedPolicySnapshot,
-    NeighborSetDefinition, PeerGroupDefinition, PolicyAsPathPrependConfig, PolicyChainAssignment,
-    PolicyStatementDefinition,
+    NeighborCreateSpec, NeighborSetDefinition, PeerGroupDefinition, PolicyAsPathPrependConfig,
+    PolicyChainAssignment, PolicyStatementDefinition, PresenceAwareNeighborCreate,
 };
 
 use crate::config::{
@@ -438,6 +438,92 @@ pub(crate) fn catalog_config_error(error: ConfigError) -> CatalogMutationError {
     }
 }
 
+fn presence_aware_neighbor(spec: &NeighborCreateSpec) -> Result<Neighbor, ConfigError> {
+    let NeighborCreateSpec::PresenceAware(raw) = spec else {
+        let NeighborCreateSpec::Legacy(config) = spec else {
+            unreachable!()
+        };
+        return Err(ConfigError::InvalidNeighborConfig {
+            address: config.address.to_string(),
+            field: "runtime_create".to_string(),
+            reason: "presence-aware event requires a presence-aware spec".to_string(),
+        });
+    };
+    Ok(raw_neighbor(raw))
+}
+
+fn raw_neighbor(raw: &PresenceAwareNeighborCreate) -> Neighbor {
+    let family_name = |(afi, safi): &(rustbgpd_wire::Afi, rustbgpd_wire::Safi)| match (afi, safi) {
+        (rustbgpd_wire::Afi::Ipv4, rustbgpd_wire::Safi::Unicast) => "ipv4_unicast".to_string(),
+        (rustbgpd_wire::Afi::Ipv6, rustbgpd_wire::Safi::Unicast) => "ipv6_unicast".to_string(),
+        _ => format!("{afi:?}_{safi:?}"),
+    };
+    Neighbor {
+        address: raw.address.to_string(),
+        interface: raw.interface.clone(),
+        remote_asn: raw.remote_asn,
+        description: raw.description.clone(),
+        peer_group: raw.peer_group.clone(),
+        hold_time: raw.hold_time,
+        min_hold_time: raw.min_hold_time,
+        send_hold_time: raw.send_hold_time,
+        slow_peer_threshold_pct: None,
+        slow_peer_duration: None,
+        slow_peer_isolation: None,
+        max_prefixes: raw.max_prefixes,
+        max_prefixes_ipv4: None,
+        max_prefixes_ipv6: None,
+        max_prefixes_out_ipv4: None,
+        max_prefixes_out_ipv6: None,
+        max_prefix_restart_seconds: raw
+            .max_prefix_restart_seconds
+            .and_then(std::num::NonZeroU32::new),
+        md5_password: None,
+        tcp_ao: None,
+        bfd: None,
+        ttl_security: None,
+        families: raw
+            .families
+            .as_ref()
+            .map(|families| families.iter().map(family_name).collect())
+            .unwrap_or_default(),
+        required_families: raw
+            .required_families
+            .as_ref()
+            .map(|families| families.iter().map(family_name).collect())
+            .unwrap_or_default(),
+        graceful_restart: None,
+        gr_restart_time: None,
+        gr_peer_restart_time_max: None,
+        gr_stale_routes_time: None,
+        llgr_stale_time: None,
+        local_ipv6_nexthop: None,
+        route_reflector_client: None,
+        orr_vantage: None,
+        route_server_client: raw.route_server_client,
+        per_client_best: raw.per_client_best,
+        next_hop_ownership: None,
+        interpret_rfc1997: None,
+        rs_control_communities: None,
+        role: raw.local_role.and_then(wire_role_to_config),
+        strict_role: raw.strict_role,
+        prefix_orf_receive: None,
+        disable_ipv4_unicast: None,
+        remove_private_as: raw.remove_private_as.clone(),
+        add_path: raw.add_path.as_ref().map(|add_path| AddPathConfig {
+            receive: add_path.receive,
+            send: add_path.send,
+            send_max: add_path.send_max,
+            receive_max: add_path.receive_max,
+        }),
+        log_level: None,
+        import_policy: Vec::new(),
+        export_policy: Vec::new(),
+        import_policy_chain: Vec::new(),
+        export_policy_chain: Vec::new(),
+    }
+}
+
 /// Apply a config event to a config snapshot and validate the result.
 #[expect(
     clippy::too_many_lines,
@@ -567,6 +653,14 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
                     export_policy_chain: Vec::new(),
                     log_level: None,
                 });
+            }
+        }
+        ConfigEvent::PresenceAwareNeighborAdded { spec, .. } => {
+            let neighbor = presence_aware_neighbor(spec)?;
+            if !config.neighbors.iter().any(|configured| {
+                configured.address == neighbor.address && configured.interface == neighbor.interface
+            }) {
+                config.neighbors.push(neighbor);
             }
         }
         ConfigEvent::NeighborDeleted { peer, .. } => {

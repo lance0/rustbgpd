@@ -5,6 +5,8 @@ package rustbgpd.v1;
 option java_multiple_files = true;
 option java_package = "com.rustbgpd.v1";
 
+import "google/protobuf/field_mask.proto";
+
 // ---------------------------------------------------------------------------
 // Common types
 // ---------------------------------------------------------------------------
@@ -797,7 +799,15 @@ message DeleteDynamicNeighborRequest {
 message DeleteDynamicNeighborResponse {}
 
 message AddNeighborRequest {
+  // Legacy payload. Remains field 1 and outside a oneof for wire compatibility.
   NeighborConfig config = 1;
+  // Presence-aware create payload. New servers require exactly one carrier.
+  NeighborCreateIntent intent = 2;
+}
+
+message NeighborCreateIntent {
+  NeighborConfig config = 1;
+  google.protobuf.FieldMask override_mask = 2;
 }
 
 message AddNeighborResponse {}
