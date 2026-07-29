@@ -1,11 +1,11 @@
 # ADR-0118: Presence-preserving runtime neighbor creation
 
-**Status:** Accepted (implementation pending)
+**Status:** Server implemented; bundled CLI pending
 **Date:** 2026-07-29
 
-> **Design only.** The shipped `AddNeighbor` request and daemon behavior remain
-> legacy until a separate implementation lands. This ADR does not authorize a
-> client to send the presence-aware payload yet.
+> **Server tranche shipped.** The daemon accepts and preserves the
+> presence-aware wrapper. The bundled CLI deliberately remains on the legacy
+> carrier until its explicit negative forms and compatibility diagnostics land.
 
 ## Context
 
@@ -308,16 +308,15 @@ tri-state.
 
 ## Exclusions and documentation fence
 
-This ADR does not implement or document as shipped:
+This server tranche does not implement:
 
-- protobuf, generated API, runtime, persistence, PeerManager, or CLI changes;
+- bundled CLI wrapper construction or explicit negative forms;
 - a new service, package, or v2 RPC;
 - a `oneof` migration for the legacy field;
 - automatic legacy fallback;
 - a broad peer-group or tri-state config redesign;
 - one-off fixes for individual route-server or route-reflector flags.
 
-Until implementation lands, user-facing API/configuration documentation, CLI
-help, examples, release notes, roadmap claims, and the v1 stable-surface digest
-must continue to describe the current legacy behavior. The implementation
-tranche must update those surfaces together with the code and proofs.
+The API/configuration docs and v1 stable-surface digest describe the reviewed
+additive server graph. CLI help and examples remain legacy until the client
+tranche lands; ROADMAP state is intentionally unchanged.

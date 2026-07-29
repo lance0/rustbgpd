@@ -666,7 +666,7 @@ added at runtime.
 
 | RPC | Description |
 |-----|-------------|
-| `AddNeighbor` | Add a peer dynamically (starts session immediately); waits for the atomic config-file update and rolls runtime back on persistence failure |
+| `AddNeighbor` | Add a peer dynamically through the legacy or presence-aware carrier (starts session immediately); waits for the atomic config-file update and leaves no runtime change on persistence failure |
 | `DeleteNeighbor` | Remove a peer and tear down its session; waits for the atomic config-file update and rolls runtime back on persistence failure |
 | `ListNeighbors` | List all peers with session state and counters |
 | `GetNeighborState` | Get detailed state for a single peer |
@@ -680,6 +680,35 @@ added at runtime.
 | `SetGracefulShutdown` | RFC 8326 initiator toggle — attach the `GRACEFUL_SHUTDOWN` community to outbound updates for one peer (or all peers when `address` is empty) and clear with `clear = true` |
 
 ### Add a neighbor
+
+`AddNeighborRequest.config` remains the legacy field 1 payload. The additive
+`intent` wrapper is field 2 and carries an inner `NeighborConfig` plus a
+required `google.protobuf.FieldMask override_mask`. A current server requires
+exactly one carrier. Both, neither, a missing inner config, or a missing mask
+returns `INVALID_ARGUMENT` before persistence or runtime mutation. An old
+server skips wrapper field 2 and rejects the request because legacy field 1 is
+absent; clients must not retry or send both.
+
+The bundled `rbgp neighbor add` command remains legacy-only in this server
+tranche. Direct gRPC clients may use the wrapper now; CLI wrapper construction,
+explicit `--no-*` forms, and old-server error wording remain pending.
+
+The create override mask has a closed top-level path set:
+`families`, `required_families`, `route_server_client`, `per_client_best`,
+`strict_role`, `add_path_receive`, `add_path_send`, `add_path_send_max`, and
+`paths_limit_receive_max`. Wildcards, nested, duplicate, unknown, or partial
+Add-Path paths are rejected. The four Add-Path paths are one atomic block.
+Masked booleans preserve explicit `false`; masked family lists replace
+inherited lists and must be non-empty. Values outside the mask must retain
+their protobuf defaults.
+
+Unmasked fields stay absent in the persisted neighbor and inherit through the
+normal config resolver. This includes peer-group TTL security, Graceful
+Restart, route-reflector mode, prefix ORF, IPv6-only behavior, policies, and
+the complete Add-Path block. With no group and no family override, IPv4
+neighbors resolve to IPv4 unicast while IPv6 neighbors resolve to IPv4 and
+IPv6 unicast. The legacy carrier retains its existing empty-list-to-IPv4 and
+implicit-false behavior.
 
 `NeighborConfig.required_families` must be a subset of `families`; otherwise
 `AddNeighbor` returns `INVALID_ARGUMENT`. Empty inherits a non-empty peer-group

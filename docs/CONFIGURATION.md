@@ -728,6 +728,20 @@ max_tier = "sensitive_read"
 Optional, repeatable. Each entry defines one BGP peer. Omit entirely for a
 dynamic-only deployment where peers are added at runtime via gRPC.
 
+The server-side presence-aware `AddNeighborRequest.intent` carrier persists the
+same raw `[[neighbors]]` intent described here, then resolves it against the
+current peer-group before starting the session. Omitted inheritable fields stay
+absent on disk and in the actor snapshot; masked `false`, non-empty family
+replacement, and an atomic disabled Add-Path block remain explicit across
+restart. Wrapper-only requests require an inner config and FieldMask, and the
+server rejects both/neither carriers and invalid masks before mutation.
+
+The bundled `rbgp neighbor add` command still sends legacy
+`AddNeighborRequest.config` in this tranche. Its historical empty-family and
+implicit-boolean behavior is unchanged; use a direct gRPC wrapper client only
+when presence-preserving creation is required. There is no automatic fallback
+from wrapper to legacy.
+
 | Field                  | Type     | Required | Default | Description                                      |
 |------------------------|----------|----------|---------|--------------------------------------------------|
 | `address`              | string   | yes      | --      | Peer IP address (IPv4 or IPv6)                   |
