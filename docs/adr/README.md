@@ -127,6 +127,7 @@ consequences so future contributors understand *why*, not just *what*.
 | [0116](0116-rfc-9857-sr-policy-state.md) | RFC 9857 SR Policy state in BGP-LS | Accepted (feature implementation demand-gated) | 2026-07-22 |
 | [0117](0117-authenticated-single-hop-bfd-decision.md) | Authenticated single-hop BFD | Accepted (implementation NO-GO; evidence-gated) | 2026-07-22 |
 | [0118](0118-presence-preserving-runtime-neighbor-create.md) | Presence-preserving runtime neighbor creation | Accepted — fully shipped | 2026-07-29 |
+| [0119](0119-rfc-8212-secure-default-config-epoch.md) | RFC 8212 secure-default config epoch | Proposed (v0.62 representation contract; secure-default activation deferred) | 2026-07-29 |
 
 ## Template
 
