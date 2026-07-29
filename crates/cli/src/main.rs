@@ -3871,6 +3871,57 @@ mod tests {
         .unwrap();
     }
 
+    #[tokio::test]
+    async fn test_neighbor_add_boolean_forms_reach_the_presence_wrapper() {
+        // Load-bearing: dropping any positive/negative dispatch mapping leaves
+        // its parsed flag at the protobuf default or outside the mask, making
+        // that exact CLI-to-RPC row red.
+        let server = spawn_mock_server(None).await;
+        let cases = [
+            ("--route-server-client", "route_server_client", true),
+            ("--no-route-server-client", "route_server_client", false),
+            ("--per-client-best", "per_client_best", true),
+            ("--no-per-client-best", "per_client_best", false),
+            ("--strict-role", "strict_role", true),
+            ("--no-strict-role", "strict_role", false),
+        ];
+        for (flag, path, expected) in cases {
+            let args = [
+                "rbgp",
+                "--addr",
+                server.addr.as_str(),
+                "neighbor",
+                "10.0.0.1",
+                "add",
+                "--asn",
+                "65001",
+                flag,
+            ];
+            run(Cli::try_parse_from(args).unwrap(), BINARY_NAME)
+                .await
+                .unwrap();
+            let request = server.state.last_add_neighbor.lock().await.clone().unwrap();
+            assert!(request.config.is_none(), "{flag} used the legacy carrier");
+            let intent = request.intent.unwrap();
+            assert_eq!(intent.override_mask.unwrap().paths, [path], "{flag}");
+            let config = intent.config.unwrap();
+            let actual = match path {
+                "route_server_client" => config.route_server_client,
+                "per_client_best" => config.per_client_best,
+                "strict_role" => config.strict_role,
+                _ => unreachable!(),
+            };
+            assert_eq!(actual, expected, "{flag}");
+        }
+        assert_eq!(
+            server
+                .state
+                .add_neighbor_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            cases.len()
+        );
+    }
+
     #[test]
     fn test_neighbor_add_rejects_opposing_and_forbidden_flags() {
         // Load-bearing: removing any conflict admits one contradictory intent.
