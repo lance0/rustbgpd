@@ -217,7 +217,9 @@ impl App {
 
     pub(crate) fn set_detail_layout(&mut self, logical_rows: usize, page_height: usize) {
         self.detail_page_height = page_height;
-        self.detail_max_scroll = logical_rows.saturating_sub(page_height);
+        self.detail_max_scroll = logical_rows
+            .saturating_sub(page_height)
+            .min(usize::from(u16::MAX));
         self.detail_scroll = self.detail_scroll.min(self.detail_max_scroll);
     }
 
@@ -736,5 +738,16 @@ mod tests {
         app.on_data(snapshot(vec![neighbor("198.51.100.2", 30)]));
         assert_eq!(app.view, View::PeerTable);
         assert_eq!(app.detail_scroll, 0, "peer disappearance resets detail");
+    }
+
+    #[test]
+    fn detail_layout_clamps_scroll_to_renderable_offset() {
+        let mut app = App::new();
+        app.view = View::PeerDetail("198.51.100.1".into());
+        app.set_detail_layout(usize::from(u16::MAX) + 100, 1);
+
+        assert_eq!(app.detail_max_scroll, usize::from(u16::MAX));
+        app.on_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        assert_eq!(app.detail_scroll, usize::from(u16::MAX));
     }
 }
