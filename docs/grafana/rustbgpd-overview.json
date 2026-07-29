@@ -2684,6 +2684,96 @@
           "refId": "B"
         }
       ]
+    },
+    {
+      "id": 62,
+      "type": "timeseries",
+      "title": "RFC 8212 missing policy",
+      "description": "Raw configured-peer state by direction. Zero-valued series remain present while enforcement is off; 1 means the reserved fail-closed policy is installed for that direction.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 161 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "max": 1,
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": { "text": "not missing", "color": "green" },
+                "1": { "text": "missing", "color": "red" }
+              }
+            }
+          ],
+          "custom": { "lineInterpolation": "stepAfter" }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "bgp_rfc8212_missing_import_policy{instance=~\"$instance\",peer=~\"$peer\"}",
+          "legendFormat": "{{peer}} missing import",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "bgp_rfc8212_missing_export_policy{instance=~\"$instance\",peer=~\"$peer\"}",
+          "legendFormat": "{{peer}} missing export",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 63,
+      "type": "timeseries",
+      "title": "Outbound prefix capacity",
+      "description": "Current peer/family usage, finite limit, saturating headroom, and 0/1 blocking state. Limit and headroom are absent when unlimited; cumulative blocked events are intentionally excluded.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 161 },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "decimals": 0, "min": 0 },
+        "overrides": [
+          {
+            "matcher": { "id": "byFrameRefID", "options": "D" },
+            "properties": [
+              { "id": "custom.axisPlacement", "value": "right" },
+              { "id": "custom.lineInterpolation", "value": "stepAfter" },
+              { "id": "max", "value": 1 }
+            ]
+          }
+        ]
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "bgp_outbound_prefix_usage{instance=~\"$instance\",peer=~\"$peer\"}",
+          "legendFormat": "{{peer}} {{family}} usage",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "bgp_outbound_prefix_limit{instance=~\"$instance\",peer=~\"$peer\"}",
+          "legendFormat": "{{peer}} {{family}} limit",
+          "refId": "B"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "bgp_outbound_prefix_headroom{instance=~\"$instance\",peer=~\"$peer\"}",
+          "legendFormat": "{{peer}} {{family}} headroom",
+          "refId": "C"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "bgp_outbound_prefix_blocking{instance=~\"$instance\",peer=~\"$peer\"}",
+          "legendFormat": "{{peer}} {{family}} blocking",
+          "refId": "D"
+        }
+      ]
     }
   ]
 }

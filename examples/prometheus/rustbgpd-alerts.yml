@@ -135,6 +135,45 @@ groups:
             bgp_max_prefix_headroom and eventually trigger Cease / Maximum
             Number of Prefixes Reached.
 
+      - alert: BgpRfc8212MissingImportPolicy
+        expr: bgp_rfc8212_missing_import_policy == 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Peer {{ $labels.peer }} is missing an RFC 8212 import policy"
+          description: >-
+            The RFC 8212 missing-import gauge for {{ $labels.peer }} on
+            {{ $labels.instance }} has remained 1 for 5 minutes; inbound
+            routes are failing closed.
+
+      - alert: BgpRfc8212MissingExportPolicy
+        expr: bgp_rfc8212_missing_export_policy == 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Peer {{ $labels.peer }} is missing an RFC 8212 export policy"
+          description: >-
+            The RFC 8212 missing-export gauge for {{ $labels.peer }} on
+            {{ $labels.instance }} has remained 1 for 5 minutes; outbound
+            routes are failing closed.
+
+      - alert: BgpOutboundPrefixBlocking
+        expr: bgp_outbound_prefix_blocking == 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: >-
+            Outbound prefix blocking for {{ $labels.peer }}
+            ({{ $labels.family }})
+          description: >-
+            The outbound prefix-limit blocking gauge for {{ $labels.peer }}
+            ({{ $labels.family }}) on {{ $labels.instance }} has remained 1
+            for 5 minutes; its advertised view is intentionally below group
+            intent.
+
       - alert: RpkiVrpTableEmpty
         # Series only exist once an RTR cache has delivered data, so
         # this cannot fire on deployments without RPKI configured. An

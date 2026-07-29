@@ -318,6 +318,82 @@ tests:
                 and the remote receiver before the backlog reaches its
                 bound.
 
+  # ── RFC 8212 / outbound prefix-limit state ───────────────────
+  # Load-bearing: each warning is pending at 4m30s and firing at 5m30s.
+  # The RFC matrix separates import-only, export-only, and healthy peers.
+  # Blocking covers sustained, zero, and transient episodes independently.
+  - interval: 30s
+    input_series:
+      - series: 'bgp_rfc8212_missing_import_policy{peer="192.0.2.20", instance="edge1:9179"}'
+        values: "1x14"
+      - series: 'bgp_rfc8212_missing_export_policy{peer="192.0.2.20", instance="edge1:9179"}'
+        values: "0x14"
+      - series: 'bgp_rfc8212_missing_import_policy{peer="192.0.2.21", instance="edge1:9179"}'
+        values: "0x14"
+      - series: 'bgp_rfc8212_missing_export_policy{peer="192.0.2.21", instance="edge1:9179"}'
+        values: "1x14"
+      - series: 'bgp_rfc8212_missing_import_policy{peer="192.0.2.22", instance="edge1:9179"}'
+        values: "0x14"
+      - series: 'bgp_rfc8212_missing_export_policy{peer="192.0.2.22", instance="edge1:9179"}'
+        values: "0x14"
+      - series: 'bgp_outbound_prefix_blocking{peer="192.0.2.30", family="ipv4_unicast", instance="edge1:9179"}'
+        values: "1x14"
+      - series: 'bgp_outbound_prefix_blocking{peer="192.0.2.31", family="ipv6_unicast", instance="edge1:9179"}'
+        values: "0x14"
+      - series: 'bgp_outbound_prefix_blocking{peer="192.0.2.32", family="ipv4_unicast", instance="edge1:9179"}'
+        values: "1 1 1 1 1 1 0x8"
+    alert_rule_test:
+      - eval_time: 4m30s
+        alertname: BgpRfc8212MissingImportPolicy
+        exp_alerts: []
+      - eval_time: 5m30s
+        alertname: BgpRfc8212MissingImportPolicy
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              peer: 192.0.2.20
+              instance: edge1:9179
+            exp_annotations:
+              summary: "Peer 192.0.2.20 is missing an RFC 8212 import policy"
+              description: >-
+                The RFC 8212 missing-import gauge for 192.0.2.20 on
+                edge1:9179 has remained 1 for 5 minutes; inbound routes are
+                failing closed.
+      - eval_time: 4m30s
+        alertname: BgpRfc8212MissingExportPolicy
+        exp_alerts: []
+      - eval_time: 5m30s
+        alertname: BgpRfc8212MissingExportPolicy
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              peer: 192.0.2.21
+              instance: edge1:9179
+            exp_annotations:
+              summary: "Peer 192.0.2.21 is missing an RFC 8212 export policy"
+              description: >-
+                The RFC 8212 missing-export gauge for 192.0.2.21 on
+                edge1:9179 has remained 1 for 5 minutes; outbound routes are
+                failing closed.
+      - eval_time: 4m30s
+        alertname: BgpOutboundPrefixBlocking
+        exp_alerts: []
+      - eval_time: 5m30s
+        alertname: BgpOutboundPrefixBlocking
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              peer: 192.0.2.30
+              family: ipv4_unicast
+              instance: edge1:9179
+            exp_annotations:
+              summary: >-
+                Outbound prefix blocking for 192.0.2.30 (ipv4_unicast)
+              description: >-
+                The outbound prefix-limit blocking gauge for 192.0.2.30
+                (ipv4_unicast) on edge1:9179 has remained 1 for 5 minutes; its
+                advertised view is intentionally below group intent.
+
   # ── RpkiVrpTableEmpty ─────────────────────────────────────────
   - interval: 1m
     input_series:

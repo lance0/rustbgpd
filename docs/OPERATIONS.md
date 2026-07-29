@@ -780,25 +780,29 @@ stuck or daemon rejecting everything" pager.
 
 ### RFC 8212 explicit-policy enforcement
 
-Present only when `[global] ebgp_requires_policy = true` (ADR-0112). Both
-gauges are 0/1 and read from the chain each peer currently has installed, so
-they cannot disagree with the `RFC 8212 Policy` block in `rbgp neighbor <addr>`
-or with the `rbgp doctor` verdict. Series are reaped when the peer is removed.
+Both 0/1 gauges exist for every configured peer, including zero-valued series
+while `[global] ebgp_requires_policy = false` (ADR-0112). They are read from the
+chain each peer currently has installed, so they cannot disagree with the
+`RFC 8212 Policy` block in `rbgp neighbor <addr>` or with the `rbgp doctor`
+verdict. Series are reaped when the peer is removed.
 
 | Metric | What it tells you |
 |--------|-------------------|
-| `bgp_rfc8212_missing_import_policy{peer}` | 1 when this external session has no explicit operator import policy, so the reserved internal deny is installed and no route it announces becomes eligible, in any negotiated family. 0 for iBGP and while enforcement is off |
-| `bgp_rfc8212_missing_export_policy{peer}` | 1 when this external session has no explicit operator export policy, so nothing enters its Adj-RIB-Out in any negotiated family |
+| `bgp_rfc8212_missing_import_policy{peer}` | 1 when this external session has no explicit operator import policy, so the reserved internal deny is installed and no route it announces becomes eligible, in any negotiated family. 0 otherwise, including for iBGP and while enforcement is off |
+| `bgp_rfc8212_missing_export_policy{peer}` | 1 when this external session has no explicit operator export policy, so nothing enters its Adj-RIB-Out in any negotiated family. 0 otherwise, including for iBGP and while enforcement is off |
 
 ```promql
-# Any eBGP peer fail-closed on a missing operator policy.
-max by (peer) (
-  bgp_rfc8212_missing_import_policy or bgp_rfc8212_missing_export_policy
-) > 0
+# Any peer fail-closed on a missing operator policy in either direction.
+(bgp_rfc8212_missing_import_policy
+ + bgp_rfc8212_missing_export_policy) > 0
 ```
 
-Alert on this rather than on readiness: `/readyz` stays green for a healthy
-daemon whose reserved deny is doing exactly what it was configured to do.
+PromQL's bare `or` is a left-biased set union, not a boolean OR of sample
+values; because both directional series have the same labels, it would hide an
+export value of 1 behind an import value of 0. The shipped directional warnings
+use `== 1` with a five-minute hold. Alert on those rather than on readiness:
+`/readyz` stays green for a healthy daemon whose reserved deny is doing exactly
+what it was configured to do.
 
 ### Ingress rejection / route-leak detection
 
