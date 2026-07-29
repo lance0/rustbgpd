@@ -88,9 +88,27 @@ TARGETS = {
         "(rate(bgp_selection_deferral_ledger_overflows_total"
         '{instance=~"$instance"}[$__rate_interval])) > 0'
     ),
+    ("RFC 8212 missing policy", "A"): (
+        'bgp_rfc8212_missing_import_policy{instance=~"$instance",peer=~"$peer"}'
+    ),
+    ("RFC 8212 missing policy", "B"): (
+        'bgp_rfc8212_missing_export_policy{instance=~"$instance",peer=~"$peer"}'
+    ),
+    ("Outbound prefix capacity", "A"): (
+        'bgp_outbound_prefix_usage{instance=~"$instance",peer=~"$peer"}'
+    ),
+    ("Outbound prefix capacity", "B"): (
+        'bgp_outbound_prefix_limit{instance=~"$instance",peer=~"$peer"}'
+    ),
+    ("Outbound prefix capacity", "C"): (
+        'bgp_outbound_prefix_headroom{instance=~"$instance",peer=~"$peer"}'
+    ),
+    ("Outbound prefix capacity", "D"): (
+        'bgp_outbound_prefix_blocking{instance=~"$instance",peer=~"$peer"}'
+    ),
 }
 
-ROUTE_SAFETY_LEGENDS = {
+REQUIRED_LEGENDS = {
     ("Peer administrative / session truth", "A"): "admin {{peer}} {{interface}}",
     ("Peer administrative / session truth", "B"): "session {{peer}} {{interface}}",
     ("Export rejections / malformed UPDATEs", "A"): (
@@ -105,12 +123,23 @@ ROUTE_SAFETY_LEGENDS = {
     ("Selection-deferral exceptional events", "B"): (
         "{{instance}} {{afi_safi}} ledger overflow"
     ),
+    ("RFC 8212 missing policy", "A"): "{{peer}} missing import",
+    ("RFC 8212 missing policy", "B"): "{{peer}} missing export",
+    ("Outbound prefix capacity", "A"): "{{peer}} {{family}} usage",
+    ("Outbound prefix capacity", "B"): "{{peer}} {{family}} limit",
+    ("Outbound prefix capacity", "C"): "{{peer}} {{family}} headroom",
+    ("Outbound prefix capacity", "D"): "{{peer}} {{family}} blocking",
 }
 
 ROUTE_SAFETY_PANELS = {
     "Export rejections / malformed UPDATEs": 0,
     "Selection-deferral state": 8,
     "Selection-deferral exceptional events": 16,
+}
+
+CAPACITY_PANELS = {
+    "RFC 8212 missing policy": (62, 0),
+    "Outbound prefix capacity": (63, 12),
 }
 
 WORKFLOW_PATHS = {
@@ -224,7 +253,7 @@ def main() -> None:
         if actual != expected:
             fail(f"target {key[0]!r}/{key[1]} must equal {expected[0]!r}; got {actual!r}")
 
-    for key, expected in ROUTE_SAFETY_LEGENDS.items():
+    for key, expected in REQUIRED_LEGENDS.items():
         actual = legends.get(key, [])
         if actual != [expected]:
             fail(f"target {key[0]!r}/{key[1]} must use legend {expected!r}; got {actual!r}")
@@ -294,6 +323,70 @@ def main() -> None:
         fail("selection-deferral state must render as nonnegative whole values")
     if selection_defaults.get("custom", {}).get("lineInterpolation") != "stepAfter":
         fail("selection-deferral state must use step interpolation")
+
+    for title, (expected_id, expected_x) in CAPACITY_PANELS.items():
+        panel = next((item for item in panels if item.get("title") == title), None)
+        if panel is None or panel.get("type") != "timeseries":
+            fail(f"{title} must exist as a timeseries panel")
+        if panel.get("id") != expected_id:
+            fail(f"{title} must use panel id {expected_id}")
+        expected_position = {"h": 8, "w": 12, "x": expected_x, "y": 161}
+        if panel.get("gridPos") != expected_position:
+            fail(f"{title} must use compact grid position {expected_position}")
+
+    rfc8212_panel = next(
+        panel for panel in panels if panel.get("title") == "RFC 8212 missing policy"
+    )
+    rfc8212_refs = [target.get("refId") for target in rfc8212_panel.get("targets", [])]
+    if rfc8212_refs != ["A", "B"]:
+        fail("RFC 8212 panel must contain exactly targets A and B")
+    rfc8212_defaults = rfc8212_panel.get("fieldConfig", {}).get("defaults", {})
+    if (
+        rfc8212_defaults.get("decimals") != 0
+        or rfc8212_defaults.get("min") != 0
+        or rfc8212_defaults.get("max") != 1
+    ):
+        fail("RFC 8212 state must be pinned to whole 0..1 values")
+    if rfc8212_defaults.get("custom", {}).get("lineInterpolation") != "stepAfter":
+        fail("RFC 8212 state must use step interpolation")
+    expected_mappings = [
+        {
+            "type": "value",
+            "options": {
+                "0": {"text": "not missing", "color": "green"},
+                "1": {"text": "missing", "color": "red"},
+            },
+        }
+    ]
+    if rfc8212_defaults.get("mappings") != expected_mappings:
+        fail("RFC 8212 state must map 0 to not missing and 1 to missing")
+
+    outbound_panel = next(
+        panel for panel in panels if panel.get("title") == "Outbound prefix capacity"
+    )
+    outbound_refs = [target.get("refId") for target in outbound_panel.get("targets", [])]
+    if outbound_refs != ["A", "B", "C", "D"]:
+        fail("outbound capacity panel must contain exactly targets A through D")
+    if any(
+        "bgp_outbound_prefix_blocked_total" in target.get("expr", "")
+        for target in outbound_panel.get("targets", [])
+    ):
+        fail("outbound capacity panel must exclude the cumulative blocked counter")
+    outbound_defaults = outbound_panel.get("fieldConfig", {}).get("defaults", {})
+    if outbound_defaults.get("decimals") != 0 or outbound_defaults.get("min") != 0:
+        fail("outbound capacity counts must render as nonnegative whole values")
+    expected_overrides = [
+        {
+            "matcher": {"id": "byFrameRefID", "options": "D"},
+            "properties": [
+                {"id": "custom.axisPlacement", "value": "right"},
+                {"id": "custom.lineInterpolation", "value": "stepAfter"},
+                {"id": "max", "value": 1},
+            ],
+        }
+    ]
+    if outbound_panel.get("fieldConfig", {}).get("overrides") != expected_overrides:
+        fail("only outbound blocking target D must use a stepped 0..1 right axis")
 
     try:
         workflow_text = WORKFLOW.read_text(encoding="utf-8")

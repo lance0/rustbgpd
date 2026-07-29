@@ -61,9 +61,9 @@ the next scrape.
 A ready-to-load Prometheus alert-rule pack (session down/flapping,
 empty Adj-RIB-In, max-prefix near-limit and breach, empty RPKI VRP table, event-outbox
 degradation, update-group residue growth, stalled policy transition, a slow
-peer, actor polls above 200ms, exact-export rejection, malformed
-UPDATE disposition, selection-deferral timeout and ledger overflow, and daemon
-down) ships at
+peer, RFC 8212 missing import/export policy, sustained outbound-prefix blocking,
+actor polls above 200ms, exact-export rejection, malformed UPDATE disposition,
+selection-deferral timeout and ledger overflow, and daemon down) ships at
 [`examples/prometheus/rustbgpd-alerts.yml`](../examples/prometheus/rustbgpd-alerts.yml),
 with per-rule unit tests in
 [`rustbgpd-alerts_test.yml`](../examples/prometheus/rustbgpd-alerts_test.yml)
@@ -98,6 +98,13 @@ with per-rule unit tests in
   are intentionally absent for unlimited scopes, and every capacity series is
   absent while the session is down; no-data is therefore distinct from zero
   headroom.
+- **RFC 8212 missing policy** plots both raw directional gauges as 0/1 steps.
+  Both zero-valued series exist for every configured peer even when enforcement
+  is off, and are reaped only when the peer is removed.
+- **Outbound prefix capacity** keeps raw peer/family usage, finite limit,
+  headroom, and blocking state together. Only query D (`blocking`) uses the
+  stepped 0..1 right axis; the cumulative `blocked_total` event counter is
+  intentionally excluded.
 - Outbound queue depth is an absolute gauge of coalesced UPDATE frames, sampled
   at enqueue-batch and writer-drain boundaries. A short convergence spike is
   not itself a slow peer; `bgp_peer_slow` is the daemon's persistent 0/1 state.
@@ -153,12 +160,19 @@ label; changing either raw selection gauge to a rate; removing step
 rendering; dropping `instance` from a route-safety aggregation; weakening any of the six
 label-rich legends; dropping any seeded-series `> 0` filter; or replacing the
 executable workflow step with only a comment.
+It also pins capacity panel IDs 62/63 and their 12-by-8 layout, the six exact
+raw queries and legends, RFC 8212 0/1 mappings and steps, and the query-D-only
+right-axis override.
 
 The slow-peer fixture is red if its `== 1` predicate or five-minute hold is
-changed. The actor fixture is red if `ignoring(le)` is removed, `le="0.2"` is
-moved to `0.5`, `> 0` becomes `>= 0`, raw counters replace `increase`, or
-`job`/`poll_kind` are aggregated away. Its firing observation is in
-`(0.2, 0.5]`; exact-boundary and historical-flat controls remain healthy.
+changed. The RFC 8212 matrix covers import-only, export-only, and healthy peers;
+the outbound-prefix matrix covers sustained, zero, and transient blocking.
+All three new warnings are pending at 4m30s and firing at 5m30s, pinning their
+predicate and five-minute hold. The actor fixture is red if `ignoring(le)` is
+removed, `le="0.2"` is moved to `0.5`, `> 0` becomes `>= 0`, raw counters
+replace `increase`, or `job`/`poll_kind` are aggregated away. Its firing
+observation is in `(0.2, 0.5]`; exact-boundary and historical-flat controls
+remain healthy.
 Each route-safety counter fixture is red if its alert is deleted, its window is
 shortened from 15 to 5 minutes, `increase` becomes a raw counter, or `> 0`
 becomes `> 1`. Malformed UPDATE fixtures cover all three bounded RFC 7606
