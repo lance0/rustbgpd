@@ -27,6 +27,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- SIGHUP now keeps the restart-required dynamic-neighbor admission limit pinned
+  to its startup value while retaining the edited desired value for restart.
+
 - Dormant dynamic-neighbor acceptance is now visible without being mistaken for
   active peers: startup reports configured range counts, empty human
   `rbgp neighbor list` distinguishes configured ranges from a first deploy
