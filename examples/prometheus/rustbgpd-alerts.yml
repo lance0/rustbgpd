@@ -10,11 +10,11 @@
 # from docs/GRAFANA.md (`job_name: rustbgpd`) — adjust the `job` label
 # in RustbgpdDown if yours differs.
 #
-# The daemon does not export a per-peer session-state gauge; session
-# health is derived from the counter pair
-# `bgp_session_established_total` / `bgp_session_flaps_total`
-# (entering Established increments the former, leaving it increments
-# the latter, so an Established peer always reads established = flaps + 1).
+# Current peer health uses the level gauges
+# `bgp_peer_admin_enabled{peer,interface}` and
+# `bgp_peer_session_established{peer,interface}`. The historical
+# `bgp_session_established_total` / `bgp_session_flaps_total` counters remain
+# available for churn and flap-rate analysis.
 # Every `peer` label is the bare neighbor address ("192.0.2.1",
 # "2001:db8::1") in every metric family, so `by (peer)` aggregations and
 # joins across families work without rewriting the label.
@@ -37,21 +37,23 @@ groups:
             unreachable, or `prometheus_addr` is no longer configured.
 
       - alert: BgpSessionNotEstablished
-        # A peer that has left Established and not returned reads
-        # flaps >= established (an Established peer reads
-        # established = flaps + 1). A peer that has never reached
-        # Established since daemon start has neither series and cannot
-        # fire — pair with RustbgpdDown and BgpPeerAdjRibInEmpty.
-        expr: bgp_session_flaps_total >= bgp_session_established_total
+        # Exact configured identity join: catches enabled peers that have never
+        # Established as well as peers that established previously and went
+        # down. Disabled peers and a healthy scoped sibling do not match.
+        expr: >-
+          bgp_peer_admin_enabled == 1
+          and on (instance, peer, interface)
+          bgp_peer_session_established == 0
         for: 2m
         labels:
           severity: critical
         annotations:
           summary: "BGP session to {{ $labels.peer }} not Established"
           description: >-
-            The BGP session to peer {{ $labels.peer }} on
-            {{ $labels.instance }} left Established more than 2 minutes
-            ago and has not re-established.
+            The administratively enabled BGP session to peer
+            {{ $labels.peer }} on interface "{{ $labels.interface }}" at
+            {{ $labels.instance }} has not been Established for more than
+            2 minutes.
 
       - alert: BgpSessionFlapping
         expr: increase(bgp_session_flaps_total[15m]) > 5

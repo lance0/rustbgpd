@@ -92,6 +92,47 @@ impl Drop for MaxPrefixMetricLease {
     }
 }
 
+/// Ownership guard for the current-session truth gauge.
+///
+/// Collision candidates remain inactive until the manager has quiesced the
+/// retiring primary. Dropping an active owner publishes a final zero but keeps
+/// the configured identity present; peer deletion is reaped by `PeerManager`.
+struct SessionEstablishedMetricLease {
+    metrics: BgpMetrics,
+    peer: String,
+    interface: String,
+    active: bool,
+    published: bool,
+}
+
+impl SessionEstablishedMetricLease {
+    fn new(metrics: BgpMetrics, peer: String, interface: String, active: bool) -> Self {
+        Self {
+            metrics,
+            peer,
+            interface,
+            active,
+            published: false,
+        }
+    }
+
+    fn set(&mut self, established: bool) {
+        if self.active {
+            self.metrics
+                .set_peer_session_established(&self.peer, &self.interface, established);
+            self.published = true;
+        }
+    }
+}
+
+impl Drop for SessionEstablishedMetricLease {
+    fn drop(&mut self) {
+        if self.published {
+            self.set(false);
+        }
+    }
+}
+
 /// Runtime for a single BGP peer session.
 ///
 /// Owns the FSM, TCP stream, timers, and read buffer. Runs as a single
@@ -245,6 +286,8 @@ pub(crate) struct PeerSession {
     /// quiesced the old primary, preventing either loser from erasing the
     /// surviving actor's values.
     max_prefix_metric_lease: MaxPrefixMetricLease,
+    /// Active-primary ownership for `bgp_peer_session_established`.
+    session_established_metric_lease: SessionEstablishedMetricLease,
     /// Optional BMP event sender (None when BMP not configured).
     bmp_tx: Option<mpsc::Sender<BmpEvent>>,
     /// A `RouteMonitoring` event for this session was dropped on a full
@@ -1023,6 +1066,12 @@ impl PeerSession {
             peer_label.clone(),
             session_identity.role == SessionRole::Primary,
         );
+        let session_established_metric_lease = SessionEstablishedMetricLease::new(
+            metrics.clone(),
+            peer_label.clone(),
+            config.peer_interface.clone().unwrap_or_default(),
+            session_identity.role == SessionRole::Primary,
+        );
         let export_encoder = Arc::new(SessionExportEncoder::new(SessionExportProfile::initial(
             &config,
             None,
@@ -1064,6 +1113,7 @@ impl PeerSession {
             session_event_tx,
             session_identity,
             max_prefix_metric_lease,
+            session_established_metric_lease,
             bmp_tx,
             bmp_stream_diverged: false,
             bmp_repair_timer: None,
@@ -1172,6 +1222,12 @@ impl PeerSession {
             peer_label.clone(),
             session_identity.role == SessionRole::Primary,
         );
+        let session_established_metric_lease = SessionEstablishedMetricLease::new(
+            metrics.clone(),
+            peer_label.clone(),
+            config.peer_interface.clone().unwrap_or_default(),
+            session_identity.role == SessionRole::Primary,
+        );
         let export_encoder = Arc::new(SessionExportEncoder::new(SessionExportProfile::initial(
             &config,
             stream.local_addr().ok().map(|addr| addr.ip()),
@@ -1225,6 +1281,7 @@ impl PeerSession {
             session_event_tx,
             session_identity,
             max_prefix_metric_lease,
+            session_established_metric_lease,
             bmp_tx,
             bmp_stream_diverged: false,
             bmp_repair_timer: None,

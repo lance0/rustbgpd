@@ -46,7 +46,8 @@ Template variables:
 - **Instance** — Prometheus `instance` label, populated from
   `bgp_rib_outbound_registered_peers` (always exported, even at zero).
 - **Peer** (`$peer`) — the `peer` label, populated from
-  `bgp_session_state_transitions_total`. Every exported metric family
+  `bgp_peer_admin_enabled`, so configured peers appear even before their first
+  FSM transition. Every exported metric family
   identifies a peer the same way, by its bare neighbor address
   (`192.0.2.1`, `2001:db8::1`), so one selector drives every per-peer panel
   and `by (peer)` joins across families match. Supports multiple values
@@ -73,6 +74,13 @@ with per-rule unit tests in
 
 - Counters are plotted with `rate(...[$__rate_interval])`; gauges are
   plotted raw. Single-stats use last-not-null.
+- **Peer administrative / session truth** plots
+  `bgp_peer_admin_enabled{peer,interface}` and
+  `bgp_peer_session_established{peer,interface}` as 0/1 steps. Its interface
+  legends distinguish scoped link-local siblings; unscoped peers carry an
+  empty `interface`. The shipped session-down alert joins these exact labels,
+  so enabled peers that never Established are visible while disabled peers do
+  not page.
 - Exact-export rejection and malformed-UPDATE disposition rates share the
   `$peer` selector, like every other per-peer panel.
   The selection-deferral state panel renders
@@ -108,9 +116,9 @@ with per-rule unit tests in
   boot; rejected reloads also leave the last accepted timestamp unchanged.
 - "Peers registered for distribution" is
   `bgp_rib_outbound_registered_peers` — the closest exported gauge to
-  "currently Established peers". The daemon does not export a per-peer
-  session-state gauge; state history is available via
-  `bgp_session_state_transitions_total`.
+  the distribution-plane count. Current configured-peer health is the
+  administrative/session truth panel above; state history remains available
+  via `bgp_session_state_transitions_total`.
 - Panels for optional subsystems (BFD, BMP, RPKI/ASPA, update groups,
   event outbox, graceful restart) stay empty until the corresponding
   feature is configured; vector metrics only emit series once a label

@@ -51,7 +51,7 @@
           "type": "prometheus",
           "uid": "${datasource}"
         },
-        "query": "label_values(bgp_session_state_transitions_total{instance=~\"$instance\"}, peer)",
+        "query": "label_values(bgp_peer_admin_enabled{instance=~\"$instance\"}, peer)",
         "current": {},
         "includeAll": true,
         "multi": true,
@@ -440,7 +440,7 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 12,
+        "w": 8,
         "x": 0,
         "y": 5
       },
@@ -499,8 +499,8 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 12,
-        "x": 12,
+        "w": 8,
+        "x": 8,
         "y": 5
       },
       "fieldConfig": {
@@ -535,6 +535,69 @@
           "expr": "sum by (peer, to) (rate(bgp_session_state_transitions_total{instance=~\"$instance\",peer=~\"$peer\"}[$__rate_interval]))",
           "legendFormat": "{{peer}} \u2192 {{to}}",
           "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 61,
+      "type": "timeseries",
+      "title": "Peer administrative / session truth",
+      "description": "Exact configured identity truth: administrative intent and active-primary Established state. Interface is empty for unscoped peers.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 5
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "max": 1,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "bgp_peer_admin_enabled{instance=~\"$instance\",peer=~\"$peer\"}",
+          "legendFormat": "admin {{peer}} {{interface}}",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "bgp_peer_session_established{instance=~\"$instance\",peer=~\"$peer\"}",
+          "legendFormat": "session {{peer}} {{interface}}",
+          "refId": "B"
         }
       ]
     },

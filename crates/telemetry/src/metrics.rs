@@ -197,6 +197,8 @@ pub struct BgpMetrics {
     state_transitions: IntCounterVec,
     session_flaps: IntCounterVec,
     session_established: IntCounterVec,
+    peer_admin_enabled: IntGaugeVec,
+    peer_session_established: IntGaugeVec,
     stale_timer_events: IntCounterVec,
 
     // ── BFD (RFC 5880, ADR-0067) ───────────────────────────────────
@@ -451,6 +453,24 @@ impl BgpMetrics {
                 "Total times a BGP session reached Established",
             ),
             &["peer"],
+        )
+        .expect("valid metric definition");
+
+        let peer_admin_enabled = IntGaugeVec::new(
+            Opts::new(
+                "bgp_peer_admin_enabled",
+                "Configured peer administrative intent (1 = enabled, 0 = disabled)",
+            ),
+            &["peer", "interface"],
+        )
+        .expect("valid metric definition");
+
+        let peer_session_established = IntGaugeVec::new(
+            Opts::new(
+                "bgp_peer_session_established",
+                "Active-primary BGP session state (1 = Established, 0 = not Established)",
+            ),
+            &["peer", "interface"],
         )
         .expect("valid metric definition");
 
@@ -1834,6 +1854,12 @@ impl BgpMetrics {
             .register(Box::new(session_established.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(peer_admin_enabled.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(peer_session_established.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(bfd_session_up.clone()))
             .expect("metric not already registered");
         registry
@@ -2301,6 +2327,8 @@ impl BgpMetrics {
             state_transitions,
             session_flaps,
             session_established,
+            peer_admin_enabled,
+            peer_session_established,
             stale_timer_events,
             bfd_session_up,
             bfd_session_flaps_total,
@@ -2484,6 +2512,8 @@ impl BgpMetrics {
         Self::reap_peer_series_from_vec(&self.state_transitions, peer);
         Self::reap_peer_series_from_vec(&self.session_flaps, peer);
         Self::reap_peer_series_from_vec(&self.session_established, peer);
+        Self::reap_peer_series_from_vec(&self.peer_admin_enabled, peer);
+        Self::reap_peer_series_from_vec(&self.peer_session_established, peer);
         Self::reap_peer_series_from_vec(&self.stale_timer_events, peer);
         Self::reap_peer_series_from_vec(&self.bfd_session_up, peer);
         Self::reap_peer_series_from_vec(&self.bfd_session_flaps_total, peer);
@@ -2539,6 +2569,16 @@ impl BgpMetrics {
         // lost, exactly as a bare `with_label_values` racing
         // `remove_label_values` could before the memo existed.
         POLICY_ROUTES_REAP_EPOCH.fetch_add(1, Ordering::Release);
+    }
+
+    /// Remove the exact configured-peer gauge identity.
+    ///
+    /// Unlike [`Self::reap_peer_series`], this preserves a scoped sibling
+    /// with the same link-local address on another interface.
+    pub fn reap_peer_identity_series(&self, peer: &str, interface: &str) {
+        let labels = &[peer, interface];
+        let _ = self.peer_admin_enabled.remove_label_values(labels);
+        let _ = self.peer_session_established.remove_label_values(labels);
     }
 
     /// Remove every series of one Vec metric whose `peer` label equals
@@ -2611,6 +2651,20 @@ impl BgpMetrics {
         if to == "established" {
             self.session_established.with_label_values(&[peer]).inc();
         }
+    }
+
+    /// Publish the authoritative configured administrative intent.
+    pub fn set_peer_admin_enabled(&self, peer: &str, interface: &str, enabled: bool) {
+        self.peer_admin_enabled
+            .with_label_values(&[peer, interface])
+            .set(i64::from(enabled));
+    }
+
+    /// Publish whether the active-primary session is Established.
+    pub fn set_peer_session_established(&self, peer: &str, interface: &str, established: bool) {
+        self.peer_session_established
+            .with_label_values(&[peer, interface])
+            .set(i64::from(established));
     }
 
     /// Set the gNMI dial-out connection gauge for a configured target.
@@ -4472,6 +4526,29 @@ mod tests {
     }
 
     #[test]
+    fn peer_truth_gauges_use_exact_identity_and_empty_unscoped_interface() {
+        let m = BgpMetrics::new();
+        m.set_peer_admin_enabled("192.0.2.1", "", true);
+        m.set_peer_session_established("192.0.2.1", "", false);
+        m.set_peer_admin_enabled("fe80::1", "eth0", true);
+        m.set_peer_session_established("fe80::1", "eth0", true);
+        m.set_peer_admin_enabled("fe80::1", "eth1", false);
+        m.set_peer_session_established("fe80::1", "eth1", false);
+
+        let text = gather_text(&m);
+        assert!(text.contains(r#"bgp_peer_admin_enabled{interface="",peer="192.0.2.1"} 1"#));
+        assert!(text.contains(r#"bgp_peer_session_established{interface="",peer="192.0.2.1"} 0"#));
+        assert!(
+            text.contains(r#"bgp_peer_session_established{interface="eth0",peer="fe80::1"} 1"#)
+        );
+
+        m.reap_peer_identity_series("fe80::1", "eth0");
+        let text = gather_text(&m);
+        assert!(!text.contains(r#"interface="eth0",peer="fe80::1""#));
+        assert!(text.contains(r#"interface="eth1",peer="fe80::1""#));
+    }
+
+    #[test]
     fn exact_export_rejections_use_bounded_labels_and_are_peer_reaped() {
         use crate::reason_labels::ExactExportReason;
 
@@ -5873,6 +5950,8 @@ mod tests {
         // state_transitions + session_flaps + session_established
         m.record_state_transition(peer, "open_confirm", "established");
         m.record_state_transition(peer, "established", "idle");
+        m.set_peer_admin_enabled(peer, "", true);
+        m.set_peer_session_established(peer, "", false);
         m.record_stale_timer_event(peer, "idle", "hold");
         m.record_bfd_state(peer, true, false);
         m.record_bfd_state(peer, false, true); // bfd flap counter
@@ -5954,8 +6033,8 @@ mod tests {
         let m = BgpMetrics::new();
         populate_all_peer_families(&m, "10.0.0.1");
         populate_all_peer_families(&m, "10.0.0.2");
-        // 50 peer-labeled families; state transitions hold two series.
-        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 50);
+        // 52 peer-labeled series; state transitions hold two series.
+        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 52);
 
         m.reap_peer_series("10.0.0.1");
 
@@ -5965,7 +6044,7 @@ mod tests {
             "peer-labeled families not reaped: {leftovers:?}"
         );
         // The other peer's series are untouched.
-        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 50);
+        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 52);
     }
 
     /// Load-bearing finite/unlimited proof: removing either finite gauge
@@ -6209,7 +6288,7 @@ mod tests {
     // `gather()`, so no runtime check can catch one that is added and
     // left unpopulated; this list plus the struct doc comment is the
     // practical ceiling.
-    const PEER_LABELED_FAMILIES: [&str; 49] = [
+    const PEER_LABELED_FAMILIES: [&str; 51] = [
         "bfd_session_flaps_total",
         "bfd_session_up",
         "bgp_as_path_loop_detected_total",
@@ -6236,7 +6315,9 @@ mod tests {
         "bgp_outbound_prefix_limit",
         "bgp_outbound_prefix_usage",
         "bgp_outbound_route_drops_total",
+        "bgp_peer_admin_enabled",
         "bgp_peer_outbound_queue_depth",
+        "bgp_peer_session_established",
         "bgp_peer_slow",
         "bgp_peer_update_group",
         "bgp_policy_routes_total",

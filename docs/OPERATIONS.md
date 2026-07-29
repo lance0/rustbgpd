@@ -643,9 +643,10 @@ Every `peer`-labeled series — session, RIB, policy, max-prefix, BFD, BMP —
 identifies the peer the same way: by its bare neighbor address, `192.0.2.1`
 or `2001:db8::1`, never the transport endpoint's `addr:port`. `sum by (peer)`
 therefore returns one series per peer, and a `by (peer)` join across any two
-families matches. Neighbor identity is unique by address (config validation
-rejects the same IPv6 link-local address on two interfaces), so no peer needs
-the port to be told apart.
+families matches. The current administrative and session-state gauges add the
+configured `interface` (empty for unscoped peers), so exact
+`on (instance, peer, interface)` joins distinguish the same IPv6 link-local
+address configured on multiple interfaces.
 
 ### Per-peer series lifecycle
 
@@ -664,19 +665,29 @@ dashboards see no negative-rate artifacts. Process-global counters and
 families keyed by other identities (AFI/SAFI, VRF, VNI, BMP collector) are
 never removed.
 
+The exact `bgp_peer_admin_enabled{peer,interface}` and
+`bgp_peer_session_established{peer,interface}` identity is removed after its
+session actor terminates, including abort-on-timeout teardown. If a scoped
+sibling shares the bare address, its exact gauge rows and the shared
+bare-address history remain.
+
 ### Health
 
 | Metric | What it tells you |
 |--------|-------------------|
+| `bgp_peer_admin_enabled{peer,interface}` | Authoritative configured administrative intent: 1 enabled, 0 disabled |
+| `bgp_peer_session_established{peer,interface}` | Current active-primary session truth: 1 Established, 0 otherwise |
 | `bgp_session_established_total` | Cumulative sessions that reached Established (per-process counter; resets on restart) |
 | `bgp_session_flaps_total` | Cumulative session flaps |
 | `bgp_session_state_transitions_total` | FSM state transitions |
 
-The current count of Established peers and daemon uptime are read via
-`ControlService.GetHealth` / `rbgp health` (and `GetMetrics`), not a
-Prometheus gauge. `GetHealth` uses the same 200 ms core-actor deadline as
-`/readyz`, but returns peer and route counts and therefore remains an
-authenticated sensitive-read surface.
+The shipped `BgpSessionNotEstablished` alert requires administrative intent 1
+and Established state 0 for the same `(instance, peer, interface)` for two
+minutes. It therefore covers never-established and previously-down peers
+without paging on disabled peers. Flap-rate alerting remains based on
+`bgp_session_flaps_total`. Aggregate Established counts and daemon uptime are
+also available via `ControlService.GetHealth` / `rbgp health`; that RPC uses
+the same 200 ms core-actor deadline as `/readyz`.
 
 ### Routing
 

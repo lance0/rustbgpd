@@ -50,6 +50,10 @@ tests:
   # 192.0.2.4 — Established with prefixes (healthy)
   - interval: 1m
     input_series:
+      - series: 'bgp_peer_admin_enabled{peer="192.0.2.1", interface="", instance="edge1:9179"}'
+        values: "1x30"
+      - series: 'bgp_peer_session_established{peer="192.0.2.1", interface="", instance="edge1:9179"}'
+        values: "0x30"
       - series: 'bgp_session_flaps_total{peer="192.0.2.1", instance="edge1:9179"}'
         values: "1x30"
       - series: 'bgp_session_established_total{peer="192.0.2.1", instance="edge1:9179"}'
@@ -91,9 +95,9 @@ tests:
             exp_annotations:
               summary: "BGP session to 192.0.2.1 not Established"
               description: >-
-                The BGP session to peer 192.0.2.1 on edge1:9179 left
-                Established more than 2 minutes ago and has not
-                re-established.
+                The administratively enabled BGP session to peer
+                192.0.2.1 on interface "" at edge1:9179 has not been
+                Established for more than 2 minutes.
       # Only the churning peer trips the 15-minute flap threshold.
       - eval_time: 16m
         alertname: BgpSessionFlapping
@@ -138,6 +142,88 @@ tests:
                 The session to 2001:db8::2 on edge1:9179 is Established
                 but its Adj-RIB-In has held zero prefixes for 10
                 minutes.
+
+  # Current-truth matrix for BgpSessionNotEstablished. Historical counters
+  # cannot suppress or fabricate the level alert, and interface identity keeps
+  # scoped siblings independent.
+  - interval: 1m
+    input_series:
+      # Enabled and never Established.
+      - series: 'bgp_peer_admin_enabled{peer="192.0.2.10", interface="", instance="edge1:9179"}'
+        values: "1x6"
+      - series: 'bgp_peer_session_established{peer="192.0.2.10", interface="", instance="edge1:9179"}'
+        values: "0x6"
+      # Established previously, now down.
+      - series: 'bgp_peer_admin_enabled{peer="192.0.2.11", interface="", instance="edge1:9179"}'
+        values: "1x6"
+      - series: 'bgp_peer_session_established{peer="192.0.2.11", interface="", instance="edge1:9179"}'
+        values: "0x6"
+      - series: 'bgp_session_established_total{peer="192.0.2.11", instance="edge1:9179"}'
+        values: "1x6"
+      - series: 'bgp_session_flaps_total{peer="192.0.2.11", instance="edge1:9179"}'
+        values: "1x6"
+      # Administratively disabled.
+      - series: 'bgp_peer_admin_enabled{peer="192.0.2.12", interface="", instance="edge1:9179"}'
+        values: "0x6"
+      - series: 'bgp_peer_session_established{peer="192.0.2.12", interface="", instance="edge1:9179"}'
+        values: "0x6"
+      # Healthy Established.
+      - series: 'bgp_peer_admin_enabled{peer="192.0.2.13", interface="", instance="edge1:9179"}'
+        values: "1x6"
+      - series: 'bgp_peer_session_established{peer="192.0.2.13", interface="", instance="edge1:9179"}'
+        values: "1x6"
+      # Recovers before the 2-minute hold expires.
+      - series: 'bgp_peer_admin_enabled{peer="192.0.2.14", interface="", instance="edge1:9179"}'
+        values: "1x6"
+      - series: 'bgp_peer_session_established{peer="192.0.2.14", interface="", instance="edge1:9179"}'
+        values: "0 0 1x4"
+      # Same link-local address on two interfaces: only eth0 is down.
+      - series: 'bgp_peer_admin_enabled{peer="fe80::1", interface="eth0", instance="edge1:9179"}'
+        values: "1x6"
+      - series: 'bgp_peer_session_established{peer="fe80::1", interface="eth0", instance="edge1:9179"}'
+        values: "0x6"
+      - series: 'bgp_peer_admin_enabled{peer="fe80::1", interface="eth1", instance="edge1:9179"}'
+        values: "1x6"
+      - series: 'bgp_peer_session_established{peer="fe80::1", interface="eth1", instance="edge1:9179"}'
+        values: "1x6"
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: BgpSessionNotEstablished
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: BgpSessionNotEstablished
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              peer: 192.0.2.10
+              instance: edge1:9179
+            exp_annotations:
+              summary: "BGP session to 192.0.2.10 not Established"
+              description: >-
+                The administratively enabled BGP session to peer
+                192.0.2.10 on interface "" at edge1:9179 has not been
+                Established for more than 2 minutes.
+          - exp_labels:
+              severity: critical
+              peer: 192.0.2.11
+              instance: edge1:9179
+            exp_annotations:
+              summary: "BGP session to 192.0.2.11 not Established"
+              description: >-
+                The administratively enabled BGP session to peer
+                192.0.2.11 on interface "" at edge1:9179 has not been
+                Established for more than 2 minutes.
+          - exp_labels:
+              severity: critical
+              peer: fe80::1
+              interface: eth0
+              instance: edge1:9179
+            exp_annotations:
+              summary: "BGP session to fe80::1 not Established"
+              description: >-
+                The administratively enabled BGP session to peer
+                fe80::1 on interface "eth0" at edge1:9179 has not been
+                Established for more than 2 minutes.
 
   # ── BgpMaxPrefixLimitExceeded ─────────────────────────────────
   - interval: 1m

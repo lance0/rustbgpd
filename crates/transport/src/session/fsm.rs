@@ -292,6 +292,10 @@ impl PeerSession {
                     self.close_tcp();
                 }
                 Action::StateChanged { old, new } => {
+                    if old == SessionState::Established || new == SessionState::Established {
+                        self.session_established_metric_lease
+                            .set(new == SessionState::Established);
+                    }
                     info!(
                         peer = %self.peer_label,
                         from = old.as_str(),

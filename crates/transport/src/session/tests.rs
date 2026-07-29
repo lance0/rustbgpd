@@ -707,6 +707,27 @@ fn max_prefix_gauge(metrics: &BgpMetrics, name: &str, peer: &str, scope: &str) -
         })
 }
 
+fn peer_truth_gauge(metrics: &BgpMetrics, name: &str, peer: &str, interface: &str) -> Option<f64> {
+    metrics
+        .registry()
+        .gather()
+        .into_iter()
+        .find(|family| family.name() == name)
+        .and_then(|family| {
+            family.get_metric().iter().find_map(|metric| {
+                let has_peer = metric
+                    .get_label()
+                    .iter()
+                    .any(|label| label.name() == "peer" && label.value() == peer);
+                let has_interface = metric
+                    .get_label()
+                    .iter()
+                    .any(|label| label.name() == "interface" && label.value() == interface);
+                (has_peer && has_interface).then(|| metric.get_gauge().value())
+            })
+        })
+}
+
 fn assert_max_prefix_gauge(session: &PeerSession, name: &str, scope: &str, expected: Option<f64>) {
     assert_eq!(
         max_prefix_gauge(&session.metrics, name, &session.peer_label, scope),
@@ -12611,6 +12632,15 @@ async fn collision_candidate_cannot_overwrite_or_reap_primary_capacity_metrics()
     primary
         .process_update(ipv4_announce(v4_prefix(2), 0, false))
         .await;
+    assert_eq!(
+        peer_truth_gauge(
+            &primary.metrics,
+            "bgp_peer_session_established",
+            &primary.peer_label,
+            ""
+        ),
+        Some(1.0)
+    );
 
     let (candidate_client, _candidate_server) = connected_stream_pair().await;
     candidate.test_install_stream(candidate_client);
@@ -12620,9 +12650,29 @@ async fn collision_candidate_cannot_overwrite_or_reap_primary_capacity_metrics()
         .process_update(ipv4_announce(v4_prefix(3), 0, false))
         .await;
     assert_max_prefix_gauge(&primary, "bgp_max_prefix_usage", "aggregate", Some(2.0));
+    assert_eq!(
+        peer_truth_gauge(
+            &primary.metrics,
+            "bgp_peer_session_established",
+            &primary.peer_label,
+            ""
+        ),
+        Some(1.0),
+        "inactive candidate must not overwrite active-primary truth"
+    );
 
     drop(candidate);
     assert_max_prefix_gauge(&primary, "bgp_max_prefix_usage", "aggregate", Some(2.0));
+    assert_eq!(
+        peer_truth_gauge(
+            &primary.metrics,
+            "bgp_peer_session_established",
+            &primary.peer_label,
+            ""
+        ),
+        Some(1.0),
+        "dropping an inactive candidate must not zero active-primary truth"
+    );
 }
 
 /// Load-bearing promoted-actor proof: removing either the activation command's
@@ -12657,6 +12707,16 @@ async fn promoted_collision_candidate_publishes_after_old_primary_quiesces() {
 
     drop(primary);
     assert_max_prefix_gauge(&candidate, "bgp_max_prefix_usage", "aggregate", None);
+    assert_eq!(
+        peer_truth_gauge(
+            &candidate.metrics,
+            "bgp_peer_session_established",
+            &candidate.peer_label,
+            ""
+        ),
+        Some(0.0),
+        "retiring primary must publish zero before ownership transfer"
+    );
     let (reply, done) = oneshot::channel();
     assert_eq!(
         candidate
@@ -12665,6 +12725,16 @@ async fn promoted_collision_candidate_publishes_after_old_primary_quiesces() {
         ControlFlow::Continue(())
     );
     done.await.unwrap();
+    assert_eq!(
+        peer_truth_gauge(
+            &candidate.metrics,
+            "bgp_peer_session_established",
+            &candidate.peer_label,
+            ""
+        ),
+        Some(1.0),
+        "promotion must synchronously publish the candidate FSM snapshot"
+    );
     assert_max_prefix_gauge(&candidate, "bgp_max_prefix_usage", "aggregate", Some(1.0));
     assert_max_prefix_gauge(
         &candidate,

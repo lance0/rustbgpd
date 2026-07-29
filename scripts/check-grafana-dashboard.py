@@ -15,10 +15,16 @@ DASHBOARD = ROOT / "docs/grafana/rustbgpd-overview.json"
 WORKFLOW = ROOT / ".github/workflows/alert-rules.yml"
 
 VARIABLES = {
-    "peer": 'label_values(bgp_session_state_transitions_total{instance=~"$instance"}, peer)',
+    "peer": 'label_values(bgp_peer_admin_enabled{instance=~"$instance"}, peer)',
 }
 
 TARGETS = {
+    ("Peer administrative / session truth", "A"): (
+        'bgp_peer_admin_enabled{instance=~"$instance",peer=~"$peer"}'
+    ),
+    ("Peer administrative / session truth", "B"): (
+        'bgp_peer_session_established{instance=~"$instance",peer=~"$peer"}'
+    ),
     ("Outbound queue by peer", "A"): (
         'bgp_peer_outbound_queue_depth{instance=~"$instance",peer=~"$peer"}'
     ),
@@ -85,6 +91,8 @@ TARGETS = {
 }
 
 ROUTE_SAFETY_LEGENDS = {
+    ("Peer administrative / session truth", "A"): "admin {{peer}} {{interface}}",
+    ("Peer administrative / session truth", "B"): "session {{peer}} {{interface}}",
     ("Export rejections / malformed UPDATEs", "A"): (
         "exact {{instance}} {{peer}} {{family}} {{reason}}"
     ),
@@ -238,6 +246,25 @@ def main() -> None:
         fail("slow-peer state must be pinned to the discrete 0..1 range")
     if slow_defaults.get("custom", {}).get("lineInterpolation") != "stepAfter":
         fail("slow-peer state must use step interpolation")
+
+    truth_panel = next(
+        panel
+        for panel in panels
+        if panel.get("title") == "Peer administrative / session truth"
+    )
+    if truth_panel.get("type") != "timeseries":
+        fail("peer administrative/session truth must use a timeseries panel")
+    if truth_panel.get("gridPos") != {"h": 8, "w": 8, "x": 16, "y": 5}:
+        fail("peer administrative/session truth must remain compact in Session health")
+    truth_defaults = truth_panel.get("fieldConfig", {}).get("defaults", {})
+    if (
+        truth_defaults.get("decimals") != 0
+        or truth_defaults.get("min") != 0
+        or truth_defaults.get("max") != 1
+    ):
+        fail("peer administrative/session truth must be pinned to whole 0..1 values")
+    if truth_defaults.get("custom", {}).get("lineInterpolation") != "stepAfter":
+        fail("peer administrative/session truth must use step interpolation")
 
     route_safety_row = next(
         (panel for panel in panels if panel.get("title") == "Route safety"), None
