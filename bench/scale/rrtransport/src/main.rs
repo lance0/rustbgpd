@@ -1,6 +1,10 @@
 use std::collections::{BTreeSet, HashMap};
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::path::Path;
 use std::sync::Arc;
+use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, ensure, Context, Result};
@@ -28,6 +32,59 @@ const PEERS: usize = 2;
 const PREFIXES: usize = 100;
 const SOURCES: usize = 4;
 const DEADLINE: Duration = Duration::from_secs(20);
+const STARTUP_GATE_TIMEOUT: Duration = Duration::from_secs(10);
+const STARTUP_READY_ENV: &str = "RRTRANSPORT_STARTUP_READY";
+const STARTUP_GO_ENV: &str = "RRTRANSPORT_STARTUP_GO";
+
+fn startup_gate_from_env() -> Result<()> {
+    let ready = std::env::var_os(STARTUP_READY_ENV);
+    let go = std::env::var_os(STARTUP_GO_ENV);
+    match (ready, go) {
+        (None, None) => Ok(()),
+        (Some(ready), Some(go)) => {
+            startup_gate(Path::new(&ready), Path::new(&go), STARTUP_GATE_TIMEOUT)
+        }
+        _ => bail!("{STARTUP_READY_ENV} and {STARTUP_GO_ENV} must be set together"),
+    }
+}
+
+fn startup_gate(ready: &Path, go: &Path, timeout: Duration) -> Result<()> {
+    let executable = std::env::current_exe()
+        .context("resolve rrtransport current executable")?
+        .canonicalize()
+        .context("canonicalize rrtransport current executable")?;
+    let pid = std::process::id();
+    let ready_tmp = ready.with_extension(format!("tmp.{pid}"));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&ready_tmp)
+        .with_context(|| format!("create startup-ready temp file {}", ready_tmp.display()))?;
+    writeln!(file, "{pid}")?;
+    writeln!(file, "{}", executable.display())?;
+    file.sync_all()?;
+    drop(file);
+    if let Err(error) = fs::rename(&ready_tmp, ready) {
+        let _ = fs::remove_file(&ready_tmp);
+        return Err(error).context("publish startup-ready identity");
+    }
+
+    wait_for_startup_release(go, timeout)
+}
+
+fn wait_for_startup_release(go: &Path, timeout: Duration) -> Result<()> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if go.try_exists().context("inspect startup release signal")? {
+            return Ok(());
+        }
+        ensure!(
+            Instant::now() < deadline,
+            "timed out waiting for rrtransport startup release"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+}
 
 #[derive(Default)]
 struct WireStats {
@@ -440,10 +497,61 @@ fn main() -> Result<()> {
             rr1000_support::runtime(12)?.block_on(rr1000::run(output, false))
         }
         [mode, output] if mode == "rrtiny" => {
+            startup_gate_from_env()?;
             rr1000_support::runtime(12)?.block_on(rr1000::run(output, true))
         }
         _ => bail!(
             "usage: rrtransport smoke | rrtransport rr1000 <output-dir> | rrtransport rrtiny <output-dir>"
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn startup_gate_blocks_until_parent_release() {
+        let directory = std::env::temp_dir().join(format!(
+            "rrtransport-startup-gate-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&directory).unwrap();
+        let ready = directory.join("ready");
+        let go = directory.join("go");
+        let ready_for_target = ready.clone();
+        let go_for_target = go.clone();
+        let target = thread::spawn(move || {
+            startup_gate(&ready_for_target, &go_for_target, STARTUP_GATE_TIMEOUT)
+        });
+
+        // Keep the parent's observation bound comfortably inside the target's
+        // release bound so a loaded runner cannot make both expire together.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !ready.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "target did not publish readiness"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            !target.is_finished(),
+            "target advanced before the parent release"
+        );
+        let fields = fs::read_to_string(&ready).unwrap();
+        assert_eq!(fields.lines().count(), 2);
+        assert_eq!(
+            fields.lines().next().unwrap(),
+            std::process::id().to_string()
+        );
+
+        fs::write(&go, b"go\n").unwrap();
+        target.join().unwrap().unwrap();
+        fs::remove_dir_all(directory).unwrap();
     }
 }

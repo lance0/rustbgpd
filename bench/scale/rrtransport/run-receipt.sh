@@ -63,6 +63,7 @@ child_identity() {
   read -r -a stat_fields <<<"$stat_line"
   (( ${#stat_fields[@]} >= 20 )) || return 1
   identity_ppid=${stat_fields[1]}
+  identity_pgrp=${stat_fields[2]}
   identity_starttime=${stat_fields[19]}
 }
 
@@ -223,6 +224,80 @@ launch_supervised() {
   pid=$!
 }
 
+validate_tiny_gate_identity() {
+  local supervisor=$1 expected=$2 ready_pid=$3 ready_exe=$4
+  local expected_exe actual_exe state start_before start_after pgrp_before pgrp_after rss
+  [[ $ready_pid =~ ^[0-9]+$ && $ready_pid == "$supervisor" ]] || return 1
+  kill -0 "$ready_pid" 2>/dev/null || return 1
+  state=$(awk '$1=="State:" {print substr($2,1,1)}' "/proc/$ready_pid/status" 2>/dev/null || true)
+  [[ -n $state && $state != X && $state != Z ]] || return 1
+  child_identity "$ready_pid" || return 1
+  start_before=$identity_starttime
+  pgrp_before=$identity_pgrp
+  expected_exe=$(readlink -f "$expected") || return 1
+  actual_exe=$(readlink -f "/proc/$ready_pid/exe") || return 1
+  rss=$(awk '/VmRSS:/ {print $2}' "/proc/$ready_pid/status") || return 1
+  [[ $rss =~ ^[0-9]+$ ]] || return 1
+  child_identity "$ready_pid" || return 1
+  start_after=$identity_starttime
+  pgrp_after=$identity_pgrp
+  [[ $ready_exe == "$expected_exe" && $actual_exe == "$expected_exe" &&
+    $start_before == "$start_after" && $pgrp_before == "$supervisor" &&
+    $pgrp_after == "$supervisor" ]] || return 1
+  tiny_validated_rss=$rss
+}
+
+await_tiny_startup_gate() {
+  local supervisor=$1 expected=$2 ready=$3 go=$4 receipt=$5
+  local state identity_status=0 rss go_tmp
+  local -a ready_fields=()
+  tiny_gate_reason=startup_timeout
+  tiny_gate_stop=true
+  for _ in {1..1000}; do
+    [[ -s $ready ]] && break
+    state=$(awk '$1=="State:" {print substr($2,1,1)}' \
+      "/proc/$supervisor/status" 2>/dev/null || true)
+    if [[ $state == X || $state == Z ]] || ! kill -0 "$supervisor" 2>/dev/null; then
+      tiny_gate_reason=pre_ready_exit
+      tiny_gate_stop=false
+      return 1
+    fi
+    sleep 0.01
+  done
+  [[ -s $ready ]] || return 1
+  mapfile -t ready_fields <"$ready"
+  if (( ${#ready_fields[@]} != 2 )); then
+    tiny_gate_reason=invalid_ready_record
+    return 1
+  fi
+  ready_pid=${ready_fields[0]}
+  ready_exe=${ready_fields[1]}
+  validate_tiny_gate_identity "$supervisor" "$expected" "$ready_pid" "$ready_exe" ||
+    identity_status=$?
+  if (( identity_status != 0 )); then
+    tiny_gate_reason=identity_rejected
+    return 1
+  fi
+  rss=$tiny_validated_rss
+  (( rss > max_rss )) && max_rss=$rss
+  printf 'sample\t%s\n' "$rss" >>"$receipt/rss.tsv"
+  if ! classify_rss "$rss" "$receipt"; then
+    tiny_gate_reason=rss_ceiling
+    return 1
+  fi
+  go_tmp="$go.tmp.$$"
+  printf 'go\n' >"$go_tmp"
+  mv "$go_tmp" "$go"
+  printf 'startup_gate resolution=release pid=%s process_group=%s initial_rss_kib=%s\n' \
+    "$ready_pid" "$supervisor" "$rss" >>"$receipt/harness.log"
+}
+
+gate_tiny_supervisor() {
+  tiny_gate_reason=gate_wait_failed
+  tiny_gate_stop=true
+  await_tiny_startup_gate "$pid" "$tiny_expected" "$tiny_ready" "$tiny_go" "$receipt"
+}
+
 stop_and_reap() {
   local stop=$1 reason=$2 state message
   if [[ $stop == true ]] && kill -0 "$pid" 2>/dev/null; then
@@ -245,10 +320,88 @@ stop_and_reap() {
   printf '%s\n' "$message" >>"$supervisor_log"
 }
 
+report_tiny_startup_failure() {
+  local receipt=$1 reason=$tiny_gate_reason
+  stop_and_reap "$tiny_gate_stop" "startup_gate_$reason"
+  printf 'startup_gate_failure reason=%s child_status=%s\n' \
+    "$reason" "$attempt_wait_status" | tee -a "$receipt/harness.log" >&2
+  cat "$receipt/harness.log" >&2
+  return 1
+}
+
 fail_supervised_attempt() {
   local reason=$1
   stop_and_reap true "$reason"
   return 1
+}
+
+startup_gate_fixture() {
+  local mode=$1 fixture_dir=$2 wrong_binary result group_pid live_members
+  rm -rf "$fixture_dir"
+  mkdir -p "$fixture_dir/receipt" "$fixture_dir/gate"
+  receipt=$fixture_dir/receipt
+  tiny_ready=$fixture_dir/gate/ready
+  tiny_go=$fixture_dir/gate/go
+  tiny_expected="$root/bench/scale/rrtransport/target/debug/rrtransport"
+  printf 'checkpoint\trss_kib\n' >"$receipt/rss.tsv"
+  max_rss=0
+  case $mode in
+    delayed-expected)
+      # Deliberately exceed the retired wait_exe one-second observation window.
+      # shellcheck disable=SC2016 # Expanded by the fixture's bash.
+      launch_supervised "$receipt/harness.log" env \
+        RRTRANSPORT_STARTUP_READY="$tiny_ready" RRTRANSPORT_STARTUP_GO="$tiny_go" \
+        bash -c 'sleep 1.2; exec "$1" rrtiny "$2"' bash "$tiny_expected" "$receipt"
+      printf '%s\n' "$pid" >"$fixture_dir/group.pid"
+      if ! gate_tiny_supervisor; then
+        report_tiny_startup_failure "$receipt" || true
+        return 1
+      fi
+      if wait "$pid"; then result=0; else result=$?; fi
+      pid=
+      [[ $result == 0 && -s $receipt/phase.json && -e $tiny_go ]]
+      ;;
+    stable-wrong)
+      wrong_binary=$fixture_dir/wrong-rrtransport
+      cp "$tiny_expected" "$wrong_binary"
+      chmod +x "$wrong_binary"
+      # shellcheck disable=SC2016 # Expanded by the fixture's bash.
+      launch_supervised "$receipt/harness.log" env \
+        RRTRANSPORT_STARTUP_READY="$tiny_ready" RRTRANSPORT_STARTUP_GO="$tiny_go" \
+        bash -c 'sleep 1.2; exec "$1" rrtiny "$2"' bash "$wrong_binary" "$receipt"
+      group_pid=$pid
+      printf '%s\n' "$group_pid" >"$fixture_dir/group.pid"
+      if gate_tiny_supervisor; then
+        stop_and_reap true false_green_wrong_executable
+        echo "stable wrong executable was released" >&2
+        return 1
+      fi
+      report_tiny_startup_failure "$receipt" || true
+      printf '%s\n' "$attempt_wait_status" >"$fixture_dir/child.status"
+      [[ $tiny_gate_reason == identity_rejected && ! -e $tiny_go && -z $pid ]]
+      live_members=$(ps -eo pgid=,stat= --no-headers |
+        awk -v group="$group_pid" '$1 == group && $2 !~ /^[XZ]/ {print}')
+      [[ -z $live_members ]]
+      ;;
+    pre-ready-exit)
+      launch_supervised "$receipt/harness.log" bash -c \
+        'sleep 0.05; printf "pre-ready fixture diagnostic\n"; exit 37'
+      printf '%s\n' "$pid" >"$fixture_dir/group.pid"
+      if gate_tiny_supervisor; then
+        stop_and_reap true false_green_pre_ready_exit
+        echo "pre-ready exit was released" >&2
+        return 1
+      fi
+      report_tiny_startup_failure "$receipt" || true
+      printf '%s\n' "$attempt_wait_status" >"$fixture_dir/child.status"
+      [[ $tiny_gate_reason == pre_ready_exit && $attempt_wait_status == 37 &&
+        ! -e $tiny_go && -z $pid ]]
+      ;;
+    *)
+      return 2
+      ;;
+  esac
+  printf '%s\tpass\n' "$mode"
 }
 
 sample_supervisor() {
@@ -513,6 +666,12 @@ case ${1:-} in
     stop_reap_fixture "$2" "$3" "$4"
     exit
     ;;
+  --startup-gate-fixture)
+    [[ $# == 3 ]] || exit 2
+    cargo build --manifest-path "$manifest" --locked
+    startup_gate_fixture "$2" "$3"
+    exit
+    ;;
   --verify-fixture)
     [[ $# == 3 ]] || exit 2
     rm -rf "$3"
@@ -531,9 +690,17 @@ case ${1:-} in
     mkdir -p "$receipt"
     tiny_binary="$root/bench/scale/rrtransport/target/debug/rrtransport"
     printf 'checkpoint\trss_kib\n' >"$receipt/rss.tsv"
-    setsid "$tiny_binary" rrtiny "$receipt" >"$receipt/harness.log" 2>&1 &
-    pid=$!; max_rss=0
-    wait_exe "$pid" "$tiny_binary"
+    tiny_ready=$receipt/.startup-ready
+    tiny_go=$receipt/.startup-go
+    tiny_expected=$tiny_binary
+    launch_supervised "$receipt/harness.log" env \
+      RRTRANSPORT_STARTUP_READY="$tiny_ready" RRTRANSPORT_STARTUP_GO="$tiny_go" \
+      "$tiny_binary" rrtiny "$receipt"
+    max_rss=0
+    if ! gate_tiny_supervisor; then
+      report_tiny_startup_failure "$receipt" || true
+      exit 1
+    fi
     while kill -0 "$pid" 2>/dev/null; do
       rss=$(awk '/VmRSS:/ {print $2}' "/proc/$pid/status" 2>/dev/null || echo 0)
       (( rss > max_rss )) && max_rss=$rss
@@ -548,6 +715,7 @@ case ${1:-} in
       exit 1
     fi
     pid=
+    rm -f "$tiny_ready" "$tiny_go"
     cp "$tiny_binary" "$receipt/rrtransport.bin"
     source_snapshot >"$receipt/source.snapshot"
     cp "$receipt/phase.json" "$receipt/phase.saved"
