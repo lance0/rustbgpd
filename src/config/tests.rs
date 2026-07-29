@@ -3780,6 +3780,23 @@ peer_group = "clients"
     )
 }
 
+fn orr_dynamic_toml(neighbor_fields: &str, dynamic_group_fields: &str) -> String {
+    format!(
+        r#"
+{base}
+
+[peer_groups.dynamic]
+{dynamic_group_fields}
+
+[[dynamic_neighbors]]
+prefix = "10.0.1.0/24"
+peer_group = "dynamic"
+remote_asn = 65001
+"#,
+        base = orr_toml(neighbor_fields, "")
+    )
+}
+
 #[test]
 fn orr_vantage_inherits_from_peer_group() {
     let toml = orr_toml(
@@ -3971,6 +3988,14 @@ fn orr_vantage_without_linkstate_raises_an_advisory() {
     // One line, so a log record stays one record.
     assert!(!text.contains('\n'), "one_line kept a newline: {text}");
 
+    // Static peer-group inheritance raises the identical final advisory.
+    let inherited = parse(&orr_toml(
+        "",
+        "orr_vantage = \"192.0.2.7\"\nroute_reflector_client = true",
+    ))
+    .unwrap();
+    assert_eq!(inherited.advisories(), vec![advisory]);
+
     // Cleared once a neighbor carries the feed.
     let toml = orr_toml(
         "orr_vantage = \"192.0.2.7\"\nroute_reflector_client = true\nfamilies = [\"ipv4_unicast\", \"linkstate\"]",
@@ -3978,6 +4003,44 @@ fn orr_vantage_without_linkstate_raises_an_advisory() {
     );
     let config = parse(&toml).unwrap();
     assert!(config.advisories().is_empty(), "{:?}", config.advisories());
+}
+
+#[test]
+fn orr_advisory_accounts_for_dynamic_peer_group_topology() {
+    // Load-bearing metamorphic matrix: removing dynamic-range enumeration
+    // misses the dynamic-only warning and the dynamic feed, while adding a
+    // static feed to the same dynamic vantage must clear the warning.
+    let vantage = "orr_vantage = \"192.0.2.7\"\nroute_reflector_client = true";
+    let vantage_and_feed = format!("{vantage}\nfamilies = [\"linkstate\"]");
+    let cases = [
+        ("dynamic vantage without feed warns", "", vantage, true),
+        (
+            "dynamic vantage with static feed clears",
+            "families = [\"linkstate\"]",
+            vantage,
+            false,
+        ),
+        (
+            "static vantage with dynamic feed clears",
+            vantage,
+            "families = [\"linkstate\"]",
+            false,
+        ),
+        (
+            "dynamic vantage with dynamic feed clears",
+            "",
+            &vantage_and_feed,
+            false,
+        ),
+    ];
+    for (case, static_fields, dynamic_fields, expected) in cases {
+        let config = parse(&orr_dynamic_toml(static_fields, dynamic_fields)).unwrap();
+        let advisories = config.advisories();
+        let actual = advisories
+            .iter()
+            .any(|advisory| advisory.headline.contains("orr_vantage"));
+        assert_eq!(actual, expected, "{case}: {advisories:?}");
+    }
 }
 
 #[test]
