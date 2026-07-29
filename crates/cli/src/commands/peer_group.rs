@@ -7,6 +7,7 @@
 
 use serde::Serialize;
 
+use crate::commands::neighbor::bare_ip_rpc_address;
 use crate::commands::policy_input::{JsonPeerGroupDefinition, load_json};
 use crate::connection::Connection;
 use crate::error::CliError;
@@ -327,7 +328,7 @@ pub async fn attach(
         PeerGroupServiceClient::with_interceptor(connection.channel(), connection.interceptor());
     client
         .set_neighbor_peer_group(SetNeighborPeerGroupRequest {
-            address: address.to_string(),
+            address: bare_ip_rpc_address(address).to_string(),
             peer_group: group.to_string(),
         })
         .await?;
@@ -344,7 +345,7 @@ pub async fn detach(connection: Connection, address: &str, json: bool) -> Result
         PeerGroupServiceClient::with_interceptor(connection.channel(), connection.interceptor());
     client
         .clear_neighbor_peer_group(ClearNeighborPeerGroupRequest {
-            address: address.to_string(),
+            address: bare_ip_rpc_address(address).to_string(),
         })
         .await?;
     output::print_result(
@@ -476,10 +477,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn attach_captures_request() {
+    async fn attach_scoped_link_local_sends_bare_request() {
         let server = spawn_mock_server(None).await;
         let connection = connect(&server.addr, None).await.unwrap();
-        attach(connection, "10.0.0.2", "transit", true)
+        attach(connection, "fe80::2%eth0", "transit", true)
             .await
             .unwrap();
         let captured = server
@@ -489,15 +490,15 @@ mod tests {
             .await
             .clone()
             .unwrap();
-        assert_eq!(captured.address, "10.0.0.2");
+        assert_eq!(captured.address, "fe80::2");
         assert_eq!(captured.peer_group, "transit");
     }
 
     #[tokio::test]
-    async fn detach_captures_request() {
+    async fn detach_scoped_link_local_sends_bare_request() {
         let server = spawn_mock_server(None).await;
         let connection = connect(&server.addr, None).await.unwrap();
-        detach(connection, "10.0.0.2", true).await.unwrap();
+        detach(connection, "fe80::2%eth0", true).await.unwrap();
         let captured = server
             .state
             .last_clear_neighbor_peer_group
@@ -505,6 +506,6 @@ mod tests {
             .await
             .clone()
             .unwrap();
-        assert_eq!(captured.address, "10.0.0.2");
+        assert_eq!(captured.address, "fe80::2");
     }
 }
