@@ -890,26 +890,44 @@ impl Config {
 
         // Validate RPKI cache server config
         if let Some(ref rpki) = self.rpki {
+            let mut cache_addresses = HashMap::new();
             for (i, server) in rpki.cache_servers.iter().enumerate() {
+                let address = server.address.parse::<SocketAddr>().map_err(|e| {
+                    ConfigError::InvalidRpkiConfig {
+                        reason: format!(
+                            "cache_servers[{i}]: invalid address {:?}: {e}",
+                            server.address
+                        ),
+                    }
+                })?;
+                if let Some(previous) = cache_addresses.insert(address, i) {
+                    return Err(ConfigError::InvalidRpkiConfig {
+                        reason: format!(
+                            "cache_servers[{i}]: duplicate address {:?}; canonical {address} \
+                             matches cache_servers[{previous}]",
+                            server.address
+                        ),
+                    });
+                }
                 if server.refresh_interval == 0 {
                     return Err(ConfigError::InvalidRpkiConfig {
-                        reason: format!("cache_server[{i}]: refresh_interval must be > 0"),
+                        reason: format!("cache_servers[{i}]: refresh_interval must be > 0"),
                     });
                 }
                 if server.retry_interval == 0 {
                     return Err(ConfigError::InvalidRpkiConfig {
-                        reason: format!("cache_server[{i}]: retry_interval must be > 0"),
+                        reason: format!("cache_servers[{i}]: retry_interval must be > 0"),
                     });
                 }
                 if server.expire_interval == 0 {
                     return Err(ConfigError::InvalidRpkiConfig {
-                        reason: format!("cache_server[{i}]: expire_interval must be > 0"),
+                        reason: format!("cache_servers[{i}]: expire_interval must be > 0"),
                     });
                 }
                 if server.expire_interval < server.refresh_interval {
                     return Err(ConfigError::InvalidRpkiConfig {
                         reason: format!(
-                            "cache_server[{i}]: expire_interval ({}) must be >= refresh_interval ({})",
+                            "cache_servers[{i}]: expire_interval ({}) must be >= refresh_interval ({})",
                             server.expire_interval, server.refresh_interval
                         ),
                     });

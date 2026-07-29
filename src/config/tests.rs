@@ -5392,21 +5392,61 @@ address = "127.0.0.1:3323"
 }
 
 #[test]
+fn rpki_cache_address_rejects_hostname_with_index_and_value() {
+    let source = rpki_toml("").replace("127.0.0.1:3323", "rpki.example.com:3323");
+    let err = parse(&source).unwrap_err().to_string();
+    assert!(err.contains("cache_servers[0]"), "{err}");
+    assert!(err.contains(r#""rpki.example.com:3323""#), "{err}");
+}
+
+#[test]
+fn rpki_cache_address_rejects_canonical_duplicate() {
+    let mut source = rpki_toml("").replace("127.0.0.1:3323", "[2001:0db8::1]:3323");
+    source.push_str(
+        r#"
+[[rpki.cache_servers]]
+address = "[2001:db8:0:0:0:0:0:1]:3323"
+"#,
+    );
+    let err = parse(&source).unwrap_err().to_string();
+    assert!(err.contains("cache_servers[1]"), "{err}");
+    assert!(err.contains(r#""[2001:db8:0:0:0:0:0:1]:3323""#), "{err}");
+}
+
+#[test]
+fn rpki_cache_address_accepts_unique_numeric_ipv4_and_ipv6() {
+    let mut source = rpki_toml("");
+    source.push_str(
+        r#"
+[[rpki.cache_servers]]
+address = "[2001:db8::1]:3323"
+"#,
+    );
+    assert!(parse(&source).is_ok());
+}
+
+#[test]
 fn rpki_zero_refresh_interval_rejected() {
-    let err = parse(&rpki_toml("refresh_interval = 0")).unwrap_err();
-    assert!(matches!(err, ConfigError::InvalidRpkiConfig { .. }));
+    let err = parse(&rpki_toml("refresh_interval = 0"))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("cache_servers[0]: refresh_interval"), "{err}");
 }
 
 #[test]
 fn rpki_zero_retry_interval_rejected() {
-    let err = parse(&rpki_toml("retry_interval = 0")).unwrap_err();
-    assert!(matches!(err, ConfigError::InvalidRpkiConfig { .. }));
+    let err = parse(&rpki_toml("retry_interval = 0"))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("cache_servers[0]: retry_interval"), "{err}");
 }
 
 #[test]
 fn rpki_zero_expire_interval_rejected() {
-    let err = parse(&rpki_toml("expire_interval = 0")).unwrap_err();
-    assert!(matches!(err, ConfigError::InvalidRpkiConfig { .. }));
+    let err = parse(&rpki_toml("expire_interval = 0"))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("cache_servers[0]: expire_interval"), "{err}");
 }
 
 #[test]
@@ -5414,8 +5454,9 @@ fn rpki_expire_less_than_refresh_rejected() {
     let err = parse(&rpki_toml(
         "refresh_interval = 3600\nexpire_interval = 1800",
     ))
-    .unwrap_err();
-    assert!(matches!(err, ConfigError::InvalidRpkiConfig { .. }));
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("cache_servers[0]: expire_interval"), "{err}");
 }
 
 #[test]
