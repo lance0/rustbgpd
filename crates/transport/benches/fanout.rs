@@ -41,6 +41,14 @@
 //! outside accumulated time. Its synthetic, unregistered source uses the
 //! production legacy-producer `session_id = 0` compatibility branch.
 //!
+//! `add_path_export_staging` measures one negotiated IPv4-unicast Add-Path
+//! peer's production top-N selection, policy evaluation, private Adj-RIB-Out
+//! staging, exact transport probe, commit, and enqueue. Its 12 rows cross
+//! permit-all/deny-best policy, 8/64/256 candidates, and send_max 1/4.
+//! Candidate replacement and recompute stay outside timing; every pass
+//! alternates a wire-visible MED while fixed LOCAL_PREF values preserve rank.
+//! This ref introduces the instrument, so it makes no performance claim.
+//!
 //! Gated behind `bench-internals`; run with:
 //!   cargo bench -p rustbgpd-transport --features bench-internals --bench fanout
 //!
@@ -61,8 +69,9 @@ use rustbgpd_rib::route::{Route, RouteOrigin};
 use rustbgpd_rib::update::{ExactExportEncoder, OutboundRouteUpdate, RibUpdate};
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_transport::{
-    FanoutBenchExportSnapshotEvidence, fanout_bench_export_encoder,
-    fanout_bench_export_snapshot_evidence, fanout_bench_route_server_export_encoder,
+    FanoutBenchExportSnapshotEvidence, fanout_bench_add_path_export_encoder,
+    fanout_bench_export_encoder, fanout_bench_export_snapshot_evidence,
+    fanout_bench_route_server_export_encoder,
 };
 use rustbgpd_wire::{
     Afi, AsPath, AsPathSegment, Ipv4Prefix, Origin, PathAttribute, Prefix, RpkiValidation, Safi,
@@ -81,6 +90,10 @@ const ADJ_RIB_OUT_GAUGE_PEER_COUNTS: [usize; 5] = [1, 8, 64, 256, 1_000];
 const GROUPED_WITHDRAWAL_PEER_COUNTS: [usize; 4] = [8, 64, 256, 1_000];
 /// Loc-RIB sizes for the late RR-client initial-table join instrument.
 const INITIAL_TABLE_JOIN_ROUTE_COUNTS: [usize; 2] = [4_096, 65_536];
+/// Candidate-set sizes for Add-Path top-N export staging.
+const ADD_PATH_CANDIDATE_COUNTS: [usize; 3] = [8, 64, 256];
+/// Negotiated Add-Path send ceilings exercised by every candidate set.
+const ADD_PATH_SEND_MAXES: [u32; 2] = [1, 4];
 /// Per-peer channel capacity — one pass of `CHANGED` announces fits without
 /// filling (a full channel would divert the peer to the dirty-resync path).
 const CHANNEL_CAP: usize = CHANGED + 8;
@@ -190,6 +203,42 @@ fn community_export_chain(community: u32) -> PolicyChain {
         entries: vec![statement],
         default_action: PolicyAction::Deny,
     }])
+}
+
+fn deny_best_export_chain(best_local_pref: u32) -> PolicyChain {
+    let mut deny = blank_stmt();
+    deny.match_local_pref_ge = Some(best_local_pref);
+    deny.action = PolicyAction::Deny;
+    PolicyChain::new(vec![Policy {
+        entries: vec![deny, blank_stmt()],
+        default_action: PolicyAction::Deny,
+    }])
+}
+
+fn add_path_source(index: usize) -> Ipv4Addr {
+    let index_u32 = u32::try_from(index).expect("benchmark candidate index fits u32");
+    let [_, _, b2, b3] = index_u32.to_be_bytes();
+    Ipv4Addr::new(198, 18, b2, b3)
+}
+
+fn add_path_route(index: usize, candidates: usize, med: u32) -> Route {
+    let mut route = make_route_with_med(add_path_prefix(), med);
+    let source = add_path_source(index);
+    route.peer = IpAddr::V4(source);
+    route.peer_router_id = source;
+    let local_pref =
+        10_000 + u32::try_from(candidates - index).expect("benchmark candidate count fits u32");
+    let mut attributes = typical_attributes();
+    *attributes
+        .iter_mut()
+        .find(|attribute| matches!(attribute, PathAttribute::LocalPref(_)))
+        .expect("benchmark attributes include LOCAL_PREF") = PathAttribute::LocalPref(local_pref);
+    *attributes
+        .iter_mut()
+        .find(|attribute| matches!(attribute, PathAttribute::Med(_)))
+        .expect("benchmark attributes include MED") = PathAttribute::Med(med);
+    route.attributes = Arc::new(attributes);
+    route
 }
 
 fn policy_regroup_routes(count: usize) -> Vec<Route> {
@@ -1132,6 +1181,301 @@ fn bench_initial_table_peer_join(c: &mut Criterion) {
     group.finish();
 }
 
+#[derive(Clone, Copy)]
+enum AddPathPolicy {
+    PermitAll,
+    DenyBest,
+}
+
+impl AddPathPolicy {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::PermitAll => "permit_all",
+            Self::DenyBest => "deny_best",
+        }
+    }
+
+    const fn first_eligible_index(self) -> usize {
+        match self {
+            Self::PermitAll => 0,
+            Self::DenyBest => 1,
+        }
+    }
+}
+
+struct AddPathStagingState {
+    manager: RibManager,
+    receiver: mpsc::Receiver<OutboundRouteUpdate>,
+    candidates: usize,
+    send_max: u32,
+    policy: AddPathPolicy,
+    med: u32,
+}
+
+fn build_add_path_staging(
+    candidates: usize,
+    send_max: u32,
+    policy: AddPathPolicy,
+) -> AddPathStagingState {
+    let (_tx, rx) = mpsc::channel::<RibUpdate>(16);
+    let (_qtx, qrx) = mpsc::channel::<RibUpdate>(16);
+    let mut manager = RibManager::new(
+        rx,
+        qrx,
+        None,
+        Some(Ipv4Addr::new(10, 255, 255, 255)),
+        BgpMetrics::new(),
+    );
+    let best_local_pref =
+        10_000 + u32::try_from(candidates).expect("benchmark candidate count fits u32");
+    let export_policy = match policy {
+        AddPathPolicy::PermitAll => None,
+        AddPathPolicy::DenyBest => Some(deny_best_export_chain(best_local_pref)),
+    };
+    manager.bench_seed_loc_rib(
+        (0..candidates)
+            .map(|index| add_path_route(index, candidates, 40))
+            .collect(),
+    );
+    let mut receiver = manager.bench_register_add_path_peer(
+        export_policy.as_ref(),
+        send_max,
+        4,
+        fanout_bench_add_path_export_encoder(),
+    );
+    let setup = receiver
+        .try_recv()
+        .expect("Add-Path setup must enqueue one route-bearing initial table");
+    assert_add_path_envelope(&setup, candidates, send_max, policy, 40);
+    let eor = receiver
+        .try_recv()
+        .expect("Add-Path setup inventory must be followed by one EoR");
+    assert_add_path_eor(&eor);
+    assert!(
+        matches!(receiver.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+        "Add-Path setup must leave a live channel with no residue"
+    );
+    assert_add_path_receipt(manager.bench_adj_rib_out_fanout_receipt(), send_max);
+    assert_eq!(
+        manager.bench_unicast_candidate_count(add_path_prefix()),
+        candidates,
+        "setup must retain the complete reverse-index candidate inventory"
+    );
+    manager.bench_reset_adj_rib_out_fanout_receipt();
+    AddPathStagingState {
+        manager,
+        receiver,
+        candidates,
+        send_max,
+        policy,
+        med: 40,
+    }
+}
+
+fn add_path_prefix() -> Prefix {
+    Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 7), 32))
+}
+
+fn assert_add_path_eor(update: &OutboundRouteUpdate) {
+    assert!(update.announce.is_empty());
+    assert!(update.withdraw.is_empty());
+    assert_eq!(update.end_of_rib, vec![(Afi::Ipv4, Safi::Unicast)]);
+    assert!(update.refresh_markers.is_empty());
+    assert!(update.next_hop_override.is_empty());
+    assert!(update.flowspec_announce.is_empty());
+    assert!(update.flowspec_withdraw.is_empty());
+    assert!(update.evpn_announce.is_empty());
+    assert!(update.evpn_withdraw.is_empty());
+    assert!(update.bgpls_announce.is_empty());
+    assert!(update.bgpls_withdraw.is_empty());
+    assert!(update.vpn_announce.is_empty());
+    assert!(update.vpn_withdraw.is_empty());
+    assert!(update.labeled_announce.is_empty());
+    assert!(update.labeled_withdraw.is_empty());
+    assert!(update.rtc_announce.is_empty());
+    assert!(update.rtc_withdraw.is_empty());
+    assert!(update.otc_blocked.is_empty());
+    assert!(update.exact_export_snapshot.is_none());
+    assert!(!update.request_refresh_all_negotiated);
+}
+
+fn assert_add_path_envelope(
+    update: &OutboundRouteUpdate,
+    candidates: usize,
+    send_max: u32,
+    policy: AddPathPolicy,
+    med: u32,
+) {
+    let expected_count = usize::try_from(send_max).expect("send_max fits usize");
+    assert_eq!(
+        update.announce.len(),
+        expected_count,
+        "policy must run before the Add-Path cap"
+    );
+    assert!(update.withdraw.is_empty());
+    assert_unicast_only_envelope(update);
+    let expected_path_ids = (1..=send_max).collect::<Vec<_>>();
+    assert_eq!(
+        update
+            .announce
+            .iter()
+            .map(|route| route.path_id)
+            .collect::<Vec<_>>(),
+        expected_path_ids,
+        "eligible Add-Path candidates must receive compact path IDs"
+    );
+    let first = policy.first_eligible_index();
+    let expected_local_prefs = (first..first + expected_count)
+        .map(|index| {
+            10_000 + u32::try_from(candidates - index).expect("benchmark candidate rank fits u32")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        update
+            .announce
+            .iter()
+            .map(Route::local_pref)
+            .collect::<Vec<_>>(),
+        expected_local_prefs,
+        "the top eligible candidates must fill send_max in best-path order"
+    );
+    assert_eq!(
+        update
+            .announce
+            .iter()
+            .map(|route| route.peer)
+            .collect::<Vec<_>>(),
+        (first..first + expected_count)
+            .map(|index| IpAddr::V4(add_path_source(index)))
+            .collect::<Vec<_>>(),
+        "the exact eligible source inventory must fill send_max"
+    );
+    assert!(
+        update.announce.iter().all(|route| {
+            route
+                .attributes
+                .iter()
+                .any(|attribute| *attribute == PathAttribute::Med(med))
+        }),
+        "every measured pass must carry the alternating wire-visible MED"
+    );
+    let snapshot = update
+        .exact_export_snapshot
+        .as_ref()
+        .expect("Add-Path envelope must retain the real transport snapshot");
+    let evidence = fanout_bench_export_snapshot_evidence(snapshot.as_ref())
+        .expect("Add-Path envelope must use the concrete transport snapshot");
+    assert_ne!(evidence.owner_id, 0);
+    assert!(
+        evidence.add_path_ipv4_unicast,
+        "the transport encoder must have negotiated IPv4-unicast Add-Path send"
+    );
+    assert_eq!(
+        evidence.max_message_len,
+        usize::from(rustbgpd_wire::MAX_MESSAGE_LEN)
+    );
+}
+
+fn assert_add_path_receipt(receipt: AdjRibOutFanoutBenchReceipt, send_max: u32) {
+    let send_max = usize::try_from(send_max).expect("send_max fits usize");
+    assert_eq!(receipt.update_groups, 0);
+    assert_eq!(receipt.grouped_peers, 0);
+    assert_eq!(receipt.ungrouped_peers, 1);
+    assert_eq!(receipt.dirty_peers, 0);
+    assert_eq!(receipt.grouped_unicast_routes, 0);
+    assert_eq!(
+        receipt.private_unicast_routes, send_max,
+        "Add-Path must retain a private per-peer inventory"
+    );
+    assert_eq!(receipt.exact_probe_batches, 1);
+    assert_eq!(receipt.exact_probe_candidates, send_max);
+    assert_eq!(receipt.exact_probe_nonzero_encoded_lengths, send_max);
+    assert_eq!(receipt.successful_commits, 1);
+    assert_eq!(receipt.successful_enqueues, 1);
+    assert_eq!(receipt.first_peer_family_values[0], send_max as i64);
+}
+
+fn measure_add_path_staging(
+    iterations: u64,
+    candidates: usize,
+    send_max: u32,
+    policy: AddPathPolicy,
+) -> Duration {
+    let mut state = build_add_path_staging(candidates, send_max, policy);
+    let mut accumulated = Duration::ZERO;
+    for _ in 0..iterations {
+        state.med = if state.med == 50 { 51 } else { 50 };
+        let affected = state.manager.bench_prepare_multipath_replacement(
+            (0..state.candidates)
+                .map(|index| add_path_route(index, state.candidates, state.med))
+                .collect(),
+        );
+        assert_eq!(affected.len(), 1);
+        assert_eq!(
+            state
+                .manager
+                .bench_unicast_candidate_count(add_path_prefix()),
+            state.candidates,
+            "replacement must retain the complete reverse-index candidate inventory"
+        );
+        state.manager.bench_reset_adj_rib_out_fanout_receipt();
+        assert_eq!(
+            state
+                .manager
+                .bench_unicast_candidate_count(add_path_prefix()),
+            state.candidates,
+            "the timed distribution must start with the exact candidate inventory"
+        );
+        let started = Instant::now();
+        state.manager.bench_distribute(&affected);
+        accumulated += started.elapsed();
+        assert_add_path_receipt(
+            state.manager.bench_adj_rib_out_fanout_receipt(),
+            state.send_max,
+        );
+        let update = state
+            .receiver
+            .try_recv()
+            .expect("measured Add-Path pass must enqueue one envelope");
+        assert_add_path_envelope(
+            &update,
+            state.candidates,
+            state.send_max,
+            state.policy,
+            state.med,
+        );
+        assert!(
+            matches!(
+                state.receiver.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ),
+            "draining the measured envelope must leave a live channel with no residue"
+        );
+    }
+    accumulated
+}
+
+fn bench_add_path_export_staging(c: &mut Criterion) {
+    let mut group = c.benchmark_group("add_path_export_staging");
+    for policy in [AddPathPolicy::PermitAll, AddPathPolicy::DenyBest] {
+        for &candidates in &ADD_PATH_CANDIDATE_COUNTS {
+            for &send_max in &ADD_PATH_SEND_MAXES {
+                let parameter = format!("{candidates}/send_max_{send_max}");
+                group.bench_with_input(
+                    BenchmarkId::new(policy.label(), parameter),
+                    &(candidates, send_max),
+                    |bench, &(candidates, send_max)| {
+                        bench.iter_custom(|iterations| {
+                            measure_add_path_staging(iterations, candidates, send_max, policy)
+                        });
+                    },
+                );
+            }
+        }
+    }
+    group.finish();
+}
+
 type PolicyRegroupState = (
     RibManager,
     Vec<mpsc::Receiver<OutboundRouteUpdate>>,
@@ -1340,6 +1684,7 @@ criterion_group!(
     bench_adj_rib_out_family_gauge,
     bench_grouped_withdrawal_fanout,
     bench_initial_table_peer_join,
+    bench_add_path_export_staging,
     bench_policy_regroup_resync,
     bench_ixp_policy_regroup_resync
 );

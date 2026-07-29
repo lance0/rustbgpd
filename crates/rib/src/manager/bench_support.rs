@@ -198,6 +198,52 @@ impl RibManager {
         )
     }
 
+    /// Register one synthetic iBGP RR client with negotiated IPv4-unicast
+    /// Add-Path send. The returned receiver retains the initial-table route
+    /// envelope and `EoR` so the caller can prove the setup inventory before
+    /// measuring a replacement pass.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `send_max` is zero.
+    #[must_use]
+    pub fn bench_register_add_path_peer(
+        &mut self,
+        export_policy: Option<&PolicyChain>,
+        send_max: u32,
+        channel_capacity: usize,
+        exact_export_encoder: Arc<dyn ExactExportEncoder>,
+    ) -> mpsc::Receiver<OutboundRouteUpdate> {
+        assert!(
+            send_max > 0,
+            "Add-Path benchmark requires a nonzero send_max"
+        );
+        let peer = Self::bench_peer_address(0);
+        let session_id = 1;
+        let (tx, rx) = mpsc::channel(channel_capacity);
+        self.pending_peer_export_encoders
+            .insert((peer, session_id), exact_export_encoder);
+        self.handle_peer_up(
+            peer,
+            session_id,
+            64_512,
+            Ipv4Addr::new(192, 0, 2, 1),
+            tx,
+            export_policy.cloned(),
+            vec![(Afi::Ipv4, Safi::Unicast)],
+            false,
+            true,
+            None,
+            false,
+            true,
+            vec![(Afi::Ipv4, Safi::Unicast)],
+            send_max,
+            Vec::new(),
+            Vec::new(),
+        );
+        rx
+    }
+
     #[allow(
         clippy::too_many_arguments,
         reason = "the bench seam keeps each production PeerUp grouping dimension explicit"
@@ -381,6 +427,49 @@ impl RibManager {
             "every benchmark replacement must change its Loc-RIB best"
         );
         changed
+    }
+
+    /// Replace a multi-path prefix's complete candidate inventory without
+    /// distributing it. Unlike the single-best replacement helper, every
+    /// candidate may change while the selected best remains stable.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any replacement's source `AdjRibIn` is absent.
+    #[must_use]
+    pub fn bench_prepare_multipath_replacement(&mut self, routes: Vec<Route>) -> HashSet<Prefix> {
+        let mut by_peer: BTreeMap<IpAddr, Vec<Route>> = BTreeMap::new();
+        let mut affected = HashSet::new();
+        for route in routes {
+            affected.insert(route.prefix);
+            by_peer.entry(route.peer).or_default().push(route);
+        }
+        for (peer, mut routes) in by_peer {
+            let mut peer_affected = HashSet::with_capacity(routes.len());
+            for route in &mut routes {
+                self.attr_intern.intern(&mut route.attributes);
+                peer_affected.insert(route.prefix);
+            }
+            let rib = self
+                .ribs
+                .get_mut(&peer)
+                .expect("benchmark source Adj-RIB-In remains registered");
+            for route in routes {
+                rib.insert(route);
+            }
+            for prefix in &peer_affected {
+                self.register_unicast_announcer(peer, *prefix);
+            }
+            let _ = self.recompute_best_after_announce(peer, &peer_affected);
+        }
+        affected
+    }
+
+    /// Count the production Adj-RIB-In candidates for `prefix` through the
+    /// same reverse-index collector used by Add-Path selection.
+    #[must_use]
+    pub fn bench_unicast_candidate_count(&self, prefix: Prefix) -> usize {
+        Self::unicast_candidates(&self.ribs, &self.unicast_prefix_peers, &prefix).count()
     }
 
     /// Reset the production-path counters immediately before one measured

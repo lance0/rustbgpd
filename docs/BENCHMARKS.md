@@ -579,6 +579,28 @@ a RIB-to-transport dependency cycle. Run it with:
 cargo bench -p rustbgpd-transport --features bench-internals --bench fanout
 ```
 
+The `add_path_export_staging` group is a 12-row instrument for IPv4-unicast
+Add-Path top-N export staging through the production `RibManager` path. It
+crosses `permit_all` and `deny_best` policy with 8, 64, and 256 candidates at
+negotiated `send_max` values 1 and 4. Each measured pass alternates a
+wire-visible MED across the complete candidate set while fixed, distinct
+LOCAL_PREF values preserve ordering; candidate replacement and Loc-RIB
+recompute remain outside accumulated time.
+
+Retained assertions require the exact Add-Path negotiation on the concrete
+transport snapshot, private (not grouped) Adj-RIB-Out inventory, exactly
+`send_max` announcements, compact path IDs `1..=send_max`, and policy-before-cap
+behavior: `deny_best` must skip the highest-LOCAL_PREF candidate and fill the
+ceiling with the next eligible paths. Production receipts additionally require
+one real exact-probe batch with nonzero encoded lengths, one successful commit
+and enqueue, and no dirty-peer or queued residue after draining. This benchmark
+is introduced without an instrument on its parent SHA, so it publishes the
+instrument only and makes no speedup or regression claim. Any future
+performance claim requires a same-SHA control before comparison. Each row has
+one target peer; because negotiated Add-Path uses private per-peer export
+state, this selection/staging work repeats for every Add-Path target in a
+production fleet.
+
 The `grouped_withdrawal_fanout` group measures the common homogeneous
 route-server withdrawal shape that first-advertise and replacement targets do
 not cover. It pre-advertises a fixed inventory of 64 IPv4-unicast routes to one
