@@ -373,9 +373,14 @@ new AFI/SAFI and EVPN dataplane expansion.
 - **Keep authoritative replacement readiness design-gated.** A retained
   heterogeneous reload exposed a 200 ms RIB readiness timeout in the per-peer
   remainder after its grouped cohort committed. [ADR-0111](docs/adr/0111-authoritative-policy-replacement-continuation.md)
-  proposes, but does not authorize, an actor-owned continuation; implementation
-  remains blocked on resumable container ownership and exact-export
-  continuation, not RIB sharding.
+  is Rejected after Gate 1 NO-GO, so the accepted
+  [ADR-0105](docs/adr/0105-grouped-export-policy-transition.md) single cohort
+  plus sequential authoritative remainder remains intentional; the LAN-333
+  campaign remains canceled. Reopen only when a separate, controlled route-
+  storage measurement proves a maintained all-family seek cursor pays for
+  itself on the convergence hot path without regression
+  ([feasibility receipt](docs/perf/authoritative-policy-replacement-cursor-feasibility-2026-07.md));
+  do not implement a partial or unicast-only continuation.
 - **Expose groupability before apply and explain it live.** Config transaction planning now projects
   established-peer update-group membership with exact fallback reasons,
   affected peers/families, shared/private totals, resync scope, and bounded
