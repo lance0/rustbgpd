@@ -249,6 +249,7 @@ class VerifyCampaign(unittest.TestCase):
             "binary_sha256": hashlib.sha256(b"vpn_query_timing").hexdigest(),
         }
         self.write("censor.json", censor)
+        self.mutate("manifest.json", lambda d: d.update(attempts=2))
         (self.root / "allocation.json").unlink()
         lines = (self.root / "host-preflight.tsv").read_text().splitlines()
         def retained_phase(line):
@@ -263,6 +264,19 @@ class VerifyCampaign(unittest.TestCase):
         (self.root / "host-preflight.tsv").write_text("\n".join(kept) + "\n")
         self.assertEqual(VERIFY.verify(self.root)["classification"],
                          "capacity_censored")
+        (self.root / "attempt-2").mkdir()
+        with self.assertRaises(VERIFY.Invalid):
+            VERIFY.verify(self.root)
+        (self.root / "attempt-2").rmdir()
+        for field, value in (("schema", 1), ("censor_phase", ""),
+                             ("censor_phase", "unknown"),
+                             ("censor_phase", "forced_fixture")):
+            original = censor[field]
+            self.mutate("censor.json", lambda d, f=field, v=value: d.update({f: v}))
+            with self.assertRaises(VERIFY.Invalid):
+                VERIFY.verify(self.root)
+            self.mutate("censor.json",
+                        lambda d, f=field, v=original: d.update({f: v}))
 
     def test_provenance_and_preflight_corruption(self):
         self.mutate("manifest.json", lambda d: d.update(source_tree="bad"))

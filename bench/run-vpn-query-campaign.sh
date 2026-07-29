@@ -21,7 +21,7 @@ fi
     exit 2
 }
 output=$1
-if ((!smoke)) && [[ -n ${RUSTBGPD_VPN_QUERY_FORCE_CENSOR:-} ]]; then
+if ((!smoke)) && [[ -v RUSTBGPD_VPN_QUERY_FORCE_CENSOR ]]; then
     echo "RUSTBGPD_VPN_QUERY_FORCE_CENSOR is forbidden for retained campaigns" >&2
     exit 2
 fi
@@ -133,10 +133,6 @@ for attempt in $(seq 1 "$attempts"); do
                     decorate "$raw" "$output/censor.json" "$timing_hash" \
                         "$ordinal" "$repetition" 120 "$attempt"
                     rm "$raw"
-                    python3 - "$output/manifest.json" "$attempt" <<'PY'
-import json, sys
-p=sys.argv[1]; d=json.load(open(p)); d["attempts"]=int(sys.argv[2]); json.dump(d,open(p,"w"),indent=2)
-PY
                     check_provenance
                     python3 "$root/bench/verify-vpn-query-campaign.py" "$output" \
                         --output "$output/classification.json"

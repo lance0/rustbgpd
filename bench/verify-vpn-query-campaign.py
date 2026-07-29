@@ -186,18 +186,21 @@ def verify(directory):
 
     attempts = manifest.get("attempts")
     require(attempts in (1, 2), "campaign permits exactly one attempt and one retry")
+    censor_path = directory / "censor.json"
+    censor = load(censor_path) if censor_path.exists() else None
+    censor_attempt = censor.get("attempt") if censor else attempts
+    require(type(censor_attempt) is int and 1 <= censor_attempt <= attempts,
+            "censor attempt outside requested attempts")
     entries = {p.name: p for p in directory.iterdir() if p.name.startswith("attempt")}
-    expected_attempts = {f"attempt-{n}" for n in range(1, attempts + 1)}
+    expected_attempts = {f"attempt-{n}" for n in range(1, censor_attempt + 1)}
     require(set(entries) == expected_attempts
             and all(path.is_dir() for path in entries.values()),
             "attempt filesystem inventory drift")
     expected_phases = {"build"}
     selected_timings = None
-    for attempt in range(1, attempts + 1):
+    for attempt in range(1, censor_attempt + 1):
         receipt_paths = sorted((directory / f"attempt-{attempt}" / "timing").glob("*.json"))
-        censor_path = directory / "censor.json"
-        if censor_path.exists() and load(censor_path).get("attempt") == attempt:
-            censor = load(censor_path)
+        if censor and censor_attempt == attempt:
             for path, completed in zip(receipt_paths, expected_cells()):
                 verify_receipt(load(path), completed, manifest, attempt)
             expected_phases.update(
@@ -205,6 +208,7 @@ def verify(directory):
                 for ordinal in range(1, len(receipt_paths) + 1)
             )
             require(censor.get("outcome") == "capacity_censored", "invalid censor outcome")
+            require(censor.get("schema") == 2, "censor schema")
             require(censor.get("ordinal") == len(receipt_paths) + 1,
                     "censor must stop the next ordered cell")
             if len(receipt_paths) == 48:
@@ -231,8 +235,11 @@ def verify(directory):
                     "censor source drift")
             require(censor.get("timeout_seconds") == 120, "censor timeout drift")
             require(censor.get("attempt") == attempt, "censor attempt drift")
-            require(isinstance(censor.get("censor_phase"), str), "missing censor phase")
-            require(attempt == attempts, "censor must terminate declared attempts")
+            require(censor.get("censor_phase") in {
+                "seed_send", "barrier_send", "barrier_reply", "service_query",
+                "actor_receipt", "service_receipt",
+            }, "invalid censor phase")
+            require(attempt == censor_attempt, "censor attempt binding")
             require(not (directory / "allocation.json").exists(),
                     "allocation must not run after timeout censor")
             verify_phases(expected_phases)
