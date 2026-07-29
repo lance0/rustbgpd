@@ -1892,9 +1892,13 @@ branch is between features.
   Concentrated in long dispatchers (FSM action loop, EVPN reconcilers,
   `manager/{mod,distribution/*}`, `rpol/{typeck,lower}`, encode/decode match
   arms). Some are honest match-heavy dispatch; this tracks the trend, not a
-  per-PR gate. One concrete win: `metrics.rs::with_registry` carries its own
-  suppression across 275 identical `.expect("valid metric definition")` call
-  sites — a tiny `counter_vec`/`gauge_vec` helper collapses it.
+  per-PR gate. A 2026-07-29 recount of
+  `crates/telemetry/src/metrics.rs::BgpMetrics::with_registry` found 159 metric
+  fields, 159 constructor definitions, and 159 matching explicit registry
+  registrations (plus the feature-gated jemalloc collector), with no live
+  registration defect. A tiny local helper would reduce boilerplate but would
+  not couple those three inventories enough to prevent drift, so that refactor
+  is not justified.
 - [ ] **`#[allow(clippy::too_many_arguments)]` cluster tidy-up.** ~104
   occurrences workspace-wide (2026-07-17; ~39 outside tests) — RIB
   distribution functions, EVPN originators, BFD socket setup. A
@@ -1955,13 +1959,13 @@ branch is between features.
   against their `main` (which already carries the 0.31 dep) — requests the release
   that unblocks this; execute the close-out above if/when any `rtnetlink` 0.22+
   publishes.
-- [ ] **Workspace `cargo doc` warning posture.** CI runs
-  `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --lib --no-deps`; keep that
-  as the standing local pre-flight expectation so broken intra-doc links surface
-  on the developer machine rather than at PR time. `--lib` keeps the root
-  daemon bin out of the doc target set (avoiding the lib/bin same-name collision);
-  Cargo's default job parallelism is intentionally left enabled so rustdoc does
-  not serialize the whole workspace.
+- [x] **Workspace `cargo doc` warning posture.** `.github/workflows/ci.yml` runs
+  `cargo doc --workspace --lib --no-deps` with
+  `RUSTDOCFLAGS="-D warnings"`; keep that as the standing local pre-flight
+  expectation so broken intra-doc links surface on the developer machine rather
+  than at PR time. `--lib` keeps the root daemon bin out of the doc target set
+  (avoiding the lib/bin same-name collision); Cargo's default job parallelism is
+  intentionally left enabled so rustdoc does not serialize the whole workspace.
 - [ ] **Mega-module splits.** The large `src/` modules have been split, and
   `crates/rib/src/manager/distribution.rs` (which had absorbed the BGP-LS/VPN/
   RTC/ORR arcs) is now a directory module with per-family concern submodules.
