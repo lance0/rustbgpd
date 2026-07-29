@@ -1835,7 +1835,14 @@ mod tests {
     async fn create_envelope_rejects_both_neither_and_missing_inner_parts_before_mutation() {
         let (peer_tx, mut peer_rx) = mpsc::channel(4);
         let (rib_tx, _rib_rx) = mpsc::channel(1);
-        let svc = NeighborService::new(65001, AccessMode::ReadWrite, peer_tx, rib_tx, None);
+        let (config_tx, mut config_rx) = mpsc::channel(4);
+        let svc = NeighborService::new(
+            65001,
+            AccessMode::ReadWrite,
+            peer_tx,
+            rib_tx,
+            Some(config_tx),
+        );
         let config = proto::NeighborConfig {
             address: "10.0.0.9".into(),
             remote_asn: 65009,
@@ -1857,6 +1864,7 @@ mod tests {
             let error = svc.add_neighbor(Request::new(request)).await.unwrap_err();
             assert_eq!(error.code(), tonic::Code::InvalidArgument);
             assert!(matches!(peer_rx.try_recv(), Err(TryRecvError::Empty)));
+            assert!(matches!(config_rx.try_recv(), Err(TryRecvError::Empty)));
         }
     }
 
@@ -1893,6 +1901,26 @@ mod tests {
                 .unwrap();
             assert!(parse_presence_aware_create(intent).is_err());
         }
+        for path in ["families", "required_families"] {
+            let intent = intent_request(Some(base.clone()), Some(vec![path]))
+                .intent
+                .unwrap();
+            assert!(parse_presence_aware_create(intent).is_err());
+        }
+        for (families, required_families) in [
+            (vec!["ipv4_unicast".into()], Vec::new()),
+            (Vec::new(), vec!["ipv4_unicast".into()]),
+        ] {
+            let config = proto::NeighborConfig {
+                families,
+                required_families,
+                ..base.clone()
+            };
+            let intent = intent_request(Some(config), Some(Vec::new()))
+                .intent
+                .unwrap();
+            assert!(parse_presence_aware_create(intent).is_err());
+        }
         let mut contradictory = base;
         contradictory.route_server_client = true;
         let intent = intent_request(Some(contradictory), Some(Vec::new()))
@@ -1907,12 +1935,14 @@ mod tests {
             address: "10.0.0.9".into(),
             remote_asn: 65009,
             families: vec!["ipv6_unicast".into()],
+            required_families: vec!["ipv6_unicast".into()],
             ..Default::default()
         };
         let intent = intent_request(
             Some(config),
             Some(vec![
                 "families",
+                "required_families",
                 "route_server_client",
                 "per_client_best",
                 "strict_role",
@@ -1929,6 +1959,10 @@ mod tests {
             panic!("presence-aware parser returned legacy")
         };
         assert_eq!(raw.families, Some(vec![(Afi::Ipv6, Safi::Unicast)]));
+        assert_eq!(
+            raw.required_families,
+            Some(vec![(Afi::Ipv6, Safi::Unicast)])
+        );
         assert_eq!(raw.route_server_client, Some(false));
         assert_eq!(raw.per_client_best, Some(false));
         assert_eq!(raw.strict_role, Some(false));
@@ -1944,12 +1978,13 @@ mod tests {
     }
 
     #[test]
-    fn bundled_cli_remains_explicitly_legacy_only() {
-        let source = include_str!("../../cli/src/commands/neighbor.rs");
-        let add = source.split_once("pub async fn add(").unwrap().1;
-        assert!(add.contains("config: Some(NeighborConfig {"));
-        assert!(add.contains("intent: None,"));
-        assert!(!add.contains("NeighborCreateIntent"));
+    fn adr_index_reports_server_implementation_and_cli_boundary() {
+        let index = include_str!("../../../docs/adr/README.md");
+        assert!(index.contains(
+            "| [0118](0118-presence-preserving-runtime-neighbor-create.md) | \
+             Presence-preserving runtime neighbor creation | \
+             Accepted (server implemented; bundled CLI pending) | 2026-07-29 |"
+        ));
     }
 
     #[tokio::test]

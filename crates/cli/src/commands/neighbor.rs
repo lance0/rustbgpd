@@ -1568,18 +1568,21 @@ mod tests {
         .unwrap();
 
         let request = server.state.last_add_neighbor.lock().await.clone().unwrap();
-        assert!(request.route_server_client);
-        assert_eq!(request.role, "rs");
-        assert!(request.strict_role);
-        assert!(request.add_path_receive);
-        assert!(request.add_path_send);
-        assert_eq!(request.add_path_send_max, 4);
-        assert_eq!(request.paths_limit_receive_max, 3);
-        assert_eq!(request.remote_asn, 65002);
-        assert_eq!(request.min_hold_time, Some(30));
-        assert_eq!(request.required_families, vec!["ipv6_unicast"]);
-        assert_eq!(request.peer_group, "rs-members");
-        assert_eq!(request.max_prefix_restart_seconds, Some(30));
+        assert!(request.config.is_some());
+        assert!(request.intent.is_none());
+        let config = request.config.unwrap();
+        assert!(config.route_server_client);
+        assert_eq!(config.role, "rs");
+        assert!(config.strict_role);
+        assert!(config.add_path_receive);
+        assert!(config.add_path_send);
+        assert_eq!(config.add_path_send_max, 4);
+        assert_eq!(config.paths_limit_receive_max, 3);
+        assert_eq!(config.remote_asn, 65002);
+        assert_eq!(config.min_hold_time, Some(30));
+        assert_eq!(config.required_families, vec!["ipv6_unicast"]);
+        assert_eq!(config.peer_group, "rs-members");
+        assert_eq!(config.max_prefix_restart_seconds, Some(30));
 
         let connection = connect(&server.addr, None).await.unwrap();
         add(
@@ -1611,8 +1614,11 @@ mod tests {
         .unwrap();
 
         let request = server.state.last_add_neighbor.lock().await.clone().unwrap();
-        assert_eq!(request.peer_group, "");
-        assert_eq!(request.max_prefix_restart_seconds, None);
+        assert!(request.config.is_some());
+        assert!(request.intent.is_none());
+        let config = request.config.unwrap();
+        assert_eq!(config.peer_group, "");
+        assert_eq!(config.max_prefix_restart_seconds, None);
     }
 
     /// The zero-peer human output must say what happened AND hand the

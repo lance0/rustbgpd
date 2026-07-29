@@ -81,7 +81,7 @@ pub(crate) struct MockState {
     pub(crate) last_config_apply: Mutex<Option<server_proto::ApplyConfigTransactionRequest>>,
     pub(crate) last_config_confirm: Mutex<Option<server_proto::ConfirmConfigTransactionRequest>>,
     pub(crate) last_config_abort: Mutex<Option<server_proto::AbortConfigTransactionRequest>>,
-    pub(crate) last_add_neighbor: Mutex<Option<server_proto::NeighborConfig>>,
+    pub(crate) last_add_neighbor: Mutex<Option<server_proto::AddNeighborRequest>>,
     pub(crate) last_get_neighbor_state: Mutex<Option<server_proto::GetNeighborStateRequest>>,
     pub(crate) neighbor_comparison: Mutex<Option<server_proto::UpdateGroupComparison>>,
     pub(crate) last_softreset: Mutex<Option<server_proto::SoftResetInRequest>>,
@@ -796,11 +796,11 @@ impl rustbgpd_api::proto::neighbor_service_server::NeighborService for MockNeigh
         &self,
         request: Request<server_proto::AddNeighborRequest>,
     ) -> Result<Response<server_proto::AddNeighborResponse>, Status> {
-        let cfg = request
-            .into_inner()
-            .config
-            .ok_or_else(|| Status::invalid_argument("config required"))?;
-        *self.state.last_add_neighbor.lock().await = Some(cfg);
+        let request = request.into_inner();
+        if request.config.is_none() {
+            return Err(Status::invalid_argument("config required"));
+        }
+        *self.state.last_add_neighbor.lock().await = Some(request);
         Ok(Response::new(server_proto::AddNeighborResponse {}))
     }
 
