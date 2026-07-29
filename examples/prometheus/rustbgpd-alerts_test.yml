@@ -923,3 +923,211 @@ tests:
                 minutes. The family exceeded the bounded identity ledger and
                 used a complete release sweep; inspect table scale and
                 retained-key pressure.
+
+  # ── BgpOutboundRouteDrops ─────────────────────────────────
+  # Load-bearing: the old increment pins 10m versus 5m, the reset then
+  # increment pins reset-safe increase versus delta, and the same-evaluation
+  # increment pins for: 0m. Every firing increment is exactly 1, pinning > 0.
+  # Flat history rejects a raw-counter query; the late evaluation pins recovery.
+  - interval: 1m
+    input_series:
+      - series: 'bgp_outbound_route_drops_total{peer="192.0.2.40", instance="edge1:9179"}'
+        values: "0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1"
+      - series: 'bgp_outbound_route_drops_total{peer="192.0.2.41", instance="edge1:9179"}'
+        values: "0 0 0 0 0 0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1"
+      - series: 'bgp_outbound_route_drops_total{peer="192.0.2.42", instance="edge1:9179"}'
+        values: "10 10 10 10 10 10 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1"
+      - series: 'bgp_outbound_route_drops_total{peer="192.0.2.43", instance="edge1:9179"}'
+        values: "7x22"
+      # A different loss counter must not satisfy the outbound-writer rule.
+      - series: 'bgp_event_outbox_dropped_total{category="route", reason="queue_full", instance="edge1:9179"}'
+        values: "0 0 0 0 0 0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1"
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: BgpOutboundRouteDrops
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: BgpOutboundRouteDrops
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              peer: 192.0.2.40
+              instance: edge1:9179
+            exp_annotations:
+              summary: "Outbound BGP work dropped for 192.0.2.40"
+              description: >-
+                bgp_outbound_route_drops_total for peer 192.0.2.40 on
+                edge1:9179 increased by 1 in the last 10 minutes. Outbound BGP
+                work was lost before reaching the peer writer; inspect the
+                writer, peer, daemon log, and last error to identify the failed
+                path. Once healthy, refresh outbound for a missed advertised
+                view or soft reset inbound for a missed inbound ROUTE-REFRESH
+                request.
+          - exp_labels:
+              severity: critical
+              peer: 192.0.2.41
+              instance: edge1:9179
+            exp_annotations:
+              summary: "Outbound BGP work dropped for 192.0.2.41"
+              description: >-
+                bgp_outbound_route_drops_total for peer 192.0.2.41 on
+                edge1:9179 increased by 1 in the last 10 minutes. Outbound BGP
+                work was lost before reaching the peer writer; inspect the
+                writer, peer, daemon log, and last error to identify the failed
+                path. Once healthy, refresh outbound for a missed advertised
+                view or soft reset inbound for a missed inbound ROUTE-REFRESH
+                request.
+          - exp_labels:
+              severity: critical
+              peer: 192.0.2.42
+              instance: edge1:9179
+            exp_annotations:
+              summary: "Outbound BGP work dropped for 192.0.2.42"
+              description: >-
+                bgp_outbound_route_drops_total for peer 192.0.2.42 on
+                edge1:9179 increased by 1 in the last 10 minutes. Outbound BGP
+                work was lost before reaching the peer writer; inspect the
+                writer, peer, daemon log, and last error to identify the failed
+                path. Once healthy, refresh outbound for a missed advertised
+                view or soft reset inbound for a missed inbound ROUTE-REFRESH
+                request.
+      - eval_time: 21m
+        alertname: BgpOutboundRouteDrops
+        exp_alerts: []
+
+  # ── BgpSendHoldExpired ────────────────────────────────────
+  # Load-bearing: the old increment pins 10m versus 5m, the reset then
+  # increment pins reset-safe increase versus delta, and the same-evaluation
+  # increment pins for: 0m. Every firing increment is exactly 1, pinning > 0.
+  # Flat history and an aged-out expiration must remain quiet.
+  - interval: 1m
+    input_series:
+      - series: 'bgp_send_hold_expirations_total{peer="192.0.2.50", instance="edge1:9179"}'
+        values: "0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1"
+      - series: 'bgp_send_hold_expirations_total{peer="192.0.2.51", instance="edge1:9179"}'
+        values: "0 0 0 0 0 0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1"
+      - series: 'bgp_send_hold_expirations_total{peer="192.0.2.52", instance="edge1:9179"}'
+        values: "10 10 10 10 10 10 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1"
+      - series: 'bgp_send_hold_expirations_total{peer="192.0.2.53", instance="edge1:9179"}'
+        values: "4x22"
+      # Hold re-arms are not send-hold teardown and must not satisfy the rule.
+      - series: 'bgp_hold_timer_rearmed_pending_input_total{peer="192.0.2.54", instance="edge1:9179"}'
+        values: "0 0 0 0 0 0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1"
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: BgpSendHoldExpired
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: BgpSendHoldExpired
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              peer: 192.0.2.50
+              instance: edge1:9179
+            exp_annotations:
+              summary: "Send-hold timer expired for 192.0.2.50"
+              description: >-
+                bgp_send_hold_expirations_total for peer 192.0.2.50 on
+                edge1:9179 increased by 1 in the last 10 minutes. The RFC 9687
+                send-hold timer expired because the peer stopped draining its
+                TCP socket, so rustbgpd tore down the session without a
+                NOTIFICATION; inspect the writer and peer before allowing the
+                session to recover.
+          - exp_labels:
+              severity: critical
+              peer: 192.0.2.51
+              instance: edge1:9179
+            exp_annotations:
+              summary: "Send-hold timer expired for 192.0.2.51"
+              description: >-
+                bgp_send_hold_expirations_total for peer 192.0.2.51 on
+                edge1:9179 increased by 1 in the last 10 minutes. The RFC 9687
+                send-hold timer expired because the peer stopped draining its
+                TCP socket, so rustbgpd tore down the session without a
+                NOTIFICATION; inspect the writer and peer before allowing the
+                session to recover.
+          - exp_labels:
+              severity: critical
+              peer: 192.0.2.52
+              instance: edge1:9179
+            exp_annotations:
+              summary: "Send-hold timer expired for 192.0.2.52"
+              description: >-
+                bgp_send_hold_expirations_total for peer 192.0.2.52 on
+                edge1:9179 increased by 1 in the last 10 minutes. The RFC 9687
+                send-hold timer expired because the peer stopped draining its
+                TCP socket, so rustbgpd tore down the session without a
+                NOTIFICATION; inspect the writer and peer before allowing the
+                session to recover.
+      - eval_time: 21m
+        alertname: BgpSendHoldExpired
+        exp_alerts: []
+
+  # ── BgpEventStreamLagged ──────────────────────────────────
+  # Load-bearing: the old increment pins 10m versus 5m, the reset then
+  # increment pins reset-safe increase versus delta, and the same-evaluation
+  # increment pins for: 0m. Every firing missed count is exactly 1, pinning
+  # > 0. Flat history and aged-out lag stay quiet.
+  - interval: 1m
+    input_series:
+      - series: 'bgp_event_stream_lagged_total{service="watch_events", source="route", instance="edge1:9179"}'
+        values: "0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1"
+      - series: 'bgp_event_stream_lagged_total{service="watch_route_events", source="route", instance="edge2:9179"}'
+        values: "0 0 0 0 0 0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1"
+      - series: 'bgp_event_stream_lagged_total{service="watch_routes", source="route", instance="edge3:9179"}'
+        values: "10 10 10 10 10 10 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1"
+      - series: 'bgp_event_stream_lagged_total{service="watch_events", source="session", instance="edge1:9179"}'
+        values: "9x22"
+      # Subscriber count is live capacity, not evidence of missed events.
+      - series: 'bgp_event_stream_subscribers{service="watch_events", source="route", instance="edge3:9179"}'
+        values: "0 0 0 0 0 0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1"
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: BgpEventStreamLagged
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: BgpEventStreamLagged
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: watch_events
+              source: route
+              instance: edge1:9179
+            exp_annotations:
+              summary: "Live event stream lagged (watch_events/route)"
+              description: >-
+                bgp_event_stream_lagged_total for watch_events consuming route
+                events on edge1:9179 increased by 1 in the last 10 minutes.
+                The live consumer missed events and its incremental view is
+                desynchronized; take a fresh authoritative snapshot for this
+                service and source, then restart the live watch.
+          - exp_labels:
+              severity: warning
+              service: watch_route_events
+              source: route
+              instance: edge2:9179
+            exp_annotations:
+              summary: >-
+                Live event stream lagged (watch_route_events/route)
+              description: >-
+                bgp_event_stream_lagged_total for watch_route_events consuming
+                route events on edge2:9179 increased by 1 in the last 10
+                minutes. The live consumer missed events and its incremental
+                view is desynchronized; take a fresh authoritative snapshot
+                for this service and source, then restart the live watch.
+          - exp_labels:
+              severity: warning
+              service: watch_routes
+              source: route
+              instance: edge3:9179
+            exp_annotations:
+              summary: "Live event stream lagged (watch_routes/route)"
+              description: >-
+                bgp_event_stream_lagged_total for watch_routes consuming route
+                events on edge3:9179 increased by 1 in the last 10 minutes.
+                The live consumer missed events and its incremental view is
+                desynchronized; take a fresh authoritative snapshot for this
+                service and source, then restart the live watch.
+      - eval_time: 21m
+        alertname: BgpEventStreamLagged
+        exp_alerts: []
