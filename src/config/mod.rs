@@ -27,6 +27,7 @@ use rustbgpd_wire::{
     MacAddress, Prefix, RouteDistinguisher, Safi,
 };
 
+pub(crate) use resolution::UnpolicedEbgpBoundary;
 #[allow(
     unused_imports,
     reason = "preserve the crate::config helper path for sibling modules; the binary mirror has no local importer"

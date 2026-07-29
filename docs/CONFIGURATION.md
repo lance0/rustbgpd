@@ -432,10 +432,11 @@ reserved policy names. A `[policy.definitions]` entry or `.rpol` policy using
 either is rejected at load, so the reserved chain can never be shadowed and
 neighbor status and explain output can attribute it unambiguously.
 
-**Before the daemon runs.** `rustbgpd --check` names every eBGP neighbor that
-resolves no explicit policy and the direction(s) it is missing, whether the
-knob is on (that direction will carry no routes) or off (that direction is
-unfiltered). It stays a warning — a permit-all route server is a legitimate
+**Before the daemon runs.** `rustbgpd --check` names every configured eBGP
+neighbor or dynamic range lacking explicit policy and names the missing
+directions. Dynamic rows also name the prefix, peer group, and fixed or
+`any AS`; the knob decides whether a missing direction carries no routes or is
+unfiltered. It stays a warning — a permit-all route server is a legitimate
 configuration — but a check with warnings summarizes as `config VALID, <n>
 WARNINGS — NOT a clean check` rather than `config OK`. The exit code is 0
 either way; add `--strict` (see [deployment.md](deployment.md)) to make any

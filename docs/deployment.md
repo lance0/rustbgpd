@@ -428,8 +428,8 @@ scaling out.
    A check that finds nothing to flag prints `config OK`. A check that
    flags something still exits 0, but the summary reads
    `config VALID, <n> WARNINGS — NOT a clean check` and the warnings are
-   framed on stderr above it. The one warning today is an eBGP neighbor
-   that resolves no explicit policy in a direction: unfiltered when
+   framed on stderr above it. The warning identifies a configured eBGP neighbor
+   or dynamic range with no explicit policy in a direction: unfiltered when
    `[global] ebgp_requires_policy` is off, and carrying no routes in that
    direction when it is on. Neither is rejected — a permit-all route
    server is a legitimate configuration — but neither should reach

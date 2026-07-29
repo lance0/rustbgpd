@@ -80,6 +80,7 @@ use tracing::{error, info, warn};
 
 use crate::config::{
     Config, GrpcAccessMode, GrpcEnforcementConfig, GrpcListener, GrpcMaxTier, GrpcRoleConfig,
+    UnpolicedEbgpBoundary,
 };
 use crate::config_persister::{ConfigMutation, ConfigPersister};
 use crate::peer_manager::PeerManager;
@@ -1882,8 +1883,8 @@ fn print_framed_warning(headline: &str, body: &str) {
     eprintln!("{}\n", rule.if_supports_color(Stderr, OwoColorize::yellow));
 }
 
-/// Print the `--check` warning for eBGP neighbors that resolve no explicit
-/// policy, and return how many there are.
+/// Print the `--check` warning for configured eBGP boundaries that resolve no
+/// explicit policy, and return how many there are.
 ///
 /// `--check` is the last gate before an operator copies a config to
 /// production, so a wide-open (or, under `ebgp_requires_policy`, a fully
@@ -1893,24 +1894,31 @@ fn print_framed_warning(headline: &str, body: &str) {
 fn warn_unpoliced_ebgp(config: &Config) -> usize {
     use std::fmt::Write as _;
 
-    let unpoliced = config.unpoliced_ebgp_neighbors();
+    let unpoliced = config.unpoliced_ebgp_boundaries();
     if unpoliced.is_empty() {
         return 0;
     }
+    let has_dynamic_range = unpoliced
+        .iter()
+        .any(UnpolicedEbgpBoundary::is_dynamic_range);
+    let subject = match (has_dynamic_range, unpoliced.len()) {
+        (false, 1) => "eBGP neighbor",
+        (false, _) => "eBGP neighbors",
+        (true, 1) => "configured eBGP policy boundary",
+        (true, _) => "configured eBGP policy boundaries",
+    };
     let headline = format!(
-        "{} eBGP neighbor{} resolve{} no explicit policy.",
+        "{} {subject} resolve{} no explicit policy.",
         unpoliced.len(),
-        if unpoliced.len() == 1 { "" } else { "s" },
         if unpoliced.len() == 1 { "s" } else { "" },
     );
     let mut body = String::new();
-    for neighbor in &unpoliced {
+    for boundary in &unpoliced {
         let _ = writeln!(
             body,
-            "  {} (AS {}): {}",
-            neighbor.address,
-            neighbor.remote_asn,
-            neighbor.missing_phrase()
+            "  {}: {}",
+            boundary.identity_phrase(),
+            boundary.missing_phrase()
         );
     }
     body.push('\n');
@@ -2972,18 +2980,40 @@ async fn run<T>(
     // deployment, but a runtime config mutation rewrites the file
     // canonically and takes any banner the operator wrote with it — the log
     // is then the only place the posture is still stated.
-    let unpoliced_ebgp = config.unpoliced_ebgp_neighbors().len();
-    if unpoliced_ebgp > 0 {
-        tracing::warn!(
-            neighbors = unpoliced_ebgp,
-            ebgp_requires_policy = config.global.ebgp_requires_policy,
-            "eBGP policy posture: {unpoliced_ebgp} neighbor(s) resolve no explicit policy — {}",
-            if config.global.ebgp_requires_policy {
+    let unpoliced_ebgp = config.unpoliced_ebgp_boundaries();
+    if !unpoliced_ebgp.is_empty() {
+        let dynamic_ranges = unpoliced_ebgp
+            .iter()
+            .filter(|boundary| boundary.is_dynamic_range())
+            .count();
+        if dynamic_ranges == 0 {
+            let unpoliced_ebgp = unpoliced_ebgp.len();
+            tracing::warn!(
+                neighbors = unpoliced_ebgp,
+                ebgp_requires_policy = config.global.ebgp_requires_policy,
+                "eBGP policy posture: {unpoliced_ebgp} neighbor(s) resolve no explicit policy — {}",
+                if config.global.ebgp_requires_policy {
+                    "those directions carry no routes (RFC 8212 reserved deny)"
+                } else {
+                    "those directions are unfiltered (permit all)"
+                }
+            );
+        } else {
+            let policy_boundaries = unpoliced_ebgp.len();
+            let neighbors = policy_boundaries - dynamic_ranges;
+            let consequence = if config.global.ebgp_requires_policy {
                 "those directions carry no routes (RFC 8212 reserved deny)"
             } else {
                 "those directions are unfiltered (permit all)"
-            }
-        );
+            };
+            tracing::warn!(
+                policy_boundaries,
+                neighbors,
+                dynamic_ranges,
+                ebgp_requires_policy = config.global.ebgp_requires_policy,
+                "eBGP policy posture: configured boundaries resolving no explicit policy: {policy_boundaries} — {consequence}"
+            );
+        }
     }
 
     let metrics = BgpMetrics::new();

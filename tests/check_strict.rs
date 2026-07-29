@@ -180,6 +180,67 @@ fn run(config_toml: &str, args: &[&str]) -> (Option<i32>, String, String) {
     )
 }
 
+fn dynamic_config(enforced: bool, policy_complete: bool) -> String {
+    let group_policy = if policy_complete {
+        "import_policy = [{ action = \"permit\", prefix = \"0.0.0.0/0\", le = 32 }]\n\
+         export_policy = [{ action = \"permit\", prefix = \"0.0.0.0/0\", le = 32 }]"
+    } else {
+        ""
+    };
+    let mut config = format!(
+        r#"
+{base}
+[peer_groups.ix]
+{group_policy}
+
+[[dynamic_neighbors]]
+prefix = "192.0.2.0/24"
+peer_group = "ix"
+remote_asn = 0
+"#,
+        base = WARNS.replace(
+            "[[neighbors]]\naddress = \"10.0.0.2\"\nremote_asn = 65002",
+            ""
+        )
+    );
+    if enforced {
+        config = config.replacen(
+            "runtime_state_dir = \"/tmp/rustbgpd-check-strict\"",
+            "runtime_state_dir = \"/tmp/rustbgpd-check-strict\"\nebgp_requires_policy = true",
+            1,
+        );
+    }
+    config
+}
+
+#[test]
+fn check_dynamic_range_policy_warning_matrix() {
+    for (enforced, consequence) in [(false, "unfiltered"), (true, "reserved deny")] {
+        let config = dynamic_config(enforced, false);
+        let (code, stdout, stderr) = run(&config, &["--check"]);
+        assert_eq!(code, Some(0), "stdout:\n{stdout}\nstderr:\n{stderr}");
+        assert!(stdout.contains("config VALID, 1 WARNING — NOT a clean check"));
+        assert!(stderr.contains(consequence), "{stderr}");
+        assert!(stderr.contains(
+            "dynamic range 192.0.2.0/24 via peer group \"ix\" (any AS): \
+             no import policy and no export policy"
+        ));
+        assert!(!stderr.contains("AS 0"), "{stderr}");
+
+        let (code, stdout, stderr) = run(&config, &["--check", "--strict"]);
+        assert_eq!(code, Some(1), "stdout:\n{stdout}\nstderr:\n{stderr}");
+    }
+    for enforced in [false, true] {
+        let clean = dynamic_config(enforced, true);
+        for args in [&["--check"][..], &["--check", "--strict"][..]] {
+            let (code, stdout, stderr) = run(&clean, args);
+            assert_eq!(code, Some(0), "stdout:\n{stdout}\nstderr:\n{stderr}");
+            assert!(stdout.contains("config OK"), "{stdout}");
+            assert!(!stderr.contains("WARNING"), "{stderr}");
+        }
+    }
+}
+
 /// Backward compatibility: warnings alone never fail a plain `--check`.
 #[test]
 fn check_without_strict_exits_zero_on_warnings() {
@@ -193,6 +254,8 @@ fn check_without_strict_exits_zero_on_warnings() {
         stderr.contains("WARNING"),
         "warning was not framed on stderr:\n{stderr}"
     );
+    assert!(stderr.contains("1 eBGP neighbor resolves no explicit policy."));
+    assert!(stderr.contains("  10.0.0.2 (AS 65002): no import policy and no export policy"));
 }
 
 /// The feature: the same config, the same warnings, a failing exit code.

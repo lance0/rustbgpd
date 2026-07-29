@@ -22,6 +22,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- RFC 8212 diagnostics now include dynamic eBGP ranges, peer groups, and `any AS`.
+
 - The shipped BGP session-down alert now uses exact current truth instead of
   inferring state from historical counters. New
   `bgp_peer_admin_enabled{peer,interface}` and

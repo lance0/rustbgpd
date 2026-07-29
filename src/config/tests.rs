@@ -17370,3 +17370,35 @@ fn unpoliced_ebgp_neighbors_names_the_missing_directions() {
     );
     assert!(unpoliced(&rfc8212_toml("", "", 65001, "")).is_empty());
 }
+
+#[test]
+fn unpoliced_ebgp_boundaries_include_dynamic_ranges() {
+    let unpoliced = |toml: &str| parse(toml).unwrap().unpoliced_ebgp_boundaries();
+    let dynamic = |global: &str, static_asn, range_asn, group: &str| {
+        format!(
+            "{}\n[peer_groups.ix]\n{group}\n[[dynamic_neighbors]]\n\
+             prefix = \"192.0.2.0/24\"\npeer_group = \"ix\"\nremote_asn = {range_asn}\n",
+            rfc8212_toml(global, "", static_asn, "")
+        )
+    };
+    let wildcard = unpoliced(&dynamic("", 65001, 0, ""));
+    assert!(wildcard[0].identity_phrase().ends_with("(any AS)"));
+    assert_eq!(
+        unpoliced(&dynamic("ebgp_requires_policy = true", 65001, 0, "")),
+        wildcard
+    );
+    let fixed = unpoliced(&dynamic("", 65001, 65002, ""));
+    assert!(fixed[0].identity_phrase().ends_with("(AS 65002)"));
+    assert!(unpoliced(&dynamic("", 65001, 65001, "")).is_empty());
+    let import = "import_policy = [{ action = \"permit\", prefix = \"0.0.0.0/0\", le = 32 }]";
+    assert_eq!(
+        unpoliced(&dynamic("", 65001, 0, import))[0].missing_phrase(),
+        "no export policy"
+    );
+    let export = "export_policy = [{ action = \"permit\", prefix = \"0.0.0.0/0\" }]";
+    let complete = format!("{import}\n{export}");
+    assert!(unpoliced(&dynamic("", 65001, 0, &complete)).is_empty());
+    let mixed = unpoliced(&dynamic("", 65002, 0, ""));
+    assert!(mixed[0].identity_phrase().starts_with("10.0.0.2"));
+    assert!(mixed[1].identity_phrase().starts_with("dynamic range"));
+}
