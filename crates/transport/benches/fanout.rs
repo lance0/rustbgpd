@@ -49,6 +49,13 @@
 //! alternates a wire-visible MED while fixed LOCAL_PREF values preserve rank.
 //! This ref introduces the instrument, so it makes no performance claim.
 //!
+//! `grouped_policy_denial_fanout` covers the grouped export-policy deny arm.
+//! Setup advertises and drains 64 MED-50 routes, then a MED-51 replacement is
+//! prepared outside timing. One production distribution pass evaluates the
+//! shared deny policy, retires the prior group-owned Adj-RIB-Out inventory, and
+//! enqueues one exact withdrawal-only envelope per member. This instrument also
+//! makes no performance claim.
+//!
 //! Gated behind `bench-internals`; run with:
 //!   cargo bench -p rustbgpd-transport --features bench-internals --bench fanout
 //!
@@ -88,6 +95,8 @@ const IXP_PEER_COUNTS: [usize; 3] = [8, 64, 256];
 const ADJ_RIB_OUT_GAUGE_PEER_COUNTS: [usize; 5] = [1, 8, 64, 256, 1_000];
 /// Route-server fleets for the production grouped-withdrawal measurement.
 const GROUPED_WITHDRAWAL_PEER_COUNTS: [usize; 4] = [8, 64, 256, 1_000];
+/// Route-server fleets for grouped export-policy denial staging.
+const GROUPED_POLICY_DENIAL_PEER_COUNTS: [usize; 3] = [8, 64, 256];
 /// Loc-RIB sizes for the late RR-client initial-table join instrument.
 const INITIAL_TABLE_JOIN_ROUTE_COUNTS: [usize; 2] = [4_096, 65_536];
 /// Candidate-set sizes for Add-Path top-N export staging.
@@ -192,6 +201,16 @@ fn representative_export_chain() -> PolicyChain {
     entries.push(blank_stmt()); // catch-all permit
     PolicyChain::new(vec![Policy {
         entries,
+        default_action: PolicyAction::Deny,
+    }])
+}
+
+fn deny_replacement_export_chain() -> PolicyChain {
+    let mut deny = blank_stmt();
+    deny.match_med_ge = Some(51);
+    deny.action = PolicyAction::Deny;
+    PolicyChain::new(vec![Policy {
+        entries: vec![deny, blank_stmt()],
         default_action: PolicyAction::Deny,
     }])
 }
@@ -310,7 +329,11 @@ fn route_server_remote_asns(n_peers: usize, distinct: bool) -> Vec<u32> {
         .collect()
 }
 
-fn build_ixp(n_peers: usize, distinct_remote_asns: bool) -> FanoutState {
+fn build_ixp_with_policy(
+    n_peers: usize,
+    distinct_remote_asns: bool,
+    export_policy: Option<&PolicyChain>,
+) -> FanoutState {
     let (_tx, rx) = mpsc::channel::<RibUpdate>(16);
     let (_qtx, qrx) = mpsc::channel::<RibUpdate>(16);
     let mut manager = RibManager::new(rx, qrx, None, None, BgpMetrics::new());
@@ -318,13 +341,17 @@ fn build_ixp(n_peers: usize, distinct_remote_asns: bool) -> FanoutState {
     let remote_asns = route_server_remote_asns(n_peers, distinct_remote_asns);
     let receivers = manager.bench_register_route_server_peers(
         &remote_asns,
-        None,
+        export_policy,
         CHANNEL_CAP,
         fanout_bench_route_server_export_encoder,
     );
     manager.bench_seed_loc_rib(prefixes.iter().copied().map(make_route).collect());
     let changed = prefixes.into_iter().collect();
     (manager, receivers, changed)
+}
+
+fn build_ixp(n_peers: usize, distinct_remote_asns: bool) -> FanoutState {
+    build_ixp_with_policy(n_peers, distinct_remote_asns, None)
 }
 
 fn expected_fanout_receipt(
@@ -838,6 +865,155 @@ fn bench_grouped_withdrawal_fanout(c: &mut Criterion) {
                         state.manager.bench_reset_adj_rib_out_fanout_receipt();
                         state.manager.bench_seed_loc_rib(state.routes.clone());
                         drain_grouped_withdrawal_setup(
+                            &mut state.receivers,
+                            &state.expected_inventory,
+                        );
+                    }
+                    accumulated
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
+struct GroupedPolicyDenialState {
+    manager: RibManager,
+    receivers: Vec<mpsc::Receiver<OutboundRouteUpdate>>,
+    changed: HashSet<Prefix>,
+    expected_inventory: HashSet<(Prefix, u32)>,
+}
+
+fn build_grouped_policy_denial_fanout(peers: usize) -> GroupedPolicyDenialState {
+    let policy = deny_replacement_export_chain();
+    let (mut manager, mut receivers, expected_prefixes) =
+        build_ixp_with_policy(peers, false, Some(&policy));
+    assert_eq!(
+        manager.bench_adj_rib_out_fanout_receipt(),
+        expected_fanout_receipt(peers, 1),
+        "the MED-50 setup must traverse policy and populate one clean update group"
+    );
+    drain_fanout_envelopes(&mut receivers, &expected_prefixes, 50);
+
+    let expected_inventory = expected_prefixes
+        .iter()
+        .copied()
+        .map(|prefix| (prefix, 0))
+        .collect::<HashSet<_>>();
+    let replacements = changed_prefixes()
+        .into_iter()
+        .map(|prefix| make_route_with_med(prefix, 51))
+        .collect();
+    let changed = manager.bench_prepare_unicast_replacement(replacements);
+    assert_eq!(
+        changed, expected_prefixes,
+        "every denied MED-51 replacement must reach production distribution"
+    );
+    manager.bench_reset_adj_rib_out_fanout_receipt();
+    GroupedPolicyDenialState {
+        manager,
+        receivers,
+        changed,
+        expected_inventory,
+    }
+}
+
+fn assert_grouped_policy_denial_receipt(receipt: AdjRibOutFanoutBenchReceipt, peers: usize) {
+    assert_eq!(receipt.update_groups, 1);
+    assert_eq!(receipt.grouped_peers, peers);
+    assert_eq!(
+        receipt.ungrouped_peers, 0,
+        "private fallback invalidates grouped policy-denial staging"
+    );
+    assert_eq!(
+        receipt.dirty_peers, 0,
+        "dirty resync invalidates grouped policy-denial staging"
+    );
+    assert_eq!(
+        receipt.grouped_unicast_routes, 0,
+        "the denied replacement must retire the prior group-owned inventory"
+    );
+    assert_eq!(
+        receipt.private_unicast_routes, 0,
+        "no private Adj-RIB-Out may retain the denied replacement"
+    );
+    assert_eq!(receipt.routes_received_dispatches, 0);
+    assert_eq!(receipt.routes_received_withdrawals, 0);
+    assert_eq!(
+        receipt.exact_probe_batches, 0,
+        "withdrawal-only policy-denial envelopes must skip announcement probes"
+    );
+    assert_eq!(receipt.exact_probe_candidates, 0);
+    assert_eq!(receipt.exact_probe_nonzero_encoded_lengths, 0);
+    assert_eq!(receipt.exact_probe_cache_reuses, 0);
+    assert_eq!(
+        receipt.successful_commits, peers,
+        "every grouped member must commit the policy withdrawal"
+    );
+    assert_eq!(
+        receipt.successful_enqueues, peers,
+        "every grouped member must enqueue the policy withdrawal"
+    );
+    assert_eq!(receipt.family_gauge_writes, peers);
+    assert_eq!(receipt.last_family_gauge_write_mask, 0x01);
+    assert_eq!(
+        receipt.first_peer_family_values, [0; 7],
+        "the denied inventory must leave the first member's Adj-RIB-Out empty"
+    );
+}
+
+fn drain_grouped_policy_denials(
+    receivers: &mut [mpsc::Receiver<OutboundRouteUpdate>],
+    expected_inventory: &HashSet<(Prefix, u32)>,
+) {
+    for receiver in receivers {
+        let update = receiver
+            .try_recv()
+            .expect("every grouped member must receive one policy withdrawal");
+        assert!(
+            update.announce.is_empty(),
+            "the denied MED-51 replacement must never be announced"
+        );
+        assert!(update.next_hop_override.is_empty());
+        assert_eq!(
+            update.withdraw.iter().copied().collect::<HashSet<_>>(),
+            *expected_inventory,
+            "the withdrawal must exactly retire the MED-50 setup inventory"
+        );
+        assert_eq!(
+            update.withdraw.len(),
+            expected_inventory.len(),
+            "the policy withdrawal must not contain duplicate identities"
+        );
+        assert_unicast_only_envelope(&update);
+        assert_real_transport_snapshot(&update);
+        assert!(
+            matches!(receiver.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "one denied replacement must leave a live channel with no residue"
+        );
+    }
+}
+
+fn bench_grouped_policy_denial_fanout(c: &mut Criterion) {
+    let mut group = c.benchmark_group("grouped_policy_denial_fanout");
+    group.sample_size(10);
+    for &peers in &GROUPED_POLICY_DENIAL_PEER_COUNTS {
+        group.bench_with_input(
+            BenchmarkId::new("homogeneous_route_server", peers),
+            &peers,
+            |bench, &peers| {
+                bench.iter_custom(|iterations| {
+                    let mut accumulated = Duration::ZERO;
+                    for _ in 0..iterations {
+                        let mut state = build_grouped_policy_denial_fanout(peers);
+                        let started = Instant::now();
+                        state.manager.bench_distribute(&state.changed);
+                        accumulated += started.elapsed();
+                        assert_grouped_policy_denial_receipt(
+                            state.manager.bench_adj_rib_out_fanout_receipt(),
+                            peers,
+                        );
+                        drain_grouped_policy_denials(
                             &mut state.receivers,
                             &state.expected_inventory,
                         );
@@ -1683,6 +1859,7 @@ criterion_group!(
     bench_ixp_exact_export_fanout,
     bench_adj_rib_out_family_gauge,
     bench_grouped_withdrawal_fanout,
+    bench_grouped_policy_denial_fanout,
     bench_initial_table_peer_join,
     bench_add_path_export_staging,
     bench_policy_regroup_resync,

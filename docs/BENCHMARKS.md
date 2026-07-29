@@ -601,6 +601,19 @@ one target peer; because negotiated Add-Path uses private per-peer export
 state, this selection/staging work repeats for every Add-Path target in a
 production fleet.
 
+The `grouped_policy_denial_fanout` group exercises the complementary
+export-policy deny arm at 8, 64, and 256 homogeneous route-server members. Each
+iteration first advertises and drains an exact 64-route MED-50 inventory,
+prepares a wire-visible MED-51 replacement outside accumulated time, then times
+one production grouped distribution pass. A shared export policy denies the
+replacement, so retained receipts require the prior group-owned Adj-RIB-Out to
+be empty, no private or dirty fallback, one successful commit and enqueue per
+member, and no announcement probe for the withdrawal-only result. Receiver
+inspection requires one exact withdrawal-only envelope per member, backed by a
+real transport-session snapshot, with no queued residue. This commit introduces
+the instrument only: it publishes no performance result, and a future claim
+requires a same-SHA control.
+
 The `grouped_withdrawal_fanout` group measures the common homogeneous
 route-server withdrawal shape that first-advertise and replacement targets do
 not cover. It pre-advertises a fixed inventory of 64 IPv4-unicast routes to one
