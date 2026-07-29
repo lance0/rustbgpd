@@ -348,7 +348,7 @@
       "id": 6,
       "type": "stat",
       "title": "Event outbox health",
-      "description": "bgp_event_outbox_degraded: 1 after any outbox drop or open failure since process start (does not auto-clear).",
+      "description": "Latched durability-impacting loss, committed-event delivery skip, or DB open/recovery/quarantine failure. Expected shutdown reason=closed drops are excluded; replay can remain available.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1403,7 +1403,7 @@
       "id": 22,
       "type": "timeseries",
       "title": "RIB ingest pressure",
-      "description": "bgp_rib_ingest_channel_depth (queued RibUpdates; pegged at capacity = producers parked), bgp_inbound_rib_backpressure_total and bgp_outbound_route_drops_total rates.",
+      "description": "Inbound RIB pressure safely parks producers and paces senders without loss. Outbound drops mean BGP work was lost because a peer writer channel was full or closed.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1453,7 +1453,7 @@
             "uid": "${datasource}"
           },
           "expr": "sum by (peer) (rate(bgp_inbound_rib_backpressure_total{instance=~\"$instance\",peer=~\"$peer\"}[$__rate_interval]))",
-          "legendFormat": "inbound blocked {{peer}}",
+          "legendFormat": "inbound safely parked {{peer}}",
           "refId": "B"
         },
         {
@@ -1462,7 +1462,7 @@
             "uid": "${datasource}"
           },
           "expr": "sum by (peer) (rate(bgp_outbound_route_drops_total{instance=~\"$instance\",peer=~\"$peer\"}[$__rate_interval]))",
-          "legendFormat": "outbound drops {{peer}}",
+          "legendFormat": "outbound work lost {{peer}}",
           "refId": "C"
         }
       ]

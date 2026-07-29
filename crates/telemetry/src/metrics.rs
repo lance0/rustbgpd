@@ -855,7 +855,7 @@ impl BgpMetrics {
         let outbound_route_drops = IntCounterVec::new(
             Opts::new(
                 "bgp_outbound_route_drops_total",
-                "Number of outbound route updates dropped due to full channel",
+                "Outbound BGP work dropped because the peer writer channel was full or closed.",
             ),
             &["peer"],
         )
@@ -1820,7 +1820,7 @@ impl BgpMetrics {
         let event_outbox_dropped = IntCounterVec::new(
             Opts::new(
                 "bgp_event_outbox_dropped_total",
-                "Events dropped before reaching durable storage. The outbox is best-effort under overload (ADR-0072); drops are observable but lie outside the committed cursor sequence by design.",
+                "Events lost before durable storage, or committed events skipped during durable cursor delivery, by category and reason (ADR-0072).",
             ),
             &["category", "reason"],
         )
@@ -1864,7 +1864,7 @@ impl BgpMetrics {
 
         let event_outbox_degraded = IntGauge::new(
             "bgp_event_outbox_degraded",
-            "1 = the event outbox has experienced at least one drop or open failure since process start. 0 = healthy. Does not auto-clear in v1; operator restarts to clear.",
+            "1 = latched durability-impacting loss, delivery skip, or DB open/recovery/quarantine failure since process start; expected shutdown reason=closed drops are excluded. 0 = no such failure observed.",
         )
         .expect("valid metric definition");
 
@@ -4510,6 +4510,24 @@ mod tests {
         let text = gather_text(&m);
         // Dynamic peer-label vectors remain absent until observed.
         assert!(!text.contains("bgp_session_state_transitions_total"));
+    }
+
+    #[test]
+    fn telemetry_loss_help_matches_exported_contracts() {
+        let m = BgpMetrics::new();
+        m.record_outbound_route_drop("192.0.2.1");
+        m.record_event_outbox_drop("route", "queue_full");
+        let text = gather_text(&m);
+
+        assert!(text.lines().any(|line| {
+            line == "# HELP bgp_outbound_route_drops_total Outbound BGP work dropped because the peer writer channel was full or closed."
+        }));
+        assert!(text.lines().any(|line| {
+            line == "# HELP bgp_event_outbox_dropped_total Events lost before durable storage, or committed events skipped during durable cursor delivery, by category and reason (ADR-0072)."
+        }));
+        assert!(text.lines().any(|line| {
+            line == "# HELP bgp_event_outbox_degraded 1 = latched durability-impacting loss, delivery skip, or DB open/recovery/quarantine failure since process start; expected shutdown reason=closed drops are excluded. 0 = no such failure observed."
+        }));
     }
 
     /// Load-bearing registration proof: removing any one scalar metric makes

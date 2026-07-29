@@ -160,7 +160,7 @@ configured. Key series:
 
 | Metric | Meaning |
 |--------|---------|
-| `bgp_event_outbox_degraded` | 1 = outbox DB failed and was quarantined; replay unavailable until operator restart |
+| `bgp_event_outbox_degraded` | 1 = latched durability-impacting loss, committed-event delivery skip, or DB open/recovery/quarantine failure; expected shutdown `reason=closed` drops are excluded. Inspect the drop reason and daemon log: replay can remain available |
 | `bmp_collector_drops_total` | messages dropped toward a slow/disconnected collector |
 | `bmp_source_drops_total` | route-monitoring events dropped at the source tap under backpressure |
 | `bmp_replay_attempts_total` | PeerUp-cache replays on collector reconnect |
