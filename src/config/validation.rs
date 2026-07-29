@@ -1248,10 +1248,10 @@ impl Config {
         Ok(())
     }
 
-    /// True when any neighbor (directly or via its peer group) has an
-    /// effective `orr_vantage` but NO neighbor's effective `families`
-    /// include `"linkstate"` — i.e. the BGP-LS topology feed the ORR SPF
-    /// needs would be empty. Pure so the warning condition is testable.
+    /// True when any static neighbor or dynamic range's referenced peer group
+    /// has an effective `orr_vantage`, but none has `"linkstate"` in its
+    /// effective `families` — i.e. the BGP-LS topology feed the ORR SPF needs
+    /// would be empty. Pure so the warning condition is testable.
     pub(crate) fn orr_vantage_without_linkstate(&self) -> bool {
         let group_of = |neighbor: &super::Neighbor| {
             neighbor
@@ -1259,15 +1259,20 @@ impl Config {
                 .as_deref()
                 .and_then(|name| self.peer_groups.get(name))
         };
+        let dynamic_groups = || {
+            self.dynamic_neighbors
+                .iter()
+                .filter_map(|range| self.peer_groups.get(&range.peer_group))
+        };
         let any_vantage = self.neighbors.iter().any(|n| {
             n.orr_vantage
                 .or_else(|| group_of(n).and_then(|g| g.orr_vantage))
                 .is_some()
-        });
+        }) || dynamic_groups().any(|group| group.orr_vantage.is_some());
         if !any_vantage {
             return false;
         }
-        !self.neighbors.iter().any(|n| {
+        let static_linkstate = self.neighbors.iter().any(|n| {
             let own = &n.families;
             let effective: &[String] = if own.is_empty() {
                 group_of(n).map_or(&[], |g| g.families.as_slice())
@@ -1275,7 +1280,10 @@ impl Config {
                 own.as_slice()
             };
             effective.iter().any(|f| f == "linkstate")
-        })
+        });
+        let dynamic_linkstate =
+            dynamic_groups().any(|group| group.families.iter().any(|f| f == "linkstate"));
+        !(static_linkstate || dynamic_linkstate)
     }
 
     /// Every advisory this configuration raises, in a stable order.

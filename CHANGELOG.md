@@ -24,6 +24,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - RFC 8212 diagnostics now include dynamic eBGP ranges, peer groups, and `any AS`.
 
+- Dynamic-neighbor ranges now validate inherited route-reflector, ORR,
+  route-server, and BGP Role combinations, contribute fixed local-AS RR clients
+  to implicit cluster-ID selection, and count referenced BGP-LS peer groups in
+  ORR topology advisories.
+
 - The shipped BGP session-down alert now uses exact current truth instead of
   inferring state from historical counters. New
   `bgp_peer_admin_enabled{peer,interface}` and
