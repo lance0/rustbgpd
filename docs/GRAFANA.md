@@ -62,6 +62,7 @@ A ready-to-load Prometheus alert-rule pack (session down/flapping,
 empty Adj-RIB-In, max-prefix near-limit and breach, empty RPKI VRP table, event-outbox
 degradation, update-group residue growth, stalled policy transition, a slow
 peer, RFC 8212 missing import/export policy, sustained outbound-prefix blocking,
+dynamic-neighbor admission near-limit and rejection,
 actor polls above 200ms, exact-export rejection, malformed UPDATE disposition,
 selection-deferral timeout and ledger overflow, and daemon down) ships at
 [`examples/prometheus/rustbgpd-alerts.yml`](../examples/prometheus/rustbgpd-alerts.yml),
@@ -167,9 +168,15 @@ right-axis override.
 The slow-peer fixture is red if its `== 1` predicate or five-minute hold is
 changed. The RFC 8212 matrix covers import-only, export-only, and healthy peers;
 the outbound-prefix matrix covers sustained, zero, and transient blocking.
-All three new warnings are pending at 4m30s and firing at 5m30s, pinning their
-predicate and five-minute hold. The actor fixture is red if `ignoring(le)` is
-removed, `le="0.2"` is moved to `0.5`, `> 0` becomes `>= 0`, raw counters
+The dynamic-neighbor admission fixture pins the exact 80% ratio and ten-minute
+hold against a 79% control, a zero-limit control, and the pre-hold boundary.
+Its rejection fixture separates an increasing counter from a flat non-zero
+counter, then observes the event after it ages out to pin the ten-minute
+`increase` window and single-event boundary.
+The RFC 8212 import/export and outbound-prefix-blocking warnings are pending at
+4m30s and firing at 5m30s, pinning their predicates and five-minute holds. The
+actor fixture is red if `ignoring(le)` is removed, `le="0.2"` is moved to
+`0.5`, `> 0` becomes `>= 0`, raw counters
 replace `increase`, or `job`/`poll_kind` are aggregated away. Its firing
 observation is in `(0.2, 0.5]`; exact-boundary and historical-flat controls
 remain healthy.
