@@ -2883,6 +2883,7 @@ dependencies = [
  "owo-colors",
  "prost",
  "prost-types",
+ "protoc-bin-vendored",
  "ratatui",
  "rustbgpd-api",
  "rustbgpd-bmp",

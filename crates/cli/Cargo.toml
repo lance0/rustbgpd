@@ -50,6 +50,7 @@ rustbgpd-wire.workspace = true
 
 [build-dependencies]
 tonic-prost-build.workspace = true
+protoc-bin-vendored = "3"
 
 [dev-dependencies]
 tempfile.workspace = true
