@@ -746,7 +746,7 @@ pub async fn show(
     Ok(())
 }
 
-fn negotiation_status_label(state: &crate::proto::NeighborState) -> &'static str {
+pub(crate) fn negotiation_status_label(state: &crate::proto::NeighborState) -> &'static str {
     match state.negotiation_available {
         None => "unknown (not exposed by daemon)",
         Some(false) if state.stale => "unknown (stale state)",
@@ -782,7 +782,7 @@ fn negotiated_session_json(
     (state.negotiation_available, negotiated)
 }
 
-fn optional_seconds_label(value: Option<u32>) -> String {
+pub(crate) fn optional_seconds_label(value: Option<u32>) -> String {
     value.map_or_else(|| "unknown".to_string(), |seconds| format!("{seconds}s"))
 }
 
@@ -811,7 +811,7 @@ fn render_negotiated_capability_details(
     )
 }
 
-fn negotiated_families_label(families: &[String]) -> String {
+pub(crate) fn negotiated_families_label(families: &[String]) -> String {
     if families.is_empty() {
         "none".to_string()
     } else {
@@ -876,7 +876,7 @@ fn authentication_label(value: i32) -> &'static str {
     }
 }
 
-fn next_hop_ownership_label(value: i32) -> &'static str {
+pub(crate) fn next_hop_ownership_label(value: i32) -> &'static str {
     match crate::proto::NextHopOwnershipMode::try_from(value) {
         Ok(crate::proto::NextHopOwnershipMode::Disabled) => "disabled",
         Ok(crate::proto::NextHopOwnershipMode::StrictPeer) => "strict_peer",

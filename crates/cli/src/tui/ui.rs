@@ -2,9 +2,13 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Wrap};
+use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table};
 
-use crate::output::{format_duration, format_family, format_state_with_stale};
+use crate::commands::neighbor::{
+    negotiated_families_label, negotiation_status_label, next_hop_ownership_label,
+    optional_seconds_label, rfc8212_policy_status_label,
+};
+use crate::output::{format_duration, format_state_with_stale};
 use crate::tui::app::{App, SortColumn, View, neighbor_key};
 use crate::tui::data::Freshness;
 use crate::tui::theme::Theme;
@@ -332,12 +336,12 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
 
 fn draw_peer_detail(f: &mut Frame, app: &mut App, address: &str, theme: &Theme) {
     let Some(neighbor) = app.neighbor(address) else {
-        app.view = View::PeerTable;
+        app.return_to_table();
         return;
     };
 
     let cfg = neighbor.config.as_ref();
-    let title = format!(" Peer Detail: {address} ");
+    let title = format!(" Peer Detail: {address} | Esc back | j/k scroll ");
 
     let block = Block::default()
         .title(title)
@@ -349,138 +353,247 @@ fn draw_peer_detail(f: &mut Frame, app: &mut App, address: &str, theme: &Theme) 
 
     let state_label = format_state_with_stale(neighbor.state, neighbor.stale);
     let state_color = theme.state_color_with_stale(neighbor.state, neighbor.stale);
-    let families = cfg
-        .map(|c| {
-            c.families
-                .iter()
-                .map(|f| format_family(crate::output::parse_family(f).unwrap_or(0)))
-                .collect::<Vec<_>>()
-                .join(", ")
-        })
-        .unwrap_or_default();
-
     let rate = app.peer_update_rate(address);
+    let negotiation = negotiation_status_label(neighbor);
+    let negotiated_hold = neighbor.negotiated_session.as_ref().map_or_else(
+        || negotiation.to_string(),
+        |session| optional_seconds_label(session.hold_time_seconds),
+    );
+    let negotiated_families = neighbor.negotiated_session.as_ref().map_or_else(
+        || negotiation.to_string(),
+        |session| negotiated_families_label(&session.families),
+    );
+    let configured_hold = cfg.map_or_else(
+        || "unknown".to_string(),
+        |config| match config.hold_time {
+            0 => "default (no override)".to_string(),
+            seconds => format!("{seconds}s"),
+        },
+    );
+    let configured_families = cfg.map_or_else(
+        || "unknown".to_string(),
+        |config| {
+            if config.families.is_empty() {
+                "ipv4_unicast (default)".to_string()
+            } else {
+                negotiated_families_label(&config.families)
+            }
+        },
+    );
+    let peer_group = match cfg.map(|config| config.peer_group.as_str()) {
+        None => "unknown",
+        Some("") => "none",
+        Some(group) => group,
+    };
+    let update_group = if neighbor.update_group.is_empty() {
+        "unknown (not exposed or no outbound registration)"
+    } else {
+        &neighbor.update_group
+    };
+    let rr_client = if neighbor.route_reflector_client {
+        "true"
+    } else {
+        "false (not configured or not exposed by older daemon)"
+    };
+    let route_server_client = cfg.map_or_else(
+        || "unknown".to_string(),
+        |config| config.route_server_client.to_string(),
+    );
+    let slow_peer = if neighbor.slow_peer {
+        "true (queue backlog signal; not a session-health verdict)"
+    } else {
+        "false (not flagged or not exposed by older daemon; not a session-health verdict)"
+    };
 
-    let lines = vec![
+    let row = |label: &str, value: String, value_style: Style| {
         Line::from(vec![
-            Span::styled("  Neighbor:       ", Style::default().fg(theme.text_dim)),
-            Span::styled(address.to_string(), Style::default().fg(theme.header_fg)),
-        ]),
-        Line::from(vec![
-            Span::styled("  Remote ASN:     ", Style::default().fg(theme.text_dim)),
             Span::styled(
-                cfg.map(|c| c.remote_asn.to_string()).unwrap_or_default(),
-                Style::default().fg(theme.text),
+                format!("  {label:<27}"),
+                Style::default().fg(theme.text_dim),
             ),
-        ]),
-        Line::from(vec![
-            Span::styled("  Description:    ", Style::default().fg(theme.text_dim)),
-            Span::styled(
-                cfg.map(|c| c.description.as_str()).unwrap_or(""),
-                Style::default().fg(theme.text),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("  State:          ", Style::default().fg(theme.text_dim)),
-            Span::styled(state_label, Style::default().fg(state_color)),
-        ]),
-        Line::from(vec![
-            Span::styled("  Uptime:         ", Style::default().fg(theme.text_dim)),
-            Span::styled(
-                format_duration(neighbor.uptime_seconds),
-                Style::default().fg(theme.text),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("  Families:       ", Style::default().fg(theme.text_dim)),
-            Span::styled(families, Style::default().fg(theme.text)),
-        ]),
+            Span::styled(value, value_style),
+        ])
+    };
+    let text = Style::default().fg(theme.text);
+    let section = |label: &str| {
+        Line::from(Span::styled(
+            format!("  {label}"),
+            Style::default()
+                .fg(theme.header_fg)
+                .add_modifier(Modifier::BOLD),
+        ))
+    };
+
+    let mut all_lines = vec![
+        row(
+            "Neighbor:",
+            address.to_string(),
+            Style::default().fg(theme.header_fg),
+        ),
+        row(
+            "Remote ASN:",
+            cfg.map(|config| config.remote_asn.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+            text,
+        ),
+        row(
+            "Description:",
+            cfg.map(|config| config.description.clone())
+                .unwrap_or_default(),
+            text,
+        ),
+        row(
+            "State:",
+            state_label.to_string(),
+            Style::default().fg(state_color),
+        ),
+        row("Uptime:", format_duration(neighbor.uptime_seconds), text),
+        row("Configured Hold Time:", configured_hold, text),
+        row("Negotiation:", negotiation.to_string(), text),
+        row("Negotiated Hold Time:", negotiated_hold, text),
+        row("Configured Families:", configured_families, text),
+        row("Negotiated Families:", negotiated_families, text),
         Line::from(""),
-        Line::from(vec![
-            Span::styled("  Prefixes Rx:    ", Style::default().fg(theme.text_dim)),
-            Span::styled(
-                format_number(neighbor.prefixes_received),
-                Style::default().fg(theme.text),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("  Prefixes Tx:    ", Style::default().fg(theme.text_dim)),
-            Span::styled(
-                format_number(neighbor.prefixes_sent),
-                Style::default().fg(theme.text),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("  Updates Rx:     ", Style::default().fg(theme.text_dim)),
-            Span::styled(
-                format_number(neighbor.updates_received),
-                Style::default().fg(theme.text),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("  Updates Tx:     ", Style::default().fg(theme.text_dim)),
-            Span::styled(
-                format_number(neighbor.updates_sent),
-                Style::default().fg(theme.text),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("  Update Rate:    ", Style::default().fg(theme.text_dim)),
-            Span::styled(format!("{rate:.1}/s"), Style::default().fg(theme.text)),
-        ]),
+        row(
+            "Prefixes Rx:",
+            format_number(neighbor.prefixes_received),
+            text,
+        ),
+        row("Prefixes Tx:", format_number(neighbor.prefixes_sent), text),
+        row(
+            "Updates Rx:",
+            format_number(neighbor.updates_received),
+            text,
+        ),
+        row("Updates Tx:", format_number(neighbor.updates_sent), text),
+        row("Update Rate:", format!("{rate:.1}/s"), text),
+        row(
+            "Notifications Rx:",
+            neighbor.notifications_received.to_string(),
+            text,
+        ),
+        row(
+            "Notifications Tx:",
+            neighbor.notifications_sent.to_string(),
+            text,
+        ),
+        row(
+            "Flap Count:",
+            neighbor.flap_count.to_string(),
+            Style::default().fg(if neighbor.flap_count > 0 {
+                theme.state_down
+            } else {
+                theme.text
+            }),
+        ),
+    ];
+    if !neighbor.last_error.is_empty() {
+        all_lines.push(row(
+            "Last Error:",
+            neighbor.last_error.clone(),
+            Style::default().fg(theme.error),
+        ));
+    }
+    all_lines.push(Line::from(""));
+    all_lines.extend([
+        row("Peer Group:", peer_group.to_string(), text),
+        row("Update Group:", update_group.to_string(), text),
+        row("RR Client:", rr_client.to_string(), text),
+        row("Route Server Client:", route_server_client, text),
+        row("Slow Peer:", slow_peer.to_string(), text),
         Line::from(""),
-        Line::from(vec![
-            Span::styled("  Notifications Rx: ", Style::default().fg(theme.text_dim)),
-            Span::styled(
-                neighbor.notifications_received.to_string(),
-                Style::default().fg(theme.text),
+        section("Effective Posture:"),
+    ]);
+    if let Some(posture) = neighbor.effective_posture.as_ref() {
+        all_lines.extend([
+            row(
+                "  NEXT_HOP Ownership:",
+                next_hop_ownership_label(posture.next_hop_ownership).to_string(),
+                text,
             ),
-        ]),
-        Line::from(vec![
-            Span::styled("  Notifications Tx: ", Style::default().fg(theme.text_dim)),
-            Span::styled(
-                neighbor.notifications_sent.to_string(),
-                Style::default().fg(theme.text),
+            row(
+                "  Interpret RFC 1997:",
+                posture.interpret_rfc1997.to_string(),
+                text,
             ),
-        ]),
-        Line::from(vec![
-            Span::styled("  Flap Count:     ", Style::default().fg(theme.text_dim)),
-            Span::styled(
-                neighbor.flap_count.to_string(),
-                Style::default().fg(if neighbor.flap_count > 0 {
-                    theme.state_down
+            row(
+                "  RS Control Communities:",
+                posture.rs_control_communities.to_string(),
+                text,
+            ),
+            row(
+                "  ORR Vantage:",
+                posture.orr_vantage.as_deref().unwrap_or("none").to_string(),
+                text,
+            ),
+        ]);
+    } else {
+        for label in [
+            "  NEXT_HOP Ownership:",
+            "  Interpret RFC 1997:",
+            "  RS Control Communities:",
+            "  ORR Vantage:",
+        ] {
+            all_lines.push(row(
+                label,
+                "unknown (not exposed by daemon)".to_string(),
+                text,
+            ));
+        }
+    }
+    all_lines.extend([
+        Line::from(""),
+        section("RFC 8212 Policy:"),
+        row(
+            "  Import:",
+            rfc8212_policy_status_label(neighbor.rfc8212_import_policy).to_string(),
+            text,
+        ),
+        row(
+            "  Export:",
+            rfc8212_policy_status_label(neighbor.rfc8212_export_policy).to_string(),
+            text,
+        ),
+        Line::from(""),
+    ]);
+    if neighbor.outbound_prefix_limits.is_empty() {
+        all_lines.push(row(
+            "Outbound Prefix Limits:",
+            "unknown (not exposed or no outbound registration)".to_string(),
+            text,
+        ));
+    } else {
+        all_lines.push(section("Outbound Prefix Limits:"));
+        for limit in &neighbor.outbound_prefix_limits {
+            let limit_label = limit
+                .limit
+                .map_or_else(|| "unlimited".to_string(), |value| value.to_string());
+            let headroom = match (limit.limit, limit.headroom) {
+                (None, _) => "not applicable".to_string(),
+                (Some(_), Some(value)) => value.to_string(),
+                (Some(_), None) => "unknown".to_string(),
+            };
+            let reason = limit
+                .reason
+                .as_deref()
+                .map_or_else(String::new, |reason| format!(" reason={reason}"));
+            all_lines.push(Line::from(Span::styled(
+                format!(
+                    "  Outbound {}: usage={} limit={limit_label} headroom={headroom} blocking={}{}",
+                    limit.family, limit.usage, limit.blocking, reason
+                ),
+                Style::default().fg(if limit.blocking {
+                    theme.error
                 } else {
                     theme.text
                 }),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("  Hold Time:      ", Style::default().fg(theme.text_dim)),
-            Span::styled(
-                format!("{}s", cfg.map(|c| c.hold_time).unwrap_or(0)),
-                Style::default().fg(theme.text),
-            ),
-        ]),
-    ];
-
-    let mut all_lines = lines;
-    if !neighbor.last_error.is_empty() {
-        all_lines.push(Line::from(vec![
-            Span::styled("  Last Error:     ", Style::default().fg(theme.text_dim)),
-            Span::styled(
-                neighbor.last_error.clone(),
-                Style::default().fg(theme.error),
-            ),
-        ]));
+            )));
+        }
     }
 
-    all_lines.push(Line::from(""));
-    all_lines.push(Line::from(Span::styled(
-        "  Press Esc to go back",
-        Style::default().fg(theme.text_dim),
-    )));
-
-    let paragraph = Paragraph::new(all_lines).wrap(Wrap { trim: false });
+    app.set_detail_layout(all_lines.len(), usize::from(inner.height));
+    let scroll = u16::try_from(app.detail_scroll).unwrap_or(u16::MAX);
+    let paragraph = Paragraph::new(all_lines).scroll((scroll, 0));
     f.render_widget(paragraph, inner);
 }
 
@@ -672,6 +785,214 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect()
+    }
+
+    fn safety_neighbor() -> NeighborState {
+        NeighborState {
+            config: Some(NeighborConfig {
+                address: "192.0.2.2".into(),
+                remote_asn: 65002,
+                description: "route-server and reflector client".into(),
+                hold_time: 90,
+                families: vec!["ipv4_unicast".into(), "ipv6_unicast".into()],
+                peer_group: "edge-clients".into(),
+                route_server_client: true,
+                ..Default::default()
+            }),
+            state: crate::proto::SessionState::Established as i32,
+            uptime_seconds: 3600,
+            prefixes_received: 11,
+            prefixes_sent: 12,
+            updates_received: 13,
+            updates_sent: 14,
+            notifications_received: 1,
+            notifications_sent: 2,
+            flap_count: 3,
+            route_reflector_client: true,
+            slow_peer: true,
+            update_group: "group:7".into(),
+            negotiation_available: Some(true),
+            negotiated_session: Some(crate::proto::NegotiatedSessionState {
+                hold_time_seconds: Some(30),
+                families: vec!["ipv4_unicast".into()],
+                ..Default::default()
+            }),
+            effective_posture: Some(crate::proto::EffectiveNeighborPosture {
+                next_hop_ownership: crate::proto::NextHopOwnershipMode::StrictPeer as i32,
+                interpret_rfc1997: true,
+                rs_control_communities: false,
+                orr_vantage: Some("pop-a".into()),
+            }),
+            rfc8212_import_policy: crate::proto::Rfc8212PolicyStatus::Present as i32,
+            rfc8212_export_policy: crate::proto::Rfc8212PolicyStatus::Missing as i32,
+            outbound_prefix_limits: vec![
+                crate::proto::OutboundPrefixLimitState {
+                    family: "ipv4_unicast".into(),
+                    usage: 7,
+                    limit: None,
+                    headroom: None,
+                    blocking: false,
+                    reason: None,
+                },
+                crate::proto::OutboundPrefixLimitState {
+                    family: "ipv6_unicast".into(),
+                    usage: 50,
+                    limit: Some(50),
+                    headroom: Some(0),
+                    blocking: true,
+                    reason: Some("outbound_prefix_limit_reached".into()),
+                },
+            ],
+            ..Default::default()
+        }
+    }
+
+    fn rendered_detail(app: &mut App, width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| draw(frame, app, &Theme::default()))
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .chunks(usize::from(width))
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn assert_detail_row(rendered: &str, label: &str, expected: &str) {
+        let line = rendered
+            .lines()
+            .find(|line| line.contains(label))
+            .unwrap_or_else(|| panic!("missing detail row {label:?}\n{rendered}"));
+        assert!(
+            line.contains(expected),
+            "detail row {label:?} did not contain {expected:?}: {line:?}"
+        );
+    }
+
+    /// Mutation receipts: changing the production older-daemon negotiation
+    /// label to plain `unknown`, rendering zero hold as `0s`, or rendering the
+    /// empty family sentinel as `none` makes the old-daemon/default half red.
+    #[test]
+    fn peer_detail_pins_rich_safety_state_and_rolling_upgrade_unknowns() {
+        let mut rich = App::new();
+        rich.on_data(snapshot(vec![safety_neighbor()], Freshness::Fresh));
+        rich.view = View::PeerDetail("192.0.2.2".into());
+        let rendered = rendered_detail(&mut rich, 130, 50);
+
+        for (label, expected) in [
+            ("Configured Hold Time:", "90s"),
+            ("Negotiated Hold Time:", "30s"),
+            ("Configured Families:", "ipv4_unicast, ipv6_unicast"),
+            ("Negotiated Families:", "ipv4_unicast"),
+            ("Peer Group:", "edge-clients"),
+            ("Update Group:", "group:7"),
+            ("RR Client:", "true"),
+            ("Route Server Client:", "true"),
+            (
+                "Slow Peer:",
+                "true (queue backlog signal; not a session-health verdict)",
+            ),
+            ("NEXT_HOP Ownership:", "strict_peer"),
+            ("Interpret RFC 1997:", "true"),
+            ("RS Control Communities:", "false"),
+            ("ORR Vantage:", "pop-a"),
+            ("Import:", "present"),
+            ("Export:", "missing"),
+            (
+                "Outbound ipv4_unicast:",
+                "usage=7 limit=unlimited headroom=not applicable blocking=false",
+            ),
+            (
+                "Outbound ipv6_unicast:",
+                "usage=50 limit=50 headroom=0 blocking=true reason=outbound_prefix_limit_reached",
+            ),
+        ] {
+            assert_detail_row(&rendered, label, expected);
+        }
+        assert!(rendered.contains("Effective Posture:"));
+        assert!(rendered.contains("RFC 8212 Policy:"));
+        assert!(rendered.contains("Outbound Prefix Limits:"));
+
+        let old_daemon = NeighborState {
+            config: Some(NeighborConfig {
+                address: "198.51.100.2".into(),
+                remote_asn: 65003,
+                hold_time: 0,
+                families: Vec::new(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut old = App::new();
+        old.on_data(snapshot(vec![old_daemon], Freshness::Fresh));
+        old.view = View::PeerDetail("198.51.100.2".into());
+        let rendered = rendered_detail(&mut old, 130, 50);
+        assert_detail_row(&rendered, "Configured Hold Time:", "default (no override)");
+        assert_detail_row(&rendered, "Configured Families:", "ipv4_unicast (default)");
+        for label in ["Negotiated Hold Time:", "Negotiated Families:"] {
+            assert_detail_row(&rendered, label, "unknown (not exposed by daemon)");
+        }
+        assert_detail_row(
+            &rendered,
+            "Update Group:",
+            "unknown (not exposed or no outbound registration)",
+        );
+        assert_detail_row(
+            &rendered,
+            "Outbound Prefix Limits:",
+            "unknown (not exposed or no outbound registration)",
+        );
+        for label in [
+            "NEXT_HOP Ownership:",
+            "Interpret RFC 1997:",
+            "RS Control Communities:",
+            "ORR Vantage:",
+        ] {
+            assert_detail_row(&rendered, label, "unknown (not exposed by daemon)");
+        }
+        assert_detail_row(
+            &rendered,
+            "RR Client:",
+            "false (not configured or not exposed by older daemon)",
+        );
+        assert_detail_row(&rendered, "Route Server Client:", "false");
+        assert_detail_row(
+            &rendered,
+            "Slow Peer:",
+            "false (not flagged or not exposed by older daemon; not a session-health verdict)",
+        );
+        assert_detail_row(&rendered, "Import:", "unknown");
+        assert_detail_row(&rendered, "Export:", "unknown");
+    }
+
+    /// Mutation receipt: forcing the production paragraph scroll offset to zero
+    /// makes the blocking-row assertion red. Re-enabling row wrapping also
+    /// makes it red because the long description consumes unreported visual
+    /// rows before the final safety row.
+    #[test]
+    fn peer_detail_130x8_reaches_final_blocking_row_without_wrapping() {
+        let mut neighbor = safety_neighbor();
+        neighbor.config.as_mut().unwrap().description = "long-description-".repeat(20);
+        let final_row = "Outbound ipv6_unicast: usage=50 limit=50 headroom=0 blocking=true";
+        let mut app = App::new();
+        app.on_data(snapshot(vec![neighbor], Freshness::Fresh));
+        app.view = View::PeerDetail("192.0.2.2".into());
+
+        let initial = rendered_detail(&mut app, 130, 8);
+        assert!(!initial.contains(final_row));
+        assert_eq!(app.detail_page_height, 6);
+        assert!(app.detail_max_scroll > app.detail_page_height);
+
+        app.on_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::End,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        let moved = rendered_detail(&mut app, 130, 8);
+        assert!(moved.contains(final_row), "{moved}");
     }
 
     /// Red proof: removing the ninth header loses its rendered label.
