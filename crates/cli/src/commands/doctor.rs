@@ -1754,6 +1754,10 @@ pub(crate) async fn run(
                                 messages_sent: n.messages_sent,
                                 flap_count: n.flap_count,
                                 last_error: redact_text(&n.last_error),
+                                is_dynamic: n.is_dynamic,
+                                accepted_dynamic_range: output::json_accepted_dynamic_range(
+                                    n.accepted_dynamic_range.as_ref(),
+                                ),
                                 route_reflector_client: n.route_reflector_client,
                                 description: redact_text(
                                     &cfg.map(|c| c.description.clone()).unwrap_or_default(),
@@ -3260,6 +3264,11 @@ paths = ["x"]
             "core peer",
         );
         slow.slow_peer = true;
+        slow.is_dynamic = true;
+        slow.accepted_dynamic_range = Some(rustbgpd_api::proto::AcceptedDynamicNeighborRange {
+            prefix: "10.0.0.0/24".to_string(),
+            peer_group: "ix-members".to_string(),
+        });
         *server.state.list_neighbors_response.lock().await = vec![slow];
         *server.state.session_events.lock().await = vec![
             rustbgpd_api::proto::BgpEvent {
@@ -3359,9 +3368,17 @@ paths = ["x"]
         let dynamic_neighbors: serde_json::Value =
             serde_json::from_str(find(&files, "peers/dynamic-neighbors.json")).unwrap();
         assert_eq!(dynamic_neighbors, serde_json::json!([]));
-        // Load-bearing mutation proof: dropping `slow_peer: n.slow_peer` from
-        // the support snapshot makes this projection assertion red.
+        // Load-bearing mutation proof: dropping any shared JsonNeighbor
+        // projection from the support snapshot makes its assertion red.
         assert_eq!(peers[0]["slow_peer"], true);
+        assert_eq!(peers[0]["is_dynamic"], true);
+        assert_eq!(
+            peers[0]["accepted_dynamic_range"],
+            serde_json::json!({
+                "prefix": "10.0.0.0/24",
+                "peer_group": "ix-members",
+            })
+        );
         let bfd: serde_json::Value = serde_json::from_str(find(&files, "peers/bfd.json")).unwrap();
         // Load-bearing mutation proof: dropping the field from the doctor
         // projection or defaulting it false/null makes this primary cause

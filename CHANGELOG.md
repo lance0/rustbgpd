@@ -11,6 +11,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Dynamic peers now report the canonical `[[dynamic_neighbors]]` prefix and
+  peer group that accepted their session. The provenance is captured at
+  accept time, survives later matcher edits while the session remains live,
+  and appears in `NeighborState`, neighbor JSON and detail, `rbgp neighbor
+  --wide`, and the TUI peer detail; older daemons remain explicit as range
+  unavailable.
+
 - Neighbor detail now reports one presence-aware Effective Posture object for
   resolved NEXT_HOP ownership, RFC 1997 interpretation, route-server control
   communities, and ORR vantage across static and accepted dynamic peers.

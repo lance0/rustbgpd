@@ -687,6 +687,13 @@ added at runtime.
 | `ListDynamicNeighbors` | List configured dynamic-neighbor ranges (prefix, peer group, remote ASN, description) |
 | `SetGracefulShutdown` | RFC 8326 initiator toggle — attach the `GRACEFUL_SHUTDOWN` community to outbound updates for one peer (or all peers when `address` is empty) and clear with `clear = true` |
 
+`ListNeighbors` and `GetNeighborState` set `is_dynamic` and, for a dynamic
+peer, include `accepted_dynamic_range` with the canonical prefix and peer group
+captured when the connection was accepted. This is session provenance, not a
+query against the current matcher: deleting or editing that range does not
+rewrite the answer for an already-live session. The nested message is absent
+for static peers and from older daemons.
+
 ### Add a neighbor
 
 `AddNeighborRequest.config` remains the legacy field 1 payload. The additive

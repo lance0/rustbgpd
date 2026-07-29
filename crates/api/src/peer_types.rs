@@ -2267,6 +2267,12 @@ pub struct PeerInfo {
     pub tcp_ao_rotation: rustbgpd_transport::TcpAoRotationStatus,
     /// True for peers auto-created from a `[[dynamic_neighbors]]` range.
     pub is_dynamic: bool,
+    /// Canonical range and peer group that accepted this dynamic peer.
+    ///
+    /// This is captured at accept time and never recomputed from the current
+    /// matcher, so an established session retains truthful provenance after a
+    /// range is edited or removed. Static peers are `None`.
+    pub accepted_dynamic_range: Option<DynamicRangeTarget>,
     /// True when the per-peer session-state query did not complete in time
     /// (e.g. the session task is parked on TCP write back-pressure). The
     /// `state` field falls back to `Idle` in that case, so consumers that

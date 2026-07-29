@@ -67,6 +67,10 @@ fn json_neighbor(n: &crate::proto::NeighborState) -> JsonNeighbor {
         messages_sent: n.messages_sent,
         flap_count: n.flap_count,
         last_error: n.last_error.clone(),
+        is_dynamic: n.is_dynamic,
+        accepted_dynamic_range: output::json_accepted_dynamic_range(
+            n.accepted_dynamic_range.as_ref(),
+        ),
         route_reflector_client: n.route_reflector_client,
         description: cfg.map(|c| c.description.clone()).unwrap_or_default(),
     }
@@ -255,6 +259,26 @@ fn emit_effective_posture_human(value: &str) -> Result<(), CliError> {
     Ok(())
 }
 
+fn emit_neighbor_source_human(neighbor: &crate::proto::NeighborState) -> Result<(), CliError> {
+    let value = format!(
+        "Peer Source:           {}\n",
+        output::neighbor_source_label(neighbor)
+    );
+    #[cfg(test)]
+    if NEIGHBOR_SHOW_CAPTURE.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let Some(bytes) = slot.as_mut() else {
+            return false;
+        };
+        bytes.extend_from_slice(value.as_bytes());
+        true
+    }) {
+        return Ok(());
+    }
+    print!("{value}");
+    Ok(())
+}
+
 pub async fn show(
     connection: Connection,
     address: &str,
@@ -311,6 +335,10 @@ pub async fn show(
             messages_sent: n.messages_sent,
             flap_count: n.flap_count,
             last_error: n.last_error.clone(),
+            is_dynamic: n.is_dynamic,
+            accepted_dynamic_range: output::json_accepted_dynamic_range(
+                n.accepted_dynamic_range.as_ref(),
+            ),
             effective_max_prefixes,
             effective_max_prefixes_ipv4: n.effective_max_prefixes_ipv4,
             effective_max_prefixes_ipv6: n.effective_max_prefixes_ipv6,
@@ -446,6 +474,7 @@ pub async fn show(
             "Description:           {}",
             cfg.map(|c| c.description.as_str()).unwrap_or("")
         );
+        emit_neighbor_source_human(&n)?;
         println!(
             "Hold Time:             {}",
             cfg.map(|c| c.hold_time).unwrap_or(0)
@@ -1473,6 +1502,15 @@ mod tests {
             orr_vantage: Some("192.0.2.7".to_string()),
         };
         *server.state.neighbor_effective_posture.lock().await = Some(posture);
+        server
+            .state
+            .neighbor_is_dynamic
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        *server.state.neighbor_accepted_dynamic_range.lock().await =
+            Some(rustbgpd_api::proto::AcceptedDynamicNeighborRange {
+                prefix: "10.0.0.0/24".to_string(),
+                peer_group: "ix-members".to_string(),
+            });
 
         begin_neighbor_show_capture();
         show(
@@ -1490,6 +1528,9 @@ mod tests {
         assert_eq!(posture["interpret_rfc1997"], false);
         assert_eq!(posture["rs_control_communities"], true);
         assert_eq!(posture["orr_vantage"], "192.0.2.7");
+        assert_eq!(json["is_dynamic"], true);
+        assert_eq!(json["accepted_dynamic_range"]["prefix"], "10.0.0.0/24");
+        assert_eq!(json["accepted_dynamic_range"]["peer_group"], "ix-members");
 
         begin_neighbor_show_capture();
         show(
@@ -1502,7 +1543,8 @@ mod tests {
         .unwrap();
         assert_eq!(
             String::from_utf8(take_neighbor_show_capture()).unwrap(),
-            "Effective Posture:\n\
+            "Peer Source:           dynamic (10.0.0.0/24, group ix-members)\n\
+             Effective Posture:\n\
                NEXT_HOP Ownership:    strict_peer\n\
                Interpret RFC 1997:    false\n\
                RS Control Communities: true\n\
@@ -1523,6 +1565,7 @@ mod tests {
             serde_json::from_slice(&take_neighbor_show_capture()).unwrap();
         assert!(json.get("effective_posture").is_none());
 
+        *server.state.neighbor_accepted_dynamic_range.lock().await = None;
         begin_neighbor_show_capture();
         show(
             connect(&server.addr, None).await.unwrap(),
@@ -1534,7 +1577,8 @@ mod tests {
         .unwrap();
         assert_eq!(
             String::from_utf8(take_neighbor_show_capture()).unwrap(),
-            "Effective Posture:     unknown (not exposed by daemon)\n"
+            "Peer Source:           dynamic (range unavailable)\n\
+             Effective Posture:     unknown (not exposed by daemon)\n"
         );
         assert_eq!(next_hop_ownership_label(i32::MAX), "unknown");
     }
@@ -2022,11 +2066,11 @@ mod tests {
         assert_eq!(json, "[]");
     }
 
-    /// Load-bearing mutation proof: replacing `slow_peer: n.slow_peer` in
-    /// `json_neighbor` with `false` makes the first assertion red; removing
-    /// the false-value serde omission makes the second assertion red.
+    /// Load-bearing mutation proof: replacing `slow_peer: n.slow_peer` with
+    /// false, or removing either provenance projection, makes an exact
+    /// assertion red. False slow state remains omitted.
     #[test]
-    fn neighbor_list_json_preserves_only_active_slow_peer_flags() {
+    fn neighbor_list_json_preserves_slow_state_and_dynamic_provenance() {
         let mut state = crate::proto::NeighborState {
             config: Some(crate::proto::NeighborConfig {
                 address: "10.0.0.2".to_string(),
@@ -2034,15 +2078,27 @@ mod tests {
                 ..Default::default()
             }),
             slow_peer: true,
+            is_dynamic: true,
+            accepted_dynamic_range: Some(crate::proto::AcceptedDynamicNeighborRange {
+                prefix: "10.0.0.0/24".to_string(),
+                peer_group: "ix-members".to_string(),
+            }),
             ..Default::default()
         };
 
         let value = serde_json::to_value(json_neighbor(&state)).expect("serialize neighbor");
         assert_eq!(value["slow_peer"], true);
+        assert_eq!(value["is_dynamic"], true);
+        assert_eq!(value["accepted_dynamic_range"]["prefix"], "10.0.0.0/24");
+        assert_eq!(value["accepted_dynamic_range"]["peer_group"], "ix-members");
 
         state.slow_peer = false;
+        state.is_dynamic = false;
+        state.accepted_dynamic_range = None;
         let value = serde_json::to_value(json_neighbor(&state)).expect("serialize neighbor");
         assert!(value.get("slow_peer").is_none());
+        assert_eq!(value["is_dynamic"], false);
+        assert!(value.get("accepted_dynamic_range").is_none());
     }
 
     #[tokio::test]

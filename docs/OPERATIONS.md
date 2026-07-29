@@ -1541,16 +1541,21 @@ for it.
 
 ```bash
 rbgp neighbor          # summary table (alias: rbgp summary)
-rbgp neighbor --wide   # adds MsgRcvd, MsgSent, Flaps, RRC, Slow, State/PfxRcd
+rbgp neighbor --wide   # adds Source, MsgRcvd, MsgSent, Flaps, RRC, Slow, State/PfxRcd
 ```
 
-`--wide` appends the classic vendor summary columns: total messages
-received/sent (all types, daemon-lifetime — an Established session whose
-counters stop moving is wedged), flap count, an RR-client marker, and the
-overloaded `State/PfxRcd` column (a number means Established and shows the
-prefixes received). Its `Slow` column marks a slow-but-established peer with
-`!`. Display-only: JSON is unaffected by `--wide` and may omit optional false
-healthy-state fields.
+`--wide` adds a `Source` column before the classic vendor summary columns.
+Static peers say `static`; dynamic peers name the canonical accepted prefix and
+peer group captured at connection time. An older daemon that exposes only
+`is_dynamic` says `dynamic (range unavailable)` rather than guessing from the
+current matcher. The remaining columns are total messages received/sent (all
+types, daemon-lifetime — an Established session whose counters stop moving is
+wedged), flap count, an RR-client marker, and the overloaded `State/PfxRcd`
+column (a number means Established and shows the prefixes received). Its
+`Slow` column marks a slow-but-established peer with `!`. Display-only: JSON is
+unaffected by `--wide` and may omit optional false healthy-state fields.
+The same captured value appears as `Peer Source` in
+`rbgp neighbor <address>` and as `Source` in the TUI peer detail.
 
 Neighbor detail includes an Effective Posture block for the resolved running
 NEXT_HOP ownership, RFC 1997 interpretation, route-server control-community
