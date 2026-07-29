@@ -251,6 +251,15 @@ struct DynamicNeighborSnapshot {
     description: String,
 }
 
+/// Doctor-only join of the redacted support projection and live fields used
+/// for diagnosis. Keeping these values in one record prevents scoped peers
+/// from being paired with another neighbor's hold-down state.
+struct NeighborDoctorRecord {
+    support: JsonNeighbor,
+    identity: String,
+    max_prefix_restart_remaining_millis: Option<u64>,
+}
+
 impl From<&crate::proto::DynamicNeighborRange> for DynamicNeighborSnapshot {
     fn from(range: &crate::proto::DynamicNeighborRange) -> Self {
         Self {
@@ -611,6 +620,7 @@ fn peer_checks(
     address: &str,
     state: &str,
     stale: bool,
+    max_prefix_restart_remaining_millis: Option<u64>,
     slow_peer: bool,
     uptime_seconds: u64,
     flap_count: u64,
@@ -624,6 +634,14 @@ fn peer_checks(
             name: format!("peer.{address}.session"),
             status: CheckStatus::Warn,
             detail: format!("peer {address} state read timed out (stale) — session task busy"),
+        });
+    } else if let Some(remaining) = max_prefix_restart_remaining_millis {
+        checks.push(Check {
+            name: format!("peer.{address}.session"),
+            status: CheckStatus::Warn,
+            detail: format!(
+                "peer {address} is intentionally held down after max-prefix shutdown; automatic restart countdown has {remaining}ms remaining (state {state})"
+            ),
         });
     } else if state == "Established" {
         checks.push(Check {
@@ -733,6 +751,38 @@ fn peer_checks(
         });
     }
     checks
+}
+
+/// A blocking outbound family is intentionally withholding routes. Rows that
+/// are merely limited (or unlimited) are capacity inventory, not failures.
+fn outbound_prefix_limit_checks(
+    identity: &str,
+    rows: &[crate::proto::OutboundPrefixLimitState],
+) -> Vec<Check> {
+    rows.iter()
+        .filter(|row| row.blocking)
+        .map(|row| {
+            let limit = row
+                .limit
+                .map_or_else(|| "unlimited".to_string(), |limit| limit.to_string());
+            let reason = row
+                .reason
+                .as_deref()
+                .filter(|reason| !reason.is_empty())
+                .unwrap_or("unknown (daemon omitted reason)");
+            Check {
+                name: format!(
+                    "peer.{identity}.outbound_prefix_limit.{}",
+                    row.family
+                ),
+                status: CheckStatus::Fail,
+                detail: format!(
+                    "peer {identity} family {} is intentionally withholding routes: usage {}, limit {limit}, reason {reason}",
+                    row.family, row.usage
+                ),
+            }
+        })
+        .collect()
 }
 
 /// Most recent session-event timestamp per peer, for time-in-state.
@@ -1667,12 +1717,29 @@ pub(crate) async fn run(
                     let transitions = last_transition_by_peer(&session_events);
                     let losses = last_loss_by_peer(&session_events);
                     let admin_states = latest_admin_state_by_peer(&session_events);
-                    let snapshots: Vec<JsonNeighbor> = neighbors
-                        .neighbors
-                        .iter()
-                        .map(|n| {
-                            let cfg = n.config.as_ref();
-                            JsonNeighbor {
+                    let mut records = Vec::with_capacity(neighbors.neighbors.len());
+                    for n in &neighbors.neighbors {
+                        let cfg = n.config.as_ref();
+                        let identity = cfg.map_or_else(String::new, |config| {
+                            peer_identity(&config.address, &config.interface)
+                        });
+                        let policy_check = rfc8212_policy_check(
+                            &identity,
+                            n.rfc8212_import_policy,
+                            n.rfc8212_export_policy,
+                        );
+                        reporter.record(
+                            policy_check.name,
+                            policy_check.status,
+                            policy_check.detail,
+                        );
+                        for check in
+                            outbound_prefix_limit_checks(&identity, &n.outbound_prefix_limits)
+                        {
+                            reporter.record(check.name, check.status, check.detail);
+                        }
+                        records.push(NeighborDoctorRecord {
+                            support: JsonNeighbor {
                                 address: cfg.map(|c| c.address.clone()).unwrap_or_default(),
                                 interface: cfg.map(|c| c.interface.clone()).unwrap_or_default(),
                                 remote_asn: cfg.map(|c| c.remote_asn).unwrap_or(0),
@@ -1691,10 +1758,13 @@ pub(crate) async fn run(
                                 description: redact_text(
                                     &cfg.map(|c| c.description.clone()).unwrap_or_default(),
                                 ),
-                            }
-                        })
-                        .collect();
-                    if snapshots.is_empty() {
+                            },
+                            identity,
+                            max_prefix_restart_remaining_millis: n
+                                .max_prefix_restart_remaining_millis,
+                        });
+                    }
+                    if records.is_empty() {
                         match dynamic_neighbor_snapshot.as_ref() {
                             Some(ranges) if ranges.is_empty() => reporter.record(
                                 "peers.configured",
@@ -1717,43 +1787,38 @@ pub(crate) async fn run(
                             ),
                         }
                     }
-                    for n in &neighbors.neighbors {
-                        let address = n.config.as_ref().map_or_else(String::new, |config| {
-                            peer_identity(&config.address, &config.interface)
-                        });
-                        let check = rfc8212_policy_check(
-                            &address,
-                            n.rfc8212_import_policy,
-                            n.rfc8212_export_policy,
-                        );
-                        reporter.record(check.name, check.status, check.detail);
-                    }
-                    for snapshot in &snapshots {
-                        let identity = peer_identity(&snapshot.address, &snapshot.interface);
+                    for record in &records {
                         let session_evidence = if session_history_available {
                             SessionHistoryEvidence::Retained {
-                                last_transition_unix: transitions.get(&identity).copied(),
-                                last_loss_unix: losses.get(&identity).copied(),
-                                latest_admin_state: admin_states.get(&identity).copied(),
+                                last_transition_unix: transitions.get(&record.identity).copied(),
+                                last_loss_unix: losses.get(&record.identity).copied(),
+                                latest_admin_state: admin_states.get(&record.identity).copied(),
                             }
                         } else {
                             SessionHistoryEvidence::Unavailable
                         };
                         for check in peer_checks(
-                            &identity,
-                            &snapshot.state,
-                            snapshot.stale,
-                            snapshot.slow_peer,
-                            snapshot.uptime_seconds,
-                            snapshot.flap_count,
+                            &record.identity,
+                            &record.support.state,
+                            record.support.stale,
+                            record.max_prefix_restart_remaining_millis,
+                            record.support.slow_peer,
+                            record.support.uptime_seconds,
+                            record.support.flap_count,
                             session_evidence,
                             now,
-                            &snapshot.last_error,
+                            &record.support.last_error,
                         ) {
                             reporter.record(check.name, check.status, check.detail);
                         }
                     }
-                    bundle.add_json("peers/neighbors.json", &snapshots)?;
+                    bundle.add_json(
+                        "peers/neighbors.json",
+                        &records
+                            .iter()
+                            .map(|record| &record.support)
+                            .collect::<Vec<_>>(),
+                    )?;
                     bundle.add_json(
                         "peers/events.json",
                         &EventsSnapshot {
@@ -2253,6 +2318,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             "10.0.0.2",
             "Established",
             false,
+            None,
             false,
             3600,
             0,
@@ -2263,6 +2329,106 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
         assert_eq!(checks.len(), 1);
         assert!(checks[0].status == CheckStatus::Ok);
         assert!(checks[0].detail.contains("Established"));
+    }
+
+    /// Load-bearing max-prefix hold-down proof: deleting the countdown branch
+    /// turns both intentional warnings back into the identical fixture's
+    /// retained-age failure. Matching only positive values makes the zero
+    /// assertion red. The stale and disabled assertions pin their precedence.
+    #[test]
+    fn max_prefix_restart_countdown_is_intentional_at_zero_and_nonzero() {
+        let evidence = || {
+            retained_session_evidence_with_admin(Some(1), None, Some(RetainedAdminState::Enabled))
+        };
+        let diagnose = |stale, countdown, evidence| {
+            peer_checks(
+                "10.0.0.2", "Connect", stale, countdown, false, 0, 0, evidence, 1_000_000, "",
+            )
+        };
+
+        let running = diagnose(false, Some(30_000), evidence());
+        assert_eq!(running[0].status, CheckStatus::Warn);
+        assert!(running[0].detail.contains("intentionally held down"));
+        assert!(running[0].detail.contains("30000ms remaining"));
+
+        let expired = diagnose(false, Some(0), evidence());
+        assert_eq!(expired[0].status, CheckStatus::Warn);
+        assert!(expired[0].detail.contains("0ms remaining"));
+
+        let absent = diagnose(false, None, evidence());
+        assert_eq!(absent[0].status, CheckStatus::Fail);
+        assert!(absent[0].detail.contains("in Connect"));
+
+        let stale = diagnose(true, Some(30_000), evidence());
+        assert_eq!(stale[0].status, CheckStatus::Warn);
+        assert!(stale[0].detail.contains("state read timed out (stale)"));
+
+        let disabled = diagnose(
+            false,
+            None,
+            retained_session_evidence_with_admin(Some(1), None, Some(RetainedAdminState::Disabled)),
+        );
+        assert_eq!(disabled[0].status, CheckStatus::Ok);
+        assert!(disabled[0].detail.contains("administratively disabled"));
+    }
+
+    /// Load-bearing blocking predicate and scope proof: removing the
+    /// `blocking` filter drops the first check; broadening it to every row
+    /// creates checks for eth1. Replacing the scoped identity with the bare
+    /// address makes the exact name assertions red.
+    #[test]
+    fn outbound_prefix_checks_report_only_blocking_scoped_families() {
+        let blocking = crate::proto::OutboundPrefixLimitState {
+            family: "ipv4_unicast".to_string(),
+            usage: 100,
+            limit: Some(100),
+            headroom: Some(0),
+            blocking: true,
+            reason: Some("outbound_prefix_limit_reached".to_string()),
+        };
+        let mut nonblocking = blocking.clone();
+        nonblocking.blocking = false;
+        nonblocking.reason = None;
+        let unlimited = crate::proto::OutboundPrefixLimitState {
+            family: "ipv6_unicast".to_string(),
+            usage: 7,
+            limit: None,
+            headroom: None,
+            blocking: false,
+            reason: None,
+        };
+
+        let eth0 = outbound_prefix_limit_checks("fe80::1%eth0", std::slice::from_ref(&blocking));
+        assert_eq!(eth0.len(), 1);
+        assert_eq!(
+            eth0[0].name,
+            "peer.fe80::1%eth0.outbound_prefix_limit.ipv4_unicast"
+        );
+        assert_eq!(eth0[0].status, CheckStatus::Fail);
+        assert!(eth0[0].detail.contains("usage 100, limit 100"));
+        assert!(
+            eth0[0]
+                .detail
+                .contains("reason outbound_prefix_limit_reached")
+        );
+        assert!(eth0[0].detail.contains("intentionally withholding routes"));
+
+        let mut missing_reason = blocking.clone();
+        missing_reason.reason = None;
+        let unknown = outbound_prefix_limit_checks("fe80::1%eth0", &[missing_reason]);
+        assert!(
+            unknown[0]
+                .detail
+                .contains("reason unknown (daemon omitted reason)")
+        );
+        assert!(
+            !unknown[0]
+                .detail
+                .contains("reason outbound_prefix_limit_reached")
+        );
+
+        assert!(outbound_prefix_limit_checks("fe80::1%eth1", &[nonblocking, unlimited]).is_empty());
+        assert!(outbound_prefix_limit_checks("fe80::1%eth1", &[]).is_empty());
     }
 
     /// ADR-0112 doctor contract, all four dispositions in one place.
@@ -2315,6 +2481,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             "10.0.0.2",
             "Connect",
             false,
+            None,
             false,
             0,
             0,
@@ -2338,6 +2505,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             "10.0.0.2",
             "Connect",
             false,
+            None,
             false,
             0,
             0,
@@ -2358,6 +2526,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             "10.0.0.2",
             "Idle",
             false,
+            None,
             true,
             0,
             FLAP_REPORT_THRESHOLD,
@@ -2393,6 +2562,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             "10.0.0.2",
             "Active",
             false,
+            None,
             false,
             0,
             0,
@@ -2415,6 +2585,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             "10.0.0.2",
             "Connect",
             false,
+            None,
             false,
             0,
             0,
@@ -2435,6 +2606,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             "10.0.0.2",
             "Established",
             false,
+            None,
             false,
             60,
             FLAP_REPORT_THRESHOLD,
@@ -2461,6 +2633,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             "10.0.0.2",
             "Established",
             false,
+            None,
             false,
             60,
             FLAP_REPORT_THRESHOLD,
@@ -2479,6 +2652,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             "10.0.0.2",
             "Stale",
             true,
+            None,
             false,
             0,
             0,
@@ -2501,6 +2675,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             "10.0.0.2",
             "Established",
             false,
+            None,
             true,
             3600,
             0,
@@ -3227,6 +3402,113 @@ paths = ["x"]
                     .as_str()
                     .is_some_and(|detail| detail.contains("retained history shows a session loss"))
         }));
+    }
+
+    /// End-to-end load-bearing proof for the doctor-private neighbor record.
+    /// Dropping the blocking check loses exit 2 and its exact scoped check;
+    /// serializing the private wrapper instead of its redacted support
+    /// projection exposes one of the forbidden internal keys.
+    #[tokio::test]
+    async fn doctor_reports_scoped_outbound_blocking_without_changing_bundle_shape() {
+        let server = spawn_mock_server(None).await;
+        let state_dir = tempfile::tempdir().unwrap();
+        *server.state.config_effective_toml.lock().await = Some(format!(
+            "[global]\nasn = 65000\nruntime_state_dir = \"{}\"\n",
+            state_dir.path().display()
+        ));
+
+        let mut blocked = neighbor(
+            "fe80::1",
+            rustbgpd_api::proto::SessionState::Connect as i32,
+            0,
+            "blocked peer",
+        );
+        blocked.config.as_mut().unwrap().interface = "eth0".to_string();
+        blocked.last_error = "token=must-not-escape".to_string();
+        blocked.max_prefix_restart_remaining_millis = Some(0);
+        blocked.outbound_prefix_limits = vec![rustbgpd_api::proto::OutboundPrefixLimitState {
+            family: "ipv4_unicast".to_string(),
+            usage: 100,
+            limit: Some(100),
+            headroom: Some(0),
+            blocking: true,
+            reason: Some("outbound_prefix_limit_reached".to_string()),
+        }];
+
+        let mut unblocked = neighbor(
+            "fe80::1",
+            rustbgpd_api::proto::SessionState::Established as i32,
+            0,
+            "healthy peer",
+        );
+        unblocked.config.as_mut().unwrap().interface = "eth1".to_string();
+        unblocked.outbound_prefix_limits = vec![rustbgpd_api::proto::OutboundPrefixLimitState {
+            family: "ipv4_unicast".to_string(),
+            usage: 99,
+            limit: Some(100),
+            headroom: Some(1),
+            blocking: false,
+            reason: None,
+        }];
+        *server.state.list_neighbors_response.lock().await = vec![blocked, unblocked];
+
+        let dir = tempfile::tempdir().unwrap();
+        let bundle_path = dir.path().join("bundle.tar.gz");
+        let code = run(
+            connect(&server.addr, None).await,
+            &DoctorOptions {
+                output: Some(&bundle_path),
+                log_file: None,
+                daemon_address: &server.addr,
+                token_file_configured: false,
+                json: true,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 2, "blocking outbound capacity must exit red");
+
+        let files = extract_bundle(&bundle_path);
+        let manifest: serde_json::Value =
+            serde_json::from_str(find(&files, "manifest.json")).unwrap();
+        let blocked_check = manifest_check(
+            &manifest,
+            "peer.fe80::1%eth0.outbound_prefix_limit.ipv4_unicast",
+        );
+        assert_eq!(blocked_check["status"], "fail");
+        assert!(
+            blocked_check["detail"]
+                .as_str()
+                .unwrap()
+                .contains("usage 100, limit 100, reason outbound_prefix_limit_reached")
+        );
+        assert!(manifest["checks"].as_array().unwrap().iter().all(|check| {
+            !check["name"]
+                .as_str()
+                .unwrap()
+                .starts_with("peer.fe80::1%eth1.outbound_prefix_limit")
+        }));
+        assert_eq!(
+            manifest_check(&manifest, "peer.fe80::1%eth0.session")["status"],
+            "warn"
+        );
+
+        let peers: serde_json::Value =
+            serde_json::from_str(find(&files, "peers/neighbors.json")).unwrap();
+        assert_eq!(peers[0]["address"], "fe80::1");
+        assert_eq!(peers[0]["interface"], "eth0");
+        assert_eq!(peers[0]["last_error"], "[REDACTED]");
+        for forbidden in [
+            "support",
+            "identity",
+            "max_prefix_restart_remaining_millis",
+            "outbound_prefix_limits",
+        ] {
+            assert!(
+                peers[0].get(forbidden).is_none(),
+                "private doctor field {forbidden} leaked into neighbors.json"
+            );
+        }
     }
 
     /// Load-bearing zero-inventory proof: omitting the range snapshot removes

@@ -1379,6 +1379,15 @@ does not expose the status, because "no evidence" is not "no problem". A red
 verdict here never affects `/readyz`: missing operator policy is a
 configuration state to repair, not a daemon that cannot serve traffic.
 
+Doctor treats a present max-prefix restart countdown, including `0ms`, as an
+intentional yellow hold-down rather than a stuck-session failure; stale
+session evidence still takes precedence. An active outbound prefix-limit
+blocking episode is red as
+`peer.<scoped-address>.outbound_prefix_limit.<family>` because that peer is
+intentionally withholding routes until capacity recovers. Merely configured,
+unlimited, and nonblocking family rows do not add checks. Link-local identities
+retain their `%interface` scope in both check names and details.
+
 First-deploy checks (network probes are bounded to a 2s timeout; all are read-only):
 
 | Check | What it probes | Red/yellow advice |
