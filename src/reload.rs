@@ -1515,6 +1515,14 @@ pub(crate) async fn reload_config_with_tcp_ao(
         new_config.global.honor_blackhole = current.global.honor_blackhole;
         honor_blackhole_changed = false;
     }
+    if new_config.global.dynamic_neighbor_limit != current.global.dynamic_neighbor_limit {
+        error!(
+            "[global].dynamic_neighbor_limit differs from the live config: dynamic-neighbor \
+             admission capacity is allocated once at startup. Restart rustbgpd to change it. \
+             The runtime snapshot keeps the startup limit for this reload."
+        );
+        new_config.global.dynamic_neighbor_limit = current.global.dynamic_neighbor_limit;
+    }
     if config::pin_ebgp_requires_policy_startup_only(&mut new_config, current) {
         error!(
             "[global].ebgp_requires_policy differs from the live config: the ADR-0112 \
@@ -4864,19 +4872,20 @@ hold_time = 90
         }
     }
 
-    /// Drive a reload against the given initial+next TOML and return
-    /// the commands the mock peer manager observed, in order.
+    /// Drive sequential reloads against the given initial+next TOML and return
+    /// the outcomes plus commands the mock peer manager observed, in order.
     /// Replies `Ok(())` to every command that carries a reply channel.
-    async fn drive_reload(
+    async fn drive_reloads(
         initial_toml: &str,
         new_toml: &str,
-    ) -> (Option<ReloadedConfig>, Vec<String>) {
+        reloads: usize,
+    ) -> (Vec<Option<ReloadedConfig>>, Vec<String>) {
         let path = unique_temp_path("reload-driver");
         write_tier_test_config(&path, initial_toml);
-        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
-        assert_tier_authorized_test_config(&initial);
-        let live_grpc_tcp = initial.global.telemetry.grpc_tcp.clone();
-        let live_grpc_uds = initial.global.telemetry.grpc_uds.clone();
+        let mut current = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        assert_tier_authorized_test_config(&current);
+        let live_grpc_tcp = current.global.telemetry.grpc_tcp.clone();
+        let live_grpc_uds = current.global.telemetry.grpc_uds.clone();
 
         write_tier_test_config(&path, new_toml);
 
@@ -4918,24 +4927,37 @@ hold_time = 90
             tags
         });
 
-        let returned = reload_config(
-            path.to_str().unwrap(),
-            &initial,
-            live_grpc_tcp.as_ref(),
-            live_grpc_uds.as_ref(),
-            &peer_mgr_tx,
-            None,
-            None,
-        )
-        .await;
-        if let Some(config) = returned.as_ref() {
-            assert_tier_authorized_test_config(config);
-            assert_tier_authorized_test_config(&config.desired);
+        let mut outcomes = Vec::with_capacity(reloads);
+        for _ in 0..reloads {
+            let returned = reload_config(
+                path.to_str().unwrap(),
+                &current,
+                live_grpc_tcp.as_ref(),
+                live_grpc_uds.as_ref(),
+                &peer_mgr_tx,
+                None,
+                None,
+            )
+            .await;
+            if let Some(config) = returned.as_ref() {
+                assert_tier_authorized_test_config(config);
+                assert_tier_authorized_test_config(&config.desired);
+                current = config.runtime.clone();
+            }
+            outcomes.push(returned);
         }
         drop(peer_mgr_tx);
         let tags = mock.await.unwrap();
         std::fs::remove_file(&path).ok();
-        (returned, tags)
+        (outcomes, tags)
+    }
+
+    async fn drive_reload(
+        initial_toml: &str,
+        new_toml: &str,
+    ) -> (Option<ReloadedConfig>, Vec<String>) {
+        let (mut outcomes, tags) = drive_reloads(initial_toml, new_toml, 1).await;
+        (outcomes.pop().unwrap(), tags)
     }
 
     /// ADR-0096: an rpol-content-only reload sends `SyncRpolPolicies`
@@ -5623,6 +5645,100 @@ tcp_ao = [
         );
         assert!(rendered.contains("honor_graceful_shutdown"), "{rendered}");
         assert!(rendered.contains("honor_blackhole"), "{rendered}");
+    }
+
+    #[tokio::test]
+    async fn reload_pins_dynamic_neighbor_limit_and_preserves_desired_value() {
+        let desired = baseline_toml().replace(
+            "listen_port = 179",
+            "listen_port = 179\ndynamic_neighbor_limit = 17",
+        );
+
+        let (returned, tags) = drive_reload(baseline_toml(), &desired).await;
+        let returned = returned.expect("limit-only reload should return a config");
+
+        assert!(
+            tags.is_empty(),
+            "restart-required limit edit must not send peer-manager commands: {tags:?}"
+        );
+        assert_eq!(
+            returned.global.dynamic_neighbor_limit, None,
+            "runtime snapshot must preserve the omitted startup value exactly"
+        );
+        assert_eq!(
+            returned.effective_dynamic_neighbor_limit(),
+            100,
+            "pinning must not materialize the effective default into runtime config"
+        );
+        assert_eq!(
+            returned.desired.global.dynamic_neighbor_limit,
+            Some(17),
+            "desired snapshot must preserve the edited value for restart"
+        );
+    }
+
+    #[tokio::test]
+    async fn mixed_reload_applies_neighbor_edit_but_pins_dynamic_neighbor_limit() {
+        let initial = baseline_toml().replace(
+            "listen_port = 179",
+            "listen_port = 179\ndynamic_neighbor_limit = 100",
+        );
+        let desired = initial
+            .replace(
+                "dynamic_neighbor_limit = 100",
+                "dynamic_neighbor_limit = 17",
+            )
+            .replace("hold_time = 90", "hold_time = 45");
+
+        let (returned, tags) = drive_reloads(&initial, &desired, 2).await;
+
+        assert_eq!(
+            tags,
+            vec!["ReconcilePeers(+0,-0,~1)"],
+            "the independently reloadable neighbor edit must still reconcile"
+        );
+        for returned in returned {
+            let returned = returned.expect("mixed reload should return a config");
+            assert_eq!(returned.neighbors[0].hold_time, Some(45));
+            assert_eq!(
+                returned.global.dynamic_neighbor_limit,
+                Some(100),
+                "mixed reload must not advance the startup-pinned admission limit"
+            );
+            assert_eq!(
+                returned.desired.global.dynamic_neighbor_limit,
+                Some(17),
+                "mixed reload must retain the edited limit as desired state"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn repeated_identical_reload_keeps_dynamic_neighbor_limit_delta_observable() {
+        let initial = baseline_toml().replace(
+            "listen_port = 179",
+            "listen_port = 179\ndynamic_neighbor_limit = 100",
+        );
+        let desired = initial.replace(
+            "dynamic_neighbor_limit = 100",
+            "dynamic_neighbor_limit = 17",
+        );
+        let (returned, tags) = drive_reloads(&initial, &desired, 2).await;
+
+        assert!(tags.is_empty(), "limit-only reloads must have no live work");
+        for returned in returned {
+            let returned = returned.expect("limit-only reload should return a config");
+            assert_eq!(
+                returned.global.dynamic_neighbor_limit,
+                Some(100),
+                "each runtime snapshot must retain the startup admission limit"
+            );
+            assert_eq!(
+                returned.desired.global.dynamic_neighbor_limit,
+                Some(17),
+                "the unapplied edit must remain observable as desired drift"
+            );
+        }
     }
 
     #[tokio::test]
