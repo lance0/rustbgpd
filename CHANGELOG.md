@@ -55,6 +55,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The per-commit real-transport smoke receipt no longer records an empty RSS
+  sample when its supervised process exits between liveness and `/proc`
+  observation, avoiding a verifier false negative while keeping live
+  non-numeric observations fail closed.
+
 - SIGHUP now pins every daemon-wide restart-required `[global]`, `[rpki]`,
   `[bmp]`, and `[mrt]` value to the running startup snapshot while preserving
   edited desired values for the next restart, preventing later runtime-added
