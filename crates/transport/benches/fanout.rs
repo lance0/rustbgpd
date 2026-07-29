@@ -8,11 +8,14 @@
 //! the `bench-internals` fanout driver (synthetic peer registration + Loc-RIB
 //! seed + `distribute_changes`).
 //!
-//! Shape: seed `CHANGED` best paths, then fan that batch out to N peers, scaling
-//! N to expose the fanout factor. `no_policy` vs `with_policy` isolates the
-//! per-peer export-policy share. The family-gauge target separately prewarms a
-//! first advertise, mutates every route's MED outside accumulated time, and
-//! measures the resulting second changed-route pass on persistent fleets.
+//! Shape: advertise `CHANGED` MED-50 best paths to N peers, drain and verify
+//! that setup, then replace every best path with a MED-51 route outside
+//! accumulated time. One production `distribute_changes` pass is timed and its
+//! receipt and wire envelopes are verified afterward. `no_policy` vs
+//! `with_policy` isolates the per-peer export-policy share. The family-gauge
+//! target separately prewarms a first advertise, mutates every route's MED
+//! outside accumulated time, and measures the resulting second changed-route
+//! pass on persistent fleets.
 //! All peers occupy one update group and ordinary members share the same
 //! unicast route/next-hop payload Arcs. The exact-export path may therefore
 //! encode each route once per compatible wire-profile cohort and reapply each
@@ -41,7 +44,8 @@
 //! Gated behind `bench-internals`; run with:
 //!   cargo bench -p rustbgpd-transport --features bench-internals --bench fanout
 //!
-//! Pinned A/B receipt: `docs/perf/exact-export-fanout-2026-07.md`.
+//! Historical first-advertise A/B receipt:
+//! `docs/perf/exact-export-fanout-2026-07.md`.
 
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr};
@@ -209,6 +213,13 @@ type FanoutState = (
     HashSet<Prefix>,
 );
 
+struct ReplacementFanoutState {
+    manager: RibManager,
+    receivers: Vec<mpsc::Receiver<OutboundRouteUpdate>>,
+    changed: HashSet<Prefix>,
+    expected_inventory: HashSet<Prefix>,
+}
+
 /// Build a manager with `n_peers` registered and `CHANGED` best paths seeded.
 /// The receivers are returned so the caller keeps the bounded channels open
 /// across the measured `distribute_changes`.
@@ -267,22 +278,157 @@ fn build_ixp(n_peers: usize, distinct_remote_asns: bool) -> FanoutState {
     (manager, receivers, changed)
 }
 
+fn expected_fanout_receipt(
+    peers: usize,
+    routes_received_dispatches: usize,
+) -> AdjRibOutFanoutBenchReceipt {
+    AdjRibOutFanoutBenchReceipt {
+        update_groups: 1,
+        grouped_peers: peers,
+        ungrouped_peers: 0,
+        dirty_peers: 0,
+        grouped_unicast_routes: CHANGED,
+        private_unicast_routes: 0,
+        routes_received_dispatches,
+        routes_received_withdrawals: 0,
+        exact_probe_batches: 1,
+        exact_probe_candidates: CHANGED,
+        exact_probe_nonzero_encoded_lengths: CHANGED * peers,
+        exact_probe_cache_reuses: CHANGED * peers.saturating_sub(1),
+        successful_commits: peers,
+        successful_enqueues: peers,
+        family_gauge_writes: peers,
+        last_family_gauge_write_mask: 0x01,
+        pristine_otc_reconcile_candidates: peers
+            * if routes_received_dispatches == 0 {
+                1
+            } else {
+                2
+            },
+        first_peer_family_values: [
+            i64::try_from(CHANGED).expect("fixture size fits i64"),
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ],
+    }
+}
+
+fn route_med(route: &Route) -> u32 {
+    route
+        .attributes
+        .iter()
+        .find_map(|attribute| match attribute {
+            PathAttribute::Med(med) => Some(*med),
+            _ => None,
+        })
+        .expect("every fanout route must retain its MED")
+}
+
+fn drain_fanout_envelopes(
+    receivers: &mut [mpsc::Receiver<OutboundRouteUpdate>],
+    expected_inventory: &HashSet<Prefix>,
+    expected_med: u32,
+) {
+    for receiver in receivers {
+        let update = receiver
+            .try_recv()
+            .expect("every fanout member must receive one route-bearing envelope");
+        assert_eq!(update.announce.len(), CHANGED);
+        assert!(update.withdraw.is_empty());
+        assert_unicast_only_envelope(&update);
+        assert_real_transport_snapshot(&update);
+        let actual_inventory = update
+            .announce
+            .iter()
+            .map(|route| {
+                assert_eq!(
+                    route_med(route),
+                    expected_med,
+                    "the envelope must carry the prepared wire-visible replacement"
+                );
+                assert_eq!(route.path_id, 0);
+                route.prefix
+            })
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            actual_inventory, *expected_inventory,
+            "the envelope must contain the exact replacement inventory"
+        );
+        assert!(
+            matches!(receiver.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "one distribution pass must leave a live channel with no second envelope"
+        );
+    }
+}
+
+fn prepare_replacement_fanout(
+    (mut manager, mut receivers, expected_inventory): FanoutState,
+    peers: usize,
+) -> ReplacementFanoutState {
+    assert_eq!(expected_inventory.len(), CHANGED);
+    assert_eq!(
+        manager.bench_adj_rib_out_fanout_receipt(),
+        expected_fanout_receipt(peers, 1),
+        "the production MED-50 seed must populate the exact grouped fixture"
+    );
+    drain_fanout_envelopes(&mut receivers, &expected_inventory, 50);
+
+    let replacements = changed_prefixes()
+        .into_iter()
+        .map(|prefix| make_route_with_med(prefix, 51))
+        .collect();
+    let changed = manager.bench_prepare_unicast_replacement(replacements);
+    assert_eq!(
+        changed, expected_inventory,
+        "every prepared MED-51 best path must be wire-visible"
+    );
+    manager.bench_reset_adj_rib_out_fanout_receipt();
+    ReplacementFanoutState {
+        manager,
+        receivers,
+        changed,
+        expected_inventory,
+    }
+}
+
+fn measure_replacement_fanout<F>(iterations: u64, peers: usize, build: F) -> Duration
+where
+    F: Fn(usize) -> FanoutState,
+{
+    let mut accumulated = Duration::ZERO;
+    for _ in 0..iterations {
+        let mut state = prepare_replacement_fanout(build(peers), peers);
+        let started = Instant::now();
+        state.manager.bench_distribute(&state.changed);
+        accumulated += started.elapsed();
+        assert_eq!(
+            state.manager.bench_adj_rib_out_fanout_receipt(),
+            expected_fanout_receipt(peers, 0),
+            "the timed replacement must use one clean production group and commit every member"
+        );
+        drain_fanout_envelopes(&mut state.receivers, &state.expected_inventory, 51);
+    }
+    accumulated
+}
+
 fn bench_fanout(c: &mut Criterion) {
     let mut group = c.benchmark_group("distribute_fanout");
     for &n in &PEER_COUNTS {
         group.bench_with_input(BenchmarkId::new("no_policy", n), &n, |b, &n| {
-            b.iter_batched_ref(
-                || build(n, None),
-                |(mgr, _recv, changed)| mgr.bench_distribute(changed),
-                BatchSize::PerIteration,
-            );
+            b.iter_custom(|iterations| {
+                measure_replacement_fanout(iterations, n, |peers| build(peers, None))
+            });
         });
         group.bench_with_input(BenchmarkId::new("with_policy", n), &n, |b, &n| {
-            b.iter_batched_ref(
-                || build(n, Some(representative_export_chain())),
-                |(mgr, _recv, changed)| mgr.bench_distribute(changed),
-                BatchSize::PerIteration,
-            );
+            b.iter_custom(|iterations| {
+                measure_replacement_fanout(iterations, n, |peers| {
+                    build(peers, Some(representative_export_chain()))
+                })
+            });
         });
     }
     group.finish();
@@ -295,19 +441,15 @@ fn bench_ixp_exact_export_fanout(c: &mut Criterion) {
             BenchmarkId::new("homogeneous_remote_asn", n),
             &n,
             |b, &n| {
-                b.iter_batched_ref(
-                    || build_ixp(n, false),
-                    |(manager, _receivers, changed)| manager.bench_distribute(changed),
-                    BatchSize::PerIteration,
-                );
+                b.iter_custom(|iterations| {
+                    measure_replacement_fanout(iterations, n, |peers| build_ixp(peers, false))
+                });
             },
         );
         group.bench_with_input(BenchmarkId::new("distinct_remote_asns", n), &n, |b, &n| {
-            b.iter_batched_ref(
-                || build_ixp(n, true),
-                |(manager, _receivers, changed)| manager.bench_distribute(changed),
-                BatchSize::PerIteration,
-            );
+            b.iter_custom(|iterations| {
+                measure_replacement_fanout(iterations, n, |peers| build_ixp(peers, true))
+            });
         });
     }
     group.finish();

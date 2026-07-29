@@ -560,9 +560,16 @@ re-advertise them to every peer. Unlike the bench above (bare structs), the
 export-policy evaluation + Adj-RIB-Out staging + bounded-channel send — fanning a
 batch of **64 changed best paths** out to N peers. It is gated behind the
 `bench-internals` feature (a synthetic peer-registration + Loc-RIB-seed driver,
-not reachable in a normal build). Each measured pass is a *first* advertise
-(empty Adj-RIB-Out, so the equality-suppression fast path never fires) — the
-conservative upper bound on per-peer cost.
+not reachable in a normal build). Each current `distribute_fanout` and
+`ixp_exact_export_fanout` pass first advertises and drains a MED-50 inventory,
+prepares a MED-51 best-path replacement outside accumulated time, then times
+exactly one production distribution pass. Post-timing receipts require one
+clean update group, the exact grouped/private inventory, real nonzero
+exact-encoder results with compatible reuse, and one commit, enqueue, and gauge
+write per peer. Receiver inspection proves the exact MED-51 inventory and no
+second envelope, so equality suppression cannot silently turn the row into a
+no-op. This is a replacement-distribution microbenchmark, not an initial-table
+or end-to-end convergence measurement.
 
 The benchmark now belongs to the transport crate so it can install a distinct
 authoritative `SessionExportEncoder` for every synthetic peer without creating
@@ -628,8 +635,12 @@ At 256 and 1,000 peers it improves the measured actor/probe/commit/enqueue
 interval by 11.69% and 14.98%, respectively; both mean-change 95% confidence
 intervals exclude zero.
 
-The July 2026 receipt compares the first real-probe baseline against ordered
-batch probing with the live prepared-attribute memo key:
+The pinned July 2026 receipt below predates `0eef03f6`, when the benchmark seed
+populated the Loc-RIB without distributing it. Those rows therefore remain
+truthful first-advertise measurements and optimization evidence, but are not
+directly comparable to the current replacement-distribution instrument.
+That receipt compares the first real-probe baseline against ordered batch
+probing with the live prepared-attribute memo key:
 
 | Peers | No policy baseline → memo | Change | Policy baseline → memo | Change |
 |-------|---------------------------|--------|------------------------|--------|
