@@ -10,18 +10,27 @@ source "$root/docs/perf/event-history-host-fence.sh"
 
 smoke=0
 attempts=1
-if [[ ${1:-} == --smoke ]]; then
-    smoke=1
-    shift
-fi
-if [[ ${1:-} == --retry ]]; then
-    attempts=2
-    shift
+declared_cpu=
+[[ ${1:-} != --smoke ]] || { smoke=1; shift; }
+[[ ${1:-} != --retry ]] || { attempts=2; shift; }
+if [[ ${1:-} == --cpu && $# -ge 2 ]]; then
+    declared_cpu=$2
+    shift 2
 fi
 [[ $# -eq 1 ]] || {
-    echo "usage: $0 [--smoke] [--retry] OUTPUT_DIRECTORY" >&2
+    echo "usage: $0 [--smoke] [--retry] --cpu LOGICAL_CPU OUTPUT_DIRECTORY" >&2
     exit 2
 }
+[[ $declared_cpu =~ ^[0-9]+$ ]] ||
+    { echo "a numeric --cpu is required for every campaign" >&2; exit 2; }
+command -v taskset >/dev/null 2>&1 ||
+    { echo "taskset is required for the declared CPU pin" >&2; exit 2; }
+taskset -c "$declared_cpu" true >/dev/null 2>&1 ||
+    { echo "declared CPU is unavailable: $declared_cpu" >&2; exit 2; }
+linux_affinity=$(taskset -c "$declared_cpu" \
+    grep '^Cpus_allowed_list:' /proc/self/status | cut -f2)
+[[ $linux_affinity == "$declared_cpu" ]] ||
+    { echo "declared CPU and Linux affinity differ" >&2; exit 2; }
 output=$1
 if ((!smoke)) && [[ -v RUSTBGPD_VPN_QUERY_FORCE_CENSOR ]]; then
     echo "RUSTBGPD_VPN_QUERY_FORCE_CENSOR is forbidden for retained campaigns" >&2
@@ -69,13 +78,15 @@ timing_hash=$(sha256sum "$output/bin/vpn_query_timing" | awk '{print $1}')
 allocation_hash=$(sha256sum "$output/bin/vpn_query_allocation" | awk '{print $1}')
 
 python3 - "$output/manifest.json" "$timing_hash" "$allocation_hash" \
-    "$source_commit" "$source_tree" "$toolchain" "$attempts" <<'PY'
+    "$source_commit" "$source_tree" "$toolchain" "$attempts" \
+    "$declared_cpu" "$linux_affinity" <<'PY'
 import json, sys
-path, timing, allocation, commit, tree, rustc, attempts = sys.argv[1:]
+path, timing, allocation, commit, tree, rustc, attempts, cpu, affinity = sys.argv[1:]
 fixed = [f"{case}{i}" for i in range(1, 9) for case in ("U", "F")]
-json.dump({"schema": 2, "base_commit": commit, "rustc": rustc,
+json.dump({"schema": 3, "base_commit": commit, "rustc": rustc,
            "host_fence": "pass", "source_tree_clean": True, "fixed_order": fixed,
            "source_tree": tree, "attempts": int(attempts),
+           "declared_cpu": int(cpu), "linux_affinity": affinity,
            "timing_binary_sha256": timing,
            "allocation_binary_sha256": allocation}, open(path, "w"), indent=2)
 PY
@@ -87,7 +98,7 @@ decorate() {
 import json, sys
 raw, output, binary_hash, ordinal, repetition, timeout, commit, attempt = sys.argv[1:]
 doc = json.load(open(raw))
-doc.update(schema=2, binary_sha256=binary_hash, ordinal=int(ordinal),
+doc.update(schema=3, binary_sha256=binary_hash, ordinal=int(ordinal),
            repetition=int(repetition), timeout_seconds=int(timeout),
            source_commit=commit, attempt=int(attempt))
 json.dump(doc, open(output, "w"), indent=2)
@@ -101,13 +112,16 @@ check_provenance() {
     [[ $(rustc --version --verbose | tr '\n' ';') == "$toolchain" ]]
     [[ $(sha256sum "$output/bin/vpn_query_timing" | awk '{print $1}') == "$timing_hash" ]]
     [[ $(sha256sum "$output/bin/vpn_query_allocation" | awk '{print $1}') == "$allocation_hash" ]]
+    [[ $(taskset -c "$declared_cpu" grep '^Cpus_allowed_list:' \
+        /proc/self/status | cut -f2) == "$linux_affinity" ]]
 }
 
 if ((smoke)); then
     vpn_query_wait_for_idle smoke "$output/host-preflight.tsv"
     for target in timing allocation; do
         raw="$output/$target-raw.json"
-        "$output/bin/vpn_query_$target" smoke U "$raw"
+        taskset -c "$declared_cpu" "$output/bin/vpn_query_$target" \
+            smoke U "$raw" "$declared_cpu"
         decorate "$raw" "$output/$target-smoke.json" \
             "$([[ $target == timing ]] && echo "$timing_hash" || echo "$allocation_hash")" \
             1 1 10 0
@@ -128,7 +142,8 @@ for attempt in $(seq 1 "$attempts"); do
                     "$output/host-preflight.tsv"
                 raw="$output/attempt-$attempt/timing/raw.json"
                 set +e
-                "$output/bin/vpn_query_timing" cell "$size" "$case" "$raw"
+                taskset -c "$declared_cpu" "$output/bin/vpn_query_timing" \
+                    cell "$size" "$case" "$raw" "$declared_cpu"
                 rc=$?
                 set -e
                 if ((rc == 75)); then
@@ -153,7 +168,8 @@ done
 check_provenance
 vpn_query_wait_for_idle allocation "$output/host-preflight.tsv"
 set +e
-"$output/bin/vpn_query_allocation" cell 1000000 U "$output/allocation-raw.json"
+taskset -c "$declared_cpu" "$output/bin/vpn_query_allocation" \
+    cell 1000000 U "$output/allocation-raw.json" "$declared_cpu"
 rc=$?
 set -e
 if ((rc == 75)); then
