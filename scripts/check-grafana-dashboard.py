@@ -28,6 +28,17 @@ TARGETS = {
     ("Outbound queue by peer", "A"): (
         'bgp_peer_outbound_queue_depth{instance=~"$instance",peer=~"$peer"}'
     ),
+    ("Event outbox health", "A"): (
+        'max(bgp_event_outbox_degraded{instance=~"$instance"})'
+    ),
+    ("RIB ingest pressure", "B"): (
+        "sum by (peer) (rate(bgp_inbound_rib_backpressure_total"
+        '{instance=~"$instance",peer=~"$peer"}[$__rate_interval]))'
+    ),
+    ("RIB ingest pressure", "C"): (
+        "sum by (peer) (rate(bgp_outbound_route_drops_total"
+        '{instance=~"$instance",peer=~"$peer"}[$__rate_interval]))'
+    ),
     ("Slow peers", "A"): (
         'bgp_peer_slow{instance=~"$instance",peer=~"$peer"}'
     ),
@@ -129,6 +140,21 @@ REQUIRED_LEGENDS = {
     ("Outbound prefix capacity", "B"): "{{peer}} {{family}} limit",
     ("Outbound prefix capacity", "C"): "{{peer}} {{family}} headroom",
     ("Outbound prefix capacity", "D"): "{{peer}} {{family}} blocking",
+    ("RIB ingest pressure", "B"): "inbound safely parked {{peer}}",
+    ("RIB ingest pressure", "C"): "outbound work lost {{peer}}",
+}
+
+REQUIRED_DESCRIPTIONS = {
+    "Event outbox health": (
+        "Latched durability-impacting loss, committed-event delivery skip, or DB "
+        "open/recovery/quarantine failure. Expected shutdown reason=closed drops "
+        "are excluded; replay can remain available."
+    ),
+    "RIB ingest pressure": (
+        "Inbound RIB pressure safely parks producers and paces senders without "
+        "loss. Outbound drops mean BGP work was lost because a peer writer "
+        "channel was full or closed."
+    ),
 }
 
 ROUTE_SAFETY_PANELS = {
@@ -257,6 +283,11 @@ def main() -> None:
         actual = legends.get(key, [])
         if actual != [expected]:
             fail(f"target {key[0]!r}/{key[1]} must use legend {expected!r}; got {actual!r}")
+
+    for title, expected in REQUIRED_DESCRIPTIONS.items():
+        panel = next((item for item in panels if item.get("title") == title), None)
+        if panel is None or panel.get("description") != expected:
+            fail(f"panel {title!r} must use exact contract description {expected!r}")
 
     update_group_panel = next(
         panel for panel in panels if panel.get("title") == "Update group by peer"
