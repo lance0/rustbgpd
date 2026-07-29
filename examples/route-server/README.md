@@ -78,3 +78,6 @@ Members can be added atomically as they join — see
 `rbgp neighbor 198.51.100.4 add --remote-asn 64503 --route-server-client \
 --per-client-best --role rs --families ipv4_unicast,ipv6_unicast --max-prefixes 50000 \
 --max-prefix-restart-seconds 30`.
+
+Omit inherited fields when adding through a peer group; use the matching
+`--no-*` flag only to override an inherited true value.

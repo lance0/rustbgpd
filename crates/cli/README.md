@@ -53,7 +53,7 @@ rbgp config import <source> [--format bird|frr|gobgp] [--out <path>]
 rbgp neighbor
 rbgp summary                                # alias for neighbor list
 rbgp neighbor <addr>
-rbgp neighbor <addr> add --remote-asn <asn> [--peer-group <name>] [--max-prefix-restart-seconds <seconds>] [--role provider|rs|rs-client|customer|peer] [--strict-role] [--route-server-client] [--per-client-best]
+rbgp neighbor <addr> add --remote-asn <asn> [--peer-group <name>] [--families <list>] [--route-server-client|--no-route-server-client] [--per-client-best|--no-per-client-best] [--role <role>] [--strict-role|--no-strict-role] [--no-add-path]
 rbgp neighbor <addr> enable
 rbgp neighbor <addr> disable --reason "maintenance"
 rbgp neighbor <addr> softreset
@@ -78,6 +78,12 @@ rbgp bfd show <addr>
 `dynamic-neighbor add` requires its peer group to exist first. The
 [Quickstart operating example](../../docs/QUICKSTART.md#5-operate) creates the
 passwordless `ix-members` group from ordinary JSON before adding the range.
+
+`neighbor add` preserves omission for peer-group inheritance. Positive and
+`--no-*` forms create explicit boolean overrides; any Add-Path option emits the
+complete atomic block, while `--no-add-path` explicitly disables it. Old
+daemons fail the one wrapper-only RPC with an upgrade diagnostic; the CLI never
+retries with legacy semantics.
 
 ### Routes, Policy, and Dataplane
 

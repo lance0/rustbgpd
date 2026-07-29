@@ -36,14 +36,15 @@ If the fleet auto-accepts via a `[[dynamic_neighbors]]` range, a new
 client inside the range needs nothing. Otherwise:
 
 ```bash
-rbgp neighbor 10.0.0.42 add --remote-asn 65000 --description "new-client"
+rbgp neighbor 10.0.0.42 add --remote-asn 65000 --peer-group rr-clients --description new-client
 # or widen the accept range:
 rbgp dynamic-neighbor add 10.0.9.0/24 --peer-group rr-clients
 ```
 
 Both persist to the daemon's config file — the `CONFIG_PATH` argument,
 or `/etc/rustbgpd/config.toml` when it is omitted — before the RPC
-returns. Verify with `rbgp neighbor --wide`
+returns. The static neighbor inherits RR-client, family, and GR settings from
+`rr-clients` without materializing CLI defaults. Verify with `rbgp neighbor --wide`
 — the `RRC` column marks reflector clients. Uniform clients join the
 existing update group automatically; there is nothing to tune.
 

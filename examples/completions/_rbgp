@@ -310,16 +310,20 @@ _arguments "${_arguments_options[@]}" : \
 '*--families=[Address families (comma-separated)]:FAMILIES:_default' \
 '*--required-families=[Families that must be negotiated (comma-separated)]:REQUIRED_FAMILIES:_default' \
 '--role=[Local BGP Role for RFC 9234 route-leak protection]:ROLE:_default' \
-'--add-path-send-max=[Max paths per prefix for Add-Path send]:ADD_PATH_SEND_MAX:_default' \
-'--paths-limit-receive-max=[Experimental Paths-Limit preference for Add-Path receive families]:PATHS_LIMIT_RECEIVE_MAX:_default' \
+'(--no-add-path)--add-path-send-max=[Max paths per prefix for Add-Path send]:ADD_PATH_SEND_MAX:_default' \
+'(--no-add-path)--paths-limit-receive-max=[Experimental Paths-Limit preference for Add-Path receive families]:PATHS_LIMIT_RECEIVE_MAX:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
-'--route-server-client[Enable transparent route-server client mode (eBGP only)]' \
-'--per-client-best[RFC 7947 per-client best-path (path-hiding mitigation); requires --route-server-client]' \
-'--strict-role[Require the peer to advertise a compatible BGP Role capability]' \
-'--add-path-receive[Enable Add-Path receive]' \
-'--add-path-send[Enable Add-Path send]' \
+'(--no-route-server-client)--route-server-client[Enable transparent route-server client mode (eBGP only)]' \
+'--no-route-server-client[Explicitly disable inherited transparent route-server client mode]' \
+'(--no-per-client-best --no-route-server-client)--per-client-best[RFC 7947 per-client best-path (path-hiding mitigation); effective route-server-client mode is validated by the daemon]' \
+'--no-per-client-best[Explicitly disable inherited per-client best-path]' \
+'(--no-strict-role)--strict-role[Require the peer to advertise a compatible BGP Role capability]' \
+'--no-strict-role[Explicitly disable inherited strict-role enforcement]' \
+'(--no-add-path)--add-path-receive[Enable Add-Path receive]' \
+'(--no-add-path)--add-path-send[Enable Add-Path send]' \
+'--no-add-path[Explicitly disable the complete inherited Add-Path block]' \
 '-j[Output in JSON format]' \
 '--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
@@ -475,16 +479,20 @@ _arguments "${_arguments_options[@]}" : \
 '*--families=[Address families (comma-separated)]:FAMILIES:_default' \
 '*--required-families=[Families that must be negotiated (comma-separated)]:REQUIRED_FAMILIES:_default' \
 '--role=[Local BGP Role for RFC 9234 route-leak protection]:ROLE:_default' \
-'--add-path-send-max=[Max paths per prefix for Add-Path send]:ADD_PATH_SEND_MAX:_default' \
-'--paths-limit-receive-max=[Experimental Paths-Limit preference for Add-Path receive families]:PATHS_LIMIT_RECEIVE_MAX:_default' \
+'(--no-add-path)--add-path-send-max=[Max paths per prefix for Add-Path send]:ADD_PATH_SEND_MAX:_default' \
+'(--no-add-path)--paths-limit-receive-max=[Experimental Paths-Limit preference for Add-Path receive families]:PATHS_LIMIT_RECEIVE_MAX:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
-'--route-server-client[Enable transparent route-server client mode (eBGP only)]' \
-'--per-client-best[RFC 7947 per-client best-path (path-hiding mitigation); requires --route-server-client]' \
-'--strict-role[Require the peer to advertise a compatible BGP Role capability]' \
-'--add-path-receive[Enable Add-Path receive]' \
-'--add-path-send[Enable Add-Path send]' \
+'(--no-route-server-client)--route-server-client[Enable transparent route-server client mode (eBGP only)]' \
+'--no-route-server-client[Explicitly disable inherited transparent route-server client mode]' \
+'(--no-per-client-best --no-route-server-client)--per-client-best[RFC 7947 per-client best-path (path-hiding mitigation); effective route-server-client mode is validated by the daemon]' \
+'--no-per-client-best[Explicitly disable inherited per-client best-path]' \
+'(--no-strict-role)--strict-role[Require the peer to advertise a compatible BGP Role capability]' \
+'--no-strict-role[Explicitly disable inherited strict-role enforcement]' \
+'(--no-add-path)--add-path-receive[Enable Add-Path receive]' \
+'(--no-add-path)--add-path-send[Enable Add-Path send]' \
+'--no-add-path[Explicitly disable the complete inherited Add-Path block]' \
 '-j[Output in JSON format]' \
 '--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \

@@ -1978,19 +1978,18 @@ mod tests {
     }
 
     #[test]
-    fn adr_index_reports_server_implementation_and_cli_boundary() {
+    fn adr_index_reports_fully_shipped_boundary() {
         let index = include_str!("../../../docs/adr/README.md");
         assert!(index.contains(
             "| [0118](0118-presence-preserving-runtime-neighbor-create.md) | \
              Presence-preserving runtime neighbor creation | \
-             Accepted (server implemented; bundled CLI pending) | 2026-07-29 |"
+             Accepted — fully shipped | 2026-07-29 |"
         ));
         let adr =
             include_str!("../../../docs/adr/0118-presence-preserving-runtime-neighbor-create.md");
         assert!(
-            adr.lines().any(
-                |line| line == "**Status:** Accepted (server implemented; bundled CLI pending)"
-            )
+            adr.lines()
+                .any(|line| line == "**Status:** Accepted — fully shipped")
         );
     }
 
