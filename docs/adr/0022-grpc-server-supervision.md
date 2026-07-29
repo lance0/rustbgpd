@@ -24,8 +24,8 @@ Options considered:
    restart the entire process.
 
 3. **Log and continue** — not appropriate for the primary management
-   interface. Acceptable for the metrics server (read-only, supplementary)
-   but not for the gRPC control plane.
+   interface. It is also unsafe for a configured telemetry listener now that
+   the same socket carries the deployment `/livez` and `/readyz` probes.
 
 ## Decision
 
@@ -48,6 +48,11 @@ The normal shutdown path (Shutdown RPC) still works because it fires
 `rpc_shutdown_rx` before the gRPC server exits — the select branch for
 `rpc_shutdown_rx` wins the race.
 
+The optional metrics/readiness listener is bound before its serving task is
+spawned. If the configured address cannot be bound, startup exits 1 with the
+address and operating-system cause. Once bound, the read-only HTTP serving task
+remains fire-and-forget; this decision does not add general task supervision.
+
 ## Consequences
 
 **Positive:**
@@ -60,5 +65,7 @@ The normal shutdown path (Shutdown RPC) still works because it fires
 - A transient gRPC failure causes full daemon restart. This is acceptable
   because gRPC failures are not expected in normal operation, and a full
   restart is a clean recovery path.
-- The metrics server remains unsupervised (fire-and-forget). This is
-  intentional — the metrics endpoint is supplementary and read-only.
+- The metrics/readiness serving task remains unsupervised after its startup
+  bind succeeds. This is intentional: the narrow startup invariant prevents a
+  daemon from starting without its configured health surface without turning
+  this ADR into general task supervision.

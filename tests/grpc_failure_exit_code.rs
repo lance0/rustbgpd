@@ -2,10 +2,10 @@
 //!
 //! Operator-initiated shutdown (SIGTERM) exits 0; a component failure
 //! exits non-zero, so supervisors like systemd with `Restart=on-failure`
-//! restart the daemon instead of treating it as a clean stop. Two
-//! component failures are covered, both provoked by holding the port the
-//! daemon needs: the gRPC server exiting unexpectedly, and the BGP
-//! listener failing to bind.
+//! restart the daemon instead of treating it as a clean stop. Three
+//! component failures are covered, all provoked by holding the port the
+//! daemon needs: the gRPC server exiting unexpectedly, the BGP listener
+//! failing to bind, and the metrics/readiness listener failing to bind.
 
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -55,12 +55,20 @@ impl Drop for Daemon {
     }
 }
 
-fn write_config(dir: &Path, grpc_port: u16, bgp_port: u16) -> PathBuf {
+fn write_config_with_metrics(
+    dir: &Path,
+    grpc_port: u16,
+    bgp_port: u16,
+    metrics_port: Option<u16>,
+) -> PathBuf {
     let runtime_dir = dir.join("runtime");
     std::fs::create_dir_all(&runtime_dir).expect("create runtime dir");
     let token_path = dir.join("grpc-token");
     std::fs::write(&token_path, "exit-code-test-token\n").expect("write test token");
     let config_path = dir.join("rustbgpd.toml");
+    let prometheus_addr = metrics_port
+        .map(|port| format!("prometheus_addr = \"127.0.0.1:{port}\""))
+        .unwrap_or_default();
     let config = format!(
         r#"
 [security.grpc]
@@ -77,6 +85,7 @@ runtime_state_dir = "{runtime_dir}"
 
 [global.telemetry]
 log_format = "json"
+{prometheus_addr}
 
 [global.telemetry.grpc_tcp]
 address = "127.0.0.1:{grpc_port}"
@@ -88,6 +97,10 @@ principal = "rustbgpd://observer/exit-code-test"
     );
     std::fs::write(&config_path, config).expect("write test config");
     config_path
+}
+
+fn write_config(dir: &Path, grpc_port: u16, bgp_port: u16) -> PathBuf {
+    write_config_with_metrics(dir, grpc_port, bgp_port, None)
 }
 
 fn spawn_daemon(dir: &Path, config_path: &Path) -> Daemon {
@@ -135,6 +148,36 @@ fn grpc_bind_failure_exits_nonzero() {
         Some(1),
         "gRPC server failure must exit 1, got {status}\n{}",
         daemon.logs()
+    );
+}
+
+#[test]
+fn metrics_listener_bind_failure_exits_nonzero() {
+    let temp = tempfile::tempdir().expect("create temp dir");
+    let occupied = TcpListener::bind("127.0.0.1:0").expect("bind occupied metrics port");
+    let metrics_port = occupied.local_addr().unwrap().port();
+    let config_path =
+        write_config_with_metrics(temp.path(), free_port(), free_port(), Some(metrics_port));
+
+    let mut daemon = spawn_daemon(temp.path(), &config_path);
+    let status = daemon.wait_within(Duration::from_secs(30));
+    let logs = daemon.logs();
+    assert!(
+        logs.contains("failed to bind configured metrics/readiness listener"),
+        "the diagnostic must identify the configured health surface\n{logs}"
+    );
+    assert!(
+        logs.contains(&format!("127.0.0.1:{metrics_port}")),
+        "the diagnostic must identify the configured address\n{logs}"
+    );
+    assert!(
+        logs.contains("Address already in use"),
+        "the diagnostic must preserve the bind cause\n{logs}"
+    );
+    assert_eq!(
+        status.code(),
+        Some(1),
+        "metrics/readiness bind failure must exit 1, got {status}\n{logs}"
     );
 }
 

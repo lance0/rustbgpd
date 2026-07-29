@@ -65,6 +65,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   edited desired values for the next restart, preventing later runtime-added
   peers from resolving against an ASN or router ID the daemon never adopted.
 
+- A configured Prometheus HTTP listener that cannot bind now fails startup
+  with exit code 1 and reports the address and operating-system cause, instead
+  of leaving a live daemon without its `/metrics`, `/livez`, and `/readyz`
+  surface. Omitting `prometheus_addr` remains supported.
+
 - The shipped empty Adj-RIB-In alert now checks the current per-session
   Established gauge instead of inferring state from lifetime counters, and
   correctly aggregates scoped siblings to peer identity before joining the
