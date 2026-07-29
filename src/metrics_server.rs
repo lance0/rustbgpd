@@ -15,21 +15,36 @@ const READ_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_REQUEST_LINE: usize = 8192;
 const MAX_CONNECTIONS: usize = 64;
 
-pub async fn serve_metrics(
+pub struct MetricsListener {
     addr: SocketAddr,
+    listener: TcpListener,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("address {addr}: {source}")]
+pub struct MetricsListenerBindError {
+    addr: SocketAddr,
+    #[source]
+    source: std::io::Error,
+}
+
+impl MetricsListener {
+    pub async fn bind(addr: SocketAddr) -> Result<Self, MetricsListenerBindError> {
+        let listener = TcpListener::bind(addr)
+            .await
+            .map_err(|source| MetricsListenerBindError { addr, source })?;
+        let addr = listener.local_addr().unwrap_or(addr);
+        Ok(Self { addr, listener })
+    }
+}
+
+pub async fn serve_metrics(
+    server: MetricsListener,
     metrics: BgpMetrics,
     readiness_probe: CoreReadinessProbe,
 ) {
-    let listener = match TcpListener::bind(addr).await {
-        Ok(l) => {
-            info!(%addr, "metrics server listening");
-            l
-        }
-        Err(e) => {
-            error!(%addr, error = %e, "failed to bind metrics server");
-            return;
-        }
-    };
+    let MetricsListener { addr, listener } = server;
+    info!(%addr, "metrics server listening");
 
     let semaphore = Arc::new(Semaphore::new(MAX_CONNECTIONS));
 
@@ -184,21 +199,13 @@ mod tests {
 
     async fn start_server(readiness_probe: CoreReadinessProbe) -> SocketAddr {
         let metrics = BgpMetrics::new();
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let semaphore = Arc::new(Semaphore::new(MAX_CONNECTIONS));
-
+        let server = MetricsListener::bind("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        let addr = server.listener.local_addr().unwrap();
+        assert_eq!(server.addr, addr);
         tokio::spawn(async move {
-            loop {
-                let permit = semaphore.clone().acquire_owned().await.unwrap();
-                let (stream, _) = listener.accept().await.unwrap();
-                let m = metrics.clone();
-                let probe = readiness_probe.clone();
-                tokio::spawn(async move {
-                    let _ = handle_connection(stream, &m, &probe).await;
-                    drop(permit);
-                });
-            }
+            serve_metrics(server, metrics, readiness_probe).await;
         });
 
         addr

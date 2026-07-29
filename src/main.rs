@@ -2326,7 +2326,7 @@ fn main() {
                   includes a valid config that was warned about\n  \
                1  The config was rejected, or --check --strict found warnings.\n     \
                   A running daemon exits 1 on a component failure that ends it\n     \
-                  (BGP listener bind, unexpected gRPC server exit)\n  \
+                  (BGP or metrics/readiness listener bind, unexpected gRPC server exit)\n  \
                2  Invalid invocation (unknown flag combination, missing argument)\n  \
                70 Internal error",
             env!("CARGO_PKG_VERSION")
@@ -4629,6 +4629,14 @@ async fn run<T>(
     // Spawn after startup wiring and initial peer registration so readiness
     // cannot go green while initialization is still in progress.
     if let Some(prometheus_addr) = config.prometheus_addr() {
+        let metrics_listener = metrics_server::MetricsListener::bind(prometheus_addr)
+            .await
+            .unwrap_or_else(|error| {
+                fatal_startup_error(
+                    "failed to bind configured metrics/readiness listener",
+                    error,
+                )
+            });
         let metrics_clone = metrics.clone();
         let readiness_probe = rustbgpd_api::health_probe::CoreReadinessProbe::new(
             peer_mgr_tx.clone(),
@@ -4638,7 +4646,7 @@ async fn run<T>(
         .with_rib_readiness(rib_readiness_tx.clone())
         .with_gate(daemon_gate.clone());
         tokio::spawn(async move {
-            metrics_server::serve_metrics(prometheus_addr, metrics_clone, readiness_probe).await;
+            metrics_server::serve_metrics(metrics_listener, metrics_clone, readiness_probe).await;
         });
     }
 
