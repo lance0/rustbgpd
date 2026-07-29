@@ -1348,9 +1348,14 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             .await
             .map_err(|_| Status::internal("peer manager unavailable"))?;
 
-        let infos = reply_rx
+        let mut infos = reply_rx
             .await
             .map_err(|_| Status::internal("peer manager dropped reply"))?;
+        infos.sort_by(|left, right| {
+            left.address
+                .cmp(&right.address)
+                .then_with(|| left.interface.cmp(&right.interface))
+        });
 
         let snapshots = query_neighbor_rib_snapshots(
             &self.rib_tx,
@@ -2992,20 +2997,26 @@ mod tests {
     /// Load-bearing: restoring the former per-peer triple-query loop sends a
     /// second RIB command here, while this responder accepts exactly one
     /// aggregate request for both rows and fails it immediately.
+    #[expect(clippy::too_many_lines, reason = "one aggregate multi-peer receipt")]
     #[tokio::test]
     async fn list_neighbors_uses_one_aggregate_rib_snapshot_for_all_peers() {
         let (peer_tx, mut peer_rx) = mpsc::channel(16);
         let (rib_tx, mut rib_rx) = mpsc::channel(16);
         let svc = NeighborService::new(65001, AccessMode::ReadWrite, peer_tx, rib_tx, None);
-        let first: IpAddr = "10.0.0.1".parse().unwrap();
         let second: IpAddr = "10.0.0.2".parse().unwrap();
+        let tenth: IpAddr = "10.0.0.10".parse().unwrap();
+        let link_local: IpAddr = "fe80::1".parse().unwrap();
 
         let peer_task = tokio::spawn(async move {
             let Some(PeerManagerCommand::ListPeers { reply }) = peer_rx.recv().await else {
                 panic!("ListNeighbors must request one peer-manager snapshot");
             };
+            let mut eth1 = peer_info(link_local);
+            eth1.interface = Some("eth1".into());
+            let mut eth0 = peer_info(link_local);
+            eth0.interface = Some("eth0".into());
             reply
-                .send(vec![peer_info(first), peer_info(second)])
+                .send(vec![peer_info(tenth), peer_info(second), eth1, eth0])
                 .unwrap();
         });
         let rib_task = tokio::spawn(async move {
@@ -3017,13 +3028,24 @@ mod tests {
             else {
                 panic!("ListNeighbors must issue one aggregate RIB snapshot");
             };
-            assert_eq!(peers, vec![first, second]);
+            assert_eq!(peers, vec![second, tenth, link_local, link_local]);
             assert!(comparison.is_none());
+            let link_local_snapshot = NeighborRibSnapshot {
+                peer: link_local,
+                advertised_count: 11,
+                policy_stats: rustbgpd_rib::NeighborPolicyStats::default(),
+                outbound: rustbgpd_rib::PeerOutboundState {
+                    update_group: "group:link-local".into(),
+                    effective_distribution_mode: EffectiveDistributionMode::AddPath,
+                    selection_deferral: vec![],
+                    outbound_prefix_limits: vec![],
+                },
+            };
             reply
                 .send(NeighborRibSnapshotResponse {
                     snapshots: vec![
                         NeighborRibSnapshot {
-                            peer: first,
+                            peer: second,
                             advertised_count: 7,
                             policy_stats: rustbgpd_rib::NeighborPolicyStats {
                                 export_policy_routes_permitted: 3,
@@ -3038,7 +3060,7 @@ mod tests {
                             },
                         },
                         NeighborRibSnapshot {
-                            peer: second,
+                            peer: tenth,
                             advertised_count: 9,
                             policy_stats: rustbgpd_rib::NeighborPolicyStats {
                                 export_policy_routes_permitted: 5,
@@ -3053,6 +3075,10 @@ mod tests {
                                 outbound_prefix_limits: vec![],
                             },
                         },
+                        // RIB identity is address-only and forbids this duplicate
+                        // live topology; identical clones isolate comparator order.
+                        link_local_snapshot.clone(),
+                        link_local_snapshot,
                     ],
                     comparison: None,
                 })
@@ -3068,7 +3094,23 @@ mod tests {
             .neighbors;
         peer_task.await.unwrap();
         rib_task.await.unwrap();
-        assert_eq!(neighbors.len(), 2);
+        assert_eq!(neighbors.len(), 4);
+        let scoped = neighbors
+            .iter()
+            .map(|neighbor| {
+                let config = neighbor.config.as_ref().unwrap();
+                (config.address.as_str(), config.interface.as_str())
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            scoped,
+            vec![
+                ("10.0.0.2", ""),
+                ("10.0.0.10", ""),
+                ("fe80::1", "eth0"),
+                ("fe80::1", "eth1"),
+            ]
+        );
         assert_eq!(neighbors[0].prefixes_sent, 7);
         assert_eq!(neighbors[0].export_policy_routes_permitted, 3);
         assert_eq!(neighbors[0].update_group, "group:7");
