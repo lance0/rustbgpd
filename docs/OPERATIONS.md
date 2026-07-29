@@ -75,8 +75,8 @@ Prints rustc-style diagnostics on error, or `config OK` on success.
 A valid config can still be worth flagging. When it is, the summary reads
 `config VALID, <n> WARNINGS — NOT a clean check` instead of `config OK`,
 the warnings are framed on stderr above it, and the exit code stays 0 —
-these are things to look at, not failures. Today that means an eBGP
-neighbor resolving no explicit policy in a direction: unfiltered with
+these are things to look at, not failures. Today this means a configured eBGP
+neighbor or dynamic range with no explicit policy in a direction: unfiltered with
 `[global] ebgp_requires_policy` off, carrying no routes in that direction
 with it on. Both are legitimate configurations; neither should reach
 production unnoticed.

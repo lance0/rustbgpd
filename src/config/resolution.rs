@@ -121,6 +121,39 @@ impl Config {
             .collect()
     }
 
+    pub(crate) fn unpoliced_ebgp_boundaries(&self) -> Vec<UnpolicedEbgpBoundary> {
+        let static_neighbors =
+            self.unpoliced_ebgp_neighbors()
+                .into_iter()
+                .map(|neighbor| UnpolicedEbgpBoundary {
+                    import_missing: neighbor.import_missing,
+                    export_missing: neighbor.export_missing,
+                    subject: UnpolicedEbgpSubject::StaticNeighbor(neighbor),
+                });
+        let dynamic_ranges = self.dynamic_neighbors.iter().filter_map(|range| {
+            let addr = super::dynamic_range_representative_addr(&range.prefix)?;
+            let neighbor = Self::synthetic_dynamic_neighbor(
+                addr,
+                range.remote_asn,
+                range.description.as_deref().unwrap_or(&range.peer_group),
+                &range.peer_group,
+            );
+            let resolved = self.effective_policy_for_neighbor(&neighbor, false).ok()?;
+            (resolved.external && !(resolved.import_explicit && resolved.export_explicit)).then(
+                || UnpolicedEbgpBoundary {
+                    subject: UnpolicedEbgpSubject::DynamicRange {
+                        prefix: range.prefix.clone(),
+                        peer_group: range.peer_group.clone(),
+                        remote_asn: std::num::NonZeroU32::new(range.remote_asn),
+                    },
+                    import_missing: !resolved.import_explicit,
+                    export_missing: !resolved.export_explicit,
+                },
+            )
+        });
+        static_neighbors.chain(dynamic_ranges).collect()
+    }
+
     /// Resolve the global import policy chain (named policies referenced
     /// by `[policy] import_chain`). `None` when no chain is configured.
     #[allow(
@@ -862,18 +895,13 @@ impl Config {
     /// OPEN must set `external_pinned` from the session's pinned
     /// classification, or a wildcard-accepted child could be re-resolved as
     /// iBGP mid-session.
-    pub(crate) fn resolve_dynamic_neighbor(
-        &self,
+    fn synthetic_dynamic_neighbor(
         addr: IpAddr,
         remote_asn: u32,
         description: &str,
-        _group: &PeerGroupConfig,
         peer_group_name: &str,
-        external_pinned: bool,
-    ) -> Result<ResolvedNeighbor, ConfigError> {
-        // Build a synthetic Neighbor that references the peer group.
-        // All fields come from the group via the normal resolution path.
-        let neighbor = Neighbor {
+    ) -> Neighbor {
+        Neighbor {
             min_hold_time: None,
             address: addr.to_string(),
             interface: None,
@@ -921,7 +949,22 @@ impl Config {
             export_policy: Vec::new(),
             import_policy_chain: Vec::new(),
             export_policy_chain: Vec::new(),
-        };
+        }
+    }
+
+    pub(crate) fn resolve_dynamic_neighbor(
+        &self,
+        addr: IpAddr,
+        remote_asn: u32,
+        description: &str,
+        _group: &PeerGroupConfig,
+        peer_group_name: &str,
+        external_pinned: bool,
+    ) -> Result<ResolvedNeighbor, ConfigError> {
+        // Build a synthetic Neighbor that references the peer group.
+        // All fields come from the group via the normal resolution path.
+        let neighbor =
+            Self::synthetic_dynamic_neighbor(addr, remote_asn, description, peer_group_name);
         self.resolve_neighbor_pinned(&neighbor, external_pinned)
     }
 
@@ -1182,6 +1225,61 @@ impl UnpolicedEbgpNeighbor {
     /// The missing direction(s) as a report phrase.
     #[must_use]
     pub fn missing_phrase(&self) -> &'static str {
+        match (self.import_missing, self.export_missing) {
+            (true, true) => "no import policy and no export policy",
+            (true, false) => "no import policy",
+            (false, true) => "no export policy",
+            // Not constructed: the resolver only yields a record when at
+            // least one direction is missing.
+            (false, false) => "",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum UnpolicedEbgpSubject {
+    StaticNeighbor(UnpolicedEbgpNeighbor),
+    DynamicRange {
+        prefix: String,
+        peer_group: String,
+        /// `None` is the configured wildcard, rendered as `any AS`.
+        remote_asn: Option<std::num::NonZeroU32>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct UnpolicedEbgpBoundary {
+    subject: UnpolicedEbgpSubject,
+    import_missing: bool,
+    export_missing: bool,
+}
+
+impl UnpolicedEbgpBoundary {
+    pub(crate) fn is_dynamic_range(&self) -> bool {
+        matches!(self.subject, UnpolicedEbgpSubject::DynamicRange { .. })
+    }
+
+    pub(crate) fn identity_phrase(&self) -> String {
+        match &self.subject {
+            UnpolicedEbgpSubject::StaticNeighbor(neighbor) => {
+                format!("{} (AS {})", neighbor.address, neighbor.remote_asn)
+            }
+            UnpolicedEbgpSubject::DynamicRange {
+                prefix,
+                peer_group,
+                remote_asn,
+            } => {
+                let asn =
+                    remote_asn.map_or_else(|| "any AS".to_string(), |asn| format!("AS {asn}"));
+                format!("dynamic range {prefix} via peer group {peer_group:?} ({asn})")
+            }
+        }
+    }
+
+    pub(crate) fn missing_phrase(&self) -> &'static str {
+        if let UnpolicedEbgpSubject::StaticNeighbor(neighbor) = &self.subject {
+            return neighbor.missing_phrase();
+        }
         match (self.import_missing, self.export_missing) {
             (true, true) => "no import policy and no export policy",
             (true, false) => "no import policy",
