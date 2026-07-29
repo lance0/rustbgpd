@@ -209,10 +209,10 @@ IXP member C (AS 64503) ──┘
 ```bash
 # Add member at runtime (persisted to config automatically)
 rbgp neighbor 198.51.100.10 add --remote-asn 64510 \
-  --description "new-member" \
+  --description new-member \
+  --route-server-client --per-client-best --role rs \
   --families ipv4_unicast,ipv6_unicast \
   --max-prefixes 10000 \
-  --peer-group rs-members \
   --max-prefix-restart-seconds 30
 
 # Verify the session comes up
