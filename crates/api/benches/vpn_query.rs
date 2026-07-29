@@ -21,6 +21,15 @@ use serde_json::json;
 use tokio::sync::{mpsc, oneshot};
 use tonic::Request;
 
+#[cfg(feature = "vpn-query-allocation")]
+const ALLOC: usize = 0;
+#[cfg(feature = "vpn-query-allocation")]
+const ALLOC_ZEROED: usize = 1;
+#[cfg(feature = "vpn-query-allocation")]
+const REALLOC: usize = 2;
+#[cfg(feature = "vpn-query-allocation")]
+const DEALLOC: usize = 3;
+
 #[cfg(not(feature = "vpn-query-allocation"))]
 #[global_allocator]
 static ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
@@ -31,7 +40,10 @@ struct TrackingAllocator {
     locked: AtomicBool,
     enabled: AtomicBool,
     live: AtomicUsize,
+    baseline: AtomicUsize,
     peak: AtomicUsize,
+    calls: [AtomicUsize; 4],
+    requested_bytes: [AtomicUsize; 4],
 }
 
 #[cfg(feature = "vpn-query-allocation")]
@@ -42,21 +54,41 @@ impl TrackingAllocator {
             locked: AtomicBool::new(false),
             enabled: AtomicBool::new(false),
             live: AtomicUsize::new(0),
+            baseline: AtomicUsize::new(0),
             peak: AtomicUsize::new(0),
+            calls: [const { AtomicUsize::new(0) }; 4],
+            requested_bytes: [const { AtomicUsize::new(0) }; 4],
         }
     }
 
     fn begin(&self) {
         let _guard = self.guard();
         let live = self.live.load(Ordering::Relaxed);
+        self.baseline.store(live, Ordering::Relaxed);
         self.peak.store(live, Ordering::Relaxed);
+        for counter in self.calls.iter().chain(&self.requested_bytes) {
+            counter.store(0, Ordering::Relaxed);
+        }
         self.enabled.store(true, Ordering::Relaxed);
     }
 
-    fn end(&self) -> usize {
+    fn end(&self) -> AllocationSnapshot {
         let _guard = self.guard();
         self.enabled.store(false, Ordering::Relaxed);
-        self.peak.load(Ordering::Relaxed)
+        let baseline = self.baseline.load(Ordering::Relaxed);
+        let peak = self.peak.load(Ordering::Relaxed);
+        AllocationSnapshot {
+            calls: std::array::from_fn(|index| self.calls[index].load(Ordering::Relaxed)),
+            requested_bytes: std::array::from_fn(|index| {
+                self.requested_bytes[index].load(Ordering::Relaxed)
+            }),
+            baseline_live_requested_bytes: baseline,
+            final_live_requested_bytes: self.live.load(Ordering::Relaxed),
+            peak_live_requested_bytes: peak,
+            peak_delta_requested_bytes: peak
+                .checked_sub(baseline)
+                .expect("allocator peak fell below query baseline"),
+        }
     }
 
     fn guard(&self) -> AllocationGuard<'_> {
@@ -76,6 +108,24 @@ impl TrackingAllocator {
             self.peak.fetch_max(live, Ordering::Relaxed);
         }
     }
+
+    fn record_request(&self, operation: usize, requested: usize) {
+        if self.enabled.load(Ordering::Relaxed) {
+            self.calls[operation].fetch_add(1, Ordering::Relaxed);
+            self.requested_bytes[operation].fetch_add(requested, Ordering::Relaxed);
+        }
+    }
+}
+
+#[cfg(feature = "vpn-query-allocation")]
+#[derive(Debug)]
+struct AllocationSnapshot {
+    calls: [usize; 4],
+    requested_bytes: [usize; 4],
+    baseline_live_requested_bytes: usize,
+    final_live_requested_bytes: usize,
+    peak_live_requested_bytes: usize,
+    peak_delta_requested_bytes: usize,
 }
 
 #[cfg(feature = "vpn-query-allocation")]
@@ -94,6 +144,7 @@ impl Drop for AllocationGuard<'_> {
 unsafe impl GlobalAlloc for TrackingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let _guard = self.guard();
+        self.record_request(ALLOC, layout.size());
         let ptr = unsafe { self.inner.alloc(layout) };
         if !ptr.is_null() {
             self.add(layout.size());
@@ -102,6 +153,7 @@ unsafe impl GlobalAlloc for TrackingAllocator {
     }
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         let _guard = self.guard();
+        self.record_request(ALLOC_ZEROED, layout.size());
         let ptr = unsafe { self.inner.alloc_zeroed(layout) };
         if !ptr.is_null() {
             self.add(layout.size());
@@ -110,6 +162,7 @@ unsafe impl GlobalAlloc for TrackingAllocator {
     }
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         let _guard = self.guard();
+        self.record_request(REALLOC, new_size);
         let resized = unsafe { self.inner.realloc(ptr, layout, new_size) };
         if !resized.is_null() {
             if new_size >= layout.size() {
@@ -123,6 +176,7 @@ unsafe impl GlobalAlloc for TrackingAllocator {
     }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         let _guard = self.guard();
+        self.record_request(DEALLOC, layout.size());
         unsafe { self.inner.dealloc(ptr, layout) };
         self.live.fetch_sub(layout.size(), Ordering::Relaxed);
     }
@@ -143,9 +197,20 @@ struct QueryReceipt {
     post_actor_ns: u64,
     actor_rows: usize,
     actor_capacity: usize,
+    actor_snapshot_lower_bound_bytes: usize,
     returned_rows: usize,
     dispatch: u64,
     checksum: u64,
+}
+
+fn actor_snapshot_lower_bound_bytes(rows: usize, capacity: usize) -> usize {
+    capacity
+        .checked_mul(std::mem::size_of::<VpnRibRoute>())
+        .and_then(|route_bytes| {
+            rows.checked_mul(std::mem::size_of::<MplsLabelEntry>())
+                .and_then(|label_bytes| route_bytes.checked_add(label_bytes))
+        })
+        .expect("VPN RIB actor snapshot lower bound overflow")
 }
 
 #[derive(Debug)]
@@ -235,6 +300,8 @@ async fn query(
             .await
             .map_err(|_| CapacityCensored("actor_receipt"))?
             .expect("VPN RIB actor receipt channel closed");
+    let actor_snapshot_lower_bound_bytes =
+        actor_snapshot_lower_bound_bytes(actor_rows, actor_capacity);
     let service_receipt = tokio::time::timeout_at(deadline, service_rx.recv())
         .await
         .map_err(|_| CapacityCensored("service_receipt"))?
@@ -256,6 +323,7 @@ async fn query(
             .expect("service_method_ns underflowed actor_handler_ns"),
         actor_rows,
         actor_capacity,
+        actor_snapshot_lower_bound_bytes,
         returned_rows: service_receipt.returned_rows,
         dispatch,
         checksum,
@@ -266,6 +334,10 @@ fn verify(receipt: &QueryReceipt, routes: usize, filtered: bool, dispatch: u64) 
     let expected_rows = if filtered { routes / PEERS } else { routes };
     assert_eq!(receipt.actor_rows, routes);
     assert!(receipt.actor_capacity >= routes);
+    assert_eq!(
+        receipt.actor_snapshot_lower_bound_bytes,
+        actor_snapshot_lower_bound_bytes(receipt.actor_rows, receipt.actor_capacity)
+    );
     assert_eq!(receipt.returned_rows, expected_rows);
     assert_eq!(receipt.dispatch, dispatch);
     assert_eq!(receipt.checksum, expected_checksum(routes, filtered));
@@ -282,6 +354,8 @@ async fn run(
     case: &str,
     output: &str,
     timeout: Duration,
+    declared_cpu: usize,
+    linux_affinity: &str,
 ) -> Result<(), CapacityCensored> {
     let (primary_tx, primary_rx) = mpsc::channel(32);
     let (query_tx, query_rx) = mpsc::channel(8);
@@ -357,29 +431,38 @@ async fn run(
     #[cfg(feature = "vpn-query-allocation")]
     ALLOCATOR.begin();
     let filtered = case == "F";
-    let receipt = query(
+    let query_result = query(
         &service,
         &mut actor_rx,
         &mut service_rx,
         if filtered { "10.0.0.1" } else { "" },
         timeout,
     )
-    .await?;
+    .await;
+    let allocation = allocation_snapshot();
+    let receipt = query_result?;
     verify(&receipt, routes, filtered, 1);
+    let (allocation_json, peak_live_requested_bytes) = allocation_evidence(
+        allocation.as_ref(),
+        receipt.actor_snapshot_lower_bound_bytes,
+    );
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs();
     let document = json!({
-        "schema": 1,
+        "schema": 2,
         "allocator": "tikv-jemallocator",
         "mode": if cfg!(feature = "vpn-query-allocation") { "allocation" } else { "timing" },
         "timestamp_unix": timestamp,
+        "declared_cpu": declared_cpu,
+        "linux_affinity": linux_affinity,
         "routes": routes,
         "peers": PEERS,
         "case": case,
         "query": receipt_json(&receipt),
-        "peak_live_requested_bytes": peak_live_requested(),
+        "allocation": allocation_json,
+        "peak_live_requested_bytes": peak_live_requested_bytes,
         "vmrss_bytes": read_status_kib("VmRSS").map(|value| value * 1024),
         "vmhwm_bytes": read_status_kib("VmHWM").map(|value| value * 1024),
     });
@@ -389,13 +472,50 @@ async fn run(
 }
 
 #[cfg(feature = "vpn-query-allocation")]
-fn peak_live_requested() -> Option<usize> {
+fn allocation_snapshot() -> Option<AllocationSnapshot> {
     Some(ALLOCATOR.end())
 }
 
 #[cfg(not(feature = "vpn-query-allocation"))]
-fn peak_live_requested() -> Option<usize> {
+fn allocation_snapshot() -> Option<()> {
     None
+}
+
+#[cfg(feature = "vpn-query-allocation")]
+fn allocation_evidence(
+    value: Option<&AllocationSnapshot>,
+    lower_bound: usize,
+) -> (serde_json::Value, Option<usize>) {
+    let value = value.expect("allocation snapshot missing");
+    assert!(
+        value.peak_delta_requested_bytes >= lower_bound,
+        "query peak delta did not retain the actor snapshot lower bound"
+    );
+    (
+        json!({
+            "alloc_calls": value.calls[ALLOC],
+            "alloc_requested_bytes": value.requested_bytes[ALLOC],
+            "alloc_zeroed_calls": value.calls[ALLOC_ZEROED],
+            "alloc_zeroed_requested_bytes": value.requested_bytes[ALLOC_ZEROED],
+            "realloc_calls": value.calls[REALLOC],
+            "realloc_requested_bytes": value.requested_bytes[REALLOC],
+            "dealloc_calls": value.calls[DEALLOC],
+            "dealloc_requested_bytes": value.requested_bytes[DEALLOC],
+            "baseline_live_requested_bytes": value.baseline_live_requested_bytes,
+            "final_live_requested_bytes": value.final_live_requested_bytes,
+            "peak_live_requested_bytes": value.peak_live_requested_bytes,
+            "peak_delta_requested_bytes": value.peak_delta_requested_bytes,
+        }),
+        Some(value.peak_live_requested_bytes),
+    )
+}
+
+#[cfg(not(feature = "vpn-query-allocation"))]
+fn allocation_evidence(
+    _value: Option<&()>,
+    _lower_bound: usize,
+) -> (serde_json::Value, Option<usize>) {
+    (serde_json::Value::Null, None)
 }
 
 fn read_status_kib(field: &str) -> Option<u64> {
@@ -409,6 +529,16 @@ fn read_status_kib(field: &str) -> Option<u64> {
         .ok()
 }
 
+fn read_linux_affinity() -> Option<String> {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()?
+        .lines()
+        .find(|line| line.starts_with("Cpus_allowed_list:"))?
+        .split_whitespace()
+        .nth(1)
+        .map(str::to_owned)
+}
+
 fn receipt_json(value: &QueryReceipt) -> serde_json::Value {
     json!({
         "actor_handler_ns": value.actor_ns,
@@ -416,6 +546,9 @@ fn receipt_json(value: &QueryReceipt) -> serde_json::Value {
         "post_actor_ns": value.post_actor_ns,
         "actor_rows": value.actor_rows,
         "actor_capacity": value.actor_capacity,
+        "vpn_rib_route_size_bytes": std::mem::size_of::<VpnRibRoute>(),
+        "mpls_label_entry_size_bytes": std::mem::size_of::<MplsLabelEntry>(),
+        "actor_snapshot_lower_bound_bytes": value.actor_snapshot_lower_bound_bytes,
         "returned_rows": value.returned_rows,
         "dispatch": value.dispatch,
         "checksum": value.checksum,
@@ -424,14 +557,16 @@ fn receipt_json(value: &QueryReceipt) -> serde_json::Value {
 
 fn main() {
     let args: Vec<_> = std::env::args().filter(|arg| arg != "--bench").collect();
-    let (routes, case, output, timeout) = match args.as_slice() {
-        [_, mode, case, output] if mode == "smoke" && (case == "U" || case == "F") => (
+    let (routes, case, output, timeout, declared_cpu) = match args.as_slice() {
+        [_, mode, case, output, cpu] if mode == "smoke" && (case == "U" || case == "F") => (
             SMOKE_ROUTES,
             case.as_str(),
             output.as_str(),
             Duration::from_secs(10),
+            cpu.parse::<usize>()
+                .expect("declared CPU must be an integer"),
         ),
-        [_, mode, count, case, output] if mode == "cell" && (case == "U" || case == "F") => {
+        [_, mode, count, case, output, cpu] if mode == "cell" && (case == "U" || case == "F") => {
             let routes = count.parse::<usize>().unwrap();
             assert!([10_000, 100_000, 1_000_000].contains(&routes));
             (
@@ -439,14 +574,22 @@ fn main() {
                 case.as_str(),
                 output.as_str(),
                 Duration::from_secs(120),
+                cpu.parse::<usize>()
+                    .expect("declared CPU must be an integer"),
             )
         }
         _ => {
             panic!(
-                "usage: vpn_query smoke U|F OUTPUT | vpn_query cell 10000|100000|1000000 U|F OUTPUT"
+                "usage: vpn_query smoke U|F OUTPUT CPU | vpn_query cell 10000|100000|1000000 U|F OUTPUT CPU"
             )
         }
     };
+    let linux_affinity = read_linux_affinity().expect("Linux CPU affinity is unavailable");
+    assert_eq!(
+        linux_affinity,
+        declared_cpu.to_string(),
+        "Linux affinity differs from the declared CPU"
+    );
     let result = if std::env::var_os("RUSTBGPD_VPN_QUERY_FORCE_CENSOR").is_some() {
         Err(CapacityCensored("forced_fixture"))
     } else {
@@ -454,12 +597,21 @@ fn main() {
             .enable_all()
             .build()
             .unwrap()
-            .block_on(run(routes, case, output, timeout))
+            .block_on(run(
+                routes,
+                case,
+                output,
+                timeout,
+                declared_cpu,
+                &linux_affinity,
+            ))
     };
     if let Err(CapacityCensored(phase)) = result {
         let document = json!({
-            "schema": 1,
+            "schema": 2,
             "mode": if cfg!(feature = "vpn-query-allocation") { "allocation" } else { "timing" },
+            "declared_cpu": declared_cpu,
+            "linux_affinity": linux_affinity,
             "routes": routes,
             "case": case,
             "outcome": "capacity_censored",

@@ -53,10 +53,35 @@ def expected_cells():
     ]
 
 
+def verify_affinity(receipt, manifest, label):
+    require((receipt.get("declared_cpu"), receipt.get("linux_affinity"))
+            == (manifest["declared_cpu"], manifest["linux_affinity"]),
+            f"{label}: CPU affinity drift")
+
+
+def verify_query(query, rows, returned, label):
+    require(query.get("actor_rows") == rows, f"{label}: actor rows")
+    capacity = query.get("actor_capacity")
+    require(type(capacity) is int and capacity >= rows, f"{label}: actor capacity")
+    route_size = query.get("vpn_rib_route_size_bytes")
+    label_size = query.get("mpls_label_entry_size_bytes")
+    lower_bound = query.get("actor_snapshot_lower_bound_bytes")
+    require(all(type(value) is int and value > 0
+                for value in (route_size, label_size, lower_bound))
+            and lower_bound == capacity * route_size + rows * label_size,
+            f"{label}: actor snapshot lower bound")
+    require(query.get("returned_rows") == returned, f"{label}: returned rows")
+    return lower_bound
+
+
 def verify_receipt(receipt, expected, manifest, attempt):
     ordinal, size, case, repetition = expected
-    require(receipt.get("schema") == 2, f"receipt {ordinal}: schema")
+    require(receipt.get("schema") == 3, f"receipt {ordinal}: schema")
     require(receipt.get("mode") == "timing", f"receipt {ordinal}: timing mode")
+    require(receipt.get("allocation") is None
+            and receipt.get("peak_live_requested_bytes") is None,
+            f"receipt {ordinal}: allocation evidence contaminated timing mode")
+    verify_affinity(receipt, manifest, f"receipt {ordinal}")
     require(receipt.get("ordinal") == ordinal, f"receipt {ordinal}: ordinal/order")
     require(receipt.get("routes") == size, f"receipt {ordinal}: routes/order")
     require(receipt.get("case") == case, f"receipt {ordinal}: case/order")
@@ -81,9 +106,7 @@ def verify_receipt(receipt, expected, manifest, attempt):
     require(service >= actor, f"receipt {ordinal}: post-actor underflow")
     require(post == service - actor, f"receipt {ordinal}: post-actor decomposition")
     expected_rows = size if case == "U" else size // 16
-    require(query.get("actor_rows") == size, f"receipt {ordinal}: actor rows")
-    require(query.get("actor_capacity", 0) >= size, f"receipt {ordinal}: actor capacity")
-    require(query.get("returned_rows") == expected_rows, f"receipt {ordinal}: returned rows")
+    verify_query(query, size, expected_rows, f"receipt {ordinal}")
     require(query.get("dispatch") == 1, f"receipt {ordinal}: dispatch")
     require(type(query.get("checksum")) is int
             and query["checksum"] == CHECKSUMS[(size, case)],
@@ -147,7 +170,7 @@ def classify(manifest, timings, allocation):
 
 def verify(directory):
     manifest = load(directory / "manifest.json")
-    require(manifest.get("schema") == 2, "manifest schema")
+    require(manifest.get("schema") == 3, "manifest schema")
     require(isinstance(manifest.get("base_commit"), str)
             and re.fullmatch(r"[0-9a-f]{40}", manifest["base_commit"]),
             "invalid base commit provenance")
@@ -159,6 +182,10 @@ def verify(directory):
     require(manifest.get("rustc"), "missing rustc provenance")
     require(manifest.get("host_fence") == "pass", "host fence did not pass")
     require(manifest.get("fixed_order") == list(CASES), "fixed order drift")
+    require(type(manifest.get("declared_cpu")) is int
+            and manifest["declared_cpu"] >= 0, "invalid declared CPU")
+    require(manifest.get("linux_affinity") == str(manifest["declared_cpu"]),
+            "manifest CPU and Linux affinity differ")
     timing_binary = directory / "bin" / "vpn_query_timing"
     allocation_binary = directory / "bin" / "vpn_query_allocation"
     require(timing_binary.is_file() and allocation_binary.is_file(), "missing binaries")
@@ -210,7 +237,8 @@ def verify(directory):
                 for ordinal in range(1, len(receipt_paths) + 1)
             )
             require(censor.get("outcome") == "capacity_censored", "invalid censor outcome")
-            require(censor.get("schema") == 2, "censor schema")
+            require(censor.get("schema") == 3, "censor schema")
+            verify_affinity(censor, manifest, "censor")
             require(censor.get("ordinal") == len(receipt_paths) + 1,
                     "censor must stop the next ordered cell")
             if len(receipt_paths) == 48:
@@ -258,8 +286,9 @@ def verify(directory):
         selected_timings = timings
 
     allocation = load(directory / "allocation.json")
-    require(allocation.get("schema") == 2, "allocation schema")
+    require(allocation.get("schema") == 3, "allocation schema")
     require(allocation.get("mode") == "allocation", "allocation mode")
+    verify_affinity(allocation, manifest, "allocation")
     require(allocation.get("routes") == 1_000_000, "allocation must use 1M routes")
     require(allocation.get("case") == "U", "allocation must use unfiltered cell")
     require(allocation.get("binary_sha256") == manifest["allocation_binary_sha256"],
@@ -269,9 +298,28 @@ def verify(directory):
     require(allocation.get("timeout_seconds") == 120,
             "allocation 120-second censor missing")
     require(allocation.get("attempt") == attempts, "allocation attempt drift")
-    require(isinstance(allocation.get("peak_live_requested_bytes"), int)
-            and allocation["peak_live_requested_bytes"] > 0,
-            "missing absolute allocator evidence")
+    counters = allocation.get("allocation")
+    require(isinstance(counters, dict), "missing whole-query allocator evidence")
+    operation_fields = tuple(f"{operation}_{suffix}"
+                             for operation in ("alloc", "alloc_zeroed", "realloc", "dealloc")
+                             for suffix in ("calls", "requested_bytes"))
+    require(all(type(counters.get(field)) is int and counters[field] >= 0
+                for field in operation_fields),
+            "invalid whole-query allocator operation evidence")
+    require(sum(counters[field] for field in operation_fields if field.endswith("_calls")) > 0
+            and sum(counters[field] for field in operation_fields
+                    if field.endswith("_requested_bytes")) > 0,
+            "empty whole-query allocator operation evidence")
+    baseline, final, peak, delta = (counters.get(field) for field in (
+        "baseline_live_requested_bytes", "final_live_requested_bytes",
+        "peak_live_requested_bytes", "peak_delta_requested_bytes"))
+    require(all(type(value) is int and value >= 0
+                for value in (baseline, final, peak, delta)),
+            "invalid whole-query live-byte evidence")
+    require(peak >= baseline and peak >= final and delta == peak - baseline,
+            "inconsistent whole-query live-byte evidence")
+    require(allocation.get("peak_live_requested_bytes") == peak,
+            "absolute allocator peak disagrees with whole-query evidence")
     query = allocation.get("query")
     require(isinstance(query, dict), "missing allocation query")
     actor, service, post = (query.get(name) for name in
@@ -279,9 +327,9 @@ def verify(directory):
     require(type(actor) is int and actor > 0 and type(service) is int and service > 0
             and type(post) is int and post >= 0 and service - actor == post,
             "allocation timing decomposition")
-    require(query.get("actor_rows") == 1_000_000, "allocation actor rows")
-    require(query.get("actor_capacity", 0) >= 1_000_000, "allocation actor capacity")
-    require(query.get("returned_rows") == 1_000_000, "allocation returned rows")
+    lower_bound = verify_query(query, 1_000_000, 1_000_000, "allocation")
+    require(delta >= lower_bound,
+            "allocation peak delta is below the actor snapshot lower bound")
     require(type(query.get("checksum")) is int
             and query["checksum"] == CHECKSUMS[(1_000_000, "U")],
             "allocation checksum")

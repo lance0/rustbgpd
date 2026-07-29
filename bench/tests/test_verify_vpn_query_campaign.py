@@ -23,9 +23,10 @@ class VerifyCampaign(unittest.TestCase):
         timing_hash = hashlib.sha256(b"vpn_query_timing").hexdigest()
         allocation_hash = hashlib.sha256(b"vpn_query_allocation").hexdigest()
         manifest = {
-            "schema": 2, "base_commit": "a" * 40, "rustc": "rustc fixture",
+            "schema": 3, "base_commit": "a" * 40, "rustc": "rustc fixture",
             "host_fence": "pass", "source_tree_clean": True,
             "source_tree": "c" * 40, "attempts": 1,
+            "declared_cpu": 8, "linux_affinity": "8",
             "fixed_order": list(VERIFY.CASES),
             "timing_binary_sha256": timing_hash,
             "allocation_binary_sha256": allocation_hash,
@@ -35,8 +36,9 @@ class VerifyCampaign(unittest.TestCase):
             actor = size * 10 + repetition * 10
             service = 300_000_000 + actor
             receipt = {
-                "schema": 2, "mode": "timing", "ordinal": ordinal,
+                "schema": 3, "mode": "timing", "ordinal": ordinal,
                 "routes": size, "case": case, "repetition": repetition,
+                "declared_cpu": 8, "linux_affinity": "8",
                 "binary_sha256": timing_hash,
                 "source_commit": "a" * 40, "timeout_seconds": 120,
                 "attempt": 1,
@@ -44,18 +46,26 @@ class VerifyCampaign(unittest.TestCase):
                     "actor_handler_ns": actor,
                     "service_method_ns": service, "post_actor_ns": 300_000_000,
                     "actor_rows": size, "actor_capacity": size,
+                    "vpn_rib_route_size_bytes": 128, "mpls_label_entry_size_bytes": 4, "actor_snapshot_lower_bound_bytes": size * 132,
                     "returned_rows": size if case == "U" else size // 16,
                     "dispatch": 1, "checksum": VERIFY.CHECKSUMS[(size, case)],
                 },
             }
             self.write(f"attempt-1/timing/{ordinal:02d}.json", receipt)
         self.write("allocation.json", {
-            "schema": 2, "mode": "allocation", "routes": 1_000_000, "case": "U",
-            "binary_sha256": allocation_hash, "peak_live_requested_bytes": 1024,
+            "schema": 3, "mode": "allocation", "routes": 1_000_000, "case": "U",
+            "declared_cpu": 8, "linux_affinity": "8",
+            "binary_sha256": allocation_hash, "peak_live_requested_bytes": 132_000_100,
             "source_commit": "a" * 40, "timeout_seconds": 120,
             "attempt": 1,
             "vmrss_bytes": 999999999999, "vmhwm_bytes": 999999999999,
+            "allocation": {
+                "alloc_calls": 4, "alloc_requested_bytes": 132_000_000, "alloc_zeroed_calls": 1, "alloc_zeroed_requested_bytes": 64,
+                "realloc_calls": 0, "realloc_requested_bytes": 0, "dealloc_calls": 2, "dealloc_requested_bytes": 32,
+                "baseline_live_requested_bytes": 100, "final_live_requested_bytes": 132_000_100, "peak_live_requested_bytes": 132_000_100, "peak_delta_requested_bytes": 132_000_000,
+            },
             "query": {"actor_rows": 1_000_000, "actor_capacity": 1_000_000,
+                      "vpn_rib_route_size_bytes": 128, "mpls_label_entry_size_bytes": 4, "actor_snapshot_lower_bound_bytes": 132_000_000,
                       "returned_rows": 1_000_000,
                       "actor_handler_ns": 10, "service_method_ns": 11,
                       "post_actor_ns": 1,
@@ -82,9 +92,35 @@ class VerifyCampaign(unittest.TestCase):
         callback(value)
         self.write(relative, value)
 
+    def mutate_all_affinity(self, manifest):
+        manifest.update(linux_affinity="8-9")
+        for path in [*(self.root / "attempt-1" / "timing").glob("*.json"), self.root / "allocation.json"]:
+            self.mutate(path.relative_to(self.root), lambda d: d.update(linux_affinity="8-9"))
+
     def test_valid_fixture_and_observational_rss(self):
         result = VERIFY.verify(self.root)
         self.assertEqual(result["classification"], "no_redesign")
+
+    def test_rejects_affinity_allocation_and_lower_bound_drift(self):
+        mutations = [
+            ("manifest.json", self.mutate_all_affinity),
+            ("attempt-1/timing/01.json", lambda d: d.update(declared_cpu=7)),
+            ("attempt-1/timing/01.json", lambda d: d["query"].update(actor_snapshot_lower_bound_bytes=1)),
+            ("allocation.json", lambda d: d.update(linux_affinity="7")),
+            ("allocation.json", lambda d: d["query"].update(vpn_rib_route_size_bytes=129, actor_snapshot_lower_bound_bytes=133_000_000)),
+            ("allocation.json", lambda d: d["allocation"].update(final_live_requested_bytes=10**12)),
+        ]
+        mutations.extend(("allocation.json", lambda d, f=field: d["allocation"].pop(f)) for operation
+                         in ("alloc", "alloc_zeroed", "realloc", "dealloc")
+                         for field in (f"{operation}_calls", f"{operation}_requested_bytes"))
+        for index, (relative, mutation) in enumerate(mutations):
+            with self.subTest(mutation=mutation):
+                self.mutate(relative, mutation)
+                with self.assertRaises(VERIFY.Invalid):
+                    VERIFY.verify(self.root)
+                if index + 1 < len(mutations):
+                    self.tearDown()
+                    self.setUp()
 
     def test_rejects_count_order_dual_case_underflow_and_binary_corruption(self):
         mutations = [
@@ -245,9 +281,10 @@ class VerifyCampaign(unittest.TestCase):
         for ordinal in range(11, 49):
             (self.root / "attempt-1" / "timing" / f"{ordinal:02d}.json").unlink()
         censor = {
-            "schema": 2, "mode": "timing", "outcome": "capacity_censored",
+            "schema": 3, "mode": "timing", "outcome": "capacity_censored",
             "censor_phase": "service_query", "ordinal": 11, "routes": 10_000,
             "case": "U", "repetition": 6, "timeout_seconds": 120,
+            "declared_cpu": 8, "linux_affinity": "8",
             "source_commit": "a" * 40,
             "attempt": 1,
             "binary_sha256": hashlib.sha256(b"vpn_query_timing").hexdigest(),

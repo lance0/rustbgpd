@@ -17,7 +17,8 @@ contaminating timing:
 
 - `vpn_query_timing` uses bare jemalloc and emits timing evidence.
 - `vpn_query_allocation` wraps jemalloc with absolute live-requested-byte
-  accounting. `peak_live_requested_bytes > 8 GiB` is capacity-censored.
+  accounting: operation calls/requested bytes and baseline/final/peak/delta
+  live bytes. Above 8 GiB is capacity-censored.
   `/proc` `VmRSS` and `VmHWM` are recorded only as observations and never drive
   classification. Its allocator forwarding and bookkeeping are serialized by
   a no-allocation spin lock, so this mode is diagnostic; its timings are not
@@ -27,9 +28,8 @@ The driver builds each executable once, copies it into the campaign directory,
 records SHA-256, commit, and `rustc` provenance, then refuses missing, changed,
 or corrupt binaries. Commit, Git tree, clean status, toolchain, and binary
 hashes are captured before the locked build and rechecked through completion.
-It acquires the shared retained-performance host lock and
-requires the same load, CPU-governor, and competing-process fence before build
-and every process.
+Every executable is pinned to one required `--cpu`; manifest and receipts require
+the same one-CPU `Cpus_allowed_list`. Host lock/load/governor/process fences apply.
 
 ## Fixed campaign
 
@@ -59,6 +59,9 @@ Every setup/query timeout produces the typed `capacity_censored` process
 outcome. The driver catches only its exit status 75, stops all remaining cells,
 and verifies the censor receipt; every other nonzero exit is a hard failure.
 
+Peak delta must cover `actor_capacity * size_of::<VpnRibRoute>() + actor_rows *
+size_of::<MplsLabelEntry>()`; the label term is one-label deep clone and values agree.
+
 Classifier precedence is exact:
 
 1. `capacity_censored`
@@ -82,7 +85,7 @@ bash bench/tests/test-vpn-query-receipt.sh
 An operator may run the full retained campaign on a dedicated host:
 
 ```console
-bench/run-vpn-query-campaign.sh /uncommitted/output-directory
+bench/run-vpn-query-campaign.sh --cpu 8 /uncommitted/output-directory
 ```
 
 The output is intentionally not a committed result. A valid campaign is checked
