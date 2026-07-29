@@ -168,3 +168,18 @@ fn every_example_config_passes_check_strict() {
         assert_clean(&config.display().to_string(), code, &stdout, &stderr);
     }
 }
+
+#[test]
+fn route_server_cookbook_does_not_apply_strict_peer_cross_family() {
+    let cookbook = fs::read_to_string(repo_root().join("docs/cookbook/route-server.md"))
+        .expect("read cookbook");
+    let strict_stanza = cookbook
+        .split("[[neighbors]]")
+        .find(|stanza| stanza.contains("next_hop_ownership = \"strict_peer\""))
+        .expect("cookbook must retain a strict_peer example");
+    assert!(
+        !(strict_stanza.contains("\"ipv4_unicast\"") && strict_stanza.contains("\"ipv6_unicast\"")),
+        "strict_peer compares the wire next hop literally with the session address; \
+         the cookbook must use same-AF sessions"
+    );
+}

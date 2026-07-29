@@ -17093,6 +17093,82 @@ async fn strict_peer_next_hop_rejects_foreign_ipv6_mp_and_withdraws_replacement(
     ));
 }
 
+/// An IPv4 session cannot own an IPv6 `MP_REACH_NLRI` next hop; strict-peer
+/// rejects the replacement as foreign and retires an existing route.
+#[tokio::test]
+async fn strict_peer_ipv4_session_rejects_ipv6_mp_replacement() {
+    use rustbgpd_telemetry::reason_labels::ImportRejectReason;
+    use rustbgpd_wire::{MpReachNlri, NlriEntry};
+
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let prefix = Prefix::V6(Ipv6Prefix::new("2001:db8:737::".parse().unwrap(), 48));
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.negotiated_families = vec![(Afi::Ipv6, Safi::Unicast)];
+    install_test_negotiated_session(&mut session, negotiated);
+    let attrs = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002])],
+        }),
+        PathAttribute::MpReachNlri(MpReachNlri {
+            afi: Afi::Ipv6,
+            safi: Safi::Unicast,
+            next_hop: "2001:db8::2".parse().unwrap(),
+            link_local_next_hop: None,
+            announced: vec![NlriEntry { path_id: 0, prefix }],
+            flowspec_announced: vec![],
+            evpn_announced: vec![],
+            bgpls_announced: vec![],
+            labeled_announced: vec![],
+            vpn_announced: vec![],
+            rtc_announced: vec![],
+        }),
+    ];
+    session
+        .process_update(UpdateMessage::build(
+            &[],
+            &[],
+            &attrs,
+            true,
+            false,
+            Ipv4UnicastMode::Body,
+        ))
+        .await;
+    let RibUpdate::RoutesReceived { announced, .. } = rib_rx.try_recv().unwrap() else {
+        panic!("expected initial route");
+    };
+    assert_eq!(announced.len(), 1);
+
+    session.config.next_hop_ownership_strict_peer = true;
+    session
+        .process_update(UpdateMessage::build(
+            &[],
+            &[],
+            &attrs,
+            true,
+            false,
+            Ipv4UnicastMode::Body,
+        ))
+        .await;
+
+    let RibUpdate::RoutesReceived {
+        announced,
+        withdrawn,
+        ..
+    } = rib_rx
+        .try_recv()
+        .expect("foreign replacement must withdraw")
+    else {
+        panic!("expected RoutesReceived");
+    };
+    assert!(announced.is_empty());
+    assert_eq!(withdrawn, vec![(prefix, 0)]);
+    let retained = session.rejected_routes.snapshot();
+    assert_eq!(retained.len(), 1);
+    assert_eq!(retained[0].1.reason, ImportRejectReason::NextHopOwnership);
+    assert_eq!(retained[0].1.next_hop, Some("2001:db8::2".parse().unwrap()));
+}
+
 /// ADR-0107 §2: a global + link-local next-hop pair always fails closed
 /// under the strict pilot — the companion cannot be mapped to the single
 /// session address even when the global component matches, and it is
