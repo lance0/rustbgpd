@@ -359,8 +359,8 @@ fn drain_fanout_envelopes(
             "the envelope must contain the exact replacement inventory"
         );
         assert!(
-            receiver.try_recv().is_err(),
-            "one distribution pass must leave no second envelope"
+            matches!(receiver.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "one distribution pass must leave a live channel with no second envelope"
         );
     }
 }
