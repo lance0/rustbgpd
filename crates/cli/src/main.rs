@@ -3878,6 +3878,110 @@ mod tests {
         assert_eq!(role.as_deref(), Some("rs"));
     }
 
+    fn documented_continued_command(document: &str, marker: &str) -> String {
+        assert_eq!(
+            document.matches(marker).count(),
+            1,
+            "documented command marker must occur exactly once: {marker}"
+        );
+        let start = document.find(marker).unwrap();
+        let mut command = String::new();
+        for line in document[start..].lines() {
+            let line = line.trim();
+            let (fragment, continued) = line
+                .strip_suffix('\\')
+                .map_or((line, false), |fragment| (fragment.trim_end(), true));
+            if !command.is_empty() {
+                command.push(' ');
+            }
+            command.push_str(fragment);
+            if !continued {
+                return command;
+            }
+        }
+        panic!("documented command never terminated: {marker}");
+    }
+
+    #[test]
+    fn test_parse_use_cases_route_server_documented_neighbor_add() {
+        let use_cases = include_str!("../../../docs/USE_CASES.md");
+        let documented = documented_continued_command(
+            use_cases,
+            "rbgp neighbor 198.51.100.10 add --remote-asn 64510",
+        );
+        let cli = Cli::try_parse_from(documented.split_whitespace()).unwrap();
+        let Command::Neighbor {
+            address: Some(address),
+            action:
+                Some(NeighborAction::Add {
+                    asn,
+                    description,
+                    families,
+                    max_prefixes,
+                    peer_group,
+                    max_prefix_restart_seconds,
+                    per_client_best,
+                    role,
+                    route_server_client,
+                    ..
+                }),
+            ..
+        } = cli.command
+        else {
+            panic!("expected Neighbor Add command");
+        };
+        assert_eq!(address, "198.51.100.10");
+        assert_eq!(asn, 64510);
+        assert_eq!(description.as_deref(), Some("new-member"));
+        assert_eq!(families, ["ipv4_unicast", "ipv6_unicast"]);
+        assert_eq!(max_prefixes, Some(10_000));
+        assert!(peer_group.is_none());
+        assert_eq!(max_prefix_restart_seconds, Some(30));
+        assert!(route_server_client);
+        assert!(per_client_best);
+        assert_eq!(role.as_deref(), Some("rs"));
+    }
+
+    #[test]
+    fn test_parse_cookbook_route_server_documented_neighbor_add() {
+        let cookbook = include_str!("../../../docs/cookbook/route-server.md");
+        let documented = documented_continued_command(
+            cookbook,
+            "rbgp neighbor 198.51.100.4 add --remote-asn 64503",
+        );
+        let cli = Cli::try_parse_from(documented.split_whitespace()).unwrap();
+        let Command::Neighbor {
+            address: Some(address),
+            action:
+                Some(NeighborAction::Add {
+                    asn,
+                    description,
+                    families,
+                    max_prefixes,
+                    peer_group,
+                    max_prefix_restart_seconds,
+                    per_client_best,
+                    role,
+                    route_server_client,
+                    ..
+                }),
+            ..
+        } = cli.command
+        else {
+            panic!("expected Neighbor Add command");
+        };
+        assert_eq!(address, "198.51.100.4");
+        assert_eq!(asn, 64503);
+        assert!(description.is_none());
+        assert_eq!(families, ["ipv4_unicast", "ipv6_unicast"]);
+        assert_eq!(max_prefixes, Some(50_000));
+        assert!(peer_group.is_none());
+        assert_eq!(max_prefix_restart_seconds, Some(30));
+        assert!(route_server_client);
+        assert!(per_client_best);
+        assert_eq!(role.as_deref(), Some("rs"));
+    }
+
     #[test]
     fn test_parse_rib_best() {
         let cli = Cli::try_parse_from(["rbgp", "rib"]).unwrap();
