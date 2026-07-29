@@ -30,6 +30,41 @@ classify_rss() {
   fi
 }
 
+observe_direct_rss() {
+  local status_file=$1 status state rss
+  direct_rss_action=reject
+  direct_rss_kib=0
+  if ! status=$(command cat -- "$status_file" 2>/dev/null); then
+    direct_rss_action=exited
+    return
+  fi
+  state=$(awk '$1=="State:" {print substr($2,1,1)}' <<<"$status")
+  rss=$(awk '/VmRSS:/ {print $2}' <<<"$status")
+  if [[ $state == X || $state == Z ]]; then
+    direct_rss_action=exited
+  elif [[ -n $state && $rss =~ ^[0-9]+$ ]]; then
+    direct_rss_action=sample
+    direct_rss_kib=$rss
+  fi
+}
+
+sample_direct_rss() {
+  local status_file=$1 output=$2
+  observe_direct_rss "$status_file"
+  case $direct_rss_action in
+    exited) ;;
+    sample)
+      (( direct_rss_kib > max_rss )) && max_rss=$direct_rss_kib
+      printf 'sample\t%s\n' "$direct_rss_kib" >>"$output/rss.tsv"
+      classify_rss "$direct_rss_kib" "$output"
+      ;;
+    *)
+      echo "tiny sampler observed live process without numeric VmRSS" >&2
+      return 1
+      ;;
+  esac
+}
+
 classify_child_observation() {
   local executable=$1 state=$2
   if [[ $state == X || $state == Z ]]; then
@@ -542,6 +577,7 @@ stop_reap_fixture() {
 
 check_seam() {
   local script=$1 outer verify_call verify_body checksums_call checksums_body
+  local direct_rss_call direct_rss_exit
   outer="timeout -k 10 1200 \"\$scr"
   outer+="ipt\" --campaign-inner \"\$output\""
   verify_call="full_ver"
@@ -552,10 +588,13 @@ check_seam() {
   checksums_call+="sums \"\$receipt\""
   checksums_body="sha256sum -c SHA"
   checksums_body+="256SUMS --strict"
+  direct_rss_call="sample_direct_rss \"/proc/\$pid/status\" \"\$receipt\""
+  direct_rss_exit="[[ \$direct_rss_action != exited ]] || break"
   if ! grep -Fq "$outer" "$script" || ! grep -Fq "$verify_call" "$script" ||
     ! grep -Fq "$verify_body" "$script" || ! grep -Fq "$checksums_call" "$script" ||
-    ! grep -Fq "$checksums_body" "$script"; then
-    echo "runner lacks production verifier/checksum seam" >&2
+    ! grep -Fq "$checksums_body" "$script" || ! grep -Fq "$direct_rss_call" "$script" ||
+    ! grep -Fq "$direct_rss_exit" "$script"; then
+    echo "runner lacks production verifier/checksum/RSS seam" >&2
     return 1
   fi
 }
@@ -644,6 +683,22 @@ case ${1:-} in
     classify_child_exe "$2" "$3" "$4"
     exit
     ;;
+  --observe-direct-rss)
+    [[ $# == 2 ]] || exit 2
+    observe_direct_rss "$2"
+    printf '%s\t%s\n' "$direct_rss_action" "$direct_rss_kib"
+    exit
+    ;;
+  --sample-direct-rss-fixture)
+    [[ $# == 3 ]] || exit 2
+    receipt=$3
+    mkdir -p "$receipt"
+    printf 'checkpoint\trss_kib\n' >"$receipt/rss.tsv"
+    max_rss=0
+    sample_direct_rss "$2" "$receipt"
+    printf '%s\t%s\t%s\n' "$direct_rss_action" "$direct_rss_kib" "$max_rss"
+    exit
+    ;;
   --resolve-child-observations)
     (( $# >= 4 )) || exit 2
     diagnostic_log=$2
@@ -702,10 +757,8 @@ case ${1:-} in
       exit 1
     fi
     while kill -0 "$pid" 2>/dev/null; do
-      rss=$(awk '/VmRSS:/ {print $2}' "/proc/$pid/status" 2>/dev/null || echo 0)
-      (( rss > max_rss )) && max_rss=$rss
-      printf 'sample\t%s\n' "$rss" >>"$receipt/rss.tsv"
-      classify_rss "$rss" "$receipt" || exit 1
+      sample_direct_rss "/proc/$pid/status" "$receipt" || exit 1
+      [[ $direct_rss_action != exited ]] || break
       sleep 0.05
     done
     if ! wait "$pid"; then
