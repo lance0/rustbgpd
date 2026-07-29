@@ -2195,6 +2195,15 @@ pub struct PeerInfo {
     /// RFC 7947 §2.3.2 per-client best-path enabled for this
     /// route-server client.
     pub per_client_best: bool,
+    /// ADR-0107 strict-peer `NEXT_HOP` ownership enforcement resolved into the
+    /// running transport config.
+    pub next_hop_ownership_strict_peer: bool,
+    /// Effective RFC 1997 `NO_EXPORT` / `NO_EXPORT_SUBCONFED` interpretation.
+    pub interpret_rfc1997: bool,
+    /// Effective RFC 7947 / RFC 8195 route-server control-community handling.
+    pub rs_control_communities: bool,
+    /// Effective RFC 9107 ORR vantage inherited by this running peer.
+    pub orr_vantage: Option<IpAddr>,
     /// Locally configured BGP Role, if advertised.
     pub local_role: Option<BgpRole>,
     /// Require a compatible remote BGP Role.

@@ -1543,6 +1543,14 @@ prefixes received). Its `Slow` column marks a slow-but-established peer with
 `!`. Display-only: JSON is unaffected by `--wide` and may omit optional false
 healthy-state fields.
 
+Neighbor detail includes an Effective Posture block for the resolved running
+NEXT_HOP ownership, RFC 1997 interpretation, route-server control-community
+handling, and ORR vantage. This is the quickest inheritance audit for both
+static and accepted dynamic peers. During a rolling CLI upgrade,
+`unknown (not exposed by daemon)` means the server predates this nested state;
+it must not be interpreted as an explicitly disabled posture. JSON preserves
+the distinction by omitting `effective_posture`.
+
 `rbgp neighbor <address>` reports actor-authoritative negotiation state only
 for the current Established session: negotiated hold time, remote router ID,
 four-octet-AS result, mutual families, and usable peer Graceful Restart family

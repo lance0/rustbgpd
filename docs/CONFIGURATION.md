@@ -1717,6 +1717,14 @@ Full community matrix and evaluation ladder:
 [the route-server cookbook](cookbook/route-server.md) and
 [RFC_NOTES.md](RFC_NOTES.md#rfc-7947-232--rfc-8195--route-server-control-communities).
 
+To audit the result after neighbor, peer-group, and derived defaults are
+resolved, use `rbgp neighbor <address>`. Its Effective Posture block reports
+`next_hop_ownership`, `interpret_rfc1997`, `rs_control_communities`, and
+`orr_vantage` from the running peer. `rbgp --json neighbor <address>` exposes
+the same values under `effective_posture`; an absent object means the daemon is
+too old to expose this view, not that the features are disabled. Static and
+accepted dynamic peers use the same projection.
+
 ### Receive-side Prefix ORF (RFC 5291/5292)
 
 Set `prefix_orf_receive = true` on a neighbor or peer group to advertise that

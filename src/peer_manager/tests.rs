@@ -2834,6 +2834,151 @@ async fn unavailable_session_preserves_graceful_shutdown_advertise_intent() {
     managed.handle.shutdown().await.unwrap().unwrap();
 }
 
+fn effective_posture(
+    info: &rustbgpd_api::peer_types::PeerInfo,
+) -> (bool, bool, bool, Option<IpAddr>) {
+    (
+        info.next_hop_ownership_strict_peer,
+        info.interpret_rfc1997,
+        info.rs_control_communities,
+        info.orr_vantage,
+    )
+}
+
+const EFFECTIVE_POSTURE_TOML: &str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+[global.telemetry]
+log_format = "json"
+[peer_groups.inherited_rs]
+route_server_client = true
+next_hop_ownership = "strict_peer"
+interpret_rfc1997 = true
+rs_control_communities = false
+[peer_groups.rr_clients]
+route_reflector_client = true
+orr_vantage = "192.0.2.7"
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+[[neighbors]]
+address = "10.0.0.3"
+remote_asn = 65003
+route_server_client = true
+[[neighbors]]
+address = "10.0.0.4"
+remote_asn = 65004
+route_server_client = true
+next_hop_ownership = "strict_peer"
+interpret_rfc1997 = true
+rs_control_communities = false
+[[neighbors]]
+address = "10.0.0.5"
+remote_asn = 65005
+peer_group = "inherited_rs"
+[[neighbors]]
+address = "10.0.0.6"
+remote_asn = 65001
+peer_group = "rr_clients"
+[[dynamic_neighbors]]
+prefix = "127.0.0.0/8"
+peer_group = "inherited_rs"
+remote_asn = 0
+"#;
+
+/// Load-bearing snapshot proof across the supported resolution shapes:
+/// deleting any `ManagedPeer.transport_config` posture assignment makes at
+/// least one exact tuple fall back to the `PeerInfo` fixture defaults.
+#[tokio::test]
+async fn effective_posture_snapshot_reports_resolved_static_values() {
+    let config = load_test_config(EFFECTIVE_POSTURE_TOML);
+    let mut mgr = test_peer_manager();
+    for (index, resolved) in config.resolved_neighbors().unwrap().into_iter().enumerate() {
+        mgr.install_established_policy_test_peer(resolved, index as u64 + 1);
+    }
+
+    let snapshot = |address: &str| {
+        let peer = key(address.parse().unwrap());
+        super::snapshot::build_peer_info(&peer, mgr.peers.get(&peer).unwrap(), None, false)
+    };
+    let cases = [
+        ("10.0.0.2", (false, true, false, None), "plain eBGP"),
+        ("10.0.0.3", (false, false, true, None), "RS defaults"),
+        ("10.0.0.4", (true, true, false, None), "neighbor override"),
+        ("10.0.0.5", (true, true, false, None), "group inheritance"),
+        (
+            "10.0.0.6",
+            (false, true, false, Some("192.0.2.7".parse().unwrap())),
+            "ORR inheritance",
+        ),
+    ];
+    for (address, expected, shape) in cases {
+        assert_eq!(effective_posture(&snapshot(address)), expected, "{shape}");
+    }
+
+    for (_, managed) in mgr.peers.drain() {
+        managed.handle.shutdown().await.unwrap().unwrap();
+    }
+}
+
+/// Load-bearing accepted-dynamic parity proof: dropping resolved posture while
+/// retaining the live inbound child makes its snapshot differ from the static
+/// member inheriting the same peer group.
+#[tokio::test]
+async fn effective_posture_snapshot_keeps_dynamic_inheritance_at_static_parity() {
+    let config = load_test_config(EFFECTIVE_POSTURE_TOML);
+    let static_rs = config
+        .resolved_neighbors()
+        .unwrap()
+        .into_iter()
+        .find(|peer| {
+            peer.transport_config.remote_addr.ip() == "10.0.0.5".parse::<IpAddr>().unwrap()
+        })
+        .unwrap();
+    let (_tx, rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let mut mgr = PeerManager::new_with_config(
+        rx,
+        mpsc::unbounded_channel().1,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+        None,
+        config,
+    );
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let listener_addr = listener.local_addr().unwrap();
+    let client = tokio::spawn(async move { TcpStream::connect(listener_addr).await.unwrap() });
+    let (server_stream, remote_addr) = listener.accept().await.unwrap();
+    let client_stream = client.await.unwrap();
+    mgr.handle_inbound(server_stream, sock(remote_addr.ip()), None, None)
+        .await;
+    mgr.install_established_policy_test_peer(static_rs, 99);
+
+    let snapshot = |address: &str| {
+        let peer = key(address.parse().unwrap());
+        super::snapshot::build_peer_info(&peer, mgr.peers.get(&peer).unwrap(), None, false)
+    };
+    let static_rs = snapshot("10.0.0.5");
+    let dynamic_rs = snapshot(&remote_addr.ip().to_string());
+    assert_eq!(
+        effective_posture(&static_rs),
+        effective_posture(&dynamic_rs)
+    );
+    assert!(!static_rs.is_dynamic && dynamic_rs.is_dynamic);
+
+    drop(client_stream);
+    for (_, managed) in mgr.peers.drain() {
+        managed.handle.shutdown().await.unwrap().unwrap();
+    }
+}
+
 /// Load-bearing: sourcing live counts from config or deriving stale headroom
 /// from zero placeholders makes at least one exact snapshot assertion fail.
 #[tokio::test]

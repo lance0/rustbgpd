@@ -87,6 +87,7 @@ pub(crate) struct MockState {
     pub(crate) add_neighbor_error: Mutex<Option<(Code, String)>>,
     pub(crate) last_get_neighbor_state: Mutex<Option<server_proto::GetNeighborStateRequest>>,
     pub(crate) neighbor_comparison: Mutex<Option<server_proto::UpdateGroupComparison>>,
+    pub(crate) neighbor_effective_posture: Mutex<Option<server_proto::EffectiveNeighborPosture>>,
     pub(crate) last_softreset: Mutex<Option<server_proto::SoftResetInRequest>>,
     pub(crate) last_refresh_outbound: Mutex<Option<server_proto::RefreshOutboundRequest>>,
     pub(crate) refresh_outbound_calls: AtomicUsize,
@@ -944,6 +945,7 @@ impl rustbgpd_api::proto::neighbor_service_server::NeighborService for MockNeigh
                     reason: None,
                 },
             ],
+            effective_posture: self.state.neighbor_effective_posture.lock().await.clone(),
         };
         response.update_group_comparison = self.state.neighbor_comparison.lock().await.clone();
         Ok(Response::new(response))

@@ -598,6 +598,31 @@ message NeighborState {
   // from a daemon that does not expose it and from a peer with no outbound
   // registration; a registered peer always reports both unicast families.
   repeated OutboundPrefixLimitState outbound_prefix_limits = 53;
+  // Resolved running posture inherited by this peer. Message presence
+  // distinguishes an older daemon from a current daemon whose boolean values
+  // are explicitly false.
+  EffectiveNeighborPosture effective_posture = 54;
+}
+
+// Read-only resolved posture copied from the peer's running transport config.
+// This is not a second configuration surface.
+message EffectiveNeighborPosture {
+  NextHopOwnershipMode next_hop_ownership = 1;
+  // Effective RFC 1997 NO_EXPORT / NO_EXPORT_SUBCONFED egress interpretation.
+  bool interpret_rfc1997 = 2;
+  // Effective RFC 7947 / RFC 8195 route-server control-community handling.
+  bool rs_control_communities = 3;
+  // Effective RFC 9107 vantage inherited by an ORR client.
+  optional string orr_vantage = 4;
+}
+
+// Effective ADR-0107 route-server NEXT_HOP ownership enforcement. Rolling
+// compatible: an older daemon omits the containing posture message; clients
+// also treat UNSPECIFIED and unrecognized future values as unknown.
+enum NextHopOwnershipMode {
+  NEXT_HOP_OWNERSHIP_MODE_UNSPECIFIED = 0;
+  NEXT_HOP_OWNERSHIP_MODE_DISABLED = 1;
+  NEXT_HOP_OWNERSHIP_MODE_STRICT_PEER = 2;
 }
 
 // RFC 8212 explicit-policy status for one direction of one session
