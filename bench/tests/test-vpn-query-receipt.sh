@@ -75,6 +75,24 @@ assert allocation["query"]["returned_rows"] == 16
 assert allocation["peak_live_requested_bytes"] > 0
 PY
 
+set +e
+mapfile -t timing_bins < <(find "$repo_root/target/release/deps" -maxdepth 1 \
+  -type f -perm -0100 -name 'vpn_query_timing-*')
+[[ ${#timing_bins[@]} -eq 1 ]]
+RUSTBGPD_VPN_QUERY_FORCE_CENSOR=1 "${timing_bins[0]}" \
+  smoke U "$tmp_dir/censor.json" >/dev/null 2>&1
+censor_status=$?
+set -e
+[[ $censor_status -eq 75 ]]
+python3 - "$tmp_dir/censor.json" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1]))
+assert doc == {
+    "schema": 1, "mode": "timing", "routes": 256, "case": "U",
+    "outcome": "capacity_censored", "censor_phase": "forced_fixture",
+}
+PY
+
 python3 - "$timing_receipt" "$tmp_dir/bad-rows.json" "$tmp_dir/bad-checksum.json" <<'PY'
 import json
 import sys

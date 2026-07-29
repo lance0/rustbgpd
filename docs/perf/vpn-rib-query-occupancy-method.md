@@ -23,7 +23,9 @@ contaminating timing:
 
 The driver builds each executable once, copies it into the campaign directory,
 records SHA-256, commit, and `rustc` provenance, then refuses missing, changed,
-or corrupt binaries. It acquires the shared retained-performance host lock and
+or corrupt binaries. Commit, Git tree, clean status, toolchain, and binary
+hashes are captured before the locked build and rechecked through completion.
+It acquires the shared retained-performance host lock and
 requires the same load, CPU-governor, and competing-process fence before build
 and every process.
 
@@ -36,6 +38,9 @@ timing processes in this immutable order:
 
 That is exactly 48 uniquely numbered receipts. Selective reruns, randomization,
 reordering, missing receipts, and dual-case receipts are invalid.
+One complete clean retry may be requested with `--retry`; it reuses the exact
+prebuilt binaries and must contain all 48 cells. Partial, selective, or third
+attempts are invalid.
 
 Within each cell, pairs are repetitions `(1,2)`, `(3,4)`, `(5,6)`, and `(7,8)`.
 For actor-handler values `a,b`, `pair_noise = abs(a-b) / ((a+b)/2)` and cell
@@ -45,13 +50,17 @@ noise is the maximum of those four values. The noise ceiling is 5% at 10k and
 `service_method_ns` encloses the trait call. The retained decomposition is
 computed with `service_method_ns.checked_sub(actor_handler_ns)`; underflow or
 missing evidence fails closed. A zero post-actor duration is valid.
+Every setup/query timeout produces the typed `capacity_censored` process
+outcome. The driver catches only its exit status 75, stops all remaining cells,
+and verifies the censor receipt; every other nonzero exit is a hard failure.
 
 Classifier precedence is exact:
 
 1. `capacity_censored`
 2. `inconclusive` (cell noise above its size-specific ceiling)
 3. `instrumentation_suspect` (filtered/unfiltered actor medians disagree by
-   more than `max(cell noise, 5%)`, or actor medians decrease with size)
+   more than `max(cell noise, 5%)`, or actor medians fail to increase strictly
+   with size)
 4. `urgent` (worst actor handler above 200 ms)
 5. `design_followup` (worst actor handler above 25 ms)
 6. `no_redesign`

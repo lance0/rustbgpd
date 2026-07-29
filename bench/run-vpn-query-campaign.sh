@@ -7,8 +7,13 @@ root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 source "$root/docs/perf/event-history-host-fence.sh"
 
 smoke=0
+attempts=1
 if [[ ${1:-} == --smoke ]]; then
     smoke=1
+    shift
+fi
+if [[ ${1:-} == --retry ]]; then
+    attempts=2
     shift
 fi
 [[ $# -eq 1 ]] || {
@@ -20,7 +25,7 @@ output=$1
     echo "refusing existing output: $output" >&2
     exit 1
 }
-mkdir -p "$output/bin" "$output/timing"
+mkdir -p "$output/bin"
 [[ -z $(git -C "$root" status --porcelain) ]] || {
     echo "refusing campaign from a dirty source tree" >&2
     exit 1
@@ -29,12 +34,17 @@ mkdir -p "$output/bin" "$output/timing"
 vpn_query_acquire_host_lock
 vpn_query_init_host_preflight_log "$output/host-preflight.tsv"
 vpn_query_wait_for_idle build "$output/host-preflight.tsv"
+source_commit=$(git -C "$root" rev-parse HEAD)
+source_tree=$(git -C "$root" rev-parse 'HEAD^{tree}')
+source_status=$(git -C "$root" status --porcelain=v1)
+toolchain=$(rustc --version --verbose | tr '\n' ';')
+[[ -z $source_status ]]
 
 target_dir="$output/target"
 export CARGO_TARGET_DIR=$target_dir
-cargo build --manifest-path "$root/Cargo.toml" --release -p rustbgpd-api \
+cargo build --locked --manifest-path "$root/Cargo.toml" --release -p rustbgpd-api \
     --bench vpn_query_timing --features bench-internals
-cargo build --manifest-path "$root/Cargo.toml" --release -p rustbgpd-api \
+cargo build --locked --manifest-path "$root/Cargo.toml" --release -p rustbgpd-api \
     --bench vpn_query_allocation --features bench-internals,vpn-query-allocation
 
 find_binary() {
@@ -53,12 +63,13 @@ timing_hash=$(sha256sum "$output/bin/vpn_query_timing" | awk '{print $1}')
 allocation_hash=$(sha256sum "$output/bin/vpn_query_allocation" | awk '{print $1}')
 
 python3 - "$output/manifest.json" "$timing_hash" "$allocation_hash" \
-    "$(git -C "$root" rev-parse HEAD)" "$(rustc --version --verbose | tr '\n' ';')" <<'PY'
+    "$source_commit" "$source_tree" "$toolchain" "$attempts" <<'PY'
 import json, sys
-path, timing, allocation, commit, rustc = sys.argv[1:]
+path, timing, allocation, commit, tree, rustc, attempts = sys.argv[1:]
 fixed = [f"{case}{i}" for i in range(1, 9) for case in ("U", "F")]
 json.dump({"schema": 2, "base_commit": commit, "rustc": rustc,
            "host_fence": "pass", "source_tree_clean": True, "fixed_order": fixed,
+           "source_tree": tree, "attempts": int(attempts),
            "timing_binary_sha256": timing,
            "allocation_binary_sha256": allocation}, open(path, "w"), indent=2)
 PY
@@ -77,6 +88,15 @@ json.dump(doc, open(output, "w"), indent=2)
 PY
 }
 
+check_provenance() {
+    [[ $(git -C "$root" rev-parse HEAD) == "$source_commit" ]]
+    [[ $(git -C "$root" rev-parse 'HEAD^{tree}') == "$source_tree" ]]
+    [[ -z $(git -C "$root" status --porcelain=v1) ]]
+    [[ $(rustc --version --verbose | tr '\n' ';') == "$toolchain" ]]
+    [[ $(sha256sum "$output/bin/vpn_query_timing" | awk '{print $1}') == "$timing_hash" ]]
+    [[ $(sha256sum "$output/bin/vpn_query_allocation" | awk '{print $1}') == "$allocation_hash" ]]
+}
+
 if ((smoke)); then
     vpn_query_wait_for_idle smoke "$output/host-preflight.tsv"
     for target in timing allocation; do
@@ -90,24 +110,57 @@ if ((smoke)); then
     exit
 fi
 
-ordinal=0
-for size in 10000 100000 1000000; do
-    for repetition in 1 2 3 4 5 6 7 8; do
-        for case in U F; do
-            ((ordinal += 1))
-            vpn_query_wait_for_idle "timing-$ordinal" "$output/host-preflight.tsv"
-            raw="$output/timing/raw.json"
-            "$output/bin/vpn_query_timing" cell "$size" "$case" "$raw"
-            decorate "$raw" "$output/timing/$(printf '%02d' "$ordinal").json" \
-                "$timing_hash" "$ordinal" "$repetition" 120
-            rm "$raw"
+for attempt in $(seq 1 "$attempts"); do
+    mkdir -p "$output/attempt-$attempt/timing"
+    ordinal=0
+    for size in 10000 100000 1000000; do
+        for repetition in 1 2 3 4 5 6 7 8; do
+            for case in U F; do
+                ((ordinal += 1))
+                check_provenance
+                vpn_query_wait_for_idle "attempt-$attempt-timing-$ordinal" \
+                    "$output/host-preflight.tsv"
+                raw="$output/attempt-$attempt/timing/raw.json"
+                set +e
+                "$output/bin/vpn_query_timing" cell "$size" "$case" "$raw"
+                rc=$?
+                set -e
+                if ((rc == 75)); then
+                    decorate "$raw" "$output/censor.json" "$timing_hash" \
+                        "$ordinal" "$repetition" 120
+                    rm "$raw"
+                    python3 "$root/bench/verify-vpn-query-campaign.py" "$output" \
+                        --output "$output/classification.json"
+                    exit
+                elif ((rc != 0)); then
+                    exit "$rc"
+                fi
+                decorate "$raw" "$output/attempt-$attempt/timing/$(printf '%02d' "$ordinal").json" \
+                    "$timing_hash" "$ordinal" "$repetition" 120
+                rm "$raw"
+            done
         done
     done
 done
+check_provenance
 vpn_query_wait_for_idle allocation "$output/host-preflight.tsv"
+set +e
 "$output/bin/vpn_query_allocation" cell 1000000 U "$output/allocation-raw.json"
+rc=$?
+set -e
+if ((rc == 75)); then
+    decorate "$output/allocation-raw.json" "$output/censor.json" \
+        "$allocation_hash" 49 1 120
+    rm "$output/allocation-raw.json"
+    python3 "$root/bench/verify-vpn-query-campaign.py" "$output" \
+        --output "$output/classification.json"
+    exit
+elif ((rc != 0)); then
+    exit "$rc"
+fi
 decorate "$output/allocation-raw.json" "$output/allocation.json" \
     "$allocation_hash" 49 1 120
 rm "$output/allocation-raw.json"
 python3 "$root/bench/verify-vpn-query-campaign.py" "$output" \
     --output "$output/classification.json"
+check_provenance

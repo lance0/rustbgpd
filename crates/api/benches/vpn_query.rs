@@ -119,6 +119,9 @@ struct QueryReceipt {
     checksum: u64,
 }
 
+#[derive(Debug)]
+struct CapacityCensored(&'static str);
+
 fn mix(mut hash: u64, bytes: &[u8]) -> u64 {
     for byte in bytes {
         hash ^= u64::from(*byte);
@@ -174,7 +177,7 @@ async fn query(
     service_rx: &mut mpsc::Receiver<VpnQueryServiceReceipt>,
     peer_filter: &str,
     timeout: Duration,
-) -> QueryReceipt {
+) -> Result<QueryReceipt, CapacityCensored> {
     let deadline = tokio::time::Instant::now() + timeout;
     let started = Instant::now();
     let response = tokio::time::timeout_at(
@@ -185,7 +188,7 @@ async fn query(
         })),
     )
     .await
-    .expect("VPN RIB service query exceeded its absolute deadline")
+    .map_err(|_| CapacityCensored("service_query"))?
     .unwrap()
     .into_inner();
     let service_method_ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
@@ -201,11 +204,11 @@ async fn query(
     let (actor_ns, actor_rows, actor_capacity, dispatch) =
         tokio::time::timeout_at(deadline, actor_rx.recv())
             .await
-            .expect("VPN RIB actor receipt exceeded the query deadline")
+            .map_err(|_| CapacityCensored("actor_receipt"))?
             .expect("VPN RIB actor receipt channel closed");
     let service_receipt = tokio::time::timeout_at(deadline, service_rx.recv())
         .await
-        .expect("VPN RIB service receipt exceeded the query deadline")
+        .map_err(|_| CapacityCensored("service_receipt"))?
         .expect("VPN RIB service receipt channel closed");
     assert_eq!(service_receipt.returned_rows, response.routes.len());
     let checksum = response.routes.iter().fold(0_u64, |sum, row| {
@@ -216,7 +219,7 @@ async fn query(
             row.labels[0],
         ))
     });
-    QueryReceipt {
+    Ok(QueryReceipt {
         actor_ns,
         service_method_ns,
         post_actor_ns: service_method_ns
@@ -227,7 +230,7 @@ async fn query(
         returned_rows: service_receipt.returned_rows,
         dispatch,
         checksum,
-    }
+    })
 }
 
 fn verify(receipt: &QueryReceipt, routes: usize, filtered: bool, dispatch: u64) {
@@ -239,10 +242,18 @@ fn verify(receipt: &QueryReceipt, routes: usize, filtered: bool, dispatch: u64) 
     assert_eq!(receipt.checksum, expected_checksum(routes, filtered));
     assert!(receipt.actor_ns > 0);
     assert!(receipt.service_method_ns > 0);
-    assert!(receipt.post_actor_ns > 0);
+    assert_eq!(
+        receipt.post_actor_ns,
+        receipt.service_method_ns - receipt.actor_ns
+    );
 }
 
-async fn run(routes: usize, case: &str, output: &str, timeout: Duration) {
+async fn run(
+    routes: usize,
+    case: &str,
+    output: &str,
+    timeout: Duration,
+) -> Result<(), CapacityCensored> {
     let (primary_tx, primary_rx) = mpsc::channel(32);
     let (query_tx, query_rx) = mpsc::channel(8);
     let (actor_tx, mut actor_rx) = mpsc::channel(4);
@@ -295,7 +306,7 @@ async fn run(routes: usize, case: &str, output: &str, timeout: Duration) {
             );
             tokio::time::timeout_at(setup_deadline, primary_tx.send(update))
                 .await
-                .expect("VPN RIB seed send exceeded the setup deadline")
+                .map_err(|_| CapacityCensored("seed_send"))?
                 .expect("VPN RIB primary channel closed during setup");
         }
     }
@@ -305,11 +316,11 @@ async fn run(routes: usize, case: &str, output: &str, timeout: Duration) {
         primary_tx.send(RibUpdate::QueryLocRibCount { reply: barrier_tx }),
     )
     .await
-    .expect("VPN RIB setup barrier send exceeded the setup deadline")
+    .map_err(|_| CapacityCensored("barrier_send"))?
     .expect("VPN RIB primary channel closed before the setup barrier");
     let _ = tokio::time::timeout_at(setup_deadline, barrier_rx)
         .await
-        .expect("VPN RIB setup barrier reply exceeded the setup deadline")
+        .map_err(|_| CapacityCensored("barrier_reply"))?
         .expect("VPN RIB manager dropped the setup barrier reply");
 
     let (service_tx, mut service_rx) = mpsc::channel(4);
@@ -324,7 +335,7 @@ async fn run(routes: usize, case: &str, output: &str, timeout: Duration) {
         if filtered { "10.0.0.1" } else { "" },
         timeout,
     )
-    .await;
+    .await?;
     verify(&receipt, routes, filtered, 1);
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -345,6 +356,7 @@ async fn run(routes: usize, case: &str, output: &str, timeout: Duration) {
     });
     std::fs::write(output, serde_json::to_vec_pretty(&document).unwrap()).unwrap();
     manager_task.abort();
+    Ok(())
 }
 
 #[cfg(feature = "vpn-query-allocation")]
@@ -406,9 +418,25 @@ fn main() {
             )
         }
     };
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .unwrap()
-        .block_on(run(routes, case, output, timeout));
+    let result = if std::env::var_os("RUSTBGPD_VPN_QUERY_FORCE_CENSOR").is_some() {
+        Err(CapacityCensored("forced_fixture"))
+    } else {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(run(routes, case, output, timeout))
+    };
+    if let Err(CapacityCensored(phase)) = result {
+        let document = json!({
+            "schema": 1,
+            "mode": if cfg!(feature = "vpn-query-allocation") { "allocation" } else { "timing" },
+            "routes": routes,
+            "case": case,
+            "outcome": "capacity_censored",
+            "censor_phase": phase,
+        });
+        std::fs::write(output, serde_json::to_vec_pretty(&document).unwrap()).unwrap();
+        std::process::exit(75);
+    }
 }
