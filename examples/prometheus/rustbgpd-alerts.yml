@@ -296,6 +296,59 @@ groups:
             concurrent readiness probe and other RIB work; inspect the
             dashboard p99 and transition state before retrying a reload.
 
+      - alert: BgpOutboundRouteDrops
+        # A full outbound distribution channel drops BGP work instead of
+        # delaying it; the failed path can be advertisement or refresh work.
+        expr: increase(bgp_outbound_route_drops_total[10m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Outbound BGP work dropped for {{ $labels.peer }}"
+          description: >-
+            bgp_outbound_route_drops_total for peer {{ $labels.peer }} on
+            {{ $labels.instance }} increased by
+            {{ $value | printf "%.0f" }} in the last 10 minutes. Outbound BGP
+            work was lost before reaching the peer writer; inspect the writer,
+            peer, daemon log, and last error to identify the failed path. Once
+            healthy, refresh outbound for a missed advertised view or soft
+            reset inbound for a missed inbound ROUTE-REFRESH request.
+
+      - alert: BgpSendHoldExpired
+        # RFC 9687 expiry means the remote peer stopped draining TCP long
+        # enough for rustbgpd to tear down the session without a NOTIFICATION.
+        expr: increase(bgp_send_hold_expirations_total[10m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Send-hold timer expired for {{ $labels.peer }}"
+          description: >-
+            bgp_send_hold_expirations_total for peer {{ $labels.peer }} on
+            {{ $labels.instance }} increased by
+            {{ $value | printf "%.0f" }} in the last 10 minutes. The RFC 9687
+            send-hold timer expired because the peer stopped draining its TCP
+            socket, so rustbgpd tore down the session without a NOTIFICATION;
+            inspect the writer and peer before allowing the session to recover.
+
+      - alert: BgpEventStreamLagged
+        # A live subscriber that falls behind misses events and can no longer
+        # treat its incremental view as synchronized with daemon state.
+        expr: increase(bgp_event_stream_lagged_total[10m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: >-
+            Live event stream lagged ({{ $labels.service }}/{{ $labels.source }})
+          description: >-
+            bgp_event_stream_lagged_total for {{ $labels.service }} consuming
+            {{ $labels.source }} events on {{ $labels.instance }} increased by
+            {{ $value | printf "%.0f" }} in the last 10 minutes. The live
+            consumer missed events and its incremental view is desynchronized;
+            take a fresh authoritative snapshot for this service and source,
+            then restart the live watch.
+
       - alert: BgpPolicyEvalErrors
         # An evaluation error makes the policy engine treat the
         # affected route as Deny (uniform eval-error rails), so every

@@ -64,12 +64,37 @@ degradation, update-group residue growth, stalled policy transition, a slow
 peer, RFC 8212 missing import/export policy, sustained outbound-prefix blocking,
 dynamic-neighbor admission near-limit and rejection,
 actor polls above 200ms, exact-export rejection, malformed UPDATE disposition,
-selection-deferral timeout and ledger overflow, and daemon down) ships at
+selection-deferral timeout and ledger overflow, outbound route loss, RFC 9687
+send-hold teardown, live event-stream lag/desynchronization, and daemon down)
+ships at
 [`examples/prometheus/rustbgpd-alerts.yml`](../examples/prometheus/rustbgpd-alerts.yml),
 with per-rule unit tests in
 [`rustbgpd-alerts_test.yml`](../examples/prometheus/rustbgpd-alerts_test.yml)
 (`promtool test rules`). It assumes the scrape config above
 (`job_name: rustbgpd`).
+
+The three loss alerts use a 10-minute counter-increase window and clear after
+the last increment ages out:
+
+- `BgpOutboundRouteDrops` is critical because the full outbound distribution
+  channel has already discarded outbound BGP work. Inspect the peer writer,
+  daemon log, and last error to identify the failed path and correct the
+  bottleneck. Then refresh outbound for a missed advertised view, or soft reset
+  inbound for a missed inbound ROUTE-REFRESH request.
+- `BgpSendHoldExpired` is critical because RFC 9687 expiry has already torn
+  down the session without a NOTIFICATION after the remote endpoint stopped
+  draining TCP. Inspect the writer and peer before allowing the session to
+  recover; repeated increments indicate the receiver or path is still wedged.
+- `BgpEventStreamLagged` is warning severity because the daemon and routing
+  sessions remain live, but the named `service`/`source` consumer missed
+  incremental events. Treat that consumer's local view as desynchronized:
+  take a fresh authoritative snapshot for the named service and source, then
+  restart the live watch. Use a durable cursor only when that API supports one.
+
+The rules intentionally alert on the exported loss counters, not adjacent
+queue-depth, subscriber-count, or slow-peer gauges. A flat non-zero counter is
+historical evidence and does not keep an alert firing; only a new increment
+inside the bounded window does.
 
 ## Reading notes
 
@@ -84,6 +109,10 @@ with per-rule unit tests in
   not page.
 - Exact-export rejection and malformed-UPDATE disposition rates share the
   `$peer` selector, like every other per-peer panel.
+  Outbound route-drop and RFC 9687 send-hold alerts preserve that same `peer`
+  identity. The live event-stream lag alert instead preserves the metric's
+  native `service` and `source` labels so operators can resnapshot and restart
+  the affected watch.
   The selection-deferral state panel renders
   the raw `active` and `waiters` gauges as steps because their discrete changes
   are normal convergence activity. Only timeout and bounded-ledger-overflow

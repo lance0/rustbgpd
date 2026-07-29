@@ -11,6 +11,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- The shipped Prometheus rule pack now pages on outbound BGP work dropped
+  before the peer writer and RFC 9687 send-hold session teardowns, and warns
+  when a live event-stream consumer misses events and becomes desynchronized.
+  Each alert preserves its native peer or service/source identity and gives
+  a bounded recovery action for the failed path.
+
 - Dynamic peers now report the canonical `[[dynamic_neighbors]]` prefix and
   peer group that accepted their session. The provenance is captured at
   accept time, survives later matcher edits while the session remains live,
