@@ -27,8 +27,8 @@ use crate::proto::global_service_client::GlobalServiceClient;
 use crate::proto::neighbor_service_client::NeighborServiceClient;
 use crate::proto::{
     BfdSession, BfdSessionState, GetBfdSessionsRequest, GetEffectiveConfigRequest,
-    GetGlobalRequest, HealthRequest, ListNeighborsRequest, ListPolicyEventsRequest,
-    ListSessionEventsRequest, MetricsRequest,
+    GetGlobalRequest, HealthRequest, ListDynamicNeighborsRequest, ListNeighborsRequest,
+    ListPolicyEventsRequest, ListSessionEventsRequest, MetricsRequest,
 };
 
 /// Bounded recent slice pulled from each event history for triage. The
@@ -241,6 +241,25 @@ struct GlobalSnapshot {
     listen_port: u32,
     tcp_ao_support: String,
     tcp_ao_detail: String,
+}
+
+#[derive(Serialize)]
+struct DynamicNeighborSnapshot {
+    prefix: String,
+    peer_group: String,
+    remote_asn: u32,
+    description: String,
+}
+
+impl From<&crate::proto::DynamicNeighborRange> for DynamicNeighborSnapshot {
+    fn from(range: &crate::proto::DynamicNeighborRange) -> Self {
+        Self {
+            prefix: range.prefix.clone(),
+            peer_group: range.peer_group.clone(),
+            remote_asn: range.remote_asn,
+            description: redact_text(&range.description),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -1558,6 +1577,32 @@ pub(crate) async fn run(
             // non-Established state, the later history query includes the
             // disable evidence.
             let neighbor_snapshot = neighbor.list_neighbors(ListNeighborsRequest {}).await;
+            let dynamic_neighbor_snapshot = match neighbor
+                .list_dynamic_neighbors(ListDynamicNeighborsRequest {})
+                .await
+            {
+                Ok(resp) => {
+                    let snapshots: Vec<DynamicNeighborSnapshot> = resp
+                        .into_inner()
+                        .ranges
+                        .iter()
+                        .map(DynamicNeighborSnapshot::from)
+                        .collect();
+                    bundle.add_json("peers/dynamic-neighbors.json", &snapshots)?;
+                    sections.insert("dynamic_neighbors", "collected".to_string());
+                    Some(snapshots)
+                }
+                Err(e) => {
+                    sections.insert(
+                        "dynamic_neighbors",
+                        format!(
+                            "unavailable: ListDynamicNeighbors RPC failed: {}",
+                            redact_text(&e.to_string())
+                        ),
+                    );
+                    None
+                }
+            };
             let (session_events, session_history_available) = match events
                 .list_session_events(ListSessionEventsRequest {
                     neighbor_address: String::new(),
@@ -1650,11 +1695,27 @@ pub(crate) async fn run(
                         })
                         .collect();
                     if snapshots.is_empty() {
-                        reporter.record(
-                            "peers.configured",
-                            CheckStatus::Warn,
-                            "no neighbors configured",
-                        );
+                        match dynamic_neighbor_snapshot.as_ref() {
+                            Some(ranges) if ranges.is_empty() => reporter.record(
+                                "peers.configured",
+                                CheckStatus::Warn,
+                                "no active neighbor sessions and no dynamic-neighbor ranges configured",
+                            ),
+                            Some(ranges) => reporter.record(
+                                "peers.configured",
+                                CheckStatus::Ok,
+                                format!(
+                                    "no active neighbor sessions; {} dynamic-neighbor range{} configured for future acceptance",
+                                    ranges.len(),
+                                    if ranges.len() == 1 { "" } else { "s" }
+                                ),
+                            ),
+                            None => reporter.record(
+                                "peers.configured",
+                                CheckStatus::Warn,
+                                "no active neighbor sessions; dynamic-neighbor range inventory unavailable",
+                            ),
+                        }
                     }
                     for n in &neighbors.neighbors {
                         let address = n.config.as_ref().map_or_else(String::new, |config| {
@@ -1727,6 +1788,10 @@ pub(crate) async fn run(
             );
             sections.insert("config", "unavailable: daemon unreachable".to_string());
             sections.insert("peers", "unavailable: daemon unreachable".to_string());
+            sections.insert(
+                "dynamic_neighbors",
+                "unavailable: daemon unreachable".to_string(),
+            );
             sections.insert(
                 "system",
                 "partial: daemon unreachable (host facts only)".to_string(),
@@ -2975,6 +3040,15 @@ paths = ["x"]
             .1
     }
 
+    fn manifest_check<'a>(manifest: &'a serde_json::Value, name: &str) -> &'a serde_json::Value {
+        manifest["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == name)
+            .unwrap_or_else(|| panic!("manifest missing check {name}"))
+    }
+
     fn neighbor(
         address: &str,
         state: i32,
@@ -3061,6 +3135,7 @@ paths = ["x"]
             "manifest.json",
             "config/effective.toml",
             "peers/bfd.json",
+            "peers/dynamic-neighbors.json",
             "peers/neighbors.json",
             "peers/events.json",
             "system/environment.json",
@@ -3080,6 +3155,7 @@ paths = ["x"]
         assert_eq!(manifest["cli_version"], env!("CARGO_PKG_VERSION"));
         assert_eq!(manifest["daemon_version"], "0.0.0-mock");
         assert_eq!(manifest["sections"]["peers"], "collected");
+        assert_eq!(manifest["sections"]["dynamic_neighbors"], "collected");
         assert!(
             manifest["sections"]["logs"]
                 .as_str()
@@ -3105,6 +3181,9 @@ paths = ["x"]
         assert!(find(&files, "config/effective.toml").contains("asn = 65000"));
         let peers: serde_json::Value =
             serde_json::from_str(find(&files, "peers/neighbors.json")).unwrap();
+        let dynamic_neighbors: serde_json::Value =
+            serde_json::from_str(find(&files, "peers/dynamic-neighbors.json")).unwrap();
+        assert_eq!(dynamic_neighbors, serde_json::json!([]));
         // Load-bearing mutation proof: dropping `slow_peer: n.slow_peer` from
         // the support snapshot makes this projection assertion red.
         assert_eq!(peers[0]["slow_peer"], true);
@@ -3148,6 +3227,155 @@ paths = ["x"]
                     .as_str()
                     .is_some_and(|detail| detail.contains("retained history shows a session loss"))
         }));
+    }
+
+    /// Load-bearing zero-inventory proof: omitting the range snapshot removes
+    /// the bundle file, while treating a truly unconfigured daemon as healthy
+    /// weakens the existing first-deploy warning.
+    #[tokio::test]
+    async fn doctor_records_zero_live_neighbors_and_zero_dynamic_ranges() {
+        let server = spawn_mock_server(None).await;
+        *server.state.config_effective_toml.lock().await =
+            Some("[global]\nasn = 65000\nrouter_id = \"192.0.2.1\"\n".to_string());
+        let dir = tempfile::tempdir().unwrap();
+        let bundle_path = dir.path().join("bundle.tar.gz");
+
+        run(
+            connect(&server.addr, None).await,
+            &DoctorOptions {
+                output: Some(&bundle_path),
+                log_file: None,
+                daemon_address: &server.addr,
+                token_file_configured: false,
+                json: true,
+            },
+        )
+        .await
+        .unwrap();
+
+        let files = extract_bundle(&bundle_path);
+        let dynamic_neighbors: serde_json::Value =
+            serde_json::from_str(find(&files, "peers/dynamic-neighbors.json")).unwrap();
+        assert_eq!(dynamic_neighbors, serde_json::json!([]));
+        let manifest: serde_json::Value =
+            serde_json::from_str(find(&files, "manifest.json")).unwrap();
+        assert_eq!(manifest["sections"]["dynamic_neighbors"], "collected");
+        let inventory = manifest_check(&manifest, "peers.configured");
+        assert_eq!(inventory["status"], "warn");
+        assert_eq!(
+            inventory["detail"],
+            "no active neighbor sessions and no dynamic-neighbor ranges configured"
+        );
+    }
+
+    /// Load-bearing dormant-range proof: deleting the range RPC projection or
+    /// correlating only the empty live-neighbor list loses both the redacted
+    /// range evidence and the exact configured-range count.
+    #[tokio::test]
+    async fn doctor_records_dormant_dynamic_neighbor_inventory() {
+        let server = spawn_mock_server(None).await;
+        *server.state.config_effective_toml.lock().await =
+            Some("[global]\nasn = 65000\nrouter_id = \"192.0.2.1\"\n".to_string());
+        *server.state.list_dynamic_neighbors_response.lock().await = vec![
+            rustbgpd_api::proto::DynamicNeighborRange {
+                prefix: "192.0.2.0/24".to_string(),
+                peer_group: "edge".to_string(),
+                remote_asn: 65002,
+                description: "password=must-not-escape".to_string(),
+            },
+            rustbgpd_api::proto::DynamicNeighborRange {
+                prefix: "198.51.100.0/24".to_string(),
+                peer_group: "edge".to_string(),
+                remote_asn: 65003,
+                description: "secondary range".to_string(),
+            },
+        ];
+        let dir = tempfile::tempdir().unwrap();
+        let bundle_path = dir.path().join("bundle.tar.gz");
+
+        run(
+            connect(&server.addr, None).await,
+            &DoctorOptions {
+                output: Some(&bundle_path),
+                log_file: None,
+                daemon_address: &server.addr,
+                token_file_configured: false,
+                json: true,
+            },
+        )
+        .await
+        .unwrap();
+
+        let files = extract_bundle(&bundle_path);
+        let dynamic_text = find(&files, "peers/dynamic-neighbors.json");
+        assert!(!dynamic_text.contains("must-not-escape"));
+        let dynamic_neighbors: serde_json::Value = serde_json::from_str(dynamic_text).unwrap();
+        assert_eq!(dynamic_neighbors.as_array().unwrap().len(), 2);
+        assert_eq!(dynamic_neighbors[0]["prefix"], "192.0.2.0/24");
+        let manifest: serde_json::Value =
+            serde_json::from_str(find(&files, "manifest.json")).unwrap();
+        assert!(
+            manifest["files"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|path| path == "peers/dynamic-neighbors.json")
+        );
+        let inventory = manifest_check(&manifest, "peers.configured");
+        assert_eq!(inventory["status"], "ok");
+        assert_eq!(
+            inventory["detail"],
+            "no active neighbor sessions; 2 dynamic-neighbor ranges configured for future acceptance"
+        );
+    }
+
+    /// Load-bearing unavailable-evidence proof: converting the range RPC error
+    /// to an empty vector fabricates zero inventory and drops the explicit
+    /// partial-evidence receipt.
+    #[tokio::test]
+    async fn doctor_marks_dynamic_neighbor_inventory_rpc_unavailable() {
+        let server = spawn_mock_server(None).await;
+        *server.state.config_effective_toml.lock().await =
+            Some("[global]\nasn = 65000\nrouter_id = \"192.0.2.1\"\n".to_string());
+        *server.state.list_dynamic_neighbors_error.lock().await =
+            Some((Code::Unavailable, "range inventory offline".to_string()));
+        let dir = tempfile::tempdir().unwrap();
+        let bundle_path = dir.path().join("bundle.tar.gz");
+
+        run(
+            connect(&server.addr, None).await,
+            &DoctorOptions {
+                output: Some(&bundle_path),
+                log_file: None,
+                daemon_address: &server.addr,
+                token_file_configured: false,
+                json: true,
+            },
+        )
+        .await
+        .unwrap();
+
+        let files = extract_bundle(&bundle_path);
+        assert!(
+            !files
+                .iter()
+                .any(|(path, _)| path == "peers/dynamic-neighbors.json")
+        );
+        let manifest: serde_json::Value =
+            serde_json::from_str(find(&files, "manifest.json")).unwrap();
+        assert!(
+            manifest["sections"]["dynamic_neighbors"]
+                .as_str()
+                .is_some_and(
+                    |status| status.contains("unavailable: ListDynamicNeighbors RPC failed")
+                )
+        );
+        let inventory = manifest_check(&manifest, "peers.configured");
+        assert_eq!(inventory["status"], "warn");
+        let detail = inventory["detail"].as_str().unwrap();
+        assert!(detail.contains("no active neighbor sessions"));
+        assert!(detail.contains("dynamic-neighbor range inventory unavailable"));
+        assert!(!detail.contains("0 dynamic-neighbor"));
     }
 
     #[tokio::test]
@@ -3701,6 +3929,10 @@ paths = ["x"]
         );
         assert_eq!(
             manifest["sections"]["peers"],
+            "unavailable: daemon unreachable"
+        );
+        assert_eq!(
+            manifest["sections"]["dynamic_neighbors"],
             "unavailable: daemon unreachable"
         );
         assert!(
