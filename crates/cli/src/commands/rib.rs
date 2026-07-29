@@ -1,3 +1,4 @@
+use crate::commands::neighbor::{bare_ip_rpc_address, restore_matching_scoped_address};
 use crate::connection::Connection;
 use crate::error::CliError;
 use crate::output::{
@@ -53,7 +54,10 @@ fn make_route_request(
     };
 
     Ok(ListRoutesRequest {
-        neighbor_address: neighbor.unwrap_or("").to_string(),
+        neighbor_address: neighbor
+            .map(bare_ip_rpc_address)
+            .unwrap_or_default()
+            .to_string(),
         afi_safi: family.unwrap_or(0),
         page_size: 0,
         page_token: String::new(),
@@ -195,7 +199,7 @@ fn make_fib_request(filters: &FibRouteFilterOpts) -> Result<ListFibRoutesRequest
         (String::new(), 0)
     };
     let peer_address = if let Some(peer) = &filters.peer {
-        let addr: std::net::IpAddr = peer
+        let addr: std::net::IpAddr = bare_ip_rpc_address(peer)
             .parse()
             .map_err(|e| CliError::Argument(format!("invalid --peer address: {e}")))?;
         addr.to_string()
@@ -249,7 +253,11 @@ fn make_bgpls_request(
 ) -> Result<ListBgpLsRequest, CliError> {
     Ok(ListBgpLsRequest {
         afi_safi: parse_bgpls_family(family)?,
-        peer_filter: peer.unwrap_or_default(),
+        peer_filter: peer
+            .as_deref()
+            .map(bare_ip_rpc_address)
+            .unwrap_or_default()
+            .to_string(),
         nlri_type_filter: nlri_type.unwrap_or(0),
     })
 }
@@ -276,7 +284,11 @@ fn make_vpn_request(
 ) -> Result<ListVpnRoutesRequest, CliError> {
     Ok(ListVpnRoutesRequest {
         afi_safi: parse_vpn_family(family)?,
-        peer_filter: peer.unwrap_or_default(),
+        peer_filter: peer
+            .as_deref()
+            .map(bare_ip_rpc_address)
+            .unwrap_or_default()
+            .to_string(),
     })
 }
 
@@ -302,7 +314,11 @@ fn make_labeled_request(
 ) -> Result<ListLabeledRoutesRequest, CliError> {
     Ok(ListLabeledRoutesRequest {
         afi_safi: parse_labeled_family(family)?,
-        peer_filter: peer.unwrap_or_default(),
+        peer_filter: peer
+            .as_deref()
+            .map(bare_ip_rpc_address)
+            .unwrap_or_default()
+            .to_string(),
     })
 }
 
@@ -1637,14 +1653,18 @@ pub async fn explain_best_path(
     let (addr, len) = output::parse_prefix(prefix).map_err(CliError::Argument)?;
     let mut client =
         RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let resp = client
+    let mut resp = client
         .explain_best_path(ExplainBestPathRequest {
             prefix: addr,
             prefix_length: len,
-            peer_address: peer.unwrap_or("").to_string(),
+            peer_address: peer
+                .map(bare_ip_rpc_address)
+                .unwrap_or_default()
+                .to_string(),
         })
         .await?
         .into_inner();
+    restore_matching_scoped_address(peer, &mut resp.peer_address);
     print_explain_best_path(&resp, json)
 }
 
@@ -1690,10 +1710,13 @@ pub async fn fib(
     json: bool,
 ) -> Result<(), CliError> {
     let mut client = connection.rib_listing_client();
-    let resp = client
+    let mut resp = client
         .list_fib_routes(make_fib_request(&filters)?)
         .await?
         .into_inner();
+    for route in &mut resp.routes {
+        restore_matching_scoped_address(filters.peer.as_deref(), &mut route.peer_address);
+    }
     print_fib_routes(&resp, json, include_fib_page_meta(&filters))
 }
 
@@ -1704,11 +1727,15 @@ pub async fn bgpls(
     nlri_type: Option<u32>,
     json: bool,
 ) -> Result<(), CliError> {
+    let requested_peer = peer.clone();
     let mut client = connection.rib_listing_client();
-    let resp = client
+    let mut resp = client
         .list_bgp_ls_routes(make_bgpls_request(family, peer, nlri_type)?)
         .await?
         .into_inner();
+    for route in &mut resp.routes {
+        restore_matching_scoped_address(requested_peer.as_deref(), &mut route.peer_address);
+    }
     print_bgpls_routes(&resp.routes, json)
 }
 
@@ -1718,11 +1745,15 @@ pub async fn vpn(
     peer: Option<String>,
     json: bool,
 ) -> Result<(), CliError> {
+    let requested_peer = peer.clone();
     let mut client = connection.rib_listing_client();
-    let resp = client
+    let mut resp = client
         .list_vpn_routes(make_vpn_request(family, peer)?)
         .await?
         .into_inner();
+    for route in &mut resp.routes {
+        restore_matching_scoped_address(requested_peer.as_deref(), &mut route.peer_address);
+    }
     print_vpn_routes(&resp.routes, json)
 }
 
@@ -1732,22 +1763,33 @@ pub async fn labeled(
     peer: Option<String>,
     json: bool,
 ) -> Result<(), CliError> {
+    let requested_peer = peer.clone();
     let mut client = connection.rib_listing_client();
-    let resp = client
+    let mut resp = client
         .list_labeled_routes(make_labeled_request(family, peer)?)
         .await?
         .into_inner();
+    for route in &mut resp.routes {
+        restore_matching_scoped_address(requested_peer.as_deref(), &mut route.peer_address);
+    }
     print_labeled_routes(&resp.routes, json)
 }
 
 pub async fn rtc(connection: Connection, peer: Option<String>, json: bool) -> Result<(), CliError> {
     let mut client = connection.rib_listing_client();
-    let resp = client
+    let mut resp = client
         .list_rtc_routes(ListRtcRoutesRequest {
-            peer_filter: peer.unwrap_or_default(),
+            peer_filter: peer
+                .as_deref()
+                .map(bare_ip_rpc_address)
+                .unwrap_or_default()
+                .to_string(),
         })
         .await?
         .into_inner();
+    for route in &mut resp.routes {
+        restore_matching_scoped_address(peer.as_deref(), &mut route.peer_address);
+    }
     print_rtc_routes(&resp.routes, json)
 }
 
@@ -1761,12 +1803,15 @@ pub async fn received(
 ) -> Result<(), CliError> {
     let mut client =
         RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let routes = fetch_all_route_pages(
+    let mut routes = fetch_all_route_pages(
         &mut client,
         &RouteListRpc::Received,
         make_route_request(Some(address), family, filters)?,
     )
     .await?;
+    for route in &mut routes {
+        restore_matching_scoped_address(Some(address), &mut route.peer_address);
+    }
     print_routes(&routes, show_age, json)
 }
 
@@ -1795,12 +1840,13 @@ pub async fn count_received(
 pub async fn rejected(connection: Connection, address: &str, json: bool) -> Result<(), CliError> {
     let mut client =
         PolicyServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let resp = client
+    let mut resp = client
         .list_rejected_routes(ListRejectedRoutesRequest {
-            peer_address: address.to_string(),
+            peer_address: bare_ip_rpc_address(address).to_string(),
         })
         .await?
         .into_inner();
+    restore_matching_scoped_address(Some(address), &mut resp.peer_address);
     print_rejected_routes(&resp, json)
 }
 
@@ -1934,12 +1980,15 @@ pub async fn advertised(
 ) -> Result<(), CliError> {
     let mut client =
         RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let routes = fetch_all_route_pages(
+    let mut routes = fetch_all_route_pages(
         &mut client,
         &RouteListRpc::Advertised,
         make_route_request(Some(address), family, filters)?,
     )
     .await?;
+    for route in &mut routes {
+        restore_matching_scoped_address(Some(address), &mut route.peer_address);
+    }
     print_routes(&routes, show_age, json)
 }
 
@@ -1978,22 +2027,28 @@ pub async fn explain_advertised(
     let (addr, len) = output::parse_prefix(prefix).map_err(CliError::Argument)?;
     let mut client =
         RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let resp = client
+    let requested_source = source_peer.filter(|_| source_path_id.is_some());
+    let mut resp = client
         .explain_advertised_route(ExplainAdvertisedRouteRequest {
-            peer_address: address.to_string(),
+            peer_address: bare_ip_rpc_address(address).to_string(),
             prefix: addr,
             prefix_length: len,
             rd: rd.unwrap_or_default().to_string(),
             labeled,
             source: source_peer.zip(source_path_id).map(|(peer, path_id)| {
                 crate::proto::RouteSourceIdentity {
-                    peer_address: peer.to_string(),
+                    peer_address: bare_ip_rpc_address(peer).to_string(),
                     path_id,
                 }
             }),
         })
         .await?
         .into_inner();
+    restore_matching_scoped_address(Some(address), &mut resp.peer_address);
+    restore_matching_scoped_address(requested_source, &mut resp.route_peer_address);
+    if let Some(source) = &mut resp.source {
+        restore_matching_scoped_address(requested_source, &mut source.peer_address);
+    }
     print_explain_advertised(&resp, json)
 }
 
@@ -2168,11 +2223,11 @@ mod tests {
 
         explain_advertised(
             connection,
-            "192.0.2.1",
+            "fe80::1%eth0",
             "203.0.113.0/24",
             None,
             false,
-            Some("198.51.100.2"),
+            Some("fe80::2%eth1"),
             Some(0),
             false,
         )
@@ -2186,7 +2241,7 @@ mod tests {
             .await
             .clone()
             .expect("explain request captured");
-        assert_eq!(req.peer_address, "192.0.2.1");
+        assert_eq!(req.peer_address, "fe80::1");
         assert_eq!(req.prefix, "203.0.113.0");
         assert_eq!(req.prefix_length, 24);
         assert_eq!(req.rd, "");
@@ -2195,7 +2250,7 @@ mod tests {
             req.source
                 .as_ref()
                 .map(|source| source.peer_address.as_str()),
-            Some("198.51.100.2")
+            Some("fe80::2")
         );
         // Load-bearing proof: treating zero as absence makes these assertions red.
     }
@@ -2251,6 +2306,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn explain_best_path_scoped_peer_sends_bare_request() {
+        let server = spawn_mock_server(None).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+
+        explain_best_path(
+            connection,
+            "203.0.113.0/24",
+            Some("fe80:0:0:0:0:0:0:1%eth0"),
+            true,
+        )
+        .await
+        .unwrap();
+
+        let req = server
+            .state
+            .last_explain_best_path
+            .lock()
+            .await
+            .clone()
+            .expect("explain best-path request captured");
+        assert_eq!(req.peer_address, "fe80:0:0:0:0:0:0:1");
+    }
+
+    #[tokio::test]
     async fn bgpls_sends_filters_and_renders_raw_bytes() {
         let server = spawn_mock_server(None).await;
         let connection = connect(&server.addr, None).await.unwrap();
@@ -2258,7 +2337,7 @@ mod tests {
         bgpls(
             connection,
             Some("linkstate"),
-            Some("198.51.100.1".to_string()),
+            Some("fe80::1%eth0".to_string()),
             Some(1),
             true,
         )
@@ -2273,7 +2352,7 @@ mod tests {
             .clone()
             .expect("BGP-LS request captured");
         assert_eq!(req.afi_safi, AddressFamily::BgpLs as i32);
-        assert_eq!(req.peer_filter, "198.51.100.1");
+        assert_eq!(req.peer_filter, "fe80::1");
         assert_eq!(req.nlri_type_filter, 1);
     }
 
@@ -2285,7 +2364,7 @@ mod tests {
         labeled(
             connection,
             Some("labeled-v4"),
-            Some("198.51.100.1".to_string()),
+            Some("fe80::1%eth0".to_string()),
             true,
         )
         .await
@@ -2299,7 +2378,7 @@ mod tests {
             .clone()
             .expect("labeled request captured");
         assert_eq!(req.afi_safi, "ipv4_labeled_unicast");
-        assert_eq!(req.peer_filter, "198.51.100.1");
+        assert_eq!(req.peer_filter, "fe80::1");
     }
 
     #[test]
@@ -2324,7 +2403,7 @@ mod tests {
         vpn(
             connection,
             Some("vpnv4"),
-            Some("198.51.100.1".to_string()),
+            Some("fe80::1%eth0".to_string()),
             true,
         )
         .await
@@ -2338,7 +2417,7 @@ mod tests {
             .clone()
             .expect("VPN request captured");
         assert_eq!(req.afi_safi, "l3vpn_ipv4_unicast");
-        assert_eq!(req.peer_filter, "198.51.100.1");
+        assert_eq!(req.peer_filter, "fe80::1");
     }
 
     #[tokio::test]
@@ -2346,7 +2425,7 @@ mod tests {
         let server = spawn_mock_server(None).await;
         let connection = connect(&server.addr, None).await.unwrap();
 
-        rtc(connection, Some("198.51.100.1".to_string()), true)
+        rtc(connection, Some("fe80::1%eth0".to_string()), true)
             .await
             .unwrap();
 
@@ -2357,7 +2436,7 @@ mod tests {
             .await
             .clone()
             .expect("RTC request captured");
-        assert_eq!(req.peer_filter, "198.51.100.1");
+        assert_eq!(req.peer_filter, "fe80::1");
 
         // Row rendering: the default row shows `default` and the locally
         // originated entry (peer 0.0.0.0) renders FROM-PEER as `local`.
@@ -2426,7 +2505,7 @@ mod tests {
                 state: None,
                 reason: None,
                 prefix: None,
-                peer: None,
+                peer: Some("fe80::2%eth0".to_string()),
                 page_size: None,
                 page_token: None,
             },
@@ -2434,6 +2513,15 @@ mod tests {
         )
         .await
         .unwrap();
+
+        let request = server
+            .state
+            .last_list_fib
+            .lock()
+            .await
+            .clone()
+            .expect("FIB request captured");
+        assert_eq!(request.peer_address, "fe80::2");
     }
 
     #[test]
@@ -2443,7 +2531,7 @@ mod tests {
             state: Some("rejected".to_string()),
             reason: Some("route_limit_exceeded".to_string()),
             prefix: Some("203.0.113.0/24".to_string()),
-            peer: Some("198.51.100.2".to_string()),
+            peer: Some("fe80::2%eth0".to_string()),
             page_size: Some(50),
             page_token: Some("100".to_string()),
         })
@@ -2454,7 +2542,7 @@ mod tests {
         assert_eq!(request.reason, "route_limit_exceeded");
         assert_eq!(request.prefix, "203.0.113.0");
         assert_eq!(request.prefix_length, 24);
-        assert_eq!(request.peer_address, "198.51.100.2");
+        assert_eq!(request.peer_address, "fe80::2");
         assert_eq!(request.page_size, 50);
         assert_eq!(request.page_token, "100");
     }
@@ -3273,7 +3361,7 @@ mod tests {
         .unwrap();
         count_received(
             connect(&server.addr, None).await.unwrap(),
-            "fe80::1",
+            "fe80::1%eth0",
             family,
             &filters,
             true,
@@ -3282,7 +3370,7 @@ mod tests {
         .unwrap();
         count_advertised(
             connect(&server.addr, None).await.unwrap(),
-            "fe80::2",
+            "fe80::2%eth1",
             family,
             &filters,
             false,
@@ -3318,6 +3406,54 @@ mod tests {
         assert_count_request(&requests[2], "fe80::2");
     }
 
+    #[tokio::test]
+    async fn scoped_route_lists_and_rejected_query_send_bare_addresses() {
+        let server = spawn_mock_server(None).await;
+        let filters = no_route_filters();
+
+        received(
+            connect(&server.addr, None).await.unwrap(),
+            "fe80::1%eth0",
+            None,
+            &filters,
+            false,
+            true,
+        )
+        .await
+        .unwrap();
+        advertised(
+            connect(&server.addr, None).await.unwrap(),
+            "fe80::2%eth1",
+            None,
+            &filters,
+            false,
+            true,
+        )
+        .await
+        .unwrap();
+        rejected(
+            connect(&server.addr, None).await.unwrap(),
+            "fe80::3%eth2",
+            true,
+        )
+        .await
+        .unwrap();
+
+        let requests = server.state.list_route_requests.lock().await;
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].neighbor_address, "fe80::1");
+        assert_eq!(requests[1].neighbor_address, "fe80::2");
+        drop(requests);
+        let rejected = server
+            .state
+            .last_list_rejected
+            .lock()
+            .await
+            .clone()
+            .expect("rejected-route request captured");
+        assert_eq!(rejected.peer_address, "fe80::3");
+    }
+
     /// `rbgp rib received` follows `next_page_token` until the listing
     /// completes — no silent truncation at the server's page size.
     #[tokio::test]
@@ -3332,7 +3468,7 @@ mod tests {
         let connection = connect(&server.addr, None).await.unwrap();
         received(
             connection,
-            "192.0.2.1",
+            "fe80::1%eth0",
             None,
             &no_route_filters(),
             false,
@@ -3344,6 +3480,7 @@ mod tests {
         let requests = server.state.list_route_requests.lock().await;
         assert_eq!(requests.len(), 2, "one RPC per page");
         assert!(requests[0].page_token.is_empty());
+        assert_eq!(requests[0].neighbor_address, "fe80::1");
         assert!(requests[0].page_size > 0, "CLI requests bounded pages");
         assert_eq!(requests[1].page_token, "10.0.0.0/24|192.0.2.1|0");
     }
