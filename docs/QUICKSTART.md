@@ -119,8 +119,19 @@ rbgp neighbor 10.0.0.5 add --remote-asn 65005
 rbgp neighbor 203.0.113.2 add --remote-asn 65002 --role provider --strict-role
 rbgp neighbor fe80::5054:ff:fe00:1%eth1 add --remote-asn 65101
 
-# Add a dynamic-neighbor accept range.
+# Create the peer group before adding a dynamic-neighbor accept range.
+# Omitting both password fields creates a passwordless group; on an existing
+# group the same omission preserves its current password.
+cat > ix-members.json <<'JSON'
+{
+  "families": ["ipv4_unicast"],
+  "route_server_client": true
+}
+JSON
+rbgp peer-group set ix-members --from-file ix-members.json
+rbgp --json peer-group get ix-members
 rbgp dynamic-neighbor add 10.0.0.0/24 --peer-group ix-members
+rbgp --json dynamic-neighbor list
 
 # Manage Linux unicast FIB-export tables.
 rbgp fib-table list

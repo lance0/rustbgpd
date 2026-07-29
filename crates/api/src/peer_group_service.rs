@@ -414,6 +414,8 @@ impl proto::peer_group_service_server::PeerGroupService for PeerGroupService {
             .ok_or_else(|| Status::invalid_argument("definition is required"))?;
         let preserve_md5_password =
             definition.md5_password.is_none() && definition.has_md5_password.unwrap_or(true);
+        let allow_passwordless_create =
+            definition.md5_password.is_none() && definition.has_md5_password.is_none();
         let definition = proto_definition_to_input(definition)?;
         let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
 
@@ -433,9 +435,14 @@ impl proto::peer_group_service_server::PeerGroupService for PeerGroupService {
                         name: name.clone(),
                         reply,
                     })
-                    .await?
-                    .ok_or_else(|| Status::not_found(format!("peer group {name} not found")))?;
-                persisted.md5_password = prior.md5_password;
+                    .await?;
+                match prior {
+                    Some(prior) => persisted.md5_password = prior.md5_password,
+                    None if allow_passwordless_create => {}
+                    None => {
+                        return Err(Status::not_found(format!("peer group {name} not found")));
+                    }
+                }
             }
 
             // A group edit that is not policy-only rebuilds every inheriting
@@ -978,6 +985,118 @@ mod tests {
         task.await
             .expect("SetPeerGroup task panicked")
             .expect("SetPeerGroup failed");
+    }
+
+    #[tokio::test]
+    async fn set_peer_group_omitted_md5_presence_creates_passwordless_group() {
+        let (peer_tx, mut peer_rx) = mpsc::channel(4);
+        let (config_tx, mut config_rx) = mpsc::channel(4);
+        let svc = PeerGroupService::new(AccessMode::ReadWrite, peer_tx, Some(config_tx), None);
+
+        let task = tokio::spawn(async move {
+            PeerGroupServiceRpc::set_peer_group(
+                &svc,
+                Request::new(proto::SetPeerGroupRequest {
+                    name: "ix-members".into(),
+                    definition: Some(proto::PeerGroupDefinition {
+                        families: vec!["ipv4_unicast".into()],
+                        route_server_client: Some(true),
+                        ..Default::default()
+                    }),
+                }),
+            )
+            .await
+        });
+
+        match peer_rx.recv().await.expect("expected prior group read") {
+            PeerManagerCommand::GetPeerGroup { name, reply } => {
+                assert_eq!(name, "ix-members");
+                reply.send(None).expect("service dropped prior read");
+            }
+            _ => panic!("unexpected peer-manager command"),
+        }
+        let staged = match config_rx
+            .recv()
+            .await
+            .expect("expected passwordless persist")
+        {
+            ConfigEvent::SetPeerGroup {
+                name,
+                definition,
+                ack,
+            } => {
+                assert_eq!(name, "ix-members");
+                assert_eq!(definition.md5_password, None);
+                assert_eq!(definition.families, vec!["ipv4_unicast"]);
+                assert!(
+                    matches!(peer_rx.try_recv(), Err(TryRecvError::Empty)),
+                    "the peer group must not change before the write is staged"
+                );
+                ack.expect("persisted mutation must carry an ack")
+            }
+            _ => panic!("unexpected config event"),
+        };
+        let staged = tokio::spawn(staged.accept());
+        match peer_rx.recv().await.expect("expected passwordless create") {
+            PeerManagerCommand::SetPeerGroup {
+                name,
+                definition,
+                reply,
+            } => {
+                assert_eq!(name, "ix-members");
+                assert_eq!(definition.md5_password, None);
+                assert_eq!(definition.families, vec!["ipv4_unicast"]);
+                assert_eq!(definition.route_server_client, Some(true));
+                reply.send(Ok(())).expect("service dropped create reply");
+            }
+            _ => panic!("unexpected peer-manager command"),
+        }
+        assert!(staged.await.expect("persist ack task panicked"));
+
+        task.await
+            .expect("SetPeerGroup task panicked")
+            .expect("passwordless create failed");
+    }
+
+    #[tokio::test]
+    async fn set_peer_group_explicit_md5_presence_still_requires_existing_group() {
+        let (peer_tx, mut peer_rx) = mpsc::channel(4);
+        let (config_tx, mut config_rx) = mpsc::channel(4);
+        let svc = PeerGroupService::new(AccessMode::ReadWrite, peer_tx, Some(config_tx), None);
+
+        let task = tokio::spawn(async move {
+            PeerGroupServiceRpc::set_peer_group(
+                &svc,
+                Request::new(proto::SetPeerGroupRequest {
+                    name: "missing".into(),
+                    definition: Some(proto::PeerGroupDefinition {
+                        has_md5_password: Some(true),
+                        md5_password: None,
+                        ..Default::default()
+                    }),
+                }),
+            )
+            .await
+        });
+
+        match peer_rx.recv().await.expect("expected prior group read") {
+            PeerManagerCommand::GetPeerGroup { name, reply } => {
+                assert_eq!(name, "missing");
+                reply.send(None).expect("service dropped prior read");
+            }
+            _ => panic!("unexpected peer-manager command"),
+        }
+
+        let error = task
+            .await
+            .expect("SetPeerGroup task panicked")
+            .expect_err("explicit preserve of a missing group must fail");
+        assert_eq!(error.code(), tonic::Code::NotFound);
+        assert!(peer_rx.try_recv().is_err(), "missing group must not apply");
+        assert!(
+            config_rx.try_recv().is_err(),
+            "missing group must not persist"
+        );
     }
 
     #[tokio::test]

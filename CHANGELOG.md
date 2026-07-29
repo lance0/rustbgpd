@@ -11,6 +11,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `rbgp peer-group set` can now create a missing passwordless peer group from
+  ordinary JSON that omits both MD5 fields. The same omission still preserves
+  an existing group's secret, explicit `has_md5_password = true` still requires
+  an existing group to preserve from, and the Quickstart now creates its
+  `ix-members` prerequisite before adding a dynamic-neighbor range.
+
 - Static `rbgp neighbor ADDR add` can atomically set a peer group and
   max-prefix restart delay during route-server member onboarding.
 
