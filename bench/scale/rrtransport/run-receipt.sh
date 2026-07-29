@@ -30,19 +30,365 @@ classify_rss() {
   fi
 }
 
-classify_child_exe() {
-  local expected=$1 actual=$2 state=$3
-  if [[ $actual == "$expected" ]]; then
-    echo sample
-  elif [[ -z $actual && ($state == X || $state == Z || $state == absent) ]]; then
-    echo exited
+classify_child_observation() {
+  local executable=$1 state=$2
+  if [[ $state == X || $state == Z ]]; then
+    [[ $executable == expected || $executable == empty ]] && echo exited || echo reject
+  elif [[ $state == absent ]]; then
+    case $executable in
+      expected) echo retry_expected_absent ;;
+      empty) echo exited ;;
+      *) echo reject ;;
+    esac
   else
-    echo reject
+    case $executable in
+      expected) echo sample ;;
+      empty) echo retry_live_empty ;;
+      *) echo reject ;;
+    esac
   fi
 }
 
+classify_child_exe() {
+  local expected=$1 actual=$2 state=$3 executable=foreign
+  [[ $actual == "$expected" ]] && executable=expected
+  [[ -z $actual ]] && executable=empty
+  classify_child_observation "$executable" "$state"
+}
+
+child_identity() {
+  local process=$1 stat_line stat_fields
+  stat_line=$(<"/proc/$process/stat") 2>/dev/null || return 1
+  stat_line=${stat_line##*) }
+  read -r -a stat_fields <<<"$stat_line"
+  (( ${#stat_fields[@]} >= 20 )) || return 1
+  identity_ppid=${stat_fields[1]}
+  identity_starttime=${stat_fields[19]}
+}
+
+read_live_sampler_observation() {
+  local supervisor=$1 expected=$2 actual_exe
+  mapfile -t observed_children < <(pgrep -P "$supervisor" || true)
+  observed_child_count=${#observed_children[@]}
+  observed_child_pid=absent
+  observed_ppid_before=absent
+  observed_start_before=absent
+  observed_exe_kind=empty
+  observed_state=absent
+  observed_rss=0
+  observed_ppid_after=absent
+  observed_start_after=absent
+  observed_supervisor_alive=false
+  if kill -0 "$supervisor" 2>/dev/null; then
+    observed_supervisor_alive=true
+  fi
+  (( observed_child_count == 1 )) || return
+
+  observed_child_pid=${observed_children[0]}
+  if child_identity "$observed_child_pid"; then
+    observed_ppid_before=$identity_ppid
+    observed_start_before=$identity_starttime
+  fi
+  actual_exe=$(readlink -f "/proc/$observed_child_pid/exe" 2>/dev/null || true)
+  if [[ $actual_exe == "$expected" ]]; then
+    observed_exe_kind=expected
+  elif [[ -n $actual_exe ]]; then
+    observed_exe_kind=foreign
+  fi
+  observed_state=$(awk '$1=="State:" {print substr($2,1,1)}' \
+    "/proc/$observed_child_pid/status" 2>/dev/null || true)
+  [[ -n $observed_state ]] || observed_state=absent
+  observed_rss=$(awk '/VmRSS:/ {print $2}' \
+    "/proc/$observed_child_pid/status" 2>/dev/null || echo 0)
+  [[ $observed_rss =~ ^[0-9]+$ ]] || observed_rss=0
+  if child_identity "$observed_child_pid"; then
+    observed_ppid_after=$identity_ppid
+    observed_start_after=$identity_starttime
+  fi
+  observed_supervisor_alive=false
+  if kill -0 "$supervisor" 2>/dev/null; then
+    observed_supervisor_alive=true
+  fi
+}
+
+read_scripted_sampler_observation() {
+  local supervisor=$1 _expected=$2 snapshot
+  snapshot=${scripted_observations[$scripted_observation_index]}
+  (( scripted_observation_index += 1 ))
+  IFS=, read -r observed_child_count observed_child_pid observed_ppid_before \
+    observed_start_before observed_exe_kind observed_state observed_rss \
+    observed_ppid_after observed_start_after observed_supervisor_alive <<<"$snapshot"
+  [[ $observed_ppid_before != supervisor ]] || observed_ppid_before=$supervisor
+  [[ $observed_ppid_after != supervisor ]] || observed_ppid_after=$supervisor
+}
+
+sampler_diagnostic() {
+  local log=$1 run=$2 observation=$3 resolution=$4 reason=$5 parent_match=$6 message
+  message=$(printf 'sampler_observation run=%s observation=%s supervisor_pid=%s supervisor_alive=%s child_count=%s child_pid=%s child_starttime=%s parent_match=%s executable=%s state=%s resolution=%s reason=%s' \
+    "$run" "$observation" "$sampler_supervisor" "$observed_supervisor_alive" \
+    "$observed_child_count" "$observed_child_pid" "$observed_start_before" \
+    "$parent_match" "$observed_exe_kind" "$observed_state" "$resolution" "$reason")
+  printf '%s\n' "$message" >&2
+  printf '%s\n' "$message" >>"$log"
+}
+
+resolve_sampler_child() {
+  local supervisor=$1 expected=$2 log=$3 run=$4 seen_expected=$5
+  local observation_attempt classification parent_match reason
+  sampler_supervisor=$supervisor
+  sampler_action=reject
+  sampler_child=absent
+  sampler_rss=0
+  for observation_attempt in 1 2 3; do
+    "$sampler_observation_reader" "$supervisor" "$expected"
+    parent_match=false
+    if (( observed_child_count > 1 )); then
+      sampler_diagnostic "$log" "$run" "$observation_attempt" reject multiple_children false
+      return
+    fi
+    if (( observed_child_count == 0 )); then
+      if [[ $seen_expected == true ]]; then
+        sampler_action=exited
+        sampler_diagnostic "$log" "$run" "$observation_attempt" exited child_disappeared false
+      else
+        sampler_action=startup_wait
+      fi
+      return
+    fi
+    if [[ $observed_ppid_before == "$supervisor" &&
+      $observed_ppid_after == "$supervisor" ]]; then
+      parent_match=true
+    fi
+    if [[ $parent_match != true || $observed_start_before == absent ||
+      $observed_start_before != "$observed_start_after" ]]; then
+      if (( observation_attempt < 3 )); then
+        sampler_diagnostic "$log" "$run" "$observation_attempt" retry identity_changed "$parent_match"
+        sleep 0.01
+        continue
+      fi
+      sampler_diagnostic "$log" "$run" "$observation_attempt" reject identity_changed "$parent_match"
+      return
+    fi
+
+    classification=$(classify_child_observation "$observed_exe_kind" "$observed_state")
+    case $classification in
+      sample)
+        sampler_action=sample
+        sampler_child=$observed_child_pid
+        sampler_rss=$observed_rss
+        if (( observation_attempt > 1 )); then
+          sampler_diagnostic "$log" "$run" "$observation_attempt" sample stable_after_retry true
+        fi
+        return
+        ;;
+      exited)
+        sampler_action=exited
+        reason=expected_terminal
+        [[ $observed_exe_kind == empty ]] && reason=empty_terminal
+        sampler_diagnostic "$log" "$run" "$observation_attempt" exited "$reason" true
+        return
+        ;;
+      reject)
+        sampler_diagnostic "$log" "$run" "$observation_attempt" reject foreign_executable true
+        return
+        ;;
+      retry_live_empty)
+        if (( observation_attempt < 3 )); then
+          sampler_diagnostic "$log" "$run" "$observation_attempt" retry live_empty true
+          sleep 0.01
+          continue
+        fi
+        sampler_diagnostic "$log" "$run" "$observation_attempt" reject persistent_live_empty true
+        return
+        ;;
+      retry_expected_absent)
+        if (( observation_attempt < 3 )); then
+          sampler_diagnostic "$log" "$run" "$observation_attempt" retry expected_absent true
+          sleep 0.01
+          continue
+        fi
+        sampler_diagnostic "$log" "$run" "$observation_attempt" reject persistent_expected_absent true
+        return
+        ;;
+    esac
+  done
+}
+
+launch_supervised() {
+  local log=$1
+  shift
+  : >"$log"
+  supervisor_log=$log
+  setsid "$@" >>"$log" 2>&1 &
+  pid=$!
+}
+
+stop_and_reap() {
+  local stop=$1 reason=$2 state message
+  if [[ $stop == true ]] && kill -0 "$pid" 2>/dev/null; then
+    kill -TERM -- "-$pid" 2>/dev/null || true
+    for _ in {1..20}; do
+      state=$(awk '$1=="State:" {print substr($2,1,1)}' "/proc/$pid/status" 2>/dev/null || true)
+      [[ -z $state || $state == X || $state == Z ]] && break
+      sleep 0.1
+    done
+    kill -KILL -- "-$pid" 2>/dev/null || true
+  fi
+  if wait "$pid"; then
+    attempt_wait_status=0
+  else
+    attempt_wait_status=$?
+  fi
+  pid=
+  message=$(printf 'sampler_reap reason=%s supervisor_status=%s' "$reason" "$attempt_wait_status")
+  printf '%s\n' "$message" >&2
+  printf '%s\n' "$message" >>"$supervisor_log"
+}
+
+fail_supervised_attempt() {
+  local reason=$1
+  stop_and_reap true "$reason"
+  return 1
+}
+
+sample_supervisor() {
+  local expected=$1 receipt=$2 run=$3
+  local seen_expected_child=false rss
+  max_rss=0
+  while kill -0 "$pid" 2>/dev/null; do
+    resolve_sampler_child "$pid" "$expected" "$receipt/harness.log" "$run" "$seen_expected_child"
+    [[ $sampler_action == exited ]] && break
+    [[ $sampler_action != startup_wait ]] || { sleep 0.05; continue; }
+    if [[ $sampler_action != sample ]]; then
+      fail_supervised_attempt sampler_rejected
+      return 1
+    fi
+    seen_expected_child=true
+    rss=$sampler_rss
+    (( rss > max_rss )) && max_rss=$rss
+    printf 'sample\t%s\n' "$rss" >>"$receipt/rss.tsv"
+    if ! classify_rss "$rss" "$receipt"; then
+      fail_supervised_attempt rss_ceiling
+      return 1
+    fi
+    sleep 0.2
+  done
+  stop_and_reap false completed
+  if (( attempt_wait_status != 0 )); then
+    echo "rr1000 attempt failed" >&2
+    return 1
+  fi
+}
+
+sampler_control_fixture() {
+  local mode=$1 expected_status=$2 fixture_dir=$3 result
+  mkdir -p "$fixture_dir"
+  receipt=$fixture_dir
+  printf 'checkpoint\trss_kib\n' >"$receipt/rss.tsv"
+  if [[ $mode == normal ]]; then
+    # shellcheck disable=SC2016 # Expanded by the fixture's bash.
+    launch_supervised "$receipt/harness.log" bash -c \
+      'printf "harness-before\n"; sleep 0.05; exit "$1"' bash "$expected_status"
+    scripted_observations=(
+      "1,200,supervisor,11,expected,X,0,supervisor,11,true"
+    )
+  else
+    # shellcheck disable=SC2016 # Expanded by the fixture's bash.
+    launch_supervised "$receipt/harness.log" bash -c \
+      'status=$1; trap '\''printf "harness-after\n"; exit "$status"'\'' TERM; printf "harness-before\n"; while :; do sleep 0.05; done' \
+      bash "$expected_status"
+    for _ in {1..100}; do
+      grep -Fq harness-before "$receipt/harness.log" && break
+      sleep 0.01
+    done
+    if [[ $mode == sampler_rejected ]]; then
+      scripted_observations=(
+        "1,200,supervisor,11,foreign,R,0,supervisor,11,true"
+      )
+    elif [[ $mode == rss_ceiling ]]; then
+      scripted_observations=(
+        "1,200,supervisor,11,expected,R,2097153,supervisor,11,true"
+      )
+    else
+      return 2
+    fi
+  fi
+  scripted_observation_index=0
+  sampler_observation_reader=read_scripted_sampler_observation
+  if sample_supervisor /expected "$receipt" 1; then
+    result=0
+  else
+    result=$?
+  fi
+  [[ -z $pid ]]
+  printf '%s\t%s\t%s\n' "$mode" "$result" "$attempt_wait_status"
+}
+
+stop_reap_fixture() {
+  local reason=$1 expected_status=$2 fixture_dir=$3 result group_pid live_members signal_trace
+  mkdir -p "$fixture_dir"
+  # Preserve the already-dead leader proof.
+  # shellcheck disable=SC2016 # Expanded by the fixture's bash.
+  launch_supervised "$fixture_dir/harness.log" bash -c 'exit "$1"' bash "$expected_status"
+  for _ in {1..100}; do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.01
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    echo "short-lived supervisor remained live" >&2
+    return 1
+  fi
+  signal_trace=$fixture_dir/already-dead-signals.log
+  : >"$signal_trace"
+  kill() {
+    if [[ ${1:-} == -TERM || ${1:-} == -KILL ]]; then
+      printf '%s\n' "$1" >>"$signal_trace"
+    fi
+    builtin kill "$@"
+  }
+  if fail_supervised_attempt "$reason"; then
+    result=0
+  else
+    result=$?
+  fi
+  unset -f kill
+  [[ $result == 1 && $attempt_wait_status == "$expected_status" && -z $pid &&
+    ! -s $signal_trace ]]
+
+  # Prove that a TERM-ignoring descendant cannot survive its leader.
+  # shellcheck disable=SC2016 # Expanded by the fixture's bash.
+  launch_supervised "$fixture_dir/harness.log" bash -c \
+    'status=$1; descendant_file=$2; trap '\''exit "$status"'\'' TERM; bash -c '\''trap "" TERM; while :; do sleep 0.05; done'\'' & printf "%s\n" "$!" >"$descendant_file"; while :; do sleep 0.05; done' \
+    bash "$expected_status" "$fixture_dir/descendant.pid"
+  group_pid=$pid
+  printf '%s\n' "$group_pid" >"$fixture_dir/group.pid"
+  for _ in {1..100}; do
+    [[ -s $fixture_dir/descendant.pid ]] && break
+    sleep 0.01
+  done
+  [[ -s $fixture_dir/descendant.pid ]]
+  if fail_supervised_attempt "$reason"; then
+    result=0
+  else
+    result=$?
+  fi
+  [[ $result == 1 && $attempt_wait_status == "$expected_status" && -z $pid ]]
+  for _ in {1..100}; do
+    live_members=$(ps -eo pgid=,stat= --no-headers |
+      awk -v group="$group_pid" '$1 == group && $2 !~ /^[XZ]/ {print}')
+    [[ -z $live_members ]] && break
+    sleep 0.01
+  done
+  if [[ -n $live_members ]]; then
+    kill -KILL -- "-$group_pid" 2>/dev/null || true
+    echo "live process-group member survived stop" >&2
+    return 1
+  fi
+  printf '%s\t%s\t%s\n' "$reason" "$result" "$attempt_wait_status"
+}
+
 check_seam() {
-  local script=$1 outer verify_call verify_body checksums_call checksums_body classifier_call supervisor_wait
+  local script=$1 outer verify_call verify_body checksums_call checksums_body
   outer="timeout -k 10 1200 \"\$scr"
   outer+="ipt\" --campaign-inner \"\$output\""
   verify_call="full_ver"
@@ -53,13 +399,10 @@ check_seam() {
   checksums_call+="sums \"\$receipt\""
   checksums_body="sha256sum -c SHA"
   checksums_body+="256SUMS --strict"
-  classifier_call="classification=\$(classify_child_exe \"\$binary\" \"\$child_exe\" \"\$child_state\")"
-  supervisor_wait="if ! wait \"\$pid\"; then echo \"rr1000 attempt failed\" >&2; pid=; exit 1; fi"
   if ! grep -Fq "$outer" "$script" || ! grep -Fq "$verify_call" "$script" ||
     ! grep -Fq "$verify_body" "$script" || ! grep -Fq "$checksums_call" "$script" ||
-    ! grep -Fq "$checksums_body" "$script" || ! grep -Fq "$classifier_call" "$script" ||
-    ! grep -Fq "$supervisor_wait" "$script"; then
-    echo "runner lacks production verifier/checksum/classifier/supervisor seam" >&2
+    ! grep -Fq "$checksums_body" "$script"; then
+    echo "runner lacks production verifier/checksum seam" >&2
     return 1
   fi
 }
@@ -146,6 +489,28 @@ case ${1:-} in
   --classify-child-exe)
     [[ $# == 4 ]] || exit 2
     classify_child_exe "$2" "$3" "$4"
+    exit
+    ;;
+  --resolve-child-observations)
+    (( $# >= 4 )) || exit 2
+    diagnostic_log=$2
+    seen_expected=$3
+    scripted_observations=("${@:4}")
+    scripted_observation_index=0
+    sampler_observation_reader=read_scripted_sampler_observation
+    : >"$diagnostic_log"
+    resolve_sampler_child 4242 /expected "$diagnostic_log" 1 "$seen_expected"
+    printf '%s\t%s\t%s\n' "$sampler_action" "$sampler_child" "$sampler_rss"
+    exit
+    ;;
+  --sampler-control-fixture)
+    [[ $# == 4 ]] || exit 2
+    sampler_control_fixture "$2" "$3" "$4"
+    exit
+    ;;
+  --stop-reap-fixture)
+    [[ $# == 4 ]] || exit 2
+    stop_reap_fixture "$2" "$3" "$4"
     exit
     ;;
   --verify-fixture)
@@ -246,26 +611,10 @@ for run in 1 2 3; do
   receipt="$output/run-$run"; mkdir -p "$receipt"
   printf '%s\n' "$source_before" >"$receipt/source.snapshot"; cp "$binary" "$receipt/rrtransport.bin"
   printf 'checkpoint\trss_kib\n' >"$receipt/rss.tsv"
-  setsid timeout -k 10 300 "$binary" rr1000 "$receipt" >"$receipt/harness.log" 2>&1 &
-  pid=$!; max_rss=0
+  launch_supervised "$receipt/harness.log" timeout -k 10 300 "$binary" rr1000 "$receipt"
   wait_exe "$pid" "$(command -v timeout)"
-  while kill -0 "$pid" 2>/dev/null; do
-    child=$(pgrep -P "$pid" -n || true)
-    [[ -n $child ]] || { sleep 0.05; continue; }
-    child_exe=$(readlink -f "/proc/$child/exe" 2>/dev/null || true)
-    child_state=$(awk '$1=="State:" {print substr($2,1,1)}' "/proc/$child/status" 2>/dev/null || true)
-    [[ -n $child_state ]] || child_state=absent
-    classification=$(classify_child_exe "$binary" "$child_exe" "$child_state")
-    [[ $classification == exited ]] && break
-    [[ $classification == sample ]] || { echo "sampler child executable mismatch" >&2; exit 1; }
-    rss=$(awk '/VmRSS:/ {print $2}' "/proc/$child/status" 2>/dev/null || echo 0)
-    (( rss > max_rss )) && max_rss=$rss
-    printf 'sample\t%s\n' "$rss" >>"$receipt/rss.tsv"
-    classify_rss "$rss" "$receipt" || exit 1
-    sleep 0.2
-  done
-  if ! wait "$pid"; then echo "rr1000 attempt failed" >&2; pid=; exit 1; fi
-  pid=
+  sampler_observation_reader=read_live_sampler_observation
+  sample_supervisor "$binary" "$receipt" "$run" || exit 1
   python3 - "$receipt" "$max_rss" <<'PY'
 import json,pathlib,sys
 d=pathlib.Path(sys.argv[1]); p=json.loads((d/"phase.json").read_text())
