@@ -35,6 +35,65 @@ async fn send_max_prefix_start_before(
 }
 
 impl PeerManager {
+    pub(super) fn publish_peer_admin_enabled_metric(&self, peer: &PeerKey, enabled: bool) {
+        self.metrics.set_peer_admin_enabled(
+            &rustbgpd_telemetry::peer_label(peer.address),
+            peer.interface.as_deref().unwrap_or(""),
+            enabled,
+        );
+    }
+
+    pub(super) fn seed_peer_truth_metrics(&self, peer: &PeerKey, enabled: bool) {
+        let peer_label = rustbgpd_telemetry::peer_label(peer.address);
+        let interface = peer.interface.as_deref().unwrap_or("");
+        self.metrics
+            .set_peer_admin_enabled(&peer_label, interface, enabled);
+        self.metrics
+            .set_peer_session_established(&peer_label, interface, false);
+    }
+
+    pub(super) async fn provision_new_peer_session(
+        &self,
+        peer: &PeerKey,
+        enabled: bool,
+        should_start: bool,
+        handle: PeerHandle,
+        context: &'static str,
+    ) -> Result<PeerHandle, PeerCommandError> {
+        self.seed_peer_truth_metrics(peer, enabled);
+        if should_start
+            && let Err(error) = handle.start_timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT).await
+        {
+            warn!(peer = %peer, %error, %context, "failed to start new peer session");
+            let _ = self
+                .shutdown_handle_bounded(peer.address, context, handle)
+                .await;
+            self.metrics.reap_peer_identity_series(
+                &rustbgpd_telemetry::peer_label(peer.address),
+                peer.interface.as_deref().unwrap_or(""),
+            );
+            return Err(error);
+        }
+        Ok(handle)
+    }
+
+    pub(super) async fn sync_owned_session_metrics(&self, peer: &PeerKey) {
+        let Some(managed) = self.peers.get(peer) else {
+            return;
+        };
+        if let Err(error) = managed
+            .handle
+            .activate_max_prefix_metrics_timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT)
+            .await
+        {
+            warn!(
+                peer = %peer,
+                %error,
+                "failed to synchronize newly owned session metrics"
+            );
+        }
+    }
+
     fn allocate_max_prefix_latch_generation(&mut self) -> u64 {
         let generation = self.next_max_prefix_latch_generation;
         self.next_max_prefix_latch_generation =
@@ -231,6 +290,7 @@ impl PeerManager {
                 if let Some(managed) = self.peers.get_mut(&peer) {
                     managed.enabled = true;
                 }
+                self.publish_peer_admin_enabled_metric(&peer, true);
                 let _ = self.max_prefix_latches.remove(&peer);
                 self.set_bfd_peer_disabled(address, false);
                 self.mark_bfd_withheld(address);
@@ -266,6 +326,7 @@ impl PeerManager {
                     if let Some(managed) = self.peers.get_mut(&peer) {
                         managed.enabled = true;
                     }
+                    self.publish_peer_admin_enabled_metric(&peer, true);
                     let _ = self.max_prefix_latches.remove(&peer);
                     self.set_bfd_peer_disabled(address, false);
                     self.publish_peer_lifecycle_event(
@@ -539,15 +600,18 @@ impl PeerManager {
         // BFD actor confirms the current permitted state through a resync ack
         // or a fresh transition.
         let withhold = enabled && self.bfd_should_withhold(&address);
-        if enabled
-            && !withhold
-            && let Err(e) = handle.start_timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT).await
-        {
-            warn!(%address, error = %e, "failed to start peer session");
-            return Err(PeerLifecycleError::Internal(format!(
-                "failed to start peer: {e}"
-            )));
-        }
+        let handle = self
+            .provision_new_peer_session(
+                &peer_key,
+                enabled,
+                enabled && !withhold,
+                handle,
+                "static peer start failure",
+            )
+            .await
+            .map_err(|error| {
+                PeerLifecycleError::Internal(format!("failed to start peer: {error}"))
+            })?;
 
         info!(%address, %remote_asn, "peer added dynamically");
         let tcp_ao_protected = transport.tcp_ao.is_some();
@@ -586,6 +650,7 @@ impl PeerManager {
             },
         );
         self.register_session(session_id, &peer_key);
+        self.sync_owned_session_metrics(&peer_key).await;
 
         if let Some(next_config) = next_config {
             self.current_config = next_config;
@@ -1247,6 +1312,7 @@ impl PeerManager {
             info!(%address, "peer deleted");
         }
 
+        let peer_for_reap = peer.clone();
         if sync_config_snapshot {
             apply_config_event(
                 &mut self.current_config,
@@ -1260,15 +1326,12 @@ impl PeerManager {
 
         // Operator rule: reap per-peer runtime/state metrics for
         // *deleted* peers only — never on a session flap (the session
-        // task records its final transitions before the shutdown join
-        // above, so this runs after the last transport-side emission).
-        if reap_metric_series && shutdown.joined() {
-            self.reap_deleted_peer_metric_series(address).await;
-        } else if reap_metric_series {
-            warn!(
-                %address,
-                "skipping deleted-peer metric reap because session shutdown did not join before the deadline"
-            );
+        // task records its final transitions before bounded shutdown
+        // joins or aborts-and-awaits it, so this runs after the last
+        // transport-side emission).
+        if reap_metric_series {
+            self.reap_deleted_peer_metric_series_for_key(&peer_for_reap)
+                .await;
         }
         Ok(removed_config)
     }
@@ -1278,14 +1341,18 @@ impl PeerManager {
     /// Every emission site — transport session, RIB manager, BFD
     /// runtime — labels `peer` with the canonical bare address, so one
     /// reap covers them all. Call only after the peer has been removed
-    /// from `self.peers` and its session task joined.
-    pub(super) async fn reap_deleted_peer_metric_series(&self, address: std::net::IpAddr) {
+    /// from `self.peers` and its session task joined or was aborted and
+    /// awaited by bounded shutdown.
+    pub(super) async fn reap_deleted_peer_metric_series_for_key(&self, peer: &PeerKey) {
+        let address = peer.address;
+        let peer_label = rustbgpd_telemetry::peer_label(address);
+        self.metrics
+            .reap_peer_identity_series(&peer_label, peer.interface.as_deref().unwrap_or(""));
         // The label can be shared with a surviving peer (the same
         // link-local address on another interface) — leave it alone
         // unless this peer was the last user of the address.
         if self.peer_keys_for_address(address).is_empty() {
-            self.metrics
-                .reap_peer_series(&rustbgpd_telemetry::peer_label(address));
+            self.metrics.reap_peer_series(&peer_label);
             // The RIB manager emits bare-address series from its own
             // task; this marker is queued behind the session's final
             // `PeerDown`, so the RIB manager reaps again *after* its
@@ -1319,6 +1386,7 @@ impl PeerManager {
         // Clear the manager-owned error only after the session accepted Start,
         // so a failed command cannot accidentally reopen passive acceptance.
         managed.enabled = true;
+        self.publish_peer_admin_enabled_metric(&peer, true);
         self.remove_max_prefix_latch(&peer);
         self.publish_peer_lifecycle_event(
             &peer,
@@ -1352,6 +1420,7 @@ impl PeerManager {
             managed.enabled = false;
             managed.pending_inbound.take()
         };
+        self.publish_peer_admin_enabled_metric(&peer, false);
         if let Some(pending) = pending {
             let _ = self
                 .quiesce_retiring_session(

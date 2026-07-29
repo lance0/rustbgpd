@@ -207,7 +207,7 @@ impl PeerManager {
                                 )
                                 .await;
                         }
-                        let shutdown = self
+                        let _ = self
                             .quiesce_retiring_session(
                                 &peer_key,
                                 primary_session_id,
@@ -243,19 +243,14 @@ impl PeerManager {
                             managed.enabled = false;
                             self.peers.insert(peer_key.clone(), managed);
                             self.register_session(session_id, &peer_key);
+                            self.seed_peer_truth_metrics(&peer_key, false);
                             info!(%peer_addr, "retained dynamic peer disabled after terminal max-prefix signal during retirement");
                         } else {
                             // Auto-removal is authoritative when no terminal
                             // breach was discovered during the join barrier.
                             self.dynamic_peer_count = self.dynamic_peer_count.saturating_sub(1);
-                            if shutdown.joined() {
-                                self.reap_deleted_peer_metric_series(peer_addr).await;
-                            } else {
-                                info!(
-                                    %peer_addr,
-                                    "skipping dynamic-peer metric reap because session shutdown did not join before the deadline"
-                                );
-                            }
+                            self.reap_deleted_peer_metric_series_for_key(&peer_key)
+                                .await;
                         }
                     }
                     // Skip pending inbound logic for removed dynamic peers
@@ -341,6 +336,9 @@ impl PeerManager {
                                 managed.max_prefix_restart_seconds,
                             )
                         });
+                if self.peers.contains_key(&peer_key) {
+                    self.publish_peer_admin_enabled_metric(&peer_key, false);
+                }
                 let installed = self.install_max_prefix_latch(
                     peer_key.clone(),
                     session_id,

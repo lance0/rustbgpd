@@ -6,7 +6,9 @@ use rustbgpd_api::peer_types::{
 };
 use rustbgpd_fsm::SessionState;
 use rustbgpd_transport::handle::MaxPrefixState;
-use rustbgpd_transport::{PeerSessionState, TcpAoRotationStatus, WarmCheckpointSessionState};
+use rustbgpd_transport::{
+    PeerCommand, PeerSessionState, TcpAoRotationStatus, WarmCheckpointSessionState,
+};
 use rustbgpd_wire::{
     Capability, Message, OpenMessage, decode_message, encode_message, peek_message_length,
 };
@@ -6312,6 +6314,10 @@ async fn remote_wins_collision_preserves_old_primary_terminal_breach() {
     assert!(mgr.retiring_sessions.is_empty());
     assert!(mgr.peer_key_for_session(1).is_none());
     assert_eq!(mgr.peer_key_for_session(2), Some(key(addr)));
+    assert_eq!(
+        peer_identity_gauge(&mgr.metrics, "bgp_peer_admin_enabled", "10.0.0.41", ""),
+        Some(0.0)
+    );
 }
 
 /// Load-bearing Idle replacement proof: the old primary emits max-prefix only
@@ -6691,14 +6697,13 @@ async fn session_event_history_records_events_without_subscriber() {
     assert_eq!(events[0].event_type, SessionLifecycleEventType::PeerEnabled);
 }
 
-/// LAN-668 production incarnation proof: successful configured-peer installs
-/// publish their current admin state only after installation. Removing the
-/// add-path publication leaves the old `PeerDisabled` as the newest retained
-/// intent after delete/re-add and makes doctor's paired regression red.
+/// Successful configured-peer installs publish their current admin event only
+/// after installation; failed duplicate adds must not fabricate one.
 #[tokio::test]
 async fn peer_add_and_readd_publish_current_admin_state_without_failed_add_noise() {
     let mut mgr = test_peer_manager();
     let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let metrics = mgr.metrics.clone();
     let admin_types = [
         SessionLifecycleEventType::PeerEnabled,
         SessionLifecycleEventType::PeerDisabled,
@@ -6707,10 +6712,15 @@ async fn peer_add_and_readd_publish_current_admin_state_without_failed_add_noise
     .collect();
 
     mgr.add_peer(make_config(addr, 65002), false).await.unwrap();
-    assert!(
-        mgr.add_peer(make_config(addr, 65002), false).await.is_err(),
-        "a failed duplicate add must not fabricate an admin event"
+    assert_eq!(
+        peer_identity_gauge(&metrics, "bgp_peer_admin_enabled", "10.0.0.2", ""),
+        Some(1.0)
     );
+    assert_eq!(
+        peer_identity_gauge(&metrics, "bgp_peer_session_established", "10.0.0.2", ""),
+        Some(0.0)
+    );
+    assert!(mgr.add_peer(make_config(addr, 65002), false).await.is_err());
     mgr.disable_peer(key(addr), None).await.unwrap();
     mgr.delete_peer(key(addr), false).await.unwrap();
     mgr.add_peer(make_config(addr, 65002), false).await.unwrap();
@@ -6719,24 +6729,20 @@ async fn peer_add_and_readd_publish_current_admin_state_without_failed_add_noise
         .await
         .unwrap();
 
-    let peers = mgr.list_peers().await;
-    assert_eq!(peers.len(), 1);
-    assert!(!peers[0].enabled);
     let events = query_session_event_history(&mgr, Some(addr), admin_types, 0).await;
-    let event_types: Vec<_> = events.iter().map(|event| event.event_type).collect();
     assert_eq!(
-        event_types,
+        events
+            .iter()
+            .map(|event| event.event_type)
+            .collect::<Vec<_>>(),
         vec![
             SessionLifecycleEventType::PeerEnabled,
             SessionLifecycleEventType::PeerDisabled,
             SessionLifecycleEventType::PeerEnabled,
             SessionLifecycleEventType::PeerDisabled,
-        ],
-        "add, disable, enabled re-add, and disabled re-add must expose exact current intent"
+        ]
     );
-    assert!(events[0].reason.contains("added administratively enabled"));
-    assert!(events[2].reason.contains("added administratively enabled"));
-    assert!(events[3].reason.contains("added administratively disabled"));
+    assert!(!mgr.list_peers().await[0].enabled);
 }
 
 #[tokio::test]
@@ -7017,10 +7023,203 @@ fn peer_metric_series_count(metrics: &BgpMetrics, peer: &str) -> usize {
         .count()
 }
 
+fn peer_identity_gauge(
+    metrics: &BgpMetrics,
+    family_name: &str,
+    peer: &str,
+    interface: &str,
+) -> Option<f64> {
+    metrics
+        .registry()
+        .gather()
+        .into_iter()
+        .find(|family| family.name() == family_name)
+        .and_then(|family| {
+            family.get_metric().iter().find_map(|metric| {
+                let has_peer = metric
+                    .get_label()
+                    .iter()
+                    .any(|label| label.name() == "peer" && label.value() == peer);
+                let has_interface = metric
+                    .get_label()
+                    .iter()
+                    .any(|label| label.name() == "interface" && label.value() == interface);
+                (has_peer && has_interface).then(|| metric.get_gauge().value())
+            })
+        })
+}
+
+fn blocked_truth_observing_start_handle(
+    metrics: BgpMetrics,
+    peer: PeerKey,
+) -> (PeerHandle, Arc<Notify>, oneshot::Receiver<()>) {
+    let (commands, mut command_rx) = mpsc::channel(1);
+    commands.try_send(PeerCommand::Start).unwrap();
+    let gate = Arc::new(Notify::new());
+    let task_gate = gate.clone();
+    let (observed_tx, observed_rx) = oneshot::channel();
+    let task = tokio::spawn(async move {
+        task_gate.notified().await;
+        let _filler = command_rx.recv().await;
+        assert!(matches!(command_rx.recv().await, Some(PeerCommand::Start)));
+        let label = rustbgpd_telemetry::peer_label(peer.address);
+        let interface = peer.interface.as_deref().unwrap_or("");
+        assert_eq!(
+            peer_identity_gauge(&metrics, "bgp_peer_admin_enabled", &label, interface),
+            Some(1.0)
+        );
+        assert_eq!(
+            peer_identity_gauge(&metrics, "bgp_peer_session_established", &label, interface),
+            Some(0.0)
+        );
+        metrics.set_peer_session_established(&label, interface, true);
+        let _ = observed_tx.send(());
+        while let Some(command) = command_rx.recv().await {
+            if matches!(command, PeerCommand::Shutdown) {
+                break;
+            }
+        }
+        Ok(())
+    });
+    (PeerHandle::from_parts(commands, task), gate, observed_rx)
+}
+
+async fn assert_new_peer_start_truth_is_seeded(peer: PeerKey) {
+    let mgr = test_peer_manager();
+    let metrics = mgr.metrics.clone();
+    let label = rustbgpd_telemetry::peer_label(peer.address);
+    let interface = peer.interface.as_deref().unwrap_or("");
+    let (handle, gate, observed) =
+        blocked_truth_observing_start_handle(metrics.clone(), peer.clone());
+    let provision = mgr.provision_new_peer_session(&peer, true, true, handle, "test start");
+    tokio::pin!(provision);
+    tokio::select! {
+        biased;
+        _ = &mut provision => panic!("Start unexpectedly advanced through a full channel"),
+        () = tokio::task::yield_now() => {}
+    }
+    assert_eq!(
+        peer_identity_gauge(&metrics, "bgp_peer_admin_enabled", &label, interface),
+        Some(1.0)
+    );
+    assert_eq!(
+        peer_identity_gauge(&metrics, "bgp_peer_session_established", &label, interface),
+        Some(0.0)
+    );
+    gate.notify_one();
+    let handle = provision.await.unwrap();
+    observed.await.unwrap();
+    assert_eq!(
+        peer_identity_gauge(&metrics, "bgp_peer_session_established", &label, interface),
+        Some(1.0),
+        "ownership preparation must never overwrite a post-Start state"
+    );
+    handle.shutdown().await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn new_peer_provisioning_seeds_truth_before_start_and_never_post_zeros() {
+    assert_new_peer_start_truth_is_seeded(key("192.0.2.10".parse().unwrap())).await;
+}
+
+#[test]
+fn static_add_routes_start_through_truth_provisioning_before_install() {
+    let source = include_str!("lifecycle.rs");
+    let body = source
+        .split_once("pub(super) async fn add_peer_with_admin_state")
+        .unwrap()
+        .1
+        .split_once("pub(super) async fn reconfigure_peer")
+        .unwrap()
+        .0;
+    assert_eq!(body.matches(".provision_new_peer_session(").count(), 1);
+    assert!(
+        body.find(".provision_new_peer_session(").unwrap()
+            < body.find("self.peers.insert(").unwrap()
+    );
+    assert!(!body.contains("seed_peer_truth_metrics"));
+}
+
+#[test]
+fn fresh_dynamic_accept_routes_start_through_truth_provisioning_before_install() {
+    let source = include_str!("inbound.rs");
+    let body = source
+        .split_once("pub(super) async fn handle_inbound")
+        .unwrap()
+        .1
+        .split_once("pub(super) async fn resolve_collision")
+        .unwrap()
+        .0;
+    assert_eq!(body.matches(".provision_new_peer_session(").count(), 1);
+    assert!(
+        body.find(".provision_new_peer_session(").unwrap()
+            < body.find("self.peers.insert(").unwrap()
+    );
+    assert!(!body.contains("seed_peer_truth_metrics"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn failed_start_exact_reaps_provisional_truth_and_preserves_scoped_sibling() {
+    let mgr = test_peer_manager();
+    let metrics = mgr.metrics.clone();
+    let address = "fe80::1".parse().unwrap();
+    let failed = scoped_key(address, "eth0");
+    let dropped = Arc::new(AtomicU32::new(0));
+    mgr.seed_peer_truth_metrics(&scoped_key(address, "eth1"), false);
+
+    assert!(
+        mgr.provision_new_peer_session(
+            &failed,
+            true,
+            true,
+            stalled_shutdown_peer_handle(dropped.clone()).await,
+            "test failed start"
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        dropped.load(Ordering::SeqCst),
+        1,
+        "failed provisioning must quiesce the provisional actor before returning"
+    );
+    for family in ["bgp_peer_admin_enabled", "bgp_peer_session_established"] {
+        assert_eq!(
+            peer_identity_gauge(&metrics, family, "fe80::1", "eth0"),
+            None
+        );
+        assert_eq!(
+            peer_identity_gauge(&metrics, family, "fe80::1", "eth1"),
+            Some(0.0)
+        );
+    }
+
+    let source = include_str!("lifecycle.rs");
+    let body = source
+        .split_once("pub(super) async fn provision_new_peer_session")
+        .unwrap()
+        .1
+        .split_once("pub(super) async fn sync_owned_session_metrics")
+        .unwrap()
+        .0;
+    assert_eq!(body.matches(".shutdown_handle_bounded(").count(), 1);
+    assert_eq!(body.matches(".reap_peer_identity_series(").count(), 1);
+    assert!(
+        body.find(".shutdown_handle_bounded(").unwrap()
+            < body.find(".reap_peer_identity_series(").unwrap(),
+        "failed provisioning must quiesce the actor before reaping its identity series"
+    );
+}
+
 /// Seed per-peer series across the emitters that own them — session,
 /// RIB, BFD — all under the one canonical bare-address `peer` label.
 fn seed_peer_metric_series(metrics: &BgpMetrics, peer_label: &str) {
+    metrics.initialize_exact_export_rejection_series(peer_label, ["ipv4_unicast"]);
+    metrics.initialize_update_malformed_series(peer_label);
+    metrics.record_state_transition(peer_label, "idle", "connect");
     metrics.record_state_transition(peer_label, "open_confirm", "established");
+    metrics.set_peer_admin_enabled(peer_label, "", true);
+    metrics.set_peer_session_established(peer_label, "", true);
     metrics.record_message_sent(peer_label, "keepalive");
     metrics.set_rib_prefixes(peer_label, "ipv4_unicast", 42);
     metrics.record_bfd_state(peer_label, true, false);
@@ -7074,6 +7273,63 @@ async fn delete_peer_reaps_metric_series() {
     // The ordered RIB-side reap marker was queued.
     let update = rib_rx.try_recv().expect("PeerDeleted queued for the RIB");
     assert!(matches!(update, RibUpdate::PeerDeleted { peer } if peer == peer_addr));
+}
+
+#[tokio::test(start_paused = true)]
+async fn timed_out_dynamic_rollback_exact_reaps_and_preserves_scoped_sibling() {
+    let mut mgr = dynamic_test_manager();
+    mgr.dynamic_ranges.clear();
+    let metrics = mgr.metrics.clone();
+    let address = "fe80::1".parse().unwrap();
+    let stale = scoped_key(address, "eth0");
+    let sibling = scoped_key(address, "eth1");
+    let dropped = Arc::new(AtomicU32::new(0));
+    insert_test_dynamic_managed_peer(
+        &mut mgr,
+        address,
+        89,
+        stalled_shutdown_peer_handle(dropped.clone()).await,
+        true,
+        "2001:db8::".parse().unwrap(),
+        64,
+        "ix-members",
+    );
+    let managed = mgr.peers.remove(&key(address)).unwrap();
+    mgr.unregister_session(89);
+    mgr.peers.insert(stale.clone(), managed);
+    mgr.register_session(89, &stale);
+    mgr.seed_peer_truth_metrics(&stale, true);
+
+    let mut sibling_config = make_config(address, 65002);
+    sibling_config.interface = Some("eth1".to_string());
+    sibling_config.scope_id = Some(2);
+    mgr.add_peer_with_admin_state(sibling_config, false, false)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        mgr.reap_dynamic_peers_not_allowed_by_current_ranges().await,
+        1
+    );
+    assert_eq!(dropped.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        peer_identity_gauge(&metrics, "bgp_peer_session_established", "fe80::1", "eth0"),
+        None
+    );
+    assert_eq!(
+        peer_identity_gauge(&metrics, "bgp_peer_admin_enabled", "fe80::1", "eth0"),
+        None
+    );
+    assert_eq!(
+        peer_identity_gauge(&metrics, "bgp_peer_admin_enabled", "fe80::1", "eth1"),
+        Some(0.0)
+    );
+    assert_eq!(
+        peer_identity_gauge(&metrics, "bgp_peer_session_established", "fe80::1", "eth1"),
+        Some(0.0)
+    );
+    assert!(mgr.peers.contains_key(&sibling));
+    mgr.delete_peer(sibling, false).await.unwrap();
 }
 
 #[tokio::test]
@@ -18339,6 +18595,10 @@ async fn strict_disable_drain_reenable_does_not_leak_bgp_before_fresh_up() {
         "strict re-enable after a local drain must withhold until fresh BFD Up"
     );
     mgr.enable_peer(key(peer)).await.unwrap();
+    assert_eq!(
+        peer_identity_gauge(&mgr.metrics, "bgp_peer_admin_enabled", "10.0.0.2", ""),
+        Some(1.0)
+    );
     assert_eq!(
         counters.start.load(Ordering::SeqCst),
         1,

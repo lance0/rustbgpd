@@ -11,6 +11,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The shipped BGP session-down alert now uses exact current truth instead of
+  inferring state from historical counters. New
+  `bgp_peer_admin_enabled{peer,interface}` and
+  `bgp_peer_session_established{peer,interface}` gauges cover enabled peers
+  that never Established, preserve scoped link-local sibling identity, follow
+  collision ownership and administrative changes synchronously, and disappear
+  on peer deletion. Flap alerting remains counter-based.
+
 - Scoped IPv6 link-local neighbors now work with peer-group, policy-chain, and
   policy-inspection day-two CLI commands: valid `%interface` zones stay visible
   in operator output but are omitted from bare-address RPC fields.

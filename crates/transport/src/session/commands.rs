@@ -1540,7 +1540,13 @@ impl PeerSession {
                 ControlFlow::Continue(())
             }
             PeerCommand::ActivateMaxPrefixMetrics { reply } => {
+                // The legacy command name predates current-session truth.
+                // Collision promotion activates every metric lease owned only
+                // by the active primary, not just max-prefix capacity.
                 self.max_prefix_metric_lease.active = true;
+                self.session_established_metric_lease.active = true;
+                self.session_established_metric_lease
+                    .set(self.fsm.state() == SessionState::Established);
                 self.sync_max_prefix_capacity_metrics();
                 let _ = reply.send(());
                 ControlFlow::Continue(())

@@ -487,20 +487,18 @@ impl PeerManager {
                     accepted_generation,
                 );
 
-                if let Err(e) = handle.start_timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT).await {
-                    warn!(%peer_addr, error = %e, "failed to start dynamic peer session");
-                    // The session task was already spawned; the handle is never
-                    // stored, so shut it down (abort-on-timeout) rather than
-                    // dropping it and orphaning a wedged task.
-                    let _ = self
-                        .shutdown_handle_bounded(
-                            peer_addr.ip(),
-                            "dynamic peer start failure",
-                            handle,
-                        )
-                        .await;
+                let Ok(handle) = self
+                    .provision_new_peer_session(
+                        &dynamic_peer_key,
+                        true,
+                        true,
+                        handle,
+                        "dynamic peer start failure",
+                    )
+                    .await
+                else {
                     return;
-                }
+                };
 
                 let managed = ManagedPeer {
                     handle,
@@ -537,6 +535,7 @@ impl PeerManager {
                 let peer_key = dynamic_peer_key;
                 self.peers.insert(peer_key.clone(), managed);
                 self.register_session(session_id, &peer_key);
+                self.sync_owned_session_metrics(&peer_key).await;
                 self.dynamic_peer_count += 1;
                 // ADR-0112: the accepted child carries the range's pinned
                 // external classification and its resolved chains.

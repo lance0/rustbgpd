@@ -435,21 +435,15 @@ impl PeerManager {
                     )
                     .await;
             }
-            let shutdown = self
+            let _ = self
                 .shutdown_handle_bounded(
                     peer_key.address,
                     "dynamic rollback primary",
                     managed.handle,
                 )
                 .await;
-            if shutdown.joined() {
-                self.reap_deleted_peer_metric_series(peer_key.address).await;
-            } else {
-                warn!(
-                    peer = %peer_key,
-                    "skipping dynamic-peer metric reap because session shutdown did not join before the deadline"
-                );
-            }
+            self.reap_deleted_peer_metric_series_for_key(&peer_key)
+                .await;
             self.dynamic_peer_count = self.dynamic_peer_count.saturating_sub(1);
             removed += 1;
             info!(
