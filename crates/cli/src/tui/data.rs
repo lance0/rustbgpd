@@ -11,8 +11,8 @@ use crate::proto::global_service_client::GlobalServiceClient;
 use crate::proto::neighbor_service_client::NeighborServiceClient;
 use crate::proto::rib_service_client::RibServiceClient;
 use crate::proto::{
-    GetGlobalRequest, GlobalState, HealthRequest, HealthResponse, ListNeighborsRequest,
-    MetricsRequest, NeighborState, WatchRoutesRequest,
+    GetGlobalRequest, GlobalState, HealthRequest, HealthResponse, ListDynamicNeighborsRequest,
+    ListNeighborsRequest, MetricsRequest, NeighborState, WatchRoutesRequest,
 };
 
 pub struct DataSnapshot {
@@ -22,6 +22,8 @@ pub struct DataSnapshot {
     pub health_fresh: bool,
     pub neighbors: Vec<NeighborState>,
     pub neighbors_freshness: Freshness,
+    pub dynamic_range_count: Option<usize>,
+    pub dynamic_ranges_freshness: Freshness,
     pub rpki_vrp_count: Option<u64>,
     pub metrics_freshness: Freshness,
     pub error: Option<String>,
@@ -65,12 +67,16 @@ fn parse_vrp_count(prometheus_text: &str) -> Option<u64> {
 }
 
 const METRICS_POLL_INTERVAL: Duration = Duration::from_secs(60);
+const DYNAMIC_RANGES_POLL_INTERVAL: Duration = Duration::from_secs(60);
 const ROUTE_STREAM_RECONNECT_BACKOFF: Duration = Duration::from_secs(2);
 
 struct FetcherState {
     global: Option<GlobalState>,
     health: Option<HealthResponse>,
     neighbors: Option<Vec<NeighborState>>,
+    dynamic_range_count: Option<usize>,
+    dynamic_ranges_freshness: Freshness,
+    next_dynamic_ranges_poll: Instant,
     rpki_vrp_count: Option<u64>,
     metrics_freshness: Freshness,
     next_metrics_poll: Instant,
@@ -82,6 +88,9 @@ impl FetcherState {
             global: None,
             health: None,
             neighbors: None,
+            dynamic_range_count: None,
+            dynamic_ranges_freshness: Freshness::Unavailable,
+            next_dynamic_ranges_poll: Instant::now(),
             rpki_vrp_count: None,
             metrics_freshness: Freshness::Unavailable,
             next_metrics_poll: Instant::now(),
@@ -167,6 +176,38 @@ async fn poll_once(connection: &Connection, state: &mut FetcherState) -> DataSna
     let neighbors = state.neighbors.clone().unwrap_or_default();
 
     let now = Instant::now();
+    if neighbors_freshness == Freshness::Fresh {
+        if neighbors.is_empty() {
+            if now >= state.next_dynamic_ranges_poll {
+                state.next_dynamic_ranges_poll = now + DYNAMIC_RANGES_POLL_INTERVAL;
+                let mut client = NeighborServiceClient::with_interceptor(
+                    connection.channel(),
+                    connection.interceptor(),
+                );
+                match client
+                    .list_dynamic_neighbors(ListDynamicNeighborsRequest {})
+                    .await
+                {
+                    Ok(response) => {
+                        state.dynamic_range_count = Some(response.into_inner().ranges.len());
+                        state.dynamic_ranges_freshness = Freshness::Fresh;
+                    }
+                    Err(_) => {
+                        state.dynamic_ranges_freshness = if state.dynamic_range_count.is_some() {
+                            Freshness::Stale
+                        } else {
+                            Freshness::Unavailable
+                        };
+                    }
+                }
+            }
+        } else {
+            // A live roster does not need dormant-range inventory. Re-arm the
+            // deadline so the next fresh transition to empty fetches at once.
+            state.next_dynamic_ranges_poll = now;
+        }
+    }
+
     if now >= state.next_metrics_poll {
         state.next_metrics_poll = now + METRICS_POLL_INTERVAL;
         let mut client =
@@ -191,6 +232,8 @@ async fn poll_once(connection: &Connection, state: &mut FetcherState) -> DataSna
         health_fresh,
         neighbors,
         neighbors_freshness,
+        dynamic_range_count: state.dynamic_range_count,
+        dynamic_ranges_freshness: state.dynamic_ranges_freshness,
         rpki_vrp_count: state.rpki_vrp_count,
         metrics_freshness: state.metrics_freshness,
         error,
@@ -286,6 +329,13 @@ mod tests {
         }
     }
 
+    fn dynamic_range_calls(server: &crate::test_support::MockServerHandle) -> usize {
+        server
+            .state
+            .list_dynamic_neighbors_calls
+            .load(Ordering::SeqCst)
+    }
+
     async fn assert_route_reconnect_backoff(server: &crate::test_support::MockServerHandle) {
         let connection = connect(&server.addr, None).await.unwrap();
         let (enabled_tx, enabled_rx) = watch::channel(true);
@@ -350,6 +400,117 @@ mod tests {
         tokio::time::advance(Duration::from_secs(2)).await;
         poll_once(&connection, &mut state).await;
         assert_eq!(server.state.metrics_calls.load(Ordering::SeqCst), 2);
+    }
+
+    /// Red proof: polling dormant inventory on the normal two-second cadence
+    /// raises the pre-deadline call count from one to thirty.
+    #[tokio::test(start_paused = true)]
+    async fn dynamic_ranges_fetch_immediately_then_use_a_slow_empty_cadence() {
+        let server = spawn_mock_server(None).await;
+        *server.state.list_dynamic_neighbors_response.lock().await =
+            vec![rustbgpd_api::proto::DynamicNeighborRange::default(); 2];
+        let connection = connect(&server.addr, None).await.unwrap();
+        let mut state = FetcherState::new();
+
+        let first = poll_once(&connection, &mut state).await;
+        assert_eq!(first.dynamic_range_count, Some(2));
+        assert_eq!(first.dynamic_ranges_freshness, Freshness::Fresh);
+        for _ in 0..29 {
+            tokio::time::advance(Duration::from_secs(2)).await;
+            poll_once(&connection, &mut state).await;
+        }
+        assert_eq!(dynamic_range_calls(&server), 1);
+
+        tokio::time::advance(Duration::from_secs(2)).await;
+        poll_once(&connection, &mut state).await;
+        assert_eq!(dynamic_range_calls(&server), 2);
+    }
+
+    /// Red proof: querying with a live roster increments the first assertion;
+    /// removing the re-arm leaves the transition-to-empty count at zero.
+    #[tokio::test(start_paused = true)]
+    async fn nonempty_roster_skips_dynamic_ranges_and_rearms_next_empty_fetch() {
+        let server = spawn_mock_server(None).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+        let mut state = FetcherState::new();
+
+        server
+            .state
+            .list_neighbors_failures_remaining
+            .store(1, Ordering::SeqCst);
+        poll_once(&connection, &mut state).await;
+        assert_eq!(dynamic_range_calls(&server), 0);
+
+        *server.state.list_neighbors_response.lock().await =
+            vec![rustbgpd_api::proto::NeighborState::default()];
+        poll_once(&connection, &mut state).await;
+        assert_eq!(dynamic_range_calls(&server), 0);
+
+        server.state.list_neighbors_response.lock().await.clear();
+        poll_once(&connection, &mut state).await;
+        assert_eq!(dynamic_range_calls(&server), 1);
+
+        tokio::time::advance(Duration::from_secs(2)).await;
+        *server.state.list_neighbors_response.lock().await =
+            vec![rustbgpd_api::proto::NeighborState::default()];
+        poll_once(&connection, &mut state).await;
+        assert_eq!(dynamic_range_calls(&server), 1);
+
+        server.state.list_neighbors_response.lock().await.clear();
+        poll_once(&connection, &mut state).await;
+        assert_eq!(dynamic_range_calls(&server), 2);
+    }
+
+    /// Red proof: folding the optional RPC into the core error path marks this
+    /// otherwise healthy snapshot disconnected.
+    #[tokio::test(start_paused = true)]
+    async fn initial_dynamic_range_failure_is_unavailable_without_disconnect() {
+        let server = spawn_mock_server(None).await;
+        *server.state.list_dynamic_neighbors_error.lock().await = Some((
+            tonic::Code::Unavailable,
+            "range inventory unavailable".into(),
+        ));
+        let connection = connect(&server.addr, None).await.unwrap();
+        let mut state = FetcherState::new();
+
+        let snapshot = poll_once(&connection, &mut state).await;
+
+        assert_eq!(snapshot.dynamic_range_count, None);
+        assert_eq!(snapshot.dynamic_ranges_freshness, Freshness::Unavailable);
+        assert!(snapshot.error.is_none());
+        assert_eq!(dynamic_range_calls(&server), 1);
+
+        tokio::time::advance(DYNAMIC_RANGES_POLL_INTERVAL - Duration::from_millis(1)).await;
+        poll_once(&connection, &mut state).await;
+        assert_eq!(dynamic_range_calls(&server), 1);
+
+        tokio::time::advance(Duration::from_millis(1)).await;
+        poll_once(&connection, &mut state).await;
+        assert_eq!(dynamic_range_calls(&server), 2);
+    }
+
+    /// Red proof: clearing the last-good zero on failure makes an unknown
+    /// inventory indistinguishable from a proven unconfigured daemon.
+    #[tokio::test(start_paused = true)]
+    async fn dynamic_range_failure_retains_last_good_zero_as_stale() {
+        let server = spawn_mock_server(None).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+        let mut state = FetcherState::new();
+
+        let first = poll_once(&connection, &mut state).await;
+        assert_eq!(first.dynamic_range_count, Some(0));
+        assert_eq!(first.dynamic_ranges_freshness, Freshness::Fresh);
+
+        *server.state.list_dynamic_neighbors_error.lock().await = Some((
+            tonic::Code::Unavailable,
+            "range inventory unavailable".into(),
+        ));
+        tokio::time::advance(DYNAMIC_RANGES_POLL_INTERVAL).await;
+        let failed = poll_once(&connection, &mut state).await;
+
+        assert_eq!(failed.dynamic_range_count, Some(0));
+        assert_eq!(failed.dynamic_ranges_freshness, Freshness::Stale);
+        assert!(failed.error.is_none());
     }
 
     /// Red proof: restoring the one-shot startup fetch leaves the second

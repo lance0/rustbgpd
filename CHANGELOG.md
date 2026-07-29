@@ -31,6 +31,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- An empty `rbgp top` roster now distinguishes configured dormant
+  dynamic-neighbor ranges, a proven unconfigured daemon, unavailable inventory,
+  and a retained stale count without marking the core connection disconnected.
+
 - SIGHUP now keeps the restart-required dynamic-neighbor admission limit pinned
   to its startup value while retaining the edited desired value for restart.
 

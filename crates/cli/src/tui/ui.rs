@@ -132,6 +132,17 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
 }
 
 fn draw_peer_table(f: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
+    if app.neighbors.is_empty() {
+        let block = Block::default()
+            .borders(Borders::LEFT | Borders::RIGHT)
+            .border_style(Style::default().fg(theme.border));
+        let empty = Paragraph::new(empty_peer_message(app))
+            .alignment(Alignment::Center)
+            .block(block);
+        f.render_widget(empty, area);
+        return;
+    }
+
     let sort_col = app.sort_column;
     let sort_asc = app.sort_ascending;
 
@@ -227,6 +238,28 @@ fn draw_peer_table(f: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
         .highlight_symbol("> ");
 
     f.render_stateful_widget(table, area, &mut app.peer_table_state);
+}
+
+fn empty_peer_message(app: &App) -> String {
+    match app.neighbors_freshness {
+        None => "loading peer inventory".to_string(),
+        Some(Freshness::Unavailable) => "peer roster unavailable".to_string(),
+        _ => match (app.dynamic_ranges_freshness, app.dynamic_range_count) {
+            (Some(Freshness::Fresh), Some(0)) => {
+                "0 active peers; no peers or dynamic ranges configured".to_string()
+            }
+            (Some(Freshness::Fresh), Some(1)) => {
+                "0 active peers; 1 dynamic range configured".to_string()
+            }
+            (Some(Freshness::Fresh), Some(count)) => {
+                format!("0 active peers; {count} dynamic ranges configured")
+            }
+            (Some(Freshness::Stale), Some(count)) => {
+                format!("0 active peers; last known dynamic range count: {count} (stale)")
+            }
+            _ => "0 active peers; dynamic ranges unavailable".to_string(),
+        },
+    }
 }
 
 fn draw_events(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
@@ -584,6 +617,8 @@ mod tests {
             health_fresh: true,
             neighbors,
             neighbors_freshness: freshness,
+            dynamic_range_count: Some(0),
+            dynamic_ranges_freshness: Freshness::Fresh,
             rpki_vrp_count: None,
             metrics_freshness: Freshness::Fresh,
             error: None,
@@ -718,5 +753,53 @@ mod tests {
         let rendered = rendered_snapshot(data);
         assert!(!rendered.contains("RPKI"));
         assert!(!rendered.contains("VRPs"));
+    }
+
+    #[test]
+    fn empty_roster_renders_fresh_dynamic_range_count_and_proven_zero() {
+        let mut configured = snapshot(Vec::new(), Freshness::Fresh);
+        configured.dynamic_range_count = Some(2);
+        assert!(
+            rendered_snapshot(configured).contains("0 active peers; 2 dynamic ranges configured")
+        );
+
+        let unconfigured = rendered_snapshot(snapshot(Vec::new(), Freshness::Fresh));
+        assert!(unconfigured.contains("0 active peers; no peers or dynamic ranges configured"));
+    }
+
+    #[test]
+    fn initial_dynamic_range_failure_is_unavailable_but_connected() {
+        let mut data = snapshot(Vec::new(), Freshness::Fresh);
+        data.dynamic_range_count = None;
+        data.dynamic_ranges_freshness = Freshness::Unavailable;
+
+        let rendered = rendered_snapshot(data);
+
+        assert!(rendered.contains("0 active peers; dynamic ranges unavailable"));
+        assert!(rendered.contains("connected"));
+        assert!(!rendered.contains("disconnected"));
+    }
+
+    #[test]
+    fn stale_dynamic_range_count_retains_nonzero_and_zero_without_false_proof() {
+        for (count, expected) in [
+            (
+                2,
+                "0 active peers; last known dynamic range count: 2 (stale)",
+            ),
+            (
+                0,
+                "0 active peers; last known dynamic range count: 0 (stale)",
+            ),
+        ] {
+            let mut data = snapshot(Vec::new(), Freshness::Fresh);
+            data.dynamic_range_count = Some(count);
+            data.dynamic_ranges_freshness = Freshness::Stale;
+            let rendered = rendered_snapshot(data);
+            assert!(rendered.contains(expected));
+            if count == 0 {
+                assert!(!rendered.contains("no peers or dynamic ranges configured"));
+            }
+        }
     }
 }
