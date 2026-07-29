@@ -14,7 +14,7 @@ use super::schema::{
     ManagedVxlanNetdevConfig,
 };
 use super::{
-    Config, ConfigError, DEFAULT_HOLD_TIME, EventHistoryConfig, GrpcEnforcementConfig,
+    Config, ConfigError, DEFAULT_HOLD_TIME, EventHistoryConfig, GrpcEnforcementConfig, Neighbor,
     PeerGroupConfig, SecurityConfig, TcpAoConfig, TcpAoKeyringConfig, dynamic_prefixes_intersect,
     is_unicast_nonzero_mac, parse_mac_address,
 };
@@ -96,6 +96,179 @@ impl ConfigAdvisory {
         }
         out
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the independent flags are the closed peer-mode validation tuple"
+)]
+struct EffectivePeerModes {
+    remote_asn: u32,
+    route_reflector_client: bool,
+    orr_vantage: Option<IpAddr>,
+    route_server_client: bool,
+    per_client_best: bool,
+    next_hop_ownership: bool,
+    role: bool,
+    strict_role: bool,
+}
+
+impl EffectivePeerModes {
+    fn for_neighbor(neighbor: &Neighbor, group: Option<&PeerGroupConfig>) -> Self {
+        Self {
+            remote_asn: neighbor.remote_asn,
+            route_reflector_client: neighbor
+                .route_reflector_client
+                .or_else(|| group.and_then(|g| g.route_reflector_client))
+                .unwrap_or(false),
+            orr_vantage: neighbor
+                .orr_vantage
+                .or_else(|| group.and_then(|g| g.orr_vantage)),
+            route_server_client: neighbor
+                .route_server_client
+                .or_else(|| group.and_then(|g| g.route_server_client))
+                .unwrap_or(false),
+            per_client_best: neighbor
+                .per_client_best
+                .or_else(|| group.and_then(|g| g.per_client_best))
+                .unwrap_or(false),
+            next_hop_ownership: neighbor
+                .next_hop_ownership
+                .or_else(|| group.and_then(|g| g.next_hop_ownership))
+                .is_some(),
+            role: neighbor
+                .role
+                .or_else(|| group.and_then(|g| g.role))
+                .is_some(),
+            strict_role: neighbor
+                .strict_role
+                .or_else(|| group.and_then(|g| g.strict_role))
+                .unwrap_or(false),
+        }
+    }
+
+    fn for_dynamic(remote_asn: u32, group: &PeerGroupConfig) -> Self {
+        Self {
+            remote_asn,
+            route_reflector_client: group.route_reflector_client.unwrap_or(false),
+            orr_vantage: group.orr_vantage,
+            route_server_client: group.route_server_client.unwrap_or(false),
+            per_client_best: group.per_client_best.unwrap_or(false),
+            next_hop_ownership: group.next_hop_ownership.is_some(),
+            role: group.role.is_some(),
+            strict_role: group.strict_role.unwrap_or(false),
+        }
+    }
+}
+
+#[derive(Debug)]
+enum PeerModeViolation {
+    RouteReflector(String),
+    RouteServer(String),
+    Neighbor { field: &'static str, reason: String },
+}
+
+impl PeerModeViolation {
+    fn into_static_error(self, address: &str) -> ConfigError {
+        match self {
+            Self::RouteReflector(reason) => ConfigError::InvalidRrConfig { reason },
+            Self::RouteServer(reason) => ConfigError::InvalidRouteServerConfig { reason },
+            Self::Neighbor { field, reason } => ConfigError::InvalidNeighborConfig {
+                address: address.to_string(),
+                field: field.to_string(),
+                reason,
+            },
+        }
+    }
+
+    fn reason(self) -> String {
+        match self {
+            Self::RouteReflector(reason)
+            | Self::RouteServer(reason)
+            | Self::Neighbor { reason, .. } => reason,
+        }
+    }
+}
+
+fn validate_effective_peer_modes(
+    modes: EffectivePeerModes,
+    local_asn: u32,
+    local_router_id: &str,
+    subject: &str,
+    exact_peer_addr: Option<IpAddr>,
+) -> Result<(), PeerModeViolation> {
+    if modes.route_reflector_client && modes.remote_asn != local_asn {
+        return Err(PeerModeViolation::RouteReflector(format!(
+            "route_reflector_client requires iBGP (remote_asn {} != local asn {})",
+            modes.remote_asn, local_asn
+        )));
+    }
+
+    if let Some(vantage) = modes.orr_vantage {
+        if modes.remote_asn != local_asn {
+            return Err(PeerModeViolation::RouteReflector(format!(
+                "orr_vantage requires iBGP (remote_asn {} != local asn {})",
+                modes.remote_asn, local_asn
+            )));
+        }
+        if !modes.route_reflector_client {
+            return Err(PeerModeViolation::RouteReflector(format!(
+                "orr_vantage on neighbor {subject} requires route_reflector_client = true"
+            )));
+        }
+        if exact_peer_addr == Some(vantage) {
+            return Err(PeerModeViolation::RouteReflector(format!(
+                "orr_vantage {vantage} on neighbor {subject} must not equal the \
+                 neighbor's own address"
+            )));
+        }
+        if local_router_id.parse::<IpAddr>().ok() == Some(vantage) {
+            return Err(PeerModeViolation::RouteReflector(format!(
+                "orr_vantage {vantage} on neighbor {subject} must not equal the \
+                 reflector's local router_id {local_router_id}"
+            )));
+        }
+        if vantage.is_unspecified() || vantage.is_loopback() {
+            return Err(PeerModeViolation::RouteReflector(format!(
+                "orr_vantage {vantage} on neighbor {subject} must be a real topology \
+                 address, not an unspecified or loopback address"
+            )));
+        }
+    }
+
+    if modes.route_server_client && modes.remote_asn == local_asn {
+        return Err(PeerModeViolation::RouteServer(format!(
+            "route_server_client requires eBGP (remote_asn {} == local asn {})",
+            modes.remote_asn, local_asn
+        )));
+    }
+    if modes.per_client_best && !modes.route_server_client {
+        return Err(PeerModeViolation::RouteServer(format!(
+            "per_client_best on neighbor {subject} requires route_server_client = true"
+        )));
+    }
+    if modes.next_hop_ownership && !modes.route_server_client {
+        return Err(PeerModeViolation::RouteServer(format!(
+            "next_hop_ownership on neighbor {subject} requires route_server_client = true"
+        )));
+    }
+    if modes.strict_role && !modes.role {
+        return Err(PeerModeViolation::Neighbor {
+            field: "strict_role",
+            reason: "strict_role requires role to be configured".to_string(),
+        });
+    }
+    if modes.role && modes.remote_asn == local_asn {
+        return Err(PeerModeViolation::Neighbor {
+            field: "role",
+            reason: format!(
+                "BGP Roles require eBGP (remote_asn {} == local asn {})",
+                modes.remote_asn, local_asn
+            ),
+        });
+    }
+    Ok(())
 }
 
 impl Config {
@@ -461,151 +634,15 @@ impl Config {
                 return Err(ConfigError::InvalidSlowPeerThreshold { value });
             }
 
-            // Validate route_reflector_client: must be iBGP
-            let route_reflector_client = neighbor
-                .route_reflector_client
-                .or_else(|| group.and_then(|g| g.route_reflector_client))
-                .unwrap_or(false);
-            if route_reflector_client && neighbor.remote_asn != self.global.asn {
-                return Err(ConfigError::InvalidRrConfig {
-                    reason: format!(
-                        "route_reflector_client requires iBGP (remote_asn {} != local asn {})",
-                        neighbor.remote_asn, self.global.asn
-                    ),
-                });
-            }
-
-            // Validate orr_vantage (RFC 9107): ORR is a route-reflector
-            // feature, so the vantage only makes sense on an iBGP
-            // route-reflector-client.
-            let orr_vantage = neighbor
-                .orr_vantage
-                .or_else(|| group.and_then(|g| g.orr_vantage));
-            if let Some(vantage) = orr_vantage {
-                if neighbor.remote_asn != self.global.asn {
-                    return Err(ConfigError::InvalidRrConfig {
-                        reason: format!(
-                            "orr_vantage requires iBGP (remote_asn {} != local asn {})",
-                            neighbor.remote_asn, self.global.asn
-                        ),
-                    });
-                }
-                if !route_reflector_client {
-                    return Err(ConfigError::InvalidRrConfig {
-                        reason: format!(
-                            "orr_vantage on neighbor {} requires route_reflector_client = true",
-                            neighbor.address
-                        ),
-                    });
-                }
-                // RFC 9107: the vantage must identify a *distinct* BGP-LS
-                // topology node. Equal to the client's own peering address
-                // or the reflector's router_id it degenerates to the
-                // reflector's own viewpoint (plain non-ORR reflection) — a
-                // copy-paste misconfiguration. Fail closed at config load.
-                if let Ok(peer_addr) = neighbor.address.parse::<IpAddr>()
-                    && vantage == peer_addr
-                {
-                    return Err(ConfigError::InvalidRrConfig {
-                        reason: format!(
-                            "orr_vantage {vantage} on neighbor {} must not equal the \
-                             neighbor's own address",
-                            neighbor.address
-                        ),
-                    });
-                }
-                if let Ok(local_addr) = self.global.router_id.parse::<IpAddr>()
-                    && vantage == local_addr
-                {
-                    return Err(ConfigError::InvalidRrConfig {
-                        reason: format!(
-                            "orr_vantage {vantage} on neighbor {} must not equal the \
-                             reflector's local router_id {}",
-                            neighbor.address, self.global.router_id
-                        ),
-                    });
-                }
-                // A wildcard (0.0.0.0 / ::) or loopback vantage names no real
-                // BGP-LS topology node, so ORR silently degenerates to plain
-                // reflection. Reject it at load rather than run inert.
-                if vantage.is_unspecified() || vantage.is_loopback() {
-                    return Err(ConfigError::InvalidRrConfig {
-                        reason: format!(
-                            "orr_vantage {vantage} on neighbor {} must be a real topology \
-                             address, not an unspecified or loopback address",
-                            neighbor.address
-                        ),
-                    });
-                }
-            }
-
-            let route_server_client = neighbor
-                .route_server_client
-                .or_else(|| group.and_then(|g| g.route_server_client))
-                .unwrap_or(false);
-            if route_server_client && neighbor.remote_asn == self.global.asn {
-                return Err(ConfigError::InvalidRouteServerConfig {
-                    reason: format!(
-                        "route_server_client requires eBGP (remote_asn {} == local asn {})",
-                        neighbor.remote_asn, self.global.asn
-                    ),
-                });
-            }
-
-            // RFC 7947 §2.3.2 per-client best-path is a route-server
-            // feature (eBGP-only follows transitively; ORR exclusion
-            // too — the vantage requires an iBGP RR client).
-            let per_client_best = neighbor
-                .per_client_best
-                .or_else(|| group.and_then(|g| g.per_client_best))
-                .unwrap_or(false);
-            if per_client_best && !route_server_client {
-                return Err(ConfigError::InvalidRouteServerConfig {
-                    reason: format!(
-                        "per_client_best on neighbor {} requires route_server_client = true",
-                        neighbor.address
-                    ),
-                });
-            }
-
-            // ADR-0107 NEXT_HOP ownership is a route-server ingress
-            // guard: it authorizes a member's announced next hop against
-            // the advertising session, which only makes sense on a
-            // transparent route-server client session.
-            let next_hop_ownership = neighbor
-                .next_hop_ownership
-                .or_else(|| group.and_then(|g| g.next_hop_ownership));
-            if next_hop_ownership.is_some() && !route_server_client {
-                return Err(ConfigError::InvalidRouteServerConfig {
-                    reason: format!(
-                        "next_hop_ownership on neighbor {} requires route_server_client = true",
-                        neighbor.address
-                    ),
-                });
-            }
-
-            let role = neighbor.role.or_else(|| group.and_then(|g| g.role));
-            let strict_role = neighbor
-                .strict_role
-                .or_else(|| group.and_then(|g| g.strict_role))
-                .unwrap_or(false);
-            if strict_role && role.is_none() {
-                return Err(ConfigError::InvalidNeighborConfig {
-                    address: neighbor.address.clone(),
-                    field: "strict_role".to_string(),
-                    reason: "strict_role requires role to be configured".to_string(),
-                });
-            }
-            if role.is_some() && neighbor.remote_asn == self.global.asn {
-                return Err(ConfigError::InvalidNeighborConfig {
-                    address: neighbor.address.clone(),
-                    field: "role".to_string(),
-                    reason: format!(
-                        "BGP Roles require eBGP (remote_asn {} == local asn {})",
-                        neighbor.remote_asn, self.global.asn
-                    ),
-                });
-            }
+            let modes = EffectivePeerModes::for_neighbor(neighbor, group);
+            validate_effective_peer_modes(
+                modes,
+                self.global.asn,
+                &self.global.router_id,
+                &neighbor.address,
+                neighbor.address.parse().ok(),
+            )
+            .map_err(|violation| violation.into_static_error(&neighbor.address))?;
 
             if let Some(mode) = neighbor
                 .remove_private_as
@@ -1014,6 +1051,22 @@ impl Config {
                     ),
                 });
             };
+
+            validate_effective_peer_modes(
+                EffectivePeerModes::for_dynamic(dn.remote_asn, group),
+                self.global.asn,
+                &self.global.router_id,
+                &dn.prefix,
+                None,
+            )
+            .map_err(|violation| ConfigError::InvalidDynamicNeighbor {
+                reason: format!(
+                    "dynamic_neighbors[{i}] prefix {:?} via peer_group {:?}: {}",
+                    dn.prefix,
+                    dn.peer_group,
+                    violation.reason()
+                ),
+            })?;
 
             if !group.required_families.is_empty() {
                 let required = parse_families(&group.required_families).map_err(|err| {

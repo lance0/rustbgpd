@@ -8103,6 +8103,123 @@ default_action = "deny"
 
 // ── Dynamic neighbor config tests ───────────────────────────────
 
+fn dynamic_modes_toml(group_fields: &str, remote_asn: u32) -> String {
+    format!(
+        r#"
+{base}
+
+[peer_groups.modes]
+{group_fields}
+
+[[dynamic_neighbors]]
+prefix = "10.0.0.0/24"
+peer_group = "modes"
+remote_asn = {remote_asn}
+"#,
+        base = valid_toml()
+    )
+}
+
+fn resolve_dynamic_modes(config: &Config, remote_asn: u32) -> ResolvedNeighbor {
+    config
+        .resolve_dynamic_neighbor(
+            "10.0.0.42".parse().unwrap(),
+            remote_asn,
+            "dynamic",
+            &config.peer_groups["modes"],
+            "modes",
+            false,
+        )
+        .unwrap()
+}
+
+#[test]
+fn dynamic_neighbor_effective_mode_validation_matrix() {
+    // Load-bearing: removing the dynamic shared-validator call makes every
+    // invalid inherited mode below load successfully and turns this test red.
+    let rr = "route_reflector_client = true";
+    let orr = "orr_vantage = \"192.0.2.7\"";
+    let rr_router = "route_reflector_client = true\norr_vantage = \"10.0.0.1\"";
+    let rr_unspecified = "route_reflector_client = true\norr_vantage = \"0.0.0.0\"";
+    let rr_loopback = "route_reflector_client = true\norr_vantage = \"127.0.0.1\"";
+    let cases = [
+        (rr, 65002, "route_reflector_client requires iBGP"),
+        (rr, 0, "route_reflector_client requires iBGP"),
+        (orr, 65002, "orr_vantage requires iBGP"),
+        (orr, 65001, "requires route_reflector_client = true"),
+        (rr_router, 65001, "router_id"),
+        (rr_unspecified, 65001, "unspecified or loopback"),
+        (rr_loopback, 65001, "unspecified or loopback"),
+        ("route_server_client = true", 65001, "requires eBGP"),
+        (
+            "per_client_best = true",
+            65002,
+            "per_client_best on neighbor",
+        ),
+        (
+            "next_hop_ownership = \"strict_peer\"",
+            65002,
+            "next_hop_ownership",
+        ),
+        ("role = \"peer\"", 65001, "BGP Roles require eBGP"),
+        ("strict_role = true", 65002, "strict_role requires role"),
+    ];
+    for (group_fields, remote_asn, expected) in cases {
+        let err = parse(&dynamic_modes_toml(group_fields, remote_asn)).unwrap_err();
+        let ConfigError::InvalidDynamicNeighbor { reason } = err else {
+            panic!("expected dynamic rejection for {group_fields:?}, got {err}");
+        };
+        assert!(reason.contains("dynamic_neighbors[0] prefix \"10.0.0.0/24\""));
+        assert!(reason.contains("peer_group \"modes\""));
+        assert!(reason.contains(expected), "{group_fields:?}: {reason}");
+    }
+}
+
+#[test]
+fn valid_dynamic_peer_modes_resolve_cluster_and_transport() {
+    // Load-bearing: removing the dynamic cluster scan loses both cluster
+    // assertions; treating wildcard ASN 0 as iBGP or dropping group inheritance
+    // breaks the valid route-server controls and resolved transport tuple.
+    let rr = parse(&dynamic_modes_toml(
+        "route_reflector_client = true\norr_vantage = \"192.0.2.7\"",
+        65001,
+    ))
+    .unwrap();
+    let cluster_id = Some(Ipv4Addr::new(10, 0, 0, 1));
+    assert_eq!(rr.cluster_id(), cluster_id);
+    let rr_resolved = resolve_dynamic_modes(&rr, 65001);
+    assert_eq!(
+        (
+            rr_resolved.transport_config.route_reflector_client,
+            rr_resolved.transport_config.orr_vantage,
+            rr_resolved.transport_config.cluster_id,
+        ),
+        (true, Some("192.0.2.7".parse().unwrap()), cluster_id)
+    );
+
+    let rs_fields = "route_server_client = true\nper_client_best = true\n\
+                     next_hop_ownership = \"strict_peer\"\nrole = \"route_server\"\n\
+                     strict_role = true";
+    for (configured_asn, accepted_asn) in [(65002, 65002), (0, 65003)] {
+        let rs = parse(&dynamic_modes_toml(rs_fields, configured_asn)).unwrap();
+        let resolved = resolve_dynamic_modes(&rs, accepted_asn);
+        assert_eq!(
+            (
+                resolved.transport_config.route_server_client,
+                resolved.transport_config.per_client_best,
+                resolved.transport_config.next_hop_ownership_strict_peer,
+                resolved.transport_config.peer.local_role,
+                resolved.transport_config.peer.strict_role,
+            ),
+            (true, true, true, Some(BgpRole::RouteServer), true)
+        );
+    }
+    assert_eq!(
+        parse(&dynamic_modes_toml("", 0)).unwrap().cluster_id(),
+        None
+    );
+}
+
 #[test]
 fn dynamic_neighbor_parses() {
     let toml = r#"

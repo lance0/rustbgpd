@@ -1325,6 +1325,11 @@ Validation rules:
 - `peer_group` must reference an existing `[peer_groups.<name>]`
 - `prefix` must be valid CIDR with a family-appropriate prefix length
 - static `[[neighbors]]` cannot use `remote_asn = 0`; that sentinel is reserved for `[[dynamic_neighbors]]`
+- inherited RR/ORR settings require a fixed local-AS `remote_asn`; wildcard
+  `0` is external and cannot form an iBGP route-reflector session
+- inherited route-server mode and BGP Roles require eBGP (`0` remains valid);
+  `per_client_best` and `next_hop_ownership` require route-server mode, while
+  `strict_role` requires a role
 - two ranges covering the **identical** effective prefix (same masked network
   and length) are rejected; overlapping ranges of *different* lengths are
   allowed and resolve by longest-prefix-match at accept time
@@ -1848,9 +1853,10 @@ See the [Policy entries](#policy-entries) section below for field details.
 ### Route Reflector (RFC 4456)
 
 rustbgpd can act as a route reflector, relaxing the iBGP full-mesh requirement.
-When `cluster_id` is set and at least one neighbor has `route_reflector_client = true`,
-iBGP-learned routes from clients are reflected to all iBGP peers, while routes
-from non-clients go to clients only.
+An explicit `cluster_id`, or any valid static or dynamic iBGP client with
+`route_reflector_client = true`, enables route-reflector mode. Without an
+explicit cluster ID, rustbgpd uses `router_id`. iBGP-learned routes from clients
+are reflected to all iBGP peers, while routes from non-clients go to clients only.
 
 ```toml
 [global]

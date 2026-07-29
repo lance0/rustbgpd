@@ -43,7 +43,7 @@ impl Config {
         if let Some(ref cid) = self.global.cluster_id {
             return Some(cid.parse().expect("validated in Config::load"));
         }
-        if self.neighbors.iter().any(|n| {
+        let static_rr = self.neighbors.iter().any(|n| {
             n.route_reflector_client.unwrap_or_else(|| {
                 n.peer_group
                     .as_deref()
@@ -51,7 +51,16 @@ impl Config {
                     .and_then(|group| group.route_reflector_client)
                     .unwrap_or(false)
             })
-        }) {
+        });
+        let dynamic_rr = self.dynamic_neighbors.iter().any(|range| {
+            range.remote_asn == self.global.asn
+                && self
+                    .peer_groups
+                    .get(&range.peer_group)
+                    .and_then(|group| group.route_reflector_client)
+                    .unwrap_or(false)
+        });
+        if static_rr || dynamic_rr {
             let router_id: Ipv4Addr = self
                 .global
                 .router_id
