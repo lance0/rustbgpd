@@ -41,6 +41,9 @@ reordering, missing receipts, and dual-case receipts are invalid.
 One complete clean retry may be requested with `--retry`; it reuses the exact
 prebuilt binaries and must contain all 48 cells. Partial, selective, or third
 attempts are invalid.
+Every receipt, including a censor, names its attempt. The verifier inventories
+all `attempt-*` entries, validates every completed earlier attempt, and accepts
+only the exact ordered prefix of the censored current attempt.
 
 Within each cell, pairs are repetitions `(1,2)`, `(3,4)`, `(5,6)`, and `(7,8)`.
 For actor-handler values `a,b`, `pair_noise = abs(a-b) / ((a+b)/2)` and cell

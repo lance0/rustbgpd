@@ -12,6 +12,12 @@ import sys
 SIZES = (10_000, 100_000, 1_000_000)
 CASES = tuple(case for pair in range(1, 9) for case in (f"U{pair}", f"F{pair}"))
 CAPACITY = 8 * 1024**3
+CHECKSUMS = {
+    (10_000, "U"): 11130280336100770277, (10_000, "F"): 7650825114892061189,
+    (100_000, "U"): 14231629525132197650, (100_000, "F"): 8208171470299167599,
+    (1_000_000, "U"): 17532315466326012662,
+    (1_000_000, "F"): 12961212697594295368,
+}
 
 
 class Invalid(ValueError):
@@ -47,7 +53,7 @@ def expected_cells():
     ]
 
 
-def verify_receipt(receipt, expected, manifest):
+def verify_receipt(receipt, expected, manifest, attempt):
     ordinal, size, case, repetition = expected
     require(receipt.get("schema") == 2, f"receipt {ordinal}: schema")
     require(receipt.get("mode") == "timing", f"receipt {ordinal}: timing mode")
@@ -55,6 +61,7 @@ def verify_receipt(receipt, expected, manifest):
     require(receipt.get("routes") == size, f"receipt {ordinal}: routes/order")
     require(receipt.get("case") == case, f"receipt {ordinal}: case/order")
     require(receipt.get("repetition") == repetition, f"receipt {ordinal}: repetition")
+    require(receipt.get("attempt") == attempt, f"receipt {ordinal}: attempt")
     require("queries" not in receipt, f"receipt {ordinal}: dual-case receipt")
     require(receipt.get("binary_sha256") == manifest["timing_binary_sha256"],
             f"receipt {ordinal}: timing binary drift")
@@ -78,6 +85,9 @@ def verify_receipt(receipt, expected, manifest):
     require(query.get("actor_capacity", 0) >= size, f"receipt {ordinal}: actor capacity")
     require(query.get("returned_rows") == expected_rows, f"receipt {ordinal}: returned rows")
     require(query.get("dispatch") == 1, f"receipt {ordinal}: dispatch")
+    require(type(query.get("checksum")) is int
+            and query["checksum"] == CHECKSUMS[(size, case)],
+            f"receipt {ordinal}: semantic checksum")
     return actor
 
 
@@ -167,23 +177,29 @@ def verify(directory):
         for line in lines[1:]:
             fields = line.split("\t")
             require(len(fields) == 10, "host preflight row")
-            phases.setdefault(fields[0], []).append(fields[-1])
+            phases.setdefault(fields[0], []).append(fields)
         require(set(phases) == expected, "host preflight phase drift")
-        require(all(values[-1] == "pass" for values in phases.values()),
-                "host preflight phase did not pass")
+        require(all(float(rows[-1][3]) < float(rows[-1][4])
+                    and rows[-1][5:9] == ["performance", "performance", "0", "none"]
+                    and rows[-1][9] == "pass" for rows in phases.values()),
+                "host preflight pass semantics")
 
     attempts = manifest.get("attempts")
     require(attempts in (1, 2), "campaign permits exactly one attempt and one retry")
-    require(not (directory / "attempt-3").exists(), "third attempt is forbidden")
+    entries = {p.name: p for p in directory.iterdir() if p.name.startswith("attempt")}
+    expected_attempts = {f"attempt-{n}" for n in range(1, attempts + 1)}
+    require(set(entries) == expected_attempts
+            and all(path.is_dir() for path in entries.values()),
+            "attempt filesystem inventory drift")
     expected_phases = {"build"}
     selected_timings = None
     for attempt in range(1, attempts + 1):
         receipt_paths = sorted((directory / f"attempt-{attempt}" / "timing").glob("*.json"))
         censor_path = directory / "censor.json"
-        if censor_path.exists():
+        if censor_path.exists() and load(censor_path).get("attempt") == attempt:
             censor = load(censor_path)
             for path, completed in zip(receipt_paths, expected_cells()):
-                verify_receipt(load(path), completed, manifest)
+                verify_receipt(load(path), completed, manifest, attempt)
             expected_phases.update(
                 f"attempt-{attempt}-timing-{ordinal}"
                 for ordinal in range(1, len(receipt_paths) + 1)
@@ -214,8 +230,9 @@ def verify(directory):
             require(censor.get("source_commit") == manifest["base_commit"],
                     "censor source drift")
             require(censor.get("timeout_seconds") == 120, "censor timeout drift")
+            require(censor.get("attempt") == attempt, "censor attempt drift")
             require(isinstance(censor.get("censor_phase"), str), "missing censor phase")
-            require(attempt == attempts, "retry cannot follow a censored attempt")
+            require(attempt == attempts, "censor must terminate declared attempts")
             require(not (directory / "allocation.json").exists(),
                     "allocation must not run after timeout censor")
             verify_phases(expected_phases)
@@ -224,15 +241,11 @@ def verify(directory):
         require(len(receipt_paths) == 48,
                 f"attempt {attempt} must contain exactly 48 timing receipts")
         timings = {(size, case): [] for size in SIZES for case in ("U", "F")}
-        checksums = {(size, case): set() for size in SIZES for case in ("U", "F")}
         for path, expected in zip(receipt_paths, expected_cells()):
             receipt = load(path)
-            elapsed = verify_receipt(receipt, expected, manifest)
+            elapsed = verify_receipt(receipt, expected, manifest, attempt)
             timings[(expected[1], expected[2])].append(elapsed)
-            checksums[(expected[1], expected[2])].add(receipt["query"]["checksum"])
             expected_phases.add(f"attempt-{attempt}-timing-{expected[0]}")
-        require(all(len(values) == 1 for values in checksums.values()),
-                f"attempt {attempt}: timing checksum drift")
         selected_timings = timings
 
     allocation = load(directory / "allocation.json")
@@ -246,15 +259,23 @@ def verify(directory):
             "allocation source provenance drift")
     require(allocation.get("timeout_seconds") == 120,
             "allocation 120-second censor missing")
+    require(allocation.get("attempt") == attempts, "allocation attempt drift")
     require(isinstance(allocation.get("peak_live_requested_bytes"), int)
             and allocation["peak_live_requested_bytes"] > 0,
             "missing absolute allocator evidence")
     query = allocation.get("query")
     require(isinstance(query, dict), "missing allocation query")
+    actor, service, post = (query.get(name) for name in
+                            ("actor_handler_ns", "service_method_ns", "post_actor_ns"))
+    require(type(actor) is int and actor > 0 and type(service) is int and service > 0
+            and type(post) is int and post >= 0 and service - actor == post,
+            "allocation timing decomposition")
     require(query.get("actor_rows") == 1_000_000, "allocation actor rows")
     require(query.get("actor_capacity", 0) >= 1_000_000, "allocation actor capacity")
     require(query.get("returned_rows") == 1_000_000, "allocation returned rows")
-    require(isinstance(query.get("checksum"), int), "allocation checksum")
+    require(type(query.get("checksum")) is int
+            and query["checksum"] == CHECKSUMS[(1_000_000, "U")],
+            "allocation checksum")
     require(query.get("dispatch") == 1, "allocation dispatch")
     expected_phases.add("allocation")
     verify_phases(expected_phases)

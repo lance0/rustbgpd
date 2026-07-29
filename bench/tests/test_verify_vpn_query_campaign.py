@@ -39,12 +39,13 @@ class VerifyCampaign(unittest.TestCase):
                 "routes": size, "case": case, "repetition": repetition,
                 "binary_sha256": timing_hash,
                 "source_commit": "a" * 40, "timeout_seconds": 120,
+                "attempt": 1,
                 "query": {
                     "actor_handler_ns": actor,
                     "service_method_ns": service, "post_actor_ns": 300_000_000,
                     "actor_rows": size, "actor_capacity": size,
                     "returned_rows": size if case == "U" else size // 16,
-                    "dispatch": 1, "checksum": size + (case == "F"),
+                    "dispatch": 1, "checksum": VERIFY.CHECKSUMS[(size, case)],
                 },
             }
             self.write(f"attempt-1/timing/{ordinal:02d}.json", receipt)
@@ -52,9 +53,13 @@ class VerifyCampaign(unittest.TestCase):
             "schema": 2, "mode": "allocation", "routes": 1_000_000, "case": "U",
             "binary_sha256": allocation_hash, "peak_live_requested_bytes": 1024,
             "source_commit": "a" * 40, "timeout_seconds": 120,
+            "attempt": 1,
             "vmrss_bytes": 999999999999, "vmhwm_bytes": 999999999999,
             "query": {"actor_rows": 1_000_000, "actor_capacity": 1_000_000,
-                      "returned_rows": 1_000_000, "checksum": 7, "dispatch": 1},
+                      "returned_rows": 1_000_000,
+                      "actor_handler_ns": 10, "service_method_ns": 11,
+                      "post_actor_ns": 1,
+                      "checksum": VERIFY.CHECKSUMS[(1_000_000, "U")], "dispatch": 1},
         })
         phases = ["build"] + [f"attempt-1-timing-{i}" for i in range(1, 49)] + [
             "allocation"
@@ -103,6 +108,12 @@ class VerifyCampaign(unittest.TestCase):
             ("allocation.json",
              lambda: self.mutate("allocation.json",
                                  lambda d: d["query"].update(returned_rows=999))),
+            ("allocation.json",
+             lambda: self.mutate("allocation.json",
+                                 lambda d: d["query"].update(checksum=999))),
+            ("allocation.json",
+             lambda: self.mutate("allocation.json",
+                                 lambda d: d["query"].update(post_actor_ns=2))),
         ]
         for index, (_, mutation) in enumerate(mutations):
             with self.subTest(mutation=mutation):
@@ -175,6 +186,11 @@ class VerifyCampaign(unittest.TestCase):
     def test_complete_retry_and_typed_capacity_censor(self):
         shutil.copytree(self.root / "attempt-1", self.root / "attempt-2")
         self.mutate("manifest.json", lambda d: d.update(attempts=2))
+        self.mutate("allocation.json", lambda d: d.update(attempt=2))
+        for path in (self.root / "attempt-2" / "timing").glob("*.json"):
+            value = json.loads(path.read_text())
+            value["attempt"] = 2
+            path.write_text(json.dumps(value))
         with (self.root / "host-preflight.tsv").open("a") as stream:
             for ordinal in range(1, 49):
                 stream.write(
@@ -182,6 +198,17 @@ class VerifyCampaign(unittest.TestCase):
                     "performance\t0\tnone\tpass\n"
                 )
         self.assertEqual(VERIFY.verify(self.root)["classification"], "no_redesign")
+        allocation = json.loads((self.root / "allocation.json").read_text())
+        allocation.update(outcome="capacity_censored", censor_phase="service_query",
+                          ordinal=49, repetition=1)
+        self.write("censor.json", allocation)
+        (self.root / "allocation.json").unlink()
+        self.assertEqual(VERIFY.verify(self.root)["classification"],
+                         "capacity_censored")
+        (self.root / "censor.json").unlink()
+        self.write("allocation.json", {k: v for k, v in allocation.items()
+                                      if k not in ("outcome", "censor_phase", "ordinal",
+                                                   "repetition")})
         (self.root / "attempt-2" / "timing" / "48.json").unlink()
         with self.assertRaises(VERIFY.Invalid):
             VERIFY.verify(self.root)
@@ -190,6 +217,24 @@ class VerifyCampaign(unittest.TestCase):
         (self.root / "attempt-3").mkdir()
         with self.assertRaises(VERIFY.Invalid):
             VERIFY.verify(self.root)
+        (self.root / "attempt-3").rmdir()
+        censor = json.loads(
+            (self.root / "attempt-2" / "timing" / "11.json").read_text())
+        censor.pop("query")
+        censor.update(outcome="capacity_censored", censor_phase="actor_receipt")
+        self.write("censor.json", censor)
+        for ordinal in range(11, 49):
+            (self.root / "attempt-2" / "timing" / f"{ordinal:02d}.json").unlink()
+        (self.root / "allocation.json").unlink()
+        log = self.root / "host-preflight.tsv"
+        log.write_text("\n".join(
+            line for line in log.read_text().splitlines()
+            if not line.startswith("allocation\t")
+            and not (line.startswith("attempt-2-timing-")
+                     and int(line.split("\t")[0].rsplit("-", 1)[1]) > 11)
+        ) + "\n")
+        self.assertEqual(VERIFY.verify(self.root)["classification"],
+                         "capacity_censored")
 
         self.tearDown()
         self.setUp()
@@ -200,6 +245,7 @@ class VerifyCampaign(unittest.TestCase):
             "censor_phase": "service_query", "ordinal": 11, "routes": 10_000,
             "case": "U", "repetition": 6, "timeout_seconds": 120,
             "source_commit": "a" * 40,
+            "attempt": 1,
             "binary_sha256": hashlib.sha256(b"vpn_query_timing").hexdigest(),
         }
         self.write("censor.json", censor)
@@ -225,6 +271,27 @@ class VerifyCampaign(unittest.TestCase):
         self.mutate("manifest.json", lambda d: d.update(source_tree="c" * 40))
         log = self.root / "host-preflight.tsv"
         log.write_text(log.read_text().replace("allocation\t1\t", "unexpected\t1\t"))
+        with self.assertRaises(VERIFY.Invalid):
+            VERIFY.verify(self.root)
+        log.write_text(log.read_text().replace(
+            "unexpected\t1\tnow\t0\t2\tperformance\tperformance\t0\tnone\tpass",
+            "allocation\t1\tnow\t0\t2\tpowersave\tperformance\t1\tvpn_query_timi\tpass"))
+        with self.assertRaises(VERIFY.Invalid):
+            VERIFY.verify(self.root)
+
+    def test_attempt_inventory_rejects_undeclared_and_malformed(self):
+        (self.root / "attempt-2").mkdir()
+        with self.assertRaises(VERIFY.Invalid):
+            VERIFY.verify(self.root)
+        (self.root / "attempt-2").rename(self.root / "attempt-extra")
+        with self.assertRaises(VERIFY.Invalid):
+            VERIFY.verify(self.root)
+
+    def test_all_cell_same_checksum_corruption(self):
+        for path in (self.root / "attempt-1" / "timing").glob("*.json"):
+            value = json.loads(path.read_text())
+            value["query"]["checksum"] = 7
+            path.write_text(json.dumps(value))
         with self.assertRaises(VERIFY.Invalid):
             VERIFY.verify(self.root)
 

@@ -17,10 +17,14 @@ if [[ ${1:-} == --retry ]]; then
     shift
 fi
 [[ $# -eq 1 ]] || {
-    echo "usage: $0 [--smoke] OUTPUT_DIRECTORY" >&2
+    echo "usage: $0 [--smoke] [--retry] OUTPUT_DIRECTORY" >&2
     exit 2
 }
 output=$1
+if ((!smoke)) && [[ -n ${RUSTBGPD_VPN_QUERY_FORCE_CENSOR:-} ]]; then
+    echo "RUSTBGPD_VPN_QUERY_FORCE_CENSOR is forbidden for retained campaigns" >&2
+    exit 2
+fi
 [[ ! -e "$output" ]] || {
     echo "refusing existing output: $output" >&2
     exit 1
@@ -75,15 +79,15 @@ json.dump({"schema": 2, "base_commit": commit, "rustc": rustc,
 PY
 
 decorate() {
-    local raw=$1 output_path=$2 binary_hash=$3 ordinal=$4 repetition=$5 timeout=$6
+    local raw=$1 output_path=$2 binary_hash=$3 ordinal=$4 repetition=$5 timeout=$6 attempt=$7
     python3 - "$raw" "$output_path" "$binary_hash" "$ordinal" "$repetition" \
-        "$timeout" "$(git -C "$root" rev-parse HEAD)" <<'PY'
+        "$timeout" "$(git -C "$root" rev-parse HEAD)" "$attempt" <<'PY'
 import json, sys
-raw, output, binary_hash, ordinal, repetition, timeout, commit = sys.argv[1:]
+raw, output, binary_hash, ordinal, repetition, timeout, commit, attempt = sys.argv[1:]
 doc = json.load(open(raw))
 doc.update(schema=2, binary_sha256=binary_hash, ordinal=int(ordinal),
            repetition=int(repetition), timeout_seconds=int(timeout),
-           source_commit=commit)
+           source_commit=commit, attempt=int(attempt))
 json.dump(doc, open(output, "w"), indent=2)
 PY
 }
@@ -103,13 +107,13 @@ if ((smoke)); then
         raw="$output/$target-raw.json"
         "$output/bin/vpn_query_$target" smoke U "$raw"
         decorate "$raw" "$output/$target-smoke.json" \
-            "$([[ $target == timing ]] && echo "$timing_hash" || echo "$allocation_hash")" 1 1 10
+            "$([[ $target == timing ]] && echo "$timing_hash" || echo "$allocation_hash")" \
+            1 1 10 0
         rm "$raw"
     done
     echo "VPN query 256-route smoke passed"
     exit
 fi
-
 for attempt in $(seq 1 "$attempts"); do
     mkdir -p "$output/attempt-$attempt/timing"
     ordinal=0
@@ -127,16 +131,22 @@ for attempt in $(seq 1 "$attempts"); do
                 set -e
                 if ((rc == 75)); then
                     decorate "$raw" "$output/censor.json" "$timing_hash" \
-                        "$ordinal" "$repetition" 120
+                        "$ordinal" "$repetition" 120 "$attempt"
                     rm "$raw"
+                    python3 - "$output/manifest.json" "$attempt" <<'PY'
+import json, sys
+p=sys.argv[1]; d=json.load(open(p)); d["attempts"]=int(sys.argv[2]); json.dump(d,open(p,"w"),indent=2)
+PY
+                    check_provenance
                     python3 "$root/bench/verify-vpn-query-campaign.py" "$output" \
                         --output "$output/classification.json"
+                    check_provenance
                     exit
                 elif ((rc != 0)); then
                     exit "$rc"
                 fi
                 decorate "$raw" "$output/attempt-$attempt/timing/$(printf '%02d' "$ordinal").json" \
-                    "$timing_hash" "$ordinal" "$repetition" 120
+                    "$timing_hash" "$ordinal" "$repetition" 120 "$attempt"
                 rm "$raw"
             done
         done
@@ -150,16 +160,18 @@ rc=$?
 set -e
 if ((rc == 75)); then
     decorate "$output/allocation-raw.json" "$output/censor.json" \
-        "$allocation_hash" 49 1 120
+        "$allocation_hash" 49 1 120 "$attempts"
     rm "$output/allocation-raw.json"
+    check_provenance
     python3 "$root/bench/verify-vpn-query-campaign.py" "$output" \
         --output "$output/classification.json"
+    check_provenance
     exit
 elif ((rc != 0)); then
     exit "$rc"
 fi
 decorate "$output/allocation-raw.json" "$output/allocation.json" \
-    "$allocation_hash" 49 1 120
+    "$allocation_hash" 49 1 120 "$attempts"
 rm "$output/allocation-raw.json"
 python3 "$root/bench/verify-vpn-query-campaign.py" "$output" \
     --output "$output/classification.json"
