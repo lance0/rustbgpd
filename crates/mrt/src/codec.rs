@@ -212,8 +212,7 @@ struct EncodeBuffer<'a> {
     bytes: &'a mut Vec<u8>,
     budget: Option<&'a WarmSnapshotBudget>,
     accounted_prefix: usize,
-    #[cfg(any(test, feature = "snapshot-allocation-diagnostics"))]
-    top_level: bool,
+    snapshot_output: bool,
     #[cfg(any(test, feature = "snapshot-allocation-diagnostics"))]
     snapshot_allocation_probe: Option<&'a Cell<u64>>,
 }
@@ -224,8 +223,18 @@ impl<'a> EncodeBuffer<'a> {
             bytes,
             budget,
             accounted_prefix: 0,
+            snapshot_output: false,
             #[cfg(any(test, feature = "snapshot-allocation-diagnostics"))]
-            top_level: true,
+            snapshot_allocation_probe: None,
+        }
+    }
+
+    fn snapshot_output(bytes: &'a mut Vec<u8>, budget: Option<&'a WarmSnapshotBudget>) -> Self {
+        Self {
+            bytes,
+            budget,
+            accounted_prefix: 0,
+            snapshot_output: true,
             #[cfg(any(test, feature = "snapshot-allocation-diagnostics"))]
             snapshot_allocation_probe: None,
         }
@@ -240,8 +249,7 @@ impl<'a> EncodeBuffer<'a> {
             bytes,
             budget,
             accounted_prefix,
-            #[cfg(any(test, feature = "snapshot-allocation-diagnostics"))]
-            top_level: false,
+            snapshot_output: false,
             #[cfg(any(test, feature = "snapshot-allocation-diagnostics"))]
             snapshot_allocation_probe: None,
         }
@@ -276,7 +284,7 @@ impl<'a> EncodeBuffer<'a> {
         }
 
         #[cfg(any(test, feature = "snapshot-allocation-diagnostics"))]
-        if self.top_level
+        if self.snapshot_output
             && self.budget.is_none()
             && let Some(probe) = self.snapshot_allocation_probe
         {
@@ -290,6 +298,9 @@ impl<'a> EncodeBuffer<'a> {
                     .max_snapshot_bytes
                     .saturating_sub(self.accounted_prefix),
             )
+        } else if self.snapshot_output {
+            let baseline = self.bytes.capacity().max(4096);
+            local_attempted.max(baseline.saturating_add(baseline / 4))
         } else {
             local_attempted
         };
@@ -1342,7 +1353,7 @@ fn encode_snapshot_inner<const FIX_ORIGINATED_TIME: bool>(
     snapshot_allocation_probe: Option<&Cell<u64>>,
 ) -> Result<Vec<u8>, EncodeError> {
     let mut buf = Vec::new();
-    let mut output = EncodeBuffer::new(&mut buf, budget);
+    let mut output = EncodeBuffer::snapshot_output(&mut buf, budget);
     #[cfg(any(test, feature = "snapshot-allocation-diagnostics"))]
     if let Some(probe) = snapshot_allocation_probe {
         output = output.with_snapshot_allocation_probe(probe);
@@ -1677,25 +1688,37 @@ mod tests {
         }
     }
 
-    /// Load-bearing proof: removing the capacity-miss increment makes the
-    /// ordinary assertion fail; counting child or bounded growth makes the
-    /// corresponding isolation assertion fail.
+    /// Load-bearing proof: exact or doubling top-level growth violates the
+    /// count or slack bounds; removing the miss increment, changing child
+    /// growth, or counting child/bounded growth violates an assertion.
     #[test]
     fn snapshot_allocation_probe_counts_only_unbounded_top_level_growth() {
         let probe = Cell::new(0_u64);
 
         let mut ordinary_bytes = Vec::with_capacity(1);
-        let mut ordinary =
-            EncodeBuffer::new(&mut ordinary_bytes, None).with_snapshot_allocation_probe(&probe);
+        let mut ordinary = EncodeBuffer::snapshot_output(&mut ordinary_bytes, None)
+            .with_snapshot_allocation_probe(&probe);
         ordinary.push(1).unwrap();
         assert_eq!(probe.get(), 0, "writes within capacity are not growth");
         ordinary.push(2).unwrap();
         assert_eq!(probe.get(), 1, "top-level ordinary growth is counted");
 
+        let bounded_growth_probe = Cell::new(0_u64);
+        let mut grown_bytes = Vec::new();
+        let mut grown = EncodeBuffer::snapshot_output(&mut grown_bytes, None)
+            .with_snapshot_allocation_probe(&bounded_growth_probe);
+        for _ in 0..600 {
+            grown.extend_from_slice(&[0; 1024]).unwrap();
+        }
+        assert!(bounded_growth_probe.get() <= 64);
+        assert!(grown.bytes.capacity() - grown.len() <= grown.len() / 4);
+
         let mut child_bytes = Vec::new();
         let mut child =
             EncodeBuffer::child(&mut child_bytes, None, 0).with_snapshot_allocation_probe(&probe);
-        child.push(1).unwrap();
+        child.extend_from_slice(&[1; 1024]).unwrap();
+        child.extend_from_slice(&[1; 1024]).unwrap();
+        assert_eq!(child.bytes.capacity(), child.len());
         assert_eq!(probe.get(), 1, "child-buffer growth is excluded");
 
         let budget = WarmSnapshotBudget::new(
@@ -1704,7 +1727,7 @@ mod tests {
             128,
         );
         let mut bounded_bytes = Vec::new();
-        let mut bounded = EncodeBuffer::new(&mut bounded_bytes, Some(&budget))
+        let mut bounded = EncodeBuffer::snapshot_output(&mut bounded_bytes, Some(&budget))
             .with_snapshot_allocation_probe(&probe);
         bounded.push(1).unwrap();
         assert_eq!(probe.get(), 1, "bounded top-level growth is excluded");
@@ -1935,6 +1958,8 @@ mod tests {
             &peers,
         )
         .unwrap();
+        // Load-bearing: standalone public encoders retain exact growth.
+        assert_eq!(buf.capacity(), buf.len());
         // Should have 12-byte header + payload
         assert!(buf.len() > 12);
         // MRT type = 13, subtype = 1
@@ -1970,6 +1995,7 @@ mod tests {
         });
         let mut buf = Vec::new();
         encode_rib_entries(&mut buf, 1_700_000_000, 0, &prefix, &[entry]).unwrap();
+        assert_eq!(buf.capacity(), buf.len());
         assert!(buf.len() > 12);
         // subtype = 2 (RIB_IPV4_UNICAST)
         assert_eq!(u16::from_be_bytes([buf[6], buf[7]]), 2);
