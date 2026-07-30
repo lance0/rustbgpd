@@ -53,11 +53,24 @@ bench/scale/rrtransport/run-receipt.sh /absolute/output/outside/the/repository
 The runner requires 4,096 file descriptors, 16 GiB available RAM, performance
 CPU governors, a quiet host, no competing BGP daemon, and a clean source tree.
 It owns a host lock, enforces a 2 GiB whole-process RSS ceiling, a 300-second
-per-run guard, and a 20-minute campaign guard. Each run retains phase and
-per-peer evidence, phase-local VmRSS/VmHWM, an independent sampler maximum,
-logs, source/binary provenance, verifier output, and checksums. Results are not
-comparable to the historical unavailable scratch harness and must not be
-published as an A/B.
+per-run guard, and a 20-minute campaign guard.
+
+Before starting the supervised target, the runner executes an explicitly
+untimed grouped-commit correctness leg through the production RIB seam and
+transport-session encoder. Its schema-2 receipt separates the one-dispatch
+65000:100 seed from a fast wire-visible RPOL transition to 65000:200. The
+transition records its native shared plan, exact probes, route-shell
+materialization, and zero authoritative per-peer fallback. Concrete transport
+snapshots plus common group-token and announce-vector identities prove the
+shared envelope path. The full-shape leg runs once and its immutable receipt is
+copied into each attempt.
+
+Each measured target records direct-PID `VmRSS`/`VmHWM` and jemalloc allocated,
+active, resident, and mapped bytes at established, staged, and wire
+checkpoints. The runner's process-tree target sampler remains separately named
+and reported. Receipts also retain per-peer evidence, logs, source/binary
+provenance, verifier output, and checksums. Results are not comparable to the
+historical unavailable scratch harness and must not be published as an A/B.
 
 CI never runs the scale shape. It runs the original smoke, a 4×100 real-TCP
 fixture through the same scale collector/verifier/RSS seams, and destructive

@@ -2,9 +2,58 @@ use std::fs;
 
 use anyhow::{ensure, Context, Result};
 use rustbgpd_fsm::SessionState;
+use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_transport::PeerHandle;
 use rustbgpd_wire::{Message, UpdateMessage};
 use tokio::sync::{mpsc, oneshot};
+
+#[derive(Clone, Copy)]
+pub struct Checkpoint {
+    pub direct_pid_vmrss_kib: u64,
+    pub direct_pid_vmhwm_kib: u64,
+    pub jemalloc_allocated_bytes: u64,
+    pub jemalloc_active_bytes: u64,
+    pub jemalloc_resident_bytes: u64,
+    pub jemalloc_mapped_bytes: u64,
+}
+
+pub fn checkpoint(metrics: &BgpMetrics) -> Result<Checkpoint> {
+    let gathered = metrics.registry().gather();
+    let integer_gauge = |name: &str| -> Result<u64> {
+        let family = gathered
+            .iter()
+            .find(|family| family.name() == name)
+            .with_context(|| format!("missing allocator metric {name}"))?;
+        ensure!(
+            family.metric.len() == 1,
+            "allocator metric {name} has unexpected cardinality"
+        );
+        let value = family.metric[0].get_gauge().value();
+        ensure!(
+            value.is_finite() && value > 0.0 && value.fract() == 0.0,
+            "allocator metric {name} is not a positive integer"
+        );
+        value
+            .to_string()
+            .parse()
+            .with_context(|| format!("allocator metric {name} is outside u64"))
+    };
+    let allocated = integer_gauge("jemalloc_allocated_bytes")?;
+    let active = integer_gauge("jemalloc_active_bytes")?;
+    ensure!(
+        allocated <= active,
+        "jemalloc allocated bytes exceed active bytes"
+    );
+    let (vmrss, vmhwm) = rss_kib()?;
+    Ok(Checkpoint {
+        direct_pid_vmrss_kib: vmrss,
+        direct_pid_vmhwm_kib: vmhwm,
+        jemalloc_allocated_bytes: allocated,
+        jemalloc_active_bytes: active,
+        jemalloc_resident_bytes: integer_gauge("jemalloc_resident_bytes")?,
+        jemalloc_mapped_bytes: integer_gauge("jemalloc_mapped_bytes")?,
+    })
+}
 
 pub fn runtime(workers: usize) -> Result<tokio::runtime::Runtime> {
     Ok(tokio::runtime::Builder::new_multi_thread()

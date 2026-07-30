@@ -1,6 +1,7 @@
 use super::{
     rr1000_support::{
-        assert_established, is_eor, rss_kib, send_before, shutdown, start_after_keepalives,
+        assert_established, checkpoint, is_eor, send_before, shutdown, start_after_keepalives,
+        Checkpoint,
     },
     transport_config,
 };
@@ -35,6 +36,10 @@ const SHAPE_DIGEST: &str = "109e38772e3bd819";
 const BITMAP_DIGEST: &str = "7c50a897bc4a4e51";
 const TINY_SHAPE: &str =
     "rrtiny-v1:peers=4;prefixes=100;sources=4;workers=12;afi=ipv4-unicast;role=ibgp-rr";
+
+#[global_allocator]
+static GLOBAL_ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 #[derive(Clone, Copy)]
 struct Shape {
     peers: usize,
@@ -149,6 +154,21 @@ fn route(prefix: Ipv4Prefix, peer: Ipv4Addr) -> Route {
         aspa_context: AspaValidationContext::default(),
     }
 }
+
+fn checkpoint_json(name: &str, value: Checkpoint) -> String {
+    format!(
+        "\"{name}\":{{\"direct_pid_vmrss_kib\":{},\"direct_pid_vmhwm_kib\":{},\
+         \"jemalloc_allocated_bytes\":{},\"jemalloc_active_bytes\":{},\
+         \"jemalloc_resident_bytes\":{},\"jemalloc_mapped_bytes\":{}}}",
+        value.direct_pid_vmrss_kib,
+        value.direct_pid_vmhwm_kib,
+        value.jemalloc_allocated_bytes,
+        value.jemalloc_active_bytes,
+        value.jemalloc_resident_bytes,
+        value.jemalloc_mapped_bytes,
+    )
+}
+
 async fn collect(
     peer: IpAddr,
     mut rx: mpsc::Receiver<Message>,
@@ -310,7 +330,7 @@ pub async fn run(output: &str, tiny: bool) -> Result<()> {
         stubs.push(tokio::time::timeout_at(run_deadline, task).await???);
     }
     assert_established(&sessions, run_deadline).await?;
-    let established_rss = rss_kib()?;
+    let established_resources = checkpoint(&metrics)?;
     let peers = addresses
         .iter()
         .map(|address| address.ip())
@@ -388,7 +408,7 @@ pub async fn run(output: &str, tiny: bool) -> Result<()> {
         tokio::time::sleep(Duration::from_millis(10)).await;
     };
     let staged_ms = t0.elapsed().as_millis();
-    let staged_rss = rss_kib()?;
+    let staged_resources = checkpoint(&metrics)?;
     let mut rows = Vec::with_capacity(shape.peers);
     for collector in collectors {
         rows.push(tokio::time::timeout_at(run_deadline, collector).await???);
@@ -400,7 +420,7 @@ pub async fn run(output: &str, tiny: bool) -> Result<()> {
                 .all(|row| format!("{:016x}", row.bitmap.digest()) == shape.bitmap_digest)
     );
     let wire_ms = rows.iter().map(|row| row.wire_ms).max().unwrap_or_default();
-    let wire_rss = rss_kib()?;
+    let wire_resources = checkpoint(&metrics)?;
     assert_established(&sessions, run_deadline).await?;
     let mut file = BufWriter::new(File::create(output.join("per-peer.tsv"))?);
     writeln!(file, "peer\tstaged\tnlri\tmessages\twithdrawals\tduplicates\toutside\tdecode_failures\tcoverage\tbitmap_digest\tinitial_eor\twire_ms")?;
@@ -422,9 +442,11 @@ pub async fn run(output: &str, tiny: bool) -> Result<()> {
         )?;
     }
     fs::write(output.join("phase.json"), format!(
-        "{{\"schema\":1,\"shape\":\"{}\",\"shape_digest\":\"{}\",\"wire_completion\":\"first_exact_bitmap\",\"sessions\":{},\"established_before\":{},\"established_after\":{},\"prefixes\":{},\"sources\":{SOURCES},\"workers\":{WORKERS},\"groups\":1,\"initial_eors\":{},\"injection_ms\":{injection_ms},\"staged_ms\":{staged_ms},\"wire_ms\":{wire_ms},\"established_rss_kib\":{},\"established_vmhwm_kib\":{},\"staged_rss_kib\":{},\"staged_vmhwm_kib\":{},\"wire_rss_kib\":{},\"wire_vmhwm_kib\":{}}}\n",
+        "{{\"schema\":2,\"shape\":\"{}\",\"shape_digest\":\"{}\",\"wire_completion\":\"first_exact_bitmap\",\"sessions\":{},\"established_before\":{},\"established_after\":{},\"prefixes\":{},\"sources\":{SOURCES},\"workers\":{WORKERS},\"groups\":1,\"initial_eors\":{},\"injection_ms\":{injection_ms},\"staged_ms\":{staged_ms},\"wire_ms\":{wire_ms},\"resource_observer_schema\":1,\"resource_observer\":{{{},{},{}}}}}\n",
         shape.name, shape.digest, shape.peers, shape.peers, shape.peers, shape.prefixes, shape.peers,
-        established_rss.0, established_rss.1, staged_rss.0, staged_rss.1, wire_rss.0, wire_rss.1))?;
+        checkpoint_json("established", established_resources),
+        checkpoint_json("staged", staged_resources),
+        checkpoint_json("wire", wire_resources)))?;
     shutdown(sessions, run_deadline).await?;
     drop(rib_tx);
     drop(query_tx);
@@ -434,13 +456,169 @@ pub async fn run(output: &str, tiny: bool) -> Result<()> {
 }
 
 #[cfg(test)]
-#[test]
-fn bitmap_coverage_counts_only_unique_in_range_prefixes() {
-    let mut bitmap = Bitmap::new(2);
-    bitmap.observe(value(0));
-    assert_eq!(bitmap.coverage(), 1);
-    bitmap.observe(value(0));
-    assert_eq!((bitmap.coverage(), bitmap.duplicates), (1, 1));
-    bitmap.observe(Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24));
-    assert_eq!((bitmap.coverage(), bitmap.outside), (1, 1));
+mod tests {
+    use super::*;
+    use rustbgpd_policy::{rpol::RpolFile, sets::SetStore, NamedPolicy, PolicyChain};
+    use rustbgpd_transport::{fanout_bench_export_encoder, fanout_bench_export_snapshot_evidence};
+
+    fn community_chain(value: u16) -> PolicyChain {
+        let source = format!("policy p {{ term t {{ add community 65000:{value}; accept }} }}");
+        let file = RpolFile::parse(&source).unwrap();
+        let compiled = file.compile_policy("p", &[], &mut SetStore::new()).unwrap();
+        PolicyChain::from_named(vec![NamedPolicy::from_rpol("p".into(), Arc::new(compiled))])
+    }
+
+    fn assert_exact_communities(routes: &[Route], expected: u32) {
+        for route in routes {
+            let mut communities = route.attributes.iter().filter_map(|attribute| {
+                if let PathAttribute::Communities(values) = attribute {
+                    Some(values)
+                } else {
+                    None
+                }
+            });
+            assert_eq!(communities.next().unwrap().as_slice(), [expected]);
+            assert!(communities.next().is_none());
+        }
+    }
+
+    #[test]
+    fn bitmap_coverage_counts_only_unique_in_range_prefixes() {
+        let mut bitmap = Bitmap::new(2);
+        bitmap.observe(value(0));
+        assert_eq!(bitmap.coverage(), 1);
+        bitmap.observe(value(0));
+        assert_eq!((bitmap.coverage(), bitmap.duplicates), (1, 1));
+        bitmap.observe(Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24));
+        assert_eq!((bitmap.coverage(), bitmap.outside), (1, 1));
+    }
+
+    #[test]
+    fn grouped_commit_receipt_fixture() {
+        let output = std::env::var_os("RRTRANSPORT_GROUPED_COMMIT_OUTPUT");
+        let peers = std::env::var("RRTRANSPORT_GROUPED_COMMIT_PEERS")
+            .map_or(Ok(4), |value| value.parse())
+            .unwrap();
+        let prefixes = std::env::var("RRTRANSPORT_GROUPED_COMMIT_PREFIXES")
+            .map_or(Ok(100), |value| value.parse())
+            .unwrap();
+        let (_rib_tx, rib_rx) = mpsc::channel(1);
+        let (_query_tx, query_rx) = mpsc::channel(1);
+        let mut manager = RibManager::new(
+            rib_rx,
+            query_rx,
+            None,
+            Some(Ipv4Addr::new(127, 255, 0, 1)),
+            BgpMetrics::new(),
+        );
+        let old = community_chain(100);
+        let mut receivers =
+            manager.bench_register_peers(peers, Some(&old), true, 2, fanout_bench_export_encoder);
+        manager.bench_reset_adj_rib_out_fanout_receipt();
+        manager.bench_seed_loc_rib(
+            (0..prefixes)
+                .map(|index| route(value(index), source(0)))
+                .collect(),
+        );
+        let mut seed_inventory = None;
+        for receiver in &mut receivers {
+            let seeded = receiver.try_recv().unwrap();
+            assert_eq!(seeded.announce.len(), prefixes);
+            assert!(seeded.shared_group_encode.is_none());
+            if let Some(first) = &seed_inventory {
+                assert!(Arc::ptr_eq(first, &seeded.announce));
+            } else {
+                seed_inventory = Some(Arc::clone(&seeded.announce));
+            }
+            assert!(receiver.try_recv().is_err());
+        }
+        let seed_receipt = manager.bench_adj_rib_out_fanout_receipt();
+        let seed_inventory = seed_inventory.unwrap();
+        assert_exact_communities(&seed_inventory, (65_000 << 16) | 100);
+        manager.bench_reset_adj_rib_out_fanout_receipt();
+        let fast_path = manager.bench_replace_export_policy_cohort(peers, &community_chain(200));
+        assert!(fast_path);
+        let mut shared_encode = None;
+        let mut shared_announce = None;
+        for receiver in &mut receivers {
+            let update = receiver.try_recv().unwrap();
+            assert_eq!(update.announce.len(), prefixes);
+            assert_ne!(update.announce[0].attributes, seed_inventory[0].attributes);
+            let evidence = fanout_bench_export_snapshot_evidence(
+                update.exact_export_snapshot.as_deref().unwrap(),
+            )
+            .unwrap();
+            assert!(
+                evidence.owner_id != 0
+                    && evidence.generation == 0
+                    && evidence.max_message_len == usize::from(rustbgpd_wire::MAX_MESSAGE_LEN)
+                    && !evidence.add_path_ipv4_unicast
+            );
+            let encode = update.shared_group_encode.as_ref().unwrap();
+            let announce = &update.announce;
+            if let (Some(first_encode), Some(first_announce)) = (&shared_encode, &shared_announce) {
+                assert!(Arc::ptr_eq(first_encode, encode) && Arc::ptr_eq(first_announce, announce));
+            } else {
+                shared_encode = Some(Arc::clone(encode));
+                shared_announce = Some(Arc::clone(announce));
+            }
+            assert!(receiver.try_recv().is_err());
+        }
+        assert_exact_communities(shared_announce.as_deref().unwrap(), (65_000 << 16) | 200);
+        let transition_receipt = manager.bench_adj_rib_out_fanout_receipt();
+        let policy_receipt = manager.bench_policy_transition_receipt();
+        assert_eq!(seed_receipt.routes_received_dispatches, 1);
+        assert_eq!(seed_receipt.routes_received_withdrawals, 0);
+        assert_eq!(transition_receipt.update_groups, 1);
+        assert_eq!(transition_receipt.grouped_peers, peers);
+        assert_eq!(transition_receipt.ungrouped_peers, 0);
+        assert_eq!(transition_receipt.dirty_peers, 0);
+        assert_eq!(transition_receipt.grouped_unicast_routes, prefixes);
+        assert_eq!(transition_receipt.private_unicast_routes, 0);
+        assert_eq!(transition_receipt.routes_received_dispatches, 0);
+        assert_eq!(transition_receipt.routes_received_withdrawals, 0);
+        assert_eq!(policy_receipt.plan_builds, 1);
+        assert_eq!(policy_receipt.full_exact_probes, prefixes);
+        assert_eq!(policy_receipt.route_shell_materializations, prefixes);
+        assert_eq!(policy_receipt.authoritative_peer_applies, 0);
+        if let Some(output) = output {
+            fs::write(
+                output,
+                format!(
+                    "{{\"schema\":2,\"timing\":\"test_profile_untimed_rpol_community_transition\",\
+                     \"fixture_peers\":{peers},\"fixture_prefixes\":{prefixes},\
+                     \"seed\":{{\"routes_received_dispatches\":1,\"routes_received_withdrawals\":0,\
+                     \"envelopes\":{peers},\"routes_per_envelope\":{prefixes},\
+                     \"shared_group_encode\":false,\"community\":\"65000:100\"}},\
+                     \"transition\":{{\"fast_path\":{fast_path},\"routes_received_dispatches\":0,\
+                     \"routes_received_withdrawals\":0,\
+                     \"probe_accounting\":\"policy_transition_receipt\",\
+                     \"plan_builds\":{},\"full_exact_probes\":{},\
+                     \"route_shell_materializations\":{},\"authoritative_peer_applies\":{},\
+                     \"envelopes\":{peers},\"routes_per_envelope\":{prefixes},\
+                     \"shared_encode_proof\":\"collected\",\
+                     \"snapshot_classification\":\"concrete_transport_session\",\
+                     \"snapshot_owner_nonzero\":true,\"snapshot_generation\":0,\
+                     \"snapshot_max_message_len\":4096,\"snapshot_add_path\":false,\
+                     \"shared_group_encode_classification\":\"one_arc_all_members\",\
+                     \"shared_announce_classification\":\"one_arc_all_members\",\
+                     \"shared_route_count\":{prefixes},\"community\":\"65000:200\",\
+                     \"update_groups\":{},\"grouped_peers\":{},\"ungrouped_peers\":{},\
+                     \"dirty_peers\":{},\"grouped_unicast_routes\":{},\
+                     \"private_unicast_routes\":{}}}}}\n",
+                    policy_receipt.plan_builds,
+                    policy_receipt.full_exact_probes,
+                    policy_receipt.route_shell_materializations,
+                    policy_receipt.authoritative_peer_applies,
+                    transition_receipt.update_groups,
+                    transition_receipt.grouped_peers,
+                    transition_receipt.ungrouped_peers,
+                    transition_receipt.dirty_peers,
+                    transition_receipt.grouped_unicast_routes,
+                    transition_receipt.private_unicast_routes,
+                ),
+            )
+            .unwrap();
+        }
+    }
 }
