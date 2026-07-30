@@ -21,7 +21,7 @@ use crate::connection::connect;
 use crate::error::CliError;
 use crate::output::parse_family;
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
-use clap_complete::Shell;
+use clap_complete::{Generator, Shell};
 use std::path::PathBuf;
 
 const BINARY_NAME: &str = "rbgp";
@@ -1885,8 +1885,15 @@ fn parse_cli(binary_name: &'static str) -> Cli {
     Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit())
 }
 
-fn generate_completions(shell: Shell, binary_name: &'static str, output: &mut dyn std::io::Write) {
-    clap_complete::generate(shell, &mut cli_command(binary_name), binary_name, output);
+fn generate_completions(
+    shell: Shell,
+    binary_name: &'static str,
+    output: &mut dyn std::io::Write,
+) -> std::io::Result<()> {
+    let mut command = cli_command(binary_name);
+    command.build();
+    shell.try_generate(&command, output)?;
+    output.flush()
 }
 
 fn validate_neighbor_compare_action(command: &Command) -> Result<(), CliError> {
@@ -2000,7 +2007,7 @@ fn flush_stdout_result<W: std::io::Write + ?Sized>(
 async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
     // Shell completions don't need a gRPC connection.
     if let Command::Completions { shell } = cli.command {
-        generate_completions(shell, binary_name, &mut std::io::stdout());
+        generate_completions(shell, binary_name, &mut std::io::stdout()).map_err(CliError::Io)?;
         return Ok(());
     }
 
@@ -3260,6 +3267,18 @@ mod tests {
     }
 
     #[test]
+    fn completions_propagate_flush_failure() {
+        assert!(
+            generate_completions(
+                Shell::Bash,
+                BINARY_NAME,
+                &mut FlushWriter(Some(std::io::ErrorKind::PermissionDenied))
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn flush_preserves_config_and_doctor_outcomes() {
         for code in [0, 2] {
             assert_eq!(
@@ -3524,7 +3543,7 @@ mod tests {
     #[test]
     fn test_rbgp_completion_uses_short_name() {
         let mut output = Vec::new();
-        generate_completions(Shell::Bash, BINARY_NAME, &mut output);
+        generate_completions(Shell::Bash, BINARY_NAME, &mut output).unwrap();
         let completion = String::from_utf8(output).unwrap();
 
         assert!(completion.contains("_rbgp()"));
@@ -3537,7 +3556,7 @@ mod tests {
         // These three are what the release tarball ships.
         for shell in [Shell::Bash, Shell::Zsh, Shell::Fish] {
             let mut output = Vec::new();
-            generate_completions(shell, BINARY_NAME, &mut output);
+            generate_completions(shell, BINARY_NAME, &mut output).unwrap();
             assert!(!output.is_empty(), "{shell} completions are empty");
         }
     }
@@ -3551,7 +3570,7 @@ mod tests {
             (Shell::Fish, "examples/completions/rbgp.fish"),
         ] {
             let mut generated = Vec::new();
-            generate_completions(shell, BINARY_NAME, &mut generated);
+            generate_completions(shell, BINARY_NAME, &mut generated).unwrap();
             let checked_in = std::fs::read(repository.join(relative_path))
                 .unwrap_or_else(|error| panic!("failed to read {relative_path}: {error}"));
             assert!(
@@ -3567,7 +3586,7 @@ mod tests {
         // least one generated release completion and makes this fence red.
         for shell in [Shell::Bash, Shell::Zsh, Shell::Fish] {
             let mut generated = Vec::new();
-            generate_completions(shell, BINARY_NAME, &mut generated);
+            generate_completions(shell, BINARY_NAME, &mut generated).unwrap();
             let generated = String::from_utf8(generated).unwrap();
             for flag in [
                 "--no-route-server-client",
