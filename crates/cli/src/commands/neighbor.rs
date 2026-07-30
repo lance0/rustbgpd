@@ -1,3 +1,5 @@
+use std::io::Write;
+
 use crate::connection::Connection;
 use crate::error::CliError;
 use crate::output::{
@@ -116,10 +118,28 @@ pub async fn list(connection: Connection, json: bool, wide: bool) -> Result<(), 
         // `--wide` is display-only: JSON is unaffected by it and may omit
         // optional false healthy-state fields.
         NeighborListView::Json(out) => output::print_json_pretty(&out)?,
-        NeighborListView::Empty(message) => println!("{message}"),
-        NeighborListView::Table(neighbors) => output::print_neighbor_table(&neighbors, wide),
+        human => {
+            let stdout = std::io::stdout();
+            write_human_neighbor_list(&mut stdout.lock(), human, wide)?;
+        }
     }
     Ok(())
+}
+
+fn write_human_neighbor_list<W: Write + ?Sized>(
+    writer: &mut W,
+    view: NeighborListView,
+    wide: bool,
+) -> Result<(), CliError> {
+    match view {
+        NeighborListView::Empty(message) => {
+            output::write_bytes(writer, format!("{message}\n").as_bytes())
+        }
+        NeighborListView::Table(neighbors) => {
+            output::write_neighbor_table(writer, &neighbors, wide)
+        }
+        NeighborListView::Json(_) => unreachable!("JSON is emitted before the human writer"),
+    }
 }
 
 /// Friendly empty state: what happened, plus the one command that
@@ -1352,6 +1372,63 @@ mod tests {
     use super::*;
     use crate::connection::connect;
     use crate::test_support::spawn_mock_server;
+
+    #[derive(Default)]
+    struct TestWriter {
+        bytes: Vec<u8>,
+        flushes: usize,
+        fail_write: bool,
+        fail_flush: bool,
+    }
+
+    impl Write for TestWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if self.fail_write {
+                return Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe));
+            }
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.flushes += 1;
+            if self.fail_flush {
+                return Err(std::io::Error::other("flush failed"));
+            }
+            Ok(())
+        }
+    }
+
+    fn human_views() -> [NeighborListView; 2] {
+        [
+            NeighborListView::Empty("empty".to_string()),
+            NeighborListView::Table(Vec::new()),
+        ]
+    }
+
+    #[test]
+    fn human_neighbor_list_propagates_writes_and_flushes_once() {
+        for (fail_write, fail_flush) in [(true, false), (false, true)] {
+            for view in human_views() {
+                let mut writer = TestWriter {
+                    fail_write,
+                    fail_flush,
+                    ..Default::default()
+                };
+                let error = write_human_neighbor_list(&mut writer, view, false).unwrap_err();
+                assert!(matches!(error, CliError::Io(_)));
+            }
+        }
+
+        for (index, view) in human_views().into_iter().enumerate() {
+            let mut writer = TestWriter::default();
+            write_human_neighbor_list(&mut writer, view, false).unwrap();
+            assert_eq!(writer.flushes, 1);
+            if index == 0 {
+                assert_eq!(writer.bytes, b"empty\n");
+            }
+        }
+    }
 
     #[test]
     fn bare_ip_rpc_address_strips_only_one_valid_link_local_zone() {
