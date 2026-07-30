@@ -56,6 +56,20 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   leaves effective prerequisite validation to the server, and fails old-server
   creation once with an upgrade diagnostic rather than downgrading.
 
+- The shipped Grafana dashboard exposes directional RFC 8212 missing-policy
+  state and per-peer outbound-prefix capacity and blocking. Three five-minute
+  alerts warn on missing import or export policy and sustained blocking.
+
+- `rbgp top` detail now distinguishes configured and negotiated hold time and
+  families; shows peer/update-group, route-server/reflector, slow-peer,
+  directional RFC 8212, and per-family outbound capacity state; and provides
+  bounded scrolling.
+
+### Changed
+
+- `ListNeighbors` now returns neighbors ordered by typed IP address, then by
+  configured interface, stabilizing human, JSON, and support-bundle inventories.
+
 ### Fixed
 
 - CLI policy formatting, config diff/plan, and doctor now fail when their
@@ -165,6 +179,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `rbgp top` now distinguishes unavailable optional global/RPKI telemetry from
   a stale retained VRP count without reporting a core disconnect, and clears a
   previous count after a successful metrics scrape with no RPKI family.
+
+- `rbgp doctor` now treats an active max-prefix restart countdown, including
+  zero milliseconds, as an intentional warning and fails when an outbound
+  prefix limit actively withholds a family.
 
 ## [0.61.0] — 2026-07-27
 
