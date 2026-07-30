@@ -244,6 +244,9 @@ pub(in crate::manager) struct OutboundLimitControl {
     /// Coalesced capacity-recovery intent: at most one resync per peer and
     /// family, regardless of how often capacity opens.
     recovery: BTreeMap<IpAddr, HashSet<Afi>>,
+    /// Peer whose recovery was most recently attempted. Selection resumes
+    /// after it and wraps, so one backpressured peer cannot retain the head.
+    recovery_cursor: Option<IpAddr>,
 }
 
 impl OutboundLimitControl {
@@ -252,6 +255,9 @@ impl OutboundLimitControl {
     /// reconnect resolves them again.
     pub(in crate::manager) fn reap_peer(&mut self, peer: IpAddr) {
         self.recovery.remove(&peer);
+        if self.recovery.is_empty() {
+            self.recovery_cursor = None;
+        }
     }
 }
 
@@ -694,6 +700,9 @@ impl RibManager {
 
     /// Coalesce one family-scoped capacity-recovery resync.
     fn schedule_outbound_limit_recovery(&mut self, peer: IpAddr, afi: Afi) {
+        if self.outbound_limit_control.recovery.is_empty() {
+            self.outbound_limit_control.recovery_cursor = None;
+        }
         self.outbound_limit_control
             .recovery
             .entry(peer)
@@ -701,7 +710,7 @@ impl RibManager {
             .insert(afi);
     }
 
-    /// Select the next runnable family in deterministic peer/family order.
+    /// Select one runnable family after the last attempted peer, then wrap.
     ///
     /// IPv4 precedes IPv6 within a peer, matching [`LIMITED_FAMILIES`].
     /// Empty/corrupt entries and departed peers are discarded rather than
@@ -717,7 +726,14 @@ impl RibManager {
                         .into_iter()
                         .any(|afi| families.contains(&afi))
             });
-        for (&peer, families) in &self.outbound_limit_control.recovery {
+        if self.outbound_limit_control.recovery.is_empty() {
+            self.outbound_limit_control.recovery_cursor = None;
+            return None;
+        }
+        let cursor = self.outbound_limit_control.recovery_cursor;
+        let mut wrapped = None;
+        let mut selected = None;
+        'peers: for (&peer, families) in &self.outbound_limit_control.recovery {
             for afi in LIMITED_FAMILIES {
                 if families.contains(&afi)
                     && !self.selection_convergence_held((afi, Safi::Unicast))
@@ -726,11 +742,19 @@ impl RibManager {
                         .get(&peer)
                         .is_some_and(|pending| pending.contains(&(afi, Safi::Unicast)))
                 {
-                    return Some((peer, afi));
+                    wrapped.get_or_insert((peer, afi));
+                    if cursor.is_none_or(|cursor| peer > cursor) {
+                        selected = Some((peer, afi));
+                        break 'peers;
+                    }
                 }
             }
         }
-        None
+        let selected = selected.or(wrapped);
+        if let Some((peer, _)) = selected {
+            self.outbound_limit_control.recovery_cursor = Some(peer);
+        }
+        selected
     }
 
     /// Remove one recovery only after its replay committed.
@@ -745,6 +769,9 @@ impl RibManager {
             });
         if remove_peer {
             self.outbound_limit_control.recovery.remove(&peer);
+        }
+        if self.outbound_limit_control.recovery.is_empty() {
+            self.outbound_limit_control.recovery_cursor = None;
         }
     }
 
