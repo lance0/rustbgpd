@@ -9,6 +9,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Clean private single-best fanout now skips per-peer affected-prefix scans
+  unless resolved ORR, per-client-best, or Add-Path send behavior requires them.
+
 - Ordinary MRT snapshot encoding now grows its output buffer geometrically,
   avoiding millions of exact-capacity reallocations on full-table dumps.
 

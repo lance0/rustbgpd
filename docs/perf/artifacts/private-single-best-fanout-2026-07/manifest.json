@@ -1,0 +1,34 @@
+{
+  "schema": 1,
+  "source": {
+    "main": ["f5568242047ffbbd32d940dcbcdaec922564d6e2", "051c6a0df05eb6b00a4a65e418a288ddf47458e8"],
+    "harness": ["775d47a662f2b7828528a2fe25e5a2a8e63daf56", "e7b741b160b0360ca6100d273dd5d24ba9e01a73", "10f9aeee7b6e4d88de5f5d90407b1e7d1ff268d4"],
+    "candidate": ["232fb0fcd7231f21c8ac355878b56f47378b37b0", "cf8cef93c480155bdd8016308b648955298e86f6", "47eb3373160d73cd2dcacc9752dedb4dd9e8b2fa"],
+    "measured": ["454a83b0f700a5d2488d9aefd684678d34fe54ad", "b9f805a0abe6c0cac79b55af89ed866c7ffa10fb"],
+    "diff_sha256": ["66c509ba38ca2306c6946fdf8baa9cb2d121acdcb2d809a07198987b551c5ac1", "fe7f2890f4203c4d0f54b299794fdbe5e90ecdadb940d9dd9e56bd97514bf907", "6f7dd217e4f2d93f606d2962e52ba38b04172ac397af4c669f73efa72d44bfe6"],
+    "cargo_lock_sha256": "38d32ad97957aaace25cc4f02b743e5a3e6647b9a48a9e8e213d0fc4e19bbc1b"
+  },
+  "benchmark": {
+    "package": "rustbgpd-transport",
+    "bench": "fanout",
+    "filter": "private_single_best_fanout",
+    "features": "bench-internals",
+    "core": 8,
+    "attempts": 6,
+    "changed_routes": 64,
+    "peers": [1, 8, 64, 256],
+    "claimed_peers": [8, 64, 256],
+    "unclaimed_peer": 1
+  },
+  "scan_counts": {
+    "harness": {"1": 64, "8": 512, "64": 4096, "256": 16384},
+    "candidate": {"1": 0, "8": 0, "64": 0, "256": 0}
+  },
+  "gate": {
+    "all_attempt_deltas_negative": true,
+    "last_ci_upper_negative": true,
+    "beyond_control_band": true,
+    "max_per_peer_savings_ratio": 1.10
+  },
+  "archive": {"file": "criterion-attempts.tar.gz", "members": 96, "max_bytes": 256000}
+}
