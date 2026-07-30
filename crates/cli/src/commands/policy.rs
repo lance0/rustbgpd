@@ -242,26 +242,29 @@ fn check_local_with_writer(
             if diagnostics.len() == 1 { "" } else { "s" }
         );
     } else {
-        let mut rendered = String::new();
-        if let Some(tests) = &tests {
-            if tests.total == 0 {
-                rendered.push_str(&format!("{path}: ok (no tests)\n"));
-            } else {
-                for failure in &tests.failures {
-                    eprintln!("test {} ... FAILED: {}", failure.name, failure.message);
+        let result = (|| -> Result<(), CliError> {
+            if let Some(tests) = &tests {
+                if tests.total == 0 {
+                    writeln!(stdout, "{path}: ok (no tests)")?;
+                } else {
+                    for failure in &tests.failures {
+                        eprintln!("test {} ... FAILED: {}", failure.name, failure.message);
+                    }
+                    writeln!(
+                        stdout,
+                        "{path}: {} passed, {} failed",
+                        tests.passed(),
+                        tests.failures.len()
+                    )?;
                 }
-                rendered.push_str(&format!(
-                    "{path}: {} passed, {} failed",
-                    tests.passed(),
-                    tests.failures.len()
-                ));
-                rendered.push('\n');
             }
-        }
-        if let (Some(cov), Some(file)) = (&cov, &file) {
-            render_coverage_text(&mut rendered, cov, file);
-        }
-        if write_policy_stdout(stdout, &rendered) != 0 {
+            if let (Some(cov), Some(file)) = (&cov, &file) {
+                write_coverage_text(stdout, cov, file)?;
+            }
+            stdout.flush()?;
+            Ok(())
+        })();
+        if report_policy_write_result(result) != 0 {
             return 1;
         }
     }
@@ -287,19 +290,19 @@ fn check_local_with_writer(
 /// The `--coverage` text report (stdout): the exercised-term headline,
 /// per-policy term table, and lint lines. Policies defined in an
 /// imported module are attributed to their defining file.
-fn render_coverage_text(
-    out: &mut String,
+fn write_coverage_text(
+    out: &mut dyn std::io::Write,
     cov: &rustbgpd_policy::rpol::CoverageReport,
     file: &rustbgpd_policy::rpol::RpolFile,
-) {
+) -> Result<(), CliError> {
     use rustbgpd_policy::rpol::PolicyTestStatus;
 
-    out.push_str(&format!(
+    writeln!(
+        out,
         "coverage: {}/{} terms exercised by tests",
         cov.terms_exercised(),
         cov.terms_total()
-    ));
-    out.push('\n');
+    )?;
     let module_path = |index: u32| -> &str {
         file.modules()
             .get(index as usize)
@@ -314,24 +317,22 @@ fn render_coverage_text(
         };
         match policy.status {
             PolicyTestStatus::Untested => {
-                out.push_str(&format!(
+                writeln!(
+                    out,
                     "  policy {}{origin}    never referenced by any test",
                     policy.name
-                ));
-                out.push('\n');
+                )?;
                 continue;
             }
             PolicyTestStatus::ApplyOnly => {
-                out.push_str(&format!(
+                writeln!(
+                    out,
                     "  policy {}{origin}    exercised via apply only (terms not attributable)",
                     policy.name
-                ));
-                out.push('\n');
+                )?;
                 continue;
             }
-            PolicyTestStatus::Tested => {
-                out.push_str(&format!("  policy {}{origin}\n", policy.name))
-            }
+            PolicyTestStatus::Tested => writeln!(out, "  policy {}{origin}", policy.name)?,
         }
         let width = policy.terms.iter().map(|t| t.name.len()).max().unwrap_or(0);
         for term in &policy.terms {
@@ -345,12 +346,13 @@ fn render_coverage_text(
             } else {
                 format!("evaluated {}x, matched {}x", term.evaluated, term.matched)
             };
-            out.push_str(&format!("    term {:width$}  {facts}\n", term.name));
+            writeln!(out, "    term {:width$}  {facts}", term.name)?;
         }
     }
     for lint in &cov.lints {
-        out.push_str(&format!("lint [{}]: {}\n", lint.kind.label(), lint.message));
+        writeln!(out, "lint [{}]: {}", lint.kind.label(), lint.message)?;
     }
+    Ok(())
 }
 
 /// The `-j` form of `rbgp policy check` output (stable keys; the
@@ -465,7 +467,8 @@ fn print_check_json(
 
 /// `rbgp policy check --list-deps` output: the resolved module graph
 /// with content hashes, module 0 first (the main file), imports in
-/// declaration order. Always exit 0 — the graph compiled.
+/// declaration order. Returns 0 when the graph and output succeed, 1
+/// when stdout cannot be written.
 fn print_deps(
     path: &str,
     file: &rustbgpd_policy::rpol::RpolFile,
@@ -506,23 +509,27 @@ fn print_deps(
         }
         return 0;
     }
-    let mut rendered = format!(
-        "{path}: {} module{}",
-        modules.len(),
-        if modules.len() == 1 { "" } else { "s" }
-    );
-    rendered.push('\n');
-    for module in modules {
-        rendered.push_str(&format!("  {} sha256:{}\n", module.path, module.digest));
-        for &id in &module.imports {
-            rendered.push_str(&format!("    imports {}\n", modules[id as usize].path));
+    let result = (|| -> Result<(), CliError> {
+        writeln!(
+            stdout,
+            "{path}: {} module{}",
+            modules.len(),
+            if modules.len() == 1 { "" } else { "s" }
+        )?;
+        for module in modules {
+            writeln!(stdout, "  {} sha256:{}", module.path, module.digest)?;
+            for &id in &module.imports {
+                writeln!(stdout, "    imports {}", modules[id as usize].path)?;
+            }
         }
-    }
-    write_policy_stdout(stdout, &rendered)
+        stdout.flush()?;
+        Ok(())
+    })();
+    report_policy_write_result(result)
 }
 
-fn write_policy_stdout(writer: &mut dyn std::io::Write, rendered: &str) -> i32 {
-    match output::write_bytes(writer, rendered.as_bytes()) {
+fn report_policy_write_result(result: Result<(), CliError>) -> i32 {
+    match result {
         Ok(()) => 0,
         Err(error) => {
             output::report_write_error("policy output", &error);
