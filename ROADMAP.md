@@ -1641,16 +1641,14 @@ an ADR "Deferred" section that points back here. Tightened, not dropped.
 
 - **Wire / API strictness items.** Continue typed error variants where
   API-visible peer-manager / RIB boundaries still return opaque `String`
-  errors; large-community duplicate normalization on receipt/encode (stored and
-  re-advertised unchanged today); MRT snapshot encode allocation pressure on
-  very large dumps. FlowSpec unknown component pass-through was investigated and
-  rejected: RFC 8955 treats unknown component types as malformed NLRI. Inbound
-  BoRR/EoRR channel-full retry was also investigated and rejected: the receive
-  path already backpressures with `send().await`.
-  observation; SIGHUP reconcile rollback semantics (reports structured per-peer
-  failures and keeps the prior snapshot, but does not roll back already-applied
-  runtime peer changes); dynamic-neighbor `handle_inbound` split for readability;
-  config snippets / examples in gRPC validation error detail.
+  errors. FlowSpec unknown component pass-through was investigated and rejected:
+  RFC 8955 treats unknown component types as malformed NLRI. Inbound BoRR/EoRR
+  channel-full retry was also investigated and rejected: the receive path already
+  backpressures with `send().await`. Remaining work also includes SIGHUP reconcile
+  rollback semantics (reports structured per-peer failures and keeps the prior
+  snapshot, but does not roll back already-applied runtime peer changes);
+  dynamic-neighbor `handle_inbound` split for readability; config snippets /
+  examples in gRPC validation error detail.
 
 ---
 
