@@ -108,6 +108,7 @@ struct AdjRibOutCommitStats {
     family_gauge_writes: usize,
     last_family_gauge_write_mask: u8,
     pristine_otc_reconcile_candidates: usize,
+    private_extra_prefix_scans: usize,
     #[cfg(test)]
     metrics_handle_clones: usize,
     #[cfg(test)]

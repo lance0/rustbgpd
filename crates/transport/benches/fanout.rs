@@ -69,7 +69,9 @@ use std::time::{Duration, Instant};
 
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 
-use rustbgpd_policy::{Policy, PolicyAction, PolicyChain, PolicyStatement, RouteModifications};
+use rustbgpd_policy::{
+    NeighborSetMatch, Policy, PolicyAction, PolicyChain, PolicyStatement, RouteModifications,
+};
 use rustbgpd_rib::RibManager;
 use rustbgpd_rib::manager::{AdjRibOutFanoutBenchReceipt, PolicyTransitionBenchReceipt};
 use rustbgpd_rib::route::{Route, RouteOrigin};
@@ -202,6 +204,20 @@ fn representative_export_chain() -> PolicyChain {
     PolicyChain::new(vec![Policy {
         entries,
         default_action: PolicyAction::Deny,
+    }])
+}
+
+fn peer_context_export_chain() -> PolicyChain {
+    let mut miss = blank_stmt();
+    miss.match_neighbor_set = Some(NeighborSetMatch {
+        addresses: Vec::new(),
+        remote_asns: vec![65_099],
+        peer_groups: Vec::new(),
+    });
+    miss.action = PolicyAction::Deny;
+    PolicyChain::new(vec![Policy {
+        entries: vec![miss],
+        default_action: PolicyAction::Permit,
     }])
 }
 
@@ -381,6 +397,7 @@ fn expected_fanout_receipt(
             } else {
                 2
             },
+        private_extra_prefix_scans: 0,
         first_peer_family_values: [
             i64::try_from(CHANGED).expect("fixture size fits i64"),
             0,
@@ -390,6 +407,33 @@ fn expected_fanout_receipt(
             0,
             0,
         ],
+    }
+}
+
+fn expected_private_single_best_receipt(
+    peers: usize,
+    routes_received_dispatches: usize,
+) -> AdjRibOutFanoutBenchReceipt {
+    AdjRibOutFanoutBenchReceipt {
+        update_groups: 0,
+        grouped_peers: 0,
+        ungrouped_peers: peers,
+        dirty_peers: 0,
+        grouped_unicast_routes: 0,
+        private_unicast_routes: CHANGED * peers,
+        routes_received_dispatches,
+        routes_received_withdrawals: 0,
+        exact_probe_batches: peers,
+        exact_probe_candidates: CHANGED * peers,
+        exact_probe_nonzero_encoded_lengths: CHANGED * peers,
+        exact_probe_cache_reuses: 0,
+        successful_commits: peers,
+        successful_enqueues: peers,
+        family_gauge_writes: peers,
+        last_family_gauge_write_mask: 0x01,
+        pristine_otc_reconcile_candidates: peers,
+        private_extra_prefix_scans: 0,
+        first_peer_family_values: [CHANGED as i64, 0, 0, 0, 0, 0, 0],
     }
 }
 
@@ -444,11 +488,12 @@ fn drain_fanout_envelopes(
 fn prepare_replacement_fanout(
     (mut manager, mut receivers, expected_inventory): FanoutState,
     peers: usize,
+    expected_receipt: fn(usize, usize) -> AdjRibOutFanoutBenchReceipt,
 ) -> ReplacementFanoutState {
     assert_eq!(expected_inventory.len(), CHANGED);
     assert_eq!(
         manager.bench_adj_rib_out_fanout_receipt(),
-        expected_fanout_receipt(peers, 1),
+        expected_receipt(peers, 1),
         "the production MED-50 seed must populate the exact grouped fixture"
     );
     drain_fanout_envelopes(&mut receivers, &expected_inventory, 50);
@@ -471,19 +516,24 @@ fn prepare_replacement_fanout(
     }
 }
 
-fn measure_replacement_fanout<F>(iterations: u64, peers: usize, build: F) -> Duration
+fn measure_replacement_fanout<F>(
+    iterations: u64,
+    peers: usize,
+    build: F,
+    expected_receipt: fn(usize, usize) -> AdjRibOutFanoutBenchReceipt,
+) -> Duration
 where
     F: Fn(usize) -> FanoutState,
 {
     let mut accumulated = Duration::ZERO;
     for _ in 0..iterations {
-        let mut state = prepare_replacement_fanout(build(peers), peers);
+        let mut state = prepare_replacement_fanout(build(peers), peers, expected_receipt);
         let started = Instant::now();
         state.manager.bench_distribute(&state.changed);
         accumulated += started.elapsed();
         assert_eq!(
             state.manager.bench_adj_rib_out_fanout_receipt(),
-            expected_fanout_receipt(peers, 0),
+            expected_receipt(peers, 0),
             "the timed replacement must use one clean production group and commit every member"
         );
         drain_fanout_envelopes(&mut state.receivers, &state.expected_inventory, 51);
@@ -496,14 +546,22 @@ fn bench_fanout(c: &mut Criterion) {
     for &n in &PEER_COUNTS {
         group.bench_with_input(BenchmarkId::new("no_policy", n), &n, |b, &n| {
             b.iter_custom(|iterations| {
-                measure_replacement_fanout(iterations, n, |peers| build(peers, None))
+                measure_replacement_fanout(
+                    iterations,
+                    n,
+                    |peers| build(peers, None),
+                    expected_fanout_receipt,
+                )
             });
         });
         group.bench_with_input(BenchmarkId::new("with_policy", n), &n, |b, &n| {
             b.iter_custom(|iterations| {
-                measure_replacement_fanout(iterations, n, |peers| {
-                    build(peers, Some(representative_export_chain()))
-                })
+                measure_replacement_fanout(
+                    iterations,
+                    n,
+                    |peers| build(peers, Some(representative_export_chain())),
+                    expected_fanout_receipt,
+                )
             });
         });
     }
@@ -518,15 +576,46 @@ fn bench_ixp_exact_export_fanout(c: &mut Criterion) {
             &n,
             |b, &n| {
                 b.iter_custom(|iterations| {
-                    measure_replacement_fanout(iterations, n, |peers| build_ixp(peers, false))
+                    measure_replacement_fanout(
+                        iterations,
+                        n,
+                        |peers| build_ixp(peers, false),
+                        expected_fanout_receipt,
+                    )
                 });
             },
         );
         group.bench_with_input(BenchmarkId::new("distinct_remote_asns", n), &n, |b, &n| {
             b.iter_custom(|iterations| {
-                measure_replacement_fanout(iterations, n, |peers| build_ixp(peers, true))
+                measure_replacement_fanout(
+                    iterations,
+                    n,
+                    |peers| build_ixp(peers, true),
+                    expected_fanout_receipt,
+                )
             });
         });
+    }
+    group.finish();
+}
+
+fn bench_private_single_best_fanout(c: &mut Criterion) {
+    let mut group = c.benchmark_group("private_single_best_fanout");
+    for &peers in &PEER_COUNTS {
+        group.bench_with_input(
+            BenchmarkId::new("policy_peer_context", peers),
+            &peers,
+            |b, &peers| {
+                b.iter_custom(|iterations| {
+                    measure_replacement_fanout(
+                        iterations,
+                        peers,
+                        |peers| build(peers, Some(peer_context_export_chain())),
+                        expected_private_single_best_receipt,
+                    )
+                });
+            },
+        );
     }
     group.finish();
 }
@@ -1856,6 +1945,7 @@ fn bench_policy_regroup_resync(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_fanout,
+    bench_private_single_best_fanout,
     bench_ixp_exact_export_fanout,
     bench_adj_rib_out_family_gauge,
     bench_grouped_withdrawal_fanout,

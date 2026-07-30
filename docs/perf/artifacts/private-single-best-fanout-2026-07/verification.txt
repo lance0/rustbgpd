@@ -1,0 +1,3 @@
+Artifact verifier mutation: RED on 256-peer harness scan count 16384 -> 0
+Restored artifact verifier: PASS; per-peer savings ratio 1.0647
+Focused compiled receipt proof: PASS at 1, 8, 64, and 256 peers

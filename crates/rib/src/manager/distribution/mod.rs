@@ -3760,26 +3760,40 @@ impl RibManager {
                     .get(&peer)
                     .is_some_and(|vantage| self.orr.spf.contains_key(vantage));
                 let peer_per_client_best = self.peer_per_client_best.contains(&peer);
-                let extras: Vec<Prefix> = all_affected
-                    .iter()
-                    .filter(|prefix| {
-                        (peer_has_resolved_orr
-                            || peer_per_client_best
-                            || self.add_path_send_max_for_prefix(peer, prefix) > 0)
-                            && !best_changed.contains(*prefix)
-                    })
-                    .copied()
-                    .collect();
-                // Common case (no ORR vantage, no Add-Path extras):
-                // borrow the shared changed set instead of re-hashing a
-                // per-peer clone of it — this loop runs once per
-                // outbound peer per distribution pass.
-                if extras.is_empty() {
+                if !peer_has_resolved_orr
+                    && !peer_per_client_best
+                    && !self.peer_has_any_add_path_send(peer)
+                {
                     Cow::Borrowed(&best_changed)
                 } else {
-                    let mut prefixes = best_changed.clone();
-                    prefixes.extend(extras);
-                    Cow::Owned(prefixes)
+                    let extras: Vec<Prefix> = all_affected
+                        .iter()
+                        .filter(|prefix| {
+                            #[cfg(any(test, feature = "bench-internals"))]
+                            {
+                                self.adj_rib_out_commit_stats.private_extra_prefix_scans = self
+                                    .adj_rib_out_commit_stats
+                                    .private_extra_prefix_scans
+                                    .saturating_add(1);
+                            }
+                            (peer_has_resolved_orr
+                                || peer_per_client_best
+                                || self.add_path_send_max_for_prefix(peer, prefix) > 0)
+                                && !best_changed.contains(*prefix)
+                        })
+                        .copied()
+                        .collect();
+                    // Common case (no ORR vantage, no Add-Path extras):
+                    // borrow the shared changed set instead of re-hashing a
+                    // per-peer clone of it — this loop runs once per
+                    // outbound peer per distribution pass.
+                    if extras.is_empty() {
+                        Cow::Borrowed(&best_changed)
+                    } else {
+                        let mut prefixes = best_changed.clone();
+                        prefixes.extend(extras);
+                        Cow::Owned(prefixes)
+                    }
                 }
             };
             let effective_flowspec_rules: HashSet<crate::route::FlowSpecKey> = if resync {

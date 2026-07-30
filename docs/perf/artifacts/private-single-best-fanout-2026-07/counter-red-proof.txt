@@ -1,0 +1,6 @@
+Proof: compiled 256-peer semantic-counter mutation
+Fixture: 256 peers x 64 changed routes
+Mutation: restore the clean-path affected-prefix scan while retaining the zero-scan assertion
+Observed private_extra_prefix_scans: 16384
+Expected private_extra_prefix_scans: 0
+Result: RED before Criterion measurement; candidate restored and passed at zero
