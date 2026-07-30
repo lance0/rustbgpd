@@ -216,7 +216,9 @@ let bytes = encode_message(&Message::Open(open)).expect("encode OPEN");
   validation-state extended community, rendered `OV_VALID` / `OV_NOT_FOUND` /
   `OV_INVALID` by `Display` (0.14.0)
 - **Revised error handling (RFC 7606)** — `UpdateMessage::parse_revised`
-  returns `RevisedParsedUpdate`: the cleanly decoded `ParsedUpdate` plus the
+  returns `RevisedParsedUpdate`: the decoded `ParsedUpdate` (an attribute that
+  decodes but fails validation may be retained in `update.attributes` for
+  observation alongside its treat-as-withdraw disposition) plus the
   `MalformedAttribute`s recovered without aborting the parse (collected via
   `RevisedAttributeDecode`), each carrying an `ErrorDisposition`
   (`AttributeDiscard` / `TreatAsWithdraw` / `SessionReset`) from

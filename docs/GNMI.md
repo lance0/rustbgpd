@@ -6,8 +6,8 @@ speak gNMI/OpenConfig.
 
 This is not a full OpenConfig router model. The v1 surface is deliberately
 narrow: `Capabilities`, `Get`, and `Subscribe` for BGP global and neighbor
-state, plus a small `Set` subset for durable static BGP neighbor and peer-group
-config. `Set` maps supported OpenConfig mutations onto the ADR-0076 transaction model:
+state, plus a small `Set` subset for durable static BGP neighbor, peer-group,
+and dynamic-neighbor-prefix config. `Set` maps supported OpenConfig mutations onto the ADR-0076 transaction model:
 payloads are redacted in audit logs, delete / replace / update operations are
 normalized into gNMI application order, and successful mutations build full
 candidate TOML before using the same plan/apply/persist/rollback path as native

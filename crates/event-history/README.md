@@ -2,6 +2,8 @@
 
 Durable event-history outbox for rustbgpd.
 
+Part of [rustbgpd](https://github.com/lance0/rustbgpd).
+
 Implements the contract in
 [ADR-0072](../../docs/adr/0072-durable-event-history.md): a SQLite
 WAL-backed local outbox that survives daemon restart with a monotonic
@@ -72,3 +74,7 @@ one SQLite transaction, and serves cursor-based replay through the
   stale-only-state check happens
   BEFORE any create-capable `Connection::open` to prevent a fresh
   empty DB from masking a quarantined state.
+
+## License
+
+MIT OR Apache-2.0

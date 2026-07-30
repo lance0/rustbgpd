@@ -164,7 +164,7 @@ These types define the contracts between crates. They are the key interfaces to 
 |------|-----------|-----------------|
 | `Prefix` | `wire::nlri` | Everything. AFI-agnostic route identity (`V4`/`V6` enum). `Copy`. |
 | `Route` | `rib::route` | Transport → RIB → distribution. Carries prefix, next-hop (`IpAddr`), attributes, origin, validation state, staleness. |
-| `RibUpdate` | `rib::update` | Transport → RIB. Enum: `RoutesReceived`, `PeerUp`, `PeerDown`, `PeerGracefulRestart`, `InjectRoute`, `QueryRoutes`, `RpkiCacheUpdate`, FlowSpec variants, etc. |
+| `RibUpdate` | `rib::update` | Transport → RIB. Enum: `RoutesReceived`, `PeerUp`, `PeerDown`, `PeerGracefulRestart`, `InjectRoute`, `QueryRoutesPage`, `RpkiCacheUpdate`, FlowSpec variants, etc. |
 | `OutboundRouteUpdate` | `rib::update` | RIB → Transport. Announces + withdrawals + FlowSpec changes for a single peer, after export policy. |
 | `PeerKey` | `api::peer_types` | API ↔ PeerManager. Stable peer identity: `address` plus an optional `interface` for scoped IPv6 link-local peers (RFC 4007 — a `fe80::/10` address is not globally unique). Numbered peers carry `interface: None`; renders as `fe80::x%ifname` (ADR-0069). |
 | `PeerManagerCommand` | `api::peer_types` | API → PeerManager. Enum: `AddPeer`, `DeletePeer`, `EnablePeer`, `DisablePeer`, `QueryState`, `ReconcilePeers`, etc. |
@@ -379,7 +379,7 @@ All inter-task communication uses bounded `tokio::mpsc` channels (capacity 4096 
 | PeerManager commands | API | PeerManager | `send().await` blocks. gRPC call waits. |
 | BMP events | Transport | BmpManager | `try_send()` — event dropped, warning logged. |
 
-One intentional unbounded channel: session-notification used for TCP collision detection. Bounded send would deadlock with synchronous peer-state queries during collision resolution.
+The small set of intentional unbounded channels is enumerated in Design Invariant #3 above; the session-notification channel used for TCP collision detection exists because a bounded send would deadlock with synchronous peer-state queries during collision resolution.
 
 ### Dirty-peer resync
 

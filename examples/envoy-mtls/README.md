@@ -18,9 +18,8 @@ The included [`envoy.yaml`](envoy.yaml) proxies gRPC over HTTP/2 from
 
 ## Backend rustbgpd config
 
-Keep the daemon on a local-only listener:
-
-No extra gRPC config is required if you keep the default UDS:
+Keep the daemon on a local-only listener. No extra gRPC config is
+required if you keep the default UDS:
 
 ```toml
 [global]

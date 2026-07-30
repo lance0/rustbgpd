@@ -178,8 +178,9 @@ Notes on the sandbox:
 - `Restart=on-failure` is load-bearing. The daemon exits `0` only on an
   operator-initiated shutdown (SIGINT/SIGTERM, the `Shutdown` RPC) and
   `1` on a component failure it cannot recover from in place — the BGP
+  listener failing to bind, a configured `prometheus_addr` health
   listener failing to bind, or the gRPC server exiting unexpectedly.
-  Neither listener is rebound without a restart, so the daemon exits
+  None of these listeners is rebound without a restart, so the daemon exits
   rather than run on deaf; the supervisor's retry is the recovery path.
   With `RestartSec=5` a transient bind failure clears on the next
   attempt, and a permanent one (port held by another speaker, missing

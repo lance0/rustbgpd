@@ -414,6 +414,6 @@ proto credential markers remain deferred.
 | 2. Audit/runtime path | Done: decision/audit layer, used by the enforced cap and role checks |
 | 3. Identity + roles | Done: roles config + bearer/UDS principals + mTLS principal extraction |
 | 4. Listener tier cap | Done: `max_tier` listener cap enforced |
-| 5. Enforcement + default flip | Done in v0.24.0: opt-in `tier` role enforcement (slice 4a) + migration prep + default flip from `legacy` to `tier` (slice 4b, closes #164) |
+| 5. Enforcement + default flip | Done in v0.24.0: opt-in `tier` role enforcement (slice 5a) + migration prep + default flip from `legacy` to `tier` (slice 5b, closes #164) |
 | 6. Audit log hardening | Partial: result-aware records + explicit credential masking table + operations guidance for audit retention and resource guardrails |
 | 7. External-review prep | Partial: current enforced-system threat model; external sign-off and auditor packet remain |

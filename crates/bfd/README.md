@@ -7,6 +7,8 @@ and produces packet/timer/state-change **actions**. It never reads a clock, open
 a socket, or spawns a task; the daemon actor owns the real I/O, timers, and
 transmit jitter.
 
+Part of [rustbgpd](https://github.com/lance0/rustbgpd).
+
 ## Scope
 
 - **Single-hop asynchronous mode** (RFC 5880 + RFC 5881).
@@ -41,3 +43,7 @@ Time is an **input**, never read internally: the session emits
 when it fires the actor feeds back `Event::TxTimerExpires` /
 `Event::DetectTimerExpires`. This keeps the whole state machine deterministic and
 unit-testable without a clock or a socket.
+
+## License
+
+MIT OR Apache-2.0

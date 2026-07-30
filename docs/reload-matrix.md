@@ -7,8 +7,10 @@ This doc is the operator-facing index. The authoritative classification
 lives in the source — `neighbor_runtime_equal()`, `config_field_impact()`,
 `neighbor_change_hot_applicable()`, and `ConfigDiff` (in
 `src/config/mod.rs`), `reload.rs` (the changed-neighbor hot/rebuild
-partition, pinning helpers `pin_tcp_ao_startup_only_runtime`,
-`pin_bfd_startup_only_runtime`, and the per-section error/warn arms), and
+partition, `pin_unreconciled_daemon_runtime_fields`, and the
+per-section error/warn arms) together with the pinning helpers
+`pin_tcp_ao_startup_only_runtime` / `pin_bfd_startup_only_runtime` it
+invokes from `src/config/mod.rs`, and
 the parse-time `ConfigError` family in `src/config/validation.rs`. If
 the matrix and the code disagree, the code is right and the matrix has a
 bug — file an issue.
@@ -289,6 +291,9 @@ chains all add/change/remove cleanly via reload.
 | `neighbor_sets` (named) | live | Add/remove/edit named neighbor sets; the resolved set drives per-peer chain bindings. |
 | `import_chain` (named) | live | Reorder, add, or remove named imports. Removing the last entry while eBGP peers inherit it is a fleet-wide ADR-0112 policy-presence transition: it is qualified for Route Refresh across every affected peer first, and rejected whole if any peer cannot converge it. |
 | `export_chain` (named) | live | Reorder, add, or remove named exports. |
+| `rpol_files` | live | SIGHUP recompiles the referenced `.rpol` files and hot-applies materially changed chains to exactly the affected peers (Route Refresh for changed import chains). Config transactions reject a candidate whose compiled `.rpol` registry changed as unsupported — the files live outside the candidate TOML (`src/config/mod.rs`, transaction classification) — so apply `.rpol` changes via SIGHUP. |
+| `rpol_roots` | live | Extra `import` resolution roots; a change takes effect through the same SIGHUP recompile path (it matters only when it changes the resolved module graph's content, which reloads as an rpol content change). |
+| `[policy.datasets]` | live | Snapshot files are re-read on every SIGHUP: content-equal re-reads are no-ops, changed content swaps atomically and refreshes only the referencing peers, and a file that fails to load keeps the prior snapshot (WARN + `bgp_policy_dataset_refresh_errors_total`). Introducing a dataset declaration (or a kind change) must load cleanly or the reload is rejected. |
 | `[policy.explain] enabled` (ADR-0073) | restart-required (per peer) | Read by `build_transport_config` when a session is constructed, so the new value is adopted into the config snapshot (sessions established *after* the reload honour it) but live sessions keep their current import-explain write behaviour until they re-establish. Logged as `WARN` during reload when changed. Diagnostic retention only — never affects which routes are accepted. |
 | `[policy.explain] cache_size` (ADR-0073) | restart-required (per peer) | Same — the per-session LRU is sized at session construction. A live session's cache is not resized in place; the new capacity applies on its next establishment. |
 | `[policy.reject_retention] enabled` (LAN-472) | restart-required (per peer) | Same contract as `[policy.explain]`: read by `build_transport_config` at session construction. Live sessions keep their current rejected-route retention behaviour until they re-establish. Diagnostic retention only — never affects which routes are accepted. |

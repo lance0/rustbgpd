@@ -207,6 +207,45 @@ bench/compare-criterion.sh \
   --bench codec
 ```
 
+## VPN query campaign
+
+`run-vpn-query-campaign.sh` drives the retained VPN query benchmark
+campaign: a CPU-pinned (`--cpu`, `taskset`-verified) run behind the
+shared host fence, refusing existing output directories so every
+campaign lands in a fresh artifact tree. `--smoke` is the reduced CI
+invocation; `--retry` allows a second attempt. Its paired verifier,
+`verify-vpn-query-campaign.py`, is a fail-closed classifier for the
+retained receipts: it pins the expected sizes, case matrix, and
+workload checksums, and rejects any missing, malformed, or
+inconsistent row. Guard tests live in
+`bench/tests/test-vpn-query-campaign.sh`,
+`bench/tests/test-vpn-query-receipt.sh`, and
+`bench/tests/test_verify_vpn_query_campaign.py`.
+
+## MRT growth campaign verifier
+
+`verify-mrt-growth-campaign.py` fail-closes ordinary-MRT output-growth
+A/B campaign receipts: it requires the exact control/candidate/
+candidate/control block order, the two disclosed fleet shapes, pinned
+source/harness/binary hashes, and complete numeric rows before a
+campaign may be quoted (see
+`docs/perf/mrt-snapshot-allocation-2026-07.md` for the retained
+result). Guard test: `bench/tests/test_verify_mrt_growth_campaign.py`.
+
+## Bench smoke check
+
+`smoke-benches.sh` proves every Criterion bench target still
+*executes* by running each benchmark body exactly once in `--test`
+mode (no measurement). The target list comes from `cargo metadata`, so
+new bench targets are covered automatically; the non-criterion
+harnesses are excluded by name.
+
+## Scale drivers
+
+See `bench/scale/README.md` for the manager-level `rrharness` and
+real-transport `rrtransport` scale drivers plus their scenario
+directories.
+
 ## RIB memory compare
 
 `compare-rib-memory.sh` runs the ignored high-N RIB structural memory profile
