@@ -30,6 +30,27 @@ def load(path):
         return json.load(stream)
 
 
+def write_rss(directory, sampler_max):
+    directory = pathlib.Path(directory)
+    phase = load(directory / "phase.json")
+    checkpoints = phase.get("resource_observer")
+    if phase.get("resource_observer_schema") != 1 or not isinstance(checkpoints, dict):
+        fail("phase resource observer is missing or invalid")
+    with (directory / "rss.tsv").open("r+", encoding="utf-8") as stream:
+        if stream.readline() != "observer\trss_kib\n":
+            fail("RSS TSV is missing its observer header")
+        stream.seek(0, 2)
+        for name in ("established", "staged", "wire"):
+            stream.write(
+                f"direct_pid_{name}_vmrss\t{checkpoints[name]['direct_pid_vmrss_kib']}\n"
+            )
+    (directory / "rss.json").write_text(
+        json.dumps({"schema": 2, "checkpoints": checkpoints,
+                    "process_tree_sampler_max_rss_kib": int(sampler_max)}) + "\n",
+        encoding="utf-8",
+    )
+
+
 def verify(directory, tiny=False):
     directory = pathlib.Path(directory)
     peers = 4 if tiny else PEERS
@@ -39,6 +60,7 @@ def verify(directory, tiny=False):
     bitmap_digest = "d4e22dcde16f2746" if tiny else BITMAP_DIGEST
     required = {
         "phase.json",
+        "grouped-commit.json",
         "per-peer.tsv",
         "rss.tsv",
         "rss.json",
@@ -51,7 +73,7 @@ def verify(directory, tiny=False):
 
     phase = load(directory / "phase.json")
     expected_phase = {
-        "schema": 1,
+        "schema": 2,
         "shape": shape,
         "shape_digest": shape_digest,
         "sessions": peers,
@@ -72,6 +94,53 @@ def verify(directory, tiny=False):
             fail(f"phase {key} is missing or invalid")
     if phase["injection_ms"] > min(phase["staged_ms"], phase["wire_ms"]):
         fail("injection completion follows a convergence timestamp")
+
+    grouped = load(directory / "grouped-commit.json")
+    expected_grouped = {
+        "schema": 2,
+        "timing": "test_profile_untimed_rpol_community_transition",
+        "fixture_peers": peers,
+        "fixture_prefixes": prefixes,
+        "seed": {
+            "routes_received_dispatches": 1,
+            "routes_received_withdrawals": 0,
+            "envelopes": peers,
+            "routes_per_envelope": prefixes,
+            "shared_group_encode": False,
+            "community": "65000:100",
+        },
+        "transition": {
+            "fast_path": True,
+            "routes_received_dispatches": 0,
+            "routes_received_withdrawals": 0,
+            "probe_accounting": "policy_transition_receipt",
+            "plan_builds": 1,
+            "full_exact_probes": prefixes,
+            "route_shell_materializations": prefixes,
+            "authoritative_peer_applies": 0,
+            "envelopes": peers,
+            "routes_per_envelope": prefixes,
+            "shared_encode_proof": "collected",
+            "snapshot_classification": "concrete_transport_session",
+            "snapshot_owner_nonzero": True,
+            "snapshot_generation": 0,
+            "snapshot_max_message_len": 4096,
+            "snapshot_add_path": False,
+            "shared_group_encode_classification": "one_arc_all_members",
+            "shared_announce_classification": "one_arc_all_members",
+            "shared_route_count": prefixes,
+            "community": "65000:200",
+            "update_groups": 1,
+            "grouped_peers": peers,
+            "ungrouped_peers": 0,
+            "dirty_peers": 0,
+            "grouped_unicast_routes": prefixes,
+            "private_unicast_routes": 0,
+        },
+    }
+    for key, expected in expected_grouped.items():
+        if grouped.get(key) != expected:
+            fail(f"grouped commit {key}: expected {expected!r}, got {grouped.get(key)!r}")
 
     with (directory / "per-peer.tsv").open(encoding="utf-8", newline="") as stream:
         rows = list(csv.DictReader(stream, delimiter="\t"))
@@ -105,35 +174,67 @@ def verify(directory, tiny=False):
         if totals[key] != 0:
             fail(f"{key} must be zero, got {totals[key]}")
 
-    rss = load(directory / "rss.json")
-    for key in ("established_kib", "staged_kib", "wire_kib", "established_vmhwm_kib",
-                "staged_vmhwm_kib", "wire_vmhwm_kib", "sampler_max_kib"):
-        if not isinstance(rss.get(key), int) or rss[key] <= 0:
-            fail(f"RSS evidence {key} is missing or invalid")
-        if rss[key] > RSS_LIMIT_KIB:
-            fail(f"RSS ceiling exceeded: {key}={rss[key]} KiB")
-    pairs = (
-        ("established_kib", "established_rss_kib"),
-        ("staged_kib", "staged_rss_kib"),
-        ("wire_kib", "wire_rss_kib"),
-        ("established_vmhwm_kib", "established_vmhwm_kib"),
-        ("staged_vmhwm_kib", "staged_vmhwm_kib"),
-        ("wire_vmhwm_kib", "wire_vmhwm_kib"),
+    observer = phase.get("resource_observer")
+    if phase.get("resource_observer_schema") != 1 or not isinstance(observer, dict):
+        fail("phase resource observer is missing or invalid")
+    allocator_keys = (
+        "jemalloc_allocated_bytes",
+        "jemalloc_active_bytes",
+        "jemalloc_resident_bytes",
+        "jemalloc_mapped_bytes",
     )
-    if any(rss[left] != phase[right] for left, right in pairs):
-        fail("phase and RSS JSON checkpoints disagree")
-    hwms = [rss[key] for key in ("established_vmhwm_kib", "staged_vmhwm_kib", "wire_vmhwm_kib")]
-    if hwms != sorted(hwms) or any(hwm < value for hwm, value in zip(hwms, (
-        rss["established_kib"], rss["staged_kib"], rss["wire_kib"]))):
+    for name in ("established", "staged", "wire"):
+        point = observer.get(name)
+        if not isinstance(point, dict):
+            fail(f"resource checkpoint {name} is missing or invalid")
+        for key in ("direct_pid_vmrss_kib", "direct_pid_vmhwm_kib"):
+            if type(point.get(key)) is not int or point[key] <= 0:
+                fail(f"resource checkpoint {name}.{key} is missing or invalid")
+            if point[key] > RSS_LIMIT_KIB:
+                fail(f"RSS ceiling exceeded: {name}.{key}={point[key]} KiB")
+        for key in allocator_keys:
+            if type(point.get(key)) is not int or point[key] <= 0:
+                fail(f"resource checkpoint {name}.{key} is missing or invalid")
+        if point["jemalloc_allocated_bytes"] > point["jemalloc_active_bytes"]:
+            fail(f"resource checkpoint {name} has allocated bytes above active bytes")
+    rss = load(directory / "rss.json")
+    if rss.get("schema") != 2 or rss.get("checkpoints") != observer:
+        fail("phase and RSS JSON resource checkpoints disagree")
+    sampler_max = rss.get("process_tree_sampler_max_rss_kib")
+    if type(sampler_max) is not int or sampler_max <= 0:
+        fail("process-tree RSS maximum is missing or invalid")
+    if sampler_max > RSS_LIMIT_KIB:
+        fail(f"RSS ceiling exceeded: process_tree_sampler_max_rss_kib={sampler_max} KiB")
+    hwms = [observer[name]["direct_pid_vmhwm_kib"] for name in ("established", "staged", "wire")]
+    values = [observer[name]["direct_pid_vmrss_kib"] for name in ("established", "staged", "wire")]
+    if hwms != sorted(hwms) or any(hwm < value for hwm, value in zip(hwms, values)):
         fail("VmHWM is non-monotonic or below VmRSS")
     with (directory / "rss.tsv").open(encoding="utf-8") as stream:
-        samples = [line.split("\t") for line in stream.read().splitlines()[1:]]
-    external = [int(value) for kind, value in samples if kind == "sample"]
-    checkpoints = {kind: int(value) for kind, value in samples if kind != "sample"}
-    if not external or max(external) != rss["sampler_max_kib"]:
-        fail("external RSS samples are absent or their maximum disagrees")
-    if checkpoints != {name: rss[f"{name}_kib"] for name in ("established", "staged", "wire")}:
-        fail("RSS TSV phase checkpoints disagree")
+        lines = stream.read().splitlines()
+    if not lines or lines[0] != "observer\trss_kib":
+        fail("RSS TSV is missing its observer header")
+    samples = [line.split("\t") for line in lines[1:]]
+    try:
+        external = [
+            int(value)
+            for kind, value in samples
+            if kind == "process_tree_target_rss_sample"
+        ]
+        checkpoints = {
+            kind: int(value)
+            for kind, value in samples
+            if kind != "process_tree_target_rss_sample"
+        }
+    except (TypeError, ValueError) as error:
+        fail(f"invalid RSS TSV value: {error}")
+    if not external or max(external) != sampler_max:
+        fail("process-tree RSS samples are absent or their maximum disagrees")
+    expected_checkpoints = {
+        f"direct_pid_{name}_vmrss": observer[name]["direct_pid_vmrss_kib"]
+        for name in ("established", "staged", "wire")
+    }
+    if checkpoints != expected_checkpoints:
+        fail("direct-PID RSS TSV checkpoints disagree")
 
     provenance = load(directory / "provenance.json")
     for key in ("head_before", "head_after", "tree_before", "tree_after", "source_sha256",
@@ -166,8 +267,11 @@ def verify(directory, tiny=False):
 
 if __name__ == "__main__":
     try:
+        if len(sys.argv) == 4 and sys.argv[2] == "--write-rss":
+            write_rss(sys.argv[1], sys.argv[3])
+            sys.exit()
         if len(sys.argv) not in (2, 3) or (len(sys.argv) == 3 and sys.argv[2] not in ("--tiny", "--full")):
-            fail("usage: verify_receipt.py RECEIPT [--tiny|--full]")
+            fail("usage: verify_receipt.py RECEIPT [--tiny|--full] | RECEIPT --write-rss SAMPLER_MAX")
         verify(sys.argv[1], len(sys.argv) == 3 and sys.argv[2] == "--tiny")
     except (OSError, ValueError, json.JSONDecodeError) as error:
         print(f"FAIL: {error}")

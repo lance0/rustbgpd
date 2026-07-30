@@ -53,16 +53,40 @@ python3 - "$fixture" <<'PY'
 import hashlib, json, pathlib, sys
 d = pathlib.Path(sys.argv[1])
 shape = "rr1000-v1:peers=1000;prefixes=100000;sources=4;workers=12;afi=ipv4-unicast;role=ibgp-rr"
-(d/"phase.json").write_text(json.dumps({"schema":1,"shape":shape,"shape_digest":"109e38772e3bd819",
+def point(rss, hwm, allocated, active, resident, mapped):
+ return {"direct_pid_vmrss_kib":rss,"direct_pid_vmhwm_kib":hwm,
+  "jemalloc_allocated_bytes":allocated,"jemalloc_active_bytes":active,
+  "jemalloc_resident_bytes":resident,"jemalloc_mapped_bytes":mapped}
+checkpoints={"established":point(100,105,1000,1100,1200,1300),
+ "staged":point(110,115,2000,2100,2200,2300),
+ "wire":point(120,125,3000,3100,3200,3300)}
+(d/"phase.json").write_text(json.dumps({"schema":2,"shape":shape,"shape_digest":"109e38772e3bd819",
  "wire_completion":"first_exact_bitmap","sessions":1000,"established_before":1000,"established_after":1000,"prefixes":100000,"sources":4,"workers":12,"groups":1,"initial_eors":1000,
- "injection_ms":1,"staged_ms":2,"wire_ms":3,"established_rss_kib":100,
- "staged_rss_kib":110,"wire_rss_kib":120,"established_vmhwm_kib":105,
- "staged_vmhwm_kib":115,"wire_vmhwm_kib":125})+"\n")
+ "injection_ms":1,"staged_ms":2,"wire_ms":3,"resource_observer_schema":1,
+ "resource_observer":checkpoints})+"\n")
+(d/"grouped-commit.json").write_text(json.dumps({"schema":2,
+ "timing":"test_profile_untimed_rpol_community_transition",
+ "fixture_peers":1000,"fixture_prefixes":100000,
+ "seed":{"routes_received_dispatches":1,"routes_received_withdrawals":0,
+  "envelopes":1000,"routes_per_envelope":100000,"shared_group_encode":False,
+  "community":"65000:100"},
+ "transition":{"fast_path":True,"routes_received_dispatches":0,
+  "routes_received_withdrawals":0,"probe_accounting":"policy_transition_receipt",
+  "plan_builds":1,"full_exact_probes":100000,"route_shell_materializations":100000,
+  "authoritative_peer_applies":0,"envelopes":1000,"routes_per_envelope":100000,
+  "shared_encode_proof":"collected","snapshot_classification":"concrete_transport_session",
+  "snapshot_owner_nonzero":True,"snapshot_generation":0,"snapshot_max_message_len":4096,
+  "snapshot_add_path":False,"shared_group_encode_classification":"one_arc_all_members",
+  "shared_announce_classification":"one_arc_all_members","shared_route_count":100000,
+  "community":"65000:200","update_groups":1,"grouped_peers":1000,
+  "ungrouped_peers":0,"dirty_peers":0,"grouped_unicast_routes":100000,
+  "private_unicast_routes":0}})+"\n")
 header="peer\tstaged\tnlri\tmessages\twithdrawals\tduplicates\toutside\tdecode_failures\tcoverage\tbitmap_digest\tinitial_eor\twire_ms\n"
 rows=[f"127.{2+i//254}.{1+i%254}.1\t100000\t100000\t391\t0\t0\t0\t0\t100000\t7c50a897bc4a4e51\ttrue\t3\n" for i in range(1000)]
 (d/"per-peer.tsv").write_text(header+"".join(rows))
-(d/"rss.tsv").write_text("checkpoint\trss_kib\nsample\t90\nsample\t125\nestablished\t100\nstaged\t110\nwire\t120\n")
-(d/"rss.json").write_text('{"established_kib":100,"staged_kib":110,"wire_kib":120,"established_vmhwm_kib":105,"staged_vmhwm_kib":115,"wire_vmhwm_kib":125,"sampler_max_kib":125}\n')
+(d/"rss.tsv").write_text("observer\trss_kib\nprocess_tree_target_rss_sample\t90\nprocess_tree_target_rss_sample\t125\ndirect_pid_established_vmrss\t100\ndirect_pid_staged_vmrss\t110\ndirect_pid_wire_vmrss\t120\n")
+(d/"rss.json").write_text(json.dumps({"schema":2,"checkpoints":checkpoints,
+ "process_tree_sampler_max_rss_kib":125})+"\n")
 (d/"source.snapshot").write_bytes(b"source")
 (d/"rrtransport.bin").write_bytes(b"binary")
 h=lambda p: hashlib.sha256((d/p).read_bytes()).hexdigest()
@@ -87,6 +111,42 @@ expect_red() {
 }
 
 "$runner" --verify-fixture "$fixture" "$tmp/accepted"
+expect_red missing-internal-receipt mutate -c 'import pathlib,sys;(pathlib.Path(sys.argv[1])/"grouped-commit.json").unlink()'
+for field in routes_received_dispatches routes_received_withdrawals envelopes \
+  routes_per_envelope; do
+  expect_red "seed-$field" mutate -c "import json,pathlib,sys;p=pathlib.Path(sys.argv[1])/'grouped-commit.json';d=json.loads(p.read_text());d['seed']['$field']+=1;p.write_text(json.dumps(d))"
+done
+for field in routes_received_dispatches routes_received_withdrawals plan_builds \
+  full_exact_probes route_shell_materializations authoritative_peer_applies \
+  envelopes routes_per_envelope shared_route_count update_groups grouped_peers \
+  ungrouped_peers dirty_peers grouped_unicast_routes private_unicast_routes; do
+  expect_red "transition-$field" mutate -c "import json,pathlib,sys;p=pathlib.Path(sys.argv[1])/'grouped-commit.json';d=json.loads(p.read_text());d['transition']['$field']+=1;p.write_text(json.dumps(d))"
+done
+for field in fast_path probe_accounting snapshot_classification snapshot_owner_nonzero snapshot_generation \
+  snapshot_max_message_len snapshot_add_path shared_group_encode_classification \
+  shared_announce_classification shared_route_count shared_encode_proof; do
+  expect_red "transition-$field" mutate -c "import json,pathlib,sys;p=pathlib.Path(sys.argv[1])/'grouped-commit.json';d=json.loads(p.read_text());d['transition']['$field']=None;p.write_text(json.dumps(d))"
+done
+for phase in seed transition; do
+  expect_red "$phase-community" mutate -c "import json,pathlib,sys;p=pathlib.Path(sys.argv[1])/'grouped-commit.json';d=json.loads(p.read_text());d['$phase']['community']='wrong';p.write_text(json.dumps(d))"
+done
+expect_red seed-shared-encode mutate -c 'import json,pathlib,sys;p=pathlib.Path(sys.argv[1])/"grouped-commit.json";d=json.loads(p.read_text());d["seed"]["shared_group_encode"]=True;p.write_text(json.dumps(d))'
+for checkpoint in established staged wire; do
+  for series in jemalloc_allocated_bytes jemalloc_active_bytes \
+    jemalloc_resident_bytes jemalloc_mapped_bytes; do
+    expect_red "missing-$checkpoint-$series" mutate -c "import json,pathlib,sys;p=pathlib.Path(sys.argv[1])/'phase.json';d=json.loads(p.read_text());del d['resource_observer']['$checkpoint']['$series'];p.write_text(json.dumps(d))"
+  done
+done
+expect_red allocator-phase-mismatch mutate -c 'import json,pathlib,sys;p=pathlib.Path(sys.argv[1])/"rss.json";d=json.loads(p.read_text());d["checkpoints"]["staged"]["jemalloc_mapped_bytes"]+=1;p.write_text(json.dumps(d))'
+expect_red allocator-nonnumeric mutate -c 'import json,pathlib,sys;p=pathlib.Path(sys.argv[1])/"phase.json";d=json.loads(p.read_text());d["resource_observer"]["wire"]["jemalloc_resident_bytes"]="invalid";p.write_text(json.dumps(d))'
+expect_red allocator-zero mutate -c 'import json,pathlib,sys;p=pathlib.Path(sys.argv[1])/"phase.json";d=json.loads(p.read_text());d["resource_observer"]["established"]["jemalloc_mapped_bytes"]=0;p.write_text(json.dumps(d))'
+expect_red allocator-relation mutate -c 'import json,pathlib,sys;p=pathlib.Path(sys.argv[1])/"phase.json";d=json.loads(p.read_text());d["resource_observer"]["staged"]["jemalloc_allocated_bytes"]=2200;p.write_text(json.dumps(d))'
+cp -a "$tmp/accepted" "$tmp/stale-checksum"
+printf '\n' >>"$tmp/stale-checksum/grouped-commit.json"
+if (cd "$tmp/stale-checksum" && sha256sum -c SHA256SUMS --strict >/dev/null 2>&1); then
+  echo "false green: stale checksum" >&2
+  exit 1
+fi
 expect_red staged-count mutate -c 'import pathlib,sys;p=pathlib.Path(sys.argv[1])/"per-peer.tsv";r=p.read_text().splitlines();h=r[0].split("\t").index("staged");x=r[1].split("\t");x[h]="99999";r[1]="\t".join(x);p.write_text("\n".join(r)+"\n")'
 expect_red nlri-count mutate -c 'import pathlib,sys;p=pathlib.Path(sys.argv[1])/"per-peer.tsv";r=p.read_text().splitlines();h=r[0].split("\t").index("nlri");x=r[1].split("\t");x[h]="99999";r[1]="\t".join(x);p.write_text("\n".join(r)+"\n")'
 expect_red corrupt-prefix mutate -c 'import pathlib,sys;p=pathlib.Path(sys.argv[1])/"per-peer.tsv";s=p.read_text();p.write_text(s.replace("7c50a897bc4a4e51","0000000000000000",1))'
@@ -97,6 +157,36 @@ for field in withdrawals duplicates outside decode_failures; do
   expect_red "$field" mutate -c "import pathlib,sys;p=pathlib.Path(sys.argv[1])/'per-peer.tsv';s=p.read_text();h=s.splitlines()[0].split('\\t').index('$field');r=s.splitlines();x=r[1].split('\\t');x[h]='1';r[1]='\\t'.join(x);p.write_text('\\n'.join(r)+'\\n')"
 done
 expect_red missing-final-rss mutate -c 'import pathlib,sys;p=pathlib.Path(sys.argv[1])/"rss.tsv";p.write_text("\n".join(p.read_text().splitlines()[:-1])+"\n")'
+expect_red wrong-final-rss-header mutate -c 'import pathlib,sys;p=pathlib.Path(sys.argv[1])/"rss.tsv";s=p.read_text();p.write_text(s.replace("observer\trss_kib","wrong\trss_kib",1))'
+cp -a "$tmp/accepted" "$tmp/missing-rss-header"
+rm "$tmp/missing-rss-header/rss.tsv"
+if python3 "$verifier" "$tmp/missing-rss-header" --write-rss 125 \
+  >"$tmp/missing-rss-header.stdout" 2>&1; then
+  echo "false green: write-rss accepted a missing observer header" >&2
+  exit 1
+fi
+grep -Fq "FAIL: [Errno 2]" "$tmp/missing-rss-header.stdout"
+cp -a "$tmp/accepted" "$tmp/wrong-rss-header"
+sed -i '1s/^observer/wrong/' "$tmp/wrong-rss-header/rss.tsv"
+if python3 "$verifier" "$tmp/wrong-rss-header" --write-rss 125 \
+  >"$tmp/wrong-rss-header.stdout" 2>&1; then
+  echo "false green: write-rss accepted the wrong observer header" >&2
+  exit 1
+fi
+grep -Fq "FAIL: RSS TSV is missing its observer header" "$tmp/wrong-rss-header.stdout"
+cp -a "$tmp/accepted" "$tmp/missing-resource-observer"
+mutate -c 'import json,pathlib,sys;p=pathlib.Path(sys.argv[1])/"phase.json";d=json.loads(p.read_text());del d["resource_observer"];p.write_text(json.dumps(d))' \
+  "$tmp/missing-resource-observer"
+if python3 "$verifier" "$tmp/missing-resource-observer" --write-rss 125 \
+  >"$tmp/missing-resource-observer.stdout" 2>&1; then
+  echo "false green: write-rss accepted a missing resource observer" >&2
+  exit 1
+fi
+if ! grep -Fxq "FAIL: phase resource observer is missing or invalid" \
+  "$tmp/missing-resource-observer.stdout"; then
+  echo "write-rss did not report the missing resource observer cleanly" >&2
+  exit 1
+fi
 if "$runner" --classify-rss 2097153 "$tmp/rss-over"; then echo "false green: rss ceiling" >&2; exit 1; fi
 grep -q '"root_failure":"rss_ceiling"' "$tmp/rss-over/failure.json"
 expect_red changed-head mutate -c 'import json,pathlib,sys;p=pathlib.Path(sys.argv[1])/"provenance.json";d=json.loads(p.read_text());d["head_after"]="changed";p.write_text(json.dumps(d))'
@@ -125,7 +215,8 @@ printf 'Name:\trrtiny\nState:\tR (running)\nVmRSS:\t2097153 kB\n' >"$tmp/over-li
 [[ $("$runner" --observe-direct-rss "$tmp/absent.status") == $'exited\t0' ]]
 [[ $("$runner" --sample-direct-rss-fixture "$tmp/live.status" "$tmp/live-rss") == \
   $'sample\t1234\t1234' ]]
-[[ $(<"$tmp/live-rss/rss.tsv") == $'checkpoint\trss_kib\nsample\t1234' ]]
+[[ $(<"$tmp/live-rss/rss.tsv") == \
+  $'checkpoint\trss_kib\nprocess_tree_target_rss_sample\t1234' ]]
 [[ $("$runner" --sample-direct-rss-fixture "$tmp/zombie.status" "$tmp/zombie-rss") == \
   $'exited\t0\t0' ]]
 [[ $(<"$tmp/zombie-rss/rss.tsv") == $'checkpoint\trss_kib' ]]
@@ -143,7 +234,8 @@ if "$runner" --sample-direct-rss-fixture "$tmp/over-limit.status" "$tmp/over-lim
   exit 1
 fi
 grep -Fq '"root_failure":"rss_ceiling"' "$tmp/over-limit/failure.json"
-[[ $(<"$tmp/over-limit/rss.tsv") == $'checkpoint\trss_kib\nsample\t2097153' ]]
+[[ $(<"$tmp/over-limit/rss.tsv") == \
+  $'checkpoint\trss_kib\nprocess_tree_target_rss_sample\t2097153' ]]
 
 resolve_observations() {
   local name=$1 seen=$2 expected=$3
@@ -342,10 +434,11 @@ for spec in messages:0 wire_ms:-1; do
 done
 expect_red wrong-peer mutate -c 'import pathlib,sys;p=pathlib.Path(sys.argv[1])/"per-peer.tsv";s=p.read_text();p.write_text(s.replace("127.2.1.1","192.0.2.1",1))'
 expect_red wire-max mutate -c 'import json,pathlib,sys;p=pathlib.Path(sys.argv[1])/"phase.json";d=json.loads(p.read_text());d["wire_ms"]=4;p.write_text(json.dumps(d))'
-expect_red phase-rss mutate -c 'import json,pathlib,sys;p=pathlib.Path(sys.argv[1])/"phase.json";d=json.loads(p.read_text());d["staged_rss_kib"]=111;p.write_text(json.dumps(d))'
-expect_red hwm-below-rss mutate -c 'import json,pathlib,sys;p=pathlib.Path(sys.argv[1]);[(lambda f,d:(d.__setitem__("wire_vmhwm_kib",119),f.write_text(json.dumps(d))))(f,json.loads(f.read_text())) for f in (p/"rss.json",p/"phase.json")]'
-expect_red hwm-nonmonotonic mutate -c 'import json,pathlib,sys;p=pathlib.Path(sys.argv[1]);[(lambda f,d:(d.__setitem__("staged_vmhwm_kib",126),f.write_text(json.dumps(d))))(f,json.loads(f.read_text())) for f in (p/"rss.json",p/"phase.json")]'
-expect_red no-external-sample mutate -c 'import pathlib,sys;p=pathlib.Path(sys.argv[1])/"rss.tsv";p.write_text("\n".join(x for x in p.read_text().splitlines() if not x.startswith("sample"))+"\n")'
-expect_red sampler-max mutate -c 'import json,pathlib,sys;p=pathlib.Path(sys.argv[1])/"rss.json";d=json.loads(p.read_text());d["sampler_max_kib"]=124;p.write_text(json.dumps(d))'
-expect_red tsv-checkpoint mutate -c 'import pathlib,sys;p=pathlib.Path(sys.argv[1])/"rss.tsv";s=p.read_text();p.write_text(s.replace("staged\t110","staged\t111"))'
+expect_red phase-rss mutate -c 'import json,pathlib,sys;p=pathlib.Path(sys.argv[1])/"phase.json";d=json.loads(p.read_text());d["resource_observer"]["staged"]["direct_pid_vmrss_kib"]=111;p.write_text(json.dumps(d))'
+expect_red hwm-below-rss mutate -c 'import json,pathlib,sys;p=pathlib.Path(sys.argv[1]);[(lambda f,d:(d["checkpoints" if f.name=="rss.json" else "resource_observer"]["wire"].__setitem__("direct_pid_vmhwm_kib",119),f.write_text(json.dumps(d))))(f,json.loads(f.read_text())) for f in (p/"rss.json",p/"phase.json")]'
+expect_red hwm-nonmonotonic mutate -c 'import json,pathlib,sys;p=pathlib.Path(sys.argv[1]);[(lambda f,d:(d["checkpoints" if f.name=="rss.json" else "resource_observer"]["staged"].__setitem__("direct_pid_vmhwm_kib",126),f.write_text(json.dumps(d))))(f,json.loads(f.read_text())) for f in (p/"rss.json",p/"phase.json")]'
+expect_red no-external-sample mutate -c 'import pathlib,sys;p=pathlib.Path(sys.argv[1])/"rss.tsv";p.write_text("\n".join(x for x in p.read_text().splitlines() if not x.startswith("process_tree_target_rss_sample"))+"\n")'
+expect_red legacy-sample-name mutate -c 'import pathlib,sys;p=pathlib.Path(sys.argv[1])/"rss.tsv";s=p.read_text();p.write_text(s.replace("process_tree_target_rss_sample","sample",1))'
+expect_red sampler-max mutate -c 'import json,pathlib,sys;p=pathlib.Path(sys.argv[1])/"rss.json";d=json.loads(p.read_text());d["process_tree_sampler_max_rss_kib"]=124;p.write_text(json.dumps(d))'
+expect_red tsv-checkpoint mutate -c 'import pathlib,sys;p=pathlib.Path(sys.argv[1])/"rss.tsv";s=p.read_text();p.write_text(s.replace("direct_pid_staged_vmrss\t110","direct_pid_staged_vmrss\t111"))'
 echo "PASS: rrtransport receipt mechanics and destructive proofs"

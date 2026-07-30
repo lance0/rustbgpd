@@ -55,7 +55,7 @@ sample_direct_rss() {
     exited) ;;
     sample)
       (( direct_rss_kib > max_rss )) && max_rss=$direct_rss_kib
-      printf 'sample\t%s\n' "$direct_rss_kib" >>"$output/rss.tsv"
+      printf 'process_tree_target_rss_sample\t%s\n' "$direct_rss_kib" >>"$output/rss.tsv"
       classify_rss "$direct_rss_kib" "$output"
       ;;
     *)
@@ -315,7 +315,7 @@ await_tiny_startup_gate() {
   fi
   rss=$tiny_validated_rss
   (( rss > max_rss )) && max_rss=$rss
-  printf 'sample\t%s\n' "$rss" >>"$receipt/rss.tsv"
+  printf 'process_tree_target_rss_sample\t%s\n' "$rss" >>"$receipt/rss.tsv"
   if ! classify_rss "$rss" "$receipt"; then
     tiny_gate_reason=rss_ceiling
     return 1
@@ -378,7 +378,7 @@ startup_gate_fixture() {
   tiny_ready=$fixture_dir/gate/ready
   tiny_go=$fixture_dir/gate/go
   tiny_expected="$root/bench/scale/rrtransport/target/debug/rrtransport"
-  printf 'checkpoint\trss_kib\n' >"$receipt/rss.tsv"
+  printf 'observer\trss_kib\n' >"$receipt/rss.tsv"
   max_rss=0
   case $mode in
     delayed-expected)
@@ -454,7 +454,7 @@ sample_supervisor() {
     seen_expected_child=true
     rss=$sampler_rss
     (( rss > max_rss )) && max_rss=$rss
-    printf 'sample\t%s\n' "$rss" >>"$receipt/rss.tsv"
+    printf 'process_tree_target_rss_sample\t%s\n' "$rss" >>"$receipt/rss.tsv"
     if ! classify_rss "$rss" "$receipt"; then
       fail_supervised_attempt rss_ceiling
       return 1
@@ -472,7 +472,7 @@ sampler_control_fixture() {
   local mode=$1 expected_status=$2 fixture_dir=$3 result
   mkdir -p "$fixture_dir"
   receipt=$fixture_dir
-  printf 'checkpoint\trss_kib\n' >"$receipt/rss.tsv"
+  printf 'observer\trss_kib\n' >"$receipt/rss.tsv"
   if [[ $mode == normal ]]; then
     # shellcheck disable=SC2016 # Expanded by the fixture's bash.
     launch_supervised "$receipt/harness.log" bash -c \
@@ -604,10 +604,18 @@ full_verify() {
   python3 "$verifier" "$receipt" --full | tee "$receipt/verifier.txt"
 }
 
+run_grouped_commit_fixture() {
+  RRTRANSPORT_GROUPED_COMMIT_OUTPUT="$1/grouped-commit.json" \
+    RRTRANSPORT_GROUPED_COMMIT_PEERS="$2" RRTRANSPORT_GROUPED_COMMIT_PREFIXES="$3" \
+    cargo test --manifest-path "$manifest" --locked \
+      rr1000::tests::grouped_commit_receipt_fixture -- --exact
+  [[ -s $1/grouped-commit.json ]]
+}
+
 full_checksums() {
   local receipt=$1
-  (cd "$receipt" && sha256sum phase.json per-peer.tsv rss.json rss.tsv provenance.json \
-    source.snapshot rrtransport.bin verifier.txt harness.log >SHA256SUMS &&
+  (cd "$receipt" && sha256sum phase.json grouped-commit.json per-peer.tsv rss.json rss.tsv \
+    provenance.json source.snapshot rrtransport.bin verifier.txt harness.log >SHA256SUMS &&
     sha256sum -c SHA256SUMS --strict)
 }
 
@@ -733,8 +741,9 @@ case ${1:-} in
     cp -a "$2" "$3"
     receipt=$3
     python3 "$verifier" "$receipt" | tee "$receipt/verifier.txt"
-    (cd "$receipt" && sha256sum phase.json per-peer.tsv rss.json rss.tsv provenance.json \
-      source.snapshot rrtransport.bin verifier.txt >SHA256SUMS && sha256sum -c SHA256SUMS)
+    (cd "$receipt" && sha256sum phase.json grouped-commit.json per-peer.tsv rss.json rss.tsv \
+      provenance.json source.snapshot rrtransport.bin verifier.txt >SHA256SUMS &&
+      sha256sum -c SHA256SUMS --strict)
     exit
     ;;
   --real-smoke)
@@ -744,7 +753,8 @@ case ${1:-} in
     rm -rf "$receipt"
     mkdir -p "$receipt"
     tiny_binary="$root/bench/scale/rrtransport/target/debug/rrtransport"
-    printf 'checkpoint\trss_kib\n' >"$receipt/rss.tsv"
+    run_grouped_commit_fixture "$receipt" 4 100
+    printf 'observer\trss_kib\n' >"$receipt/rss.tsv"
     tiny_ready=$receipt/.startup-ready
     tiny_go=$receipt/.startup-go
     tiny_expected=$tiny_binary
@@ -772,16 +782,7 @@ case ${1:-} in
     cp "$tiny_binary" "$receipt/rrtransport.bin"
     source_snapshot >"$receipt/source.snapshot"
     cp "$receipt/phase.json" "$receipt/phase.saved"
-    python3 - "$receipt" "$max_rss" <<'PY'
-import json,pathlib,sys
-d=pathlib.Path(sys.argv[1]); p=json.loads((d/"phase.json").read_text())
-with (d/"rss.tsv").open("a") as f:
- for name in ("established","staged","wire"): f.write(f"{name}\t{p[name+'_rss_kib']}\n")
-(d/"rss.json").write_text(json.dumps({"established_kib":p["established_rss_kib"],
- "staged_kib":p["staged_rss_kib"],"wire_kib":p["wire_rss_kib"],
- "established_vmhwm_kib":p["established_vmhwm_kib"],"staged_vmhwm_kib":p["staged_vmhwm_kib"],
- "wire_vmhwm_kib":p["wire_vmhwm_kib"],"sampler_max_kib":int(sys.argv[2])})+"\n")
-PY
+    python3 "$verifier" "$receipt" --write-rss "$max_rss"
     head=$(git -C "$root" rev-parse HEAD); tree=$(git -C "$root" write-tree)
     source_hash=$(sha256sum "$receipt/source.snapshot"|cut -d' ' -f1)
     binary_hash=$(sha256sum "$receipt/rrtransport.bin"|cut -d' ' -f1)
@@ -819,6 +820,8 @@ head_before=$(git -C "$root" rev-parse HEAD); tree_before=$(git -C "$root" write
 source_before=$(source_snapshot)
 timeout -k 10 300 cargo build --manifest-path "$manifest" --locked --release
 mkdir -p "$output"; campaign_started=$SECONDS
+run_grouped_commit_fixture "$output" 1000 100000
+chmod 0444 "$output/grouped-commit.json"
 before_load=''
 after_load=''
 before_pswpin=''
@@ -831,21 +834,13 @@ for run in 1 2 3; do
   require_quiet before || { echo "host not quiet before attempt" >&2; exit 1; }
   receipt="$output/run-$run"; mkdir -p "$receipt"
   printf '%s\n' "$source_before" >"$receipt/source.snapshot"; cp "$binary" "$receipt/rrtransport.bin"
-  printf 'checkpoint\trss_kib\n' >"$receipt/rss.tsv"
+  cp "$output/grouped-commit.json" "$receipt/grouped-commit.json"
+  printf 'observer\trss_kib\n' >"$receipt/rss.tsv"
   launch_supervised "$receipt/harness.log" timeout -k 10 300 "$binary" rr1000 "$receipt"
   wait_exe "$pid" "$(command -v timeout)"
   sampler_observation_reader=read_live_sampler_observation
   sample_supervisor "$binary" "$receipt" "$run" || exit 1
-  python3 - "$receipt" "$max_rss" <<'PY'
-import json,pathlib,sys
-d=pathlib.Path(sys.argv[1]); p=json.loads((d/"phase.json").read_text())
-with (d/"rss.tsv").open("a") as f:
- for name in ("established","staged","wire"): f.write(f"{name}\t{p[name+'_rss_kib']}\n")
-(d/"rss.json").write_text(json.dumps({"established_kib":p["established_rss_kib"],
- "staged_kib":p["staged_rss_kib"],"wire_kib":p["wire_rss_kib"],
- "established_vmhwm_kib":p["established_vmhwm_kib"],"staged_vmhwm_kib":p["staged_vmhwm_kib"],
- "wire_vmhwm_kib":p["wire_vmhwm_kib"],"sampler_max_kib":int(sys.argv[2])})+"\n")
-PY
+  python3 "$verifier" "$receipt" --write-rss "$max_rss"
   head_after=$(git -C "$root" rev-parse HEAD); tree_after=$(git -C "$root" write-tree)
   source_after=$(source_snapshot)
   [[ -z $(git -C "$root" status --porcelain) ]] || { echo "tree dirtied during run" >&2; exit 1; }
