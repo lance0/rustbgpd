@@ -60,14 +60,21 @@ class AnalyzerContracts(unittest.TestCase):
         result = run_analyzer("analyze-soak-hot-reload.py", fields, rows)
         self.assertEqual(result.returncode, 0, result.stderr)
         rows[-1]["apply_cycles"], rows[-1]["apply_fail"] = "2", "1"
-        self.assertEqual(
-            run_analyzer("analyze-soak-hot-reload.py", fields, rows).returncode, 1
-        )
+        result = run_analyzer("analyze-soak-hot-reload.py", fields, rows)
+        self.assertFalse(json.loads(result.stdout)["gates"]["apply_failures"]["pass"])
+        self.assertTrue(json.loads(result.stdout)["gates"]["apply_cycles"]["pass"])
         rows[-1]["apply_cycles"], rows[-1]["apply_fail"] = "1", "0"
         rows[-1]["flap_count"] = "4"
         self.assertEqual(
             run_analyzer("analyze-soak-hot-reload.py", fields, rows).returncode, 1
         )
+        rows[-1]["flap_count"], rows[-1]["apply_cycles"] = "3", "2"
+        result = run_analyzer("analyze-soak-hot-reload.py", fields, rows)
+        self.assertFalse(json.loads(result.stdout)["gates"]["apply_cycles"]["pass"])
+        self.assertTrue(json.loads(result.stdout)["gates"]["apply_failures"]["pass"])
+        rows[-1]["apply_cycles"] = rows[-1]["apply_ok"] = "0"
+        result = run_analyzer("analyze-soak-hot-reload.py", fields, rows)
+        self.assertFalse(json.loads(result.stdout)["gates"]["apply_failures"]["pass"])
 
     def test_injection_requires_exact_final_consumer_and_continuity(self):
         fields = [*BASE, "elapsed_sec", "live_target", "frr_route_count",
@@ -117,53 +124,86 @@ class AnalyzerContracts(unittest.TestCase):
                 row[required] = "not-a-number"
                 result = run_analyzer(analyzer, fields, [row])
                 self.assertEqual(result.returncode, 2)
+                for invalid in ("-1", "1.5"):
+                    row[required] = invalid
+                    self.assertEqual(run_analyzer(analyzer, fields, [row]).returncode, 2)
 
-    def test_injection_commands_propagate_failure(self):
-        script = HERE / "run-soak-inject-churn.sh"
-        command = f"""
-source {script!s}
-docker() {{ return 17; }}
-rb_inject_add 10.0.0.0/24
-"""
-        result = subprocess.run(
-            ["bash", "-c", command], text=True, capture_output=True, check=False
+    def bash(self, script, body):
+        return subprocess.run(
+            ["bash", "-c", f"source {HERE / script}\n{body}"],
+            text=True, capture_output=True, check=False,
         )
+
+    def test_gr_runner_requires_complete_ordered_restart(self):
+        body = r'''
+state=$(mktemp); echo 0 >"$state"
+docker() { echo "$*" >&2; }
+sleep() { :; }; wait_established() { echo established >&2; }
+cycle_log() { :; }
+prom_scrape() { n=$(cat "$state"); echo $((n+1)) >"$state"; if [ "$n" = 0 ]; then
+ echo "bgp_gr_active_peers 1"; echo "bgp_gr_stale_routes 2"
+else echo "bgp_gr_active_peers 0"; echo "bgp_gr_stale_routes 0"; fi; }
+sample_row() { echo "sample:$2"; }
+restart_frr_bgpd 7 0
+'''
+        result = self.bash("run-soak-gr-restart-intern-gc.sh", body)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["sample:0", "sample:0"])
+        self.assertIn(" stop", result.stderr)
+        self.assertIn(" start", result.stderr)
+        self.assertIn("established", result.stderr)
+
+    def test_hot_runner_cp_plan_and_apply_fail_closed(self):
+        body = r'''
+CANDIDATE_TOML=/tmp/candidate; cycle_log() { :; }; write_candidate_toml() { :; }
+docker() {
+ case "$MODE:$*" in
+ cp:cp*) return 11;;
+ malformed:*config\ plan*) echo '{bad';;
+ missing:*config\ plan*) echo '{}';;
+ apply:*config\ plan*) printf '{\n "runtime_snapshot_token": "token"\n}\n';;
+ apply:*config\ apply*) return 13;;
+ good:*config\ plan*) printf '{\n "runtime_snapshot_token": "token"\n}\n';;
+ esac
+}
+run_apply_cycle 1
+'''
+        for mode, code in (("cp", 11), ("malformed", 1), ("missing", 2),
+                           ("apply", 1), ("good", 0)):
+            with self.subTest(mode=mode):
+                result = self.bash("run-soak-hot-reload.sh", f"MODE={mode}\n{body}")
+                self.assertEqual(result.returncode, code, result.stderr)
+
+    def test_injection_mutates_counts_only_after_commands_succeed(self):
+        body = r'''
+CHURN_BATCH=1; LIVE_SET_FILE=$(mktemp); echo 1 >"$LIVE_SET_FILE"
+d=$(mktemp); a=$(mktemp); echo 1 >"$d"; echo 2 >"$a"
+rb_inject_del() { [ "$MODE" != del ]; }
+rb_inject_add() { [ "$MODE" != add ]; }
+churn_log() { :; }
+trap 'tr -d "\n" <"$LIVE_SET_FILE"' EXIT
+run_churn_cycle "$d" "$a"
+'''
+        for mode, expected in (("del", "1"), ("add", "")):
+            result = self.bash("run-soak-inject-churn.sh", f"MODE={mode}\n{body}")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(result.stdout, expected)
+        result = self.bash("run-soak-inject-churn.sh", "docker() { return 17; }\nrb_inject_add x")
         self.assertEqual(result.returncode, 17)
+        result = self.bash("run-soak-inject-churn.sh", "docker() { return 18; }\nrb_inject_del x")
+        self.assertEqual(result.returncode, 18)
 
-    def test_runners_are_sourceable_and_end_with_analyzer_gate(self):
-        for script in (
-            "run-soak-gr-restart-intern-gc.sh",
-            "run-soak-hot-reload.sh",
+    def test_frr_query_and_final_analyzer_failures_propagate(self):
+        result = self.bash(
             "run-soak-inject-churn.sh",
-        ):
-            with self.subTest(script=script):
-                path = HERE / script
-                result = subprocess.run(
-                    ["bash", "-c", f"source {path!s}"],
-                    text=True, capture_output=True, check=False,
-                )
-                self.assertEqual(result.returncode, 0, result.stderr)
-                text = path.read_text()
-                self.assertRegex(text, r'python3 .*analyze-soak-.* --output ')
-                self.assertIn('BASH_SOURCE[0]', text)
-
-    def test_runner_commands_are_load_bearing(self):
-        inject = (HERE / "run-soak-inject-churn.sh").read_text()
-        self.assertNotRegex(
-            inject, r'rbgp .* rib (?:add|delete).*?(?:\|\| true)',
+            "frr_vtysh() { return 19; }\nfrr_route_count",
         )
-        self.assertIn('count=$(frr_route_count)', inject)
-        hot = (HERE / "run-soak-hot-reload.sh").read_text()
-        self.assertIn(
-            'docker cp "$CANDIDATE_TOML" "$RUSTBGPD:/tmp/candidate.toml"',
-            hot,
-        )
-        self.assertIn('run_apply_cycle "$cycles"', hot)
-        gr = (HERE / "run-soak-gr-restart-intern-gc.sh").read_text()
-        self.assertIn('frrinit.sh stop >/dev/null', gr)
-        self.assertIn('frrinit.sh start >/dev/null', gr)
-        self.assertNotIn('frrinit.sh stop >/dev/null 2>&1 || true', gr)
-        self.assertNotIn('frrinit.sh start >/dev/null 2>&1 || true', gr)
+        self.assertNotEqual(result.returncode, 0)
+        for script in ("gr-restart-intern-gc", "hot-reload", "inject-churn"):
+            result = self.bash(
+                f"run-soak-{script}.sh", "python3() { return 23; }\nrun_analyzer"
+            )
+            self.assertEqual(result.returncode, 23)
 
 
 if __name__ == "__main__":

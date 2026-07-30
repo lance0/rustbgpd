@@ -174,8 +174,16 @@ container_rss_mb() {
 }
 
 frr_route_count() {
-    frr_vtysh "show bgp ipv4 unicast" \
-        | awk '/10\\./ {count++} END {print count+0}'
+    frr_vtysh "show bgp ipv4 unicast json" |
+        python3 -c 'import json,sys
+d=json.load(sys.stdin)
+r=d.get("routes")
+if not isinstance(r, dict): raise SystemExit(2)
+print(len(r))'
+}
+
+run_analyzer() {
+    python3 "$SOAK_SCRIPT_DIR/analyze-soak-inject-churn.py" "$RUN_DIR" --output "$RUN_DIR/verdict.json"
 }
 
 neighbor_state() {
@@ -405,7 +413,7 @@ main() {
     wait_final_routes
     sample_row "$final_elapsed" "$cycles" "$add_total" "$del_total"
     log "soak loop completed; $cycles churn cycles; final samples in $SAMPLES_CSV"
-    python3 "$SOAK_SCRIPT_DIR/analyze-soak-inject-churn.py" "$RUN_DIR" --output "$RUN_DIR/verdict.json"
+    run_analyzer
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then

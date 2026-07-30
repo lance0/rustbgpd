@@ -29,6 +29,9 @@ REQUIRED = {
     "elapsed_sec", "rss_mb", "intern_size", "gr_active_peers",
     "gr_stale_routes", "bgp_established", "restart_cycles",
 }
+COUNTERS = {
+    "intern_size", "gr_active_peers", "gr_stale_routes", "restart_cycles",
+}
 
 
 def safe_float(value: str | None) -> Optional[float]:
@@ -164,8 +167,12 @@ def main() -> int:
         return 2
     for line, row in enumerate(rows, 2):
         for column in REQUIRED - {"bgp_established"}:
-            if safe_float(row.get(column)) is None:
+            value = safe_float(row.get(column))
+            if value is None:
                 print(f"error: row {line}: invalid {column}", file=sys.stderr)
+                return 2
+            if column in COUNTERS and (value < 0 or not value.is_integer()):
+                print(f"error: row {line}: invalid counter {column}", file=sys.stderr)
                 return 2
         if row["bgp_established"] not in {"0", "1"}:
             print(f"error: row {line}: invalid bgp_established", file=sys.stderr)

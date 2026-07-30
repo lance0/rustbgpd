@@ -112,13 +112,6 @@ container_rss_mb() {
     ' 2>/dev/null || true
 }
 
-rb_gr_active() {
-    local prom
-    prom=$(prom_scrape)
-    [ -z "$prom" ] && { echo 0; return; }
-    prom_extract_or_zero "$prom" bgp_gr_active_peers
-}
-
 frr_established_seen() {
     docker exec "$FRR" vtysh -c "show bgp neighbors $RUSTBGPD_IP json" 2>/dev/null \
         | grep -q '"bgpState":"Established"'
@@ -169,6 +162,10 @@ restart_frr_bgpd() {
     done
     log "ERROR: GR active/stale evidence did not clear"
     return 1
+}
+
+run_analyzer() {
+    python3 "$SOAK_SCRIPT_DIR/analyze-soak-gr-restart.py" "$RUN_DIR" --output "$RUN_DIR/verdict.json"
 }
 
 write_run_json() {
@@ -294,7 +291,7 @@ main() {
     local final_elapsed=$(( $(date +%s) - start_epoch ))
     sample_row "$final_elapsed" "$cycles"
     log "soak loop completed; $cycles restart cycles; final samples in $SAMPLES_CSV"
-    python3 "$SOAK_SCRIPT_DIR/analyze-soak-gr-restart.py" "$RUN_DIR" --output "$RUN_DIR/verdict.json"
+    run_analyzer
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then

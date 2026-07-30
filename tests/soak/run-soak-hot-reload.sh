@@ -168,13 +168,17 @@ EOF
 
 # Plan a candidate config, extract the runtime_snapshot_token from JSON.
 plan_and_extract_token() {
-    local token
-    token=$(docker exec "$RUSTBGPD" rbgp -s "$GRPC_ADDR" config plan \
-        --from-file /tmp/candidate.toml -j 2>/dev/null \
-        | grep -o '"runtime_snapshot_token":"[^"]*"' \
-        | head -1 \
-        | sed 's/"runtime_snapshot_token":"//;s/"//')
-    printf '%s' "$token"
+    docker exec "$RUSTBGPD" rbgp -s "$GRPC_ADDR" config plan \
+        --from-file /tmp/candidate.toml -j |
+        python3 -c 'import json,sys
+d=json.load(sys.stdin)
+t=d.get("runtime_snapshot_token")
+if not isinstance(t, str) or not t: raise SystemExit(2)
+print(t)'
+}
+
+run_analyzer() {
+    python3 "$SOAK_SCRIPT_DIR/analyze-soak-hot-reload.py" "$RUN_DIR" --output "$RUN_DIR/verdict.json"
 }
 
 run_apply_cycle() {
@@ -329,7 +333,7 @@ main() {
     local final_elapsed=$(( $(date +%s) - start_epoch ))
     sample_row "$final_elapsed" "$cycles" "$apply_ok" "$apply_fail"
     log "soak loop completed; $cycles apply cycles ($apply_ok ok, $apply_fail fail); final samples in $SAMPLES_CSV"
-    python3 "$SOAK_SCRIPT_DIR/analyze-soak-hot-reload.py" "$RUN_DIR" --output "$RUN_DIR/verdict.json"
+    run_analyzer
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
