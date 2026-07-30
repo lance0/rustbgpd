@@ -1989,13 +1989,12 @@ fn candidate_file(candidate: Option<String>, from_file: Option<String>) -> Strin
         .expect("clap requires CANDIDATE or --from-file")
 }
 
-/// Terminate with the `config diff` / `config plan` detailed exit code:
-/// 0 when the candidate matches the runtime config, 2 when changes are
-/// present (errors take the generic exit-1 path in `main`).
-fn exit_with_change_status(has_changes: bool) -> ! {
-    use std::io::Write as _;
-    let _ = std::io::stdout().flush();
-    std::process::exit(commands::config::change_status_exit_code(has_changes));
+fn flush_stdout_result<W: std::io::Write + ?Sized>(
+    writer: &mut W,
+    result: Result<i32, CliError>,
+) -> Result<i32, CliError> {
+    writer.flush().map_err(CliError::Io)?;
+    result
 }
 
 async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
@@ -2153,7 +2152,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
     // owns a detailed 0/1/2 exit-code contract.
     if let Command::Doctor { output, log_file } = &cli.command {
         let connection = connect(&cli.addr, cli.token_file.as_deref()).await;
-        let code = commands::doctor::run(
+        let result = commands::doctor::run(
             connection,
             &commands::doctor::DoctorOptions {
                 output: output.as_deref(),
@@ -2163,9 +2162,8 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                 json: cli.json,
             },
         )
-        .await?;
-        use std::io::Write as _;
-        let _ = std::io::stdout().flush();
+        .await;
+        let code = flush_stdout_result(&mut std::io::stdout(), result)?;
         std::process::exit(code);
     }
 
@@ -2205,7 +2203,8 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
             } => {
                 let from_file = candidate_file(candidate, from_file);
                 let has_changes = commands::config::diff(connection, &from_file, json).await?;
-                exit_with_change_status(has_changes);
+                let code = commands::config::change_status_exit_code(has_changes);
+                std::process::exit(flush_stdout_result(&mut std::io::stdout(), Ok(code))?);
             }
             ConfigAction::Plan {
                 candidate,
@@ -2220,7 +2219,8 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                     json,
                 )
                 .await?;
-                exit_with_change_status(has_changes);
+                let code = commands::config::change_status_exit_code(has_changes);
+                std::process::exit(flush_stdout_result(&mut std::io::stdout(), Ok(code))?);
             }
             ConfigAction::Apply {
                 candidate,
@@ -3245,6 +3245,57 @@ mod tests {
     use super::*;
     use crate::test_support::spawn_mock_server;
     use clap::Parser;
+
+    struct FlushWriter(Option<std::io::ErrorKind>);
+
+    impl std::io::Write for FlushWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.0
+                .map_or(Ok(()), |kind| Err(std::io::Error::from(kind)))
+        }
+    }
+
+    #[test]
+    fn flush_preserves_config_and_doctor_outcomes() {
+        for code in [0, 2] {
+            assert_eq!(
+                flush_stdout_result(&mut FlushWriter(None), Ok(code)).unwrap(),
+                code
+            );
+        }
+        for outcome in [
+            Ok(0),
+            Ok(2),
+            Err(CliError::Argument("doctor failed".into())),
+        ] {
+            let result = flush_stdout_result(&mut FlushWriter(None), outcome);
+            match result {
+                Ok(code) => assert!(matches!(code, 0 | 2)),
+                Err(error) => assert_eq!(error.to_string(), "doctor failed"),
+            }
+        }
+    }
+
+    #[test]
+    fn flush_error_overrides_success_and_original_error() {
+        for kind in [
+            std::io::ErrorKind::BrokenPipe,
+            std::io::ErrorKind::PermissionDenied,
+        ] {
+            for outcome in [
+                Ok(0),
+                Ok(2),
+                Err(CliError::Argument("doctor failed".into())),
+            ] {
+                let error = flush_stdout_result(&mut FlushWriter(Some(kind)), outcome).unwrap_err();
+                assert!(matches!(error, CliError::Io(ref error) if error.kind() == kind));
+            }
+        }
+    }
 
     #[test]
     fn generic_broken_pipe_error_has_no_rendered_diagnostic() {

@@ -511,6 +511,16 @@ fn print_policy_json<T: Serialize>(
     }
 }
 
+fn write_formatted_stdout(writer: &mut dyn std::io::Write, formatted: &str) -> i32 {
+    match output::write_bytes(writer, formatted.as_bytes()) {
+        Ok(()) => 0,
+        Err(error) => {
+            output::report_write_error("formatted policy output", &error);
+            1
+        }
+    }
+}
+
 /// `rbgp policy fmt [--check] FILE...` — the canonical `.rpol`
 /// formatter (LAN-323). Rewrites files in place via an atomic
 /// write-temp-rename; `--check` rewrites nothing and prints a diff
@@ -521,7 +531,7 @@ fn print_policy_json<T: Serialize>(
 /// `--check` found differences or any file was unreadable/unformattable
 /// (syntax errors — broken files are refused, never rewritten).
 pub fn fmt_local(files: &[String], check: bool) -> i32 {
-    use std::io::{IsTerminal, Read, Write};
+    use std::io::{IsTerminal, Read};
 
     use rustbgpd_policy::rpol::{FmtError, format_rpol};
 
@@ -576,8 +586,8 @@ pub fn fmt_local(files: &[String], check: bool) -> i32 {
                     eprintln!("<stdin>: needs formatting");
                     failed = true;
                 }
-            } else if std::io::stdout().write_all(formatted.as_bytes()).is_err() {
-                failed = true;
+            } else {
+                failed |= write_formatted_stdout(&mut std::io::stdout(), &formatted) != 0;
             }
             continue;
         }
@@ -1893,6 +1903,58 @@ mod tests {
 
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
+        }
+    }
+
+    struct ObservedWriter {
+        bytes: Vec<u8>,
+        flushes: usize,
+        write_error: Option<std::io::ErrorKind>,
+        flush_error: Option<std::io::ErrorKind>,
+    }
+
+    impl Write for ObservedWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if let Some(kind) = self.write_error {
+                return Err(std::io::Error::from(kind));
+            }
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.flushes += 1;
+            self.flush_error
+                .map_or(Ok(()), |kind| Err(std::io::Error::from(kind)))
+        }
+    }
+
+    #[test]
+    fn formatted_stdout_writes_exact_bytes_and_flushes() {
+        let mut writer = ObservedWriter {
+            bytes: Vec::new(),
+            flushes: 0,
+            write_error: None,
+            flush_error: None,
+        };
+        assert_eq!(write_formatted_stdout(&mut writer, "policy p {}\n"), 0);
+        assert_eq!(writer.bytes, b"policy p {}\n");
+        assert_eq!(writer.flushes, 1);
+    }
+
+    #[test]
+    fn formatted_stdout_write_and_flush_failures_exit_one() {
+        for (write_error, flush_error) in [
+            (Some(std::io::ErrorKind::BrokenPipe), None),
+            (None, Some(std::io::ErrorKind::PermissionDenied)),
+        ] {
+            let mut writer = ObservedWriter {
+                bytes: Vec::new(),
+                flushes: 0,
+                write_error,
+                flush_error,
+            };
+            assert_eq!(write_formatted_stdout(&mut writer, "policy p {}\n"), 1);
         }
     }
 
