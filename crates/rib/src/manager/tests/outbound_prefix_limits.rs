@@ -870,6 +870,100 @@ fn recovery_ticks_slice_peers_in_order_and_keep_each_slice_truthful() {
     assert!(!manager.resync_dirty_peers_bounded());
 }
 
+/// A permanently full lowest-address peer spends one turn but cannot retain
+/// the queue head forever. Each healthy successor commits on one of the next
+/// turns, while the failed intent survives the rotation and retries afterward.
+///
+/// Load-bearing breaks: always selecting the first runnable `BTreeMap` entry
+/// or advancing only after commit starves every healthy peer; skipping the
+/// first entry makes the initial failed turn succeed; dropping failed intent
+/// loses both durability checks; draining more than one slice touches a later
+/// receiver early; failing to wrap loses the retry; bypassing transactional
+/// replay or completion breaks its wire truth or leaves pending intent.
+#[test]
+fn backpressured_recovery_rotates_past_healthy_peers_and_retries() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    manager.test_force_ungrouped = true;
+    let peers = [
+        IpAddr::V4(Ipv4Addr::new(10, 113, 0, 1)),
+        IpAddr::V4(Ipv4Addr::new(10, 113, 0, 2)),
+        IpAddr::V4(Ipv4Addr::new(10, 113, 0, 3)),
+        IpAddr::V4(Ipv4Addr::new(10, 113, 0, 4)),
+    ];
+    let mut outbound = peers
+        .into_iter()
+        .map(|peer| register_peer(&mut manager, peer))
+        .collect::<Vec<_>>();
+    let limits = |cap| limit_config(&peers.map(|peer| (peer, Some(cap), None)), &[]);
+    install(&mut manager, 1, limits(1));
+    let source = Ipv4Addr::new(192, 0, 2, 120);
+    announce(
+        &mut manager,
+        IpAddr::V4(source),
+        source_routes(source, &[61, 62]),
+    );
+    for receiver in &mut outbound {
+        drop(wire_prefixes(receiver));
+    }
+    install(&mut manager, 2, limits(2));
+
+    let blocked_tx = manager
+        .outbound_peers
+        .get(&peers[0])
+        .expect("lowest-address peer stays registered")
+        .clone();
+    while blocked_tx.try_send(OutboundRouteUpdate::default()).is_ok() {}
+
+    assert!(
+        !manager.drain_outbound_limit_recovery(),
+        "the full peer's one attempted slice must fail"
+    );
+    assert_eq!(
+        manager.outbound_limit_recovery_for(peers[0]),
+        vec![Afi::Ipv4],
+        "failure must retain its durable recovery intent"
+    );
+
+    for healthy_index in 1..peers.len() {
+        assert!(
+            manager.drain_outbound_limit_recovery(),
+            "healthy peer {healthy_index} must commit within N+1 turns"
+        );
+        for (receiver_index, receiver) in outbound.iter_mut().enumerate().skip(1) {
+            assert_eq!(
+                wire_prefixes(receiver).len(),
+                if receiver_index == healthy_index {
+                    2
+                } else {
+                    0
+                },
+                "one turn may replay only healthy peer {healthy_index}"
+            );
+        }
+    }
+    assert_eq!(
+        manager.outbound_limit_recovery_for(peers[0]),
+        vec![Afi::Ipv4],
+        "the failed intent must survive a complete rotation"
+    );
+
+    drop(wire_prefixes(&mut outbound[0]));
+    assert!(
+        manager.drain_outbound_limit_recovery(),
+        "the failed peer must retry after capacity returns"
+    );
+    assert_eq!(
+        wire_prefixes(&mut outbound[0]).len(),
+        2,
+        "the retry must commit its full truthful replay"
+    );
+    assert!(
+        !manager.outbound_limit_recovery_pending(),
+        "all intent must be complete after the retry"
+    );
+}
+
 /// A stale queue head is discarded without spending the tick or disturbing
 /// either live sibling. The next live peer still completes, and its ordered
 /// successor remains queued.

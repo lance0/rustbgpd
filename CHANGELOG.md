@@ -58,6 +58,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Outbound prefix-limit recovery now rotates after a backpressured peer,
+  allowing other queued peers to recover while preserving the failed peer's
+  transactional retry intent.
+
 - The per-commit real-transport smoke receipt no longer records an empty RSS
   sample when its supervised process exits between liveness and `/proc`
   observation, avoiding a verifier false negative while keeping live
