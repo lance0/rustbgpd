@@ -14,9 +14,9 @@ use super::schema::{
     ManagedVxlanNetdevConfig,
 };
 use super::{
-    Config, ConfigError, DEFAULT_HOLD_TIME, EventHistoryConfig, GrpcEnforcementConfig, Neighbor,
-    PeerGroupConfig, SecurityConfig, TcpAoConfig, TcpAoKeyringConfig, dynamic_prefixes_intersect,
-    is_unicast_nonzero_mac, parse_mac_address,
+    Config, ConfigError, DEFAULT_HOLD_TIME, EventHistoryConfig, GrpcEnforcementConfig,
+    InboundAdmissionConfig, Neighbor, PeerGroupConfig, SecurityConfig, TcpAoConfig,
+    TcpAoKeyringConfig, dynamic_prefixes_intersect, is_unicast_nonzero_mac, parse_mac_address,
 };
 
 /// Canonical key for a dynamic-neighbor prefix: the network address with all
@@ -314,6 +314,7 @@ impl Config {
 
         validate_reserved_policy_names(self)?;
         validate_event_history(&self.event_history)?;
+        validate_inbound_admission(&self.inbound_admission)?;
         validate_grpc_security(&self.security)?;
         self.validate_no_redacted_secrets()?;
 
@@ -2606,6 +2607,48 @@ fn validate_event_history(cfg: &EventHistoryConfig) -> Result<(), ConfigError> {
     if cfg.max_bytes == 0 {
         return Err(ConfigError::InvalidEventHistoryConfig {
             reason: "max_bytes must be > 0".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_inbound_admission(cfg: &InboundAdmissionConfig) -> Result<(), ConfigError> {
+    if !cfg.enabled {
+        return Ok(());
+    }
+
+    if cfg.rate_per_minute == 0 {
+        return Err(ConfigError::InvalidInboundAdmissionConfig {
+            reason: "rate_per_minute must be > 0".to_string(),
+        });
+    }
+    if cfg.burst == 0 {
+        return Err(ConfigError::InvalidInboundAdmissionConfig {
+            reason: "burst must be > 0".to_string(),
+        });
+    }
+    if !(8..=32).contains(&cfg.v4_aggregation_len) {
+        return Err(ConfigError::InvalidInboundAdmissionConfig {
+            reason: format!(
+                "v4_aggregation_len = {} out of range; expected 8..=32",
+                cfg.v4_aggregation_len
+            ),
+        });
+    }
+    if !(16..=128).contains(&cfg.v6_aggregation_len) {
+        return Err(ConfigError::InvalidInboundAdmissionConfig {
+            reason: format!(
+                "v6_aggregation_len = {} out of range; expected 16..=128",
+                cfg.v6_aggregation_len
+            ),
+        });
+    }
+    if !(64..=65536).contains(&cfg.table_capacity) {
+        return Err(ConfigError::InvalidInboundAdmissionConfig {
+            reason: format!(
+                "table_capacity = {} out of range; expected 64..=65536",
+                cfg.table_capacity
+            ),
         });
     }
     Ok(())

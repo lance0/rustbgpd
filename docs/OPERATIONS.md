@@ -711,6 +711,13 @@ Ordinary Idle removal and config-rollback reaping return a slot; a terminal
 max-prefix peer retained disabled for explicit recovery still owns one.
 `bgp_dynamic_neighbor_limit_rejections_total` increments only when a matching
 inbound dynamic connection is dropped because all slots are occupied.
+`bgp_inbound_connections_dropped_total` breaks accept-path drops down by a
+bounded `reason` vocabulary (ADR-0120): `unconfigured` (source matched no
+static neighbor and no dynamic range), `rate_limited` (the opt-in
+`[inbound_admission]` per-source token bucket was empty), and
+`dynamic_limit` (slot saturation, counted alongside the legacy counter).
+There is deliberately no per-source label — source cardinality is unbounded
+exactly under the floods these drops account for.
 
 | Metric | What it tells you |
 |--------|-------------------|
@@ -721,6 +728,7 @@ inbound dynamic connection is dropped because all slots are occupied.
 | `bgp_dynamic_neighbor_slots_limit` | Effective process-global `dynamic_neighbor_limit` |
 | `bgp_dynamic_neighbor_slots_headroom` | Saturating `limit - used`; zero means the next matching dynamic inbound is rejected |
 | `bgp_dynamic_neighbor_limit_rejections_total` | Matching inbound dynamic connections rejected because the slot limit was already full |
+| `bgp_inbound_connections_dropped_total{reason}` | Accept-path inbound connection drops by bounded reason: `unconfigured`, `rate_limited` (ADR-0120 `[inbound_admission]`), or `dynamic_limit` |
 | `bgp_max_prefix_usage{peer,scope}` | Live session-actor max-prefix enforcement count for `aggregate`, `ipv4_unicast`, or `ipv6_unicast`; series are absent while the session is down |
 | `bgp_max_prefix_limit{peer,scope}` | Effective finite bound for the same scope; absent means unlimited, never zero |
 | `bgp_max_prefix_headroom{peer,scope}` | Saturating `limit - usage` for a finite scope; absent when unlimited or disconnected |

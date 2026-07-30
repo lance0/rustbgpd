@@ -115,9 +115,84 @@ pub struct Config {
     /// restart-safe event replay. All fields are restart-required.
     #[serde(default)]
     pub event_history: EventHistoryConfig,
+    /// Per-source inbound accept-rate limiting (ADR-0120). **Opt-in
+    /// (default off)** — existing deployments keep their accept behavior
+    /// unchanged. All fields are restart-required.
+    #[serde(default)]
+    pub inbound_admission: InboundAdmissionConfig,
     /// Path of the config file (populated by `Config::load`, not serialized).
     #[serde(skip)]
     pub file_path: Option<PathBuf>,
+}
+
+/// Per-source inbound connection admission rate limiting (ADR-0120).
+///
+/// A token bucket per aggregated source address bounds how fast a
+/// dynamic-range-matched source can cycle the passive accept path.
+/// Statically configured neighbor addresses are exempt — a flapping
+/// legitimate peer must never lock itself out of re-establishment.
+/// All fields are restart-required; the reload matrix documents the
+/// classification.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct InboundAdmissionConfig {
+    /// Enable the accept-rate limiter. **Default `false`** — when off,
+    /// inbound admission behavior is unchanged and only the
+    /// `bgp_inbound_connections_dropped_total` accounting for the
+    /// pre-existing drop sites is recorded.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Sustained accepts allowed per source aggregate per minute
+    /// (token-bucket refill rate). Must be > 0 when enabled.
+    #[serde(default = "default_inbound_admission_rate_per_minute")]
+    pub rate_per_minute: u32,
+    /// Accepts a source aggregate may burst before the sustained rate
+    /// applies (token-bucket depth). Must be > 0 when enabled.
+    #[serde(default = "default_inbound_admission_burst")]
+    pub burst: u32,
+    /// IPv4 source aggregation prefix length (8–32). Default 32:
+    /// per-host accounting.
+    #[serde(default = "default_inbound_admission_v4_aggregation_len")]
+    pub v4_aggregation_len: u8,
+    /// IPv6 source aggregation prefix length (16–128). Default 64:
+    /// per-/128 accounting is trivially evadable within one on-link
+    /// allocation, so accounting aggregates at the /64 boundary.
+    #[serde(default = "default_inbound_admission_v6_aggregation_len")]
+    pub v6_aggregation_len: u8,
+    /// Maximum tracked source aggregates (64–65536). The tracking
+    /// table evicts least-recently-used entries at capacity, bounding
+    /// limiter memory regardless of offered load.
+    #[serde(default = "default_inbound_admission_table_capacity")]
+    pub table_capacity: usize,
+}
+
+impl Default for InboundAdmissionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            rate_per_minute: default_inbound_admission_rate_per_minute(),
+            burst: default_inbound_admission_burst(),
+            v4_aggregation_len: default_inbound_admission_v4_aggregation_len(),
+            v6_aggregation_len: default_inbound_admission_v6_aggregation_len(),
+            table_capacity: default_inbound_admission_table_capacity(),
+        }
+    }
+}
+
+fn default_inbound_admission_rate_per_minute() -> u32 {
+    12
+}
+fn default_inbound_admission_burst() -> u32 {
+    5
+}
+fn default_inbound_admission_v4_aggregation_len() -> u8 {
+    32
+}
+fn default_inbound_admission_v6_aggregation_len() -> u8 {
+    64
+}
+fn default_inbound_admission_table_capacity() -> usize {
+    4096
 }
 
 /// Durable event-history outbox configuration (ADR-0072).
@@ -2379,6 +2454,8 @@ pub enum ConfigError {
     InvalidRuntimeStateDir { value: String, reason: String },
     #[error("invalid event_history config: {reason}")]
     InvalidEventHistoryConfig { reason: String },
+    #[error("invalid inbound_admission config: {reason}")]
+    InvalidInboundAdmissionConfig { reason: String },
     #[error("invalid RPKI config: {reason}")]
     InvalidRpkiConfig { reason: String },
     #[error("undefined policy {name:?} referenced in chain")]

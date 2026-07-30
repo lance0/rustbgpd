@@ -390,6 +390,24 @@ what's deferred.
 | `batch_size` | restart-required | Batch-commit size threshold. |
 | `batch_interval_ms` | restart-required | Batch-commit time threshold. |
 
+## `[inbound_admission]` (ADR-0120)
+
+The per-source accept-rate limiter is built once by the accept-path
+owner at startup; hot-applying an aggregation-length or capacity change
+would invalidate every live bucket and re-open a fresh burst allowance
+for every source. v1 pins every field as restart-required and surfaces
+the change as an `ERROR`-level log line during reload, matching the
+sibling admission knob `dynamic_neighbor_limit`.
+
+| Field | Class | Notes |
+|---|---|---|
+| `enabled` | restart-required | Off (default) ⇒ accept behavior unchanged; the limiter is never built. |
+| `rate_per_minute` | restart-required | Token-bucket refill rate per source aggregate. |
+| `burst` | restart-required | Token-bucket depth per source aggregate. |
+| `v4_aggregation_len` | restart-required | IPv4 bucket-key prefix length (8–32). |
+| `v6_aggregation_len` | restart-required | IPv6 bucket-key prefix length (16–128); default /64 because per-/128 accounting is trivially evadable. |
+| `table_capacity` | restart-required | Fixed LRU tracking-table capacity (64–65536). |
+
 ## Rejected configurations (parse-time)
 
 These are the `ConfigError` variants in `src/config/validation.rs` that

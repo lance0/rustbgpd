@@ -453,6 +453,7 @@ fn make_dynamic_manager_config() -> Config {
         bfd_profiles: Vec::new(),
         apply_bum_enforcement: false,
         event_history: crate::config::EventHistoryConfig::default(),
+        inbound_admission: crate::config::InboundAdmissionConfig::default(),
     };
     assert_tier_authorized_test_config(&config);
     config
@@ -7215,6 +7216,25 @@ fn assert_dynamic_neighbor_capacity(
         ),
         (Some(used), Some(limit), Some(headroom), Some(rejections))
     );
+}
+
+/// `None` when the reason's series does not exist yet — a reason never
+/// recorded has no child, so `None` doubles as "never dropped".
+fn inbound_drop_metric(metrics: &BgpMetrics, reason: &str) -> Option<f64> {
+    metrics
+        .registry()
+        .gather()
+        .into_iter()
+        .find(|family| family.name() == "bgp_inbound_connections_dropped_total")
+        .and_then(|family| {
+            family.get_metric().iter().find_map(|metric| {
+                metric
+                    .get_label()
+                    .iter()
+                    .any(|label| label.name() == "reason" && label.value() == reason)
+                    .then(|| metric.get_counter().value())
+            })
+        })
 }
 
 fn peer_identity_gauge(
@@ -17824,11 +17844,213 @@ async fn saturated_dynamic_neighbor_accept_counts_rejection_without_consuming_ca
         .await;
 
     assert_dynamic_neighbor_capacity(&metrics_view, 1.0, 1.0, 0.0, 1.0);
+    assert_eq!(
+        inbound_drop_metric(&metrics_view, "dynamic_limit"),
+        Some(1.0),
+        "slot saturation must also count under the bounded drop-reason vocabulary"
+    );
     assert_eq!(mgr.dynamic_peer_count, 1);
     assert_eq!(mgr.peers.len(), 1);
     assert!(!mgr.peers.contains_key(&key(rejected_addr)));
     drop(first_client);
     drop(rejected_client);
+}
+
+async fn localhost_inbound_stream() -> (TcpStream, TcpStream) {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let listener_addr = listener.local_addr().unwrap();
+    let client = tokio::spawn(async move { TcpStream::connect(listener_addr).await.unwrap() });
+    let (server_stream, _) = listener.accept().await.unwrap();
+    let client_stream = client.await.unwrap();
+    (server_stream, client_stream)
+}
+
+/// Load-bearing unconfigured-source accounting proof (ADR-0120): the
+/// pre-existing unmatched-source drop must count under the bounded
+/// drop-reason vocabulary even with the limiter disabled (the default).
+#[tokio::test]
+async fn unmatched_inbound_source_counts_unconfigured_drop() {
+    let (_tx, rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let metrics = BgpMetrics::new();
+    let metrics_view = metrics.clone();
+    let mut config = make_dynamic_manager_config();
+    config.dynamic_neighbors.clear();
+    let mut mgr = PeerManager::new_with_config(
+        rx,
+        mpsc::unbounded_channel().1,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        metrics,
+        rib_tx,
+        None,
+        None,
+        config,
+    );
+
+    let (server_stream, client_stream) = localhost_inbound_stream().await;
+    mgr.handle_inbound(
+        server_stream,
+        sock(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7))),
+        None,
+        None,
+    )
+    .await;
+
+    assert!(mgr.peers.is_empty());
+    assert_eq!(
+        inbound_drop_metric(&metrics_view, "unconfigured"),
+        Some(1.0)
+    );
+    drop(client_stream);
+}
+
+/// ADR-0120 default-off invariant: without `[inbound_admission]`, rapid
+/// re-accept churn from one dynamic source behaves exactly as before —
+/// every cycle is admitted and nothing is rate-limited.
+#[tokio::test]
+async fn inbound_admission_disabled_by_default_admits_rapid_dynamic_reaccepts() {
+    let (_tx, rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let metrics = BgpMetrics::new();
+    let metrics_view = metrics.clone();
+    let mut mgr = PeerManager::new_with_config(
+        rx,
+        mpsc::unbounded_channel().1,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        metrics,
+        rib_tx,
+        None,
+        None,
+        make_dynamic_manager_config(),
+    );
+
+    let churny = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 9));
+    let mut client_streams = Vec::new();
+    for cycle in 0..3 {
+        let (server_stream, client_stream) = localhost_inbound_stream().await;
+        client_streams.push(client_stream);
+        mgr.handle_inbound(server_stream, sock(churny), None, None)
+            .await;
+        assert!(
+            mgr.peers.contains_key(&key(churny)),
+            "cycle {cycle}: default config must admit every re-accept"
+        );
+        let session_id = mgr.peers.get(&key(churny)).unwrap().session_id;
+        mgr.handle_session_notification(SessionNotification::BackToIdle {
+            session_id,
+            role: rustbgpd_transport::SessionRole::Primary,
+            peer_addr: churny,
+        })
+        .await;
+        assert!(
+            mgr.peers.is_empty(),
+            "cycle {cycle}: peer should be removed"
+        );
+    }
+    assert_eq!(inbound_drop_metric(&metrics_view, "rate_limited"), None);
+    drop(client_streams);
+}
+
+/// Load-bearing ADR-0120 enforcement proof: with `[inbound_admission]`
+/// enabled at burst 1, a dynamic source's re-accept inside the same v4
+/// aggregate is dropped before session spawn and counted, while a static
+/// neighbor inside the very same aggregate is exempt by admission path.
+#[tokio::test]
+async fn enabled_inbound_admission_rate_limits_dynamic_source_but_exempts_static_neighbor() {
+    let (_tx, rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let metrics = BgpMetrics::new();
+    let metrics_view = metrics.clone();
+    let mut config = make_dynamic_manager_config();
+    config.inbound_admission = crate::config::InboundAdmissionConfig {
+        enabled: true,
+        rate_per_minute: 1,
+        burst: 1,
+        v4_aggregation_len: 24,
+        v6_aggregation_len: 64,
+        table_capacity: 64,
+    };
+    let mut mgr = PeerManager::new_with_config(
+        rx,
+        mpsc::unbounded_channel().1,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        metrics,
+        rib_tx,
+        None,
+        None,
+        config,
+    );
+
+    // First accept consumes the aggregate's whole burst.
+    let first_source = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 9));
+    let (server_stream, first_client) = localhost_inbound_stream().await;
+    mgr.handle_inbound(server_stream, sock(first_source), None, None)
+        .await;
+    assert!(
+        mgr.peers.contains_key(&key(first_source)),
+        "the first accept within burst must be admitted"
+    );
+    let session_id = mgr.peers.get(&key(first_source)).unwrap().session_id;
+    mgr.handle_session_notification(SessionNotification::BackToIdle {
+        session_id,
+        role: rustbgpd_transport::SessionRole::Primary,
+        peer_addr: first_source,
+    })
+    .await;
+    assert!(mgr.peers.is_empty());
+
+    // A different host inside the same /24 aggregate shares the empty
+    // bucket: dropped before session spawn, counted, logged.
+    let second_source = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 10));
+    let (server_stream, second_client) = localhost_inbound_stream().await;
+    mgr.handle_inbound(server_stream, sock(second_source), None, None)
+        .await;
+    assert!(
+        mgr.peers.is_empty(),
+        "an over-rate source aggregate must not spawn a session"
+    );
+    assert_eq!(
+        inbound_drop_metric(&metrics_view, "rate_limited"),
+        Some(1.0)
+    );
+    assert_dynamic_neighbor_capacity(&metrics_view, 0.0, 100.0, 100.0, 0.0);
+
+    // A statically configured neighbor inside the very same exhausted
+    // aggregate is exempt: its inbound takes the static path and never
+    // consults the limiter.
+    let static_addr = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 20));
+    insert_test_managed_peer_with_asn(
+        &mut mgr,
+        static_addr,
+        65002,
+        acking_policy_handle(static_addr, SessionState::Established),
+        false,
+    );
+    let (server_stream, static_client) = localhost_inbound_stream().await;
+    mgr.handle_inbound(server_stream, sock(static_addr), None, None)
+        .await;
+    assert!(
+        mgr.peers.contains_key(&key(static_addr)),
+        "static neighbor must survive its inbound untouched"
+    );
+    assert_eq!(
+        inbound_drop_metric(&metrics_view, "rate_limited"),
+        Some(1.0),
+        "the static path must not consult the ADR-0120 limiter"
+    );
+
+    drop(first_client);
+    drop(second_client);
+    drop(static_client);
 }
 
 #[tokio::test]

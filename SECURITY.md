@@ -110,6 +110,16 @@ input from the network. It runs under continuous fuzzing in CI.
   after TCP accept.
 - Dynamic-neighbor admission is capped by `dynamic_neighbor_limit`
   (restart-pinned); connections beyond the cap are dropped and counted.
+- An opt-in per-source accept-rate limiter (`[inbound_admission]`,
+  ADR-0120, default off) token-buckets sources that match a
+  `[[dynamic_neighbors]]` range, keyed by aggregated source address
+  (per-host for IPv4, per-/64 for IPv6 by default; both configurable).
+  Over-rate connections are dropped immediately after accept and counted
+  in `bgp_inbound_connections_dropped_total{reason="rate_limited"}`.
+  Tracking state is a fixed-capacity LRU table, so limiter memory is
+  bounded regardless of offered load. Statically configured neighbor
+  addresses are exempt so a flapping legitimate peer cannot lock itself
+  out of re-establishment.
 - The message-processing path between peer sessions and the RIB uses
   bounded channels, so a fast or abusive peer parks on backpressure
   instead of growing daemon memory (see Design Invariant #3 in

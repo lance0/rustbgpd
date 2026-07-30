@@ -206,6 +206,7 @@ pub struct BgpMetrics {
     dynamic_neighbor_slots_limit: IntGauge,
     dynamic_neighbor_slots_headroom: IntGauge,
     dynamic_neighbor_limit_rejections: IntCounter,
+    inbound_connections_dropped: IntCounterVec,
 
     // ── BFD (RFC 5880, ADR-0067) ───────────────────────────────────
     bfd_session_up: IntGaugeVec,
@@ -538,6 +539,15 @@ impl BgpMetrics {
         let dynamic_neighbor_limit_rejections = IntCounter::new(
             "bgp_dynamic_neighbor_limit_rejections_total",
             "Inbound dynamic-neighbor connections dropped because the process-global admission limit was reached.",
+        )
+        .expect("valid metric definition");
+
+        let inbound_connections_dropped = IntCounterVec::new(
+            Opts::new(
+                "bgp_inbound_connections_dropped_total",
+                "Inbound connections dropped by the accept-path admission checks, by bounded reason (ADR-0120): unconfigured source, per-source rate limit, or dynamic-neighbor slot saturation.",
+            ),
+            &["reason"],
         )
         .expect("valid metric definition");
 
@@ -1914,6 +1924,9 @@ impl BgpMetrics {
             .register(Box::new(dynamic_neighbor_limit_rejections.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(inbound_connections_dropped.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(notifications_sent.clone()))
             .expect("metric not already registered");
         registry
@@ -2376,6 +2389,7 @@ impl BgpMetrics {
             dynamic_neighbor_slots_limit,
             dynamic_neighbor_slots_headroom,
             dynamic_neighbor_limit_rejections,
+            inbound_connections_dropped,
             bfd_session_up,
             bfd_session_flaps_total,
             gnmi_dialout_connected,
@@ -2547,6 +2561,18 @@ impl BgpMetrics {
     /// Record an inbound dynamic-neighbor drop caused by slot saturation.
     pub fn record_dynamic_neighbor_limit_rejection(&self) {
         self.dynamic_neighbor_limit_rejections.inc();
+    }
+
+    /// Record an accept-path inbound connection drop by bounded reason
+    /// (ADR-0120). `reason` is the canonical typed admission-drop
+    /// vocabulary — never a source address.
+    pub fn record_inbound_connection_drop(
+        &self,
+        reason: crate::reason_labels::InboundConnectionDropReason,
+    ) {
+        self.inbound_connections_dropped
+            .with_label_values(&[reason.as_str()])
+            .inc();
     }
 
     // ── Per-peer series reaping ────────────────────────────────────

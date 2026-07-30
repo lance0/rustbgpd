@@ -1787,6 +1787,10 @@ pub struct ConfigDiff {
     /// configured once at startup (all fields are restart-required per
     /// the reload matrix), so edits must remain visible in `--diff`.
     pub event_history_changed: bool,
+    /// `[inbound_admission]` changed. The ADR-0120 accept-path limiter
+    /// is built once at startup (all fields are restart-required per
+    /// the reload matrix), so edits must remain visible in `--diff`.
+    pub inbound_admission_changed: bool,
     /// `[[fib_tables]]` blocks added/removed/modified between old and new.
     /// Reload-applied in the common case: the ADR-0061 general-FIB actor
     /// accepts a runtime table-set swap on SIGHUP
@@ -2048,6 +2052,7 @@ impl ConfigDiff {
             || self.managed_netdevs_changed
             || self.security_grpc_changed
             || self.event_history_changed
+            || self.inbound_admission_changed
     }
 
     /// Changes detected but not applied by current SIGHUP. Empty
@@ -2712,6 +2717,11 @@ pub fn classify_config_transaction_v1(diff: &ConfigDiff) -> ConfigTransactionSec
             .restart_required_sections
             .push("[event_history]".to_string());
     }
+    if diff.inbound_admission_changed {
+        class
+            .restart_required_sections
+            .push("[inbound_admission]".to_string());
+    }
     if diff.apply_bum_enforcement_changed {
         class
             .restart_required_sections
@@ -2879,6 +2889,7 @@ pub fn config_diff_json_value(diff: &ConfigDiff) -> serde_json::Value {
             "managed_netdevs_changed": diff.managed_netdevs_changed,
             "security_grpc_changed": diff.security_grpc_changed,
             "event_history_changed": diff.event_history_changed,
+            "inbound_admission_changed": diff.inbound_admission_changed,
             "fib_tables_requires_restart": diff.fib_tables_requires_restart,
             "apply_bum_enforcement_changed": diff.apply_bum_enforcement_changed,
             "blackhole_fib_discard_changed": diff.blackhole_fib_discard_changed,
@@ -3136,6 +3147,9 @@ pub fn format_config_diff_with_style(diff: &ConfigDiff, style: &ConfigDiffTextSt
     if diff.event_history_changed {
         restart_sections.push("[event_history]");
     }
+    if diff.inbound_admission_changed {
+        restart_sections.push("[inbound_admission]");
+    }
     if diff.fib_tables_requires_restart {
         restart_sections.push("[[fib_tables]] (start FIB from an empty config)");
     }
@@ -3281,6 +3295,7 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
         managed_netdevs_changed: old.managed_netdevs != new.managed_netdevs,
         security_grpc_changed: old.security != new.security,
         event_history_changed: old.event_history != new.event_history,
+        inbound_admission_changed: old.inbound_admission != new.inbound_admission,
         fib_tables_changed: old.fib_tables != new.fib_tables,
         fib_tables_requires_restart: old.fib_tables.is_empty() && !new.fib_tables.is_empty(),
         dynamic_neighbors_changed: old.dynamic_neighbors != new.dynamic_neighbors,

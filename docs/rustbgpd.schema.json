@@ -100,6 +100,18 @@
       ],
       "default": null
     },
+    "inbound_admission": {
+      "description": "Per-source inbound accept-rate limiting (ADR-0120). **Opt-in\n(default off)** — existing deployments keep their accept behavior\nunchanged. All fields are restart-required.",
+      "$ref": "#/$defs/InboundAdmissionConfig",
+      "default": {
+        "burst": 5,
+        "enabled": false,
+        "rate_per_minute": 12,
+        "table_capacity": 4096,
+        "v4_aggregation_len": 32,
+        "v6_aggregation_len": 64
+      }
+    },
     "managed_netdevs": {
       "description": "Optional rustbgpd-managed EVPN Linux netdev lifecycle\n(ADR-0091). Empty by default — existing deployments keep the\noperator-provisioned / observe-only contract. Configured rows opt\ninto class-scoped bridge, fixed-VNI VXLAN, SVD VXLAN, VLAN upper,\nVRF, and L3VXLAN create/adopt/reap.",
       "$ref": "#/$defs/ManagedNetdevsConfig",
@@ -1363,6 +1375,55 @@
             "string",
             "null"
           ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "InboundAdmissionConfig": {
+      "description": "Per-source inbound connection admission rate limiting (ADR-0120).\n\nA token bucket per aggregated source address bounds how fast a\ndynamic-range-matched source can cycle the passive accept path.\nStatically configured neighbor addresses are exempt — a flapping\nlegitimate peer must never lock itself out of re-establishment.\nAll fields are restart-required; the reload matrix documents the\nclassification.",
+      "type": "object",
+      "properties": {
+        "burst": {
+          "description": "Accepts a source aggregate may burst before the sustained rate\napplies (token-bucket depth). Must be > 0 when enabled.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 5,
+          "minimum": 0
+        },
+        "enabled": {
+          "description": "Enable the accept-rate limiter. **Default `false`** — when off,\ninbound admission behavior is unchanged and only the\n`bgp_inbound_connections_dropped_total` accounting for the\npre-existing drop sites is recorded.",
+          "type": "boolean",
+          "default": false
+        },
+        "rate_per_minute": {
+          "description": "Sustained accepts allowed per source aggregate per minute\n(token-bucket refill rate). Must be > 0 when enabled.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 12,
+          "minimum": 0
+        },
+        "table_capacity": {
+          "description": "Maximum tracked source aggregates (64–65536). The tracking\ntable evicts least-recently-used entries at capacity, bounding\nlimiter memory regardless of offered load.",
+          "type": "integer",
+          "format": "uint",
+          "default": 4096,
+          "minimum": 0
+        },
+        "v4_aggregation_len": {
+          "description": "IPv4 source aggregation prefix length (8–32). Default 32:\nper-host accounting.",
+          "type": "integer",
+          "format": "uint8",
+          "default": 32,
+          "maximum": 255,
+          "minimum": 0
+        },
+        "v6_aggregation_len": {
+          "description": "IPv6 source aggregation prefix length (16–128). Default 64:\nper-/128 accounting is trivially evadable within one on-link\nallocation, so accounting aggregates at the /64 boundary.",
+          "type": "integer",
+          "format": "uint8",
+          "default": 64,
+          "maximum": 255,
+          "minimum": 0
         }
       },
       "additionalProperties": false
