@@ -675,8 +675,13 @@ fn ansi_overhead(colored: &str, plain_len: usize) -> usize {
 /// (MsgRcvd, MsgSent, Flaps, RRC), a compact slow-peer marker, and the overloaded
 /// `State/PfxRcd` — prefixes-received count when Established, state name
 /// otherwise — as the last column.
-pub fn print_neighbor_table(neighbors: &[proto::NeighborState], wide: bool) {
-    print!("{}", render_neighbor_table(neighbors, wide));
+pub(crate) fn write_neighbor_table<W: Write + ?Sized>(
+    writer: &mut W,
+    neighbors: &[proto::NeighborState],
+    wide: bool,
+) -> Result<(), CliError> {
+    let rendered = render_neighbor_table(neighbors, wide);
+    write_bytes(writer, rendered.as_bytes())
 }
 
 fn render_neighbor_table(neighbors: &[proto::NeighborState], wide: bool) -> String {
@@ -2030,7 +2035,9 @@ mod tests {
 Neighbor    AS    State       Uptime   Rx Pfx Tx Pfx  Description
 10.0.0.1    64512 Established 01:01:40    100      5  core-rr-client
 2001:db8::2 65001 Idle        00:00:00      0      0  \n";
-        assert_eq!(render_neighbor_table(&table_fixture(), false), expected);
+        let mut bytes = Vec::new();
+        write_neighbor_table(&mut bytes, &table_fixture(), false).unwrap();
+        assert_eq!(bytes, expected.as_bytes());
     }
 
     /// Golden wide table: default columns unchanged and in order, then
@@ -2045,7 +2052,9 @@ Neighbor    AS    State       Uptime   Rx Pfx Tx Pfx  Description
 Neighbor    AS    State       Uptime   Rx Pfx Tx Pfx Description    Source                                    MsgRcvd MsgSent Flaps RRC Slow State/PfxRcd
 10.0.0.1    64512 Established 01:01:40    100      5 core-rr-client dynamic (10.0.0.0/24, group core-members)    1234     567     2 *   !    100
 2001:db8::2 65001 Idle        00:00:00      0      0                static                                          0       0     9          Idle\n";
-        assert_eq!(render_neighbor_table(&table_fixture(), true), expected);
+        let mut bytes = Vec::new();
+        write_neighbor_table(&mut bytes, &table_fixture(), true).unwrap();
+        assert_eq!(bytes, expected.as_bytes());
     }
 
     /// A stale row must never render its placeholder state as a
