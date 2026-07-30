@@ -1379,7 +1379,10 @@ fn config_field_impact(field: &str) -> Option<(ConfigFieldImpact, &'static str)>
         | "per_client_best"
         | "next_hop_ownership"
         | "interpret_rfc1997"
-        | "rs_control_communities" => (
+        | "rs_control_communities"
+        | "slow_peer_threshold_pct"
+        | "slow_peer_duration"
+        | "slow_peer_isolation" => (
             ConfigFieldImpact::SessionReset,
             "session reset: session re-establish",
         ),
@@ -1505,6 +1508,9 @@ pub fn describe_neighbor_changes(old: &Neighbor, new: &Neighbor) -> Vec<FieldCha
     cmp_field!(hold_time);
     cmp_field!(min_hold_time);
     cmp_field!(send_hold_time);
+    cmp_field!(slow_peer_threshold_pct);
+    cmp_field!(slow_peer_duration);
+    cmp_field!(slow_peer_isolation);
     cmp_field!(max_prefixes);
     cmp_field!(max_prefixes_ipv4);
     cmp_field!(max_prefixes_ipv6);
@@ -1631,6 +1637,9 @@ fn neighbor_runtime_equal(old: &Neighbor, new: &Neighbor) -> bool {
         && old.hold_time == new.hold_time
         && old.min_hold_time == new.min_hold_time
         && old.send_hold_time == new.send_hold_time
+        && old.slow_peer_threshold_pct == new.slow_peer_threshold_pct
+        && old.slow_peer_duration == new.slow_peer_duration
+        && old.slow_peer_isolation == new.slow_peer_isolation
         && old.max_prefixes == new.max_prefixes
         && old.max_prefixes_ipv4 == new.max_prefixes_ipv4
         && old.max_prefixes_ipv6 == new.max_prefixes_ipv6

@@ -75,6 +75,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Editing `slow_peer_threshold_pct`, `slow_peer_duration`, or
+  `slow_peer_isolation` on a static `[[neighbors]]` entry was silently ignored
+  by SIGHUP reload: the change took effect only at the next natural session
+  re-establishment and never appeared in `rustbgpd --diff`. The reconciler now
+  detects the edit, reports it as a session reset in `--diff`, and rebuilds the
+  session immediately so the new value applies right away. Peer-group slow_peer
+  edits keep their existing behavior (members are session-reshaped via the
+  conservative fallback).
+
 - CLI policy formatting, config diff/plan, doctor, and neighbor list — plus
   the daemon's offline commands and rs-config-render — now fail when their
   buffered stdout cannot be flushed instead of reporting a successful status.

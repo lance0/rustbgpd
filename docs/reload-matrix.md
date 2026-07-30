@@ -107,9 +107,9 @@ reload).
 | `hold_time` | live (effective next session) | Negotiated in OPEN. On SIGHUP the reconciler rebuilds the session immediately, so the new value is negotiated right away. |
 | `min_hold_time` | live (effective next session) | Validates the peer's next OPEN proposal. On SIGHUP the reconciler rebuilds the session immediately; existing sessions are not re-evaluated in place. |
 | `send_hold_time` | live (effective next session) | RFC 9687 send hold timer. The per-peer writer task captures the value when its TCP connection is established, so a new value (including 0 = disable) guards the next session; the existing session keeps the old timer. |
-| `slow_peer_threshold_pct` | live (effective next session) | Slow-peer detection backlog threshold (LAN-470), percent of the outbound writer buffer. Captured into the session's transport config; the reconciler rebuilds the session on change. |
-| `slow_peer_duration` | live (effective next session) | Seconds the backlog must persist before the slow-peer flag raises; 0 disables detection. Same capture semantics as the threshold. |
-| `slow_peer_isolation` | live (effective next session) | Move a flagged-slow peer to the per-peer update path. Same capture semantics as the threshold. |
+| `slow_peer_threshold_pct` | live (session reset) | Slow-peer detection backlog threshold, percent of the outbound writer buffer. Captured into the session's transport config; on SIGHUP the reconciler rebuilds the session immediately, so the new value applies right away. Annotated "session reset: session re-establish" by `rustbgpd --diff`. |
+| `slow_peer_duration` | live (session reset) | Seconds the backlog must persist before the slow-peer flag raises; 0 disables detection. Same capture and session-rebuild semantics as the threshold. |
+| `slow_peer_isolation` | live (session reset) | Move a flagged-slow peer to the per-peer update path. Same capture and session-rebuild semantics as the threshold. |
 | `max_prefixes` | live | Threshold re-evaluated on every received UPDATE. |
 | `max_prefixes_ipv4` | live | Per-family IPv4-unicast inbound cap (ADR-0108), enforced independently of the aggregate `max_prefixes`. Hot-applied in place; the new threshold governs the next received UPDATE. |
 | `max_prefixes_ipv6` | live | IPv6-unicast sibling of `max_prefixes_ipv4` (ADR-0108). |
@@ -160,9 +160,9 @@ configure their keyring directly.
 | `hold_time` | live (effective next session) | Same as neighbor. |
 | `min_hold_time` | live (effective next session) | Same as neighbor; static and dynamic group members are session-reshaped. |
 | `send_hold_time` | live (effective next session) | Same as neighbor. |
-| `slow_peer_threshold_pct` | live (effective next session) | Same as neighbor. |
-| `slow_peer_duration` | live (effective next session) | Same as neighbor. |
-| `slow_peer_isolation` | live (effective next session) | Same as neighbor. |
+| `slow_peer_threshold_pct` | live (session reset) | Same as neighbor; a group slow_peer edit is never all-hot, so static members are session-reshaped via the conservative fallback. |
+| `slow_peer_duration` | live (session reset) | Same as neighbor; same conservative-reshape fallback as the threshold. |
+| `slow_peer_isolation` | live (session reset) | Same as neighbor; same conservative-reshape fallback as the threshold. |
 | `max_prefixes` | live | Same as neighbor. |
 | `max_prefixes_ipv4` | live | Same as neighbor; per-family ADR-0108 cap inherited by group members. |
 | `max_prefixes_ipv6` | live | Same as neighbor. |

@@ -7717,6 +7717,79 @@ fn neighbor_change_hot_applicable_partitions_by_impact_class() {
 }
 
 #[test]
+fn slow_peer_edit_on_static_neighbor_takes_session_rebuild_path() {
+    let old = test_neighbor("10.0.0.2", 65002);
+    let mut new = old.clone();
+    new.slow_peer_threshold_pct = Some(25);
+    new.slow_peer_duration = Some(10);
+    new.slow_peer_isolation = Some(true);
+
+    // Detected: a slow_peer-only edit must be visible to the reconciler
+    // at all — it was silently invisible to `diff_neighbors` before.
+    let diff = super::diff_neighbors(std::slice::from_ref(&old), std::slice::from_ref(&new));
+    assert_eq!(
+        diff.changed.len(),
+        1,
+        "a slow_peer-only edit must be reported by diff_neighbors"
+    );
+
+    // Reported: `--diff` / reload logging must name all three fields,
+    // classed session-reset (captured into the session transport config).
+    let changes = super::describe_neighbor_changes(&old, &new);
+    let fields: Vec<&str> = changes.iter().map(|change| change.field).collect();
+    for field in [
+        "slow_peer_threshold_pct",
+        "slow_peer_duration",
+        "slow_peer_isolation",
+    ] {
+        assert!(
+            fields.contains(&field),
+            "describe_neighbor_changes must name {field}, got {fields:?}"
+        );
+    }
+    assert!(
+        changes
+            .iter()
+            .all(|change| change.impact == Some(super::ConfigFieldImpact::SessionReset)),
+        "slow_peer fields must classify as session reset: {changes:?}"
+    );
+
+    // Applied: the reload partition must take the session-rebuild path,
+    // never hot-apply in place.
+    assert!(
+        !super::neighbor_change_hot_applicable(&old, &new),
+        "a slow_peer edit must rebuild the session, not hot-apply"
+    );
+}
+
+#[test]
+fn slow_peer_edit_on_peer_group_keeps_conservative_reshape() {
+    let old_group = PeerGroupConfig::default();
+    let mut new_group = old_group.clone();
+    new_group.slow_peer_threshold_pct = Some(25);
+    new_group.slow_peer_duration = Some(10);
+    new_group.slow_peer_isolation = Some(true);
+
+    // Detected: diff_peer_groups compares whole structs, so the group
+    // edit is visible.
+    let old_map = std::collections::HashMap::from([("ixp".to_string(), old_group.clone())]);
+    let new_map = std::collections::HashMap::from([("ixp".to_string(), new_group.clone())]);
+    let diff = super::diff_peer_groups(&old_map, &new_map);
+    assert_eq!(
+        diff.changed,
+        vec!["ixp".to_string()],
+        "a group slow_peer edit must be reported as changed"
+    );
+
+    // Applied: the group path stays on the conservative reshape
+    // (delete + re-add) fallback — never hot-applied to members in place.
+    assert!(
+        !super::peer_group_change_hot_applicable(&old_group, &new_group),
+        "a group slow_peer edit must reshape members, not hot-apply"
+    );
+}
+
+#[test]
 fn config_diff_human_output_is_operator_grade() {
     // Mixed diff: one added, one changed (hot + session-reset fields),
     // one untouched neighbor.
