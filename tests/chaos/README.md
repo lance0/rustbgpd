@@ -26,10 +26,12 @@ Each script:
 
 - `containerlab deploy -t tests/interop/<topology>.clab.yml` — each
   script's header states which.
-- The rustbgpd daemon running inside the topology (each script sources
-  `tests/interop/scripts/test-lib.sh` and uses `start_rustbgpd` if it
-  isn't already up).
-- `grpcurl` and `jq` on the host. `bc` for slope arithmetic.
+- The rustbgpd daemon running inside the topology. Each script sources
+  `tests/interop/scripts/test-lib.sh` for `resolve_grpc_addr` /
+  `grpc_health`; the scripts do NOT start the daemon — they fail if it
+  is not already up.
+- `grpcurl` on the host (flap-storm, grpc-churn); `jq` (flap-storm).
+  Arithmetic uses `awk` — no `bc` needed.
 
 ## Usage
 

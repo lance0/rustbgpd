@@ -144,10 +144,13 @@ in `tests/soak/README.md` under "Host mutex".
 ```bash
 # Default-feature benchmarks. A bare `cargo bench` runs only the targets that
 # build with default features (codec, rib_ops, policy_eval, explain_snapshot,
-# validate, and the mrt snapshot_allocation harness); the five
-# `bench-internals`-gated targets (fanout, inbound_attrs,
-# fib_projection, route_paging, event_history_producer) are skipped and must
-# be run explicitly with `--features bench-internals` as shown below.
+# validate, and the mrt snapshot_allocation harness); the seven
+# `bench-internals`-gated targets (fanout, inbound_attrs, fib_projection,
+# route_paging, event_history_producer, vpn_query_timing,
+# vpn_query_allocation) are skipped and must be run explicitly with
+# `--features bench-internals` as shown below. vpn_query_allocation
+# additionally requires the api crate's vpn-query-allocation feature
+# (required-features = ["bench-internals", "vpn-query-allocation"]).
 cargo bench
 
 # Wire codec only
@@ -1177,7 +1180,7 @@ binaries at `/usr/sbin/`, so the harness config never loads and the image's own
 entrypoint runs with zero neighbors; `monitor.py wait_established()` is an
 unbounded loop and hung about 11 minutes before the attempt was killed. The
 comparison is therefore four-way. Root cause and retained evidence are in the
-[receipt](perf/competitive-bgperf2-2026-07.md#openbgpd-could-not-be-collected-harness-defect-not-a-daemon-result).
+[receipt](perf/competitive-bgperf2-2026-07.md#openbgpd-could-not-be-collected--harness-defect-not-a-daemon-result).
 The [IXP receipt matrix](perf/ixp-matrix-2026-07.md) carries a head-to-head
 OpenBGPD 9.1 comparison through a different harness.
 
@@ -1380,8 +1383,8 @@ Note: the announce/withdraw counters include idempotent re-advertises
 during churn, so they are larger than the steady-state route count.
 `final_count` (50,000) is the distinct-key cardinality.
 
-Measurement environment: AMD Ryzen 9 7950X (64 logical cores), 125 GB
-RAM, Linux 6.17, Docker 27.x, containerlab. Single
+Measurement environment: AMD Ryzen Threadripper 7970X (32 cores /
+64 threads), 125 GB RAM, Linux 6.17, Docker 27.x, containerlab. Single
 `rustbgpd:dev` container per node, all four nodes on the same host.
 
 **Notes on methodology:**

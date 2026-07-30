@@ -404,9 +404,10 @@ landing, tracked here for visibility)
     BGP Established, Type 5 origination both directions, PE1
     kernel route + L3 neighbor + L3VXLAN FDB rows landed,
     `installed_routes_count == 1`, bidirectional `ip vrf exec
-    vrf1 ping`, and withdraw on `ip addr del`. Same hosted-runner
-    constraint as M30b (Azure kernel lacks `vrf` module); manual
-    invocation per the row in `docs/INTEROP.md`.
+    vrf1 ping`, and withdraw on `ip addr del`. Runs automatically
+    in the hosted `kernel-dataplane` workflow (the `vrf` module is
+    loaded via `linux-modules-extra`; on transient apt-mirror
+    kernel skew the vrf-dependent jobs skip with a notice).
 
   Follow-on optimization once the reconcile-loop integration is
   in place: share one rtnetlink link dump across

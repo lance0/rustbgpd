@@ -103,8 +103,14 @@ input from the network. It runs under continuous fuzzing in CI.
   top of the listener split; see [docs/SECURITY.md](docs/SECURITY.md) and
   [docs/grpc-method-inventory.md](docs/grpc-method-inventory.md).
 
-### Rate Limiting
+### Inbound Connection Handling
 
-- Max inbound TCP connections per source IP: configurable (default 5/min)
-- Max total pending connections: configurable (default 100)
-- Connections from unconfigured peers dropped immediately after TCP accept
+- Inbound connections from source addresses matching no configured static
+  neighbor and no `[[dynamic_neighbors]]` range are dropped immediately
+  after TCP accept.
+- Dynamic-neighbor admission is capped by `dynamic_neighbor_limit`
+  (restart-pinned); connections beyond the cap are dropped and counted.
+- The message-processing path between peer sessions and the RIB uses
+  bounded channels, so a fast or abusive peer parks on backpressure
+  instead of growing daemon memory (see Design Invariant #3 in
+  [ARCHITECTURE.md](ARCHITECTURE.md) for the channel policy).

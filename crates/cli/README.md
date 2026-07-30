@@ -196,7 +196,7 @@ rbgp events policy
 rbgp events evpn
 rbgp watch              # legacy route-update stream
 
-rbgp topology           # RFC 9107 ORR topology graph from BGP-LS
+rbgp topology nodes|links   # RFC 9107 ORR topology graph from BGP-LS
 rbgp orr                # RFC 9107 ORR per-vantage status
 rbgp gshut [--neighbor <addr>] [--clear]   # RFC 8326 graceful-shutdown toggle
 rbgp mrt-dump

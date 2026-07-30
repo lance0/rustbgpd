@@ -620,9 +620,12 @@ Bounded channels, prefix limits, and backpressure behavior are detailed in [ARCH
   `tls_key_file` / `tls_client_ca_file` (all three required together; no
   TLS-without-mTLS half-mode) — see docs/CONFIGURATION.md "Native gRPC mTLS".
   UDS listeners and bearer-token auth are also available.
-- Per-listener access mode (`read_only` / `read_write`) controls which RPCs
-  are available. The eleven-service split supports per-service auth policies
-  when finer-grained authorization is added.
+- Per-method tier authorization (ADR-0064) is the enforcement model: every
+  RPC carries a tier assignment (docs/grpc-method-inventory.md), listeners
+  enforce a `max_tier` ceiling, and `[security.grpc].enforcement = "tier"`
+  (the default since v0.24.0) maps authenticated principals to role
+  ceilings. The per-listener `access_mode = "read_only"` setting remains as
+  a compatibility ceiling on top of the eleven-service split.
 
 ---
 

@@ -722,7 +722,8 @@ VXLAN local-bias split-horizon (RFC 8365 §8.3.1) is **not** part of this
 and remains the open all-active correctness gate — ASIC/offload-dependent
 on the Linux softswitch (ADR-0065).
 Operators who need the prior observe-only / single-dst posture can
-still opt out explicitly with `apply_bum_enforcement = false` and/or
+still opt out explicitly with the top-level `apply_bum_enforcement =
+false` key (document-root, restart-required) and/or
 `apply_aliasing_ecmp = false` on the relevant `[[evpn_instances]]`
 entry.
 

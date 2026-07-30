@@ -209,9 +209,13 @@ IPv4/IPv6 `Prefix` routes.
 | Interop test suite | Yes | No | No | No | No |
 | FIB/kernel integration | Partial[^fib] | Yes | Yes | Yes | Yes |
 | Route server mode | Yes | Yes | Yes | Yes | Yes |
-| Dynamic neighbors | Yes | Yes | Yes | Yes | No |
+| Dynamic neighbors | Yes | Yes | Yes | Yes | Yes[^dyn-openbgpd] |
 | Looking glass | Yes | No | Yes | No | Yes |
 | BFD integration | Yes[^bfd] | Yes | Yes | Yes | No |
+
+[^dyn-openbgpd]: Prefix-template neighbors: `neighbor 10.0.0.0/8` in
+    bgpd.conf(5) accepts any connection from within the network as a cloned
+    neighbor, optionally with any remote AS.
 
 [^bfd]: Single-hop **asynchronous** BFD ships (RFC 5880/5881, ADR-0067): an
     in-process, no-GC actor runs sessions over UDP/3784 (TTL/Hop-Limit 255,
