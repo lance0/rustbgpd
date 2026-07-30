@@ -828,7 +828,7 @@ The same `rbgp neighbor <addr>` output reports one row per unicast family with
 its admitted prefix count, effective maximum, remaining headroom, and whether
 a blocking episode is open (stable reason `outbound_prefix_limit_reached`).
 Usage is the post-policy, post-OTC, post-exact-export admitted count and
-agrees with `rbgp neighbor <addr> advertised-routes`. Prometheus exposes the
+agrees with `rbgp rib advertised <addr>`. Prometheus exposes the
 same truth as `bgp_outbound_prefix_usage`, `bgp_outbound_prefix_limit`,
 `bgp_outbound_prefix_headroom`, and `bgp_outbound_prefix_blocking`, plus the
 `bgp_outbound_prefix_blocked_total` attempt counter — all labelled by peer and

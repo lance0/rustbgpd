@@ -12,7 +12,7 @@ evaluation is `evaluate_export_chain` in
 `crates/rib/src/manager/distribution/mod.rs`, and `ExplainAdvertisedRoute`
 assembly lives in `crates/rib/src/manager/distribution/unicast.rs`), and
 the RPC surface hangs off the route-explain group at
-`proto/rustbgpd.proto:1677` (`RibService.ExplainAdvertisedRoute`).
+`proto/rustbgpd.proto:1722` (`RibService.ExplainAdvertisedRoute`).
 
 There is no equivalent for **import**. The operator question
 "why didn't this route come in?" cannot be answered today, because:
@@ -394,7 +394,7 @@ built in stages but is not split across PRs:
 - Export-explain reference: `evaluate_export_chain` in
   `crates/rib/src/manager/distribution/mod.rs` (assembly in
   `crates/rib/src/manager/distribution/unicast.rs`),
-  RPC at `proto/rustbgpd.proto:1677`
+  RPC at `proto/rustbgpd.proto:1722`
 - Existing import counters: `record_import_policy_eval` at
   `crates/transport/src/session/inbound.rs:34`
 - Authz tier reference: `crates/api/src/authz.rs`

@@ -652,8 +652,9 @@ reflection through controller injection; see
 - Spin up a VTEP with a templated FRR config + a gRPC call to register
   the new peer — no config-file write dance.
 - Pipe EVPN route events into your SDN controller or fabric-observability
-  tool via `WatchRoutes`. (BMP and MRT export carry unicast / FlowSpec
-  today; typed EVPN extraction in those channels is on the roadmap.)
+  tool via `WatchEvents` / `SubscribeFromEvent` (typed `EvpnRouteEvent`
+  payloads). BMP route monitoring and MRT `RIB_GENERIC` dumps carry EVPN
+  routes as well.
 - Validate policy changes with `rbgp rib --prefix <PREFIX> --explain` before
   pushing — routable-surface diffs, not CLI scraping.
 

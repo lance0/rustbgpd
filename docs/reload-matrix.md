@@ -424,9 +424,10 @@ their own — they exist to keep the schema honest.
 # Parse + validate, do not apply
 rustbgpd --check /etc/rustbgpd/config.toml
 
-# Compute the diff against the running daemon's view; print expected
-# reload class per change
-rustbgpd --diff /etc/rustbgpd/config.toml
+# Compare the candidate file against the current on-disk config; print
+# expected reload class per change (for a live-daemon comparison use
+# `rbgp config diff`)
+rustbgpd --diff /tmp/new-config.toml /etc/rustbgpd/config.toml
 
 # Apply via SIGHUP
 systemctl reload rustbgpd

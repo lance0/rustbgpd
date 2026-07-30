@@ -448,12 +448,19 @@ scaling out.
    rbgp neighbor
    ```
 
-5. **Edit + reload cycle.** Edit
-   `/etc/rustbgpd/config.toml`, then dry-run the diff:
+5. **Edit + reload cycle.** Edit a copy of the config, then dry-run
+   the diff of the candidate against the current on-disk config
+   (`--diff` takes the candidate; the positional argument is the
+   config to compare against, default `/etc/rustbgpd/config.toml`):
 
    ```sh
-   rustbgpd --diff /etc/rustbgpd/config.toml
+   cp /etc/rustbgpd/config.toml /tmp/new-config.toml
+   $EDITOR /tmp/new-config.toml
+   rustbgpd --diff /tmp/new-config.toml /etc/rustbgpd/config.toml
    ```
+
+   When the diff looks right, install the candidate over
+   `/etc/rustbgpd/config.toml` before reloading.
 
    `--diff` calls into the same `ConfigDiff` machinery the reload
    path uses; what it reports is what reload will do. Cross-reference
@@ -495,7 +502,7 @@ These cover the config lifecycle, from bootstrap to reload:
 | `rustbgpd --init-config <lab\|edge> --stdout` | Print a curated, commented starter TOML to stdout and exit (file output is not yet supported). `lab` is a minimal single-box profile; `edge` is an eBGP edge skeleton with a default-route-dropping import chain and a default-deny export chain to fill in. Both use a mode-`0600` local UDS whose filesystem permissions authenticate access and whose stable `operator` principal is tier-authorized, set `[global] ebgp_requires_policy = true`, and pass `--check --strict` as emitted. Cannot be combined with `--check` / `--diff`. |
 | `rustbgpd --check <file>` | Parse + validate; print `config OK`, `config VALID, <n> WARNINGS — NOT a clean check` (warnings framed on stderr; still exit 0), or a rustc-style diagnostic (exit 1). Does not start the daemon. |
 | `rustbgpd --check --strict <file>` | The same check, but any warning exits 1 instead of 0 — for CI and deployment gates that must not accept a valid-but-risky config. A clean check still exits 0. `--strict` without `--check` is an error (exit 2). |
-| `rustbgpd --diff <file>` | Compute the diff against the running daemon's view; print per-section change list with expected reload class. |
+| `rustbgpd --diff <candidate> [<current>]` | Compare a candidate file against the current on-disk config (`<current>` defaults to `/etc/rustbgpd/config.toml`); print per-section change list with expected reload class. This is a static file-vs-file compare — to compare against the running daemon's view, use `rbgp config diff`. |
 | `systemctl reload rustbgpd` (or `kill -HUP $(pidof rustbgpd)`) | Apply the diff. Live fields hot-apply; restart-required fields are pinned and logged at `ERROR` (the live values are kept). |
 
 The validation pipeline is the same in all three places: TOML parse

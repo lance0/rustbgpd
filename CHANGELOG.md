@@ -9,19 +9,6 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-- Clean private single-best fanout now skips per-peer affected-prefix scans
-  unless resolved ORR, per-client-best, or Add-Path send behavior requires them.
-
-- Ordinary MRT snapshot encoding now grows its output buffer geometrically,
-  avoiding millions of exact-capacity reallocations on full-table dumps.
-
-- **MRT dump work is bounded after delays, impossible output paths, and
-  canceled requests.** Export skips missed ticks, preflights its output path
-  before cloning the RIB, and prevents encode/publication when cancellation is
-  observed while awaiting the RIB reply. A request already canceled when the
-  actor handles it skips materialization; a synchronous clone already running
-  is not interruptible. Failures remain non-fatal and on-time bytes unchanged.
-
 ### Added
 
 - The shipped Prometheus rule pack now pages on outbound BGP work dropped
@@ -73,10 +60,27 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `ListNeighbors` now returns neighbors ordered by typed IP address, then by
   configured interface, stabilizing human, JSON, and support-bundle inventories.
 
+- Clean private single-best fanout now skips per-peer affected-prefix scans
+  unless resolved ORR, per-client-best, or Add-Path send behavior requires them.
+
+- Ordinary MRT snapshot encoding now grows its output buffer geometrically,
+  avoiding millions of exact-capacity reallocations on full-table dumps.
+
+- **MRT dump work is bounded after delays, impossible output paths, and
+  canceled requests.** Export skips missed ticks, preflights its output path
+  before cloning the RIB, and prevents encode/publication when cancellation is
+  observed while awaiting the RIB reply. A request already canceled when the
+  actor handles it skips materialization; a synchronous clone already running
+  is not interruptible. Failures remain non-fatal and on-time bytes unchanged.
+
 ### Fixed
 
-- CLI policy formatting, config diff/plan, and doctor now fail when their
+- CLI policy formatting, config diff/plan, doctor, and neighbor list — plus
+  the daemon's offline commands and rs-config-render — now fail when their
   buffered stdout cannot be flushed instead of reporting a successful status.
+
+- Per-peer exact-export overlay state is now retired on peer teardown instead
+  of being retained for the process lifetime.
 
 - RPKI cache endpoints now fail configuration validation unless they are unique
   numeric IPv4 or bracketed IPv6 socket addresses; DNS hostnames and equivalent
