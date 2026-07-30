@@ -1340,6 +1340,20 @@ async fn orr_with_addpath_send_ranks_by_vantage_cost() {
     drain_eor(&mut out_b).await;
 
     announce_divergent_bests(&tx).await;
+    let extra_source = Ipv4Addr::new(198, 18, 0, 1);
+    let extra = (1..=62)
+        .map(|path_id| {
+            let mut route = ibgp_route(
+                orr_prefix(),
+                extra_source,
+                IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1)),
+            );
+            route.path_id = path_id;
+            route
+        })
+        .collect();
+    announce_unicast(&tx, extra_source, extra).await;
+    let _ = query_best_routes(&tx).await;
     drop(tx);
     handle.await.unwrap();
 

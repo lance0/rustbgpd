@@ -1530,9 +1530,13 @@ impl RibManager {
         )
         .collect();
 
-        // Sort by best-path preference (best first). A target bound to a
+        // Rank by best-path preference (best first). A target bound to a
         // resolved ORR vantage ranks by the vantage's interior cost to each
-        // NEXT_HOP first (RFC 9107 §3.1) — comparator swap only.
+        // NEXT_HOP first (RFC 9107 §3.1) — comparator swap only. For actual
+        // finite Add-Path with a small ceiling and a large candidate set,
+        // partition out and sort only a 2N window. Export policy is evaluated
+        // lazily below; if denials exhaust that window, the remaining tail is
+        // sorted before evaluation resumes.
         let mut compare = |a: &&crate::route::Route, b: &&crate::route::Route| match orr {
             Some((topology, spf)) => best_path_cmp_orr(
                 a,
@@ -1542,9 +1546,19 @@ impl RibManager {
             ),
             None => best_path_cmp(a, b),
         };
-        candidates.sort_by(&mut compare);
-        #[cfg(any(test, feature = "bench-internals"))]
-        record_add_path_selection(|stats| stats.full_sort_dispatches += 1);
+        let bounded = !stage_path_id_zero && (1..=4).contains(&send_max) && candidates.len() >= 64;
+        let mut ordered_len = candidates.len();
+        if bounded {
+            ordered_len = (send_max as usize) * 2;
+            let (window, _, _) = candidates.select_nth_unstable_by(ordered_len, &mut compare);
+            window.sort_by(&mut compare);
+            #[cfg(any(test, feature = "bench-internals"))]
+            record_add_path_selection(|stats| stats.bounded_dispatches += 1);
+        } else {
+            candidates.sort_by(&mut compare);
+            #[cfg(any(test, feature = "bench-internals"))]
+            record_add_path_selection(|stats| stats.full_sort_dispatches += 1);
+        }
 
         // Walk candidates, evaluate export policy, assign path_ids 1..N
         let needs_as_path_string = export_pol.is_some_and(PolicyChain::requires_as_path_string);
@@ -1554,10 +1568,20 @@ impl RibManager {
         } else {
             send_max as usize
         };
-        for candidate in &candidates {
+        let mut candidate_index = 0;
+        while candidate_index < candidates.len() {
             if (next_rank as usize) > limit {
                 break;
             }
+            if candidate_index == ordered_len {
+                debug_assert!(bounded, "only bounded selection leaves an unsorted tail");
+                candidates[ordered_len..].sort_by(&mut compare);
+                ordered_len = candidates.len();
+                #[cfg(any(test, feature = "bench-internals"))]
+                record_add_path_selection(|stats| stats.sorted_tail_fallbacks += 1);
+            }
+            let candidate = candidates[candidate_index];
+            candidate_index += 1;
 
             // Export policy check per-candidate
             let aspath_str = needs_as_path_string.then(|| memo.aspath_str(candidate));

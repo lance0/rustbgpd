@@ -1560,11 +1560,7 @@ fn assert_add_path_envelope(
     );
 }
 
-fn assert_add_path_receipt(
-    receipt: AdjRibOutFanoutBenchReceipt,
-    _candidates: usize,
-    send_max: u32,
-) {
+fn assert_add_path_receipt(receipt: AdjRibOutFanoutBenchReceipt, candidates: usize, send_max: u32) {
     let send_max = usize::try_from(send_max).expect("send_max fits usize");
     assert_eq!(receipt.update_groups, 0);
     assert_eq!(receipt.grouped_peers, 0);
@@ -1580,8 +1576,14 @@ fn assert_add_path_receipt(
     assert_eq!(receipt.exact_probe_nonzero_encoded_lengths, send_max);
     assert_eq!(receipt.successful_commits, 1);
     assert_eq!(receipt.successful_enqueues, 1);
-    assert_eq!(receipt.add_path_bounded_dispatches, 0);
-    assert_eq!(receipt.add_path_full_sort_dispatches, 1);
+    assert_eq!(
+        receipt.add_path_bounded_dispatches,
+        usize::from(candidates >= 64)
+    );
+    assert_eq!(
+        receipt.add_path_full_sort_dispatches,
+        usize::from(candidates < 64)
+    );
     assert_eq!(receipt.add_path_sorted_tail_fallbacks, 0);
     assert_eq!(receipt.first_peer_family_values[0], send_max as i64);
 }

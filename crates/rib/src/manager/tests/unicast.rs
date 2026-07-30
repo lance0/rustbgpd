@@ -1568,6 +1568,84 @@ async fn paths_limit_drives_dual_stack_initial_churn_withdraw_and_refresh() {
     handle.await.unwrap();
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn add_path_bounded_fallback_matches_full_sort_exactly() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 114, 0), 24);
+    let source = Ipv4Addr::new(198, 51, 100, 1);
+    let routes = (1..=64)
+        .map(|path_id| {
+            let mut route = make_route_with_lp(prefix, source, 1_001 - path_id);
+            route.path_id = path_id;
+            route
+        })
+        .collect();
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(source),
+        announced: routes,
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let _ = query_best_routes(&tx).await;
+    crate::manager::distribution::reset_add_path_selection_stats();
+
+    let policy = super::export_explain::deny_local_pref_at_least(993);
+    let mut receivers = Vec::new();
+    for (host, send_max) in [(10, 4), (11, 8)] {
+        let (out_tx, out_rx) = mpsc::channel(8);
+        tx.send(RibUpdate::PeerUp {
+            peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, host)),
+            session_id: 0,
+            peer_asn: 65100,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            outbound_tx: out_tx,
+            export_policy: Some(policy.clone()),
+            sendable_families: ipv4_sendable(),
+            is_ebgp: true,
+            route_reflector_client: false,
+            orr_vantage: None,
+            per_client_best: false,
+            interpret_rfc1997: true,
+            add_path_send_families: ipv4_sendable(),
+            add_path_send_max: send_max,
+            negotiated_orf_recv: vec![],
+            negotiated_llgr_families: vec![],
+        })
+        .await
+        .unwrap();
+        receivers.push(out_rx);
+    }
+    let _ = query_best_routes(&tx).await;
+    drop(tx);
+    handle.await.unwrap();
+
+    let bounded = drain_unicast_state(&mut receivers.remove(0));
+    let full = drain_unicast_state(&mut receivers.remove(0));
+    assert_eq!(bounded.len(), 4);
+    assert_eq!(full.len(), 8);
+    for path_id in 1..=4 {
+        let key = (Prefix::V4(prefix), path_id);
+        let (bounded_route, full_route) = (&bounded[&key], &full[&key]);
+        assert!(crate::manager::helpers::routes_equal(
+            bounded_route,
+            full_route
+        ));
+        assert_eq!(bounded_route.local_pref(), 993 - path_id);
+    }
+    let stats = crate::manager::distribution::add_path_selection_stats();
+    assert_eq!(stats.bounded_dispatches, 1);
+    assert_eq!(stats.full_sort_dispatches, 1);
+    assert_eq!(stats.sorted_tail_fallbacks, 1);
+}
+
 #[tokio::test]
 async fn routes_received_and_queried() {
     let (tx, rx) = mpsc::channel(64);

@@ -137,7 +137,7 @@ async fn add_path_explain_peer_up(
     out_rx
 }
 
-fn deny_local_pref_at_least(threshold: u32) -> PolicyChain {
+pub(super) fn deny_local_pref_at_least(threshold: u32) -> PolicyChain {
     let mut deny = statement(
         Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0),
         PolicyAction::Deny,
