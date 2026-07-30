@@ -127,6 +127,22 @@ case "${1:-all}" in
         ;;
 esac
 
+SECCOMP_ARGS=()
+if [ -n "${SECCOMP_PROFILE:-}" ]; then
+    if [[ "$SECCOMP_PROFILE" = /* ]]; then
+        SECCOMP_PROFILE_CANDIDATE="$SECCOMP_PROFILE"
+    else
+        SECCOMP_PROFILE_CANDIDATE="$REPO_ROOT/$SECCOMP_PROFILE"
+    fi
+    if ! SECCOMP_PROFILE_RESOLVED="$(realpath -- "$SECCOMP_PROFILE_CANDIDATE" 2>/dev/null)" ||
+        [ ! -f "$SECCOMP_PROFILE_RESOLVED" ] ||
+        [ ! -r "$SECCOMP_PROFILE_RESOLVED" ]; then
+        echo "ERROR: SECCOMP_PROFILE must resolve to a readable regular file: $SECCOMP_PROFILE" >&2
+        exit 2
+    fi
+    SECCOMP_ARGS+=("--security-opt=seccomp=$SECCOMP_PROFILE_RESOLVED")
+fi
+
 if ! command -v docker >/dev/null 2>&1; then
     echo "ERROR: docker not found in PATH" >&2
     exit 2
@@ -187,6 +203,7 @@ DOCKER_ARGS=(
     # SYS_ADMIN don't help — AppArmor's mount mediation runs
     # independently of POSIX caps.
     --security-opt apparmor=unconfined
+    "${SECCOMP_ARGS[@]}"
     -e EVPN_LINUX_NETNS=1
     -e RUST_BACKTRACE=1
     -e CARGO_TERM_COLOR=always
