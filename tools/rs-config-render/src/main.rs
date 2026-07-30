@@ -149,13 +149,12 @@ fn main() -> ExitCode {
     }))
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::{fs::File, io::BufWriter};
 
     #[test]
-    #[cfg(unix)]
     fn stdout_exit_distinguishes_quiet_broken_pipe_from_other_flush_error() {
         let file = tempfile::NamedTempFile::new().unwrap();
         let mut writer = BufWriter::new(File::open(file.path()).unwrap());

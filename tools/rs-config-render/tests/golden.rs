@@ -147,6 +147,7 @@ fn receipt_carries_cardinalities_and_fingerprint() {
     assert!(receipt["rendered_at_utc"].as_str().unwrap().ends_with('Z'));
 }
 
+#[cfg(unix)]
 #[test]
 fn cli_stdout_matrix_retains_files_and_receipt() {
     use std::os::{fd::OwnedFd, unix::net::UnixStream};
