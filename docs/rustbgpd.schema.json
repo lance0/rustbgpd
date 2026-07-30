@@ -403,7 +403,7 @@
       "type": "object",
       "properties": {
         "address": {
-          "description": "RTR cache endpoint as `host:port`.",
+          "description": "Numeric RTR cache endpoint as IPv4 `address:port` or bracketed IPv6 `[address]:port`.",
           "type": "string"
         },
         "expire_interval": {

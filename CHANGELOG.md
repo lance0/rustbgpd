@@ -58,6 +58,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- RPKI cache endpoints now fail configuration validation unless they are unique
+  numeric IPv4 or bracketed IPv6 socket addresses; DNS hostnames and equivalent
+  duplicate IPv6 spellings are rejected before startup.
+
 - Outbound prefix-limit recovery now rotates after a backpressured peer,
   allowing other queued peers to recover while preserving the failed peer's
   transactional retry intent.

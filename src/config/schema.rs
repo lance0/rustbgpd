@@ -307,7 +307,7 @@ pub struct RpkiConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CacheServer {
-    /// RTR cache endpoint as `host:port`.
+    /// Numeric RTR cache endpoint as IPv4 `address:port` or bracketed IPv6 `[address]:port`.
     pub address: String,
     /// RTR refresh interval in seconds. Default 3600.
     #[serde(default = "default_rpki_refresh")]

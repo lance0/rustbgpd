@@ -2012,23 +2012,24 @@ address = "127.0.0.1:3323"
 
 ### Multiple cache servers (redundancy)
 
-For production, connect to 2+ caches. VRPs are merged (union) across all
-connected caches:
+For production, connect to 2+ caches. Addresses must be numeric IP endpoints;
+DNS hostnames are not supported, and IPv6 addresses must be bracketed. VRPs are
+merged (union) across all connected caches:
 
 ```toml
 [rpki]
 [[rpki.cache_servers]]
-address = "rpki1.example.com:3323"
+address = "192.0.2.10:3323"
 
 [[rpki.cache_servers]]
-address = "rpki2.example.com:3323"
+address = "[2001:db8::10]:3323"
 ```
 
 ### Cache server options
 
 | Field | Type | Required | Default | Description |
 |-------|------|:--------:|:-------:|-------------|
-| `address` | string | yes | -- | Cache server `host:port` |
+| `address` | string | yes | -- | Numeric cache server `IP:port`; bracket IPv6 addresses |
 | `refresh_interval` | u64 | no | 3600 | Seconds between Serial Queries |
 | `retry_interval` | u64 | no | 600 | Seconds before reconnect on failure |
 | `expire_interval` | u64 | no | 7200 | Seconds before discarding stale VRPs |
@@ -3981,6 +3982,7 @@ starting:
 | RT/RO local administrator must be <= 65535 for a 4-octet ASN or dotted IPv4 administrator; numeric ASNs <= 65535 carry a u32 local value | `local admin ... exceeds 65535 for ...` |
 | RPKI `refresh_interval`, `retry_interval`, `expire_interval` must be > 0 | `must be > 0` |
 | RPKI `expire_interval` must be >= `refresh_interval` | `expire_interval must be >= refresh_interval` |
+| RPKI cache addresses must be unique numeric `IP:port` endpoints (bracketed for IPv6) | `invalid address` / `duplicate address` |
 | Named policy referenced in chain must exist in `[policy.definitions]` | `undefined policy` |
 | Inline policy and policy chain cannot both be set for the same neighbor/direction | `mutually exclusive` |
 | `route_server_client` is only valid on eBGP neighbors | `invalid route_server_client` |

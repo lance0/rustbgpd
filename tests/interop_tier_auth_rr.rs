@@ -147,8 +147,25 @@ fn rr_and_route_server_interop_is_tier_authenticated_end_to_end() {
             .replace("GOBMP_ADDR", "127.0.0.1")
             .replace("SINK_ADDR", "127.0.0.1")
             .replace("ROUTINATOR_ADDR", "127.0.0.1")
-            .replace("STAYRTR_ADDR", "127.0.0.1")
-            .replace("RTRV2_ADDR", "127.0.0.1");
+            .replace("STAYRTR_ADDR", "127.0.0.2")
+            .replace("RTRV2_ADDR", "127.0.0.3");
+        if name == "rustbgpd-m84-multicache.toml" {
+            let value: toml::Value =
+                toml::from_str(&materialized).unwrap_or_else(|error| panic!("{name}: {error}"));
+            let addresses: BTreeSet<_> = value["rpki"]["cache_servers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|cache| {
+                    cache["address"]
+                        .as_str()
+                        .unwrap()
+                        .parse::<std::net::SocketAddr>()
+                })
+                .collect::<Result<_, _>>()
+                .unwrap();
+            assert_eq!(addresses.len(), 3, "M84 must retain three distinct caches");
+        }
         let mut staged = tempfile::Builder::new()
             .suffix(".config-check")
             .tempfile_in(&config_dir)
