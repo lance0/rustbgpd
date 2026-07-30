@@ -432,7 +432,7 @@ fn expected_private_single_best_receipt(
         family_gauge_writes: peers,
         last_family_gauge_write_mask: 0x01,
         pristine_otc_reconcile_candidates: peers,
-        private_extra_prefix_scans: CHANGED * peers,
+        private_extra_prefix_scans: 0,
         first_peer_family_values: [CHANGED as i64, 0, 0, 0, 0, 0, 0],
     }
 }
