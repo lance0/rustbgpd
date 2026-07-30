@@ -1,6 +1,6 @@
 # ADR-0119: RFC 8212 secure-default config epoch
 
-**Status:** Proposed (v0.62 representation contract; secure-default activation deferred)
+**Status:** Proposed (representation contract and secure-default activation deferred; owner gate required)
 **Date:** 2026-07-29
 
 ## Context
@@ -15,7 +15,7 @@ files, retained history, generated configurations, and transaction candidates.
 File age, comments, formatting, release provenance, history sequence, and
 whether a document looks canonical are not trustworthy freshness signals.
 
-v0.62 needs an explicit representation boundary before any secure-default
+Future implementation needs an explicit representation boundary before any secure-default
 activation is considered. This ADR defines that representation and its
 diagnostics only. It does not change route handling, activate a new default,
 or supersede ADR-0112 and its M95 real-session receipt.
@@ -42,9 +42,9 @@ source verdict is formed.
 
 ### Version matrix
 
-The complete v0.62 and possible later-activation matrix is:
+The complete pre-activation and possible later-activation matrix is:
 
-| Epoch syntax | Raw `ebgp_requires_policy` | v0.62 result | Eventual activation result |
+| Epoch syntax | Raw `ebgp_requires_policy` | Pre-activation result | Eventual activation result |
 |---|---|---|---|
 | omitted (epoch 1) | omitted | `legacy_omission`, `false` | unchanged |
 | omitted (epoch 1) | `false` | `explicit_false`, `false` | unchanged |
@@ -61,10 +61,10 @@ Legacy and explicit epoch-1 omission remain effective `false` forever.
 Explicit booleans are preserved in every epoch and phase. Activation may
 change only the epoch-2/omitted cell from rejected to effective `true`.
 
-In v0.62, the epoch-2 omission diagnostic is exactly:
+Before activation, the epoch-2 omission diagnostic is exactly:
 
 ```text
-config_epoch = 2 requires [global].ebgp_requires_policy = true or [global].ebgp_requires_policy = false in v0.62; add one explicit assignment
+config_epoch = 2 requires [global].ebgp_requires_policy = true or [global].ebgp_requires_policy = false before secure-default activation; add one explicit assignment
 ```
 
 The diagnostic points at the absent/required field and rejects startup,
@@ -145,7 +145,7 @@ edit, and submit a full candidate. Raw/source may change only through the named
 materialization transition; the gNMI receipt retains and reports both tuples
 rather than losing epoch, raw presence, source, or effective value silently.
 
-The v0.62 migration tool requires an explicit operator-selected posture and
+The future migration tool requires an explicit operator-selected posture and
 never infers intent from a freshness heuristic. It offers exact edits: pin
 legacy behavior with root `config_epoch = 1` plus
 `[global].ebgp_requires_policy = false`, or prepare the secure epoch with root
@@ -192,7 +192,7 @@ The implementation gate must make each production mutation independently red:
    unknown before epoch parsing.
 2. **Matrix/invalid epochs:** change any epoch/source normalization cell,
    including explicit epoch 1 or any invalid epoch.
-3. **Epoch-2 omission diagnostic:** accept omission in v0.62, or weaken/remove
+3. **Epoch-2 omission diagnostic:** accept omission before activation, or weaken/remove
    the exact edit requiring explicit `true` or `false`.
 4. **Legacy advisory:** remove it from a fully-policed omitted config, change
    normal/strict exit behavior, or warn on explicit false.
@@ -223,7 +223,7 @@ budgets, `git diff --check`, matrix review, and contradiction review.
 
 ## Consequences
 
-- v0.62 can record deliberate intent without changing the shipped default.
+- A future representation release can record deliberate intent without changing the shipped default.
 - Untouched legacy files and history have deterministic, permanent semantics.
 - Durable canonicalization changes diagnostics at the named materialization
   transition; source-aware comparison adds state even when behavior is unchanged.
