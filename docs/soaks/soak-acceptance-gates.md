@@ -79,7 +79,8 @@ green slope would not be clean evidence.
 ### 1. GR-restart intern-gc — `run-soak-gr-restart-intern-gc.sh`
 
 Injection: repeated peer daemon restart (`killall -9 bgpd` in the FRR
-container; watchfrr restarts it — never `frrinit.sh stop`, which kills
+container; watchfrr restarts it, harness-supervised past watchfrr's
+restart-abandon threshold — never `frrinit.sh stop`, which kills
 the container's PID 1 and destroys the clab veth) driving rustbgpd
 through session-down → stale-mark → reconnect → EoR → stale-clear →
 intern GC. Analyzer: `analyze-soak-gr-restart.py`.
@@ -211,7 +212,7 @@ scripts), mapped to the daemon guarantee it tests.
 
 | Injection | Mechanism | Scenario(s) | Guarantee under test |
 |-----------|-----------|-------------|----------------------|
-| Peer daemon restart (session loss + GR) | `killall -9 bgpd` in FRR container (watchfrr restarts it) | 1 | GR state machine: stale-mark, EoR, stale-clear, intern GC; bounded re-establish |
+| Peer daemon restart (session loss + GR) | `killall -9 bgpd` in FRR container (watchfrr restarts it, harness-supervised) | 1 | GR state machine: stale-mark, EoR, stale-clear, intern GC; bounded re-establish |
 | Transactional config churn | `rbgp config plan`/`apply` cycles | 2 | Live-apply atomicity; zero session impact; no candidate-world leak |
 | Controller route churn | gRPC AddPath/DeletePath | 3 | Injection path RIB + intern stability; exact announce/withdraw delivery |
 | Route churn at scale (50 k) | tester bulk advertise + sustained churn | 4 | RIB/intern/label-set stability at scale |
