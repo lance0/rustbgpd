@@ -70,6 +70,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   of leaving a live daemon without its `/metrics`, `/livez`, and `/readyz`
   surface. Omitting `prometheus_addr` remains supported.
 
+- `rbgp doctor` dependency reachability rows now say they probe from the CLI
+  network vantage and warn instead of exiting red when an RTR, BMP, or gNMI
+  collector cannot be reached by the `rbgp` process. The authoritative BGP
+  listener and daemon-side RPKI VRP checks keep their existing semantics.
+
 - The shipped empty Adj-RIB-In alert now checks the current per-session
   Established gauge instead of inferring state from lifetime counters, and
   correctly aggregates scoped siblings to peer identity before joining the

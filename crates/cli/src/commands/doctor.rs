@@ -1009,6 +1009,7 @@ struct ProbeSpec {
     label: String,
     addr: String,
     advice: &'static str,
+    cli_vantage: bool,
 }
 
 struct ProbeTaskIdentity {
@@ -1023,18 +1024,38 @@ struct ProbeTask {
 }
 
 async fn run_probe(spec: ProbeSpec) -> Check {
+    let vantage = spec
+        .cli_vantage
+        .then_some(" from the rbgp CLI network vantage");
     match probe_tcp(spec.addr.clone()).await {
         Ok(()) => Check {
             name: spec.name,
             status: CheckStatus::Ok,
-            detail: format!("{} {} reachable", spec.label, spec.addr),
+            detail: format!(
+                "{} {} reachable{}",
+                spec.label,
+                spec.addr,
+                vantage.unwrap_or_default()
+            ),
         },
         Err(e) => Check {
             name: spec.name,
-            status: CheckStatus::Fail,
+            status: if spec.cli_vantage {
+                CheckStatus::Warn
+            } else {
+                CheckStatus::Fail
+            },
             detail: format!(
-                "{} {} unreachable ({e}) — {}",
-                spec.label, spec.addr, spec.advice
+                "{} {} unreachable{} ({e}) — {}{}",
+                spec.label,
+                spec.addr,
+                vantage.unwrap_or_default(),
+                if spec.cli_vantage {
+                    "this is not daemon-side connectivity evidence; "
+                } else {
+                    ""
+                },
+                spec.advice
             ),
         },
     }
@@ -1094,33 +1115,40 @@ async fn reachability_checks(
             advice: "the daemon is up but nothing accepts on its BGP listen port; check the \
                      daemon log for listener bind errors (a port below 1024 needs \
                      CAP_NET_BIND_SERVICE)",
+            cli_vantage: false,
         });
     }
     for addr in &targets.rpki_caches {
         specs.push(ProbeSpec {
-            name: format!("rpki.cache.{addr}.reachable"),
+            name: format!("rpki.cache.{addr}.reachable_from_cli"),
             label: "RTR cache".to_string(),
             addr: addr.clone(),
-            advice: "origin validation stays degraded until the cache connects; verify the \
-                     cache address and reachability",
+            advice: "inspect the daemon-side rpki.vrp_table check and RTR logs for actual \
+                     cache state; troubleshoot the CLI path only when rbgp and rustbgpd are \
+                     expected to share a network vantage",
+            cli_vantage: true,
         });
     }
     for addr in &targets.bmp_collectors {
         specs.push(ProbeSpec {
-            name: format!("bmp.collector.{addr}.reachable"),
+            name: format!("bmp.collector.{addr}.reachable_from_cli"),
             label: "BMP collector".to_string(),
             addr: addr.clone(),
-            advice: "BMP monitoring data is not being exported; verify the collector address \
-                     and reachability (the daemon retries on its reconnect interval)",
+            advice: "inspect rustbgpd and collector logs for actual export state; troubleshoot \
+                     the CLI path only when rbgp and rustbgpd are expected to share a network \
+                     vantage",
+            cli_vantage: true,
         });
     }
     for (name, addr) in &targets.gnmi_collectors {
         specs.push(ProbeSpec {
-            name: format!("gnmi_dialout.{name}.reachable"),
+            name: format!("gnmi_dialout.{name}.reachable_from_cli"),
             label: format!("gNMI dial-out collector {name}"),
             addr: addr.clone(),
-            advice: "dial-out telemetry backs off and retries; verify the collector address \
-                     and reachability",
+            advice: "inspect the daemon-side gnmi_dialout_connected metric and logs for actual \
+                     dial-out state; troubleshoot the CLI path only when rbgp and rustbgpd are \
+                     expected to share a network vantage",
+            cli_vantage: true,
         });
     }
     let tasks = specs
@@ -2897,7 +2925,7 @@ paths = ["x"]
     }
 
     #[tokio::test]
-    async fn reachability_probe_is_green_for_listening_and_red_for_refused() {
+    async fn reachability_probe_distinguishes_listener_from_cli_vantage() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let live = listener.local_addr().unwrap();
         // A port that was just bound and released: connecting is refused.
@@ -2906,28 +2934,47 @@ paths = ["x"]
             l.local_addr().unwrap()
         };
         let targets = DeployTargets {
-            listen_port: None,
+            listen_port: Some(dead.port()),
             rpki_caches: vec![live.to_string()],
             bmp_collectors: vec![dead.to_string()],
             gnmi_collectors: vec![("central".to_string(), dead.to_string())],
         };
-        let checks = reachability_checks(false, "unix:///run/x.sock", &targets).await;
-        assert_eq!(checks.len(), 3);
-        assert_eq!(checks[0].name, format!("rpki.cache.{live}.reachable"));
-        assert_eq!(checks[0].status, CheckStatus::Ok);
-        assert_eq!(checks[1].name, format!("bmp.collector.{dead}.reachable"));
-        assert_eq!(checks[1].status, CheckStatus::Fail);
+        let checks = reachability_checks(true, "http://127.0.0.1:50051", &targets).await;
+        assert_eq!(checks.len(), 4);
+        // Load-bearing proof: weakening the authoritative daemon-listener
+        // probe to the dependency warning semantics makes this red.
+        assert_eq!(checks[0].name, "bgp.listener");
+        assert_eq!(checks[0].status, CheckStatus::Fail);
+        assert_eq!(
+            checks[1].name,
+            format!("rpki.cache.{live}.reachable_from_cli")
+        );
+        assert_eq!(checks[1].status, CheckStatus::Ok);
         assert!(
-            checks[1].detail.contains("unreachable"),
+            checks[1]
+                .detail
+                .contains("reachable from the rbgp CLI network vantage"),
             "{}",
             checks[1].detail
         );
-        assert_eq!(checks[2].name, "gnmi_dialout.central.reachable");
-        assert_eq!(checks[2].status, CheckStatus::Fail);
+        assert_eq!(
+            checks[2].name,
+            format!("bmp.collector.{dead}.reachable_from_cli")
+        );
+        assert_eq!(checks[2].status, CheckStatus::Warn);
         assert!(
-            checks[2].detail.contains("dial-out"),
+            checks[2]
+                .detail
+                .contains("unreachable from the rbgp CLI network vantage"),
             "{}",
             checks[2].detail
+        );
+        assert_eq!(checks[3].name, "gnmi_dialout.central.reachable_from_cli");
+        assert_eq!(checks[3].status, CheckStatus::Warn);
+        assert!(
+            checks[3].detail.contains("dial-out"),
+            "{}",
+            checks[3].detail
         );
     }
 
@@ -3922,12 +3969,12 @@ paths = ["x"]
         assert_eq!(events["session"][0]["summary"], "session evidence survives");
     }
 
-    /// LAN-482: one full daemon-up run with every first-deploy probe
-    /// active — listener reachable, one live and one dead RTR cache, a
-    /// dead BMP collector, a dead gNMI dial-out collector, and a healthy
-    /// state dir. Pins the emitted check-name set and statuses.
+    /// A remote-daemon run proves dependency connects describe the rbgp
+    /// process's network vantage, not daemon-side reachability. Restoring
+    /// `Fail` for a refused dependency makes the exit-code assertion red;
+    /// removing the vantage wording makes the exact detail assertion red.
     #[tokio::test]
-    async fn doctor_first_deploy_probes_daemon_up() {
+    async fn doctor_remote_daemon_dependency_probes_are_cli_vantage_warnings() {
         let live = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let live_port = live.local_addr().unwrap().port();
         let dead = {
@@ -3941,7 +3988,6 @@ paths = ["x"]
             r#"[global]
 asn = 65000
 router_id = "192.0.2.1"
-listen_port = {live_port}
 runtime_state_dir = "{state}"
 
 [rpki]
@@ -3974,14 +4020,14 @@ paths = ["x"]
             &DoctorOptions {
                 output: Some(&bundle_path),
                 log_file: None,
-                daemon_address: &server.addr,
+                daemon_address: "http://198.51.100.9:50051",
                 token_file_configured: false,
                 json: true,
             },
         )
         .await
         .unwrap();
-        assert_eq!(code, 2, "dead probe targets must exit red");
+        assert_eq!(code, 0, "CLI-vantage dependency failures must not exit red");
 
         let files = extract_bundle(&bundle_path);
         let manifest: serde_json::Value =
@@ -3999,32 +4045,63 @@ paths = ["x"]
                 .as_str()
                 .unwrap()
         };
-        assert_eq!(status_of("bgp.listener"), "ok");
+        let detail_of = |name: &str| -> &str {
+            checks
+                .iter()
+                .find(|c| c["name"] == name)
+                .unwrap_or_else(|| panic!("missing check {name}"))["detail"]
+                .as_str()
+                .unwrap()
+        };
         assert_eq!(
-            status_of(&format!("rpki.cache.127.0.0.1:{live_port}.reachable")),
+            status_of(&format!(
+                "rpki.cache.127.0.0.1:{live_port}.reachable_from_cli"
+            )),
             "ok"
         );
         // Red proof: removing effective-config/metrics wiring removes this check.
         assert_eq!(status_of("rpki.vrp_table"), "warn");
-        assert_eq!(status_of(&format!("rpki.cache.{dead}.reachable")), "fail");
         assert_eq!(
-            status_of(&format!("bmp.collector.{dead}.reachable")),
-            "fail"
+            status_of(&format!("rpki.cache.{dead}.reachable_from_cli")),
+            "warn"
         );
-        assert_eq!(status_of("gnmi_dialout.central.reachable"), "fail");
+        assert_eq!(
+            status_of(&format!("bmp.collector.{dead}.reachable_from_cli")),
+            "warn"
+        );
+        assert_eq!(status_of("gnmi_dialout.central.reachable_from_cli"), "warn");
         assert_eq!(status_of("state_dir.writable"), "ok");
         assert_eq!(status_of("host.run_context"), "ok");
         assert_ne!(status_of("state_dir.disk"), "fail");
-        // Advice text is actionable, not just a status.
-        let bmp_detail = checks
-            .iter()
-            .find(|c| c["name"] == format!("bmp.collector.{dead}.reachable"))
-            .unwrap()["detail"]
-            .as_str()
-            .unwrap();
-        assert!(
-            bmp_detail.contains("verify the collector address"),
-            "{bmp_detail}"
+        assert_eq!(
+            detail_of(&format!("rpki.cache.{dead}.reachable_from_cli")),
+            format!(
+                "RTR cache {dead} unreachable from the rbgp CLI network vantage \
+                 (Connection refused (os error 111)) — this is not daemon-side connectivity \
+                 evidence; inspect the daemon-side rpki.vrp_table check and RTR logs for \
+                 actual cache state; troubleshoot the CLI path only when rbgp and rustbgpd \
+                 are expected to share a network vantage"
+            )
+        );
+        assert_eq!(
+            detail_of(&format!("bmp.collector.{dead}.reachable_from_cli")),
+            format!(
+                "BMP collector {dead} unreachable from the rbgp CLI network vantage \
+                 (Connection refused (os error 111)) — this is not daemon-side connectivity \
+                 evidence; inspect rustbgpd and collector logs for actual export state; \
+                 troubleshoot the CLI path only when rbgp and rustbgpd are expected to share \
+                 a network vantage"
+            )
+        );
+        assert_eq!(
+            detail_of("gnmi_dialout.central.reachable_from_cli"),
+            format!(
+                "gNMI dial-out collector central {dead} unreachable from the rbgp CLI network \
+                 vantage (Connection refused (os error 111)) — this is not daemon-side \
+                 connectivity evidence; inspect the daemon-side gnmi_dialout_connected metric \
+                 and logs for actual dial-out state; troubleshoot the CLI path only when rbgp \
+                 and rustbgpd are expected to share a network vantage"
+            )
         );
     }
 
