@@ -47,6 +47,9 @@ mod unicast;
 mod vpn;
 
 pub(in crate::manager) use export_memo::ExportMemo;
+#[cfg(any(test, feature = "bench-internals"))]
+#[allow(unused_imports)]
+pub(in crate::manager) use unicast::{add_path_selection_stats, reset_add_path_selection_stats};
 
 /// Maximum wire-equivalence cohorts retained for one update group.
 ///

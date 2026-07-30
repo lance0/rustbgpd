@@ -381,6 +381,9 @@ fn expected_fanout_receipt(
             } else {
                 2
             },
+        add_path_bounded_dispatches: 0,
+        add_path_full_sort_dispatches: 0,
+        add_path_sorted_tail_fallbacks: 0,
         first_peer_family_values: [
             i64::try_from(CHANGED).expect("fixture size fits i64"),
             0,
@@ -1413,6 +1416,7 @@ fn build_add_path_staging(
             .map(|index| add_path_route(index, candidates, 40))
             .collect(),
     );
+    manager.bench_reset_adj_rib_out_fanout_receipt();
     let mut receiver = manager.bench_register_add_path_peer(
         export_policy.as_ref(),
         send_max,
@@ -1431,7 +1435,11 @@ fn build_add_path_staging(
         matches!(receiver.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
         "Add-Path setup must leave a live channel with no residue"
     );
-    assert_add_path_receipt(manager.bench_adj_rib_out_fanout_receipt(), send_max);
+    assert_add_path_receipt(
+        manager.bench_adj_rib_out_fanout_receipt(),
+        candidates,
+        send_max,
+    );
     assert_eq!(
         manager.bench_unicast_candidate_count(add_path_prefix()),
         candidates,
@@ -1552,7 +1560,11 @@ fn assert_add_path_envelope(
     );
 }
 
-fn assert_add_path_receipt(receipt: AdjRibOutFanoutBenchReceipt, send_max: u32) {
+fn assert_add_path_receipt(
+    receipt: AdjRibOutFanoutBenchReceipt,
+    _candidates: usize,
+    send_max: u32,
+) {
     let send_max = usize::try_from(send_max).expect("send_max fits usize");
     assert_eq!(receipt.update_groups, 0);
     assert_eq!(receipt.grouped_peers, 0);
@@ -1568,6 +1580,9 @@ fn assert_add_path_receipt(receipt: AdjRibOutFanoutBenchReceipt, send_max: u32) 
     assert_eq!(receipt.exact_probe_nonzero_encoded_lengths, send_max);
     assert_eq!(receipt.successful_commits, 1);
     assert_eq!(receipt.successful_enqueues, 1);
+    assert_eq!(receipt.add_path_bounded_dispatches, 0);
+    assert_eq!(receipt.add_path_full_sort_dispatches, 1);
+    assert_eq!(receipt.add_path_sorted_tail_fallbacks, 0);
     assert_eq!(receipt.first_peer_family_values[0], send_max as i64);
 }
 
@@ -1607,6 +1622,7 @@ fn measure_add_path_staging(
         accumulated += started.elapsed();
         assert_add_path_receipt(
             state.manager.bench_adj_rib_out_fanout_receipt(),
+            state.candidates,
             state.send_max,
         );
         let update = state

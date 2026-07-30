@@ -8,6 +8,45 @@ use super::{
     should_suppress_ibgp_inner, unicast_route_family, validate_route_aspa, validate_route_rpki,
 };
 
+#[cfg(any(test, feature = "bench-internals"))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(in crate::manager) struct AddPathSelectionStats {
+    pub bounded_dispatches: usize,
+    pub full_sort_dispatches: usize,
+    pub sorted_tail_fallbacks: usize,
+}
+
+#[cfg(any(test, feature = "bench-internals"))]
+std::thread_local! {
+    static ADD_PATH_SELECTION_STATS: std::cell::Cell<AddPathSelectionStats> =
+        const { std::cell::Cell::new(AddPathSelectionStats {
+            bounded_dispatches: 0,
+            full_sort_dispatches: 0,
+            sorted_tail_fallbacks: 0,
+        }) };
+}
+
+#[cfg(any(test, feature = "bench-internals"))]
+#[allow(dead_code)]
+pub(in crate::manager) fn reset_add_path_selection_stats() {
+    ADD_PATH_SELECTION_STATS.set(AddPathSelectionStats::default());
+}
+
+#[cfg(any(test, feature = "bench-internals"))]
+#[allow(dead_code)]
+pub(in crate::manager) fn add_path_selection_stats() -> AddPathSelectionStats {
+    ADD_PATH_SELECTION_STATS.get()
+}
+
+#[cfg(any(test, feature = "bench-internals"))]
+fn record_add_path_selection(update: impl FnOnce(&mut AddPathSelectionStats)) {
+    ADD_PATH_SELECTION_STATS.with(|cell| {
+        let mut stats = cell.get();
+        update(&mut stats);
+        cell.set(stats);
+    });
+}
+
 /// Gate code and message for an export-policy deny.
 ///
 /// ADR-0112: a rejection by the reserved internal deny is a *missing* operator
@@ -1492,19 +1531,20 @@ impl RibManager {
         .collect();
 
         // Sort by best-path preference (best first). A target bound to a
-        // resolved ORR vantage ranks by the vantage's interior cost to
-        // each NEXT_HOP first (RFC 9107 §3.1) — comparator swap only.
-        match orr {
-            Some((topology, spf)) => candidates.sort_by(|a, b| {
-                best_path_cmp_orr(
-                    a,
-                    b,
-                    spf.cost_to(topology, a.next_hop),
-                    spf.cost_to(topology, b.next_hop),
-                )
-            }),
-            None => candidates.sort_by(|a, b| best_path_cmp(a, b)),
-        }
+        // resolved ORR vantage ranks by the vantage's interior cost to each
+        // NEXT_HOP first (RFC 9107 §3.1) — comparator swap only.
+        let mut compare = |a: &&crate::route::Route, b: &&crate::route::Route| match orr {
+            Some((topology, spf)) => best_path_cmp_orr(
+                a,
+                b,
+                spf.cost_to(topology, a.next_hop),
+                spf.cost_to(topology, b.next_hop),
+            ),
+            None => best_path_cmp(a, b),
+        };
+        candidates.sort_by(&mut compare);
+        #[cfg(any(test, feature = "bench-internals"))]
+        record_add_path_selection(|stats| stats.full_sort_dispatches += 1);
 
         // Walk candidates, evaluate export policy, assign path_ids 1..N
         let needs_as_path_string = export_pol.is_some_and(PolicyChain::requires_as_path_string);

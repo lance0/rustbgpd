@@ -69,6 +69,9 @@ pub struct AdjRibOutFanoutBenchReceipt {
     pub family_gauge_writes: usize,
     pub last_family_gauge_write_mask: u8,
     pub pristine_otc_reconcile_candidates: usize,
+    pub add_path_bounded_dispatches: usize,
+    pub add_path_full_sort_dispatches: usize,
+    pub add_path_sorted_tail_fallbacks: usize,
     pub first_peer_family_values: [i64; 7],
 }
 
@@ -476,6 +479,7 @@ impl RibManager {
     /// fanout pass.
     pub fn bench_reset_adj_rib_out_fanout_receipt(&mut self) {
         self.adj_rib_out_commit_stats = super::AdjRibOutCommitStats::default();
+        super::distribution::reset_add_path_selection_stats();
     }
 
     /// Capture production-path and current metric evidence after one measured
@@ -500,6 +504,7 @@ impl RibManager {
             .filter(|membership| matches!(membership, GroupMembership::Grouped(_)))
             .count();
         let stats = self.adj_rib_out_commit_stats;
+        let selection = super::distribution::add_path_selection_stats();
         AdjRibOutFanoutBenchReceipt {
             update_groups: group_ids.len(),
             grouped_peers,
@@ -530,6 +535,9 @@ impl RibManager {
             family_gauge_writes: stats.family_gauge_writes,
             last_family_gauge_write_mask: stats.last_family_gauge_write_mask,
             pristine_otc_reconcile_candidates: stats.pristine_otc_reconcile_candidates,
+            add_path_bounded_dispatches: selection.bounded_dispatches,
+            add_path_full_sort_dispatches: selection.full_sort_dispatches,
+            add_path_sorted_tail_fallbacks: selection.sorted_tail_fallbacks,
             first_peer_family_values: self
                 .bench_adj_rib_out_family_values(Self::bench_peer_address(0)),
         }
