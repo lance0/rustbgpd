@@ -815,7 +815,7 @@ per-cycle events recorded in `churn.log`.
 | Harness | Proves | Topology / analyzer |
 |---------|--------|---------------------|
 | `run-soak-gr-restart-intern-gc.sh` | The attribute intern table does not grow across GR-restart → EoR → stale-clear cycles: `bgp_rib_attr_intern_global_size` slope `< 1.0`/hr | containerlab topology + post-hoc slope analyzer |
-| `run-soak-hot-reload.sh` | Sustained SIGHUP / live-apply config churn leaks no state | containerlab topology + post-hoc analyzer |
+| `run-soak-hot-reload.sh` | Sustained transactional `config plan` / `config apply` churn leaks no state | containerlab topology + post-hoc analyzer |
 | `run-soak-inject-churn.sh` | Sustained gRPC AddPath/DeletePath churn holds RSS + intern-table size flat | containerlab topology + post-hoc analyzer |
 
 Each pairs a containerlab topology with a post-hoc analyzer and runs under the

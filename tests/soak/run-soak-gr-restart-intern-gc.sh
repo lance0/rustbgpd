@@ -26,7 +26,7 @@
 
 set -euo pipefail
 
-SOAK_SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SOAK_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SOAK_SCRIPT_DIR/../.." && pwd)"
 TOPOLOGY="${TOPOLOGY:-$REPO_ROOT/tests/soak/soak-gr-restart-intern-gc.clab.yml}"
 
@@ -45,7 +45,6 @@ FRR_IP="${FRR_IP:-10.0.0.2}"
 
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
 RUN_DIR="${RUN_DIR_OVERRIDE:-$SOAK_SCRIPT_DIR/runs/soak-gr-restart-$RUN_ID}"
-mkdir -p "$RUN_DIR"
 
 SAMPLES_CSV="$RUN_DIR/samples.csv"
 SOAK_LOG="$RUN_DIR/soak.log"
@@ -53,11 +52,8 @@ CYCLES_LOG="$RUN_DIR/cycles.log"
 RUN_JSON="$RUN_DIR/run.json"
 RUSTBGPD_LOG="$RUN_DIR/rustbgpd.log"
 
-exec > >(tee -a "$SOAK_LOG") 2>&1
-
-# shellcheck source=./host-lock.sh
+# shellcheck source=tests/soak/host-lock.sh
 source "$SOAK_SCRIPT_DIR/host-lock.sh"
-acquire_rustbgpd_host_lock
 
 log() {
     printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"
@@ -90,11 +86,11 @@ prom_scrape() {
     curl -sfm 5 "http://${ip}:9179/metrics" 2>/dev/null || true
 }
 
-prom_extract_or_zero() {
+prom_extract_required() {
     local text="$1" metric="$2"
     printf '%s' "$text" | awk -v m="$metric" '
         $0 ~ "^"m"( |\\{)" { print $NF; found=1; exit }
-        END { if (!found) { print "0" } }
+        END { if (!found) { print "nan" } }
     '
 }
 
@@ -102,8 +98,8 @@ prom_extract_or_zero() {
 prom_extract_sum() {
     local prom="$1" name="$2"
     awk -v n="$name" '
-        $0 ~ "^"n"[{ ]" { s += $NF }
-        END { printf "%d", s+0 }
+        $0 ~ "^"n"[{ ]" { s += $NF; found=1 }
+        END { if (!found) print "nan"; else printf "%d", s }
     ' <<<"$prom"
 }
 
@@ -114,13 +110,6 @@ container_rss_mb() {
             awk "/^VmRSS:/ { printf \"%.3f\", \$2 / 1024.0 }" "/proc/$pid/status"
         fi
     ' 2>/dev/null || true
-}
-
-rb_gr_active() {
-    local prom
-    prom=$(prom_scrape)
-    [ -z "$prom" ] && { echo 0; return; }
-    prom_extract_or_zero "$prom" bgp_gr_active_peers
 }
 
 frr_established_seen() {
@@ -143,13 +132,40 @@ wait_established() {
 }
 
 restart_frr_bgpd() {
+    local elapsed=${1:?} cycles=${2:?} active=nan stale=nan prom
     cycle_log "restarting FRR bgpd"
-    # Stop bgpd, wait for rustbgpd to notice the session drop and mark stale.
-    docker exec "$FRR" /usr/lib/frr/frrinit.sh stop >/dev/null 2>&1 || true
-    sleep 5
-    # Start bgpd again; rustbgpd will see reconnect + EoR + stale-clear + gc.
-    docker exec "$FRR" /usr/lib/frr/frrinit.sh start >/dev/null 2>&1 || true
-    cycle_log "FRR bgpd restart initiated"
+    docker exec "$FRR" /usr/lib/frr/frrinit.sh stop >/dev/null
+    for _ in $(seq 1 30); do
+        prom=$(prom_scrape) || prom=""
+        active=$(prom_extract_required "$prom" bgp_gr_active_peers)
+        stale=$(prom_extract_required "$prom" bgp_gr_stale_routes)
+        if awk "BEGIN {exit !($active > 0 && $stale > 0)}" 2>/dev/null; then
+            sample_row "$elapsed" "$cycles"
+            break
+        fi
+        sleep 1
+    done
+    awk "BEGIN {exit !($active > 0 && $stale > 0)}" 2>/dev/null ||
+        { log "ERROR: GR active/stale evidence not observed"; return 1; }
+    docker exec "$FRR" /usr/lib/frr/frrinit.sh start >/dev/null
+    wait_established 60
+    for _ in $(seq 1 30); do
+        prom=$(prom_scrape) || prom=""
+        active=$(prom_extract_required "$prom" bgp_gr_active_peers)
+        stale=$(prom_extract_required "$prom" bgp_gr_stale_routes)
+        if [ "$active" = "0" ] && [ "$stale" = "0" ]; then
+            sample_row "$elapsed" "$cycles"
+            cycle_log "FRR bgpd restart completed"
+            return 0
+        fi
+        sleep 1
+    done
+    log "ERROR: GR active/stale evidence did not clear"
+    return 1
+}
+
+run_analyzer() {
+    python3 "$SOAK_SCRIPT_DIR/analyze-soak-gr-restart.py" "$RUN_DIR" --output "$RUN_DIR/verdict.json"
 }
 
 write_run_json() {
@@ -193,33 +209,38 @@ cleanup() {
     exit "$exit_code"
 }
 
-trap cleanup EXIT INT TERM HUP
-
 sample_row() {
     local elapsed=${1:?}
     local cycles=${2:?}
     local prom rss intern_size gr_active established
-    prom=$(prom_scrape)
+    prom=$(prom_scrape) || prom=""
     rss=$(container_rss_mb)
     intern_size=$(prom_extract_sum "$prom" bgp_rib_attr_intern_global_size)
-    gr_active=$(prom_extract_or_zero "$prom" bgp_gr_active_peers)
+    gr_active=$(prom_extract_required "$prom" bgp_gr_active_peers)
+    local gr_stale
+    gr_stale=$(prom_extract_required "$prom" bgp_gr_stale_routes)
     if frr_established_seen; then
         established=1
     else
         established=0
     fi
-    printf '%s,%s,%s,%s,%s,%s,%s\n' \
+    printf '%s,%s,%s,%s,%s,%s,%s,%s\n' \
         "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         "$elapsed" \
         "${rss:-nan}" \
         "$intern_size" \
         "$gr_active" \
+        "$gr_stale" \
         "$established" \
         "$cycles" \
         >>"$SAMPLES_CSV"
 }
 
 main() {
+    mkdir -p "$RUN_DIR"
+    exec > >(tee -a "$SOAK_LOG") 2>&1
+    acquire_rustbgpd_host_lock
+    trap cleanup EXIT INT TERM HUP
     require_tool docker
     require_tool curl
     require_tool awk
@@ -241,7 +262,7 @@ main() {
     log "Warmup: waiting ${WARMUP_SEC}s for initial convergence"
     sleep "$WARMUP_SEC"
 
-    echo "timestamp,elapsed_sec,rss_mb,intern_size,gr_active_peers,bgp_established,restart_cycles" >"$SAMPLES_CSV"
+    echo "timestamp,elapsed_sec,rss_mb,intern_size,gr_active_peers,gr_stale_routes,bgp_established,restart_cycles" >"$SAMPLES_CSV"
 
     local start_epoch end_epoch next_sample next_restart cycles
     start_epoch=$(date +%s)
@@ -255,11 +276,9 @@ main() {
     while [ "$(date +%s)" -lt "$end_epoch" ]; do
         now=$(date +%s)
         if [ "$now" -ge "$next_restart" ]; then
-            restart_frr_bgpd
+            restart_frr_bgpd "$((now - start_epoch))" "$cycles"
             cycles=$((cycles + 1))
             next_restart=$((now + RESTART_INTERVAL_SEC))
-            # Wait for re-establishment so the cycle is well-formed.
-            wait_established 60 || log "WARN: session did not re-establish after cycle $cycles"
         fi
         if [ "$now" -ge "$next_sample" ]; then
             local elapsed=$((now - start_epoch))
@@ -272,7 +291,9 @@ main() {
     local final_elapsed=$(( $(date +%s) - start_epoch ))
     sample_row "$final_elapsed" "$cycles"
     log "soak loop completed; $cycles restart cycles; final samples in $SAMPLES_CSV"
-    log "Run the analyzer: python3 tests/soak/analyze-soak-gr-restart.py $RUN_DIR"
+    run_analyzer
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi
