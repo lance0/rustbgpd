@@ -6,11 +6,11 @@ Status: **bounded ordinary-output growth is GO and implemented**. The
 immediate-parent comparison cleared every predeclared gate. Bounded
 warm-checkpoint encoding is unchanged.
 
-This receipt asks one narrow question: does ordinary MRT snapshot output growth
-allocate enough that a later, bounded preallocation experiment is worth doing?
-It does not measure actor cloning, checkpoint admission, filesystem writes,
-compression, or restore, and it does not authorize streaming or a RIB/actor
-redesign.
+This receipt answers one narrow question: does bounded geometric growth reduce
+ordinary MRT full-snapshot allocation churn without changing encoded output or
+the warm-checkpoint budget contract? It does not measure actor cloning,
+checkpoint admission, filesystem writes, compression, or restore, and it does
+not authorize preallocation, streaming, or a RIB/actor redesign.
 
 Any later optimization is held unless **both** fleet shapes clear every
 predeclared GO threshold. A failure or an inconclusive/noisy result is a HOLD;
@@ -115,9 +115,9 @@ The benchmark source compiles into two mutually exclusive measurement modes:
 The bounded CI versions are:
 
 ```bash
-cargo test -p rustbgpd-mrt --bench snapshot_allocation -- timing --smoke
+cargo test -p rustbgpd-mrt --bench snapshot_allocation -- timing --candidate --smoke
 cargo test -p rustbgpd-mrt --features snapshot-allocation-diagnostics \
-  --bench snapshot_allocation -- diagnostic --smoke
+  --bench snapshot_allocation -- diagnostic --candidate --smoke
 ```
 
 Full retained runs use the same source and mode guards:

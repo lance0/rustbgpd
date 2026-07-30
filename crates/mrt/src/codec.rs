@@ -1690,9 +1690,9 @@ mod tests {
 
     /// Load-bearing proof: exact or doubling top-level growth violates the
     /// count or slack bounds; removing the miss increment, changing child
-    /// growth, or counting child/bounded growth violates an assertion.
+    /// growth, or counting child/budgeted growth violates an assertion.
     #[test]
-    fn snapshot_allocation_probe_counts_only_unbounded_top_level_growth() {
+    fn snapshot_allocation_probe_counts_bounded_snapshot_growth_only() {
         let probe = Cell::new(0_u64);
 
         let mut ordinary_bytes = Vec::with_capacity(1);

@@ -107,8 +107,8 @@ jobs:
       # the PR critical path while retaining the harness's path assertions.
       - name: Smoke MRT snapshot allocation benchmark modes
         run: |
-          cargo test -p rustbgpd-mrt --bench snapshot_allocation -- timing --smoke
-          cargo test -p rustbgpd-mrt --features snapshot-allocation-diagnostics --bench snapshot_allocation -- diagnostic --smoke
+          cargo test -p rustbgpd-mrt --bench snapshot_allocation -- timing --candidate --smoke
+          cargo test -p rustbgpd-mrt --features snapshot-allocation-diagnostics --bench snapshot_allocation -- diagnostic --candidate --smoke
       # Same class of gap for the root crate: `bench-internals` exposes
       # `pub mod config` (and its EVPN reload-diff dependencies) in the
       # lib, a surface the default `--all-targets` clippy never compiles.
