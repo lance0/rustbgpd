@@ -162,17 +162,25 @@ pub fn check_local(
     coverage_min: Option<f64>,
     json: bool,
 ) -> i32 {
-    check_local_with_json_writer(path, roots, list_deps, coverage, coverage_min, json, None)
+    check_local_with_writer(
+        path,
+        roots,
+        list_deps,
+        coverage,
+        coverage_min,
+        json,
+        &mut std::io::stdout().lock(),
+    )
 }
 
-fn check_local_with_json_writer(
+fn check_local_with_writer(
     path: &str,
     roots: &[String],
     list_deps: bool,
     coverage: bool,
     coverage_min: Option<f64>,
     json: bool,
-    json_writer: Option<&mut dyn std::io::Write>,
+    stdout: &mut dyn std::io::Write,
 ) -> i32 {
     use std::io::IsTerminal;
     use std::path::PathBuf;
@@ -202,7 +210,7 @@ fn check_local_with_json_writer(
     // --list-deps on a broken graph falls through to the compile
     // diagnostics below (exit 1).
     if list_deps && let Some(file) = &file {
-        return print_deps(path, file, json, json_writer);
+        return print_deps(path, file, json, stdout);
     }
     let want_coverage = coverage || coverage_min.is_some();
     let (tests, cov) = match &file {
@@ -221,7 +229,7 @@ fn check_local_with_json_writer(
             tests.as_ref(),
             cov.as_ref(),
             file.as_ref(),
-            json_writer,
+            stdout,
         ) {
             output::report_write_error("policy JSON output", &error);
             return 1;
@@ -234,22 +242,27 @@ fn check_local_with_json_writer(
             if diagnostics.len() == 1 { "" } else { "s" }
         );
     } else {
+        let mut rendered = String::new();
         if let Some(tests) = &tests {
             if tests.total == 0 {
-                println!("{path}: ok (no tests)");
+                rendered.push_str(&format!("{path}: ok (no tests)\n"));
             } else {
                 for failure in &tests.failures {
                     eprintln!("test {} ... FAILED: {}", failure.name, failure.message);
                 }
-                println!(
+                rendered.push_str(&format!(
                     "{path}: {} passed, {} failed",
                     tests.passed(),
                     tests.failures.len()
-                );
+                ));
+                rendered.push('\n');
             }
         }
         if let (Some(cov), Some(file)) = (&cov, &file) {
-            print_coverage_text(cov, file);
+            render_coverage_text(&mut rendered, cov, file);
+        }
+        if write_policy_stdout(stdout, &rendered) != 0 {
+            return 1;
         }
     }
 
@@ -274,17 +287,19 @@ fn check_local_with_json_writer(
 /// The `--coverage` text report (stdout): the exercised-term headline,
 /// per-policy term table, and lint lines. Policies defined in an
 /// imported module are attributed to their defining file.
-fn print_coverage_text(
+fn render_coverage_text(
+    out: &mut String,
     cov: &rustbgpd_policy::rpol::CoverageReport,
     file: &rustbgpd_policy::rpol::RpolFile,
 ) {
     use rustbgpd_policy::rpol::PolicyTestStatus;
 
-    println!(
+    out.push_str(&format!(
         "coverage: {}/{} terms exercised by tests",
         cov.terms_exercised(),
         cov.terms_total()
-    );
+    ));
+    out.push('\n');
     let module_path = |index: u32| -> &str {
         file.modules()
             .get(index as usize)
@@ -299,20 +314,24 @@ fn print_coverage_text(
         };
         match policy.status {
             PolicyTestStatus::Untested => {
-                println!(
+                out.push_str(&format!(
                     "  policy {}{origin}    never referenced by any test",
                     policy.name
-                );
+                ));
+                out.push('\n');
                 continue;
             }
             PolicyTestStatus::ApplyOnly => {
-                println!(
+                out.push_str(&format!(
                     "  policy {}{origin}    exercised via apply only (terms not attributable)",
                     policy.name
-                );
+                ));
+                out.push('\n');
                 continue;
             }
-            PolicyTestStatus::Tested => println!("  policy {}{origin}", policy.name),
+            PolicyTestStatus::Tested => {
+                out.push_str(&format!("  policy {}{origin}\n", policy.name))
+            }
         }
         let width = policy.terms.iter().map(|t| t.name.len()).max().unwrap_or(0);
         for term in &policy.terms {
@@ -326,11 +345,11 @@ fn print_coverage_text(
             } else {
                 format!("evaluated {}x, matched {}x", term.evaluated, term.matched)
             };
-            println!("    term {:width$}  {facts}", term.name);
+            out.push_str(&format!("    term {:width$}  {facts}\n", term.name));
         }
     }
     for lint in &cov.lints {
-        println!("lint [{}]: {}", lint.kind.label(), lint.message);
+        out.push_str(&format!("lint [{}]: {}\n", lint.kind.label(), lint.message));
     }
 }
 
@@ -342,7 +361,7 @@ fn print_check_json(
     tests: Option<&rustbgpd_policy::rpol::TestReport>,
     cov: Option<&rustbgpd_policy::rpol::CoverageReport>,
     file: Option<&rustbgpd_policy::rpol::RpolFile>,
-    json_writer: Option<&mut dyn std::io::Write>,
+    stdout: &mut dyn std::io::Write,
 ) -> Result<(), CliError> {
     #[derive(Serialize)]
     struct JsonFailure<'a> {
@@ -441,7 +460,7 @@ fn print_check_json(
         }),
         coverage,
     };
-    print_policy_json(json_writer, &out)
+    print_policy_json(Some(stdout), &out)
 }
 
 /// `rbgp policy check --list-deps` output: the resolved module graph
@@ -451,7 +470,7 @@ fn print_deps(
     path: &str,
     file: &rustbgpd_policy::rpol::RpolFile,
     json: bool,
-    json_writer: Option<&mut dyn std::io::Write>,
+    stdout: &mut dyn std::io::Write,
 ) -> i32 {
     let modules = file.modules();
     if json {
@@ -481,24 +500,35 @@ fn print_deps(
                 })
                 .collect(),
         };
-        if let Err(error) = print_policy_json(json_writer, &out) {
+        if let Err(error) = print_policy_json(Some(stdout), &out) {
             output::report_write_error("policy JSON output", &error);
             return 1;
         }
         return 0;
     }
-    println!(
+    let mut rendered = format!(
         "{path}: {} module{}",
         modules.len(),
         if modules.len() == 1 { "" } else { "s" }
     );
+    rendered.push('\n');
     for module in modules {
-        println!("  {} sha256:{}", module.path, module.digest);
+        rendered.push_str(&format!("  {} sha256:{}\n", module.path, module.digest));
         for &id in &module.imports {
-            println!("    imports {}", modules[id as usize].path);
+            rendered.push_str(&format!("    imports {}\n", modules[id as usize].path));
         }
     }
-    0
+    write_policy_stdout(stdout, &rendered)
+}
+
+fn write_policy_stdout(writer: &mut dyn std::io::Write, rendered: &str) -> i32 {
+    match output::write_bytes(writer, rendered.as_bytes()) {
+        Ok(()) => 0,
+        Err(error) => {
+            output::report_write_error("policy output", &error);
+            1
+        }
+    }
 }
 
 fn print_policy_json<T: Serialize>(
@@ -1962,16 +1992,60 @@ mod tests {
     fn check_local_json_write_failure_exits_one() {
         let tmp = write_rpol("policy p { term t { accept } }");
         assert_eq!(
-            check_local_with_json_writer(
+            check_local_with_writer(
                 tmp.path().to_str().unwrap(),
                 &[],
                 false,
                 false,
                 None,
                 true,
-                Some(&mut BrokenWriter),
+                &mut BrokenWriter,
             ),
             1
+        );
+    }
+
+    #[test]
+    fn check_text_paths_preserve_bytes_and_reject_write_failures() {
+        let tmp = write_rpol(
+            "policy p { term t { accept } }\n\
+             test ok { route { prefix 10.0.0.0/24 } expect p == accept }",
+        );
+        let path = tmp.path().to_str().unwrap();
+        for (list_deps, coverage) in [(false, false), (true, false), (false, true)] {
+            assert_eq!(
+                check_local_with_writer(
+                    path,
+                    &[],
+                    list_deps,
+                    coverage,
+                    None,
+                    false,
+                    &mut BrokenWriter
+                ),
+                1
+            );
+            let mut flush = ObservedWriter {
+                bytes: vec![],
+                flushes: 0,
+                write_error: None,
+                flush_error: Some(std::io::ErrorKind::PermissionDenied),
+            };
+            assert_eq!(
+                check_local_with_writer(path, &[], list_deps, coverage, None, false, &mut flush),
+                1
+            );
+        }
+        let mut bytes = Vec::new();
+        assert_eq!(
+            check_local_with_writer(path, &[], false, true, None, false, &mut bytes),
+            0
+        );
+        assert_eq!(
+            String::from_utf8(bytes).unwrap(),
+            format!(
+                "{path}: 1 passed, 0 failed\ncoverage: 1/1 terms exercised by tests\n  policy p\n    term t  evaluated 1x, matched 1x\n"
+            )
         );
     }
 

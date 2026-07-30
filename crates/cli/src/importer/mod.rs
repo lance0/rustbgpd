@@ -662,19 +662,16 @@ fn emit_toml(
 /// CLI entry: read, translate, write, report. Returns the process exit
 /// code per the module-level ladder.
 pub fn run_import(source: &str, format: Option<&str>, out: Option<&str>, json: bool) -> i32 {
-    if json {
-        let stdout = std::io::stdout();
-        return run_import_with_json_writer(source, format, out, json, Some(&mut stdout.lock()));
-    }
-    run_import_with_json_writer(source, format, out, json, None)
+    let stdout = std::io::stdout();
+    run_import_with_writer(source, format, out, json, &mut stdout.lock())
 }
 
-fn run_import_with_json_writer(
+fn run_import_with_writer(
     source: &str,
     format: Option<&str>,
     out: Option<&str>,
     json: bool,
-    json_writer: Option<&mut dyn IoWrite>,
+    stdout: &mut dyn IoWrite,
 ) -> i32 {
     if json && out.is_none() {
         eprintln!(
@@ -714,7 +711,17 @@ fn run_import_with_json_writer(
                 return 1;
             }
         }
-        None => print!("{}", imported.config_toml),
+        None => {
+            if let Err(error) = stdout
+                .write_all(imported.config_toml.as_bytes())
+                .and_then(|()| stdout.flush())
+            {
+                if error.kind() != std::io::ErrorKind::BrokenPipe {
+                    eprintln!("error: cannot write imported config: {error}");
+                }
+                return 1;
+            }
+        }
     }
     if json {
         let rendered = match serde_json::to_string_pretty(&imported.report) {
@@ -724,14 +731,10 @@ fn run_import_with_json_writer(
                 return 1;
             }
         };
-        let Some(writer) = json_writer else {
-            eprintln!("error: cannot write import JSON output: no output writer");
-            return 1;
-        };
-        if let Err(error) = writer
+        if let Err(error) = stdout
             .write_all(rendered.as_bytes())
-            .and_then(|()| writer.write_all(b"\n"))
-            .and_then(|()| writer.flush())
+            .and_then(|()| stdout.write_all(b"\n"))
+            .and_then(|()| stdout.flush())
         {
             if error.kind() != std::io::ErrorKind::BrokenPipe {
                 eprintln!("error: cannot write import JSON output: {error}");
@@ -772,7 +775,7 @@ mod writer_tests {
         );
         let mut bytes = Vec::new();
 
-        let code = run_import_with_json_writer(&source, None, Some(&out), true, Some(&mut bytes));
+        let code = run_import_with_writer(&source, None, Some(&out), true, &mut bytes);
 
         assert_eq!(code, 2);
         assert_eq!(bytes, expected.as_bytes());
@@ -794,7 +797,7 @@ mod writer_tests {
     fn json_report_write_failure_exits_one() {
         let (_dir, source, out) = paths();
         assert_eq!(
-            run_import_with_json_writer(&source, None, Some(&out), true, Some(&mut BrokenWriter),),
+            run_import_with_writer(&source, None, Some(&out), true, &mut BrokenWriter),
             1
         );
     }
@@ -815,7 +818,27 @@ mod writer_tests {
     fn json_report_flush_failure_exits_one() {
         let (_dir, source, out) = paths();
         assert_eq!(
-            run_import_with_json_writer(&source, None, Some(&out), true, Some(&mut FlushFailure),),
+            run_import_with_writer(&source, None, Some(&out), true, &mut FlushFailure),
+            1
+        );
+    }
+
+    #[test]
+    fn config_stdout_preserves_bytes_and_rejects_write_failures() {
+        let (_dir, source, _out) = paths();
+        let expected = import_source(SourceFormat::Frr, &source, FRR).unwrap();
+        let mut bytes = Vec::new();
+        assert_eq!(
+            run_import_with_writer(&source, None, None, false, &mut bytes),
+            2
+        );
+        assert_eq!(bytes, expected.config_toml.as_bytes());
+        assert_eq!(
+            run_import_with_writer(&source, None, None, false, &mut BrokenWriter),
+            1
+        );
+        assert_eq!(
+            run_import_with_writer(&source, None, None, false, &mut FlushFailure),
             1
         );
     }
