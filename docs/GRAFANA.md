@@ -135,6 +135,12 @@ inside the bounded window does.
   headroom, and blocking state together. Only query D (`blocking`) uses the
   stepped 0..1 right axis; the cumulative `blocked_total` event counter is
   intentionally excluded.
+- **Dynamic-neighbor admission capacity** plots raw used, limit, and saturating
+  headroom gauges for each selected scrape instance. These daemon metrics are
+  process-global and label-free; they cannot provide a listener- or range-level
+  breakdown.
+- **Dynamic-neighbor admission rejections** plots the non-zero admission
+  rejection rate for each selected scrape instance.
 - Outbound queue depth is an absolute gauge of coalesced UPDATE frames, sampled
   at enqueue-batch and writer-drain boundaries. A short convergence spike is
   not itself a slow peer; `bgp_peer_slow` is the daemon's persistent 0/1 state.
@@ -190,9 +196,10 @@ label; changing either raw selection gauge to a rate; removing step
 rendering; dropping `instance` from a route-safety aggregation; weakening any of the six
 label-rich legends; dropping any seeded-series `> 0` filter; or replacing the
 executable workflow step with only a comment.
-It also pins capacity panel IDs 62/63 and their 12-by-8 layout, the six exact
-raw queries and legends, RFC 8212 0/1 mappings and steps, and the query-D-only
-right-axis override.
+It also pins capacity panel IDs 62–65 and their 12-by-8 layout, the exact
+queries and legends, RFC 8212 0/1 mappings and steps, the query-D-only right-axis
+override, and dynamic-neighbor panel target sets, units, and minima. Removing
+either dynamic-neighbor panel or changing any of its four queries is red.
 
 The slow-peer fixture is red if its `== 1` predicate or five-minute hold is
 changed. The RFC 8212 matrix covers import-only, export-only, and healthy peers;

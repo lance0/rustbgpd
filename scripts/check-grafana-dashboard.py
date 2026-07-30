@@ -117,6 +117,19 @@ TARGETS = {
     ("Outbound prefix capacity", "D"): (
         'bgp_outbound_prefix_blocking{instance=~"$instance",peer=~"$peer"}'
     ),
+    ("Dynamic-neighbor admission capacity", "A"): (
+        'bgp_dynamic_neighbor_slots_used{instance=~"$instance"}'
+    ),
+    ("Dynamic-neighbor admission capacity", "B"): (
+        'bgp_dynamic_neighbor_slots_limit{instance=~"$instance"}'
+    ),
+    ("Dynamic-neighbor admission capacity", "C"): (
+        'bgp_dynamic_neighbor_slots_headroom{instance=~"$instance"}'
+    ),
+    ("Dynamic-neighbor admission rejections", "A"): (
+        "rate(bgp_dynamic_neighbor_limit_rejections_total"
+        '{instance=~"$instance"}[$__rate_interval]) > 0'
+    ),
 }
 
 REQUIRED_LEGENDS = {
@@ -140,6 +153,10 @@ REQUIRED_LEGENDS = {
     ("Outbound prefix capacity", "B"): "{{peer}} {{family}} limit",
     ("Outbound prefix capacity", "C"): "{{peer}} {{family}} headroom",
     ("Outbound prefix capacity", "D"): "{{peer}} {{family}} blocking",
+    ("Dynamic-neighbor admission capacity", "A"): "{{instance}} used",
+    ("Dynamic-neighbor admission capacity", "B"): "{{instance}} limit",
+    ("Dynamic-neighbor admission capacity", "C"): "{{instance}} headroom",
+    ("Dynamic-neighbor admission rejections", "A"): "{{instance}} rejected",
     ("RIB ingest pressure", "B"): "inbound safely parked {{peer}}",
     ("RIB ingest pressure", "C"): "outbound work lost {{peer}}",
 }
@@ -164,8 +181,10 @@ ROUTE_SAFETY_PANELS = {
 }
 
 CAPACITY_PANELS = {
-    "RFC 8212 missing policy": (62, 0),
-    "Outbound prefix capacity": (63, 12),
+    "RFC 8212 missing policy": (62, 0, 161),
+    "Outbound prefix capacity": (63, 12, 161),
+    "Dynamic-neighbor admission capacity": (64, 0, 169),
+    "Dynamic-neighbor admission rejections": (65, 12, 169),
 }
 
 WORKFLOW_PATHS = {
@@ -355,13 +374,13 @@ def main() -> None:
     if selection_defaults.get("custom", {}).get("lineInterpolation") != "stepAfter":
         fail("selection-deferral state must use step interpolation")
 
-    for title, (expected_id, expected_x) in CAPACITY_PANELS.items():
+    for title, (expected_id, expected_x, expected_y) in CAPACITY_PANELS.items():
         panel = next((item for item in panels if item.get("title") == title), None)
         if panel is None or panel.get("type") != "timeseries":
             fail(f"{title} must exist as a timeseries panel")
         if panel.get("id") != expected_id:
             fail(f"{title} must use panel id {expected_id}")
-        expected_position = {"h": 8, "w": 12, "x": expected_x, "y": 161}
+        expected_position = {"h": 8, "w": 12, "x": expected_x, "y": expected_y}
         if panel.get("gridPos") != expected_position:
             fail(f"{title} must use compact grid position {expected_position}")
 
@@ -418,6 +437,38 @@ def main() -> None:
     ]
     if outbound_panel.get("fieldConfig", {}).get("overrides") != expected_overrides:
         fail("only outbound blocking target D must use a stepped 0..1 right axis")
+
+    dynamic_capacity_panel = next(
+        panel
+        for panel in panels
+        if panel.get("title") == "Dynamic-neighbor admission capacity"
+    )
+    dynamic_capacity_refs = [
+        target.get("refId") for target in dynamic_capacity_panel.get("targets", [])
+    ]
+    if dynamic_capacity_refs != ["A", "B", "C"]:
+        fail("dynamic-neighbor capacity panel must contain exactly targets A through C")
+    dynamic_capacity_defaults = dynamic_capacity_panel.get("fieldConfig", {}).get(
+        "defaults", {}
+    )
+    if dynamic_capacity_defaults != {"unit": "short", "decimals": 0, "min": 0}:
+        fail("dynamic-neighbor capacity must render as nonnegative whole values")
+
+    dynamic_rejections_panel = next(
+        panel
+        for panel in panels
+        if panel.get("title") == "Dynamic-neighbor admission rejections"
+    )
+    dynamic_rejection_refs = [
+        target.get("refId") for target in dynamic_rejections_panel.get("targets", [])
+    ]
+    if dynamic_rejection_refs != ["A"]:
+        fail("dynamic-neighbor rejections panel must contain exactly target A")
+    dynamic_rejection_defaults = dynamic_rejections_panel.get("fieldConfig", {}).get(
+        "defaults", {}
+    )
+    if dynamic_rejection_defaults != {"unit": "ops", "min": 0}:
+        fail("dynamic-neighbor rejection rate must render as nonnegative operations")
 
     try:
         workflow_text = WORKFLOW.read_text(encoding="utf-8")
