@@ -10,6 +10,7 @@ JSON verdict against the soak-specific gates:
   - RSS slope (steady state, MB/hour) < 1.0
   - peak RSS < 512 MB
   - at least one restart cycle recorded
+  - positive GR-active and stale-route evidence followed by both clearing
   - BGP established observed in the final 3 samples (session recovered)
 
 Stdlib only. Exit code 0 on pass, 1 on any gate failure, 2 on

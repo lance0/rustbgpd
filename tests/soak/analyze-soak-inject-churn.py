@@ -9,6 +9,8 @@ verdict against the soak-specific gates:
   - peak RSS < 512 MB
   - session established in final 3 samples (no flap)
   - at least one churn cycle recorded
+  - final consumer route count exactly matches the live target
+  - unchanged flap count and nondecreasing session uptime
 
 Stdlib only. Exit code 0 on pass, 1 on any gate failure, 2 on
 harness/input error.

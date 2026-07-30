@@ -8,8 +8,8 @@ verdict against the soak-specific gates:
   - intern table size (bgp_rib_attr_intern_global_size) slope per hour < 1.0
   - peak RSS < 512 MB
   - session established in final 3 samples (no flap from live-apply)
-  - at least one apply cycle recorded
-  - apply failure rate < 50% (live-apply path must be functional)
+  - at least one successful apply, zero failures, and exact apply accounting
+  - unchanged flap count and nondecreasing session uptime
 
 Stdlib only. Exit code 0 on pass, 1 on any gate failure, 2 on
 harness/input error.
