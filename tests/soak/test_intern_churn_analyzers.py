@@ -135,9 +135,17 @@ class AnalyzerContracts(unittest.TestCase):
         )
 
     def test_gr_runner_requires_complete_ordered_restart(self):
+        # The restart kills only bgpd (never the container's PID 1) and
+        # supervises the comeback itself when watchfrr abandons the
+        # daemon: kill -> GR-positive evidence + sample -> explicit
+        # watchfrr restart (bgpd observed not running) -> established ->
+        # stale-clear evidence + sample.
         body = r'''
 state=$(mktemp); events=$(mktemp); echo 0 >"$state"
-docker() { case "$*" in *" stop") echo stop;; *" start") echo start;; esac >>"$events"; }
+docker() { case "$*" in
+ *killall*bgpd*) echo kill >>"$events";;
+ *watchfrr.sh\ restart*) echo supervise >>"$events";;
+esac; }
 sleep() { :; }; wait_established() { echo established >>"$events"; }
 cycle_log() { :; }
 prom_scrape() { n=$(cat "$state"); echo $((n+1)) >"$state"; if [ "$n" = 0 ]; then
@@ -150,7 +158,7 @@ restart_frr_bgpd 7 0; cat "$events"
         result = self.bash("run-soak-gr-restart-intern-gc.sh", body)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines(), [
-            "stop", "positive", "sample:0", "start", "established",
+            "kill", "positive", "sample:0", "supervise", "established",
             "clear", "sample:0",
         ])
 
