@@ -9,6 +9,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Ordinary MRT snapshot encoding now grows its output buffer geometrically,
+  avoiding millions of exact-capacity reallocations on full-table dumps.
+
 - **MRT dump work is bounded after delays, impossible output paths, and
   canceled requests.** Export skips missed ticks, preflights its output path
   before cloning the RIB, and prevents encode/publication when cancellation is

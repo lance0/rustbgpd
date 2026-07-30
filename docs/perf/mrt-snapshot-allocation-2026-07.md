@@ -2,20 +2,43 @@
 
 ## Status and decision boundary
 
-Status: **standalone control retained; a bounded growth candidate experiment is
-warranted but remains a separate held tranche**. The ordinary MRT snapshot
-encoder keeps its current unbounded output growth strategy, and bounded
+Status: **bounded ordinary-output growth is GO and implemented**. The
+immediate-parent comparison cleared every predeclared gate. Bounded
 warm-checkpoint encoding is unchanged.
 
-This receipt asks one narrow question: does ordinary MRT snapshot output growth
-allocate enough that a later, bounded preallocation experiment is worth doing?
-It does not measure actor cloning, checkpoint admission, filesystem writes,
-compression, or restore, and it does not authorize streaming or a RIB/actor
-redesign.
+This receipt answers one narrow question: does bounded geometric growth reduce
+ordinary MRT full-snapshot allocation churn without changing encoded output or
+the warm-checkpoint budget contract? It does not measure actor cloning,
+checkpoint admission, filesystem writes, compression, or restore, and it does
+not authorize preallocation, streaming, or a RIB/actor redesign.
 
 Any later optimization is held unless **both** fleet shapes clear every
 predeclared GO threshold. A failure or an inconclusive/noisy result is a HOLD;
 it is still useful evidence and must not be rewritten into a win.
+
+## Bounded growth result
+
+The candidate grows only ordinary full-snapshot top-level output geometrically
+by 25%, from a 4 KiB floor. Standalone public encoders remain exact, and
+budgeted warm-checkpoint buffers retain their separate capped doubling
+strategy. Four complete A-B-B-A blocks compared control
+`6e1c11edce2d8cd6e12036e7e4cc937f4e943dd4` with candidate
+`f4a5a521a82b3bc7c8a99442d0f8964b596c323b`; both used the same locked harness
+and fresh, isolated timing and diagnostic binaries.
+
+| Shape | Time reduction, all blocks | Allocation-call reduction | Growth misses, control -> candidate | Final slack | Candidate peak overhead |
+|-------|----------------------------:|--------------------------:|------------------------------------:|------------:|------------------------:|
+| IXP many-source | 68.34%..69.61% | 53.13% | 6,809,607 -> 41 | 14.48% | 8,135,463 B |
+| Two full feeds | 61.86%..63.29% | 46.43% | 10,410,415 -> 43 | 3.66% | 8,528,915 B |
+
+Cumulative requested allocator bytes fell by more than 99.999% on both shapes.
+All 32 retained comparison rows passed the closed validator; maximum timing CV
+was 2.29%, all fixed-time bytes and decoded counts were identical, every
+preflight used CPU 0 with the `performance` governor and no competing work, and
+admitted one-minute load stayed in 1.03..1.87. These results apply to the two
+disclosed ordinary MRT fleet shapes, not warm snapshots or filesystem
+publication. The sanitized evidence is retained in
+[`artifacts/mrt-output-growth-2026-07/`](artifacts/mrt-output-growth-2026-07/).
 
 ## Standalone control result
 
@@ -92,9 +115,9 @@ The benchmark source compiles into two mutually exclusive measurement modes:
 The bounded CI versions are:
 
 ```bash
-cargo test -p rustbgpd-mrt --bench snapshot_allocation -- timing --smoke
+cargo test -p rustbgpd-mrt --bench snapshot_allocation -- timing --candidate --smoke
 cargo test -p rustbgpd-mrt --features snapshot-allocation-diagnostics \
-  --bench snapshot_allocation -- diagnostic --smoke
+  --bench snapshot_allocation -- diagnostic --candidate --smoke
 ```
 
 Full retained runs use the same source and mode guards:
