@@ -649,7 +649,12 @@ jobs:
       - name: ADR-0061 FIB runtime netns test
         run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh fib_runtime
 
-      - name: ADR-0067 BFD runtime netns test
+      # This ephemeral hosted invocation denies AF_INET6 to prove the current
+      # IPv4-only BFD actor does not depend on that family. Future selectors
+      # that open address families can reuse the same opt-in harness profile.
+      - name: ADR-0067 BFD runtime netns test (IPv4-only, AF_INET6 absent)
+        env:
+          SECCOMP_PROFILE: crates/evpn-linux/tests/docker/seccomp-deny-af-inet6.json
         run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh bfd_runtime
 
       - name: ADR-0089 VLAN-scoped FDB netns test
