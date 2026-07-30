@@ -119,7 +119,7 @@ shape itself does not raise the tier.
 | `ListPolicies` | `sensitive_read` | Exposes named policies, statements, actions, communities. |
 | `GetPolicy` | `sensitive_read` | Single-policy detail. |
 | `SetPolicy` | `operator_only` | Replaces a named policy and hot-applies every affected peer; a widely referenced policy can change routing decisions network-wide. |
-| `DeletePolicy` | `mutating` | Per-name. Will fail if still referenced (typed error in the works). |
+| `DeletePolicy` | `mutating` | Per-name. Returns `FAILED_PRECONDITION` if still referenced; the request does nothing. |
 | `ListNeighborSets` | `sensitive_read` | Topology grouping disclosure. |
 | `GetNeighborSet` | `sensitive_read` | Single-set detail. |
 | `SetNeighborSet` | `operator_only` | Replaces a named match set and hot-applies every affected peer; a globally referenced set has network-wide policy impact. |

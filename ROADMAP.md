@@ -365,11 +365,9 @@ new AFI/SAFI and EVPN dataplane expansion.
   transport-side encode wake storm is bound by ADR-0109's progressive
   chunk-publication amendment, so an observer's longest wire silence now
   tracks per-slice encode latency instead of the single-threaded full-table
-  encode. Remaining: gate repeated heterogeneous reloads on completion time,
-  control-query latency, session continuity, and folded advertised-state
-  equivalence. The withdrawn historical `< 1 s` claim is now superseded on
-  every axis by the 2026-07-16 receipt (see its honesty notes for the
-  single-observer worst-case tail).
+  encode. The withdrawn historical `< 1 s` claim is now superseded on every
+  axis by the 2026-07-16 receipt (see its honesty notes for the single-observer
+  worst-case tail).
 - **Keep authoritative replacement readiness design-gated.** A retained
   heterogeneous reload exposed a 200 ms RIB readiness timeout in the per-peer
   remainder after its grouped cohort committed. [ADR-0111](docs/adr/0111-authoritative-policy-replacement-continuation.md)

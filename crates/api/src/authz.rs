@@ -1012,6 +1012,13 @@ mod tests {
     /// the rows underneath it.
     #[test]
     fn markdown_inventory_matches_machine_readable_export() {
+        assert!(
+            INVENTORY_MD.contains(
+                "| `DeletePolicy` | `mutating` | Per-name. Returns `FAILED_PRECONDITION` if still referenced; the request does nothing. |"
+            ),
+            "DeletePolicy documents its shipped in-use rejection contract"
+        );
+
         let export = serde_json::from_str::<serde_json::Value>(INVENTORY_JSON)
             .expect("docs/grpc-method-inventory.json must be valid JSON");
         let exported = export["methods"]
