@@ -78,6 +78,33 @@ require_container() {
     fi
 }
 
+daemon_running() {
+    docker exec "$RUSTBGPD" sh -c 'cat /proc/[0-9]*/comm 2>/dev/null' \
+        | grep -qx rustbgpd
+}
+
+# The soak topology launches the container with `cmd: sleep infinity`;
+# start the daemon explicitly. Idempotent so a re-run against a live
+# topology does not double-start it.
+ensure_daemon_running() {
+    if daemon_running; then
+        return 0
+    fi
+    log "rustbgpd not running in $RUSTBGPD; starting"
+    # Redirect into the file the log stream tails: a detached exec's
+    # stdout is otherwise discarded and rustbgpd.log stays empty.
+    docker exec -d "$RUSTBGPD" sh -c \
+        '/usr/local/bin/start-rustbgpd.sh >>/var/log/rustbgpd.log 2>&1'
+    for _ in $(seq 1 10); do
+        if daemon_running; then
+            return 0
+        fi
+        sleep 1
+    done
+    log "ERROR: rustbgpd failed to start within 10s"
+    return 1
+}
+
 prom_scrape() {
     local ip
     ip=$(docker inspect --format \
@@ -292,6 +319,7 @@ main() {
     require_tool python3
     require_container "$RUSTBGPD"
     require_container "$FRR"
+    ensure_daemon_running
 
     write_run_json
     start_log_stream

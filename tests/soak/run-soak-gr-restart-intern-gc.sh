@@ -77,6 +77,33 @@ require_container() {
     fi
 }
 
+daemon_running() {
+    docker exec "$RUSTBGPD" sh -c 'cat /proc/[0-9]*/comm 2>/dev/null' \
+        | grep -qx rustbgpd
+}
+
+# The soak topology launches the container with `cmd: sleep infinity`;
+# start the daemon explicitly. Idempotent so a re-run against a live
+# topology does not double-start it.
+ensure_daemon_running() {
+    if daemon_running; then
+        return 0
+    fi
+    log "rustbgpd not running in $RUSTBGPD; starting"
+    # Redirect into the file the log stream tails: a detached exec's
+    # stdout is otherwise discarded and rustbgpd.log stays empty.
+    docker exec -d "$RUSTBGPD" sh -c \
+        '/usr/local/bin/start-rustbgpd.sh >>/var/log/rustbgpd.log 2>&1'
+    for _ in $(seq 1 10); do
+        if daemon_running; then
+            return 0
+        fi
+        sleep 1
+    done
+    log "ERROR: rustbgpd failed to start within 10s"
+    return 1
+}
+
 prom_scrape() {
     local ip
     ip=$(docker inspect --format \
@@ -88,9 +115,18 @@ prom_scrape() {
 
 prom_extract_required() {
     local text="$1" metric="$2"
+    # Empty scrape (daemon/exporter unreachable) → nan, which the
+    # analyzer rejects. A successful scrape missing the series → 0:
+    # the GR gauges are lazily registered and legitimately absent
+    # from /metrics until the first GR event, so 0 is their true
+    # value — recording nan there false-reds the whole run.
+    if [ -z "$text" ]; then
+        printf 'nan'
+        return
+    fi
     printf '%s' "$text" | awk -v m="$metric" '
         $0 ~ "^"m"( |\\{)" { print $NF; found=1; exit }
-        END { if (!found) { print "nan" } }
+        END { if (!found) { print 0 } }
     '
 }
 
@@ -117,6 +153,11 @@ frr_established_seen() {
         | grep -q '"bgpState":"Established"'
 }
 
+frr_bgpd_running() {
+    docker exec "$FRR" sh -c 'cat /proc/[0-9]*/comm 2>/dev/null' \
+        | grep -qx bgpd
+}
+
 wait_established() {
     local timeout=${1:-90}
     log "Waiting for BGP session to reach Established (timeout ${timeout}s)..."
@@ -134,7 +175,13 @@ wait_established() {
 restart_frr_bgpd() {
     local elapsed=${1:?} cycles=${2:?} active=nan stale=nan prom
     cycle_log "restarting FRR bgpd"
-    docker exec "$FRR" /usr/lib/frr/frrinit.sh stop >/dev/null
+    # Kill only bgpd; watchfrr restarts it. Never use frrinit.sh
+    # stop/start here: it kills the FRR container's PID 1, docker
+    # (restart policy: always) bounces the container, and the clab
+    # veth is destroyed on both sides with no exec re-run — the
+    # topology is unrecoverable after that. Same mechanism as the
+    # M16 interop smoke.
+    docker exec "$FRR" killall -9 bgpd >/dev/null
     for _ in $(seq 1 30); do
         prom=$(prom_scrape) || prom=""
         active=$(prom_extract_required "$prom" bgp_gr_active_peers)
@@ -147,7 +194,19 @@ restart_frr_bgpd() {
     done
     awk "BEGIN {exit !($active > 0 && $stale > 0)}" 2>/dev/null ||
         { log "ERROR: GR active/stale evidence not observed"; return 1; }
-    docker exec "$FRR" /usr/lib/frr/frrinit.sh start >/dev/null
+    # watchfrr normally restarts bgpd within ~5s, but it permanently
+    # abandons a daemon after repeated kills (observed: 4 restarts,
+    # then no further attempt), which a multi-hour soak always
+    # reaches. Supervise the restart ourselves: give watchfrr 10s,
+    # then drive it explicitly. wait_established stays the gate.
+    for _ in $(seq 1 10); do
+        frr_bgpd_running && break
+        sleep 1
+    done
+    if ! frr_bgpd_running; then
+        cycle_log "watchfrr did not restart bgpd; restarting explicitly"
+        docker exec "$FRR" /usr/lib/frr/watchfrr.sh restart bgpd >/dev/null 2>&1 || true
+    fi
     wait_established 60
     for _ in $(seq 1 30); do
         prom=$(prom_scrape) || prom=""
@@ -246,6 +305,7 @@ main() {
     require_tool awk
     require_container "$RUSTBGPD"
     require_container "$FRR"
+    ensure_daemon_running
 
     write_run_json
     start_log_stream
