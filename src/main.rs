@@ -50,12 +50,12 @@ mod test_support;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
-use std::io::{Read as _, Write as _};
+use std::io::{self, Read as _, Write as _};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::os::unix::fs::DirBuilderExt as _;
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
-use std::process;
+use std::process::{self, ExitCode};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant as StdInstant, SystemTime, UNIX_EPOCH};
@@ -1943,7 +1943,7 @@ fn warn_unpoliced_ebgp(config: &Config) -> usize {
     unpoliced.len()
 }
 
-fn print_config_diff(diff: &config::ConfigDiff) {
+fn write_config_diff(writer: &mut dyn io::Write, diff: &config::ConfigDiff) -> io::Result<()> {
     use owo_colors::OwoColorize;
 
     let reload_header = "Reload-applied changes:".green().to_string();
@@ -1961,7 +1961,54 @@ fn print_config_diff(diff: &config::ConfigDiff) {
         restart_marker: restart_marker.into(),
         no_changes: "No changes.".into(),
     };
-    print!("{}", config::format_config_diff_with_style(diff, &style));
+    write!(
+        writer,
+        "{}",
+        config::format_config_diff_with_style(diff, &style)
+    )
+}
+
+#[derive(Debug)]
+enum StdoutWriteError {
+    BrokenPipe,
+    Other(std::io::Error),
+}
+
+impl From<std::io::Error> for StdoutWriteError {
+    fn from(error: std::io::Error) -> Self {
+        if error.kind() == std::io::ErrorKind::BrokenPipe {
+            Self::BrokenPipe
+        } else {
+            Self::Other(error)
+        }
+    }
+}
+
+fn write_stdout_with(
+    writer: &mut dyn std::io::Write,
+    output: impl FnOnce(&mut dyn std::io::Write) -> std::io::Result<()>,
+) -> Result<(), StdoutWriteError> {
+    output(writer)?;
+    writer.flush()?;
+    Ok(())
+}
+
+fn write_stdout(
+    output: impl FnOnce(&mut dyn std::io::Write) -> std::io::Result<()>,
+) -> Result<(), StdoutWriteError> {
+    let stdout = std::io::stdout();
+    write_stdout_with(&mut stdout.lock(), output)
+}
+
+fn stdout_exit(result: Result<(), StdoutWriteError>) -> ExitCode {
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(StdoutWriteError::BrokenPipe) => ExitCode::from(1),
+        Err(StdoutWriteError::Other(error)) => {
+            eprintln!("rustbgpd: failed to write stdout: {error}");
+            ExitCode::from(1)
+        }
+    }
 }
 
 async fn trigger_import_validation_refresh(
@@ -2284,27 +2331,29 @@ Default configuration file.
     clippy::too_many_lines,
     reason = "the daemon entrypoint keeps startup validation and shutdown ownership together"
 )]
-fn main() {
+fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
 
     // Handle --version / -V before anything else.
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("rustbgpd {}", env!("CARGO_PKG_VERSION"));
-        return;
+        return stdout_exit(write_stdout(|writer| {
+            writeln!(writer, "rustbgpd {}", env!("CARGO_PKG_VERSION"))
+        }));
     }
 
     // Handle --man: print the roff man page (section 8) to stdout and
     // exit. Render with `rustbgpd --man | man -l -` or install with
     // `rustbgpd --man > /usr/local/share/man/man8/rustbgpd.8`.
     if args.iter().any(|a| a == "--man") {
-        print!("{}", man_page());
-        return;
+        return stdout_exit(write_stdout(|writer| write!(writer, "{}", man_page())));
     }
 
     // Handle --help / -h.
     if args.iter().any(|a| a == "--help" || a == "-h") {
-        println!(
-            "rustbgpd {} — API-first BGP daemon\n\n\
+        return stdout_exit(write_stdout(|writer| {
+            writeln!(
+                writer,
+                "rustbgpd {} — API-first BGP daemon\n\n\
              Usage: rustbgpd [OPTIONS] [CONFIG_PATH]\n\n\
              Arguments:\n  \
                CONFIG_PATH  Path to TOML config file [default: /etc/rustbgpd/config.toml]\n\n\
@@ -2329,9 +2378,9 @@ fn main() {
                   (BGP or metrics/readiness listener bind, unexpected gRPC server exit)\n  \
                2  Invalid invocation (unknown flag combination, missing argument)\n  \
                70 Internal error",
-            env!("CARGO_PKG_VERSION")
-        );
-        return;
+                env!("CARGO_PKG_VERSION")
+            )
+        }));
     }
 
     // Parse flags and config path from remaining args.
@@ -2419,8 +2468,9 @@ fn main() {
             eprintln!("error: --dump-config-schema cannot be combined with other modes");
             process::exit(2);
         }
-        print!("{}", config::config_json_schema());
-        return;
+        return stdout_exit(write_stdout(|writer| {
+            write!(writer, "{}", config::config_json_schema())
+        }));
     }
 
     // `--init-config PROFILE --stdout` prints a curated starter config and
@@ -2451,8 +2501,7 @@ fn main() {
             );
             process::exit(70);
         }
-        print!("{toml}");
-        return;
+        return stdout_exit(write_stdout(|writer| write!(writer, "{toml}")));
     }
 
     // Removed escape hatch: fail loudly rather than silently ignoring it,
@@ -2484,14 +2533,20 @@ fn main() {
         // and otherwise gives way to the count. Without `--strict` the exit
         // code stays 0 either way — these are warnings, not failures.
         let warnings = check_warnings(&config);
-        if warnings == 0 {
-            println!("config OK: {config_path}");
-            return;
+        let output = write_stdout(|writer| {
+            if warnings == 0 {
+                writeln!(writer, "config OK: {config_path}")
+            } else {
+                writeln!(
+                    writer,
+                    "config VALID, {warnings} WARNING{} — NOT a clean check: {config_path}",
+                    if warnings == 1 { "" } else { "S" }
+                )
+            }
+        });
+        if output.is_err() || warnings == 0 {
+            return stdout_exit(output);
         }
-        println!(
-            "config VALID, {warnings} WARNING{} — NOT a clean check: {config_path}",
-            if warnings == 1 { "" } else { "S" }
-        );
         if strict {
             // Exit 1, the same code a `--check` that could not load the
             // config uses: from a gate's point of view both mean "this
@@ -2503,7 +2558,7 @@ fn main() {
             );
             process::exit(1);
         }
-        return;
+        return ExitCode::SUCCESS;
     }
 
     if let Some(ref diff_target) = diff_path {
@@ -2515,19 +2570,22 @@ fn main() {
             }
         };
         let diff = config::diff_config(&config, &new_config);
-        if json_output {
+        let output = if json_output {
             let output = config::config_diff_json_value(&diff);
             match serde_json::to_string_pretty(&output) {
-                Ok(json) => println!("{json}"),
+                Ok(json) => write_stdout(|writer| writeln!(writer, "{json}")),
                 Err(e) => {
                     eprintln!("error: failed to serialize diff: {e}");
                     process::exit(2);
                 }
             }
         } else {
-            print_config_diff(&diff);
+            write_stdout(|writer| write_config_diff(writer, &diff))
+        };
+        if let Err(error) = output {
+            return stdout_exit(Err(error));
         }
-        process::exit(i32::from(diff.has_actionable_changes()));
+        return ExitCode::from(u8::from(diff.has_actionable_changes()));
     }
 
     // Durable commit-confirm (ADR-0076 Decision 6): if the last run stopped
@@ -2588,6 +2646,7 @@ fn main() {
         // Restart=on-failure) this was a component failure, not a clean stop.
         process::exit(1);
     }
+    ExitCode::SUCCESS
 }
 
 /// Number of panic reports retained in `<runtime_state_dir>/crash/`;
@@ -5243,6 +5302,37 @@ mod tests {
     use crate::test_support::{
         assert_tier_authorized_test_config, tier_authorized_uds_test_config,
     };
+
+    #[derive(Default)]
+    struct FlushFailure {
+        flushes: usize,
+    }
+
+    impl std::io::Write for FlushFailure {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.flushes += 1;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "injected flush failure",
+            ))
+        }
+    }
+
+    #[test]
+    fn stdout_write_success_flush_failure_and_variants_remain_distinct() {
+        let mut writer = FlushFailure::default();
+        let result = write_stdout_with(&mut writer, |output| output.write_all(b"complete"));
+        assert!(matches!(result, Err(StdoutWriteError::BrokenPipe)));
+        assert_eq!(writer.flushes, 1, "terminal flush must run exactly once");
+        let broken = StdoutWriteError::from(std::io::Error::from(std::io::ErrorKind::BrokenPipe));
+        let other = StdoutWriteError::from(std::io::Error::other("other"));
+        assert!(matches!(broken, StdoutWriteError::BrokenPipe));
+        assert!(matches!(other, StdoutWriteError::Other(_)));
+    }
 
     /// Load-bearing proof: restoring the per-handle relative timeout-and-abort
     /// loop leaves this helper pending after two seconds, before the second and
