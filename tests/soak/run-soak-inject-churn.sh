@@ -156,14 +156,6 @@ prom_extract_sum() {
     ' <<<"$prom"
 }
 
-prom_sum() {
-    local text="$1" metric="$2"
-    printf '%s' "$text" | awk -v m="$metric" '
-        $0 ~ "^"m"( |\\{)" { sum += $NF }
-        END { if (sum == "") { print "0" } else { print sum } }
-    '
-}
-
 container_rss_mb() {
     docker exec "$RUSTBGPD" sh -c '
         pid=$(pidof rustbgpd 2>/dev/null || true)
@@ -304,7 +296,9 @@ sample_row() {
         established=0
     fi
     intern_size=$(prom_extract_sum "$prom" bgp_rib_attr_intern_global_size)
-    read -r flap_count uptime_seconds < <(neighbor_state)
+    local neighbor
+    neighbor=$(neighbor_state)
+    read -r flap_count uptime_seconds <<<"$neighbor"
     printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
         "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         "$elapsed" \

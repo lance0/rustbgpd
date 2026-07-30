@@ -136,22 +136,23 @@ class AnalyzerContracts(unittest.TestCase):
 
     def test_gr_runner_requires_complete_ordered_restart(self):
         body = r'''
-state=$(mktemp); echo 0 >"$state"
-docker() { echo "$*" >&2; }
-sleep() { :; }; wait_established() { echo established >&2; }
+state=$(mktemp); events=$(mktemp); echo 0 >"$state"
+docker() { case "$*" in *" stop") echo stop;; *" start") echo start;; esac >>"$events"; }
+sleep() { :; }; wait_established() { echo established >>"$events"; }
 cycle_log() { :; }
 prom_scrape() { n=$(cat "$state"); echo $((n+1)) >"$state"; if [ "$n" = 0 ]; then
+ echo positive >>"$events"
  echo "bgp_gr_active_peers 1"; echo "bgp_gr_stale_routes 2"
-else echo "bgp_gr_active_peers 0"; echo "bgp_gr_stale_routes 0"; fi; }
-sample_row() { echo "sample:$2"; }
-restart_frr_bgpd 7 0
+else echo clear >>"$events"; echo "bgp_gr_active_peers 0"; echo "bgp_gr_stale_routes 0"; fi; }
+sample_row() { echo "sample:$2" >>"$events"; }
+restart_frr_bgpd 7 0; cat "$events"
 '''
         result = self.bash("run-soak-gr-restart-intern-gc.sh", body)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.splitlines(), ["sample:0", "sample:0"])
-        self.assertIn(" stop", result.stderr)
-        self.assertIn(" start", result.stderr)
-        self.assertIn("established", result.stderr)
+        self.assertEqual(result.stdout.splitlines(), [
+            "stop", "positive", "sample:0", "start", "established",
+            "clear", "sample:0",
+        ])
 
     def test_hot_runner_cp_plan_and_apply_fail_closed(self):
         body = r'''
@@ -161,6 +162,7 @@ docker() {
  cp:cp*) return 11;;
  malformed:*config\ plan*) echo '{bad';;
  missing:*config\ plan*) echo '{}';;
+ exit2:*config\ plan*) printf '{\n "runtime_snapshot_token": "token"\n}\n'; return 2;;
  apply:*config\ plan*) printf '{\n "runtime_snapshot_token": "token"\n}\n';;
  apply:*config\ apply*) return 13;;
  good:*config\ plan*) printf '{\n "runtime_snapshot_token": "token"\n}\n';;
@@ -168,7 +170,7 @@ docker() {
 }
 run_apply_cycle 1
 '''
-        for mode, code in (("cp", 11), ("malformed", 1), ("missing", 2),
+        for mode, code in (("cp", 11), ("malformed", 1), ("missing", 2), ("exit2", 0),
                            ("apply", 1), ("good", 0)):
             with self.subTest(mode=mode):
                 result = self.bash("run-soak-hot-reload.sh", f"MODE={mode}\n{body}")
@@ -205,6 +207,14 @@ run_churn_cycle "$d" "$a"
             )
             self.assertEqual(result.returncode, 23)
 
+    def test_neighbor_state_failure_after_output_propagates(self):
+        body = r'''SAMPLES_CSV=/dev/null; LIVE_TARGET_PREFIXES=1
+prom_scrape() { echo metric; }; container_rss_mb() { echo 1; }
+prom_extract_sum() { echo 1; }; frr_route_count() { echo 1; }
+frr_established_seen() { return 0; }; neighbor_state() { echo "0 10"; return 19; }
+sample_row 0 0 0 0'''
+        for script in ("hot-reload", "inject-churn"):
+            self.assertEqual(self.bash(f"run-soak-{script}.sh", body).returncode, 19)
 
 if __name__ == "__main__":
     unittest.main()

@@ -168,9 +168,14 @@ EOF
 
 # Plan a candidate config, extract the runtime_snapshot_token from JSON.
 plan_and_extract_token() {
-    docker exec "$RUSTBGPD" rbgp -s "$GRPC_ADDR" config plan \
-        --from-file /tmp/candidate.toml -j |
-        python3 -c 'import json,sys
+    local output status
+    set +e
+    output=$(docker exec "$RUSTBGPD" rbgp -s "$GRPC_ADDR" config plan \
+        --from-file /tmp/candidate.toml -j)
+    status=$?
+    set -e
+    case "$status" in 0|2) ;; *) return "$status";; esac
+    printf '%s' "$output" | python3 -c 'import json,sys
 d=json.load(sys.stdin)
 t=d.get("runtime_snapshot_token")
 if not isinstance(t, str) or not t: raise SystemExit(2)
@@ -254,7 +259,9 @@ sample_row() {
     prom=$(prom_scrape) || prom=""
     rss=$(container_rss_mb)
     intern_size=$(prom_extract_sum "$prom" bgp_rib_attr_intern_global_size)
-    read -r flap_count uptime_seconds < <(neighbor_state)
+    local neighbor
+    neighbor=$(neighbor_state)
+    read -r flap_count uptime_seconds <<<"$neighbor"
     if frr_established_seen; then
         established=1
     else
