@@ -38,6 +38,55 @@ struct Cli {
     allow_shape_drift: bool,
 }
 
+#[derive(Debug)]
+enum StdoutWriteError {
+    BrokenPipe,
+    Other(std::io::Error),
+}
+impl From<std::io::Error> for StdoutWriteError {
+    fn from(error: std::io::Error) -> Self {
+        if error.kind() == std::io::ErrorKind::BrokenPipe {
+            Self::BrokenPipe
+        } else {
+            Self::Other(error)
+        }
+    }
+}
+fn write_stdout_with(
+    writer: &mut dyn std::io::Write,
+    output: impl FnOnce(&mut dyn std::io::Write) -> std::io::Result<()>,
+) -> Result<(), StdoutWriteError> {
+    output(writer)?;
+    writer.flush()?;
+    Ok(())
+}
+fn write_stdout(
+    output: impl FnOnce(&mut dyn std::io::Write) -> std::io::Result<()>,
+) -> Result<(), StdoutWriteError> {
+    let stdout = std::io::stdout();
+    write_stdout_with(&mut stdout.lock(), output)
+}
+fn stdout_exit_with(
+    result: Result<(), StdoutWriteError>,
+    diagnostic: &mut dyn std::io::Write,
+) -> ExitCode {
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(StdoutWriteError::BrokenPipe) => ExitCode::from(1),
+        Err(StdoutWriteError::Other(error)) => {
+            let _ = writeln!(
+                diagnostic,
+                "rs-config-render: failed to write stdout: {error}"
+            );
+            ExitCode::from(1)
+        }
+    }
+}
+fn stdout_exit(result: Result<(), StdoutWriteError>) -> ExitCode {
+    let stderr = std::io::stderr();
+    stdout_exit_with(result, &mut stderr.lock())
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let context = match std::fs::read_to_string(&cli.context) {
@@ -89,11 +138,37 @@ fn main() -> ExitCode {
         );
         return ExitCode::from(1);
     }
-    println!(
-        "rendered {} file(s) + receipt into {} — gate with `rustbgpd --check --strict {}` before swapping",
-        rendered.files.len(),
-        cli.out_dir.display(),
-        cli.out_dir.join("config.toml").display()
-    );
-    ExitCode::SUCCESS
+    stdout_exit(write_stdout(|writer| {
+        writeln!(
+            writer,
+            "rendered {} file(s) + receipt into {} — gate with `rustbgpd --check --strict {}` before swapping",
+            rendered.files.len(),
+            cli.out_dir.display(),
+            cli.out_dir.join("config.toml").display()
+        )
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{fs::File, io::BufWriter};
+
+    #[test]
+    #[cfg(unix)]
+    fn stdout_exit_distinguishes_quiet_broken_pipe_from_other_flush_error() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut writer = BufWriter::new(File::open(file.path()).unwrap());
+        let result = write_stdout_with(&mut writer, |out| out.write_all(b"complete"));
+        assert_eq!(writer.buffer(), b"complete");
+        let mut err = Vec::new();
+        assert_eq!(stdout_exit_with(result, &mut err), ExitCode::from(1));
+        let err_text = String::from_utf8(err.clone()).unwrap();
+        assert!(err_text.starts_with("rs-config-render: failed to write stdout: "));
+        assert!(err_text.ends_with('\n'));
+        err.clear();
+        let broken = stdout_exit_with(Err(StdoutWriteError::BrokenPipe), &mut err);
+        assert_eq!(broken, ExitCode::from(1));
+        assert!(err.is_empty());
+    }
 }

@@ -148,6 +148,72 @@ fn receipt_carries_cardinalities_and_fingerprint() {
 }
 
 #[test]
+fn cli_stdout_matrix_retains_files_and_receipt() {
+    use std::os::{fd::OwnedFd, unix::net::UnixStream};
+    use std::process::{Command, Stdio};
+
+    fn command(context: &std::path::Path, out: &std::path::Path) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_rs-config-render"));
+        command
+            .arg("--context")
+            .arg(context)
+            .arg("--out-dir")
+            .arg(out)
+            .arg("--rtr-cache")
+            .arg("127.0.0.1:3323");
+        command
+    }
+
+    fn assert_outputs(out: &std::path::Path) {
+        for path in [
+            "config.toml",
+            "policy/rs-hygiene.rpol",
+            "policy/client-as4242-1.rpol",
+            "policy/client-as197000-1.rpol",
+            "render-receipt.json",
+        ] {
+            assert!(out.join(path).is_file(), "missing retained {path}");
+        }
+        let receipt: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(out.join("render-receipt.json")).unwrap())
+                .unwrap();
+        assert_eq!(receipt["clients"].as_array().unwrap().len(), 2);
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let context = temp.path().join("context.yml");
+    std::fs::write(&context, to_yaml(&healthy_value())).unwrap();
+
+    let healthy_dir = temp.path().join("healthy");
+    let healthy = command(&context, &healthy_dir).output().unwrap();
+    assert_eq!(healthy.status.code(), Some(0), "{healthy:?}");
+    assert!(healthy.stderr.is_empty(), "{healthy:?}");
+    assert_eq!(
+        healthy.stdout,
+        format!(
+            "rendered 4 file(s) + receipt into {} — gate with `rustbgpd --check --strict {}` before swapping\n",
+            healthy_dir.display(),
+            healthy_dir.join("config.toml").display()
+        )
+        .as_bytes()
+    );
+    assert_outputs(&healthy_dir);
+
+    let closed_dir = temp.path().join("closed");
+    let (peer, stdout) = UnixStream::pair().unwrap();
+    drop(peer);
+    let mut closed_command = command(&context, &closed_dir);
+    closed_command.stdout(Stdio::from(OwnedFd::from(stdout)));
+    let closed = closed_command.output().unwrap();
+    assert_eq!(closed.status.code(), Some(1), "{closed:?}");
+    assert!(
+        closed.stdout.is_empty() && closed.stderr.is_empty(),
+        "{closed:?}"
+    );
+    assert_outputs(&closed_dir);
+}
+
+#[test]
 fn empty_prefix_set_aborts_the_render() {
     // The untouched fixture: client AS51325_1 resolved zero IRR prefixes.
     match render(FIXTURE, &rtr_options()) {
