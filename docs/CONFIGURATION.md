@@ -2209,6 +2209,14 @@ rpol_files = ["policies/core.rpol", "policies/customers.rpol"]
   load; any diagnostic (rendered with source excerpts, like
   `rbgp policy check`) is a config load error — a broken `.rpol` file
   never half-loads.
+- **Import roots (`rpol_roots`):** an optional array of extra
+  directories for `.rpol` `import` resolution. An import resolves
+  against the importing file's directory first, then against these
+  roots in order; the resolved file must stay inside the main file's
+  directory or one of the roots. Relative entries resolve against the
+  config file's directory and are rewritten absolute at load, like
+  `rpol_files`. See [`rpol-language.md`](rpol-language.md) for module
+  resolution details.
 - **One namespace:** `.rpol` policies and `[policy.definitions]` TOML
   policies share the named-policy namespace. A name defined by both —
   or by two `.rpol` files — is a load error naming both sources.

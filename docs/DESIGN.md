@@ -3,7 +3,7 @@
 A modern, API-first BGP daemon in Rust, inspired by GoBGP's ergonomics and "drive it via gRPC" operating model.
 
 **Author:** lance0
-**Status:** pre-1.0 hardening — P0/P1/P2/P2.5 complete, publishing prep
+**Status:** pre-1.0 hardening — public alpha
 
 ---
 
@@ -19,7 +19,7 @@ A modern, API-first BGP daemon in Rust, inspired by GoBGP's ergonomics and "driv
 
 ## Non-Goals (v1)
 
-This is not a full routing suite replacement. rustbgpd will not implement OSPF, IS-IS, LDP, full VRF support, or a complete policy language in v1. It will not attempt every BGP extension at once (Confederation, VPNv4/v6, MPLS-EVPN encap, etc.). The goal is a reliable, API-driven BGP speaker — not a kitchen sink.
+This is not a full routing suite replacement. rustbgpd will not implement OSPF, IS-IS, LDP, or full VRF support in v1 (the `.rpol` policy language shipped via ADR-0096). It will not attempt every BGP extension at once (Confederation, PE-role VPNv4/v6 — the RR/controller-feed slice shipped per ADR-0077 — MPLS-EVPN encap, etc.). The goal is a reliable, API-driven BGP speaker — not a kitchen sink.
 
 ## Target v1 Use Cases
 
@@ -374,7 +374,8 @@ Best-path rules (implemented), applied in order:
 5. eBGP over iBGP (only `RouteOrigin::Ebgp`; Local uses LOCAL_PREF/AS_PATH)
 5.5. Shortest CLUSTER_LIST length (RFC 4456 §9)
 5.6. Lowest ORIGINATOR_ID (RFC 4456 §9) — only when both routes carry the attribute
-6. Lowest peer address (final disambiguator — guarantees strict ordering)
+6. Lowest peer address (tiebreaker)
+7. Lowest inbound Add-Path path identifier (same-peer route identity only; reported as `lower_path_id` in explain)
 
 **Implementation choices (ADR-0014):**
 - `best_path_cmp()` is a standalone function, not `Ord` on `Route`. Domain-specific ordering doesn't belong as a trait impl — multiple orderings may be needed.
@@ -658,7 +659,7 @@ See [ARCHITECTURE.md — Where to Change X](../ARCHITECTURE.md#where-to-change-x
 
 ## Roadmap Beyond v1
 
-- Plugin-based policy engine (WASM or embedded DSL) — only after core stability
+- Plugin-based policy engine (WASM) — the embedded DSL shipped as `.rpol` (ADR-0096); WASM plugins only after core stability
 
 ---
 

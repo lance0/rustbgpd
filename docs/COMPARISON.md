@@ -174,7 +174,7 @@ IPv4/IPv6 `Prefix` routes.
 
 | Feature | rustbgpd | FRR | BIRD | GoBGP | OpenBGPd |
 |---|:---:|:---:|:---:|:---:|:---:|
-| Prometheus metrics | Yes | Yes | No | Yes | No |
+| Prometheus metrics | Yes | Via exporter[^prom-frr] | No | Yes | No |
 | Structured logging (JSON) | Yes | No | No | No | No |
 | BMP (RFC 7854) | Yes | Yes | Yes | Yes | No |
 | BMP full trio (7854 + 8671 Adj-RIB-Out + 9069 Loc-RIB) | Yes | No | No | No | No |
@@ -247,6 +247,12 @@ IPv4/IPv6 `Prefix` routes.
     on 2026-05-25) support interface autodiscovery. OpenBGPd has no interface /
     unnumbered neighbor model (numeric-IP neighbors only), although it does
     support the RFC 8950 next-hop encoding itself.
+
+[^prom-frr]: FRR has no native Prometheus endpoint; metrics are
+    scraped through the external `frr_exporter` (packaged in Debian as
+    `prometheus-frr-exporter`), which polls the FRR vty sockets and
+    serves `/metrics` itself. GoBGP's metrics are native: `gobgpd
+    --pprof-host` serves Prometheus metrics on `/metrics`.
 
 [^gnmi]: rustbgpd ships a native `gnmi.gNMI` target for a strict
     OpenConfig BGP operational-state subset: `Capabilities`, `Get`, and

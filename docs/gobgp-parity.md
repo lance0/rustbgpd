@@ -335,7 +335,7 @@ scope:
 | ~~MEDIUM~~ | ~~Policy engine tests concentrated in one file~~ | Done — split into 8 focused test modules: prefix, community, large_community, aspath_regex, as_path_length, modifications, chain, rpki |
 | ~~MEDIUM~~ | ~~No FlowSpec fuzz target~~ | Done — `decode_flowspec` target added |
 | ~~MEDIUM~~ | ~~RTR expire_interval not enforced~~ | Done — stale VRPs now expire and are withdrawn if no fresh EndOfData arrives before the effective expiry timer |
-| MEDIUM | Unknown FlowSpec component types rejected | Should be preserved/skipped for forward compatibility with future RFCs |
+| ~~MEDIUM~~ | ~~Unknown FlowSpec component types rejected~~ | Closed wontfix — RFC 8955 §4.2 treats an NLRI with an unknown component type as malformed, and components carry no length field, so skipping is impossible (see the `crates/wire/src/flowspec.rs` module docs) |
 | ~~LOW~~ | ~~`timer.rs:118` production `panic!()`~~ | Done — removed |
 | ~~LOW~~ | ~~CLI `.unwrap()` on JSON serialization~~ | Done — only test code uses `.unwrap()` now |
 | ~~LOW~~ | ~~RTR client polling-only~~ | Done — RTR sessions stay connected and honor Serial Notify |

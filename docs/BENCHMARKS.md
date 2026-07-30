@@ -582,6 +582,27 @@ a RIB-to-transport dependency cycle. Run it with:
 cargo bench -p rustbgpd-transport --features bench-internals --bench fanout
 ```
 
+The `private_single_best_fanout` group is the private (per-peer
+Adj-RIB-Out) sibling of the replacement-distribution pair above: a
+peer-context export chain forces every peer onto private export state,
+and the same advertise/drain/replace discipline times one production
+distribution pass whose receipt requires the exact private single-best
+inventory per peer. It instruments the clean single-best path that
+skips per-peer affected-prefix scans unless resolved ORR,
+per-client-best, or Add-Path send behavior requires them.
+
+Three further groups complete the fanout bench's inventory.
+`initial_table_peer_join` times one initial-table join of a
+route-reflector client — the full inventory advertisement plus exactly
+one End-of-RIB envelope — at fixed route counts.
+`policy_regroup_resync` times an export-policy replacement across a
+peer cohort in both its `shared_plan` (one shared regroup plan) and
+`forced_per_peer` arms across route/peer grids, and
+`ixp_policy_regroup_resync` is its IXP-shaped sibling
+(homogeneous-remote-ASN vs distinct-remote-ASN route-server cohorts at
+4,096 routes; a 700-peer receipt is gated behind
+`RUSTBGPD_IXP_LARGE_RECEIPT`).
+
 The `add_path_export_staging` group is a 12-row instrument for IPv4-unicast
 Add-Path top-N export staging through the production `RibManager` path. It
 crosses `permit_all` and `deny_best` policy with 8, 64, and 256 candidates at

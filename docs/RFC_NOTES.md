@@ -138,8 +138,10 @@ deviations; [docs/INTEROP.md](INTEROP.md) has the interop matrix,
   upgrade silently drop routes in a way indistinguishable from a policy
   change — the warn-first posture RFC 8212 Appendix A.1 describes for
   implementations with an installed base. `rustbgpd --check` warns on every
-  eBGP neighbor missing explicit policy whether the knob is on or off, and
-  every shipped starter config sets the knob.
+  eBGP neighbor missing explicit policy whether the knob is on or off, every
+  shipped starter config with eBGP neighbors sets the knob, and all starters
+  pass `rustbgpd --check --strict` (fenced by
+  `tests/starter_configs_check_strict.rs`).
 - Full knob semantics, what counts as explicit policy, and the observability
   surfaces (neighbor detail, Prometheus, doctor, export explain) are in
   [docs/CONFIGURATION.md](CONFIGURATION.md) under

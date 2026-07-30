@@ -943,8 +943,8 @@ did not take on:
 ## Cross-References
 
 - **ADR-0050** — architectural record for Phase 1
-- **CHANGELOG.md** — `[Unreleased]` entry for EVPN RR
-- **ROADMAP.md** — P2 block with Phase 1-5 breakdown
+- **CHANGELOG.md** — release-by-release EVPN feature history
+- **ROADMAP.md** — EVPN rows in the status-at-a-glance table and the "EVPN standards tail" item
 - **docs/INTEROP.md** — P1.5 "EVPN validation depth" gap list
 - **docs/RFC_NOTES.md** — RFC 7432 / 9012 / 9135 implementation notes
 - **docs/USE_CASES.md §7** — "VXLAN-EVPN DC Fabric Route Reflector"

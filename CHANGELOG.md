@@ -60,6 +60,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `ListNeighbors` now returns neighbors ordered by typed IP address, then by
   configured interface, stabilizing human, JSON, and support-bundle inventories.
 
+- The `bgp_rib_stale_session_message_ignored_total{peer,kind}` counter's `kind`
+  label inventory expanded with `bgpls`, `vpn`, `labeled`, `rtc`, and
+  `slow_peer` so every session-scoped RIB message variant is counted; queries
+  pinned to the previous label set will not see the new values.
+
 - Clean private single-best fanout now skips per-peer affected-prefix scans
   unless resolved ORR, per-client-best, or Add-Path send behavior requires them.
 

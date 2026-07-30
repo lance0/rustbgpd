@@ -303,10 +303,15 @@ byte counts.
   (replaying reverse commands to undo successful steps) is still
   out of scope — peer-group changes flap sessions, and unwinding
   flap them again.
-- **MRT snapshot encoding is allocation-heavy at large scale.** The
-  `TABLE_DUMP_V2` encoder groups routes by prefix and synthesizes
-  per-entry attributes, which is correct but can create extra allocation
-  pressure for very large snapshots. Track as a performance optimization,
+- **MRT snapshot attribute synthesis still allocates per entry.** The
+  dominant allocation cost — millions of exact-capacity output-buffer
+  reallocations on full-table dumps — was removed by bounded geometric
+  output growth (growth misses fell from millions to ~40 on both
+  measured fleet shapes; see
+  [docs/perf/mrt-snapshot-allocation-2026-07.md](docs/perf/mrt-snapshot-allocation-2026-07.md)).
+  The `TABLE_DUMP_V2` encoder still groups routes by prefix and
+  synthesizes per-entry attributes, which remains a residual allocation
+  cost for very large snapshots. Track as a performance optimization,
   not a correctness issue.
 - **Injected routes support multiple paths via path_id.** `InjectionService`
   supports multiple injected routes per prefix using explicit `path_id`.

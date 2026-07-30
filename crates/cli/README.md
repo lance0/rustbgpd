@@ -1,10 +1,7 @@
 # rustbgpd-cli (rbgp)
 
-Command-line interface for rustbgpd. Thin gRPC wrapper for daemon
-management with human-readable and JSON output modes.
-
-The CLI installs as `rbgp` and exposes the daemon's gRPC management surface with
-human-readable and JSON output modes.
+Installs as `rbgp` — a thin gRPC wrapper over the daemon's management
+surface with human-readable and JSON output modes.
 
 Part of [rustbgpd](https://github.com/lance0/rustbgpd).
 
@@ -110,6 +107,7 @@ rbgp rib rtc      # RT-Constrain membership NLRI (RFC 4684, SAFI 132)
 rbgp rib add <prefix> --nexthop <ip> [--origin <0|1|2>] [--local-pref <n>] [--med <n>] [--as-path "<asn> <asn>..."] [--communities <c1,c2,...>] [--large-communities <c1,c2,...>] [--path-id <n>]
 rbgp rib delete <prefix> [--path-id <n>]
 rbgp diff advertised   # compare live Adj-RIB-Out against an incumbent NDJSON snapshot (read-only; own 0/1/2 exit contract)
+rbgp diff snapshot from-mrt <file> --view adj-rib-out-capture --peer <addr> --peer-asn <asn>   # offline: produce an rbgp-ribsnap/1 snapshot from an incumbent MRT dump (see docs/ribdiff.md; from-bmp for BMP captures)
 
 rbgp policy list
 rbgp policy get <name>
@@ -121,7 +119,7 @@ rbgp policy chain set-export [--neighbor <addr>] <names...>
 rbgp policy chain clear-import [--neighbor <addr>]
 rbgp policy chain clear-export [--neighbor <addr>]
 rbgp policy explain --neighbor <addr> --prefix <cidr> [--path-id <n>]
-rbgp policy check <file.rpol>                          # parse + typecheck an .rpol file in-process (no daemon)
+rbgp policy check <file.rpol>                          # parse, typecheck, and run in-language tests in-process (no daemon; --coverage-min for a CI coverage gate)
 rbgp policy fmt <file.rpol>... [--check]               # canonical .rpol formatter (in-place; --check for CI; - = stdin)
 rbgp policy test <file.rpol> --policy <name> --direction import|export [--neighbor <addr>]   # dry-run over the live RIB
 rbgp policy stats [--neighbor <addr>]                     # live per-term hit counters
