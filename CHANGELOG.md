@@ -9,6 +9,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.62.0] — 2026-07-30
+
 ### Added
 
 - New opt-in `[inbound_admission]` table (ADR-0120) rate-limits inbound

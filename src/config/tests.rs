@@ -889,6 +889,27 @@ fn v1_stable_v0_60_route_server_fixture_parses() {
         .unwrap_or_else(|err| panic!("v0.60.0 route-server config no longer validates: {err}"));
 }
 
+#[test]
+fn v1_stable_v0_61_route_server_fixture_parses() {
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/v1-stable/v0.61.0/route-server");
+    let config_path = fixture.join("config.toml");
+    let source = fs::read_to_string(&config_path).unwrap_or_else(|err| {
+        panic!(
+            "failed to read immutable v0.61.0 route-server fixture {}: {err}",
+            config_path.display()
+        );
+    });
+    let mut config: Config = toml::from_str(&source)
+        .unwrap_or_else(|err| panic!("v0.61.0 route-server config no longer parses: {err}"));
+    config
+        .load_rpol_files(Some(&fixture))
+        .unwrap_or_else(|err| panic!("v0.61.0 route-server rpol no longer loads: {err}"));
+    config
+        .validate()
+        .unwrap_or_else(|err| panic!("v0.61.0 route-server config no longer validates: {err}"));
+}
+
 const V1_EFFECTIVE_DEFAULTS_TOML: &str = r#"
 [global]
 asn = 65001

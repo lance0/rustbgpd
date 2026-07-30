@@ -310,7 +310,7 @@ dependencies = [
 
 [[package]]
 name = "birdwatcher-adapter"
-version = "0.61.0"
+version = "0.62.0"
 dependencies = [
  "axum",
  "clap",
@@ -944,7 +944,7 @@ dependencies = [
 
 [[package]]
 name = "event-bridge"
-version = "0.61.0"
+version = "0.62.0"
 dependencies = [
  "clap",
  "rustbgpd-api",
@@ -2817,7 +2817,7 @@ checksum = "323c417e1d9665a65b263ec744ba09030cfb277e9daa0b018a4ab62e57bc8189"
 
 [[package]]
 name = "rs-config-render"
-version = "0.61.0"
+version = "0.62.0"
 dependencies = [
  "clap",
  "serde",
@@ -2871,7 +2871,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpctl"
-version = "0.61.0"
+version = "0.62.0"
 dependencies = [
  "clap",
  "clap_complete",
@@ -2905,7 +2905,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd"
-version = "0.61.0"
+version = "0.62.0"
 dependencies = [
  "axum",
  "bgpkit-parser",
@@ -2958,7 +2958,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-api"
-version = "0.61.0"
+version = "0.62.0"
 dependencies = [
  "arc-swap",
  "bytes",
@@ -2996,7 +2996,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-bfd"
-version = "0.61.0"
+version = "0.62.0"
 dependencies = [
  "bytes",
  "proptest",
@@ -3005,7 +3005,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-bmp"
-version = "0.61.0"
+version = "0.62.0"
 dependencies = [
  "bytes",
  "rustbgpd-telemetry",
@@ -3017,7 +3017,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-event-history"
-version = "0.61.0"
+version = "0.62.0"
 dependencies = [
  "rusqlite",
  "rustbgpd-telemetry",
@@ -3032,7 +3032,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-evpn"
-version = "0.61.0"
+version = "0.62.0"
 dependencies = [
  "rustbgpd-wire",
  "thiserror 2.0.19",
@@ -3041,7 +3041,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-evpn-linux"
-version = "0.61.0"
+version = "0.62.0"
 dependencies = [
  "futures",
  "libc",
@@ -3059,7 +3059,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-evpn-load"
-version = "0.61.0"
+version = "0.62.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3085,7 +3085,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-mrt"
-version = "0.61.0"
+version = "0.62.0"
 dependencies = [
  "bytes",
  "chrono",
@@ -3105,7 +3105,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-policy"
-version = "0.61.0"
+version = "0.62.0"
 dependencies = [
  "arc-swap",
  "ariadne",
@@ -3122,7 +3122,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-rib"
-version = "0.61.0"
+version = "0.62.0"
 dependencies = [
  "bytes",
  "criterion",
@@ -3145,7 +3145,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-rpki"
-version = "0.61.0"
+version = "0.62.0"
 dependencies = [
  "criterion",
  "rustbgpd-wire",
@@ -3157,7 +3157,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-telemetry"
-version = "0.61.0"
+version = "0.62.0"
 dependencies = [
  "prometheus",
  "thiserror 2.0.19",
@@ -3168,7 +3168,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-transport"
-version = "0.61.0"
+version = "0.62.0"
 dependencies = [
  "bytes",
  "criterion",

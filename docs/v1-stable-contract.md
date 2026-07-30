@@ -163,7 +163,9 @@ milestone-jump upgrade exercise, extending the inventory's accepted release
 chain to the v0.60.0 anchor. The v0.60.0 route-server example is likewise
 archived under `tests/fixtures/v1-stable/v0.60.0/`; the v0.61.0 release records
 it as the accepted consecutive v0.60.0-to-v0.61.0 exercise and proves it with
-the current parser.
+the current parser. The v0.61.0 route-server example continues the chain under
+`tests/fixtures/v1-stable/v0.61.0/` as the accepted consecutive
+v0.61.0-to-v0.62.0 exercise, proven the same way.
 
 ## Release gate
 

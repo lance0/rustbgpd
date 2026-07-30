@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "contract": "rustbgpd-rs-rr-v1",
-  "baseline_release": "v0.61.0",
+  "baseline_release": "v0.62.0",
   "scope": "Narrow route-server and route-reflector product contract; unlisted surfaces are not stable by implication.",
   "roles": [
     {
@@ -312,6 +312,20 @@
       "semantic_toml_sha256": "ee265b2761539f3c88c0c0d449c9a44c8350cda99c742b14227cc0b7130beda9",
       "validation_source": "src/config/tests.rs",
       "validation_test": "config::tests::v1_stable_v0_60_route_server_fixture_parses",
+      "result": "accepted_without_config_migration"
+    },
+    {
+      "from_release": "v0.61.0",
+      "to_release": "v0.62.0",
+      "fixture_directory": "tests/fixtures/v1-stable/v0.61.0/route-server",
+      "source_directory": "examples/route-server",
+      "files": [
+        {"path": "config.toml", "sha256": "6983436b76a5d75457dca88a1572eab553c5852c2b1916f4ee4a31f752278f76"},
+        {"path": "hygiene.rpol", "sha256": "9035313c7813273a64856780be66d790f25cafcb8a7f04e44ada16efb083e515"}
+      ],
+      "semantic_toml_sha256": "450d3b3e844bb42d4dfe0974efbfafa5f2098e3c15547a94bb7fe70b7ad82704",
+      "validation_source": "src/config/tests.rs",
+      "validation_test": "config::tests::v1_stable_v0_61_route_server_fixture_parses",
       "result": "accepted_without_config_migration"
     }
   ]
