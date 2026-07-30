@@ -95,7 +95,10 @@ ensure_daemon_running() {
         return 0
     fi
     log "rustbgpd not running in $RUSTBGPD; starting"
-    docker exec -d "$RUSTBGPD" /usr/local/bin/start-rustbgpd.sh
+    # Redirect into the file the log stream tails: a detached exec's
+    # stdout is otherwise discarded and rustbgpd.log stays empty.
+    docker exec -d "$RUSTBGPD" sh -c \
+        '/usr/local/bin/start-rustbgpd.sh >>/var/log/rustbgpd.log 2>&1'
     for _ in $(seq 1 10); do
         if daemon_running; then
             return 0

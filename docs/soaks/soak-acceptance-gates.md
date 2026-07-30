@@ -68,6 +68,14 @@ plateaus of 20–30 MB with slopes ≤ 0.2 MB/h on clean builds), so the
 1.0 MB/h fail line has an order-of-magnitude margin over observed-clean
 while still catching a ~25 MB/day leak.
 
+The slope gates are precommitted for windows of **24 h or longer**. On
+sub-hour smokes and rehearsals the allocator's settle dominates the
+regression and overshoots the hourly bound (the archived 24 h receipts
+show cumulative slope monotonically tightening from > 1 MB/h at hour 2
+to < 0.2 MB/h at terminal); a short run's red slope gate is a
+small-window artifact, not leak evidence — exactly as a short run's
+green slope would not be clean evidence.
+
 ### 1. GR-restart intern-gc — `run-soak-gr-restart-intern-gc.sh`
 
 Injection: repeated peer daemon restart (`killall -9 bgpd` in the FRR

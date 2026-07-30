@@ -90,7 +90,10 @@ ensure_daemon_running() {
         return 0
     fi
     log "rustbgpd not running in $RUSTBGPD; starting"
-    docker exec -d "$RUSTBGPD" /usr/local/bin/start-rustbgpd.sh
+    # Redirect into the file the log stream tails: a detached exec's
+    # stdout is otherwise discarded and rustbgpd.log stays empty.
+    docker exec -d "$RUSTBGPD" sh -c \
+        '/usr/local/bin/start-rustbgpd.sh >>/var/log/rustbgpd.log 2>&1'
     for _ in $(seq 1 10); do
         if daemon_running; then
             return 0
@@ -150,6 +153,11 @@ frr_established_seen() {
         | grep -q '"bgpState":"Established"'
 }
 
+frr_bgpd_running() {
+    docker exec "$FRR" sh -c 'cat /proc/[0-9]*/comm 2>/dev/null' \
+        | grep -qx bgpd
+}
+
 wait_established() {
     local timeout=${1:-90}
     log "Waiting for BGP session to reach Established (timeout ${timeout}s)..."
@@ -186,7 +194,19 @@ restart_frr_bgpd() {
     done
     awk "BEGIN {exit !($active > 0 && $stale > 0)}" 2>/dev/null ||
         { log "ERROR: GR active/stale evidence not observed"; return 1; }
-    # watchfrr restarts bgpd on its own; just wait for re-establish.
+    # watchfrr normally restarts bgpd within ~5s, but it permanently
+    # abandons a daemon after repeated kills (observed: 4 restarts,
+    # then no further attempt), which a multi-hour soak always
+    # reaches. Supervise the restart ourselves: give watchfrr 10s,
+    # then drive it explicitly. wait_established stays the gate.
+    for _ in $(seq 1 10); do
+        frr_bgpd_running && break
+        sleep 1
+    done
+    if ! frr_bgpd_running; then
+        cycle_log "watchfrr did not restart bgpd; restarting explicitly"
+        docker exec "$FRR" /usr/lib/frr/watchfrr.sh restart bgpd >/dev/null 2>&1 || true
+    fi
     wait_established 60
     for _ in $(seq 1 30); do
         prom=$(prom_scrape) || prom=""

@@ -40,7 +40,7 @@ topology:
       image: quay.io/frrouting/frr:10.3.1
       binds:
         - ../interop/configs/frr-daemons:/etc/frr/daemons:ro
-        - ../interop/configs/frr-bgpd-m16-llgr.conf:/etc/frr/frr.conf:ro
+        - ./configs/frr-bgpd-soak-gr-restart.conf:/etc/frr/frr.conf:ro
       exec:
         - ip addr add 10.0.0.2/24 dev eth1
         - ip link set eth1 up
