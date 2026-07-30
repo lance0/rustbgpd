@@ -3763,6 +3763,13 @@ impl RibManager {
                 let extras: Vec<Prefix> = all_affected
                     .iter()
                     .filter(|prefix| {
+                        #[cfg(any(test, feature = "bench-internals"))]
+                        {
+                            self.adj_rib_out_commit_stats.private_extra_prefix_scans = self
+                                .adj_rib_out_commit_stats
+                                .private_extra_prefix_scans
+                                .saturating_add(1);
+                        }
                         (peer_has_resolved_orr
                             || peer_per_client_best
                             || self.add_path_send_max_for_prefix(peer, prefix) > 0)
