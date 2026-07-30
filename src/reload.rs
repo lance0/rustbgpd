@@ -1527,6 +1527,14 @@ pub(crate) async fn reload_config_with_tcp_ao(
         );
         new_config.event_history = current.event_history.clone();
     }
+    if new_config.inbound_admission != current.inbound_admission {
+        error!(
+            "[inbound_admission] changed — the ADR-0120 accept-path limiter is \
+             built once at startup. Restart rustbgpd to apply; inbound admission \
+             keeps its startup configuration until then."
+        );
+        new_config.inbound_admission = current.inbound_admission.clone();
+    }
     if new_config.managed_netdevs != current.managed_netdevs {
         error!(
             "[managed_netdevs] changed — the ADR-0091 managed-netdev lifecycle \
@@ -6109,6 +6117,39 @@ hold_time = 90
         assert!(
             returned.desired.event_history.enabled,
             "desired TOML must preserve the operator's edit for restart"
+        );
+    }
+
+    #[tokio::test]
+    async fn reload_pins_inbound_admission_edits_to_startup_snapshot() {
+        // ADR-0120: every [inbound_admission] field is restart-required
+        // (the accept-path limiter is built once at startup). A SIGHUP
+        // must pin the runtime snapshot back to the startup admission
+        // config — but keep the operator's edit in the desired TOML.
+        let initial = baseline_toml();
+        let new_toml = format!(
+            "{}\n[inbound_admission]\nenabled = true\nrate_per_minute = 6\n",
+            baseline_toml()
+        );
+
+        let (returned, tags) = drive_reload(initial, &new_toml).await;
+        let returned = returned.expect("reload should return pinned runtime config");
+
+        assert!(
+            tags.is_empty(),
+            "inbound-admission-only edits are restart-required and must not reconcile peers: {tags:?}"
+        );
+        assert!(
+            !returned.inbound_admission.enabled,
+            "runtime snapshot must keep the startup (disabled) admission config"
+        );
+        assert!(
+            returned.desired.inbound_admission.enabled,
+            "desired TOML must preserve the operator's edit for restart"
+        );
+        assert_eq!(
+            returned.desired.inbound_admission.rate_per_minute, 6,
+            "desired TOML must carry the edited rate"
         );
     }
 

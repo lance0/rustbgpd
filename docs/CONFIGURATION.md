@@ -1981,6 +1981,49 @@ comparison design.
 
 ---
 
+## `[inbound_admission]`
+
+Per-source inbound accept-rate limiting
+([ADR-0120](adr/0120-inbound-connection-admission.md)). A token bucket
+per aggregated source address bounds how fast a
+`[[dynamic_neighbors]]`-matched source can cycle the passive accept
+path — a churny or abusive member inside a permitted range is bounded
+to `burst` immediate accepts and `rate_per_minute` sustained accepts,
+dropped immediately after TCP accept once over rate. Statically
+configured neighbor addresses are exempt: a flapping legitimate peer
+must never lock itself out of re-establishment. Sources matching no
+configuration at all are dropped by the existing unconfigured-source
+check before the limiter is consulted.
+
+**Opt-in — default off.** An existing deployment's accept behavior is
+unchanged on upgrade. All fields are restart-required; see
+[reload-matrix.md](reload-matrix.md#inbound_admission-adr-0120) for the
+per-field classification.
+
+```toml
+[inbound_admission]
+enabled = false          # default; set true to enforce the accept-rate limit
+rate_per_minute = 12     # sustained accepts per source aggregate per minute (> 0)
+burst = 5                # immediate accepts before the sustained rate applies (> 0)
+v4_aggregation_len = 32  # IPv4 bucket-key prefix length (8-32); 32 = per host
+v6_aggregation_len = 64  # IPv6 bucket-key prefix length (16-128); per-/128 is trivially evadable
+table_capacity = 4096    # tracked source aggregates (64-65536), LRU-evicted at capacity
+```
+
+Accounting is per aggregated source: all hosts inside one aggregate
+(one v6 /64 by default) share a bucket. The tracking table is a
+fixed-capacity LRU, so limiter memory stays bounded (roughly
+`table_capacity` × ~100 bytes) regardless of how many sources probe the
+listener; an evicted aggregate re-enters with a fresh burst allowance.
+
+Drops are counted in
+`bgp_inbound_connections_dropped_total{reason="rate_limited"}`; the
+`unconfigured` and `dynamic_limit` reasons account the pre-existing
+drop sites and are recorded even while the limiter is disabled. See
+`docs/OPERATIONS.md` for the metric reference.
+
+---
+
 ## `[rpki]`
 
 Optional. Configures RPKI origin validation via a persistent RTR client (RFC 8210).

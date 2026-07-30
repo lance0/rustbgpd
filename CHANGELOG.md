@@ -11,6 +11,19 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- New opt-in `[inbound_admission]` table (ADR-0120) rate-limits inbound
+  connection accepts per source address, aggregated per-host for IPv4 and
+  per-/64 for IPv6 by default, with configurable rate, burst, aggregation
+  lengths, and a fixed-capacity LRU tracking table. It protects the accept
+  path against churny or abusive sources inside permitted
+  `[[dynamic_neighbors]]` ranges; statically configured neighbors are exempt
+  so a flapping peer can always re-establish. Default off — existing
+  deployments keep their accept behavior unchanged; all fields are
+  restart-required. Accept-path drops are now counted in
+  `bgp_inbound_connections_dropped_total{reason}` with the bounded reasons
+  `unconfigured`, `rate_limited`, and `dynamic_limit` (the `unconfigured`
+  and `dynamic_limit` sites are accounted even while the limiter is off).
+
 - The shipped Prometheus rule pack now pages on outbound BGP work dropped
   before the peer writer and RFC 9687 send-hold session teardowns, and warns
   when a live event-stream consumer misses events and becomes desynchronized.

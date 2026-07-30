@@ -6872,6 +6872,84 @@ fn diff_config_flags_event_history_as_restart_required() {
     );
 }
 
+#[test]
+fn diff_config_flags_inbound_admission_as_restart_required() {
+    // ADR-0120: every `[inbound_admission]` field is restart-required
+    // (the accept-path limiter is built once at startup) — an edit must
+    // classify as restart-required, not vanish from the diff.
+    let old = parse(valid_toml()).unwrap();
+    let mut new = old.clone();
+    new.inbound_admission.enabled = !new.inbound_admission.enabled;
+
+    let diff = super::diff_config(&old, &new);
+    assert!(diff.inbound_admission_changed);
+    assert!(diff.has_restart_required_changes());
+    assert!(
+        !diff.has_reload_applied_changes(),
+        "an inbound-admission-only edit does not hot-apply"
+    );
+
+    let json = super::config_diff_json_value(&diff);
+    assert_eq!(json["restart_required"]["inbound_admission_changed"], true);
+
+    let text = super::format_config_diff_with_style(&diff, &super::ConfigDiffTextStyle::default());
+    assert!(text.contains("[inbound_admission]"), "{text}");
+
+    let sections = super::classify_config_transaction_v1(&diff);
+    assert!(
+        sections
+            .restart_required_sections
+            .contains(&"[inbound_admission]".to_string()),
+        "{sections:?}"
+    );
+}
+
+#[test]
+fn inbound_admission_defaults_off_and_validates_bounds() {
+    // ADR-0120: opt-in — a config without the table parses with the
+    // limiter disabled and the documented defaults.
+    let default = parse(valid_toml()).unwrap();
+    assert!(!default.inbound_admission.enabled);
+    assert_eq!(default.inbound_admission.rate_per_minute, 12);
+    assert_eq!(default.inbound_admission.burst, 5);
+    assert_eq!(default.inbound_admission.v4_aggregation_len, 32);
+    assert_eq!(default.inbound_admission.v6_aggregation_len, 64);
+    assert_eq!(default.inbound_admission.table_capacity, 4096);
+
+    let enabled = |extra: &str| {
+        parse(&format!(
+            "{}\n[inbound_admission]\nenabled = true\n{extra}\n",
+            valid_toml()
+        ))
+    };
+    assert!(enabled("").is_ok());
+    for (rejected, needle) in [
+        ("rate_per_minute = 0", "rate_per_minute"),
+        ("burst = 0", "burst"),
+        ("v4_aggregation_len = 7", "v4_aggregation_len"),
+        ("v4_aggregation_len = 33", "v4_aggregation_len"),
+        ("v6_aggregation_len = 15", "v6_aggregation_len"),
+        ("v6_aggregation_len = 129", "v6_aggregation_len"),
+        ("table_capacity = 63", "table_capacity"),
+        ("table_capacity = 65537", "table_capacity"),
+    ] {
+        let error = enabled(rejected).unwrap_err().to_string();
+        assert!(
+            error.contains("inbound_admission") && error.contains(needle),
+            "{rejected}: {error}"
+        );
+    }
+    // Bounds are enforced only when enabled — a disabled table with
+    // out-of-range values still parses (the limiter is never built).
+    assert!(
+        parse(&format!(
+            "{}\n[inbound_admission]\nrate_per_minute = 0\n",
+            valid_toml()
+        ))
+        .is_ok()
+    );
+}
+
 /// ADR-0112: the RFC 8212 enforcement mode is opt-in and off by default, so an
 /// existing deployment keeps permit-all EBGP behavior without editing anything.
 #[test]

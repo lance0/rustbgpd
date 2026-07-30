@@ -167,6 +167,7 @@ prometheus.workspace = true
 thiserror.workspace = true
 bytes.workspace = true
 serde_json.workspace = true
+lru.workspace = true
 sha2.workspace = true
 uuid.workspace = true
 owo-colors.workspace = true

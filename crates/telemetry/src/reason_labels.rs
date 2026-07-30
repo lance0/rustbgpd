@@ -1,4 +1,5 @@
-//! Canonical reason-label vocabulary for UPDATE-path route rejection.
+//! Canonical reason-label vocabulary for UPDATE-path route rejection
+//! and inbound connection admission drops.
 //!
 //! Single source of truth for the `reason` strings that ingress (and
 //! the OTC egress sibling) route-rejection mechanisms report across
@@ -174,6 +175,53 @@ impl RrLoopReason {
 }
 
 impl std::fmt::Display for RrLoopReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Inbound connection admission drop reasons (ADR-0120).
+///
+/// Surfaces sharing this vocabulary:
+///
+/// - `bgp_inbound_connections_dropped_total{reason}` label values
+///   ([`crate::BgpMetrics::record_inbound_connection_drop`]);
+/// - the `reason` token on the peer-manager accept-path log lines;
+/// - the documented values in `docs/OPERATIONS.md` and ADR-0120.
+///
+/// The vocabulary is closed and label-free beyond `reason` — never a
+/// source address, which is unbounded exactly under the flood these
+/// drops account for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum InboundConnectionDropReason {
+    /// The source matched no configured static neighbor and no
+    /// `[[dynamic_neighbors]]` range.
+    Unconfigured,
+    /// The ADR-0120 per-source token bucket was empty for the source's
+    /// aggregate.
+    RateLimited,
+    /// The process-global `dynamic_neighbor_limit` slots were all
+    /// occupied.
+    DynamicLimit,
+}
+
+impl InboundConnectionDropReason {
+    /// Every canonical inbound drop reason, for vocabulary walks in
+    /// tests and docs.
+    pub const ALL: [Self; 3] = [Self::Unconfigured, Self::RateLimited, Self::DynamicLimit];
+
+    /// The canonical reason string shared by every surface.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unconfigured => "unconfigured",
+            Self::RateLimited => "rate_limited",
+            Self::DynamicLimit => "dynamic_limit",
+        }
+    }
+}
+
+impl std::fmt::Display for InboundConnectionDropReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }

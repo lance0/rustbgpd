@@ -2,6 +2,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 
 use rustbgpd_api::peer_types::PeerKey;
 use rustbgpd_fsm::SessionState;
+use rustbgpd_telemetry::reason_labels::InboundConnectionDropReason;
 use rustbgpd_transport::{
     PeerHandle, SessionIdentity, StateQueryOutcome, TcpAoInfoSnapshot, TcpAoRotationGeneration,
 };
@@ -337,16 +338,40 @@ impl PeerManager {
             if let SocketAddr::V6(v6) = peer_addr
                 && v6.ip().segments()[0] & 0xffc0 == 0xfe80
             {
+                self.metrics
+                    .record_inbound_connection_drop(InboundConnectionDropReason::Unconfigured);
                 warn!(
                     %peer_addr,
                     "inbound IPv6 link-local connection did not match a configured scoped neighbor; dynamic acceptance of link-local peers is not supported, dropping"
                 );
                 return;
             }
+            // ADR-0120: per-source accept-rate limit, after the
+            // unconfigured-source classification but before any
+            // session-spawn work. Static neighbors never reach this
+            // arm, so a flapping configured peer is exempt by path.
+            if self.match_dynamic_range(peer_ip).is_some()
+                && let Some(admission) = self.inbound_admission.as_mut()
+                && !admission.admit(peer_ip)
+            {
+                let suppressed = admission.should_log();
+                self.metrics
+                    .record_inbound_connection_drop(InboundConnectionDropReason::RateLimited);
+                if let Some(suppressed) = suppressed {
+                    warn!(
+                        %peer_ip,
+                        suppressed,
+                        "inbound accept rate exceeded for source aggregate, dropping connection"
+                    );
+                }
+                return;
+            }
             if let Some(range) = self.match_dynamic_range(peer_ip) {
                 // Check dynamic peer limit
                 if self.dynamic_peer_count >= self.dynamic_neighbor_limit as usize {
                     self.metrics.record_dynamic_neighbor_limit_rejection();
+                    self.metrics
+                        .record_inbound_connection_drop(InboundConnectionDropReason::DynamicLimit);
                     warn!(
                         %peer_ip,
                         limit = self.dynamic_neighbor_limit,
@@ -569,6 +594,8 @@ impl PeerManager {
             }
 
             // No dynamic range match either — drop with hint
+            self.metrics
+                .record_inbound_connection_drop(InboundConnectionDropReason::Unconfigured);
             warn!(
                 %peer_ip,
                 hint = %format_args!(

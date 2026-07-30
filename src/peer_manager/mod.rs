@@ -31,6 +31,7 @@ use crate::policy_admin::{
     neighbor_policy_chains_from_config,
 };
 
+mod admission;
 mod bfd;
 mod dynamic;
 mod events;
@@ -318,6 +319,10 @@ pub struct PeerManager {
     dynamic_peer_count: usize,
     /// Maximum dynamic peers allowed. Default 100.
     dynamic_neighbor_limit: u32,
+    /// ADR-0120 per-source accept-rate limiter. `None` when
+    /// `[inbound_admission]` is disabled (the default); built once at
+    /// startup — every field is restart-required.
+    inbound_admission: Option<admission::InboundAdmission>,
     /// Dead-lettered hot-apply / Route Refresh / `GShut` intent from dynamic
     /// peers auto-removed by `BackToIdle`. Restored on the next inbound
     /// from the same address. Bounded at `dynamic_neighbor_limit` so a
@@ -464,6 +469,7 @@ impl PeerManager {
                 bfd_profiles: Vec::new(),
                 apply_bum_enforcement: false,
                 event_history: crate::config::EventHistoryConfig::default(),
+                inbound_admission: crate::config::InboundAdmissionConfig::default(),
             },
         )
     }
@@ -609,6 +615,9 @@ impl PeerManager {
             dynamic_ranges: Self::parse_dynamic_ranges(&current_config),
             dynamic_peer_count: 0,
             dynamic_neighbor_limit: current_config.effective_dynamic_neighbor_limit(),
+            inbound_admission: admission::InboundAdmission::from_config(
+                &current_config.inbound_admission,
+            ),
             dead_lettered_pending: HashMap::new(),
             dead_lettered_pending_order: VecDeque::new(),
             next_session_id: 1,

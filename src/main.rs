@@ -6937,6 +6937,7 @@ tcp_ao = {{ key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)"
             bfd_profiles: Vec::new(),
             apply_bum_enforcement: false,
             event_history: crate::config::EventHistoryConfig::default(),
+            inbound_admission: crate::config::InboundAdmissionConfig::default(),
         };
 
         assert_eq!(max_gr_restart_time_secs(&config), Some(180));
