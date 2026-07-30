@@ -1,4 +1,5 @@
 use super::*;
+use crate::best_path::BestPathReason;
 
 /// Helper: build an IPv6 route with specific peer, AS path, and
 /// `LOCAL_PREF` for dual-stack Add-Path tests.
@@ -118,6 +119,145 @@ async fn multipath_send_advertises_multiple_routes() {
     // Higher LOCAL_PREF route should be path_id 1 (best)
     let best = update.announce.iter().find(|r| r.path_id == 1).unwrap();
     assert_eq!(best.next_hop, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "one live session proves initial rank, payload replacement, explain, and withdrawal compaction"
+)]
+#[tokio::test]
+async fn same_peer_add_path_rank_is_stable_across_order_and_replacement() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 7, 1));
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 7, 2));
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
+
+    let mut path_7 = make_multipath_route(prefix, Ipv4Addr::new(10, 0, 7, 1), vec![65001], 100);
+    path_7.path_id = 7;
+    path_7.next_hop = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7));
+    let mut path_9 = path_7.clone();
+    path_9.path_id = 9;
+    path_9.next_hop = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 9));
+
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![path_9.clone(), path_7.clone()],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let (out_tx, mut out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
+        interpret_rfc1997: true,
+        session_id: 0,
+        peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        add_path_send_families: ipv4_sendable(),
+        add_path_send_max: 2,
+        negotiated_orf_recv: vec![],
+        negotiated_llgr_families: vec![],
+    })
+    .await
+    .unwrap();
+
+    let initial = out_rx.recv().await.unwrap();
+    assert_eq!(initial.announce.len(), 2);
+    assert_eq!(
+        initial
+            .announce
+            .iter()
+            .find(|route| route.path_id == 1)
+            .unwrap()
+            .next_hop,
+        path_7.next_hop,
+        "reverse insertion order must not assign rank 1 to path 9"
+    );
+    drain_eor(&mut out_rx).await;
+
+    let explain = query_explain_best_path_for_peer(&tx, Prefix::V4(prefix), target)
+        .await
+        .unwrap();
+    assert_eq!(explain.best.as_ref().unwrap().path_id, 7);
+    assert_eq!(explain.best_reason, Some(BestPathReason::LowerPathId));
+    assert_eq!(explain.best_reason_detail, "path_id 7 < 9");
+    assert_eq!(
+        explain.candidates[0].vs_best_reason,
+        BestPathReason::LowerPathId
+    );
+    assert_eq!(explain.candidates[0].vs_best_detail, "path_id 9 > 7");
+    assert_eq!(explain.candidates[0].advertised_path_id, 2);
+
+    path_7.next_hop = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 77));
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![path_7.clone()],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let _ = query_best_routes(&tx).await;
+    let replacement = tokio::time::timeout(Duration::from_secs(2), out_rx.recv())
+        .await
+        .expect("replacement update must arrive")
+        .expect("outbound channel must stay open");
+    assert_eq!(replacement.announce.len(), 1);
+    assert_eq!(replacement.announce[0].path_id, 1);
+    assert_eq!(replacement.announce[0].next_hop, path_7.next_hop);
+    assert!(replacement.withdraw.is_empty());
+    assert!(
+        matches!(out_rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+        "replacement must produce one exact outbound update"
+    );
+
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![],
+        withdrawn: vec![(Prefix::V4(prefix), 7)],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let _ = query_best_routes(&tx).await;
+    let reranked = tokio::time::timeout(Duration::from_secs(2), out_rx.recv())
+        .await
+        .expect("rerank update must arrive")
+        .expect("outbound channel must stay open");
+    assert_eq!(reranked.announce.len(), 1);
+    assert_eq!(reranked.announce[0].path_id, 1);
+    assert_eq!(reranked.announce[0].next_hop, path_9.next_hop);
+    assert_eq!(reranked.withdraw, vec![(Prefix::V4(prefix), 2)]);
+    assert!(
+        matches!(out_rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+        "withdrawal must produce one exact rerank update"
+    );
 
     drop(tx);
     handle.await.unwrap();

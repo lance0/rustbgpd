@@ -499,8 +499,10 @@ When all caches are down, the VRP table is empty and all routes have
 validation state `NotFound`. If your policy denies `NotFound` routes, this
 will cause route drops. The recommended policy is to deny `Invalid` and
 prefer `Valid`, leaving `NotFound` as a neutral fallback.
-`rbgp doctor` probes every configured cache
-(`rpki.cache.<addr>.reachable`) and goes red on an unreachable one.
+`rbgp doctor` probes every configured cache from the `rbgp` process
+(`rpki.cache.<addr>.reachable_from_cli`). That raw connect is explicitly a
+CLI-network-vantage check and warns on failure; use the daemon-side
+`rpki.vrp_table` check to assess whether rustbgpd has synchronized VRPs.
 
 ### BMP collector unreachable
 
@@ -1405,9 +1407,9 @@ First-deploy checks (network probes are bounded to a 2s timeout; all are read-on
 |-------|----------------|-------------------|
 | `bgp.listener` | Daemon up: TCP connect to the BGP listen port. Daemon down: test-bind the port and release it | `CAP_NET_BIND_SERVICE` for ports below 1024; port-in-use is yellow (an unreachable daemon may hold it) |
 | `rpki.vrp_table` | With configured caches and a reachable daemon, sums the complete IPv4 + IPv6 `bgp_rpki_vrp_count` snapshot | yellow when the merged table is zero, missing, malformed, or unavailable; verify RTR synchronization and `/metrics` |
-| `rpki.cache.<addr>.reachable` | TCP connect to each `[rpki] cache_servers` entry | origin validation stays degraded until the cache connects |
-| `bmp.collector.<addr>.reachable` | TCP connect to each `[bmp] collectors` entry | monitoring export is down; the daemon retries on its reconnect interval |
-| `gnmi_dialout.<name>.reachable` | TCP connect to each `[gnmi_dialout] targets` entry | dial-out telemetry backs off and retries |
+| `rpki.cache.<addr>.reachable_from_cli` | TCP connect from the `rbgp` process to each `[rpki] cache_servers` entry | yellow on failure because this is CLI-network-vantage evidence, not daemon-side connectivity; use `rpki.vrp_table` for the daemon's VRP state |
+| `bmp.collector.<addr>.reachable_from_cli` | TCP connect from the `rbgp` process to each `[bmp] collectors` entry | yellow on failure because the daemon may have a different network vantage; inspect rustbgpd and collector logs for actual export state |
+| `gnmi_dialout.<name>.reachable_from_cli` | TCP connect from the `rbgp` process to each `[gnmi_dialout] targets` entry | yellow on failure because the daemon may have a different network vantage; inspect `gnmi_dialout_connected` and daemon logs for actual dial-out state |
 | `state_dir.writable` / `state_dir.disk` | `runtime_state_dir` writability and free space (yellow < 1 GiB, red < 100 MiB) | journal, MRT dumps, crash reports, and the event-history DB write there |
 | `host.run_context` | systemd / container / unknown from pid-1 facts | tailors remediation lines (e.g. `LimitNOFILE=` vs container ulimits) |
 | `daemon.config_freshness.<pid>` | config file mtime vs. local daemon start time | yellow when on-disk edits are pending; validate with `rustbgpd --check` then reload with SIGHUP |
