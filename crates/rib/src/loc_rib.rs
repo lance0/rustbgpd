@@ -117,7 +117,7 @@ impl LocRib {
         if let Some(new_best) = best {
             // Detect preference-relevant changes AND same-peer payload
             // churn. `best_path_cmp` compares only the fields that drive
-            // selection and tiebreaks on the peer address, so the same
+            // selection and tiebreaks on route identity, so the same
             // peer re-advertising the prefix with a new next-hop or
             // changed attributes (communities, equal-length AS_PATH
             // content, ...) would compare Equal and the stale payload
@@ -2499,6 +2499,40 @@ mod tests {
         );
         // Same input again — no change.
         assert!(!loc.recompute(prefix, [&r_attr.clone()].into_iter()));
+    }
+
+    #[test]
+    fn unicast_same_peer_add_path_rank_survives_order_and_replacement() {
+        let v4 = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 7, 0), 24);
+        let prefix = Prefix::V4(v4);
+        let mut path_7 = make_route(1, v4, 100);
+        path_7.path_id = 7;
+        path_7.next_hop = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7));
+        let mut path_9 = path_7.clone();
+        path_9.path_id = 9;
+        path_9.next_hop = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 9));
+
+        let mut loc = LocRib::new();
+        assert!(loc.recompute(prefix, [&path_9, &path_7].into_iter()));
+        assert_eq!(loc.get(&prefix).unwrap().path_id, 7);
+        assert!(
+            !loc.recompute(prefix, [&path_7, &path_9].into_iter()),
+            "reversing candidate order must not move the winner"
+        );
+
+        let mut replacement = path_7.clone();
+        replacement.next_hop = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 77));
+        assert!(loc.recompute(prefix, [&path_9, &replacement].into_iter()));
+        assert_eq!(
+            loc.get(&prefix).unwrap().next_hop,
+            replacement.next_hop,
+            "same-identity payload replacement remains the deterministic winner"
+        );
+
+        assert!(loc.recompute(prefix, [&path_9].into_iter()));
+        assert_eq!(loc.get(&prefix).unwrap().path_id, 9);
+        assert!(loc.recompute(prefix, [&replacement, &path_9].into_iter()));
+        assert_eq!(loc.get(&prefix).unwrap().path_id, 7);
     }
 
     /// Regression: `recompute_flowspec` must report change when the same
