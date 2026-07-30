@@ -3192,7 +3192,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-wire"
-version = "0.16.0"
+version = "0.16.1"
 dependencies = [
  "bytes",
  "criterion",
