@@ -58,6 +58,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- CLI policy formatting, config diff/plan, and doctor now fail when their
+  buffered stdout cannot be flushed instead of reporting a successful status.
+
 - RPKI cache endpoints now fail configuration validation unless they are unique
   numeric IPv4 or bracketed IPv6 socket addresses; DNS hostnames and equivalent
   duplicate IPv6 spellings are rejected before startup.
