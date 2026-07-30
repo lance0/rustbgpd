@@ -25,7 +25,7 @@
 
 set -euo pipefail
 
-SOAK_SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SOAK_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SOAK_SCRIPT_DIR/../.." && pwd)"
 TOPOLOGY="${TOPOLOGY:-$REPO_ROOT/tests/soak/soak-inject-churn.clab.yml}"
 
@@ -49,7 +49,6 @@ NEXTHOP="${NEXTHOP:-10.0.0.1}"
 
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
 RUN_DIR="${RUN_DIR_OVERRIDE:-$SOAK_SCRIPT_DIR/runs/soak-inject-churn-$RUN_ID}"
-mkdir -p "$RUN_DIR"
 
 SAMPLES_CSV="$RUN_DIR/samples.csv"
 SOAK_LOG="$RUN_DIR/soak.log"
@@ -58,11 +57,8 @@ RUN_JSON="$RUN_DIR/run.json"
 RUSTBGPD_LOG="$RUN_DIR/rustbgpd.log"
 LIVE_SET_FILE="$RUN_DIR/live-prefix-indexes.txt"
 
-exec > >(tee -a "$SOAK_LOG") 2>&1
-
-# shellcheck source=./host-lock.sh
+# shellcheck source=tests/soak/host-lock.sh
 source "$SOAK_SCRIPT_DIR/host-lock.sh"
-acquire_rustbgpd_host_lock
 
 log() {
     printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"
@@ -103,17 +99,17 @@ wrap_index() {
 rb_inject_add() {
     local prefix=${1:?}
     docker exec "$RUSTBGPD" rbgp -s "$GRPC_ADDR" rib add "$prefix" \
-        --nexthop "$NEXTHOP" >/dev/null 2>&1 || true
+        --nexthop "$NEXTHOP" >/dev/null
 }
 
 rb_inject_del() {
     local prefix=${1:?}
     docker exec "$RUSTBGPD" rbgp -s "$GRPC_ADDR" rib delete "$prefix" \
-        >/dev/null 2>&1 || true
+        >/dev/null
 }
 
 frr_vtysh() {
-    docker exec "$FRR" vtysh -c "$1" 2>/dev/null || true
+    docker exec "$FRR" vtysh -c "$1"
 }
 
 frr_established_seen() {
@@ -143,11 +139,11 @@ prom_scrape() {
     curl -sfm 5 "http://${ip}:9179/metrics" 2>/dev/null || true
 }
 
-prom_extract_or_zero() {
+prom_extract_required() {
     local text="$1" metric="$2"
     printf '%s' "$text" | awk -v m="$metric" '
         $0 ~ "^"m"( |\\{)" { print $NF; found=1; exit }
-        END { if (!found) { print "0" } }
+        END { if (!found) { print "nan" } }
     '
 }
 
@@ -155,8 +151,8 @@ prom_extract_or_zero() {
 prom_extract_sum() {
     local prom="$1" name="$2"
     awk -v n="$name" '
-        $0 ~ "^"n"[{ ]" { s += $NF }
-        END { printf "%d", s+0 }
+        $0 ~ "^"n"[{ ]" { s += $NF; found=1 }
+        END { if (!found) print "nan"; else printf "%d", s }
     ' <<<"$prom"
 }
 
@@ -179,7 +175,23 @@ container_rss_mb() {
 
 frr_route_count() {
     frr_vtysh "show bgp ipv4 unicast" \
-        | grep -c '10\.' || true
+        | awk '/10\\./ {count++} END {print count+0}'
+}
+
+neighbor_state() {
+    docker exec "$RUSTBGPD" rbgp -s "$GRPC_ADDR" neighbor -j |
+        python3 -c 'import json,sys; n=json.load(sys.stdin)[0]; print(n["flap_count"], n["uptime_seconds"])'
+}
+
+wait_final_routes() {
+    local count
+    for _ in $(seq 1 30); do
+        count=$(frr_route_count)
+        [ "$count" -eq "$LIVE_TARGET_PREFIXES" ] && return 0
+        sleep 1
+    done
+    log "ERROR: FRR route count ${count:-unknown}, expected $LIVE_TARGET_PREFIXES"
+    return 1
 }
 
 write_run_json() {
@@ -239,8 +251,6 @@ cleanup() {
     exit "$exit_code"
 }
 
-trap cleanup EXIT INT TERM HUP
-
 validate_config() {
     if [ "$PREFIX_POOL_SIZE" -le "$LIVE_TARGET_PREFIXES" ]; then
         log "ERROR: PREFIX_POOL_SIZE must be greater than LIVE_TARGET_PREFIXES"
@@ -266,8 +276,8 @@ prefill_live_set() {
     log "Prefilling $LIVE_TARGET_PREFIXES injected prefixes"
     local idx
     for idx in $(seq 1 "$LIVE_TARGET_PREFIXES"); do
-        printf '%s\n' "$idx" >>"$LIVE_SET_FILE"
         rb_inject_add "$(format_prefix "$idx")"
+        printf '%s\n' "$idx" >>"$LIVE_SET_FILE"
     done
 }
 
@@ -276,8 +286,8 @@ sample_row() {
     local cycles=${2:?}
     local add_total=${3:?}
     local del_total=${4:?}
-    local prom rss frr_count established intern_size
-    prom=$(prom_scrape)
+    local prom rss frr_count established intern_size flap_count uptime_seconds
+    prom=$(prom_scrape) || prom=""
     rss=$(container_rss_mb)
     frr_count=$(frr_route_count)
     if frr_established_seen; then
@@ -286,7 +296,8 @@ sample_row() {
         established=0
     fi
     intern_size=$(prom_extract_sum "$prom" bgp_rib_attr_intern_global_size)
-    printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+    read -r flap_count uptime_seconds < <(neighbor_state)
+    printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
         "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         "$elapsed" \
         "${rss:-nan}" \
@@ -297,6 +308,8 @@ sample_row() {
         "$cycles" \
         "$add_total" \
         "$del_total" \
+        "$flap_count" \
+        "$uptime_seconds" \
         >>"$SAMPLES_CSV"
 }
 
@@ -317,8 +330,8 @@ run_churn_cycle() {
 
     for i in $(seq 1 "$CHURN_BATCH"); do
         prefix=$(format_prefix "$add_idx")
-        printf '%s\n' "$add_idx" >>"$LIVE_SET_FILE"
         rb_inject_add "$prefix"
+        printf '%s\n' "$add_idx" >>"$LIVE_SET_FILE"
         churn_log "add $prefix"
         add_idx=$(wrap_index $((add_idx + 1)))
     done
@@ -328,9 +341,14 @@ run_churn_cycle() {
 }
 
 main() {
+    mkdir -p "$RUN_DIR"
+    exec > >(tee -a "$SOAK_LOG") 2>&1
+    acquire_rustbgpd_host_lock
+    trap cleanup EXIT INT TERM HUP
     require_tool docker
     require_tool curl
     require_tool awk
+    require_tool python3
     require_container "$RUSTBGPD"
     require_container "$FRR"
     validate_config
@@ -348,7 +366,7 @@ main() {
     wait_established
     prefill_live_set
 
-    echo "timestamp,elapsed_sec,rss_mb,intern_size,live_target,frr_route_count,bgp_established,churn_cycles,add_total,del_total" >"$SAMPLES_CSV"
+    echo "timestamp,elapsed_sec,rss_mb,intern_size,live_target,frr_route_count,bgp_established,churn_cycles,add_total,del_total,flap_count,uptime_seconds" >"$SAMPLES_CSV"
 
     local start_epoch end_epoch next_sample next_churn cycles add_total del_total
     local del_idx_file add_idx_file now
@@ -384,9 +402,12 @@ main() {
     done
 
     local final_elapsed=$(( $(date +%s) - start_epoch ))
+    wait_final_routes
     sample_row "$final_elapsed" "$cycles" "$add_total" "$del_total"
     log "soak loop completed; $cycles churn cycles; final samples in $SAMPLES_CSV"
-    log "Run the analyzer: python3 tests/soak/analyze-soak-inject-churn.py $RUN_DIR"
+    python3 "$SOAK_SCRIPT_DIR/analyze-soak-inject-churn.py" "$RUN_DIR" --output "$RUN_DIR/verdict.json"
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi

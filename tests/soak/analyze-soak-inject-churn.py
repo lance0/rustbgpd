@@ -23,6 +23,12 @@ import math
 import sys
 from typing import Optional
 
+REQUIRED = {
+    "elapsed_sec", "rss_mb", "intern_size", "live_target", "frr_route_count",
+    "bgp_established", "churn_cycles", "add_total", "del_total",
+    "flap_count", "uptime_seconds",
+}
+
 
 def safe_float(value: str | None) -> Optional[float]:
     if value is None or value in ("", "NaN", "nan"):
@@ -51,6 +57,8 @@ def analyze(rows: list[dict[str, str]]) -> dict:
     intern_pts: list[tuple[float, float]] = []
     established_final: list[str] = []
     max_cycles = 0
+    first_flaps = first_uptime = final_flaps = final_uptime = 0
+    final_target = final_routes = 0
 
     for row in rows:
         e = safe_float(row.get("elapsed_sec"))
@@ -64,6 +72,13 @@ def analyze(rows: list[dict[str, str]]) -> dict:
         if c is not None:
             max_cycles = max(max_cycles, int(c))
         established_final.append(row.get("bgp_established", ""))
+        flaps = int(safe_float(row.get("flap_count")))
+        uptime = int(safe_float(row.get("uptime_seconds")))
+        if len(established_final) == 1:
+            first_flaps, first_uptime = flaps, uptime
+        final_flaps, final_uptime = flaps, uptime
+        final_target = int(safe_float(row.get("live_target")))
+        final_routes = int(safe_float(row.get("frr_route_count")))
 
     rss_slope = (
         linreg([e / 3600 for e, _ in rss_pts], [r for _, r in rss_pts])
@@ -105,6 +120,15 @@ def analyze(rows: list[dict[str, str]]) -> dict:
             "value": final_established,
             "pass": final_established,
         },
+        "final_consumer_convergence": {
+            "value": {"target": final_target, "routes": final_routes},
+            "pass": final_target > 0 and final_routes == final_target,
+        },
+        "session_continuity": {
+            "value": {"flap_delta": final_flaps - first_flaps,
+                      "uptime_delta": final_uptime - first_uptime},
+            "pass": final_flaps == first_flaps and final_uptime >= first_uptime,
+        },
     }
 
     all_pass = all(g["pass"] for g in gates.values())
@@ -128,7 +152,12 @@ def main() -> int:
     csv_path = f"{args.run_dir}/samples.csv"
     try:
         with open(csv_path, newline="") as f:
-            rows = list(csv.DictReader(f))
+            reader = csv.DictReader(f)
+            missing = REQUIRED - set(reader.fieldnames or [])
+            if missing:
+                print(f"error: missing required columns: {', '.join(sorted(missing))}", file=sys.stderr)
+                return 2
+            rows = list(reader)
     except OSError as e:
         print(f"error reading {csv_path}: {e}", file=sys.stderr)
         return 2
@@ -136,6 +165,14 @@ def main() -> int:
     if not rows:
         print("error: samples.csv is empty", file=sys.stderr)
         return 2
+    for line, row in enumerate(rows, 2):
+        for column in REQUIRED - {"bgp_established"}:
+            if safe_float(row.get(column)) is None:
+                print(f"error: row {line}: invalid {column}", file=sys.stderr)
+                return 2
+        if row["bgp_established"] not in {"0", "1"}:
+            print(f"error: row {line}: invalid bgp_established", file=sys.stderr)
+            return 2
 
     result = analyze(rows)
     out = json.dumps(result, indent=2)

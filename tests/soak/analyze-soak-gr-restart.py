@@ -25,6 +25,11 @@ import math
 import sys
 from typing import Optional
 
+REQUIRED = {
+    "elapsed_sec", "rss_mb", "intern_size", "gr_active_peers",
+    "gr_stale_routes", "bgp_established", "restart_cycles",
+}
+
 
 def safe_float(value: str | None) -> Optional[float]:
     if value is None or value in ("", "NaN", "nan"):
@@ -54,6 +59,8 @@ def analyze(rows: list[dict[str, str]]) -> dict:
     intern = []
     established_final = []
     max_cycles = 0
+    saw_positive_phase = False
+    cleared_after_positive = False
 
     for row in rows:
         e = safe_float(row.get("elapsed_sec"))
@@ -70,6 +77,11 @@ def analyze(rows: list[dict[str, str]]) -> dict:
             max_cycles = max(max_cycles, int(c))
         est = row.get("bgp_established")
         established_final.append(est)
+        active = safe_float(row.get("gr_active_peers"))
+        stale = safe_float(row.get("gr_stale_routes"))
+        saw_positive_phase = saw_positive_phase or (active > 0 and stale > 0)
+        if saw_positive_phase and active == 0 and stale == 0:
+            cleared_after_positive = True
 
     # Convert to hours for slope-per-hour.
     rss_slope = linreg([e / 3600 for e, _ in rss], [r for _, r in rss]) if rss else float("nan")
@@ -110,6 +122,10 @@ def analyze(rows: list[dict[str, str]]) -> dict:
             "value": final_established,
             "pass": final_established,
         },
+        "gr_active_stale_then_clear": {
+            "value": cleared_after_positive,
+            "pass": cleared_after_positive,
+        },
     }
 
     all_pass = all(g["pass"] for g in gates.values())
@@ -133,7 +149,12 @@ def main() -> int:
     csv_path = f"{args.run_dir}/samples.csv"
     try:
         with open(csv_path, newline="") as f:
-            rows = list(csv.DictReader(f))
+            reader = csv.DictReader(f)
+            missing = REQUIRED - set(reader.fieldnames or [])
+            if missing:
+                print(f"error: missing required columns: {', '.join(sorted(missing))}", file=sys.stderr)
+                return 2
+            rows = list(reader)
     except OSError as e:
         print(f"error reading {csv_path}: {e}", file=sys.stderr)
         return 2
@@ -141,6 +162,14 @@ def main() -> int:
     if not rows:
         print("error: samples.csv is empty", file=sys.stderr)
         return 2
+    for line, row in enumerate(rows, 2):
+        for column in REQUIRED - {"bgp_established"}:
+            if safe_float(row.get(column)) is None:
+                print(f"error: row {line}: invalid {column}", file=sys.stderr)
+                return 2
+        if row["bgp_established"] not in {"0", "1"}:
+            print(f"error: row {line}: invalid bgp_established", file=sys.stderr)
+            return 2
 
     result = analyze(rows)
     out = json.dumps(result, indent=2)

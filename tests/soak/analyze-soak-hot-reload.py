@@ -24,6 +24,11 @@ import math
 import sys
 from typing import Optional
 
+REQUIRED = {
+    "elapsed_sec", "rss_mb", "intern_size", "bgp_established",
+    "apply_cycles", "apply_ok", "apply_fail", "flap_count", "uptime_seconds",
+}
+
 
 def safe_float(value: str | None) -> Optional[float]:
     if value is None or value in ("", "NaN", "nan"):
@@ -59,6 +64,7 @@ def analyze(rows: list[dict[str, str]]) -> dict:
     max_cycles = 0
     final_ok = 0
     final_fail = 0
+    first_flaps = first_uptime = final_flaps = final_uptime = 0
 
     for row in rows:
         e = safe_float(row.get("elapsed_sec"))
@@ -78,6 +84,11 @@ def analyze(rows: list[dict[str, str]]) -> dict:
         if fail is not None:
             final_fail = fail
         established_final.append(row.get("bgp_established", ""))
+        flaps = safe_int(row.get("flap_count"))
+        uptime = safe_int(row.get("uptime_seconds"))
+        if not rss_pts or len(established_final) == 1:
+            first_flaps, first_uptime = flaps, uptime
+        final_flaps, final_uptime = flaps, uptime
 
     rss_slope = (
         linreg([e / 3600 for e, _ in rss_pts], [r for _, r in rss_pts])
@@ -95,8 +106,6 @@ def analyze(rows: list[dict[str, str]]) -> dict:
     final_established = tail.count("1") > 0 if tail else False
 
     total_applies = final_ok + final_fail
-    fail_rate = (final_fail / total_applies) if total_applies > 0 else 1.0
-
     gates = {
         "intern_slope_per_hour": {
             "value": intern_slope if not math.isnan(intern_slope) else None,
@@ -116,16 +125,21 @@ def analyze(rows: list[dict[str, str]]) -> dict:
         "apply_cycles": {
             "value": max_cycles,
             "limit": 1,
-            "pass": max_cycles >= 1,
+            "pass": max_cycles >= 1 and max_cycles == total_applies,
         },
         "final_session_established": {
             "value": final_established,
             "pass": final_established,
         },
-        "apply_failure_rate": {
-            "value": fail_rate,
-            "limit": 0.5,
-            "pass": fail_rate < 0.5,
+        "apply_failures": {
+            "value": final_fail,
+            "limit": 0,
+            "pass": final_ok >= 1 and final_fail == 0,
+        },
+        "session_continuity": {
+            "value": {"flap_delta": final_flaps - first_flaps,
+                      "uptime_delta": final_uptime - first_uptime},
+            "pass": final_flaps == first_flaps and final_uptime >= first_uptime,
         },
     }
 
@@ -135,7 +149,6 @@ def analyze(rows: list[dict[str, str]]) -> dict:
         "apply_cycles": max_cycles,
         "apply_ok": final_ok,
         "apply_fail": final_fail,
-        "apply_failure_rate": fail_rate,
         "intern_slope_per_hour": intern_slope if not math.isnan(intern_slope) else None,
         "rss_slope_per_hour": rss_slope if not math.isnan(rss_slope) else None,
         "peak_rss_mb": peak_rss if not math.isnan(peak_rss) else None,
@@ -153,7 +166,12 @@ def main() -> int:
     csv_path = f"{args.run_dir}/samples.csv"
     try:
         with open(csv_path, newline="") as f:
-            rows = list(csv.DictReader(f))
+            reader = csv.DictReader(f)
+            missing = REQUIRED - set(reader.fieldnames or [])
+            if missing:
+                print(f"error: missing required columns: {', '.join(sorted(missing))}", file=sys.stderr)
+                return 2
+            rows = list(reader)
     except OSError as e:
         print(f"error reading {csv_path}: {e}", file=sys.stderr)
         return 2
@@ -161,6 +179,14 @@ def main() -> int:
     if not rows:
         print("error: samples.csv is empty", file=sys.stderr)
         return 2
+    for line, row in enumerate(rows, 2):
+        for column in REQUIRED - {"bgp_established"}:
+            if safe_float(row.get(column)) is None:
+                print(f"error: row {line}: invalid {column}", file=sys.stderr)
+                return 2
+        if row["bgp_established"] not in {"0", "1"}:
+            print(f"error: row {line}: invalid bgp_established", file=sys.stderr)
+            return 2
 
     result = analyze(rows)
     out = json.dumps(result, indent=2)
