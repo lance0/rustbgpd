@@ -2774,6 +2774,54 @@
           "refId": "D"
         }
       ]
+    },
+    {
+      "id": 64,
+      "type": "timeseries",
+      "title": "Dynamic-neighbor admission capacity",
+      "description": "Process-global dynamic-neighbor slots per selected scrape instance. The daemon metrics are label-free: no listener- or range-level breakdown exists.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 169 },
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 0, "min": 0 }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "bgp_dynamic_neighbor_slots_used{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} used",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "bgp_dynamic_neighbor_slots_limit{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} limit",
+          "refId": "B"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "bgp_dynamic_neighbor_slots_headroom{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} headroom",
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "id": 65,
+      "type": "timeseries",
+      "title": "Dynamic-neighbor admission rejections",
+      "description": "Per-instance rate of matching inbound dynamic connections rejected because the process-global slot limit was full. Zero-valued series are suppressed.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 169 },
+      "fieldConfig": { "defaults": { "unit": "ops", "min": 0 }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "rate(bgp_dynamic_neighbor_limit_rejections_total{instance=~\"$instance\"}[$__rate_interval]) > 0",
+          "legendFormat": "{{instance}} rejected",
+          "refId": "A"
+        }
+      ]
     }
   ]
 }
