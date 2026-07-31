@@ -33,7 +33,10 @@ Cells:
 
 The dataset is derived only from (n_members, total_prefixes, seed, list
 bounds, changed fraction) — never from the cell — so all four cells filter
-the SAME member/prefix data. Generation B replaces the first `delta` padding
+the SAME member/prefix data. Path-hiding and churn-admission are recorded
+emission modes, not canonical member-dataset inputs; disabling churn admission
+removes the harness's 172.16-23.x blocks from emitted policies only. Generation
+B replaces the first `delta` padding
 prefixes of each changed member's list with fresh ones (content-real,
 output-neutral: announced and churn prefixes are never touched) and swaps the
 export marker community 65400:1000 -> 65400:2000, which forces the full
@@ -48,7 +51,7 @@ Usage:
     gen-irr-scenario.py <cell> <n_members> <total_prefixes> <out_dir>
         [--port 1790] [--seed 61] [--min-list 1000] [--max-list 40000]
         [--changed-fraction 0.1] [--render-bin PATH] [--threads 8]
-        [--conf-dir DIR]
+        [--conf-dir DIR] [--path-hiding true|false] [--admit-churn true|false]
 
 Emits into <out_dir> (per cell):
   rustbgpd      config.toml, member.rpol (live, = gen-a), gen-a.rpol,
@@ -84,6 +87,7 @@ PADDING_SPACE = 70 * 65536
 # 172.16.0.0/12 is deliberately absent (churn range, see module docstring).
 BOGONS_V4 = ["10.0.0.0/8", "192.168.0.0/16"]
 MAX_AS_PATH_LEN = 32
+CHURN_PREFIX_STEMS = tuple(f"172.{16 + churner}." for churner in range(CHURNERS))
 
 
 def stub_addr(i: int) -> str:
@@ -120,6 +124,13 @@ class Member:
     @property
     def changed(self) -> bool:
         return self.list_a != self.list_b
+
+
+def policy_prefixes(member: Member, gen: str, admit_churn: bool) -> list[str]:
+    prefixes = member.prefixes(gen)
+    if admit_churn:
+        return prefixes
+    return [prefix for prefix in prefixes if not prefix.startswith(CHURN_PREFIX_STEMS)]
 
 
 def build_dataset(args) -> list[Member]:
@@ -171,6 +182,7 @@ def write_manifest(out: pathlib.Path, args, members, files: list[str]) -> None:
     dataset_digest = hashlib.sha256()
     for member in members:
         dataset_digest.update(canonical_member_record(member))
+    path_hiding_applicable = args.cell in ("rustbgpd", "rustbgpd-txn")
     manifest = {
         "cell": args.cell,
         "n_members": args.n_members,
@@ -179,9 +191,15 @@ def write_manifest(out: pathlib.Path, args, members, files: list[str]) -> None:
         "min_list": args.min_list,
         "max_list": args.max_list,
         "changed_fraction": args.changed_fraction,
+        "path_hiding": args.path_hiding if path_hiding_applicable else None,
+        "path_hiding_requested": args.path_hiding,
+        "path_hiding_applicable": path_hiding_applicable,
+        "admit_churn": args.admit_churn,
         "dataset_sha256": dataset_digest.hexdigest(),
-        "list_sizes": [len(m.list_a) for m in members],
-        "total_filter_entries": sum(len(m.list_a) for m in members),
+        "list_sizes": [len(policy_prefixes(m, "a", args.admit_churn)) for m in members],
+        "total_filter_entries": sum(
+            len(policy_prefixes(m, "a", args.admit_churn)) for m in members
+        ),
         "changed_members": [m.idx for m in members if m.changed],
         "runtime_files": files,
         "file_bytes": {f: (out / f).stat().st_size for f in files},
@@ -192,7 +210,9 @@ def write_manifest(out: pathlib.Path, args, members, files: list[str]) -> None:
 # --- rustbgpd (SIGHUP) cell -------------------------------------------------
 
 
-def context_doc(members: list[Member], gen: str) -> dict:
+def context_doc(
+    members: list[Member], gen: str, path_hiding: bool, admit_churn: bool
+) -> dict:
     """Synthetic `arouteserver template-context` single-document form.
 
     Modeled on tools/rs-config-render/tests/fixtures/context-small.yml (the
@@ -215,7 +235,7 @@ def context_doc(members: list[Member], gen: str) -> dict:
                     "length": int(p.split("/")[1]),
                     "exact": True,
                 }
-                for p in m.prefixes(gen)
+                for p in policy_prefixes(m, gen, admit_churn)
             ],
         }
         clients.append(
@@ -256,7 +276,7 @@ def context_doc(members: list[Member], gen: str) -> dict:
             "rs_as": RS_ASN,
             "router_id": "10.0.0.1",
             "prepend_rs_as": False,
-            "path_hiding": True,
+            "path_hiding": path_hiding,
             "passive": True,
             "gtsm": False,
             "multihop": None,
@@ -396,7 +416,9 @@ def emit_rustbgpd(args, members: list[Member], out: pathlib.Path) -> list[str]:
     check_sun_len(rundir)
     for gen in ("a", "b"):
         ctx = out / f"context-{gen}.json"
-        ctx.write_text(json.dumps(context_doc(members, gen)))
+        ctx.write_text(
+            json.dumps(context_doc(members, gen, args.path_hiding, args.admit_churn))
+        )
         render_dir = out / f"render-{gen}"
         subprocess.run(
             [
@@ -494,7 +516,7 @@ def txn_config(args, members: list[Member], gen: str, rundir: pathlib.Path) -> s
             f"[policy.definitions.m{m.idx}-prefixes]",
             'default_action = "deny"',
         ]
-        for p in m.prefixes(gen):
+        for p in policy_prefixes(m, gen, args.admit_churn):
             lines += [
                 f"[[policy.definitions.m{m.idx}-prefixes.statements]]",
                 'action = "permit"',
@@ -507,7 +529,7 @@ def txn_config(args, members: list[Member], gen: str, rundir: pathlib.Path) -> s
             f'address = "{m.addr}"',
             f"remote_asn = {m.asn}",
             "route_server_client = true",
-            "per_client_best = true",
+            *(["per_client_best = true"] if args.path_hiding else []),
             'families = ["ipv4_unicast"]',
             "hold_time = 180",
             f'import_policy_chain = ["irr-hygiene", "m{m.idx}-origin", "m{m.idx}-prefixes"]',
@@ -530,7 +552,7 @@ def emit_txn(args, members: list[Member], out: pathlib.Path) -> list[str]:
 # --- BIRD cell ---------------------------------------------------------------
 
 
-def bird_gen_conf(members: list[Member], gen: str) -> str:
+def bird_gen_conf(members: list[Member], gen: str, admit_churn: bool) -> str:
     out = [
         "# IRR reload-matrix policy generation - generated by gen-irr-scenario.py.",
         "# Swapped over gen.conf, then `birdc configure`. One prefix-set define +",
@@ -547,7 +569,7 @@ def bird_gen_conf(members: list[Member], gen: str) -> str:
         "",
     ]
     for m in members:
-        prefixes = m.prefixes(gen)
+        prefixes = policy_prefixes(m, gen, admit_churn)
         out.append(f"define M{m.idx}_PFX = [")
         for k in range(0, len(prefixes), 8):
             row = ", ".join(prefixes[k : k + 8])
@@ -569,7 +591,9 @@ def bird_gen_conf(members: list[Member], gen: str) -> str:
 def emit_bird(args, members: list[Member], out: pathlib.Path) -> list[str]:
     conf_dir = args.conf_dir or "/etc/bird"
     for gen in ("a", "b"):
-        (out / f"gen-{gen}.conf").write_text(bird_gen_conf(members, gen))
+        (out / f"gen-{gen}.conf").write_text(
+            bird_gen_conf(members, gen, args.admit_churn)
+        )
     (out / "gen.conf").write_text((out / "gen-a.conf").read_text())
     config = [
         "# IRR reload-matrix BIRD route server - generated by gen-irr-scenario.py.",
@@ -622,7 +646,7 @@ def emit_bird(args, members: list[Member], out: pathlib.Path) -> list[str]:
 # --- OpenBGPD cell -----------------------------------------------------------
 
 
-def obgpd_gen_conf(members: list[Member], gen: str) -> str:
+def obgpd_gen_conf(members: list[Member], gen: str, admit_churn: bool) -> str:
     out = [
         "# IRR reload-matrix policy generation - generated by gen-irr-scenario.py.",
         "# Swapped over gen.conf, then `bgpctl reload`. Prefix-sets first, then",
@@ -632,7 +656,7 @@ def obgpd_gen_conf(members: list[Member], gen: str) -> str:
         "",
     ]
     for m in members:
-        prefixes = m.prefixes(gen)
+        prefixes = policy_prefixes(m, gen, admit_churn)
         out.append(f"prefix-set ps{m.idx} {{")
         for k in range(0, len(prefixes), 8):
             out.append("\t" + " ".join(prefixes[k : k + 8]))
@@ -656,7 +680,9 @@ def obgpd_gen_conf(members: list[Member], gen: str) -> str:
 def emit_obgpd(args, members: list[Member], out: pathlib.Path) -> list[str]:
     conf_dir = args.conf_dir or "/etc/bgpd"
     for gen in ("a", "b"):
-        (out / f"gen-{gen}.conf").write_text(obgpd_gen_conf(members, gen))
+        (out / f"gen-{gen}.conf").write_text(
+            obgpd_gen_conf(members, gen, args.admit_churn)
+        )
     (out / "gen.conf").write_text((out / "gen-a.conf").read_text())
     config = [
         "# IRR reload-matrix OpenBGPD route server - generated by gen-irr-scenario.py.",
@@ -719,11 +745,25 @@ def main() -> None:
     parser.add_argument("--threads", type=int, default=8, help="BIRD threads knob")
     parser.add_argument("--conf-dir", help="config dir as seen by the running daemon")
     parser.add_argument(
+        "--path-hiding",
+        choices=("true", "false"),
+        default="true",
+        help="render per-client best-path mitigation (default: true)",
+    )
+    parser.add_argument(
+        "--admit-churn",
+        choices=("true", "false"),
+        default="true",
+        help="include harness churn blocks in emitted import policies (default: true)",
+    )
+    parser.add_argument(
         "--canonical-dataset-out",
         type=pathlib.Path,
         help="test/debug output: stream the exact cell-independent digest input",
     )
     args = parser.parse_args()
+    args.path_hiding = args.path_hiding == "true"
+    args.admit_churn = args.admit_churn == "true"
 
     if args.n_members < CHURNERS:
         sys.exit(f"n_members must be >= {CHURNERS} (harness churner contract)")
@@ -740,7 +780,7 @@ def main() -> None:
                 canonical.write(canonical_member_record(member))
     files = EMITTERS[args.cell](args, members, args.out_dir)
     write_manifest(args.out_dir, args, members, files)
-    total_entries = sum(len(m.list_a) for m in members)
+    total_entries = sum(len(policy_prefixes(m, "a", args.admit_churn)) for m in members)
     swapped = files[1]  # the live swap file in every cell's roster
     print(
         f"wrote {args.out_dir.resolve()} cell={args.cell} members={args.n_members} "
