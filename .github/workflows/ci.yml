@@ -1,5 +1,9 @@
 name: CI
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 # Placed above `on:` so the trigger-contract self-check below (which
 # asserts the exact `on:`..`jobs:` region) stays byte-stable.
 permissions:
@@ -62,6 +66,10 @@ jobs:
           bash -n .github/scripts/install-grpcurl.sh
           shellcheck .github/scripts/install-grpcurl.sh
           bash .github/scripts/install-grpcurl.sh --self-test
+      - name: Prove CI image-primer contract
+        run: |
+          python3 -m unittest -v scripts/test_check_ci_image_primer_contract.py
+          python3 scripts/check_ci_image_primer_contract.py
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # stable
         with:
           toolchain: stable
