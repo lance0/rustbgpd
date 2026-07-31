@@ -142,6 +142,7 @@ struct GenerationProgress {
     excluded_start: usize,
     excluded_end: usize,
     completed_at_us: Option<u64>,
+    first_marker_base_at_us: Option<u64>,
 }
 
 impl GenerationProgress {
@@ -154,6 +155,7 @@ impl GenerationProgress {
         self.excluded_start = usize::try_from(excluded_start).unwrap();
         self.excluded_end = usize::try_from(excluded_start + excluded_len).unwrap();
         self.completed_at_us = None;
+        self.first_marker_base_at_us = None;
     }
 
     fn observe(&mut self, prefix_index: usize, t_us: u64) {
@@ -167,6 +169,9 @@ impl GenerationProgress {
         };
         if *slot & bit != 0 {
             return;
+        }
+        if self.first_marker_base_at_us.is_none() {
+            self.first_marker_base_at_us = Some(t_us);
         }
         *slot |= bit;
         self.unique += 1;
@@ -240,7 +245,7 @@ fn observe_generation(
     progress: &mut GenerationProgress,
     expected_community: u32,
     communities: &[u32],
-    announced: &[Ipv4Prefix],
+    announced: impl IntoIterator<Item = Ipv4Prefix>,
     total_prefixes: u32,
     t_us: u64,
 ) {
@@ -248,7 +253,7 @@ fn observe_generation(
         return;
     }
     for prefix in announced {
-        if let Some(index) = base_prefix_index(*prefix, total_prefixes) {
+        if let Some(index) = base_prefix_index(prefix, total_prefixes) {
             progress.observe(index, t_us);
         }
     }
@@ -545,16 +550,17 @@ async fn establish_stub(ctx: Arc<Ctx>, i: u32) -> Result<Stub, String> {
                             }
 
                             let expected = ob.expected_community.load(Ordering::Acquire);
-                            if base > 0 && expected != 0 && communities.contains(&expected) {
+                            if base > 0 && expected != 0 {
                                 let mut generation = ob.generation.lock().unwrap();
                                 if ob.expected_community.load(Ordering::Acquire) == expected {
-                                    for e in &parsed.announced {
-                                        if let Some(index) =
-                                            base_prefix_index(e.prefix, total_prefixes)
-                                        {
-                                            generation.observe(index, t_us);
-                                        }
-                                    }
+                                    observe_generation(
+                                        &mut generation,
+                                        expected,
+                                        communities,
+                                        parsed.announced.iter().map(|entry| entry.prefix),
+                                        total_prefixes,
+                                        t_us,
+                                    );
                                 }
                             }
                         }
@@ -1166,8 +1172,8 @@ fn main() {
              completion_p50_s,completion_p95_s,completion_max_s,\
              changed_maxgap_p50_ms,changed_maxgap_p95_ms,changed_maxgap_max_ms,\
              all_observer_maxgap_p50_ms,all_observer_maxgap_p95_ms,\
-             all_observer_maxgap_max_ms,changed_first_update_p50_ms,\
-             changed_first_update_p95_ms,changed_first_update_max_ms,\
+             all_observer_maxgap_max_ms,changed_first_generation_update_p50_ms,\
+             changed_first_generation_update_p95_ms,changed_first_generation_update_max_ms,\
              rss_before_mib,rss_after_mib,stable_marker_peers,sessions_up,parse_errors"
         );
 
@@ -1194,11 +1200,16 @@ fn main() {
                     u32::try_from(i).unwrap() * per_peer,
                     per_peer,
                 );
+            }
+            // The tracker stays disarmed until its trigger timestamp exists,
+            // so a delayed UPDATE from an older A/B generation cannot become
+            // pre-trigger evidence (or underflow the duration below).
+            let t_hup = now_us(&ctx);
+            for observer in ctx.obs.iter().take(changed_peers as usize) {
                 observer
                     .expected_community
                     .store(expected_community, Ordering::Release);
             }
-            let t_hup = now_us(&ctx);
             let expected_stable = usize::try_from(n_peers - changed_peers).unwrap();
             if let Some(cmd) = &reload_cmd {
                 // Matrix cells (BIRD/OpenBGPD) reload via a command, e.g.
@@ -1341,10 +1352,14 @@ fn main() {
                 if let Some(tc) = completion_us(&ctx, i) {
                     comp_s.push((tc - t_hup) as f64 / 1e6);
                     gaps.push(max_gap_ms(&ctx, i, t_hup, tc, false));
-                    // Leading stall: SIGHUP -> first UPDATE of any kind.
-                    let ev = ctx.obs[i].events.lock().unwrap();
-                    if let Some(e) = ev.iter().find(|e| e.t_us >= t_hup) {
-                        firsts.push((e.t_us - t_hup) as f64 / 1000.0);
+                    // Leading generation stall: trigger -> first base-prefix
+                    // UPDATE carrying the expected generation marker.
+                    let generation = ctx.obs[i].generation.lock().unwrap();
+                    if let Some(first) = generation.first_marker_base_at_us {
+                        let elapsed = first
+                            .checked_sub(t_hup)
+                            .expect("generation evidence predates reload trigger");
+                        firsts.push(elapsed as f64 / 1000.0);
                     }
                 }
             }
@@ -1357,7 +1372,10 @@ fn main() {
                 &format!("reload {r} all_observer_maxgap_ms"),
                 all_observer_gaps,
             );
-            let first_update = stats_line(&format!("reload {r} first_update_ms"), firsts);
+            let first_generation_update = stats_line(
+                &format!("reload {r} changed_first_generation_update_ms"),
+                firsts,
+            );
             let rss_after = rss_mib(pid);
             println!(
                 "reload {r} rss_mib before={rss_before} after={} comms_sample={:?}",
@@ -1399,9 +1417,9 @@ fn main() {
                 all_gap.p50,
                 all_gap.p95,
                 all_gap.max,
-                first_update.p50,
-                first_update.p95,
-                first_update.max,
+                first_generation_update.p50,
+                first_generation_update.p95,
+                first_generation_update.max,
             );
             // Quiesce between reloads.
             tokio::time::sleep(Duration::from_secs(20)).await;
@@ -1530,25 +1548,57 @@ mod tests {
 
         observe_generation(
             &mut progress,
+            0,
+            &[COMMUNITY_GEN_B],
+            announced.iter().copied(),
+            128,
+            5,
+        );
+        assert_eq!(
+            progress.first_marker_base_at_us, None,
+            "generation evidence must stay empty while the tracker is disarmed"
+        );
+
+        observe_generation(
+            &mut progress,
             COMMUNITY_GEN_B,
             &[COMMUNITY_GEN_A],
-            &announced,
+            announced.iter().copied(),
             128,
             10,
         );
         assert_eq!(progress.unique, 0);
         assert_eq!(progress.completed_at_us, None);
+        assert_eq!(progress.first_marker_base_at_us, None);
+
+        // Churn carrying the expected marker is not base-generation output.
+        observe_generation(
+            &mut progress,
+            COMMUNITY_GEN_B,
+            &[COMMUNITY_GEN_B],
+            std::iter::once(churn_prefix(0, 0)),
+            128,
+            15,
+        );
+        assert_eq!(progress.first_marker_base_at_us, None);
 
         observe_generation(
             &mut progress,
             COMMUNITY_GEN_B,
             &[COMMUNITY_GEN_B],
-            &announced,
+            announced.iter().copied(),
             128,
             20,
         );
         assert_eq!(progress.unique, 1);
         assert_eq!(progress.completed_at_us, Some(20));
+        assert_eq!(progress.first_marker_base_at_us, Some(20));
+
+        progress.reset(128, 1, 100, 27);
+        assert_eq!(
+            progress.first_marker_base_at_us, None,
+            "a new generation must not inherit first-output evidence"
+        );
     }
 
     #[test]
@@ -1556,11 +1606,17 @@ mod tests {
         let mut progress = GenerationProgress::default();
         progress.reset(4, 3, 2, 1);
 
+        progress.observe(2, 5);
+        assert_eq!(progress.first_marker_base_at_us, None);
         progress.observe(0, 10);
         progress.observe(1, 20);
-        progress.observe(2, 30);
         assert_eq!(progress.unique, 2, "own prefix must not advance completion");
         assert_eq!(progress.completed_at_us, None);
+        assert_eq!(
+            progress.first_marker_base_at_us,
+            Some(10),
+            "excluded own-slice output must not set or replace accepted evidence"
+        );
 
         progress.observe(3, 40);
         assert_eq!(progress.unique, 3);

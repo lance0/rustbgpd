@@ -71,6 +71,11 @@ record):
   non-self base-table prefix re-advertised with the new generation marker
   community (`completion_{p50,p95,max}_s`); duplicates never advance the
   window; churn prefixes are excluded by prefix range.
+- **First generation output** —
+  `changed_first_generation_update_{p50,p95,max}_ms` measures reload trigger
+  to the first non-self base prefix carrying the expected generation marker.
+  Unmarked output, stale markers, churn space, duplicates, and the observer's
+  excluded own slice cannot start this clock.
 - **RSS during reload** — `rss_before_mib`/`rss_after_mib` sampled from
   `/proc/<pid>` around each reload for the bare rustbgpd cells, plus the
   full process-tree 5 s-cadence sampler (`bench/scale/matrix/rss-sampler.sh`)
@@ -111,6 +116,24 @@ exit, daemon process-tree RSS > 100 GiB (cell aborted), or cell timeout
 (`CELL_TIMEOUT`). Failed cells keep their artifacts and are published with
 their mechanism, not silently rerun (`status` files make the campaign
 resumable per cell).
+
+Resume status is fingerprint-qualified. The fingerprint covers the exact Git
+commit and dirty-state content, runner/generator/sampler/transaction scripts,
+built daemon/CLI/renderer/harness binaries, Rust/Python/jq/Docker environment,
+selected cells, shape and timing inputs, and the local content IDs behind
+selected container image references. Each cell also retains `scenario.sha256`,
+a relative-path/content-hash roster of the generated config bundle; its digest
+is bound into that cell's provenance and pass status. A pass from any other
+fingerprint or config-bundle digest is discarded and rerun; its old rows cannot
+satisfy the new campaign. Root and per-cell `provenance.json` retain the
+fingerprint without hostnames, usernames, absolute paths, or other host-unique
+identifiers.
+Successful cells may delete their generated scenario only after retaining its
+generator `manifest.json` alongside that provenance.
+
+The RSS sampler is a required instrument: early/nonzero sampler exit or an
+empty/malformed `rss.csv` fails the cell. The runner reaps the sampler after
+the daemon exits and preserves all artifacts on failure.
 
 **Run count**: two full independent campaign runs minimum (fresh daemon
 starts, same cell order) so run-to-run spread is visible — run B into a

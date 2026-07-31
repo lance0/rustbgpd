@@ -76,6 +76,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   content-equal sets from separate generations still compare by value.
   (#1346)
 
+- IRR reload campaign receipts now measure first generation output only from
+  marker-qualified non-self base prefixes, fingerprint resumable passes and
+  retained rows to the exact code, binaries, scripts, and campaign inputs, and
+  fail closed on missing or invalid RSS samples instead of accepting stale or
+  incomplete evidence. (LAN-790)
+
 ## [0.62.0] — 2026-07-30
 
 ### Added
