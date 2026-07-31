@@ -161,77 +161,37 @@ Action 1 filtering is only credible if members can see it working:
   import ladder and names the statement that rejected it — the
   support-ticket workflow is in [explain.md](../explain.md).
 
-## Complete example
+## Copyable example
 
-A minimal self-contained Action 1 shape — RPKI invalid = reject,
-inline stand-ins for rendered IRR sets, hygiene ordering, RFC 8212 on,
-per-family limits. In production the member prefix statements and
-ceilings come from the pipeline render; the checked-in
-[`examples/route-server/`](../../examples/route-server/) starter adds
-the `.rpol` hygiene chain, RPKI-valid preference, dual-stack members,
-and Add-Path / per-client-best path-hiding mitigation.
+The checked-in [`examples/manrs-action1/`](../../examples/manrs-action1/)
+is the minimal complete example. Its
+[`config.toml`](../../examples/manrs-action1/config.toml) keeps RPKI-invalid
+rejection ahead of the member filter, references the `.rpol` file through
+`rpol_files`, enables the RFC 8212 posture, and declares transparent export
+explicitly while retaining a per-family prefix limit.
 
-```toml
-[global]
-asn = 64500
-router_id = "192.0.2.1"
-listen_port = 179
-ebgp_requires_policy = true
+The member authorization is deliberately conjunctive. Both the resolved
+AS-SET and prefix-set must match; the tail rejects everything else:
 
-[global.telemetry]
-log_format = "json"
+```rpol
+asn-set member-a-origins { 64501 }
+prefix-set member-a-prefixes { 203.0.113.0/24 }
 
-[global.telemetry.grpc_uds]
-path = "/var/lib/rustbgpd/grpc.sock"
-principal = "operator"
-
-[security.grpc]
-enforcement = "tier"
-
-[security.grpc.roles]
-operator = "operator"
-
-[rpki]
-[[rpki.cache_servers]]
-address = "127.0.0.1:3323"
-
-[policy.definitions.reject-rpki-invalid]
-[[policy.definitions.reject-rpki-invalid.statements]]
-match_rpki_validation = "invalid"
-action = "deny"
-
-# Stand-in for a rendered per-member IRR set: permit only what the
-# member's AS-SET resolves to, deny the rest.
-[policy.definitions.member-a-irr]
-default_action = "deny"
-[[policy.definitions.member-a-irr.statements]]
-prefix = "203.0.113.0/24"
-action = "permit"
-
-# Transparent export is a declared decision (RFC 7947), not an omission.
-[policy.definitions.rs-transparent-export]
-default_action = "permit"
-
-[policy]
-export_chain = ["rs-transparent-export"]
-
-[[neighbors]]
-address = "192.0.2.10"
-remote_asn = 64501
-description = "member-a"
-route_server_client = true
-role = "route_server"
-families = ["ipv4_unicast"]
-max_prefixes_ipv4 = 10000
-max_prefix_restart_seconds = 900
-import_policy_chain = ["reject-rpki-invalid", "member-a-irr"]
+policy member-a-irr {
+    term accept-authorized {
+        if route.origin-as in member-a-origins && route.prefix in member-a-prefixes { accept }
+    }
+    term reject-unauthorized { reject }
+}
 ```
 
-Validate before anything touches the wire — this exact configuration
-exits 0:
+The adjacent in-language fixtures prove the authorized route is accepted,
+the same prefix with the wrong origin is rejected, and the registered origin
+cannot announce a different prefix. Validate the copy before deployment:
 
 ```bash
-rustbgpd --check --strict manrs-action1.toml
+rustbgpd --check --strict examples/manrs-action1/config.toml
+rbgp policy check examples/manrs-action1/member-a-irr.rpol
 ```
 
 ## Publishing your policy
