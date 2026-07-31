@@ -14,7 +14,7 @@ TRIGGER_HASH = "65951f4c4d1d6c4d3aae2c33705d14cdc144b3efd8bcc01653049e6d7f2fb5f8
 PERMISSION_HASH = "9691400b3b1036bcdfe724926816dbe71b0aa22ed9b5eb89627e2eeb75079898"
 JOB_HASHES = {
     "core": "81bea34b590cff22f28e437e20dd15ba200d1bfb2424b9158ecdc1c61ac4b2e9",
-    "scale_receipts": "003631994e4a9d995e580ca5b974ef4316d1e020ff66fb954133a6b6cfc339c7",
+    "scale_receipts": "0d6914750718aa18049269ed71ca4de5d85f75ce931701d6af305fb6c2d9844c",
     "check": "afc9629a32cc7c3194ccf0417aaf2623e7a01a8dc95fd0194c2cbfbb29068b57",
     "msrv": "db1ae833d9c8fbbc47dbf2969ac291b90cf413ba9eed2b95dd4cfe34e0a4ba5d",
     "evpn_bum_filter_kernel": "f965e7f95f30772d9d335104dda9e30c53816098bd5f1225a3cadabe7d9a23b3",
@@ -96,6 +96,7 @@ def check(root: Path) -> list[str]:
         "runs-on: ubuntu-latest",
         "timeout-minutes: 30",
         CHECKOUT,
+        "fetch-depth: 0",
         TOOLCHAIN,
         "toolchain: stable",
         "components: rustfmt, clippy",

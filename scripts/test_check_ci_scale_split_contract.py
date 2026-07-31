@@ -71,6 +71,7 @@ class ScaleSplitContractTests(unittest.TestCase):
         cases = (
             ("name: scale / receipt checks", "name: changed"),
             ("timeout-minutes: 30", "timeout-minutes: 29"),
+            ("fetch-depth: 0", "fetch-depth: 1", 1),
             ("components: rustfmt, clippy", "components: rustfmt"),
             ("uses: ./.github/actions/install-protobuf", "uses: ./changed", 1),
             ("sudo apt-get install -y ripgrep", "sudo apt-get install -y grep"),
