@@ -376,7 +376,7 @@ fn measure_resolution(fixture: &Fixture) -> (AllocationReceipt, Vec<ResolvedNeig
 }
 
 /// Fixed-operation gate for the retained resolved-neighbor batch. With one
-/// shared 10,000-entry set, ten peers may add neighbor shells and chain
+/// shared 10,000-entry set, 65 peers may add neighbor shells and chain
 /// handles (small per-peer allocations) but must not rebuild any indexed
 /// set: the compiled unit interns its sets once at config load, so
 /// resolution never allocates a set index at all. Rebuilding even one
@@ -384,22 +384,22 @@ fn measure_resolution(fixture: &Fixture) -> (AllocationReceipt, Vec<ResolvedNeig
 /// bucket vector per member), so the bound discriminates set rebuilds
 /// from per-peer shell growth.
 ///
-/// Red proof: restoring per-chain set interning (`Lowerer` re-interning
-/// through a per-call `SetStore`) produces 100,000+ resolution
-/// allocations for ten peers and makes the bound red; so does dropping
-/// the shared-tables `Arc` reuse for any single peer.
+/// Red proof: routing `.rpol` set-table construction back through the
+/// existing 32-neighbor chunk stores creates additional 10,000-entry indexes
+/// at peers 33 and 65 and makes this bound red; so does dropping the
+/// shared-tables `Arc` reuse for any single peer.
 #[test]
 fn shared_set_batch_allocations_do_not_scale_per_peer() {
     let one = shared_fixture(1);
-    let ten = shared_fixture(10);
+    let many = shared_fixture(65);
 
     let (one_resolve, _) = measure_resolution(&one);
-    let (ten_resolve, resolved) = measure_resolution(&ten);
+    let (many_resolve, resolved) = measure_resolution(&many);
     assert!(
-        ten_resolve.calls < one_resolve.calls + SET_ENTRIES / 2,
-        "ten-peer resolution rebuilt a shared set index: one={} ten={}",
+        many_resolve.calls < one_resolve.calls + SET_ENTRIES / 2,
+        "65-peer resolution rebuilt a shared set index: one={} many={}",
         one_resolve.calls,
-        ten_resolve.calls
+        many_resolve.calls
     );
     assert_eq!(
         canonical_prefix_set_count(&resolved, "shared"),

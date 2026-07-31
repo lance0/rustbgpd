@@ -274,6 +274,12 @@ impl SetTables {
     /// `Arc`). Must only be called on a typechecked AST.
     pub(super) fn build(file: &SourceFile) -> Self {
         let mut store = SetStore::new();
+        Self::build_with_store(file, &mut store)
+    }
+
+    /// Intern every set defined in `file` through the caller's store.
+    /// This preserves content sharing across one-shot compilations.
+    pub(super) fn build_with_store(file: &SourceFile, store: &mut SetStore) -> Self {
         let prefix_sets = file
             .prefix_sets
             .iter()
@@ -316,13 +322,15 @@ impl SetTables {
 }
 
 impl<'a> Lowerer<'a> {
-    /// Build the chain tables over `file`, interning its sets fresh.
+    /// Build the chain tables over `file`, interning its sets through
+    /// the caller-owned store.
     /// Callers holding an [`RpolFile`](super::RpolFile) should go
     /// through its cached tables instead (via
     /// [`Self::from_tables`]) — this entry is for one-shot compiles
-    /// that own no file handle.
-    pub(super) fn new(file: &'a SourceFile) -> Self {
-        Self::from_tables(file, &SetTables::build(file))
+    /// that own no file handle and may share content with other
+    /// one-shot compiles using the same store.
+    pub(super) fn new(file: &'a SourceFile, store: &mut SetStore) -> Self {
+        Self::from_tables(file, &SetTables::build_with_store(file, store))
     }
 
     /// Build the chain tables over `file` from pre-interned set

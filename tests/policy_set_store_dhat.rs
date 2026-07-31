@@ -18,7 +18,6 @@ use rustbgpd::config::Config;
 
 const SET_ENTRIES: usize = 10_000;
 const PEERS: usize = 1_000;
-const EXPECTED_SET_STORE_CHUNK_SIZE: usize = 32;
 
 #[global_allocator]
 static ALLOCATOR: dhat::Alloc = dhat::Alloc;
@@ -131,12 +130,8 @@ fn shared_set_resolution_dhat() {
         .count();
     assert_eq!(
         canonical_copies,
-        if expect_shared {
-            PEERS.div_ceil(EXPECTED_SET_STORE_CHUNK_SIZE)
-        } else {
-            PEERS
-        },
-        "common-set copies must match the bounded chunk contract"
+        if expect_shared { 1 } else { PEERS },
+        "common-set copies must match the whole-unit sharing contract"
     );
     std::hint::black_box(&resolved);
     drop(profiler);

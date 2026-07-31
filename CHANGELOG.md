@@ -50,11 +50,31 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   budget is read from the incoming config on every load, so a SIGHUP
   reload compiles under the reloaded file's own value.
 
+- `rbgp policy check --max-graph-bytes <bytes>` lets operators check an
+  import graph against the same configurable total-source-byte budget used
+  at daemon config load. (#1342)
+
 - Release binaries (tarballs and packages) are now built against
   glibc 2.31, so they run on Debian 11+, Ubuntu 22.04+, and
   RHEL/Rocky/Alma 9+; previously they required the newer glibc of the
   CI build host and failed to start on Debian stable and RHEL 9
   derivatives.
+
+### Fixed
+
+- IRR-scale boot and SIGHUP reload no longer recompile the `.rpol` set
+  data once per chain resolution: a compiled unit now interns its
+  prefix/community/asn sets exactly once and every chain instantiation
+  (per-neighbor import/export resolution, validation, reload sweeps)
+  shares those `Arc`s. At a 320-member route-server shape with 3.2M
+  prefix-set entries, config validation drops from over five minutes to
+  about one second, boot and reload stop pinning runtime workers long
+  enough to expire hold timers, and resident memory stops scaling with
+  the neighbor count (previously one full copy of the set data per
+  resolved neighbor). Policy equality gets the standard `Arc`
+  same-allocation fast path for chains from the same compiled unit;
+  content-equal sets from separate generations still compare by value.
+  (#1346)
 
 ## [0.62.0] — 2026-07-30
 
@@ -141,19 +161,6 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   is not interruptible. Failures remain non-fatal and on-time bytes unchanged.
 
 ### Fixed
-
-- IRR-scale boot and SIGHUP reload no longer recompile the `.rpol` set
-  data once per chain resolution: a compiled unit now interns its
-  prefix/community/asn sets exactly once and every chain instantiation
-  (per-neighbor import/export resolution, validation, reload sweeps)
-  shares those `Arc`s. At a 320-member route-server shape with 3.2M
-  prefix-set entries, config validation drops from over five minutes to
-  about one second, boot and reload stop pinning runtime workers long
-  enough to expire hold timers, and resident memory stops scaling with
-  the neighbor count (previously one full copy of the set data per
-  resolved neighbor). `PrefixSet` equality gained a same-allocation
-  fast path, so policy diffs on shared sets are O(1) instead of a full
-  member-list comparison per peer.
 
 - Editing `slow_peer_threshold_pct`, `slow_peer_duration`, or
   `slow_peer_isolation` on a static `[[neighbors]]` entry was silently ignored
