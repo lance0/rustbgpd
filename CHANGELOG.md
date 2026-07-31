@@ -142,6 +142,19 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- IRR-scale boot and SIGHUP reload no longer recompile the `.rpol` set
+  data once per chain resolution: a compiled unit now interns its
+  prefix/community/asn sets exactly once and every chain instantiation
+  (per-neighbor import/export resolution, validation, reload sweeps)
+  shares those `Arc`s. At a 320-member route-server shape with 3.2M
+  prefix-set entries, config validation drops from over five minutes to
+  about one second, boot and reload stop pinning runtime workers long
+  enough to expire hold timers, and resident memory stops scaling with
+  the neighbor count (previously one full copy of the set data per
+  resolved neighbor). `PrefixSet` equality gained a same-allocation
+  fast path, so policy diffs on shared sets are O(1) instead of a full
+  member-list comparison per peer.
+
 - Editing `slow_peer_threshold_pct`, `slow_peer_duration`, or
   `slow_peer_isolation` on a static `[[neighbors]]` entry was silently ignored
   by SIGHUP reload: the change took effect only at the next natural session

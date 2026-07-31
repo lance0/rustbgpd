@@ -25,8 +25,12 @@ use super::{
     PeerGroupConfig, RFC8212_MISSING_EXPORT_POLICY, RFC8212_MISSING_IMPORT_POLICY,
 };
 
-/// Bound canonical policy-set key retention while still sharing common sets
-/// across the dominant contiguous roster shape.
+/// Bound the resolution store's canonical policy-set key retention while
+/// still sharing common sets across the dominant contiguous roster shape.
+/// Scope note: `.rpol` set data no longer flows through this store — the
+/// compiled unit interns it once and every chain shares those `Arc`s
+/// regardless of chunk (LAN-788) — so this bounds only TOML-defined set
+/// and regex retention during a resolution sweep.
 const RESOLVED_NEIGHBOR_SET_STORE_CHUNK_SIZE: usize = 32;
 
 impl Config {

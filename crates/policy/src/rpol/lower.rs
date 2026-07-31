@@ -253,15 +253,88 @@ pub(super) struct Lowerer<'a> {
     missing_datasets: Vec<String>,
 }
 
+/// The interned set data of one source file: every defined
+/// prefix/community/asn set, indexed in definition order. Building
+/// this is the expensive part of lowering — at IRR scale a file
+/// carries millions of prefix-set entries — so `RpolFile` builds it
+/// once and every chain instantiation reuses the `Arc`s instead of
+/// re-interning through a fresh store (LAN-788: per-neighbor chain
+/// resolution re-interned the full file, turning a ~1 s compile into
+/// minutes and one shared set copy into one copy per neighbor).
+#[derive(Debug)]
+pub(super) struct SetTables {
+    prefix: Vec<Arc<PrefixSet>>,
+    community: Vec<Arc<CommunitySet>>,
+    asn: Vec<Arc<AsnSet>>,
+}
+
+impl SetTables {
+    /// Intern every set defined in `file`. A local store preserves
+    /// intra-file deduplication (two identically-valued sets share one
+    /// `Arc`). Must only be called on a typechecked AST.
+    pub(super) fn build(file: &SourceFile) -> Self {
+        let mut store = SetStore::new();
+        let prefix_sets = file
+            .prefix_sets
+            .iter()
+            .map(|def| {
+                let entries: Vec<PrefixSetEntry> = def
+                    .entries
+                    .iter()
+                    .map(|entry| PrefixSetEntry {
+                        prefix: entry.prefix,
+                        ge: entry.ge,
+                        le: entry.le,
+                    })
+                    .collect();
+                store.prefix_set(&entries)
+            })
+            .collect();
+        let community_sets = file
+            .community_sets
+            .iter()
+            .map(|def| {
+                let criteria: Vec<CommunityMatch> =
+                    def.entries.iter().map(|lit| lit.node.to_match()).collect();
+                store.community_set(&criteria)
+            })
+            .collect();
+        let asn_sets = file
+            .asn_sets
+            .iter()
+            .map(|def| {
+                let asns: Vec<u32> = def.entries.iter().map(|asn| asn.node).collect();
+                store.asn_set(&asns)
+            })
+            .collect();
+        Self {
+            prefix: prefix_sets,
+            community: community_sets,
+            asn: asn_sets,
+        }
+    }
+}
+
 impl<'a> Lowerer<'a> {
-    /// Intern every defined set through `store` and build the chain
-    /// tables. Must only be called on a typechecked AST.
-    pub(super) fn new(file: &'a SourceFile, store: &mut SetStore) -> Self {
+    /// Build the chain tables over `file`, interning its sets fresh.
+    /// Callers holding an [`RpolFile`](super::RpolFile) should go
+    /// through its cached tables instead (via
+    /// [`Self::from_tables`]) — this entry is for one-shot compiles
+    /// that own no file handle.
+    pub(super) fn new(file: &'a SourceFile) -> Self {
+        Self::from_tables(file, &SetTables::build(file))
+    }
+
+    /// Build the chain tables over `file` from pre-interned set
+    /// tables: the set `Arc`s are cloned, so every chain built from
+    /// the same tables shares one copy of each set's data. Must only
+    /// be called with tables built from this same `file`.
+    pub(super) fn from_tables(file: &'a SourceFile, tables: &SetTables) -> Self {
         let mut lowerer = Self {
             file,
-            prefix_sets: Vec::new(),
-            community_sets: Vec::new(),
-            asn_sets: Vec::new(),
+            prefix_sets: tables.prefix.clone(),
+            community_sets: tables.community.clone(),
+            asn_sets: tables.asn.clone(),
             as_path_regexes: Vec::new(),
             prefix_set_names: Vec::new(),
             community_set_names: Vec::new(),
@@ -275,43 +348,25 @@ impl<'a> Lowerer<'a> {
             bindings: DatasetBindings::new(),
             missing_datasets: Vec::new(),
         };
-        for def in &file.prefix_sets {
-            let entries: Vec<PrefixSetEntry> = def
-                .entries
-                .iter()
-                .map(|entry| PrefixSetEntry {
-                    prefix: entry.prefix,
-                    ge: entry.ge,
-                    le: entry.le,
-                })
-                .collect();
-            let set = store.prefix_set(&entries);
-            let id = SetId(u32::try_from(lowerer.prefix_sets.len()).expect("fits u32"));
-            lowerer.prefix_sets.push(set);
+        for (index, def) in file.prefix_sets.iter().enumerate() {
+            let id = SetId(u32::try_from(index).expect("fits u32"));
             lowerer.prefix_set_names.push(Some(def.name.node.clone()));
             lowerer.prefix_set_ids.insert(def.name.node.clone(), id);
         }
-        for def in &file.community_sets {
-            let criteria: Vec<CommunityMatch> =
-                def.entries.iter().map(|lit| lit.node.to_match()).collect();
-            let set = store.community_set(&criteria);
-            let id = SetId(u32::try_from(lowerer.community_sets.len()).expect("fits u32"));
-            lowerer.community_sets.push(set);
+        for (index, def) in file.community_sets.iter().enumerate() {
+            let id = SetId(u32::try_from(index).expect("fits u32"));
             lowerer
                 .community_set_names
                 .push(Some(def.name.node.clone()));
             lowerer.community_set_ids.insert(def.name.node.clone(), id);
         }
-        for def in &file.asn_sets {
-            let asns: Vec<u32> = def.entries.iter().map(|asn| asn.node).collect();
-            let set = store.asn_set(&asns);
-            let id = SetId(u32::try_from(lowerer.asn_sets.len()).expect("fits u32"));
-            lowerer.asn_sets.push(set);
+        for (index, def) in file.asn_sets.iter().enumerate() {
+            let id = SetId(u32::try_from(index).expect("fits u32"));
             lowerer.asn_set_names.push(Some(def.name.node.clone()));
             lowerer.asn_set_ids.insert(def.name.node.clone(), id);
         }
         // Regexes are interned lazily at each use site (they can be
-        // parameter-dependent via `contains <param>`); `store` is
+        // parameter-dependent via `contains <param>`); the store is
         // borrowed per call instead of held in `self` because test-run
         // instantiation happens after the main chain is built.
         lowerer
