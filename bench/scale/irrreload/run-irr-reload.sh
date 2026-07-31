@@ -25,7 +25,7 @@
 #
 # Knobs (env): N_MEMBERS TOTAL_PREFIXES MIN_LIST MAX_LIST SEED
 #              CHANGED_FRACTION PORT RELOADS CONTROL_SECS BIRD_THREADS
-#              CELL_TIMEOUT ARTIFACTS_DIR SKIP_PREFLIGHT
+#              CELL_TIMEOUT START_TIMEOUT ARTIFACTS_DIR SKIP_PREFLIGHT
 set -u
 
 REPO="$(cd "$(dirname "$0")/../../.." && pwd)"
@@ -63,6 +63,12 @@ fi
 SEED="${SEED:-61}"
 CHANGED_FRACTION="${CHANGED_FRACTION:-0.1}"
 PORT="${PORT:-1790}"
+# Daemon-start readiness ceiling (seconds). Parsing a multi-MB IRR
+# policy takes far longer than a small-config boot, so readiness is
+# polled (1 s cadence, until the BGP listener is up) instead of a
+# fixed sleep; this is only the hard ceiling. A harness parameter, not
+# a measurement — see README "Startup and readiness windows".
+START_TIMEOUT="${START_TIMEOUT:-600}"
 BIRD_THREADS="${BIRD_THREADS:-8}"
 ART="${ARTIFACTS_DIR:-/tmp/irrreload-artifacts}"
 RSS_LIMIT_KIB=$((100 * 1024 * 1024)) # abort a cell past 100 GiB (precommitted)
@@ -70,7 +76,7 @@ RSS_LIMIT_KIB=$((100 * 1024 * 1024)) # abort a cell past 100 GiB (precommitted)
 CELLS=("$@")
 [ ${#CELLS[@]} -eq 0 ] && CELLS=(rustbgpd-sighup rustbgpd-txn bird openbgpd)
 
-for tool in docker jq python3 cargo; do
+for tool in docker jq python3 cargo ss; do
     command -v "$tool" >/dev/null || {
         echo "missing required tool: $tool" >&2
         exit 1
@@ -119,6 +125,43 @@ gen_scenario() {
     python3 "$GEN" "$cell" "$N_MEMBERS" "$TOTAL_PREFIXES" "$run" \
         --port "$PORT" --seed "$SEED" --min-list "$MIN_LIST" \
         --max-list "$MAX_LIST" --changed-fraction "$CHANGED_FRACTION" "$@"
+}
+
+# wait_ready <cell> <cdir>: poll (1 s cadence, ceiling START_TIMEOUT)
+# until the cell's daemon listens on $PORT — large-config parses take
+# far longer than the fixed 3 s the small-config harness assumed. For
+# container cells this also captures daemon_pid via docker inspect,
+# retried until nonzero: a single immediate inspect used to race a
+# slow-starting container and record pid=0. Fails fast if the daemon
+# process/container dies first. Uses/sets the caller's daemon_pid and
+# container.
+wait_ready() {
+    local cell=$1 cdir=$2 waited=0
+    while :; do
+        if [ -n "$container" ]; then
+            if [ "$(docker inspect -f '{{.State.Running}}' "$container" 2>/dev/null)" != true ]; then
+                echo "cell $cell: container died at start" >&2
+                docker logs "$container" >"$cdir/daemon.log" 2>&1
+                docker rm -f "$container" >/dev/null 2>&1
+                return 1
+            fi
+            if [ "${daemon_pid:-0}" -le 0 ]; then
+                daemon_pid=$(docker inspect -f '{{.State.Pid}}' "$container" 2>/dev/null) || daemon_pid=0
+            fi
+        elif [ ! -d "/proc/$daemon_pid" ]; then
+            echo "cell $cell: daemon died at start (see $cdir/daemon.log)" >&2
+            return 1
+        fi
+        if [ "${daemon_pid:-0}" -gt 0 ] && ss -ltnH "sport = :$PORT" | grep -q .; then
+            return 0
+        fi
+        if [ "$waited" -ge "$START_TIMEOUT" ]; then
+            echo "cell $cell: no listener on :$PORT after ${START_TIMEOUT}s" >&2
+            return 1
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
 }
 
 # run_cell <cell>: one matrix cell. Nonzero return = cell failed; the
@@ -175,19 +218,7 @@ run_cell() {
         ;;
     esac
 
-    sleep 3
-    if [ -n "$container" ]; then
-        daemon_pid=$(docker inspect -f '{{.State.Pid}}' "$container") || daemon_pid=0
-        if [ "$daemon_pid" -le 0 ]; then
-            echo "cell $cell: container died at start" >&2
-            docker logs "$container" >"$cdir/daemon.log" 2>&1
-            docker rm -f "$container" >/dev/null 2>&1
-            return 1
-        fi
-    elif [ ! -d "/proc/$daemon_pid" ]; then
-        echo "cell $cell: daemon died at start (see $cdir/daemon.log)" >&2
-        return 1
-    fi
+    wait_ready "$cell" "$cdir" || return 1
 
     "$SAMPLER" "$daemon_pid" "$cdir/rss.csv" 5 &
     local sampler_pid=$!

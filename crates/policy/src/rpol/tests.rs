@@ -5113,7 +5113,12 @@ test missing-override-fails {
             "import \"lib.rpol\"\npolicy p { term t { if route.origin-as in customers { accept } } term r { reject } }\n",
         )
         .expect("write main");
-        let file = RpolFile::load(&dir.path().join("main.rpol"), &[]).expect("loads");
+        let file = RpolFile::load(
+            &dir.path().join("main.rpol"),
+            &[],
+            crate::rpol::DEFAULT_MAX_GRAPH_BYTES,
+        )
+        .expect("loads");
         assert_eq!(
             file.dataset_decls().collect::<Vec<_>>(),
             vec![("customers", DatasetKind::Asn)]

@@ -1538,7 +1538,7 @@ fn default_bfd_multiplier() -> u32 {
     3
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PolicyConfig {
     /// Named policy definitions, reusable across neighbors and directions.
@@ -1583,6 +1583,21 @@ pub struct PolicyConfig {
     /// `rpol_files`.
     #[serde(default)]
     pub rpol_roots: Vec<String>,
+    /// Total source-byte budget for each `.rpol` compilation unit's
+    /// resolved module graph — one `rpol_files` entry plus everything
+    /// its `import` graph pulls in. The budget plays two roles: it is
+    /// the anti-runaway guard that keeps an unbounded or recursively
+    /// generated module graph from being read into memory at load
+    /// time, and it must comfortably fit the product's canonical
+    /// IRR-scale route-server workload — a realistic 320-member
+    /// exchange with log-uniform 1k–40k-entry IRR prefix lists renders
+    /// to roughly 65 MB of `.rpol` source, so the 256 MiB default
+    /// clears that with headroom for larger exchanges. Accepted range
+    /// 1 MiB..=4 GiB; values outside it are config load errors. Read
+    /// from the incoming config on every load, so a SIGHUP reload
+    /// compiles under the reloaded file's own value.
+    #[serde(default = "default_rpol_max_graph_bytes")]
+    pub rpol_max_graph_bytes: usize,
     /// Compiled `.rpol` policy registry (populated at load, not
     /// serialized). `PartialEq` is resolved-content-based across each
     /// unit's whole module graph, so config diffs see an edit to any
@@ -1613,6 +1628,30 @@ pub struct PolicyConfig {
     /// the dependency-scoped peer refresh and `failed` into metrics.
     #[serde(skip)]
     pub dataset_events: DatasetLoadEvents,
+}
+
+fn default_rpol_max_graph_bytes() -> usize {
+    rustbgpd_policy::rpol::DEFAULT_MAX_GRAPH_BYTES
+}
+
+impl Default for PolicyConfig {
+    fn default() -> Self {
+        Self {
+            definitions: HashMap::new(),
+            neighbor_sets: HashMap::new(),
+            import_chain: Vec::new(),
+            export_chain: Vec::new(),
+            explain: PolicyExplainConfig::default(),
+            reject_retention: PolicyRejectRetentionConfig::default(),
+            rpol_files: Vec::new(),
+            rpol_roots: Vec::new(),
+            rpol_max_graph_bytes: default_rpol_max_graph_bytes(),
+            rpol: rustbgpd_policy::rpol::RpolPolicySet::default(),
+            datasets: HashMap::new(),
+            dataset_bindings: rustbgpd_policy::datasets::DatasetBindings::default(),
+            dataset_events: DatasetLoadEvents::default(),
+        }
+    }
 }
 
 /// One `[policy.datasets.<name>]` binding (LAN-305).

@@ -185,10 +185,18 @@ fn check_local_with_writer(
     use std::io::IsTerminal;
     use std::path::PathBuf;
 
-    use rustbgpd_policy::rpol::{LoadError, RpolFile};
+    use rustbgpd_policy::rpol::{DEFAULT_MAX_GRAPH_BYTES, LoadError, RpolFile};
 
     let root_paths: Vec<PathBuf> = roots.iter().map(PathBuf::from).collect();
-    let (file, diagnostics) = match RpolFile::load(std::path::Path::new(path), &root_paths) {
+    // Standalone check has no daemon config to read a budget from —
+    // the default matches the daemon's `[policy] rpol_max_graph_bytes`
+    // default, so a file that checks clean here loads under a
+    // default-budget daemon.
+    let (file, diagnostics) = match RpolFile::load(
+        std::path::Path::new(path),
+        &root_paths,
+        DEFAULT_MAX_GRAPH_BYTES,
+    ) {
         Ok(file) => (Some(file), Vec::new()),
         Err(LoadError::Io { path, reason }) => {
             eprintln!("Error: cannot read {path}: {reason}");

@@ -77,6 +77,33 @@ record):
   for every cell (`rss.csv`; the only RSS instrument for the container
   cells).
 
+**Startup and readiness windows** (harness parameters, not
+measurements — none of them is timed into any reported number; they
+only bound how long the harness waits before declaring a cell broken):
+
+- **Daemon-start readiness**: the runner polls at 1 s cadence until
+  the cell's daemon holds a listener on the BGP port (containers: also
+  until `docker inspect` reports a nonzero daemon PID, retried — a
+  single immediate inspect can race a slow start and record pid=0),
+  with a hard ceiling of `START_TIMEOUT` (default **600 s**). A
+  multi-MB IRR policy parse legitimately takes far longer than a
+  small-config boot; the poll returns as soon as the daemon is ready,
+  so a generous ceiling costs nothing on fast starts.
+- **Stub connect**: each stub retries its TCP connect at 500 ms
+  cadence for up to **120 s** (`CONNECT_WINDOW` in the reloadstall
+  harness) before failing the cell — refused connects while the daemon
+  is still absorbing a large config, or during accept-backlog spikes
+  under the 64-stub establishment waves, are retries, not failures.
+- **Convergence / reload-completion stall watchdogs**: base-table
+  convergence and each reload's completion tracker allow up to
+  **600 s** (`FIRST_OUTPUT_WINDOW`) for the first observed
+  announcement of their phase — ingesting 183k routes through
+  IRR-scale per-peer import chains, or re-parsing a multi-MB policy on
+  SIGHUP, computes for minutes before anything reaches the wire — then
+  abort after **120 s** (`STALL_WINDOW`) with no further observer
+  progress. Completion and stall *measurements* are timestamp-based
+  and unaffected by watchdog size.
+
 **Acceptance / abort criteria** (a cycle emits no row, the cell fails):
 any stub session down at reload validation, missing generation-marker
 evidence, any daemon UPDATE that fails to decode, a nonzero reload-command

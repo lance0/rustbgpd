@@ -38,6 +38,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- IRR-scale `.rpol` policies now load. Previously any `.rpol`
+  compilation unit whose resolved module graph exceeded a fixed 8 MiB
+  (or any single file over 1 MiB) was rejected at config load — a
+  realistic route-server policy rendered from IRR data for a
+  320-member exchange is ~65 MB and could not boot the daemon. The
+  budget is now the `[policy] rpol_max_graph_bytes` key (default
+  256 MiB, range 1 MiB–4 GiB), applied per compilation unit as a
+  total-source-byte bound; the separate per-file limit is gone (a
+  single oversized file exhausts the graph budget by itself). The
+  budget is read from the incoming config on every load, so a SIGHUP
+  reload compiles under the reloaded file's own value.
+
 - Release binaries (tarballs and packages) are now built against
   glibc 2.31, so they run on Debian 11+, Ubuntu 22.04+, and
   RHEL/Rocky/Alma 9+; previously they required the newer glibc of the

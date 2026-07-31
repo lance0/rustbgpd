@@ -226,6 +226,20 @@ impl Config {
     fn load_rpol_files(&mut self, base_dir: Option<&std::path::Path>) -> Result<(), ConfigError> {
         use rustbgpd_policy::rpol::{LoadError, RpolFile, RpolPolicyEntry};
 
+        // Bounds-check the graph budget here rather than in
+        // `validate()`: this method runs first and consumes the value.
+        const MIN_RPOL_GRAPH_BYTES: usize = 1024 * 1024;
+        const MAX_RPOL_GRAPH_BYTES: usize = 4 * 1024 * 1024 * 1024;
+        let max_graph_bytes = self.policy.rpol_max_graph_bytes;
+        if !(MIN_RPOL_GRAPH_BYTES..=MAX_RPOL_GRAPH_BYTES).contains(&max_graph_bytes) {
+            return Err(ConfigError::InvalidPolicyEntry {
+                reason: format!(
+                    "rpol_max_graph_bytes = {max_graph_bytes} out of range; expected \
+                     {MIN_RPOL_GRAPH_BYTES}..={MAX_RPOL_GRAPH_BYTES} (1 MiB..=4 GiB)"
+                ),
+            });
+        }
+
         // Policy roots for `import` resolution (LAN-300): absolutize
         // against the config directory and rewrite, like `rpol_files`.
         for root in &mut self.policy.rpol_roots {
@@ -254,7 +268,7 @@ impl Config {
             // resolves the file's `import` graph against `roots`
             // (LAN-300) as one compilation unit — a missing or broken
             // import anywhere rejects the whole load.
-            let file = match RpolFile::load(&path, &roots) {
+            let file = match RpolFile::load(&path, &roots, max_graph_bytes) {
                 Ok(file) => Arc::new(file),
                 Err(LoadError::Io { path, reason }) => {
                     return Err(ConfigError::InvalidRpolFile { path, reason });

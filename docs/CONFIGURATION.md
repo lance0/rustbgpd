@@ -2260,6 +2260,14 @@ rpol_files = ["policies/core.rpol", "policies/customers.rpol"]
   config file's directory and are rewritten absolute at load, like
   `rpol_files`. See [`rpol-language.md`](rpol-language.md) for module
   resolution details.
+- **Graph budget (`rpol_max_graph_bytes`):** total source-byte budget
+  for each compilation unit's resolved module graph (the `rpol_files`
+  entry plus everything its `import` graph pulls in), range
+  1 MiB–4 GiB. Default 256 MiB: large enough that IRR-scale
+  route-server policies (a 320-member exchange with 1k–40k-entry IRR
+  prefix lists renders to ~65 MB) load with headroom, while still
+  stopping unbounded or recursively generated graphs at load time. A
+  unit over the budget is a config load error naming the file.
 - **One namespace:** `.rpol` policies and `[policy.definitions]` TOML
   policies share the named-policy namespace. A name defined by both —
   or by two `.rpol` files — is a load error naming both sources.
