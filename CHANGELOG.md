@@ -9,6 +9,41 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Native `.deb` and `.rpm` packages on every tagged release, for
+  Debian 11+/Ubuntu 22.04+ and RHEL/Rocky/Alma 9+ on amd64 and arm64.
+  The package installs the daemon, `rbgp`, and `rs-config-render` to
+  `/usr/bin`, the hardened systemd unit, man pages and completions,
+  creates the `rustbgpd` service user, and drops a non-overwriting
+  starter config at `/etc/rustbgpd/config.toml` — install, edit the
+  config, `systemctl enable --now rustbgpd`.
+
+- Release supply-chain verification: every release asset (tarballs,
+  packages, SBOM) and the GHCR image digest now carry GitHub
+  build-provenance attestations — `gh attestation verify <asset>
+  --repo lance0/rustbgpd` proves an artifact came out of this
+  repository's release workflow at the tagged commit. Each release
+  also publishes a CycloneDX SBOM of the full dependency graph as
+  `rustbgpd.cdx.json`. See "Verifying release artifacts" in
+  `docs/deployment.md`.
+
+- The container image declares a `HEALTHCHECK` probing `rbgp --json
+  health` over the daemon's local gRPC socket, so `docker ps` and
+  orchestrators report container health without extra wiring.
+
+- The release tarballs now also ship the `birdwatcher-adapter` binary
+  and the systemd unit + kernel-dataplane drop-in under
+  `share/systemd/`.
+
+### Changed
+
+- Release binaries (tarballs and packages) are now built against
+  glibc 2.31, so they run on Debian 11+, Ubuntu 22.04+, and
+  RHEL/Rocky/Alma 9+; previously they required the newer glibc of the
+  CI build host and failed to start on Debian stable and RHEL 9
+  derivatives.
+
 ## [0.62.0] — 2026-07-30
 
 ### Added

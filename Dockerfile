@@ -152,4 +152,12 @@ USER rustbgpd
 
 EXPOSE 179 9179
 
+# Liveness via the local gRPC control socket: `rbgp health` succeeds
+# only when the daemon answers the Health RPC; the grep additionally
+# requires the daemon to self-report healthy. rbgp's default address is
+# the default UDS (`unix:///var/lib/rustbgpd/grpc.sock`); configs that
+# move the socket set RUSTBGPD_ADDR on the container to match.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD rbgp --json health | grep -q '"healthy": true' || exit 1
+
 CMD ["rustbgpd", "/etc/rustbgpd/config.toml"]
