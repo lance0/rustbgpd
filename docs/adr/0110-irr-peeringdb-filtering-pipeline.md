@@ -1,6 +1,8 @@
 # ADR-0110: IRR/PeeringDB-driven filtering pipeline — ride arouteserver, defer native ingestion
 
-**Status:** Proposed
+**Status:** Accepted (phase-1 renderer shipped as `tools/rs-config-render`; the
+M90 arouteserver/BIRD-vs-rustbgpd filtering differential is archived in
+`docs/INTEROP.md`; native ingestion remains demand-gated)
 **Date:** 2026-07-17
 
 ## Context

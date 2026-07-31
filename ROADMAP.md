@@ -39,7 +39,7 @@ those.
 | Route Refresh (2918) + Enhanced Route Refresh (7313) | Shipped | |
 | BGP Roles + Only-to-Customer (9234) | Shipped | Static eBGP, IPv4/IPv6 unicast (ADR-0071, M55) |
 | BGP unnumbered / IPv6 link-local peering | Shipped | Static interface-bound link-local (ADR-0069, M53) |
-| Confederation (5065) | Planned | |
+| Confederation (5065) | Rejected | See "Researched and rejected" under Next — no demand signal; revival requires a new recorded decision |
 | EVPN-VXLAN: Route Reflector (7432, types 1–5) | Shipped | |
 | EVPN-VXLAN: single-homed VTEP (Type-2 / Type-3 IMET origination, FDB program) | Partial (alpha) | Linux/VXLAN only |
 | EVPN-VXLAN: multi-homing (ESI, Type-1/4, DF election, BUM suppression, aliasing ECMP) | Partial (alpha) | Production-default enforcement with opt-out |
@@ -119,7 +119,8 @@ adds PE/MPLS/dataplane breadth. Three tracks:
 **1. Route-server adoption pipeline.** What keeps IXPs on BIRD+arouteserver is
 the data-driven filtering/tooling wrapper, not the daemon.
 - IRR/PeeringDB-driven prefix filtering — MANRS Action 1, the #1 adoption
-  blocker. **Direction decided (ADR-0110, 2026-07-17):** hybrid — an external
+  blocker. **Direction decided (ADR-0110, 2026-07-17; now Accepted with
+  phase 1 shipped and differential-proven):** hybrid — an external
   renderer consuming `arouteserver template-context` output feeds the existing
   parse-then-swap reload seam (inherits the whole industry ingest pipeline, no
   upstream gate); native ingestion demand-gated. The phase-1 renderer is
@@ -406,9 +407,12 @@ new AFI/SAFI and EVPN dataplane expansion.
   comparison (LAN-18), rather than relying only on bounded convergence receipts.
 - **Turn shipped shadow tooling into external evidence.** The canonical semantic
   diff engine, `rbgp diff`, incumbent snapshot adapters, and BMP Adj-RIB-Out
-  importer are shipped. The remaining adoption gate is a real BIRD/FRR/GoBGP
-  shadow or canary run with explained differences, exact sanitized inputs, and
-  an operator-readable rollback record.
+  importer are shipped, and the shadow-pilot cookbook
+  ([docs/cookbook/route-server-shadow-pilot.md](docs/cookbook/route-server-shadow-pilot.md),
+  #1331) now documents the standing non-authoritative deployment end to end —
+  the tooling side is done. The remaining adoption gate is only a real
+  sanitized shadow run with explained differences and an operator-readable
+  rollback record.
 - **Tighten lifecycle security without reopening scope.** Preserve the shipped
   unprivileged base service and opt-in dataplane capability profile. The typed
   API-error migration is complete (#898 closed the last API-visible stringly
@@ -416,8 +420,14 @@ new AFI/SAFI and EVPN dataplane expansion.
   eBGP-received LOCAL_PREF is ignored on ingress (#836). Management-plane
   bearer and mTLS bytes behind unchanged paths now
   rotate atomically on SIGHUP; listener, path, auth-mode, principal, role, and
-  access changes remain restart-required. Privilege separation remains a
-  larger architectural choice, not a release-checkbox claim.
+  access changes remain restart-required. Privilege separation stays a
+  documented posture — the shipped unprivileged base service plus the opt-in
+  dataplane capability profile, stated in `docs/SECURITY.md` — not an
+  implementation program; a multi-quarter process-separation architecture is
+  out of solo scope and would not be claimed as a release checkbox. A
+  third-party security audit is a funding-inquiry item (OSTIF/NLnet-style):
+  sending the inquiry starts a multi-month clock, no major open-source BGP
+  daemon has had one, and nothing about it gates a release.
 - **Route-server next-hop ownership strict-peer pilot shipped
   ([#964](https://github.com/lance0/rustbgpd/pull/964)).**
   [ADR-0107](docs/adr/0107-route-server-next-hop-ownership.md) is Accepted:
@@ -497,6 +507,13 @@ Details in the "Recently shipped" section below and ADR-0097.
 
 **Next, in rough order** (each research-backed, sized about one slice):
 
+- **RFC 8212 secure-by-default.** Opt-in enforcement
+  (`ebgp_requires_policy`, ADR-0112) is shipped and receipted; the
+  config-epoch representation contract that makes a default flip safe is
+  specified in ADR-0119 (Proposed — the representation itself is not yet
+  implemented). Activation is an explicit owner decision plus the
+  production-mutation proofs ADR-0119 enumerates — proposed for the next
+  release, not scheduled. Neither incumbent daemon defaults it.
 - **Trust/adoption hygiene sweep** (all small): keep the cargo-fuzz / OSS-Fuzz
   onboarding and per-RFC receipts/conformance page current, and keep the
   published Grafana dashboard aligned with the shipped metrics. The secure
@@ -527,8 +544,10 @@ Details in the "Recently shipped" section below and ADR-0097.
   (status/peer/accepted/filtered/noexport views; reject reasons via
   `PolicyService.ListRejectedRoutes`, noexport via the export-explain
   surface). The [1,000-peer route-server receipt](docs/perf/route-server-1000-2026-07.md)
-  now retains real-daemon 400k-route/reload/readiness evidence. Remaining
-  demand-shaped work is a real shadow/canary receipt.
+  now retains real-daemon 400k-route/reload/readiness evidence. The
+  shadow-pilot cookbook (#1331) is shipped; remaining demand-shaped work is
+  only a real sanitized shadow run with explained differences and an
+  operator-readable rollback record.
 - **RFC 9857 SR Policy state in BGP-LS** (receive/reflect/API) — ADR-0116
   records a bounded fit for the controller-feed / RR niche, but feature code is
   a no-go until a named controller demand supplies a real producer, consumer,
@@ -546,16 +565,20 @@ adoption tooling. ADR-0101/M83 covers RFC 7947 transparency, Add-Path and
 multi-stack BIRD/GoBGP/FRR/StayRTR proof. The adapter's Alice-LG contract
 is complete: filtered-route views from `PolicyService.ListRejectedRoutes`
 (reject reasons mapped to large communities under `64496:65520:*`) and
-noexport views from the export-explain surface (`64496:65521:*`). Next
-useful work is a real shadow/canary receipt using the shipped `rbgp diff`
-against an incumbent's MRT/BMP feed; the 1,000-peer route-server scale receipt
+noexport views from the export-explain surface (`64496:65521:*`). With the
+shadow-pilot cookbook shipped (#1331), the next useful work is executing that
+cookbook: a real sanitized shadow run using the shipped `rbgp diff` against an
+incumbent's MRT/BMP feed, with explained differences and an operator-readable
+rollback record; the 1,000-peer route-server scale receipt
 is [retained](docs/perf/route-server-1000-2026-07.md). The ARouteServer target
 ships as `tools/rs-config-render`. The current external adapter already serves
 the Birdwatcher-shaped status, peer, accepted-route, and filtered-route subset.
 
 **Researched and rejected** (recorded so they aren't re-litigated):
 confederations (RFC 5065 — no demand signal in two years of issues and
-talks; solves the problem RRs already solve), diverse-path RFC 6774 /
+talks; solves the problem RRs already solve; a future revival decision would
+also have to pick up the deferred RFC 9234 confederation-scope items and the
+RFC 8326 confederation gating recorded under Deferred), diverse-path RFC 6774 /
 advertise-best-external (commercial-only; superseded by Add-Path, which
 rustbgpd ships across families), Flowspec v2 (codepoint churn), BGP-CT/CAR
 (PE-scale, out of niche), custom Kafka/NATS bridges (BMP *is* the bridge;
@@ -673,7 +696,15 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
   A/B CSV + Markdown receipts under the shared bench/soak host mutex.
   **Done:** `docs/OPERATIONAL_PROOF.md` now consolidates CI interop, hosted
   kernel dataplane, benchmark, high-N memory, and archived 24 h soak receipts
-  into one operator-facing proof index.
+  into one operator-facing proof index. The precommitted soak acceptance
+  gates
+  ([docs/soaks/soak-acceptance-gates.md](docs/soaks/soak-acceptance-gates.md))
+  name eight guarantees with no soak injection today; of those, the SIGHUP
+  file-reload path and the max-prefix trip / timed-restart cycle are
+  scheduled into the authorized soak window, while RPKI cache withdrawal,
+  the sub-minute peer flap storm, plain-path daemon SIGKILL, listener kill,
+  transport-level disturbance, and BMP/BFD duration coverage are explicitly
+  deferred.
   Exit: one repeatable soak result operators can inspect, bench comparison
   receipts for perf PRs, and memory tracking that covers full-table scale
   without relying only on bgperf2.
@@ -1448,10 +1479,6 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
   trie-backed prefix indexes shipped; the larger LocRib trie swap remains
   deferred because the naive version regressed recompute. Shared route storage
   was measured and rejected — see Deferred.
-- **AIGP best-path support (RFC 7311).** Standards completeness for deployments
-  that carry accumulated IGP cost in BGP — the one best-path step we don't
-  implement (the chain is otherwise 11/11). Not a headline feature unless
-  operators ask.
 - **Conditional advertisement.** Policy feature for advertise-if-present /
   advertise-if-absent workflows (FRR and GoBGP have it). Useful and common, but
   less tied to the current positioning than ORF — defer until operator demand is
@@ -1459,6 +1486,12 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
 
 ### Maybe / demand-shaped
 
+- **AIGP (RFC 7311) — demand-gated.** Implement only on named operator demand.
+  The best-path chain stands without it — this is the one step of the tiebreak
+  ladder not implemented, and no deployment has asked for accumulated IGP cost
+  in BGP. Recorded here so the gap does not read as an open invitation:
+  building it ahead of a named requester would be standards completeness for
+  its own sake.
 - **TCP-AO remaining rotation polish.** Static TCP-AO + BIRD interop (M43), direct
   dynamic-prefix listener MKTs, fail-closed accepted-socket validation, and
   live neighbor API/CLI inspection are shipped. Ordered startup keyrings allow
@@ -1504,9 +1537,6 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
   alternative — defer EoR for every ORF peer, with a timeout backstop so a
   client that never sends its ROUTE-REFRESH still converges — stays deferred
   until interop evidence shows a non-GR receiver misreading the early EoR.
-- **Confederation (RFC 5065).** Required for service-provider deployments, but
-  SPs are not the initial target market. (Unblocks several deferred RFC 9234
-  confederation-scope items and the RFC 8326 confederation gating.)
 - **Out-of-niche address families.** L3VPN (VPNv4/v6, RFC 4364 / RFC 4659),
   labeled-unicast (RFC 8277), Route Target Constraints (RFC 4684), and BGP-LS
   (RFC 9552, obsoleting RFC 7752 / RFC 9029) shipped as the ADR-0077
@@ -1881,9 +1911,11 @@ branch is between features.
   lock with SIGHUP through config-persistence acknowledgement. Persistence
   rejection rolls the accepted runtime mutation back, completing the same
   lock/ack/rollback invariant used by FIB-table and dynamic-neighbor CRUD.
-- [ ] **`#[expect(clippy::too_many_lines)]` reduction.** ~282 occurrences
-  workspace-wide (2026-07-17 re-measure; ~120 outside test paths) — the
-  earlier "~30" figure was stale and the direction is *up*, tracking the
+- [ ] **`#[expect(clippy::too_many_lines)]` reduction.** ~326 occurrences
+  workspace-wide (2026-07-30 re-measure; ~117 outside test files and
+  top-level test modules — the non-test count is roughly flat, so recent
+  growth is concentrated in test code) — the earlier "~30" figure was stale
+  and the direction is *up*, tracking the
   RIB-manager / policy-language / EVPN expansion of the last sprints.
   Concentrated in long dispatchers (FSM action loop, EVPN reconcilers,
   `manager/{mod,distribution/*}`, `rpol/{typeck,lower}`, encode/decode match
@@ -1895,8 +1927,8 @@ branch is between features.
   registration defect. A tiny local helper would reduce boilerplate but would
   not couple those three inventories enough to prevent drift, so that refactor
   is not justified.
-- [ ] **`#[allow(clippy::too_many_arguments)]` cluster tidy-up.** ~104
-  occurrences workspace-wide (2026-07-17; ~39 outside tests) — RIB
+- [ ] **`#[allow(clippy::too_many_arguments)]` cluster tidy-up.** ~109
+  occurrences workspace-wide (2026-07-30 re-measure) — RIB
   distribution functions, EVPN originators, BFD socket setup. A
   `DistributionContext` parameter struct would absorb the metric / policy
   threading; same trick fits the EVPN originators.
@@ -1969,11 +2001,14 @@ branch is between features.
   `manager/tests/` — shared fixtures in `mod.rs` plus per-concern sibling test
   modules. `crates/api/src/event_service.rs` is no longer a candidate — its
   2,318-line total is mostly the test module; real production body is ~630
-  lines. The current largest *production* bodies (test modules excluded,
-  2026-07-27) are `crates/evpn-linux/src/reconcile.rs` (~7,647 lines),
-  `src/config/mod.rs` (~6,932), and `crates/rib/src/manager/mod.rs`
-  (~5,431) — the best next split candidates. Keep splitting only where it
-  reduces real conflict or review cost.
+  lines. `src/config/mod.rs` has since had its resolution concern split out
+  into `src/config/resolution.rs` (#1215). The current largest *production*
+  bodies (test modules excluded, 2026-07-30) are
+  `crates/evpn-linux/src/reconcile.rs` (~7,647 lines — unchanged; the file's
+  9,095-line total includes its in-file test module), `src/config/mod.rs`
+  (~5,792, down from ~6,932 via the resolution split), and
+  `crates/rib/src/manager/mod.rs` (~5,547) — the best next split candidates.
+  Keep splitting only where it reduces real conflict or review cost.
 - [ ] **Doc-precision + lint-policy consistency sweep (v0.41.0 review).** A
   whole-codebase review found no correctness or security defects; the residue was
   documentation/policy drift, all low-risk. The documentation and lint-policy
