@@ -1,5 +1,10 @@
 # Bounded eager policy-set sharing receipt — 2026-07
 
+> **Historical receipt.** This captures the superseded 32-neighbor chunk
+> implementation. Current loading interns sets once for the whole compiled
+> unit; the measurements and rows below are preserved as historical evidence,
+> not as the current sharing contract.
+
 This is the implementation gate for sharing content-equal indexed `.rpol`
 sets while resolving a retained neighbor roster. The accepted implementation
 uses one content-keyed `SetStore` per contiguous 32-neighbor chunk. It

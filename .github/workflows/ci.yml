@@ -21,10 +21,10 @@ jobs:
     runs-on: ubuntu-latest
     # Bound any wedge (e.g. a rustdoc hang) so a stuck step fails fast
     # instead of running to GitHub's 6-hour default. Recent green runs
-    # take 24-29 minutes; the previous 30-minute bound sat inside normal
-    # hosted-runner variance and cancelled two healthy runs mid
-    # `cargo test --workspace`, so the ceiling keeps ~1.5x headroom over
-    # the observed green range.
+    # now reach the mid-30-minute range; the previous 30-minute bound sat
+    # inside normal hosted-runner variance and cancelled two healthy runs
+    # mid `cargo test --workspace`. Keep the 45-minute ceiling above that
+    # observed green range.
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7

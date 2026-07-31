@@ -372,7 +372,7 @@ impl Eq for RpolPolicySet {}
 pub fn compile_rpol(source: &str, store: &mut SetStore) -> Result<CompiledChain, Diagnostics> {
     let (file, diags) = front(source)?;
     debug_assert!(diags.is_empty());
-    let mut lowerer = lower::Lowerer::new(&file);
+    let mut lowerer = lower::Lowerer::new(&file, store);
     let chain = lowerer.zero_param_chain(store, &DatasetBindings::new());
     // Inline compilation has no config to bind datasets from
     // (LAN-305): a zero-parameter policy probing one is an error here,
@@ -406,7 +406,7 @@ pub fn compile_rpol(source: &str, store: &mut SetStore) -> Result<CompiledChain,
 pub fn run_rpol_tests(source: &str) -> Result<TestReport, Diagnostics> {
     let (file, _) = front(source)?;
     let mut store = SetStore::new();
-    let mut lowerer = lower::Lowerer::new(&file);
+    let mut lowerer = lower::Lowerer::new(&file, &mut store);
     Ok(testing::run_tests(&file.tests, &mut lowerer, &mut store))
 }
 
