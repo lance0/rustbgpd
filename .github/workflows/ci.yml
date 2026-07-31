@@ -20,9 +20,12 @@ jobs:
   check:
     runs-on: ubuntu-latest
     # Bound any wedge (e.g. a rustdoc hang) so a stuck step fails fast
-    # instead of running to GitHub's 6-hour default. Cold build + clippy
-    # (--all-targets) + test (--workspace) + doc fits comfortably under this.
-    timeout-minutes: 30
+    # instead of running to GitHub's 6-hour default. Recent green runs
+    # take 24-29 minutes; the previous 30-minute bound sat inside normal
+    # hosted-runner variance and cancelled two healthy runs mid
+    # `cargo test --workspace`, so the ceiling keeps ~1.5x headroom over
+    # the observed green range.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
