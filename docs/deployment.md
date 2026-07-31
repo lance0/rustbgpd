@@ -61,6 +61,7 @@ The filename is the same on every release; `releases/latest/download/`
 always resolves to the current tag, so this snippet never needs a
 version bump.
 
+<!-- release-install-contract:tarball:start -->
 ```sh
 # Pick the right arch.
 SUFFIX=linux-amd64    # or linux-arm64
@@ -74,7 +75,23 @@ sudo install -m 0644 share/man/man1/rbgp.1 /usr/local/share/man/man1/
 sudo install -m 0644 share/man/man8/rustbgpd.8 /usr/local/share/man/man8/
 sudo install -m 0644 share/completions/rbgp.bash \
   /usr/share/bash-completion/completions/rbgp
+
+sudo useradd --system --home-dir /var/lib/rustbgpd \
+  --shell /usr/sbin/nologin rustbgpd 2>/dev/null || true
+sudo install -m 0644 share/systemd/rustbgpd.service \
+  /etc/systemd/system/rustbgpd.service
+sudo install -d -m 0755 /etc/rustbgpd
+rustbgpd --init-config edge --stdout | \
+  sudo tee /etc/rustbgpd/config.toml >/dev/null
+sudo chmod 0640 /etc/rustbgpd/config.toml
+sudo chgrp rustbgpd /etc/rustbgpd/config.toml
+
+# Kernel-dataplane hosts only; control-plane-only hosts omit this drop-in.
+sudo install -d /etc/systemd/system/rustbgpd.service.d
+sudo install -m 0644 share/systemd/rustbgpd-dataplane.conf \
+  /etc/systemd/system/rustbgpd.service.d/rustbgpd-dataplane.conf
 ```
+<!-- release-install-contract:tarball:end -->
 
 The man pages and completions are also generated on demand by the
 binaries themselves (`rbgp man`, `rustbgpd --man`,
@@ -119,7 +136,9 @@ sudo dnf install -y \
   https://github.com/lance0/rustbgpd/releases/download/vX.Y.Z/rustbgpd-X.Y.Z-1.x86_64.rpm
 ```
 
-The package installs the three binaries to `/usr/bin`, the hardened
+<!-- release-install-contract:native-package:start -->
+The package installs the three binaries (`rustbgpd`, `rbgp`, and
+`rs-config-render`) to `/usr/bin`, the hardened
 systemd unit (see [systemd](#systemd) below — same unit, `ExecStart`
 pointed at `/usr/bin`), man pages and shell completions, and creates
 the `rustbgpd` system user (imperatively at install time, plus a
@@ -127,6 +146,7 @@ declarative `sysusers.d` file). A starter config lands at
 `/etc/rustbgpd/config.toml` (mode `0640 root:rustbgpd`, never
 overwritten on upgrade) — the [minimal profile](../examples/minimal/config.toml)
 with its state paths set to `/var/lib/rustbgpd`. Then:
+<!-- release-install-contract:native-package:end -->
 
 ```sh
 sudo $EDITOR /etc/rustbgpd/config.toml   # set ASN, router_id, neighbors
@@ -278,8 +298,10 @@ Notes on the sandbox:
 
 The [Debian/RPM packages](#debian--rpm-packages) perform all of the
 below on install (unit at `/lib/systemd/system`, `ExecStart` at
-`/usr/bin`). For a tarball or source install:
+`/usr/bin`). The tarball commands above use its `share/systemd/` tree.
+The following paths are only for a source checkout:
 
+<!-- release-install-contract:source-checkout:start -->
 ```sh
 sudo useradd --system --home-dir /var/lib/rustbgpd \
   --shell /usr/sbin/nologin rustbgpd
@@ -292,6 +314,7 @@ $EDITOR /etc/rustbgpd/config.toml    # set ASN, router_id, neighbors
 sudo systemctl daemon-reload
 sudo systemctl enable --now rustbgpd
 ```
+<!-- release-install-contract:source-checkout:end -->
 
 ### Kernel dataplane: opt-in privilege drop-in
 

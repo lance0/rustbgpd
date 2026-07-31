@@ -1,0 +1,36 @@
+name: Release install contract
+
+on:
+  pull_request:
+    paths:
+      - docs/deployment.md
+      - docs/QUICKSTART.md
+      - examples/birdwatcher-adapter/README.md
+      - .github/workflows/release.yml
+      - packaging/nfpm.yaml
+      - scripts/check_release_install_contract.py
+      - scripts/test_check_release_install_contract.py
+      - .github/workflows/release-install-contract.yml
+  push:
+    branches: [main]
+    paths:
+      - docs/deployment.md
+      - docs/QUICKSTART.md
+      - examples/birdwatcher-adapter/README.md
+      - .github/workflows/release.yml
+      - packaging/nfpm.yaml
+      - scripts/check_release_install_contract.py
+      - scripts/test_check_release_install_contract.py
+      - .github/workflows/release-install-contract.yml
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Test release install contract
+        run: python3 scripts/test_check_release_install_contract.py
+      - name: Check repository release install contract
+        run: python3 scripts/check_release_install_contract.py
