@@ -20,9 +20,11 @@ jobs:
     # leaving time for build, the full sweep, log upload, and failure restore.
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: update-group-fault
       - name: Verify exact ignored corpus test exists
@@ -91,7 +93,7 @@ jobs:
           echo "status=$result_status" >>"$GITHUB_OUTPUT"
       - name: Upload failing corpus log
         if: steps.corpus.outputs.status != '0'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: update-group-fault-${{ github.run_id }}
           path: update-group-fault.log

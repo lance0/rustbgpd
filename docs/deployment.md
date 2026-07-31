@@ -44,12 +44,18 @@ and shell completions under `share/`:
 
 ```
 rustbgpd, rbgp, rs-config-render        binaries
+birdwatcher-adapter                     Alice-LG birdwatcher shim
 LICENSE-MIT, LICENSE-APACHE             licenses
 rustbgpd.schema.json                    config JSON Schema
 share/man/man1/rbgp.1                   CLI man page
 share/man/man8/rustbgpd.8               daemon man page
 share/completions/rbgp.{bash,zsh,fish}  shell completions
+share/systemd/rustbgpd.service          hardened systemd unit
+share/systemd/rustbgpd-dataplane.conf   opt-in CAP_NET_ADMIN drop-in
 ```
+
+The binaries are built against glibc 2.31; any distro at or above it
+works (Debian 11+, Ubuntu 22.04+, RHEL/Rocky/Alma 9+).
 
 The filename is the same on every release; `releases/latest/download/`
 always resolves to the current tag, so this snippet never needs a
@@ -93,6 +99,86 @@ rs-config-render --version
 ([`tools/rs-config-render/`](../tools/rs-config-render/README.md)). It is
 in the archive either way, so install it now rather than discovering it is
 missing from a cron refresh later.
+
+### Debian / RPM packages
+
+Tagged releases also publish native packages built with
+[nfpm](https://nfpm.goreleaser.com/) from the same binaries as the
+tarballs ([`packaging/nfpm.yaml`](../packaging/nfpm.yaml)):
+
+- `rustbgpd_X.Y.Z_{amd64,arm64}.deb` — Debian 11+, Ubuntu 22.04+
+- `rustbgpd-X.Y.Z-1.{x86_64,aarch64}.rpm` — RHEL/Rocky/Alma 9+
+
+```sh
+# Debian / Ubuntu
+curl -fLO https://github.com/lance0/rustbgpd/releases/latest/download/rustbgpd_X.Y.Z_amd64.deb
+sudo apt-get install -y ./rustbgpd_X.Y.Z_amd64.deb
+
+# RHEL / Rocky / Alma
+sudo dnf install -y \
+  https://github.com/lance0/rustbgpd/releases/download/vX.Y.Z/rustbgpd-X.Y.Z-1.x86_64.rpm
+```
+
+The package installs the three binaries to `/usr/bin`, the hardened
+systemd unit (see [systemd](#systemd) below — same unit, `ExecStart`
+pointed at `/usr/bin`), man pages and shell completions, and creates
+the `rustbgpd` system user (imperatively at install time, plus a
+declarative `sysusers.d` file). A starter config lands at
+`/etc/rustbgpd/config.toml` (mode `0640 root:rustbgpd`, never
+overwritten on upgrade) — the [minimal profile](../examples/minimal/config.toml)
+with its state paths set to `/var/lib/rustbgpd`. Then:
+
+```sh
+sudo $EDITOR /etc/rustbgpd/config.toml   # set ASN, router_id, neighbors
+sudo systemctl enable --now rustbgpd
+```
+
+The kernel-dataplane capability drop-in ships as documentation at
+`/usr/share/doc/rustbgpd/examples/rustbgpd-dataplane.conf`; copy it
+into `/etc/systemd/system/rustbgpd.service.d/` only for deployments
+that program the kernel (see below). Config-mutating RPCs (`rbgp
+neighbor add`, gNMI `Set`) need `/etc/rustbgpd` writable by the
+service user; the packaged default (`0750 root:rustbgpd`, read-only
+for the daemon) supports the SIGHUP-reload workflow — `chown
+rustbgpd /etc/rustbgpd /etc/rustbgpd/config.toml` if you want runtime
+mutation.
+
+### Verifying release artifacts
+
+Every release asset — both tarballs, all `.deb`/`.rpm` packages, and
+the SBOM — carries a GitHub build-provenance attestation ([SLSA
+provenance](https://slsa.dev/) signed via GitHub OIDC), created by the
+release workflow at tag time. Verify with the `gh` CLI (≥ 2.49)
+before installing:
+
+```sh
+gh attestation verify rustbgpd-linux-amd64.tar.gz --repo lance0/rustbgpd
+gh attestation verify rustbgpd_X.Y.Z_amd64.deb --repo lance0/rustbgpd
+```
+
+The container image is attested by digest, with the attestation pushed
+to GHCR alongside the image:
+
+```sh
+gh attestation verify oci://ghcr.io/lance0/rustbgpd:latest --repo lance0/rustbgpd
+```
+
+A successful verification proves the artifact was built by this
+repository's release workflow from the tagged commit — not rebuilt or
+modified by anyone else, including a compromised release-asset upload.
+
+A CycloneDX SBOM covering the full workspace dependency graph is
+published with each release under the stable asset name
+`rustbgpd.cdx.json` (one per release; the dependency set is identical
+across architectures and package formats):
+
+```sh
+curl -fLO https://github.com/lance0/rustbgpd/releases/latest/download/rustbgpd.cdx.json
+```
+
+The separately published crates.io libraries (`rustbgpd-wire`,
+`rustbgpd-fsm`) appear in that SBOM as workspace components; their
+crates.io releases do not carry their own SBOM documents.
 
 ### From source
 
@@ -189,6 +275,10 @@ Notes on the sandbox:
   through its `bgp.listener` check.
 
 ### Installation
+
+The [Debian/RPM packages](#debian--rpm-packages) perform all of the
+below on install (unit at `/lib/systemd/system`, `ExecStart` at
+`/usr/bin`). For a tarball or source install:
 
 ```sh
 sudo useradd --system --home-dir /var/lib/rustbgpd \
@@ -347,6 +437,14 @@ For your own deployment:
   *directory*, not just the file, has to be writable, and every mutating
   RPC is rejected without it. Mount it `:ro` only when the config is
   managed entirely from outside and reloaded with SIGHUP.
+
+- **Health**: the image declares a `HEALTHCHECK` that runs `rbgp
+  --json health` against the daemon's local gRPC socket and requires a
+  self-reported healthy status — `docker ps` / orchestrators see the
+  container flip `healthy` once the daemon answers. It probes rbgp's
+  default endpoint (`unix:///var/lib/rustbgpd/grpc.sock`, the daemon
+  default); if your config moves the socket, set `RUSTBGPD_ADDR` on
+  the container to match.
 
 - **Logs**: structured JSON when `[global.telemetry] log_format =
   "json"` is set; pipe to your log aggregator.
