@@ -16,6 +16,7 @@ receipts that prove its scenario ([`RECEIPTS.md`](../RECEIPTS.md)).
 | [Route-server migration](route-server-migration.md) | Map FRR, BIRD, and ARouteServer concepts into rustbgpd and run a shadow-trial cutover | M19, M83 |
 | [Route-server shadow pilot](route-server-shadow-pilot.md) | Run rustbgpd for weeks as a receive-only, non-authoritative second route server beside production BIRD/OpenBGPD — standing comparison loop, data-return contract, clean teardown | M19, M83, [IXP receipt matrix](../perf/ixp-matrix-2026-07.md) |
 | [IXP filter pipeline](ixp-filter-pipeline.md) | Keep your arouteserver `general.yml`/`clients.yml`: render member filters with `rs-config-render`, reload fail-stale, serve Alice-LG | M19, M83 |
+| [MANRS IXP Action 1](manrs-ixp-action1.md) | Document your MANRS IXP Programme participation: Action 1 mapped requirement-by-requirement to validated config and member-verifiable surfaces | M83, fragments pass `rustbgpd --check --strict` |
 | [Controller / monitoring feed](monitoring-feed.md) | Streaming BMP, durable events, and MRT into a controller or collector stack | M24, M81 |
 | [EVPN fabric route reflector](evpn-fabric-rr.md) | Control-plane-only RR for a VXLAN-EVPN leaf/spine fabric | M29, M30, M82, M33 |
 | [Policy quickstart (`.rpol`)](policy-quickstart.md) | First typed policy: tests, dry-run, hot swap, explain | M80, M34 |
@@ -26,6 +27,7 @@ Operator runbooks — short, ordered checklists for a live daemon:
 |---------|----------------------|
 | [Peer-flap triage](peer-flap-triage.md) | A session keeps cycling: confirm, read events, match the teardown reason, contain |
 | [RR pair day-2](rr-pair-day2.md) | Routine changes on a redundant RR pair: GR sanity, adding clients, hot vs session-reset edits, commit-confirm |
+| [Paired route servers](paired-route-servers.md) | Two independent RS instances: staggered config rollout, inter-RS consistency via `rbgp diff advertised`, RFC 8326 maintenance drain |
 | Shadow cutover | The step-by-step shadow trial lives in [route-server-migration.md](route-server-migration.md); the comparison tool it gates on is [`rbgp diff advertised`](../ribdiff.md) |
 
 Conventions:
