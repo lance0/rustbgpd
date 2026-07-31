@@ -21,14 +21,13 @@ on:
       - "**/*.md"
 
 jobs:
-  check:
+  core:
     runs-on: ubuntu-latest
     # Bound any wedge (e.g. a rustdoc hang) so a stuck step fails fast
-    # instead of running to GitHub's 6-hour default. Recent green runs
-    # now reach the mid-30-minute range; the previous 30-minute bound sat
-    # inside normal hosted-runner variance and cancelled two healthy runs
-    # mid `cargo test --workspace`. Keep the 45-minute ceiling above that
-    # observed green range.
+    # instead of running to GitHub's 6-hour default. The last serial run
+    # took 24m32; extracting the 9m10 scale/receipt block should leave this
+    # lane near 15 minutes. Keep the inherited 45-minute ceiling until
+    # hosted receipts establish a safe tighter bound.
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -70,6 +69,10 @@ jobs:
         run: |
           python3 -m unittest -v scripts/test_check_ci_image_primer_contract.py
           python3 scripts/check_ci_image_primer_contract.py
+      - name: Prove CI scale split contract
+        run: |
+          python3 -m unittest -v scripts/test_check_ci_scale_split_contract.py
+          python3 scripts/check_ci_scale_split_contract.py
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # stable
         with:
           toolchain: stable
@@ -148,81 +151,6 @@ jobs:
       # deny(unsafe_code) lint posture — it is only armed when neither
       # allocator feature is on, so the default build no longer checks it.
       - run: cargo check -p rustbgpd --no-default-features --all-targets
-      - name: Check standalone scale harnesses and receipt classifiers
-        run: |
-          set -euo pipefail
-          cargo fmt --manifest-path bench/scale/rrharness/Cargo.toml -- --check
-          cargo fmt --manifest-path bench/scale/rrtransport/Cargo.toml -- --check
-          cargo fmt --manifest-path bench/scale/reloadstall/Cargo.toml -- --check
-          cargo fmt --manifest-path bench/scale/outbound-prefix-limits/Cargo.toml -- --check
-          cargo fmt --manifest-path bench/scale/config-persistence/Cargo.toml -- --check
-          cargo fmt --manifest-path bench/scale/enhanced-route-refresh/Cargo.toml -- --check
-          cargo fmt --manifest-path bench/scale/outbound-prefix-limit-scale/Cargo.toml -- --check
-          cargo test --manifest-path bench/scale/rrharness/Cargo.toml --locked
-          cargo test --manifest-path bench/scale/rrtransport/Cargo.toml --locked
-          cargo test --manifest-path bench/scale/reloadstall/Cargo.toml --locked
-          cargo test --manifest-path bench/scale/outbound-prefix-limits/Cargo.toml --locked
-          cargo test --manifest-path bench/scale/config-persistence/Cargo.toml --locked
-          cargo test --manifest-path bench/scale/enhanced-route-refresh/Cargo.toml --locked
-          cargo test --manifest-path bench/scale/outbound-prefix-limit-scale/Cargo.toml --locked
-          cargo clippy --manifest-path bench/scale/outbound-prefix-limits/Cargo.toml \
-            --locked --all-targets -- -D warnings
-          cargo clippy --manifest-path bench/scale/rrtransport/Cargo.toml \
-            --locked --all-targets -- -D warnings
-          cargo run --manifest-path bench/scale/rrtransport/Cargo.toml --locked -- smoke
-          rrtransport_receipt=$(mktemp -d)
-          bench/scale/rrtransport/run-receipt.sh --real-smoke "$rrtransport_receipt"
-          bash bench/tests/test-rrtransport-receipt.sh
-          cargo clippy --manifest-path bench/scale/config-persistence/Cargo.toml \
-            --locked --all-targets -- -D warnings
-          cargo clippy --manifest-path bench/scale/enhanced-route-refresh/Cargo.toml \
-            --locked --all-targets -- -D warnings
-          cargo clippy --manifest-path bench/scale/outbound-prefix-limit-scale/Cargo.toml \
-            --locked --all-targets -- -D warnings
-          # The IRR manifest contract exercises the production rustbgpd
-          # renderer, so make that prerequisite explicit on a clean runner.
-          cargo build -p rs-config-render
-          cargo test --test reloadstall_scenario_emitted_check
-          bash -n bench/compare-criterion.sh
-          shellcheck bench/smoke-benches.sh
-          bash -n bench/scale/route-server-1000/run-receipt.sh
-          bash -n bench/scale/outbound-prefix-limits/run-receipt.sh
-          bash -n bench/scale/config-persistence/run-receipt.sh
-          bash -n bench/scale/enhanced-route-refresh/run-receipt.sh
-          bash -n bench/scale/outbound-prefix-limit-scale/run-receipt.sh
-          bash -n bench/scale/rrtransport/run-receipt.sh
-          bash -n bench/tests/test-rrtransport-receipt.sh
-          bash -n bench/tests/test-route-server-1000-receipt.sh
-          bash -n bench/tests/test-vpn-query-receipt.sh
-          bash -n bench/tests/test-vpn-query-campaign.sh
-          bash -n bench/run-vpn-query-campaign.sh
-          shellcheck bench/scale/route-server-1000/run-receipt.sh \
-            bench/scale/outbound-prefix-limits/run-receipt.sh \
-            bench/scale/config-persistence/run-receipt.sh \
-            bench/scale/enhanced-route-refresh/run-receipt.sh \
-            bench/scale/outbound-prefix-limit-scale/run-receipt.sh \
-            bench/scale/rrtransport/run-receipt.sh \
-            bench/tests/test-rrtransport-receipt.sh \
-            bench/tests/test-route-server-1000-receipt.sh
-          shellcheck bench/tests/test-vpn-query-receipt.sh
-          shellcheck bench/tests/test-vpn-query-campaign.sh \
-            bench/run-vpn-query-campaign.sh
-          bash bench/tests/test-route-server-1000-receipt.sh
-          bash bench/tests/test-vpn-query-receipt.sh
-          bash bench/tests/test-vpn-query-campaign.sh
-          bash -n bench/scale/compare-rrharness.sh
-          bash bench/tests/test-rrharness-driver.sh
-          python3 -m unittest discover \
-            -s bench/scale/enhanced-route-refresh -p 'test_*.py'
-          python3 -m unittest -v tests/soak/test_intern_churn_analyzers.py
-          python3 bench/scale/rebaseline/test_classifiers.py
-          python3 bench/scale/rebaseline/test_parse_rrharness.py
-          python3 bench/scale/rebaseline/test_validate_lan395_criterion.py
-          python3 bench/tests/test_verify_mrt_growth_campaign.py
-          (
-            cd docs/perf/artifacts/enhanced-route-refresh-2026-07
-            sha256sum -c SHA256SUMS
-          )
       - name: Verify committed RIB rebaseline receipt
         run: |
           set -euo pipefail
@@ -329,6 +257,116 @@ jobs:
               exit 1
             fi
             echo "wire bump + README touched — gate passed"
+          fi
+
+  scale_receipts:
+    name: scale / receipt checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # stable
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+      - uses: ./.github/actions/install-protobuf
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Install receipt-tool dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ripgrep
+      - name: Check standalone scale harnesses and receipt classifiers
+        run: |
+          set -euo pipefail
+          cargo fmt --manifest-path bench/scale/rrharness/Cargo.toml -- --check
+          cargo fmt --manifest-path bench/scale/rrtransport/Cargo.toml -- --check
+          cargo fmt --manifest-path bench/scale/reloadstall/Cargo.toml -- --check
+          cargo fmt --manifest-path bench/scale/outbound-prefix-limits/Cargo.toml -- --check
+          cargo fmt --manifest-path bench/scale/config-persistence/Cargo.toml -- --check
+          cargo fmt --manifest-path bench/scale/enhanced-route-refresh/Cargo.toml -- --check
+          cargo fmt --manifest-path bench/scale/outbound-prefix-limit-scale/Cargo.toml -- --check
+          cargo test --manifest-path bench/scale/rrharness/Cargo.toml --locked
+          cargo test --manifest-path bench/scale/rrtransport/Cargo.toml --locked
+          cargo test --manifest-path bench/scale/reloadstall/Cargo.toml --locked
+          cargo test --manifest-path bench/scale/outbound-prefix-limits/Cargo.toml --locked
+          cargo test --manifest-path bench/scale/config-persistence/Cargo.toml --locked
+          cargo test --manifest-path bench/scale/enhanced-route-refresh/Cargo.toml --locked
+          cargo test --manifest-path bench/scale/outbound-prefix-limit-scale/Cargo.toml --locked
+          cargo clippy --manifest-path bench/scale/outbound-prefix-limits/Cargo.toml \
+            --locked --all-targets -- -D warnings
+          cargo clippy --manifest-path bench/scale/rrtransport/Cargo.toml \
+            --locked --all-targets -- -D warnings
+          cargo run --manifest-path bench/scale/rrtransport/Cargo.toml --locked -- smoke
+          rrtransport_receipt=$(mktemp -d)
+          bench/scale/rrtransport/run-receipt.sh --real-smoke "$rrtransport_receipt"
+          bash bench/tests/test-rrtransport-receipt.sh
+          cargo clippy --manifest-path bench/scale/config-persistence/Cargo.toml \
+            --locked --all-targets -- -D warnings
+          cargo clippy --manifest-path bench/scale/enhanced-route-refresh/Cargo.toml \
+            --locked --all-targets -- -D warnings
+          cargo clippy --manifest-path bench/scale/outbound-prefix-limit-scale/Cargo.toml \
+            --locked --all-targets -- -D warnings
+          # The IRR manifest contract exercises the production rustbgpd
+          # renderer, so make that prerequisite explicit on a clean runner.
+          cargo build -p rs-config-render
+          cargo test --test reloadstall_scenario_emitted_check
+          bash -n bench/compare-criterion.sh
+          shellcheck bench/smoke-benches.sh
+          bash -n bench/scale/route-server-1000/run-receipt.sh
+          bash -n bench/scale/outbound-prefix-limits/run-receipt.sh
+          bash -n bench/scale/config-persistence/run-receipt.sh
+          bash -n bench/scale/enhanced-route-refresh/run-receipt.sh
+          bash -n bench/scale/outbound-prefix-limit-scale/run-receipt.sh
+          bash -n bench/scale/rrtransport/run-receipt.sh
+          bash -n bench/tests/test-rrtransport-receipt.sh
+          bash -n bench/tests/test-route-server-1000-receipt.sh
+          bash -n bench/tests/test-vpn-query-receipt.sh
+          bash -n bench/tests/test-vpn-query-campaign.sh
+          bash -n bench/run-vpn-query-campaign.sh
+          shellcheck bench/scale/route-server-1000/run-receipt.sh \
+            bench/scale/outbound-prefix-limits/run-receipt.sh \
+            bench/scale/config-persistence/run-receipt.sh \
+            bench/scale/enhanced-route-refresh/run-receipt.sh \
+            bench/scale/outbound-prefix-limit-scale/run-receipt.sh \
+            bench/scale/rrtransport/run-receipt.sh \
+            bench/tests/test-rrtransport-receipt.sh \
+            bench/tests/test-route-server-1000-receipt.sh
+          shellcheck bench/tests/test-vpn-query-receipt.sh
+          shellcheck bench/tests/test-vpn-query-campaign.sh \
+            bench/run-vpn-query-campaign.sh
+          bash bench/tests/test-route-server-1000-receipt.sh
+          bash bench/tests/test-vpn-query-receipt.sh
+          bash bench/tests/test-vpn-query-campaign.sh
+          bash -n bench/scale/compare-rrharness.sh
+          bash bench/tests/test-rrharness-driver.sh
+          python3 -m unittest discover \
+            -s bench/scale/enhanced-route-refresh -p 'test_*.py'
+          python3 -m unittest -v tests/soak/test_intern_churn_analyzers.py
+          python3 bench/scale/rebaseline/test_classifiers.py
+          python3 bench/scale/rebaseline/test_parse_rrharness.py
+          python3 bench/scale/rebaseline/test_validate_lan395_criterion.py
+          python3 bench/tests/test_verify_mrt_growth_campaign.py
+          (
+            cd docs/perf/artifacts/enhanced-route-refresh-2026-07
+            sha256sum -c SHA256SUMS
+          )
+  check:
+    name: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: ${{ always() }}
+    needs: [core, scale_receipts]
+    env:
+      CORE_RESULT: ${{ needs.core.result }}
+      SCALE_RECEIPTS_RESULT: ${{ needs.scale_receipts.result }}
+    steps:
+      - name: Aggregate required CI result
+        run: |
+          set -euo pipefail
+          printf 'core=%s\n' "$CORE_RESULT"
+          printf 'scale_receipts=%s\n' "$SCALE_RECEIPTS_RESULT"
+          if [[ "$CORE_RESULT" != "success" || "$SCALE_RECEIPTS_RESULT" != "success" ]]; then
+            exit 1
           fi
 
   msrv:
