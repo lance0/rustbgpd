@@ -1,0 +1,48 @@
+# Minimal MANRS IXP Action 1 route-server example.
+
+[global]
+asn = 64500
+router_id = "192.0.2.1"
+listen_port = 179
+ebgp_requires_policy = true
+
+[global.telemetry]
+log_format = "json"
+
+[global.telemetry.grpc_uds]
+path = "/var/lib/rustbgpd/grpc.sock"
+principal = "operator"
+
+[security.grpc]
+enforcement = "tier"
+
+[security.grpc.roles]
+operator = "operator"
+
+[rpki]
+[[rpki.cache_servers]]
+address = "127.0.0.1:3323"
+
+[policy.definitions.reject-rpki-invalid]
+[[policy.definitions.reject-rpki-invalid.statements]]
+match_rpki_validation = "invalid"
+action = "deny"
+
+# Transparent route-server export is explicit, not permit-by-omission.
+[policy.definitions.rs-transparent-export]
+default_action = "permit"
+
+[policy]
+rpol_files = ["member-a-irr.rpol"]
+
+[[neighbors]]
+address = "192.0.2.10"
+remote_asn = 64501
+description = "member-a"
+route_server_client = true
+role = "route_server"
+families = ["ipv4_unicast"]
+max_prefixes_ipv4 = 10000
+max_prefix_restart_seconds = 900
+import_policy_chain = ["reject-rpki-invalid", "member-a-irr"]
+export_policy_chain = ["rs-transparent-export"]

@@ -1,0 +1,25 @@
+# Minimal resolved IRR authorization for member AS64501.
+asn-set member-a-origins { 64501 }
+prefix-set member-a-prefixes { 203.0.113.0/24 }
+
+policy member-a-irr {
+    term accept-authorized {
+        if route.origin-as in member-a-origins && route.prefix in member-a-prefixes { accept }
+    }
+    term reject-unauthorized { reject }
+}
+
+test authorized-origin-and-prefix-is-accepted {
+    route { prefix 203.0.113.0/24; as-path "64501" }
+    expect member-a-irr == accept
+}
+
+test registered-prefix-with-wrong-origin-is-rejected {
+    route { prefix 203.0.113.0/24; as-path "64502" }
+    expect member-a-irr == reject
+}
+
+test registered-origin-with-other-prefix-is-rejected {
+    route { prefix 198.51.100.0/24; as-path "64501" }
+    expect member-a-irr == reject
+}
