@@ -661,6 +661,15 @@ fn irr_reload_manifest_seals_a_cell_independent_dataset_digest() {
             &std::fs::read(dir.path().join("manifest.json")).expect("read manifest"),
         )
         .expect("parse manifest");
+        let applicable = matches!(cell, "rustbgpd" | "rustbgpd-txn");
+        assert_eq!(manifest["path_hiding_applicable"], applicable);
+        assert_eq!(manifest["path_hiding_requested"], true);
+        let expected_path_hiding = serde_json::json!(applicable.then_some(true));
+        assert_eq!(manifest["path_hiding"], expected_path_hiding);
+        assert_eq!(
+            manifest["admit_churn"], true,
+            "default digest path admits churn"
+        );
         digests.push(
             manifest["dataset_sha256"]
                 .as_str()
@@ -731,4 +740,232 @@ fn irr_reload_manifest_seals_a_cell_independent_dataset_digest() {
     )
     .expect("parse manifest");
     assert_ne!(manifest["dataset_sha256"], digests[0]);
+}
+
+#[test]
+/// Red proof: reversing or omitting the path-hiding value changes the emitted
+/// context/config assertions; adding it to the canonical record changes the
+/// byte-for-byte canonical stream and dataset digest comparison.
+fn irr_memory_path_hiding_is_explicit_but_not_dataset_identity() {
+    let root = env!("CARGO_MANIFEST_DIR");
+    let generator = format!("{root}/bench/scale/reloadstall/gen-irr-scenario.py");
+    let target_dir = std::env::var_os("CARGO_TARGET_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(root).join("target"));
+    let renderer = target_dir.join("debug/rs-config-render");
+    assert!(
+        renderer.is_file(),
+        "build rs-config-render before this test"
+    );
+
+    let mut observations = Vec::new();
+    for (path_hiding, admit_churn) in [("true", "false"), ("false", "false"), ("true", "true")] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let canonical = dir.path().join("canonical.jsonl");
+        let output = std::process::Command::new("python3")
+            .args([&generator, "rustbgpd", "8", "80"])
+            .arg(dir.path())
+            .args([
+                "--render-bin",
+                renderer.to_str().expect("renderer path"),
+                "--min-list",
+                "10",
+                "--max-list",
+                "10",
+                "--path-hiding",
+                path_hiding,
+                "--admit-churn",
+                admit_churn,
+                "--canonical-dataset-out",
+            ])
+            .arg(&canonical)
+            .output()
+            .expect("run generator");
+        assert!(
+            output.status.success(),
+            "generator failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let manifest: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(dir.path().join("manifest.json")).expect("manifest"),
+        )
+        .expect("manifest JSON");
+        let context: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(dir.path().join("context-a.json")).expect("context"),
+        )
+        .expect("context JSON");
+        let config = std::fs::read_to_string(dir.path().join("config.toml")).expect("config");
+        let expected = path_hiding == "true";
+        let expected_churn = admit_churn == "true";
+        let stdout = String::from_utf8(output.stdout).expect("generator stdout");
+        let effective_entries = if expected_churn { 208 } else { 80 };
+        assert!(stdout.contains(&format!("filter_entries={effective_entries}")));
+        assert_eq!(manifest["path_hiding"], expected);
+        assert_eq!(manifest["admit_churn"], expected_churn);
+        assert_eq!(context["cfg"]["path_hiding"], expected);
+        assert_eq!(context["cfg"]["add_path"], false);
+        assert_eq!(
+            config.matches("per_client_best = true").count(),
+            if expected { 8 } else { 0 }
+        );
+        assert!(!config.contains("[neighbors.add_path]"));
+        let policy = std::fs::read_to_string(dir.path().join("member.rpol")).expect("policy");
+        assert!(
+            policy.contains("20.0.0.0/24"),
+            "base prefix must remain admitted"
+        );
+        if expected_churn {
+            assert!(policy.contains("\n    172.16.0.0/24"));
+            assert_eq!(manifest["total_filter_entries"], 208);
+            assert!(
+                manifest["list_sizes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|size| size == 26)
+            );
+        } else {
+            assert!(
+                !policy.contains("\n    172."),
+                "all churn blocks must be rejected"
+            );
+            assert_eq!(manifest["total_filter_entries"], 80);
+            assert!(
+                manifest["list_sizes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|size| size == 10)
+            );
+        }
+        observations.push((
+            manifest["dataset_sha256"].as_str().unwrap().to_owned(),
+            std::fs::read(canonical).expect("canonical dataset"),
+        ));
+    }
+    assert!(observations.windows(2).all(|pair| pair[0] == pair[1]));
+}
+
+#[test]
+/// Fixture-backed red proofs execute the same semantic validators as a real
+/// run. Each corrupt fixture must be rejected independently; token presence
+/// alone cannot make this test pass.
+fn irr_memory_protocol_self_test_exercises_semantic_rejections() {
+    let runner = format!(
+        "{}/bench/scale/irrreload/run-memory-attribution.sh",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let output = std::process::Command::new("bash")
+        .arg(&runner)
+        .env("SELF_TEST", "1")
+        .env_remove("MODE")
+        .output()
+        .expect("run memory attribution self-test");
+    assert!(
+        output.status.success(),
+        "self-test failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("UTF-8 self-test output");
+    for proof in [
+        "leg-reordered",
+        "leg-omitted",
+        "path-hiding-mapping-and-hash",
+        "group-enforcement",
+        "queue-enforcement",
+        "route-count-enforcement",
+        "route-family-enforcement",
+        "adj-out-family-enforcement",
+        "metric-parser-duplicate-label",
+        "metric-parser-malformed-label",
+        "metric-parser-malformed-escape",
+        "metric-parser-nonfinite",
+        "metric-parser-unexpected-label",
+        "metric-parser-missing-label",
+        "metric-parser-duplicate-peer",
+        "fractional-group",
+        "three-scrape-stability",
+        "allocator-conflation",
+        "allocator-omission",
+        "pid-reuse",
+        "proc-omission",
+        "tree-rss-omission",
+        "timestamp-retry-accumulation",
+        "timestamp-cadence",
+        "timestamp-order-reversal",
+        "roster-duplicate",
+        "roster-root-omission",
+        "roster-root-replacement",
+        "roster-tree-sum",
+        "roster-disconnected",
+        "dhat-zero-live",
+        "dhat-unsymbolized",
+        "dhat-raw-derivative-mismatch",
+        "metrics-port-fixed",
+        "port-positive",
+        "port-range",
+        "timeout-numeric",
+        "timeout-positive",
+        "start-timeout-cap",
+        "settle-timeout-cap",
+        "leg-timeout-cap",
+    ] {
+        assert!(
+            stdout.contains(&format!("red-proof {proof}=pass")),
+            "{proof}"
+        );
+    }
+    assert!(stdout.contains("positive-proof prometheus-syntax=pass"));
+    assert!(stdout.contains("SELF_TEST pass"));
+
+    let failed_tmp = tempfile::tempdir().expect("failed self-test TMPDIR");
+    let failed = std::process::Command::new("bash")
+        .arg(&runner)
+        .env("SELF_TEST", "1")
+        .env("GENERATOR", failed_tmp.path().join("missing-generator.py"))
+        .env("TMPDIR", failed_tmp.path())
+        .output()
+        .expect("run deliberately failed self-test");
+    assert!(!failed.status.success());
+    assert_eq!(
+        std::fs::read_dir(failed_tmp.path())
+            .expect("read failed self-test TMPDIR")
+            .count(),
+        0,
+        "removing the self-test EXIT trap leaves its generated tempdir behind"
+    );
+
+    let implicit = std::process::Command::new("bash")
+        .arg(&runner)
+        .env_remove("MODE")
+        .output()
+        .expect("run implicit mode");
+    assert_eq!(implicit.status.code(), Some(2));
+
+    let full_without_opt_in = std::process::Command::new("bash")
+        .arg(&runner)
+        .env("MODE", "full")
+        .env("DRY_RUN_PROTOCOL", "1")
+        .env_remove("FULL_SHAPE")
+        .output()
+        .expect("run gated full mode");
+    assert!(!full_without_opt_in.status.success());
+
+    for mode in ["smoke", "dhat"] {
+        let dry = std::process::Command::new("bash")
+            .arg(&runner)
+            .env("MODE", mode)
+            .env("DRY_RUN_PROTOCOL", "1")
+            .output()
+            .expect("run bounded dry protocol");
+        assert!(dry.status.success(), "{mode} dry protocol");
+        let text = String::from_utf8(dry.stdout).expect("dry protocol UTF-8");
+        assert!(text.contains("protocol=private,grouped,grouped,private"));
+        assert!(text.contains("path_hiding=true,false,false,true"));
+        assert!(text.contains("admit_churn=false"));
+        assert!(text.contains("ports=1790,9179"));
+        assert!(text.contains("rss_abort_gib=100"));
+    }
 }
