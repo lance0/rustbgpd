@@ -456,7 +456,7 @@ fn resolve_rpol_chain_ref(
     }
     let mut compiled = entry
         .file
-        .compile_policy_bound(base, &args, store, datasets)
+        .compile_policy_bound_cached_tables(base, &args, store, datasets)
         .expect("registry entry names a policy defined in its file")
         .map_err(|missing| ConfigError::InvalidPolicyEntry {
             // Unreachable through `Config::load` (bind_datasets runs

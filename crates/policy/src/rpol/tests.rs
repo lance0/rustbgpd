@@ -11,7 +11,7 @@ use crate::engine::{PolicyAction, RouteContext, RouteModifications};
 use crate::ir::{Cmp, MatchExpr, PolicySource, SetId, TermAction};
 use crate::sets::SetStore;
 
-use super::{TestReport, check_rpol, compile_rpol, run_rpol_tests};
+use super::{RpolFile, TestReport, check_rpol, compile_rpol, run_rpol_tests};
 
 const ADR_EXAMPLE: &str = r"
 prefix-set customers { 10.10.0.0/16 ge 24 le 28, 192.0.2.0/24 }
@@ -103,6 +103,52 @@ fn one_shot_compiles_share_literal_sets_through_caller_store() {
     let mut store = SetStore::new();
     let first = compile_rpol(&source("first"), &mut store).expect("first source compiles");
     let second = compile_rpol(&source("second"), &mut store).expect("second source compiles");
+
+    assert!(Arc::ptr_eq(&first.prefix_sets[0], &second.prefix_sets[0]));
+    assert!(Arc::ptr_eq(
+        &first.community_sets[0],
+        &second.community_sets[0]
+    ));
+    assert!(Arc::ptr_eq(&first.asn_sets[0], &second.asn_sets[0]));
+}
+
+/// `RpolFile::compile_policy{_bound}` retains the caller-owned `SetStore`
+/// contract even after each file's high-fanout cache has been initialized.
+///
+/// Red proof: routing either public compile back through `self.tables()` makes
+/// all three pointer-identity assertions red because the two files own separate
+/// private tables.
+#[test]
+fn rpol_file_compiles_share_literal_sets_through_caller_store() {
+    let source = |policy: &str| {
+        format!(
+            "prefix-set prefixes {{ 192.0.2.0/24 }}\n\
+             community-set communities {{ 65000:100 }}\n\
+             asn-set asns {{ 64512 }}\n\
+             policy {policy} {{ term allow {{ accept }} }}"
+        )
+    };
+    let first_file = RpolFile::parse(&source("first")).expect("first source parses");
+    let second_file = RpolFile::parse(&source("second")).expect("second source parses");
+
+    // Initialize both private tables first: caller-store sharing must not rely
+    // on this public compile happening to win each OnceLock race.
+    assert_eq!(first_file.run_tests().total, 0);
+    assert_eq!(second_file.run_tests().total, 0);
+
+    let mut store = SetStore::new();
+    let first = first_file
+        .compile_policy("first", &[], &mut store)
+        .expect("first policy compiles");
+    let second = second_file
+        .compile_policy_bound(
+            "second",
+            &[],
+            &mut store,
+            &crate::datasets::DatasetBindings::new(),
+        )
+        .expect("second policy exists")
+        .expect("second policy binds");
 
     assert!(Arc::ptr_eq(&first.prefix_sets[0], &second.prefix_sets[0]));
     assert!(Arc::ptr_eq(

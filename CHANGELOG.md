@@ -76,6 +76,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   content-equal sets from separate generations still compare by value.
   (#1346)
 
+- The public `RpolFile` compiler again interns literal sets through its
+  caller-owned `SetStore`, preserving sharing across separately parsed files.
+  The daemon selects the whole-file table cache explicitly for roster fan-out,
+  retaining the IRR-scale reload fix without silently changing the public
+  compiler contract.
+
 - IRR reload campaign receipts now measure first generation output only from
   marker-qualified non-self base prefixes, fingerprint resumable passes and
   retained rows to the exact code, binaries, scripts, and campaign inputs, and
