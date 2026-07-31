@@ -140,11 +140,41 @@ on:
       - "**/*.md"
       - "docs/**"
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
 jobs:
+  # Warm one fixed-scope cache per source SHA; jobs still build and load their
+  # own image, falling back to an uncached build if the cache is unavailable.
+  prime_dev_image:
+    name: Prime rustbgpd:dev build cache
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: rustbgpd-dev-image-${{ github.sha }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+      - name: Prime rustbgpd:dev build cache
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: .
+          load: false
+          tags: rustbgpd:dev
+          target: dev
+          cache-from: type=gha,scope=rustbgpd-dev
+          cache-to: type=gha,scope=rustbgpd-dev,mode=max,ignore-error=true
+
   m1:
+    needs: prime_dev_image
     name: M1 — basic session + UPDATE (FRR 10.3.1)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -168,8 +198,7 @@ jobs:
           load: true
           tags: rustbgpd:dev
           target: dev
-          cache-from: type=gha
-          cache-to: type=gha,mode=max,ignore-error=true
+          cache-from: type=gha,scope=rustbgpd-dev
 
       - name: Run M1 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -179,6 +208,7 @@ jobs:
           script: tests/interop/scripts/test-m1-frr.sh
 
   m13:
+    needs: prime_dev_image
     name: M13 — Policy Engine (FRR 10.3.1, 3-node)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -202,8 +232,7 @@ jobs:
           load: true
           tags: rustbgpd:dev
           target: dev
-          cache-from: type=gha
-          cache-to: type=gha,mode=max,ignore-error=true
+          cache-from: type=gha,scope=rustbgpd-dev
 
       - name: Run M13 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -213,6 +242,7 @@ jobs:
           script: tests/interop/scripts/test-m13-policy-frr.sh
 
   m80:
+    needs: prime_dev_image
     name: M80 — rpol policy parity (ADR-0096, FRR 10.3.1, 4-node)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -239,8 +269,7 @@ jobs:
           load: true
           tags: rustbgpd:dev
           target: dev
-          cache-from: type=gha
-          cache-to: type=gha,mode=max,ignore-error=true
+          cache-from: type=gha,scope=rustbgpd-dev
 
       - name: Run M80 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -250,6 +279,7 @@ jobs:
           script: tests/interop/scripts/test-m80-rpol-policy-parity-frr.sh
 
   m15:
+    needs: prime_dev_image
     name: M15 — Route Refresh via gRPC SoftResetIn (FRR 10.3.1)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -273,8 +303,7 @@ jobs:
           load: true
           tags: rustbgpd:dev
           target: dev
-          cache-from: type=gha
-          cache-to: type=gha,mode=max,ignore-error=true
+          cache-from: type=gha,scope=rustbgpd-dev
 
       - name: Run M15 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -284,6 +313,7 @@ jobs:
           script: tests/interop/scripts/test-m15-rr-frr.sh
 
   m10:
+    needs: prime_dev_image
     name: M10 — IPv6 dual-stack / MP-BGP (FRR 10.3.1)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -307,8 +337,7 @@ jobs:
           load: true
           tags: rustbgpd:dev
           target: dev
-          cache-from: type=gha
-          cache-to: type=gha,mode=max,ignore-error=true
+          cache-from: type=gha,scope=rustbgpd-dev
 
       - name: Run M10 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -318,6 +347,7 @@ jobs:
           script: tests/interop/scripts/test-m10-frr-ipv6.sh
 
   m14:
+    needs: prime_dev_image
     name: M14 — Route Reflector (FRR 10.3.1, 3-node iBGP)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -341,8 +371,7 @@ jobs:
           load: true
           tags: rustbgpd:dev
           target: dev
-          cache-from: type=gha
-          cache-to: type=gha,mode=max,ignore-error=true
+          cache-from: type=gha,scope=rustbgpd-dev
 
       - name: Run M14 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -352,6 +381,7 @@ jobs:
           script: tests/interop/scripts/test-m14-rr-frr.sh
 
   m17:
+    needs: prime_dev_image
     name: M17/M89 — Add-Path + experimental Paths-Limit (FRR 10.3.1)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -376,8 +406,7 @@ jobs:
           load: true
           tags: rustbgpd:dev
           target: dev
-          cache-from: type=gha
-          cache-to: type=gha,mode=max,ignore-error=true
+          cache-from: type=gha,scope=rustbgpd-dev
 
       - name: Run M17 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -394,6 +423,7 @@ jobs:
           script: tests/interop/scripts/test-m89-paths-limit-frr.sh
 
   m73:
+    needs: prime_dev_image
     name: M73/M87 — GoBGP BGP-LS + exact-export/BIRD
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -418,8 +448,7 @@ jobs:
           load: true
           tags: rustbgpd:dev
           target: dev
-          cache-from: type=gha
-          cache-to: type=gha,mode=max,ignore-error=true
+          cache-from: type=gha,scope=rustbgpd-dev
 
       - name: Build gobgp:bgpls
         run: docker build -t gobgp:bgpls -f tests/interop/Dockerfile.gobgp-bgpls tests/interop
@@ -442,6 +471,7 @@ jobs:
           script: tests/interop/scripts/test-m87-exact-export-rejection.sh
 
   m74:
+    needs: prime_dev_image
     name: M74 — VPNv4 route reflection (GoBGP 3.x)
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -466,8 +496,7 @@ jobs:
           load: true
           tags: rustbgpd:dev
           target: dev
-          cache-from: type=gha
-          cache-to: type=gha,mode=max,ignore-error=true
+          cache-from: type=gha,scope=rustbgpd-dev
 
       - name: Build gobgp:interop
         run: docker build -t gobgp:interop -f tests/interop/Dockerfile.gobgp tests/interop
@@ -480,6 +509,7 @@ jobs:
           script: tests/interop/scripts/test-m74-vpnv4-reflection-gobgp.sh
 
   m75:
+    needs: prime_dev_image
     name: M75 — RT-Constrain VPNv4 filtering (GoBGP 3.x)
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -504,8 +534,7 @@ jobs:
           load: true
           tags: rustbgpd:dev
           target: dev
-          cache-from: type=gha
-          cache-to: type=gha,mode=max,ignore-error=true
+          cache-from: type=gha,scope=rustbgpd-dev
 
       - name: Build gobgp:interop
         run: docker build -t gobgp:interop -f tests/interop/Dockerfile.gobgp tests/interop
@@ -518,6 +547,7 @@ jobs:
           script: tests/interop/scripts/test-m75-rtc-vpnv4-filter-gobgp.sh
 
   m76:
+    needs: prime_dev_image
     name: M76 — ORR divergent-best (GoBGP 4.6.0)
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -542,8 +572,7 @@ jobs:
           load: true
           tags: rustbgpd:dev
           target: dev
-          cache-from: type=gha
-          cache-to: type=gha,mode=max,ignore-error=true
+          cache-from: type=gha,scope=rustbgpd-dev
 
       - name: Build gobgp:bgpls
         run: docker build -t gobgp:bgpls -f tests/interop/Dockerfile.gobgp-bgpls tests/interop
@@ -556,6 +585,7 @@ jobs:
           script: tests/interop/scripts/test-m76-orr-divergent-best-gobgp.sh
 
   m77:
+    needs: prime_dev_image
     name: M77 — GR/LLGR RR-family stale preservation (GoBGP 4.6.0)
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -580,8 +610,7 @@ jobs:
           load: true
           tags: rustbgpd:dev
           target: dev
-          cache-from: type=gha
-          cache-to: type=gha,mode=max,ignore-error=true
+          cache-from: type=gha,scope=rustbgpd-dev
 
       - name: Build gobgp:bgpls
         run: docker build -t gobgp:bgpls -f tests/interop/Dockerfile.gobgp-bgpls tests/interop
@@ -594,6 +623,7 @@ jobs:
           script: tests/interop/scripts/test-m77-gr-llgr-rr-gobgp.sh
 
   m78:
+    needs: prime_dev_image
     name: M78 — Multi-cluster ORR + inter-RR Add-Path (GoBGP 4.6.0)
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -618,8 +648,7 @@ jobs:
           load: true
           tags: rustbgpd:dev
           target: dev
-          cache-from: type=gha
-          cache-to: type=gha,mode=max,ignore-error=true
+          cache-from: type=gha,scope=rustbgpd-dev
 
       - name: Build gobgp:bgpls
         run: docker build -t gobgp:bgpls -f tests/interop/Dockerfile.gobgp-bgpls tests/interop
@@ -632,6 +661,7 @@ jobs:
           script: tests/interop/scripts/test-m78-multicluster-orr-gobgp.sh
 
   m79:
+    needs: prime_dev_image
     name: M79 — Labeled-unicast route reflection + GR (GoBGP 4.6.0)
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -656,8 +686,7 @@ jobs:
           load: true
           tags: rustbgpd:dev
           target: dev
-          cache-from: type=gha
-          cache-to: type=gha,mode=max,ignore-error=true
+          cache-from: type=gha,scope=rustbgpd-dev
 
       - name: Build gobgp:bgpls
         run: docker build -t gobgp:bgpls -f tests/interop/Dockerfile.gobgp-bgpls tests/interop
@@ -670,6 +699,7 @@ jobs:
           script: tests/interop/scripts/test-m79-labeled-reflection-gobgp.sh
 
   m22:
+    needs: prime_dev_image
     name: M22 — FlowSpec (FRR 10.3.1)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -697,8 +727,7 @@ jobs:
           load: true
           tags: rustbgpd:dev
           target: dev
-          cache-from: type=gha
-          cache-to: type=gha,mode=max,ignore-error=true
+          cache-from: type=gha,scope=rustbgpd-dev
 
       - name: Run M22 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -708,6 +737,7 @@ jobs:
           script: tests/interop/scripts/test-m22-flowspec-frr.sh
 
   m24:
+    needs: prime_dev_image
     name: M24 — BMP (FRR 10.3.1, Python receiver)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -731,8 +761,7 @@ jobs:
           load: true
           tags: rustbgpd:dev
           target: dev
-          cache-from: type=gha
-          cache-to: type=gha,mode=max,ignore-error=true
+          cache-from: type=gha,scope=rustbgpd-dev
 
       - name: Run M24 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -742,6 +771,7 @@ jobs:
           script: tests/interop/scripts/test-m24-bmp-frr.sh
 
   m81:
+    needs: prime_dev_image
     name: M81 — BMP trio + BMPv4 receipt (pmacct + gobmp + tshark)
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -767,8 +797,7 @@ jobs:
           load: true
           tags: rustbgpd:dev
           target: dev
-          cache-from: type=gha
-          cache-to: type=gha,mode=max,ignore-error=true
+          cache-from: type=gha,scope=rustbgpd-dev
 
       - name: Build gobgp:interop
         run: docker build -t gobgp:interop -f tests/interop/Dockerfile.gobgp tests/interop
@@ -787,6 +816,7 @@ jobs:
           script: tests/interop/scripts/test-m81-bmp-trio-gobgp.sh
 
   m82:
+    needs: prime_dev_image
     # Synthetic leg only. The SR Linux vendor leg
     # (m82-evpn-bundle-srlinux.clab.yml) stays local: the NOS image is
     # ~750 MB compressed / 3.2 GB on disk and boots a full chassis sim —
@@ -816,8 +846,7 @@ jobs:
           load: true
           tags: rustbgpd:dev
           target: dev
-          cache-from: type=gha
-          cache-to: type=gha,mode=max,ignore-error=true
+          cache-from: type=gha,scope=rustbgpd-dev
 
       - name: Build gobgp:interop
         run: docker build -t gobgp:interop -f tests/interop/Dockerfile.gobgp tests/interop
@@ -830,6 +859,7 @@ jobs:
           script: tests/interop/scripts/test-m82-evpn-bundle-synthetic-gobgp.sh
 
   m83:
+    needs: prime_dev_image
     # Full 3-stack leg in CI: BIRD 2 is a plain apt install on
     # bookworm-slim (deterministic build) and BIRD already runs in
     # hosted CI (M43, kernel-dataplane.yml) without flake history —
@@ -859,8 +889,7 @@ jobs:
           load: true
           tags: rustbgpd:dev
           target: dev
-          cache-from: type=gha
-          cache-to: type=gha,mode=max,ignore-error=true
+          cache-from: type=gha,scope=rustbgpd-dev
 
       - name: Build bird:2-bookworm
         # bird2 + tshark: the member stack that carries the byte-level
@@ -887,6 +916,7 @@ jobs:
           retention-days: 14
 
   m85:
+    needs: prime_dev_image
     name: M85/M93/M95 — RR core, required families, and RFC 8212 presence transitions against BIRD 2
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -912,8 +942,7 @@ jobs:
           load: true
           tags: rustbgpd:dev
           target: dev
-          cache-from: type=gha
-          cache-to: type=gha,mode=max,ignore-error=true
+          cache-from: type=gha,scope=rustbgpd-dev
 
       - name: Build bird:2-bookworm
         run: docker build -t bird:2-bookworm -f tests/interop/Dockerfile.bird tests/interop
@@ -944,6 +973,7 @@ jobs:
           script: tests/interop/scripts/test-m95-rfc8212-presence.sh
 
   m94:
+    needs: prime_dev_image
     name: M94 — RFC 6793 AS4 migration against OLD speakers
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -969,8 +999,7 @@ jobs:
           load: true
           tags: rustbgpd:dev
           target: dev
-          cache-from: type=gha
-          cache-to: type=gha,mode=max,ignore-error=true
+          cache-from: type=gha,scope=rustbgpd-dev
 
       - name: Pull pinned ExaBGP 5.0.9 source
         run: docker pull ghcr.io/exa-networks/exabgp@sha256:5554ac053766e66ca3b99eb6b66e83e32113913729a184dcbaf0cc4abd2f4244
@@ -985,6 +1014,7 @@ jobs:
           script: tests/interop/scripts/test-m94-as4-migration-exabgp.sh
 
   m86:
+    needs: prime_dev_image
     name: M86 — RR core reflection + GR truth against OpenBGPD 9.1 clients
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -1010,8 +1040,7 @@ jobs:
           load: true
           tags: rustbgpd:dev
           target: dev
-          cache-from: type=gha
-          cache-to: type=gha,mode=max,ignore-error=true
+          cache-from: type=gha,scope=rustbgpd-dev
 
       - name: Pull openbgpd/openbgpd:9.1
         # Pinned upstream image from the OpenBGPD portable project; its
@@ -1028,6 +1057,7 @@ jobs:
           script: tests/interop/scripts/test-m86-rr-openbgpd.sh
 
   m25:
+    needs: prime_dev_image
     name: M25 — TCP MD5 + GTSM (FRR 10.3.1)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -1051,8 +1081,7 @@ jobs:
           load: true
           tags: rustbgpd:dev
           target: dev
-          cache-from: type=gha
-          cache-to: type=gha,mode=max,ignore-error=true
+          cache-from: type=gha,scope=rustbgpd-dev
 
       - name: Run M25 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -1062,6 +1091,7 @@ jobs:
           script: tests/interop/scripts/test-m25-md5-gtsm-frr.sh
 
   m29:
+    needs: prime_dev_image
     name: M29 — EVPN cap negotiation (FRR 10.3.1)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -1094,8 +1124,7 @@ jobs:
           load: true
           tags: rustbgpd:dev
           target: dev
-          cache-from: type=gha
-          cache-to: type=gha,mode=max,ignore-error=true
+          cache-from: type=gha,scope=rustbgpd-dev
 
       - name: Run M29 (deploy + test + destroy with retry)
         # The composite always destroys before each attempt, so an
@@ -1107,6 +1136,7 @@ jobs:
           script: tests/interop/scripts/test-m29-evpn-rr-frr.sh
 
   m30:
+    needs: prime_dev_image
     name: M30 — EVPN Type 2 reflection (FRR 10.3.1, kernel VXLAN)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -1134,8 +1164,7 @@ jobs:
           load: true
           tags: rustbgpd:dev
           target: dev
-          cache-from: type=gha
-          cache-to: type=gha,mode=max,ignore-error=true
+          cache-from: type=gha,scope=rustbgpd-dev
 
       - name: Run M30 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -1145,6 +1174,7 @@ jobs:
           script: tests/interop/scripts/test-m30-evpn-type2-frr.sh
 
   m34:
+    needs: prime_dev_image
     name: M34 — SIGHUP policy soft-reset (FRR 10.3.1)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -1171,8 +1201,7 @@ jobs:
           load: true
           tags: rustbgpd:dev
           target: dev
-          cache-from: type=gha
-          cache-to: type=gha,mode=max,ignore-error=true
+          cache-from: type=gha,scope=rustbgpd-dev
 
       - name: Run M34 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -1182,6 +1211,7 @@ jobs:
           script: tests/interop/scripts/test-m34-policy-soft-reset-frr.sh
 
   m35:
+    needs: prime_dev_image
     name: M35 — RFC 8326 Graceful Shutdown (FRR 10.3.1)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -1208,8 +1238,7 @@ jobs:
           load: true
           tags: rustbgpd:dev
           target: dev
-          cache-from: type=gha
-          cache-to: type=gha,mode=max,ignore-error=true
+          cache-from: type=gha,scope=rustbgpd-dev
 
       - name: Run M35 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -1219,6 +1248,7 @@ jobs:
           script: tests/interop/scripts/test-m35-graceful-shutdown-frr.sh
 
   m35b:
+    needs: prime_dev_image
     name: M35b — RFC 8326 GShut FlowSpec (FRR 10.3.1)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -1245,8 +1275,7 @@ jobs:
           load: true
           tags: rustbgpd:dev
           target: dev
-          cache-from: type=gha
-          cache-to: type=gha,mode=max,ignore-error=true
+          cache-from: type=gha,scope=rustbgpd-dev
 
       - name: Run M35b (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -1256,6 +1285,7 @@ jobs:
           script: tests/interop/scripts/test-m35b-graceful-shutdown-flowspec-frr.sh
 
   m35c:
+    needs: prime_dev_image
     name: M35c — RFC 8326 GShut EVPN (FRR 10.3.1)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -1281,8 +1311,7 @@ jobs:
           load: true
           tags: rustbgpd:dev
           target: dev
-          cache-from: type=gha
-          cache-to: type=gha,mode=max,ignore-error=true
+          cache-from: type=gha,scope=rustbgpd-dev
 
       - name: Run M35c (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -1292,6 +1321,7 @@ jobs:
           script: tests/interop/scripts/test-m35c-graceful-shutdown-evpn-frr.sh
 
   m41:
+    needs: prime_dev_image
     name: M41 — RFC 7999 BLACKHOLE (FRR 10.3.1)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -1319,8 +1349,7 @@ jobs:
           load: true
           tags: rustbgpd:dev
           target: dev
-          cache-from: type=gha
-          cache-to: type=gha,mode=max,ignore-error=true
+          cache-from: type=gha,scope=rustbgpd-dev
 
       - name: Run M41 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -1330,6 +1359,7 @@ jobs:
           script: tests/interop/scripts/test-m41-blackhole-frr.sh
 
   m44:
+    needs: prime_dev_image
     name: M44 — ADR-0064 gRPC tier authorization (mTLS)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -1353,8 +1383,7 @@ jobs:
           load: true
           tags: rustbgpd:dev
           target: dev
-          cache-from: type=gha
-          cache-to: type=gha,mode=max,ignore-error=true
+          cache-from: type=gha,scope=rustbgpd-dev
 
       # The mTLS PKI fixture must exist before deploy so the topology
       # can bind-mount it into the rustbgpd container. Generated here
@@ -1371,6 +1400,7 @@ jobs:
           script: tests/interop/scripts/test-m44-grpc-tier-authz.sh
 
   m54:
+    needs: prime_dev_image
     name: M54 — ADR-0070 gNMI / OpenConfig over mTLS
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -1397,8 +1427,7 @@ jobs:
           load: true
           tags: rustbgpd:dev
           target: dev
-          cache-from: type=gha
-          cache-to: type=gha,mode=max,ignore-error=true
+          cache-from: type=gha,scope=rustbgpd-dev
 
       # The mTLS PKI fixture must exist before deploy so the topology
       # can bind-mount it into the rustbgpd container.
@@ -1413,6 +1442,7 @@ jobs:
           script: tests/interop/scripts/test-m54-gnmi-openconfig.sh
 
   m55:
+    needs: prime_dev_image
     name: M55 — ADR-0071 BGP Roles + OTC (FRR 10.3.1)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -1437,8 +1467,7 @@ jobs:
           load: true
           tags: rustbgpd:dev
           target: dev
-          cache-from: type=gha
-          cache-to: type=gha,mode=max,ignore-error=true
+          cache-from: type=gha,scope=rustbgpd-dev
 
       - name: Run M55 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -1448,6 +1477,7 @@ jobs:
           script: tests/interop/scripts/test-m55-bgp-roles-otc-frr.sh
 
   m56:
+    needs: prime_dev_image
     name: M56 — gNMI Subscribe ON_CHANGE (ADR-0070 deferral resolved)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -1474,8 +1504,7 @@ jobs:
           load: true
           tags: rustbgpd:dev
           target: dev
-          cache-from: type=gha
-          cache-to: type=gha,mode=max,ignore-error=true
+          cache-from: type=gha,scope=rustbgpd-dev
 
       # Reuses the M54 mTLS PKI; same operator cert chain.
       - name: Generate M54 mTLS certs
@@ -1489,6 +1518,7 @@ jobs:
           script: tests/interop/scripts/test-m56-gnmi-onchange-frr.sh
 
   m45:
+    needs: prime_dev_image
     name: M45 — EVPN Type 5 injection (gRPC → FRR)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -1512,8 +1542,7 @@ jobs:
           load: true
           tags: rustbgpd:dev
           target: dev
-          cache-from: type=gha
-          cache-to: type=gha,mode=max,ignore-error=true
+          cache-from: type=gha,scope=rustbgpd-dev
 
       - name: Run M45 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -1523,6 +1552,7 @@ jobs:
           script: tests/interop/scripts/test-m45-evpn-type5-injection.sh
 
   m57:
+    needs: prime_dev_image
     name: M57 — Outbound Route Filtering (RFC 5291/5292, FRR 10.3.1)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -1549,8 +1579,7 @@ jobs:
           load: true
           tags: rustbgpd:dev
           target: dev
-          cache-from: type=gha
-          cache-to: type=gha,mode=max,ignore-error=true
+          cache-from: type=gha,scope=rustbgpd-dev
 
       - name: Run M57 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -1560,6 +1589,7 @@ jobs:
           script: tests/interop/scripts/test-m57-orf-frr.sh
 
   m63:
+    needs: prime_dev_image
     name: M63 — ADR-0078 stalled-RIB hold-timer survival (FRR 10.3.1)
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -1587,8 +1617,7 @@ jobs:
           load: true
           tags: rustbgpd:dev
           target: dev
-          cache-from: type=gha
-          cache-to: type=gha,mode=max,ignore-error=true
+          cache-from: type=gha,scope=rustbgpd-dev
 
       - name: Run M63 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -1598,6 +1627,7 @@ jobs:
           script: tests/interop/scripts/test-m63-stalled-rib-hold-timer.sh
 
   m64:
+    needs: prime_dev_image
     name: M64 — IPv6-only peering via disable_ipv4_unicast (FRR 10.3.1)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -1625,8 +1655,7 @@ jobs:
           load: true
           tags: rustbgpd:dev
           target: dev
-          cache-from: type=gha
-          cache-to: type=gha,mode=max,ignore-error=true
+          cache-from: type=gha,scope=rustbgpd-dev
 
       - name: Run M64 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test

@@ -94,9 +94,6 @@ runs:
         load: true
         tags: rustbgpd:dev
         target: dev
-        cache-from: type=gha
-        # ignore-error: a flaking GHA cache backend ("error writing
-        # layer blob: not_found") must cost the NEXT build its cache
-        # hit, not kill THIS build — the cache is an optimization,
-        # never a correctness input.
-        cache-to: type=gha,mode=max,ignore-error=true
+        # Consumers load locally from the primer's fixed scope but never write
+        # it; a cache miss simply falls back to a normal source build.
+        cache-from: type=gha,scope=rustbgpd-dev
