@@ -14,10 +14,14 @@ complete: IPv4/IPv6 unicast single-table only (no VPN/EVPN views, no
 Rationale: the daemon's durable API identity is **gRPC + `rbgp`**.
 Partial compatibility with someone else's REST API inside daemon core
 is a permanent source of misunderstanding, so the birdwatcher surface
-lives here as a maintained adapter instead. It is a workspace member
-but not part of the default `cargo build`, release tarballs, or
-container images; it builds with `--workspace` or an explicit
-`-p birdwatcher-adapter`.
+lives here as a maintained adapter instead.
+
+<!-- release-install-contract:birdwatcher-boundary:start -->
+The `birdwatcher-adapter` binary is included in release tarballs. It is
+excluded from the default `cargo build`, native `.deb`/`.rpm` packages, and
+container images; build it from a source checkout with `--workspace` or an
+explicit `-p birdwatcher-adapter`.
+<!-- release-install-contract:birdwatcher-boundary:end -->
 
 ## Build + run
 

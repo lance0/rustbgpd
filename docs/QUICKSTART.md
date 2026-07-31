@@ -10,6 +10,7 @@ For the fastest no-host setup, use the Docker Compose lab in
 
 Grab the pre-built release tarball — no Rust toolchain, no compile:
 
+<!-- release-install-contract:tarball:start -->
 ```bash
 SUFFIX=linux-amd64   # or linux-arm64
 curl -fLO "https://github.com/lance0/rustbgpd/releases/latest/download/rustbgpd-${SUFFIX}.tar.gz"
@@ -18,8 +19,24 @@ sha256sum -c "checksums-${SUFFIX}.txt"
 tar -xzf "rustbgpd-${SUFFIX}.tar.gz"
 sudo install -m 0755 rustbgpd rbgp rs-config-render /usr/local/bin/
 
+sudo useradd --system --home-dir /var/lib/rustbgpd \
+  --shell /usr/sbin/nologin rustbgpd 2>/dev/null || true
+sudo install -m 0644 share/systemd/rustbgpd.service \
+  /etc/systemd/system/rustbgpd.service
+sudo install -d -m 0755 /etc/rustbgpd
+rustbgpd --init-config edge --stdout | \
+  sudo tee /etc/rustbgpd/config.toml >/dev/null
+sudo chmod 0640 /etc/rustbgpd/config.toml
+sudo chgrp rustbgpd /etc/rustbgpd/config.toml
+
+# Kernel-dataplane hosts only:
+sudo install -d /etc/systemd/system/rustbgpd.service.d
+sudo install -m 0644 share/systemd/rustbgpd-dataplane.conf \
+  /etc/systemd/system/rustbgpd.service.d/rustbgpd-dataplane.conf
+
 rustbgpd --version && rbgp --version
 ```
+<!-- release-install-contract:tarball:end -->
 
 The third binary, `rs-config-render`, is the
 [IXP route-server config renderer](../tools/rs-config-render/README.md);
@@ -45,7 +62,9 @@ The built binaries are `target/release/rustbgpd` (daemon) and
 
 ## 2. Create a config
 
-Generate a starter config from a built-in profile:
+The tarball systemd install above already generated the production-path
+`edge` profile. For this foreground walkthrough (or a source checkout),
+generate a disposable `lab` profile in the current directory:
 
 ```bash
 # `lab` = minimal single-box setup:
@@ -61,11 +80,13 @@ real config loader before it is printed, and each passes
 `rustbgpd --check --strict` as emitted: `lab` is permit-all in both
 directions, but says so in an explicit chain rather than by omission.
 
-Prefer a checked-in starter file?
+From a source checkout, prefer a checked-in starter file?
 
+<!-- release-install-contract:source-checkout:start -->
 ```bash
 cp examples/minimal/config.toml config.toml
 ```
+<!-- release-install-contract:source-checkout:end -->
 
 For route-server deployments, start from
 [`examples/route-server/config.toml`](../examples/route-server/config.toml) and
