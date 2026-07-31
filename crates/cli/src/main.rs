@@ -603,6 +603,12 @@ enum PolicyAction {
         /// daemon's `[policy] rpol_roots`
         #[arg(long = "root")]
         roots: Vec<String>,
+        /// Total source-byte budget for the resolved import graph —
+        /// mirror of the daemon's `[policy] rpol_max_graph_bytes`
+        /// (default 256 MiB). Set this to match a daemon whose budget
+        /// was raised, so the offline verdict matches the daemon's.
+        #[arg(long = "max-graph-bytes")]
+        max_graph_bytes: Option<usize>,
         /// Print the resolved import graph — each module's path,
         /// SHA-256 content hash, and imports — instead of running
         /// tests (audit/packaging aid)
@@ -2026,6 +2032,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                 list_deps,
                 coverage,
                 coverage_min,
+                max_graph_bytes,
             },
     } = &cli.command
     {
@@ -2035,6 +2042,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
             *list_deps,
             *coverage,
             *coverage_min,
+            *max_graph_bytes,
             cli.json,
         ));
     }

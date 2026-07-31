@@ -1224,7 +1224,10 @@ headroom while still bounding load-time memory) across ≤ 64 files.
 There is no separate per-file limit: a single oversized file exhausts
 the graph budget by itself. All enforced at load with diagnostics;
 evaluation never touches the filesystem. `rbgp policy check` (no
-daemon config) checks against the default budget.
+daemon config) checks against the default budget — pass
+`--max-graph-bytes` to mirror a daemon whose budget was raised, so the
+offline verdict matches the daemon's. The over-budget diagnostic names
+the knob.
 
 **Auditing.** `rbgp policy check FILE --list-deps [--root DIR]...`
 prints the resolved graph — every module's canonical path, SHA-256

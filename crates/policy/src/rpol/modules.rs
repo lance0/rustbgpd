@@ -299,8 +299,12 @@ impl Resolver {
                 Span::in_file(0..0, id),
                 format!(
                     "resolved module graph exceeds {} total source bytes \
-                     at this file",
-                    self.max_graph_bytes
+                     (~{} MiB) at this file; if this graph is intended, \
+                     raise `[policy] rpol_max_graph_bytes` in the daemon \
+                     config (`rbgp policy check --max-graph-bytes` for the \
+                     offline checker)",
+                    self.max_graph_bytes,
+                    self.max_graph_bytes / (1024 * 1024)
                 ),
                 "graph source budget exhausted here",
             ));
