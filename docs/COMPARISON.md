@@ -165,6 +165,11 @@ IPv4/IPv6 `Prefix` routes.
 | Privilege separation | No | No | No | No | Yes |
 | Memory-safe language | Yes | No | No | Yes | No |
 
+CVE-2026-49943, a stack-based buffer overflow in BIRD's AS-path filter
+matching reachable when RFC 8654 extended messages are enabled (affected
+through 2.19.0), is a recent example of the vulnerability class the
+memory-safe-language row refers to.
+
 [^aspa]: rustbgpd ships RTR v2 ASPA input, role-aware upstream/downstream path
     verification selected by BGP Roles, best-path preference, policy matching
     for IPv4/IPv6 unicast, and targeted import-policy refresh when validation

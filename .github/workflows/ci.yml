@@ -41,6 +41,13 @@ jobs:
             echo "CI triggers must keep main-only pushes, all PRs, and Markdown ignores" >&2
             exit 1
           fi
+      # The chooser's security link once pointed at a posture doc and a
+      # nonexistent security email; keep it pinned to the private
+      # vulnerability-reporting intake so it cannot silently drift again.
+      - name: Check issue-chooser security link targets private vulnerability reporting
+        run: |
+          grep -q 'https://github.com/lance0/rustbgpd/security/advisories/new' \
+            .github/ISSUE_TEMPLATE/config.yml
       - name: Check pinned grpcurl installer contract
         shell: bash
         run: |
