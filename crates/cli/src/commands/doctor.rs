@@ -2928,11 +2928,9 @@ paths = ["x"]
     async fn reachability_probe_distinguishes_listener_from_cli_vantage() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let live = listener.local_addr().unwrap();
-        // A port that was just bound and released: connecting is refused.
-        let dead = {
-            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            l.local_addr().unwrap()
-        };
+        let dead_socket = tokio::net::TcpSocket::new_v4().unwrap();
+        dead_socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let dead = dead_socket.local_addr().unwrap();
         let targets = DeployTargets {
             listen_port: Some(dead.port()),
             rpki_caches: vec![live.to_string()],
@@ -3977,10 +3975,9 @@ paths = ["x"]
     async fn doctor_remote_daemon_dependency_probes_are_cli_vantage_warnings() {
         let live = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let live_port = live.local_addr().unwrap().port();
-        let dead = {
-            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            l.local_addr().unwrap()
-        };
+        let dead_socket = tokio::net::TcpSocket::new_v4().unwrap();
+        dead_socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let dead = dead_socket.local_addr().unwrap();
 
         let server = spawn_mock_server(None).await;
         let state_dir = tempfile::tempdir().unwrap();
