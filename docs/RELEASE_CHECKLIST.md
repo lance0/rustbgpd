@@ -57,6 +57,10 @@ convention in `CONTRIBUTING.md`:
       docs, and tests all move together.
 - [ ] Process-only documentation changes intentionally omit CHANGELOG entries
       unless they affect users or operators.
+- [ ] Every README front-matter performance claim cites a receipt measured
+      within the last three releases, or carries an explicit measured-on date
+      in the claim text (e.g. "measured 2026-07-03"). Older numbers stay
+      quotable with their date; undated stale numbers do not ship.
 
 ## Narrow v1 RS/RR compatibility gate
 
