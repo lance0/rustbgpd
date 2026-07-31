@@ -74,13 +74,13 @@ pub struct RpolFile {
     modules: Vec<ModuleSource>,
     /// The merged compilation unit (imports dissolved).
     file: ast::SourceFile,
-    /// Lazily-built interned set tables, shared by every chain
-    /// compiled from this unit. Interning is the expensive part of
-    /// lowering (IRR-scale files carry millions of prefix-set
-    /// entries), and per-chain re-interning also gave every chain its
-    /// own copy of the set data — one build here means per-neighbor
-    /// chain resolution costs an `Arc` clone and all chains share one
-    /// copy (LAN-788).
+    /// Lazily-built interned set tables for high-fanout compilation.
+    /// Interning is the expensive part of lowering (IRR-scale files
+    /// carry millions of prefix-set entries), and per-chain re-interning
+    /// gave every daemon neighbor its own copy of the set data. The
+    /// roster resolver explicitly uses this cache; the general public
+    /// compiler keeps interning through its caller's `SetStore` so
+    /// separately parsed files can still share content.
     tables: std::sync::OnceLock<lower::SetTables>,
 }
 
@@ -247,9 +247,10 @@ impl RpolFile {
     }
 
     /// [`Self::compile_policy`] with explicit dataset bindings
-    /// (LAN-305): the daemon's chain resolver passes the config-built
-    /// registry bindings; referenced-but-unbound (or kind-mismatched)
-    /// datasets yield `Err` naming them.
+    /// (LAN-305): referenced-but-unbound (or kind-mismatched) datasets yield
+    /// `Err` naming them. Literal sets are interned through
+    /// `store`, preserving content sharing with other sources compiled through
+    /// that same caller-owned store.
     ///
     /// # Panics
     ///
@@ -263,13 +264,53 @@ impl RpolFile {
         store: &mut SetStore,
         datasets: &DatasetBindings,
     ) -> Option<Result<CompiledChain, MissingDatasets>> {
+        self.compile_policy_bound_impl(name, args, store, datasets, false)
+    }
+
+    /// High-fanout variant of [`Self::compile_policy_bound`] for a caller that
+    /// deliberately wants this file's once-built literal-set tables. The
+    /// caller store still interns parameter-dependent regexes, but literal
+    /// prefix/community/ASN sets come from the file cache instead of being
+    /// re-canonicalized for every chain.
+    ///
+    /// Most callers should use [`Self::compile_policy_bound`], which preserves
+    /// the [`SetStore`] contract across separately parsed files. The daemon's
+    /// roster resolver uses this variant because one `RpolFile` fans out to
+    /// hundreds of peer chains at IRR scale.
+    ///
+    /// # Panics
+    ///
+    /// If `args.len()` does not match the policy's declared parameter count.
+    #[must_use]
+    pub fn compile_policy_bound_cached_tables(
+        &self,
+        name: &str,
+        args: &[u32],
+        store: &mut SetStore,
+        datasets: &DatasetBindings,
+    ) -> Option<Result<CompiledChain, MissingDatasets>> {
+        self.compile_policy_bound_impl(name, args, store, datasets, true)
+    }
+
+    fn compile_policy_bound_impl(
+        &self,
+        name: &str,
+        args: &[u32],
+        store: &mut SetStore,
+        datasets: &DatasetBindings,
+        cached_tables: bool,
+    ) -> Option<Result<CompiledChain, MissingDatasets>> {
         let def = self.file.policies.iter().find(|p| p.name.node == name)?;
         assert_eq!(
             def.params.len(),
             args.len(),
             "rpol chain reference arity is checked at config resolve"
         );
-        let mut lowerer = lower::Lowerer::from_tables(&self.file, self.tables());
+        let mut lowerer = if cached_tables {
+            lower::Lowerer::from_tables(&self.file, self.tables())
+        } else {
+            lower::Lowerer::new(&self.file, store)
+        };
         let chain = lowerer.instantiate_chain(name, args, store, datasets);
         let missing = lowerer.take_missing_datasets();
         Some(if missing.is_empty() {
