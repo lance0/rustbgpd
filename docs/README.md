@@ -29,6 +29,8 @@ Start here if you have never run the daemon.
 | [cookbook/rr-pair-day2.md](cookbook/rr-pair-day2.md) | Runbook: day-2 operations on a redundant RR pair — GR sanity, adding clients, safe config edits |
 | [cookbook/route-server-migration.md](cookbook/route-server-migration.md) | Shadow cutover runbook: map FRR/BIRD/ARouteServer concepts, run the shadow trial, gate cutover on `rbgp diff advertised` |
 | [cookbook/ixp-filter-pipeline.md](cookbook/ixp-filter-pipeline.md) | End-to-end IXP toolchain: arouteserver → `rs-config-render` → validated reload → Alice-LG looking glass |
+| [cookbook/manrs-ixp-action1.md](cookbook/manrs-ixp-action1.md) | MANRS IXP Programme Action 1, mapped requirement-by-requirement to validated config and member-verifiable surfaces |
+| [cookbook/paired-route-servers.md](cookbook/paired-route-servers.md) | Runbook: two independent route servers — staggered updates, inter-RS consistency diff, maintenance-window drain |
 | [explain.md](explain.md) | Answer "why is this route (not) here?": the catalog of every explain surface, with the support-ticket workflow |
 | [deployment.md](deployment.md) | End-to-end install + lifecycle: systemd, Docker, containerlab, validate, reload, upgrade |
 | [ribdiff.md](ribdiff.md) | Drive `rbgp diff advertised` for the shadow trial (also the `rbgp-ribsnap/1` snapshot-format reference) |
@@ -58,6 +60,7 @@ Start here if you have never run the daemon.
 | [gobgp-parity.md](gobgp-parity.md) | Feature-by-feature parity table against GoBGP |
 | [../crates/cli/README.md#familiar-command-map](../crates/cli/README.md#familiar-command-map) | Familiar command map: the FRR/BIRD show-command mental model translated to `rbgp` |
 | [COMPARISON.md](COMPARISON.md) | Feature comparison across open-source BGP daemons |
+| [ixp-evaluation.md](ixp-evaluation.md) | One-page IXP route-server evaluation matrix: capability status with the receipt or config behind each row |
 | [kernel-dataplane-runner.md](kernel-dataplane-runner.md) | How the privileged Linux dataplane CI workflow runs |
 | [grafana/](grafana/) | The importable Grafana dashboard JSON |
 
