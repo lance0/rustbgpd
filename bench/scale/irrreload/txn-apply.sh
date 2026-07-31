@@ -33,5 +33,9 @@ if [ -z "$token" ]; then
     echo "txn-apply: plan returned no runtime_snapshot_token" >&2
     exit 1
 fi
+if [[ ! $token =~ ^kv2:[0-9a-f]{16}:8$ ]]; then
+    echo "txn-apply: plan returned an unexpected runtime_snapshot_token shape" >&2
+    exit 1
+fi
 exec "$rbgp" --addr "$addr" config apply "$candidate" \
     --expected-runtime-snapshot-token "$token"

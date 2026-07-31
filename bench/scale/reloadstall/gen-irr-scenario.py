@@ -57,11 +57,13 @@ Emits into <out_dir> (per cell):
                 gen-a.toml, gen-b.toml
   bird          bird.conf, gen.conf (live, = gen-a), gen-a.conf, gen-b.conf
   openbgpd      bgpd.conf, gen.conf (live, = gen-a), gen-a.conf, gen-b.conf
-plus manifest.json (shape, seed, per-member list sizes, changed members,
-emitted byte sizes) in every cell.
+plus manifest.json (shape, seed, canonical cell-independent dataset digest,
+runtime-input roster, per-member list sizes, changed members, emitted byte
+sizes) in every cell.
 """
 
 import argparse
+import hashlib
 import json
 import math
 import pathlib
@@ -154,7 +156,21 @@ def check_sun_len(rundir: pathlib.Path) -> str:
     return sock
 
 
+def canonical_member_record(member: Member) -> bytes:
+    record = {
+        "idx": member.idx,
+        "asn": member.asn,
+        "addr": member.addr,
+        "list_a": member.list_a,
+        "list_b": member.list_b,
+    }
+    return json.dumps(record, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+
+
 def write_manifest(out: pathlib.Path, args, members, files: list[str]) -> None:
+    dataset_digest = hashlib.sha256()
+    for member in members:
+        dataset_digest.update(canonical_member_record(member))
     manifest = {
         "cell": args.cell,
         "n_members": args.n_members,
@@ -163,9 +179,11 @@ def write_manifest(out: pathlib.Path, args, members, files: list[str]) -> None:
         "min_list": args.min_list,
         "max_list": args.max_list,
         "changed_fraction": args.changed_fraction,
+        "dataset_sha256": dataset_digest.hexdigest(),
         "list_sizes": [len(m.list_a) for m in members],
         "total_filter_entries": sum(len(m.list_a) for m in members),
         "changed_members": [m.idx for m in members if m.changed],
+        "runtime_files": files,
         "file_bytes": {f: (out / f).stat().st_size for f in files},
     }
     (out / "manifest.json").write_text(json.dumps(manifest, indent=1) + "\n")
@@ -700,6 +718,11 @@ def main() -> None:
     parser.add_argument("--render-bin", help="rs-config-render binary (rustbgpd cell)")
     parser.add_argument("--threads", type=int, default=8, help="BIRD threads knob")
     parser.add_argument("--conf-dir", help="config dir as seen by the running daemon")
+    parser.add_argument(
+        "--canonical-dataset-out",
+        type=pathlib.Path,
+        help="test/debug output: stream the exact cell-independent digest input",
+    )
     args = parser.parse_args()
 
     if args.n_members < CHURNERS:
@@ -711,6 +734,10 @@ def main() -> None:
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     members = build_dataset(args)
+    if args.canonical_dataset_out is not None:
+        with args.canonical_dataset_out.open("wb") as canonical:
+            for member in members:
+                canonical.write(canonical_member_record(member))
     files = EMITTERS[args.cell](args, members, args.out_dir)
     write_manifest(args.out_dir, args, members, files)
     total_entries = sum(len(m.list_a) for m in members)

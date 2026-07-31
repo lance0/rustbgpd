@@ -1,15 +1,16 @@
 # irrreload — IRR-scale reload-receipt matrix
 
 Reload stall + completion under live sessions with a realistic multi-MB
-IRR-generated member policy, for rustbgpd on **both** reload paths (SIGHUP
-parse-then-swap and the gRPC transactional apply) versus BIRD 3.3.x and
-OpenBGPD 9.x.
+IRR-generated member policy. The full-shape comparison covers rustbgpd's
+SIGHUP parse-then-swap path versus BIRD 3.3.x and OpenBGPD 9.x. The gRPC
+transactional path is a separate, explicitly smaller receipt because its
+single-message candidate cannot carry the full dataset.
 
 This directory is the campaign runner and protocol. The instrument is the
-existing `bench/scale/reloadstall` harness, unchanged — real BGP stub
+existing `bench/scale/reloadstall` harness — real BGP stub
 sessions over loopback TCP, receiver-side timestamps, generation-marker
 completion tracking — driven by `bench/scale/reloadstall/gen-irr-scenario.py`,
-which emits all four cells from one seeded dataset.
+which can emit every native representation from one seeded dataset.
 
 ## What is being reloaded
 
@@ -28,19 +29,27 @@ policy generations:
 
 ## Shape (a harness parameter, stated exactly)
 
-| Parameter | Smoke (`SMOKE=1`) | Measured default |
-|---|---|---|
-| Members (`N_MEMBERS`) | 10 | 320 |
-| Announced base table (`TOTAL_PREFIXES`) | 100 (10 × /24 each) | 183,040 (572 × /24 each) |
-| Per-member IRR filter list (`MIN_LIST`–`MAX_LIST`) | 100 | log-uniform 1,000–40,000 entries |
-| Generation-changed members (`CHANGED_FRACTION`) | 10% | 10% |
-| Seed (`SEED`) | 61 | 61 |
-| Reload cycles per cell (`RELOADS`) | 1 | 4 |
+| Parameter | Smoke (`SMOKE=1`) | Full cross-daemon | Bounded transaction |
+|---|---|---|---|
+| Members (`N_MEMBERS`) | 10 | 320 | 10 |
+| Announced base table (`TOTAL_PREFIXES`) | 100 | 183,040 (572/member) | 5,720 (572/member) |
+| Per-member IRR filter list (`MIN_LIST`–`MAX_LIST`) | 100 | log-uniform 1,000–40,000 | log-uniform 1,000–12,000 |
+| Per-member change probability (`CHANGED_FRACTION`) | 10% | 10% | 10% |
+| Seed (`SEED`) | 61 | 61 | 61 |
+| Reload cycles per cell (`RELOADS`) | 1 | 4 | 4 |
 
 Dataset generation is fully deterministic from the shape + seed and is
-identical across cells (the generator never consults the cell when building
-the dataset). The multi-MB configs are **not** committed; they reproduce
-from the generator alone. Padding prefixes are /24s from
+identical across cells at the same shape (the generator never consults the
+cell when building the dataset). The manifest carries a canonical
+`dataset_sha256`; the full campaign rejects a cell whose digest differs.
+`CHANGED_FRACTION` is a Bernoulli probability, not an exact cohort size: seed
+61 changes 36/320 IRR filter lists at the full shape and 1/10 at the bounded
+transaction shape. Separately, the global A/B export marker changes output
+for all observers, so `peers_changed=320` and the first-generation timing
+percentiles cover 320 observers in the full receipt—not only the 36 members
+whose input lists changed.
+The multi-MB configs are **not** committed; they reproduce from the generator
+and pinned inputs. Padding prefixes are /24s from
 30.0.0.0–99.255.255.0 (disjoint from the announced table, the churn range,
 and the bogon list).
 
@@ -82,6 +91,19 @@ record):
   for every cell (`rss.csv`; the only RSS instrument for the container
   cells).
 
+Cross-daemon RSS comparisons use only the outer sampler, never the row-level
+VmRSS fields (which are zero for container cells). For each reload, the
+precommitted control statistic is the median `total_rss_kib` sample whose
+integer epoch is in `[floor(trigger)-CONTROL_SECS, floor(trigger))`; the reload
+statistic is the maximum sample in
+`[floor(trigger), ceil(trigger+completion_max_s)]`. The trigger comes from the
+logged `wall_us` and completion from that reload's emitted row. A missing
+sample in either window invalidates the RSS comparison. The sampler sums RSS
+across a process tree, so shared mappings can be double-counted; it prefers
+`smaps_rollup` for readable processes and can fall back to VmRSS for
+root-owned container processes. Close absolute differences are therefore not
+treated as exact allocator comparisons.
+
 **Startup and readiness windows** (harness parameters, not
 measurements — none of them is timed into any reported number; they
 only bound how long the harness waits before declaring a cell broken):
@@ -113,19 +135,25 @@ only bound how long the harness waits before declaring a cell broken):
 any stub session down at reload validation, missing generation-marker
 evidence, any daemon UPDATE that fails to decode, a nonzero reload-command
 exit, daemon process-tree RSS > 100 GiB (cell aborted), or cell timeout
-(`CELL_TIMEOUT`). Failed cells keep their artifacts and are published with
-their mechanism, not silently rerun (`status` files make the campaign
-resumable per cell).
+(`CELL_TIMEOUT`). Artifact roots are immutable: a failed/interrupted cell,
+an inconsistent row set, or a different campaign fingerprint is never
+overwritten. Preserve it and choose a fresh `ARTIFACTS_DIR`; matching passed
+cells alone are resumable/skippable. Each passed cell seals its exact rows,
+RSS samples, daemon and harness logs, manifest, provenance, and scenario roster;
+resume revalidates that evidence and the root-row copy before skipping. A
+missing or malformed root seal aborts the whole invocation before another cell
+can append evidence.
 
 Resume status is fingerprint-qualified. The fingerprint covers the exact Git
 commit and dirty-state content, runner/generator/sampler/transaction scripts,
 built daemon/CLI/renderer/harness binaries, Rust/Python/jq/Docker environment,
 selected cells, shape and timing inputs, and the local content IDs behind
 selected container image references. Each cell also retains `scenario.sha256`,
-a relative-path/content-hash roster of the generated config bundle; its digest
-is bound into that cell's provenance and pass status. A pass from any other
-fingerprint or config-bundle digest is discarded and rerun; its old rows cannot
-satisfy the new campaign. Root and per-cell `provenance.json` retain the
+a relative-path/content-hash roster of the manifest and exact daemon runtime
+inputs (not timestamped renderer receipts); its digest and the common dataset
+digest are bound into that cell's provenance and pass status. A pass from any
+other fingerprint or input digest cannot satisfy the new campaign. Root and
+per-cell `provenance.json` retain the
 fingerprint without hostnames, usernames, absolute paths, or other host-unique
 identifiers.
 Successful cells may delete their generated scenario only after retaining its
@@ -135,9 +163,10 @@ The RSS sampler is a required instrument: early/nonzero sampler exit or an
 empty/malformed `rss.csv` fails the cell. The runner reaps the sampler after
 the daemon exits and preserves all artifacts on failure.
 
-**Run count**: two full independent campaign runs minimum (fresh daemon
-starts, same cell order) so run-to-run spread is visible — run B into a
-separate `ARTIFACTS_DIR`.
+**Run count**: two fixed-order fresh-process campaign repeats minimum (fresh
+daemon starts, same cell order) so run-to-run spread is visible — run B into
+a separate `ARTIFACTS_DIR`. These are repeats, not statistically independent
+or counterbalanced trials.
 
 **Host-quiet preconditions** (measured mode enforces): the campaign starts
 only after `tests/soak/preflight.sh` passes (competing-workload, host-lock,
@@ -150,7 +179,7 @@ a measurement.
 
 Mirrors the IXP matrix fairness notes (`docs/perf/ixp-matrix-2026-07.md`):
 
-- **One harness, one instrument** for all cells; same addressing, same
+- **One harness, one instrument** for the three full-shape cells; same addressing, same
   churn, same completion semantics.
 - **Same dataset, native idiom per daemon.** Every cell filters the same
   member/prefix dataset with the same semantic core — per-member
@@ -178,13 +207,16 @@ Documented asymmetries (the honesty notes for the eventual receipt):
   `.rpol` route-server representation. Cross-daemon comparisons should use
   the SIGHUP cell; the txn cell answers "what does the transactional seam
   cost for the same semantic change", not engine-vs-engine.
-- **The txn cell is size-capped today.** The candidate travels inside one
+- **The txn cell is size-capped and separate today.** The candidate travels inside one
   gRPC message and the daemon's tonic server uses the default ~4 MiB
   decode limit, and the chain-engine TOML encoding is several times larger
-  than the equivalent `.rpol`. At the measured default shape the candidate
-  far exceeds the cap, so the transactional cell must run at the largest
-  shape that fits (or the daemon must grow a raised/streamed limit first —
-  a finding of this harness, to be stated in the receipt either way).
+  than the equivalent `.rpol`. The measured default therefore excludes it.
+  Running `rustbgpd-txn` alone selects the bounded 10-member shape above; the
+  runner rejects any candidate whose encoded apply request (candidate plus
+  the required fixed-shape snapshot token) would exceed 4 MiB before starting
+  the daemon. `txn-apply.sh` rejects an unexpected token shape rather than
+  invalidating that bound. Its rows and artifact root never enter the
+  cross-daemon table.
 - **Hygiene depth differs slightly.** The rustbgpd SIGHUP cell carries the
   full rendered `rs-hygiene` (including the AS_SET-segment reject term);
   the chain engine and the BIRD/OpenBGPD cells carry the shared core
@@ -208,14 +240,19 @@ Documented asymmetries (the honesty notes for the eventual receipt):
 SMOKE=1 bench/scale/irrreload/run-irr-reload.sh
 
 # Measured campaign (quiet host only — preflight-gated), two runs:
-bench/scale/irrreload/run-irr-reload.sh
-ARTIFACTS_DIR=/tmp/irrreload-artifacts-runB bench/scale/irrreload/run-irr-reload.sh
+ARTIFACTS_DIR=/tmp/irrreload-full-runA bench/scale/irrreload/run-irr-reload.sh
+ARTIFACTS_DIR=/tmp/irrreload-full-runB bench/scale/irrreload/run-irr-reload.sh
+
+# Separate bounded transaction receipt, also repeated into fresh roots:
+ARTIFACTS_DIR=/tmp/irrreload-txn-runA bench/scale/irrreload/run-irr-reload.sh rustbgpd-txn
+ARTIFACTS_DIR=/tmp/irrreload-txn-runB bench/scale/irrreload/run-irr-reload.sh rustbgpd-txn
 ```
 
 The runner builds what it needs (`rustbgpd`, `rbgp`, `rs-config-render`,
 the harness), generates each cell's scenario under `/tmp/irr-<cell>` (short
 paths: the gRPC UDS must fit `SUN_LEN`), runs one cell at a time, tears
 down containers/daemons, and appends one row per reload to
-`$ARTIFACTS_DIR/rows.csv`. Exit code 0 requires every requested cell to
-pass and produce at least `RELOADS` rows. Container images: `bird:3.3.1`
+`$ARTIFACTS_DIR/rows.csv`. At the full default, exit code 0 requires the
+three comparable cells to pass and produce exactly `RELOADS` rows apiece.
+Container images: `bird:3.3.1`
 (built from `tests/interop/Dockerfile.bird3`) and `openbgpd/openbgpd:9.1`.

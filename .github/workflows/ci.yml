@@ -171,6 +171,9 @@ jobs:
             --locked --all-targets -- -D warnings
           cargo clippy --manifest-path bench/scale/outbound-prefix-limit-scale/Cargo.toml \
             --locked --all-targets -- -D warnings
+          # The IRR manifest contract exercises the production rustbgpd
+          # renderer, so make that prerequisite explicit on a clean runner.
+          cargo build -p rs-config-render
           cargo test --test reloadstall_scenario_emitted_check
           bash -n bench/compare-criterion.sh
           shellcheck bench/smoke-benches.sh
