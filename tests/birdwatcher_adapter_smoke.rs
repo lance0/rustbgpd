@@ -257,21 +257,35 @@ principal = "rustbgpd://observer/birdwatcher-test"
 address = "192.0.2.10"
 remote_asn = 65010
 description = "smoke peer"
+graceful_restart = false
 
 [[neighbors]]
 address = "127.0.0.1"
 remote_asn = 65020
 description = "live peer"
+graceful_restart = false
 
 [[neighbors]]
 address = "127.0.0.2"
 remote_asn = 65030
 description = "receiver peer"
+graceful_restart = false
 "#,
         runtime_dir = runtime_dir.display(),
         token_path = token_path.display()
     );
     let parsed: toml::Value = toml::from_str(&config).expect("test config must parse");
+    let graceful_restart = parsed["neighbors"]
+        .as_array()
+        .expect("neighbors must be an array")
+        .iter()
+        .map(|neighbor| {
+            neighbor
+                .get("graceful_restart")
+                .and_then(toml::Value::as_bool)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(graceful_restart, vec![Some(false); 3]);
     let principal = "rustbgpd://observer/birdwatcher-test";
     assert_eq!(
         parsed["security"]["grpc"]["enforcement"].as_str(),
