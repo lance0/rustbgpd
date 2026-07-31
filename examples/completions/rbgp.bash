@@ -7151,13 +7151,17 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__policy__subcmd__check)
-            opts="-s -j -h --root --list-deps --coverage --coverage-min --addr --token-file --json --no-color --help"
+            opts="-s -j -h --root --max-graph-bytes --list-deps --coverage --coverage-min --addr --token-file --json --no-color --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
                 --root)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --max-graph-bytes)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;

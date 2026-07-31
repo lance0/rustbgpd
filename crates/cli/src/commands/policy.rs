@@ -160,6 +160,7 @@ pub fn check_local(
     list_deps: bool,
     coverage: bool,
     coverage_min: Option<f64>,
+    max_graph_bytes: Option<usize>,
     json: bool,
 ) -> i32 {
     check_local_with_writer(
@@ -168,17 +169,23 @@ pub fn check_local(
         list_deps,
         coverage,
         coverage_min,
+        max_graph_bytes,
         json,
         &mut std::io::stdout().lock(),
     )
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "thin CLI plumbing mirroring the flag surface; a struct would only relabel it"
+)]
 fn check_local_with_writer(
     path: &str,
     roots: &[String],
     list_deps: bool,
     coverage: bool,
     coverage_min: Option<f64>,
+    max_graph_bytes: Option<usize>,
     json: bool,
     stdout: &mut dyn std::io::Write,
 ) -> i32 {
@@ -190,12 +197,13 @@ fn check_local_with_writer(
     let root_paths: Vec<PathBuf> = roots.iter().map(PathBuf::from).collect();
     // Standalone check has no daemon config to read a budget from —
     // the default matches the daemon's `[policy] rpol_max_graph_bytes`
-    // default, so a file that checks clean here loads under a
+    // default (override with --max-graph-bytes to mirror a raised
+    // daemon budget), so a file that checks clean here loads under a
     // default-budget daemon.
     let (file, diagnostics) = match RpolFile::load(
         std::path::Path::new(path),
         &root_paths,
-        DEFAULT_MAX_GRAPH_BYTES,
+        max_graph_bytes.unwrap_or(DEFAULT_MAX_GRAPH_BYTES),
     ) {
         Ok(file) => (Some(file), Vec::new()),
         Err(LoadError::Io { path, reason }) => {
@@ -1930,11 +1938,27 @@ mod tests {
              }",
         );
         assert_eq!(
-            check_local(tmp.path().to_str().unwrap(), &[], false, false, None, false),
+            check_local(
+                tmp.path().to_str().unwrap(),
+                &[],
+                false,
+                false,
+                None,
+                None,
+                false
+            ),
             0
         );
         assert_eq!(
-            check_local(tmp.path().to_str().unwrap(), &[], false, false, None, true),
+            check_local(
+                tmp.path().to_str().unwrap(),
+                &[],
+                false,
+                false,
+                None,
+                None,
+                true
+            ),
             0
         );
     }
@@ -2013,6 +2037,7 @@ mod tests {
                 false,
                 false,
                 None,
+                None,
                 true,
                 &mut BrokenWriter,
             ),
@@ -2035,6 +2060,7 @@ mod tests {
                     list_deps,
                     coverage,
                     None,
+                    None,
                     false,
                     &mut BrokenWriter
                 ),
@@ -2047,13 +2073,22 @@ mod tests {
                 flush_error: Some(std::io::ErrorKind::PermissionDenied),
             };
             assert_eq!(
-                check_local_with_writer(path, &[], list_deps, coverage, None, false, &mut flush),
+                check_local_with_writer(
+                    path,
+                    &[],
+                    list_deps,
+                    coverage,
+                    None,
+                    None,
+                    false,
+                    &mut flush
+                ),
                 1
             );
         }
         let mut bytes = Vec::new();
         assert_eq!(
-            check_local_with_writer(path, &[], false, true, None, false, &mut bytes),
+            check_local_with_writer(path, &[], false, true, None, None, false, &mut bytes),
             0
         );
         assert_eq!(
@@ -2068,12 +2103,28 @@ mod tests {
     fn check_local_diagnostics_exit_one() {
         let tmp = write_rpol("policy p { term t { if route.zzz == 1 { accept } } }");
         assert_eq!(
-            check_local(tmp.path().to_str().unwrap(), &[], false, false, None, false),
+            check_local(
+                tmp.path().to_str().unwrap(),
+                &[],
+                false,
+                false,
+                None,
+                None,
+                false
+            ),
             1
         );
         // Unreadable file is also exit 1.
         assert_eq!(
-            check_local("/nonexistent/nope.rpol", &[], false, false, None, false),
+            check_local(
+                "/nonexistent/nope.rpol",
+                &[],
+                false,
+                false,
+                None,
+                None,
+                false
+            ),
             1
         );
     }
@@ -2105,19 +2156,35 @@ mod tests {
         let main = main.to_str().unwrap();
         let root = lib.path().to_str().unwrap().to_string();
         // Without the root the import cannot resolve.
-        assert_eq!(check_local(main, &[], false, false, None, false), 1);
+        assert_eq!(check_local(main, &[], false, false, None, None, false), 1);
         // With it: clean check (the cross-module test runs) and deps.
         assert_eq!(
-            check_local(main, std::slice::from_ref(&root), false, false, None, false),
+            check_local(
+                main,
+                std::slice::from_ref(&root),
+                false,
+                false,
+                None,
+                None,
+                false
+            ),
             0
         );
         assert_eq!(
-            check_local(main, std::slice::from_ref(&root), true, false, None, false),
+            check_local(
+                main,
+                std::slice::from_ref(&root),
+                true,
+                false,
+                None,
+                None,
+                false
+            ),
             0
         );
-        assert_eq!(check_local(main, &[root], true, false, None, true), 0);
+        assert_eq!(check_local(main, &[root], true, false, None, None, true), 0);
         // --list-deps on a broken graph still exits 1.
-        assert_eq!(check_local(main, &[], true, false, None, false), 1);
+        assert_eq!(check_local(main, &[], true, false, None, None, false), 1);
     }
 
     #[test]
@@ -2130,7 +2197,15 @@ mod tests {
              }",
         );
         assert_eq!(
-            check_local(tmp.path().to_str().unwrap(), &[], false, false, None, false),
+            check_local(
+                tmp.path().to_str().unwrap(),
+                &[],
+                false,
+                false,
+                None,
+                None,
+                false
+            ),
             2
         );
     }
@@ -2150,10 +2225,16 @@ mod tests {
              }",
         );
         let path = tmp.path().to_str().unwrap();
-        assert_eq!(check_local(path, &[], false, true, None, false), 0);
-        assert_eq!(check_local(path, &[], false, true, None, true), 0);
-        assert_eq!(check_local(path, &[], false, false, Some(100.0), false), 3);
-        assert_eq!(check_local(path, &[], false, true, Some(50.0), false), 0);
+        assert_eq!(check_local(path, &[], false, true, None, None, false), 0);
+        assert_eq!(check_local(path, &[], false, true, None, None, true), 0);
+        assert_eq!(
+            check_local(path, &[], false, false, Some(100.0), None, false),
+            3
+        );
+        assert_eq!(
+            check_local(path, &[], false, true, Some(50.0), None, false),
+            0
+        );
         // A failing test wins over the coverage threshold.
         let failing = write_rpol(
             "policy p { term t { reject } }
@@ -2164,7 +2245,7 @@ mod tests {
         );
         let failing = failing.path().to_str().unwrap();
         assert_eq!(
-            check_local(failing, &[], false, false, Some(100.0), false),
+            check_local(failing, &[], false, false, Some(100.0), None, false),
             2
         );
     }
@@ -2676,7 +2757,10 @@ mod tests {
         assert_eq!(fmt_local(&files, true), 0);
         // No temp residue from the atomic write.
         assert!(!dir.path().join("p.rpol.tmp").exists());
-        assert_eq!(check_local(&files[0], &[], false, false, None, false), 0);
+        assert_eq!(
+            check_local(&files[0], &[], false, false, None, None, false),
+            0
+        );
     }
 
     /// LAN-323: `--check` never rewrites, exits 1 on drift, and a
