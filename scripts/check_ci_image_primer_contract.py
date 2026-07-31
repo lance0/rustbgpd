@@ -49,9 +49,9 @@ CALL_HASHES = {
 }
 PINS = collections.Counter(
     {
-        "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7": 75,
-        "dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # stable": 1,
-        "Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2": 3,
+        "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7": 76,
+        "dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # stable": 2,
+        "Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2": 4,
         "dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # 1.95": 2,
         "docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4": 42,
         "docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7": 43,
