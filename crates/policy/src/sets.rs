@@ -222,6 +222,14 @@ impl PrefixSet {
 
 impl PartialEq for PrefixSet {
     fn eq(&self, other: &Self) -> bool {
+        // Same allocation ⇒ equal without touching the member list —
+        // chains built from one file share their sets via `Arc`
+        // (LAN-788), and IRR-scale sets carry millions of entries, so
+        // policy diffs would otherwise pay a full-set comparison per
+        // peer.
+        if std::ptr::eq(self, other) {
+            return true;
+        }
         // The index is derived deterministically from the canonical
         // member list, so members alone are the identity.
         self.entries == other.entries

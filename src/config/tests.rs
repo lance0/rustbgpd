@@ -15868,17 +15868,20 @@ import_policy_chain = ["distinct-import"]
     );
 }
 
-/// Set sharing is bounded to contiguous roster chunks without changing
-/// neighbor order.
+/// Every resolved neighbor shares one canonical copy of an rpol set's
+/// data, without changing neighbor order: the compiled unit interns
+/// its sets once and every chain instantiation clones the `Arc`s
+/// (LAN-788 — per-chunk re-interning gave 320 IRR-scale peers ten
+/// independent multi-million-entry copies).
 ///
 /// Red proofs:
-/// - restoring one store per neighbor makes the within-chunk identity and
+/// - restoring per-chain interning (`Lowerer::new` re-interning
+///   through the caller's store) makes the identity and
 ///   canonical-copy-count assertions red;
-/// - restoring one unbounded store makes the boundary identity and
-///   canonical-copy-count assertions red;
-/// - reordering chunk output makes the address-order assertion red.
+/// - reordering resolution output makes the address-order assertion
+///   red.
 #[test]
-fn resolved_neighbor_set_sharing_is_chunk_bounded_and_ordered() {
+fn resolved_neighbor_set_sharing_is_global_and_ordered() {
     let source = r"
 prefix-set shared { 10.0.0.0/8 le 32, 192.0.2.0/24 }
 policy shared-import {
@@ -15937,7 +15940,7 @@ import_policy_chain = ["shared-import"]
         &set(&resolved[0]),
         &set(&resolved[31])
     ));
-    assert!(!std::sync::Arc::ptr_eq(
+    assert!(std::sync::Arc::ptr_eq(
         &set(&resolved[31]),
         &set(&resolved[32])
     ));
@@ -15947,8 +15950,8 @@ import_policy_chain = ["shared-import"]
         .collect();
     assert_eq!(
         canonical_copies.len(),
-        3,
-        "65 peers must retain one canonical set per 32-neighbor chunk"
+        1,
+        "all 65 peers must share one canonical copy of the set data"
     );
     let actual_order: Vec<_> = resolved
         .iter()

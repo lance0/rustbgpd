@@ -74,6 +74,14 @@ pub struct RpolFile {
     modules: Vec<ModuleSource>,
     /// The merged compilation unit (imports dissolved).
     file: ast::SourceFile,
+    /// Lazily-built interned set tables, shared by every chain
+    /// compiled from this unit. Interning is the expensive part of
+    /// lowering (IRR-scale files carry millions of prefix-set
+    /// entries), and per-chain re-interning also gave every chain its
+    /// own copy of the set data — one build here means per-neighbor
+    /// chain resolution costs an `Arc` clone and all chains share one
+    /// copy (LAN-788).
+    tables: std::sync::OnceLock<lower::SetTables>,
 }
 
 impl RpolFile {
@@ -90,6 +98,7 @@ impl RpolFile {
         Ok(Self {
             modules: vec![ModuleSource::inline(source)],
             file,
+            tables: std::sync::OnceLock::new(),
         })
     }
 
@@ -123,7 +132,14 @@ impl RpolFile {
         Ok(Self {
             modules: graph.modules,
             file: graph.merged,
+            tables: std::sync::OnceLock::new(),
         })
+    }
+
+    /// The unit's interned set tables, built on first use.
+    fn tables(&self) -> &lower::SetTables {
+        self.tables
+            .get_or_init(|| lower::SetTables::build(&self.file))
     }
 
     /// The main file's source text.
@@ -163,7 +179,7 @@ impl RpolFile {
     #[must_use]
     pub fn run_tests(&self) -> TestReport {
         let mut store = SetStore::new();
-        let mut lowerer = lower::Lowerer::new(&self.file, &mut store);
+        let mut lowerer = lower::Lowerer::from_tables(&self.file, self.tables());
         testing::run_tests(&self.file.tests, &mut lowerer, &mut store)
     }
 
@@ -176,7 +192,7 @@ impl RpolFile {
     #[must_use]
     pub fn run_tests_with_coverage(&self) -> (TestReport, CoverageReport) {
         let mut store = SetStore::new();
-        let mut lowerer = lower::Lowerer::new(&self.file, &mut store);
+        let mut lowerer = lower::Lowerer::from_tables(&self.file, self.tables());
         let mut accum = coverage::CoverageAccum::new(&self.file);
         let report = testing::run_tests_recording(
             &self.file.tests,
@@ -253,7 +269,7 @@ impl RpolFile {
             args.len(),
             "rpol chain reference arity is checked at config resolve"
         );
-        let mut lowerer = lower::Lowerer::new(&self.file, store);
+        let mut lowerer = lower::Lowerer::from_tables(&self.file, self.tables());
         let chain = lowerer.instantiate_chain(name, args, store, datasets);
         let missing = lowerer.take_missing_datasets();
         Some(if missing.is_empty() {
@@ -356,7 +372,7 @@ impl Eq for RpolPolicySet {}
 pub fn compile_rpol(source: &str, store: &mut SetStore) -> Result<CompiledChain, Diagnostics> {
     let (file, diags) = front(source)?;
     debug_assert!(diags.is_empty());
-    let mut lowerer = lower::Lowerer::new(&file, store);
+    let mut lowerer = lower::Lowerer::new(&file);
     let chain = lowerer.zero_param_chain(store, &DatasetBindings::new());
     // Inline compilation has no config to bind datasets from
     // (LAN-305): a zero-parameter policy probing one is an error here,
@@ -390,7 +406,7 @@ pub fn compile_rpol(source: &str, store: &mut SetStore) -> Result<CompiledChain,
 pub fn run_rpol_tests(source: &str) -> Result<TestReport, Diagnostics> {
     let (file, _) = front(source)?;
     let mut store = SetStore::new();
-    let mut lowerer = lower::Lowerer::new(&file, &mut store);
+    let mut lowerer = lower::Lowerer::new(&file);
     Ok(testing::run_tests(&file.tests, &mut lowerer, &mut store))
 }
 
