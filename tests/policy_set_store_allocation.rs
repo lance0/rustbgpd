@@ -20,7 +20,6 @@ use rustbgpd_policy::sets::PrefixSet;
 
 const SET_ENTRIES: usize = 10_000;
 const PEER_SHAPES: [usize; 4] = [1, 10, 100, 1_000];
-const EXPECTED_SET_STORE_CHUNK_SIZE: usize = 32;
 const DEFAULT_RUNS: usize = 5;
 
 struct TrackingAllocator {
@@ -377,12 +376,18 @@ fn measure_resolution(fixture: &Fixture) -> (AllocationReceipt, Vec<ResolvedNeig
 }
 
 /// Fixed-operation gate for the retained resolved-neighbor batch. With one
-/// shared 10,000-entry set, ten peers may add neighbor shells and chain handles
-/// but must not rebuild ten indexed sets.
+/// shared 10,000-entry set, ten peers may add neighbor shells and chain
+/// handles (small per-peer allocations) but must not rebuild any indexed
+/// set: the compiled unit interns its sets once at config load, so
+/// resolution never allocates a set index at all. Rebuilding even one
+/// 10,000-entry index costs at least `SET_ENTRIES` allocations (one
+/// bucket vector per member), so the bound discriminates set rebuilds
+/// from per-peer shell growth.
 ///
-/// Red proof: restoring the old local `SetStore` inside the shared-store chain
-/// resolver produces 100,381 resolution allocations for ten peers, more than
-/// ten times the one-peer control, and makes the bound red.
+/// Red proof: restoring per-chain set interning (`Lowerer` re-interning
+/// through a per-call `SetStore`) produces 100,000+ resolution
+/// allocations for ten peers and makes the bound red; so does dropping
+/// the shared-tables `Arc` reuse for any single peer.
 #[test]
 fn shared_set_batch_allocations_do_not_scale_per_peer() {
     let one = shared_fixture(1);
@@ -391,10 +396,15 @@ fn shared_set_batch_allocations_do_not_scale_per_peer() {
     let (one_resolve, _) = measure_resolution(&one);
     let (ten_resolve, resolved) = measure_resolution(&ten);
     assert!(
-        ten_resolve.calls < one_resolve.calls * 2,
-        "ten-peer resolution rebuilt shared sets: one={} ten={}",
+        ten_resolve.calls < one_resolve.calls + SET_ENTRIES / 2,
+        "ten-peer resolution rebuilt a shared set index: one={} ten={}",
         one_resolve.calls,
         ten_resolve.calls
+    );
+    assert_eq!(
+        canonical_prefix_set_count(&resolved, "shared"),
+        1,
+        "all peers must share one canonical copy of the set data"
     );
     assert!(Arc::ptr_eq(
         named_prefix_set(&resolved[0], "shared"),
@@ -402,9 +412,10 @@ fn shared_set_batch_allocations_do_not_scale_per_peer() {
     ));
 }
 
-/// This receipt is ignored because the 1,000-peer current-main control
-/// intentionally retains repeated 10,000-entry indexes. It is a fixed real
-/// config-resolution shape, not a daemon/RSS or shipped-allocator benchmark.
+/// This receipt is a fixed real config-resolution shape, not a
+/// daemon/RSS or shipped-allocator benchmark; it is ignored because it
+/// prints a multi-shape CSV for manual reading rather than asserting a
+/// single bound.
 #[test]
 #[ignore = "manual eager policy-set allocation receipt"]
 fn shared_large_set_receipt() {
@@ -433,15 +444,11 @@ fn shared_large_set_receipt() {
             if expect_shared {
                 assert!(shared, "resolved neighbors must share the common set");
             }
-            let expected_copies = if expect_shared {
-                peers.div_ceil(EXPECTED_SET_STORE_CHUNK_SIZE)
-            } else {
-                peers
-            };
+            let expected_copies = if expect_shared { 1 } else { peers };
             assert_eq!(
                 canonical_prefix_set_count(&resolved, "shared"),
                 expected_copies,
-                "common-set copies must match the bounded chunk contract"
+                "the roster must share one canonical copy of the common set"
             );
             println!(
                 "resolve,{peers},{run},{elapsed_us},{},{},{},{shared}",
