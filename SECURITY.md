@@ -13,7 +13,8 @@ logging — see [docs/SECURITY.md](docs/SECURITY.md).
 ## Reporting a Vulnerability
 
 Report security vulnerabilities via
-[GitHub Security Advisories](https://github.com/lance0/rustbgpd/security/advisories/new).
+[GitHub private vulnerability reporting](https://github.com/lance0/rustbgpd/security/advisories/new),
+which is enabled on this repository.
 
 **Do not open a public issue for security vulnerabilities.**
 
@@ -31,6 +32,12 @@ Report security vulnerabilities via
 - **Critical vulnerabilities** (remote crash, session hijack): Patched
   and released within 72 hours of confirmation
 - **Other vulnerabilities:** Patched in the next milestone release
+
+### CVE Assignment
+
+Qualifying vulnerabilities are published as GitHub Security Advisories
+once a fix is released, and a CVE ID is requested for each through
+GitHub's GHSA-to-CVE assignment flow.
 
 ## Security Posture
 
@@ -68,6 +75,48 @@ input from the network. It runs under continuous fuzzing in CI.
   of that code ships in the daemon or in any published library crate.
 - **Structured errors, not strings.** Every failure produces a
   machine-parseable event for forensic analysis.
+
+### Memory Safety
+
+rustbgpd is written in Rust, consistent with product-security guidance
+published by CISA and partner agencies recommending memory-safe languages
+for software that processes untrusted network input. The enforcement
+mechanism is the crate-root `#![deny(unsafe_code)]` invariant described
+under Design Principles above: no `unsafe` in shipped paths beyond the
+two documented, scoped exceptions.
+
+One concrete bound this pins: `AS_PATH` matching is length-bounded under
+RFC 8654 Extended Messages. The policy engine matches the rendered path
+string with no fixed-capacity per-ASN buffer anywhere in the match path;
+`crates/policy/tests/as_path_extended_message_bound.rs` decodes a
+maximum-size (65,533-byte) UPDATE and proves regex and length matching
+see the full ~16,000-ASN path.
+
+### Fuzzing
+
+Four fuzz crates (`crates/wire`, `crates/policy`, `crates/mrt`,
+`crates/evpn`) carry 17 fuzz targets covering the message decoders, the
+policy frontend, MRT snapshot and warm-bundle readers, and EVPN parsing.
+A nightly CI campaign (`.github/workflows/fuzz.yml`) runs every target
+in each crate against tracked seed corpora and fails loudly if target
+enumeration returns nothing. A ClusterFuzzLite workflow builds all
+targets with AddressSanitizer for on-demand campaigns. The target
+inventory is fail-closed: `scripts/check_fuzz_target_inventory.py` runs
+in CI and fails when the inventory drifts from the reviewed list.
+
+### Notes for Integrators
+
+Manufacturers integrating rustbgpd who need to document upstream
+open-source handling (for example under the EU Cyber Resilience Act) can
+point at:
+
+- This coordinated disclosure policy, including the response timelines
+  above.
+- Private vulnerability intake via GitHub private vulnerability
+  reporting, enabled on the repository.
+- CVE assignment for qualifying vulnerabilities via the GHSA flow.
+- Machine-readable dependency inventory: from v0.63 onward, release
+  artifacts include an SBOM.
 
 ### Authentication (v1)
 
