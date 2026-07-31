@@ -1217,9 +1217,14 @@ file paths. One unit compiles all-or-nothing — a broken or missing
 import anywhere rejects the whole load and the running generation is
 untouched.
 
-**Budgets.** Import nesting ≤ 8; each file ≤ 1 MiB; a unit's total
-source ≤ 8 MiB across ≤ 64 files. All enforced at load with
-diagnostics; evaluation never touches the filesystem.
+**Budgets.** Import nesting ≤ 8; a unit's total source ≤
+`[policy] rpol_max_graph_bytes` (default 256 MiB — sized so IRR-scale
+route-server renders, ~65 MB for a 320-member exchange, load with
+headroom while still bounding load-time memory) across ≤ 64 files.
+There is no separate per-file limit: a single oversized file exhausts
+the graph budget by itself. All enforced at load with diagnostics;
+evaluation never touches the filesystem. `rbgp policy check` (no
+daemon config) checks against the default budget.
 
 **Auditing.** `rbgp policy check FILE --list-deps [--root DIR]...`
 prints the resolved graph — every module's canonical path, SHA-256

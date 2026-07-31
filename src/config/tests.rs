@@ -16046,6 +16046,82 @@ import_chain = ["edge-in"]
     assert!(err.contains("bogons.rpol"), "names the leaf module: {err}");
 }
 
+/// Config dir with one `.rpol` unit and an optional
+/// `rpol_max_graph_bytes` line, for graph-budget tests.
+fn rpol_budget_config_dir(rpol_source: &str, budget_line: &str) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("tempdir");
+    fs::create_dir(dir.path().join("policies")).expect("mkdir");
+    fs::write(dir.path().join("policies/core.rpol"), rpol_source).expect("write rpol");
+    let toml = format!(
+        r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[policy]
+rpol_files = ["policies/core.rpol"]
+{budget_line}
+import_chain = ["edge-in"]
+"#,
+    );
+    fs::write(
+        dir.path().join("config.toml"),
+        tier_authorized_uds_test_config(&toml),
+    )
+    .expect("write config");
+    dir
+}
+
+const RPOL_BUDGET_POLICY: &str = "policy edge-in { term bogon { if route.prefix == 127.0.0.0/8 { reject } } term rest { accept } }\n";
+
+#[test]
+fn rpol_default_graph_budget_fits_a_multi_mib_irr_scale_unit() {
+    // A single ~9 MiB unit — over the pre-configurable 8 MiB budget —
+    // loads under the default (IRR-scale renders are single files well
+    // past 8 MiB).
+    let padding = format!("# padding\n{}\n", "#".repeat(9 * 1024 * 1024));
+    let source = format!("{RPOL_BUDGET_POLICY}{padding}");
+    let dir = rpol_budget_config_dir(&source, "");
+    let config = load_dir(&dir).expect("multi-MiB rpol unit loads under the default budget");
+    assert_eq!(
+        config.policy.rpol_max_graph_bytes,
+        rustbgpd_policy::rpol::DEFAULT_MAX_GRAPH_BYTES
+    );
+}
+
+#[test]
+fn rpol_unit_over_the_configured_graph_budget_is_rejected() {
+    // ~1.5 MiB unit against the 1 MiB floor: same diagnostic shape as
+    // the pre-configurable budget.
+    let padding = format!("# padding\n{}\n", "#".repeat(1536 * 1024));
+    let source = format!("{RPOL_BUDGET_POLICY}{padding}");
+    let dir = rpol_budget_config_dir(&source, "rpol_max_graph_bytes = 1048576");
+    let err = load_dir(&dir).expect_err("unit over the configured budget rejects the load");
+    assert!(
+        err.contains("resolved module graph exceeds 1048576 total source bytes"),
+        "{err}"
+    );
+}
+
+#[test]
+fn rpol_max_graph_bytes_out_of_range_is_a_load_error() {
+    for budget in ["1024", "17179869185"] {
+        let dir = rpol_budget_config_dir(
+            RPOL_BUDGET_POLICY,
+            &format!("rpol_max_graph_bytes = {budget}"),
+        );
+        let err = load_dir(&dir).expect_err("out-of-range budget rejects the load");
+        assert!(
+            err.contains("rpol_max_graph_bytes") && err.contains("out of range"),
+            "{err}"
+        );
+    }
+}
+
 // ── LAN-296: computed prepend operands at config attachment ─────────
 
 /// A config dir whose neighbor binds `.rpol` chains in BOTH

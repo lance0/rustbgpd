@@ -171,6 +171,7 @@
           "enabled": true
         },
         "rpol_files": [],
+        "rpol_max_graph_bytes": 268435456,
         "rpol_roots": []
       }
     },
@@ -2619,6 +2620,13 @@
           "items": {
             "type": "string"
           }
+        },
+        "rpol_max_graph_bytes": {
+          "description": "Total source-byte budget for each `.rpol` compilation unit's\nresolved module graph — one `rpol_files` entry plus everything\nits `import` graph pulls in. The budget plays two roles: it is\nthe anti-runaway guard that keeps an unbounded or recursively\ngenerated module graph from being read into memory at load\ntime, and it must comfortably fit the product's canonical\nIRR-scale route-server workload — a realistic 320-member\nexchange with log-uniform 1k–40k-entry IRR prefix lists renders\nto roughly 65 MB of `.rpol` source, so the 256 MiB default\nclears that with headroom for larger exchanges. Accepted range\n1 MiB..=4 GiB; values outside it are config load errors. Read\nfrom the incoming config on every load, so a SIGHUP reload\ncompiles under the reloaded file's own value.",
+          "type": "integer",
+          "format": "uint",
+          "default": 268435456,
+          "minimum": 0
         },
         "rpol_roots": {
           "description": "Additional policy roots for `.rpol` `import` resolution\n(LAN-300). Imports resolve against the importing file's\ndirectory first, then these directories in order, and the\nresolved file must stay inside the main file's directory or one\nof these roots. Relative entries resolve against the config\nfile's directory and are rewritten absolute at load, like\n`rpol_files`.",

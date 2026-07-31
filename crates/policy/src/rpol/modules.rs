@@ -26,9 +26,11 @@
 //!   iteration, so identical graphs compile identically (ADR-0103
 //!   Decision 5.1). Diamond imports load once; cycles are compile
 //!   errors naming the cycle (the `apply`/`fn` DAG precedent).
-//! - Budgets: [`MAX_MODULE_DEPTH`] import nesting, [`MAX_FILE_BYTES`]
-//!   per file, [`MAX_GRAPH_BYTES`] and [`MAX_MODULE_FILES`] for the
-//!   whole graph.
+//! - Budgets: [`MAX_MODULE_DEPTH`] import nesting,
+//!   [`MAX_MODULE_FILES`] files per graph, and a caller-supplied
+//!   total-source-byte budget ([`DEFAULT_MAX_GRAPH_BYTES`] when no
+//!   configuration provides one — the daemon threads
+//!   `[policy] rpol_max_graph_bytes` through).
 //! - The merge appends definitions dependency-first (post-order), main
 //!   file last; all definitions share one flat namespace and duplicate
 //!   names across modules are compile errors naming both files (the
@@ -50,12 +52,20 @@ use super::parser;
 /// is depth 0; an import chain deeper than this is a compile error.
 pub const MAX_MODULE_DEPTH: u32 = 8;
 
-/// Maximum size of one `.rpol` source file (ADR-0103 Decision 3:
-/// load-time reject).
-pub const MAX_FILE_BYTES: usize = 1024 * 1024;
-
-/// Maximum total source size of a resolved module graph.
-pub const MAX_GRAPH_BYTES: usize = 8 * 1024 * 1024;
+/// Default total-source-byte budget for a resolved module graph — the
+/// fallback for paths with no configuration (`rbgp policy check`, unit
+/// compiles); the daemon passes `[policy] rpol_max_graph_bytes`
+/// (which defaults to this value) instead.
+///
+/// The budget plays two roles at once: it is the anti-runaway guard
+/// that stops an unbounded or maliciously recursive graph from being
+/// read into memory at load time, and it must comfortably fit the
+/// product's canonical IRR-scale route-server workload — a realistic
+/// 320-member exchange with log-uniform 1k–40k-entry IRR prefix lists
+/// renders to roughly 65 MB of `.rpol` source, so 256 MiB clears that
+/// with headroom for larger exchanges while still bounding load-time
+/// memory.
+pub const DEFAULT_MAX_GRAPH_BYTES: usize = 256 * 1024 * 1024;
 
 /// Maximum number of files in a resolved module graph.
 pub const MAX_MODULE_FILES: usize = 64;
@@ -150,10 +160,16 @@ pub(super) struct ResolvedGraph {
 }
 
 /// Resolve `main_path`'s import graph. `roots` are the configured
-/// policy roots (the main file's directory is always added). Returns
-/// the resolved graph, or an error for unreadable inputs / resolution
-/// and parse diagnostics.
-pub(super) fn resolve(main_path: &Path, roots: &[PathBuf]) -> Result<ResolvedGraph, LoadError> {
+/// policy roots (the main file's directory is always added);
+/// `max_graph_bytes` is the total-source-byte budget for the whole
+/// graph ([`DEFAULT_MAX_GRAPH_BYTES`] when no configuration provides
+/// one). Returns the resolved graph, or an error for unreadable
+/// inputs / resolution and parse diagnostics.
+pub(super) fn resolve(
+    main_path: &Path,
+    roots: &[PathBuf],
+    max_graph_bytes: usize,
+) -> Result<ResolvedGraph, LoadError> {
     let io = |path: &Path, reason: String| LoadError::Io {
         path: path.display().to_string(),
         reason,
@@ -187,6 +203,7 @@ pub(super) fn resolve(main_path: &Path, roots: &[PathBuf]) -> Result<ResolvedGra
         in_progress: Vec::new(),
         post_order: Vec::new(),
         total_bytes: 0,
+        max_graph_bytes,
         diags: Vec::new(),
     };
     let text = std::fs::read_to_string(&main_canon)
@@ -244,6 +261,8 @@ struct Resolver {
     post_order: Vec<u32>,
     /// Running total of loaded source bytes.
     total_bytes: usize,
+    /// Total-source-byte budget for the whole graph.
+    max_graph_bytes: usize,
     /// Resolution + parse diagnostics, across all modules.
     diags: Vec<Diagnostic>,
 }
@@ -270,19 +289,18 @@ impl Resolver {
         self.asts.push(ast::SourceFile::default());
         self.in_progress.push(true);
 
-        if text_len > MAX_FILE_BYTES {
-            self.diags.push(Diagnostic::new(
-                Span::in_file(0..0, id),
-                format!("`.rpol` file is {text_len} bytes; the per-file limit is {MAX_FILE_BYTES}"),
-                "this file is too large",
-            ));
-        }
-        if self.total_bytes > MAX_GRAPH_BYTES {
+        // A single oversized file trips this too — the graph total
+        // includes the file just loaded, so no separate per-file limit
+        // is needed (the pre-configurable-budget per-file cap was
+        // strictly subsumed by this check once the budget had to fit
+        // IRR-scale single-file renders).
+        if self.total_bytes > self.max_graph_bytes {
             self.diags.push(Diagnostic::new(
                 Span::in_file(0..0, id),
                 format!(
-                    "resolved module graph exceeds {MAX_GRAPH_BYTES} total source bytes \
-                     at this file"
+                    "resolved module graph exceeds {} total source bytes \
+                     at this file",
+                    self.max_graph_bytes
                 ),
                 "graph source budget exhausted here",
             ));
@@ -436,7 +454,7 @@ mod tests {
     }
 
     fn load(dir: &Path, main: &str) -> Result<RpolFile, LoadError> {
-        RpolFile::load(&dir.join(main), &[])
+        RpolFile::load(&dir.join(main), &[], DEFAULT_MAX_GRAPH_BYTES)
     }
 
     /// The rendered compile error of a load expected to fail.
@@ -503,6 +521,7 @@ mod tests {
         let file = RpolFile::load(
             &main_dir.path().join("main.rpol"),
             &[lib_dir.path().to_path_buf()],
+            DEFAULT_MAX_GRAPH_BYTES,
         )
         .expect("clean load with root");
         assert_eq!(file.modules().len(), 2);
@@ -524,6 +543,7 @@ mod tests {
         let file = RpolFile::load(
             &dir.path().join("nested/main.rpol"),
             &[dir.path().to_path_buf()],
+            DEFAULT_MAX_GRAPH_BYTES,
         )
         .expect("clean load once the parent is a root");
         assert_eq!(file.modules().len(), 2);
@@ -713,15 +733,25 @@ mod tests {
         );
     }
 
+    /// Rendered compile error of a load with an explicit budget,
+    /// expected to fail.
+    fn load_err_with_budget(dir: &Path, main: &str, budget: usize) -> String {
+        match RpolFile::load(&dir.join(main), &[], budget) {
+            Ok(_) => panic!("load unexpectedly succeeded"),
+            Err(err) => err.render(false),
+        }
+    }
+
     #[test]
-    fn an_oversized_file_is_rejected() {
+    fn a_single_file_over_the_budget_is_rejected() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let mut big = String::from("# padding\n");
-        big.push_str(&"#".repeat(MAX_FILE_BYTES));
-        write(dir.path(), "big.rpol", &big);
-        write(dir.path(), "main.rpol", "import \"big.rpol\"");
-        let err = load_err(dir.path(), "main.rpol");
-        assert!(err.contains("per-file limit"), "{err}");
+        let big = format!("# padding\n{}", "#".repeat(4096));
+        write(dir.path(), "main.rpol", &big);
+        let err = load_err_with_budget(dir.path(), "main.rpol", 4096);
+        assert!(err.contains("exceeds 4096 total source bytes"), "{err}");
+        // The same file loads once the budget covers it.
+        RpolFile::load(&dir.path().join("main.rpol"), &[], big.len())
+            .expect("loads within the budget");
     }
 
     #[test]
@@ -729,17 +759,17 @@ mod tests {
         use std::fmt::Write;
 
         let dir = tempfile::tempdir().expect("tempdir");
-        // Nine modules of exactly 1 MiB each pass the per-file limit
-        // but blow the 8 MiB graph budget.
-        let filler = format!("# leaf\n{}", "#".repeat(MAX_FILE_BYTES - 7));
-        assert_eq!(filler.len(), MAX_FILE_BYTES);
+        // Nine 1 KiB modules against an 8 KiB budget: no single file
+        // exceeds it, the resolved graph does.
+        let filler = format!("# leaf\n{}", "#".repeat(1024 - 7));
+        assert_eq!(filler.len(), 1024);
         let mut main = String::new();
         for index in 0..9 {
             write(dir.path(), &format!("leaf{index}.rpol"), &filler);
             let _ = writeln!(main, "import \"leaf{index}.rpol\"");
         }
         write(dir.path(), "main.rpol", &main);
-        let err = load_err(dir.path(), "main.rpol");
+        let err = load_err_with_budget(dir.path(), "main.rpol", 8 * 1024);
         assert!(err.contains("total source bytes"), "{err}");
     }
 

@@ -67,6 +67,24 @@ const COMMUNITY_GEN_A: u32 = (65_400 << 16) | 1_000;
 const COMMUNITY_GEN_B: u32 = (65_400 << 16) | 2_000;
 const COMMUNITY_STABLE: u32 = (65_400 << 16) | 9_000;
 const STALL_WINDOW: Duration = Duration::from_secs(120);
+/// First-output window: how long the base-table convergence and
+/// reload-completion watchdogs wait for the FIRST observed
+/// announcement of their phase before declaring a stall. Ingesting
+/// the base table through IRR-scale per-peer import chains — or
+/// re-parsing and recompiling a multi-MB policy on reload —
+/// legitimately takes minutes of compute before the first UPDATE
+/// reaches any observer; once output starts, the steady-state
+/// [`STALL_WINDOW`] no-progress watchdog applies. A harness
+/// parameter, not a measurement (completion and stall measurements
+/// are timestamp-based and unaffected by watchdog size).
+const FIRST_OUTPUT_WINDOW: Duration = Duration::from_secs(600);
+/// Stub-connect window: how long one stub keeps retrying its TCP
+/// connect (500 ms cadence) before failing. The daemon may still be
+/// absorbing a large config, or its accept backlog may briefly
+/// overflow under the 64-stub establishment waves — refused connects
+/// inside this window are retried, not fatal. A harness parameter,
+/// not a measurement (establishment is not timed against it).
+const CONNECT_WINDOW: Duration = Duration::from_secs(120);
 const FLAP_ROUNDS: u32 = 3;
 const FLAP_RECONNECT_SECS: u64 = 10;
 const EVIDENCE_TIMEOUT: Duration = Duration::from_secs(15);
@@ -316,13 +334,26 @@ fn own_slice(ctx: &Ctx, i: u32) -> Vec<Ipv4Prefix> {
 
 async fn establish_stub(ctx: Arc<Ctx>, i: u32) -> Result<Stub, String> {
     let local = stub_addr(i);
-    let sock = TcpSocket::new_v4().map_err(|e| format!("socket: {e}"))?;
-    sock.bind(SocketAddr::new(local.into(), 0))
-        .map_err(|e| format!("bind {local}: {e}"))?;
-    let mut stream = sock
-        .connect(ctx.daemon)
-        .await
-        .map_err(|e| format!("connect from {local}: {e}"))?;
+    // Connect with retries inside CONNECT_WINDOW: the socket is
+    // consumed by a failed connect, so each attempt rebuilds it.
+    let deadline = Instant::now() + CONNECT_WINDOW;
+    let mut stream = loop {
+        let sock = TcpSocket::new_v4().map_err(|e| format!("socket: {e}"))?;
+        sock.bind(SocketAddr::new(local.into(), 0))
+            .map_err(|e| format!("bind {local}: {e}"))?;
+        match sock.connect(ctx.daemon).await {
+            Ok(stream) => break stream,
+            Err(e) => {
+                if Instant::now() >= deadline {
+                    return Err(format!(
+                        "connect from {local}: {e} (retried for {}s)",
+                        CONNECT_WINDOW.as_secs()
+                    ));
+                }
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+        }
+    };
     stream.set_nodelay(true).ok();
 
     let open = OpenMessage {
@@ -1042,10 +1073,18 @@ fn main() {
                 break;
             }
             let sum: u64 = counts.iter().sum();
+            // Before the first observed announcement, allow the larger
+            // FIRST_OUTPUT_WINDOW: large-policy imports compute for
+            // minutes before anything reaches the wire.
+            let window = if last_sum == 0 {
+                FIRST_OUTPUT_WINDOW
+            } else {
+                STALL_WINDOW
+            };
             if sum > last_sum {
                 last_sum = sum;
                 last_progress = Instant::now();
-            } else if last_progress.elapsed() > STALL_WINDOW {
+            } else if last_progress.elapsed() > window {
                 let below: Vec<(usize, u64)> = counts
                     .iter()
                     .enumerate()
@@ -1056,7 +1095,7 @@ fn main() {
                     "FAIL: base-table convergence stalled for {}s: expected >= {expected} \
                      base prefixes per observer, {} of {n_peers} observers below; \
                      first stalled (observer, observed): {:?}",
-                    STALL_WINDOW.as_secs(),
+                    window.as_secs(),
                     below.len(),
                     &below[..below.len().min(10)]
                 );
@@ -1216,13 +1255,24 @@ fn main() {
                     eprintln!("reload {r} progress: complete={sat}/{changed_peers}");
                 }
                 let sum = unique_sum(&ctx);
+                // Before the first re-advertised prefix, allow the
+                // larger FIRST_OUTPUT_WINDOW: a large-policy reload
+                // re-parses and recompiles for minutes before the
+                // first marker UPDATE reaches the wire (the reload
+                // completion/stall *measurements* are timestamp-based
+                // and unaffected by this watchdog).
+                let window = if last_unique == 0 {
+                    FIRST_OUTPUT_WINDOW
+                } else {
+                    STALL_WINDOW
+                };
                 if sum > last_unique {
                     last_unique = sum;
                     last_progress = Instant::now();
-                } else if last_progress.elapsed() > STALL_WINDOW {
+                } else if last_progress.elapsed() > window {
                     println!(
                         "reload {r} STALLED: no re-advertisement progress for {}s",
-                        STALL_WINDOW.as_secs()
+                        window.as_secs()
                     );
                     let sat = (0..changed_peers as usize)
                         .filter(|&i| completion_us(&ctx, i).is_some())

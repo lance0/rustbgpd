@@ -37,7 +37,7 @@ pub use coverage::{
 pub use diag::{Diagnostic, Diagnostics, Span, Spanned, closest_matches};
 pub use fmt::{FmtError, format_rpol};
 pub use modules::{
-    LoadError, MAX_FILE_BYTES, MAX_GRAPH_BYTES, MAX_MODULE_DEPTH, MAX_MODULE_FILES, ModuleSource,
+    DEFAULT_MAX_GRAPH_BYTES, LoadError, MAX_MODULE_DEPTH, MAX_MODULE_FILES, ModuleSource,
 };
 pub use testing::{TestFailure, TestReport};
 
@@ -95,16 +95,20 @@ impl RpolFile {
 
     /// Read `path`, resolve its `import` graph against the importing
     /// files' directories plus `roots` (LAN-300), and typecheck the
-    /// merged unit. All budgets (depth, per-file and total size, file
-    /// count), path confinement, cycle and duplicate-name checks apply.
+    /// merged unit. All budgets (depth, `max_graph_bytes` total source
+    /// size, file count), path confinement, cycle and duplicate-name
+    /// checks apply. `max_graph_bytes` is the total-source-byte budget
+    /// for the resolved graph — the daemon threads
+    /// `[policy] rpol_max_graph_bytes` through; callers with no
+    /// configuration pass [`DEFAULT_MAX_GRAPH_BYTES`].
     ///
     /// # Errors
     ///
     /// [`LoadError::Io`] when the main file or a configured root is
     /// unreadable; [`LoadError::Compile`] with multi-file diagnostics
     /// otherwise.
-    pub fn load(path: &Path, roots: &[PathBuf]) -> Result<Self, LoadError> {
-        let graph = modules::resolve(path, roots)?;
+    pub fn load(path: &Path, roots: &[PathBuf], max_graph_bytes: usize) -> Result<Self, LoadError> {
+        let graph = modules::resolve(path, roots, max_graph_bytes)?;
         let type_diags = typeck::typecheck(&graph.merged);
         if !type_diags.is_empty() {
             return Err(LoadError::Compile {
