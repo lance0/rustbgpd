@@ -2919,6 +2919,7 @@ dependencies = [
  "nix 0.31.3",
  "owo-colors",
  "prometheus",
+ "prost",
  "rs-config-render",
  "rtnetlink",
  "rustbgpctl",

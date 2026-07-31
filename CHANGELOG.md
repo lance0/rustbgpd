@@ -88,6 +88,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   fail closed on missing or invalid RSS samples instead of accepting stale or
   incomplete evidence. (LAN-790)
 
+- The measured IRR reload campaign now keeps its 320-member comparison to the
+  three mechanisms that can carry the same full dataset; the tonic-bounded
+  transaction path runs as a separately labeled 10-member receipt. Campaign
+  roots refuse to overwrite failed, interrupted, mismatched, or inconsistent
+  evidence, and each native cell is sealed to one canonical dataset digest and
+  its exact runtime inputs rather than timestamped renderer receipts.
+
 ## [0.62.0] — 2026-07-30
 
 ### Added
