@@ -27,6 +27,7 @@
 #              CHANGED_FRACTION PORT RELOADS CONTROL_SECS BIRD_THREADS
 #              CELL_TIMEOUT START_TIMEOUT ARTIFACTS_DIR SKIP_PREFLIGHT
 set -u
+set -o pipefail
 
 REPO="$(cd "$(dirname "$0")/../../.." && pwd)"
 RSTALL="$REPO/bench/scale/reloadstall"
@@ -76,7 +77,7 @@ RSS_LIMIT_KIB=$((100 * 1024 * 1024)) # abort a cell past 100 GiB (precommitted)
 CELLS=("$@")
 [ ${#CELLS[@]} -eq 0 ] && CELLS=(rustbgpd-sighup rustbgpd-txn bird openbgpd)
 
-for tool in docker jq python3 cargo ss; do
+for tool in docker jq python3 cargo ss sha256sum git awk timeout find sort; do
     command -v "$tool" >/dev/null || {
         echo "missing required tool: $tool" >&2
         exit 1
@@ -101,6 +102,113 @@ for bin in "$HARNESS" "$RBGP" "$RENDER" "$DAEMON"; do
     }
 done
 mkdir -p "$ART"
+PRIOR_FINGERPRINT=$(jq -r '.fingerprint // empty' "$ART/provenance.json" 2>/dev/null)
+hash_file() {
+    local output
+    output=$(sha256sum -- "$1") || return 1
+    printf '%s\n' "${output%% *}"
+}
+
+BIRD_IMAGE="bird:3.3.1"
+OPENBGPD_IMAGE="openbgpd/openbgpd:9.1"
+image_id_for_cells() {
+    local cell=$1 image=$2
+    if [[ " ${CELLS[*]} " != *" $cell "* ]]; then
+        printf 'not-selected'
+        return
+    fi
+    docker image inspect --format '{{.Id}}' "$image" 2>/dev/null || {
+        docker pull "$image" >/dev/null || return 1
+        docker image inspect --format '{{.Id}}' "$image"
+    }
+}
+BIRD_IMAGE_ID=$(image_id_for_cells bird "$BIRD_IMAGE") || exit 1
+OPENBGPD_IMAGE_ID=$(image_id_for_cells openbgpd "$OPENBGPD_IMAGE") || exit 1
+DOCKER_VERSION=$(docker --version)
+if [[ " ${CELLS[*]} " == *" bird "* || " ${CELLS[*]} " == *" openbgpd "* ]]; then
+    DOCKER_VERSION=$(docker version --format '{{.Client.Version}}/{{.Server.Version}}') || exit 1
+fi
+
+# Seal resumability and retained evidence to the exact code, tools, and
+# campaign inputs. All paths stay repository-relative and no host identity is
+# recorded. A dirty checkout is represented by its byte-exact tracked diff
+# plus content hashes for untracked files.
+COMMIT=$(git -C "$REPO" rev-parse HEAD) || exit 1
+DIRTY=false
+[ -z "$(git -C "$REPO" status --porcelain=v1)" ] || DIRTY=true
+DIRTY_STATE_SHA256=$(
+    cd "$REPO" || exit 1
+    git status --porcelain=v1
+    git diff --binary HEAD --
+    git ls-files --others --exclude-standard -z |
+        while IFS= read -r -d '' path; do
+            printf 'untracked %s ' "$path"
+            hash_file "$path"
+        done
+) || exit 1
+DIRTY_STATE_SHA256=$(printf '%s' "$DIRTY_STATE_SHA256" | sha256sum | cut -d' ' -f1) || exit 1
+CAMPAIGN_PROVENANCE=$(jq -cn \
+    --arg commit "$COMMIT" --argjson dirty "$DIRTY" \
+    --arg dirty_state_sha256 "$DIRTY_STATE_SHA256" \
+    --arg run_script_sha256 "$(hash_file "$REPO/bench/scale/irrreload/run-irr-reload.sh")" \
+    --arg generator_sha256 "$(hash_file "$GEN")" \
+    --arg sampler_sha256 "$(hash_file "$SAMPLER")" \
+    --arg txn_apply_sha256 "$(hash_file "$TXN_APPLY")" \
+    --arg harness_sha256 "$(hash_file "$HARNESS")" \
+    --arg daemon_sha256 "$(hash_file "$DAEMON")" \
+    --arg cli_sha256 "$(hash_file "$RBGP")" \
+    --arg renderer_sha256 "$(hash_file "$RENDER")" \
+    --arg cells "$(IFS=,; echo "${CELLS[*]}")" \
+    --arg smoke "$SMOKE" --arg n_members "$N_MEMBERS" \
+    --arg total_prefixes "$TOTAL_PREFIXES" --arg min_list "$MIN_LIST" \
+    --arg max_list "$MAX_LIST" --arg seed "$SEED" \
+    --arg changed_fraction "$CHANGED_FRACTION" --arg port "$PORT" \
+    --arg reloads "$RELOADS" --arg control_secs "$CONTROL_SECS" \
+    --arg cell_timeout "$CELL_TIMEOUT" --arg start_timeout "$START_TIMEOUT" \
+    --arg bird_threads "$BIRD_THREADS" --arg skip_preflight "${SKIP_PREFLIGHT:-}" \
+    --arg rustc "$(rustc -Vv)" --arg cargo "$(cargo -V)" \
+    --arg python "$(python3 --version 2>&1)" --arg jq "$(jq --version)" \
+    --arg docker "$DOCKER_VERSION" \
+    --arg kernel "$(uname -srm)" \
+    --arg cpu_model "$(awk -F: '/^model name/ { sub(/^[[:space:]]+/, "", $2); print $2; exit }' /proc/cpuinfo)" \
+    --arg bird_image "$BIRD_IMAGE" --arg bird_image_id "$BIRD_IMAGE_ID" \
+    --arg openbgpd_image "$OPENBGPD_IMAGE" --arg openbgpd_image_id "$OPENBGPD_IMAGE_ID" \
+    '{schema:1,git:{commit:$commit,dirty:$dirty,dirty_state_sha256:$dirty_state_sha256},scripts:{runner:$run_script_sha256,generator:$generator_sha256,rss_sampler:$sampler_sha256,txn_apply:$txn_apply_sha256},binaries:{reloadstall:$harness_sha256,rustbgpd:$daemon_sha256,rbgp:$cli_sha256,rs_config_render:$renderer_sha256},environment:{rustc:$rustc,cargo:$cargo,python:$python,jq:$jq,docker:$docker,kernel:$kernel,cpu_model:$cpu_model},inputs:{cells:$cells,smoke:$smoke,n_members:$n_members,total_prefixes:$total_prefixes,min_list:$min_list,max_list:$max_list,seed:$seed,changed_fraction:$changed_fraction,port:$port,reloads:$reloads,control_secs:$control_secs,cell_timeout:$cell_timeout,start_timeout:$start_timeout,bird_threads:$bird_threads,skip_preflight:$skip_preflight,bird_image:$bird_image,bird_image_id:$bird_image_id,openbgpd_image:$openbgpd_image,openbgpd_image_id:$openbgpd_image_id}}') || exit 1
+CAMPAIGN_FINGERPRINT=$(printf '%s' "$CAMPAIGN_PROVENANCE" | sha256sum | cut -d' ' -f1) || exit 1
+printf '%s\n' "$CAMPAIGN_PROVENANCE" | jq --arg fingerprint "$CAMPAIGN_FINGERPRINT" \
+    '. + {fingerprint:$fingerprint}' >"$ART/provenance.json" || exit 1
+ROWS_HEADER="cell,reload,peers_total,peers_changed,peers_stable,prefixes,completion_p50_s,completion_p95_s,completion_max_s,changed_maxgap_p50_ms,changed_maxgap_p95_ms,changed_maxgap_max_ms,all_observer_maxgap_p50_ms,all_observer_maxgap_p95_ms,all_observer_maxgap_max_ms,changed_first_generation_update_p50_ms,changed_first_generation_update_p95_ms,changed_first_generation_update_max_ms,rss_before_mib,rss_after_mib,stable_marker_peers,sessions_up,parse_errors"
+if [ "$PRIOR_FINGERPRINT" != "$CAMPAIGN_FINGERPRINT" ] ||
+    [ "$(head -n1 "$ART/rows.csv" 2>/dev/null)" != "$ROWS_HEADER" ]; then
+    printf '%s\n' "$ROWS_HEADER" >"$ART/rows.csv"
+fi
+
+cell_receipt_matches() {
+    local cdir=$1 scenario_sha actual_sha
+    scenario_sha=$(jq -er --arg fingerprint "$CAMPAIGN_FINGERPRINT" \
+        'select(.fingerprint == $fingerprint) | .scenario.manifest_sha256' \
+        "$cdir/provenance.json" 2>/dev/null) || return 1
+    [ -n "$scenario_sha" ] || return 1
+    actual_sha=$(hash_file "$cdir/scenario.sha256" 2>/dev/null) || return 1
+    [ "$actual_sha" = "$scenario_sha" ] || return 1
+    grep -qx "pass $CAMPAIGN_FINGERPRINT $scenario_sha" "$cdir/status" 2>/dev/null
+}
+
+seal_scenario() {
+    local run=$1 cdir=$2
+    (
+        cd "$run" || exit 1
+        find . -type f -print0 | sort -z |
+            while IFS= read -r -d '' path; do
+                digest=$(hash_file "$path") || exit 1
+                printf '%s  %s\n' "$digest" "$path"
+            done
+    ) >"$cdir/scenario.sha256" || return 1
+    CELL_SCENARIO_SHA256=$(hash_file "$cdir/scenario.sha256") || return 1
+    jq --arg scenario_sha "$CELL_SCENARIO_SHA256" \
+        '. + {scenario:{manifest_sha256:$scenario_sha}}' \
+        "$ART/provenance.json" >"$cdir/provenance.json"
+}
 
 cleanup() {
     # shellcheck disable=SC2317  # invoked via trap
@@ -176,9 +284,11 @@ run_cell() {
 
     local daemon_pid="" container="" reload_cmd="" pid_arg=""
     local live a b
+    CELL_SCENARIO_SHA256=""
     case $cell in
     rustbgpd-sighup)
         gen_scenario rustbgpd "$run" --render-bin "$RENDER" || return 1
+        seal_scenario "$run" "$cdir" || return 1
         "$DAEMON" "$run/config.toml" >"$cdir/daemon.log" 2>&1 &
         daemon_pid=$!
         live="$run/member.rpol" a="$run/gen-a.rpol" b="$run/gen-b.rpol"
@@ -186,6 +296,7 @@ run_cell() {
         ;;
     rustbgpd-txn)
         gen_scenario rustbgpd-txn "$run" || return 1
+        seal_scenario "$run" "$cdir" || return 1
         "$DAEMON" "$run/config.toml" >"$cdir/daemon.log" 2>&1 &
         daemon_pid=$!
         live="$run/candidate.toml" a="$run/gen-a.toml" b="$run/gen-b.toml"
@@ -194,20 +305,22 @@ run_cell() {
         ;;
     bird)
         gen_scenario bird "$run" --threads "$BIRD_THREADS" || return 1
+        seal_scenario "$run" "$cdir" || return 1
         container="irr-bird"
         docker rm -f "$container" >/dev/null 2>&1
         docker run -d --name "$container" --network=host -v "$run":/etc/bird \
-            bird:3.3.1 bird -f -c /etc/bird/bird.conf >/dev/null || return 1
+            "$BIRD_IMAGE_ID" bird -f -c /etc/bird/bird.conf >/dev/null || return 1
         reload_cmd="docker exec $container birdc configure"
         live="$run/gen.conf" a="$run/gen-a.conf" b="$run/gen-b.conf"
         pid_arg=0 # the outer sampler owns RSS
         ;;
     openbgpd)
         gen_scenario openbgpd "$run" || return 1
+        seal_scenario "$run" "$cdir" || return 1
         container="irr-obgpd"
         docker rm -f "$container" >/dev/null 2>&1
         docker run -d --name "$container" --network=host -v "$run":/etc/bgpd \
-            openbgpd/openbgpd:9.1 >/dev/null || return 1
+            "$OPENBGPD_IMAGE_ID" >/dev/null || return 1
         reload_cmd="docker exec $container bgpctl reload"
         live="$run/gen.conf" a="$run/gen-a.conf" b="$run/gen-b.conf"
         pid_arg=0
@@ -234,6 +347,12 @@ run_cell() {
     local hpid=$!
     local rc=""
     while kill -0 "$hpid" 2>/dev/null; do
+        if ! kill -0 "$sampler_pid" 2>/dev/null; then
+            echo "cell $cell: RSS sampler exited before harness completion" >&2
+            kill "$hpid" 2>/dev/null
+            rc=98
+            break
+        fi
         local last_kib
         last_kib=$(tail -n1 "$cdir/rss.csv" 2>/dev/null | cut -d, -f2)
         case ${last_kib:-} in
@@ -253,41 +372,70 @@ run_cell() {
     hrc=$?
     [ -z "$rc" ] && rc=$hrc
 
-    kill "$sampler_pid" 2>/dev/null
     if [ -n "$container" ]; then
         docker logs "$container" >"$cdir/daemon.log" 2>&1
         docker rm -f "$container" >/dev/null 2>&1
     else
         kill "$daemon_pid" 2>/dev/null
+        wait "$daemon_pid" 2>/dev/null
     fi
-    cp "$run/manifest.json" "$cdir/manifest.json" 2>/dev/null
+    local sampler_rc=0
+    wait "$sampler_pid" || sampler_rc=$?
+    if [ "$sampler_rc" -ne 0 ]; then
+        echo "cell $cell: RSS sampler failed rc=$sampler_rc" >&2
+        rc=98
+    elif ! awk -F, 'NR == 1 { if ($0 != "epoch_s,total_rss_kib,pids") bad=1; next } NF != 3 || $1 !~ /^[0-9]+$/ || $2 !~ /^[1-9][0-9]*$/ || $3 !~ /^[1-9][0-9]*$/ { bad=1 } NR > 1 { rows++ } END { exit (bad || rows == 0) }' "$cdir/rss.csv"; then
+        echo "cell $cell: RSS sampler produced empty or invalid data" >&2
+        rc=98
+    fi
+    if ! cp "$run/manifest.json" "$cdir/manifest.json" ||
+        [ "$(hash_file "$cdir/scenario.sha256" 2>/dev/null)" != "$CELL_SCENARIO_SHA256" ]; then
+        echo "cell $cell: required manifest/provenance retention failed" >&2
+        rc=97
+    fi
     if [ "$rc" -eq 0 ]; then
+        local rows_tmp="$cdir/rows.csv.tmp"
         grep '^reloadstall_csv,' "$cdir/reloadstall.log" |
-            sed "s/^reloadstall_csv/$cell/" >>"$ART/rows.csv"
-        rm -rf "$run" # scenario reproduces from the generator + manifest
+            sed "s/^reloadstall_csv/$cell/" >"$rows_tmp"
+        if ! awk -F, -v cell="$cell" -v expected="$RELOADS" \
+            'NF != 23 || $1 != cell || $2 != sprintf("%d", NR) { bad=1 } END { exit (bad || NR != expected) }' \
+            "$rows_tmp"; then
+            echo "cell $cell: invalid, missing, or duplicate measurement rows" >&2
+            rm -f "$rows_tmp"
+            rc=96
+        else
+            if ! sed -n '1,$p' "$rows_tmp" >>"$ART/rows.csv"; then
+                echo "cell $cell: failed to retain measurement rows" >&2
+                rc=96
+            else
+                rm -f "$rows_tmp"
+                rm -rf "$run" # reproduces from the generator + manifest
+            fi
+        fi
     fi
     echo "cell $cell: harness rc=$rc (artifacts: $cdir)"
     return "$rc"
 }
 
-grep -q '^cell,' "$ART/rows.csv" 2>/dev/null || echo \
-    "cell,reload,peers_total,peers_changed,peers_stable,prefixes,completion_p50_s,completion_p95_s,completion_max_s,changed_maxgap_p50_ms,changed_maxgap_p95_ms,changed_maxgap_max_ms,all_observer_maxgap_p50_ms,all_observer_maxgap_p95_ms,all_observer_maxgap_max_ms,changed_first_update_p50_ms,changed_first_update_p95_ms,changed_first_update_max_ms,rss_before_mib,rss_after_mib,stable_marker_peers,sessions_up,parse_errors" \
-    >"$ART/rows.csv"
-
 overall=0
 for cell in "${CELLS[@]}"; do
     status_file="$ART/$cell/status"
-    if [ -f "$status_file" ] && grep -qx pass "$status_file"; then
-        echo "cell $cell: already pass, skipping (rm $status_file to rerun)"
+    existing_rows=$(grep -c "^$cell," "$ART/rows.csv" 2>/dev/null)
+    if cell_receipt_matches "$ART/$cell" &&
+        [ "${existing_rows:-0}" -eq "$RELOADS" ]; then
+        echo "cell $cell: matching fingerprint already passed, skipping"
         continue
     fi
+    # Rows from another fingerprint can never satisfy this campaign.
+    awk -F, -v cell="$cell" 'NR == 1 || $1 != cell' "$ART/rows.csv" >"$ART/rows.csv.tmp" &&
+        mv "$ART/rows.csv.tmp" "$ART/rows.csv"
     load_gate
     echo "=== cell $cell start $(date -Is) ==="
     if run_cell "$cell"; then
-        echo pass >"$status_file"
+        echo "pass $CAMPAIGN_FINGERPRINT $CELL_SCENARIO_SHA256" >"$status_file"
         echo "=== cell $cell PASS $(date -Is) ==="
     else
-        echo "fail rc=$? $(date -Is)" >"$status_file"
+        echo "fail $CAMPAIGN_FINGERPRINT ${CELL_SCENARIO_SHA256:-unavailable} rc=$?" >"$status_file"
         echo "=== cell $cell FAIL ==="
         overall=1
     fi
@@ -297,10 +445,10 @@ done
 
 # Completion gate: every requested cell passed and produced its rows.
 for cell in "${CELLS[@]}"; do
-    grep -qx pass "$ART/$cell/status" 2>/dev/null || overall=1
+    cell_receipt_matches "$ART/$cell" || overall=1
     rows=$(grep -c "^$cell," "$ART/rows.csv" 2>/dev/null)
-    if [ "${rows:-0}" -lt "$RELOADS" ]; then
-        echo "cell $cell: expected >= $RELOADS measurement rows, found ${rows:-0}" >&2
+    if [ "${rows:-0}" -ne "$RELOADS" ]; then
+        echo "cell $cell: expected exactly $RELOADS measurement rows, found ${rows:-0}" >&2
         overall=1
     fi
 done

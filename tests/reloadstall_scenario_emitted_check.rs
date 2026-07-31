@@ -85,3 +85,64 @@ fn emitted_1000_peer_scenario_is_all_ebgp_and_daemon_valid() {
         String::from_utf8_lossy(&checked.stderr)
     );
 }
+
+#[test]
+/// Red proof: replacing the fingerprint-qualified status match with the old
+/// bare `pass` match, or removing the sampler wait/data gate, makes this fail.
+/// The column assertion likewise fails if the ambiguous historical label is
+/// restored in future output.
+fn irr_reload_campaign_seals_resume_rows_and_rss_evidence() {
+    let runner = std::fs::read_to_string(format!(
+        "{}/bench/scale/irrreload/run-irr-reload.sh",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .expect("read IRR reload runner");
+
+    for required in [
+        "pass $CAMPAIGN_FINGERPRINT",
+        "provenance.json",
+        "DIRTY_STATE_SHA256",
+        "bird_image_id",
+        "openbgpd_image_id",
+        "scenario.sha256",
+        "cell_receipt_matches",
+        "[ \"$actual_sha\" = \"$scenario_sha\" ] || return 1",
+        "pass $CAMPAIGN_FINGERPRINT $scenario_sha",
+        "pass $CAMPAIGN_FINGERPRINT $CELL_SCENARIO_SHA256",
+        "wait \"$sampler_pid\"",
+        "RSS sampler produced empty or invalid data",
+        "changed_first_generation_update_p50_ms",
+        "changed_first_generation_update_p95_ms",
+        "changed_first_generation_update_max_ms",
+        "[ \"$PRIOR_FINGERPRINT\" != \"$CAMPAIGN_FINGERPRINT\" ]",
+        "[ \"$(head -n1 \"$ART/rows.csv\" 2>/dev/null)\" != \"$ROWS_HEADER\" ]",
+        "required manifest/provenance retention failed",
+        "rc=97",
+        "NF != 23 || $1 != cell || $2 != sprintf(\"%d\", NR)",
+        "NR != expected",
+        "invalid, missing, or duplicate measurement rows",
+        "failed to retain measurement rows",
+        "rc=96",
+        "[ \"${existing_rows:-0}\" -eq \"$RELOADS\" ]",
+        "[ \"${rows:-0}\" -ne \"$RELOADS\" ]",
+    ] {
+        assert!(
+            runner.contains(required),
+            "missing receipt seal: {required}"
+        );
+    }
+    assert!(
+        !runner.contains("changed_first_update_p50_ms"),
+        "future rows must not reuse the ambiguous historical column name"
+    );
+    let retention_gate = runner
+        .find("required manifest/provenance retention failed")
+        .expect("retention failure gate");
+    let scenario_delete = runner
+        .rfind("rm -rf \"$run\"")
+        .expect("successful scenario deletion");
+    assert!(
+        retention_gate < scenario_delete,
+        "retention must fail closed before successful scenario deletion"
+    );
+}
