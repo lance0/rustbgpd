@@ -32,7 +32,8 @@ reproducible receipt:
   **4.7–5.0 s** vs 61.6–65.3 s (BIRD) and 338.8–422.1 s (OpenBGPD) —
   [same matrix](docs/perf/ixp-matrix-2026-07.md#s1--cold-convergence)
 - **Route-reflector scale**: 1,000 RR clients × 100k routes converge on the
-  wire in **1.82 s** at **419 MiB** whole-process RSS —
+  wire in **1.82 s** at **419 MiB** whole-process RSS — measured 2026-07-03
+  at the close of the update-groups arc,
   [1000-peer scale receipt](docs/perf/scale-receipt-2026-07.md)
 - **The losses, stated plainly**: OpenBGPD holds a smaller reload stall
   (p50 0.24–0.28 s vs rustbgpd's 0.42–0.73 s), and BIRD keeps the settled-RSS

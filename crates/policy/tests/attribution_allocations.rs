@@ -6,7 +6,8 @@
 //! `PolicyChain::evaluate_with_attribution` calls.
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::cell::Cell;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use rustbgpd_policy::{
     NamedPolicy, Policy, PolicyAction, PolicyChain, RouteContext, RouteModifications,
@@ -15,9 +16,19 @@ use rustbgpd_wire::{AspaValidation, RpkiValidation};
 
 const VERDICTS: usize = 256;
 
+// Counting is scoped to the measuring thread, not the process. The
+// evaluation under test runs entirely on the test thread, but the test
+// process also hosts libtest-harness threads whose incidental allocations
+// (progress plumbing, timing) land inside the measured window when a
+// loaded host stretches its wall-clock span — a handful of phantom
+// "label rebuilds" that no policy code performed. A per-verdict label
+// rebuild happens on this thread and still counts exactly.
+thread_local! {
+    static COUNTING: Cell<bool> = const { Cell::new(false) };
+}
+
 struct CountingAllocator {
     inner: System,
-    enabled: AtomicBool,
     allocations: AtomicUsize,
 }
 
@@ -25,24 +36,24 @@ impl CountingAllocator {
     const fn new() -> Self {
         Self {
             inner: System,
-            enabled: AtomicBool::new(false),
             allocations: AtomicUsize::new(0),
         }
     }
 
     fn begin(&self) {
-        self.enabled.store(false, Ordering::Relaxed);
         self.allocations.store(0, Ordering::Relaxed);
-        self.enabled.store(true, Ordering::Relaxed);
+        COUNTING.set(true);
     }
 
     fn end(&self) -> usize {
-        self.enabled.store(false, Ordering::Relaxed);
+        COUNTING.set(false);
         self.allocations.load(Ordering::Relaxed)
     }
 
     fn count_success(&self, pointer: *mut u8) {
-        if !pointer.is_null() && self.enabled.load(Ordering::Relaxed) {
+        // `try_with` (not `with`): the allocator is reachable from TLS
+        // destructors on exiting threads, where key access would panic.
+        if !pointer.is_null() && COUNTING.try_with(Cell::get).unwrap_or(false) {
             self.allocations.fetch_add(1, Ordering::Relaxed);
         }
     }
