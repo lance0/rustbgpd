@@ -13,34 +13,44 @@ This document is the contract for embedders: which crate to depend on, what the
 
 ## 1. Crate map and publish status
 
-| Crate                    | Published? | Depends on (internal)              | Deps (external)            | Stability target | Role for embedders |
-|--------------------------|-----------|-----------------------------------|----------------------------|------------------|--------------------|
-| `rustbgpd-wire`          | **Yes** — crates.io `0.16.1` | none (internal)            | `bytes`, `thiserror`      | **Stable codec** | The one to link. Pure encode/decode. |
-| `rustbgpd-fsm`           | **Yes** — crates.io `0.3.1` | `rustbgpd-wire`            | `thiserror`, `bytes`      | Pure FSM API     | Pure RFC 4271 FSM; no I/O. |
-| `rustbgpd-rpki`          | No (`publish = false`) | `rustbgpd-wire`            | `tokio`, `tracing`, `smallvec` | Publish next     | VRP table + RTR client. |
-| `rustbgpd-rib`           | No (`publish = false`) | wire, policy, telemetry, rpki     | `prefix-trie`, `ipnet`, ... | Later            | Adj/Loc-RIB; heavier. |
-| `rustbgpd-policy`        | No (`publish = false`) | wire                    | `arc-swap`, `ariadne`, `logos`, `regex`, `sha2`, ... | Later | Import/export policy. |
-| `rustbgpd-transport`     | No (`publish = false`) | wire, fsm, rib, rpki, policy, telemetry, bmp | `tokio`, `socket2`, ... | Later (daemon-tier) | Async session runtime. |
-| `rustbgpd-api`           | No (`publish = false`) | (codegen)                | `tonic`, `prost`           | Never as a lib   | gRPC server types. External clients generate from the proto instead — see §3.4. |
-| `rustbgpd-bmp`           | No (`publish = false`) | telemetry                | `tokio`                    | After rib        | RFC 7854 BMP export. |
-| `rustbgpd-mrt`           | No (`publish = false`) | wire, rib                | `flate2`, `chrono`         | After rib        | RFC 6396 dump export. |
-| `rustbgpd-evpn`          | No (`publish = false`) | wire                     | `thiserror`, `tracing`     | Daemon-tier      | EVPN origination. |
-| `rustbgpd-evpn-linux`    | No (`publish = false`) | (internal)                | `rtnetlink`, `nix`         | Never (Linux-specific) | Kernel dataplane. |
-| `rustbgpd` (daemon bin)  | No (`publish = false`) | all                            | —                          | N/A              | The daemon. Not a library. |
+<!-- BEGIN EMBEDDING CRATE MAP -->
+| Package | Cargo publish | Internal normal/build path dependencies | Role |
+|---------|---------------|-----------------------------------------|------|
+| `birdwatcher-adapter` | Disabled | `rustbgpd-api` | Birdwatcher-compatible REST adapter backed by the daemon gRPC API. |
+| `event-bridge` | Disabled | `rustbgpd-api` | Reference durable-event collector bridge. |
+| `rs-config-render` | Disabled | None | Route-server configuration rendering tool. |
+| `rustbgpctl` | Disabled | `rustbgpd-policy`, `rustbgpd-wire` | Thin gRPC management CLI and support library. |
+| `rustbgpd` | Disabled | `rustbgpd-api`, `rustbgpd-bfd`, `rustbgpd-bmp`, `rustbgpd-event-history`, `rustbgpd-evpn`, `rustbgpd-evpn-linux`, `rustbgpd-fsm`, `rustbgpd-mrt`, `rustbgpd-policy`, `rustbgpd-rib`, `rustbgpd-rpki`, `rustbgpd-telemetry`, `rustbgpd-transport`, `rustbgpd-wire` | Daemon binary and internal assembly library. |
+| `rustbgpd-api` | Disabled | `rustbgpd-event-history`, `rustbgpd-evpn`, `rustbgpd-fsm`, `rustbgpd-policy`, `rustbgpd-rib`, `rustbgpd-telemetry`, `rustbgpd-transport`, `rustbgpd-wire` | gRPC server, generated bindings, and service types. |
+| `rustbgpd-bfd` | Disabled | None | Pure BFD packet codec and session state machine. |
+| `rustbgpd-bmp` | Disabled | `rustbgpd-telemetry`, `rustbgpd-wire` | RFC 7854 BMP export. |
+| `rustbgpd-event-history` | Disabled | `rustbgpd-telemetry` | Durable local event outbox. |
+| `rustbgpd-evpn` | Disabled | `rustbgpd-wire` | EVPN VTEP domain model. |
+| `rustbgpd-evpn-linux` | Disabled | `rustbgpd-evpn` | Linux netlink EVPN dataplane reconciler. |
+| `rustbgpd-evpn-load` | Disabled | `rustbgpd-wire` | EVPN route-reflector benchmark load generator. |
+| `rustbgpd-fsm` | Enabled | `rustbgpd-wire` | Pure RFC 4271 FSM; no I/O. |
+| `rustbgpd-mrt` | Disabled | `rustbgpd-rib`, `rustbgpd-wire` | RFC 6396 MRT dump export. |
+| `rustbgpd-policy` | Disabled | `rustbgpd-wire` | Import/export policy engine. |
+| `rustbgpd-rib` | Disabled | `rustbgpd-bmp`, `rustbgpd-policy`, `rustbgpd-rpki`, `rustbgpd-telemetry`, `rustbgpd-wire` | Adj-RIB and Loc-RIB best-path data structures. |
+| `rustbgpd-rpki` | Disabled | `rustbgpd-wire` | VRP table, RTR client, and origin validation. |
+| `rustbgpd-telemetry` | Disabled | None | Prometheus metrics and structured tracing. |
+| `rustbgpd-transport` | Disabled | `rustbgpd-bmp`, `rustbgpd-fsm`, `rustbgpd-policy`, `rustbgpd-rib`, `rustbgpd-rpki`, `rustbgpd-telemetry`, `rustbgpd-wire` | Async TCP session runtime. |
+| `rustbgpd-wire` | Enabled | None | Pure BGP message encode/decode. |
+<!-- END EMBEDDING CRATE MAP -->
 
-Only `rustbgpd-wire` and `rustbgpd-fsm` are on crates.io. Every other crate in
-the workspace carries `publish = false` and cannot be named as a dependency by
-a project outside this repository — including `rustbgpd-api`. A consumer that
-needs the daemon's gRPC surface generates a client from the proto (§3.4).
+All Cargo workspace packages are listed. Internal dependencies include normal and build dependencies, including target-specific dependencies; dev dependencies are excluded.
 
-**Publish order and why:** the dependency DAG drives the order: `fsm` depends
-only on `wire`; `rpki` depends only on `wire`; `rib` depends on
-`wire + policy + telemetry + rpki`. Publishing in this order means each
-published crate has only *already-published* (or external) dependencies, which
-is a hard crates.io requirement. `fsm` shipped before `rpki` because it is the
-smaller, purer, and more broadly useful building block — a test harness or a
-minimal speaker needs the fsm but not the RPKI table. `rpki` is the next
-candidate. See §4 for the full rationale.
+Only `rustbgpd-wire` and `rustbgpd-fsm` are registry-published releases from
+this workspace. `Disabled` means this repository's package manifest sets
+`publish = false`; it makes no claim about unrelated registry packages with a
+similar name. These workspace packages can still be consumed through git or
+path dependencies, including from outside this repository. A consumer that
+needs the daemon's gRPC surface can instead generate a client from the proto
+(§3.4).
+
+This map records the current workspace topology, not a publication sequence.
+Notably, `rustbgpd-rib` depends on `rustbgpd-bmp`; §4 discusses future
+publication candidates and the gates that would apply.
 
 ---
 

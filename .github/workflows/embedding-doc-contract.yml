@@ -6,7 +6,11 @@ on:
     paths: &paths
       - docs/EMBEDDING.md
       - docs/RELEASE_CHECKLIST.md
+      - Cargo.toml
+      - '**/Cargo.toml'
+      - scripts/check_embedding_crate_map.py
       - scripts/check_embedding_versions.py
+      - scripts/test_check_embedding_crate_map.py
       - scripts/test_check_embedding_versions.py
       - .github/workflows/embedding-doc-contract.yml
   pull_request:
@@ -24,3 +28,7 @@ jobs:
         run: |
           python3 -m unittest -v scripts/test_check_embedding_versions.py
           python3 scripts/check_embedding_versions.py
+      - name: Check embedding crate map
+        run: |
+          python3 -m unittest -v scripts/test_check_embedding_crate_map.py
+          python3 scripts/check_embedding_crate_map.py
