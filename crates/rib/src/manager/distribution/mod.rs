@@ -2031,6 +2031,9 @@ impl RibManager {
         mut shared_unicast_precommit: Option<SharedUnicastPrecommit<'_>>,
         otc_reconcile_prefixes: Option<&HashSet<Prefix>>,
     ) -> bool {
+        #[cfg(feature = "bench-internals")]
+        let bench_per_client_best_resync = self.peer_per_client_best.contains(&peer)
+            && (self.dirty_peers.contains(&peer) || self.force_outbound_peers.contains(&peer));
         let gated = announce
             .iter()
             .any(|route| self.selection_deferred(prefix_family(&route.prefix)))
@@ -2091,7 +2094,6 @@ impl RibManager {
         let Ok(permit) = tx.try_reserve() else {
             return false;
         };
-
         // Validate the trust boundary before consuming any durable pending
         // state (OTC diagnostics or the rejected-route overlay). A failed
         // precommit leaves those structures intact for the retry.
@@ -2219,6 +2221,8 @@ impl RibManager {
         {
             use crate::update::{ExactExportCandidate, ExactExportKey};
 
+            #[cfg(feature = "bench-internals")]
+            let bench_exact_started = bench_per_client_best_resync.then(std::time::Instant::now);
             debug_assert_eq!(announce.len(), next_hop_override.len());
             let family_lengths = [
                 announce.len(),
@@ -2317,6 +2321,10 @@ impl RibManager {
                 }
                 results
             };
+            #[cfg(feature = "bench-internals")]
+            if let Some(started) = bench_exact_started {
+                super::bench_support::bench_record_per_client_best_exact(started.elapsed());
+            }
             #[cfg(any(test, feature = "bench-internals"))]
             {
                 self.adj_rib_out_commit_stats
@@ -2506,7 +2514,6 @@ impl RibManager {
         {
             self.peer_unexportable.remove(&peer);
         }
-
         // Recompute grouped projections after the sparse overlay mutation;
         // these counts drive both metrics and query/BMP truth.
         let grouped_unicast_count = self.grouped_advertised_count(peer);
@@ -2560,6 +2567,8 @@ impl RibManager {
             | (u8::from(vpn_changed) << 4)
             | (u8::from(labeled_changed) << 5)
             | (u8::from(rtc_changed) << 6);
+        #[cfg(feature = "bench-internals")]
+        let bench_commit_started = bench_per_client_best_resync.then(std::time::Instant::now);
         if has_committed_route_payload {
             #[cfg(any(test, feature = "bench-internals"))]
             {
@@ -2679,6 +2688,10 @@ impl RibManager {
                 );
             }
         }
+        #[cfg(feature = "bench-internals")]
+        if let Some(started) = bench_commit_started {
+            super::bench_support::bench_record_per_client_best_commit(started.elapsed());
+        }
 
         // ADR-0113 capacity gauges publish the committed admitted truth, so
         // they refresh here rather than at the enforcement seam above, which
@@ -2698,6 +2711,8 @@ impl RibManager {
                 self.pending_otc_blocked.remove(&peer);
             }
         }
+        #[cfg(feature = "bench-internals")]
+        let bench_enqueue_started = bench_per_client_best_resync.then(std::time::Instant::now);
         enqueue_outbound_update(
             permit,
             OutboundRouteUpdate {
@@ -2725,6 +2740,10 @@ impl RibManager {
                 shared_group_encode: None,
             },
         );
+        #[cfg(feature = "bench-internals")]
+        if let Some(started) = bench_enqueue_started {
+            super::bench_support::bench_record_per_client_best_enqueue(started.elapsed());
+        }
         #[cfg(any(test, feature = "bench-internals"))]
         if has_committed_route_payload {
             self.adj_rib_out_commit_stats.successful_enqueues = self
@@ -3699,6 +3718,11 @@ impl RibManager {
                 "a grouped force-only resync cannot share a nonempty best-change pass"
             );
             let resync = is_dirty || is_force;
+            #[cfg(feature = "bench-internals")]
+            let bench_per_client_best_resync = resync && self.peer_per_client_best.contains(&peer);
+            #[cfg(feature = "bench-internals")]
+            let bench_enumeration_started =
+                bench_per_client_best_resync.then(std::time::Instant::now);
             let effective_prefixes: Cow<'_, HashSet<Prefix>> = if resync {
                 let mut all: HashSet<Prefix> = self.loc_rib.iter().map(|r| r.prefix).collect();
                 if let Some(gid) = member_of {
@@ -3940,6 +3964,13 @@ impl RibManager {
             } else {
                 HashSet::new()
             };
+            #[cfg(feature = "bench-internals")]
+            if let Some(started) = bench_enumeration_started {
+                super::bench_support::bench_record_per_client_best_enumeration(
+                    effective_prefixes.len(),
+                    started.elapsed(),
+                );
+            }
 
             if effective_prefixes.is_empty()
                 && effective_flowspec_rules.is_empty()
@@ -3977,6 +4008,8 @@ impl RibManager {
                 continue;
             }
 
+            #[cfg(feature = "bench-internals")]
+            let bench_staging_started = bench_per_client_best_resync.then(std::time::Instant::now);
             let mut announce = Vec::new();
             let mut withdraw = Vec::new();
             let mut nh_override_flags: Vec<Option<rustbgpd_policy::NextHopAction>> = Vec::new();
@@ -4576,6 +4609,13 @@ impl RibManager {
                 );
             }
 
+            #[cfg(feature = "bench-internals")]
+            if let Some(started) = bench_staging_started {
+                super::bench_support::bench_record_per_client_best_staging(
+                    effective_prefixes.len(),
+                    started.elapsed(),
+                );
+            }
             // The outbound payload: the group-shared Arc for a covered
             // member, otherwise this peer's own staged vectors. A shared
             // member never stages per-peer unicast (grouped + in-sync),
