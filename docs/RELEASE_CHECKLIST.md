@@ -645,6 +645,9 @@ changed.
 4. Add a `rustbgpd-wire` entry in `CHANGELOG.md`
 5. `cargo publish -p rustbgpd-wire --dry-run`
 6. `cargo publish -p rustbgpd-wire`
+7. Verify the version is visible in the registry, update the declared current
+   boundary and dependency snippets in `docs/EMBEDDING.md`, then run
+   `python3 scripts/check_embedding_versions.py`.
 
 **Wire crate semver:**
 - **Patch**: bug fixes, stricter validation, docs/test improvements
@@ -673,3 +676,6 @@ do not force an FSM release for every daemon tag.
 4. Add a `rustbgpd-fsm` entry in `CHANGELOG.md`
 5. `cargo publish -p rustbgpd-fsm --dry-run`
 6. `cargo publish -p rustbgpd-fsm`
+7. Verify the version is visible in the registry, update the declared current
+   boundary and dependency snippets in `docs/EMBEDDING.md`, then run
+   `python3 scripts/check_embedding_versions.py`.
