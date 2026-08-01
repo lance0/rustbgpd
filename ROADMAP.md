@@ -1414,11 +1414,15 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
     per-(vantage, key) ORR groups — cut (win bounded by
     peers-per-vantage, second staged-table dimension), un-defer trigger:
     an operator running many peers per vantage.
-  - Adj-RIB-In attribute interning: explore storing a stable fingerprint beside
-    interned `Arc<Vec<PathAttribute>>` sets to avoid hashing every attribute on
-    each insert, with full equality fallback. Gate on `adj_rib_in_insert`,
-    `bulk_initial_load`, and churn benches across typical, rich, and
-    many-unique attribute sets; do not regress the memory win from interning.
+  - Adj-RIB-In attribute-intern hashing: **measured NO-GO**
+    ([August 2026 receipt](docs/perf/attr-intern-hashing-2026-08.md)). The
+    rich/shared intern, insert, and bulk rows were stable, but their required
+    isolated hash-only numerator exceeded the 3% same-SHA range cap (19.71%),
+    and rich/shared churn exceeded its 5% cap (5.04%); no stable fingerprint
+    prototype or production gain is authorized. Reopen only with a cleaner
+    isolated attribution and repeat the full typical/rich/unique insert,
+    bulk-load, and churn measurement matrix. Only a measurement GO may proceed
+    to a prototype's collision and memory gates.
   - General FIB runtime: investigate prefix-dirty reconcile so a single prefix
     change does not necessarily trigger full RIB query + full kernel dump +
     full projection. Design-gated because drift recovery, ECMP siblings,
