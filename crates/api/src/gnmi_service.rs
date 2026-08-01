@@ -262,6 +262,7 @@ impl GnmiService {
                     plan.encoding,
                 )?);
             }
+            updates = deduplicate_update_paths(updates);
         }
 
         let mut responses = Vec::new();
@@ -548,6 +549,7 @@ impl GnmiService {
                 SupportedPath::Global { .. } => {}
             }
         }
+        updates = deduplicate_update_paths(updates);
 
         if updates.is_empty() {
             return true;
@@ -1795,6 +1797,58 @@ fn json_quote(value: &str) -> String {
     }
     out.push('"');
     out
+}
+
+#[derive(PartialEq, Eq, Hash)]
+struct CanonicalPath {
+    origin: String,
+    target: String,
+    element: Vec<String>,
+    elem: Vec<(String, Vec<(String, String)>)>,
+}
+
+impl From<&gnmi::Path> for CanonicalPath {
+    fn from(path: &gnmi::Path) -> Self {
+        let elem = path
+            .elem
+            .iter()
+            .map(|elem| {
+                let mut keys = elem
+                    .key
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect::<Vec<_>>();
+                keys.sort_unstable();
+                (elem.name.clone(), keys)
+            })
+            .collect();
+        Self {
+            origin: path.origin.clone(),
+            target: path.target.clone(),
+            #[allow(deprecated)]
+            element: path.element.clone(),
+            elem,
+        }
+    }
+}
+
+/// Collapse duplicate fully resolved paths within one Notification. The first
+/// path position is stable, while the final rendered Update supplies its value.
+fn deduplicate_update_paths(updates: Vec<gnmi::Update>) -> Vec<gnmi::Update> {
+    let mut positions = HashMap::with_capacity(updates.len());
+    let mut output: Vec<gnmi::Update> = Vec::with_capacity(updates.len());
+    for update in updates {
+        if let Some(path) = update.path.as_ref() {
+            let identity = CanonicalPath::from(path);
+            if let Some(index) = positions.get(&identity).copied() {
+                output[index] = update;
+                continue;
+            }
+            positions.insert(identity, output.len());
+        }
+        output.push(update);
+    }
+    output
 }
 
 fn leaf_update(path: gnmi::Path, value: &LeafValue, encoding: gnmi::Encoding) -> gnmi::Update {
@@ -3055,6 +3109,107 @@ mod tests {
         );
     }
 
+    #[test]
+    fn update_path_dedup_is_canonical_stable_and_last_wins() {
+        fn path(keys: &[(&str, &str)], leaf: &str) -> gnmi::Path {
+            gnmi::Path {
+                #[allow(deprecated)]
+                element: vec!["legacy".to_string()],
+                origin: "openconfig".to_string(),
+                target: "router-a".to_string(),
+                elem: vec![
+                    gnmi::PathElem {
+                        name: "neighbor".to_string(),
+                        key: keys
+                            .iter()
+                            .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+                            .collect(),
+                    },
+                    pe(leaf),
+                ],
+            }
+        }
+
+        let first = path(&[("address", "10.0.0.2"), ("afi", "ipv4")], "state");
+        let equivalent = path(&[("afi", "ipv4"), ("address", "10.0.0.2")], "state");
+        let distinct_key = path(&[("address", "10.0.0.3"), ("afi", "ipv4")], "state");
+        let distinct_leaf = path(&[("address", "10.0.0.2"), ("afi", "ipv4")], "counters");
+        let mut distinct_order = first.clone();
+        distinct_order.elem.swap(0, 1);
+        let mut distinct_origin = first.clone();
+        distinct_origin.origin = "other".to_string();
+        let mut distinct_target = first.clone();
+        distinct_target.target = "router-b".to_string();
+        let mut distinct_legacy = first.clone();
+        #[allow(deprecated)]
+        distinct_legacy.element.push("tail".to_string());
+        let non_overlap = global_leaf_path("as");
+        let mut final_update = set_update(equivalent, b"\"final\"");
+        final_update.duplicates = 7;
+
+        let output = deduplicate_update_paths(vec![
+            set_update(first, b"\"first\""),
+            set_update(distinct_key.clone(), b"1"),
+            set_update(distinct_leaf.clone(), b"2"),
+            set_update(distinct_order.clone(), b"3"),
+            set_update(distinct_origin.clone(), b"4"),
+            set_update(distinct_target.clone(), b"5"),
+            set_update(distinct_legacy.clone(), b"6"),
+            set_update(non_overlap.clone(), b"7"),
+            final_update.clone(),
+        ]);
+        assert_eq!(
+            output,
+            vec![
+                final_update,
+                set_update(distinct_key, b"1"),
+                set_update(distinct_leaf, b"2"),
+                set_update(distinct_order, b"3"),
+                set_update(distinct_origin, b"4"),
+                set_update(distinct_target, b"5"),
+                set_update(distinct_legacy, b"6"),
+                set_update(non_overlap, b"7"),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn subscription_snapshots_deduplicate_identical_and_overlapping_paths() {
+        let service = test_service(Vec::new());
+        let subtree = mounted_path(&[pe("bgp"), pe("global"), pe("state")]);
+        let leaf = global_leaf_path("router-id");
+        for (outer_mode, path_mode) in [
+            (
+                gnmi::subscription_list::Mode::Once,
+                gnmi::SubscriptionMode::TargetDefined,
+            ),
+            (
+                gnmi::subscription_list::Mode::Poll,
+                gnmi::SubscriptionMode::TargetDefined,
+            ),
+            (
+                gnmi::subscription_list::Mode::Stream,
+                gnmi::SubscriptionMode::Sample,
+            ),
+        ] {
+            let mut list = subscription_list(outer_mode, path_mode, subtree.clone());
+            let duplicate = list.subscription[0].clone();
+            let mut overlapping_leaf = duplicate.clone();
+            overlapping_leaf.path = Some(leaf.clone());
+            list.subscription.extend([duplicate, overlapping_leaf]);
+            let plan = parse_subscription_list(&list).unwrap();
+            let mut responses = service
+                .render_subscription_snapshot(&plan, None, true)
+                .await
+                .unwrap();
+            assert_eq!(
+                subscribe_paths(responses.remove(0)),
+                vec![Some(global_leaf_path("as")), Some(leaf.clone())],
+                "{outer_mode:?}"
+            );
+        }
+    }
+
     /// Build a single-path STREAM/SAMPLE subscription list with an explicit
     /// `sample_interval` (in nanoseconds) so the interval-floor logic is testable.
     fn stream_sample_list(sample_interval_nanos: u64) -> gnmi::SubscriptionList {
@@ -3357,6 +3512,37 @@ mod tests {
         );
         // ONCE closes the stream after the sync.
         assert!(stream.message().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn tcp_subscribe_deduplicates_overlapping_snapshot_paths() {
+        // Load-bearing break: bypassing the final snapshot dedup emits the
+        // subtree's router-id twice more instead of this exact two-leaf set.
+        let subtree = mounted_path(&[pe("bgp"), pe("global"), pe("state")]);
+        let leaf = global_leaf_path("router-id");
+        let mut list = subscription_list(
+            gnmi::subscription_list::Mode::Once,
+            gnmi::SubscriptionMode::TargetDefined,
+            subtree,
+        );
+        let duplicate = list.subscription[0].clone();
+        let mut overlapping_leaf = duplicate.clone();
+        overlapping_leaf.path = Some(leaf.clone());
+        list.subscription.extend([duplicate, overlapping_leaf]);
+
+        let mut harness = serve(test_service(Vec::new())).await;
+        let mut stream = harness
+            .client
+            .subscribe(tokio_stream::iter(vec![subscribe_msg(list)]))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            subscribe_paths(next_bounded(&mut stream).await.unwrap().unwrap()),
+            vec![Some(global_leaf_path("as")), Some(leaf)]
+        );
+        assert_sync(&mut stream).await;
+        assert!(next_bounded(&mut stream).await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -4156,6 +4342,26 @@ mod tests {
         drop(stream);
         drop(harness);
         manager.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn on_change_initial_snapshot_deduplicates_wildcard_and_concrete_paths() {
+        let address = "10.0.0.2";
+        let service = test_service(vec![test_peer(address.parse().unwrap())]);
+        let mut list = stream_on_change_list(neighbor_session_state_wildcard_path());
+        let mut concrete = list.subscription[0].clone();
+        concrete.path = Some(neighbor_session_state_path(address));
+        list.subscription.push(concrete);
+        let plan = parse_subscription_list(&list).unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+
+        assert!(service.forward_on_change_snapshot(&plan, &tx).await);
+        drop(tx);
+        assert_eq!(
+            subscribe_paths(rx.recv().await.unwrap().unwrap()),
+            vec![Some(neighbor_session_state_path(address))]
+        );
+        assert!(rx.recv().await.is_none());
     }
 
     #[tokio::test]
