@@ -1143,6 +1143,7 @@ impl MockRibService {
                 routes: vec![],
                 next_page_token: String::new(),
                 total_count: 0,
+                page_version: None,
             }
         } else {
             pages.remove(0)

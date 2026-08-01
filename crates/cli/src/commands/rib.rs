@@ -3235,6 +3235,7 @@ mod tests {
             }],
             next_page_token: next_page_token.to_string(),
             total_count: 2,
+            page_version: None,
         }
     }
 
@@ -3259,6 +3260,7 @@ mod tests {
             // continuation: `total_count` already covers the query.
             next_page_token: "poison-if-followed".to_string(),
             total_count,
+            page_version: None,
         }
     }
 

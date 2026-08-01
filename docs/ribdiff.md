@@ -39,6 +39,11 @@ $ echo $?
 | `--deadline <SECS>` | 120 | Aggregate live-query budget, started after bounded local snapshot parsing and shared by neighbor discovery plus every advertised-route page; expiry refuses the comparison |
 | `--json` | off | Full machine-readable report (`rbgp-ribdiff/1` schema) |
 
+When exactly one family is selected, the live request sends that concrete
+`AddressFamily` so the daemon can narrow its walk. The default and an explicit
+two-family selection send `ADDRESS_FAMILY_UNSPECIFIED`; the client still
+validates every returned route against the requested family set.
+
 Ignored-attribute choices and the live-source normalization notes are
 emitted in both the human and JSON reports, so a report is always
 self-describing about what it did not compare.
@@ -65,12 +70,16 @@ Live-source limitations (also printed in every report):
   (the proto exposes a flat ASN list); `AS_SET` structure is not compared.
 - **Unknown attributes**: path attributes outside the typed set are not
   visible over gRPC and are not compared.
-- **Generation**: the route-listing API exposes no numeric RIB generation.
-  Opaque route-page tokens bind the RPC scope and canonical filters and abort
-  on any mid-walk mutation in the conservative Received/Best/Advertised scope
-  class, including an unrelated peer in that class; the adapter also refuses
-  per-page `total_count` drift. The snapshot header's `generation` is adopted
-  for the live side.
+- **Generation**: `ListRoutesResponse.page_version` exposes an opaque
+  process-local `{epoch, generation}` consistency fence, not a numeric RIB
+  snapshot generation. The adapter pins the complete pair across every live
+  page and peer walk and refuses a change. It never compares or substitutes
+  `page_version.generation` with the producer-local `rbgp-ribsnap/1` header
+  generation. The header value remains the report's live-side generation only
+  to preserve the `rbgp-ribdiff/1` report schema; it does not validate the live
+  capture. Opaque continuation tokens still bind the RPC scope and canonical
+  filters and abort on a mid-walk mutation, while per-page `total_count` checks
+  remain defense in depth.
 
 ## Fail-closed behaviors
 
@@ -82,11 +91,15 @@ Live-source limitations (also printed in every report):
   attribute must not silently compare as absent), as are blank lines,
   records after the trailer, and conflicting ASNs for one peer (exit 2).
 - Live pagination refuses repeated or non-advancing page tokens (the same
-  page twice), `total_count` drift between pages (the RIB changed under
-  the walk), and a fetched count that differs from the server's
-  `total_count` (exit 2).
+  page twice), a changed `page_version`, mixed present/absent versions,
+  `total_count` drift between pages, and a fetched count that differs from the
+  server's `total_count` (exit 2). An older daemon whose every response omits
+  `page_version` is supported only when the deduplicated request selects
+  exactly one peer; multi-peer legacy captures are incomparable (exit 2).
 - `--max-routes` and `--max-input-bytes` are enforced before buffering,
-  on both sides (exit 2).
+  on both sides (exit 2). The live route ceiling is one aggregate count across
+  all returned rows from all requested peers, including defensively discarded
+  rows from a family the daemon should have filtered.
 - `--deadline` starts only after the bounded local snapshot parse completes.
   One absolute cutoff then covers `ListNeighbors` and every
   `ListAdvertisedRoutes` page across all requested peers; time spent in an

@@ -62,6 +62,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Advertised RIB diffs now fence one live capture across every page and peer
+  with the route API's process-local `page_version`, rejecting changed or
+  mixed present/absent versions. Older daemons without the additive field are
+  accepted only for exactly one deduplicated peer. A single requested address
+  family is sent to the daemon concretely, and `--max-routes` is enforced once
+  across all returned live rows rather than resetting for every peer.
+
 - Neighbor read RPCs now return retryable gRPC `UNAVAILABLE` when the peer
   manager cannot accept or answer their snapshot request, instead of reporting
   the actor outage as `INTERNAL`.

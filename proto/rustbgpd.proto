@@ -1858,12 +1858,26 @@ message ListRoutesRequest {
   repeated string large_community_filter = 10;
 }
 
+// Process-local consistency fence for one route-page response. Both values
+// are opaque to clients: compare the pair only for equality across one
+// logical capture, and never treat generation as a producer or RIB snapshot
+// generation. Either value may repeat after a daemon restart.
+message RoutePageVersion {
+  uint64 epoch = 1;
+  uint64 generation = 2;
+}
+
 message ListRoutesResponse {
   repeated Route routes = 1;
   // Opaque continuation for the next page. Empty means the listing is
   // complete. Pass it back verbatim with the same RPC, scope, and filters.
   string next_page_token = 2;
   uint64 total_count = 3;
+  // Present on every response from daemons that support cross-request
+  // consistency fencing, including empty and terminal pages. Clients may
+  // compare this pair across pages and peer walks from the same process, but
+  // must not compare it with producer-local snapshot generations.
+  RoutePageVersion page_version = 4;
 }
 
 enum ExplainDecision {
