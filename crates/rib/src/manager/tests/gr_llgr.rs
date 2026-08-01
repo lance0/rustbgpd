@@ -1406,6 +1406,225 @@ async fn gr_expiry_sweep_spares_reestablished_peer_awaiting_eor() {
 
 // --- Route Reflector tests ---
 
+fn establish_ibgp_peer(
+    manager: &mut RibManager,
+    peer: IpAddr,
+    session_id: u64,
+    route_reflector_client: bool,
+    negotiated_llgr_families: Vec<(Afi, Safi)>,
+) -> mpsc::Receiver<OutboundRouteUpdate> {
+    let (outbound_tx, outbound_rx) = mpsc::channel(16);
+    manager.handle_update(RibUpdate::PeerUp {
+        per_client_best: false,
+        interpret_rfc1997: true,
+        session_id,
+        peer,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx,
+        export_policy: None,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: false,
+        route_reflector_client,
+        orr_vantage: None,
+        add_path_send_families: Vec::new(),
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+        negotiated_llgr_families,
+    });
+    outbound_rx
+}
+
+fn make_rr_ibgp_route(prefix: Ipv4Prefix, source: Ipv4Addr) -> Route {
+    let mut route = make_route(prefix, source);
+    route.origin_type = crate::route::RouteOrigin::Ibgp;
+    route
+}
+
+async fn drain_unicast_initial_dump(
+    outbound_rx: &mut mpsc::Receiver<OutboundRouteUpdate>,
+) -> Vec<Route> {
+    let mut announced = Vec::new();
+    loop {
+        let update = outbound_rx.recv().await.expect("initial dump stays open");
+        assert!(
+            update.withdraw.is_empty(),
+            "an initial dump must not withdraw unicast routes"
+        );
+        announced.extend(update.announce.iter().cloned());
+        if update.end_of_rib.contains(&(Afi::Ipv4, Safi::Unicast)) {
+            return announced;
+        }
+    }
+}
+
+#[tokio::test]
+async fn grouped_late_join_reflects_gr_retained_rr_client_route() {
+    let (_tx, rx) = mpsc::channel(64);
+    let cluster_id = Some(Ipv4Addr::new(10, 0, 0, 254));
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, cluster_id, BgpMetrics::new());
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+
+    let mut source_rx = establish_ibgp_peer(&mut manager, source, 11, true, Vec::new());
+    drain_eor(&mut source_rx).await;
+    manager.handle_update(RibUpdate::RoutesReceived {
+        session_id: 11,
+        peer: source,
+        announced: vec![make_rr_ibgp_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
+        withdrawn: Vec::new(),
+        flowspec_announced: Vec::new(),
+        flowspec_withdrawn: Vec::new(),
+        evpn_announced: Vec::new(),
+        evpn_withdrawn: Vec::new(),
+    });
+    drain_route_chunks(&mut manager);
+
+    manager.handle_update(RibUpdate::PeerGracefulRestart {
+        session_id: 11,
+        peer: source,
+        restart_time: 120,
+        stale_routes_time: 360,
+        gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_llgr_capable: false,
+        peer_llgr_families: Vec::new(),
+        llgr_stale_time: 0,
+    });
+
+    let mut target_rx = establish_ibgp_peer(&mut manager, target, 21, false, Vec::new());
+    assert!(
+        manager.grouped_member_of(target).is_some(),
+        "late join must exercise the grouped initial-dump path"
+    );
+    let initial = drain_unicast_initial_dump(&mut target_rx).await;
+    assert!(
+        initial
+            .iter()
+            .any(|route| route.prefix == Prefix::V4(prefix) && route.is_stale),
+        "a non-client must receive an RR-client source's GR-retained route before EoR"
+    );
+
+    manager.sweep_gr_stale(source);
+    assert!(
+        !manager.peer_is_rr_client.contains_key(&source),
+        "terminal GR expiry must remove the retained source classification"
+    );
+}
+
+#[tokio::test]
+async fn ungrouped_llgr_promotion_keeps_rr_client_route_advertised() {
+    let (_tx, rx) = mpsc::channel(64);
+    let cluster_id = Some(Ipv4Addr::new(10, 0, 0, 254));
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, cluster_id, BgpMetrics::new());
+    manager.test_force_ungrouped = true;
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+    let family = (Afi::Ipv4, Safi::Unicast);
+
+    let mut source_rx = establish_ibgp_peer(&mut manager, source, 31, true, vec![family]);
+    drain_eor(&mut source_rx).await;
+    let mut target_rx = establish_ibgp_peer(&mut manager, target, 41, false, vec![family]);
+    drain_eor(&mut target_rx).await;
+    assert!(manager.grouped_member_of(target).is_none());
+
+    manager.handle_update(RibUpdate::RoutesReceived {
+        session_id: 31,
+        peer: source,
+        announced: vec![make_rr_ibgp_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
+        withdrawn: Vec::new(),
+        flowspec_announced: Vec::new(),
+        flowspec_withdrawn: Vec::new(),
+        evpn_announced: Vec::new(),
+        evpn_withdrawn: Vec::new(),
+    });
+    drain_route_chunks(&mut manager);
+    let initial = target_rx
+        .try_recv()
+        .expect("target receives reflected route");
+    assert!(
+        initial
+            .announce
+            .iter()
+            .any(|route| route.prefix == Prefix::V4(prefix))
+    );
+    assert!(initial.withdraw.is_empty());
+
+    manager.handle_update(RibUpdate::PeerGracefulRestart {
+        session_id: 31,
+        peer: source,
+        restart_time: 120,
+        stale_routes_time: 360,
+        gr_families: vec![family],
+        peer_llgr_capable: true,
+        peer_llgr_families: vec![rustbgpd_wire::LlgrFamily {
+            afi: family.0,
+            safi: family.1,
+            forwarding_preserved: false,
+            stale_time: 600,
+        }],
+        llgr_stale_time: 600,
+    });
+    while let Ok(update) = target_rx.try_recv() {
+        assert!(
+            !update.withdraw.contains(&(Prefix::V4(prefix), 0)),
+            "GR entry must not withdraw the reflected route"
+        );
+    }
+
+    manager.sweep_gr_stale(source);
+    while let Ok(update) = target_rx.try_recv() {
+        assert!(
+            !update.withdraw.contains(&(Prefix::V4(prefix), 0)),
+            "LLGR promotion must not reclassify the retained client route as split-horizon"
+        );
+    }
+    assert!(
+        manager.adj_ribs_out[&target]
+            .get(&Prefix::V4(prefix), 0)
+            .is_some(),
+        "the ungrouped target must retain the reflected prefix after LLGR promotion"
+    );
+    assert_eq!(manager.peer_is_rr_client.get(&source), Some(&true));
+
+    manager.sweep_llgr_stale(source, &[family]);
+    assert!(
+        !manager.peer_is_rr_client.contains_key(&source),
+        "terminal LLGR expiry must remove the retained source classification"
+    );
+}
+
+#[tokio::test]
+async fn rr_client_role_is_overwritten_when_source_reestablishes_as_nonclient() {
+    let (_tx, rx) = mpsc::channel(64);
+    let cluster_id = Some(Ipv4Addr::new(10, 0, 0, 254));
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, cluster_id, BgpMetrics::new());
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+
+    let mut first_rx = establish_ibgp_peer(&mut manager, source, 51, true, Vec::new());
+    drain_eor(&mut first_rx).await;
+    manager.handle_update(RibUpdate::PeerGracefulRestart {
+        session_id: 51,
+        peer: source,
+        restart_time: 120,
+        stale_routes_time: 360,
+        gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_llgr_capable: false,
+        peer_llgr_families: Vec::new(),
+        llgr_stale_time: 0,
+    });
+    assert_eq!(manager.peer_is_rr_client.get(&source), Some(&true));
+
+    let mut replacement_rx = establish_ibgp_peer(&mut manager, source, 52, false, Vec::new());
+    drain_eor(&mut replacement_rx).await;
+    assert_eq!(
+        manager.peer_is_rr_client.get(&source),
+        Some(&false),
+        "new-session registration must overwrite the retained GR role"
+    );
+}
+
 // --- Per-family LLGR lifecycle (LAN-282) + LLGR export coupling (LAN-191) ---
 
 /// Re-establish `peer` through the run loop as an iBGP RR client with the

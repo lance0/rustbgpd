@@ -62,6 +62,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Graceful Restart and Long-Lived Graceful Restart now retain an iBGP route
+  source's route-reflector-client classification for as long as its stale
+  routes remain eligible for reflection, preventing late joins or LLGR
+  promotion from silently suppressing previously reflected routes.
+
 - Config transactions now fail closed when a native apply/rollback or gNMI
   `Set` would adopt a full candidate snapshot while either the running or
   candidate config references external `.rpol` graphs or policy datasets.
