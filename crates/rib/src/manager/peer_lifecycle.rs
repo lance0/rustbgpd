@@ -337,6 +337,7 @@ impl RibManager {
         self.peer_asn.remove(&peer);
         self.peer_group.remove(&peer);
         self.peer_bgp_id.remove(&peer);
+        self.peer_is_rr_client.remove(&peer);
         self.force_outbound_peers.remove(&peer);
         self.clear_peer_refresh_metrics(peer);
     }
@@ -471,8 +472,9 @@ impl RibManager {
     /// graceful-restart teardown paths. Keeping ONE list prevents the two
     /// cleanup sites from drifting — the GR path historically missed maps
     /// added later (the ORF filter/gate leak). Peer-identity maps
-    /// (`peer_asn`/`peer_group`/`peer_bgp_id`) stay out: GR keeps them for
-    /// the returning peer; `PeerDown` removes them at its call site.
+    /// (`peer_asn`/`peer_group`/`peer_bgp_id`) and the retained route-source
+    /// classification (`peer_is_rr_client`) stay out: GR keeps them for stale
+    /// routes and the returning peer; terminal `PeerDown` removes them.
     pub(super) fn clear_outbound_peer_state(&mut self, peer: IpAddr) {
         let was_registered = self.outbound_peers.remove(&peer).is_some();
         self.outbound_session_ids.remove(&peer);
@@ -514,7 +516,6 @@ impl RibManager {
         self.peer_sendable_families.remove(&peer);
         self.peer_advertised_llgr_families.remove(&peer);
         self.peer_is_ebgp.remove(&peer);
-        self.peer_is_rr_client.remove(&peer);
         self.peer_local_roles.remove(&peer);
         self.peer_export_encoders.remove(&peer);
         self.peer_unexportable.remove(&peer);

@@ -274,7 +274,10 @@ pub struct RibManager {
     peer_advertised_llgr_families: HashMap<IpAddr, Vec<(Afi, Safi)>>,
     /// Whether each registered outbound peer is eBGP (true) or iBGP (false).
     peer_is_ebgp: HashMap<IpAddr, bool>,
-    /// Whether each registered outbound peer is a route reflector client.
+    /// Whether the active or GR/LLGR-retained peer is a route reflector
+    /// client. Retained across graceful-restart outbound teardown because
+    /// stale iBGP routes still need their source classification; overwritten
+    /// at re-registration and removed by terminal peer teardown.
     peer_is_rr_client: HashMap<IpAddr, bool>,
     /// Local RFC 9234 role for the active outbound registration.
     peer_local_roles: HashMap<IpAddr, Option<BgpRole>>,
