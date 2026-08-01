@@ -30,6 +30,14 @@ reload is rejected before its CSV row if any session is down, post-completion
 stable-marker evidence is missing, or a daemon UPDATE fails to decode. Each
 valid reload emits a `reloadstall_csv` record for durable raw receipts.
 
+Reload and flapstorm runs gate initial convergence on exact unique-prefix bitmap
+coverage at every observer: the full table minus its own slice. Duplicate,
+own-slice, and out-of-range announcements cannot advance completion;
+the bitmap is disarmed before the pre-churn evidence barrier and churn begin.
+One `first_exact_bitmap` receipt records the mode and fleet coverage. Historical
+zero-reload, non-flap convergence-only runs retain the cumulative announcement
+gate unchanged.
+
 Depends only on `crates/wire` (wire encode/decode for the stub sessions).
 
 ## Backs
