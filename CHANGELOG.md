@@ -62,6 +62,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Batched gNMI Subscribe notifications now emit each fully resolved Update path
+  once when identical or overlapping subscriptions select the same leaf.
+
 - `WatchRoutes`, `WatchRouteEvents`, and the route, session, policy, and EVPN
   admissions for `WatchEvents` now report actor command-channel closure and
   dropped replies as `UNAVAILABLE`, with stable actor-specific messages. Live
