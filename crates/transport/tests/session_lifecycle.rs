@@ -545,7 +545,7 @@ async fn stop_command_sends_cease() {
 
 #[tokio::test]
 async fn connect_failure_retries() {
-    // Bind to a port, then drop the listener so connection is refused
+    // Learn an ephemeral port, then release it so the first connection attempt fails.
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     drop(listener);
@@ -569,16 +569,35 @@ async fn connect_failure_retries() {
     );
     handle.start().await.unwrap();
 
-    // Let it fail and retry a couple times
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    let active_deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if let Some(state) = handle.query_state_timeout(Duration::from_millis(100)).await
+            && state.fsm_state == SessionState::Active
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < active_deadline,
+            "first refused connection did not reach Active within 2s"
+        );
+        tokio::task::yield_now().await;
+    }
 
-    // Verify state transition metrics were recorded (multiple transitions
-    // through Connect → Active cycle)
-    let families = metrics.registry().gather();
-    let transitions = families
-        .iter()
-        .find(|f| f.name() == "bgp_session_state_transitions_total");
-    assert!(transitions.is_some(), "should have state transitions");
+    // Load-bearing: without InitiateTcpConnection on Active's retry-timer
+    // transition, this second accept times out instead of receiving an OPEN.
+    let listener = TcpListener::bind(addr).await.unwrap();
+    let (mut peer_stream, _) = tokio::time::timeout(Duration::from_millis(1500), listener.accept())
+        .await
+        .expect("Active retry should connect within 1.5s")
+        .unwrap();
+    let mut buf = BytesMut::with_capacity(4096);
+    let message = tokio::time::timeout(
+        Duration::from_secs(2),
+        read_bgp_message(&mut peer_stream, &mut buf),
+    )
+    .await
+    .expect("retry should send OPEN within 2s");
+    assert!(matches!(message, Message::Open(_)));
 
     handle.shutdown().await.unwrap().unwrap();
 }
