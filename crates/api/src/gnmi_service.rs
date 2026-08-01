@@ -200,11 +200,12 @@ impl GnmiService {
         encoding: gnmi::Encoding,
     ) -> Result<Vec<gnmi::Update>, Status> {
         match (query, peers) {
-            (SupportedPath::Neighbor { address, .. }, Some(peers))
-                if !peers.iter().any(|peer| peer.address == *address) =>
-            {
-                Ok(Vec::new())
-            }
+            (SupportedPath::Neighbor { address, select }, Some(peers)) => Ok(peers
+                .iter()
+                .find(|peer| peer.address == *address)
+                .map_or_else(Vec::new, |peer| {
+                    render_one_neighbor_updates(peer, self.asn, *select, encoding)
+                })),
             _ => self.render_query(query, peers, encoding),
         }
     }
