@@ -3,9 +3,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 use tonic::{Request, Response, Status};
 
+use crate::actor_read::peer_manager_read;
 use crate::audit::{set_peer_group_summary, set_request_summary};
 use crate::neighbor_service::{
     family_to_string, parse_families_proto, parse_remove_private_as_proto,
@@ -341,14 +342,10 @@ impl proto::peer_group_service_server::PeerGroupService for PeerGroupService {
         &self,
         _request: Request<proto::ListPeerGroupsRequest>,
     ) -> Result<Response<proto::ListPeerGroupsResponse>, Status> {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.peer_mgr_tx
-            .send(PeerManagerCommand::ListPeerGroups { reply: reply_tx })
-            .await
-            .map_err(|_| Status::internal("peer manager unavailable"))?;
-        let peer_groups = reply_rx
-            .await
-            .map_err(|_| Status::internal("peer manager dropped reply"))?;
+        let peer_groups = peer_manager_read(&self.peer_mgr_tx, |reply| {
+            PeerManagerCommand::ListPeerGroups { reply }
+        })
+        .await?;
         Ok(Response::new(proto::ListPeerGroupsResponse {
             peer_groups: peer_groups
                 .into_iter()
@@ -368,18 +365,14 @@ impl proto::peer_group_service_server::PeerGroupService for PeerGroupService {
         if req.name.trim().is_empty() {
             return Err(Status::invalid_argument("name is required"));
         }
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.peer_mgr_tx
-            .send(PeerManagerCommand::GetPeerGroup {
+        let definition = peer_manager_read(&self.peer_mgr_tx, |reply| {
+            PeerManagerCommand::GetPeerGroup {
                 name: req.name.clone(),
-                reply: reply_tx,
-            })
-            .await
-            .map_err(|_| Status::internal("peer manager unavailable"))?;
-        let definition = reply_rx
-            .await
-            .map_err(|_| Status::internal("peer manager dropped reply"))?
-            .ok_or_else(|| Status::not_found("peer group not found"))?;
+                reply,
+            }
+        })
+        .await?
+        .ok_or_else(|| Status::not_found("peer group not found"))?;
         Ok(Response::new(proto::GetPeerGroupResponse {
             name: req.name,
             definition: Some(input_definition_to_proto(&definition)),
@@ -613,6 +606,102 @@ mod tests {
             route_server_client: Some(true),
             ..Default::default()
         }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum PeerGroupRead {
+        List,
+        Get,
+    }
+
+    const PEER_GROUP_READS: [PeerGroupRead; 2] = [PeerGroupRead::List, PeerGroupRead::Get];
+
+    async fn invoke_peer_group_read(
+        service: &PeerGroupService,
+        rpc: PeerGroupRead,
+    ) -> Result<(), Status> {
+        match rpc {
+            PeerGroupRead::List => PeerGroupServiceRpc::list_peer_groups(
+                service,
+                Request::new(proto::ListPeerGroupsRequest {}),
+            )
+            .await
+            .map(|_| ()),
+            PeerGroupRead::Get => PeerGroupServiceRpc::get_peer_group(
+                service,
+                Request::new(proto::GetPeerGroupRequest {
+                    name: "rs-clients".into(),
+                }),
+            )
+            .await
+            .map(|_| ()),
+        }
+    }
+
+    /// Load-bearing: restoring either unary peer-group send mapping to
+    /// `INTERNAL` makes its row red.
+    #[tokio::test]
+    async fn peer_group_read_send_failures_are_unavailable() {
+        for rpc in PEER_GROUP_READS {
+            let (peer_tx, peer_rx) = mpsc::channel(1);
+            drop(peer_rx);
+            let service = PeerGroupService::new(AccessMode::ReadOnly, peer_tx, None, None);
+            let error = invoke_peer_group_read(&service, rpc).await.unwrap_err();
+            assert_eq!(error.code(), tonic::Code::Unavailable, "{rpc:?}");
+            assert_eq!(error.message(), "peer manager unavailable", "{rpc:?}");
+        }
+    }
+
+    /// Load-bearing: restoring either unary peer-group reply-await mapping to
+    /// `INTERNAL` makes its accepted-then-dropped row red.
+    #[tokio::test]
+    async fn peer_group_read_reply_drops_are_unavailable() {
+        for rpc in PEER_GROUP_READS {
+            let (peer_tx, mut peer_rx) = mpsc::channel(1);
+            let actor = tokio::spawn(async move {
+                drop(peer_rx.recv().await.expect("peer-group read command"));
+            });
+            let service = PeerGroupService::new(AccessMode::ReadOnly, peer_tx, None, None);
+            let error = invoke_peer_group_read(&service, rpc).await.unwrap_err();
+            actor.await.unwrap();
+            assert_eq!(error.code(), tonic::Code::Unavailable, "{rpc:?}");
+            assert_eq!(error.message(), "peer manager dropped reply", "{rpc:?}");
+        }
+    }
+
+    /// Negative controls: validation happens before actor admission, while an
+    /// accepted missing-resource reply remains `NOT_FOUND` rather than actor
+    /// unavailability.
+    #[tokio::test]
+    async fn peer_group_read_preserves_invalid_and_not_found() {
+        let (peer_tx, mut peer_rx) = mpsc::channel(1);
+        let service = PeerGroupService::new(AccessMode::ReadOnly, peer_tx, None, None);
+        let invalid = PeerGroupServiceRpc::get_peer_group(
+            &service,
+            Request::new(proto::GetPeerGroupRequest { name: " ".into() }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(invalid.code(), tonic::Code::InvalidArgument);
+        assert!(matches!(peer_rx.try_recv(), Err(TryRecvError::Empty)));
+
+        let call = tokio::spawn(async move {
+            PeerGroupServiceRpc::get_peer_group(
+                &service,
+                Request::new(proto::GetPeerGroupRequest {
+                    name: "missing".into(),
+                }),
+            )
+            .await
+        });
+        let PeerManagerCommand::GetPeerGroup { reply, .. } =
+            peer_rx.recv().await.expect("missing peer-group lookup")
+        else {
+            panic!("expected peer-group lookup");
+        };
+        reply.send(None).unwrap();
+        let missing = call.await.unwrap().unwrap_err();
+        assert_eq!(missing.code(), tonic::Code::NotFound);
     }
 
     #[test]

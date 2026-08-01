@@ -11,6 +11,7 @@ use rustbgpd_wire::{Afi, Ipv4Prefix, Ipv6Prefix, Prefix, Safi};
 use tokio::sync::{mpsc, oneshot};
 use tonic::{Request, Response, Status};
 
+use crate::actor_read::{peer_manager_read, rib_manager_read};
 use crate::peer_types::{
     ConfigEvent, NamedPolicyDefinition, PeerManagerCommand, PolicyStatementDefinition,
 };
@@ -28,27 +29,18 @@ const POLICY_STATS_AGGREGATE_TIMEOUT: Duration = Duration::from_millis(500);
 /// Run one policy-stats backend send and reply within the RPC's shared
 /// absolute deadline. A saturated bounded channel is part of the same budget
 /// as the reply wait; no sequential stage receives a fresh timeout.
-async fn policy_stats_request<C, T>(
-    tx: &mpsc::Sender<C>,
+async fn policy_stats_request<T>(
     deadline: tokio::time::Instant,
-    build_command: impl FnOnce(oneshot::Sender<T>) -> C,
-    unavailable: &'static str,
-    dropped_reply: &'static str,
+    request: impl std::future::Future<Output = Result<T, Status>>,
 ) -> Result<T, Status> {
     if deadline <= tokio::time::Instant::now() {
         return Err(Status::deadline_exceeded(
             "policy stats aggregate deadline exceeded",
         ));
     }
-    tokio::time::timeout_at(deadline, async {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        tx.send(build_command(reply_tx))
-            .await
-            .map_err(|_| Status::internal(unavailable))?;
-        reply_rx.await.map_err(|_| Status::internal(dropped_reply))
-    })
-    .await
-    .map_err(|_| Status::deadline_exceeded("policy stats aggregate deadline exceeded"))?
+    tokio::time::timeout_at(deadline, request)
+        .await
+        .map_err(|_| Status::deadline_exceeded("policy stats aggregate deadline exceeded"))?
 }
 
 /// Map the v1-supported `AddressFamily` proto values to `(Afi, Safi)`.
@@ -444,11 +436,11 @@ async fn require_managed_peer_address(
     deadline: tokio::time::Instant,
 ) -> Result<(), Status> {
     policy_stats_request(
-        peer_mgr_tx,
         deadline,
-        |reply| PeerManagerCommand::HasPeerAddress { address, reply },
-        "peer manager unavailable",
-        "peer manager dropped reply",
+        peer_manager_read(peer_mgr_tx, |reply| PeerManagerCommand::HasPeerAddress {
+            address,
+            reply,
+        }),
     )
     .await?
     .then_some(())
@@ -461,14 +453,10 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         &self,
         _request: Request<proto::ListPoliciesRequest>,
     ) -> Result<Response<proto::ListPoliciesResponse>, Status> {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.peer_mgr_tx
-            .send(PeerManagerCommand::ListPolicies { reply: reply_tx })
-            .await
-            .map_err(|_| Status::internal("peer manager unavailable"))?;
-        let policies = reply_rx
-            .await
-            .map_err(|_| Status::internal("peer manager dropped reply"))?;
+        let policies = peer_manager_read(&self.peer_mgr_tx, |reply| {
+            PeerManagerCommand::ListPolicies { reply }
+        })
+        .await?;
         Ok(Response::new(proto::ListPoliciesResponse {
             policies: policies
                 .into_iter()
@@ -488,17 +476,12 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         if req.name.trim().is_empty() {
             return Err(Status::invalid_argument("name is required"));
         }
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.peer_mgr_tx
-            .send(PeerManagerCommand::GetPolicy {
+        let definition =
+            peer_manager_read(&self.peer_mgr_tx, |reply| PeerManagerCommand::GetPolicy {
                 name: req.name.clone(),
-                reply: reply_tx,
+                reply,
             })
-            .await
-            .map_err(|_| Status::internal("peer manager unavailable"))?;
-        let definition = reply_rx
-            .await
-            .map_err(|_| Status::internal("peer manager dropped reply"))?
+            .await?
             .ok_or_else(|| Status::not_found("policy not found"))?;
         Ok(Response::new(proto::GetPolicyResponse {
             name: req.name,
@@ -581,14 +564,10 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         &self,
         _request: Request<proto::ListNeighborSetsRequest>,
     ) -> Result<Response<proto::ListNeighborSetsResponse>, Status> {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.peer_mgr_tx
-            .send(PeerManagerCommand::ListNeighborSets { reply: reply_tx })
-            .await
-            .map_err(|_| Status::internal("peer manager unavailable"))?;
-        let neighbor_sets = reply_rx
-            .await
-            .map_err(|_| Status::internal("peer manager dropped reply"))?;
+        let neighbor_sets = peer_manager_read(&self.peer_mgr_tx, |reply| {
+            PeerManagerCommand::ListNeighborSets { reply }
+        })
+        .await?;
         Ok(Response::new(proto::ListNeighborSetsResponse {
             neighbor_sets: neighbor_sets
                 .into_iter()
@@ -612,18 +591,14 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         if req.name.trim().is_empty() {
             return Err(Status::invalid_argument("name is required"));
         }
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.peer_mgr_tx
-            .send(PeerManagerCommand::GetNeighborSet {
+        let definition = peer_manager_read(&self.peer_mgr_tx, |reply| {
+            PeerManagerCommand::GetNeighborSet {
                 name: req.name.clone(),
-                reply: reply_tx,
-            })
-            .await
-            .map_err(|_| Status::internal("peer manager unavailable"))?;
-        let definition = reply_rx
-            .await
-            .map_err(|_| Status::internal("peer manager dropped reply"))?
-            .ok_or_else(|| Status::not_found("neighbor set not found"))?;
+                reply,
+            }
+        })
+        .await?
+        .ok_or_else(|| Status::not_found("neighbor set not found"))?;
         Ok(Response::new(proto::GetNeighborSetResponse {
             name: req.name,
             definition: Some(proto::NeighborSetDefinition {
@@ -724,14 +699,10 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         &self,
         _request: Request<proto::GetGlobalPolicyChainsRequest>,
     ) -> Result<Response<proto::GlobalPolicyChains>, Status> {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.peer_mgr_tx
-            .send(PeerManagerCommand::GetGlobalPolicyChains { reply: reply_tx })
-            .await
-            .map_err(|_| Status::internal("peer manager unavailable"))?;
-        let chains = reply_rx
-            .await
-            .map_err(|_| Status::internal("peer manager dropped reply"))?;
+        let chains = peer_manager_read(&self.peer_mgr_tx, |reply| {
+            PeerManagerCommand::GetGlobalPolicyChains { reply }
+        })
+        .await?;
         Ok(Response::new(proto::GlobalPolicyChains {
             import_policy_names: chains.import_policy_names,
             export_policy_names: chains.export_policy_names,
@@ -867,18 +838,11 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             .address
             .parse()
             .map_err(|e| Status::invalid_argument(format!("invalid address: {e}")))?;
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.peer_mgr_tx
-            .send(PeerManagerCommand::GetNeighborPolicyChains {
-                address,
-                reply: reply_tx,
-            })
-            .await
-            .map_err(|_| Status::internal("peer manager unavailable"))?;
-        let chains = reply_rx
-            .await
-            .map_err(|_| Status::internal("peer manager dropped reply"))?
-            .ok_or_else(|| Status::not_found("neighbor not found"))?;
+        let chains = peer_manager_read(&self.peer_mgr_tx, |reply| {
+            PeerManagerCommand::GetNeighborPolicyChains { address, reply }
+        })
+        .await?
+        .ok_or_else(|| Status::not_found("neighbor not found"))?;
         Ok(Response::new(proto::NeighborPolicyChains {
             address: req.address,
             import_policy_names: chains.import_policy_names,
@@ -1056,21 +1020,17 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         let (afi, safi) = explain_afi_safi(req.afi_safi)?;
         let prefix = explain_prefix(afi, &req.prefix, req.prefix_length)?;
 
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.peer_mgr_tx
-            .send(PeerManagerCommand::ExplainImportPolicy {
+        let reply = peer_manager_read(&self.peer_mgr_tx, |reply| {
+            PeerManagerCommand::ExplainImportPolicy {
                 address,
                 afi,
                 safi,
                 prefix,
                 path_id: req.path_id,
-                reply: reply_tx,
-            })
-            .await
-            .map_err(|_| Status::internal("peer manager unavailable"))?;
-        let reply = reply_rx
-            .await
-            .map_err(|_| Status::internal("peer manager dropped reply"))?;
+                reply,
+            }
+        })
+        .await?;
         let reply: Option<ImportExplainReply> = match reply {
             SessionQueryOutcome::Reply(reply) => Some(reply),
             SessionQueryOutcome::SessionGone => None,
@@ -1152,17 +1112,10 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             .parse()
             .map_err(|e| Status::invalid_argument(format!("invalid peer_address: {e}")))?;
 
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.peer_mgr_tx
-            .send(PeerManagerCommand::ListRejectedRoutes {
-                address,
-                reply: reply_tx,
-            })
-            .await
-            .map_err(|_| Status::internal("peer manager unavailable"))?;
-        let reply = reply_rx
-            .await
-            .map_err(|_| Status::internal("peer manager dropped reply"))?;
+        let reply = peer_manager_read(&self.peer_mgr_tx, |reply| {
+            PeerManagerCommand::ListRejectedRoutes { address, reply }
+        })
+        .await?;
         let reply: Option<RejectedRoutesReply> = match reply {
             SessionQueryOutcome::Reply(reply) => Some(reply),
             SessionQueryOutcome::SessionGone => None,
@@ -1322,33 +1275,25 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         let rib_tx = self.rib_tx.as_ref().ok_or_else(|| {
             Status::failed_precondition("route snapshot runtime unavailable on this listener")
         })?;
-        let (reply_tx, reply_rx) = oneshot::channel();
-        let query = if import {
-            RibUpdate::QueryReceivedRoutes {
-                peer: peer_filter,
-                reply: reply_tx,
+        let routes = rib_manager_read(rib_tx, |reply| {
+            if import {
+                RibUpdate::QueryReceivedRoutes {
+                    peer: peer_filter,
+                    reply,
+                }
+            } else {
+                RibUpdate::QueryBestRoutes { reply }
             }
-        } else {
-            RibUpdate::QueryBestRoutes { reply: reply_tx }
-        };
-        rib_tx
-            .send(query)
-            .await
-            .map_err(|_| Status::internal("RIB manager unavailable"))?;
-        let routes = reply_rx
-            .await
-            .map_err(|_| Status::internal("RIB manager dropped reply"))?;
+        })
+        .await?;
 
         // Peer context (ASN / peer-group) so guards on peer.* fields
         // see real values.
-        let (peers_tx, peers_rx) = oneshot::channel();
-        self.peer_mgr_tx
-            .send(PeerManagerCommand::ListPeers { reply: peers_tx })
-            .await
-            .map_err(|_| Status::internal("peer manager unavailable"))?;
-        let peer_context: std::collections::HashMap<IpAddr, (u32, Option<String>)> = peers_rx
-            .await
-            .map_err(|_| Status::internal("peer manager dropped reply"))?
+        let peer_context: std::collections::HashMap<IpAddr, (u32, Option<String>)> =
+            peer_manager_read(&self.peer_mgr_tx, |reply| PeerManagerCommand::ListPeers {
+                reply,
+            })
+            .await?
             .into_iter()
             .map(|info| (info.address, (info.remote_asn, info.peer_group)))
             .collect();
@@ -1420,11 +1365,11 @@ impl proto::policy_service_server::PolicyService for PolicyService {
                 Status::failed_precondition("policy stats runtime unavailable on this listener")
             })?;
             let chains = policy_stats_request(
-                rib_tx,
                 deadline,
-                |reply| RibUpdate::QueryExportPolicyTermHits { peer, reply },
-                "RIB manager unavailable",
-                "RIB manager dropped reply",
+                rib_manager_read(rib_tx, |reply| RibUpdate::QueryExportPolicyTermHits {
+                    peer,
+                    reply,
+                }),
             )
             .await?;
             out.extend(chains.into_iter().map(|chain| {
@@ -1445,15 +1390,14 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         }
         if want_import {
             let chains = policy_stats_request(
-                &self.peer_mgr_tx,
                 deadline,
-                |reply| PeerManagerCommand::QueryImportPolicyTermHits {
-                    peer,
-                    deadline,
-                    reply,
-                },
-                "peer manager unavailable",
-                "peer manager dropped reply",
+                peer_manager_read(&self.peer_mgr_tx, |reply| {
+                    PeerManagerCommand::QueryImportPolicyTermHits {
+                        peer,
+                        deadline,
+                        reply,
+                    }
+                }),
             )
             .await?;
             let chains = match chains {
@@ -1488,11 +1432,10 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         // operator-visible half of "failed refresh keeps the prior
         // snapshot" (name, kind, generation, records, last error).
         let datasets = policy_stats_request(
-            &self.peer_mgr_tx,
             deadline,
-            |reply| PeerManagerCommand::QueryPolicyDatasets { reply },
-            "peer manager unavailable",
-            "peer manager dropped reply",
+            peer_manager_read(&self.peer_mgr_tx, |reply| {
+                PeerManagerCommand::QueryPolicyDatasets { reply }
+            }),
         )
         .await?
         .into_iter()
@@ -1712,6 +1655,351 @@ mod tests {
                 ..Default::default()
             }],
         }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum PolicyRead {
+        ListPolicies,
+        GetPolicy,
+        ListNeighborSets,
+        GetNeighborSet,
+        GetGlobalPolicyChains,
+        GetNeighborPolicyChains,
+        ExplainImportPolicy,
+        ListRejectedRoutes,
+        TestPolicy,
+        GetPolicyStats,
+    }
+
+    const POLICY_READS: [PolicyRead; 10] = [
+        PolicyRead::ListPolicies,
+        PolicyRead::GetPolicy,
+        PolicyRead::ListNeighborSets,
+        PolicyRead::GetNeighborSet,
+        PolicyRead::GetGlobalPolicyChains,
+        PolicyRead::GetNeighborPolicyChains,
+        PolicyRead::ExplainImportPolicy,
+        PolicyRead::ListRejectedRoutes,
+        PolicyRead::TestPolicy,
+        PolicyRead::GetPolicyStats,
+    ];
+
+    impl PolicyRead {
+        const fn rib_first(self) -> bool {
+            matches!(self, Self::TestPolicy | Self::GetPolicyStats)
+        }
+    }
+
+    fn test_policy_request() -> proto::TestPolicyRequest {
+        proto::TestPolicyRequest {
+            rpol_source: TEST_RPOL.to_string(),
+            policy: "customer-in(200)".to_string(),
+            direction: "import".to_string(),
+            peer: String::new(),
+            afi_safi: proto::AddressFamily::Unspecified as i32,
+            limit: 0,
+            show_changes: 0,
+        }
+    }
+
+    fn policy_stats_rpc_request(
+        peer_address: &str,
+        direction: &str,
+    ) -> proto::GetPolicyStatsRequest {
+        proto::GetPolicyStatsRequest {
+            peer_address: peer_address.to_string(),
+            direction: direction.to_string(),
+        }
+    }
+
+    async fn invoke_policy_read(service: &PolicyService, rpc: PolicyRead) -> Result<(), Status> {
+        match rpc {
+            PolicyRead::ListPolicies => PolicyServiceRpc::list_policies(
+                service,
+                Request::new(proto::ListPoliciesRequest {}),
+            )
+            .await
+            .map(|_| ()),
+            PolicyRead::GetPolicy => PolicyServiceRpc::get_policy(
+                service,
+                Request::new(proto::GetPolicyRequest { name: "p".into() }),
+            )
+            .await
+            .map(|_| ()),
+            PolicyRead::ListNeighborSets => PolicyServiceRpc::list_neighbor_sets(
+                service,
+                Request::new(proto::ListNeighborSetsRequest {}),
+            )
+            .await
+            .map(|_| ()),
+            PolicyRead::GetNeighborSet => PolicyServiceRpc::get_neighbor_set(
+                service,
+                Request::new(proto::GetNeighborSetRequest { name: "s".into() }),
+            )
+            .await
+            .map(|_| ()),
+            PolicyRead::GetGlobalPolicyChains => PolicyServiceRpc::get_global_policy_chains(
+                service,
+                Request::new(proto::GetGlobalPolicyChainsRequest {}),
+            )
+            .await
+            .map(|_| ()),
+            PolicyRead::GetNeighborPolicyChains => PolicyServiceRpc::get_neighbor_policy_chains(
+                service,
+                Request::new(proto::GetNeighborPolicyChainsRequest {
+                    address: "192.0.2.1".into(),
+                }),
+            )
+            .await
+            .map(|_| ()),
+            PolicyRead::ExplainImportPolicy => {
+                PolicyServiceRpc::explain_import_policy(service, Request::new(explain_request()))
+                    .await
+                    .map(|_| ())
+            }
+            PolicyRead::ListRejectedRoutes => PolicyServiceRpc::list_rejected_routes(
+                service,
+                Request::new(proto::ListRejectedRoutesRequest {
+                    peer_address: "192.0.2.1".into(),
+                }),
+            )
+            .await
+            .map(|_| ()),
+            PolicyRead::TestPolicy => {
+                PolicyServiceRpc::test_policy(service, Request::new(test_policy_request()))
+                    .await
+                    .map(|_| ())
+            }
+            PolicyRead::GetPolicyStats => PolicyServiceRpc::get_policy_stats(
+                service,
+                Request::new(policy_stats_rpc_request("", "export")),
+            )
+            .await
+            .map(|_| ()),
+        }
+    }
+
+    /// Load-bearing: restoring any included RPC's first actor-send mapping to
+    /// `INTERNAL` makes its row red. The two multi-stage RPCs start at the RIB.
+    #[tokio::test]
+    async fn policy_read_send_failures_are_unavailable() {
+        for rpc in POLICY_READS {
+            let (peer_tx, peer_rx) = mpsc::channel(1);
+            let (rib_tx, rib_rx) = mpsc::channel(1);
+            let service = PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None)
+                .with_rib_query(rib_tx);
+            let expected = if rpc.rib_first() {
+                drop(rib_rx);
+                let _peer_rx = peer_rx;
+                "RIB manager unavailable"
+            } else {
+                drop(peer_rx);
+                let _rib_rx = rib_rx;
+                "peer manager unavailable"
+            };
+            let error = invoke_policy_read(&service, rpc).await.unwrap_err();
+            assert_eq!(error.code(), tonic::Code::Unavailable, "{rpc:?}");
+            assert_eq!(error.message(), expected, "{rpc:?}");
+        }
+    }
+
+    /// Load-bearing: restoring any included RPC's first reply-await mapping to
+    /// `INTERNAL` makes its accepted-then-dropped row red.
+    #[tokio::test]
+    async fn policy_read_reply_drops_are_unavailable() {
+        for rpc in POLICY_READS {
+            let (peer_tx, mut peer_rx) = mpsc::channel(1);
+            let (rib_tx, mut rib_rx) = mpsc::channel(1);
+            let service = PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None)
+                .with_rib_query(rib_tx);
+            let (actor, expected) = if rpc.rib_first() {
+                (
+                    tokio::spawn(async move {
+                        drop(rib_rx.recv().await.expect("policy RIB read"));
+                    }),
+                    "RIB manager dropped reply",
+                )
+            } else {
+                (
+                    tokio::spawn(async move {
+                        drop(peer_rx.recv().await.expect("policy peer read"));
+                    }),
+                    "peer manager dropped reply",
+                )
+            };
+            let error = invoke_policy_read(&service, rpc).await.unwrap_err();
+            actor.await.unwrap();
+            assert_eq!(error.code(), tonic::Code::Unavailable, "{rpc:?}");
+            assert_eq!(error.message(), expected, "{rpc:?}");
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum PolicyReadExtraStage {
+        TestPolicyPeerContext,
+        PolicyStatsPeerValidation,
+        PolicyStatsImport,
+        PolicyStatsDatasets,
+    }
+
+    const POLICY_READ_EXTRA_STAGES: [PolicyReadExtraStage; 4] = [
+        PolicyReadExtraStage::TestPolicyPeerContext,
+        PolicyReadExtraStage::PolicyStatsPeerValidation,
+        PolicyReadExtraStage::PolicyStatsImport,
+        PolicyReadExtraStage::PolicyStatsDatasets,
+    ];
+
+    async fn invoke_policy_extra_stage(
+        service: &PolicyService,
+        stage: PolicyReadExtraStage,
+    ) -> Result<(), Status> {
+        match stage {
+            PolicyReadExtraStage::TestPolicyPeerContext => {
+                PolicyServiceRpc::test_policy(service, Request::new(test_policy_request()))
+                    .await
+                    .map(|_| ())
+            }
+            PolicyReadExtraStage::PolicyStatsPeerValidation => PolicyServiceRpc::get_policy_stats(
+                service,
+                Request::new(policy_stats_rpc_request("192.0.2.1", "export")),
+            )
+            .await
+            .map(|_| ()),
+            PolicyReadExtraStage::PolicyStatsImport => PolicyServiceRpc::get_policy_stats(
+                service,
+                Request::new(policy_stats_rpc_request("", "import")),
+            )
+            .await
+            .map(|_| ()),
+            PolicyReadExtraStage::PolicyStatsDatasets => PolicyServiceRpc::get_policy_stats(
+                service,
+                Request::new(policy_stats_rpc_request("", "export")),
+            )
+            .await
+            .map(|_| ()),
+        }
+    }
+
+    async fn answer_policy_stage_rib(mut rib_rx: mpsc::Receiver<rustbgpd_rib::RibUpdate>) {
+        let Some(update) = rib_rx.recv().await else {
+            return;
+        };
+        match update {
+            rustbgpd_rib::RibUpdate::QueryReceivedRoutes { reply, .. }
+            | rustbgpd_rib::RibUpdate::QueryBestRoutes { reply } => {
+                let _ = reply.send(Vec::new());
+            }
+            rustbgpd_rib::RibUpdate::QueryExportPolicyTermHits { reply, .. } => {
+                let _ = reply.send(Vec::new());
+            }
+            _ => panic!("unexpected policy-stage RIB query"),
+        }
+    }
+
+    /// Load-bearing: bypassing the shared peer helper at any post-RIB or
+    /// stats-only peer stage makes that stage's send-closed row red.
+    #[tokio::test]
+    async fn policy_extra_stage_send_failures_are_unavailable() {
+        for stage in POLICY_READ_EXTRA_STAGES {
+            let (peer_tx, peer_rx) = mpsc::channel(1);
+            drop(peer_rx);
+            let (rib_tx, rib_rx) = mpsc::channel(1);
+            let rib = tokio::spawn(answer_policy_stage_rib(rib_rx));
+            let service = PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None)
+                .with_rib_query(rib_tx);
+            let error = invoke_policy_extra_stage(&service, stage)
+                .await
+                .unwrap_err();
+            drop(service);
+            rib.await.unwrap();
+            assert_eq!(error.code(), tonic::Code::Unavailable, "{stage:?}");
+            assert_eq!(error.message(), "peer manager unavailable", "{stage:?}");
+        }
+    }
+
+    /// Load-bearing: bypassing the shared peer helper at any post-RIB or
+    /// stats-only peer stage makes that accepted/dropped row red.
+    #[tokio::test]
+    async fn policy_extra_stage_reply_drops_are_unavailable() {
+        for stage in POLICY_READ_EXTRA_STAGES {
+            let (peer_tx, mut peer_rx) = mpsc::channel(1);
+            let peer = tokio::spawn(async move {
+                drop(peer_rx.recv().await.expect("policy-stage peer read"));
+            });
+            let (rib_tx, rib_rx) = mpsc::channel(1);
+            let rib = tokio::spawn(answer_policy_stage_rib(rib_rx));
+            let service = PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None)
+                .with_rib_query(rib_tx);
+            let error = invoke_policy_extra_stage(&service, stage)
+                .await
+                .unwrap_err();
+            drop(service);
+            peer.await.unwrap();
+            rib.await.unwrap();
+            assert_eq!(error.code(), tonic::Code::Unavailable, "{stage:?}");
+            assert_eq!(error.message(), "peer manager dropped reply", "{stage:?}");
+        }
+    }
+
+    /// Negative control: request validation still precedes actor I/O, while
+    /// successfully delivered typed `None` replies retain `NOT_FOUND`.
+    #[tokio::test]
+    async fn policy_reads_preserve_invalid_and_not_found() {
+        let (peer_tx, mut peer_rx) = mpsc::channel(3);
+        let service = PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None);
+
+        let invalid = PolicyServiceRpc::get_policy(
+            &service,
+            Request::new(proto::GetPolicyRequest {
+                name: String::new(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(invalid.code(), tonic::Code::InvalidArgument);
+        assert!(matches!(peer_rx.try_recv(), Err(TryRecvError::Empty)));
+
+        let actor = tokio::spawn(async move {
+            for _ in 0..3 {
+                match peer_rx.recv().await.expect("policy read") {
+                    PeerManagerCommand::GetPolicy { reply, .. } => {
+                        let _ = reply.send(None);
+                    }
+                    PeerManagerCommand::GetNeighborSet { reply, .. } => {
+                        let _ = reply.send(None);
+                    }
+                    PeerManagerCommand::GetNeighborPolicyChains { reply, .. } => {
+                        let _ = reply.send(None);
+                    }
+                    _ => panic!("unexpected policy read"),
+                }
+            }
+        });
+
+        let policy = PolicyServiceRpc::get_policy(
+            &service,
+            Request::new(proto::GetPolicyRequest { name: "p".into() }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(policy.code(), tonic::Code::NotFound);
+        let neighbor_set = PolicyServiceRpc::get_neighbor_set(
+            &service,
+            Request::new(proto::GetNeighborSetRequest { name: "s".into() }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(neighbor_set.code(), tonic::Code::NotFound);
+        let chains = PolicyServiceRpc::get_neighbor_policy_chains(
+            &service,
+            Request::new(proto::GetNeighborPolicyChainsRequest {
+                address: "192.0.2.1".into(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(chains.code(), tonic::Code::NotFound);
+        actor.await.unwrap();
     }
 
     #[test]
@@ -3173,18 +3461,11 @@ policy customer-in(peer_lp: u32) {
     /// leaking backend closure as INTERNAL.
     #[tokio::test(start_paused = true)]
     async fn policy_stats_expired_deadline_precedes_immediately_closed_backend() {
-        let (tx, rx) = mpsc::channel::<u8>(1);
-        drop(rx);
-
-        let error = policy_stats_request::<u8, ()>(
-            &tx,
-            tokio::time::Instant::now(),
-            |_reply| 1,
-            "backend unavailable",
-            "backend dropped reply",
-        )
-        .await
-        .expect_err("already-expired request must fail");
+        let closed_backend =
+            std::future::ready(Err::<(), _>(Status::unavailable("backend unavailable")));
+        let error = policy_stats_request(tokio::time::Instant::now(), closed_backend)
+            .await
+            .expect_err("already-expired request must fail");
 
         assert_eq!(error.code(), tonic::Code::DeadlineExceeded);
     }

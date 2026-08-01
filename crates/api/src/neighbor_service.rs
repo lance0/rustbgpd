@@ -10,6 +10,7 @@ use rustbgpd_wire::{Afi, BgpRole, Safi};
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tonic::{Request, Response, Status};
 
+use crate::actor_read::{peer_manager_read, rib_manager_read};
 use crate::peer_types::{
     ConfigEvent, DynamicRangeError, NeighborCreateAddPath, NeighborCreateSpec,
     OutboundRefreshError, PeerInfo, PeerKey, PeerLifecycleError, PeerManagerCommand,
@@ -52,20 +53,6 @@ fn validate_update_group_comparison_scope(
     } else {
         Ok(())
     }
-}
-
-async fn peer_manager_read<T>(
-    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
-    command: impl FnOnce(oneshot::Sender<T>) -> PeerManagerCommand,
-) -> Result<T, Status> {
-    let (reply_tx, reply_rx) = oneshot::channel();
-    peer_mgr_tx
-        .send(command(reply_tx))
-        .await
-        .map_err(|_| Status::unavailable("peer manager unavailable"))?;
-    reply_rx
-        .await
-        .map_err(|_| Status::unavailable("peer manager dropped reply"))
 }
 
 /// Parse a list of family strings from the gRPC proto into `(Afi, Safi)` pairs.
@@ -204,20 +191,14 @@ async fn query_neighbor_rib_snapshots(
     peers: Vec<IpAddr>,
     comparison: Option<(IpAddr, IpAddr)>,
 ) -> Result<NeighborRibSnapshotResponse, Status> {
-    let (reply_tx, reply_rx) = oneshot::channel();
-    tokio::time::timeout(RIB_SNAPSHOT_TIMEOUT, async {
-        rib_tx
-            .send(RibUpdate::QueryNeighborRibSnapshots {
-                peers,
-                comparison,
-                reply: reply_tx,
-            })
-            .await
-            .map_err(|_| Status::internal("RIB manager unavailable"))?;
-        reply_rx
-            .await
-            .map_err(|_| Status::internal("RIB manager dropped reply"))
-    })
+    tokio::time::timeout(
+        RIB_SNAPSHOT_TIMEOUT,
+        rib_manager_read(rib_tx, |reply| RibUpdate::QueryNeighborRibSnapshots {
+            peers,
+            comparison,
+            reply,
+        }),
+    )
     .await
     .map_err(|_| Status::deadline_exceeded("RIB snapshot query timed out"))?
 }
@@ -1936,6 +1917,99 @@ mod tests {
         assert_eq!(error.code(), tonic::Code::Unavailable);
         assert_eq!(error.message(), "peer manager dropped reply");
         assert!(matches!(rib_rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[derive(Clone, Copy)]
+    enum NeighborRibReadRpc {
+        ListNeighbors,
+        GetNeighborState,
+    }
+
+    async fn invoke_neighbor_rib_read(
+        svc: &NeighborService,
+        rpc: NeighborRibReadRpc,
+    ) -> Result<(), Status> {
+        match rpc {
+            NeighborRibReadRpc::ListNeighbors => svc
+                .list_neighbors(Request::new(proto::ListNeighborsRequest {}))
+                .await
+                .map(|_| ()),
+            NeighborRibReadRpc::GetNeighborState => svc
+                .get_neighbor_state(Request::new(proto::GetNeighborStateRequest {
+                    address: "192.0.2.1".into(),
+                    ..Default::default()
+                }))
+                .await
+                .map(|_| ()),
+        }
+    }
+
+    fn neighbor_rib_read_service(
+        rpc: NeighborRibReadRpc,
+        rib_tx: mpsc::Sender<RibUpdate>,
+    ) -> (NeighborService, tokio::task::JoinHandle<()>) {
+        let (peer_tx, mut peer_rx) = mpsc::channel(1);
+        let actor = tokio::spawn(async move {
+            match (rpc, peer_rx.recv().await.expect("peer read command")) {
+                (NeighborRibReadRpc::ListNeighbors, PeerManagerCommand::ListPeers { reply }) => {
+                    reply
+                        .send(vec![peer_info("192.0.2.1".parse().unwrap())])
+                        .unwrap();
+                }
+                (
+                    NeighborRibReadRpc::GetNeighborState,
+                    PeerManagerCommand::GetPeerState { reply, .. },
+                ) => {
+                    reply
+                        .send(Some(peer_info("192.0.2.1".parse().unwrap())))
+                        .unwrap();
+                }
+                _ => panic!("unexpected peer read command"),
+            }
+        });
+        (
+            NeighborService::new(65001, AccessMode::ReadWrite, peer_tx, rib_tx, None),
+            actor,
+        )
+    }
+
+    /// Load-bearing: restoring either RIB send mapping to `INTERNAL` makes
+    /// both rows red after their peer-manager stage succeeds.
+    #[tokio::test]
+    async fn neighbor_rib_read_send_failures_are_unavailable() {
+        for rpc in [
+            NeighborRibReadRpc::ListNeighbors,
+            NeighborRibReadRpc::GetNeighborState,
+        ] {
+            let (rib_tx, rib_rx) = mpsc::channel(1);
+            drop(rib_rx);
+            let (svc, peer) = neighbor_rib_read_service(rpc, rib_tx);
+            let error = invoke_neighbor_rib_read(&svc, rpc).await.unwrap_err();
+            peer.await.unwrap();
+            assert_eq!(error.code(), tonic::Code::Unavailable);
+            assert_eq!(error.message(), "RIB manager unavailable");
+        }
+    }
+
+    /// Load-bearing: restoring either RIB reply-await mapping to `INTERNAL`
+    /// makes both accepted-then-dropped rows red.
+    #[tokio::test]
+    async fn neighbor_rib_read_reply_drops_are_unavailable() {
+        for rpc in [
+            NeighborRibReadRpc::ListNeighbors,
+            NeighborRibReadRpc::GetNeighborState,
+        ] {
+            let (rib_tx, mut rib_rx) = mpsc::channel(1);
+            let (svc, peer) = neighbor_rib_read_service(rpc, rib_tx);
+            let rib = tokio::spawn(async move {
+                drop(rib_rx.recv().await.expect("RIB read command"));
+            });
+            let error = invoke_neighbor_rib_read(&svc, rpc).await.unwrap_err();
+            peer.await.unwrap();
+            rib.await.unwrap();
+            assert_eq!(error.code(), tonic::Code::Unavailable);
+            assert_eq!(error.message(), "RIB manager dropped reply");
+        }
     }
 
     fn intent_request(

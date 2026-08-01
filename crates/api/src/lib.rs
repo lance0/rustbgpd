@@ -9,6 +9,7 @@
 #![deny(clippy::all)]
 #![warn(clippy::pedantic)]
 
+mod actor_read;
 mod audit;
 pub mod authz;
 pub mod authz_principal;
