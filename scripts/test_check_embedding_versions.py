@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+"""Mutation proofs for the embedding-version documentation contract."""
+
 import subprocess
 import sys
 import tempfile
