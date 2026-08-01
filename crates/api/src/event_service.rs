@@ -25,6 +25,7 @@ use filters::{
     parse_list_session_events_filter, parse_watch_events_filter,
 };
 
+use crate::actor_read::{peer_manager_read, rib_manager_read};
 use crate::peer_types::{PeerManagerCommand, SessionEvent};
 use crate::proto;
 use crate::rib_service::{BlackholeDiscardSnapshotFn, FibRouteSnapshotFn};
@@ -516,21 +517,17 @@ impl proto::event_service_server::EventService for EventService {
         request: Request<proto::ListEvpnEventsRequest>,
     ) -> Result<Response<proto::ListEvpnEventsResponse>, Status> {
         let filter = parse_list_evpn_events_filter(&request.into_inner())?;
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.rib_tx
-            .send(RibUpdate::QueryEvpnRouteEventHistory {
+        let events = rib_manager_read(&self.rib_tx, |reply| {
+            RibUpdate::QueryEvpnRouteEventHistory {
                 peer: filter.peer,
                 route_type: filter.route_type,
                 rd: filter.rd,
                 event_types: filter.event_types,
                 limit: filter.limit,
-                reply: reply_tx,
-            })
-            .await
-            .map_err(|_| Status::internal("RIB manager unavailable"))?;
-        let events = reply_rx
-            .await
-            .map_err(|_| Status::internal("RIB manager dropped reply"))?;
+                reply,
+            }
+        })
+        .await?;
         Ok(Response::new(proto::ListEvpnEventsResponse {
             events: events.into_iter().map(evpn_event_to_bgp_event).collect(),
         }))
@@ -541,19 +538,15 @@ impl proto::event_service_server::EventService for EventService {
         request: Request<proto::ListSessionEventsRequest>,
     ) -> Result<Response<proto::ListSessionEventsResponse>, Status> {
         let filter = parse_list_session_events_filter(&request.into_inner())?;
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.peer_mgr_tx
-            .send(PeerManagerCommand::QuerySessionEventHistory {
+        let events = peer_manager_read(&self.peer_mgr_tx, |reply| {
+            PeerManagerCommand::QuerySessionEventHistory {
                 peer: filter.peer,
                 event_types: filter.event_types,
                 limit: filter.limit,
-                reply: reply_tx,
-            })
-            .await
-            .map_err(|_| Status::internal("peer manager unavailable"))?;
-        let events = reply_rx
-            .await
-            .map_err(|_| Status::internal("peer manager dropped reply"))?;
+                reply,
+            }
+        })
+        .await?;
         Ok(Response::new(proto::ListSessionEventsResponse {
             events: events
                 .into_iter()
@@ -567,18 +560,14 @@ impl proto::event_service_server::EventService for EventService {
         request: Request<proto::ListPolicyEventsRequest>,
     ) -> Result<Response<proto::ListPolicyEventsResponse>, Status> {
         let filter = parse_list_policy_events_filter(&request.into_inner())?;
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.peer_mgr_tx
-            .send(PeerManagerCommand::QueryPolicyEventHistory {
+        let events = peer_manager_read(&self.peer_mgr_tx, |reply| {
+            PeerManagerCommand::QueryPolicyEventHistory {
                 peer: filter.peer,
                 limit: filter.limit,
-                reply: reply_tx,
-            })
-            .await
-            .map_err(|_| Status::internal("peer manager unavailable"))?;
-        let events = reply_rx
-            .await
-            .map_err(|_| Status::internal("peer manager dropped reply"))?;
+                reply,
+            }
+        })
+        .await?;
         Ok(Response::new(proto::ListPolicyEventsResponse {
             events: events.into_iter().map(policy_event_to_bgp_event).collect(),
         }))
@@ -645,6 +634,88 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use tokio::sync::broadcast;
     use tokio_stream::StreamExt;
+
+    #[derive(Clone, Copy, Debug)]
+    enum ListEventRead {
+        Evpn,
+        Session,
+        Policy,
+    }
+
+    const LIST_EVENT_READS: [ListEventRead; 3] = [
+        ListEventRead::Evpn,
+        ListEventRead::Session,
+        ListEventRead::Policy,
+    ];
+
+    async fn invoke_list_event_read(
+        service: &EventService,
+        rpc: ListEventRead,
+    ) -> Result<(), Status> {
+        match rpc {
+            ListEventRead::Evpn => service
+                .list_evpn_events(Request::new(proto::ListEvpnEventsRequest::default()))
+                .await
+                .map(|_| ()),
+            ListEventRead::Session => service
+                .list_session_events(Request::new(proto::ListSessionEventsRequest::default()))
+                .await
+                .map(|_| ()),
+            ListEventRead::Policy => service
+                .list_policy_events(Request::new(proto::ListPolicyEventsRequest::default()))
+                .await
+                .map(|_| ()),
+        }
+    }
+
+    /// Load-bearing: restoring an included list RPC's actor-send mapping to
+    /// `INTERNAL` makes its row red. No watch/subscription RPC is included.
+    #[tokio::test]
+    async fn list_event_read_send_failures_are_unavailable() {
+        for rpc in LIST_EVENT_READS {
+            let (rib_tx, rib_rx) = tokio::sync::mpsc::channel(1);
+            let (peer_tx, peer_rx) = tokio::sync::mpsc::channel(1);
+            match rpc {
+                ListEventRead::Evpn => drop(rib_rx),
+                ListEventRead::Session | ListEventRead::Policy => drop(peer_rx),
+            }
+            let service = EventService::new(rib_tx, peer_tx);
+            let error = invoke_list_event_read(&service, rpc).await.unwrap_err();
+            assert_eq!(error.code(), tonic::Code::Unavailable, "{rpc:?}");
+            let expected = match rpc {
+                ListEventRead::Evpn => "RIB manager unavailable",
+                ListEventRead::Session | ListEventRead::Policy => "peer manager unavailable",
+            };
+            assert_eq!(error.message(), expected, "{rpc:?}");
+        }
+    }
+
+    /// Load-bearing: restoring an included list RPC's reply-await mapping to
+    /// `INTERNAL` makes its accepted-then-dropped row red.
+    #[tokio::test]
+    async fn list_event_read_reply_drops_are_unavailable() {
+        for rpc in LIST_EVENT_READS {
+            let (rib_tx, mut rib_rx) = tokio::sync::mpsc::channel(1);
+            let (peer_tx, mut peer_rx) = tokio::sync::mpsc::channel(1);
+            let actor = match rpc {
+                ListEventRead::Evpn => tokio::spawn(async move {
+                    drop(rib_rx.recv().await.expect("EVPN history read"));
+                }),
+                ListEventRead::Session | ListEventRead::Policy => tokio::spawn(async move {
+                    drop(peer_rx.recv().await.expect("peer event-history read"));
+                }),
+            };
+            let service = EventService::new(rib_tx, peer_tx);
+            let error = invoke_list_event_read(&service, rpc).await.unwrap_err();
+            actor.await.unwrap();
+            assert_eq!(error.code(), tonic::Code::Unavailable, "{rpc:?}");
+            let expected = match rpc {
+                ListEventRead::Evpn => "RIB manager dropped reply",
+                ListEventRead::Session | ListEventRead::Policy => "peer manager dropped reply",
+            };
+            assert_eq!(error.message(), expected, "{rpc:?}");
+        }
+    }
 
     #[tokio::test]
     async fn route_event_bridge_emits_bgp_event() {

@@ -12,6 +12,7 @@ use tokio_stream::{Stream, StreamExt, wrappers::BroadcastStream};
 use tonic::{Request, Response, Status};
 use tracing::debug;
 
+use crate::actor_read::rib_manager_read;
 use crate::event_service::{route_event_to_bgp_event, stream_lag_bgp_event};
 use crate::proto;
 use rustbgpd_rib::{
@@ -229,25 +230,11 @@ impl RibService {
     }
 
     async fn query_orr_topology(&self) -> Result<OrrTopologySnapshot, Status> {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.rib_tx
-            .send(RibUpdate::QueryOrrTopology { reply: reply_tx })
-            .await
-            .map_err(|_| Status::internal("RIB manager unavailable"))?;
-        reply_rx
-            .await
-            .map_err(|_| Status::internal("RIB manager dropped reply"))
+        rib_manager_read(&self.rib_tx, |reply| RibUpdate::QueryOrrTopology { reply }).await
     }
 
     async fn query_orr_status(&self) -> Result<OrrStatusSnapshot, Status> {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.rib_tx
-            .send(RibUpdate::QueryOrrStatus { reply: reply_tx })
-            .await
-            .map_err(|_| Status::internal("RIB manager unavailable"))?;
-        reply_rx
-            .await
-            .map_err(|_| Status::internal("RIB manager dropped reply"))
+        rib_manager_read(&self.rib_tx, |reply| RibUpdate::QueryOrrStatus { reply }).await
     }
 
     /// One bounded, resumable page from the RIB task. Filtering and
@@ -262,30 +249,23 @@ impl RibService {
         expected_version: Option<RoutePageVersion>,
         page_size: usize,
     ) -> Result<RoutePage, Status> {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.rib_tx
-            .send(RibUpdate::QueryRoutesPage {
-                scope,
-                filter,
-                after,
-                expected_version,
-                page_size,
-                reply: reply_tx,
-            })
-            .await
-            .map_err(|_| Status::internal("RIB manager unavailable"))?;
-
-        reply_rx
-            .await
-            .map_err(|_| Status::internal("RIB manager dropped reply"))?
-            .map_err(|error| match error {
-                RoutePageError::Invalidated => Status::aborted(
-                    "route table changed during pagination; restart with an empty page_token",
-                ),
-                RoutePageError::GenerationExhausted => Status::unavailable(
-                    "route pagination unavailable because its process-local generation is exhausted",
-                ),
-            })
+        rib_manager_read(&self.rib_tx, |reply| RibUpdate::QueryRoutesPage {
+            scope,
+            filter,
+            after,
+            expected_version,
+            page_size,
+            reply,
+        })
+        .await?
+        .map_err(|error| match error {
+            RoutePageError::Invalidated => Status::aborted(
+                "route table changed during pagination; restart with an empty page_token",
+            ),
+            RoutePageError::GenerationExhausted => Status::unavailable(
+                "route pagination unavailable because its process-local generation is exhausted",
+            ),
+        })
     }
 
     async fn query_explain_advertised_route(
@@ -296,23 +276,16 @@ impl RibService {
         labeled: bool,
         source: Option<RouteSourceIdentity>,
     ) -> Result<ExplainAdvertisedRoute, Status> {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.rib_tx
-            .send(RibUpdate::ExplainAdvertisedRoute {
-                peer,
-                prefix,
-                rd,
-                labeled,
-                source,
-                reply: reply_tx,
-            })
-            .await
-            .map_err(|_| Status::internal("RIB manager unavailable"))?;
-
-        reply_rx
-            .await
-            .map_err(|_| Status::internal("RIB manager dropped reply"))?
-            .map_err(explain_advertised_error_status)
+        rib_manager_read(&self.rib_tx, |reply| RibUpdate::ExplainAdvertisedRoute {
+            peer,
+            prefix,
+            rd,
+            labeled,
+            source,
+            reply,
+        })
+        .await?
+        .map_err(explain_advertised_error_status)
     }
 
     async fn query_explain_best_path(
@@ -320,19 +293,12 @@ impl RibService {
         prefix: Prefix,
         peer: Option<IpAddr>,
     ) -> Result<Option<ExplainBestPath>, Status> {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.rib_tx
-            .send(RibUpdate::ExplainBestPath {
-                prefix,
-                peer,
-                reply: reply_tx,
-            })
-            .await
-            .map_err(|_| Status::internal("RIB manager unavailable"))?;
-
-        reply_rx
-            .await
-            .map_err(|_| Status::internal("RIB manager dropped reply"))
+        rib_manager_read(&self.rib_tx, |reply| RibUpdate::ExplainBestPath {
+            prefix,
+            peer,
+            reply,
+        })
+        .await
     }
 }
 
@@ -1603,21 +1569,14 @@ impl proto::rib_service_server::RibService for RibService {
             )
         };
 
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.rib_tx
-            .send(RibUpdate::QueryRouteEventHistory {
-                peer,
-                afi,
-                prefix,
-                limit: req.limit as usize,
-                reply: reply_tx,
-            })
-            .await
-            .map_err(|_| Status::internal("RIB manager unavailable"))?;
-
-        let events = reply_rx
-            .await
-            .map_err(|_| Status::internal("RIB manager dropped reply"))?;
+        let events = rib_manager_read(&self.rib_tx, |reply| RibUpdate::QueryRouteEventHistory {
+            peer,
+            afi,
+            prefix,
+            limit: req.limit as usize,
+            reply,
+        })
+        .await?;
         Ok(Response::new(proto::ListRouteEventsResponse {
             events: events.into_iter().map(route_event_to_proto).collect(),
         }))
@@ -1734,15 +1693,10 @@ impl proto::rib_service_server::RibService for RibService {
         let req = request.into_inner();
         validate_flowspec_afi_safi(req.afi_safi)?;
 
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.rib_tx
-            .send(RibUpdate::QueryFlowSpecRoutes { reply: reply_tx })
-            .await
-            .map_err(|_| Status::internal("RIB manager unavailable"))?;
-
-        let all_routes = reply_rx
-            .await
-            .map_err(|_| Status::internal("RIB manager dropped reply"))?;
+        let all_routes = rib_manager_read(&self.rib_tx, |reply| RibUpdate::QueryFlowSpecRoutes {
+            reply,
+        })
+        .await?;
 
         // Filter by AFI if requested
         let filtered: Vec<&FlowSpecRoute> = all_routes
@@ -1793,15 +1747,8 @@ impl proto::rib_service_server::RibService for RibService {
             )
         };
 
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.rib_tx
-            .send(RibUpdate::QueryEvpnRoutes { reply: reply_tx })
-            .await
-            .map_err(|_| Status::internal("RIB manager unavailable"))?;
-
-        let all_routes = reply_rx
-            .await
-            .map_err(|_| Status::internal("RIB manager dropped reply"))?;
+        let all_routes =
+            rib_manager_read(&self.rib_tx, |reply| RibUpdate::QueryEvpnRoutes { reply }).await?;
 
         let type_filter = req.route_type_filter;
 
@@ -1855,15 +1802,8 @@ impl proto::rib_service_server::RibService for RibService {
         }
         let peer_filter = parse_optional_peer_filter(&req.peer_filter)?;
 
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.rib_tx
-            .send(RibUpdate::QueryBgpLsRoutes { reply: reply_tx })
-            .await
-            .map_err(|_| Status::internal("RIB manager unavailable"))?;
-
-        let all_routes = reply_rx
-            .await
-            .map_err(|_| Status::internal("RIB manager dropped reply"))?;
+        let all_routes =
+            rib_manager_read(&self.rib_tx, |reply| RibUpdate::QueryBgpLsRoutes { reply }).await?;
 
         let family_filter = req.afi_safi;
         let type_filter = req.nlri_type_filter;
@@ -1906,15 +1846,8 @@ impl proto::rib_service_server::RibService for RibService {
             )));
         }
 
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.rib_tx
-            .send(RibUpdate::QueryVpnRoutes { reply: reply_tx })
-            .await
-            .map_err(|_| Status::internal("RIB manager unavailable"))?;
-
-        let all_routes = reply_rx
-            .await
-            .map_err(|_| Status::internal("RIB manager dropped reply"))?;
+        let all_routes =
+            rib_manager_read(&self.rib_tx, |reply| RibUpdate::QueryVpnRoutes { reply }).await?;
 
         #[cfg(feature = "bench-internals")]
         let post_actor_started = Instant::now();
@@ -1962,15 +1895,10 @@ impl proto::rib_service_server::RibService for RibService {
             )));
         }
 
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.rib_tx
-            .send(RibUpdate::QueryLabeledRoutes { reply: reply_tx })
-            .await
-            .map_err(|_| Status::internal("RIB manager unavailable"))?;
-
-        let all_routes = reply_rx
-            .await
-            .map_err(|_| Status::internal("RIB manager dropped reply"))?;
+        let all_routes = rib_manager_read(&self.rib_tx, |reply| RibUpdate::QueryLabeledRoutes {
+            reply,
+        })
+        .await?;
 
         let family_filter = req.afi_safi;
         let routes = all_routes
@@ -1997,15 +1925,8 @@ impl proto::rib_service_server::RibService for RibService {
         let req = request.into_inner();
         let peer_filter = parse_optional_peer_filter(&req.peer_filter)?;
 
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.rib_tx
-            .send(RibUpdate::QueryRtcRoutes { reply: reply_tx })
-            .await
-            .map_err(|_| Status::internal("RIB manager unavailable"))?;
-
-        let all_routes = reply_rx
-            .await
-            .map_err(|_| Status::internal("RIB manager dropped reply"))?;
+        let all_routes =
+            rib_manager_read(&self.rib_tx, |reply| RibUpdate::QueryRtcRoutes { reply }).await?;
 
         let routes = all_routes
             .iter()
@@ -2795,6 +2716,149 @@ mod tests {
     fn make_service() -> RibService {
         let (tx, _rx) = mpsc::channel(16);
         RibService::new(tx)
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum UnaryRibRead {
+        ListReceivedRoutes,
+        ListBestRoutes,
+        ListAdvertisedRoutes,
+        ExplainAdvertisedRoute,
+        ExplainBestPath,
+        ListRouteEvents,
+        ListFlowSpecRoutes,
+        ListEvpnRoutes,
+        ListBgpLsRoutes,
+        ListVpnRoutes,
+        ListLabeledRoutes,
+        ListRtcRoutes,
+        ListTopologyNodes,
+        ListTopologyLinks,
+        ListOrrStatus,
+    }
+
+    const UNARY_RIB_READS: [UnaryRibRead; 15] = [
+        UnaryRibRead::ListReceivedRoutes,
+        UnaryRibRead::ListBestRoutes,
+        UnaryRibRead::ListAdvertisedRoutes,
+        UnaryRibRead::ExplainAdvertisedRoute,
+        UnaryRibRead::ExplainBestPath,
+        UnaryRibRead::ListRouteEvents,
+        UnaryRibRead::ListFlowSpecRoutes,
+        UnaryRibRead::ListEvpnRoutes,
+        UnaryRibRead::ListBgpLsRoutes,
+        UnaryRibRead::ListVpnRoutes,
+        UnaryRibRead::ListLabeledRoutes,
+        UnaryRibRead::ListRtcRoutes,
+        UnaryRibRead::ListTopologyNodes,
+        UnaryRibRead::ListTopologyLinks,
+        UnaryRibRead::ListOrrStatus,
+    ];
+
+    async fn invoke_unary_rib_read(svc: &RibService, rpc: UnaryRibRead) -> Result<(), Status> {
+        match rpc {
+            UnaryRibRead::ListReceivedRoutes => svc
+                .list_received_routes(Request::new(list_routes_request()))
+                .await
+                .map(|_| ()),
+            UnaryRibRead::ListBestRoutes => svc
+                .list_best_routes(Request::new(list_routes_request()))
+                .await
+                .map(|_| ()),
+            UnaryRibRead::ListAdvertisedRoutes => svc
+                .list_advertised_routes(Request::new(proto::ListRoutesRequest {
+                    neighbor_address: "192.0.2.1".into(),
+                    ..list_routes_request()
+                }))
+                .await
+                .map(|_| ()),
+            UnaryRibRead::ExplainAdvertisedRoute => svc
+                .explain_advertised_route(Request::new(proto::ExplainAdvertisedRouteRequest {
+                    peer_address: "192.0.2.1".into(),
+                    prefix: "203.0.113.0".into(),
+                    prefix_length: 24,
+                    ..Default::default()
+                }))
+                .await
+                .map(|_| ()),
+            UnaryRibRead::ExplainBestPath => svc
+                .explain_best_path(Request::new(explain_best_path_request()))
+                .await
+                .map(|_| ()),
+            UnaryRibRead::ListRouteEvents => svc
+                .list_route_events(Request::new(proto::ListRouteEventsRequest::default()))
+                .await
+                .map(|_| ()),
+            UnaryRibRead::ListFlowSpecRoutes => svc
+                .list_flow_spec_routes(Request::new(proto::ListFlowSpecRequest::default()))
+                .await
+                .map(|_| ()),
+            UnaryRibRead::ListEvpnRoutes => svc
+                .list_evpn_routes(Request::new(proto::ListEvpnRequest::default()))
+                .await
+                .map(|_| ()),
+            UnaryRibRead::ListBgpLsRoutes => svc
+                .list_bgp_ls_routes(Request::new(proto::ListBgpLsRequest::default()))
+                .await
+                .map(|_| ()),
+            UnaryRibRead::ListVpnRoutes => svc
+                .list_vpn_routes(Request::new(proto::ListVpnRoutesRequest::default()))
+                .await
+                .map(|_| ()),
+            UnaryRibRead::ListLabeledRoutes => svc
+                .list_labeled_routes(Request::new(proto::ListLabeledRoutesRequest::default()))
+                .await
+                .map(|_| ()),
+            UnaryRibRead::ListRtcRoutes => svc
+                .list_rtc_routes(Request::new(proto::ListRtcRoutesRequest::default()))
+                .await
+                .map(|_| ()),
+            UnaryRibRead::ListTopologyNodes => svc
+                .list_topology_nodes(Request::new(proto::ListTopologyNodesRequest {}))
+                .await
+                .map(|_| ()),
+            UnaryRibRead::ListTopologyLinks => svc
+                .list_topology_links(Request::new(proto::ListTopologyLinksRequest {}))
+                .await
+                .map(|_| ()),
+            UnaryRibRead::ListOrrStatus => svc
+                .list_orr_status(Request::new(proto::ListOrrStatusRequest {}))
+                .await
+                .map(|_| ()),
+        }
+    }
+
+    /// Load-bearing: restoring any included unary RIB send mapping to
+    /// `INTERNAL` makes its row red. Stream subscription RPCs are absent.
+    #[tokio::test]
+    async fn unary_rib_read_send_failures_are_unavailable() {
+        for rpc in UNARY_RIB_READS {
+            let (tx, rx) = mpsc::channel(1);
+            drop(rx);
+            let error = invoke_unary_rib_read(&RibService::new(tx), rpc)
+                .await
+                .unwrap_err();
+            assert_eq!(error.code(), tonic::Code::Unavailable, "{rpc:?}");
+            assert_eq!(error.message(), "RIB manager unavailable", "{rpc:?}");
+        }
+    }
+
+    /// Load-bearing: restoring any included unary RIB reply-await mapping to
+    /// `INTERNAL` makes its accepted-then-dropped row red.
+    #[tokio::test]
+    async fn unary_rib_read_reply_drops_are_unavailable() {
+        for rpc in UNARY_RIB_READS {
+            let (tx, mut rx) = mpsc::channel(1);
+            let actor = tokio::spawn(async move {
+                drop(rx.recv().await.expect("unary RIB read command"));
+            });
+            let error = invoke_unary_rib_read(&RibService::new(tx), rpc)
+                .await
+                .unwrap_err();
+            actor.await.unwrap();
+            assert_eq!(error.code(), tonic::Code::Unavailable, "{rpc:?}");
+            assert_eq!(error.message(), "RIB manager dropped reply", "{rpc:?}");
+        }
     }
 
     fn bgpls_test_routes(peer: IpAddr) -> Vec<BgpLsRibRoute> {
