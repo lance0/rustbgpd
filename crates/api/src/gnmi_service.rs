@@ -15,6 +15,7 @@ use tokio_stream::{Stream, wrappers::ReceiverStream};
 use tonic::{Request, Response, Status};
 use tracing::debug;
 
+use crate::actor_read::peer_manager_read;
 use crate::audit::{gnmi_set_summary, set_request_summary};
 use crate::gnmi;
 use crate::gnmi_ext;
@@ -74,13 +75,10 @@ impl GnmiService {
         Self::with_peer_snapshot(asn, router_id, move || {
             let peer_mgr_tx = peer_mgr_tx.clone();
             Box::pin(async move {
-                let (reply, rx) = tokio::sync::oneshot::channel();
-                peer_mgr_tx
-                    .send(PeerManagerCommand::ListPeers { reply })
-                    .await
-                    .map_err(|_| Status::internal("peer manager unavailable"))?;
-                rx.await
-                    .map_err(|_| Status::internal("peer manager dropped reply"))
+                peer_manager_read(&peer_mgr_tx, |reply| PeerManagerCommand::ListPeers {
+                    reply,
+                })
+                .await
             })
         })
     }
@@ -3093,6 +3091,120 @@ mod tests {
         }
     }
 
+    /// Drive a real Subscribe client until the peer-snapshot outage reaches it.
+    /// This goes red if a Subscribe path emits data/sync, closes cleanly, hangs,
+    /// or changes the shared actor-read status contract.
+    async fn subscribe_outage_status(
+        client: &mut GNmiClient<Channel>,
+        list: gnmi::SubscriptionList,
+    ) -> Status {
+        let result = client
+            .subscribe(tokio_stream::iter(vec![subscribe_msg(list)]))
+            .await;
+        match result {
+            Err(status) => status,
+            Ok(response) => {
+                let mut stream = response.into_inner();
+                match tokio::time::timeout(Duration::from_secs(2), stream.message()).await {
+                    Ok(Err(status)) => status,
+                    Ok(Ok(Some(response))) => {
+                        panic!("actor outage emitted a Subscribe response: {response:?}")
+                    }
+                    Ok(Ok(None)) => panic!("actor outage closed Subscribe cleanly"),
+                    Err(elapsed) => panic!("actor outage left Subscribe waiting: {elapsed}"),
+                }
+            }
+        }
+    }
+
+    /// Exercise every neighbor snapshot surface through the TCP gNMI server.
+    /// This goes red if `GnmiService::new` stops using the shared fail-closed
+    /// actor-read mapping, including the old `INTERNAL` mapping.
+    async fn assert_peer_snapshot_outage(service: GnmiService, expected_message: &str) {
+        let mut harness = serve(service).await;
+        let path = neighbor_session_state_wildcard_path();
+        let error = harness
+            .client
+            .get(get_request(path.clone()))
+            .await
+            .expect_err("neighbor Get must fail when its actor snapshot is unavailable");
+        let mut errors = vec![("Get", error)];
+
+        let subscriptions = [
+            (
+                "Subscribe ONCE",
+                subscription_list(
+                    gnmi::subscription_list::Mode::Once,
+                    gnmi::SubscriptionMode::TargetDefined,
+                    path.clone(),
+                ),
+            ),
+            (
+                "Subscribe POLL",
+                subscription_list(
+                    gnmi::subscription_list::Mode::Poll,
+                    gnmi::SubscriptionMode::TargetDefined,
+                    path.clone(),
+                ),
+            ),
+            (
+                "Subscribe STREAM/SAMPLE",
+                subscription_list(
+                    gnmi::subscription_list::Mode::Stream,
+                    gnmi::SubscriptionMode::Sample,
+                    path.clone(),
+                ),
+            ),
+            ("Subscribe STREAM/ON_CHANGE", stream_on_change_list(path)),
+        ];
+        for (surface, list) in subscriptions {
+            let error = subscribe_outage_status(&mut harness.client, list).await;
+            errors.push((surface, error));
+        }
+        for (surface, error) in errors {
+            assert_eq!(error.code(), tonic::Code::Unavailable, "{surface}");
+            assert_eq!(error.message(), expected_message, "{surface}");
+        }
+    }
+
+    #[tokio::test]
+    async fn peer_snapshot_send_failures_are_unavailable_on_every_gnmi_surface() {
+        // Load-bearing break: restoring the constructor's INTERNAL send-error
+        // mapping makes Get and all four Subscribe surfaces fail this matrix.
+        let (peer_tx, peer_rx) = tokio::sync::mpsc::channel(1);
+        drop(peer_rx);
+        let manager = event_history_manager().await;
+        let service = GnmiService::new(65001, "192.0.2.1".to_string(), peer_tx)
+            .with_event_history(Some(manager.handle()));
+        assert_peer_snapshot_outage(service, "peer manager unavailable").await;
+        manager.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn peer_snapshot_reply_drops_are_unavailable_on_every_gnmi_surface() {
+        // Load-bearing break: restoring the constructor's INTERNAL reply-error
+        // mapping makes Get and all four Subscribe surfaces fail this matrix.
+        let (peer_tx, mut peer_rx) = tokio::sync::mpsc::channel(5);
+        let actor = tokio::spawn(async move {
+            for _ in 0..5 {
+                let command = peer_rx.recv().await.expect("expected ListPeers command");
+                let PeerManagerCommand::ListPeers { reply } = command else {
+                    panic!("expected ListPeers command");
+                };
+                drop(reply);
+            }
+        });
+        let manager = event_history_manager().await;
+        let service = GnmiService::new(65001, "192.0.2.1".to_string(), peer_tx)
+            .with_event_history(Some(manager.handle()));
+        assert_peer_snapshot_outage(service, "peer manager dropped reply").await;
+        tokio::time::timeout(Duration::from_secs(2), actor)
+            .await
+            .expect("peer-manager fixture did not finish")
+            .expect("peer-manager fixture failed");
+        manager.shutdown().await;
+    }
+
     #[tokio::test]
     async fn subscribe_once_streams_update_then_sync_then_ends() {
         let mut harness = serve(test_service(Vec::new())).await;
@@ -3393,9 +3505,10 @@ mod tests {
         assert_eq!(err.code(), tonic::Code::FailedPrecondition);
     }
 
-    async fn ehm_service(
-        peers: Vec<PeerInfo>,
-    ) -> (GnmiService, rustbgpd_event_history::EventHistoryManager) {
+    /// Start the real EHM required to reach the `ON_CHANGE` snapshot seam.
+    /// This goes red if outage tests accidentally stop exercising `ON_CHANGE`'s
+    /// actor-backed initial snapshot and fail earlier on missing event history.
+    async fn event_history_manager() -> rustbgpd_event_history::EventHistoryManager {
         use rustbgpd_event_history::{EventHistoryConfig, EventHistoryManager, SynchronousMode};
         let dir = tempfile::tempdir().unwrap();
         let manager = EventHistoryManager::start(EventHistoryConfig {
@@ -3420,6 +3533,13 @@ mod tests {
         .expect("EHM start");
         // Keep tempdir alive for the manager lifetime by leaking — tests are short.
         std::mem::forget(dir);
+        manager
+    }
+
+    async fn ehm_service(
+        peers: Vec<PeerInfo>,
+    ) -> (GnmiService, rustbgpd_event_history::EventHistoryManager) {
+        let manager = event_history_manager().await;
         let service = GnmiService::with_peer_snapshot(65001, "192.0.2.1", move || {
             let peers = peers.clone();
             async move { Ok(peers) }
