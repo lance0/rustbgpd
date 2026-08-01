@@ -83,6 +83,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - gNMI neighbor `Get` and `Subscribe` reads now report peer-manager channel
   closure or dropped replies as retryable `UNAVAILABLE` instead of `INTERNAL`.
 
+- Concrete gNMI neighbor subscriptions now treat an absent neighbor as an empty
+  snapshot cycle, allowing ONCE/POLL to sync and SAMPLE/ON_CHANGE to remain live
+  until the peer appears. Unary `Get` remains strict `NOT_FOUND`.
+
 - gNMI `updates_only` STREAM/SAMPLE subscriptions now resume sampled data after
   the initial sync instead of remaining silent for the stream's lifetime.
 

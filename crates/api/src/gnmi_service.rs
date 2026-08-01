@@ -193,6 +193,23 @@ impl GnmiService {
         }
     }
 
+    fn render_subscription_query(
+        &self,
+        query: &SupportedPath,
+        peers: Option<&[PeerInfo]>,
+        encoding: gnmi::Encoding,
+    ) -> Result<Vec<gnmi::Update>, Status> {
+        match (query, peers) {
+            (SupportedPath::Neighbor { address, select }, Some(peers)) => Ok(peers
+                .iter()
+                .find(|peer| peer.address == *address)
+                .map_or_else(Vec::new, |peer| {
+                    render_one_neighbor_updates(peer, self.asn, *select, encoding)
+                })),
+            _ => self.render_query(query, peers, encoding),
+        }
+    }
+
     async fn render_subscription_snapshot(
         &self,
         plan: &SubscriptionPlan,
@@ -211,7 +228,11 @@ impl GnmiService {
                 None
             };
             for query in &plan.paths {
-                updates.extend(self.render_query(query, peers.as_deref(), plan.encoding)?);
+                updates.extend(self.render_subscription_query(
+                    query,
+                    peers.as_deref(),
+                    plan.encoding,
+                )?);
             }
         }
 
@@ -3102,6 +3123,13 @@ mod tests {
             .expect("Subscribe response timed out")
     }
 
+    async fn assert_sync(stream: &mut tonic::Streaming<gnmi::SubscribeResponse>) {
+        assert_eq!(
+            next_bounded(stream).await.unwrap().unwrap().response,
+            Some(gnmi::subscribe_response::Response::SyncResponse(true))
+        );
+    }
+
     /// Drive a real Subscribe client until the peer-snapshot outage reaches it.
     /// This goes red if a Subscribe path emits data/sync, closes cleanly, hangs,
     /// or changes the shared actor-read status contract.
@@ -3168,7 +3196,12 @@ mod tests {
             ),
             ("Subscribe STREAM/ON_CHANGE", stream_on_change_list(path)),
         ];
-        for (surface, list) in subscriptions {
+        for (surface, mut list) in subscriptions {
+            if surface != "Subscribe STREAM/ON_CHANGE" {
+                let mut global = list.subscription[0].clone();
+                global.path = Some(mounted_path(&[pe("bgp"), pe("global"), pe("state")]));
+                list.subscription.insert(0, global);
+            }
             let error = subscribe_outage_status(&mut harness.client, list).await;
             errors.push((surface, error));
         }
@@ -3246,6 +3279,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn subscribe_once_absent_neighbor_syncs_then_ends() {
+        // Load-bearing break: delegating an absent concrete neighbor directly
+        // to strict Get rendering returns NOT_FOUND instead of sync then EOF.
+        let mut harness = serve(test_service(Vec::new())).await;
+        let list = subscription_list(
+            gnmi::subscription_list::Mode::Once,
+            gnmi::SubscriptionMode::TargetDefined,
+            neighbor_session_state_path("10.0.0.2"),
+        );
+        let mut stream = harness
+            .client
+            .subscribe(tokio_stream::iter(vec![subscribe_msg(list)]))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_sync(&mut stream).await;
+        assert!(next_bounded(&mut stream).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn subscribe_once_mixed_global_and_absent_neighbor_keeps_global() {
+        // Load-bearing break: aborting or skipping the whole mixed plan either
+        // returns NOT_FOUND or loses the global Updates before sync and EOF.
+        let mut harness = serve(test_service(Vec::new())).await;
+        let mut list = subscription_list(
+            gnmi::subscription_list::Mode::Once,
+            gnmi::SubscriptionMode::TargetDefined,
+            mounted_path(&[pe("bgp"), pe("global"), pe("state")]),
+        );
+        let mut absent = list.subscription[0].clone();
+        absent.path = Some(neighbor_session_state_path("10.0.0.2"));
+        list.subscription.push(absent);
+        let mut stream = harness
+            .client
+            .subscribe(tokio_stream::iter(vec![subscribe_msg(list)]))
+            .await
+            .unwrap()
+            .into_inner();
+        let response = next_bounded(&mut stream).await.unwrap().unwrap();
+        let Some(gnmi::subscribe_response::Response::Update(notification)) = response.response
+        else {
+            panic!("expected global Updates, got {response:?}");
+        };
+        assert_eq!(
+            notification.update,
+            render_global_updates(65001, "192.0.2.1", None, gnmi::Encoding::JsonIetf)
+        );
+        assert_sync(&mut stream).await;
+        assert!(next_bounded(&mut stream).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
     async fn subscribe_poll_sends_initial_snapshot_then_per_poll() {
         let mut harness = serve(test_service(Vec::new())).await;
         let list = subscription_list(
@@ -3287,6 +3372,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn subscribe_poll_absent_neighbor_later_appears_then_outage() {
+        // Load-bearing break: strict or tombstoned absence prevents empty sync,
+        // later exact peer Update, or the following actor UNAVAILABLE status.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = Arc::new(AtomicUsize::new(0));
+        let snapshot_calls = Arc::clone(&calls);
+        let service = GnmiService::with_peer_snapshot(65001, "192.0.2.1", move || {
+            let call = snapshot_calls.fetch_add(1, Ordering::SeqCst);
+            async move {
+                match call {
+                    0 => Ok(Vec::new()),
+                    1 => Ok(vec![test_peer("10.0.0.2".parse().unwrap())]),
+                    _ => Err(Status::unavailable("scripted peer outage")),
+                }
+            }
+        });
+        let mut harness = serve(service).await;
+        let list = subscription_list(
+            gnmi::subscription_list::Mode::Poll,
+            gnmi::SubscriptionMode::TargetDefined,
+            neighbor_session_state_path("10.0.0.2"),
+        );
+        let (req_tx, req_rx) = tokio::sync::mpsc::channel(3);
+        req_tx.send(subscribe_msg(list)).await.unwrap();
+        let mut stream = harness
+            .client
+            .subscribe(ReceiverStream::new(req_rx))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_sync(&mut stream).await;
+        req_tx.send(poll_msg()).await.unwrap();
+        let response = next_bounded(&mut stream).await.unwrap().unwrap();
+        let Some(gnmi::subscribe_response::Response::Update(notification)) = response.response
+        else {
+            panic!("expected appeared-peer Update, got {response:?}");
+        };
+        assert_eq!(
+            notification.update,
+            vec![leaf_update(
+                neighbor_leaf_path("10.0.0.2".parse().unwrap(), NeighborLeaf::SessionState),
+                &LeafValue::Str("ESTABLISHED".to_string()),
+                gnmi::Encoding::JsonIetf,
+            )]
+        );
+        assert_sync(&mut stream).await;
+        req_tx.send(poll_msg()).await.unwrap();
+        let error = next_bounded(&mut stream).await.unwrap_err();
+        assert_eq!(error.code(), tonic::Code::Unavailable);
+        assert_eq!(error.message(), "scripted peer outage");
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
     async fn subscribe_stream_sample_emits_initial_sync_and_resamples() {
         let mut harness = serve(test_service(Vec::new())).await;
         // 1s floor; a couple of ticks is enough to confirm resampling.
@@ -3315,6 +3454,41 @@ mod tests {
         ));
         // Dropping the client end lets the sample task exit promptly via select!.
         drop(stream);
+    }
+
+    #[tokio::test]
+    async fn subscribe_stream_sample_survives_absence_then_emits_peer() {
+        // Load-bearing break: strict absent-neighbor rendering closes SAMPLE
+        // with NOT_FOUND before a peer appearing after initial sync can emit.
+        let peers = Arc::new(Mutex::new(Vec::new()));
+        let snapshot = Arc::clone(&peers);
+        let service = GnmiService::with_peer_snapshot(65001, "192.0.2.1", move || {
+            let peers = snapshot.lock().unwrap().clone();
+            async move { Ok(peers) }
+        });
+        let mut harness = serve(service).await;
+        let list = subscription_list(
+            gnmi::subscription_list::Mode::Stream,
+            gnmi::SubscriptionMode::Sample,
+            neighbor_session_state_path("10.0.0.2"),
+        );
+        let mut stream = harness
+            .client
+            .subscribe(tokio_stream::iter(vec![subscribe_msg(list)]))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_sync(&mut stream).await;
+        peers
+            .lock()
+            .unwrap()
+            .push(test_peer("10.0.0.2".parse().unwrap()));
+        let response = next_bounded(&mut stream).await.unwrap().unwrap();
+        let Some(gnmi::subscribe_response::Response::Update(notification)) = response.response
+        else {
+            panic!("expected appeared-peer Update, got {response:?}");
+        };
+        assert_eq!(notification.update.len(), 1);
     }
 
     #[tokio::test]
@@ -3389,19 +3563,21 @@ mod tests {
 
     #[tokio::test]
     async fn updates_only_stream_sample_resumes_updates_after_initial_sync() {
-        // Load-bearing break: removing the clear suppresses later samples;
-        // moving it before the first forward emits data before initial sync.
+        // Load-bearing break: removing the updates_only clear suppresses all
+        // reads; strict absence closes before the later peer and dropped reply.
         use std::sync::atomic::{AtomicUsize, Ordering};
-        let (peer_tx, mut peer_rx) = tokio::sync::mpsc::channel(2);
+        let (peer_tx, mut peer_rx) = tokio::sync::mpsc::channel(3);
         let calls = Arc::new(AtomicUsize::new(0));
         let actor_calls = Arc::clone(&calls);
         let actor = tokio::spawn(async move {
-            for call in 1..=2 {
+            for call in 1..=3 {
                 let PeerManagerCommand::ListPeers { reply } = peer_rx.recv().await.unwrap() else {
                     panic!("expected ListPeers command");
                 };
                 actor_calls.store(call, Ordering::SeqCst);
                 if call == 1 {
+                    reply.send(Vec::new()).unwrap();
+                } else if call == 2 {
                     reply
                         .send(vec![test_peer("10.0.0.2".parse().unwrap())])
                         .unwrap();
@@ -3412,7 +3588,7 @@ mod tests {
         let mut list = subscription_list(
             gnmi::subscription_list::Mode::Stream,
             gnmi::SubscriptionMode::Sample,
-            neighbor_session_state_wildcard_path(),
+            neighbor_session_state_path("10.0.0.2"),
         );
         list.updates_only = true;
         let mut stream = harness
@@ -3427,17 +3603,21 @@ mod tests {
             Some(gnmi::subscribe_response::Response::SyncResponse(true))
         );
         assert_eq!(calls.load(Ordering::SeqCst), 0);
-        let sampled = next_bounded(&mut stream).await.unwrap().unwrap();
+        let sampled = tokio::time::timeout(Duration::from_secs(4), stream.message())
+            .await
+            .expect("two SAMPLE cycles timed out")
+            .unwrap()
+            .unwrap();
         let Some(gnmi::subscribe_response::Response::Update(notification)) = sampled.response
         else {
             panic!("expected sampled neighbor Update, got {sampled:?}");
         };
         assert!(!notification.update.is_empty());
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
         let error = next_bounded(&mut stream).await.unwrap_err();
         assert_eq!(error.code(), tonic::Code::Unavailable);
         assert_eq!(error.message(), "peer manager dropped reply");
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
         tokio::time::timeout(Duration::from_secs(2), actor)
             .await
             .unwrap()
@@ -3745,14 +3925,12 @@ mod tests {
 
     #[tokio::test]
     async fn subscribe_on_change_streams_session_transitions() {
-        // Inject a SessionStateChanged event through EHM and verify
-        // the ON_CHANGE subscriber receives the new state on the
-        // session-state leaf.
+        // Load-bearing break: rejecting an absent initial concrete neighbor
+        // prevents sync and the later EHM transition Update from arriving.
         use rustbgpd_event_history::{
             Category, EnvelopePeers, EventEnvelope, PayloadCodec, Severity,
         };
-        let peer = test_peer("10.0.0.2".parse().unwrap());
-        let (service, manager) = ehm_service(vec![peer]).await;
+        let (service, manager) = ehm_service(Vec::new()).await;
         let mut harness = serve(service).await;
 
         let mut stream = harness
@@ -3764,9 +3942,7 @@ mod tests {
             .unwrap()
             .into_inner();
 
-        // Drain the initial snapshot + sync_response so the test
-        // observes only the post-sync transition.
-        let _initial = stream.message().await.unwrap().unwrap();
+        // The absent peer produces no initial Update, but sync completes.
         let sync = stream.message().await.unwrap().unwrap();
         assert_eq!(
             sync.response,
