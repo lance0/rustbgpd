@@ -161,7 +161,7 @@ pub(crate) struct PeerSession {
     ///   retained** so the run-loop's writer-exit `select!` arm can
     ///   observe the writer task exiting — cleanly after draining its
     ///   priority queue on ordinary closes, or with
-    ///   `WriterExit::TornDown` after the saturation hard close (bulk
+    ///   `WriterExit::TornDown` after a local hard close (bulk
     ///   backlog discarded, `Cease/8` flushed best-effort). The arm body
     ///   clears `writer_join = None` after `JoinHandle::await` resolves
     ///   exactly once — polling a completed `JoinHandle` again panics.
@@ -177,7 +177,7 @@ pub(crate) struct PeerSession {
     writer_bulk_tx: Option<mpsc::Sender<Bytes>>,
     /// Unbounded priority channel handed to the writer task. Carries
     /// OPEN, KEEPALIVE, NOTIFICATION, operator ROUTE-REFRESH commands,
-    /// and the `Cease/8` we emit on bulk saturation.
+    /// and the `Cease/8` we emit on a local Out-of-Resources teardown.
     writer_priority_tx: Option<mpsc::UnboundedSender<Bytes>>,
     /// KEEPALIVE cadence control for the writer task (ADR-0078). The
     /// session sends `Some(interval)` when the FSM starts the keepalive
@@ -393,6 +393,8 @@ pub(crate) struct PeerSession {
     flap_count: u64,
     established_at: Option<Instant>,
     last_error: String,
+    /// Root cause of an in-flight local Cease/8 teardown.
+    pending_outbound_teardown_cause: Option<crate::handle::SessionFailureCause>,
     /// Latest query-time TCP-AO inspection for the currently owned stream.
     tcp_ao_info: Option<crate::TcpAoInfoSnapshot>,
     /// Secret-free configured MKT identity/rollover metadata. This survives
@@ -1148,6 +1150,7 @@ impl PeerSession {
             flap_count: 0,
             established_at: None,
             last_error: String::new(),
+            pending_outbound_teardown_cause: None,
             tcp_ao_info: None,
             tcp_ao_key_metadata,
             tcp_ao_protected,
@@ -1316,6 +1319,7 @@ impl PeerSession {
             flap_count: 0,
             established_at: None,
             last_error: String::new(),
+            pending_outbound_teardown_cause: None,
             tcp_ao_info,
             tcp_ao_key_metadata,
             tcp_ao_protected,
@@ -1562,6 +1566,11 @@ impl PeerSession {
             )
             .to_string(),
             shutdown_reason,
+            failure_cause: (direction == SessionNotificationDirection::Sent
+                && notification.code == NotificationCode::Cease
+                && notification.subcode == cease_subcode::OUT_OF_RESOURCES)
+                .then_some(self.pending_outbound_teardown_cause)
+                .flatten(),
         };
 
         if let Err(e) = tx.try_send(event) {
@@ -1599,6 +1608,11 @@ impl PeerSession {
         &mut self,
         join_result: Result<Result<(), writer::WriterExit>, tokio::task::JoinError>,
     ) {
+        // A local Cease/8 cause owns the diagnostic until the writer exit
+        // resulting from that teardown is observed. Taking the latch here
+        // preserves the cause through this match while allowing a later,
+        // independent connection failure to become visible.
+        let pending_outbound_cause = self.pending_outbound_teardown_cause.take();
         match join_result {
             Ok(Ok(())) => {
                 debug!(peer = %self.peer_label, "writer task exited cleanly");
@@ -1610,10 +1624,12 @@ impl PeerSession {
                 self.last_down_reason = Some(PeerDownReason::LocalNoNotification(
                     SEND_HOLD_TIMER_EXPIRES_FSM_EVENT,
                 ));
-                self.last_error = format!(
-                    "send hold timer expired after {}s (RFC 9687)",
-                    limit.as_secs()
-                );
+                if pending_outbound_cause.is_none() {
+                    self.last_error = format!(
+                        "send hold timer expired after {}s (RFC 9687)",
+                        limit.as_secs()
+                    );
+                }
                 self.emit_notification_event(
                     SessionNotificationDirection::Sent,
                     &NotificationMessage {
@@ -1629,22 +1645,53 @@ impl PeerSession {
                 );
             }
             Ok(Err(writer::WriterExit::TornDown)) => {
-                // Saturation teardown: the writer discarded the bulk
-                // backlog, put the Cease/8 on the wire best-effort, and
-                // hard-closed. Fall through so the FSM sees
+                // Local hard teardown: the writer discarded the bulk backlog,
+                // put the Cease/8 on the wire best-effort, and hard-closed.
+                // Fall through so the FSM sees
                 // `TcpConnectionFails` and the RIB gets its
                 // PeerDown/deregistration from this run-loop path.
-                debug!(peer = %self.peer_label, "writer task hard-closed by saturation teardown");
+                debug!(peer = %self.peer_label, "writer task completed local hard teardown");
             }
             Ok(Err(writer::WriterExit::Io(e))) => {
-                debug!(peer = %self.peer_label, error = %e, "writer task TCP error");
+                let cause = crate::handle::SessionFailureCause::WriterIo(e.kind());
+                debug!(peer = %self.peer_label, cause = %cause, "writer task TCP error");
+                if pending_outbound_cause.is_none() {
+                    self.last_error = cause.to_string();
+                }
             }
             Err(e) => {
-                warn!(peer = %self.peer_label, error = %e, "writer task panicked");
+                let cause = if e.is_cancelled() {
+                    crate::handle::SessionFailureCause::WriterCancelled
+                } else {
+                    crate::handle::SessionFailureCause::WriterPanicked
+                };
+                warn!(peer = %self.peer_label, cause = %cause, "writer task ended unexpectedly");
+                if pending_outbound_cause.is_none() {
+                    self.last_error = cause.to_string();
+                }
             }
         }
         self.handle_tcp_disconnect();
         self.drive_fsm(Event::TcpConnectionFails).await;
+    }
+
+    async fn handle_tcp_read_result(&mut self, result: std::io::Result<usize>) {
+        match result {
+            Ok(0) => {
+                self.handle_tcp_disconnect();
+                self.drive_fsm(Event::TcpConnectionFails).await;
+            }
+            Ok(_n) => self.process_read_buffer().await,
+            Err(e) => {
+                let cause = crate::handle::SessionFailureCause::ReaderIo(e.kind());
+                debug!(peer = %self.peer_label, cause = %cause, "TCP read error");
+                if self.pending_outbound_teardown_cause.is_none() {
+                    self.last_error = cause.to_string();
+                }
+                self.handle_tcp_disconnect();
+                self.drive_fsm(Event::TcpConnectionFails).await;
+            }
+        }
     }
 
     pub(super) fn record_otc_routes_blocked(
@@ -1720,18 +1767,7 @@ impl PeerSession {
             tokio::select! {
                 // TCP read — only when connected and past the Idle bootstrap
                 result = read_tcp(read_half, &mut read_buf.buf), if read_active => {
-                    match result {
-                        Ok(0) => {
-                            self.handle_tcp_disconnect();
-                            self.drive_fsm(Event::TcpConnectionFails).await;
-                        }
-                        Ok(_n) => self.process_read_buffer().await,
-                        Err(e) => {
-                            debug!(peer = %self.peer_label, error = %e, "TCP read error");
-                            self.handle_tcp_disconnect();
-                            self.drive_fsm(Event::TcpConnectionFails).await;
-                        }
-                    }
+                    self.handle_tcp_read_result(result).await;
                 }
 
                 // External command

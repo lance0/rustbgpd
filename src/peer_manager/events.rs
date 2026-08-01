@@ -272,10 +272,14 @@ impl PeerManager {
             TransportNotificationDirection::Sent => "sent",
             TransportNotificationDirection::Received => "received",
         };
-        let reason = format!(
+        let mut reason = format!(
             "BGP NOTIFICATION {direction} for peer {}: {}/{} ({})",
             event.peer_addr, event.code, event.subcode, event.description
         );
+        if let Some(cause) = event.failure_cause {
+            use std::fmt::Write as _;
+            let _ = write!(reason, "; transport failure: {cause}");
+        }
         self.publish_session_event(SessionEvent::Notification(SessionNotificationEvent {
             event_type,
             peer: event.peer_addr,

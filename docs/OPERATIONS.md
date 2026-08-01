@@ -2191,6 +2191,13 @@ warning log. Cease/8 still tears down the session if transport encounters an
 impossible single-route message or a missing/mismatched encoder snapshot; that
 is defense in depth, not the normal rejection path.
 
+Neighbor `last_error` and session notification history retain the bounded local
+cause of that defense-in-depth teardown, outbound queue saturation, and TCP
+reader/writer failures. These diagnostics deliberately exclude raw operating-
+system errors, task panic payloads, routes, attributes, policy data, and
+shutdown communication text. A locally sent Cease/8 retains the category while
+its canonical BGP description and wire payload remain unchanged.
+
 An RFC 9107 ORR peer's explain ranks the per-vantage candidate set the
 ORR export uses (with per-candidate cost output). When filtered or ignored
 topology inputs are present, the stable

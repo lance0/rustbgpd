@@ -3054,6 +3054,7 @@ async fn received_notification_events_report_direct_and_hard_reset_shutdown_reas
         assert_eq!(event.code, NotificationCode::Cease.as_u8());
         assert_eq!(event.subcode, expected_subcode);
         assert_eq!(event.shutdown_reason.as_deref(), Some(reason));
+        assert_eq!(event.failure_cause, None);
     }
 }
 
@@ -3155,6 +3156,7 @@ async fn locally_sent_notification_events_report_direct_and_hard_reset_shutdown_
         assert_eq!(event.code, NotificationCode::Cease.as_u8());
         assert_eq!(event.subcode, expected_subcode);
         assert_eq!(event.shutdown_reason.as_deref(), Some(reason));
+        assert_eq!(event.failure_cause, None);
     }
 }
 
@@ -3191,6 +3193,7 @@ async fn stop_command_sends_and_reports_exact_shutdown_communication() {
         event.shutdown_reason.as_deref(),
         Some("planned maintenance")
     );
+    assert_eq!(event.failure_cause, None);
     let notification = read_until_notification(&mut server).await;
     assert_eq!(notification.code, NotificationCode::Cease);
     assert_eq!(notification.subcode, cease_subcode::ADMINISTRATIVE_SHUTDOWN);
@@ -7019,19 +7022,31 @@ impl rustbgpd_rib::ExactExportSnapshot for ForeignExactExportSnapshot {
 async fn route_bearing_envelope_without_own_session_snapshot_fails_closed() {
     use rustbgpd_wire::notification::{NotificationCode, cease_subcode};
 
+    type SnapshotFailureCase = (
+        &'static str,
+        Option<Arc<dyn rustbgpd_rib::ExactExportSnapshot>>,
+        crate::handle::SessionFailureCause,
+    );
+
     let (other_session, _other_rib_rx) = make_test_session_with_rib(65001, 65002);
-    let cases: Vec<(&str, Option<Arc<dyn rustbgpd_rib::ExactExportSnapshot>>)> = vec![
-        ("missing", None),
+    let cases: Vec<SnapshotFailureCase> = vec![
+        (
+            "missing",
+            None,
+            crate::handle::SessionFailureCause::ExportSnapshotMissing,
+        ),
         (
             "foreign concrete type",
             Some(Arc::new(ForeignExactExportSnapshot)),
+            crate::handle::SessionFailureCause::ExportSnapshotIncompatible,
         ),
         (
             "same concrete type from another session",
             Some(other_session.publish_export_profile()),
+            crate::handle::SessionFailureCause::ExportSnapshotWrongOwner,
         ),
     ];
-    for (name, snapshot) in cases {
+    for (name, snapshot, cause) in cases {
         let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
         let (client, mut server) = connected_stream_pair().await;
         session.test_install_stream(client);
@@ -7047,12 +7062,182 @@ async fn route_bearing_envelope_without_own_session_snapshot_fails_closed() {
         };
         assert_eq!(notification.code, NotificationCode::Cease);
         assert_eq!(notification.subcode, cease_subcode::OUT_OF_RESOURCES);
+        assert_eq!(
+            session.pending_outbound_teardown_cause,
+            Some(cause),
+            "{name}"
+        );
+        assert_eq!(session.last_error, cause.to_string(), "{name}");
         assert!(session.read_half.is_none(), "{name}: read half must close");
         assert!(
             session.writer_bulk_tx.is_none(),
             "{name}: bulk sender must close"
         );
     }
+}
+
+/// Load-bearing: storing raw I/O text leaks the sentinel, dropping the read
+/// cause loses the bounded value, and treating clean EOF as an error replaces
+/// the seeded diagnostic.
+#[tokio::test]
+async fn tcp_reader_error_is_bounded_but_clean_eof_is_not_an_error() {
+    let (mut failed, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (event_tx, mut event_rx) = mpsc::channel(1);
+    failed.session_event_tx = Some(event_tx);
+    failed.last_error = "prior".to_string();
+    failed
+        .handle_tcp_read_result(Err(std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "secret reader detail",
+        )))
+        .await;
+    assert_eq!(
+        failed.last_error,
+        "TCP reader I/O failure (ConnectionReset)"
+    );
+    assert!(!failed.last_error.contains("secret"));
+    assert!(matches!(
+        event_rx.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
+
+    let (mut eof, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    eof.last_error = "prior".to_string();
+    eof.handle_tcp_read_result(Ok(0)).await;
+    assert_eq!(eof.last_error, "prior");
+}
+
+/// Load-bearing: raw writer or `JoinError` rendering leaks either sentinel;
+/// collapsing panic and cancellation or changing a clean exit replaces one of
+/// the exact bounded/seeded assertions.
+#[tokio::test]
+async fn writer_io_and_join_failure_are_bounded() {
+    let (mut io_session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (event_tx, mut event_rx) = mpsc::channel(1);
+    io_session.session_event_tx = Some(event_tx);
+    io_session
+        .handle_writer_exit(Ok(Err(super::writer::WriterExit::Io(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "secret writer detail",
+        )))))
+        .await;
+    assert_eq!(io_session.last_error, "TCP writer I/O failure (BrokenPipe)");
+    assert!(!io_session.last_error.contains("secret"));
+    assert!(matches!(
+        event_rx.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
+
+    let join = tokio::spawn(async { panic!("secret panic detail") }).await;
+    let (mut panic_session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    panic_session.handle_writer_exit(join.map(|_| Ok(()))).await;
+    assert_eq!(panic_session.last_error, "TCP writer task panicked");
+    assert!(!panic_session.last_error.contains("secret"));
+
+    let cancelled = tokio::spawn(std::future::pending::<()>());
+    cancelled.abort();
+    let cancelled = cancelled.await;
+    let (mut cancelled_session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    cancelled_session
+        .handle_writer_exit(cancelled.map(|()| Ok(())))
+        .await;
+    assert_eq!(cancelled_session.last_error, "TCP writer task cancelled");
+
+    let (mut clean, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    clean.last_error = "prior actionable failure".to_string();
+    clean.handle_writer_exit(Ok(Ok(()))).await;
+    assert_eq!(clean.last_error, "prior actionable failure");
+}
+
+/// Load-bearing: removing the pending-cause guards lets consequential writer
+/// or reader I/O replace the exact-export cause; never clearing the latch keeps
+/// the final independent read failure from becoming visible.
+#[tokio::test]
+async fn outbound_root_cause_survives_writer_exit() {
+    let cause = crate::handle::SessionFailureCause::PostCommitInvariant;
+    for exit in [
+        super::writer::WriterExit::TornDown,
+        super::writer::WriterExit::Io(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "secondary writer detail",
+        )),
+    ] {
+        let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+        session.pending_outbound_teardown_cause = Some(cause);
+        session.last_error = cause.to_string();
+        session.handle_writer_exit(Ok(Err(exit))).await;
+        assert_eq!(session.last_error, cause.to_string());
+        assert!(session.pending_outbound_teardown_cause.is_none());
+    }
+
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    session.pending_outbound_teardown_cause = Some(cause);
+    session.last_error = cause.to_string();
+    session
+        .handle_tcp_read_result(Err(std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "consequential reader detail",
+        )))
+        .await;
+    assert_eq!(session.last_error, cause.to_string());
+    assert_eq!(session.pending_outbound_teardown_cause, Some(cause));
+    session
+        .handle_writer_exit(Ok(Err(super::writer::WriterExit::TornDown)))
+        .await;
+    assert!(session.pending_outbound_teardown_cause.is_none());
+    session
+        .handle_tcp_read_result(Err(std::io::Error::new(
+            std::io::ErrorKind::ConnectionAborted,
+            "later independent reader detail",
+        )))
+        .await;
+    assert_eq!(
+        session.last_error,
+        "TCP reader I/O failure (ConnectionAborted)"
+    );
+}
+
+/// Load-bearing: omitting a cause, classifying a snapshot breach as generic
+/// post-commit failure, or labeling any exact-export site as saturation changes
+/// one of these production-source inventory counts.
+#[test]
+fn outbound_out_of_resources_sites_have_specific_cause_inventory() {
+    let source = include_str!("outbound.rs");
+    let production = source
+        .split_once("\n#[cfg(test)]\nmod tests")
+        .expect("outbound module keeps production before tests")
+        .0;
+    assert_eq!(
+        production
+            .matches("trigger_outbound_out_of_resources_teardown(")
+            .count(),
+        17
+    );
+    assert_eq!(
+        production
+            .matches("SessionFailureCause::ExportSnapshotMissing")
+            .count(),
+        1
+    );
+    assert_eq!(
+        production
+            .matches("SessionFailureCause::ExportSnapshotIncompatible")
+            .count(),
+        1
+    );
+    assert_eq!(
+        production
+            .matches("SessionFailureCause::ExportSnapshotWrongOwner")
+            .count(),
+        1
+    );
+    assert_eq!(
+        production
+            .matches("SessionFailureCause::PostCommitInvariant")
+            .count(),
+        14
+    );
+    assert!(!production.contains("SessionFailureCause::OutboundSaturation"));
 }
 /// Without the negotiated Route Refresh capability the request is
 /// skipped (warned, not sent) — the rest of the update still goes out.
@@ -15178,10 +15363,7 @@ async fn outbound_saturation_teardown_emits_cease_out_of_resources() {
         session.notifications_sent, 1,
         "a duplicate saturation trigger must not invent another sent notification"
     );
-    assert_eq!(
-        session.last_error,
-        "sent NOTIFICATION 6/8 (Out of Resources)"
-    );
+    assert_eq!(session.last_error, "outbound writer queue saturated");
     let prometheus_count = counter_value(
         &session.metrics,
         "bgp_notifications_sent_total",
@@ -15195,6 +15377,10 @@ async fn outbound_saturation_teardown_emits_cease_out_of_resources() {
     assert_eq!(event.direction, SessionNotificationDirection::Sent);
     assert_eq!(event.code, NotificationCode::Cease.as_u8());
     assert_eq!(event.subcode, cease_subcode::OUT_OF_RESOURCES);
+    assert_eq!(
+        event.failure_cause,
+        Some(crate::handle::SessionFailureCause::OutboundSaturation)
+    );
     assert!(
         matches!(event_rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
         "duplicate trigger must not publish another sent-notification event"
