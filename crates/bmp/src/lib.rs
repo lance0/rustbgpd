@@ -21,7 +21,7 @@ pub mod types;
 pub use client::BmpClient;
 pub use manager::BmpManager;
 pub use types::{
-    BmpClientConfig, BmpControlEvent, BmpDumpChunk, BmpDumpCursor, BmpDumpRequest, BmpEvent,
-    BmpLocRibConfig, BmpMonitorFilter, BmpPathStatus, BmpPeerInfo, BmpPeerType, BmpVersion,
-    LOC_RIB_TABLE_NAME, PeerDownReason,
+    BmpClientConfig, BmpCollectorBootstrap, BmpControlEvent, BmpDumpChunk, BmpDumpCursor,
+    BmpDumpRequest, BmpEvent, BmpLocRibConfig, BmpMonitorFilter, BmpPathStatus, BmpPeerInfo,
+    BmpPeerType, BmpVersion, LOC_RIB_TABLE_NAME, PeerDownReason,
 };

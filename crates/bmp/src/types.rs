@@ -181,7 +181,7 @@ pub struct BmpPathStatus {
 }
 
 /// Control-plane events sent from BMP clients to the BMP manager.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
 pub enum BmpControlEvent {
     /// A collector connected and successfully completed BMP Initiation.
     CollectorConnected {
@@ -189,6 +189,10 @@ pub enum BmpControlEvent {
         collector_id: usize,
         /// TCP socket address of the collector.
         collector_addr: SocketAddr,
+        /// Fresh bounded channel for messages belonging to this TCP connection.
+        sender: tokio::sync::mpsc::Sender<Bytes>,
+        /// Manager acknowledgement and ordered bootstrap payload.
+        bootstrap: oneshot::Sender<BmpCollectorBootstrap>,
     },
     /// A collector disconnected after previously being connected.
     CollectorDisconnected {
@@ -196,12 +200,30 @@ pub enum BmpControlEvent {
         collector_id: usize,
         /// TCP socket address of the collector.
         collector_addr: SocketAddr,
+        /// Connection generation that disconnected.
+        generation: u64,
+    },
+    /// The client has written the ordered bootstrap onto TCP.
+    CollectorBootstrapComplete {
+        /// Index of the collector in the configuration list.
+        collector_id: usize,
+        /// Manager-owned connection generation returned in the bootstrap.
+        generation: u64,
     },
     /// Coordinated daemon shutdown request.
     ///
     /// The BMP manager stops fan-out and drops collector channels so
     /// per-collector clients can send BMP Termination and exit.
     Shutdown,
+}
+
+/// Ordered manager-to-client state required before live BMP fan-out begins.
+#[derive(Debug)]
+pub struct BmpCollectorBootstrap {
+    /// Connection generation this bootstrap was built for.
+    pub generation: u64,
+    /// Fully framed BMP messages to write before live channel traffic.
+    pub messages: Vec<Bytes>,
 }
 
 /// Information about a monitored peer, used to build the BMP per-peer header.
