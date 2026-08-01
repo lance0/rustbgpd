@@ -1216,9 +1216,19 @@ listing can therefore restart after an unrelated peer in the same class
 changes. The server retains no route snapshot or cursor registry. `page_size`
 is capped server-side at 1000 rows per page (0 = default of 100).
 
-Every `ListRoutesResponse` also carries `total_count`: the exact filtered
-count for the whole selected view, regardless of page size. This is the
-contract behind `rbgp rib --count` and
+Every `ListRoutesResponse`, including an empty or terminal page, carries a
+`page_version` message with an `epoch` and `generation`. The pair exposes the
+same process-local consistency fence used by continuation tokens. A client may
+compare the complete pair for equality across the pages and peer walks of one
+logical capture; a changed value means the capture must be discarded. The
+values are opaque, may repeat after daemon restart, and are not a RIB snapshot
+generation. In particular, `page_version.generation` must never be compared
+with or substituted for a producer-local `rbgp-ribsnap/1` header generation.
+Older daemons omit this additive message field.
+
+Every response also carries `total_count`: the exact filtered count for the
+whole selected view, regardless of page size. This is the contract behind
+`rbgp rib --count` and
 `rbgp rib received|advertised <PEER> --count`, which request a single-row
 page and read only `total_count`.
 

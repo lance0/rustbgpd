@@ -989,6 +989,10 @@ fn route_page_to_response(
             .collect(),
         next_page_token,
         total_count: page.total,
+        page_version: Some(proto::RoutePageVersion {
+            epoch: page.version.epoch,
+            generation: page.version.generation,
+        }),
     }
 }
 
@@ -4999,6 +5003,50 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Load-bearing response proof: removing `page_version` from
+    /// `route_page_to_response` makes this empty terminal-page assertion red.
+    #[test]
+    fn empty_terminal_route_page_exposes_process_local_version() {
+        use prost::Message;
+
+        let version = RoutePageVersion {
+            epoch: 0x0123_4567_89ab_cdef,
+            generation: 42,
+        };
+        let response = route_page_to_response(
+            &RoutePage {
+                routes: Vec::new(),
+                total: 0,
+                has_more: false,
+                version,
+            },
+            RouteQueryScope::Best,
+            &route_page_identity(&list_routes_request()),
+            true,
+        );
+
+        assert!(response.routes.is_empty());
+        assert!(response.next_page_token.is_empty());
+        assert_eq!(response.total_count, 0);
+        assert_eq!(
+            response.page_version,
+            Some(proto::RoutePageVersion {
+                epoch: version.epoch,
+                generation: version.generation,
+            })
+        );
+
+        let decoded = proto::ListRoutesResponse::decode(response.encode_to_vec().as_slice())
+            .expect("route-page response round trip");
+        assert_eq!(
+            decoded.page_version,
+            Some(proto::RoutePageVersion {
+                epoch: version.epoch,
+                generation: version.generation,
+            })
+        );
     }
 
     #[test]

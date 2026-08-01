@@ -25,7 +25,7 @@ use crate::error::CliError;
 use crate::output;
 use crate::proto::neighbor_service_client::NeighborServiceClient;
 use crate::proto::rib_service_client::RibServiceClient;
-use crate::proto::{ListNeighborsRequest, ListRoutesRequest, Route};
+use crate::proto::{AddressFamily, ListNeighborsRequest, ListRoutesRequest, Route};
 use rustbgpctl::ribdiff::{
     self, AsPathSegment, AsSegmentKind, DiffClass, DiffLimits, DiffReport, FamilyId, Nlri,
     PathAttrs, PeerId, RoutePath, RouteSet, SnapshotMeta, UnknownAttr, Verdict,
@@ -67,9 +67,9 @@ const LIVE_SOURCE_NOTES: &[&str] = &[
     "unknown attributes: path attributes outside the typed set (origin, as_path, next_hop, \
      med, local_pref, communities, extended/large communities) are not visible over gRPC \
      and are not compared",
-    "generation: route-page tokens are process-local and mutation-fenced, so mid-walk \
-     drift aborts the listing and requires a restart; the API still exposes no numeric \
-     RIB generation, so the snapshot header's generation is adopted for the live side",
+    "generation: the route-page epoch/generation pair is a process-local consistency fence, \
+     compared only across live pages and peers; it is not a RIB snapshot generation and is \
+     never compared with the producer-local snapshot header generation",
 ];
 
 /// MED-conflation caveat, emitted only when the daemon never populated
@@ -253,6 +253,17 @@ async fn run(connection: Connection, opts: &AdvertisedDiffOpts) -> Result<(Strin
     // True once any live route carries `med_attr` — the daemon is
     // MED-absence-aware and the MED-conflation caveat does not apply.
     let mut med_attr_seen = false;
+    let mut live_capture = LiveCaptureState {
+        // One process-local route-page fence spans the entire live capture.
+        // The nested option distinguishes "no page observed yet" from an
+        // older daemon that omitted the additive page_version field.
+        expected_page_version: None,
+        // The operator-selected live-row ceiling is global across every peer,
+        // not reset for each independently constructed per-peer RouteSet.
+        returned_rows: 0,
+        max_routes: opts.max_routes,
+        requested_peer_count: requested.len(),
+    };
 
     let mut report = DiffReport {
         schema: ribdiff::SCHEMA_VERSION,
@@ -346,7 +357,7 @@ async fn run(connection: Connection, opts: &AdvertisedDiffOpts) -> Result<(Strin
             &mut live,
             &family_filter,
             &ignored,
-            opts.max_routes,
+            &mut live_capture,
             deadline,
         )
         .await?;
@@ -862,6 +873,13 @@ fn as_path_segment(asns: &[u32]) -> Vec<AsPathSegment> {
 // live side: fail-closed Adj-RIB-Out pagination
 // ---------------------------------------------------------------------------
 
+struct LiveCaptureState {
+    expected_page_version: Option<Option<(u64, u64)>>,
+    returned_rows: usize,
+    max_routes: usize,
+    requested_peer_count: usize,
+}
+
 /// Walk every page of `ListAdvertisedRoutes` for one peer, inserting into
 /// `live` page by page (only one page is ever buffered). Fail-closed:
 ///
@@ -883,13 +901,13 @@ async fn fetch_advertised_into(
     live: &mut RouteSet,
     family_filter: &[FamilyId],
     ignored: &[String],
-    max_routes: usize,
+    capture: &mut LiveCaptureState,
     deadline: Instant,
 ) -> Result<bool, CliError> {
     let peer_addr = peer.address;
     let mut req = ListRoutesRequest {
         neighbor_address: peer_addr.to_string(),
-        afi_safi: 0,
+        afi_safi: requested_afi_safi(family_filter),
         page_size: ROUTE_PAGE_SIZE,
         page_token: String::new(),
         prefix_filter: String::new(),
@@ -912,6 +930,14 @@ async fn fetch_advertised_into(
         )
         .await?
         .into_inner();
+        observe_page_version(
+            &mut capture.expected_page_version,
+            resp.page_version
+                .as_ref()
+                .map(|version| (version.epoch, version.generation)),
+            capture.requested_peer_count,
+            peer_addr,
+        )?;
         match expected_total {
             None => expected_total = Some(resp.total_count),
             Some(total) if total != resp.total_count => {
@@ -924,14 +950,17 @@ async fn fetch_advertised_into(
             }
             Some(_) => {}
         }
-        if fetched + resp.routes.len() as u64 > max_routes as u64 {
+        if resp.routes.len() > capture.max_routes.saturating_sub(capture.returned_rows) {
             return Err(op(format!(
-                "max_routes limit exceeded while fetching advertised routes for peer \
-                 {peer_addr} (more than {max_routes}); refusing to compare truncated input"
+                "max_routes limit exceeded while fetching advertised routes across all \
+                 requested peers (more than {}; reached peer {peer_addr}); refusing to compare \
+                 truncated input",
+                capture.max_routes
             )));
         }
+        capture.returned_rows += resp.routes.len();
+        fetched += resp.routes.len() as u64;
         for route in &resp.routes {
-            fetched += 1;
             med_attr_seen |= route.med_attr.is_some();
             let (family, nlri, path) = convert_live_route(route)
                 .map_err(|msg| op(format!("daemon returned an unusable route: {msg}")))?;
@@ -963,6 +992,57 @@ async fn fetch_advertised_into(
         )));
     }
     Ok(med_attr_seen)
+}
+
+/// Select the narrowest server-side family request that exactly represents
+/// the operator's filter. Empty (default) and explicit dual-family filters
+/// use UNSPECIFIED; returned rows are still validated defensively below.
+fn requested_afi_safi(family_filter: &[FamilyId]) -> i32 {
+    match family_filter {
+        [family] if *family == FamilyId::IPV4_UNICAST => AddressFamily::Ipv4Unicast as i32,
+        [family] if *family == FamilyId::IPV6_UNICAST => AddressFamily::Ipv6Unicast as i32,
+        _ => AddressFamily::Unspecified as i32,
+    }
+}
+
+/// Hold one advertised-route response version across every page and peer in
+/// the capture. Absence is tolerated only for a one-peer walk against an
+/// older daemon; present/absent mixing and value changes always fail closed.
+fn observe_page_version(
+    expected: &mut Option<Option<(u64, u64)>>,
+    actual: Option<(u64, u64)>,
+    requested_peer_count: usize,
+    peer_addr: IpAddr,
+) -> Result<(), CliError> {
+    match *expected {
+        None => {
+            if actual.is_none() && requested_peer_count != 1 {
+                return Err(op(format!(
+                    "advertised listings for {requested_peer_count} requested peers omit \
+                     page_version; an older daemon can be compared safely only when exactly \
+                     one deduplicated peer is requested"
+                )));
+            }
+            *expected = Some(actual);
+            Ok(())
+        }
+        Some(Some(version)) if actual == Some(version) => Ok(()),
+        Some(None) if actual.is_none() => Ok(()),
+        Some(Some(version)) => match actual {
+            Some(changed) => Err(op(format!(
+                "advertised route page_version changed during the live capture at peer \
+                 {peer_addr} ({version:?} -> {changed:?}); refusing a mixed-version comparison"
+            ))),
+            None => Err(op(format!(
+                "advertised route page_version presence changed during the live capture at \
+                 peer {peer_addr}; refusing mixed present/absent responses"
+            ))),
+        },
+        Some(None) => Err(op(format!(
+            "advertised route page_version presence changed during the live capture at peer \
+             {peer_addr}; refusing mixed present/absent responses"
+        ))),
+    }
 }
 
 fn convert_live_route(route: &Route) -> Result<(FamilyId, Nlri, RoutePath), String> {
@@ -1184,6 +1264,8 @@ mod tests {
 
     const PEER: &str = "192.0.2.1";
     const PEER_ASN: u32 = 64501;
+    const PEER_TWO: &str = "192.0.2.2";
+    const PEER_TWO_ASN: u32 = 64502;
     const DEADLINE_TEST_SECONDS: u64 = 2;
     const DEADLINE_TEST_OUTER_GUARD: Duration = Duration::from_secs(4);
 
@@ -1407,10 +1489,14 @@ mod tests {
     }
 
     fn route_line(prefix: &str, med: Option<u32>) -> String {
+        route_line_for(PEER, PEER_ASN, prefix, med)
+    }
+
+    fn route_line_for(peer: &str, peer_asn: u32, prefix: &str, med: Option<u32>) -> String {
         let mut value = serde_json::json!({
             "record": "route",
-            "peer": PEER,
-            "peer_asn": PEER_ASN,
+            "peer": peer,
+            "peer_asn": peer_asn,
             "prefix": prefix,
             "origin": 0,
             "as_path": [65001],
@@ -1468,10 +1554,32 @@ mod tests {
         next_page_token: &str,
         total_count: u64,
     ) -> server_proto::ListRoutesResponse {
+        versioned_page(routes, next_page_token, total_count, 11, 13)
+    }
+
+    fn versioned_page(
+        routes: Vec<server_proto::Route>,
+        next_page_token: &str,
+        total_count: u64,
+        epoch: u64,
+        generation: u64,
+    ) -> server_proto::ListRoutesResponse {
         server_proto::ListRoutesResponse {
             routes,
             next_page_token: next_page_token.to_string(),
             total_count,
+            page_version: Some(server_proto::RoutePageVersion { epoch, generation }),
+        }
+    }
+
+    fn legacy_page(
+        routes: Vec<server_proto::Route>,
+        next_page_token: &str,
+        total_count: u64,
+    ) -> server_proto::ListRoutesResponse {
+        server_proto::ListRoutesResponse {
+            page_version: None,
+            ..page(routes, next_page_token, total_count)
         }
     }
 
@@ -1558,6 +1666,189 @@ mod tests {
         let requests = server.state.list_route_requests.lock().await;
         let tokens: Vec<&str> = requests.iter().map(|r| r.page_token.as_str()).collect();
         assert_eq!(tokens, vec!["", "p1"]);
+    }
+
+    /// Load-bearing fence proof: rejecting an equal subsequent page version
+    /// in `observe_page_version` makes this multi-page/multi-peer success red.
+    #[tokio::test]
+    async fn one_page_version_spans_multiple_pages_and_peers() {
+        let file = snapshot_file(&[
+            header_line(),
+            route_line_for(PEER, PEER_ASN, "10.0.0.0/24", None),
+            route_line_for(PEER, PEER_ASN, "10.0.1.0/24", None),
+            route_line_for(PEER_TWO, PEER_TWO_ASN, "10.0.2.0/24", None),
+            trailer_line(3),
+        ]);
+        let server = spawn_mock_server(None).await;
+        *server.state.list_neighbors_response.lock().await =
+            vec![neighbor(PEER, PEER_ASN), neighbor(PEER_TWO, PEER_TWO_ASN)];
+        *server.state.list_route_pages.lock().await = vec![
+            page(vec![live_route("10.0.0.0", 0)], "p1", 2),
+            page(vec![live_route("10.0.1.0", 0)], "", 2),
+            page(vec![live_route("10.0.2.0", 0)], "", 1),
+        ];
+
+        let (rendered, code) = run_against(&server, &opts(file.path())).await.unwrap();
+        assert_eq!(code, EXIT_IN_SYNC, "output was:\n{rendered}");
+        let requests = server.state.list_route_requests.lock().await;
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[0].neighbor_address, PEER);
+        assert_eq!(requests[0].page_token, "");
+        assert_eq!(requests[1].neighbor_address, PEER);
+        assert_eq!(requests[1].page_token, "p1");
+        assert_eq!(requests[2].neighbor_address, PEER_TWO);
+        assert_eq!(requests[2].page_token, "");
+    }
+
+    /// Load-bearing fence proof: accepting different present values in
+    /// `observe_page_version` makes this stale-capture rejection red.
+    #[tokio::test]
+    async fn changed_page_version_exits_two() {
+        let file = snapshot_file(&many_route_lines(2));
+        let server = server_with_pages(vec![
+            versioned_page(vec![live_route("10.0.0.0", 0)], "p1", 2, 11, 13),
+            versioned_page(vec![live_route("10.0.1.0", 0)], "", 2, 11, 14),
+        ])
+        .await;
+
+        let err = run_against(&server, &opts(file.path())).await.unwrap_err();
+        assert!(
+            err.to_string().contains("page_version changed")
+                && err.to_string().contains("mixed-version"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// Load-bearing presence proof: accepting a missing version after a
+    /// present one in `observe_page_version` makes this rejection red.
+    #[tokio::test]
+    async fn mixed_page_version_presence_exits_two() {
+        let file = snapshot_file(&many_route_lines(2));
+        let server = server_with_pages(vec![
+            page(vec![live_route("10.0.0.0", 0)], "p1", 2),
+            legacy_page(vec![live_route("10.0.1.0", 0)], "", 2),
+        ])
+        .await;
+
+        let err = run_against(&server, &opts(file.path())).await.unwrap_err();
+        assert!(
+            err.to_string().contains("mixed present/absent"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// Load-bearing compatibility proof: rejecting all absent versions makes
+    /// the deduplicated one-peer case red; allowing them for multiple peers
+    /// makes the second assertion red.
+    #[tokio::test]
+    async fn legacy_page_versions_require_exactly_one_deduplicated_peer() {
+        let one_file = snapshot_file(&[
+            header_line(),
+            route_line("10.0.0.0/24", None),
+            trailer_line(1),
+        ]);
+        let one_server =
+            server_with_pages(vec![legacy_page(vec![live_route("10.0.0.0", 0)], "", 1)]).await;
+        let mut duplicated = opts(one_file.path());
+        duplicated.peers = vec![PEER.to_string(), PEER.to_string()];
+        let (rendered, code) = run_against(&one_server, &duplicated).await.unwrap();
+        assert_eq!(code, EXIT_IN_SYNC, "output was:\n{rendered}");
+
+        let multi_file = snapshot_file(&[header_line(), trailer_line(0)]);
+        let multi_server = spawn_mock_server(None).await;
+        *multi_server.state.list_neighbors_response.lock().await =
+            vec![neighbor(PEER, PEER_ASN), neighbor(PEER_TWO, PEER_TWO_ASN)];
+        *multi_server.state.list_route_pages.lock().await = vec![
+            legacy_page(vec![live_route("10.0.0.0", 0)], "", 1),
+            legacy_page(vec![live_route("10.0.1.0", 0)], "", 1),
+        ];
+        let mut multi = opts(multi_file.path());
+        multi.peers = vec![PEER.to_string(), PEER_TWO.to_string()];
+        let err = run_against(&multi_server, &multi).await.unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("only when exactly one deduplicated peer is requested"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// Load-bearing request proof: forcing `requested_afi_safi` to always use
+    /// UNSPECIFIED makes the concrete-family assertion red; sending either
+    /// concrete family for the dual-family case makes the last assertion red.
+    #[tokio::test]
+    async fn advertised_request_uses_concrete_family_only_for_exactly_one() {
+        let file = snapshot_file(&[
+            header_line(),
+            route_line("10.0.0.0/24", None),
+            trailer_line(1),
+        ]);
+
+        let single_server =
+            server_with_pages(vec![page(vec![live_route("10.0.0.0", 0)], "", 1)]).await;
+        let mut single = opts(file.path());
+        single.families = vec!["ipv4_unicast".to_string()];
+        let (_, code) = run_against(&single_server, &single).await.unwrap();
+        assert_eq!(code, EXIT_IN_SYNC);
+        assert_eq!(
+            single_server.state.list_route_requests.lock().await[0].afi_safi,
+            AddressFamily::Ipv4Unicast as i32
+        );
+
+        let both_server =
+            server_with_pages(vec![page(vec![live_route("10.0.0.0", 0)], "", 1)]).await;
+        let mut both = opts(file.path());
+        both.families = vec!["ipv4_unicast".to_string(), "ipv6_unicast".to_string()];
+        let (_, code) = run_against(&both_server, &both).await.unwrap();
+        assert_eq!(code, EXIT_IN_SYNC);
+        assert_eq!(
+            both_server.state.list_route_requests.lock().await[0].afi_safi,
+            AddressFamily::Unspecified as i32
+        );
+
+        let default_server =
+            server_with_pages(vec![page(vec![live_route("10.0.0.0", 0)], "", 1)]).await;
+        let (_, code) = run_against(&default_server, &opts(file.path()))
+            .await
+            .unwrap();
+        assert_eq!(code, EXIT_IN_SYNC);
+        assert_eq!(
+            default_server.state.list_route_requests.lock().await[0].afi_safi,
+            AddressFamily::Unspecified as i32
+        );
+    }
+
+    /// Load-bearing global-ceiling proof: resetting
+    /// `LiveCaptureState.returned_rows` in the peer loop makes these two
+    /// individually-small walks pass the limit.
+    #[tokio::test]
+    async fn max_routes_is_global_across_requested_peers() {
+        let file = snapshot_file(&[header_line(), trailer_line(0)]);
+        let server = spawn_mock_server(None).await;
+        *server.state.list_neighbors_response.lock().await =
+            vec![neighbor(PEER, PEER_ASN), neighbor(PEER_TWO, PEER_TWO_ASN)];
+        *server.state.list_route_pages.lock().await = vec![
+            page(
+                vec![live_route("10.0.0.0", 0), live_route("10.0.1.0", 0)],
+                "",
+                2,
+            ),
+            page(
+                vec![live_route("10.0.2.0", 0), live_route("10.0.3.0", 0)],
+                "",
+                2,
+            ),
+        ];
+        let mut limited = opts(file.path());
+        limited.peers = vec![PEER.to_string(), PEER_TWO.to_string()];
+        limited.max_routes = 3;
+
+        let err = run_against(&server, &limited).await.unwrap_err();
+        assert!(
+            err.to_string().contains("across all requested peers")
+                && err.to_string().contains(PEER_TWO),
+            "unexpected error: {err}"
+        );
+        assert_eq!(server.state.list_route_requests.lock().await.len(), 2);
     }
 
     #[tokio::test]
@@ -1693,8 +1984,8 @@ mod tests {
 
     #[tokio::test]
     async fn total_count_drift_across_pages_exits_two() {
-        // The API exposes no generation token; total_count movement is the
-        // RIB-changed-mid-capture detector.
+        // page_version is the primary cross-page fence. total_count remains
+        // defense in depth for legacy daemons and contract-violating replies.
         let file = snapshot_file(&[header_line(), trailer_line(0)]);
         let server = server_with_pages(vec![
             page(vec![live_route("10.0.0.0", 0)], "p1", 2),
