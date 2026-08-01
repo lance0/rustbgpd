@@ -1793,7 +1793,7 @@ impl BgpMetrics {
         let bmp_collector_drops = IntCounterVec::new(
             Opts::new(
                 "bmp_collector_drops_total",
-                "BMP messages dropped at the BmpManager→BmpClient channel per collector, by phase (fan_out, replay) and reason (channel_full, channel_closed)",
+                "BMP messages dropped per collector, by phase (fan_out, loc_rib_dump) and bounded channel/buffer/request/reply failure reason",
             ),
             &["collector", "phase", "reason"],
         )
@@ -1811,7 +1811,7 @@ impl BgpMetrics {
         let bmp_control_event_drops = IntCounterVec::new(
             Opts::new(
                 "bmp_control_event_drops_total",
-                "BMP control events (collector_connected, collector_disconnected) that failed to reach the manager — surfaces silent skipped PeerUp replay when the control channel is wedged",
+                "BMP control events (collector_connected, collector_bootstrap_complete, collector_disconnected) that failed to reach the manager, by bounded channel failure reason",
             ),
             &["collector", "kind", "reason"],
         )
@@ -4301,11 +4301,9 @@ impl BgpMetrics {
     }
 
     /// Record a BMP control event (e.g., `CollectorConnected`) that
-    /// failed to reach the manager. `reason` ∈ {`channel_closed`,
-    /// `channel_timeout`}. When this counter is non-zero the manager
-    /// hasn't processed the corresponding event, which (for
-    /// `collector_connected`) means the `PeerUp` cache replay never
-    /// fires for that reconnect.
+    /// failed to reach the manager. `reason` is one of `channel_full`,
+    /// `channel_closed`, or `channel_timeout`. When this counter is non-zero
+    /// the manager has not processed the corresponding connection phase.
     pub fn record_bmp_control_event_drop(&self, collector: &str, kind: &str, reason: &str) {
         self.bmp_control_event_drops
             .with_label_values(&[collector, kind, reason])

@@ -98,6 +98,20 @@ This ADR records the decisions of that arc as shipped.
    ceiling: each chunk re-scans the family's key set (O(table) per
    chunk); a sorted index is the upgrade path if dump CPU ever bites.
 
+   *As-built reconnect-fencing amendment:* each TCP attempt now owns a fresh
+   bounded live queue and a manager-owned generation. After Initiation the
+   manager returns a finite bootstrap containing cached ordinary Peer Ups and,
+   when selected, the Loc-RIB Peer Up. The client writes that bootstrap directly
+   to TCP and sends a generation-tagged completion barrier before the manager
+   admits the Loc-RIB dump. This prevents prior-session backlog from crossing a
+   reconnect and prevents a slow or large Peer Up bootstrap from racing the
+   dump into the live queue. Dump-request admission, each RIB reply, and each
+   collector send have separate finite deadlines. Only the terminal RIB chunk
+   carrying the synthesized End-of-RIB closure completes the dump; any earlier
+   failure discards buffered Loc-RIB deltas and suppresses that view until the
+   next generation. Ordinary Adj-RIB views remain live-only and continue under
+   the existing bounded fan-out policy.
+
 3. **Rib-out table dumps were rejected.** AdjRibOut stores routes
    *pre*-transport-stamping — ORIGINATOR_ID/CLUSTER_LIST, GShut, and
    LLGR stripping apply session-side at encode. A dump synthesized from

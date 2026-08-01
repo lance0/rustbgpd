@@ -179,9 +179,11 @@ slow consumer. That is the signal to resume via the durable cursor
 (`--from-event-id <last-processed>`) rather than the live ring.
 
 **A BMP collector shows nothing after a network blip.** The daemon
-redials every `reconnect_interval` seconds and replays the full state
-dump on reconnect; check the collector-side listener first, then the
-daemon log for the collector's connection state transitions.
+redials with backoff capped by `reconnect_interval`, replays cached Peer Up
+state, and performs a fresh EoR-closed table dump only for collectors with
+`monitor = ["loc_rib"]`. Adj-RIB-In and Adj-RIB-Out remain live-only after a
+reconnect; see [Known issues](../../KNOWN_ISSUES.md). Check the collector-side
+listener first, then the daemon log for connection and bootstrap failures.
 
 **pmacct rejects the v4 stream (`BMPv4 BGP PDU TLV != 1`).** Known and
 expected — see the caveat in the config above. Move that collector to

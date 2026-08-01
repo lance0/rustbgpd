@@ -3224,7 +3224,6 @@ async fn run<T>(
 
         let mut collectors: Vec<(
             std::net::SocketAddr,
-            mpsc::Sender<bytes::Bytes>,
             rustbgpd_bmp::BmpMonitorFilter,
             rustbgpd_bmp::BmpVersion,
         )> = Vec::new();
@@ -3241,7 +3240,6 @@ async fn run<T>(
                     continue;
                 }
             };
-            let (msg_tx, msg_rx) = mpsc::channel(4096);
             let collector_id = collectors.len();
             let filter = rustbgpd_bmp::BmpMonitorFilter {
                 rib_in_pre: collector
@@ -3258,7 +3256,7 @@ async fn run<T>(
             } else {
                 rustbgpd_bmp::BmpVersion::V3
             };
-            collectors.push((addr, msg_tx, filter, version));
+            collectors.push((addr, filter, version));
             let client = rustbgpd_bmp::BmpClient::new(
                 rustbgpd_bmp::BmpClientConfig {
                     collector_id,
@@ -3266,10 +3264,9 @@ async fn run<T>(
                     reconnect_interval: collector.reconnect_interval,
                     version,
                 },
-                msg_rx,
                 sys_name.clone(),
                 sys_descr.clone(),
-                Some(bmp_control_tx.clone()),
+                bmp_control_tx.clone(),
                 metrics.clone(),
             )
             .with_reconnect_shutdown(bmp_reconnect_shutdown_rx.clone());
@@ -3277,7 +3274,7 @@ async fn run<T>(
             client_handles.push(tokio::spawn(client.run()));
         }
 
-        let loc_rib_enabled = collectors.iter().any(|(_, _, filter, _)| filter.loc_rib);
+        let loc_rib_enabled = collectors.iter().any(|(_, filter, _)| filter.loc_rib);
         let mut mgr = rustbgpd_bmp::BmpManager::new(
             bmp_event_rx,
             bmp_control_rx,
@@ -5244,6 +5241,13 @@ async fn run<T>(
 
     // 3. Shut down BMP subsystem (send explicit shutdown and await bounded drain)
     if let Some(mut bmp_runtime) = bmp_runtime {
+        // Stop disconnected clients from opening a new TCP generation before
+        // the manager drains control events accepted ahead of Shutdown. A
+        // connected client deliberately observes this only after the manager
+        // closes its generation sender; it drains queued bytes and emits the
+        // BMP Termination message last.
+        let _ = bmp_runtime.reconnect_shutdown_tx.send(true);
+
         if let Err(e) = bmp_runtime
             .control_tx
             .send(rustbgpd_bmp::BmpControlEvent::Shutdown)
@@ -5261,11 +5265,6 @@ async fn run<T>(
             }
         }
 
-        // The manager exits first so its final PeerDown messages are queued
-        // before its collector senders close. Reconnecting clients can then
-        // stop immediately; connected clients deliberately ignore this signal
-        // and drain that queue before sending Termination.
-        let _ = bmp_runtime.reconnect_shutdown_tx.send(true);
         await_bmp_client_shutdown(bmp_runtime.client_handles, BMP_CLIENT_SHUTDOWN_DEADLINE).await;
     }
 

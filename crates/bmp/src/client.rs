@@ -6,11 +6,12 @@
 
 use std::time::Duration;
 
+#[cfg(test)]
 use bytes::Bytes;
 use rustbgpd_telemetry::BgpMetrics;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{debug, info, warn};
 
 use crate::codec;
@@ -18,6 +19,15 @@ use crate::types::{BmpClientConfig, BmpControlEvent};
 
 /// Write timeout for BMP collector TCP writes.
 const BMP_WRITE_TIMEOUT_SECS: u64 = 5;
+const CONTROL_TIMEOUT: Duration = Duration::from_secs(1);
+const COLLECTOR_CHANNEL_CAPACITY: usize = 4096;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PostConnectWriteOutcome {
+    Sent,
+    Retry,
+    Shutdown,
+}
 
 /// Per-collector BMP client.
 ///
@@ -26,16 +36,44 @@ const BMP_WRITE_TIMEOUT_SECS: u64 = 5;
 /// connection failure with capped exponential backoff.
 pub struct BmpClient {
     config: BmpClientConfig,
-    rx: mpsc::Receiver<Bytes>,
     sys_name: String,
     sys_descr: String,
-    control_tx: Option<mpsc::Sender<BmpControlEvent>>,
+    control_tx: mpsc::Sender<BmpControlEvent>,
     metrics: BgpMetrics,
     reconnect_shutdown: Option<watch::Receiver<bool>>,
 }
 
 impl BmpClient {
-    async fn write_all_with_timeout(stream: &mut TcpStream, msg: &[u8]) -> std::io::Result<()> {
+    fn notify_disconnected(
+        &self,
+        collector_id: usize,
+        collector_addr: std::net::SocketAddr,
+        generation: u64,
+    ) {
+        if let Err(send_err) = self
+            .control_tx
+            .try_send(BmpControlEvent::CollectorDisconnected {
+                collector_id,
+                collector_addr,
+                generation,
+            })
+        {
+            let reason = match send_err {
+                mpsc::error::TrySendError::Full(_) => "channel_full",
+                mpsc::error::TrySendError::Closed(_) => "channel_closed",
+            };
+            self.metrics.record_bmp_control_event_drop(
+                &collector_addr.to_string(),
+                "collector_disconnected",
+                reason,
+            );
+        }
+    }
+
+    async fn write_all_with_timeout<W>(stream: &mut W, msg: &[u8]) -> std::io::Result<()>
+    where
+        W: AsyncWrite + Unpin,
+    {
         match tokio::time::timeout(
             Duration::from_secs(BMP_WRITE_TIMEOUT_SECS),
             stream.write_all(msg),
@@ -50,7 +88,10 @@ impl BmpClient {
         }
     }
 
-    async fn flush_with_timeout(stream: &mut TcpStream) -> std::io::Result<()> {
+    async fn flush_with_timeout<W>(stream: &mut W) -> std::io::Result<()>
+    where
+        W: AsyncWrite + Unpin,
+    {
         match tokio::time::timeout(Duration::from_secs(BMP_WRITE_TIMEOUT_SECS), stream.flush())
             .await
         {
@@ -62,19 +103,104 @@ impl BmpClient {
         }
     }
 
+    async fn send_termination<W>(&self, stream: &mut W)
+    where
+        W: AsyncWrite + Unpin,
+    {
+        let term = codec::encode_termination(0, "daemon shutting down", self.config.version);
+        let _ = Self::write_all_with_timeout(stream, &term).await;
+        let _ = Self::flush_with_timeout(stream).await;
+    }
+
+    async fn wait_post_connect_retry_or_terminate<W>(
+        &self,
+        stream: &mut W,
+        shutdown: &mut watch::Receiver<bool>,
+        backoff: &mut Duration,
+        max_backoff: Duration,
+    ) -> bool
+    where
+        W: AsyncWrite + Unpin,
+    {
+        if reconnect_shutdown_requested(shutdown) {
+            self.send_termination(stream).await;
+            return true;
+        }
+        wait_post_connect_retry(shutdown, backoff, max_backoff).await;
+        if reconnect_shutdown_requested(shutdown) {
+            self.send_termination(stream).await;
+            return true;
+        }
+        false
+    }
+
+    async fn send_initiation_or_retry<W>(
+        &self,
+        stream: &mut W,
+        message: &[u8],
+        shutdown: &mut watch::Receiver<bool>,
+        backoff: &mut Duration,
+        max_backoff: Duration,
+    ) -> PostConnectWriteOutcome
+    where
+        W: AsyncWrite + Unpin,
+    {
+        if let Err(error) = Self::write_all_with_timeout(stream, message).await {
+            warn!(collector = %self.config.collector_addr, %error, "failed to send BMP Initiation");
+            return if self
+                .wait_post_connect_retry_or_terminate(stream, shutdown, backoff, max_backoff)
+                .await
+            {
+                PostConnectWriteOutcome::Shutdown
+            } else {
+                PostConnectWriteOutcome::Retry
+            };
+        }
+        PostConnectWriteOutcome::Sent
+    }
+
+    async fn send_live_or_retry<W>(
+        &self,
+        stream: &mut W,
+        message: &[u8],
+        generation: u64,
+        shutdown: &mut watch::Receiver<bool>,
+        backoff: &mut Duration,
+        max_backoff: Duration,
+    ) -> PostConnectWriteOutcome
+    where
+        W: AsyncWrite + Unpin,
+    {
+        if let Err(error) = Self::write_all_with_timeout(stream, message).await {
+            warn!(collector = %self.config.collector_addr, %error, "BMP write failed, reconnecting");
+            self.notify_disconnected(
+                self.config.collector_id,
+                self.config.collector_addr,
+                generation,
+            );
+            return if self
+                .wait_post_connect_retry_or_terminate(stream, shutdown, backoff, max_backoff)
+                .await
+            {
+                PostConnectWriteOutcome::Shutdown
+            } else {
+                PostConnectWriteOutcome::Retry
+            };
+        }
+        PostConnectWriteOutcome::Sent
+    }
+
     /// Create a new BMP client for the given collector.
     #[must_use]
     pub fn new(
         config: BmpClientConfig,
-        rx: mpsc::Receiver<Bytes>,
         sys_name: String,
         sys_descr: String,
-        control_tx: Option<mpsc::Sender<BmpControlEvent>>,
+        control_tx: mpsc::Sender<BmpControlEvent>,
         metrics: BgpMetrics,
     ) -> Self {
         Self {
             config,
-            rx,
             sys_name,
             sys_descr,
             control_tx,
@@ -85,9 +211,9 @@ impl BmpClient {
 
     /// Stop retrying a disconnected collector when daemon shutdown begins.
     ///
-    /// The signal is intentionally observed only while connecting or waiting
-    /// to reconnect. Once Initiation has been sent, the client drains the
-    /// manager queue before sending Termination.
+    /// The signal interrupts connection and bootstrap retries. Once a
+    /// generation is live, the client waits for the manager to close its
+    /// sender, drains the accepted queue, and sends Termination last.
     #[must_use]
     pub fn with_reconnect_shutdown(mut self, shutdown: watch::Receiver<bool>) -> Self {
         self.reconnect_shutdown = Some(shutdown);
@@ -95,11 +221,16 @@ impl BmpClient {
     }
 
     /// Run the client loop. Connects, sends Initiation, streams messages.
-    /// Returns when the mpsc channel is closed (daemon shutdown).
+    /// Returns when coordinated daemon shutdown closes the active generation.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the ordered TCP generation lifecycle is kept in one state-machine loop"
+    )]
     pub async fn run(mut self) {
         let addr = self.config.collector_addr;
         let id = self.config.collector_id;
         let max_backoff = Duration::from_secs(self.config.reconnect_interval.max(1));
+        let mut post_connect_backoff = Duration::from_secs(1).min(max_backoff);
 
         // Keep the fallback sender alive for callers that do not install a
         // daemon shutdown signal. A closed watch channel is treated as a stop
@@ -127,43 +258,53 @@ impl BmpClient {
             // configured BMP version)
             let init_msg =
                 codec::encode_initiation(&self.sys_name, &self.sys_descr, self.config.version);
-            if let Err(e) = Self::write_all_with_timeout(&mut stream, &init_msg).await {
-                warn!(collector = %addr, error = %e, "failed to send BMP Initiation");
-                continue; // reconnect
-            }
-
-            // Collector is now ready to receive BMP messages. Surface
-            // a back-pressure or closed-channel failure here loudly:
-            // dropping this event silently means the manager never
-            // replays the PeerUp cache to a freshly reconnected
-            // collector, even though the collector is connected and
-            // looks healthy from the client side. Use a 1 s timed
-            // send so a wedged manager doesn't block reconnect
-            // forever — and bump bmp_control_event_drops_total on
-            // either failure mode so operators can alert on the
-            // skipped replay rather than tail logs.
-            if let Some(ref control_tx) = self.control_tx {
-                let event = BmpControlEvent::CollectorConnected {
-                    collector_id: id,
-                    collector_addr: addr,
-                };
-                match tokio::time::timeout(
-                    std::time::Duration::from_secs(1),
-                    control_tx.send(event),
+            match self
+                .send_initiation_or_retry(
+                    &mut stream,
+                    &init_msg,
+                    &mut reconnect_shutdown,
+                    &mut post_connect_backoff,
+                    max_backoff,
                 )
                 .await
-                {
-                    Ok(Ok(())) => {}
+            {
+                PostConnectWriteOutcome::Sent => {}
+                PostConnectWriteOutcome::Retry => continue,
+                PostConnectWriteOutcome::Shutdown => return,
+            }
+
+            let (sender, mut rx) = mpsc::channel(COLLECTOR_CHANNEL_CAPACITY);
+            let (bootstrap_tx, bootstrap_rx) = oneshot::channel();
+            let event = BmpControlEvent::CollectorConnected {
+                collector_id: id,
+                collector_addr: addr,
+                sender,
+                bootstrap: bootstrap_tx,
+            };
+            let bootstrap = match tokio::time::timeout(CONTROL_TIMEOUT, self.control_tx.send(event))
+                .await
+            {
+                Ok(Ok(())) => match tokio::time::timeout(CONTROL_TIMEOUT, bootstrap_rx).await {
+                    Ok(Ok(bootstrap)) => bootstrap,
                     Ok(Err(_)) => {
                         self.metrics.record_bmp_control_event_drop(
                             &addr.to_string(),
                             "collector_connected",
                             "channel_closed",
                         );
-                        warn!(
-                            collector = %addr,
-                            "BMP control channel closed; PeerUp replay will not fire"
-                        );
+                        warn!(collector = %addr, "BMP manager dropped bootstrap acknowledgement");
+                        if self
+                            .wait_post_connect_retry_or_terminate(
+                                &mut stream,
+                                &mut reconnect_shutdown,
+                                &mut post_connect_backoff,
+                                max_backoff,
+                            )
+                            .await
+                        {
+                            return;
+                        }
+                        continue;
                     }
                     Err(_) => {
                         self.metrics.record_bmp_control_event_drop(
@@ -171,53 +312,180 @@ impl BmpClient {
                             "collector_connected",
                             "channel_timeout",
                         );
-                        warn!(
-                            collector = %addr,
-                            "BMP control channel send timed out; PeerUp replay will not fire"
-                        );
+                        warn!(collector = %addr, "BMP manager bootstrap acknowledgement timed out");
+                        if self
+                            .wait_post_connect_retry_or_terminate(
+                                &mut stream,
+                                &mut reconnect_shutdown,
+                                &mut post_connect_backoff,
+                                max_backoff,
+                            )
+                            .await
+                        {
+                            return;
+                        }
+                        continue;
                     }
+                },
+                Ok(Err(_)) => {
+                    self.metrics.record_bmp_control_event_drop(
+                        &addr.to_string(),
+                        "collector_connected",
+                        "channel_closed",
+                    );
+                    if self
+                        .wait_post_connect_retry_or_terminate(
+                            &mut stream,
+                            &mut reconnect_shutdown,
+                            &mut post_connect_backoff,
+                            max_backoff,
+                        )
+                        .await
+                    {
+                        return;
+                    }
+                    continue;
+                }
+                Err(_) => {
+                    self.metrics.record_bmp_control_event_drop(
+                        &addr.to_string(),
+                        "collector_connected",
+                        "channel_timeout",
+                    );
+                    warn!(collector = %addr, "BMP control channel send timed out");
+                    if self
+                        .wait_post_connect_retry_or_terminate(
+                            &mut stream,
+                            &mut reconnect_shutdown,
+                            &mut post_connect_backoff,
+                            max_backoff,
+                        )
+                        .await
+                    {
+                        return;
+                    }
+                    continue;
+                }
+            };
+            let mut bootstrap_failed = false;
+            for message in bootstrap.messages {
+                if let Err(e) = Self::write_all_with_timeout(&mut stream, &message).await {
+                    warn!(collector = %addr, error = %e, "failed to write BMP bootstrap");
+                    bootstrap_failed = true;
+                    break;
+                }
+            }
+            if bootstrap_failed {
+                self.notify_disconnected(id, addr, bootstrap.generation);
+                if self
+                    .wait_post_connect_retry_or_terminate(
+                        &mut stream,
+                        &mut reconnect_shutdown,
+                        &mut post_connect_backoff,
+                        max_backoff,
+                    )
+                    .await
+                {
+                    return;
+                }
+                continue;
+            }
+
+            match tokio::time::timeout(
+                CONTROL_TIMEOUT,
+                self.control_tx
+                    .send(BmpControlEvent::CollectorBootstrapComplete {
+                        collector_id: id,
+                        generation: bootstrap.generation,
+                    }),
+            )
+            .await
+            {
+                Ok(Ok(())) => {
+                    post_connect_backoff = Duration::from_secs(1).min(max_backoff);
+                }
+                Ok(Err(_)) => {
+                    self.metrics.record_bmp_control_event_drop(
+                        &addr.to_string(),
+                        "collector_bootstrap_complete",
+                        "channel_closed",
+                    );
+                    self.notify_disconnected(id, addr, bootstrap.generation);
+                    if self
+                        .wait_post_connect_retry_or_terminate(
+                            &mut stream,
+                            &mut reconnect_shutdown,
+                            &mut post_connect_backoff,
+                            max_backoff,
+                        )
+                        .await
+                    {
+                        return;
+                    }
+                    continue;
+                }
+                Err(_) => {
+                    self.metrics.record_bmp_control_event_drop(
+                        &addr.to_string(),
+                        "collector_bootstrap_complete",
+                        "channel_timeout",
+                    );
+                    self.notify_disconnected(id, addr, bootstrap.generation);
+                    if self
+                        .wait_post_connect_retry_or_terminate(
+                            &mut stream,
+                            &mut reconnect_shutdown,
+                            &mut post_connect_backoff,
+                            max_backoff,
+                        )
+                        .await
+                    {
+                        return;
+                    }
+                    continue;
                 }
             }
 
             // Stream messages until error or channel close
             loop {
-                let Some(msg) = self.rx.recv().await else {
-                    // Channel closed — send Termination and exit
-                    let term =
-                        codec::encode_termination(0, "daemon shutting down", self.config.version);
-                    let _ = Self::write_all_with_timeout(&mut stream, &term).await;
-                    let _ = Self::flush_with_timeout(&mut stream).await;
-                    info!(collector = %addr, "BMP client shutting down");
-                    return;
+                let Some(msg) = rx.recv().await else {
+                    if reconnect_shutdown_requested(&reconnect_shutdown) {
+                        // Coordinated shutdown closes the generation sender
+                        // only after the manager's final messages are queued.
+                        self.send_termination(&mut stream).await;
+                        info!(collector = %addr, "BMP client shutting down");
+                        return;
+                    }
+                    self.notify_disconnected(id, addr, bootstrap.generation);
+                    if self
+                        .wait_post_connect_retry_or_terminate(
+                            &mut stream,
+                            &mut reconnect_shutdown,
+                            &mut post_connect_backoff,
+                            max_backoff,
+                        )
+                        .await
+                    {
+                        info!(collector = %addr, "BMP client shutting down");
+                        return;
+                    }
+                    break;
                 };
 
-                if let Err(e) = Self::write_all_with_timeout(&mut stream, &msg).await {
-                    warn!(collector = %addr, error = %e, "BMP write failed, reconnecting");
-                    if let Some(ref control_tx) = self.control_tx {
-                        // CollectorDisconnected is best-effort but
-                        // still observable: a dropped Disconnected
-                        // means the manager won't see the gap until
-                        // the next reconnect's Connected — count it
-                        // so operators can spot stuck disconnected
-                        // states.
-                        if let Err(send_err) =
-                            control_tx.try_send(BmpControlEvent::CollectorDisconnected {
-                                collector_id: id,
-                                collector_addr: addr,
-                            })
-                        {
-                            let reason = match send_err {
-                                mpsc::error::TrySendError::Full(_) => "channel_full",
-                                mpsc::error::TrySendError::Closed(_) => "channel_closed",
-                            };
-                            self.metrics.record_bmp_control_event_drop(
-                                &addr.to_string(),
-                                "collector_disconnected",
-                                reason,
-                            );
-                        }
-                    }
-                    break; // reconnect
+                match self
+                    .send_live_or_retry(
+                        &mut stream,
+                        &msg,
+                        bootstrap.generation,
+                        &mut reconnect_shutdown,
+                        &mut post_connect_backoff,
+                        max_backoff,
+                    )
+                    .await
+                {
+                    PostConnectWriteOutcome::Sent => {}
+                    PostConnectWriteOutcome::Retry => break,
+                    PostConnectWriteOutcome::Shutdown => return,
                 }
             }
         }
@@ -226,6 +494,27 @@ impl BmpClient {
 
 fn reconnect_shutdown_requested(shutdown: &watch::Receiver<bool>) -> bool {
     *shutdown.borrow() || shutdown.has_changed().is_err()
+}
+
+/// Wait between failed post-connect handshakes without delaying shutdown.
+async fn wait_reconnect_backoff(shutdown: &mut watch::Receiver<bool>, delay: Duration) {
+    if reconnect_shutdown_requested(shutdown) {
+        return;
+    }
+    tokio::select! {
+        biased;
+        _ = shutdown.changed() => {}
+        () = tokio::time::sleep(delay) => {}
+    }
+}
+
+async fn wait_post_connect_retry(
+    shutdown: &mut watch::Receiver<bool>,
+    backoff: &mut Duration,
+    max_backoff: Duration,
+) {
+    wait_reconnect_backoff(shutdown, *backoff).await;
+    *backoff = backoff.saturating_mul(2).min(max_backoff);
 }
 
 async fn connect_with_reconnect_shutdown<F, Fut>(
@@ -284,13 +573,38 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::pin::Pin;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::{Context, Poll};
 
     use super::*;
     use crate::types::BmpVersion;
     use tokio::io::AsyncReadExt;
     use tokio::net::TcpListener;
+
+    struct BrokenWriter;
+
+    impl AsyncWrite for BrokenWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "injected initiation failure",
+            )))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
 
     /// Load-bearing proof: replacing the connect select with a plain await
     /// trips the pending-connect assertion; replacing the backoff select with
@@ -376,7 +690,6 @@ mod tests {
     async fn connected_shutdown_drains_payload_then_sends_exact_termination() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let (msg_tx, msg_rx) = mpsc::channel(8);
         let (control_tx, mut control_rx) = mpsc::channel(8);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let payload = Bytes::from_static(b"queued-before-shutdown");
@@ -388,10 +701,9 @@ mod tests {
                 reconnect_interval: 1,
                 version: BmpVersion::V3,
             },
-            msg_rx,
             "rustbgpd".to_string(),
             "test".to_string(),
-            Some(control_tx),
+            control_tx,
             BgpMetrics::new(),
         )
         .with_reconnect_shutdown(shutdown_rx);
@@ -402,14 +714,25 @@ mod tests {
         let mut observed_initiation = vec![0; initiation.len()];
         stream.read_exact(&mut observed_initiation).await.unwrap();
         assert_eq!(observed_initiation, initiation);
+        let BmpControlEvent::CollectorConnected {
+            sender, bootstrap, ..
+        } = control_rx.recv().await.unwrap()
+        else {
+            panic!("expected connected");
+        };
+        bootstrap
+            .send(crate::types::BmpCollectorBootstrap {
+                generation: 42,
+                messages: vec![],
+            })
+            .unwrap();
         assert!(matches!(
             control_rx.recv().await,
-            Some(BmpControlEvent::CollectorConnected { .. })
+            Some(BmpControlEvent::CollectorBootstrapComplete { generation: 42, .. })
         ));
-
-        msg_tx.send(payload.clone()).await.unwrap();
+        sender.send(payload.clone()).await.unwrap();
         shutdown_tx.send(true).unwrap();
-        drop(msg_tx);
+        drop(sender);
 
         let termination = codec::encode_termination(0, "daemon shutting down", BmpVersion::V3);
         let mut tail = Vec::new();
@@ -423,13 +746,225 @@ mod tests {
         handle.await.unwrap();
     }
 
+    /// Load-bearing proof: dropping the pre-live shutdown termination path
+    /// leaves an empty TCP tail when the manager closes the bootstrap
+    /// acknowledgement during coordinated shutdown.
     #[tokio::test]
-    async fn emits_collector_connected_after_initiation() {
+    async fn shutdown_during_bootstrap_sends_termination_last() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (control_tx, mut control_rx) = mpsc::channel(8);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let client = BmpClient::new(
+            BmpClientConfig {
+                collector_id: 7,
+                collector_addr: addr,
+                reconnect_interval: 30,
+                version: BmpVersion::V3,
+            },
+            "rustbgpd".to_string(),
+            "test".to_string(),
+            control_tx,
+            BgpMetrics::new(),
+        )
+        .with_reconnect_shutdown(shutdown_rx);
+        let handle = tokio::spawn(client.run());
+
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let initiation = codec::encode_initiation("rustbgpd", "test", BmpVersion::V3);
+        let mut observed = vec![0; initiation.len()];
+        stream.read_exact(&mut observed).await.unwrap();
+        let BmpControlEvent::CollectorConnected { bootstrap, .. } =
+            control_rx.recv().await.unwrap()
+        else {
+            panic!("expected connected");
+        };
+        shutdown_tx.send(true).unwrap();
+        drop(bootstrap);
+
+        let termination = codec::encode_termination(0, "daemon shutting down", BmpVersion::V3);
+        let mut tail = Vec::new();
+        tokio::time::timeout(Duration::from_secs(2), stream.read_to_end(&mut tail))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(tail, termination.to_vec());
+        handle.await.unwrap();
+    }
+
+    /// Load-bearing proof: treating every generation-channel close as daemon
+    /// shutdown emits a Termination and exits instead of establishing the
+    /// second TCP connection.
+    #[tokio::test]
+    async fn generation_channel_close_reconnects_without_termination() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (control_tx, mut control_rx) = mpsc::channel(8);
+        let client = BmpClient::new(
+            BmpClientConfig {
+                collector_id: 7,
+                collector_addr: addr,
+                reconnect_interval: 1,
+                version: BmpVersion::V3,
+            },
+            "rustbgpd".to_string(),
+            "test".to_string(),
+            control_tx,
+            BgpMetrics::new(),
+        );
+        let handle = tokio::spawn(client.run());
+
+        let (mut first, _) = listener.accept().await.unwrap();
+        let initiation = codec::encode_initiation("rustbgpd", "test", BmpVersion::V3);
+        let mut observed = vec![0; initiation.len()];
+        first.read_exact(&mut observed).await.unwrap();
+        let BmpControlEvent::CollectorConnected {
+            sender, bootstrap, ..
+        } = control_rx.recv().await.unwrap()
+        else {
+            panic!("expected connected");
+        };
+        bootstrap
+            .send(crate::types::BmpCollectorBootstrap {
+                generation: 1,
+                messages: vec![],
+            })
+            .unwrap();
+        assert!(matches!(
+            control_rx.recv().await,
+            Some(BmpControlEvent::CollectorBootstrapComplete { generation: 1, .. })
+        ));
+        drop(sender);
+
+        let mut tail = Vec::new();
+        tokio::time::timeout(Duration::from_secs(2), first.read_to_end(&mut tail))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            tail.is_empty(),
+            "ordinary generation reset emitted Termination"
+        );
+        let _second = tokio::time::timeout(Duration::from_secs(2), listener.accept())
+            .await
+            .expect("client did not reconnect after generation channel closed")
+            .unwrap();
+        handle.abort();
+    }
+
+    /// Load-bearing call-site proof: removing the bounded retry from the
+    /// Initiation failure handler makes this task finish before one second.
+    /// The injected writer makes the real Initiation write path fail without
+    /// relying on TCP reset timing.
+    #[tokio::test(start_paused = true)]
+    async fn initiation_write_failure_waits_before_retry() {
+        let (control_tx, _control_rx) = mpsc::channel(1);
+        let client = BmpClient::new(
+            BmpClientConfig {
+                collector_id: 7,
+                collector_addr: "127.0.0.1:11019".parse().unwrap(),
+                reconnect_interval: 4,
+                version: BmpVersion::V3,
+            },
+            "rustbgpd".to_string(),
+            "test".to_string(),
+            control_tx,
+            BgpMetrics::new(),
+        );
+        let (_shutdown_tx, mut shutdown_rx) = watch::channel(false);
+        let task = tokio::spawn(async move {
+            let mut writer = BrokenWriter;
+            let mut backoff = Duration::from_secs(1);
+            let outcome = client
+                .send_initiation_or_retry(
+                    &mut writer,
+                    b"initiation",
+                    &mut shutdown_rx,
+                    &mut backoff,
+                    Duration::from_secs(4),
+                )
+                .await;
+            (outcome, backoff)
+        });
+
+        tokio::task::yield_now().await;
+        assert!(
+            !task.is_finished(),
+            "Initiation failure skipped retry delay"
+        );
+        tokio::time::advance(Duration::from_millis(999)).await;
+        assert!(!task.is_finished(), "Initiation retry fired too early");
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert_eq!(
+            task.await.unwrap(),
+            (PostConnectWriteOutcome::Retry, Duration::from_secs(2))
+        );
+    }
+
+    /// Load-bearing call-site proof: removing the bounded retry from the live
+    /// write failure handler makes this task finish before one second. The
+    /// injected writer avoids relying on TCP reset timing.
+    #[tokio::test(start_paused = true)]
+    async fn live_write_failure_waits_before_reconnect() {
+        let (control_tx, mut control_rx) = mpsc::channel(1);
+        let client = BmpClient::new(
+            BmpClientConfig {
+                collector_id: 7,
+                collector_addr: "127.0.0.1:11020".parse().unwrap(),
+                reconnect_interval: 4,
+                version: BmpVersion::V3,
+            },
+            "rustbgpd".to_string(),
+            "test".to_string(),
+            control_tx,
+            BgpMetrics::new(),
+        );
+        let (_shutdown_tx, mut shutdown_rx) = watch::channel(false);
+        let task = tokio::spawn(async move {
+            let mut writer = BrokenWriter;
+            let mut backoff = Duration::from_secs(1);
+            let outcome = client
+                .send_live_or_retry(
+                    &mut writer,
+                    b"live",
+                    42,
+                    &mut shutdown_rx,
+                    &mut backoff,
+                    Duration::from_secs(4),
+                )
+                .await;
+            (outcome, backoff)
+        });
+
+        tokio::task::yield_now().await;
+        assert!(
+            !task.is_finished(),
+            "live write failure skipped retry delay"
+        );
+        tokio::time::advance(Duration::from_millis(999)).await;
+        assert!(!task.is_finished(), "live retry fired too early");
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert_eq!(
+            task.await.unwrap(),
+            (PostConnectWriteOutcome::Retry, Duration::from_secs(2))
+        );
+        assert!(matches!(
+            control_rx.recv().await,
+            Some(BmpControlEvent::CollectorDisconnected { generation: 42, .. })
+        ));
+    }
+
+    /// Load-bearing proof: draining the live receiver before writing the
+    /// bootstrap reverses the two sentinels; sending `BootstrapComplete` before
+    /// the bootstrap write lets the assertion observe completion too early.
+    #[tokio::test]
+    async fn writes_bootstrap_before_completion_and_live_queue() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
-        let (_msg_tx, msg_rx) = mpsc::channel(8);
         let (control_tx, mut control_rx) = mpsc::channel(8);
+        let bootstrap_message = Bytes::from_static(b"bootstrap-before-live");
+        let live_message = Bytes::from_static(b"live-after-bootstrap");
 
         let client = BmpClient::new(
             BmpClientConfig {
@@ -438,21 +973,19 @@ mod tests {
                 reconnect_interval: 1,
                 version: BmpVersion::V3,
             },
-            msg_rx,
             "rustbgpd".to_string(),
             "test".to_string(),
-            Some(control_tx),
+            control_tx,
             BgpMetrics::new(),
         );
         let handle = tokio::spawn(client.run());
 
-        // Accept TCP connection and read a little data so initiation write path runs.
+        // Initiation is always the first BMP message on a connection.
         let (mut stream, _) = listener.accept().await.unwrap();
-        let mut buf = [0u8; 64];
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), stream.read(&mut buf))
-            .await
-            .unwrap()
-            .unwrap();
+        let initiation = codec::encode_initiation("rustbgpd", "test", BmpVersion::V3);
+        let mut observed_initiation = vec![0; initiation.len()];
+        stream.read_exact(&mut observed_initiation).await.unwrap();
+        assert_eq!(observed_initiation, initiation);
 
         let ev = tokio::time::timeout(std::time::Duration::from_secs(2), control_rx.recv())
             .await
@@ -462,20 +995,156 @@ mod tests {
             BmpControlEvent::CollectorConnected {
                 collector_id,
                 collector_addr,
+                sender,
+                bootstrap,
             } => {
                 assert_eq!(collector_id, 7);
                 assert_eq!(collector_addr, addr);
+                sender.send(live_message.clone()).await.unwrap();
+                bootstrap
+                    .send(crate::types::BmpCollectorBootstrap {
+                        generation: 1,
+                        messages: vec![bootstrap_message.clone()],
+                    })
+                    .unwrap();
             }
             other => panic!("expected CollectorConnected, got {other:?}"),
         }
 
+        assert!(matches!(
+            control_rx.recv().await,
+            Some(BmpControlEvent::CollectorBootstrapComplete {
+                collector_id: 7,
+                generation: 1
+            })
+        ));
+        let mut ordered = vec![0; bootstrap_message.len() + live_message.len()];
+        stream.read_exact(&mut ordered).await.unwrap();
+        let mut expected = bootstrap_message.to_vec();
+        expected.extend_from_slice(&live_message);
+        assert_eq!(ordered, expected);
+
         handle.abort();
     }
 
-    /// When the manager's control channel is wedged (saturated and
-    /// not draining), `CollectorConnected` send times out — but the
-    /// collector stays connected and the rest of the BMP stream
-    /// continues. We must surface the silent skipped replay via
+    /// Load-bearing proof: removing the completion send timeout hangs this
+    /// test; entering the live loop after the timeout writes the queued live
+    /// sentinel and makes the empty-wire assertion red.
+    #[tokio::test]
+    async fn bootstrap_completion_timeout_never_enters_live_stream() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (control_tx, mut control_rx) = mpsc::channel(1);
+        let control_fill_tx = control_tx.clone();
+        let metrics = BgpMetrics::new();
+        let client = BmpClient::new(
+            BmpClientConfig {
+                collector_id: 7,
+                collector_addr: addr,
+                reconnect_interval: 1,
+                version: BmpVersion::V3,
+            },
+            "rustbgpd".to_string(),
+            "test".to_string(),
+            control_tx,
+            metrics.clone(),
+        );
+        let handle = tokio::spawn(client.run());
+
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let initiation = codec::encode_initiation("rustbgpd", "test", BmpVersion::V3);
+        let mut observed_initiation = vec![0; initiation.len()];
+        stream.read_exact(&mut observed_initiation).await.unwrap();
+        let BmpControlEvent::CollectorConnected {
+            sender, bootstrap, ..
+        } = control_rx.recv().await.unwrap()
+        else {
+            panic!("expected connected");
+        };
+        sender
+            .send(Bytes::from_static(b"must-not-reach-wire"))
+            .await
+            .unwrap();
+        control_fill_tx
+            .send(BmpControlEvent::Shutdown)
+            .await
+            .unwrap();
+        bootstrap
+            .send(crate::types::BmpCollectorBootstrap {
+                generation: 9,
+                messages: vec![],
+            })
+            .unwrap();
+
+        tokio::time::sleep(CONTROL_TIMEOUT + Duration::from_millis(100)).await;
+        let mut sentinel = [0_u8; 1];
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), stream.read_exact(&mut sentinel))
+                .await
+                .is_err(),
+            "live queue drained after BootstrapComplete timed out"
+        );
+        let drops = metrics
+            .registry()
+            .gather()
+            .iter()
+            .find(|family| family.name() == "bmp_control_event_drops_total")
+            .into_iter()
+            .flat_map(|family| &family.metric)
+            .filter(|metric| {
+                metric.label.iter().any(|label| {
+                    label.name() == "kind" && label.value() == "collector_bootstrap_complete"
+                }) && metric
+                    .label
+                    .iter()
+                    .any(|label| label.name() == "reason" && label.value() == "channel_timeout")
+            })
+            .map(|metric| metric.counter.value())
+            .sum::<f64>();
+        assert!((drops - 1.0).abs() < f64::EPSILON);
+        handle.abort();
+    }
+
+    /// Load-bearing proof: removing the delay makes the task finish before
+    /// one second; removing the doubling leaves the returned delay at one
+    /// second; ignoring shutdown leaves the final task pending.
+    #[tokio::test(start_paused = true)]
+    async fn post_connect_retry_is_delayed_capped_and_shutdown_aware() {
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let mut delayed_shutdown = shutdown_rx.clone();
+        let delayed = tokio::spawn(async move {
+            let mut backoff = Duration::from_secs(1);
+            wait_post_connect_retry(&mut delayed_shutdown, &mut backoff, Duration::from_secs(4))
+                .await;
+            backoff
+        });
+        tokio::task::yield_now().await;
+        assert!(!delayed.is_finished());
+        tokio::time::advance(Duration::from_millis(999)).await;
+        assert!(!delayed.is_finished());
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert_eq!(delayed.await.unwrap(), Duration::from_secs(2));
+
+        let mut interrupted_shutdown = shutdown_rx;
+        let interrupted = tokio::spawn(async move {
+            let mut backoff = Duration::from_secs(4);
+            wait_post_connect_retry(
+                &mut interrupted_shutdown,
+                &mut backoff,
+                Duration::from_secs(4),
+            )
+            .await;
+        });
+        tokio::task::yield_now().await;
+        assert!(!interrupted.is_finished());
+        shutdown_tx.send(true).unwrap();
+        tokio::task::yield_now().await;
+        assert!(interrupted.is_finished());
+    }
+
+    /// Load-bearing proof: removing the Connected send timeout hangs the test;
+    /// failing open into the live stream would make the connection persist
+    /// without a manager-owned generation. The timeout is surfaced via
     /// `bmp_control_event_drops_total{kind=collector_connected,
     /// reason=channel_timeout}`.
     #[tokio::test]
@@ -483,7 +1152,6 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
-        let (_msg_tx, msg_rx) = mpsc::channel(8);
         // 1-deep + pre-fill = next send blocks until pre-fill is drained.
         // The manager-side receiver here is never read, so the send
         // hits the 1 s timeout in the client.
@@ -492,6 +1160,7 @@ mod tests {
             .try_send(BmpControlEvent::CollectorDisconnected {
                 collector_id: 0,
                 collector_addr: addr,
+                generation: 0,
             })
             .unwrap();
 
@@ -503,10 +1172,9 @@ mod tests {
                 reconnect_interval: 1,
                 version: BmpVersion::V3,
             },
-            msg_rx,
             "rustbgpd".to_string(),
             "test".to_string(),
-            Some(control_tx),
+            control_tx,
             metrics.clone(),
         );
         let handle = tokio::spawn(client.run());

@@ -55,12 +55,11 @@ resolved.
   `bmp_*` counters surface what was previously only `tracing::warn!`
   output: `bmp_source_drops_total{peer, reason}` covers the
   PeerSession→BmpManager mpsc fill, `bmp_collector_drops_total
-  {collector, phase, reason}` covers the per-collector mpsc fill
-  (with `phase` distinguishing fan-out from PeerUp-cache replay),
-  `bmp_replay_attempts_total{collector}` is the denominator for a
-  "replay drop rate" alert, and `bmp_control_event_drops_total
-  {collector, kind, reason}` surfaces BMP control events that fail
-  to reach the manager (closing the silent skipped-replay window).
+  {collector, phase, reason}` covers live fan-out and bounded Loc-RIB
+  dump failures, `bmp_replay_attempts_total{collector}` counts
+  manager-side bootstrap attempts, and `bmp_control_event_drops_total
+  {collector, kind, reason}` surfaces connection-phase control events
+  that fail to reach the manager.
   Operators can now alert on BMP loss without a log scraper.
 
 - **CLI gRPC integration tests added (fixed).** `rbgp` now has
@@ -203,8 +202,16 @@ byte counts.
   next inbound UPDATE. The RFC 9069 Loc-RIB view
   (`monitor = ["loc_rib"]`) does NOT share this gap — it performs a
   full table dump (closed by per-family End-of-RIB) on every collector
-  (re)connect, and for a route reflector the post-policy Loc-RIB is the
-  view most dump consumers actually want. Rib-out dump synthesis was
+  (re)connect. The client writes the complete Peer Up bootstrap before it
+  drains that connection's fresh live queue; the manager defers the Loc-RIB
+  dump until the client confirms that bootstrap write. Thus disconnected or
+  prior-generation bytes cannot leak into the new session. If Loc-RIB dump
+  admission, reply, or delivery fails before its terminal EoRs,
+  buffered live Loc-RIB rows are discarded and that view stays
+  suppressed until the next reconnect rather than being released as
+  an incomplete snapshot. For a route reflector the
+  post-policy Loc-RIB is the view most dump consumers actually want. Rib-out
+  dump synthesis was
   evaluated and deliberately deferred: `AdjRibOut` stores post-policy
   routes *before* transport stamping, so a synthesized dump would miss
   the session-side attribute rewrites (`ORIGINATOR_ID`/`CLUSTER_LIST`
@@ -223,7 +230,8 @@ byte counts.
   traffic. The per-collector fan-out queue remains lossy by design
   (`bmp_collector_drops_total`); a collector that saturates its own
   channel diverges until its next reconnect, which per RFC 7854
-  discards all state and replays PeerUp — alert on that counter.
+  discards all state and replays Peer Up; a configured Loc-RIB view then gets a
+  new EoR-closed dump. Alert on that counter.
 
 - **RFC 8326 receiver gating doesn't yet know about confederations.**
   When `[global] honor_graceful_shutdown = true`, the implicit chain-

@@ -2856,9 +2856,14 @@ messages (each stamped with its install time), closed by one End-of-RIB per
 streamed family, after which live updates continue seamlessly. Live changes
 racing the dump may be observed both in the dump and as live messages — the
 standard BMP overlap; collectors reconcile by prefix. The dump is paced to
-the collector's TCP drain rate and aborts (with a
-`bmp_collector_drops_total{phase="loc_rib_dump"}` increment) if the
-collector stalls for over 30 s; the next reconnect starts a fresh dump.
+the collector's TCP drain rate. Every TCP attempt gets a fresh queue; the client
+writes cached ordinary and Loc-RIB Peer Ups before confirming the generation,
+and only then does the manager start the dump. Request admission, RIB replies,
+and collector delivery are independently bounded. A failure before the
+RIB-owned terminal End-of-RIB closure increments
+`bmp_collector_drops_total{phase="loc_rib_dump"}`, discards buffered live
+Loc-RIB rows, and suppresses that view until the next reconnect rather than
+releasing an incomplete snapshot.
 
 All Loc-RIB messages — including the emulated peer's Peer Up/Down and stats
 — go only to collectors that monitor `loc_rib`.

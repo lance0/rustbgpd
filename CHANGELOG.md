@@ -71,6 +71,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   locally generated Cease/8 history records include the same safe cause without
   exposing raw I/O, panic, route, policy, or shutdown payload text.
 
+- BMP collector reconnects now use a fresh generation queue and an ordered,
+  two-phase Peer Up bootstrap before live delivery, so disconnected or stale
+  bytes cannot cross TCP sessions. Loc-RIB dumps start only after the bootstrap
+  reaches the socket; an incomplete dump stays suppressed until reconnect
+  instead of releasing buffered live rows without End-of-RIB.
+
 - IRR-scale boot and SIGHUP reload no longer recompile the `.rpol` set
   data once per chain resolution: a compiled unit now interns its
   prefix/community/asn sets exactly once and every chain instantiation
