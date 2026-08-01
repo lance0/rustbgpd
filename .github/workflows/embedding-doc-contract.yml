@@ -1,0 +1,26 @@
+name: Embedding docs contract
+
+on:
+  push:
+    branches: [main]
+    paths: &paths
+      - docs/EMBEDDING.md
+      - docs/RELEASE_CHECKLIST.md
+      - scripts/check_embedding_versions.py
+      - scripts/test_check_embedding_versions.py
+      - .github/workflows/embedding-doc-contract.yml
+  pull_request:
+    paths: *paths
+
+permissions:
+  contents: read
+
+jobs:
+  embedding-doc-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Check published crate boundary
+        run: |
+          python3 -m unittest -v scripts.test_check_embedding_versions
+          python3 scripts/check_embedding_versions.py

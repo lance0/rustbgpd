@@ -15,8 +15,8 @@ This document is the contract for embedders: which crate to depend on, what the
 
 | Crate                    | Published? | Depends on (internal)              | Deps (external)            | Stability target | Role for embedders |
 |--------------------------|-----------|-----------------------------------|----------------------------|------------------|--------------------|
-| `rustbgpd-wire`          | **Yes** — crates.io `0.15.0` | none (internal)            | `bytes`, `thiserror`      | **Stable codec** | The one to link. Pure encode/decode. |
-| `rustbgpd-fsm`           | **Yes** — crates.io `0.3.0` | `rustbgpd-wire`            | `thiserror`, `bytes`      | Pure FSM API     | Pure RFC 4271 FSM; no I/O. |
+| `rustbgpd-wire`          | **Yes** — crates.io `0.16.1` | none (internal)            | `bytes`, `thiserror`      | **Stable codec** | The one to link. Pure encode/decode. |
+| `rustbgpd-fsm`           | **Yes** — crates.io `0.3.1` | `rustbgpd-wire`            | `thiserror`, `bytes`      | Pure FSM API     | Pure RFC 4271 FSM; no I/O. |
 | `rustbgpd-rpki`          | No (`publish = false`) | `rustbgpd-wire`            | `tokio`, `tracing`, `smallvec` | Publish next     | VRP table + RTR client. |
 | `rustbgpd-rib`           | No (`publish = false`) | wire, policy, telemetry, rpki     | `prefix-trie`, `ipnet`, ... | Later            | Adj/Loc-RIB; heavier. |
 | `rustbgpd-policy`        | No (`publish = false`) | wire                    | `arc-swap`, `ariadne`, `logos`, `regex`, `sha2`, ... | Later | Import/export policy. |
@@ -118,7 +118,7 @@ in a minor release without a semver-major break. Closed-by-construction sets
 `RpkiValidation`) stay exhaustively matchable on purpose. `crates/wire/README.md`
 carries the full split under "Enum exhaustiveness".
 
-**The prepared 0.16.0 change** is additive at the API level, but **decode
+**The 0.16.0 release** is additive at the API level, but **decode
 acceptance or type classification changed in six places** — bytes that decoded
 under 0.15.0 may now be rejected or typed differently. `crates/wire/README.md`
 carries the itemized list under "0.16.0 compatibility note"; diff exactly that
@@ -143,7 +143,7 @@ This is the "MRT reader / monitor / analyzer" consumer. Links only
 ```toml
 # Cargo.toml
 [dependencies]
-rustbgpd-wire = "0.15.0"
+rustbgpd-wire = "0.16.1"
 bytes = "1"
 ```
 
@@ -203,8 +203,8 @@ intentional split (ADR-0002: inherent methods, no I/O in the FSM).
 ```toml
 # Cargo.toml
 [dependencies]
-rustbgpd-wire = "0.15.0"
-rustbgpd-fsm = "0.3.0"
+rustbgpd-wire = "0.16.1"
+rustbgpd-fsm = "0.3.1"
 bytes = "1"
 tokio = { version = "1", features = ["net", "io-util", "time", "rt"] }
 ```
@@ -302,17 +302,19 @@ once that crate is published.
 **Status: `wire` → `fsm` are published; `rpki` is next; `rib`, `bmp`, `mrt`,
 and `policy` are later.**
 
-1. **`rustbgpd-wire` (published as `0.15.0`; `0.16.0` prepared).** This is the
+1. **`rustbgpd-wire` (published as `0.16.1`).** This is the
    foundation — dependent crate versions cannot publish before their wire
    dependency exists on crates.io. `0.15.0` brought `Capability::PathsLimit`
    with its `PathsLimitFamily` entry type (experimental capability code 76),
    the `Ord` implementation on `EvpnRouteKey`, and `#[non_exhaustive]` across
-   the registry-tracking enums. The prepared `0.16.0` is additive at the API
+   the registry-tracking enums. The `0.16.0` release is additive at the API
    level with six binary decode-acceptance changes plus the separate additive
-   Route Distinguisher text-parser change described in §2.3.
+   Route Distinguisher text-parser change described in §2.3. `0.16.1` is a
+   documentation/rustdoc-only release correcting RFC 7606 retained-attribute
+   wording; it has no library-code, public-API, or decode-behavior change.
 
-2. **`rustbgpd-fsm` (published as `0.3.0`; `0.3.1` prepared).** The prepared
-   `0.3.1` keeps the public API backward-compatible: `PeerConfig` gains
+2. **`rustbgpd-fsm` (published as `0.3.1`).** The `0.3.1` release keeps the
+   public API backward-compatible: `PeerConfig` gains
    `min_hold_time` and `required_families`, and `PeerConfig` is
    `#[non_exhaustive]`, so external construction through `PeerConfig::new` is
    unaffected. Negotiation behavior also carries conformance fixes: the last
@@ -405,10 +407,9 @@ To be the de facto Rust BGP codec, the concrete gaps:
 
 ## 7. Published-crate release boundary
 
-`rustbgpd-wire 0.15.0` and `rustbgpd-fsm 0.3.0` are published and are the
-versions the §3 dependency examples name. The next cut prepares
-`rustbgpd-wire 0.16.0` and `rustbgpd-fsm 0.3.1`; the ordering rules that govern
-it, and every publish after it, are:
+`rustbgpd-wire 0.16.1` and `rustbgpd-fsm 0.3.1` are published and are the
+versions the §3 dependency examples name. The ordering rules that govern every
+future publish are:
 
 - Publish `rustbgpd-wire` first, then verify it is registry-visible. Only then
   run the fully verified package/dry-run gate for `rustbgpd-fsm`. Cargo
@@ -416,7 +417,7 @@ it, and every publish after it, are:
   version, so a full FSM package verify cannot resolve before that wire release
   is present in the registry.
 - Keep the dependency examples in §3 pinned to the versions actually available
-  from crates.io — never to a version prepared in-repo but not yet published.
+  from crates.io — never to a version not yet published.
 - Both crates keep their package metadata and README; the README is the rendered
   docs.rs landing page and carries the per-version compatibility notes.
 - Treat any additional crate publish as separate, demand-gated work.
