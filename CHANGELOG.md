@@ -100,6 +100,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - gNMI STREAM/SAMPLE now rejects nonzero intervals outside the supported 1s–1h
   range instead of silently clamping them; zero still selects the 1s floor.
 
+- gNMI STREAM/SAMPLE now supports per-path redundant-value suppression and
+  fixed-cadence heartbeats from 1 second through 1 hour. Heartbeats force current
+  leaves, coalesce with coincident samples, and skip missed periods; suppressed
+  `updates_only` streams seed their hidden baseline before the initial sync.
+  ON_CHANGE heartbeat support remains deferred.
+
 - Graceful Restart and Long-Lived Graceful Restart now retain an iBGP route
   source's route-reflector-client classification for as long as its stale
   routes remain eligible for reflection, preventing late joins or LLGR
