@@ -62,6 +62,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `WatchRoutes`, `WatchRouteEvents`, and the route, session, policy, and EVPN
+  admissions for `WatchEvents` now report actor command-channel closure and
+  dropped replies as `UNAVAILABLE`, with stable actor-specific messages. Live
+  stream closure and lag behavior after admission are unchanged.
+
 - A Loc-RIB live buffer that outgrows its 8,192-row bound during BMP bootstrap
   now closes only that collector's incomplete TCP generation and reconnects
   from a fresh dump. It no longer drops one delta while allowing the same

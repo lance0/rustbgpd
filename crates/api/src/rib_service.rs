@@ -6,7 +6,7 @@ use std::pin::Pin;
 use std::time::Instant;
 
 use sha2::{Digest, Sha256};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use tokio_stream::{Stream, StreamExt, wrappers::BroadcastStream};
 use tonic::{Request, Response, Status};
@@ -1600,16 +1600,10 @@ impl proto::rib_service_server::RibService for RibService {
             )
         };
 
-        // Subscribe to route events from the RIB manager
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.rib_tx
-            .send(RibUpdate::SubscribeRouteEvents { reply: reply_tx })
-            .await
-            .map_err(|_| Status::internal("RIB manager unavailable"))?;
-
-        let broadcast_rx = reply_rx
-            .await
-            .map_err(|_| Status::internal("RIB manager dropped reply"))?;
+        let broadcast_rx = rib_manager_read(&self.rib_tx, |reply| {
+            RibUpdate::SubscribeRouteEvents { reply }
+        })
+        .await?;
 
         let metrics = self.metrics.clone();
         let subscriber_guard = metrics.event_stream_subscriber_guard("watch_routes", "route");
@@ -1651,15 +1645,10 @@ impl proto::rib_service_server::RibService for RibService {
             )
         };
 
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.rib_tx
-            .send(RibUpdate::SubscribeRouteEvents { reply: reply_tx })
-            .await
-            .map_err(|_| Status::internal("RIB manager unavailable"))?;
-
-        let broadcast_rx = reply_rx
-            .await
-            .map_err(|_| Status::internal("RIB manager dropped reply"))?;
+        let broadcast_rx = rib_manager_read(&self.rib_tx, |reply| {
+            RibUpdate::SubscribeRouteEvents { reply }
+        })
+        .await?;
 
         let metrics = self.metrics.clone();
         let subscriber_guard = metrics.event_stream_subscriber_guard("watch_route_events", "route");
@@ -2755,6 +2744,38 @@ mod tests {
         UnaryRibRead::ListOrrStatus,
     ];
 
+    #[derive(Clone, Copy, Debug)]
+    enum RibWatchAdmission {
+        WatchRoutes,
+        WatchRouteEvents,
+    }
+
+    const RIB_WATCH_ADMISSIONS: [RibWatchAdmission; 2] = [
+        RibWatchAdmission::WatchRoutes,
+        RibWatchAdmission::WatchRouteEvents,
+    ];
+
+    async fn invoke_rib_watch_admission(
+        service: &RibService,
+        rpc: RibWatchAdmission,
+    ) -> Result<(), Status> {
+        let request = proto::WatchRoutesRequest::default();
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            match rpc {
+                RibWatchAdmission::WatchRoutes => service
+                    .watch_routes(Request::new(request))
+                    .await
+                    .map(|_| ()),
+                RibWatchAdmission::WatchRouteEvents => service
+                    .watch_route_events(Request::new(request))
+                    .await
+                    .map(|_| ()),
+            }
+        })
+        .await
+        .expect("RIB watch admission timed out")
+    }
+
     async fn invoke_unary_rib_read(svc: &RibService, rpc: UnaryRibRead) -> Result<(), Status> {
         match rpc {
             UnaryRibRead::ListReceivedRoutes => svc
@@ -2856,6 +2877,42 @@ mod tests {
                 .await
                 .unwrap_err();
             actor.await.unwrap();
+            assert_eq!(error.code(), tonic::Code::Unavailable, "{rpc:?}");
+            assert_eq!(error.message(), "RIB manager dropped reply", "{rpc:?}");
+        }
+    }
+
+    /// Load-bearing: restoring either watch admission's actor-send mapping to
+    /// `INTERNAL` makes its actual-handler row red.
+    #[tokio::test]
+    async fn rib_watch_admission_send_failures_are_unavailable() {
+        for rpc in RIB_WATCH_ADMISSIONS {
+            let (tx, rx) = mpsc::channel(1);
+            drop(rx);
+            let error = invoke_rib_watch_admission(&RibService::new(tx), rpc)
+                .await
+                .unwrap_err();
+            assert_eq!(error.code(), tonic::Code::Unavailable, "{rpc:?}");
+            assert_eq!(error.message(), "RIB manager unavailable", "{rpc:?}");
+        }
+    }
+
+    /// Load-bearing: restoring either watch admission's reply-await mapping to
+    /// `INTERNAL` makes its accepted-then-dropped actual-handler row red.
+    #[tokio::test]
+    async fn rib_watch_admission_reply_drops_are_unavailable() {
+        for rpc in RIB_WATCH_ADMISSIONS {
+            let (tx, mut rx) = mpsc::channel(1);
+            let actor = tokio::spawn(async move {
+                drop(rx.recv().await.expect("RIB watch admission"));
+            });
+            let error = invoke_rib_watch_admission(&RibService::new(tx), rpc)
+                .await
+                .unwrap_err();
+            tokio::time::timeout(std::time::Duration::from_secs(1), actor)
+                .await
+                .expect("RIB actor join timed out")
+                .unwrap();
             assert_eq!(error.code(), tonic::Code::Unavailable, "{rpc:?}");
             assert_eq!(error.message(), "RIB manager dropped reply", "{rpc:?}");
         }
