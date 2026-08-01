@@ -6,7 +6,6 @@
 
 use std::time::Duration;
 
-#[cfg(test)]
 use bytes::Bytes;
 use rustbgpd_telemetry::BgpMetrics;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
@@ -44,6 +43,34 @@ pub struct BmpClient {
 }
 
 impl BmpClient {
+    fn generation_closed<T>(rx: &mpsc::Receiver<T>, stop: &watch::Receiver<bool>) -> bool {
+        rx.is_closed() && !reconnect_shutdown_requested(stop)
+    }
+
+    async fn close_generation_and_retry(
+        &self,
+        receiver: mpsc::Receiver<Bytes>,
+        mut stream: TcpStream,
+        generation: u64,
+        shutdown: &mut watch::Receiver<bool>,
+        backoff: &mut Duration,
+        max_backoff: Duration,
+    ) -> bool {
+        self.notify_disconnected(
+            self.config.collector_id,
+            self.config.collector_addr,
+            generation,
+        );
+        drop(receiver);
+        if reconnect_shutdown_requested(shutdown) {
+            self.send_termination(&mut stream).await;
+            return true;
+        }
+        drop(stream);
+        wait_post_connect_retry(shutdown, backoff, max_backoff).await;
+        reconnect_shutdown_requested(shutdown)
+    }
+
     fn notify_disconnected(
         &self,
         collector_id: usize,
@@ -159,33 +186,13 @@ impl BmpClient {
         PostConnectWriteOutcome::Sent
     }
 
-    async fn send_live_or_retry<W>(
-        &self,
-        stream: &mut W,
-        message: &[u8],
-        generation: u64,
-        shutdown: &mut watch::Receiver<bool>,
-        backoff: &mut Duration,
-        max_backoff: Duration,
-    ) -> PostConnectWriteOutcome
+    async fn send_live_or_retry<W>(&self, stream: &mut W, message: &[u8]) -> PostConnectWriteOutcome
     where
         W: AsyncWrite + Unpin,
     {
         if let Err(error) = Self::write_all_with_timeout(stream, message).await {
             warn!(collector = %self.config.collector_addr, %error, "BMP write failed, reconnecting");
-            self.notify_disconnected(
-                self.config.collector_id,
-                self.config.collector_addr,
-                generation,
-            );
-            return if self
-                .wait_post_connect_retry_or_terminate(stream, shutdown, backoff, max_backoff)
-                .await
-            {
-                PostConnectWriteOutcome::Shutdown
-            } else {
-                PostConnectWriteOutcome::Retry
-            };
+            return PostConnectWriteOutcome::Retry;
         }
         PostConnectWriteOutcome::Sent
     }
@@ -211,9 +218,10 @@ impl BmpClient {
 
     /// Stop retrying a disconnected collector when daemon shutdown begins.
     ///
-    /// The signal interrupts connection and bootstrap retries. Once a
-    /// generation is live, the client waits for the manager to close its
-    /// sender, drains the accepted queue, and sends Termination last.
+    /// The signal interrupts connection and bootstrap retries. Once shutdown
+    /// is signaled, a live client drains the manager-accepted queue and sends
+    /// Termination last; ordinary generation closure discards its invalidated
+    /// queue and reconnects.
     #[must_use]
     pub fn with_reconnect_shutdown(mut self, shutdown: watch::Receiver<bool>) -> Self {
         self.reconnect_shutdown = Some(shutdown);
@@ -241,7 +249,7 @@ impl BmpClient {
             .take()
             .unwrap_or(fallback_shutdown_rx);
 
-        loop {
+        'reconnect: loop {
             let Some(mut stream) = connect_with_reconnect_shutdown(
                 addr,
                 max_backoff,
@@ -367,19 +375,47 @@ impl BmpClient {
                     continue;
                 }
             };
-            let mut bootstrap_failed = false;
             for message in bootstrap.messages {
+                if Self::generation_closed(&rx, &reconnect_shutdown) {
+                    if self
+                        .close_generation_and_retry(
+                            rx,
+                            stream,
+                            bootstrap.generation,
+                            &mut reconnect_shutdown,
+                            &mut post_connect_backoff,
+                            max_backoff,
+                        )
+                        .await
+                    {
+                        return;
+                    }
+                    continue 'reconnect;
+                }
                 if let Err(e) = Self::write_all_with_timeout(&mut stream, &message).await {
                     warn!(collector = %addr, error = %e, "failed to write BMP bootstrap");
-                    bootstrap_failed = true;
-                    break;
+                    if self
+                        .close_generation_and_retry(
+                            rx,
+                            stream,
+                            bootstrap.generation,
+                            &mut reconnect_shutdown,
+                            &mut post_connect_backoff,
+                            max_backoff,
+                        )
+                        .await
+                    {
+                        return;
+                    }
+                    continue 'reconnect;
                 }
             }
-            if bootstrap_failed {
-                self.notify_disconnected(id, addr, bootstrap.generation);
+            if Self::generation_closed(&rx, &reconnect_shutdown) {
                 if self
-                    .wait_post_connect_retry_or_terminate(
-                        &mut stream,
+                    .close_generation_and_retry(
+                        rx,
+                        stream,
+                        bootstrap.generation,
                         &mut reconnect_shutdown,
                         &mut post_connect_backoff,
                         max_backoff,
@@ -410,10 +446,11 @@ impl BmpClient {
                         "collector_bootstrap_complete",
                         "channel_closed",
                     );
-                    self.notify_disconnected(id, addr, bootstrap.generation);
                     if self
-                        .wait_post_connect_retry_or_terminate(
-                            &mut stream,
+                        .close_generation_and_retry(
+                            rx,
+                            stream,
+                            bootstrap.generation,
                             &mut reconnect_shutdown,
                             &mut post_connect_backoff,
                             max_backoff,
@@ -430,10 +467,11 @@ impl BmpClient {
                         "collector_bootstrap_complete",
                         "channel_timeout",
                     );
-                    self.notify_disconnected(id, addr, bootstrap.generation);
                     if self
-                        .wait_post_connect_retry_or_terminate(
-                            &mut stream,
+                        .close_generation_and_retry(
+                            rx,
+                            stream,
+                            bootstrap.generation,
                             &mut reconnect_shutdown,
                             &mut post_connect_backoff,
                             max_backoff,
@@ -456,35 +494,56 @@ impl BmpClient {
                         info!(collector = %addr, "BMP client shutting down");
                         return;
                     }
-                    self.notify_disconnected(id, addr, bootstrap.generation);
                     if self
-                        .wait_post_connect_retry_or_terminate(
-                            &mut stream,
+                        .close_generation_and_retry(
+                            rx,
+                            stream,
+                            bootstrap.generation,
                             &mut reconnect_shutdown,
                             &mut post_connect_backoff,
                             max_backoff,
                         )
                         .await
                     {
-                        info!(collector = %addr, "BMP client shutting down");
                         return;
                     }
-                    break;
+                    continue 'reconnect;
                 };
+                if Self::generation_closed(&rx, &reconnect_shutdown) {
+                    if self
+                        .close_generation_and_retry(
+                            rx,
+                            stream,
+                            bootstrap.generation,
+                            &mut reconnect_shutdown,
+                            &mut post_connect_backoff,
+                            max_backoff,
+                        )
+                        .await
+                    {
+                        return;
+                    }
+                    continue 'reconnect;
+                }
 
-                match self
-                    .send_live_or_retry(
-                        &mut stream,
-                        &msg,
-                        bootstrap.generation,
-                        &mut reconnect_shutdown,
-                        &mut post_connect_backoff,
-                        max_backoff,
-                    )
-                    .await
-                {
+                match self.send_live_or_retry(&mut stream, &msg).await {
                     PostConnectWriteOutcome::Sent => {}
-                    PostConnectWriteOutcome::Retry => break,
+                    PostConnectWriteOutcome::Retry => {
+                        if self
+                            .close_generation_and_retry(
+                                rx,
+                                stream,
+                                bootstrap.generation,
+                                &mut reconnect_shutdown,
+                                &mut post_connect_backoff,
+                                max_backoff,
+                            )
+                            .await
+                        {
+                            return;
+                        }
+                        continue 'reconnect;
+                    }
                     PostConnectWriteOutcome::Shutdown => return,
                 }
             }
@@ -852,6 +911,204 @@ mod tests {
         handle.abort();
     }
 
+    /// Production mutation: retaining `stream` while awaiting retry makes EOF
+    /// miss the sub-backoff deadline; treating the close as shutdown emits a
+    /// Termination instead of an empty tail.
+    #[tokio::test]
+    async fn empty_generation_close_drops_tcp_before_reconnect_backoff() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (control_tx, mut control_rx) = mpsc::channel(8);
+        let client = BmpClient::new(
+            BmpClientConfig {
+                collector_id: 7,
+                collector_addr: addr,
+                reconnect_interval: 30,
+                version: BmpVersion::V3,
+            },
+            "rustbgpd".to_string(),
+            "test".to_string(),
+            control_tx,
+            BgpMetrics::new(),
+        );
+        let handle = tokio::spawn(client.run());
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let initiation = codec::encode_initiation("rustbgpd", "test", BmpVersion::V3);
+        let mut observed = vec![0; initiation.len()];
+        stream.read_exact(&mut observed).await.unwrap();
+        let BmpControlEvent::CollectorConnected {
+            sender, bootstrap, ..
+        } = control_rx.recv().await.unwrap()
+        else {
+            panic!("expected connected");
+        };
+        bootstrap
+            .send(crate::types::BmpCollectorBootstrap {
+                generation: 11,
+                messages: vec![],
+            })
+            .unwrap();
+        assert!(matches!(
+            control_rx.recv().await,
+            Some(BmpControlEvent::CollectorBootstrapComplete { generation: 11, .. })
+        ));
+        drop(sender);
+
+        let mut tail = Vec::new();
+        tokio::time::timeout(Duration::from_millis(500), stream.read_to_end(&mut tail))
+            .await
+            .expect("TCP remained open into one-second retry backoff")
+            .unwrap();
+        assert!(tail.is_empty(), "ordinary close emitted Termination");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                .await
+                .is_err(),
+            "client reconnected before the one-second backoff"
+        );
+        assert!(matches!(
+            control_rx.recv().await,
+            Some(BmpControlEvent::CollectorDisconnected { generation: 11, .. })
+        ));
+        handle.abort();
+    }
+
+    /// Production mutation: deleting the post-`recv(Some)` close check writes
+    /// the queued EoR-shaped sentinel. Holding the socket across retry misses
+    /// the EOF deadline. The full control channel deterministically parks the
+    /// client after its final bootstrap check until the sender is closed.
+    #[tokio::test]
+    async fn closed_generation_never_starts_prequeued_live_message() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (control_tx, mut control_rx) = mpsc::channel(1);
+        let control_fill = control_tx.clone();
+        let client = BmpClient::new(
+            BmpClientConfig {
+                collector_id: 7,
+                collector_addr: addr,
+                reconnect_interval: 30,
+                version: BmpVersion::V3,
+            },
+            "rustbgpd".to_string(),
+            "test".to_string(),
+            control_tx,
+            BgpMetrics::new(),
+        );
+        let handle = tokio::spawn(client.run());
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let initiation = codec::encode_initiation("rustbgpd", "test", BmpVersion::V3);
+        let mut observed = vec![0; initiation.len()];
+        stream.read_exact(&mut observed).await.unwrap();
+        let BmpControlEvent::CollectorConnected {
+            sender, bootstrap, ..
+        } = control_rx.recv().await.unwrap()
+        else {
+            panic!("expected connected");
+        };
+        sender
+            .send(Bytes::from_static(&[3, 0, 0, 0, 6, 0]))
+            .await
+            .unwrap();
+        control_fill.send(BmpControlEvent::Shutdown).await.unwrap();
+        bootstrap
+            .send(crate::types::BmpCollectorBootstrap {
+                generation: 12,
+                messages: vec![],
+            })
+            .unwrap();
+        tokio::task::yield_now().await;
+        drop(sender);
+        assert!(matches!(
+            control_rx.recv().await,
+            Some(BmpControlEvent::Shutdown)
+        ));
+        assert!(matches!(
+            control_rx.recv().await,
+            Some(BmpControlEvent::CollectorBootstrapComplete { generation: 12, .. })
+        ));
+
+        let mut tail = Vec::new();
+        tokio::time::timeout(Duration::from_millis(500), stream.read_to_end(&mut tail))
+            .await
+            .expect("TCP remained open into one-second retry backoff")
+            .unwrap();
+        assert!(tail.is_empty(), "closed queue sentinel reached TCP");
+        handle.abort();
+    }
+
+    /// Production mutations: removing the per-bootstrap check, the final
+    /// pre-completion check, or the post-recv check changes the exact count;
+    /// moving any check after its write violates the source-order assertions.
+    #[test]
+    fn generation_close_checks_guard_every_write_seam() {
+        let source = include_str!("client.rs")
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap();
+        let loop_start = source.find("for message in bootstrap.messages").unwrap();
+        let first_check = source[loop_start..]
+            .find("Self::generation_closed(&rx")
+            .unwrap()
+            + loop_start;
+        let bootstrap_write = source[first_check..]
+            .find("Self::write_all_with_timeout")
+            .unwrap()
+            + first_check;
+        let final_check = source[bootstrap_write..]
+            .find("Self::generation_closed(&rx")
+            .unwrap()
+            + bootstrap_write;
+        let completion = source[final_check..]
+            .find("CollectorBootstrapComplete")
+            .unwrap()
+            + final_check;
+        let receive = source[completion..].find("rx.recv().await").unwrap() + completion;
+        let live_check = source[receive..]
+            .find("Self::generation_closed(&rx")
+            .unwrap()
+            + receive;
+        let live_write = source[live_check..].find("send_live_or_retry").unwrap() + live_check;
+        let retry = source[live_write..]
+            .find("PostConnectWriteOutcome::Retry =>")
+            .unwrap()
+            + live_write;
+        let retry_close = source[retry..].find("close_generation_and_retry").unwrap() + retry;
+        assert!(loop_start < first_check && first_check < bootstrap_write);
+        assert!(bootstrap_write < final_check && final_check < completion);
+        assert!(receive < live_check && live_check < live_write);
+        assert!(live_write < retry && retry < retry_close);
+        let completion_failures = &source[completion..receive];
+        assert_eq!(
+            completion_failures
+                .matches("close_generation_and_retry")
+                .count(),
+            2
+        );
+        assert_eq!(source.matches("Self::generation_closed(&rx").count(), 3);
+    }
+
+    /// Semantic half of the structural bootstrap proof: closing after the
+    /// first direct write makes the same predicate stop before message two.
+    /// Making `generation_closed` ignore `Receiver::is_closed` turns it red.
+    #[test]
+    fn bootstrap_close_after_message_one_excludes_message_two() {
+        let (sender, receiver) = mpsc::channel::<Bytes>(1);
+        let (_shutdown_tx, shutdown) = watch::channel(false);
+        let mut sender = Some(sender);
+        let mut written = Vec::new();
+        for message in [b"one".as_slice(), b"two".as_slice()] {
+            if BmpClient::generation_closed(&receiver, &shutdown) {
+                break;
+            }
+            written.push(message);
+            if written.len() == 1 {
+                drop(sender.take());
+            }
+        }
+        assert_eq!(written, [b"one".as_slice()]);
+    }
+
     /// Load-bearing call-site proof: removing the bounded retry from the
     /// Initiation failure handler makes this task finish before one second.
     /// The injected writer makes the real Initiation write path fail without
@@ -901,12 +1158,12 @@ mod tests {
         );
     }
 
-    /// Load-bearing call-site proof: removing the bounded retry from the live
-    /// write failure handler makes this task finish before one second. The
-    /// injected writer avoids relying on TCP reset timing.
-    #[tokio::test(start_paused = true)]
-    async fn live_write_failure_waits_before_reconnect() {
-        let (control_tx, mut control_rx) = mpsc::channel(1);
+    /// Load-bearing proof: reporting a failed write as sent makes this red.
+    /// The generation owner—not the borrowed writer helper—owns TCP close and
+    /// retry, so it can discard the socket before awaiting backoff.
+    #[tokio::test]
+    async fn live_write_failure_returns_retry_to_generation_owner() {
+        let (control_tx, _control_rx) = mpsc::channel(1);
         let client = BmpClient::new(
             BmpClientConfig {
                 collector_id: 7,
@@ -919,39 +1176,11 @@ mod tests {
             control_tx,
             BgpMetrics::new(),
         );
-        let (_shutdown_tx, mut shutdown_rx) = watch::channel(false);
-        let task = tokio::spawn(async move {
-            let mut writer = BrokenWriter;
-            let mut backoff = Duration::from_secs(1);
-            let outcome = client
-                .send_live_or_retry(
-                    &mut writer,
-                    b"live",
-                    42,
-                    &mut shutdown_rx,
-                    &mut backoff,
-                    Duration::from_secs(4),
-                )
-                .await;
-            (outcome, backoff)
-        });
-
-        tokio::task::yield_now().await;
-        assert!(
-            !task.is_finished(),
-            "live write failure skipped retry delay"
-        );
-        tokio::time::advance(Duration::from_millis(999)).await;
-        assert!(!task.is_finished(), "live retry fired too early");
-        tokio::time::advance(Duration::from_millis(1)).await;
+        let mut writer = BrokenWriter;
         assert_eq!(
-            task.await.unwrap(),
-            (PostConnectWriteOutcome::Retry, Duration::from_secs(2))
+            client.send_live_or_retry(&mut writer, b"live").await,
+            PostConnectWriteOutcome::Retry
         );
-        assert!(matches!(
-            control_rx.recv().await,
-            Some(BmpControlEvent::CollectorDisconnected { generation: 42, .. })
-        ));
     }
 
     /// Load-bearing proof: draining the live receiver before writing the
@@ -991,7 +1220,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        match ev {
+        let generation_sender = match ev {
             BmpControlEvent::CollectorConnected {
                 collector_id,
                 collector_addr,
@@ -1007,9 +1236,10 @@ mod tests {
                         messages: vec![bootstrap_message.clone()],
                     })
                     .unwrap();
+                sender
             }
             other => panic!("expected CollectorConnected, got {other:?}"),
-        }
+        };
 
         assert!(matches!(
             control_rx.recv().await,
@@ -1023,13 +1253,15 @@ mod tests {
         let mut expected = bootstrap_message.to_vec();
         expected.extend_from_slice(&live_message);
         assert_eq!(ordered, expected);
+        drop(generation_sender);
 
         handle.abort();
     }
 
-    /// Load-bearing proof: removing the completion send timeout hangs this
-    /// test; entering the live loop after the timeout writes the queued live
-    /// sentinel and makes the empty-wire assertion red.
+    /// Load-bearing proof: removing the completion timeout hangs this test;
+    /// retaining TCP across its retry misses the EOF deadline; entering the
+    /// live loop writes the queued sentinel. The sender closes only after the
+    /// client is parked in the full completion-send channel.
     #[tokio::test]
     async fn bootstrap_completion_timeout_never_enters_live_stream() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1075,14 +1307,18 @@ mod tests {
                 messages: vec![],
             })
             .unwrap();
+        tokio::task::yield_now().await;
+        drop(sender);
 
         tokio::time::sleep(CONTROL_TIMEOUT + Duration::from_millis(100)).await;
-        let mut sentinel = [0_u8; 1];
+        let mut tail = Vec::new();
+        tokio::time::timeout(Duration::from_millis(100), stream.read_to_end(&mut tail))
+            .await
+            .expect("completion timeout retained TCP into reconnect backoff")
+            .unwrap();
         assert!(
-            tokio::time::timeout(Duration::from_millis(100), stream.read_exact(&mut sentinel))
-                .await
-                .is_err(),
-            "live queue drained after BootstrapComplete timed out"
+            tail.is_empty(),
+            "live queue drained after completion timeout"
         );
         let drops = metrics
             .registry()
