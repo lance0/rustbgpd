@@ -206,7 +206,11 @@ The three A/B comparison summaries are retained under
 
 Post-fix A/B (pinned harness, three alternating attempts, v0.51.0 base —
 `ab-final-post-fix.md`): `rib_pipeline` -0.2%/-1.5%/-1.1%, `bulk_initial_load`
--0.7% at 10k and a non-confident straddle at 100k. A flat residual of roughly 20-30 ns per call
+-0.7% at 10k and a non-confident straddle at 100k. That 100k control used
+65,536 unique prefixes; its A/B remains byte-truthful for the duplicate-shaped
+workload but is not unique-100k cold-load evidence. The core 100k/400k paging
+matrix uses an independent unique `/32` generator and is unaffected. See the
+[prefix-fixture audit](rib-ops-prefix-fixture-audit-2026-08.md). A flat residual of roughly 20-30 ns per call
 remains visible only in the `loc_rib_recompute` microbenchmark (+21-49%); a
 discriminator build with the journal note stubbed to a no-op still measures
 +18-30%, attributing the residual to carrying the index feature itself (a

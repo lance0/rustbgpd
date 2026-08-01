@@ -29,6 +29,11 @@ number is noise by construction.
 | `bulk_initial_load/10000` | 1.67% |
 | `bulk_initial_load/100000` | 4.05% |
 
+The three rows above 65,536 (`adj_rib_in_insert/100000`, `/500000`, and
+`bulk_initial_load/100000`) used 65,536 unique keys. Their same-SHA variability
+remains exact for that duplicate-shaped workload, but is not unique high-N
+evidence; see the [prefix-fixture audit](rib-ops-prefix-fixture-audit-2026-08.md).
+
 The spread across shapes is over thirtyfold, on one host, in one sitting, at
 one commit. `adj_rib_in_insert/100000` is the outlier: its same-SHA control
 swung −17.20%..+25.44% while `/10000` stayed inside −0.30%..+3.50%.
@@ -66,7 +71,8 @@ other size.
 `adj_rib_in_insert/500000` measured −14.24% with stddev 4.87% in the same run.
 That is recorded here as **suggestive receipt data, not a claim**: its best case
 (−5.03%) falls inside the same-SHA control's own range (−8.78%..+8.22%), so the
-measurement cannot separate it from that shape's noise. `/100000` is not quoted
+measurement cannot separate it from that duplicate-shaped workload's noise.
+`/100000` is not quoted
 at all — its control stddev of 16.76% makes any delta at that size
 uninterpretable.
 
