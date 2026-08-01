@@ -53,13 +53,45 @@ use crate::update::{
 
 fn send_update_group_snapshot(
     reply: tokio::sync::oneshot::Sender<UpdateGroupSnapshot>,
-    build: impl FnOnce() -> UpdateGroupSnapshot,
+    build: impl FnOnce(
+        &tokio::sync::oneshot::Sender<UpdateGroupSnapshot>,
+    ) -> Option<UpdateGroupSnapshot>,
 ) {
     if reply.is_closed() {
         debug!("update-group snapshot query canceled before materialization");
         return;
     }
-    let _ = reply.send(build());
+    let Some(snapshot) = build(&reply) else {
+        debug!("update-group snapshot query canceled during materialization");
+        return;
+    };
+    let _ = reply.send(snapshot);
+}
+
+fn materialize_update_group_snapshot(
+    reply: &tokio::sync::oneshot::Sender<UpdateGroupSnapshot>,
+    peers: &mut [IpAddr],
+    mut build_row: impl FnMut(IpAddr) -> UpdateGroupPeerSnapshot,
+) -> Option<UpdateGroupSnapshot> {
+    if reply.is_closed() {
+        return None;
+    }
+    peers.sort_by_key(|peer| match peer {
+        IpAddr::V4(addr) => (0, addr.octets().to_vec()),
+        IpAddr::V6(addr) => (1, addr.octets().to_vec()),
+    });
+
+    let mut rows = Vec::with_capacity(peers.len());
+    for &peer in peers.iter() {
+        if reply.is_closed() {
+            return None;
+        }
+        rows.push(build_row(peer));
+    }
+    if reply.is_closed() {
+        return None;
+    }
+    Some(UpdateGroupSnapshot { peers: rows })
 }
 
 /// A configured policy name retained by shared staging. `Arc` keeps a
@@ -3238,36 +3270,37 @@ impl RibManager {
         &self,
         reply: tokio::sync::oneshot::Sender<UpdateGroupSnapshot>,
     ) {
-        send_update_group_snapshot(reply, || {
+        send_update_group_snapshot(reply, |reply| {
             let mut peers = self
                 .update_groups
                 .members
-                .iter()
-                .map(|(&peer, membership)| {
-                    let chain = self.export_policy_for(peer);
-                    let orf_negotiated = self
-                        .live_sessions
-                        .get(&peer)
-                        .and_then(|sessions| sessions.last())
-                        .is_some_and(|record| !record.negotiated_orf_recv.is_empty());
-                    let input = self.update_group_classifier_input(
-                        peer,
-                        chain,
-                        orf_negotiated || self.peer_orf_filters.contains_key(&peer),
-                    );
-                    UpdateGroupPeerSnapshot {
-                        peer,
-                        classification: classify_update_group(input.clone()),
-                        input,
-                        runtime_membership: membership.label(),
-                    }
-                })
+                .keys()
+                .copied()
                 .collect::<Vec<_>>();
-            peers.sort_by_key(|row| match row.peer {
-                IpAddr::V4(addr) => (0, addr.octets().to_vec()),
-                IpAddr::V6(addr) => (1, addr.octets().to_vec()),
-            });
-            UpdateGroupSnapshot { peers }
+            materialize_update_group_snapshot(reply, &mut peers, |peer| {
+                let membership = self
+                    .update_groups
+                    .members
+                    .get(&peer)
+                    .expect("snapshot peer collected from update-group membership");
+                let chain = self.export_policy_for(peer);
+                let orf_negotiated = self
+                    .live_sessions
+                    .get(&peer)
+                    .and_then(|sessions| sessions.last())
+                    .is_some_and(|record| !record.negotiated_orf_recv.is_empty());
+                let input = self.update_group_classifier_input(
+                    peer,
+                    chain,
+                    orf_negotiated || self.peer_orf_filters.contains_key(&peer),
+                );
+                UpdateGroupPeerSnapshot {
+                    peer,
+                    classification: classify_update_group(input.clone()),
+                    input,
+                    runtime_membership: membership.label(),
+                }
+            })
         });
     }
 
@@ -3519,7 +3552,7 @@ fn classify_effective_distribution_mode(
 
 #[cfg(test)]
 mod tests {
-    use std::net::{IpAddr, Ipv4Addr};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     use rustbgpd_policy::Policy;
     use rustbgpd_wire::{
@@ -3532,7 +3565,138 @@ mod tests {
     fn canceled_update_group_snapshot_does_not_invoke_builder() {
         let (reply, receiver) = tokio::sync::oneshot::channel::<UpdateGroupSnapshot>();
         drop(receiver);
-        send_update_group_snapshot(reply, || panic!("canceled query materialized"));
+        send_update_group_snapshot(reply, |_| panic!("canceled query materialized"));
+    }
+
+    fn test_snapshot_row(peer: IpAddr) -> UpdateGroupPeerSnapshot {
+        let input = UpdateGroupClassifierInput {
+            policy_fingerprint: None,
+            policy_provenance: None,
+            policy_requires_peer_context: false,
+            target_is_ebgp: true,
+            target_is_rr_client: false,
+            target_local_role: None,
+            interpret_rfc1997: true,
+            sendable_families: vec![(Afi::Ipv4 as u16, Safi::Unicast as u8)],
+            llgr_families: Vec::new(),
+            add_path_send: false,
+            per_client_best: false,
+            orr_vantage: None,
+            orf_installed: false,
+        };
+        UpdateGroupPeerSnapshot {
+            peer,
+            classification: classify_update_group(input.clone()),
+            input,
+            runtime_membership: "group:0".to_string(),
+        }
+    }
+
+    fn unsorted_mixed_snapshot_peers() -> Vec<IpAddr> {
+        vec![
+            IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 2)),
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2)),
+            IpAddr::V6(Ipv6Addr::LOCALHOST),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)),
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+        ]
+    }
+
+    #[test]
+    fn canceled_update_group_snapshot_stops_between_sorted_rows() {
+        let (reply, receiver) = tokio::sync::oneshot::channel::<UpdateGroupSnapshot>();
+        let mut receiver = Some(receiver);
+        let mut peers = unsorted_mixed_snapshot_peers();
+        let mut observed = Vec::new();
+
+        let snapshot = materialize_update_group_snapshot(&reply, &mut peers, |peer| {
+            observed.push(peer);
+            if observed.len() == 3 {
+                drop(receiver.take());
+            }
+            test_snapshot_row(peer)
+        });
+
+        assert!(snapshot.is_none(), "a canceled snapshot must not be sent");
+        assert_eq!(
+            observed,
+            vec![
+                IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+                IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+                IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2)),
+            ],
+            "cancellation after K=3 row builds must stop before row K+1"
+        );
+    }
+
+    #[test]
+    fn canceled_after_address_collection_does_not_sort_or_build_rows() {
+        let (reply, receiver) = tokio::sync::oneshot::channel::<UpdateGroupSnapshot>();
+        let mut peers = unsorted_mixed_snapshot_peers();
+        let collected_order = peers.clone();
+        drop(receiver);
+
+        let snapshot = materialize_update_group_snapshot(&reply, &mut peers, |_| {
+            panic!("canceled snapshot built a row")
+        });
+
+        assert!(snapshot.is_none());
+        assert_eq!(
+            peers, collected_order,
+            "post-collection cancellation must be observed before sorting"
+        );
+    }
+
+    #[test]
+    fn cancellation_from_last_row_does_not_complete_snapshot() {
+        let (reply, receiver) = tokio::sync::oneshot::channel::<UpdateGroupSnapshot>();
+        let mut receiver = Some(receiver);
+        let mut peers = unsorted_mixed_snapshot_peers();
+        let row_count = peers.len();
+        let mut built = 0;
+
+        let snapshot = materialize_update_group_snapshot(&reply, &mut peers, |peer| {
+            built += 1;
+            if built == row_count {
+                drop(receiver.take());
+            }
+            test_snapshot_row(peer)
+        });
+
+        assert_eq!(built, row_count, "the receiver closes from the final row");
+        assert!(
+            snapshot.is_none(),
+            "final cancellation must prevent completing the snapshot"
+        );
+    }
+
+    #[test]
+    fn update_group_snapshot_preserves_legacy_mixed_address_order() {
+        let (reply, receiver) = tokio::sync::oneshot::channel::<UpdateGroupSnapshot>();
+        let mut peers = unsorted_mixed_snapshot_peers();
+        send_update_group_snapshot(reply, |reply| {
+            materialize_update_group_snapshot(reply, &mut peers, test_snapshot_row)
+        });
+
+        let snapshot = receiver
+            .blocking_recv()
+            .expect("complete snapshot is delivered");
+        assert_eq!(
+            snapshot
+                .peers
+                .iter()
+                .map(|row| row.peer)
+                .collect::<Vec<_>>(),
+            vec![
+                IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+                IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+                IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2)),
+                IpAddr::V6(Ipv6Addr::LOCALHOST),
+                IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)),
+                IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 2)),
+            ]
+        );
     }
     use crate::test_support::make_route;
 
