@@ -34,7 +34,10 @@ use std::net::IpAddr;
 use std::sync::Arc;
 
 use rustbgpd_policy::{NextHopAction, PolicyAction, PolicyChain, PolicyEvaluation};
-use rustbgpd_wire::{Afi, BgpRole, LargeCommunity, PathAttribute, Prefix, Safi};
+use rustbgpd_wire::{
+    Afi, BgpRole, ExtendedCommunity, LargeCommunity, PathAttribute, Prefix, Safi, VpnAddressFamily,
+    VpnRouteKey,
+};
 use rustc_hash::FxHashMap;
 use tracing::{debug, info, warn};
 
@@ -47,7 +50,17 @@ use crate::update::{
     UpdateGroupComparisonDifference, UpdateGroupComparisonMembership, UpdateGroupComparisonVerdict,
     UpdateGroupPeerComparison, UpdateGroupPeerSnapshot, UpdateGroupSnapshot, classify_update_group,
 };
-use rustbgpd_wire::{ExtendedCommunity, VpnAddressFamily, VpnRouteKey};
+
+fn send_update_group_snapshot(
+    reply: tokio::sync::oneshot::Sender<UpdateGroupSnapshot>,
+    build: impl FnOnce() -> UpdateGroupSnapshot,
+) {
+    if reply.is_closed() {
+        debug!("update-group snapshot query canceled before materialization");
+        return;
+    }
+    let _ = reply.send(build());
+}
 
 /// A configured policy name retained by shared staging. `Arc` keeps a
 /// group-wide per-route verdict from rebuilding the same owned label at every
@@ -3225,35 +3238,37 @@ impl RibManager {
         &self,
         reply: tokio::sync::oneshot::Sender<UpdateGroupSnapshot>,
     ) {
-        let mut peers = self
-            .update_groups
-            .members
-            .iter()
-            .map(|(&peer, membership)| {
-                let chain = self.export_policy_for(peer);
-                let orf_negotiated = self
-                    .live_sessions
-                    .get(&peer)
-                    .and_then(|sessions| sessions.last())
-                    .is_some_and(|record| !record.negotiated_orf_recv.is_empty());
-                let input = self.update_group_classifier_input(
-                    peer,
-                    chain,
-                    orf_negotiated || self.peer_orf_filters.contains_key(&peer),
-                );
-                UpdateGroupPeerSnapshot {
-                    peer,
-                    classification: classify_update_group(input.clone()),
-                    input,
-                    runtime_membership: membership.label(),
-                }
-            })
-            .collect::<Vec<_>>();
-        peers.sort_by_key(|row| match row.peer {
-            IpAddr::V4(addr) => (0, addr.octets().to_vec()),
-            IpAddr::V6(addr) => (1, addr.octets().to_vec()),
+        send_update_group_snapshot(reply, || {
+            let mut peers = self
+                .update_groups
+                .members
+                .iter()
+                .map(|(&peer, membership)| {
+                    let chain = self.export_policy_for(peer);
+                    let orf_negotiated = self
+                        .live_sessions
+                        .get(&peer)
+                        .and_then(|sessions| sessions.last())
+                        .is_some_and(|record| !record.negotiated_orf_recv.is_empty());
+                    let input = self.update_group_classifier_input(
+                        peer,
+                        chain,
+                        orf_negotiated || self.peer_orf_filters.contains_key(&peer),
+                    );
+                    UpdateGroupPeerSnapshot {
+                        peer,
+                        classification: classify_update_group(input.clone()),
+                        input,
+                        runtime_membership: membership.label(),
+                    }
+                })
+                .collect::<Vec<_>>();
+            peers.sort_by_key(|row| match row.peer {
+                IpAddr::V4(addr) => (0, addr.octets().to_vec()),
+                IpAddr::V6(addr) => (1, addr.octets().to_vec()),
+            });
+            UpdateGroupSnapshot { peers }
         });
-        let _ = reply.send(UpdateGroupSnapshot { peers });
     }
 
     pub(super) fn handle_query_update_group_comparison(
@@ -3512,6 +3527,13 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn canceled_update_group_snapshot_does_not_invoke_builder() {
+        let (reply, receiver) = tokio::sync::oneshot::channel::<UpdateGroupSnapshot>();
+        drop(receiver);
+        send_update_group_snapshot(reply, || panic!("canceled query materialized"));
+    }
     use crate::test_support::make_route;
 
     fn comparison_key() -> GroupKey {
