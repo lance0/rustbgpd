@@ -875,6 +875,9 @@ impl PeerManager {
                             let _ = reply.send(result);
                         }
                         PeerManagerCommand::ListPeers { reply } => {
+                            if reply.is_closed() {
+                                continue;
+                            }
                             let infos = self.list_peers().await;
                             let _ = reply.send(infos);
                         }
@@ -911,12 +914,18 @@ impl PeerManager {
                         PeerManagerCommand::PlanConfigTransaction {
                             candidate_toml,
                             expected_runtime_snapshot_token,
-                            reply,
+                            mut reply,
                         } => {
-                            let result = self.plan_config_transaction(
+                            let planning = self.plan_config_transaction(
                                 &candidate_toml,
                                 expected_runtime_snapshot_token.as_deref(),
-                            ).await;
+                            );
+                            tokio::pin!(planning);
+                            let result = tokio::select! {
+                                biased;
+                                () = reply.closed() => continue,
+                                result = &mut planning => result,
+                            };
                             let _ = reply.send(result);
                         }
                         PeerManagerCommand::StageConfigSnapshot {

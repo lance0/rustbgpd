@@ -40,6 +40,18 @@ pub(super) fn send_mrt_snapshot(
         warn!("MRT snapshot query caller dropped before receiving response");
     }
 }
+
+fn send_neighbor_rib_snapshot(
+    reply: tokio::sync::oneshot::Sender<NeighborRibSnapshotResponse>,
+    build: impl FnOnce() -> NeighborRibSnapshotResponse,
+) {
+    if reply.is_closed() {
+        debug!("neighbor RIB snapshot query canceled before materialization");
+        return;
+    }
+    let _ = reply.send(build());
+}
+
 /// Synthesized messages per RFC 9069 Loc-RIB dump chunk — the
 /// per-request allocation bound of the resumable dump (the final chunk
 /// additionally carries one End-of-RIB marker per streamed family).
@@ -1637,26 +1649,28 @@ impl RibManager {
         comparison: Option<(IpAddr, IpAddr)>,
         reply: tokio::sync::oneshot::Sender<NeighborRibSnapshotResponse>,
     ) {
-        let snapshots = peers
-            .into_iter()
-            .map(|peer| NeighborRibSnapshot {
-                peer,
-                advertised_count: self
-                    .grouped_advertised_count(peer)
-                    .unwrap_or_else(|| self.adj_ribs_out.get(&peer).map_or(0, AdjRibOut::len)),
-                policy_stats: self
-                    .export_policy_stats
-                    .get(&peer)
-                    .copied()
-                    .unwrap_or_default(),
-                outbound: self.peer_outbound_state(peer),
-            })
-            .collect();
-        let comparison = comparison
-            .map(|(primary, comparison)| self.update_group_comparison(primary, comparison));
-        let _ = reply.send(NeighborRibSnapshotResponse {
-            snapshots,
-            comparison,
+        send_neighbor_rib_snapshot(reply, || {
+            let snapshots = peers
+                .into_iter()
+                .map(|peer| NeighborRibSnapshot {
+                    peer,
+                    advertised_count: self
+                        .grouped_advertised_count(peer)
+                        .unwrap_or_else(|| self.adj_ribs_out.get(&peer).map_or(0, AdjRibOut::len)),
+                    policy_stats: self
+                        .export_policy_stats
+                        .get(&peer)
+                        .copied()
+                        .unwrap_or_default(),
+                    outbound: self.peer_outbound_state(peer),
+                })
+                .collect();
+            let comparison = comparison
+                .map(|(primary, comparison)| self.update_group_comparison(primary, comparison));
+            NeighborRibSnapshotResponse {
+                snapshots,
+                comparison,
+            }
         });
     }
     /// Snapshot the live per-term hit counters of installed export
@@ -2007,5 +2021,17 @@ impl RibManager {
             routes,
             evpn_routes,
         })
+    }
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+
+    #[test]
+    fn canceled_neighbor_rib_snapshot_does_not_invoke_builder() {
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        drop(receiver);
+        send_neighbor_rib_snapshot(reply, || panic!("canceled query materialized"));
     }
 }

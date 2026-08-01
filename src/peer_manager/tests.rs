@@ -154,6 +154,134 @@ fn test_peer_manager() -> PeerManager {
 }
 
 #[tokio::test]
+async fn canceled_ordinary_list_peers_skips_session_queries() {
+    let (tx, rx) = mpsc::channel(8);
+    let (rib_tx, _rib_rx) = mpsc::channel(8);
+    let mut manager = PeerManager::new(
+        rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    let peer: IpAddr = "192.0.2.1".parse().unwrap();
+    let counters = Arc::new(FakePeerCounters::default());
+    insert_test_managed_peer(
+        &mut manager,
+        peer,
+        fake_peer_handle(peer, SessionState::Established, None, counters.clone()),
+        false,
+    );
+    let stale_peer: IpAddr = "192.0.2.2".parse().unwrap();
+    let (stale_commands, stale_receiver) = mpsc::channel(1);
+    let stale_task = tokio::spawn(async move {
+        drop(stale_receiver);
+        Ok::<(), rustbgpd_transport::TransportError>(())
+    });
+    insert_test_managed_peer(
+        &mut manager,
+        stale_peer,
+        PeerHandle::from_parts(stale_commands, stale_task),
+        false,
+    );
+    let actor = tokio::spawn(manager.run());
+    tokio::task::yield_now().await;
+
+    let (reply, receiver) = oneshot::channel();
+    drop(receiver);
+    tx.send(PeerManagerCommand::ListPeers { reply })
+        .await
+        .unwrap();
+
+    let (reply, receiver) = oneshot::channel();
+    tx.send(PeerManagerCommand::ListPeers { reply })
+        .await
+        .unwrap();
+    let peers = receiver.await.unwrap();
+    assert_eq!(peers.len(), 2);
+    assert!(
+        peers.iter().any(|row| row.address == peer && !row.stale),
+        "live row remains fresh"
+    );
+    assert!(
+        peers
+            .iter()
+            .any(|row| row.address == stale_peer && row.stale),
+        "unanswered row keeps the existing stale fallback"
+    );
+    assert_eq!(counters.query_state.load(Ordering::SeqCst), 1);
+
+    tx.send(PeerManagerCommand::Shutdown).await.unwrap();
+    actor.await.unwrap();
+}
+
+#[tokio::test]
+async fn canceled_plan_drops_rib_snapshot_and_actor_answers_later_command() {
+    let config = load_test_config(
+        r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "127.0.0.1:9179"
+log_format = "json"
+"#,
+    );
+    let candidate = toml::to_string_pretty(&config).unwrap();
+    let (tx, rx) = mpsc::channel(8);
+    let (rib_tx, mut rib_rx) = mpsc::channel(8);
+    let manager = PeerManager::new_with_config(
+        rx,
+        mpsc::unbounded_channel().1,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+        None,
+        config,
+    );
+    let actor = tokio::spawn(manager.run());
+
+    let (plan_reply, plan_receiver) = oneshot::channel();
+    tx.send(PeerManagerCommand::PlanConfigTransaction {
+        candidate_toml: candidate,
+        expected_runtime_snapshot_token: None,
+        reply: plan_reply,
+    })
+    .await
+    .unwrap();
+    let RibUpdate::QueryUpdateGroupSnapshot { mut reply } = rib_rx.recv().await.unwrap() else {
+        panic!("plan did not request its RIB snapshot");
+    };
+    drop(plan_receiver);
+    tokio::time::timeout(Duration::from_secs(1), reply.closed())
+        .await
+        .expect("abandoned plan kept its RIB snapshot receiver alive");
+
+    let (policies_reply, policies_receiver) = oneshot::channel();
+    tx.send(PeerManagerCommand::ListPolicies {
+        reply: policies_reply,
+    })
+    .await
+    .unwrap();
+    let _ = tokio::time::timeout(Duration::from_secs(1), policies_receiver)
+        .await
+        .expect("actor remained blocked on the abandoned RIB snapshot")
+        .unwrap();
+
+    tx.send(PeerManagerCommand::Shutdown).await.unwrap();
+    actor.await.unwrap();
+}
+
+#[tokio::test]
 async fn stale_live_snapshot_is_rejected_before_candidate_validation() {
     let config = load_test_config(
         r#"
