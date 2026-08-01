@@ -461,6 +461,21 @@ or above-1-hour requests fail with `INVALID_ARGUMENT`. Multiple SAMPLE paths in
 one subscription retain their own accepted intervals; co-due neighbor paths
 share one peer snapshot, and delayed ticks skip missed periods without bursts.
 
+STREAM/SAMPLE also supports per-path `suppress_redundant` and
+`heartbeat_interval`. Suppression compares the exact rendered `TypedValue` at
+each fully resolved leaf path and emits changed, new, or reappearing leaves at
+the next sample deadline. A nonzero heartbeat from 1 second through 1 hour
+forces all current leaves on its own fixed monotonic cadence; zero disables it.
+Missed heartbeat periods are skipped, and coincident sample/heartbeat deadlines
+coalesce into one batch and one peer snapshot. With `updates_only`, suppressed
+paths are read into the hidden comparison baseline before `sync_response`, but
+their initial values are withheld.
+
+Nondefault controls on ONCE/POLL return `INVALID_ARGUMENT`. ON_CHANGE rejects
+`suppress_redundant` with `INVALID_ARGUMENT`; ON_CHANGE heartbeat support is
+not implemented and returns `UNIMPLEMENTED`. STREAM/TARGET_DEFINED remains
+unsupported.
+
 ## Troubleshooting
 
 | Symptom | Likely cause |
