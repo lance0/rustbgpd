@@ -66,6 +66,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   manager cannot accept or answer their snapshot request, instead of reporting
   the actor outage as `INTERNAL`.
 
+- Neighbor diagnostics now retain bounded transport root causes for reader and
+  writer failures, outbound saturation, and exact-export invariant teardown;
+  locally generated Cease/8 history records include the same safe cause without
+  exposing raw I/O, panic, route, policy, or shutdown payload text.
+
 - IRR-scale boot and SIGHUP reload no longer recompile the `.rpol` set
   data once per chain resolution: a compiled unit now interns its
   prefix/community/asn sets exactly once and every chain instantiation

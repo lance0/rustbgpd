@@ -144,6 +144,49 @@ pub enum SessionNotificationDirection {
     Received,
 }
 
+/// Bounded, secret-free cause for a locally detected session failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionFailureCause {
+    /// TCP reader failed with the named stable I/O error kind.
+    ReaderIo(std::io::ErrorKind),
+    /// TCP writer failed with the named stable I/O error kind.
+    WriterIo(std::io::ErrorKind),
+    /// The writer task panicked.
+    WriterPanicked,
+    /// The writer task was cancelled.
+    WriterCancelled,
+    /// The bounded outbound writer queue saturated.
+    OutboundSaturation,
+    /// A route-bearing envelope omitted its exact export snapshot.
+    ExportSnapshotMissing,
+    /// An exact export snapshot had an incompatible concrete type.
+    ExportSnapshotIncompatible,
+    /// An exact export snapshot belonged to another session.
+    ExportSnapshotWrongOwner,
+    /// Exact export failed after the RIB had committed the update.
+    PostCommitInvariant,
+}
+
+impl std::fmt::Display for SessionFailureCause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ReaderIo(kind) => write!(f, "TCP reader I/O failure ({kind:?})"),
+            Self::WriterIo(kind) => write!(f, "TCP writer I/O failure ({kind:?})"),
+            Self::WriterPanicked => f.write_str("TCP writer task panicked"),
+            Self::WriterCancelled => f.write_str("TCP writer task cancelled"),
+            Self::OutboundSaturation => f.write_str("outbound writer queue saturated"),
+            Self::ExportSnapshotMissing => f.write_str("exact export snapshot missing"),
+            Self::ExportSnapshotIncompatible => {
+                f.write_str("exact export snapshot type incompatible")
+            }
+            Self::ExportSnapshotWrongOwner => {
+                f.write_str("exact export snapshot owned by another session")
+            }
+            Self::PostCommitInvariant => f.write_str("post-commit exact export invariant failed"),
+        }
+    }
+}
+
 /// Metadata-only BGP NOTIFICATION event emitted by a peer session for
 /// operator-facing observability.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -164,6 +207,8 @@ pub struct SessionNotificationEvent {
     pub description: String,
     /// RFC 8203 shutdown communication reason, when present.
     pub shutdown_reason: Option<String>,
+    /// Bounded local failure cause; present only on locally sent Cease/8.
+    pub failure_cause: Option<SessionFailureCause>,
 }
 
 impl SessionIdentity {

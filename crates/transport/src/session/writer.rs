@@ -24,19 +24,18 @@
 //! KEEPALIVE frame on each deadline. This is FRR's dedicated
 //! keepalive-thread invariant in our two-task shape.
 //!
-//! Saturation policy lives in the session task, not here:
-//! `bulk_tx.try_send` failing with `Full` means the peer hasn't drained
-//! 4096 BGP messages, the session emits a `Cease/8` (Out of Resources,
-//! RFC 4486 §4 subcode 8) through `priority_tx`, signals `teardown_tx`,
-//! and drops the senders. The teardown signal makes this task **discard
+//! Local Out-of-Resources policy lives in the session task, not here.
+//! Queue saturation and exact-export invariant failures emit a `Cease/8`
+//! (Out of Resources, RFC 4486 §4 subcode 8) through `priority_tx`, signal
+//! `teardown_tx`, and drop the senders. The teardown signal makes this task **discard
 //! the queued bulk backlog instead of draining it** — the Cease must be
-//! the final frame the peer sees, and flushing a saturated queue would
+//! the final frame the peer sees, and flushing a queued backlog would
 //! delay the close indefinitely — flush the already-enqueued priority
 //! frames best-effort within [`TEARDOWN_LINGER`], and exit with
 //! [`WriterExit::TornDown`] so the session's writer-exit arm drives
 //! `TcpConnectionFails` + FSM/RIB cleanup exactly like a real TCP
 //! failure. Wiring lives in
-//! `PeerSession::trigger_outbound_saturation_teardown`; this module
+//! `PeerSession::trigger_outbound_out_of_resources_teardown`; this module
 //! owns the discard/flush/close mechanics.
 //!
 //! # Bulk write coalescing (LAN-332)
@@ -49,7 +48,7 @@
 //! contiguous buffer and issues a single `write_all + flush` — the
 //! same shape as FRR's packed subgroup streams. Only bulk frames
 //! coalesce: priority frames (OPEN, KEEPALIVE, NOTIFICATION, Cease)
-//! always write alone, so the saturation-teardown guarantee that the
+//! always write alone, so the hard-teardown guarantee that the
 //! `Cease/8` is the final frame on the wire cannot be violated by a
 //! batch that pulled the Cease and then appended bulk behind it, and
 //! biased priority preemption keeps single-frame granularity on the
@@ -103,7 +102,7 @@ pub(super) enum WriterExit {
         /// The configured `SendHoldTime` that elapsed.
         limit: Duration,
     },
-    /// Session-requested hard close (outbound saturation `Cease/8`):
+    /// Session-requested hard close after a local `Cease/8`:
     /// the queued bulk backlog was discarded — never drained — the
     /// Cease was flushed best-effort within [`TEARDOWN_LINGER`], and
     /// the socket closed. The session's writer-exit arm maps this to
@@ -114,7 +113,7 @@ pub(super) enum WriterExit {
 /// Best-effort bound on teardown writes: how long the writer will wait
 /// for an in-flight frame to reach a frame boundary and for the Cease
 /// NOTIFICATION to reach the wire before hard-closing anyway. A
-/// saturated TCP window may never accept the Cease; the close must not
+/// blocked TCP window may never accept the Cease; the close must not
 /// wait on it.
 const TEARDOWN_LINGER: Duration = Duration::from_secs(2);
 
@@ -180,7 +179,7 @@ pub(super) struct WriterHandle {
     /// retimes the writer-owned periodic KEEPALIVE, `None` stops it.
     /// Dropping the sender also stops it.
     pub(super) keepalive_tx: watch::Sender<Option<Duration>>,
-    /// Hard-teardown signal (saturation `Cease/8`): sending `true`
+    /// Hard-teardown signal (local `Cease/8`): sending `true`
     /// makes the writer discard the bulk backlog, flush pending
     /// priority frames within [`TEARDOWN_LINGER`], and exit with
     /// [`WriterExit::TornDown`]. Racing an in-flight write is part of
@@ -254,7 +253,7 @@ struct WriterTask {
 
 /// Resolve once the session has signalled hard teardown. Pends forever
 /// otherwise — including when the sender is dropped *without*
-/// signalling, which is the ordinary (non-saturation) close path and
+/// signalling, which is the ordinary (non-hard-teardown) close path and
 /// must keep the writer's drain-then-exit semantics.
 async fn teardown_requested(rx: &mut watch::Receiver<bool>) {
     while !*rx.borrow_and_update() {
@@ -285,7 +284,7 @@ impl WriterTask {
         let mut cadence: Option<Duration> = *self.keepalive_rx.borrow();
         let mut next_keepalive = cadence.map(|interval| tokio::time::Instant::now() + interval);
         loop {
-            // Hard teardown (saturation Cease/8): discard the bulk
+            // Hard teardown (local Cease/8): discard the bulk
             // backlog, flush the pending priority frames best-effort,
             // close. Checked at the top of every iteration so no bulk
             // frame can slip out between the signal and the close.
@@ -300,7 +299,7 @@ impl WriterTask {
                 return Ok(());
             }
             // `biased` keeps NOTIFICATIONs and KEEPALIVEs from starving
-            // behind a backlog of UPDATEs, and ensures the saturation
+            // behind a backlog of UPDATEs, and ensures the teardown
             // `Cease/8` reaches the wire before any further bulk work.
             // The bool marks bulk-arm frames as coalescible; priority
             // and cadence frames always write alone (module docs,
@@ -435,7 +434,7 @@ impl WriterTask {
             }
         };
         result.map_err(|e| {
-            warn!(error = %e, "writer: write/flush failed");
+            warn!(error_kind = ?e.kind(), "writer: write/flush failed");
             WriterExit::Io(e)
         })
     }
@@ -443,7 +442,7 @@ impl WriterTask {
     /// Session-requested hard close: drop the queued bulk backlog on
     /// the floor — the `Cease/8` already enqueued on the priority
     /// channel must be the FINAL frame the peer sees, and draining a
-    /// saturated queue could take unbounded time — then flush the
+    /// queued backlog could take unbounded time — then flush the
     /// pending priority frames best-effort within [`TEARDOWN_LINGER`]
     /// and exit. Returning drops the write half, which closes the
     /// socket without draining.
@@ -459,12 +458,12 @@ impl WriterTask {
             };
             match tokio::time::timeout_at(deadline, write).await {
                 Ok(Ok(())) => {}
-                // Best-effort: a saturated TCP window may never accept
+                // Best-effort: a blocked TCP window may never accept
                 // the Cease. Do not delay the close for it.
                 Ok(Err(_)) | Err(_) => break,
             }
         }
-        debug!(peer = %self.peer_label, "writer: hard close after saturation teardown");
+        debug!(peer = %self.peer_label, "writer: session-requested hard close complete");
         Err(WriterExit::TornDown)
     }
 }

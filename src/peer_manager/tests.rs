@@ -6981,6 +6981,40 @@ async fn session_event_history_records_events_without_subscriber() {
     assert_eq!(events[0].event_type, SessionLifecycleEventType::PeerEnabled);
 }
 
+/// Load-bearing: omitting the bounded cause from notification-history
+/// projection removes the exact suffix while changing the canonical BGP
+/// description or shutdown reason breaks the remaining field assertions.
+#[tokio::test]
+async fn notification_event_reason_includes_bounded_failure_cause() {
+    let mut mgr = test_peer_manager();
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let mut events = mgr.session_events_tx.subscribe();
+    mgr.publish_notification_event(rustbgpd_transport::SessionNotificationEvent {
+        session_id: 1,
+        peer_addr: addr,
+        role: rustbgpd_transport::SessionRole::Primary,
+        direction: rustbgpd_transport::SessionNotificationDirection::Sent,
+        code: rustbgpd_wire::notification::NotificationCode::Cease.as_u8(),
+        subcode: rustbgpd_wire::notification::cease_subcode::OUT_OF_RESOURCES,
+        description: "Out of Resources".to_string(),
+        shutdown_reason: None,
+        failure_cause: Some(rustbgpd_transport::handle::SessionFailureCause::OutboundSaturation),
+    });
+
+    let rustbgpd_api::peer_types::SessionEvent::Notification(event) = events.try_recv().unwrap()
+    else {
+        panic!("expected notification event");
+    };
+    assert_eq!(
+        event.reason,
+        "BGP NOTIFICATION sent for peer 10.0.0.2: 6/8 (Out of Resources); transport failure: outbound writer queue saturated"
+    );
+    assert_eq!(event.code, 6);
+    assert_eq!(event.subcode, 8);
+    assert_eq!(event.description, "Out of Resources");
+    assert_eq!(event.shutdown_reason, None);
+}
+
 /// Successful configured-peer installs publish their current admin event only
 /// after installation; failed duplicate adds must not fabricate one.
 #[tokio::test]

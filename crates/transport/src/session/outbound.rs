@@ -144,7 +144,9 @@ impl PeerSession {
                     peer = %self.peer_label,
                     "RIB route-bearing envelope omitted its exact export snapshot — sending Cease/Out-of-Resources and tearing down"
                 );
-                self.trigger_outbound_out_of_resources_teardown();
+                self.trigger_outbound_out_of_resources_teardown(
+                    crate::handle::SessionFailureCause::ExportSnapshotMissing,
+                );
                 return;
             }
         };
@@ -153,7 +155,9 @@ impl PeerSession {
                 peer = %self.peer_label,
                 "RIB outbound envelope carries an exact export snapshot from the wrong encoder — sending Cease/Out-of-Resources and tearing down"
             );
-            self.trigger_outbound_out_of_resources_teardown();
+            self.trigger_outbound_out_of_resources_teardown(
+                crate::handle::SessionFailureCause::ExportSnapshotIncompatible,
+            );
             return;
         };
         if rustbgpd_rib::ExactExportSnapshot::owner_id(export)
@@ -163,7 +167,9 @@ impl PeerSession {
                 peer = %self.peer_label,
                 "RIB outbound envelope carries an exact export snapshot owned by another session — sending Cease/Out-of-Resources and tearing down"
             );
-            self.trigger_outbound_out_of_resources_teardown();
+            self.trigger_outbound_out_of_resources_teardown(
+                crate::handle::SessionFailureCause::ExportSnapshotWrongOwner,
+            );
             return;
         }
         for route in &update.otc_blocked {
@@ -396,7 +402,9 @@ impl PeerSession {
                             %error,
                             "IPv4 Extended Next Hop route failed exact export preparation after RIB commit — sending Cease/Out-of-Resources and tearing down"
                         );
-                        self.trigger_outbound_out_of_resources_teardown();
+                        self.trigger_outbound_out_of_resources_teardown(
+                            crate::handle::SessionFailureCause::PostCommitInvariant,
+                        );
                         return;
                     }
                 };
@@ -533,7 +541,9 @@ impl PeerSession {
                         %error,
                         "IPv6 route failed exact export preparation after RIB commit — sending Cease/Out-of-Resources and tearing down"
                     );
-                    self.trigger_outbound_out_of_resources_teardown();
+                    self.trigger_outbound_out_of_resources_teardown(
+                        crate::handle::SessionFailureCause::PostCommitInvariant,
+                    );
                     return;
                 }
             };
@@ -1166,7 +1176,9 @@ impl PeerSession {
                         max = max_len,
                         "single IPv4 {kind} entry exceeds maximum message length — tearing down the session so Adj-RIB-Out is rebuilt on reconnect"
                     );
-                    self.trigger_outbound_out_of_resources_teardown();
+                    self.trigger_outbound_out_of_resources_teardown(
+                        crate::handle::SessionFailureCause::PostCommitInvariant,
+                    );
                     return false;
                 }
                 chunk_size = (chunk_size / 2).max(1);
@@ -1253,7 +1265,9 @@ impl PeerSession {
                         "single {family} {kind} cannot be encoded — tearing down the session so Adj-RIB-Out is rebuilt on reconnect"
                     ),
                 }
-                self.trigger_outbound_out_of_resources_teardown();
+                self.trigger_outbound_out_of_resources_teardown(
+                    crate::handle::SessionFailureCause::PostCommitInvariant,
+                );
                 return false;
             }
             let message = candidate.expect("successful MP build checked above");
@@ -1332,7 +1346,9 @@ impl PeerSession {
                         max = max_len,
                         "single EVPN route exceeds maximum message length — tearing down the session so Adj-RIB-Out is rebuilt on reconnect"
                     );
-                    self.trigger_outbound_out_of_resources_teardown();
+                    self.trigger_outbound_out_of_resources_teardown(
+                        crate::handle::SessionFailureCause::PostCommitInvariant,
+                    );
                     return false;
                 }
                 chunk_size = (chunk_size / 2).max(1);
@@ -1375,7 +1391,9 @@ impl PeerSession {
                         max = max_len,
                         "single EVPN withdrawal exceeds maximum message length — tearing down the session so Adj-RIB-Out is rebuilt on reconnect"
                     );
-                    self.trigger_outbound_out_of_resources_teardown();
+                    self.trigger_outbound_out_of_resources_teardown(
+                        crate::handle::SessionFailureCause::PostCommitInvariant,
+                    );
                     return false;
                 }
                 chunk_size = (chunk_size / 2).max(1);
@@ -1426,7 +1444,9 @@ impl PeerSession {
                         max = max_len,
                         "single BGP-LS route exceeds maximum message length — sending Cease/Out-of-Resources and tearing down"
                     );
-                    self.trigger_outbound_out_of_resources_teardown();
+                    self.trigger_outbound_out_of_resources_teardown(
+                        crate::handle::SessionFailureCause::PostCommitInvariant,
+                    );
                     return false;
                 }
                 chunk_size = (chunk_size / 2).max(1);
@@ -1469,7 +1489,9 @@ impl PeerSession {
                         max = max_len,
                         "single BGP-LS withdrawal exceeds maximum message length — sending Cease/Out-of-Resources and tearing down"
                     );
-                    self.trigger_outbound_out_of_resources_teardown();
+                    self.trigger_outbound_out_of_resources_teardown(
+                        crate::handle::SessionFailureCause::PostCommitInvariant,
+                    );
                     return false;
                 }
                 chunk_size = (chunk_size / 2).max(1);
@@ -1533,7 +1555,9 @@ impl PeerSession {
                         max = max_len,
                         "single VPN route exceeds maximum message length — sending Cease/Out-of-Resources and tearing down"
                     );
-                    self.trigger_outbound_out_of_resources_teardown();
+                    self.trigger_outbound_out_of_resources_teardown(
+                        crate::handle::SessionFailureCause::PostCommitInvariant,
+                    );
                     return false;
                 }
                 chunk_size = (chunk_size / 2).max(1);
@@ -1577,7 +1601,9 @@ impl PeerSession {
                         max = max_len,
                         "single VPN withdrawal exceeds maximum message length — sending Cease/Out-of-Resources and tearing down"
                     );
-                    self.trigger_outbound_out_of_resources_teardown();
+                    self.trigger_outbound_out_of_resources_teardown(
+                        crate::handle::SessionFailureCause::PostCommitInvariant,
+                    );
                     return false;
                 }
                 chunk_size = (chunk_size / 2).max(1);
@@ -1635,7 +1661,9 @@ impl PeerSession {
                         max = max_len,
                         "single labeled route exceeds maximum message length — sending Cease/Out-of-Resources and tearing down"
                     );
-                    self.trigger_outbound_out_of_resources_teardown();
+                    self.trigger_outbound_out_of_resources_teardown(
+                        crate::handle::SessionFailureCause::PostCommitInvariant,
+                    );
                     return false;
                 }
                 chunk_size = (chunk_size / 2).max(1);
@@ -1685,7 +1713,9 @@ impl PeerSession {
                         max = max_len,
                         "single labeled withdrawal exceeds maximum message length — sending Cease/Out-of-Resources and tearing down"
                     );
-                    self.trigger_outbound_out_of_resources_teardown();
+                    self.trigger_outbound_out_of_resources_teardown(
+                        crate::handle::SessionFailureCause::PostCommitInvariant,
+                    );
                     return false;
                 }
                 chunk_size = (chunk_size / 2).max(1);
@@ -1736,7 +1766,9 @@ impl PeerSession {
                         max = max_len,
                         "single RTC route exceeds maximum message length — sending Cease/Out-of-Resources and tearing down"
                     );
-                    self.trigger_outbound_out_of_resources_teardown();
+                    self.trigger_outbound_out_of_resources_teardown(
+                        crate::handle::SessionFailureCause::PostCommitInvariant,
+                    );
                     return false;
                 }
                 chunk_size = (chunk_size / 2).max(1);
@@ -1780,7 +1812,9 @@ impl PeerSession {
                         max = max_len,
                         "single RTC withdrawal exceeds maximum message length — sending Cease/Out-of-Resources and tearing down"
                     );
-                    self.trigger_outbound_out_of_resources_teardown();
+                    self.trigger_outbound_out_of_resources_teardown(
+                        crate::handle::SessionFailureCause::PostCommitInvariant,
+                    );
                     return false;
                 }
                 chunk_size = (chunk_size / 2).max(1);
@@ -2005,6 +2039,14 @@ mod tests {
             };
             assert_eq!(notification.code, NotificationCode::Cease);
             assert_eq!(notification.subcode, cease_subcode::OUT_OF_RESOURCES);
+            assert_eq!(
+                session.pending_outbound_teardown_cause,
+                Some(crate::handle::SessionFailureCause::PostCommitInvariant)
+            );
+            assert_eq!(
+                session.last_error,
+                crate::handle::SessionFailureCause::PostCommitInvariant.to_string()
+            );
 
             let join = session
                 .writer_join

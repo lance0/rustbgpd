@@ -405,13 +405,18 @@ impl PeerSession {
             peer = %self.peer_label,
             "outbound writer channel saturated — sending Cease/Out-of-Resources and tearing down"
         );
-        self.trigger_outbound_out_of_resources_teardown();
+        self.trigger_outbound_out_of_resources_teardown(
+            crate::handle::SessionFailureCause::OutboundSaturation,
+        );
     }
 
     /// Emit Cease/8, record its bounded cause, and hard-close the writer.
     /// Callers must log their own truthful cause before entering this common
     /// primitive (writer saturation, exact-snapshot invariant breach, etc.).
-    pub(super) fn trigger_outbound_out_of_resources_teardown(&mut self) {
+    pub(super) fn trigger_outbound_out_of_resources_teardown(
+        &mut self,
+        cause: crate::handle::SessionFailureCause,
+    ) {
         // `handle_tcp_disconnect` clears the priority sender on the first
         // trigger. A second failure can already be in the synchronous caller
         // stack; do not emit another notification event/counter for a writer
@@ -419,12 +424,14 @@ impl PeerSession {
         if self.writer_priority_tx.is_none() {
             return;
         }
+        self.pending_outbound_teardown_cause = Some(cause);
         let notif = rustbgpd_wire::NotificationMessage::new(
             NotificationCode::Cease,
             cease_subcode::OUT_OF_RESOURCES,
             bytes::Bytes::new(),
         );
         self.record_notification_cause(SessionNotificationDirection::Sent, &notif);
+        self.last_error = cause.to_string();
         // Classify the upcoming BMP Peer Down truthfully: reason 1
         // (local system sent NOTIFICATION) carrying the Cease/8 PDU,
         // instead of the reason-4 "remote closed" default.
