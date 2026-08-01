@@ -1564,8 +1564,7 @@ mod tests {
             std::fs::create_dir_all(&directory).unwrap();
             std::fs::write(directory.join(marker), b"stale\n").unwrap();
 
-            let error =
-                await_pre_churn_evidence_capture(&directory, Duration::from_millis(10))
+            let error = await_pre_churn_evidence_capture(&directory, Duration::from_millis(10))
                 .await
                 .unwrap_err();
 
