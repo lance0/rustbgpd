@@ -12,10 +12,11 @@
 //! the default no-op sink with its concrete EHM sink without widening the
 //! normal public API or duplicating manager-side ring/broadcast work.
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use rustbgpd_policy::PolicyChain;
 use rustbgpd_wire::{Afi, Prefix, Safi};
@@ -30,6 +31,147 @@ use crate::update::{
 };
 
 static POLICY_TRANSITION_RECEIPT_PRINTED: AtomicBool = AtomicBool::new(false);
+static PCB_ENUMERATION_PHASES: AtomicUsize = AtomicUsize::new(0);
+static PCB_ENUMERATED_PREFIXES: AtomicUsize = AtomicUsize::new(0);
+static PCB_STAGING_PHASES: AtomicUsize = AtomicUsize::new(0);
+static PCB_STAGING_PREFIXES: AtomicUsize = AtomicUsize::new(0);
+static PCB_EXACT_PHASES: AtomicUsize = AtomicUsize::new(0);
+static PCB_COMMIT_PHASES: AtomicUsize = AtomicUsize::new(0);
+static PCB_ENQUEUE_PHASES: AtomicUsize = AtomicUsize::new(0);
+static PCB_TOTAL_ENUMERATION_NANOS: AtomicU64 = AtomicU64::new(0);
+static PCB_TOTAL_STAGING_NANOS: AtomicU64 = AtomicU64::new(0);
+static PCB_TOTAL_EXACT_NANOS: AtomicU64 = AtomicU64::new(0);
+static PCB_TOTAL_COMMIT_NANOS: AtomicU64 = AtomicU64::new(0);
+static PCB_TOTAL_ENQUEUE_NANOS: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Clone, Copy)]
+struct PerClientBestCandidateBenchAggregate {
+    capture_active: bool,
+    prefix_visits: usize,
+    empty_sets: usize,
+    singleton_sets: usize,
+    multi_sets: usize,
+    heap_backed_collections: usize,
+}
+
+impl PerClientBestCandidateBenchAggregate {
+    const INACTIVE: Self = Self {
+        capture_active: false,
+        prefix_visits: 0,
+        empty_sets: 0,
+        singleton_sets: 0,
+        multi_sets: 0,
+        heap_backed_collections: 0,
+    };
+
+    const fn active() -> Self {
+        Self {
+            capture_active: true,
+            ..Self::INACTIVE
+        }
+    }
+}
+
+thread_local! {
+    static PCB_CANDIDATE_AGGREGATE: Cell<PerClientBestCandidateBenchAggregate> =
+        const { Cell::new(PerClientBestCandidateBenchAggregate::INACTIVE) };
+}
+
+/// Bench-only proof that an authoritative per-client-best policy replacement
+/// traversed the real full-resync selection arm. Durations are deliberately
+/// coarse per-peer totals; no clock is read inside the prefix loop.
+#[derive(Clone, Copy, Debug)]
+pub struct PerClientBestResyncBenchReceipt {
+    pub candidate_prefix_visits: usize,
+    pub empty_candidate_sets: usize,
+    pub singleton_candidate_sets: usize,
+    pub multi_candidate_sets: usize,
+    pub heap_backed_candidate_collections: usize,
+    pub enumeration_phases: usize,
+    pub enumerated_prefixes: usize,
+    pub staging_phases: usize,
+    pub staging_prefixes: usize,
+    pub exact_phases: usize,
+    pub commit_phases: usize,
+    pub enqueue_phases: usize,
+    pub total_enumeration: std::time::Duration,
+    pub total_staging: std::time::Duration,
+    pub total_exact_build_and_encode: std::time::Duration,
+    pub total_private_commit: std::time::Duration,
+    pub total_enqueue: std::time::Duration,
+    pub pending_regroup_baselines: usize,
+    pub pending_extra_withdraw_peers: usize,
+    pub pending_exact_export_withdrawals: usize,
+    pub exact_export_rejection_peers: usize,
+    pub outbound_prefix_limit_peers: usize,
+    pub forced_resync_peers: usize,
+}
+
+fn bench_duration_nanos(duration: std::time::Duration) -> u64 {
+    u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
+}
+
+fn bench_add_duration(total: &AtomicU64, elapsed: std::time::Duration) {
+    let nanos = bench_duration_nanos(elapsed);
+    let _ = total.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        Some(current.saturating_add(nanos))
+    });
+}
+
+pub(in crate::manager) fn bench_record_per_client_best_candidates(
+    cardinality: usize,
+    heap_backed: bool,
+) {
+    PCB_CANDIDATE_AGGREGATE.with(|aggregate| {
+        let mut receipt = aggregate.get();
+        if !receipt.capture_active {
+            return;
+        }
+        receipt.prefix_visits = receipt.prefix_visits.saturating_add(1);
+        match cardinality {
+            0 => receipt.empty_sets = receipt.empty_sets.saturating_add(1),
+            1 => receipt.singleton_sets = receipt.singleton_sets.saturating_add(1),
+            _ => receipt.multi_sets = receipt.multi_sets.saturating_add(1),
+        }
+        if heap_backed {
+            receipt.heap_backed_collections = receipt.heap_backed_collections.saturating_add(1);
+        }
+        aggregate.set(receipt);
+    });
+}
+
+pub(in crate::manager) fn bench_record_per_client_best_enumeration(
+    prefixes: usize,
+    elapsed: std::time::Duration,
+) {
+    PCB_ENUMERATION_PHASES.fetch_add(1, Ordering::Relaxed);
+    PCB_ENUMERATED_PREFIXES.fetch_add(prefixes, Ordering::Relaxed);
+    bench_add_duration(&PCB_TOTAL_ENUMERATION_NANOS, elapsed);
+}
+
+pub(in crate::manager) fn bench_record_per_client_best_staging(
+    prefixes: usize,
+    elapsed: std::time::Duration,
+) {
+    PCB_STAGING_PHASES.fetch_add(1, Ordering::Relaxed);
+    PCB_STAGING_PREFIXES.fetch_add(prefixes, Ordering::Relaxed);
+    bench_add_duration(&PCB_TOTAL_STAGING_NANOS, elapsed);
+}
+
+pub(in crate::manager) fn bench_record_per_client_best_exact(elapsed: std::time::Duration) {
+    PCB_EXACT_PHASES.fetch_add(1, Ordering::Relaxed);
+    bench_add_duration(&PCB_TOTAL_EXACT_NANOS, elapsed);
+}
+
+pub(in crate::manager) fn bench_record_per_client_best_commit(elapsed: std::time::Duration) {
+    PCB_COMMIT_PHASES.fetch_add(1, Ordering::Relaxed);
+    bench_add_duration(&PCB_TOTAL_COMMIT_NANOS, elapsed);
+}
+
+pub(in crate::manager) fn bench_record_per_client_best_enqueue(elapsed: std::time::Duration) {
+    PCB_ENQUEUE_PHASES.fetch_add(1, Ordering::Relaxed);
+    bench_add_duration(&PCB_TOTAL_ENQUEUE_NANOS, elapsed);
+}
 
 /// Instrumentation from the production clean-transition state machine.
 #[derive(Clone, Copy, Debug)]
@@ -123,6 +265,7 @@ impl RibManager {
             channel_capacity,
             |_| 64_512,
             false,
+            false,
             is_rr_client,
             |_| make_exact_export_encoder(),
         )
@@ -195,6 +338,33 @@ impl RibManager {
             |index| remote_asns[index],
             true,
             false,
+            false,
+            make_exact_export_encoder,
+        )
+    }
+
+    /// Register synthetic eBGP route-server clients on the production
+    /// per-client-best fallback. The explicit seam keeps the grouping
+    /// disqualifier visible instead of adding a positional flag to callers.
+    #[must_use]
+    pub fn bench_register_per_client_best_route_server_peers<F>(
+        &mut self,
+        remote_asns: &[u32],
+        export_policy: Option<&PolicyChain>,
+        channel_capacity: usize,
+        make_exact_export_encoder: F,
+    ) -> Vec<mpsc::Receiver<OutboundRouteUpdate>>
+    where
+        F: FnMut(u32) -> Arc<dyn ExactExportEncoder>,
+    {
+        self.bench_register_peers_with_profile(
+            remote_asns.len(),
+            export_policy,
+            channel_capacity,
+            |index| remote_asns[index],
+            true,
+            true,
+            false,
             make_exact_export_encoder,
         )
     }
@@ -256,6 +426,7 @@ impl RibManager {
         channel_capacity: usize,
         mut peer_asn: P,
         is_ebgp: bool,
+        per_client_best: bool,
         is_rr_client: bool,
         mut make_exact_export_encoder: F,
     ) -> Vec<mpsc::Receiver<OutboundRouteUpdate>>
@@ -284,8 +455,8 @@ impl RibManager {
                 vec![(Afi::Ipv4, Safi::Unicast)],
                 is_ebgp,
                 is_rr_client,
-                None,       // no ORR vantage
-                false,      // no per-client best (RS mode)
+                None, // no ORR vantage
+                per_client_best,
                 true,       // interpret RFC 1997 (production default)
                 Vec::new(), // no Add-Path send
                 0,
@@ -477,6 +648,70 @@ impl RibManager {
     /// fanout pass.
     pub fn bench_reset_adj_rib_out_fanout_receipt(&mut self) {
         self.adj_rib_out_commit_stats = super::AdjRibOutCommitStats::default();
+    }
+
+    /// Reset the feature-gated per-client-best full-resync instrumentation.
+    pub fn bench_reset_per_client_best_resync_receipt(&mut self) {
+        PCB_CANDIDATE_AGGREGATE.set(PerClientBestCandidateBenchAggregate::active());
+        for counter in [
+            &PCB_ENUMERATION_PHASES,
+            &PCB_ENUMERATED_PREFIXES,
+            &PCB_STAGING_PHASES,
+            &PCB_STAGING_PREFIXES,
+            &PCB_EXACT_PHASES,
+            &PCB_COMMIT_PHASES,
+            &PCB_ENQUEUE_PHASES,
+        ] {
+            counter.store(0, Ordering::Relaxed);
+        }
+        for total in [
+            &PCB_TOTAL_ENUMERATION_NANOS,
+            &PCB_TOTAL_STAGING_NANOS,
+            &PCB_TOTAL_EXACT_NANOS,
+            &PCB_TOTAL_COMMIT_NANOS,
+            &PCB_TOTAL_ENQUEUE_NANOS,
+        ] {
+            total.store(0, Ordering::Relaxed);
+        }
+    }
+
+    /// Capture the most recent per-client-best full-resync phase and residue
+    /// proof. The returned non-`Eq` receipt deliberately carries durations.
+    #[must_use]
+    pub fn bench_per_client_best_resync_receipt(&self) -> PerClientBestResyncBenchReceipt {
+        let candidates = PCB_CANDIDATE_AGGREGATE.get();
+        PCB_CANDIDATE_AGGREGATE.set(PerClientBestCandidateBenchAggregate {
+            capture_active: false,
+            ..candidates
+        });
+        let load = |counter: &AtomicUsize| counter.load(Ordering::Relaxed);
+        let duration =
+            |total: &AtomicU64| std::time::Duration::from_nanos(total.load(Ordering::Relaxed));
+        PerClientBestResyncBenchReceipt {
+            candidate_prefix_visits: candidates.prefix_visits,
+            empty_candidate_sets: candidates.empty_sets,
+            singleton_candidate_sets: candidates.singleton_sets,
+            multi_candidate_sets: candidates.multi_sets,
+            heap_backed_candidate_collections: candidates.heap_backed_collections,
+            enumeration_phases: load(&PCB_ENUMERATION_PHASES),
+            enumerated_prefixes: load(&PCB_ENUMERATED_PREFIXES),
+            staging_phases: load(&PCB_STAGING_PHASES),
+            staging_prefixes: load(&PCB_STAGING_PREFIXES),
+            exact_phases: load(&PCB_EXACT_PHASES),
+            commit_phases: load(&PCB_COMMIT_PHASES),
+            enqueue_phases: load(&PCB_ENQUEUE_PHASES),
+            total_enumeration: duration(&PCB_TOTAL_ENUMERATION_NANOS),
+            total_staging: duration(&PCB_TOTAL_STAGING_NANOS),
+            total_exact_build_and_encode: duration(&PCB_TOTAL_EXACT_NANOS),
+            total_private_commit: duration(&PCB_TOTAL_COMMIT_NANOS),
+            total_enqueue: duration(&PCB_TOTAL_ENQUEUE_NANOS),
+            pending_regroup_baselines: self.pending_regroup_baseline.len(),
+            pending_extra_withdraw_peers: self.pending_extra_withdraws.len(),
+            pending_exact_export_withdrawals: self.pending_exact_export_withdrawals.len(),
+            exact_export_rejection_peers: self.peer_unexportable.len(),
+            outbound_prefix_limit_peers: self.outbound_prefix_limits.len(),
+            forced_resync_peers: self.force_outbound_peers.len(),
+        }
     }
 
     /// Capture production-path and current metric evidence after one measured

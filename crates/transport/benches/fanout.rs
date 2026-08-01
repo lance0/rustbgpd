@@ -56,6 +56,15 @@
 //! enqueues one exact withdrawal-only envelope per member. This instrument also
 //! makes no performance claim.
 //!
+//! `per_client_best_full_resync` covers the authoritative private fallback at
+//! 4,096 IPv4 routes and 8/64 eBGP route-server clients. Routes are sourced
+//! round-robin from that same fleet, so every resync proves both self-source
+//! exclusion and the singleton per-target candidate arm. Setup output is
+//! drained before one export-policy replacement per peer is timed; selection,
+//! exact-encoder, private commit, enqueue, inventory, and residue receipts are
+//! checked afterward. This is instrumentation only and makes no performance
+//! claim.
+//!
 //! Gated behind `bench-internals`; run with:
 //!   cargo bench -p rustbgpd-transport --features bench-internals --bench fanout
 //!
@@ -99,6 +108,12 @@ const ADJ_RIB_OUT_GAUGE_PEER_COUNTS: [usize; 5] = [1, 8, 64, 256, 1_000];
 const GROUPED_WITHDRAWAL_PEER_COUNTS: [usize; 4] = [8, 64, 256, 1_000];
 /// Route-server fleets for grouped export-policy denial staging.
 const GROUPED_POLICY_DENIAL_PEER_COUNTS: [usize; 3] = [8, 64, 256];
+/// Fleet sizes for the private per-client-best full-table resync instrument.
+const PER_CLIENT_BEST_RESYNC_PEER_COUNTS: [usize; 2] = [8, 64];
+/// Fixed Loc-RIB inventory for private per-client-best full-table resync.
+const PER_CLIENT_BEST_RESYNC_ROUTES: usize = 4_096;
+const PER_CLIENT_BEST_COMMUNITY_A: u32 = (65_000 << 16) | 100;
+const PER_CLIENT_BEST_COMMUNITY_B: u32 = (65_000 << 16) | 200;
 /// Loc-RIB sizes for the late RR-client initial-table join instrument.
 const INITIAL_TABLE_JOIN_ROUTE_COUNTS: [usize; 2] = [4_096, 65_536];
 /// Candidate-set sizes for Add-Path top-N export staging.
@@ -662,6 +677,239 @@ fn assert_real_transport_snapshot(update: &OutboundRouteUpdate) {
         usize::from(rustbgpd_wire::MAX_MESSAGE_LEN),
         "the benchmark fleet must use classic-message session profiles"
     );
+}
+
+struct PerClientBestResyncState {
+    manager: RibManager,
+    receivers: Vec<mpsc::Receiver<OutboundRouteUpdate>>,
+    expected_inventories: Vec<HashSet<(Prefix, u32)>>,
+    current_community: u32,
+}
+
+fn per_client_best_resync_routes(peers: usize) -> Vec<Route> {
+    assert_eq!(PER_CLIENT_BEST_RESYNC_ROUTES % peers, 0);
+    policy_regroup_routes(PER_CLIENT_BEST_RESYNC_ROUTES)
+        .into_iter()
+        .enumerate()
+        .map(|(index, mut route)| {
+            let source = RibManager::bench_peer_address(index % peers);
+            route.peer = source;
+            route.peer_router_id = match source {
+                IpAddr::V4(address) => address,
+                IpAddr::V6(_) => unreachable!("benchmark peer addresses are IPv4"),
+            };
+            route
+        })
+        .collect()
+}
+
+fn route_has_community(route: &Route, community: u32) -> bool {
+    route.attributes.iter().any(|attribute| {
+        matches!(attribute, PathAttribute::Communities(values) if values.contains(&community))
+    })
+}
+
+fn drain_per_client_best_resync_envelopes(
+    receiver: &mut mpsc::Receiver<OutboundRouteUpdate>,
+    target: IpAddr,
+    expected: &HashSet<(Prefix, u32)>,
+    expected_community: u32,
+    expected_envelopes: usize,
+) {
+    let mut actual = HashSet::with_capacity(expected.len());
+    for _ in 0..expected_envelopes {
+        let update = receiver
+            .try_recv()
+            .expect("each private full-resync phase must enqueue its route inventory");
+        assert_unicast_only_envelope(&update);
+        assert_real_transport_snapshot(&update);
+        assert!(update.announce_source_exclusion.is_none());
+        assert!(update.withdraw.is_empty());
+        assert_eq!(update.announce.len(), update.next_hop_override.len());
+        assert!(update.next_hop_override.iter().all(Option::is_none));
+        for route in update.announce.iter() {
+            assert_ne!(route.peer, target, "self-sourced routes must stay excluded");
+            assert_eq!(route.path_id, 0, "per-client best is single-path output");
+            assert!(
+                route_has_community(route, expected_community),
+                "the policy replacement must remain wire-visible"
+            );
+            assert!(
+                actual.insert((route.prefix, route.path_id)),
+                "a private inventory must not repeat an NLRI identity"
+            );
+        }
+    }
+    assert_eq!(actual, *expected);
+    assert!(
+        matches!(receiver.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+        "the live channel must be empty after the expected private envelope(s)"
+    );
+}
+
+fn build_per_client_best_resync(peers: usize) -> PerClientBestResyncState {
+    let (_tx, rx) = mpsc::channel::<RibUpdate>(16);
+    let (_qtx, qrx) = mpsc::channel::<RibUpdate>(16);
+    let mut manager = RibManager::new(rx, qrx, None, None, BgpMetrics::new());
+    let remote_asns = route_server_remote_asns(peers, true);
+    let old_policy = community_export_chain(PER_CLIENT_BEST_COMMUNITY_A);
+    let mut receivers = manager.bench_register_per_client_best_route_server_peers(
+        &remote_asns,
+        Some(&old_policy),
+        peers + 1,
+        fanout_bench_route_server_export_encoder,
+    );
+    let routes = per_client_best_resync_routes(peers);
+    let expected_inventories = (0..peers)
+        .map(|index| {
+            let target = RibManager::bench_peer_address(index);
+            routes
+                .iter()
+                .filter(|route| route.peer != target)
+                .map(|route| (route.prefix, route.path_id))
+                .collect::<HashSet<_>>()
+        })
+        .collect::<Vec<_>>();
+    manager.bench_seed_loc_rib(routes);
+
+    let expected_per_peer = PER_CLIENT_BEST_RESYNC_ROUTES
+        - PER_CLIENT_BEST_RESYNC_ROUTES
+            .checked_div(peers)
+            .expect("nonzero fleet");
+    let setup_receipt = manager.bench_adj_rib_out_fanout_receipt();
+    assert_eq!(setup_receipt.update_groups, 0);
+    assert_eq!(setup_receipt.grouped_peers, 0);
+    assert_eq!(setup_receipt.ungrouped_peers, peers);
+    assert_eq!(setup_receipt.dirty_peers, 0);
+    assert_eq!(setup_receipt.grouped_unicast_routes, 0);
+    assert_eq!(
+        setup_receipt.private_unicast_routes,
+        expected_per_peer * peers
+    );
+    for (index, receiver) in receivers.iter_mut().enumerate() {
+        assert_eq!(expected_inventories[index].len(), expected_per_peer);
+        drain_per_client_best_resync_envelopes(
+            receiver,
+            RibManager::bench_peer_address(index),
+            &expected_inventories[index],
+            PER_CLIENT_BEST_COMMUNITY_A,
+            peers - 1,
+        );
+    }
+    manager.bench_reset_adj_rib_out_fanout_receipt();
+    manager.bench_reset_per_client_best_resync_receipt();
+    PerClientBestResyncState {
+        manager,
+        receivers,
+        expected_inventories,
+        current_community: PER_CLIENT_BEST_COMMUNITY_A,
+    }
+}
+
+fn assert_per_client_best_resync_receipts(state: &mut PerClientBestResyncState, peers: usize) {
+    let expected_per_peer = PER_CLIENT_BEST_RESYNC_ROUTES - PER_CLIENT_BEST_RESYNC_ROUTES / peers;
+    let expected_private = expected_per_peer * peers;
+    let fanout = state.manager.bench_adj_rib_out_fanout_receipt();
+    assert_eq!(fanout.update_groups, 0);
+    assert_eq!(fanout.grouped_peers, 0);
+    assert_eq!(fanout.ungrouped_peers, peers);
+    assert_eq!(fanout.dirty_peers, 0);
+    assert_eq!(fanout.grouped_unicast_routes, 0);
+    assert_eq!(fanout.private_unicast_routes, expected_private);
+    assert_eq!(fanout.routes_received_dispatches, 0);
+    assert_eq!(fanout.routes_received_withdrawals, 0);
+    assert_eq!(fanout.exact_probe_batches, peers);
+    assert_eq!(fanout.exact_probe_candidates, expected_private);
+    assert_eq!(fanout.exact_probe_nonzero_encoded_lengths, expected_private);
+    assert_eq!(fanout.exact_probe_cache_reuses, 0);
+    assert_eq!(fanout.successful_commits, peers);
+    assert_eq!(fanout.successful_enqueues, peers);
+    assert_eq!(fanout.family_gauge_writes, peers);
+    assert_eq!(fanout.last_family_gauge_write_mask, 0x01);
+    assert_eq!(fanout.private_extra_prefix_scans, 0);
+    assert_eq!(fanout.first_peer_family_values[0], expected_per_peer as i64);
+
+    let policy = state.manager.bench_policy_transition_receipt();
+    assert_eq!(policy.plan_builds, 0);
+    assert_eq!(policy.full_exact_probes, 0);
+    assert_eq!(policy.route_shell_materializations, 0);
+    assert_eq!(policy.actor_polls, 0);
+    assert_eq!(policy.authoritative_peer_applies, peers);
+
+    let pcb = state.manager.bench_per_client_best_resync_receipt();
+    let prefix_visits = PER_CLIENT_BEST_RESYNC_ROUTES * peers;
+    assert_eq!(pcb.candidate_prefix_visits, prefix_visits);
+    assert_eq!(pcb.empty_candidate_sets, PER_CLIENT_BEST_RESYNC_ROUTES);
+    assert_eq!(pcb.singleton_candidate_sets, expected_private);
+    assert_eq!(pcb.multi_candidate_sets, 0);
+    assert_eq!(pcb.heap_backed_candidate_collections, expected_private);
+    assert_eq!(pcb.enumeration_phases, peers);
+    assert_eq!(pcb.enumerated_prefixes, prefix_visits);
+    assert_eq!(pcb.staging_phases, peers);
+    assert_eq!(pcb.staging_prefixes, prefix_visits);
+    assert_eq!(pcb.exact_phases, peers);
+    assert_eq!(pcb.commit_phases, peers);
+    assert_eq!(pcb.enqueue_phases, peers);
+    assert_eq!(pcb.pending_regroup_baselines, 0);
+    assert_eq!(pcb.pending_extra_withdraw_peers, 0);
+    assert_eq!(pcb.pending_exact_export_withdrawals, 0);
+    assert_eq!(pcb.exact_export_rejection_peers, 0);
+    assert_eq!(pcb.outbound_prefix_limit_peers, 0);
+    assert_eq!(pcb.forced_resync_peers, 0);
+    assert!(!pcb.total_enumeration.is_zero());
+    assert!(!pcb.total_staging.is_zero());
+    assert!(!pcb.total_exact_build_and_encode.is_zero());
+    assert!(!pcb.total_private_commit.is_zero());
+    assert!(!pcb.total_enqueue.is_zero());
+
+    for (index, receiver) in state.receivers.iter_mut().enumerate() {
+        drain_per_client_best_resync_envelopes(
+            receiver,
+            RibManager::bench_peer_address(index),
+            &state.expected_inventories[index],
+            state.current_community,
+            1,
+        );
+    }
+}
+
+fn bench_per_client_best_full_resync(c: &mut Criterion) {
+    let mut group = c.benchmark_group("per_client_best_full_resync");
+    group.sample_size(10);
+    for &peers in &PER_CLIENT_BEST_RESYNC_PEER_COUNTS {
+        group.bench_with_input(
+            BenchmarkId::new(
+                "ipv4_routes",
+                format!("{PER_CLIENT_BEST_RESYNC_ROUTES}/{peers}"),
+            ),
+            &peers,
+            |bench, &peers| {
+                let mut state = build_per_client_best_resync(peers);
+                bench.iter_custom(|iterations| {
+                    let mut accumulated = Duration::ZERO;
+                    for _ in 0..iterations {
+                        state.current_community =
+                            if state.current_community == PER_CLIENT_BEST_COMMUNITY_A {
+                                PER_CLIENT_BEST_COMMUNITY_B
+                            } else {
+                                PER_CLIENT_BEST_COMMUNITY_A
+                            };
+                        let next_policy = community_export_chain(state.current_community);
+                        state.manager.bench_reset_adj_rib_out_fanout_receipt();
+                        state.manager.bench_reset_per_client_best_resync_receipt();
+                        let started = Instant::now();
+                        state
+                            .manager
+                            .bench_replace_export_policy_per_peer(peers, &next_policy);
+                        accumulated += started.elapsed();
+                        assert_per_client_best_resync_receipts(&mut state, peers);
+                    }
+                    accumulated
+                });
+            },
+        );
+    }
+    group.finish();
 }
 
 fn drain_one_route_bearing_envelope_per_peer(
@@ -1946,6 +2194,7 @@ criterion_group!(
     benches,
     bench_fanout,
     bench_private_single_best_fanout,
+    bench_per_client_best_full_resync,
     bench_ixp_exact_export_fanout,
     bench_adj_rib_out_family_gauge,
     bench_grouped_withdrawal_fanout,

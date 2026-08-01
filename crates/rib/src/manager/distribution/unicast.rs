@@ -1490,6 +1490,13 @@ impl RibManager {
             llgr,
         )
         .collect();
+        #[cfg(feature = "bench-internals")]
+        if stage_path_id_zero {
+            super::super::bench_support::bench_record_per_client_best_candidates(
+                candidates.len(),
+                candidates.capacity() > 0,
+            );
+        }
 
         // Sort by best-path preference (best first). A target bound to a
         // resolved ORR vantage ranks by the vantage's interior cost to
