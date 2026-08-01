@@ -503,15 +503,17 @@ trie-backed secondary prefix index).
 | Routes | Time | Throughput | vs v0.31.0 |
 |--------|------|------------|------------|
 | 10,000 | 2.36 ms | 4.2M routes/sec | −34.2% |
-| 100,000 | 31.6 ms | 3.2M routes/sec | −39.8% |
-| 500,000 | 89.5 ms | 5.6M routes/sec | −49.3% |
+| 100,000 iterations / 65,536 unique keys | 31.6 ms | duplicate-shaped | −39.8% |
+| 500,000 iterations / 65,536 unique keys | 89.5 ms | duplicate-shaped | −49.3% |
 
-The scale/memory sprint roughly halved insert time at scale. The biggest
+The historical A/B roughly halved time for these exact shapes. Rows above
+65,536 used a repeating fixture and are not unique-table throughput evidence;
+see the [prefix-fixture audit](perf/rib-ops-prefix-fixture-audit-2026-08.md).
+The biggest
 contributors are the inlined `SmallVec<[u32; 1]>` Adj-RIB-In prefix index
 (no per-prefix `HashSet` allocation in the common no-Add-Path case) and the
 `FxHash` route maps (a faster non-cryptographic hasher for the internal,
-`max_prefixes`-bounded keys). A full Internet table (900k prefixes) now inserts
-in ~160 ms. The secondary prefix index keeps `iter_prefix()` at bounded depth, so
+`max_prefixes`-bounded keys). The secondary prefix index keeps `iter_prefix()` at bounded depth, so
 the full pipeline below stays linear at scale. The prefix index has since moved
 from `HashMap` to a trie (`prefix_trie::PrefixMap`) — this trims RIB index memory
 (see *Memory Footprint*) and improved insert a further ~8% in a quick A/B; the
@@ -790,9 +792,10 @@ cargo bench -p rustbgpd-rib --bench rib_ops -- "bulk_initial_load"
 | Routes | Time | vs v0.31.0 |
 |--------|------|------------|
 | 10,000 | 1.54 ms | −57.3% |
-| 100,000 | 39.2 ms | −50.5% |
+| 100,000 iterations / 65,536 unique prefixes | 39.2 ms | −50.5% |
 
-Cold table load benefits the most from the sprint — the `SmallVec` prefix
+The 100k row is an exact duplicate-shaped regression anchor, not unique-100k
+cold-load evidence. The `SmallVec` prefix
 index removes a per-prefix `HashSet` allocation on every insert, and the
 coalesced distribution flushes one outbound batch instead of one per chunk.
 
@@ -1093,10 +1096,10 @@ prove that the codec is never a bottleneck for large MP-BGP, VPN, EVPN, or
 malformed-recovery workloads. Framing-only messages still avoid UPDATE
 attribute parsing.
 
-**RIB insert** — Bulk insert now ranges from ~3.2M routes/sec at 100k rows to
-~5.6M routes/sec at 500k rows. A 900k-prefix Internet table extrapolates to
-~160ms for the insert step, well within acceptable convergence time for
-route-server deployments.
+**RIB insert** — The pinned 10k row measures 4.2M unique routes/sec. Historical
+100k and 500k rows repeated after 65,536 keys, so they remain exact-shape
+regression anchors but do not support unique full-table throughput or a 900k
+insert extrapolation.
 
 **Best-path selection** — Full-ladder comparisons are ~19.8ns each. Even an
 8-candidate Add-Path selection completes in ~167ns per prefix, and the common
