@@ -3,7 +3,7 @@
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::broadcast;
 use tokio_stream::Stream;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::{BroadcastStream, errors::BroadcastStreamRecvError};
@@ -213,14 +213,10 @@ impl proto::event_service_server::EventService for EventService {
 
         let route_stream: Pin<Box<dyn Stream<Item = Result<proto::BgpEvent, Status>> + Send>> =
             if filter.wants_route_events() {
-                let (reply_tx, reply_rx) = oneshot::channel();
-                self.rib_tx
-                    .send(RibUpdate::SubscribeRouteEvents { reply: reply_tx })
-                    .await
-                    .map_err(|_| Status::internal("RIB manager unavailable"))?;
-                let broadcast_rx = reply_rx
-                    .await
-                    .map_err(|_| Status::internal("RIB manager dropped reply"))?;
+                let broadcast_rx = rib_manager_read(&self.rib_tx, |reply| {
+                    RibUpdate::SubscribeRouteEvents { reply }
+                })
+                .await?;
                 let route_filter = filter.clone();
                 let route_metrics = self.metrics.clone();
                 let route_subscriber_guard =
@@ -259,14 +255,10 @@ impl proto::event_service_server::EventService for EventService {
 
         let session_stream: Pin<Box<dyn Stream<Item = Result<proto::BgpEvent, Status>> + Send>> =
             if filter.wants_session_events() {
-                let (reply_tx, reply_rx) = oneshot::channel();
-                self.peer_mgr_tx
-                    .send(PeerManagerCommand::SubscribeSessionEvents { reply: reply_tx })
-                    .await
-                    .map_err(|_| Status::internal("peer manager unavailable"))?;
-                let broadcast_rx = reply_rx
-                    .await
-                    .map_err(|_| Status::internal("peer manager dropped reply"))?;
+                let broadcast_rx = peer_manager_read(&self.peer_mgr_tx, |reply| {
+                    PeerManagerCommand::SubscribeSessionEvents { reply }
+                })
+                .await?;
                 let session_filter = filter.clone();
                 let session_metrics = self.metrics.clone();
                 let session_subscriber_guard =
@@ -305,14 +297,10 @@ impl proto::event_service_server::EventService for EventService {
 
         let policy_stream: Pin<Box<dyn Stream<Item = Result<proto::BgpEvent, Status>> + Send>> =
             if filter.wants_policy_events() {
-                let (reply_tx, reply_rx) = oneshot::channel();
-                self.peer_mgr_tx
-                    .send(PeerManagerCommand::SubscribePolicyEvents { reply: reply_tx })
-                    .await
-                    .map_err(|_| Status::internal("peer manager unavailable"))?;
-                let broadcast_rx = reply_rx
-                    .await
-                    .map_err(|_| Status::internal("peer manager dropped reply"))?;
+                let broadcast_rx = peer_manager_read(&self.peer_mgr_tx, |reply| {
+                    PeerManagerCommand::SubscribePolicyEvents { reply }
+                })
+                .await?;
                 let policy_filter = filter.clone();
                 let policy_metrics = self.metrics.clone();
                 let policy_subscriber_guard =
@@ -426,14 +414,10 @@ impl proto::event_service_server::EventService for EventService {
 
         let evpn_stream: Pin<Box<dyn Stream<Item = Result<proto::BgpEvent, Status>> + Send>> =
             if filter.wants_evpn_events() {
-                let (reply_tx, reply_rx) = oneshot::channel();
-                self.rib_tx
-                    .send(RibUpdate::SubscribeEvpnRouteEvents { reply: reply_tx })
-                    .await
-                    .map_err(|_| Status::internal("RIB manager unavailable"))?;
-                let broadcast_rx = reply_rx
-                    .await
-                    .map_err(|_| Status::internal("RIB manager dropped reply"))?;
+                let broadcast_rx = rib_manager_read(&self.rib_tx, |reply| {
+                    RibUpdate::SubscribeEvpnRouteEvents { reply }
+                })
+                .await?;
                 let evpn_filter = filter.clone();
                 let evpn_metrics = self.metrics.clone();
                 let evpn_subscriber_guard =
@@ -648,6 +632,78 @@ mod tests {
         ListEventRead::Policy,
     ];
 
+    #[derive(Clone, Copy, Debug)]
+    enum WatchEventAdmission {
+        Route,
+        Session,
+        Policy,
+        Evpn,
+    }
+
+    impl WatchEventAdmission {
+        fn category(self) -> proto::EventCategory {
+            match self {
+                Self::Route => proto::EventCategory::Route,
+                Self::Session => proto::EventCategory::Session,
+                Self::Policy => proto::EventCategory::Policy,
+                Self::Evpn => proto::EventCategory::Evpn,
+            }
+        }
+
+        fn manager(self) -> &'static str {
+            match self {
+                Self::Route | Self::Evpn => "RIB",
+                Self::Session | Self::Policy => "peer",
+            }
+        }
+    }
+
+    const WATCH_EVENT_ADMISSIONS: [WatchEventAdmission; 4] = [
+        WatchEventAdmission::Route,
+        WatchEventAdmission::Session,
+        WatchEventAdmission::Policy,
+        WatchEventAdmission::Evpn,
+    ];
+
+    fn watch_event_request(source: WatchEventAdmission) -> proto::WatchEventsRequest {
+        proto::WatchEventsRequest {
+            categories: vec![source.category() as i32],
+            ..Default::default()
+        }
+    }
+
+    async fn within_test_deadline<T>(future: impl std::future::Future<Output = T>) -> T {
+        tokio::time::timeout(std::time::Duration::from_secs(1), future)
+            .await
+            .expect("test operation timed out")
+    }
+
+    async fn invoke_watch_event_admission(
+        service: &EventService,
+        source: WatchEventAdmission,
+    ) -> Result<(), Status> {
+        within_test_deadline(service.watch_events(Request::new(watch_event_request(source))))
+            .await
+            .map(|_| ())
+    }
+
+    fn event_service_with_metrics(
+        rib_tx: tokio::sync::mpsc::Sender<RibUpdate>,
+        peer_tx: tokio::sync::mpsc::Sender<PeerManagerCommand>,
+        metrics: &BgpMetrics,
+    ) -> EventService {
+        EventService::with_dataplane_snapshots_broadcaster_and_metrics(
+            rib_tx,
+            peer_tx,
+            Arc::new(Vec::new),
+            Arc::new(Vec::new),
+            dataplane_event_broadcaster(),
+            None,
+            None,
+            metrics.clone(),
+        )
+    }
+
     async fn invoke_list_event_read(
         service: &EventService,
         rpc: ListEventRead,
@@ -714,6 +770,188 @@ mod tests {
                 ListEventRead::Session | ListEventRead::Policy => "peer manager dropped reply",
             };
             assert_eq!(error.message(), expected, "{rpc:?}");
+        }
+    }
+
+    /// Load-bearing: restoring any included `WatchEvents` actor-send mapping to
+    /// `INTERNAL` makes its isolated actual-handler row red.
+    #[tokio::test]
+    async fn watch_event_admission_send_failures_are_unavailable() {
+        for source in WATCH_EVENT_ADMISSIONS {
+            let (rib_tx, rib_rx) = tokio::sync::mpsc::channel(1);
+            let (peer_tx, peer_rx) = tokio::sync::mpsc::channel(1);
+            match source {
+                WatchEventAdmission::Route | WatchEventAdmission::Evpn => drop(rib_rx),
+                WatchEventAdmission::Session | WatchEventAdmission::Policy => drop(peer_rx),
+            }
+            let service = EventService::new(rib_tx, peer_tx);
+            let error = invoke_watch_event_admission(&service, source)
+                .await
+                .unwrap_err();
+            assert_eq!(error.code(), tonic::Code::Unavailable, "{source:?}");
+            assert_eq!(
+                error.message(),
+                format!("{} manager unavailable", source.manager()),
+                "{source:?}"
+            );
+        }
+    }
+
+    /// Load-bearing: restoring any included `WatchEvents` reply-await mapping to
+    /// `INTERNAL` makes its accepted-then-dropped actual-handler row red.
+    #[tokio::test]
+    async fn watch_event_admission_reply_drops_are_unavailable() {
+        for source in WATCH_EVENT_ADMISSIONS {
+            let (rib_tx, mut rib_rx) = tokio::sync::mpsc::channel(1);
+            let (peer_tx, mut peer_rx) = tokio::sync::mpsc::channel(1);
+            let actor = match source {
+                WatchEventAdmission::Route | WatchEventAdmission::Evpn => {
+                    tokio::spawn(async move {
+                        drop(rib_rx.recv().await.expect("RIB watch admission"));
+                    })
+                }
+                WatchEventAdmission::Session | WatchEventAdmission::Policy => {
+                    tokio::spawn(async move {
+                        drop(peer_rx.recv().await.expect("peer watch admission"));
+                    })
+                }
+            };
+            let service = EventService::new(rib_tx, peer_tx);
+            let error = invoke_watch_event_admission(&service, source)
+                .await
+                .unwrap_err();
+            within_test_deadline(actor).await.unwrap();
+            assert_eq!(error.code(), tonic::Code::Unavailable, "{source:?}");
+            assert_eq!(
+                error.message(),
+                format!("{} manager dropped reply", source.manager()),
+                "{source:?}"
+            );
+        }
+    }
+
+    /// Load-bearing: leaking the route receiver or its subscriber guard across
+    /// a later session-admission error makes the zero-count assertion red;
+    /// restoring the session send mapping to `INTERNAL` makes the status red.
+    #[tokio::test]
+    async fn watch_events_releases_route_admission_when_session_send_fails() {
+        let (rib_tx, mut rib_rx) = tokio::sync::mpsc::channel(1);
+        let (peer_tx, peer_rx) = tokio::sync::mpsc::channel(1);
+        let (route_events_tx, _) = broadcast::channel(1);
+        let route_events_for_actor = route_events_tx.clone();
+        let rib_actor = tokio::spawn(async move {
+            match rib_rx.recv().await.expect("route watch admission") {
+                RibUpdate::SubscribeRouteEvents { reply } => {
+                    let _ = reply.send(route_events_for_actor.subscribe());
+                }
+                _ => panic!("expected route watch admission"),
+            }
+        });
+        drop(peer_rx);
+
+        let metrics = BgpMetrics::new();
+        let service = event_service_with_metrics(rib_tx, peer_tx, &metrics);
+        let Err(error) = within_test_deadline(service.watch_events(Request::new(
+            proto::WatchEventsRequest {
+                categories: vec![
+                    proto::EventCategory::Route as i32,
+                    proto::EventCategory::Session as i32,
+                ],
+                ..Default::default()
+            },
+        )))
+        .await
+        else {
+            panic!("session admission must fail");
+        };
+        within_test_deadline(rib_actor).await.unwrap();
+
+        assert_eq!(error.code(), tonic::Code::Unavailable);
+        assert_eq!(error.message(), "peer manager unavailable");
+        assert_eq!(route_events_tx.receiver_count(), 0);
+        assert!(
+            gather_text(&metrics).contains(
+                "bgp_event_stream_subscribers{service=\"watch_events\",source=\"route\"} 0"
+            )
+        );
+    }
+
+    /// Load-bearing: leaking any earlier receiver or subscriber guard across
+    /// the later EVPN reply drop makes its zero-count assertion red; restoring
+    /// the EVPN reply mapping to `INTERNAL` makes the status red.
+    #[tokio::test]
+    async fn watch_events_releases_earlier_admissions_when_evpn_reply_drops() {
+        let (rib_tx, mut rib_rx) = tokio::sync::mpsc::channel(2);
+        let (peer_tx, mut peer_rx) = tokio::sync::mpsc::channel(2);
+        let (route_events_tx, _) = broadcast::channel(1);
+        let (session_events_tx, _) = broadcast::channel(1);
+        let (policy_events_tx, _) = broadcast::channel(1);
+
+        let route_events_for_actor = route_events_tx.clone();
+        let rib_actor = tokio::spawn(async move {
+            match rib_rx.recv().await.expect("route watch admission") {
+                RibUpdate::SubscribeRouteEvents { reply } => {
+                    let _ = reply.send(route_events_for_actor.subscribe());
+                }
+                _ => panic!("expected route watch admission"),
+            }
+            match rib_rx.recv().await.expect("EVPN watch admission") {
+                RibUpdate::SubscribeEvpnRouteEvents { reply } => drop(reply),
+                _ => panic!("expected EVPN watch admission"),
+            }
+        });
+
+        let session_events_for_actor = session_events_tx.clone();
+        let policy_events_for_actor = policy_events_tx.clone();
+        let peer_actor = tokio::spawn(async move {
+            match peer_rx.recv().await.expect("session watch admission") {
+                PeerManagerCommand::SubscribeSessionEvents { reply } => {
+                    let _ = reply.send(session_events_for_actor.subscribe());
+                }
+                _ => panic!("expected session watch admission"),
+            }
+            match peer_rx.recv().await.expect("policy watch admission") {
+                PeerManagerCommand::SubscribePolicyEvents { reply } => {
+                    let _ = reply.send(policy_events_for_actor.subscribe());
+                }
+                _ => panic!("expected policy watch admission"),
+            }
+        });
+
+        let metrics = BgpMetrics::new();
+        let service = event_service_with_metrics(rib_tx, peer_tx, &metrics);
+        let Err(error) = within_test_deadline(service.watch_events(Request::new(
+            proto::WatchEventsRequest {
+                categories: vec![
+                    proto::EventCategory::Route as i32,
+                    proto::EventCategory::Session as i32,
+                    proto::EventCategory::Policy as i32,
+                    proto::EventCategory::Evpn as i32,
+                ],
+                ..Default::default()
+            },
+        )))
+        .await
+        else {
+            panic!("EVPN admission must fail");
+        };
+        within_test_deadline(rib_actor).await.unwrap();
+        within_test_deadline(peer_actor).await.unwrap();
+
+        assert_eq!(error.code(), tonic::Code::Unavailable);
+        assert_eq!(error.message(), "RIB manager dropped reply");
+        for (source, receivers) in [
+            ("route", route_events_tx.receiver_count()),
+            ("session", session_events_tx.receiver_count()),
+            ("policy", policy_events_tx.receiver_count()),
+        ] {
+            assert_eq!(receivers, 0, "{source} receiver leaked");
+            assert!(
+                gather_text(&metrics).contains(&format!(
+                    "bgp_event_stream_subscribers{{service=\"watch_events\",source=\"{source}\"}} 0"
+                )),
+                "{source} subscriber gauge did not return to zero"
+            );
         }
     }
 

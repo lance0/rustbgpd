@@ -1,4 +1,4 @@
-//! Shared transport boundary for unary reads from the state-owning actors.
+//! Shared transport boundary for read-only requests to the state-owning actors.
 
 use rustbgpd_rib::RibUpdate;
 use tokio::sync::{mpsc, oneshot};
@@ -6,7 +6,7 @@ use tonic::Status;
 
 use crate::peer_types::PeerManagerCommand;
 
-/// Send one read command to the peer manager and await its reply.
+/// Send one read-only request to the peer manager and await its reply.
 pub(crate) async fn peer_manager_read<T>(
     tx: &mpsc::Sender<PeerManagerCommand>,
     build: impl FnOnce(oneshot::Sender<T>) -> PeerManagerCommand,
@@ -20,7 +20,7 @@ pub(crate) async fn peer_manager_read<T>(
         .map_err(|_| Status::unavailable("peer manager dropped reply"))
 }
 
-/// Send one read command to the RIB manager and await its reply.
+/// Send one read-only request to the RIB manager and await its reply.
 pub(crate) async fn rib_manager_read<T>(
     tx: &mpsc::Sender<RibUpdate>,
     build: impl FnOnce(oneshot::Sender<T>) -> RibUpdate,
