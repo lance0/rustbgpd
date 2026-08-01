@@ -90,9 +90,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - gNMI `updates_only` STREAM/SAMPLE subscriptions now resume sampled data after
   the initial sync instead of remaining silent for the stream's lifetime.
 
-- gNMI STREAM/SAMPLE now schedules every path at its requested clamped interval
+- gNMI STREAM/SAMPLE now schedules every path at its requested interval
   instead of slowing the whole subscription to its longest interval. Co-due
   neighbor paths still share one peer snapshot, and missed periods do not burst.
+
+- gNMI STREAM/SAMPLE now rejects nonzero intervals outside the supported 1s–1h
+  range instead of silently clamping them; zero still selects the 1s floor.
 
 - Graceful Restart and Long-Lived Graceful Restart now retain an iBGP route
   source's route-reflector-client classification for as long as its stale

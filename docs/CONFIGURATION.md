@@ -2920,7 +2920,7 @@ tls_key_file = "/etc/rustbgpd/client.key"    # required with tls_cert_file
 | `address` | string | yes | -- | Collector `host:port` (DNS names allowed; bracket IPv6 literals) |
 | `paths` | array | yes | -- | OpenConfig gNMI paths in xpath form — the same path surface the dial-in Subscribe server supports (see `docs/GNMI.md`) |
 | `mode` | string | no | `"sample"` | `"sample"` (periodic resample) or `"on_change"` (event-driven; v1 covers the `session-state` leaf and requires `[event_history].enabled = true`) |
-| `sample_interval` | u64 | no | 10 | Seconds between samples in SAMPLE mode, clamped to [1s, 1h] like dial-in |
+| `sample_interval` | u64 | no | 10 | Seconds between samples in SAMPLE mode; values from 1 through 3600 are retained, while zero and values above 3600 are rejected |
 | `backoff_initial` | u64 | no | 1 | First reconnect delay in seconds; doubles per consecutive failure |
 | `backoff_max` | u64 | no | 30 | Reconnect delay cap in seconds |
 | `tls_ca_file` | string | no | -- | CA bundle (PEM path) verifying the collector's server certificate; setting it enables TLS |
