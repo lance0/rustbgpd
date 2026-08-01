@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Check that the embedding crate map matches locked, offline Cargo metadata."""
 
+from __future__ import annotations
+
 import json
 import subprocess
 import sys
@@ -10,15 +12,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DOCUMENT = ROOT / "docs" / "EMBEDDING.md"
-COMMAND = (
-    "cargo",
-    "metadata",
-    "--locked",
-    "--offline",
-    "--format-version",
-    "1",
-    "--no-deps",
-)
+COMMAND = "cargo metadata --locked --offline --format-version 1 --no-deps".split()
 BEGIN = "<!-- BEGIN EMBEDDING CRATE MAP -->"
 END = "<!-- END EMBEDDING CRATE MAP -->"
 SCOPE = (
