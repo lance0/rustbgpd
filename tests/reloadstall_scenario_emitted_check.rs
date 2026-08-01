@@ -187,6 +187,27 @@ fn irr_reload_campaign_seals_resume_rows_and_rss_evidence() {
     assert!(terminate.contains("wait \"$pid\""));
 }
 
+#[test]
+/// Red proof: removing or moving the empty-sample guard after the CSV append
+/// makes this fail, restoring the teardown race's bogus terminal `0,0` row.
+fn rss_sampler_drops_empty_teardown_samples_before_append() {
+    let sampler = std::fs::read_to_string(format!(
+        "{}/bench/scale/matrix/rss-sampler.sh",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .expect("read RSS sampler");
+    let guard = sampler
+        .find("if [ \"$n\" -eq 0 ] || [ \"$total\" -eq 0 ]; then")
+        .expect("empty RSS sample guard");
+    let append = sampler
+        .find("echo \"$(date +%s),$total,$n\" >>\"$out\"")
+        .expect("RSS sample append");
+    assert!(
+        guard < append,
+        "empty samples must be rejected before append"
+    );
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 /// Red proof: removing the process-group KILL escalation leaves the TERM-
@@ -740,6 +761,248 @@ fn irr_reload_manifest_seals_a_cell_independent_dataset_digest() {
     )
     .expect("parse manifest");
     assert_ne!(manifest["dataset_sha256"], digests[0]);
+}
+
+#[test]
+/// Red proofs: removing a semantic verifier check makes its named corrupt
+/// fixture pass; changing the default/control rosters or their explicit mode
+/// flags fails the executed dry-protocol assertions. Removing the pre-trigger
+/// topology call, quiet double-sample, source fence, identity fence, or final
+/// immutable seal fails the corresponding structural assertion below.
+fn irr_reload_counterbalanced_receipt_protocol_is_load_bearing() {
+    let root = env!("CARGO_MANIFEST_DIR");
+    let runner = format!("{root}/bench/scale/irrreload/run-irr-reload.sh");
+    let verifier = format!("{root}/bench/scale/irrreload/verify-receipt.py");
+
+    let self_test = std::process::Command::new("python3")
+        .args([&verifier, "self-test"])
+        .output()
+        .expect("run receipt verifier self-test");
+    assert!(
+        self_test.status.success(),
+        "verifier self-test failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&self_test.stdout),
+        String::from_utf8_lossy(&self_test.stderr)
+    );
+    let stdout = String::from_utf8(self_test.stdout).expect("self-test UTF-8");
+    for proof in [
+        "default-roster",
+        "mixed-roster",
+        "mode-flags",
+        "live-topology-gauge",
+        "route-gauge",
+        "route-family",
+        "one-scrape-drift",
+        "add-path",
+        "config-count",
+        "topology-mutation",
+        "barrier-marker",
+        "final-barrier-marker",
+        "ordering",
+        "dirty-commit",
+        "origin-only",
+        "head-matches-false",
+        "mismatched-commit",
+        "commit-malformed",
+        "scripts-null",
+        "scripts-empty-map",
+        "binary-malformed",
+        "fingerprint-recompute",
+        "canonical-changed-fraction",
+        "canonical-control-secs",
+        "canonical-bird-threads",
+        "repeat-image-identity",
+        "cell-root-provenance",
+        "nonoverlap-order",
+        "reused-identity",
+        "quiet-spacing",
+        "preflight-raw",
+        "cell-status",
+        "cell-provenance",
+        "evidence-roster",
+        "scenario-roster",
+        "scenario-duplicate",
+        "scenario-unsafe-path",
+        "scenario-retained-config",
+        "cell-root-rows",
+        "reload-log-rows",
+        "row-invariants",
+        "rss-raw",
+        "seal-checksum",
+        "exact-root-roster",
+        "symlink-anywhere",
+        "writable-root",
+        "grouped-output-isolation",
+        "output-exact-roster",
+        "output-audit-call",
+    ] {
+        assert!(
+            stdout.contains(&format!("red-proof {proof}=pass")),
+            "{proof}"
+        );
+    }
+
+    let dry = |cells: &[&str]| {
+        std::process::Command::new("bash")
+            .arg(&runner)
+            .args(cells)
+            .env("DRY_RUN_PROTOCOL", "1")
+            .env_remove("SMOKE")
+            .output()
+            .expect("run dry protocol")
+    };
+    let comparison = dry(&[]);
+    assert!(comparison.status.success());
+    let comparison = String::from_utf8(comparison.stdout).expect("comparison UTF-8");
+    assert!(comparison.contains("cells=rustbgpd-sighup,bird,openbgpd\n"));
+    assert!(comparison.contains("campaign_kind=full-cross-daemon\n"));
+    assert!(comparison.contains("rustbgpd_private=path_hiding:true,admit_churn:true\n"));
+    assert!(comparison.contains("competitor_path_hiding=applicable:false,requested:true\n"));
+    assert!(comparison.contains("shape=320,183040,1000,40000\n"));
+
+    let grouped = dry(&["rustbgpd-sighup-grouped-control"]);
+    assert!(grouped.status.success());
+    let grouped = String::from_utf8(grouped.stdout).expect("grouped UTF-8");
+    assert!(grouped.contains("cells=rustbgpd-sighup-grouped-control\n"));
+    assert!(grouped.contains("campaign_kind=full-grouped-control\n"));
+    assert!(
+        grouped.contains(
+            "rustbgpd_grouped_control=path_hiding:false,admit_churn:true,standalone:true\n"
+        )
+    );
+    let mixed = dry(&["rustbgpd-sighup", "rustbgpd-sighup-grouped-control"]);
+    assert!(
+        !mixed.status.success(),
+        "grouped control entered comparison roster"
+    );
+
+    let script = std::fs::read_to_string(&runner).expect("read runner");
+    assert!(
+        script.lines().count() <= 950,
+        "runner parsing belongs in Python"
+    );
+    for guard in [
+        "RELOADSTALL_PRE_CHURN_EVIDENCE_DIR=\"$barrier\"",
+        "RELOADSTALL_EVIDENCE_DIR=\"$final_barrier\"",
+        "jq -cS . | sha256sum",
+        "320,183040,1000,40000,61,4,0.1,1790,30,4194275,7200,600,8",
+        "capture_topology \"$topology_mode\" \"$cdir\" \"$run\" \"$hpid\" \"$barrier\"",
+        "ack_pre_churn \"$barrier\" true \"$cdir\"",
+        "--peers \"$N_MEMBERS\" --total \"$TOTAL_PREFIXES\"",
+        "TOPOLOGY_CAPTURE_TIMEOUT=50",
+        "deadline=$((SECONDS + TOPOLOGY_CAPTURE_TIMEOUT))",
+        "rm -f \"$cdir/topology.json\" \"$cdir\"/metrics-{1,2,3}.prom",
+        "bind_first_trigger \"$cdir\"",
+        "full measured campaigns require a clean HEAD exactly at origin/main",
+        "printf 'sample\\tepoch_s\\tload1\\n'",
+        "[ \"$sample\" -gt 2 ] || sleep 30",
+        "daemon PID/start identity changed",
+        "find . -type f ! -name SHA256SUMS",
+        "chmod -R a-w \"$ART\"",
+    ] {
+        assert!(script.contains(guard), "missing protocol guard: {guard}");
+    }
+}
+
+#[test]
+/// Red proof: moving the atomic `ack` publish before the `/proc` starttime
+/// comparison or process.tsv capture fails the source-order assertions;
+/// removing the mismatch guard makes the wrong-start invocation create ack.
+fn irr_reload_final_evidence_captures_identity_before_ack() {
+    let runner = std::fs::read_to_string(format!(
+        "{}/bench/scale/irrreload/run-irr-reload.sh",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .expect("read runner");
+    let body = runner
+        .split_once("ack_final_evidence() {")
+        .and_then(|(_, rest)| rest.split_once("bind_first_trigger() {"))
+        .map(|(body, _)| format!("ack_final_evidence() {{{body}"))
+        .expect("final evidence helper");
+    let identity = body.find("after=$(awk").expect("identity read");
+    let process = body.find("process.tsv").expect("process receipt");
+    let ack = body
+        .find("mv -T \"$tmp\" \"$barrier/ack\"")
+        .expect("atomic ack");
+    assert!(identity < process && process < ack);
+
+    let temp = tempfile::tempdir().unwrap();
+    let barrier = temp.path().join("barrier");
+    let evidence = temp.path().join("evidence");
+    std::fs::create_dir(&barrier).unwrap();
+    std::fs::write(barrier.join("ready"), "ready\n").unwrap();
+    let pid = std::process::id().to_string();
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+    let start = stat
+        .split_whitespace()
+        .nth(21)
+        .unwrap()
+        .parse::<u64>()
+        .unwrap();
+    let invalid = std::process::Command::new("bash")
+        .args([
+            "-c",
+            &format!("{body}\nack_final_evidence \"$BARRIER\" \"$EVIDENCE\" \"$PID\" \"$START\""),
+        ])
+        .env("BARRIER", &barrier)
+        .env("EVIDENCE", &evidence)
+        .env("PID", &pid)
+        .env("START", (start + 1).to_string())
+        .status()
+        .unwrap();
+    assert!(!invalid.success());
+    assert!(!barrier.join("ack").exists());
+}
+
+#[test]
+/// Red proof: removing the evidence-valid guard creates `ack` for the false
+/// invocation and fails this test; replacing the atomic regular-file publish
+/// with a non-file marker fails the positive half.
+fn irr_reload_invalid_topology_never_acknowledges_pre_churn_barrier() {
+    let runner = std::fs::read_to_string(format!(
+        "{}/bench/scale/irrreload/run-irr-reload.sh",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .expect("read runner");
+    let body = runner
+        .split_once("ack_pre_churn() {")
+        .and_then(|(_, rest)| rest.split_once("bind_first_trigger() {"))
+        .map(|(body, _)| format!("ack_pre_churn() {{{body}"))
+        .expect("ack helper");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let barrier = temp.path().join("barrier");
+    let evidence = temp.path().join("evidence");
+    std::fs::create_dir(&barrier).unwrap();
+    std::fs::write(barrier.join("ready"), "ready\n").unwrap();
+
+    let invalid = std::process::Command::new("bash")
+        .args([
+            "-c",
+            &format!("{body}\nack_pre_churn \"$BARRIER\" false \"$EVIDENCE\""),
+        ])
+        .env("BARRIER", &barrier)
+        .env("EVIDENCE", &evidence)
+        .status()
+        .expect("run invalid acknowledgement");
+    assert!(!invalid.success());
+    assert!(!barrier.join("ack").exists());
+
+    let valid = std::process::Command::new("bash")
+        .args([
+            "-c",
+            &format!("{body}\nack_pre_churn \"$BARRIER\" true \"$EVIDENCE\""),
+        ])
+        .env("BARRIER", &barrier)
+        .env("EVIDENCE", &evidence)
+        .status()
+        .expect("run valid acknowledgement");
+    assert!(valid.success());
+    let metadata = std::fs::symlink_metadata(barrier.join("ack")).unwrap();
+    assert!(metadata.file_type().is_file() && !metadata.file_type().is_symlink());
+    assert_eq!(
+        std::fs::read_to_string(evidence.join("pre-churn/ack")).unwrap(),
+        "ack\n"
+    );
 }
 
 #[test]

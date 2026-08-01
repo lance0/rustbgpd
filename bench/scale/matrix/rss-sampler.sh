@@ -42,6 +42,12 @@ while [ -d "/proc/$root" ]; do
             n=$((n + 1))
         fi
     done
+    # The root can exit after the loop's /proc liveness check but before its
+    # status is read. Do not turn that teardown race into a bogus zero sample.
+    if [ "$n" -eq 0 ] || [ "$total" -eq 0 ]; then
+        sleep "$interval"
+        continue
+    fi
     echo "$(date +%s),$total,$n" >>"$out"
     sleep "$interval"
 done

@@ -88,6 +88,7 @@ const CONNECT_WINDOW: Duration = Duration::from_secs(120);
 const FLAP_ROUNDS: u32 = 3;
 const FLAP_RECONNECT_SECS: u64 = 10;
 const EVIDENCE_TIMEOUT: Duration = Duration::from_secs(15);
+const PRE_CHURN_EVIDENCE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// What the shared per-observer bitmap is armed to track (flapstorm mode).
 const FLAP_OFF: u32 = 0;
@@ -934,6 +935,52 @@ async fn await_evidence_capture(evidence_dir: &Path, timeout: Duration) -> std::
     Ok(())
 }
 
+async fn await_pre_churn_evidence_capture(
+    evidence_dir: &Path,
+    timeout: Duration,
+) -> std::io::Result<()> {
+    std::fs::create_dir_all(evidence_dir)?;
+    if std::fs::read_dir(evidence_dir)?.next().is_some() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "pre-churn evidence directory is not empty",
+        ));
+    }
+    std::fs::write(evidence_dir.join("ready"), b"ready\n")?;
+    if !std::fs::symlink_metadata(evidence_dir.join("ready"))?
+        .file_type()
+        .is_file()
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "pre-churn ready marker is not a regular file",
+        ));
+    }
+    let deadline = Instant::now() + timeout;
+    loop {
+        match std::fs::symlink_metadata(evidence_dir.join("ack")) {
+            Ok(metadata) if metadata.file_type().is_file() => return Ok(()),
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        if Instant::now() >= deadline {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!(
+                    "pre-churn evidence acknowledgement not received within {}s",
+                    timeout.as_secs()
+                ),
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+fn final_evidence_allowed(_reloads: u32, flapstorm: Option<u32>) -> bool {
+    flapstorm.is_none()
+}
+
 #[allow(clippy::too_many_lines)]
 fn main() {
     let mut a: Vec<String> = std::env::args().collect();
@@ -974,6 +1021,8 @@ fn main() {
     let changed_peers: u32 = a.get(10).map_or(n_peers, |value| value.parse().unwrap());
     let reload_cmd: Option<String> = a.get(11).cloned();
     let evidence_dir = std::env::var_os("RELOADSTALL_EVIDENCE_DIR").map(PathBuf::from);
+    let pre_churn_evidence_dir =
+        std::env::var_os("RELOADSTALL_PRE_CHURN_EVIDENCE_DIR").map(PathBuf::from);
     assert!(n_peers >= CHURNERS, "n_peers must be at least {CHURNERS}");
     assert!(
         (1..=n_peers).contains(&changed_peers),
@@ -984,8 +1033,8 @@ fn main() {
         "daemon_pid 0 (outer RSS sampler) requires reload_cmd or --flapstorm"
     );
     assert!(
-        evidence_dir.is_none() || (reloads == 0 && flapstorm.is_none()),
-        "RELOADSTALL_EVIDENCE_DIR is only valid for zero-reload measurements"
+        evidence_dir.is_none() || final_evidence_allowed(reloads, flapstorm),
+        "RELOADSTALL_EVIDENCE_DIR is not valid for flapstorm measurements"
     );
     if let Some(k) = flapstorm {
         assert!(
@@ -1113,6 +1162,15 @@ fn main() {
             ctx.t0.elapsed().as_secs_f64(),
             rss_mib(pid)
         );
+
+        if let Some(evidence_dir) = pre_churn_evidence_dir.as_deref() {
+            if let Err(error) =
+                await_pre_churn_evidence_capture(evidence_dir, PRE_CHURN_EVIDENCE_TIMEOUT).await
+            {
+                eprintln!("FAIL: pre-churn evidence handshake failed: {error}");
+                std::process::exit(1);
+            }
+        }
 
         // --- Start churn: last CHURNERS stubs flap a dedicated block. ---
         for c in 0..CHURNERS {
@@ -1472,18 +1530,17 @@ mod tests {
     #[tokio::test]
     async fn evidence_handshake_keeps_boundary_until_ack() {
         let directory = evidence_test_dir("ack");
-        let writer_dir = directory.clone();
-        let ack_writer = tokio::spawn(async move {
-            while !writer_dir.join("ready").is_file() {
-                tokio::time::sleep(Duration::from_millis(1)).await;
-            }
-            std::fs::write(writer_dir.join("ack"), b"ack\n").unwrap();
+        let waiter_dir = directory.clone();
+        let waiter = tokio::spawn(async move {
+            await_evidence_capture(&waiter_dir, Duration::from_secs(1)).await
         });
-
-        await_evidence_capture(&directory, Duration::from_secs(1))
-            .await
-            .unwrap();
-        ack_writer.await.unwrap();
+        while !directory.join("ready").is_file() {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert!(!waiter.is_finished(), "barrier advanced before regular ack");
+        std::fs::write(directory.join("ack"), b"ack\n").unwrap();
+        waiter.await.unwrap().unwrap();
         assert!(directory.join("ready").is_file());
         std::fs::remove_dir_all(directory).unwrap();
     }
@@ -1491,7 +1548,7 @@ mod tests {
     #[tokio::test]
     async fn evidence_handshake_timeout_fails_closed() {
         let directory = evidence_test_dir("timeout");
-        let error = await_evidence_capture(&directory, Duration::from_millis(10))
+        let error = await_pre_churn_evidence_capture(&directory, Duration::from_millis(10))
             .await
             .unwrap_err();
 
@@ -1507,13 +1564,62 @@ mod tests {
             std::fs::create_dir_all(&directory).unwrap();
             std::fs::write(directory.join(marker), b"stale\n").unwrap();
 
-            let error = await_evidence_capture(&directory, Duration::from_millis(10))
+            let error =
+                await_pre_churn_evidence_capture(&directory, Duration::from_millis(10))
                 .await
                 .unwrap_err();
 
             assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
             std::fs::remove_dir_all(directory).unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn evidence_handshake_rejects_non_regular_ack() {
+        let directory = evidence_test_dir("ack-directory");
+        let writer_dir = directory.clone();
+        let writer = tokio::spawn(async move {
+            while !writer_dir.join("ready").is_file() {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            std::fs::create_dir(writer_dir.join("ack")).unwrap();
+        });
+        let error = await_pre_churn_evidence_capture(&directory, Duration::from_millis(25))
+            .await
+            .unwrap_err();
+        writer.await.unwrap();
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn pre_churn_evidence_barrier_is_ordered_before_churn() {
+        let source = include_str!("main.rs");
+        let converged = source.find("\"converged (>=").unwrap();
+        let barrier = source
+            .find("await_pre_churn_evidence_capture(evidence_dir, PRE_CHURN_EVIDENCE_TIMEOUT)")
+            .unwrap();
+        let churn = source.find("// --- Start churn:").unwrap();
+        assert!(converged < barrier && barrier < churn);
+        let opt_in = ["RELOADSTALL_PRE_", "CHURN_EVIDENCE_DIR"].concat();
+        assert_eq!(
+            source.matches(&opt_in).count(),
+            1,
+            "removing opt-in or making the barrier unconditional changes behavior"
+        );
+    }
+
+    #[test]
+    fn final_evidence_accepts_reloads_but_rejects_flapstorm() {
+        assert!(final_evidence_allowed(4, None));
+        assert!(final_evidence_allowed(0, None));
+        assert!(!final_evidence_allowed(0, Some(1)));
+        assert!(!final_evidence_allowed(4, Some(1)));
+    }
+
+    #[test]
+    fn pre_churn_evidence_timeout_is_exactly_sixty_seconds() {
+        assert_eq!(PRE_CHURN_EVIDENCE_TIMEOUT, Duration::from_secs(60));
     }
 
     #[test]
