@@ -302,7 +302,7 @@ impl GnmiService {
     /// every `sample_interval`, exiting promptly when the client disconnects.
     async fn run_stream_sample(
         self,
-        plan: SubscriptionPlan,
+        mut plan: SubscriptionPlan,
         tx: tokio::sync::mpsc::Sender<Result<gnmi::SubscribeResponse, Status>>,
     ) {
         let mut include_sync = true;
@@ -311,6 +311,8 @@ impl GnmiService {
                 return;
             }
             include_sync = false;
+            // `updates_only` suppresses initial data, not later SAMPLE ticks.
+            plan.updates_only = false;
             // Sleep until the next sample, but bail out promptly if the client
             // disconnects (or the server drops the receiver) instead of waiting
             // out a full interval first.
@@ -3091,6 +3093,15 @@ mod tests {
         }
     }
 
+    /// Load-bearing hang guard: removing a timer or terminal status makes callers red.
+    async fn next_bounded(
+        stream: &mut tonic::Streaming<gnmi::SubscribeResponse>,
+    ) -> Result<Option<gnmi::SubscribeResponse>, Status> {
+        tokio::time::timeout(Duration::from_secs(2), stream.message())
+            .await
+            .expect("Subscribe response timed out")
+    }
+
     /// Drive a real Subscribe client until the peer-snapshot outage reaches it.
     /// This goes red if a Subscribe path emits data/sync, closes cleanly, hangs,
     /// or changes the shared actor-read status contract.
@@ -3304,6 +3315,135 @@ mod tests {
         ));
         // Dropping the client end lets the sample task exit promptly via select!.
         drop(stream);
+    }
+
+    #[tokio::test]
+    async fn updates_only_once_is_sync_only_without_actor_reads() {
+        // Load-bearing break: clearing `updates_only` for ONCE emits data and
+        // queues ListPeers instead of ending immediately after sync.
+        let (peer_tx, mut peer_rx) = tokio::sync::mpsc::channel(1);
+        let mut harness = serve(GnmiService::new(65001, "192.0.2.1".into(), peer_tx)).await;
+        let mut list = subscription_list(
+            gnmi::subscription_list::Mode::Once,
+            gnmi::SubscriptionMode::TargetDefined,
+            neighbor_session_state_wildcard_path(),
+        );
+        list.updates_only = true;
+        let mut stream = harness
+            .client
+            .subscribe(tokio_stream::iter(vec![subscribe_msg(list)]))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            next_bounded(&mut stream).await.unwrap().unwrap().response,
+            Some(gnmi::subscribe_response::Response::SyncResponse(true))
+        );
+        assert!(next_bounded(&mut stream).await.unwrap().is_none());
+        assert!(matches!(
+            peer_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+        drop(stream);
+        drop(harness);
+    }
+
+    #[tokio::test]
+    async fn updates_only_poll_is_sync_only_without_actor_reads() {
+        // Load-bearing break: clearing `updates_only` in POLL emits data and
+        // queues ListPeers during the initial phase or either explicit poll.
+        let (peer_tx, mut peer_rx) = tokio::sync::mpsc::channel(1);
+        let mut harness = serve(GnmiService::new(65001, "192.0.2.1".into(), peer_tx)).await;
+        let mut list = subscription_list(
+            gnmi::subscription_list::Mode::Poll,
+            gnmi::SubscriptionMode::TargetDefined,
+            neighbor_session_state_wildcard_path(),
+        );
+        list.updates_only = true;
+        let (req_tx, req_rx) = tokio::sync::mpsc::channel(3);
+        req_tx.send(subscribe_msg(list)).await.unwrap();
+        let mut stream = harness
+            .client
+            .subscribe(ReceiverStream::new(req_rx))
+            .await
+            .unwrap()
+            .into_inner();
+        for phase in 0..3 {
+            assert_eq!(
+                next_bounded(&mut stream).await.unwrap().unwrap().response,
+                Some(gnmi::subscribe_response::Response::SyncResponse(true))
+            );
+            assert!(matches!(
+                peer_rx.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ));
+            if phase < 2 {
+                req_tx.send(poll_msg()).await.unwrap();
+            }
+        }
+        drop(req_tx);
+        assert!(next_bounded(&mut stream).await.unwrap().is_none());
+        drop(stream);
+        drop(harness);
+    }
+
+    #[tokio::test]
+    async fn updates_only_stream_sample_resumes_updates_after_initial_sync() {
+        // Load-bearing break: removing the clear suppresses later samples;
+        // moving it before the first forward emits data before initial sync.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let (peer_tx, mut peer_rx) = tokio::sync::mpsc::channel(2);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let actor_calls = Arc::clone(&calls);
+        let actor = tokio::spawn(async move {
+            for call in 1..=2 {
+                let PeerManagerCommand::ListPeers { reply } = peer_rx.recv().await.unwrap() else {
+                    panic!("expected ListPeers command");
+                };
+                actor_calls.store(call, Ordering::SeqCst);
+                if call == 1 {
+                    reply
+                        .send(vec![test_peer("10.0.0.2".parse().unwrap())])
+                        .unwrap();
+                }
+            }
+        });
+        let mut harness = serve(GnmiService::new(65001, "192.0.2.1".into(), peer_tx)).await;
+        let mut list = subscription_list(
+            gnmi::subscription_list::Mode::Stream,
+            gnmi::SubscriptionMode::Sample,
+            neighbor_session_state_wildcard_path(),
+        );
+        list.updates_only = true;
+        let mut stream = harness
+            .client
+            .subscribe(tokio_stream::iter(vec![subscribe_msg(list)]))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(
+            next_bounded(&mut stream).await.unwrap().unwrap().response,
+            Some(gnmi::subscribe_response::Response::SyncResponse(true))
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        let sampled = next_bounded(&mut stream).await.unwrap().unwrap();
+        let Some(gnmi::subscribe_response::Response::Update(notification)) = sampled.response
+        else {
+            panic!("expected sampled neighbor Update, got {sampled:?}");
+        };
+        assert!(!notification.update.is_empty());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let error = next_bounded(&mut stream).await.unwrap_err();
+        assert_eq!(error.code(), tonic::Code::Unavailable);
+        assert_eq!(error.message(), "peer manager dropped reply");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        tokio::time::timeout(Duration::from_secs(2), actor)
+            .await
+            .unwrap()
+            .unwrap();
+        drop(stream);
+        drop(harness);
     }
 
     // --- ADR-0072 follow-up: Subscribe ON_CHANGE -------------------------
