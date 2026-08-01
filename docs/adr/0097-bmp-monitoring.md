@@ -110,7 +110,13 @@ This ADR records the decisions of that arc as shipped.
    carrying the synthesized End-of-RIB closure completes the dump; any earlier
    failure discards buffered Loc-RIB deltas and suppresses that view until the
    next generation. Ordinary Adj-RIB views remain live-only and continue under
-   the existing bounded fan-out policy.
+   the existing bounded fan-out policy. The held live delta buffer is bounded
+   at 8,192 rows. Reaching row 8,193 fences that collector generation, aborts
+   and awaits its dump forwarder, and closes TCP before the capped reconnect
+   delay; a fresh generation starts cursor-less. RFC 7854's TCP-session
+   lifetime is the validity boundary, so any rows already streamed on the
+   incomplete generation are invalidated rather than followed by a misleading
+   End-of-RIB. Coordinated daemon shutdown remains the distinct draining path.
 
 3. **Rib-out table dumps were rejected.** AdjRibOut stores routes
    *pre*-transport-stamping — ORIGINATOR_ID/CLUSTER_LIST, GShut, and

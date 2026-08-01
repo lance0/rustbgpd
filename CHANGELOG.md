@@ -62,6 +62,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A Loc-RIB live buffer that outgrows its 8,192-row bound during BMP bootstrap
+  now closes only that collector's incomplete TCP generation and reconnects
+  from a fresh dump. It no longer drops one delta while allowing the same
+  session's End-of-RIB to certify an incomplete view.
+
 - `ListFibTables` now reports FIB reconciler command-channel closure or a
   dropped `GetTables` reply as retryable `UNAVAILABLE`; mutation-path actor
   faults remain `INTERNAL`.

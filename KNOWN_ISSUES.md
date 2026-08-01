@@ -209,9 +209,11 @@ byte counts.
   admission, reply, or delivery fails before its terminal EoRs,
   buffered live Loc-RIB rows are discarded and that view stays
   suppressed until the next reconnect rather than being released as
-  an incomplete snapshot. For a route reflector the
-  post-policy Loc-RIB is the view most dump consumers actually want. Rib-out
-  dump synthesis was
+  an incomplete snapshot. The same fail-closed reconnect occurs if more than
+  8,192 live rows accumulate during bootstrap or the dump; TCP EOF invalidates
+  the incomplete BMP session before a new generation starts fresh. For a route
+  reflector the post-policy Loc-RIB is the view most dump consumers actually
+  want. Rib-out dump synthesis was
   evaluated and deliberately deferred: `AdjRibOut` stores post-policy
   routes *before* transport stamping, so a synthesized dump would miss
   the session-side attribute rewrites (`ORIGINATOR_ID`/`CLUSTER_LIST`

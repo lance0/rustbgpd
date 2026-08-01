@@ -2867,7 +2867,10 @@ and collector delivery are independently bounded. A failure before the
 RIB-owned terminal End-of-RIB closure increments
 `bmp_collector_drops_total{phase="loc_rib_dump"}`, discards buffered live
 Loc-RIB rows, and suppresses that view until the next reconnect rather than
-releasing an incomplete snapshot.
+releasing an incomplete snapshot. More than 8,192 live rows buffered behind
+bootstrap or an in-flight dump closes only that collector's TCP generation;
+the reconnect starts a fresh cursor-less dump, so an End-of-RIB cannot certify
+a view with a dropped live delta.
 
 All Loc-RIB messages — including the emulated peer's Peer Up/Down and stats
 — go only to collectors that monitor `loc_rib`.

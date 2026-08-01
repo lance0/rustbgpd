@@ -38,10 +38,9 @@ const LOC_RIB_DUMP_REPLY_TIMEOUT: std::time::Duration = std::time::Duration::fro
 /// reconnect triggers a fresh one).
 const LOC_RIB_DUMP_SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// Bound on live Loc-RIB messages held back per collector while its
-/// initial table dump streams. Overflow drops the newest message
-/// (counted on `bmp_collector_drops_total`) — the same lossy posture as
-/// a full collector channel; the collector's next reconnect resyncs.
+/// Maximum live Loc-RIB rows held behind bootstrap or an in-flight dump.
+/// Exceeding the cap fails that collector generation closed rather than
+/// certifying a snapshot that omitted live deltas.
 const LOC_RIB_DUMP_LIVE_BUFFER_CAP: usize = 8192;
 
 /// One in-flight Loc-RIB dump for a collector connection generation.
@@ -291,7 +290,7 @@ impl BmpManager {
             tokio::select! {
                 maybe_event = self.event_rx.recv(), if events_open => {
                     if let Some(event) = maybe_event {
-                        self.handle_event(&event);
+                        self.handle_event(&event).await;
                     } else {
                         events_open = false;
                         debug!("BMP event channel closed");
@@ -395,7 +394,11 @@ impl BmpManager {
     /// flushed after the dump's End-of-RIB ([`Self::handle_dump_done`]),
     /// so the collector-facing order is always dump rows (point-in-time
     /// snapshot) → `EoR` → live deltas from that point.
-    fn handle_loc_rib_event(&mut self, event: &BmpEvent) {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "encoding, fan-out, and fail-closed fencing form one actor transaction"
+    )]
+    async fn handle_loc_rib_event(&mut self, event: &BmpEvent) {
         let Some(cfg) = self.loc_rib.clone() else {
             return;
         };
@@ -438,6 +441,7 @@ impl BmpManager {
             _ => unreachable!("guarded above"),
         };
         let mut memo: [Option<Bytes>; 2] = [None, None];
+        let mut overflowed = Vec::new();
         for idx in 0..self.collectors.len() {
             if !self.collectors[idx].filter.loc_rib || self.loc_rib_suppressed.contains(&idx) {
                 continue;
@@ -450,14 +454,18 @@ impl BmpManager {
             match &mut self.collectors[idx].phase {
                 CollectorPhase::Disconnected => {}
                 CollectorPhase::BootstrapPending { loc_rib_buffer, .. } => {
-                    buffer_loc_rib_message(&self.metrics, addr, loc_rib_buffer, msg);
+                    if buffer_loc_rib_message(loc_rib_buffer, msg) {
+                        overflowed.push(idx);
+                    }
                 }
                 CollectorPhase::Active {
                     generation, sender, ..
                 } => {
                     if let Some(dump) = self.active_dumps.get_mut(&idx) {
-                        if *generation == dump.generation {
-                            buffer_loc_rib_message(&self.metrics, addr, &mut dump.buffered, msg);
+                        if *generation == dump.generation
+                            && buffer_loc_rib_message(&mut dump.buffered, msg)
+                        {
+                            overflowed.push(idx);
                         }
                     } else if let Err(e) = sender.try_send(msg) {
                         let reason = trysend_reason(&e);
@@ -472,12 +480,51 @@ impl BmpManager {
                 }
             }
         }
+        if overflowed.is_empty() {
+            return;
+        }
+
+        // Fence every affected generation before awaiting any forwarder. TCP
+        // EOF invalidates all rows already observed for that BMP session.
+        let mut tasks = Vec::new();
+        for idx in overflowed {
+            self.collectors[idx]
+                .generation
+                .fetch_add(1, Ordering::SeqCst);
+            let phase = std::mem::replace(
+                &mut self.collectors[idx].phase,
+                CollectorPhase::Disconnected,
+            );
+            let discarded = match phase {
+                CollectorPhase::BootstrapPending { loc_rib_buffer, .. } => loc_rib_buffer.len(),
+                CollectorPhase::Active { .. } => {
+                    let dump = self.active_dumps.remove(&idx).unwrap();
+                    let len = dump.buffered.len();
+                    tasks.push(dump.task);
+                    len
+                }
+                CollectorPhase::Disconnected => unreachable!("validated connected phase"),
+            };
+            self.metrics.record_bmp_collector_drop(
+                &self.collectors[idx].addr.to_string(),
+                "loc_rib_dump",
+                "live_buffer_full",
+                u64::try_from(discarded).unwrap_or(u64::MAX),
+            );
+            warn!(collector = %self.collectors[idx].addr, discarded, "live Loc-RIB buffer exceeded its bound; closing incomplete BMP generation");
+        }
+        for task in &tasks {
+            task.abort();
+        }
+        for task in tasks {
+            let _ = task.await;
+        }
     }
 
-    fn handle_event(&mut self, event: &BmpEvent) {
+    async fn handle_event(&mut self, event: &BmpEvent) {
         match event {
             BmpEvent::LocRibRouteMonitoring { .. } | BmpEvent::LocRibStats { .. } => {
-                self.handle_loc_rib_event(event);
+                self.handle_loc_rib_event(event).await;
             }
             BmpEvent::PeerUp { peer_info, .. } => {
                 // Encode both versions eagerly: the cache must be able
@@ -548,7 +595,7 @@ impl BmpManager {
                 // event already accepted before fencing generations so its
                 // wire message precedes the terminal Loc-RIB Peer Down.
                 while let Ok(event) = self.event_rx.try_recv() {
-                    self.handle_event(&event);
+                    self.handle_event(&event).await;
                 }
                 self.fence_and_abort_dumps().await;
                 // RFC 9069 §5.3: emit Peer Down only on a generation whose
@@ -1043,18 +1090,9 @@ async fn stream_loc_rib_dump(f: DumpForwarder) -> Option<DumpOutcome> {
     }
 }
 
-fn buffer_loc_rib_message(
-    metrics: &BgpMetrics,
-    addr: SocketAddr,
-    buffer: &mut Vec<Bytes>,
-    message: Bytes,
-) {
-    if buffer.len() < LOC_RIB_DUMP_LIVE_BUFFER_CAP {
-        buffer.push(message);
-    } else {
-        metrics.record_bmp_collector_drop(&addr.to_string(), "loc_rib_dump", "live_buffer_full", 1);
-        warn!(collector = %addr, "live Loc-RIB buffer full before initial dump completion, dropping message");
-    }
+fn buffer_loc_rib_message(buffer: &mut Vec<Bytes>, message: Bytes) -> bool {
+    buffer.push(message);
+    buffer.len() > LOC_RIB_DUMP_LIVE_BUFFER_CAP
 }
 
 /// Classify a `tokio::sync::mpsc::error::TrySendError` into the
@@ -2762,6 +2800,236 @@ mod tests {
             collector_rx.recv().await.is_none(),
             "detached dump retained the generation sender"
         );
+    }
+
+    /// Production mutation: restoring the `len < CAP` drop-newest branch
+    /// leaves the generation connected and records one drop instead of all
+    /// CAP+1 rows invalidated by the now-incomplete TCP session.
+    #[tokio::test]
+    async fn bootstrap_live_buffer_overflow_closes_generation_and_counts_all_rows() {
+        let (_event_tx, event_rx) = mpsc::channel(1);
+        let (_control_tx, control_rx) = mpsc::channel(1);
+        let (dump_tx, _dump_rx) = mpsc::channel(1);
+        let metrics = BgpMetrics::new();
+        let mut manager = BmpManager::new(
+            event_rx,
+            control_rx,
+            vec![(collector_addr(0), loc_rib_filter(), BmpVersion::V3)],
+            metrics.clone(),
+        )
+        .with_loc_rib(loc_rib_config(), dump_tx);
+        let (sender, mut receiver) = mpsc::channel(1);
+        manager.collectors[0].generation.store(7, Ordering::SeqCst);
+        manager.collectors[0].phase = CollectorPhase::BootstrapPending {
+            generation: 7,
+            sender,
+            loc_rib_peer_up: true,
+            loc_rib_buffer: vec![Bytes::new(); LOC_RIB_DUMP_LIVE_BUFFER_CAP],
+        };
+        assert_eq!(manager.collectors[0].phase.generation(), Some(7));
+        assert!(!receiver.is_closed(), "CAP rows keep the generation live");
+
+        manager
+            .handle_event(&BmpEvent::LocRibStats { per_family: vec![] })
+            .await;
+
+        assert!(matches!(
+            manager.collectors[0].phase,
+            CollectorPhase::Disconnected
+        ));
+        assert!(receiver.recv().await.is_none(), "CAP+1 closes the sender");
+        assert_eq!(
+            metric_value_with_labels(
+                &metrics,
+                "bmp_collector_drops_total",
+                &[
+                    ("collector", &collector_addr(0).to_string()),
+                    ("phase", "loc_rib_dump"),
+                    ("reason", "live_buffer_full"),
+                ],
+            ),
+            (LOC_RIB_DUMP_LIVE_BUFFER_CAP + 1) as u64
+        );
+    }
+
+    /// Production mutations: awaiting one task before fencing collector 1
+    /// makes the first sentinel report false; omitting abort-or-await leaves a
+    /// sentinel/reply live; fencing all collectors closes the unaffected third.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one fixture proves fencing, cancellation, accounting, and isolation"
+    )]
+    #[tokio::test]
+    async fn active_dump_overflow_fences_all_then_awaits_with_isolation() {
+        struct FenceSentinel {
+            other: Arc<AtomicU64>,
+            result: Option<tokio::sync::oneshot::Sender<bool>>,
+        }
+        impl Drop for FenceSentinel {
+            fn drop(&mut self) {
+                let _ = self
+                    .result
+                    .take()
+                    .unwrap()
+                    .send(self.other.load(Ordering::SeqCst) != 9);
+            }
+        }
+
+        let (_event_tx, event_rx) = mpsc::channel(1);
+        let (_control_tx, control_rx) = mpsc::channel(1);
+        let (dump_tx, _dump_rx) = mpsc::channel(1);
+        let metrics = BgpMetrics::new();
+        let mut manager = BmpManager::new(
+            event_rx,
+            control_rx,
+            (0..3)
+                .map(|id| (collector_addr(id), loc_rib_filter(), BmpVersion::V3))
+                .collect(),
+            metrics.clone(),
+        )
+        .with_loc_rib(loc_rib_config(), dump_tx);
+        let mut receivers = Vec::new();
+        let mut task_senders = Vec::new();
+        for collector in &mut manager.collectors {
+            let (sender, receiver) = mpsc::channel(1);
+            task_senders.push(sender.clone());
+            collector.generation.store(9, Ordering::SeqCst);
+            collector.phase = CollectorPhase::Active {
+                generation: 9,
+                sender,
+                loc_rib_peer_up: true,
+            };
+            receivers.push(receiver);
+        }
+        let other = Arc::clone(&manager.collectors[1].generation);
+        let (fenced_tx, fenced_rx) = tokio::sync::oneshot::channel();
+        let held0 = task_senders.remove(0);
+        let task0 = tokio::spawn(async move {
+            let _held = held0;
+            let _sentinel = FenceSentinel {
+                other,
+                result: Some(fenced_tx),
+            };
+            std::future::pending::<()>().await;
+        });
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel::<()>();
+        let held1 = task_senders.remove(0);
+        let task1 = tokio::spawn(async move {
+            let _held = held1;
+            let _ = reply_rx.await;
+        });
+        tokio::task::yield_now().await;
+        manager.active_dumps.insert(
+            0,
+            ActiveDump {
+                generation: 9,
+                task: task0,
+                buffered: vec![Bytes::new(); LOC_RIB_DUMP_LIVE_BUFFER_CAP],
+            },
+        );
+        manager.active_dumps.insert(
+            1,
+            ActiveDump {
+                generation: 9,
+                task: task1,
+                buffered: vec![Bytes::new(); LOC_RIB_DUMP_LIVE_BUFFER_CAP],
+            },
+        );
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            manager.handle_event(&BmpEvent::LocRibStats { per_family: vec![] }),
+        )
+        .await
+        .expect("overflow handler did not abort and await every dump");
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), fenced_rx)
+                .await
+                .expect("cancellation sentinel was not dropped")
+                .unwrap(),
+            "all generations fence before await"
+        );
+        assert!(reply_tx.is_closed(), "dump reply closed before resume");
+        assert!(!manager.active_dumps.contains_key(&0));
+        assert!(!manager.active_dumps.contains_key(&1));
+        assert!(matches!(
+            manager.collectors[0].phase,
+            CollectorPhase::Disconnected
+        ));
+        assert!(matches!(
+            manager.collectors[1].phase,
+            CollectorPhase::Disconnected
+        ));
+        assert_eq!(manager.collectors[2].phase.generation(), Some(9));
+        for receiver in &mut receivers[..2] {
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_secs(1), receiver.recv())
+                    .await
+                    .expect("affected generation sender remained live")
+                    .is_none()
+            );
+        }
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), receivers[2].recv())
+                .await
+                .expect("unaffected collector stopped receiving")
+                .unwrap()[5],
+            1,
+            "third stays live"
+        );
+        for id in 0..2 {
+            assert_eq!(
+                metric_value_with_labels(
+                    &metrics,
+                    "bmp_collector_drops_total",
+                    &[
+                        ("collector", &collector_addr(id).to_string()),
+                        ("reason", "live_buffer_full"),
+                    ],
+                ),
+                (LOC_RIB_DUMP_LIVE_BUFFER_CAP + 1) as u64
+            );
+        }
+    }
+
+    /// Production mutation: omitting the `ActiveDump` generation comparison
+    /// lets an overflow left by generation 4 fence its generation 5 replacement.
+    #[tokio::test]
+    async fn stale_active_dump_overflow_cannot_fence_replacement() {
+        let (_event_tx, event_rx) = mpsc::channel(1);
+        let (_control_tx, control_rx) = mpsc::channel(1);
+        let (dump_tx, _dump_rx) = mpsc::channel(1);
+        let mut manager = BmpManager::new(
+            event_rx,
+            control_rx,
+            vec![(collector_addr(0), loc_rib_filter(), BmpVersion::V3)],
+            BgpMetrics::new(),
+        )
+        .with_loc_rib(loc_rib_config(), dump_tx);
+        let (sender, receiver) = mpsc::channel(1);
+        manager.collectors[0].generation.store(5, Ordering::SeqCst);
+        manager.collectors[0].phase = CollectorPhase::Active {
+            generation: 5,
+            sender,
+            loc_rib_peer_up: true,
+        };
+        manager.active_dumps.insert(
+            0,
+            ActiveDump {
+                generation: 4,
+                task: tokio::spawn(std::future::pending()),
+                buffered: vec![Bytes::new(); LOC_RIB_DUMP_LIVE_BUFFER_CAP],
+            },
+        );
+
+        manager
+            .handle_event(&BmpEvent::LocRibStats { per_family: vec![] })
+            .await;
+
+        assert_eq!(manager.collectors[0].phase.generation(), Some(5));
+        assert!(!receiver.is_closed(), "replacement remains connected");
+        manager.active_dumps.remove(&0).unwrap().task.abort();
     }
 
     #[tokio::test]
