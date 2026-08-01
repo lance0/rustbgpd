@@ -496,15 +496,15 @@ enum ConfigAction {
     /// Show pending or last confirmed-transaction lifecycle state
     Status,
 
-    /// List retained previously applied configs (newest first)
+    /// List retained recorded config snapshots (newest first)
     ///
     /// The daemon keeps a bounded, content-deduplicated on-disk history of
-    /// applied configs under its runtime state directory. Each line shows
-    /// the rollback index (0 = currently running), timestamp, content
-    /// hash, and a one-line summary. Restore one with `config rollback N`.
+    /// recorded config snapshots under its runtime state directory. Each line
+    /// shows the rollback index (0 = newest recorded), timestamp, content hash,
+    /// and a one-line summary. Restore an older one with `config rollback N`.
     History,
 
-    /// Roll back to a previously applied config (Junos `rollback N`)
+    /// Roll back to an older recorded config snapshot (Junos `rollback N`)
     ///
     /// Restores history entry N (see `config history`; N >= 1) through the
     /// same transaction path as `config apply`: same plan classification,
@@ -512,7 +512,7 @@ enum ConfigAction {
     /// --confirm-timeout to make the rollback itself auto-revert unless
     /// confirmed.
     Rollback {
-        /// History entry to restore (1 = previous applied config)
+        /// History entry to restore (1 = next older recorded config)
         index: u32,
 
         /// Optional runtime snapshot token to guard against concurrent changes
@@ -3512,6 +3512,28 @@ mod tests {
                 "config {name} --help must document exit code 1: {help}"
             );
         }
+    }
+
+    #[test]
+    fn config_history_help_calls_zero_newest_recorded() {
+        let mut command = cli_command(BINARY_NAME);
+        let help = command
+            .find_subcommand_mut("config")
+            .expect("config subcommand exists")
+            .find_subcommand_mut("history")
+            .expect("config history subcommand exists")
+            .render_long_help()
+            .to_string();
+        let normalized = help.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        assert!(
+            normalized.contains("0 = newest recorded"),
+            "config history help was: {help}"
+        );
+        assert!(
+            !normalized.contains("0 = currently running"),
+            "config history help was: {help}"
+        );
     }
 
     #[test]

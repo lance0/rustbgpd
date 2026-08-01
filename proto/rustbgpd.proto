@@ -142,10 +142,11 @@ service ConfigService {
   // secret-bearing config cannot silently boot as-is.
   rpc GetEffectiveConfig(GetEffectiveConfigRequest) returns (GetEffectiveConfigResponse);
 
-  // List the daemon's bounded on-disk history of previously applied configs
-  // (newest first; index 0 is the currently persisted config). The response
+  // List the daemon's bounded on-disk history of recorded config snapshots
+  // (newest first; index 0 is the newest recorded config). The response
   // carries timestamps, content hashes, and one-line summaries only — never
-  // config document contents.
+  // config document contents. A retained SHA-256 covers normalized TOML only,
+  // not referenced external .rpol or dataset file contents.
   rpc ListConfigHistory(ListConfigHistoryRequest) returns (ListConfigHistoryResponse);
 
   // Roll back to a retained history entry (index >= 1). The daemon resolves
@@ -160,11 +161,11 @@ service ConfigService {
 message ListConfigHistoryRequest {}
 
 message ConfigHistoryEntry {
-  // 0 = the currently persisted config, 1 = the previous one, and so on.
+  // 0 = the newest recorded config, 1 = the next older entry, and so on.
   uint32 index = 1;
   // When this config was recorded (unix seconds).
   uint64 timestamp_unix_seconds = 2;
-  // SHA-256 of the persisted TOML document, hex-encoded.
+  // SHA-256 of the retained normalized TOML document only, hex-encoded.
   string sha256 = 3;
   // One-line redacted summary (ASN, router id, object counts) — never the
   // config document itself.
@@ -172,18 +173,19 @@ message ConfigHistoryEntry {
 }
 
 message ListConfigHistoryResponse {
-  // Newest first; entries[0] is the currently persisted config.
+  // Newest first; entries[0] is the newest recorded config.
   repeated ConfigHistoryEntry entries = 1;
   string human_text = 2;
 }
 
 message RollbackConfigTransactionRequest {
-  // History entry to restore; must be >= 1 (index 0 is already running).
+  // History entry to restore; must be >= 1 (index 0 is newest recorded).
   uint32 index = 1;
   // Optional optimistic-concurrency token from PlanConfigTransaction /
   // ListConfigHistory-time planning. Empty skips the stale-snapshot guard —
   // the candidate is resolved server-side from proven history, not supplied
-  // by the caller.
+  // by the caller. Referenced external .rpol and dataset files are not retained
+  // in history; rollback reads their current filesystem contents during apply.
   string expected_runtime_snapshot_token = 2;
   // Optional audit/correlation identifier supplied by automation.
   string client_request_id = 3;

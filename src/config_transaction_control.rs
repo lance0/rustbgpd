@@ -719,7 +719,7 @@ impl ConfigTransactionController {
         let dir = self.history_dir()?;
         let entries = crate::config_history::list(dir).map_err(|error| {
             ConfigTransactionApplyError::Internal(format!(
-                "failed to read the applied-config history at {}: {error}",
+                "failed to read the recorded config history at {}: {error}",
                 dir.display()
             ))
         })?;
@@ -739,10 +739,10 @@ impl ConfigTransactionController {
             });
         }
         let human_text = if proto_entries.is_empty() {
-            "No applied configs recorded yet.\n".to_string()
+            "No config snapshots recorded yet.\n".to_string()
         } else {
             format!(
-                "{} applied config(s) retained; index 0 is the currently persisted config. Restore one with RollbackConfigTransaction (rbgp config rollback N).\n",
+                "{} recorded config snapshot(s) retained; index 0 is the newest recorded config. Restore an older one with RollbackConfigTransaction (rbgp config rollback N).\n",
                 proto_entries.len()
             )
         };
@@ -764,8 +764,7 @@ impl ConfigTransactionController {
         self.history_dir()?;
         if request.index == 0 {
             return Err(ConfigTransactionApplyError::InvalidArgument(
-                "rollback index must be >= 1: index 0 is the currently persisted config"
-                    .to_string(),
+                "rollback index must be >= 1: index 0 is the newest recorded config".to_string(),
             ));
         }
         if request.confirm_id.is_empty() && request.confirm_timeout_seconds > 0 {
@@ -823,7 +822,7 @@ impl ConfigTransactionController {
         self.deps.config_history_dir.as_deref().ok_or_else(|| {
             ConfigTransactionApplyError::FailedPrecondition(
                 "config history is unavailable: this daemon is running without an \
-                 applied-config history directory"
+                 config-history directory"
                     .to_string(),
             )
         })
@@ -8238,7 +8237,7 @@ log_format = "json"
         rib_task.await.unwrap();
     }
     // -----------------------------------------------------------------
-    // Applied-config history + rollback (Junos `rollback N`)
+    // Recorded config history + rollback (Junos `rollback N`)
     // -----------------------------------------------------------------
 
     /// Controller wired with a real on-disk history dir and the dynamic
@@ -8283,7 +8282,7 @@ log_format = "json"
         let previous_toml = base_toml("");
         let current_toml = dynamic_candidate_toml();
         // History as the persister would have recorded it: previous apply,
-        // then the currently running config.
+        // then the newer recorded config.
         crate::config_history::record(dir.path(), &previous_toml).unwrap();
         crate::config_history::record(dir.path(), &current_toml).unwrap();
         let (controller, snapshot_toml, ack_task) =
@@ -8428,7 +8427,7 @@ log_format = "json"
             .expect_err("history without a state dir must fail closed");
         assert!(
             matches!(err, ConfigTransactionApplyError::FailedPrecondition(ref message)
-                if message.contains("applied-config history directory")),
+                if message.contains("config-history directory")),
             "{err:?}"
         );
         let err = controller
@@ -8445,7 +8444,7 @@ log_format = "json"
             .expect_err("rollback without a state dir must fail closed");
         assert!(
             matches!(err, ConfigTransactionApplyError::FailedPrecondition(ref message)
-                if message.contains("applied-config history directory")),
+                if message.contains("config-history directory")),
             "{err:?}"
         );
     }
@@ -8483,7 +8482,23 @@ log_format = "json"
             "{}",
             response.entries[0].summary
         );
-        assert!(response.human_text.contains("2 applied config(s)"));
+        assert!(
+            response
+                .human_text
+                .contains("2 recorded config snapshot(s)")
+        );
+        assert!(
+            response
+                .human_text
+                .contains("index 0 is the newest recorded config"),
+            "{}",
+            response.human_text
+        );
+        assert!(
+            !response.human_text.contains("currently persisted"),
+            "{}",
+            response.human_text
+        );
         ack_task.abort();
     }
 

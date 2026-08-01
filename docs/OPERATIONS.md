@@ -207,19 +207,20 @@ For operators coming from Junos, the four verbs map directly:
 | `commit confirmed` | `rbgp config apply --confirm-id ... --confirm-timeout ...` |
 | `rollback N` | `rbgp config rollback N` |
 
-The daemon retains a bounded on-disk history of applied configs (the last 20
-distinct documents, content-hash-deduplicated, timestamped) under
-`<runtime_state_dir>/config-history/`. Transaction applies, gRPC
-neighbor/FIB/policy CRUD, successful SIGHUP reloads, and the config running at
-daemon startup all record an entry, so the history survives restarts and "put
-back what was running yesterday" is one command:
+The daemon retains a bounded on-disk history of recorded config snapshots (the
+last 20 distinct normalized TOML documents, content-hash-deduplicated and
+timestamped) under `<runtime_state_dir>/config-history/`. Transaction applies
+and gRPC neighbor/FIB/policy CRUD record after their durable write. Boot and
+successful SIGHUP reload also record the canonical validated snapshot on a
+best-effort basis; SIGHUP does not rewrite the operator's file. History
+survives restarts:
 
 ```bash
-# What has been applied? Newest first; index 0 is the running config.
+# What has been recorded? Newest first; index 0 is the newest snapshot.
 rbgp config history
 rbgp -j config history
 
-# Restore the previous applied config (Junos `rollback 1`)
+# Restore the next older recorded config snapshot (Junos `rollback 1`)
 rbgp config rollback 1
 
 # A cautious rollback: auto-reverts the rollback itself unless confirmed
@@ -228,9 +229,10 @@ rbgp config confirm undo-1
 ```
 
 `config history` lists index, timestamp, content hash, and a one-line summary
-per entry — never config document contents. `config rollback N` resolves
-entry N server-side, verifies that its bytes match the SHA-256 in its file
-name, and routes it through the **same transaction path as
+per entry — never config document contents. Index 0 means newest recorded, not
+necessarily the running or currently persisted config. `config rollback N`
+resolves entry N server-side, verifies that its bytes match the SHA-256 in its
+file name, and routes it through the **same transaction path as
 `config apply`**: the same plan classification, the same reload-impact and
 update-group annotations, the same receipts, and the same
 `--confirm-id`/`--confirm-timeout` confirmed-commit window (journal, timeout
@@ -240,11 +242,13 @@ commit live (for example restart-required `[global]` fields) is rejected
 without mutation, exactly like an apply of that file would be. Rolling back
 past the retained history fails cleanly, naming how many entries exist.
 
-History retains what the daemon itself persisted, so it starts empty on a
-daemon that has never made a runtime change. SIGHUP reloads adopt the
-operator's edited file without recording it — the history tracks what the
-daemon itself persisted; your config file under version control remains the
-authority for hand-edited changes.
+Each retained payload and its SHA-256 cover only the normalized TOML snapshot.
+The main and imported `.rpol` source files and `[policy.datasets]` file contents
+referenced by that TOML are not archived or hashed. Rollback validates and
+re-reads those paths from the current filesystem, so changed or missing
+external inputs can make the restored policy differ or make rollback fail.
+Keep the operator-authored TOML, `.rpol` graph, and datasets under version
+control or another coordinated deployment system.
 
 For a static-neighbor edit, change the neighbor in the candidate file (for
 example `hold_time`, `max_prefixes`, policy-chain refs, or ORF receive), run

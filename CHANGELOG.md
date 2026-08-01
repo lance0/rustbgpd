@@ -62,6 +62,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Config history now counts TOML `[policy.definitions.*]` tables correctly and
+  describes index 0 as the newest recorded normalized TOML snapshot instead of
+  implying it must be the running or persisted config; operator docs now state
+  that rollback re-reads unarchived external `.rpol` and dataset inputs.
+
 - Advertised RIB diffs now fence one live capture across every page and peer
   with the route API's process-local `page_version`, rejecting changed or
   mixed present/absent versions. Older daemons without the additive field are
@@ -620,11 +625,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   reports in future fails a strict run. `--help` and `rustbgpd(8)` now
   document the exit-status ladder.
 
-- **Applied-config history and `rbgp config rollback N`,** completing the
+- **Recorded config history and `rbgp config rollback N`,** completing the
   Junos-style transactional quartet (check / compare / commit confirmed /
-  rollback). Every applied config — transaction applies, gRPC config CRUD,
-  successful SIGHUP reloads, and the boot-time config — is recorded in a
-  bounded on-disk history under `<runtime_state_dir>/config-history/`
+  rollback). Transaction applies and gRPC config CRUD record after their
+  durable write; successful SIGHUP reloads and the boot-time config snapshot
+  are recorded on a best-effort basis in a bounded on-disk history under
+  `<runtime_state_dir>/config-history/`
   (last 20 distinct configs, content-hash-deduplicated, timestamped,
   restart-safe). `rbgp config history` lists index / timestamp / SHA-256 /
   one-line summary; `rbgp config rollback N` restores entry N through the
