@@ -62,6 +62,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Config transactions now fail closed when a native apply/rollback or gNMI
+  `Set` would adopt a full candidate snapshot while either the running or
+  candidate config references external `.rpol` graphs or policy datasets.
+  Those file bytes are outside the transaction token and staging boundary;
+  deploy TOML and external files together, then use SIGHUP. External-input
+  no-ops and targeted `[[fib_tables]]` transactions with unchanged policy
+  inputs remain available. Config diffs now expose dataset binding/path
+  changes, and `.rpol` diffs also cover roots and graph-budget settings.
+
 - Config history now counts TOML `[policy.definitions.*]` tables correctly and
   describes index 0 as the newest recorded normalized TOML snapshot instead of
   implying it must be the running or persisted config; operator docs now state

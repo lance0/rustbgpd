@@ -250,6 +250,14 @@ external inputs can make the restored policy differ or make rollback fail.
 Keep the operator-authored TOML, `.rpol` graph, and datasets under version
 control or another coordinated deployment system.
 
+Do not use native config apply/rollback or gNMI Set for a full-candidate change
+while either side references `.rpol` or `[policy.datasets]` files. Those bytes
+are outside the transaction token and rollback payload, so the planner rejects
+the change without mutation. Deploy the TOML and external inputs together and
+send SIGHUP instead. External-input no-ops still return `NOOP`; a pure
+`[[fib_tables]]` transaction with unchanged external inputs remains safe and
+committable because it stages only the FIB table set.
+
 For a static-neighbor edit, change the neighbor in the candidate file (for
 example `hold_time`, `max_prefixes`, policy-chain refs, or ORF receive), run
 `config plan`, then apply with the returned token. The transaction reconfigures
@@ -276,6 +284,10 @@ rollback, and live dynamic sessions accepted by an affected
 re-accept under the committed config on reconnect (ADR-0086). Mixed-family
 candidates, dynamic-range peer-group reassignments, mixed policy/session
 effective impact, and unsupported sections are rejected without mutation.
+The same rejection applies to every full-candidate family while the running or
+candidate config references external `.rpol` graphs or policy datasets; use a
+coordinated file deployment plus SIGHUP. Pure `[[fib_tables]]` edits with those
+inputs unchanged remain the targeted exception.
 
 Output is grouped into two actionable sections plus a per-neighbor
 effective-impact view:
