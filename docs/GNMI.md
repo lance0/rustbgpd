@@ -261,6 +261,11 @@ accepted.
 Broad subtree requests are bounded; v1 does not use gNMI to stream
 the full route table.
 
+A concrete keyed-neighbor subscription whose successful peer snapshot does not
+contain that neighbor emits no update for the cycle; sync still completes and
+POLL/STREAM remain live for later appearances. Concrete neighbor `Get` remains
+strictly `NOT_FOUND`, and peer-snapshot failures remain `UNAVAILABLE`.
+
 ## Dial-out (device-initiated push)
 
 Everything above is dial-in: a collector connects to the daemon. The
