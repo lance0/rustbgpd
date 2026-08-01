@@ -62,6 +62,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `ListFibTables` now reports FIB reconciler command-channel closure or a
+  dropped `GetTables` reply as retryable `UNAVAILABLE`; mutation-path actor
+  faults remain `INTERNAL`.
+
 - Peer- and RIB-manager-backed unary reads in the Neighbor, RIB, Policy, Event,
   and PeerGroup services now report command-channel closure and dropped replies
   as `UNAVAILABLE`, while retaining existing deadline and business errors.

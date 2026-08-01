@@ -81,7 +81,7 @@ pub enum FibTableControlError {
     /// present at startup (enabling FIB is restart-required) or the runtime is
     /// unavailable (non-Linux platform / netlink setup failure).
     FailedPrecondition(String),
-    /// The persistence channel is saturated or closed.
+    /// A retryable actor-read or persistence channel is unavailable.
     Unavailable(String),
     /// Coordinator lock poisoned, actor channel closed, or other internal fault.
     Internal(String),
