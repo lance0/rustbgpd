@@ -29,7 +29,7 @@ const DEFAULT_PROTOCOL_NAME: &str = "BGP";
 const MAX_SUBSCRIPTIONS: usize = 16;
 const SUBSCRIBE_CHANNEL_DEPTH: usize = 16;
 const MIN_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
-/// Upper bound on a client-requested `STREAM` `SAMPLE` interval. Clamps absurd
+/// Upper bound on a client-requested `STREAM` `SAMPLE` interval. Rejects absurd
 /// values (a client could otherwise request an interval of centuries) so a
 /// subscription always resamples within a sane bound.
 const MAX_SAMPLE_INTERVAL: Duration = Duration::from_hours(1);
@@ -743,7 +743,7 @@ pub(crate) struct SubscriptionPlan {
     stream_mode: Option<gnmi::SubscriptionMode>,
     paths: Vec<SupportedPath>,
     updates_only: bool,
-    /// Clamped interval for each path in a STREAM plan, in `paths` order.
+    /// Accepted interval for each path in a STREAM/SAMPLE plan, in `paths` order.
     sample_intervals: Vec<Duration>,
     encoding: gnmi::Encoding,
 }
@@ -1047,12 +1047,41 @@ fn parse_subscription_list(list: &gnmi::SubscriptionList) -> Result<Subscription
     let mut paths = Vec::with_capacity(list.subscription.len());
     let mut sample_intervals = Vec::with_capacity(list.subscription.len());
     let mut stream_mode: Option<gnmi::SubscriptionMode> = None;
-    for subscription in &list.subscription {
+    for (index, subscription) in list.subscription.iter().enumerate() {
         let path = subscription
             .path
             .as_ref()
             .ok_or_else(|| Status::invalid_argument("subscription path is required"))?;
         let full_path = combine_paths(list.prefix.as_ref(), path)?;
+        let this_mode = gnmi::SubscriptionMode::try_from(subscription.mode).map_err(|_| {
+            Status::invalid_argument(format!("unknown subscription mode {}", subscription.mode))
+        })?;
+        if mode == gnmi::subscription_list::Mode::Stream {
+            let raw_nanos = subscription.sample_interval;
+            if this_mode == gnmi::SubscriptionMode::TargetDefined && raw_nanos != 0 {
+                return Err(Status::invalid_argument(format!(
+                    "gNMI subscription {} TARGET_DEFINED sample_interval {raw_nanos}ns must be zero",
+                    index + 1
+                )));
+            }
+            let requested = if this_mode == gnmi::SubscriptionMode::Sample && raw_nanos != 0 {
+                let requested = Duration::from_nanos(raw_nanos);
+                if !(MIN_SAMPLE_INTERVAL..=MAX_SAMPLE_INTERVAL).contains(&requested) {
+                    return Err(Status::invalid_argument(format!(
+                        "gNMI subscription {} sample_interval {raw_nanos}ns is outside supported \
+                         range [{}ns, {}ns]",
+                        index + 1,
+                        MIN_SAMPLE_INTERVAL.as_nanos(),
+                        MAX_SAMPLE_INTERVAL.as_nanos()
+                    )));
+                }
+                requested
+            } else {
+                MIN_SAMPLE_INTERVAL
+            };
+            sample_intervals.push(requested);
+        }
+
         // Validate the mode against the fully-joined path so the
         // ON_CHANGE leaf check still works when the subscription
         // splits prefix and tail across `list.prefix` + `path`.
@@ -1060,20 +1089,10 @@ fn parse_subscription_list(list: &gnmi::SubscriptionList) -> Result<Subscription
         paths.push(parse_supported_path(&full_path)?);
 
         if mode == gnmi::subscription_list::Mode::Stream {
-            // Honor the client's requested interval, clamped to
-            // [MIN_SAMPLE_INTERVAL, MAX_SAMPLE_INTERVAL] (a missing/zero interval
-            // defaults to the floor; an absurd value is capped).
-            let requested = Duration::from_nanos(subscription.sample_interval)
-                .clamp(MIN_SAMPLE_INTERVAL, MAX_SAMPLE_INTERVAL);
-            sample_intervals.push(requested);
-
             // Reject mixed STREAM modes within one SubscriptionList:
             // the v1 dispatch picks SAMPLE *or* ON_CHANGE for the
             // whole task, not per-path. Two same-mode subscriptions
             // are fine.
-            let this_mode = gnmi::SubscriptionMode::try_from(subscription.mode).map_err(|_| {
-                Status::invalid_argument(format!("unknown subscription mode {}", subscription.mode))
-            })?;
             match stream_mode {
                 None => stream_mode = Some(this_mode),
                 Some(existing) if existing == this_mode => {}
@@ -2980,6 +2999,19 @@ mod tests {
         .unwrap_err();
         assert_eq!(target_defined.code(), tonic::Code::Unimplemented);
 
+        let mut target_defined_nonzero = subscription_list(
+            gnmi::subscription_list::Mode::Stream,
+            gnmi::SubscriptionMode::TargetDefined,
+            path.clone(),
+        );
+        target_defined_nonzero.subscription[0].sample_interval = 1_000_000_000;
+        let err = parse_subscription_list(&target_defined_nonzero).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert_eq!(
+            err.message(),
+            "gNMI subscription 1 TARGET_DEFINED sample_interval 1000000000ns must be zero"
+        );
+
         let mut too_many = subscription_list(
             gnmi::subscription_list::Mode::Once,
             gnmi::SubscriptionMode::TargetDefined,
@@ -3057,66 +3089,31 @@ mod tests {
     }
 
     #[test]
-    fn stream_sample_interval_honors_request_above_floor() {
-        // A 5s request is kept as-is (it is already above the 1s floor).
-        let plan = parse_subscription_list(&stream_sample_list(5_000_000_000)).unwrap();
-        assert_eq!(plan.sample_intervals, vec![Duration::from_secs(5)]);
+    fn stream_sample_intervals_accept_zero_and_supported_range() {
+        for (raw_nanos, expected) in [
+            (0, MIN_SAMPLE_INTERVAL),
+            (1_000_000_000, Duration::from_secs(1)),
+            (5_000_000_000, Duration::from_secs(5)),
+            (3_600_000_000_000, MAX_SAMPLE_INTERVAL),
+        ] {
+            let plan = parse_subscription_list(&stream_sample_list(raw_nanos)).unwrap();
+            assert_eq!(plan.sample_intervals, vec![expected]);
+        }
     }
 
     #[test]
-    fn stream_sample_interval_raises_sub_floor_request_to_floor() {
-        // A 1ms request is raised up to the 1s floor.
-        let plan = parse_subscription_list(&stream_sample_list(1_000_000)).unwrap();
-        assert_eq!(plan.sample_intervals, vec![MIN_SAMPLE_INTERVAL]);
-    }
-
-    #[test]
-    fn stream_sample_interval_defaults_zero_to_floor() {
-        // A missing/zero interval defaults to the floor.
-        let plan = parse_subscription_list(&stream_sample_list(0)).unwrap();
-        assert_eq!(plan.sample_intervals, vec![MIN_SAMPLE_INTERVAL]);
-    }
-
-    #[test]
-    fn stream_sample_interval_caps_absurd_request_to_ceiling() {
-        // An absurd interval (u64::MAX ns ≈ centuries) is capped to the ceiling.
-        let plan = parse_subscription_list(&stream_sample_list(u64::MAX)).unwrap();
-        assert_eq!(plan.sample_intervals, vec![MAX_SAMPLE_INTERVAL]);
-    }
-
-    #[test]
-    fn stream_sample_intervals_are_clamped_per_subscription() {
-        let path = mounted_path(&[pe("bgp"), pe("global"), pe("state")]);
-        let subscription = |nanos| gnmi::Subscription {
-            path: Some(path.clone()),
-            mode: gnmi::SubscriptionMode::Sample as i32,
-            sample_interval: nanos,
-            suppress_redundant: false,
-            heartbeat_interval: 0,
-        };
-        let list = gnmi::SubscriptionList {
-            prefix: None,
-            subscription: vec![
-                subscription(0),             // -> floor (1s)
-                subscription(2_000_000_000), // -> 2s
-                subscription(1_000_000),     // -> floor (1s)
-            ],
-            qos: None,
-            mode: gnmi::subscription_list::Mode::Stream as i32,
-            allow_aggregation: false,
-            use_models: Vec::new(),
-            encoding: gnmi::Encoding::JsonIetf as i32,
-            updates_only: false,
-        };
-        let plan = parse_subscription_list(&list).unwrap();
-        assert_eq!(
-            plan.sample_intervals,
-            vec![
-                MIN_SAMPLE_INTERVAL,
-                Duration::from_secs(2),
-                MIN_SAMPLE_INTERVAL
-            ]
-        );
+    fn stream_sample_intervals_reject_nonzero_outside_supported_range() {
+        for raw_nanos in [1, 999_999_999, 3_600_000_000_001, u64::MAX] {
+            let err = parse_subscription_list(&stream_sample_list(raw_nanos)).unwrap_err();
+            assert_eq!(err.code(), tonic::Code::InvalidArgument);
+            assert_eq!(
+                err.message(),
+                format!(
+                    "gNMI subscription 1 sample_interval {raw_nanos}ns is outside supported range \
+                     [1000000000ns, 3600000000000ns]"
+                )
+            );
+        }
     }
 
     // --- Subscribe RPC-level harness ---------------------------------------
@@ -3658,6 +3655,40 @@ mod tests {
             vec![Some(fast_path), Some(slow_path)]
         );
         assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn tcp_subscribe_rejects_invalid_second_interval_before_snapshot() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let snapshot_calls = Arc::clone(&calls);
+        let service = GnmiService::with_peer_snapshot(65001, "192.0.2.1", move || {
+            snapshot_calls.fetch_add(1, Ordering::SeqCst);
+            async move { Ok(Vec::new()) }
+        });
+        let (mut list, _, _) = two_interval_neighbor_sample_list();
+        list.subscription[1].sample_interval = 999_999_999;
+        let mut harness = serve(service).await;
+        let status = match harness
+            .client
+            .subscribe(tokio_stream::iter(vec![subscribe_msg(list)]))
+            .await
+        {
+            Err(status) => status,
+            Ok(response) => response
+                .into_inner()
+                .message()
+                .await
+                .expect_err("invalid second interval must precede Update or sync_response"),
+        };
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert_eq!(
+            status.message(),
+            "gNMI subscription 2 sample_interval 999999999ns is outside supported range \
+             [1000000000ns, 3600000000000ns]"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

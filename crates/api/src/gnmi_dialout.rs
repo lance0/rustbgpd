@@ -574,6 +574,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn build_subscription_list_uses_dial_in_sample_interval_validation() {
+        let paths = [GLOBAL_AS_PATH.to_string()];
+        for interval in [
+            Duration::from_secs(1),
+            Duration::from_secs(10),
+            Duration::from_hours(1),
+        ] {
+            build_subscription_list(&paths, DialoutMode::Sample, interval)
+                .expect("an in-range SAMPLE interval must be accepted");
+        }
+
+        for (interval, raw_nanos) in [
+            (Duration::from_nanos(999_999_999), 999_999_999_u64),
+            (Duration::from_nanos(3_600_000_000_001), 3_600_000_000_001),
+        ] {
+            let err = build_subscription_list(&paths, DialoutMode::Sample, interval).unwrap_err();
+            assert_eq!(
+                err,
+                format!(
+                    "gNMI subscription 1 sample_interval {raw_nanos}ns is outside supported range \
+                     [1000000000ns, 3600000000000ns]"
+                )
+            );
+        }
+    }
+
     // ── zero-key-material pin ─────────────────────────────────────────
 
     #[test]

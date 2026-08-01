@@ -471,8 +471,8 @@ pub struct GnmiDialoutTarget {
     /// and requires `[event_history].enabled = true`).
     #[serde(default)]
     pub mode: GnmiDialoutModeConfig,
-    /// SAMPLE resample interval in seconds. Default 10; clamped to
-    /// [1s, 1h] like a dial-in subscription's requested interval.
+    /// SAMPLE resample interval in seconds. Default 10; values from 1
+    /// through 3600 are retained, while zero and values above 3600 are rejected.
     #[serde(default = "default_gnmi_dialout_sample_interval")]
     pub sample_interval: u64,
     /// First reconnect delay in seconds after a connection failure;

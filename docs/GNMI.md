@@ -455,11 +455,11 @@ gnmic \
   --path "$OC_BGP/global/state/router-id"
 ```
 
-The requested `--sample-interval` is clamped to `[1s, 1h]`: a sub-second
-or zero/missing interval is raised to the 1-second floor, and anything
-above one hour is capped at the 1-hour ceiling. Multiple SAMPLE paths in one
-subscription retain their own clamped intervals; co-due neighbor paths share
-one peer snapshot, and delayed ticks skip missed periods without catch-up bursts.
+For STREAM/SAMPLE, a zero/missing `--sample-interval` uses the 1-second floor.
+Nonzero intervals from 1 second through 1 hour are retained exactly; sub-second
+or above-1-hour requests fail with `INVALID_ARGUMENT`. Multiple SAMPLE paths in
+one subscription retain their own accepted intervals; co-due neighbor paths
+share one peer snapshot, and delayed ticks skip missed periods without bursts.
 
 ## Troubleshooting
 
