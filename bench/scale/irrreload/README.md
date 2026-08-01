@@ -58,6 +58,7 @@ and the bogon list).
 | Cell | Policy representation | Reload mechanism |
 |---|---|---|
 | `rustbgpd-sighup` | `.rpol` per-member IRR filters rendered by `tools/rs-config-render` (the production IRR pipeline renderer) from a synthetic `arouteserver template-context` document, concatenated into one swapped file | copy generation file over live, `SIGHUP` |
+| `rustbgpd-sighup-grouped-control` | the same `.rpol` policy and canonical dataset, with `per_client_best = false` so all 320 members share one update group | copy generation file over live, `SIGHUP`; standalone diagnostic control only |
 | `rustbgpd-txn` | same dataset as inline `[policy.definitions]` chain-engine statements in a full candidate config TOML | copy candidate, `rbgp config plan` + `config apply` with the plan's snapshot token (`txn-apply.sh`) |
 | `bird` | per-member prefix-set `define`s + import filters in the swapped include file | copy include, `birdc configure` |
 | `openbgpd` | per-member `prefix-set`s + `source-as`/`prefix-set` allow rules in the swapped include file | copy include, `bgpctl reload` |
@@ -158,22 +159,59 @@ fingerprint without hostnames, usernames, absolute paths, or other host-unique
 identifiers.
 Successful cells may delete their generated scenario only after retaining its
 generator `manifest.json` alongside that provenance.
+Offline verification recomputes the canonical provenance fingerprint, requires
+the exact full-workload knobs and repeat tool/image identities, and re-parses
+`scenario.sha256` against the manifest's safe `runtime_files` roster. Any
+symlink in a retained receipt is invalid.
 
 The RSS sampler is a required instrument: early/nonzero sampler exit or an
 empty/malformed `rss.csv` fails the cell. The runner reaps the sampler after
 the daemon exits and preserves all artifacts on failure.
 
-**Run count**: two fixed-order fresh-process campaign repeats minimum (fresh
-daemon starts, same cell order) so run-to-run spread is visible — run B into
-a separate `ARTIFACTS_DIR`. These are repeats, not statistically independent
-or counterbalanced trials.
+For the two rustbgpd cells, the runner opts into the reloadstall harness's
+`RELOADSTALL_PRE_CHURN_EVIDENCE_DIR` boundary. After base convergence and
+before starting churn, the harness publishes `ready` and waits at most 60
+seconds for a regular `ack`; absent means the historical harness path is
+unchanged. The runner retries transiently unsettled evidence for at most 50
+seconds, and atomically publishes `ack` only after accepting three production
+Prometheus scrapes at least one second apart. Invalid evidence is never
+acknowledged, so the cell fails closed with the boundary and attempt retained.
 
-**Host-quiet preconditions** (measured mode enforces): the campaign starts
-only after `tests/soak/preflight.sh` passes (competing-workload, host-lock,
-disk and mutex checks; `SKIP_PREFLIGHT=1` to override deliberately), plus a
-1-min loadavg < 2.0 gate before each cell and 300 s cool-downs between
-cells. `SMOKE=1` skips all quiet gates because it is a pipeline proof, not
-a measurement.
+Every cell also opts into `RELOADSTALL_EVIDENCE_DIR`. After the final measured
+rows are emitted, the harness keeps its stub sessions live and publishes
+`ready`. Before atomically publishing `ack`, the runner verifies that the
+daemon PID/start identity still matches the cell and records `process.tsv`.
+The retained final `ready`/`ack` pair therefore binds process identity to the
+measurement end rather than to a post-exit state with the stubs already gone.
+Missing or mismatched evidence is never acknowledged and fails the cell.
+
+At the full shape, the scrapes must show no Add-Path config, all 320 sessions
+established, empty outbound queues, Loc-RIB exactly 183,040, exact per-peer Adj-RIB-In and
+Adj-RIB-Out family rosters/counts, and a stable exact update-group topology.
+The comparison cell requires 320 `per_client_best` peers, zero groups, 320
+fallback peers, and every peer's group gauge at `-1`. The grouped control
+requires no `per_client_best` peers, exactly one 320-member group, zero
+fallback peers, and one shared nonnegative group ID. The last accepted scrape
+must precede the harness's first wire-measurement trigger. The retained
+`ready`, `ack`, timestamps, config, and raw scrapes are all in the cell's
+checksum chain and are independently re-parsed by the four-root verifier.
+
+**Run count and order**: four fresh artifact roots in fixed A/B/B/A order:
+comparison A, grouped-control A, grouped-control B, comparison B. Each cell
+gets a fresh daemon PID/start identity. This counterbalances host drift around
+the diagnostic control without putting the control in the competitor table.
+`verify-receipt.py campaigns` rejects reordered roots, reused process
+identities, source/dataset/shape mismatches, non-quiet cells, broken seals, or
+grouped rows in `comparison.csv`; it writes grouped rows only to
+`grouped-control.csv`. The repeats are not statistically independent trials.
+
+**Host-quiet preconditions** (full measured mode enforces): clean `HEAD`
+exactly at `origin/main`, the canonical shape/seed, no `SKIP_PREFLIGHT`, a
+passing `tests/soak/preflight.sh`, and exclusive ownership of the shared host
+lock. Before every cell, two retained 1-minute-load samples at least 30 seconds
+apart must both be below 2.0; cells retain their daemon PID/start identity.
+Successful roots carry `COMPLETED` plus an exact `SHA256SUMS` roster and become
+read-only. `SMOKE=1` skips the quiet gates because it is not a measurement.
 
 ## Comparability protocol
 
@@ -232,6 +270,12 @@ Documented asymmetries (the honesty notes for the eventual receipt):
   disabled in the context). Rendered policy files are never edited.
 - **Padding realism ceiling**: filter-list padding entries are all /24s;
   real IRR lists mix lengths. Constant across daemons and generations.
+- **Path-hiding control is not another competitor.** The comparison's
+  rustbgpd config explicitly uses `--path-hiding true --admit-churn true`.
+  The standalone grouped control uses `false/true`. BIRD and OpenBGPD retain
+  the same canonical dataset and churn admission, but path hiding is recorded
+  as non-applicable in their manifests. Grouped-control rows diagnose the
+  update-group fanout seam and never enter comparison or recommendation text.
 
 ## Running
 
@@ -239,9 +283,16 @@ Documented asymmetries (the honesty notes for the eventual receipt):
 # Smoke (pipeline proof, any host, ~minutes):
 SMOKE=1 bench/scale/irrreload/run-irr-reload.sh
 
-# Measured campaign (quiet host only — preflight-gated), two runs:
-ARTIFACTS_DIR=/tmp/irrreload-full-runA bench/scale/irrreload/run-irr-reload.sh
-ARTIFACTS_DIR=/tmp/irrreload-full-runB bench/scale/irrreload/run-irr-reload.sh
+# Full campaign (quiet host only), exact A/B/B/A order and fresh roots:
+ARTIFACTS_DIR=/tmp/irrreload-comparison-A bench/scale/irrreload/run-irr-reload.sh
+ARTIFACTS_DIR=/tmp/irrreload-grouped-A bench/scale/irrreload/run-irr-reload.sh rustbgpd-sighup-grouped-control
+ARTIFACTS_DIR=/tmp/irrreload-grouped-B bench/scale/irrreload/run-irr-reload.sh rustbgpd-sighup-grouped-control
+ARTIFACTS_DIR=/tmp/irrreload-comparison-B bench/scale/irrreload/run-irr-reload.sh
+
+python3 bench/scale/irrreload/verify-receipt.py campaigns \
+  --output-dir /tmp/irrreload-verified \
+  /tmp/irrreload-comparison-A /tmp/irrreload-grouped-A \
+  /tmp/irrreload-grouped-B /tmp/irrreload-comparison-B
 
 # Separate bounded transaction receipt, also repeated into fresh roots:
 ARTIFACTS_DIR=/tmp/irrreload-txn-runA bench/scale/irrreload/run-irr-reload.sh rustbgpd-txn
