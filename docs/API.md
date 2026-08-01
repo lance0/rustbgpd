@@ -467,6 +467,16 @@ at a time. Cross-family candidates, mixed policy/session effective impacts,
 and other valid-but-unsupported sections return `REJECTED` without mutation
 until their section executor lands.
 
+Native apply and rollback reject any supported family that would stage and
+adopt the full candidate snapshot when either side references external
+`.rpol` main/import files or `[policy.datasets]` snapshots. Those bytes are not
+covered by the transaction token and cannot be rolled back atomically with the
+TOML. Deploy the TOML, `.rpol` graph, and dataset snapshots together, then send
+SIGHUP. A true no-op remains `NOOP`; a pure `[[fib_tables]]` transaction with
+unchanged external inputs remains committable because that executor substitutes
+only the targeted table set rather than adopting the full candidate config.
+`diff_json.reload_applied.datasets_changed` reports dataset binding/path edits.
+
 ```bash
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   -d @ localhost:50051 rustbgpd.v1.ConfigService/DiffRuntimeConfig <<'JSON'

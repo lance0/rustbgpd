@@ -194,7 +194,7 @@ query machinery — no session impact, `SensitiveRead` authz. In-language
 standalone), so operators unit-test policies in CI before ever touching
 the daemon.
 
-## Decision 7 — Apply semantics ride ADR-0076 unchanged
+## Decision 7 — Apply semantics ride ADR-0076, with an external-input fence
 
 Compile at plan time (sub-ms; compile failure = plan failure, nothing
 applied). The planner's impact set comes from IR structural diff
@@ -202,6 +202,15 @@ applied). The planner's impact set comes from IR structural diff
 per-session atomic, commit-confirmed compatible, no FRR-style
 reject-window. Set-data-only changes (a prefix added to a set) diff as
 data, refreshing only peers whose policies reference that set.
+
+Compatibility correction: native config apply/rollback and gNMI Set cannot
+atomically stage or restore `.rpol` main/import files or policy-dataset
+snapshots. While either the running or candidate config references those
+inputs, the v1 planner rejects every executor family that would adopt the full
+candidate snapshot. Operators deploy TOML and external inputs together and use
+SIGHUP. True no-ops remain no-ops; pure `[[fib_tables]]` transactions with
+unchanged external inputs remain committable because that targeted executor
+does not adopt the full candidate config.
 
 ## Deferred (explicitly, with re-entry conditions)
 

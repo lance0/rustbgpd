@@ -4106,9 +4106,10 @@ peer_group = "{group}"
             ),
             staged.clone(),
         ));
+        let (config_tx, mut config_rx) = mpsc::channel(1);
 
         let response = apply_config_transaction(
-            deps(None, peer_tx, None, Vec::new()),
+            deps(None, peer_tx, Some(config_tx), Vec::new()),
             proto::ApplyConfigTransactionRequest {
                 candidate_toml: base_toml(
                     r#"
@@ -4135,6 +4136,11 @@ peer_group = "ix-members"
         );
         assert!(response.committed_sections.is_empty());
         assert!(staged.lock().await.is_empty());
+        assert!(matches!(
+            config_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty
+                | tokio::sync::mpsc::error::TryRecvError::Disconnected)
+        ));
     }
 
     #[tokio::test]
@@ -4583,7 +4589,12 @@ remote_asn = 65010
     async fn rejected_confirmed_apply_leaves_no_journal() {
         let dir = tempfile::tempdir().unwrap();
         let journal_path = dir.path().join("commit-confirm-journal.json");
-        let snapshot_toml = Arc::new(Mutex::new(base_toml("")));
+        let history_dir = dir.path().join("history");
+        std::fs::create_dir(&history_dir).unwrap();
+        let history_sentinel = history_dir.join("existing.json");
+        std::fs::write(&history_sentinel, "retained history").unwrap();
+        let original_snapshot = base_toml("");
+        let snapshot_toml = Arc::new(Mutex::new(original_snapshot.clone()));
         let peers = Arc::new(Mutex::new(Vec::new()));
         let (peer_tx, peer_rx) = mpsc::channel(8);
         tokio::spawn(fake_snapshot_peer_manager(
@@ -4592,15 +4603,11 @@ remote_asn = 65010
             snapshot_toml.clone(),
             peers,
         ));
-        let (config_tx, config_rx) = mpsc::channel(8);
-        let ack_task = tokio::spawn(ack_config_transaction_commits(config_rx));
-        let controller = ConfigTransactionController::new(
-            FibTableControlDeps {
-                confirm_journal_path: Some(journal_path.clone()),
-                ..deps_value(None, peer_tx, Some(config_tx), Vec::new())
-            },
-            BgpMetrics::new(),
-        );
+        let (config_tx, mut config_rx) = mpsc::channel(8);
+        let mut deps = deps_value(None, peer_tx, Some(config_tx), Vec::new());
+        deps.confirm_journal_path = Some(journal_path.clone());
+        deps.config_history_dir = Some(history_dir.clone());
+        let controller = ConfigTransactionController::new(deps, BgpMetrics::new());
 
         let response = controller
             .clone()
@@ -4619,7 +4626,16 @@ remote_asn = 65010
             !journal_path.exists(),
             "a rejected confirmed apply must not leave a journal behind"
         );
-        ack_task.abort();
+        assert_eq!(*snapshot_toml.lock().await, original_snapshot);
+        assert_eq!(
+            std::fs::read_to_string(&history_sentinel).unwrap(),
+            "retained history"
+        );
+        assert_eq!(std::fs::read_dir(&history_dir).unwrap().count(), 1);
+        assert!(matches!(
+            config_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
     }
 
     /// Shared body for the LAN-277 ambiguous-completion apply tests: run one

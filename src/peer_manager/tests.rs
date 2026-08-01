@@ -807,6 +807,267 @@ remote_asn = 65002
     responder.await.unwrap();
 }
 
+#[tokio::test]
+async fn transaction_plan_rejects_full_snapshot_family_with_external_policy_inputs() {
+    let dir = tempfile::tempdir().unwrap();
+    let rpol_path = dir.path().join("edge.rpol");
+    let dataset_path = dir.path().join("customers.list");
+    std::fs::write(
+        &rpol_path,
+        r"
+dataset asn-set customers
+
+policy edge-in {
+    term customer { if route.origin-as in customers { accept } }
+    term rest { reject }
+}
+",
+    )
+    .unwrap();
+    std::fs::write(&dataset_path, "64500\n").unwrap();
+    let config = load_test_config(&format!(
+        r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[policy]
+rpol_files = [{rpol_path:?}]
+
+[policy.datasets.customers]
+path = {dataset_path:?}
+
+[[neighbors]]
+address = "192.0.2.1"
+remote_asn = 65002
+description = "before"
+import_policy_chain = ["edge-in"]
+"#,
+        rpol_path = rpol_path.display().to_string(),
+        dataset_path = dataset_path.display().to_string()
+    ));
+    let live_dataset = std::sync::Arc::clone(
+        config
+            .policy
+            .dataset_bindings
+            .get("customers")
+            .expect("live dataset binding"),
+    );
+    let live_status = live_dataset.status();
+    std::fs::write(&dataset_path, "64500\n64999\n").unwrap();
+    let mut candidate = config.clone();
+    candidate.neighbors[0].description = Some("after".to_string());
+    let candidate = toml::to_string_pretty(&candidate).unwrap();
+    let (_tx, rx) = mpsc::channel(4);
+    let (_internal_tx, internal_rx) = mpsc::unbounded_channel();
+    let (rib_tx, mut rib_rx) = mpsc::channel(4);
+    let mgr = PeerManager::new_with_config(
+        rx,
+        internal_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+        None,
+        config,
+    );
+    let responder = tokio::spawn(async move {
+        let Some(RibUpdate::QueryUpdateGroupSnapshot { reply }) = rib_rx.recv().await else {
+            panic!("plan snapshot query missing");
+        };
+        reply
+            .send(rustbgpd_rib::UpdateGroupSnapshot::default())
+            .unwrap();
+    });
+
+    let plan = mgr.plan_config_transaction(&candidate, None).await.unwrap();
+
+    assert_eq!(
+        plan.status,
+        rustbgpd_api::peer_types::RuntimeConfigTransactionStatus::Rejected
+    );
+    assert_eq!(plan.supported_sections, vec!["[[neighbors]] modify"]);
+    assert_eq!(plan.unsupported_sections.len(), 1);
+    assert!(plan.unsupported_sections[0].contains("external inputs"));
+    assert_eq!(
+        mgr.current_config.neighbors[0].description.as_deref(),
+        Some("before")
+    );
+    assert_eq!(live_dataset.status(), live_status);
+    assert_eq!(live_dataset.pin().data.records(), 1);
+    responder.await.unwrap();
+}
+
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "keeps the external dataset, real peer snapshot, and both planner verdicts in one load-bearing scenario"
+)]
+async fn independent_external_reparse_noop_and_pure_fib_have_zero_update_group_impact() {
+    let dir = tempfile::tempdir().unwrap();
+    let rpol_path = dir.path().join("catalog.rpol");
+    let dataset_path = dir.path().join("customers.list");
+    std::fs::write(
+        &rpol_path,
+        r"
+dataset asn-set customers
+
+policy dataset-export {
+    term customer { if route.origin-as in customers { accept } }
+    term rest { reject }
+}
+",
+    )
+    .unwrap();
+    std::fs::write(&dataset_path, "64500\n").unwrap();
+    let mut current = load_test_config(&format!(
+        r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[policy]
+rpol_files = [{rpol_path:?}]
+
+[policy.datasets.customers]
+path = {dataset_path:?}
+
+[[neighbors]]
+address = "192.0.2.1"
+remote_asn = 65002
+export_policy_chain = ["dataset-export"]
+"#,
+        rpol_path = rpol_path.display().to_string(),
+        dataset_path = dataset_path.display().to_string()
+    ));
+    current.fib_tables.push(crate::config::FibTableConfig {
+        name: "edge".to_string(),
+        table_id: 1000,
+        metric: 200,
+        families: vec!["ipv4_unicast".to_string()],
+        allowed_peer_groups: Vec::new(),
+        allowed_neighbors: Vec::new(),
+        max_routes: None,
+        maximum_paths: None,
+        maximum_paths_ebgp: None,
+        maximum_paths_ibgp: None,
+    });
+    let noop_candidate = toml::to_string_pretty(&current).unwrap();
+    let mut fib_candidate = current.clone();
+    fib_candidate.fib_tables[0].metric = 201;
+    let fib_candidate = toml::to_string_pretty(&fib_candidate).unwrap();
+    let resolved = current.resolved_neighbors().unwrap();
+    let neighbor = &resolved[0];
+    let policy = neighbor
+        .export_policy
+        .as_ref()
+        .expect("export chain resolved");
+    assert!(policy.references_dataset("customers"));
+    let live_input = rustbgpd_rib::UpdateGroupClassifierInput {
+        policy_fingerprint: Some(format!("{policy:?}")),
+        policy_provenance: Some(policy.groupability_provenance().to_string()),
+        policy_requires_peer_context: policy.requires_peer_context(),
+        target_is_ebgp: true,
+        target_is_rr_client: neighbor.transport_config.route_reflector_client,
+        target_local_role: neighbor
+            .transport_config
+            .peer
+            .local_role
+            .map(rustbgpd_wire::BgpRole::to_u8),
+        sendable_families: vec![(1, 1)],
+        llgr_families: Vec::new(),
+        add_path_send: false,
+        per_client_best: neighbor.transport_config.per_client_best,
+        interpret_rfc1997: neighbor.transport_config.interpret_rfc1997,
+        orr_vantage: neighbor.transport_config.orr_vantage,
+        orf_installed: false,
+    };
+    let live_classification = rustbgpd_rib::classify_update_group(live_input.clone());
+    let (_tx, rx) = mpsc::channel(4);
+    let (_internal_tx, internal_rx) = mpsc::unbounded_channel();
+    let (rib_tx, mut rib_rx) = mpsc::channel(4);
+    let mgr = PeerManager::new_with_config(
+        rx,
+        internal_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+        None,
+        current,
+    );
+    let responder = tokio::spawn(async move {
+        for _ in 0..2 {
+            let Some(RibUpdate::QueryUpdateGroupSnapshot { reply }) = rib_rx.recv().await else {
+                panic!("plan snapshot query missing");
+            };
+            reply
+                .send(rustbgpd_rib::UpdateGroupSnapshot {
+                    peers: vec![rustbgpd_rib::UpdateGroupPeerSnapshot {
+                        peer: "192.0.2.1".parse().unwrap(),
+                        input: live_input.clone(),
+                        classification: live_classification.clone(),
+                        runtime_membership: "group:0".to_string(),
+                    }],
+                })
+                .unwrap();
+        }
+    });
+
+    let noop = mgr
+        .plan_config_transaction(&noop_candidate, None)
+        .await
+        .unwrap();
+    let fib = mgr
+        .plan_config_transaction(&fib_candidate, None)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        noop.status,
+        rustbgpd_api::peer_types::RuntimeConfigTransactionStatus::Noop
+    );
+    assert!(noop.supported_sections.is_empty());
+    assert!(noop.unsupported_sections.is_empty());
+    assert_eq!(noop.update_group_impact.entries.len(), 1);
+    assert_eq!(noop.update_group_impact.entries[0].transition, "no_op");
+    assert!(!noop.update_group_impact.entries[0].local_resync);
+    assert_eq!(noop.update_group_impact.rollup.affected_peers, 0);
+    assert_eq!(noop.update_group_impact.rollup.affected_families, 0);
+    assert_eq!(noop.update_group_impact.rollup.local_resyncs, 0);
+    assert_eq!(noop.update_group_impact.rollup.no_op, 1);
+    assert_eq!(
+        fib.status,
+        rustbgpd_api::peer_types::RuntimeConfigTransactionStatus::Committable
+    );
+    assert_eq!(fib.supported_sections, vec!["[[fib_tables]]"]);
+    assert!(fib.unsupported_sections.is_empty());
+    assert_eq!(fib.update_group_impact.entries.len(), 1);
+    assert_eq!(fib.update_group_impact.entries[0].transition, "no_op");
+    assert!(!fib.update_group_impact.entries[0].local_resync);
+    assert_eq!(fib.update_group_impact.rollup.affected_peers, 0);
+    assert_eq!(fib.update_group_impact.rollup.affected_families, 0);
+    assert_eq!(fib.update_group_impact.rollup.local_resyncs, 0);
+    assert_eq!(fib.update_group_impact.rollup.no_op, 1);
+    responder.await.unwrap();
+}
+
 async fn query_session_event_history(
     mgr: &PeerManager,
     peer: Option<IpAddr>,

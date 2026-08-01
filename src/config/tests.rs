@@ -16440,6 +16440,119 @@ fn rpol_edit_classifies_policy_chain_impact_for_referencing_peers_only() {
     assert!(diff.effective_neighbor_impact.is_empty(), "{diff:?}");
 }
 
+#[test]
+fn full_snapshot_transaction_with_rpol_inputs_is_rejected() {
+    let dir = rpol_config_dir(RPOL_SOURCE, r#""customer-in(200)""#);
+    let current = load_dir(&dir).expect("config with rpol input loads");
+    let mut candidate = load_dir(&dir).expect("candidate independently reloads rpol input");
+    candidate.neighbors[1].description = Some("changed by transaction".to_string());
+
+    let diff = diff_config(&current, &candidate);
+    assert!(!diff.policy.rpol_changed, "external inputs are unchanged");
+    let class = classify_config_transaction_v1(&diff);
+
+    assert_eq!(class.supported_sections, vec!["[[neighbors]] modify"]);
+    assert_eq!(
+        class.unsupported_sections,
+        vec![TRANSACTION_EXTERNAL_POLICY_INPUTS_SECTION]
+    );
+    assert!(!class.is_committable());
+}
+
+#[test]
+fn rpol_resolution_settings_change_is_unsupported() {
+    let dir = rpol_config_dir(RPOL_SOURCE, r#""customer-in(200)""#);
+    let current = load_dir(&dir).expect("config with rpol input loads");
+
+    let mut roots_candidate = current.clone();
+    roots_candidate
+        .policy
+        .rpol_roots
+        .push(dir.path().join("policies").display().to_string());
+    let roots_diff = diff_config(&current, &roots_candidate);
+    assert!(roots_diff.policy.rpol_changed);
+    assert_eq!(
+        classify_config_transaction_v1(&roots_diff).unsupported_sections,
+        vec![TRANSACTION_EXTERNAL_POLICY_INPUTS_SECTION]
+    );
+
+    let mut budget_candidate = current.clone();
+    budget_candidate.policy.rpol_max_graph_bytes /= 2;
+    let budget_diff = diff_config(&current, &budget_candidate);
+    assert!(budget_diff.policy.rpol_changed);
+    assert_eq!(
+        classify_config_transaction_v1(&budget_diff).unsupported_sections,
+        vec![TRANSACTION_EXTERNAL_POLICY_INPUTS_SECTION]
+    );
+    let json = config_diff_json_value(&budget_diff);
+    assert_eq!(json["reload_applied"]["rpol_changed"], true);
+    let text = format_config_diff(&budget_diff);
+    assert!(text.contains("rpol_max_graph_bytes"), "{text}");
+}
+
+#[test]
+fn targeted_fib_transaction_with_unchanged_external_inputs_remains_committable() {
+    let dir = rpol_config_dir(RPOL_SOURCE, r#""customer-in(200)""#);
+    let mut current = load_dir(&dir).expect("config with rpol input loads");
+    current.fib_tables.push(FibTableConfig {
+        name: "edge".to_string(),
+        table_id: 1000,
+        metric: 200,
+        families: vec!["ipv4_unicast".to_string()],
+        allowed_peer_groups: Vec::new(),
+        allowed_neighbors: Vec::new(),
+        max_routes: None,
+        maximum_paths: None,
+        maximum_paths_ebgp: None,
+        maximum_paths_ibgp: None,
+    });
+    let mut candidate = current.clone();
+    candidate.fib_tables[0].metric = 201;
+
+    let diff = diff_config(&current, &candidate);
+    let class = classify_config_transaction_v1(&diff);
+
+    assert_eq!(class.supported_sections, vec!["[[fib_tables]]"]);
+    assert!(class.unsupported_sections.is_empty(), "{class:?}");
+    assert!(class.is_committable(), "{class:?}");
+
+    let mut budget_candidate = candidate.clone();
+    budget_candidate.policy.rpol_max_graph_bytes /= 2;
+    let mixed_budget = classify_config_transaction_v1(&diff_config(&current, &budget_candidate));
+    assert_eq!(mixed_budget.supported_sections, vec!["[[fib_tables]]"]);
+    assert_eq!(
+        mixed_budget.unsupported_sections,
+        vec![TRANSACTION_EXTERNAL_POLICY_INPUTS_SECTION]
+    );
+    assert!(!mixed_budget.is_committable());
+
+    let mut roots_candidate = candidate;
+    roots_candidate
+        .policy
+        .rpol_roots
+        .push(dir.path().join("policies").display().to_string());
+    let mixed_roots = classify_config_transaction_v1(&diff_config(&current, &roots_candidate));
+    assert_eq!(mixed_roots.supported_sections, vec!["[[fib_tables]]"]);
+    assert_eq!(
+        mixed_roots.unsupported_sections,
+        vec![TRANSACTION_EXTERNAL_POLICY_INPUTS_SECTION]
+    );
+    assert!(!mixed_roots.is_committable());
+}
+
+#[test]
+fn external_input_noop_remains_noop() {
+    let dir = rpol_config_dir(RPOL_SOURCE, r#""customer-in(200)""#);
+    let current = load_dir(&dir).expect("config with rpol input loads");
+    let candidate = load_dir(&dir).expect("candidate independently reloads rpol input");
+
+    let diff = diff_config(&current, &candidate);
+    let class = classify_config_transaction_v1(&diff);
+
+    assert!(class.is_noop(), "{class:?}");
+    assert!(class.unsupported_sections.is_empty(), "{class:?}");
+}
+
 // ── RFC 9687 send hold timer config ─────────────────────────────
 
 #[test]
@@ -17012,6 +17125,128 @@ fn staged_dataset_reload_defers_live_handle_mutation_until_commit() {
     assert!(live.status().last_error.is_some());
     assert_eq!(live.pin().generation, 2);
     assert_eq!(live.pin().data.records(), 2);
+}
+
+#[test]
+fn dataset_path_change_is_visible_and_transaction_unsupported() {
+    let dir = dataset_config_dir("64500\n");
+    let current = load_dir(&dir).expect("config with dataset input loads");
+    let mut candidate = current.clone();
+    candidate
+        .policy
+        .datasets
+        .get_mut("customers")
+        .expect("binding")
+        .path
+        .push_str(".next");
+
+    let diff = diff_config(&current, &candidate);
+    let class = classify_config_transaction_v1(&diff);
+
+    assert!(diff.policy.datasets_changed);
+    assert!(diff.has_reload_applied_changes());
+    assert_eq!(
+        config_diff_json_value(&diff)["reload_applied"]["datasets_changed"],
+        true
+    );
+    let text = format_config_diff(&diff);
+    assert!(text.contains("policy dataset bindings / paths"), "{text}");
+    assert_eq!(
+        class.unsupported_sections,
+        vec![TRANSACTION_EXTERNAL_POLICY_INPUTS_SECTION]
+    );
+    assert!(!class.is_committable());
+
+    let mut fib_current = current;
+    fib_current.fib_tables.push(FibTableConfig {
+        name: "edge".to_string(),
+        table_id: 1000,
+        metric: 200,
+        families: vec!["ipv4_unicast".to_string()],
+        allowed_peer_groups: Vec::new(),
+        allowed_neighbors: Vec::new(),
+        max_routes: None,
+        maximum_paths: None,
+        maximum_paths_ebgp: None,
+        maximum_paths_ibgp: None,
+    });
+    let mut mixed_candidate = fib_current.clone();
+    mixed_candidate.fib_tables[0].metric = 201;
+    mixed_candidate
+        .policy
+        .datasets
+        .get_mut("customers")
+        .expect("binding")
+        .path
+        .push_str(".next");
+    let mixed = classify_config_transaction_v1(&diff_config(&fib_current, &mixed_candidate));
+    assert_eq!(mixed.supported_sections, vec!["[[fib_tables]]"]);
+    assert_eq!(
+        mixed.unsupported_sections,
+        vec![TRANSACTION_EXTERNAL_POLICY_INPUTS_SECTION]
+    );
+    assert!(!mixed.is_committable());
+}
+
+#[test]
+fn full_snapshot_transaction_with_dataset_inputs_is_rejected_without_handle_mutation() {
+    let dir = dataset_config_dir("64500\n");
+    let current = load_dir(&dir).expect("config with dataset input loads");
+    let live = std::sync::Arc::clone(
+        current
+            .policy
+            .dataset_bindings
+            .get("customers")
+            .expect("live binding"),
+    );
+    let generation = live.pin().generation;
+    let mut candidate = load_dir(&dir).expect("candidate independently reloads dataset input");
+    let candidate_binding = std::sync::Arc::clone(
+        candidate
+            .policy
+            .dataset_bindings
+            .get("customers")
+            .expect("candidate binding"),
+    );
+    candidate.neighbors[0].description = Some("changed by transaction".to_string());
+
+    let diff = diff_config(&current, &candidate);
+    let class = classify_config_transaction_v1(&diff);
+
+    assert!(!diff.policy.datasets_changed, "binding is unchanged");
+    assert_eq!(class.supported_sections, vec!["[[neighbors]] modify"]);
+    assert_eq!(
+        class.unsupported_sections,
+        vec![TRANSACTION_EXTERNAL_POLICY_INPUTS_SECTION]
+    );
+    assert!(!class.is_committable());
+    assert!(!std::sync::Arc::ptr_eq(&live, &candidate_binding));
+    assert_eq!(live.pin().generation, generation);
+}
+
+#[test]
+fn only_fib_transactions_avoid_full_candidate_snapshot_staging() {
+    assert!(!transaction_stages_full_candidate_snapshot(&[
+        TRANSACTION_FIB_SECTION.to_string(),
+    ]));
+
+    for section in [
+        TRANSACTION_DYNAMIC_SECTION,
+        TRANSACTION_NEIGHBOR_ADD_SECTION,
+        TRANSACTION_NEIGHBOR_DELETE_SECTION,
+        TRANSACTION_NEIGHBOR_MODIFY_SECTION,
+        TRANSACTION_PEER_GROUP_CATALOG_SECTION,
+        TRANSACTION_POLICY_DEFINITIONS_SECTION,
+        TRANSACTION_POLICY_NEIGHBOR_SETS_SECTION,
+        TRANSACTION_POLICY_GLOBAL_CHAINS_SECTION,
+        TRANSACTION_POLICY_LIVE_IMPACT_SECTION,
+        TRANSACTION_SESSION_RESHAPE_SECTION,
+    ] {
+        assert!(
+            transaction_stages_full_candidate_snapshot(&[section.to_string()]),
+            "{section} must stay behind the external-input fence"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

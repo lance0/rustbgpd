@@ -1245,6 +1245,8 @@ const TRANSACTION_POLICY_NEIGHBOR_SETS_SECTION: &str = "[policy] neighbor_sets";
 const TRANSACTION_POLICY_GLOBAL_CHAINS_SECTION: &str = "[policy] global chains";
 const TRANSACTION_POLICY_LIVE_IMPACT_SECTION: &str = "[policy] live impact";
 const TRANSACTION_SESSION_RESHAPE_SECTION: &str = "effective neighbor session reshape";
+const TRANSACTION_EXTERNAL_POLICY_INPUTS_SECTION: &str =
+    "[policy] external inputs (rpol_files / datasets; deploy files and apply via SIGHUP reload)";
 
 /// Detect removed config keys in a TOML document that failed typed
 /// deserialization and return a migration error naming the
@@ -1700,6 +1702,10 @@ pub struct PeerGroupDiff {
 
 /// Differences between two policy configurations.
 #[derive(Debug, serde::Serialize)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "diff flags intentionally mirror independently reportable policy surfaces"
+)]
 pub struct PolicyDiff {
     pub definitions_added: Vec<String>,
     pub definitions_removed: Vec<String>,
@@ -1709,11 +1715,22 @@ pub struct PolicyDiff {
     pub neighbor_sets_changed: Vec<String>,
     pub import_chain_changed: bool,
     pub export_chain_changed: bool,
-    /// The `[policy] rpol_files` list or any referenced `.rpol` file's
-    /// compiled content changed (ADR-0096). Reload-applied: chains
-    /// referencing rpol policies re-resolve and hot-swap through the
-    /// same live-policy path as `[policy.definitions]` edits.
+    /// The `[policy] rpol_files` / `rpol_roots` / `rpol_max_graph_bytes`
+    /// settings or any referenced `.rpol` file's compiled graph changed
+    /// (ADR-0096). Reload-applied: chains referencing rpol policies
+    /// re-resolve and hot-swap through the same live-policy path as
+    /// `[policy.definitions]` edits.
     pub rpol_changed: bool,
+    /// A `[policy.datasets.<name>]` binding or path changed. Dataset
+    /// contents live outside TOML; this flag describes only the binding
+    /// surface visible in a config diff.
+    pub datasets_changed: bool,
+    /// Internal transaction-planning fence: either side of this diff
+    /// references `.rpol` or dataset files. Kept out of serialized diff
+    /// output; the public JSON surface exposes only actual changes.
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub external_inputs_present: bool,
 }
 
 impl PolicyDiff {
@@ -1727,6 +1744,7 @@ impl PolicyDiff {
             || self.import_chain_changed
             || self.export_chain_changed
             || self.rpol_changed
+            || self.datasets_changed
     }
 }
 
@@ -2040,6 +2058,7 @@ impl ConfigDiff {
             || self.policy.import_chain_changed
             || self.policy.export_chain_changed
             || self.policy.rpol_changed
+            || self.policy.datasets_changed
             || self.honor_graceful_shutdown_changed
             || self.honor_blackhole_changed
             || self.dynamic_neighbors_reload_applied_changed
@@ -2647,13 +2666,22 @@ pub fn classify_config_transaction_v1(diff: &ConfigDiff) -> ConfigTransactionSec
             .push("mixed transaction families".to_string());
     }
     if diff.policy.rpol_changed {
-        // No v1 transaction executor owns the .rpol file catalog — the
-        // files live outside the candidate TOML, so a transaction
-        // cannot atomically stage their content. Apply .rpol changes
-        // via SIGHUP reload (which re-reads and hot-swaps them).
-        class
-            .unsupported_sections
-            .push("[policy] rpol_files (apply .rpol changes via SIGHUP reload)".to_string());
+        push_transaction_external_policy_inputs_reason(&mut class);
+    }
+    if diff.policy.datasets_changed {
+        push_transaction_external_policy_inputs_reason(&mut class);
+    }
+    if diff.policy.external_inputs_present
+        && transaction_stages_full_candidate_snapshot(&class.supported_sections)
+    {
+        // Every v1 executor except the targeted FIB path adopts the full
+        // candidate snapshot. External policy bytes are neither staged nor
+        // covered by the optimistic token, so accepting that snapshot could
+        // make an unrelated neighbor/catalog mutation silently adopt policy
+        // content that was never part of the transaction. A true no-op has no
+        // supported family and remains a no-op; pure FIB substitutes only the
+        // table set and is therefore safe with unchanged external inputs.
+        push_transaction_external_policy_inputs_reason(&mut class);
     }
     if diff.honor_graceful_shutdown_changed {
         class
@@ -2851,6 +2879,26 @@ fn transaction_sections_are_one_family(sections: &[String]) -> bool {
         <= 1
 }
 
+fn transaction_stages_full_candidate_snapshot(sections: &[String]) -> bool {
+    sections
+        .iter()
+        .any(|section| section != TRANSACTION_FIB_SECTION)
+}
+
+fn push_transaction_external_policy_inputs_reason(
+    class: &mut ConfigTransactionSectionClassification,
+) {
+    if !class
+        .unsupported_sections
+        .iter()
+        .any(|section| section == TRANSACTION_EXTERNAL_POLICY_INPUTS_SECTION)
+    {
+        class
+            .unsupported_sections
+            .push(TRANSACTION_EXTERNAL_POLICY_INPUTS_SECTION.to_string());
+    }
+}
+
 /// JSON schema shared by `rustbgpd --diff --json` and the live runtime
 /// config-diff API. The schema mirrors the human diff buckets:
 /// reload-applied, restart-required, and informational.
@@ -2880,6 +2928,7 @@ pub fn config_diff_json_value(diff: &ConfigDiff) -> serde_json::Value {
             "import_chain_changed": diff.policy.import_chain_changed,
             "export_chain_changed": diff.policy.export_chain_changed,
             "rpol_changed": diff.policy.rpol_changed,
+            "datasets_changed": diff.policy.datasets_changed,
             "honor_graceful_shutdown_changed": diff.honor_graceful_shutdown_changed,
             "honor_blackhole_changed": diff.honor_blackhole_changed,
             "dynamic_neighbors_changed": diff.dynamic_neighbors_reload_applied_changed,
@@ -2976,7 +3025,8 @@ pub fn format_config_diff_with_style(diff: &ConfigDiff, style: &ConfigDiffTextSt
         || !p.neighbor_sets_changed.is_empty()
         || p.import_chain_changed
         || p.export_chain_changed
-        || p.rpol_changed;
+        || p.rpol_changed
+        || p.datasets_changed;
 
     if diff.has_reload_applied_changes() {
         let _ = writeln!(out, "{}\n", style.reload_header);
@@ -3050,7 +3100,14 @@ pub fn format_config_diff_with_style(diff: &ConfigDiff, style: &ConfigDiffTextSt
             if p.rpol_changed {
                 let _ = writeln!(
                     out,
-                    "    {} rpol_files / .rpol content",
+                    "    {} rpol_files / rpol_roots / rpol_max_graph_bytes / .rpol graph",
+                    style.change_marker
+                );
+            }
+            if p.datasets_changed {
+                let _ = writeln!(
+                    out,
+                    "    {} policy dataset bindings / paths",
                     style.change_marker
                 );
             }
@@ -5001,7 +5058,15 @@ pub fn diff_policy(old: &PolicyConfig, new: &PolicyConfig) -> PolicyDiff {
         neighbor_sets_changed,
         import_chain_changed: old.import_chain != new.import_chain,
         export_chain_changed: old.export_chain != new.export_chain,
-        rpol_changed: old.rpol_files != new.rpol_files || old.rpol != new.rpol,
+        rpol_changed: old.rpol_files != new.rpol_files
+            || old.rpol_roots != new.rpol_roots
+            || old.rpol_max_graph_bytes != new.rpol_max_graph_bytes
+            || old.rpol != new.rpol,
+        datasets_changed: old.datasets != new.datasets,
+        external_inputs_present: !old.rpol_files.is_empty()
+            || !new.rpol_files.is_empty()
+            || !old.datasets.is_empty()
+            || !new.datasets.is_empty(),
     }
 }
 

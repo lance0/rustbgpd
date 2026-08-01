@@ -98,6 +98,12 @@ Transaction and validation behavior:
 - supported changes translate the live runtime config snapshot into candidate
   TOML and call the ADR-0076 transaction controller. There is no parallel commit
   path.
+- If either the running or generated candidate references external `.rpol`
+  graphs or `[policy.datasets]` snapshots, a supported non-noop Set is rejected
+  before mutation: those bytes are outside the transaction token and rollback
+  boundary. A true no-op remains a no-op. Deploy the TOML and external files
+  together and use SIGHUP. (The native transaction API's targeted pure-
+  `[[fib_tables]]` exception is not a gNMI Set surface.)
 - unsupported config leaves, including `enabled`, `local-as`, auth, timers,
   transport, BFD, AFI-SAFI, policy, route-reflector/client,
   route-server-client, and Add-Path settings, return `UNIMPLEMENTED`.
@@ -150,6 +156,9 @@ Transaction and validation behavior:
   place, and live dynamic sessions accepted by an affected range are
   gracefully reset after persist to re-accept under the committed config
   (ADR-0086).
+- The external-policy-input fence above applies even when the requested
+  peer-group leaf itself is unrelated to policy; the executor would otherwise
+  adopt the whole generated candidate snapshot.
 - If a candidate peer-group edit would affect a dynamic-neighbor range in a
   way that the transaction model cannot safely reshape (for example a range
   peer-group reassignment, or mixed policy/session impact), the transaction
