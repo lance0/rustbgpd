@@ -9,6 +9,7 @@ use rustbgpd_bmp::{BmpEvent, BmpPeerInfo, BmpPeerType};
 use rustbgpd_fsm::SessionState;
 use rustbgpd_policy::PolicyChain;
 use rustbgpd_transport::{PeerHandle, PeerSessionState};
+use tokio_util::task::AbortOnDropHandle;
 use tracing::warn;
 
 use crate::config::{RFC8212_MISSING_EXPORT_POLICY, RFC8212_MISSING_IMPORT_POLICY};
@@ -214,15 +215,14 @@ fn effective_remote_asn(managed: &ManagedPeer, session_state: Option<&PeerSessio
 async fn collect_session_states(
     peers: &HashMap<PeerKey, ManagedPeer>,
 ) -> HashMap<PeerKey, Option<PeerSessionState>> {
-    let mut tasks: Vec<tokio::task::JoinHandle<(PeerKey, Option<PeerSessionState>)>> =
-        Vec::with_capacity(peers.len());
+    let mut tasks = Vec::with_capacity(peers.len());
     for (peer, managed) in peers {
         let peer = peer.clone();
         let commands = managed.handle.commands_sender();
-        tasks.push(tokio::spawn(async move {
+        tasks.push(AbortOnDropHandle::new(tokio::spawn(async move {
             let state = PeerHandle::query_state_with(commands, PEER_QUERY_TIMEOUT).await;
             (peer, state)
-        }));
+        })));
     }
 
     let mut out = HashMap::with_capacity(tasks.len());
@@ -349,12 +349,12 @@ impl PeerManager {
             let peer = peer.clone();
             let session_id = managed.session_id;
             let commands = managed.handle.commands_sender();
-            tasks.push(tokio::spawn(async move {
+            tasks.push(AbortOnDropHandle::new(tokio::spawn(async move {
                 let state =
                     PeerHandle::query_warm_checkpoint_state_with(commands, PEER_QUERY_TIMEOUT)
                         .await;
                 (peer, session_id, canonical_import_policy, state)
-            }));
+            })));
         }
 
         let mut sessions = Vec::with_capacity(tasks.len());
@@ -469,6 +469,45 @@ impl PeerManager {
             infos.push(info);
         }
         infos
+    }
+
+    /// Answer an operator/readiness peer snapshot only when its caller still
+    /// owns the response. Dropping the response mid-fan-out drops
+    /// `list_peers`; its abort-on-drop query drivers then release any bounded
+    /// session-command slots they were waiting to acquire. A query already
+    /// admitted to a session may still be observed, but no orphaned driver
+    /// remains behind the canceled aggregate read.
+    pub(super) async fn answer_list_peers(
+        &self,
+        mut reply: tokio::sync::oneshot::Sender<Vec<PeerInfo>>,
+    ) {
+        if reply.is_closed() {
+            return;
+        }
+        let infos = tokio::select! {
+            biased;
+            () = reply.closed() => return,
+            infos = self.list_peers() => infos,
+        };
+        let _ = reply.send(infos);
+    }
+
+    /// Complete-only warm-checkpoint reply fence. Cancellation drops the
+    /// capture future and therefore every abort-on-drop per-session driver;
+    /// successful callers still receive one all-or-nothing, sorted capture.
+    pub(super) async fn answer_warm_checkpoint_capture(
+        &self,
+        mut reply: tokio::sync::oneshot::Sender<Result<WarmCheckpointCapture, String>>,
+    ) {
+        if reply.is_closed() {
+            return;
+        }
+        let capture = tokio::select! {
+            biased;
+            () = reply.closed() => return,
+            capture = self.query_warm_checkpoint_capture() => capture,
+        };
+        let _ = reply.send(capture);
     }
 
     fn bmp_peer_info(

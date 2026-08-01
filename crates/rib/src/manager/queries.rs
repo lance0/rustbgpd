@@ -21,7 +21,8 @@ use crate::update::{
     BestPathCandidate, ExactExportKey, ExplainAdvertisedRoute, ExplainAdvertisedRouteError,
     ExplainBestPath, MrtPeerEntry, MrtSnapshotData, NeighborPolicyStats, NeighborRibSnapshot,
     NeighborRibSnapshotResponse, RoutePage, RoutePageError, RoutePageVersion, RouteQueryFilter,
-    RouteQueryKey, RouteQueryScope, WarmMrtSnapshotBudget, WarmMrtSnapshotView, route_query_key,
+    RouteQueryKey, RouteQueryScope, UpdateGroupPeerComparison, WarmMrtSnapshotBudget,
+    WarmMrtSnapshotView, route_query_key,
 };
 
 pub(super) fn send_mrt_snapshot(
@@ -41,15 +42,51 @@ pub(super) fn send_mrt_snapshot(
     }
 }
 
+fn materialize_neighbor_rib_snapshot(
+    peers: Vec<IpAddr>,
+    comparison: Option<(IpAddr, IpAddr)>,
+    mut is_canceled: impl FnMut() -> bool,
+    mut build_row: impl FnMut(IpAddr) -> NeighborRibSnapshot,
+    build_comparison: impl FnOnce(IpAddr, IpAddr) -> UpdateGroupPeerComparison,
+) -> Option<NeighborRibSnapshotResponse> {
+    let mut snapshots = Vec::with_capacity(peers.len());
+    for peer in peers {
+        if is_canceled() {
+            return None;
+        }
+        snapshots.push(build_row(peer));
+    }
+    if is_canceled() {
+        return None;
+    }
+    let comparison = comparison.map(|(primary, comparison)| build_comparison(primary, comparison));
+    if is_canceled() {
+        return None;
+    }
+    Some(NeighborRibSnapshotResponse {
+        snapshots,
+        comparison,
+    })
+}
+
 fn send_neighbor_rib_snapshot(
     reply: tokio::sync::oneshot::Sender<NeighborRibSnapshotResponse>,
-    build: impl FnOnce() -> NeighborRibSnapshotResponse,
+    peers: Vec<IpAddr>,
+    comparison: Option<(IpAddr, IpAddr)>,
+    build_row: impl FnMut(IpAddr) -> NeighborRibSnapshot,
+    build_comparison: impl FnOnce(IpAddr, IpAddr) -> UpdateGroupPeerComparison,
 ) {
-    if reply.is_closed() {
-        debug!("neighbor RIB snapshot query canceled before materialization");
+    let Some(snapshot) = materialize_neighbor_rib_snapshot(
+        peers,
+        comparison,
+        || reply.is_closed(),
+        build_row,
+        build_comparison,
+    ) else {
+        debug!("neighbor RIB snapshot query canceled during materialization");
         return;
-    }
-    let _ = reply.send(build());
+    };
+    let _ = reply.send(snapshot);
 }
 
 /// Synthesized messages per RFC 9069 Loc-RIB dump chunk — the
@@ -1649,29 +1686,24 @@ impl RibManager {
         comparison: Option<(IpAddr, IpAddr)>,
         reply: tokio::sync::oneshot::Sender<NeighborRibSnapshotResponse>,
     ) {
-        send_neighbor_rib_snapshot(reply, || {
-            let snapshots = peers
-                .into_iter()
-                .map(|peer| NeighborRibSnapshot {
-                    peer,
-                    advertised_count: self
-                        .grouped_advertised_count(peer)
-                        .unwrap_or_else(|| self.adj_ribs_out.get(&peer).map_or(0, AdjRibOut::len)),
-                    policy_stats: self
-                        .export_policy_stats
-                        .get(&peer)
-                        .copied()
-                        .unwrap_or_default(),
-                    outbound: self.peer_outbound_state(peer),
-                })
-                .collect();
-            let comparison = comparison
-                .map(|(primary, comparison)| self.update_group_comparison(primary, comparison));
-            NeighborRibSnapshotResponse {
-                snapshots,
-                comparison,
-            }
-        });
+        send_neighbor_rib_snapshot(
+            reply,
+            peers,
+            comparison,
+            |peer| NeighborRibSnapshot {
+                peer,
+                advertised_count: self
+                    .grouped_advertised_count(peer)
+                    .unwrap_or_else(|| self.adj_ribs_out.get(&peer).map_or(0, AdjRibOut::len)),
+                policy_stats: self
+                    .export_policy_stats
+                    .get(&peer)
+                    .copied()
+                    .unwrap_or_default(),
+                outbound: self.peer_outbound_state(peer),
+            },
+            |primary, comparison| self.update_group_comparison(primary, comparison),
+        );
     }
     /// Snapshot the live per-term hit counters of installed export
     /// chains (ADR-0096 Decision 3.3): one entry per peer with an
@@ -2032,6 +2064,120 @@ mod cancellation_tests {
     fn canceled_neighbor_rib_snapshot_does_not_invoke_builder() {
         let (reply, receiver) = tokio::sync::oneshot::channel();
         drop(receiver);
-        send_neighbor_rib_snapshot(reply, || panic!("canceled query materialized"));
+        send_neighbor_rib_snapshot(
+            reply,
+            vec!["192.0.2.1".parse().unwrap()],
+            None,
+            |_| panic!("canceled query materialized"),
+            |_, _| panic!("canceled query compared"),
+        );
+    }
+
+    /// Load-bearing mid-materialization cancellation proof: removing the
+    /// per-row closure check visits K+1 and continues building an
+    /// undeliverable response; removing the pre-comparison check invokes the
+    /// comparison after the Kth row cancels the request.
+    #[test]
+    fn canceled_neighbor_rib_snapshot_stops_at_exact_row_boundary() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        const PEERS: usize = 32;
+        const CLOSE_AFTER: usize = 7;
+        let canceled = Rc::new(std::cell::Cell::new(false));
+        let visited = Rc::new(RefCell::new(Vec::new()));
+        let peers: Vec<IpAddr> = (1..=PEERS)
+            .map(|octet| IpAddr::V4(Ipv4Addr::new(192, 0, 2, u8::try_from(octet).unwrap())))
+            .collect();
+
+        let response = materialize_neighbor_rib_snapshot(
+            peers.clone(),
+            Some((peers[0], peers[1])),
+            {
+                let canceled = Rc::clone(&canceled);
+                move || canceled.get()
+            },
+            {
+                let canceled = Rc::clone(&canceled);
+                let visited = Rc::clone(&visited);
+                move |peer| {
+                    visited.borrow_mut().push(peer);
+                    if visited.borrow().len() == CLOSE_AFTER {
+                        canceled.set(true);
+                    }
+                    NeighborRibSnapshot {
+                        peer,
+                        advertised_count: 0,
+                        policy_stats: NeighborPolicyStats::default(),
+                        outbound: crate::update::PeerOutboundState {
+                            update_group: String::new(),
+                            effective_distribution_mode:
+                                crate::update::EffectiveDistributionMode::Unknown,
+                            selection_deferral: Vec::new(),
+                            outbound_prefix_limits: Vec::new(),
+                        },
+                    }
+                }
+            },
+            |_, _| panic!("comparison must not be built after cancellation"),
+        );
+
+        assert!(response.is_none(), "canceled snapshot is never publishable");
+        assert_eq!(&*visited.borrow(), &peers[..CLOSE_AFTER]);
+    }
+
+    /// Load-bearing pre-comparison fence: removing the check immediately
+    /// after the final row invokes comparison construction for a request that
+    /// was canceled while that row was materialized.
+    #[test]
+    fn canceled_neighbor_rib_snapshot_skips_comparison_after_last_row() {
+        let canceled = std::cell::Cell::new(false);
+        let response = materialize_neighbor_rib_snapshot(
+            vec!["192.0.2.1".parse().unwrap()],
+            Some(("192.0.2.1".parse().unwrap(), "192.0.2.2".parse().unwrap())),
+            || canceled.get(),
+            |peer| {
+                canceled.set(true);
+                NeighborRibSnapshot {
+                    peer,
+                    advertised_count: 0,
+                    policy_stats: NeighborPolicyStats::default(),
+                    outbound: crate::update::PeerOutboundState {
+                        update_group: String::new(),
+                        effective_distribution_mode:
+                            crate::update::EffectiveDistributionMode::Unknown,
+                        selection_deferral: Vec::new(),
+                        outbound_prefix_limits: Vec::new(),
+                    },
+                }
+            },
+            |_, _| panic!("comparison must not be built after the final row canceled"),
+        );
+        assert!(response.is_none());
+    }
+
+    /// Load-bearing final fence: removing the post-comparison cancellation
+    /// check returns `Some`, which makes the caller enter its send path after
+    /// the request was canceled during comparison construction.
+    #[test]
+    fn canceled_neighbor_rib_snapshot_skips_send_after_comparison() {
+        let canceled = std::cell::Cell::new(false);
+        let response = materialize_neighbor_rib_snapshot(
+            Vec::new(),
+            Some(("192.0.2.1".parse().unwrap(), "192.0.2.2".parse().unwrap())),
+            || canceled.get(),
+            |_| unreachable!("no rows requested"),
+            |_, _| {
+                canceled.set(true);
+                UpdateGroupPeerComparison {
+                    primary_update_group: String::new(),
+                    verdict: crate::update::UpdateGroupComparisonVerdict::Unknown,
+                    primary_membership: crate::update::UpdateGroupComparisonMembership::Unknown,
+                    comparison_membership: crate::update::UpdateGroupComparisonMembership::Unknown,
+                    differences: Vec::new(),
+                }
+            },
+        );
+        assert!(response.is_none(), "send path must remain unreachable");
     }
 }
