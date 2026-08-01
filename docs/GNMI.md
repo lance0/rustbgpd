@@ -457,7 +457,9 @@ gnmic \
 
 The requested `--sample-interval` is clamped to `[1s, 1h]`: a sub-second
 or zero/missing interval is raised to the 1-second floor, and anything
-above one hour is capped at the 1-hour ceiling.
+above one hour is capped at the 1-hour ceiling. Multiple SAMPLE paths in one
+subscription retain their own clamped intervals; co-due neighbor paths share
+one peer snapshot, and delayed ticks skip missed periods without catch-up bursts.
 
 ## Troubleshooting
 

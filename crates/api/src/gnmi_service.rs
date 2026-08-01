@@ -38,6 +38,24 @@ const MAX_SAMPLE_INTERVAL: Duration = Duration::from_hours(1);
 /// target will service at once so a flood of collectors cannot exhaust resources.
 const MAX_CONCURRENT_SUBSCRIPTIONS: usize = 64;
 
+/// Preserve a SAMPLE path's monotonic phase while skipping every deadline that
+/// passed during a delayed render. The remainder avoids an unbounded catch-up
+/// loop even after a long stall.
+fn rearm_sample_deadline(
+    deadline: tokio::time::Instant,
+    interval: Duration,
+    completed: tokio::time::Instant,
+) -> tokio::time::Instant {
+    let elapsed = completed.saturating_duration_since(deadline);
+    let interval_nanos = interval.as_nanos();
+    let until_next = interval_nanos - elapsed.as_nanos() % interval_nanos;
+    completed
+        + Duration::new(
+            u64::try_from(until_next / 1_000_000_000).expect("sample interval fits u64 seconds"),
+            (until_next % 1_000_000_000) as u32,
+        )
+}
+
 type PeerSnapshotFuture = Pin<Box<dyn Future<Output = Result<Vec<PeerInfo>, Status>> + Send>>;
 type PeerSnapshotFn = Arc<dyn Fn() -> PeerSnapshotFuture + Send + Sync>;
 
@@ -213,21 +231,31 @@ impl GnmiService {
     async fn render_subscription_snapshot(
         &self,
         plan: &SubscriptionPlan,
+        due_paths: Option<&[usize]>,
         include_sync: bool,
     ) -> Result<Vec<gnmi::SubscribeResponse>, Status> {
         let mut updates = Vec::new();
         if !plan.updates_only {
+            let is_due = |index| due_paths.is_none_or(|due| due.contains(&index));
             // Snapshot peers once per snapshot/tick (the subscription may carry
             // multiple neighbor paths; otherwise each path fans out its own
             // peer-manager round-trip). Global-only plans skip the snapshot.
-            let peers = if plan.paths.iter().any(SupportedPath::needs_peers) {
+            let peers = if plan
+                .paths
+                .iter()
+                .enumerate()
+                .any(|(index, path)| is_due(index) && path.needs_peers())
+            {
                 let mut peers = (self.peer_snapshot)().await?;
                 peers.sort_by_key(|peer| peer.address);
                 Some(peers)
             } else {
                 None
             };
-            for query in &plan.paths {
+            for (index, query) in plan.paths.iter().enumerate() {
+                if !is_due(index) {
+                    continue;
+                }
                 updates.extend(self.render_subscription_query(
                     query,
                     peers.as_deref(),
@@ -262,10 +290,14 @@ impl GnmiService {
     async fn forward_snapshot(
         &self,
         plan: &SubscriptionPlan,
+        due_paths: Option<&[usize]>,
         include_sync: bool,
         tx: &tokio::sync::mpsc::Sender<Result<gnmi::SubscribeResponse, Status>>,
     ) -> bool {
-        match self.render_subscription_snapshot(plan, include_sync).await {
+        match self
+            .render_subscription_snapshot(plan, due_paths, include_sync)
+            .await
+        {
             Ok(responses) => {
                 for response in responses {
                     if tx.send(Ok(response)).await.is_err() {
@@ -289,7 +321,7 @@ impl GnmiService {
         mut inbound: tonic::Streaming<gnmi::SubscribeRequest>,
         tx: tokio::sync::mpsc::Sender<Result<gnmi::SubscribeResponse, Status>>,
     ) {
-        if !self.forward_snapshot(&plan, true, &tx).await {
+        if !self.forward_snapshot(&plan, None, true, &tx).await {
             return;
         }
         loop {
@@ -298,7 +330,7 @@ impl GnmiService {
                     request: Some(gnmi::subscribe_request::Request::Poll(_)),
                     ..
                 })) => {
-                    if !self.forward_snapshot(&plan, true, &tx).await {
+                    if !self.forward_snapshot(&plan, None, true, &tx).await {
                         return;
                     }
                 }
@@ -319,27 +351,48 @@ impl GnmiService {
         }
     }
 
-    /// STREAM/SAMPLE task: emit an initial snapshot + sync, then a fresh sample
-    /// every `sample_interval`, exiting promptly when the client disconnects.
+    /// STREAM/SAMPLE task: emit an initial snapshot + sync, then render paths at
+    /// their own sample intervals, exiting promptly when the client disconnects.
     async fn run_stream_sample(
         self,
         mut plan: SubscriptionPlan,
         tx: tokio::sync::mpsc::Sender<Result<gnmi::SubscribeResponse, Status>>,
     ) {
-        let mut include_sync = true;
+        if !self.forward_snapshot(&plan, None, true, &tx).await {
+            return;
+        }
+        // `updates_only` suppresses initial data, not later SAMPLE ticks.
+        plan.updates_only = false;
+        let now = tokio::time::Instant::now();
+        let mut deadlines: Vec<_> = plan
+            .sample_intervals
+            .iter()
+            .map(|interval| now + *interval)
+            .collect();
         loop {
-            if !self.forward_snapshot(&plan, include_sync, &tx).await {
+            let deadline = *deadlines.iter().min().expect("SAMPLE plan has paths");
+            tokio::select! {
+                () = tokio::time::sleep_until(deadline) => {}
+                () = tx.closed() => return,
+            }
+            let now = tokio::time::Instant::now();
+            let due: Vec<_> = deadlines
+                .iter()
+                .enumerate()
+                .filter_map(|(index, deadline)| (*deadline <= now).then_some(index))
+                .collect();
+            if !self.forward_snapshot(&plan, Some(&due), false, &tx).await {
                 return;
             }
-            include_sync = false;
-            // `updates_only` suppresses initial data, not later SAMPLE ticks.
-            plan.updates_only = false;
-            // Sleep until the next sample, but bail out promptly if the client
-            // disconnects (or the server drops the receiver) instead of waiting
-            // out a full interval first.
-            tokio::select! {
-                () = tokio::time::sleep(plan.sample_interval) => {}
-                () = tx.closed() => return,
+            // Preserve each path's monotonic phase while skipping every period
+            // missed during a delayed render.
+            let completed = tokio::time::Instant::now();
+            for index in due {
+                deadlines[index] = rearm_sample_deadline(
+                    deadlines[index],
+                    plan.sample_intervals[index],
+                    completed,
+                );
             }
         }
     }
@@ -690,7 +743,8 @@ pub(crate) struct SubscriptionPlan {
     stream_mode: Option<gnmi::SubscriptionMode>,
     paths: Vec<SupportedPath>,
     updates_only: bool,
-    sample_interval: Duration,
+    /// Clamped interval for each path in a STREAM plan, in `paths` order.
+    sample_intervals: Vec<Duration>,
     encoding: gnmi::Encoding,
 }
 
@@ -991,7 +1045,7 @@ fn parse_subscription_list(list: &gnmi::SubscriptionList) -> Result<Subscription
     }
 
     let mut paths = Vec::with_capacity(list.subscription.len());
-    let mut sample_interval = MIN_SAMPLE_INTERVAL;
+    let mut sample_intervals = Vec::with_capacity(list.subscription.len());
     let mut stream_mode: Option<gnmi::SubscriptionMode> = None;
     for subscription in &list.subscription {
         let path = subscription
@@ -1008,12 +1062,10 @@ fn parse_subscription_list(list: &gnmi::SubscriptionList) -> Result<Subscription
         if mode == gnmi::subscription_list::Mode::Stream {
             // Honor the client's requested interval, clamped to
             // [MIN_SAMPLE_INTERVAL, MAX_SAMPLE_INTERVAL] (a missing/zero interval
-            // defaults to the floor; an absurd value is capped). The shared sample
-            // timer ticks at the *largest* clamped interval across subscriptions
-            // so no subscription is sampled faster than it asked for.
+            // defaults to the floor; an absurd value is capped).
             let requested = Duration::from_nanos(subscription.sample_interval)
                 .clamp(MIN_SAMPLE_INTERVAL, MAX_SAMPLE_INTERVAL);
-            sample_interval = sample_interval.max(requested);
+            sample_intervals.push(requested);
 
             // Reject mixed STREAM modes within one SubscriptionList:
             // the v1 dispatch picks SAMPLE *or* ON_CHANGE for the
@@ -1040,7 +1092,7 @@ fn parse_subscription_list(list: &gnmi::SubscriptionList) -> Result<Subscription
         stream_mode,
         paths,
         updates_only: list.updates_only,
-        sample_interval,
+        sample_intervals,
         encoding,
     })
 }
@@ -1832,7 +1884,7 @@ impl gnmi::g_nmi_server::GNmi for GnmiService {
 
         match plan.mode {
             gnmi::subscription_list::Mode::Once => {
-                let responses = self.render_subscription_snapshot(&plan, true).await?;
+                let responses = self.render_subscription_snapshot(&plan, None, true).await?;
                 drop(permit);
                 Ok(Response::new(Box::pin(tokio_stream::iter(
                     responses.into_iter().map(Ok),
@@ -2906,7 +2958,7 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(stream.mode, gnmi::subscription_list::Mode::Stream);
-        assert_eq!(stream.sample_interval, MIN_SAMPLE_INTERVAL);
+        assert_eq!(stream.sample_intervals, vec![MIN_SAMPLE_INTERVAL]);
     }
 
     #[test]
@@ -2957,7 +3009,7 @@ mod tests {
         .unwrap();
 
         let responses = service
-            .render_subscription_snapshot(&plan, true)
+            .render_subscription_snapshot(&plan, None, true)
             .await
             .unwrap();
         assert_eq!(responses.len(), 2);
@@ -2992,38 +3044,48 @@ mod tests {
         }
     }
 
+    fn two_interval_neighbor_sample_list() -> (gnmi::SubscriptionList, gnmi::Path, gnmi::Path) {
+        let fast_path = neighbor_session_state_path("10.0.0.2");
+        let slow_path = neighbor_leaf_path("10.0.0.3".parse().unwrap(), NeighborLeaf::PeerAs);
+        let mut list = stream_sample_list(1_000_000_000);
+        list.subscription[0].path = Some(fast_path.clone());
+        let mut slow = list.subscription[0].clone();
+        slow.path = Some(slow_path.clone());
+        slow.sample_interval = 2_000_000_000;
+        list.subscription.push(slow);
+        (list, fast_path, slow_path)
+    }
+
     #[test]
     fn stream_sample_interval_honors_request_above_floor() {
         // A 5s request is kept as-is (it is already above the 1s floor).
         let plan = parse_subscription_list(&stream_sample_list(5_000_000_000)).unwrap();
-        assert_eq!(plan.sample_interval, Duration::from_secs(5));
+        assert_eq!(plan.sample_intervals, vec![Duration::from_secs(5)]);
     }
 
     #[test]
     fn stream_sample_interval_raises_sub_floor_request_to_floor() {
         // A 1ms request is raised up to the 1s floor.
         let plan = parse_subscription_list(&stream_sample_list(1_000_000)).unwrap();
-        assert_eq!(plan.sample_interval, MIN_SAMPLE_INTERVAL);
+        assert_eq!(plan.sample_intervals, vec![MIN_SAMPLE_INTERVAL]);
     }
 
     #[test]
     fn stream_sample_interval_defaults_zero_to_floor() {
         // A missing/zero interval defaults to the floor.
         let plan = parse_subscription_list(&stream_sample_list(0)).unwrap();
-        assert_eq!(plan.sample_interval, MIN_SAMPLE_INTERVAL);
+        assert_eq!(plan.sample_intervals, vec![MIN_SAMPLE_INTERVAL]);
     }
 
     #[test]
     fn stream_sample_interval_caps_absurd_request_to_ceiling() {
         // An absurd interval (u64::MAX ns ≈ centuries) is capped to the ceiling.
         let plan = parse_subscription_list(&stream_sample_list(u64::MAX)).unwrap();
-        assert_eq!(plan.sample_interval, MAX_SAMPLE_INTERVAL);
+        assert_eq!(plan.sample_intervals, vec![MAX_SAMPLE_INTERVAL]);
     }
 
     #[test]
-    fn stream_sample_interval_takes_largest_floored_across_subscriptions() {
-        // The shared sample timer ticks at the largest floored interval so no
-        // subscription is sampled faster than it requested.
+    fn stream_sample_intervals_are_clamped_per_subscription() {
         let path = mounted_path(&[pe("bgp"), pe("global"), pe("state")]);
         let subscription = |nanos| gnmi::Subscription {
             path: Some(path.clone()),
@@ -3047,7 +3109,14 @@ mod tests {
             updates_only: false,
         };
         let plan = parse_subscription_list(&list).unwrap();
-        assert_eq!(plan.sample_interval, Duration::from_secs(2));
+        assert_eq!(
+            plan.sample_intervals,
+            vec![
+                MIN_SAMPLE_INTERVAL,
+                Duration::from_secs(2),
+                MIN_SAMPLE_INTERVAL
+            ]
+        );
     }
 
     // --- Subscribe RPC-level harness ---------------------------------------
@@ -3128,6 +3197,21 @@ mod tests {
             next_bounded(stream).await.unwrap().unwrap().response,
             Some(gnmi::subscribe_response::Response::SyncResponse(true))
         );
+    }
+
+    fn subscribe_updates(response: gnmi::SubscribeResponse) -> Vec<gnmi::Update> {
+        let Some(gnmi::subscribe_response::Response::Update(notification)) = response.response
+        else {
+            panic!("expected Subscribe Update, got {response:?}");
+        };
+        notification.update
+    }
+
+    fn subscribe_paths(response: gnmi::SubscribeResponse) -> Vec<Option<gnmi::Path>> {
+        subscribe_updates(response)
+            .into_iter()
+            .map(|update| update.path)
+            .collect()
     }
 
     /// Drive a real Subscribe client until the peer-snapshot outage reaches it.
@@ -3454,6 +3538,126 @@ mod tests {
         ));
         // Dropping the client end lets the sample task exit promptly via select!.
         drop(stream);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stream_sample_schedules_each_path_and_batches_co_due_peer_reads() {
+        // Load-bearing break: collapsing these intervals to one shared 2s timer
+        // loses the 1s Update; rendering all paths per wake adds the slow path at
+        // 1s, while snapshotting per path makes the 2s call count four, not three.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let snapshot_calls = Arc::clone(&calls);
+        let peers = vec![
+            test_peer("10.0.0.2".parse().unwrap()),
+            test_peer("10.0.0.3".parse().unwrap()),
+        ];
+        let service = GnmiService::with_peer_snapshot(65001, "192.0.2.1", move || {
+            snapshot_calls.fetch_add(1, Ordering::SeqCst);
+            let peers = peers.clone();
+            async move { Ok(peers) }
+        });
+        let (list, fast_path, slow_path) = two_interval_neighbor_sample_list();
+        let plan = parse_subscription_list(&list).unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(SUBSCRIBE_CHANNEL_DEPTH);
+        tokio::spawn(service.run_stream_sample(plan, tx));
+        tokio::task::yield_now().await;
+
+        let initial = subscribe_updates(rx.try_recv().unwrap().unwrap());
+        assert_eq!(initial.len(), 2);
+        assert_eq!(
+            rx.try_recv().unwrap().unwrap().response,
+            Some(gnmi::subscribe_response::Response::SyncResponse(true))
+        );
+        assert!(rx.try_recv().is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let started = tokio::time::Instant::now();
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            subscribe_paths(rx.try_recv().unwrap().unwrap()),
+            vec![Some(fast_path.clone())]
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            subscribe_paths(rx.try_recv().unwrap().unwrap()),
+            vec![Some(fast_path.clone()), Some(slow_path)]
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+
+        // Wake 1.5s late for the 3s deadline. Both paths render once at 4.5s,
+        // then the fast path retains its original phase and fires at 5s.
+        tokio::time::advance(Duration::from_millis(2_500)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(subscribe_updates(rx.try_recv().unwrap().unwrap()).len(), 2);
+        assert!(rx.try_recv().is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
+        tokio::time::advance(Duration::from_millis(500)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            subscribe_paths(rx.try_recv().unwrap().unwrap()),
+            vec![Some(fast_path)]
+        );
+        assert_eq!(
+            tokio::time::Instant::now() - started,
+            Duration::from_secs(5)
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 5);
+    }
+
+    #[tokio::test]
+    async fn tcp_subscribe_preserves_distinct_sample_intervals() {
+        // Real TCP proof that parsing and dispatch reach the per-path scheduler.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let snapshot_calls = Arc::clone(&calls);
+        let service = GnmiService::with_peer_snapshot(65001, "192.0.2.1", move || {
+            snapshot_calls.fetch_add(1, Ordering::SeqCst);
+            async move {
+                Ok(vec![
+                    test_peer("10.0.0.2".parse().unwrap()),
+                    test_peer("10.0.0.3".parse().unwrap()),
+                ])
+            }
+        });
+        let (list, fast_path, slow_path) = two_interval_neighbor_sample_list();
+        let mut harness = serve(service).await;
+        let mut stream = harness
+            .client
+            .subscribe(tokio_stream::iter(vec![subscribe_msg(list)]))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(
+            subscribe_updates(stream.message().await.unwrap().unwrap()).len(),
+            2
+        );
+        assert_sync(&mut stream).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let fast = tokio::time::timeout(Duration::from_millis(1_500), stream.message())
+            .await
+            .expect("fast path missed its 1s window")
+            .unwrap()
+            .unwrap();
+        assert_eq!(subscribe_paths(fast), vec![Some(fast_path.clone())]);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        let both = tokio::time::timeout(Duration::from_millis(1_500), stream.message())
+            .await
+            .expect("co-due paths missed their 2s window")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            subscribe_paths(both),
+            vec![Some(fast_path), Some(slow_path)]
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
     }
 
     #[tokio::test]
