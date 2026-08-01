@@ -78,6 +78,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - gNMI neighbor `Get` and `Subscribe` reads now report peer-manager channel
   closure or dropped replies as retryable `UNAVAILABLE` instead of `INTERNAL`.
 
+- gNMI `updates_only` STREAM/SAMPLE subscriptions now resume sampled data after
+  the initial sync instead of remaining silent for the stream's lifetime.
+
 - Graceful Restart and Long-Lived Graceful Restart now retain an iBGP route
   source's route-reflector-client classification for as long as its stale
   routes remain eligible for reflection, preventing late joins or LLGR
