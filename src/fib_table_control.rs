@@ -127,11 +127,15 @@ async fn handle(
             // A running reconciler is the source of truth; otherwise fall back
             // to the startup set so configured tables stay visible even when
             // the actor failed to spawn (non-Linux / netlink failure).
-            let (tables, runtime_available) =
-                match read_current_tables(deps.fib_cmd_tx.as_ref()).await? {
-                    Some(current) => (current, true),
-                    None => (deps.startup_tables.clone(), false),
-                };
+            let (tables, runtime_available) = match read_current_tables(
+                deps.fib_cmd_tx.as_ref(),
+                FibTableControlError::Unavailable,
+            )
+            .await?
+            {
+                Some(current) => (current, true),
+                None => (deps.startup_tables.clone(), false),
+            };
             Ok(proto::ListFibTablesResponse {
                 tables: tables.iter().map(config_to_proto).collect(),
                 runtime_available,
@@ -190,7 +194,7 @@ async fn mutate(
                 .map_err(FibTableControlError::FailedPrecondition)?;
         }
 
-        let current = read_current_tables(Some(&fib_cmd_tx))
+        let current = read_current_tables(Some(&fib_cmd_tx), FibTableControlError::Internal)
             .await?
             .unwrap_or_default();
         let candidate = apply_mutation(current, mutation)?;
@@ -220,7 +224,7 @@ pub(crate) async fn commit_fib_tables_locked(
     config_tx: &mpsc::Sender<ConfigEvent>,
     candidate: Vec<FibTableConfig>,
 ) -> Result<proto::ListFibTablesResponse, FibCommitFailure> {
-    let previous_tables = read_current_tables(Some(fib_cmd_tx))
+    let previous_tables = read_current_tables(Some(fib_cmd_tx), FibTableControlError::Internal)
         .await?
         .unwrap_or_default();
     let previous_snapshots: Vec<FibTableSnapshot> =
@@ -302,6 +306,7 @@ pub(crate) async fn commit_fib_tables_locked(
 /// running (used by `List` to report `runtime_available = false`).
 async fn read_current_tables(
     fib_cmd_tx: Option<&mpsc::Sender<FibRuntimeCommand>>,
+    actor_error: fn(String) -> FibTableControlError,
 ) -> Result<Option<Vec<FibTableConfig>>, FibTableControlError> {
     let Some(tx) = fib_cmd_tx else {
         return Ok(None);
@@ -309,12 +314,10 @@ async fn read_current_tables(
     let (reply_tx, reply_rx) = oneshot::channel();
     tx.send(FibRuntimeCommand::GetTables { reply: reply_tx })
         .await
-        .map_err(|_| {
-            FibTableControlError::Internal("FIB reconciler command channel closed".to_string())
-        })?;
-    let tables = reply_rx.await.map_err(|_| {
-        FibTableControlError::Internal("FIB reconciler dropped the GetTables reply".to_string())
-    })?;
+        .map_err(|_| actor_error("FIB reconciler command channel closed".to_string()))?;
+    let tables = reply_rx
+        .await
+        .map_err(|_| actor_error("FIB reconciler dropped the GetTables reply".to_string()))?;
     Ok(Some(tables))
 }
 
@@ -570,8 +573,189 @@ fn config_to_snapshot(table: &FibTableConfig) -> FibTableSnapshot {
 mod tests {
     use super::*;
     use rustbgpd_api::peer_types::PeerManagerCommand;
+    use rustbgpd_api::proto::rib_service_server::RibService as _;
+    use rustbgpd_api::rib_service::RibService;
+    use rustbgpd_api::server::AccessMode;
+    use tonic::{Code, Request, Status};
 
     use crate::test_support::basic_fib_table as table;
+
+    #[derive(Clone, Copy)]
+    enum ReadFailure {
+        SendClosed,
+        ReplyDropped,
+    }
+
+    #[derive(Clone, Copy)]
+    enum MutationRpc {
+        Set,
+        Delete,
+    }
+
+    impl MutationRpc {
+        async fn call(self, service: &RibService) -> Result<(), Status> {
+            match self {
+                Self::Set => service
+                    .set_fib_table(Request::new(proto::SetFibTableRequest {
+                        table: Some(config_to_proto(&table("core", 1001))),
+                    }))
+                    .await
+                    .map(|_| ()),
+                Self::Delete => service
+                    .delete_fib_table(Request::new(proto::DeleteFibTableRequest {
+                        name: "edge".to_string(),
+                    }))
+                    .await
+                    .map(|_| ()),
+            }
+        }
+    }
+
+    fn failing_fib_actor(
+        first_reply: Option<Vec<FibTableConfig>>,
+        failure: ReadFailure,
+    ) -> mpsc::Sender<FibRuntimeCommand> {
+        let (tx, mut rx) = mpsc::channel(2);
+        if first_reply.is_none() && matches!(failure, ReadFailure::SendClosed) {
+            drop(rx);
+            return tx;
+        }
+        tokio::spawn(async move {
+            if let Some(tables) = first_reply {
+                let Some(FibRuntimeCommand::GetTables { reply }) = rx.recv().await else {
+                    panic!("expected initial GetTables")
+                };
+                reply.send(tables).expect("caller awaits initial roster");
+            }
+            match failure {
+                ReadFailure::SendClosed => drop(rx),
+                ReadFailure::ReplyDropped => {
+                    let Some(FibRuntimeCommand::GetTables { reply }) = rx.recv().await else {
+                        panic!("expected failing GetTables")
+                    };
+                    drop(reply);
+                }
+            }
+        });
+        tx
+    }
+
+    fn rpc_service(
+        fib_cmd_tx: Option<mpsc::Sender<FibRuntimeCommand>>,
+        startup_tables: Vec<FibTableConfig>,
+    ) -> RibService {
+        let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(1);
+        tokio::spawn(async move {
+            if let Some(command) = peer_mgr_rx.recv().await {
+                let PeerManagerCommand::StageFibTables { reply, .. } = command else {
+                    panic!("actor-read test reached an unexpected peer-manager command")
+                };
+                let _ = reply.send(Err(
+                    "unexpected peer-manager staging in FIB actor-read test".to_string(),
+                ));
+            }
+        });
+        let (config_tx, mut config_rx) = mpsc::channel(1);
+        tokio::spawn(async move {
+            assert!(
+                config_rx.recv().await.is_none(),
+                "actor-read test unexpectedly reached persistence"
+            );
+        });
+        let control = make_fib_table_control_fn(FibTableControlDeps {
+            fib_cmd_tx,
+            peer_mgr_tx,
+            rib_tx: None,
+            config_tx: Some(config_tx),
+            lock: Arc::new(Mutex::new(())),
+            config_mutation_gate: None,
+            startup_tables,
+            confirm_journal_path: None,
+            config_history_dir: None,
+        });
+        let (rib_tx, _rib_rx) = mpsc::channel(1);
+        RibService::new(rib_tx).with_fib_table_control(AccessMode::ReadWrite, Some(control))
+    }
+
+    fn assert_actor_read_error(status: &Status, code: Code, failure: ReadFailure) {
+        let expected = match failure {
+            ReadFailure::SendClosed => "FIB reconciler command channel closed",
+            ReadFailure::ReplyDropped => "FIB reconciler dropped the GetTables reply",
+        };
+        assert_eq!(status.message(), expected);
+        assert_eq!(status.code(), code);
+    }
+
+    #[tokio::test]
+    async fn list_fib_tables_actor_read_outages_are_unavailable() {
+        for failure in [ReadFailure::SendClosed, ReadFailure::ReplyDropped] {
+            let status = rpc_service(Some(failing_fib_actor(None, failure)), vec![])
+                .list_fib_tables(Request::new(proto::ListFibTablesRequest {}))
+                .await
+                .unwrap_err();
+            assert_actor_read_error(&status, Code::Unavailable, failure);
+        }
+    }
+
+    #[tokio::test]
+    async fn fib_table_mutation_initial_reads_remain_internal() {
+        for rpc in [MutationRpc::Set, MutationRpc::Delete] {
+            for failure in [ReadFailure::SendClosed, ReadFailure::ReplyDropped] {
+                let status = rpc
+                    .call(&rpc_service(Some(failing_fib_actor(None, failure)), vec![]))
+                    .await
+                    .unwrap_err();
+                assert_actor_read_error(&status, Code::Internal, failure);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn fib_table_mutation_commit_reads_remain_internal() {
+        for rpc in [MutationRpc::Set, MutationRpc::Delete] {
+            for failure in [ReadFailure::SendClosed, ReadFailure::ReplyDropped] {
+                let current = vec![table("edge", 1000)];
+                let status = rpc
+                    .call(&rpc_service(
+                        Some(failing_fib_actor(Some(current.clone()), failure)),
+                        current,
+                    ))
+                    .await
+                    .unwrap_err();
+                assert_actor_read_error(&status, Code::Internal, failure);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn list_fib_tables_preserves_hook_internal_error() {
+        let control: FibTableControlFn = Arc::new(|_| {
+            Box::pin(async {
+                Err(FibTableControlError::Internal(
+                    "sentinel hook failure".to_string(),
+                ))
+            })
+        });
+        let (rib_tx, _rib_rx) = mpsc::channel(1);
+        let status = RibService::new(rib_tx)
+            .with_fib_table_control(AccessMode::ReadWrite, Some(control))
+            .list_fib_tables(Request::new(proto::ListFibTablesRequest {}))
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), Code::Internal);
+        assert_eq!(status.message(), "sentinel hook failure");
+    }
+
+    #[tokio::test]
+    async fn list_fib_tables_without_actor_returns_startup_snapshot() {
+        let response = rpc_service(None, vec![table("edge", 1000)])
+            .list_fib_tables(Request::new(proto::ListFibTablesRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!response.runtime_available);
+        assert_eq!(response.tables, [config_to_proto(&table("edge", 1000))]);
+    }
 
     #[tokio::test]
     async fn persistence_rejection_rolls_back_runtime_and_snapshot() {
