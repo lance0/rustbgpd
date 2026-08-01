@@ -836,7 +836,7 @@ mod tests {
         });
 
         // Peer manager that drops the ListPeers reply exactly once on
-        // demand: the next sample snapshot then fails with an internal
+        // demand: the next sample snapshot then fails with `UNAVAILABLE`
         // Status, ending the outbound stream mid-session — the same
         // stream-ending error shape as ON_CHANGE broadcast DataLoss.
         let fail_next = Arc::new(AtomicBool::new(false));
