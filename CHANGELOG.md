@@ -62,6 +62,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Neighbor read RPCs now return retryable gRPC `UNAVAILABLE` when the peer
+  manager cannot accept or answer their snapshot request, instead of reporting
+  the actor outage as `INTERNAL`.
+
 - IRR-scale boot and SIGHUP reload no longer recompile the `.rpol` set
   data once per chain resolution: a compiled unit now interns its
   prefix/community/asn sets exactly once and every chain instantiation
