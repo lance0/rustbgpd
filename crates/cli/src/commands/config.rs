@@ -229,7 +229,7 @@ pub async fn status(connection: Connection, json: bool) -> Result<(), CliError> 
     Ok(())
 }
 
-/// List the daemon's bounded on-disk applied-config history: index,
+/// List the daemon's bounded on-disk recorded config history: index,
 /// timestamp, content hash, and a one-line summary per retained entry
 /// (never config document contents).
 pub async fn history(connection: Connection, json: bool) -> Result<(), CliError> {
@@ -258,7 +258,7 @@ pub async fn rollback(
 ) -> Result<(), CliError> {
     if options.index == 0 {
         return Err(CliError::Argument(
-            "rollback index must be >= 1 (index 0 is the currently running config)".to_string(),
+            "rollback index must be >= 1 (index 0 is the newest recorded config)".to_string(),
         ));
     }
     if options.confirm_id.is_none() && options.confirm_timeout_seconds.is_some() {
@@ -322,7 +322,7 @@ fn history_to_json(resp: &ListConfigHistoryResponse) -> serde_json::Value {
 fn print_history_human(resp: &ListConfigHistoryResponse) {
     for entry in &resp.entries {
         let short_hash = entry.sha256.get(..12).unwrap_or(&entry.sha256);
-        let marker = if entry.index == 0 { " (running)" } else { "" };
+        let marker = history_index_marker(entry.index);
         println!(
             "{:>3}  {}  {}  {}{}",
             entry.index,
@@ -333,6 +333,10 @@ fn print_history_human(resp: &ListConfigHistoryResponse) {
         );
     }
     print!("{}", resp.human_text);
+}
+
+fn history_index_marker(index: u32) -> &'static str {
+    if index == 0 { " (latest)" } else { "" }
 }
 
 /// Render unix seconds as `YYYY-MM-DDTHH:MM:SSZ` without a date dependency
@@ -1353,7 +1357,7 @@ mod tests {
                 sha256: "ab".repeat(32),
                 summary: "asn 65001, router-id 10.0.0.1, 2 neighbor(s)".to_string(),
             }],
-            human_text: "1 applied config(s) retained.\n".to_string(),
+            human_text: "1 recorded config snapshot(s) retained.\n".to_string(),
         });
 
         assert_eq!(value["entries"][0]["index"], 0);
@@ -1364,7 +1368,16 @@ mod tests {
             value["entries"][0]["summary"],
             "asn 65001, router-id 10.0.0.1, 2 neighbor(s)"
         );
-        assert_eq!(value["human_text"], "1 applied config(s) retained.\n");
+        assert_eq!(
+            value["human_text"],
+            "1 recorded config snapshot(s) retained.\n"
+        );
+    }
+
+    #[test]
+    fn history_index_zero_uses_latest_marker() {
+        assert_eq!(history_index_marker(0), " (latest)");
+        assert_eq!(history_index_marker(1), "");
     }
 
     #[test]
@@ -1432,7 +1445,10 @@ mod tests {
         .expect_err("rollback 0 must fail before RPC");
 
         assert!(
-            matches!(err, CliError::Argument(ref message) if message.contains("index must be >= 1")),
+            matches!(err, CliError::Argument(ref message)
+                if message.contains("index must be >= 1")
+                    && message.contains("newest recorded config")
+                    && !message.contains("running")),
             "{err:?}"
         );
         assert_eq!(server.state.config_rollback_calls.load(Ordering::SeqCst), 0);

@@ -1,12 +1,16 @@
-//! Bounded on-disk history of applied configs (Junos-style `rollback N`).
+//! Bounded on-disk history of recorded config snapshots (Junos-style `rollback N`).
 //!
-//! [`crate::config_persister`] records each validated applied config here —
-//! durable mutations, the boot snapshot, and successful SIGHUP refreshes —
-//! one entry per distinct config, content-hash-deduplicated against the newest
-//! entry and bounded to [`HISTORY_LIMIT`] snapshots under
+//! [`crate::config_persister`] records each canonical, validated config snapshot
+//! here on a best-effort basis — durable mutations, the boot snapshot, and
+//! successful SIGHUP refreshes — one entry per distinct config,
+//! content-hash-deduplicated against the newest entry and bounded to
+//! [`HISTORY_LIMIT`] snapshots under
 //! `<runtime_state_dir>/config-history/`. Rollback resolves an entry by
 //! index and routes it through the ordinary config transaction path (see
 //! `config_transaction_control`); this module only stores and lists.
+//! Retained bytes and their SHA-256 cover only normalized TOML. Referenced
+//! external `.rpol` main/import files and policy datasets are not archived or
+//! hashed here, so rollback may observe different external inputs or fail.
 //!
 //! Entries are individual files named `<seq>-<unix_ts>-<sha256>.toml`,
 //! written with the commit-confirm journal's fsync'd atomic-write primitive.
@@ -26,7 +30,7 @@ use sha2::{Digest as _, Sha256};
 /// Directory name under `runtime_state_dir`.
 pub const HISTORY_DIR_NAME: &str = "config-history";
 
-/// Number of applied-config snapshots retained on disk. Deliberately a
+/// Number of recorded config snapshots retained on disk. Deliberately a
 /// fixed bound, same as the crash-report retention cap: N recent configs,
 /// no candidate-config database.
 pub const HISTORY_LIMIT: usize = 20;
@@ -39,13 +43,13 @@ const MAX_ENTRY_BYTES: u64 = 10 * 1024 * 1024;
 /// Metadata for one retained config snapshot (no document contents).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoryEntry {
-    /// 0 = newest (the currently persisted config), 1 = previous, …
+    /// 0 = newest recorded config, 1 = the next older entry, …
     pub index: usize,
     /// Monotonic on-disk sequence number (newest = highest).
     pub sequence: u64,
     /// Unix seconds at record time.
     pub timestamp_unix_seconds: u64,
-    /// Hex-encoded SHA-256 of the applied TOML document.
+    /// Hex-encoded SHA-256 of the retained normalized TOML document only.
     pub sha256: String,
     /// Entry file path.
     pub path: PathBuf,
@@ -252,8 +256,8 @@ pub fn summarize(toml_str: &str) -> String {
     let policies = value
         .get("policy")
         .and_then(|p| p.get("definitions"))
-        .and_then(toml::Value::as_array)
-        .map_or(0, Vec::len);
+        .and_then(toml::Value::as_table)
+        .map_or(0, toml::Table::len);
     format!(
         "asn {asn}, router-id {router_id}, {} neighbor(s), {} dynamic range(s), {} fib table(s), {policies} policy definition(s)",
         array_len("neighbors"),
@@ -364,7 +368,7 @@ mod tests {
         let entries = list(dir.path()).unwrap();
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].sha256, sha256_hex(&config_toml(65002)));
-        // …and a boot-time re-record of the running config deduplicates
+        // …and a boot-time re-record of the same config deduplicates
         // against the persisted newest entry instead of growing history.
         assert!(!record(dir.path(), &config_toml(65002)).unwrap());
         assert_eq!(list(dir.path()).unwrap().len(), 2);
@@ -476,6 +480,23 @@ mod tests {
             summarize("not [valid toml"),
             "(unparseable config snapshot)"
         );
+    }
+
+    #[test]
+    fn summarize_counts_policy_definition_tables() {
+        let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[policy.definitions.customer-in]
+
+[policy.definitions.customer-out]
+"#;
+
+        let summary = summarize(toml_str);
+        assert!(summary.contains("2 policy definition(s)"), "{summary}");
     }
 
     #[test]
