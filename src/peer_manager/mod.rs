@@ -508,11 +508,7 @@ impl PeerManager {
     async fn handle_readiness_query(&self, query: PeerManagerReadinessQuery) {
         match query {
             PeerManagerReadinessQuery::ListPeers { reply } => {
-                if reply.is_closed() {
-                    return;
-                }
-                let infos = self.list_peers().await;
-                let _ = reply.send(infos);
+                self.answer_list_peers(reply).await;
             }
         }
     }
@@ -875,15 +871,10 @@ impl PeerManager {
                             let _ = reply.send(result);
                         }
                         PeerManagerCommand::ListPeers { reply } => {
-                            if reply.is_closed() {
-                                continue;
-                            }
-                            let infos = self.list_peers().await;
-                            let _ = reply.send(infos);
+                            self.answer_list_peers(reply).await;
                         }
                         PeerManagerCommand::QueryWarmCheckpointCapture { reply } => {
-                            let capture = self.query_warm_checkpoint_capture().await;
-                            let _ = reply.send(capture);
+                            self.answer_warm_checkpoint_capture(reply).await;
                         }
                         PeerManagerCommand::SubscribeSessionEvents { reply } => {
                             let _ = reply.send(self.session_events_tx.subscribe());
