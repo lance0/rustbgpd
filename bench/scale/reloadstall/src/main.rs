@@ -565,10 +565,7 @@ async fn establish_stub(ctx: Arc<Ctx>, i: u32) -> Result<Stub, String> {
                                 }
                             }
                         }
-                        // Flapstorm arming: feed the tracked direction into the
-                        // same per-observer bitmap the reload path uses. Runs
-                        // for withdraw-only UPDATEs too (the reload-generation
-                        // block above is announce-gated).
+                        // Feed the armed direction into the shared bitmap, including withdrawals.
                         let flap_mode = ob.flap_mode.load(Ordering::Acquire);
                         if flap_mode != FLAP_OFF {
                             let tracked = if flap_mode == FLAP_TRACK_WITHDRAWS {
@@ -577,9 +574,12 @@ async fn establish_stub(ctx: Arc<Ctx>, i: u32) -> Result<Stub, String> {
                                 &parsed.announced
                             };
                             let mut generation = ob.generation.lock().unwrap();
-                            for e in tracked {
-                                if let Some(index) = base_prefix_index(e.prefix, total_prefixes) {
-                                    generation.observe(index, t_us);
+                            if ob.flap_mode.load(Ordering::Acquire) == flap_mode {
+                                for e in tracked {
+                                    if let Some(index) = base_prefix_index(e.prefix, total_prefixes)
+                                    {
+                                        generation.observe(index, t_us);
+                                    }
                                 }
                             }
                         }
@@ -981,6 +981,10 @@ fn final_evidence_allowed(_reloads: u32, flapstorm: Option<u32>) -> bool {
     flapstorm.is_none()
 }
 
+fn needs_first_exact_bitmap(reloads: u32, flapstorm: Option<u32>) -> bool {
+    reloads > 0 || flapstorm.is_some()
+}
+
 #[allow(clippy::too_many_lines)]
 fn main() {
     let mut a: Vec<String> = std::env::args().collect();
@@ -1103,29 +1107,42 @@ fn main() {
             ctx.t0.elapsed().as_secs_f64()
         );
 
-        // --- Announce base table. ---
+        let expected = u64::from(total - per_peer);
+        let exact_initial = needs_first_exact_bitmap(reloads, flapstorm); // FIRST_EXACT_ARM:
+        if exact_initial {
+            for (i, observer) in ctx.obs.iter().enumerate() {
+                let own_start = u32::try_from(i).unwrap() * per_peer;
+                let mut generation = observer.generation.lock().unwrap();
+                generation.reset(total, expected, own_start, per_peer);
+                let mode = &observer.flap_mode;
+                mode.store(FLAP_TRACK_ANNOUNCES, Ordering::Release);
+            }
+        }
+        // --- Announce base table (FIRST_EXACT_SEND). ---
         for i in 0..n_peers {
             let slice = own_slice(&ctx, i);
             for m in announce_msgs(i, &slice) {
                 stubs[i as usize].tx.send(m).await.unwrap();
             }
         }
-        // Converged: every observer holds the table minus its own slice.
-        // Watchdog: if no observer makes progress for a generous window,
-        // abort with expected-vs-observed counts instead of parking forever
-        // (the pre-LAN-449 failure mode: a wrong predicate here is silent).
-        let expected = u64::from(total - per_peer);
+        // Require every observer's table-minus-own-slice; abort stalls (LAN-449).
         let mut last_sum = 0u64;
         let mut last_progress = Instant::now();
-        loop {
+        let unique = loop { // FIRST_EXACT_COUNT_LOOP:
             tokio::time::sleep(Duration::from_millis(200)).await;
             let counts: Vec<u64> = ctx
                 .obs
                 .iter()
-                .map(|o| o.base_ann_total.load(Ordering::Relaxed))
+                .map(|observer| {
+                    if exact_initial {
+                        observer.generation.lock().unwrap().unique
+                    } else {
+                        observer.base_ann_total.load(Ordering::Relaxed)
+                    }
+                })
                 .collect();
             if *counts.iter().min().unwrap() >= expected {
-                break;
+                break counts;
             }
             let sum: u64 = counts.iter().sum();
             // Before the first observed announcement, allow the larger
@@ -1156,6 +1173,19 @@ fn main() {
                 );
                 std::process::exit(1);
             }
+        };
+        if exact_initial {
+            for observer in &ctx.obs {
+                let _g = observer.generation.lock().unwrap();
+                observer.flap_mode.store(FLAP_OFF, Ordering::Release);
+            } // FIRST_EXACT_RECEIPT
+            println!(
+                "first_exact_bitmap,mode={},peers={n_peers},total={total},per_peer={per_peer},expected={expected},completed={},min_unique={},max_unique={}",
+                if flapstorm.is_some() { "flapstorm" } else { "reload" },
+                unique.iter().filter(|&&count| count >= expected).count(),
+                unique.iter().min().unwrap(),
+                unique.iter().max().unwrap()
+            );
         }
         println!(
             "converged (>= {expected}/observer) at {:.1}s rss_mib={}",
@@ -1594,12 +1624,29 @@ mod tests {
     #[test]
     fn pre_churn_evidence_barrier_is_ordered_before_churn() {
         let source = include_str!("main.rs");
-        let converged = source.find("\"converged (>=").unwrap();
+        let marker = |needle: &str| source.find(needle).unwrap();
+        let ordered = ["ARM:", "SEND", "COUNT_LOOP:", "RECEIPT"].map(|suffix| {
+            let needle = ["FIRST_EXACT_", suffix].concat();
+            assert_eq!(source.matches(&needle).count(), 1);
+            marker(&needle)
+        });
         let barrier = source
             .find("await_pre_churn_evidence_capture(evidence_dir, PRE_CHURN_EVIDENCE_TIMEOUT)")
             .unwrap();
         let churn = source.find("// --- Start churn:").unwrap();
-        assert!(converged < barrier && barrier < churn);
+        let disarm_source = ["flap_mode.store(", "FLAP_OFF"].concat();
+        let cutoff = marker("_g = observer.generation.lock().unwrap();");
+        let disarm = source.match_indices(&disarm_source).nth(2).unwrap().0;
+        assert!(ordered[..3].is_sorted() && ordered[2] < cutoff);
+        assert!(cutoff < disarm && disarm < ordered[3]);
+        assert!(ordered[3] < barrier && barrier < churn);
+        let arm_source = "store(FLAP_TRACK_ANNOUNCES, Ordering::Release)";
+        assert_eq!(source.matches(arm_source).count(), 2);
+        let recheck_source = ["flap_mode.load(Ordering::Acquire) == ", "flap_mode"].concat();
+        assert_eq!(source.matches(&recheck_source).count(), 1);
+        let count_source = "observer.generation.lock().unwrap().unique";
+        assert_eq!(source.matches(count_source).count(), 2);
+        assert_eq!(source.matches(&disarm_source).count(), 3);
         let opt_in = ["RELOADSTALL_PRE_", "CHURN_EVIDENCE_DIR"].concat();
         assert_eq!(
             source.matches(&opt_in).count(),
@@ -1614,6 +1661,14 @@ mod tests {
         assert!(final_evidence_allowed(0, None));
         assert!(!final_evidence_allowed(0, Some(1)));
         assert!(!final_evidence_allowed(4, Some(1)));
+    }
+
+    #[test]
+    fn first_exact_bitmap_mode_matrix() {
+        assert!(!needs_first_exact_bitmap(0, None));
+        assert!(needs_first_exact_bitmap(1, None));
+        assert!(needs_first_exact_bitmap(0, Some(1)));
+        assert!(needs_first_exact_bitmap(1, Some(1)));
     }
 
     #[test]
