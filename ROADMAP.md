@@ -1815,7 +1815,7 @@ branch is between features.
   `crates/bfd/src/discriminator.rs` now returns a typed discriminator-exhaustion
   error instead of panicking. The daemon logs and refuses to install the new BFD
   session if the 32-bit non-zero discriminator space is ever exhausted.
-- [ ] **Stringly command errors → typed errors where API status depends on
+- [x] **Stringly command errors → typed errors where API status depends on
   class.** PR #334 introduced `DynamicRangeError` so
   `AddDynamicNeighbor` / `DeleteDynamicNeighbor` can map duplicate, not-found,
   and invalid-input failures to stable gRPC status codes without parsing error
@@ -1828,11 +1828,10 @@ branch is between features.
   use typed errors where callers need status-class distinctions. The transport
   peer-session command ACK surface (`SendRouteRefresh`, live import/export
   policy updates, and graceful-shutdown toggles) now uses typed errors while
-  preserving the existing peer-manager operator text. Older peer-manager / RIB
-  commands still commonly return
-  `Result<_, String>`; keep that for one-status surfaces, but migrate to small
-  typed enums when a caller needs to distinguish `ALREADY_EXISTS`, `NOT_FOUND`,
-  `INVALID_ARGUMENT`, or similar API-visible classes.
+  preserving the existing peer-manager operator text. Remaining
+  `Result<_, String>` replies are intentional one-status or internal-
+  orchestration surfaces; keep them until a caller needs multiple API-visible
+  status classes.
 - [x] **RTR encode length conversions → checked typed errors.** The
   clippy-reason ratchet documented a few pre-existing RTR encode-path casts
   from `usize` to `u32`. They are not peer-reachable today — the encoder is fed
@@ -1989,8 +1988,10 @@ branch is between features.
   crates.io with 0.31 support**: drop the Dependabot ignore + the
   `[patch.crates-io]` pin, bump the pair together in one PR, rerun the #538 matrix
   (raw `IFLA_PROTINFO` AC-gate encode + `link_carrier` flag reads are the surfaces
-  to re-verify), and merge. #452 stays the upstream-watch tracker. Verified during
-  the FIB route-drift eventing work (#482). **Upstream nudge filed 2026-06-23:**
+  to re-verify), and merge. LAN-643 is the sole live upstream-watch tracker;
+  closed Dependabot PR #452 remains the duplicate-version/type-mismatch proof.
+  Verified during the FIB route-drift eventing work (#482). **Upstream nudge
+  filed 2026-06-23:**
   rust-netlink/rtnetlink#173 — a "New release 0.22.0" version-bump + CHANGELOG PR
   against their `main` (which already carries the 0.31 dep) — requests the release
   that unblocks this; execute the close-out above if/when any `rtnetlink` 0.22+
@@ -2011,12 +2012,12 @@ branch is between features.
   2,318-line total is mostly the test module; real production body is ~630
   lines. `src/config/mod.rs` has since had its resolution concern split out
   into `src/config/resolution.rs` (#1215). The current largest *production*
-  bodies (test modules excluded, 2026-07-30) are
+  bodies (test modules excluded, 2026-07-31) are
   `crates/evpn-linux/src/reconcile.rs` (~7,647 lines — unchanged; the file's
   9,095-line total includes its in-file test module), `src/config/mod.rs`
-  (~5,792, down from ~6,932 via the resolution split), and
-  `crates/rib/src/manager/mod.rs` (~5,547) — the best next split candidates.
-  Keep splitting only where it reduces real conflict or review cost.
+  (~5,871), and `src/main.rs` (~5,295). `crates/rib/src/manager/mod.rs` is
+  3,534 lines total and is no longer in the top three. Further splitting remains
+  driven by demand, conflicts, and review cost, not a commitment.
 - [ ] **Doc-precision + lint-policy consistency sweep (v0.41.0 review).** A
   whole-codebase review found no correctness or security defects; the residue was
   documentation/policy drift, all low-risk. The documentation and lint-policy
@@ -2040,10 +2041,11 @@ branch is between features.
     `dhat-heap` allocator features, and the test/bench targets that carry
     justified `unsafe` outside any shipped path.
 
-  The one live residue is the `thiserror` 1.x/2.x duplicate (1.0.69 + 2.0.18 both
-  resolved) — upstream-blocked, since 1.x is pulled only by `protobuf` via
-  `prometheus` and by no first-party crate. Periodic hygiene at a dependency
-  refresh, not actionable until upstream moves off it.
+  The one live residue is the `thiserror` 1.x/2.x duplicate (1.0.69 + 2.0.19 both
+  resolved) — upstream-blocked, since 1.x is transitive through
+  `protobuf` / `prometheus` and `rtnetlink`, and no first-party crate depends
+  on 1.x directly. Periodic hygiene at a dependency refresh, not actionable
+  until upstream moves off it.
 - [x] **Retire `rustbgpctl` in favor of `rbgp` (single CLI name).** The CLI
   crate now ships only the `rbgp` binary. The old `include!` alias/shim and
   long-form binary are removed; supported docs, package artifacts, generated
