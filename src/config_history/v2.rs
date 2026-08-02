@@ -1,8 +1,8 @@
-//! Dormant, bounded ADR-0121 v2 history-envelope wire codec.
+//! Dormant, bounded ADR-0121 v2 history codec and descriptor-relative store.
 
 #![allow(
     dead_code,
-    reason = "ADR-0121 tranche 2 deliberately lands the codec before filesystem wiring"
+    reason = "ADR-0121 deliberately lands v2 storage before runtime/public activation"
 )]
 
 use std::collections::HashMap;
@@ -10,11 +10,13 @@ use std::ffi::{OsStr, OsString};
 #[cfg(test)]
 use std::fs;
 use std::fs::File;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::os::fd::OwnedFd;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -29,6 +31,273 @@ const MAX_IMPORTS: usize = 4096;
 const MAX_DATASETS: usize = 65_536;
 const MAX_TEXT: usize = 64 * 1024;
 const SOURCE_DIGEST_DOMAIN: &[u8] = b"rustbgpd.config-source.v2\0";
+static WRITER_LOCK: Mutex<()> = Mutex::new(());
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WriteStep {
+    Pinned,
+    CleanupSync,
+    StageCreate,
+    StageWrite,
+    StageSync,
+    EvictionUnlink,
+    EvictionSync,
+    Publish,
+    FinalSync,
+}
+
+/// Dormant v2 writer. Deliberately private and unreachable from v1 callers.
+fn record_v2(dir: &Path, normalized_toml: &str, manifest: Manifest) -> io::Result<bool> {
+    record_v2_with(dir, normalized_toml, manifest, |_| Ok(()))
+}
+
+#[allow(clippy::too_many_lines)]
+fn record_v2_with(
+    dir: &Path,
+    normalized_toml: &str,
+    mut manifest: Manifest,
+    mut step: impl FnMut(WriteStep) -> io::Result<()>,
+) -> io::Result<bool> {
+    use nix::fcntl::{OFlag, RenameFlags, openat, renameat2};
+    use nix::sys::stat::{Mode, fchmod};
+    use nix::unistd::{UnlinkatFlags, unlinkat};
+
+    let _guard = WRITER_LOCK
+        .lock()
+        .map_err(|_| io::Error::other("config history writer lock is poisoned"))?;
+
+    // Validate every caller-controlled component before creating even a stage.
+    if normalized_toml.len() > MAX_TOML {
+        return Err(limit("normalized TOML", MAX_TOML));
+    }
+    let toml_sha256 = Sha256::digest(normalized_toml.as_bytes()).into();
+    if manifest.toml_sha256 != toml_sha256 {
+        return Err(invalid("normalized TOML digest mismatch"));
+    }
+    validate_manifest(&manifest)?;
+
+    let directory = open_or_create_writer_directory(dir)?;
+    step(WriteStep::Pinned)?;
+    let cleanup_result = cleanup_stages(&directory);
+    let cleanup_sync_result = step(WriteStep::CleanupSync).and_then(|()| directory.sync_all());
+    cleanup_result?;
+    cleanup_sync_result?;
+
+    let mut rows = scan_pinned(&directory, dir)?;
+    let sequence = rows
+        .iter()
+        .map(|row| row.sequence)
+        .max()
+        .map_or(Ok(1), |maximum| {
+            maximum
+                .checked_add(1)
+                .ok_or_else(|| invalid("config history sequence is exhausted"))
+        })?;
+
+    // Repair a pre-existing over-cap history before considering deduplication.
+    if rows.len() > super::HISTORY_LIMIT {
+        evict_to(&directory, &mut rows, super::HISTORY_LIMIT, &mut step)?;
+    }
+    if let Some(newest) = rows.first()
+        && newest.status == StoredStatus::Recorded
+        && newest.format == StoredFormat::V2
+        && open_and_decode(&directory, newest, true).is_ok_and(|(payload, _)| {
+            matches!(payload, StoredPayload::V2(envelope)
+                if envelope.normalized_toml.as_bytes() == normalized_toml.as_bytes()
+                    && envelope.manifest == manifest)
+        })
+    {
+        return Ok(false);
+    }
+
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs());
+    manifest.toml_sha256 = toml_sha256;
+    let source_sha256 = manifest_source_sha256(&manifest);
+    let envelope = Envelope {
+        version: VERSION,
+        sequence,
+        timestamp_unix_seconds: timestamp,
+        sha256: toml_sha256,
+        source_sha256,
+        normalized_toml: normalized_toml.to_owned(),
+        manifest,
+    };
+    let encoded = encode_envelope(&envelope)?;
+    let digest = encode_hex(&source_sha256);
+    let final_name = format!("v2-{sequence:020}-{timestamp}-{digest}.json");
+    let stage_name = format!(".v2-{sequence:020}-{timestamp}-{digest}.json.tmp");
+
+    let mut stage_exists = false;
+    let mut stage_identity = None;
+    let mut published = false;
+    let result = (|| {
+        step(WriteStep::StageCreate)?;
+        let fd = openat(
+            &directory,
+            stage_name.as_str(),
+            OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW,
+            Mode::from_bits_truncate(0o600),
+        )
+        .map_err(errno)?;
+        stage_exists = true;
+        let mut stage = File::from(fd);
+        fchmod(&stage, Mode::from_bits_truncate(0o600)).map_err(errno)?;
+        let metadata = stage.metadata()?;
+        stage_identity = Some((metadata.dev(), metadata.ino()));
+        step(WriteStep::StageWrite)?;
+        stage.write_all(&encoded)?;
+        step(WriteStep::StageSync)?;
+        stage.sync_all()?;
+        drop(stage);
+
+        evict_to(&directory, &mut rows, super::HISTORY_LIMIT - 1, &mut step)?;
+        step(WriteStep::Publish)?;
+        renameat2(
+            &directory,
+            stage_name.as_str(),
+            &directory,
+            final_name.as_str(),
+            RenameFlags::RENAME_NOREPLACE,
+        )
+        .map_err(errno)?;
+        stage_exists = false;
+        published = true;
+        step(WriteStep::FinalSync)?;
+        directory.sync_all()
+    })();
+    if result.is_err() && stage_exists && !published {
+        if metadata_at(&directory, OsStr::new(&stage_name)).is_ok_and(|metadata| {
+            metadata.regular
+                && metadata.uid == nix::unistd::geteuid().as_raw()
+                && stage_identity == Some((metadata.dev, metadata.ino))
+        }) {
+            let _ = unlinkat(&directory, stage_name.as_str(), UnlinkatFlags::NoRemoveDir);
+        }
+        let _ = directory.sync_all();
+    }
+    result.map(|()| true)
+}
+
+fn open_or_create_writer_directory(path: &Path) -> io::Result<File> {
+    use nix::fcntl::{OFlag, open};
+    use nix::sys::stat::{Mode, fchmod};
+    use nix::unistd::geteuid;
+
+    use std::os::unix::fs::DirBuilderExt;
+
+    let mut builder = std::fs::DirBuilder::new();
+    builder.mode(0o700);
+    match builder.create(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error),
+    }
+    let fd = open(
+        path,
+        OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW,
+        Mode::empty(),
+    )
+    .map_err(errno)?;
+    let file = File::from(fd);
+    let metadata = file.metadata()?;
+    if !metadata.is_dir() || metadata.uid() != geteuid().as_raw() {
+        return Err(invalid("unsafe config history directory owner or type"));
+    }
+    fchmod(&file, Mode::from_bits_truncate(0o700)).map_err(errno)?;
+    let metadata = file.metadata()?;
+    validate_directory_metadata(
+        metadata.is_dir(),
+        metadata.uid(),
+        metadata.mode(),
+        geteuid().as_raw(),
+    )?;
+    Ok(file)
+}
+
+fn cleanup_stages(directory: &File) -> io::Result<()> {
+    use nix::dir::Dir;
+    use nix::unistd::{UnlinkatFlags, geteuid, unlinkat};
+
+    let owned: OwnedFd = directory.try_clone()?.into();
+    let mut entries = Dir::from_fd(owned).map_err(errno)?;
+    for item in entries.iter() {
+        let item = item.map_err(errno)?;
+        let name = OsString::from_vec(item.file_name().to_bytes().to_vec());
+        if parse_stage_name(&name).is_none() {
+            continue;
+        }
+        let metadata = metadata_at(directory, &name)?;
+        if !metadata.regular || metadata.uid != geteuid().as_raw() {
+            return Err(invalid("unsafe config history stage owner or type"));
+        }
+        unlinkat(directory, Path::new(&name), UnlinkatFlags::NoRemoveDir).map_err(errno)?;
+    }
+    Ok(())
+}
+
+fn evict_to(
+    directory: &File,
+    rows: &mut Vec<StoredRow>,
+    limit: usize,
+    step: &mut impl FnMut(WriteStep) -> io::Result<()>,
+) -> io::Result<()> {
+    use nix::unistd::{UnlinkatFlags, geteuid, unlinkat};
+
+    let remove = rows.len().saturating_sub(limit);
+    for row in rows.iter().rev().take(remove) {
+        let metadata = metadata_at(directory, &row.filename)?;
+        if !metadata.regular || metadata.uid != geteuid().as_raw() {
+            return Err(invalid("unsafe config history eviction candidate"));
+        }
+    }
+    for row in rows.iter().rev().take(remove) {
+        step(WriteStep::EvictionUnlink)?;
+        if let Err(error) = unlinkat(
+            directory,
+            Path::new(&row.filename),
+            UnlinkatFlags::NoRemoveDir,
+        )
+        .map_err(errno)
+        {
+            let _ = directory.sync_all();
+            return Err(error);
+        }
+    }
+    rows.truncate(rows.len() - remove);
+    step(WriteStep::EvictionSync)?;
+    directory.sync_all()
+}
+
+struct AtMetadata {
+    regular: bool,
+    uid: u32,
+    dev: u64,
+    ino: u64,
+}
+
+fn metadata_at(directory: &File, name: &OsStr) -> io::Result<AtMetadata> {
+    use nix::fcntl::AtFlags;
+    use nix::sys::stat::{SFlag, fstatat};
+
+    // fstatat is the type/owner authority. Opening is intentionally avoided so
+    // a FIFO or device can never block; AT_SYMLINK_NOFOLLOW rejects links.
+    let stat = fstatat(directory, Path::new(name), AtFlags::AT_SYMLINK_NOFOLLOW).map_err(errno)?;
+    Ok(AtMetadata {
+        regular: SFlag::from_bits_truncate(stat.st_mode) & SFlag::S_IFMT == SFlag::S_IFREG,
+        uid: stat.st_uid,
+        dev: stat.st_dev,
+        ino: stat.st_ino,
+    })
+}
+
+fn parse_stage_name(name: &OsStr) -> Option<ParsedName> {
+    let text = name.to_str()?;
+    let final_name = text.strip_prefix('.')?.strip_suffix(".tmp")?;
+    let parsed = parse_mixed_name(OsStr::new(final_name))?;
+    (parsed.format == StoredFormat::V2).then_some(parsed)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum StoredFormat {
@@ -665,6 +934,20 @@ mod tests {
         envelope.sha256 = Sha256::digest(envelope.normalized_toml.as_bytes()).into();
         envelope.manifest.toml_sha256 = envelope.sha256;
         envelope.source_sha256 = manifest_source_sha256(&envelope.manifest);
+    }
+
+    fn manifest_for(toml: &str) -> Manifest {
+        let mut manifest = sample().manifest;
+        manifest.toml_sha256 = Sha256::digest(toml.as_bytes()).into();
+        manifest
+    }
+
+    fn recorded_rows(dir: &Path) -> Vec<StoredRow> {
+        scan_mixed(dir)
+            .unwrap()
+            .into_iter()
+            .filter(|row| row.format == StoredFormat::V2)
+            .collect()
     }
 
     fn assert_error(result: io::Result<impl Sized>, text: &str) {
@@ -1528,11 +1811,641 @@ mod tests {
     #[test]
     fn v2_remains_invisible_to_public_legacy_reader() {
         let dir = tempfile::tempdir().unwrap();
-        write_v2(dir.path(), &sample());
+        let toml = "asn = 64512\n";
+        assert!(record_v2(dir.path(), toml, manifest_for(toml)).unwrap());
         assert!(super::super::list(dir.path()).unwrap().is_empty());
         assert_eq!(
             super::super::read_entry(dir.path(), 0).unwrap_err().kind(),
             io::ErrorKind::NotFound
         );
+    }
+
+    /// LOAD-BEARING BREAK: failing to assign unique contiguous sequences or
+    /// changing the retention bound leaves the wrong 20 logical rows.
+    #[test]
+    fn writer_serializes_sequence_and_retains_twenty() {
+        use std::sync::Arc;
+
+        let root = tempfile::tempdir().unwrap();
+        let dir = Arc::new(root.path().join("history"));
+        let mut threads = Vec::new();
+        for index in 0..24 {
+            let dir = Arc::clone(&dir);
+            threads.push(std::thread::spawn(move || {
+                let toml = format!("asn = {}\n", 64512 + index);
+                record_v2(&dir, &toml, manifest_for(&toml)).unwrap()
+            }));
+        }
+        assert!(threads.into_iter().all(|thread| thread.join().unwrap()));
+        let rows = recorded_rows(&dir);
+        assert_eq!(rows.len(), super::super::HISTORY_LIMIT);
+        assert_eq!(rows.first().unwrap().sequence, 24);
+        assert_eq!(rows.last().unwrap().sequence, 5);
+        assert!(rows.iter().all(|row| row.status == StoredStatus::Recorded));
+    }
+
+    /// LOAD-BEARING BREAK: comparing TOML without the complete manifest, or
+    /// accepting a legacy/corrupt newest row, loses a distinct source snapshot.
+    #[test]
+    fn writer_dedupe_requires_exact_toml_manifest_and_valid_v2_newest() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("history");
+        let toml = "asn = 64512\n";
+        let manifest = manifest_for(toml);
+        assert!(record_v2(&dir, toml, manifest.clone()).unwrap());
+        assert!(!record_v2(&dir, toml, manifest.clone()).unwrap());
+
+        let mut changed = manifest.clone();
+        changed.rpol_units[0].modules[0].length += 1;
+        assert!(record_v2(&dir, toml, changed).unwrap());
+        assert_eq!(recorded_rows(&dir).len(), 2);
+
+        let newest = recorded_rows(&dir).remove(0);
+        fs::write(dir.join(&newest.filename), b"corrupt").unwrap();
+        assert!(record_v2(&dir, toml, manifest.clone()).unwrap());
+
+        let legacy_dir = root.path().join("legacy");
+        fs::create_dir(&legacy_dir).unwrap();
+        fs::set_permissions(&legacy_dir, fs::Permissions::from_mode(0o700)).unwrap();
+        let digest = encode_hex(&Sha256::digest(toml.as_bytes()));
+        write_private(
+            &legacy_dir.join(format!("1-1-{digest}.toml")),
+            toml.as_bytes(),
+        );
+        assert!(record_v2(&legacy_dir, toml, manifest).unwrap());
+    }
+
+    /// LOAD-BEARING BREAK: path-relative work after pinning publishes into the
+    /// replacement decoy rather than the original directory authority.
+    #[test]
+    fn writer_uses_pinned_directory_after_path_replacement() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("history");
+        let moved = root.path().join("moved");
+        let toml = "asn = 64512\n";
+        let mut replaced = false;
+        assert!(
+            record_v2_with(&path, toml, manifest_for(toml), |point| {
+                if point == WriteStep::Pinned && !replaced {
+                    fs::rename(&path, &moved)?;
+                    fs::create_dir(&path)?;
+                    fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
+                    write_private(&path.join("decoy"), b"untouched");
+                    replaced = true;
+                }
+                Ok(())
+            })
+            .unwrap()
+        );
+        assert_eq!(recorded_rows(&moved).len(), 1);
+        assert!(recorded_rows(&path).is_empty());
+        assert_eq!(fs::read(path.join("decoy")).unwrap(), b"untouched");
+    }
+
+    /// LOAD-BEARING BREAK: broad stage matching deletes operator files;
+    /// following an exact-stage link turns cleanup into an arbitrary unlink.
+    #[test]
+    fn writer_cleanup_is_exact_and_unsafe_exact_stage_blocks() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("history");
+        fs::create_dir(&dir).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+        let digest = "0".repeat(64);
+        let exact = format!(".v2-{:020}-1-{digest}.json.tmp", 1);
+        write_private(&dir.join(&exact), b"stage");
+        for name in [
+            format!("{exact}.extra"),
+            format!(".v2-1-1-{digest}.json.tmp"),
+            format!(".v2-{:020}-01-{digest}.json.tmp", 1),
+            format!(".v2-{:020}-1-{}.json.tmp", 1, "A".repeat(64)),
+        ] {
+            write_private(&dir.join(name), b"keep");
+        }
+        let toml = "x = 1\n";
+        assert!(record_v2(&dir, toml, manifest_for(toml)).unwrap());
+        assert!(!dir.join(exact).exists());
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 5);
+
+        let unsafe_name = format!(".v2-{:020}-2-{digest}.json.tmp", 2);
+        symlink(dir.join("absent"), dir.join(&unsafe_name)).unwrap();
+        let mut cleanup_sync_observed = false;
+        assert_error(
+            record_v2_with(&dir, "x = 2\n", manifest_for("x = 2\n"), |point| {
+                cleanup_sync_observed |= point == WriteStep::CleanupSync;
+                Ok(())
+            }),
+            "unsafe config history stage",
+        );
+        assert!(cleanup_sync_observed);
+        assert!(
+            fs::symlink_metadata(dir.join(unsafe_name))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+
+    /// LOAD-BEARING BREAK: validation after directory/stage creation leaves
+    /// filesystem residue for an input that was never eligible to publish.
+    #[test]
+    fn writer_prevalidation_creates_no_directory_or_residue() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("history");
+        let mut manifest = manifest_for("x = 1\n");
+        manifest.rpol_units[0].modules.clear();
+        assert_error(record_v2(&dir, "x = 1\n", manifest), "1..=64 modules");
+        assert!(!dir.exists());
+
+        let target = root.path().join("target");
+        fs::create_dir(&target).unwrap();
+        let link = root.path().join("link");
+        symlink(&target, &link).unwrap();
+        assert!(record_v2(&link, "x = 1\n", manifest_for("x = 1\n")).is_err());
+        assert_eq!(fs::read_dir(&target).unwrap().count(), 0);
+        let file = root.path().join("file");
+        fs::write(&file, b"untouched").unwrap();
+        assert!(record_v2(&file, "x = 1\n", manifest_for("x = 1\n")).is_err());
+        assert_eq!(fs::read(&file).unwrap(), b"untouched");
+    }
+
+    /// LOAD-BEARING BREAK: a non-exclusive create, public stage mode, or
+    /// clobbering rename can expose a partial entry or overwrite an object.
+    #[test]
+    fn writer_stage_is_private_and_publication_never_clobbers() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("history");
+        let toml = "x = 1\n";
+        let mut collision = None;
+        let result = record_v2_with(&dir, toml, manifest_for(toml), |point| {
+            if point == WriteStep::StageWrite {
+                let stage = fs::read_dir(&dir)?
+                    .map(|item| item.unwrap())
+                    .find(|item| parse_stage_name(&item.file_name()).is_some())
+                    .unwrap();
+                assert_eq!(stage.metadata()?.mode() & 0o7777, 0o600);
+            }
+            if point == WriteStep::Publish {
+                let stage = fs::read_dir(&dir)?
+                    .map(|item| item.unwrap().file_name())
+                    .find(|name| parse_stage_name(name).is_some())
+                    .unwrap();
+                let final_name = stage
+                    .to_str()
+                    .unwrap()
+                    .strip_prefix('.')
+                    .unwrap()
+                    .strip_suffix(".tmp")
+                    .unwrap();
+                write_private(&dir.join(final_name), b"collision");
+                collision = Some(final_name.to_string());
+            }
+            Ok(())
+        });
+        assert!(result.is_err());
+        assert_eq!(
+            fs::read(dir.join(collision.unwrap())).unwrap(),
+            b"collision"
+        );
+        assert!(
+            fs::read_dir(&dir)
+                .unwrap()
+                .all(|item| parse_stage_name(&item.unwrap().file_name()).is_none())
+        );
+    }
+
+    /// LOAD-BEARING BREAK: dropping any sync or moving it across publication
+    /// changes this real operation trace and its durability boundary.
+    #[test]
+    fn writer_operation_trace_and_final_sync_failure_boundary() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("history");
+        let toml = "x = 1\n";
+        let mut trace = Vec::new();
+        assert!(
+            record_v2_with(&dir, toml, manifest_for(toml), |point| {
+                trace.push(point);
+                Ok(())
+            })
+            .unwrap()
+        );
+        assert_eq!(
+            trace,
+            [
+                WriteStep::Pinned,
+                WriteStep::CleanupSync,
+                WriteStep::StageCreate,
+                WriteStep::StageWrite,
+                WriteStep::StageSync,
+                WriteStep::EvictionSync,
+                WriteStep::Publish,
+                WriteStep::FinalSync,
+            ]
+        );
+
+        let error = record_v2_with(&dir, "x = 2\n", manifest_for("x = 2\n"), |point| {
+            if point == WriteStep::FinalSync {
+                Err(io::Error::other("injected final sync failure"))
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("final sync"));
+        assert_eq!(recorded_rows(&dir).len(), 2);
+        assert!(
+            fs::read_dir(&dir)
+                .unwrap()
+                .all(|item| parse_stage_name(&item.unwrap().file_name()).is_none())
+        );
+    }
+
+    /// LOAD-BEARING BREAK: every injected pre-publication error must remove
+    /// this writer's stage and must not make a final visible.
+    #[test]
+    fn every_injected_prepublish_failure_has_no_final_or_stage() {
+        for failure in [
+            WriteStep::StageCreate,
+            WriteStep::StageWrite,
+            WriteStep::StageSync,
+            WriteStep::Publish,
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let dir = root.path().join("history");
+            let result = record_v2_with(&dir, "x = 1\n", manifest_for("x = 1\n"), |point| {
+                if point == failure {
+                    Err(io::Error::other("injected prepublish failure"))
+                } else {
+                    Ok(())
+                }
+            });
+            assert!(result.is_err(), "{failure:?}");
+            assert!(recorded_rows(&dir).is_empty(), "{failure:?}");
+            assert!(
+                fs::read_dir(&dir)
+                    .unwrap()
+                    .all(|item| parse_stage_name(&item.unwrap().file_name()).is_none())
+            );
+        }
+
+        for failure in [WriteStep::EvictionUnlink, WriteStep::EvictionSync] {
+            let root = tempfile::tempdir().unwrap();
+            let dir = root.path().join("history");
+            for index in 0..super::super::HISTORY_LIMIT {
+                let toml = format!("x = {index}\n");
+                record_v2(&dir, &toml, manifest_for(&toml)).unwrap();
+            }
+            let result = record_v2_with(&dir, "x = 99\n", manifest_for("x = 99\n"), |point| {
+                if point == failure {
+                    Err(io::Error::other("injected eviction failure"))
+                } else {
+                    Ok(())
+                }
+            });
+            assert!(result.is_err(), "{failure:?}");
+            assert!(recorded_rows(&dir).iter().all(|row| row.sequence <= 20));
+            assert!(
+                fs::read_dir(&dir)
+                    .unwrap()
+                    .all(|item| parse_stage_name(&item.unwrap().file_name()).is_none())
+            );
+        }
+    }
+
+    /// LOAD-BEARING BREAK: failure cleanup must compare the stage object it
+    /// created, not unlink an attacker replacement that reused the basename.
+    #[test]
+    fn unsafe_stage_regular_replacement_survives_failure_cleanup() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("history");
+        let sentinel = b"replacement-sentinel";
+        let mut replacement = None;
+        let result = record_v2_with(&dir, "x = 1\n", manifest_for("x = 1\n"), |point| {
+            if point == WriteStep::StageSync {
+                let name = fs::read_dir(&dir)?
+                    .map(|item| item.unwrap().file_name())
+                    .find(|name| parse_stage_name(name).is_some())
+                    .unwrap();
+                fs::remove_file(dir.join(&name))?;
+                write_private(&dir.join(&name), sentinel);
+                replacement = Some(name);
+                return Err(io::Error::other("injected replacement"));
+            }
+            Ok(())
+        });
+        assert!(result.is_err());
+        let replacement = replacement.unwrap();
+        assert_eq!(fs::read(dir.join(replacement)).unwrap(), sentinel);
+    }
+
+    /// LOAD-BEARING BREAK: eviction must revalidate the exact oldest object;
+    /// following or removing an unsafe recognized final destroys evidence.
+    #[test]
+    fn unsafe_oldest_final_blocks_eviction_and_survives() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("history");
+        fs::create_dir(&dir).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+        let digest = "0".repeat(64);
+        let unsafe_name = format!("v2-{:020}-1-{digest}.json", 1);
+        symlink(dir.join("absent"), dir.join(&unsafe_name)).unwrap();
+        for sequence in 2..=20 {
+            write_private(
+                &dir.join(format!("v2-{sequence:020}-1-{digest}.json")),
+                b"corrupt",
+            );
+        }
+        assert_error(
+            record_v2(&dir, "x = 1\n", manifest_for("x = 1\n")),
+            "unsafe config history eviction candidate",
+        );
+        assert!(
+            fs::symlink_metadata(dir.join(unsafe_name))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(scan_mixed(&dir).unwrap().len(), 20);
+    }
+
+    /// LOAD-BEARING BREAK: dedupe before repairing an over-cap store leaves 21
+    /// rows, while skipping the unconditional cleanup sync permits a stage.
+    #[test]
+    fn over_cap_repair_precedes_dedupe_and_cleanup_sync_retries() {
+        let root = tempfile::tempdir().unwrap();
+        let failed = root.path().join("failed-sync");
+        assert!(
+            record_v2_with(&failed, "x = 1\n", manifest_for("x = 1\n"), |point| {
+                if point == WriteStep::CleanupSync {
+                    Err(io::Error::other("injected cleanup sync failure"))
+                } else {
+                    Ok(())
+                }
+            })
+            .is_err()
+        );
+        assert!(scan_mixed(&failed).unwrap().is_empty());
+        assert!(record_v2(&failed, "x = 1\n", manifest_for("x = 1\n")).unwrap());
+
+        let dir = root.path().join("over-cap");
+        fs::create_dir(&dir).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+        let digest = "0".repeat(64);
+        for sequence in 1..=20 {
+            write_private(
+                &dir.join(format!("v2-{sequence:020}-1-{digest}.json")),
+                b"corrupt",
+            );
+        }
+        let toml = "x = 1\n";
+        let manifest = manifest_for(toml);
+        let envelope = Envelope {
+            version: VERSION,
+            sequence: 21,
+            timestamp_unix_seconds: 1,
+            sha256: manifest.toml_sha256,
+            source_sha256: manifest_source_sha256(&manifest),
+            normalized_toml: toml.into(),
+            manifest: manifest.clone(),
+        };
+        write_v2(&dir, &envelope);
+        assert!(!record_v2(&dir, toml, manifest).unwrap());
+        let rows = scan_mixed(&dir).unwrap();
+        assert_eq!(rows.len(), 20);
+        assert_eq!(rows.first().unwrap().sequence, 21);
+        assert_eq!(rows.last().unwrap().sequence, 2);
+    }
+
+    /// LOAD-BEARING BREAK: tied sequences are ordered by raw basename bytes;
+    /// reverse eviction must remove the lexically largest tied name first.
+    #[test]
+    fn tied_sequence_eviction_uses_reverse_raw_basename_order() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("history");
+        fs::create_dir(&dir).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+        let name = |prefix: u8| format!("v2-{:020}-1-{:02x}{}.json", 7, prefix, "0".repeat(62));
+        for prefix in 0..=20 {
+            write_private(&dir.join(name(prefix)), b"corrupt");
+        }
+        let mut unlinks = 0;
+        let result = record_v2_with(&dir, "x = 1\n", manifest_for("x = 1\n"), |point| {
+            if point == WriteStep::EvictionUnlink {
+                unlinks += 1;
+                if unlinks == 2 {
+                    return Err(io::Error::other("stop at publication eviction"));
+                }
+            }
+            Ok(())
+        });
+        assert!(result.is_err());
+        assert!(!dir.join(name(20)).exists());
+        assert!(dir.join(name(19)).exists());
+        assert_eq!(scan_mixed(&dir).unwrap().len(), super::super::HISTORY_LIMIT);
+    }
+
+    /// LOAD-BEARING BREAK: the process-wide guard must cover both descriptor
+    /// pinning/selection and the final publication boundary.
+    #[test]
+    fn writer_lock_spans_pinning_through_publication() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("history");
+        let mut observed = Vec::new();
+        assert!(
+            record_v2_with(&dir, "x = 1\n", manifest_for("x = 1\n"), |point| {
+                if matches!(point, WriteStep::Pinned | WriteStep::Publish) {
+                    assert!(WRITER_LOCK.try_lock().is_err(), "lock absent at {point:?}");
+                    observed.push(point);
+                }
+                Ok(())
+            })
+            .unwrap()
+        );
+        assert_eq!(observed, [WriteStep::Pinned, WriteStep::Publish]);
+    }
+
+    /// LOAD-BEARING BREAK: sequence selection that ignores either generation
+    /// can reuse an identity; wrapping at `u64::MAX` silently poisons history.
+    #[test]
+    fn writer_mixed_sequence_and_overflow_are_strict() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("history");
+        fs::create_dir(&dir).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+        let bytes = b"legacy";
+        let digest = encode_hex(&Sha256::digest(bytes));
+        write_private(&dir.join(format!("8-1-{digest}.toml")), bytes);
+        assert!(record_v2(&dir, "x = 1\n", manifest_for("x = 1\n")).unwrap());
+        assert_eq!(recorded_rows(&dir)[0].sequence, 9);
+
+        let overflow = root.path().join("overflow");
+        fs::create_dir(&overflow).unwrap();
+        fs::set_permissions(&overflow, fs::Permissions::from_mode(0o700)).unwrap();
+        write_private(
+            &overflow.join(format!("{}-1-{digest}.toml", u64::MAX)),
+            bytes,
+        );
+        assert_error(
+            record_v2(&overflow, "x = 1\n", manifest_for("x = 1\n")),
+            "sequence is exhausted",
+        );
+        assert_eq!(fs::read_dir(&overflow).unwrap().count(), 1);
+    }
+
+    /// LOAD-BEARING BREAK: removing the directory `fchmod(0700)` leaves an
+    /// owned existing directory public. Ignoring corrupt or duplicate logical
+    /// rows breaks both the retention count and next-sequence selection.
+    #[test]
+    fn writer_repairs_directory_mode_and_counts_corrupt_duplicates() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("history");
+        fs::create_dir(&dir).unwrap();
+        for sequence in 1..=21 {
+            let digest = "0".repeat(64);
+            write_private(
+                &dir.join(format!("v2-{sequence:020}-1-{digest}.json")),
+                b"corrupt",
+            );
+        }
+        // A second recognized final with sequence 21 poisons both duplicates.
+        write_private(&dir.join(format!("21-1-{}.toml", "0".repeat(64))), b"bad");
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(record_v2(&dir, "x = 1\n", manifest_for("x = 1\n")).unwrap());
+        assert_eq!(fs::metadata(&dir).unwrap().mode() & 0o7777, 0o700);
+        assert_eq!(scan_mixed(&dir).unwrap().len(), super::super::HISTORY_LIMIT);
+        assert_eq!(recorded_rows(&dir)[0].sequence, 22);
+    }
+
+    /// LOAD-BEARING BREAK: a duplicate or unknown-version newest row cannot be
+    /// treated as a valid v2 dedupe target, including writable downgrade where
+    /// a legacy writer reuses a sequence already occupied by v2.
+    #[test]
+    fn writer_refuses_duplicate_and_unknown_newest_dedupe() {
+        let root = tempfile::tempdir().unwrap();
+        let toml = "x = 1\n";
+
+        let duplicate = root.path().join("duplicate");
+        record_v2(&duplicate, toml, manifest_for(toml)).unwrap();
+        let digest = encode_hex(&Sha256::digest(toml.as_bytes()));
+        write_private(
+            &duplicate.join(format!("1-1-{digest}.toml")),
+            toml.as_bytes(),
+        );
+        let poisoned = scan_mixed(&duplicate).unwrap();
+        assert_eq!(poisoned.len(), 2);
+        assert!(
+            poisoned
+                .iter()
+                .all(|row| row.status == StoredStatus::Unreadable)
+        );
+        assert!(record_v2(&duplicate, toml, manifest_for(toml)).unwrap());
+        assert_eq!(recorded_rows(&duplicate)[0].sequence, 2);
+
+        let unknown = root.path().join("unknown");
+        record_v2(&unknown, toml, manifest_for(toml)).unwrap();
+        let row = recorded_rows(&unknown).remove(0);
+        let parsed = parse_mixed_name(&row.filename).unwrap();
+        let manifest = manifest_for(toml);
+        let aligned = Envelope {
+            version: VERSION,
+            sequence: 2,
+            timestamp_unix_seconds: parsed.timestamp,
+            sha256: manifest.toml_sha256,
+            source_sha256: manifest_source_sha256(&manifest),
+            normalized_toml: toml.into(),
+            manifest,
+        };
+        let broken = String::from_utf8(encode_envelope(&aligned).unwrap())
+            .unwrap()
+            .replace("\"version\":2", "\"version\":3");
+        write_private(
+            &unknown.join(format!(
+                "v2-{:020}-{}-{}.json",
+                2,
+                parsed.timestamp,
+                encode_hex(&aligned.source_sha256)
+            )),
+            broken.as_bytes(),
+        );
+        assert!(record_v2(&unknown, toml, manifest_for(toml)).unwrap());
+        assert_eq!(recorded_rows(&unknown)[0].sequence, 3);
+    }
+
+    /// Exact structural fence around the real durability/mode syscalls. This
+    /// complements behavioral fault tests: deleting an actual guarded syscall,
+    /// while leaving its nearby test hook in place, must still turn red.
+    #[test]
+    fn writer_real_syscall_fence_is_load_bearing() {
+        let source = include_str!("v2.rs");
+        for parts in [
+            &["builder.mode", "(0o700);"][..],
+            &["fchmod(&file, Mode::", "from_bits_truncate(0o700))"],
+            &["fchmod(&stage, Mode::", "from_bits_truncate(0o600))"],
+            &["stage.sync_", "all()?;"],
+            &[
+                "cleanup_sync_result = step(WriteStep::CleanupSync)",
+                ".and_then(|()| directory.sync_all())",
+            ],
+            &[
+                "step(WriteStep::EvictionSync)?;\n",
+                "    directory.sync_all()",
+            ],
+            &[
+                "step(WriteStep::FinalSync)?;\n",
+                "        directory.sync_all()",
+            ],
+            &["static WRITER_LOCK: Mutex<", "()> = Mutex::new(());"],
+            &["RenameFlags::RENAME_", "NOREPLACE"],
+            &[
+                ".lock()\n        .map_err(|_| io::Error::other(",
+                "\"config history writer lock is poisoned\"))?;",
+            ],
+        ] {
+            let required = parts.concat();
+            assert!(
+                source.contains(&required),
+                "missing production fence: {required}"
+            );
+        }
+        let lock = source
+            .find(&["let _guard = WRITER_", "LOCK"].concat())
+            .unwrap();
+        let selection = source
+            .find(&["let mut rows = scan_", "pinned(&directory, dir)?;"].concat())
+            .unwrap();
+        let publication = selection
+            + source[selection..]
+                .find(&["renameat2", "("].concat())
+                .unwrap();
+        assert!(lock < selection && selection < publication);
+
+        let writer_start = source.find(&["fn record_v2_", "with("].concat()).unwrap();
+        let writer_end = writer_start
+            + source[writer_start..]
+                .find(&["fn open_or_create_", "writer_directory"].concat())
+                .unwrap();
+        let writer = &source[writer_start..writer_end];
+        let stage_start = writer.find(&["let fd = open", "at("].concat()).unwrap();
+        let stage_end = stage_start
+            + writer[stage_start..]
+                .find(&[".map_err", "(errno)?;"].concat())
+                .unwrap();
+        let stage_open = &writer[stage_start..stage_end];
+        for parts in [
+            &["OFlag::O_EX", "CL"][..],
+            &["OFlag::O_NO", "FOLLOW"],
+            &["Mode::from_bits_", "truncate(0o600)"],
+        ] {
+            let required = parts.concat();
+            assert!(
+                stage_open.contains(&required),
+                "stage open missing exact guard: {required}"
+            );
+        }
     }
 }
