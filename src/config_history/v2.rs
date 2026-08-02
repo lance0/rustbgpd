@@ -51,7 +51,10 @@ fn record_v2(dir: &Path, normalized_toml: &str, manifest: Manifest) -> io::Resul
     record_v2_with(dir, normalized_toml, manifest, |_| Ok(()))
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the dormant writer keeps one ordered crash-consistency transaction visible"
+)]
 fn record_v2_with(
     dir: &Path,
     normalized_toml: &str,
