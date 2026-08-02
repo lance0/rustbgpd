@@ -79,13 +79,14 @@ use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
 use crate::config::{
-    Config, GrpcAccessMode, GrpcEnforcementConfig, GrpcListener, GrpcMaxTier, GrpcRoleConfig,
-    UnpolicedEbgpBoundary,
+    AcceptedConfigSnapshot, Config, GrpcAccessMode, GrpcEnforcementConfig, GrpcListener,
+    GrpcMaxTier, GrpcRoleConfig, UnpolicedEbgpBoundary,
 };
 use crate::config_persister::{ConfigMutation, ConfigPersister};
 use crate::peer_manager::PeerManager;
 use crate::reload::{
-    apply_reload_outcome, reload_config_with_tcp_ao, run_config_bridge, runtime_config_snapshot,
+    apply_reload_outcome, reload_config_with_tcp_ao, run_config_bridge_accepted,
+    runtime_config_snapshot_accepted,
 };
 use rustbgpd_api::health_probe::DaemonGate;
 use rustbgpd_api::peer_types::{
@@ -2518,13 +2519,14 @@ fn main() -> ExitCode {
         process::exit(1);
     }
 
-    let mut config = match Config::load_with_diagnostics(&config_path) {
-        Ok(c) => c,
+    let mut accepted = match AcceptedConfigSnapshot::load(Path::new(&config_path), None) {
+        Ok(snapshot) => Arc::new(snapshot),
         Err(diagnostic) => {
             eprintln!("{diagnostic}");
             process::exit(1);
         }
     };
+    let mut config = accepted.config();
 
     if check_only {
         // The summary line is the only thing some operators read. When
@@ -2602,7 +2604,15 @@ fn main() -> ExitCode {
     ) {
         Ok(None) => None,
         Ok(Some(revert)) => {
-            config = *revert.config;
+            drop(revert.config);
+            accepted = match AcceptedConfigSnapshot::load(Path::new(&config_path), None) {
+                Ok(snapshot) => Arc::new(snapshot),
+                Err(diagnostic) => {
+                    eprintln!("{diagnostic}");
+                    process::exit(1);
+                }
+            };
+            config = accepted.config();
             Some(revert.notice)
         }
         Err(message) => {
@@ -2639,7 +2649,7 @@ fn main() -> ExitCode {
         .enable_all()
         .build()
         .unwrap_or_else(|e| fatal_startup_error("failed to create tokio runtime", e));
-    let grpc_server_failed = rt.block_on(run(config, boot_revert_notice, profiler));
+    let grpc_server_failed = rt.block_on(run(accepted, boot_revert_notice, profiler));
     shutdown_daemon_runtime(rt);
     if grpc_server_failed {
         // The coordinated teardown already ran (NOTIFICATIONs, GR marker,
@@ -2856,10 +2866,11 @@ fn resolve_rib_channel_capacity_from(env: Option<&str>) -> usize {
 /// unexpectedly (a component failure — the process must exit non-zero),
 /// `false` for operator-initiated shutdowns (signals, Shutdown RPC).
 async fn run<T>(
-    mut config: Config,
+    accepted: Arc<AcceptedConfigSnapshot>,
     boot_revert_notice: Option<confirm_journal::BootRevertNotice>,
     profiler: Option<T>,
 ) -> bool {
+    let mut config = accepted.config();
     // Snapshot the gRPC listener config as it was at process start.
     // The live TCP/UDS listeners bind once and are not rebuilt on
     // SIGHUP; this snapshot is what they're actually serving. Reload
@@ -3552,26 +3563,28 @@ async fn run<T>(
     // what's on disk. Otherwise the next gRPC mutation would apply
     // to a stale pre-reload snapshot and overwrite the persisted
     // file with `stale_pre_reload + one_mutation`.
-    let (config_event_tx, bridge_replace_tx) = if let Some(ref path) = config.file_path {
+    let (config_event_tx, bridge_replace_tx, accepted_rx) = if let Some(ref path) = config.file_path
+    {
         let (event_tx, event_rx) = mpsc::channel::<rustbgpd_api::peer_types::ConfigEvent>(64);
         let (mutation_tx, mutation_rx) = mpsc::channel::<ConfigMutation>(64);
-        let (bridge_replace_tx, bridge_replace_rx) = mpsc::unbounded_channel::<Box<Config>>();
-        let persister = ConfigPersister::new(
+        let (bridge_replace_tx, bridge_replace_rx) = mpsc::unbounded_channel();
+        let (accepted_tx, accepted_rx) = watch::channel(Arc::clone(&accepted));
+        let persister = ConfigPersister::new_accepted(
             mutation_rx,
             path.clone(),
-            config.clone(),
+            Arc::clone(&accepted),
             Some(config.runtime_state_dir()),
         );
         tokio::spawn(persister.run());
-        tokio::spawn(run_config_bridge(
+        tokio::spawn(run_config_bridge_accepted(
             event_rx,
             bridge_replace_rx,
             mutation_tx,
-            config.clone(),
+            accepted_tx,
         ));
-        (Some(event_tx), Some(bridge_replace_tx))
+        (Some(event_tx), Some(bridge_replace_tx), Some(accepted_rx))
     } else {
-        (None, None)
+        (None, None, None)
     };
 
     // Shutdown channels:
@@ -4282,7 +4295,7 @@ async fn run<T>(
     // accepted runtime changes.
     let runtime_config_lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
     let config_transaction_controller =
-        config_transaction_control::ConfigTransactionController::new(
+        config_transaction_control::ConfigTransactionController::new_accepted(
             fib_table_control::FibTableControlDeps {
                 fib_cmd_tx: fib_cmd_tx.clone(),
                 peer_mgr_tx: peer_mgr_tx.clone(),
@@ -4302,6 +4315,10 @@ async fn run<T>(
                 config_history_dir: Some(config_history::history_dir(&config.runtime_state_dir())),
             },
             metrics.clone(),
+            accepted_rx
+                .as_ref()
+                .expect("daemon config transactions require accepted-config authority")
+                .clone(),
         );
     // Process-wide availability gate (LAN-286): BGP-listener bind failure
     // turns readiness red; coordinated shutdown turns readiness red AND
@@ -4809,6 +4826,8 @@ async fn run<T>(
                 let reload_metrics = metrics.clone();
                 let tcp_ao_listener = tcp_ao_listener_handle.clone();
                 let limits_rib_tx = rib_tx.clone();
+                let accepted_rx = accepted_rx.clone();
+                let live_bindings = config.policy.dataset_bindings.clone();
                 reload_in_flight = Some(tokio::spawn(async move {
                     let _runtime_config_guard = runtime_config_lock.lock().await;
                     if let Err(error) = config_transaction_controller
@@ -4833,7 +4852,18 @@ async fn run<T>(
                             }
                         }
                     }
-                    let snapshot = match runtime_config_snapshot(&pm_tx).await {
+                    let Some(accepted_rx) = accepted_rx else {
+                        error!("SIGHUP reload has no accepted-config authority");
+                        return None;
+                    };
+                    let prior_accepted = accepted_rx.borrow().clone();
+                    let snapshot = match runtime_config_snapshot_accepted(
+                        &pm_tx,
+                        &prior_accepted,
+                        &live_bindings,
+                    )
+                    .await
+                    {
                         Ok(snapshot) => snapshot,
                         Err(error) => {
                             error!(
@@ -4852,15 +4882,25 @@ async fn run<T>(
                     // though the operator's file still holds it. A candidate
                     // that will not parse is left for the reload itself to
                     // report.
-                    if let Ok(candidate) = config::Config::load_with_diagnostics(&path)
-                        && let Err(error) =
-                            reload::apply_outbound_prefix_limits(&limits_rib_tx, &candidate).await
+                    let desired = match AcceptedConfigSnapshot::load_for_reload(
+                        Path::new(&path),
+                        &prior_accepted,
+                        &live_bindings,
+                    ) {
+                        Ok(snapshot) => Arc::new(snapshot),
+                        Err(diagnostic) => {
+                            error!("{diagnostic}");
+                            return None;
+                        }
+                    };
+                    if let Err(error) =
+                        reload::apply_outbound_prefix_limits(&limits_rib_tx, &desired).await
                     {
                         error!(error = %error, "SIGHUP reload rejected");
                         return None;
                     }
                     let reloaded = reload_config_with_tcp_ao(
-                        &path,
+                        desired,
                         &snapshot,
                         live_tcp.as_ref(),
                         live_uds.as_ref(),

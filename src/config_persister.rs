@@ -8,11 +8,14 @@
 
 use std::net::IpAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use tokio::sync::{mpsc, oneshot};
 use tracing::{error, info, warn};
 
-use crate::config::{Config, Neighbor, persisted_config_document};
+#[cfg(test)]
+use crate::config::Config;
+use crate::config::{AcceptedConfigSnapshot, Neighbor};
 
 /// File under `runtime_state_dir` recording the config file's mtime as of the
 /// daemon's last read or write of it.
@@ -29,17 +32,23 @@ pub enum ConfigMutation {
     AddNeighbor(Box<Neighbor>),
     DeleteNeighbor(IpAddr),
     /// Replace the entire config snapshot and persist it to disk.
-    ReplaceConfig(Box<Config>),
+    ReplaceConfig(Arc<AcceptedConfigSnapshot>),
     /// Replace the entire config snapshot, persist it to disk, then acknowledge
     /// the result to a caller that must not proceed until the write has settled.
-    ReplaceConfigAck(Box<Config>, oneshot::Sender<Result<(), String>>),
+    ReplaceConfigAck(
+        Arc<AcceptedConfigSnapshot>,
+        oneshot::Sender<Result<(), String>>,
+    ),
     /// Durably stage a replacement snapshot without publishing it, then
     /// acknowledge whether the write can land. Every persistence failure an
     /// operator actually hits (unwritable directory, read-only mount, full
     /// filesystem) surfaces here, before the caller mutates any runtime state.
     ///
     /// Exactly one stage may be outstanding; a second replaces the first.
-    StageConfigAck(Box<Config>, oneshot::Sender<Result<(), String>>),
+    StageConfigAck(
+        Arc<AcceptedConfigSnapshot>,
+        oneshot::Sender<Result<(), String>>,
+    ),
     /// Publish the staged snapshot: rename it into place and adopt it.
     CommitStagedConfig(oneshot::Sender<Result<(), String>>),
     /// Drop the staged snapshot. The caller's runtime change did not land, so
@@ -52,27 +61,30 @@ pub enum ConfigMutation {
     /// snapshot, but future gRPC mutations must still apply on top of
     /// the operator's desired file rather than writing the pinned
     /// runtime snapshot back to disk.
-    RefreshSnapshotNoPersist(Box<Config>),
+    RefreshSnapshotNoPersist(Arc<AcceptedConfigSnapshot>),
 }
 
 /// Listens for config mutations and persists them atomically.
 pub struct ConfigPersister {
     rx: mpsc::Receiver<ConfigMutation>,
     config_path: PathBuf,
-    current: Config,
+    current: Arc<AcceptedConfigSnapshot>,
     /// `runtime_state_dir`, the home of the applied-config history
     /// (`config_history`) and the last-persist marker. `None` disables both
     /// (unit tests, embedders without a state dir).
     state_dir: Option<PathBuf>,
     /// Durably written but unpublished snapshot, awaiting commit or discard.
-    staged: Option<(crate::confirm_journal::StagedWrite, Config, String)>,
+    staged: Option<(
+        crate::confirm_journal::StagedWrite,
+        Arc<AcceptedConfigSnapshot>,
+    )>,
 }
 
 impl ConfigPersister {
-    pub fn new(
+    pub fn new_accepted(
         rx: mpsc::Receiver<ConfigMutation>,
         config_path: PathBuf,
-        current: Config,
+        current: Arc<AcceptedConfigSnapshot>,
         state_dir: Option<PathBuf>,
     ) -> Self {
         Self {
@@ -82,6 +94,21 @@ impl ConfigPersister {
             state_dir,
             staged: None,
         }
+    }
+
+    #[cfg(test)]
+    pub fn new(
+        rx: mpsc::Receiver<ConfigMutation>,
+        config_path: PathBuf,
+        current: Config,
+        state_dir: Option<PathBuf>,
+    ) -> Self {
+        Self::new_accepted(
+            rx,
+            config_path,
+            AcceptedConfigSnapshot::from_config_for_test(current),
+            state_dir,
+        )
     }
 
     pub async fn run(mut self) {
@@ -96,9 +123,9 @@ impl ConfigPersister {
             match mutation {
                 ConfigMutation::ReplaceConfigAck(new_config, ack) => {
                     self.discard_staged();
-                    let previous = self.current.clone();
+                    let previous = Arc::clone(&self.current);
                     info!("replacing persister config snapshot and persisting it");
-                    self.current = *new_config;
+                    self.current = new_config;
                     let result = self.persist().map_err(|e| e.to_string());
                     if let Err(e) = &result {
                         self.current = previous;
@@ -112,7 +139,7 @@ impl ConfigPersister {
                     continue;
                 }
                 ConfigMutation::StageConfigAck(new_config, ack) => {
-                    let _ = ack.send(self.stage(*new_config).map_err(|e| e.to_string()));
+                    let _ = ack.send(self.stage(new_config).map_err(|e| e.to_string()));
                     continue;
                 }
                 ConfigMutation::CommitStagedConfig(ack) => {
@@ -144,23 +171,25 @@ impl ConfigPersister {
     /// it. A failure here is the whole point of the two-phase handshake: the
     /// caller learns the write cannot land while its runtime state is still
     /// untouched.
-    fn stage(&mut self, new_config: Config) -> std::io::Result<()> {
+    fn stage(&mut self, new_config: Arc<AcceptedConfigSnapshot>) -> std::io::Result<()> {
         // A superseded stage is discarded, never published: its caller either
         // failed its apply or is gone.
         self.discard_staged();
-        let toml_str = persisted_config_document(&new_config).map_err(std::io::Error::other)?;
-        let staged = crate::confirm_journal::stage_atomic(&self.config_path, toml_str.as_bytes())?;
+        let staged = crate::confirm_journal::stage_atomic(
+            &self.config_path,
+            new_config.normalized_toml().as_bytes(),
+        )?;
         info!(
             path = %self.config_path.display(),
             "staged config write, awaiting commit"
         );
-        self.staged = Some((staged, new_config, toml_str));
+        self.staged = Some((staged, new_config));
         Ok(())
     }
 
     /// Publish the staged candidate and adopt it as the persister snapshot.
     fn commit_staged(&mut self) -> Result<(), String> {
-        let Some((staged, config, toml_str)) = self.staged.take() else {
+        let Some((staged, config)) = self.staged.take() else {
             return Err("no staged config write to commit".to_string());
         };
         if let Err(error) = staged.commit() {
@@ -172,7 +201,7 @@ impl ConfigPersister {
             return Err(error.to_string());
         }
         self.current = config;
-        self.record_history(&toml_str);
+        self.record_current_history();
         Ok(())
     }
 
@@ -206,32 +235,42 @@ impl ConfigPersister {
                     );
                 } else {
                     info!(address = %neighbor.address, "persisting added neighbor");
-                    self.current.neighbors.push(*neighbor);
+                    let mut config = self.current.config();
+                    config.neighbors.push(*neighbor);
+                    self.current = self
+                        .current
+                        .derive_config(config)
+                        .expect("validated config remains serializable");
                 }
                 true
             }
             ConfigMutation::DeleteNeighbor(address) => {
                 let addr_str = address.to_string();
-                let before = self.current.neighbors.len();
-                self.current.neighbors.retain(|n| n.address != addr_str);
-                if self.current.neighbors.len() < before {
+                let mut config = self.current.config();
+                let before = config.neighbors.len();
+                config.neighbors.retain(|n| n.address != addr_str);
+                if config.neighbors.len() < before {
                     info!(%address, "persisting deleted neighbor");
                 }
+                self.current = self
+                    .current
+                    .derive_config(config)
+                    .expect("validated config remains serializable");
                 true
             }
             ConfigMutation::ReplaceConfig(new_config) => {
                 info!("replacing persister config snapshot and persisting it");
-                self.current = *new_config;
+                self.current = new_config;
                 true
             }
             ConfigMutation::ReplaceConfigAck(new_config, _) => {
                 info!("replacing persister config snapshot and persisting it");
-                self.current = *new_config;
+                self.current = new_config;
                 true
             }
             ConfigMutation::RefreshSnapshotNoPersist(new_config) => {
                 info!("refreshing persister config snapshot without writing to disk");
-                self.current = *new_config;
+                self.current = new_config;
                 // The operator already persisted and successfully reloaded
                 // this desired config. Record the validated snapshot without
                 // writing it back: otherwise history index 0 still names the
@@ -243,16 +282,17 @@ impl ConfigPersister {
     }
 
     fn persist(&self) -> std::io::Result<()> {
-        let toml_str = persisted_config_document(&self.current).map_err(std::io::Error::other)?;
-
         // Durable atomic write: temp file → fsync → rename → fsync parent dir.
         // Reuses the commit-confirm journal's proven primitive so a crash in the
         // settle window can never leave a torn/zero-length config (LAN-206).
-        crate::confirm_journal::write_atomic(&self.config_path, toml_str.as_bytes())?;
+        crate::confirm_journal::write_atomic(
+            &self.config_path,
+            self.current.normalized_toml().as_bytes(),
+        )?;
         // Every durable config write funnels through this method, so recording
         // here gives the applied-config history exactly one choke point:
         // transaction commits, gRPC CRUD mutations, and boot all land in it.
-        self.record_history(&toml_str);
+        self.record_history(self.current.normalized_toml());
         Ok(())
     }
 
@@ -321,19 +361,14 @@ impl ConfigPersister {
     }
 
     fn record_current_history(&self) {
-        match persisted_config_document(&self.current) {
-            Ok(toml_str) => self.record_history(&toml_str),
-            Err(error) => warn!(
-                error = %error,
-                "failed to serialize the applied config for config history"
-            ),
-        }
+        self.record_history(self.current.normalized_toml());
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::persisted_config_document;
 
     fn minimal_config() -> Config {
         let toml_str = r#"
@@ -616,11 +651,8 @@ remote_asn = 65002
 
         let mut refreshed = minimal_config();
         refreshed.neighbors.push(test_neighbor("10.0.0.2", 65002));
-        assert!(
-            !persister.apply(ConfigMutation::RefreshSnapshotNoPersist(Box::new(
-                refreshed.clone()
-            ),))
-        );
+        let refreshed_snapshot = persister.current.derive_config(refreshed.clone()).unwrap();
+        assert!(!persister.apply(ConfigMutation::RefreshSnapshotNoPersist(refreshed_snapshot)));
 
         let entries = crate::config_history::list(&history).unwrap();
         assert_eq!(entries.len(), 2);
@@ -642,9 +674,9 @@ remote_asn = 65002
         let persister = ConfigPersister::new(rx, path.clone(), config, None);
         let handle = tokio::spawn(persister.run());
 
-        tx.send(ConfigMutation::RefreshSnapshotNoPersist(Box::new(
-            refreshed,
-        )))
+        tx.send(ConfigMutation::RefreshSnapshotNoPersist(
+            AcceptedConfigSnapshot::from_config_for_test(refreshed),
+        ))
         .await
         .unwrap();
         tx.send(ConfigMutation::AddNeighbor(Box::new(test_neighbor(
@@ -759,9 +791,11 @@ log_format = "json"
         let (tx, rx) = mpsc::channel(16);
         let persister = ConfigPersister::new(rx, path.clone(), reloaded.clone(), None);
         let handle = tokio::spawn(persister.run());
-        tx.send(ConfigMutation::ReplaceConfig(Box::new(reloaded)))
-            .await
-            .unwrap();
+        tx.send(ConfigMutation::ReplaceConfig(
+            AcceptedConfigSnapshot::from_config_for_test(reloaded),
+        ))
+        .await
+        .unwrap();
         drop(tx);
         handle.await.unwrap();
         let second = std::fs::read_to_string(&path).unwrap();

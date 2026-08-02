@@ -4,6 +4,7 @@ pub mod profiles;
 mod resolution;
 mod schema;
 mod source_provenance;
+pub(crate) use source_provenance::AcceptedConfigSnapshot;
 mod validation;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -385,7 +386,7 @@ impl Config {
 
     #[expect(
         clippy::too_many_lines,
-        reason = "the dormant provenance handoff preserves the existing linear load state machine"
+        reason = "active provenance capture preserves the existing linear load state machine"
     )]
     fn bind_datasets_capturing(
         &mut self,
@@ -606,6 +607,7 @@ impl Config {
     /// mutating their shared handles. Call [`Self::prepare_staged_datasets`]
     /// after every no-side-effect reload preflight has passed, then commit the
     /// returned plan at the ordered dataset reconciliation step.
+    #[cfg(test)]
     pub(crate) fn load_with_diagnostics_and_staged_datasets(
         path: &str,
         prior_datasets: &rustbgpd_policy::datasets::DatasetBindings,

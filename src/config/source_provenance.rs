@@ -1,8 +1,8 @@
-//! Dormant accepted-config same-read source identity (ADR-0121 tranche 1).
+//! Accepted-config ownership and same-read source identity (ADR-0121).
 
 #![allow(
     dead_code,
-    reason = "ADR-0121 tranche 1 deliberately lands a dormant loader handoff"
+    reason = "accepted ownership is active while digest and v2 exposure remain private"
 )]
 
 use std::path::{Path, PathBuf};
@@ -177,7 +177,7 @@ fn lossless_path_bytes(path: &Path) -> (&'static [u8], Vec<u8>) {
     (b"windows-wide-be", bytes)
 }
 
-struct AcceptedConfigSnapshot {
+pub(crate) struct AcceptedConfigSnapshot {
     config: Arc<Config>,
     normalized_toml: Arc<str>,
     manifest: SourceManifest,
@@ -186,13 +186,35 @@ struct AcceptedConfigSnapshot {
 }
 
 impl AcceptedConfigSnapshot {
-    fn load(path: &Path, prior: Option<&Self>) -> Result<Self, String> {
+    pub(crate) fn load(path: &Path, prior: Option<&Self>) -> Result<Self, String> {
         Self::load_with_hook(path, prior, || {})
+    }
+
+    pub(crate) fn load_for_reload(
+        path: &Path,
+        prior: &Self,
+        live_bindings: &rustbgpd_policy::datasets::DatasetBindings,
+    ) -> Result<Self, String> {
+        Self::load_captured(path, Some(prior), Some(live_bindings), || {})
     }
 
     fn load_with_hook(
         path: &Path,
         prior: Option<&Self>,
+        after_capture: impl FnOnce(),
+    ) -> Result<Self, String> {
+        Self::load_captured(
+            path,
+            prior,
+            prior.map(|snapshot| &snapshot.config.policy.dataset_bindings),
+            after_capture,
+        )
+    }
+
+    fn load_captured(
+        path: &Path,
+        prior: Option<&Self>,
+        live_bindings: Option<&rustbgpd_policy::datasets::DatasetBindings>,
         after_capture: impl FnOnce(),
     ) -> Result<Self, String> {
         let bytes = std::fs::read(path)
@@ -205,7 +227,7 @@ impl AcceptedConfigSnapshot {
             &content,
             &path.display().to_string(),
             base_dir.as_deref(),
-            prior.map(|snapshot| &snapshot.config.policy.dataset_bindings),
+            live_bindings,
             DatasetBindMode::Stage,
             Some(&mut capture),
             prior.map(|snapshot| &snapshot.manifest),
@@ -229,10 +251,138 @@ impl AcceptedConfigSnapshot {
         })
     }
 
-    fn config(&self) -> Config {
+    pub(crate) fn derive_config(&self, mut config: Config) -> Result<Arc<Self>, String> {
+        self.require_same_external_roster(&config)?;
+        config.policy.dataset_bindings = config.policy.dataset_bindings.detached_clone();
+        let normalized_toml: Arc<str> = persisted_config_document(&config)
+            .map_err(|error| format!("failed to normalize accepted config: {error}"))?
+            .into();
+        let sha256 = Sha256::digest(normalized_toml.as_bytes()).into();
+        let mut manifest = self.manifest.clone();
+        manifest.toml_sha256 = sha256;
+        let source_sha256 = manifest.source_sha256();
+        Ok(Arc::new(Self {
+            config: Arc::new(config),
+            normalized_toml,
+            manifest,
+            sha256,
+            source_sha256,
+        }))
+    }
+
+    pub(crate) fn derive_toml_without_sources(
+        &self,
+        content: &str,
+        source_name: &str,
+    ) -> Result<Arc<Self>, String> {
+        let mut config: Config =
+            toml::from_str(content).map_err(|error| format!("invalid {source_name}: {error}"))?;
+        self.require_same_external_roster(&config)?;
+        config.file_path.clone_from(&self.config.file_path);
+        config.policy.rpol.clone_from(&self.config.policy.rpol);
+        config.policy.dataset_bindings = self.config.policy.dataset_bindings.detached_clone();
+        config.policy.dataset_events = self.config.policy.dataset_events.clone();
+        config
+            .validate()
+            .map_err(|error| format!("invalid {source_name}: {error}"))?;
+        self.derive_config(config)
+    }
+
+    pub(crate) fn runtime_config_without_sources(
+        &self,
+        content: &str,
+        rpol_files: &[String],
+        rpol: rustbgpd_policy::rpol::RpolPolicySet,
+        live_bindings: &rustbgpd_policy::datasets::DatasetBindings,
+    ) -> Result<Config, String> {
+        let mut config: Config = toml::from_str(content)
+            .map_err(|error| format!("invalid runtime config snapshot: {error}"))?;
+        if config.policy.rpol_files != rpol_files {
+            return Err(
+                "runtime config snapshot rpol roster disagrees with live registry".to_string(),
+            );
+        }
+        config.file_path.clone_from(&self.config.file_path);
+        config.policy.rpol = rpol;
+        config.policy.dataset_bindings = live_bindings.clone();
+        config
+            .validate()
+            .map_err(|error| format!("invalid runtime config snapshot: {error}"))?;
+        Ok(config)
+    }
+
+    /// Reconstruct a config document for transaction editing or rollback
+    /// serialization without attaching any accepted or live external data.
+    ///
+    /// A partial SIGHUP may leave runtime generation A beside accepted desired
+    /// generation B. Transaction construction needs A's document shape, but
+    /// must not validate it against B's detached datasets or expose those
+    /// bindings to policy planning. The eventual transaction executor reloads
+    /// and validates the candidate at its existing accepted-input boundary.
+    pub(crate) fn transaction_config_without_sources(
+        &self,
+        content: &str,
+        rpol_files: &[String],
+    ) -> Result<Config, String> {
+        let mut config: Config = toml::from_str(content)
+            .map_err(|error| format!("invalid runtime config document: {error}"))?;
+        if config.policy.rpol_files != rpol_files {
+            return Err(
+                "runtime config document rpol roster disagrees with live registry".to_string(),
+            );
+        }
+        config.file_path.clone_from(&self.config.file_path);
+        Ok(config)
+    }
+
+    fn require_same_external_roster(&self, config: &Config) -> Result<(), String> {
+        if config.policy.rpol_files != self.config.policy.rpol_files
+            || config.policy.rpol_roots != self.config.policy.rpol_roots
+            || config.policy.rpol_max_graph_bytes != self.config.policy.rpol_max_graph_bytes
+            || config.policy.datasets != self.config.policy.datasets
+        {
+            return Err(
+                "runtime config mutation cannot change external policy-source inventory; edit the config file and use SIGHUP"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_config_for_test(config: Config) -> Arc<Self> {
+        let normalized_toml: Arc<str> = persisted_config_document(&config).unwrap().into();
+        let sha256 = Sha256::digest(normalized_toml.as_bytes()).into();
+        let manifest = SourceCapture::default().finish(sha256);
+        Arc::new(Self {
+            config: Arc::new(config),
+            normalized_toml,
+            source_sha256: manifest.source_sha256(),
+            manifest,
+            sha256,
+        })
+    }
+
+    pub(crate) fn config(&self) -> Config {
         let mut config = (*self.config).clone();
         config.policy.dataset_bindings = config.policy.dataset_bindings.detached_clone();
         config
+    }
+
+    pub(crate) fn config_ref(&self) -> &Config {
+        &self.config
+    }
+
+    pub(crate) fn normalized_toml(&self) -> &str {
+        &self.normalized_toml
+    }
+}
+
+impl std::ops::Deref for AcceptedConfigSnapshot {
+    type Target = Config;
+
+    fn deref(&self) -> &Self::Target {
+        self.config_ref()
     }
 }
 
@@ -307,6 +457,102 @@ path = "customers.txt"
             .iter()
             .map(|module| module.path.file_name().unwrap().to_str().unwrap())
             .collect()
+    }
+
+    #[test]
+    fn source_free_derivation_retains_roster_and_rejects_inventory_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let snapshot = AcceptedConfigSnapshot::load(&fixture(dir.path()), None).unwrap();
+        fs::remove_file(dir.path().join("policy.rpol")).unwrap();
+        fs::remove_file(dir.path().join("lib.rpol")).unwrap();
+        fs::remove_file(dir.path().join("a-child.rpol")).unwrap();
+        fs::remove_file(dir.path().join("a-unit.rpol")).unwrap();
+        fs::remove_file(dir.path().join("customers.txt")).unwrap();
+
+        let mut fib_only = snapshot.config();
+        fib_only.fib_tables.push(super::super::FibTableConfig {
+            name: "edge".to_string(),
+            table_id: 100,
+            metric: 100,
+            families: super::super::default_fib_families(),
+            allowed_peer_groups: Vec::new(),
+            allowed_neighbors: Vec::new(),
+            max_routes: None,
+            maximum_paths: None,
+            maximum_paths_ebgp: None,
+            maximum_paths_ibgp: None,
+        });
+        let derived = snapshot
+            .derive_config(fib_only)
+            .expect("post-capture derivation must not reread deleted sources");
+        assert_eq!(derived.manifest.rpol_units, snapshot.manifest.rpol_units);
+        assert_eq!(derived.manifest.datasets, snapshot.manifest.datasets);
+
+        let live_bindings = snapshot.policy.dataset_bindings.detached_clone();
+        let live_dataset = Arc::clone(live_bindings.get("customers").unwrap());
+        let supplied_rpol = snapshot.policy.rpol.clone();
+        let supplied_file = Arc::clone(&supplied_rpol.policies["outbound"].file);
+        let runtime = snapshot
+            .runtime_config_without_sources(
+                snapshot.normalized_toml(),
+                &snapshot.policy.rpol_files,
+                supplied_rpol,
+                &live_bindings,
+            )
+            .expect("runtime reconstruction must not reread deleted external sources");
+        assert!(Arc::ptr_eq(
+            runtime.policy.dataset_bindings.get("customers").unwrap(),
+            &live_dataset
+        ));
+        assert!(Arc::ptr_eq(
+            &runtime.policy.rpol.policies["outbound"].file,
+            &supplied_file
+        ));
+
+        let mut changed_roster = snapshot.config();
+        changed_roster
+            .policy
+            .rpol_files
+            .push("/new/source.rpol".to_string());
+        assert!(
+            snapshot.derive_config(changed_roster).is_err(),
+            "a source-free mutation must not relabel changed external inventory"
+        );
+    }
+
+    #[test]
+    fn partial_reload_runtime_roster_stays_distinct_from_accepted_desired() {
+        let dir = tempfile::tempdir().unwrap();
+        let desired = AcceptedConfigSnapshot::load(&fixture(dir.path()), None).unwrap();
+        fs::remove_file(dir.path().join("policy.rpol")).unwrap();
+        fs::remove_file(dir.path().join("lib.rpol")).unwrap();
+        fs::remove_file(dir.path().join("a-child.rpol")).unwrap();
+        fs::remove_file(dir.path().join("a-unit.rpol")).unwrap();
+        fs::remove_file(dir.path().join("customers.txt")).unwrap();
+
+        let runtime_toml = tier_authorized_uds_test_config(
+            r#"
+[global]
+asn = 65000
+router_id = "192.0.2.1"
+listen_port = 179
+[global.telemetry]
+log_format = "json"
+"#,
+        );
+        let runtime = desired
+            .runtime_config_without_sources(
+                &runtime_toml,
+                &[],
+                rustbgpd_policy::rpol::RpolPolicySet::default(),
+                &rustbgpd_policy::datasets::DatasetBindings::default(),
+            )
+            .expect("runtime A must reconstruct independently of desired roster B");
+
+        assert!(runtime.policy.rpol_files.is_empty());
+        assert!(runtime.policy.datasets.is_empty());
+        assert_eq!(desired.policy.rpol_files.len(), 2);
+        assert_eq!(desired.policy.datasets.len(), 1);
     }
 
     #[test]
