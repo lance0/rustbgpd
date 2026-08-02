@@ -216,6 +216,8 @@ fn durable_event_type_mask(event_type: proto::BgpEventType) -> u8 {
         | proto::BgpEventType::SessionLost
         | proto::BgpEventType::PeerEnabled
         | proto::BgpEventType::PeerDisabled
+        | proto::BgpEventType::PeerAdded
+        | proto::BgpEventType::PeerRemoved
         | proto::BgpEventType::NotificationSent
         | proto::BgpEventType::NotificationReceived => 2,
         proto::BgpEventType::PolicyChanged | proto::BgpEventType::OtcRouteBlocked => 4,
@@ -609,7 +611,7 @@ mod tests {
             };
             let expected = match raw {
                 1..=4 => 1,
-                10..=14 | 20..=21 => 2,
+                10..=16 | 20..=21 => 2,
                 22..=23 => 4,
                 30..=33 => 8,
                 40..=42 => 16,

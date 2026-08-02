@@ -281,6 +281,8 @@ impl WatchEventsFilter {
                         | proto::BgpEventType::SessionLost
                         | proto::BgpEventType::PeerEnabled
                         | proto::BgpEventType::PeerDisabled
+                        | proto::BgpEventType::PeerAdded
+                        | proto::BgpEventType::PeerRemoved
                         | proto::BgpEventType::NotificationSent
                         | proto::BgpEventType::NotificationReceived
                         | proto::BgpEventType::StreamLagged)
@@ -407,6 +409,8 @@ fn bgp_event_type_to_session_event_type(
         proto::BgpEventType::SessionLost => Some(SessionLifecycleEventType::Lost),
         proto::BgpEventType::PeerEnabled => Some(SessionLifecycleEventType::PeerEnabled),
         proto::BgpEventType::PeerDisabled => Some(SessionLifecycleEventType::PeerDisabled),
+        proto::BgpEventType::PeerAdded => Some(SessionLifecycleEventType::PeerAdded),
+        proto::BgpEventType::PeerRemoved => Some(SessionLifecycleEventType::PeerRemoved),
         proto::BgpEventType::Unspecified
         | proto::BgpEventType::RouteAdded
         | proto::BgpEventType::RouteWithdrawn
@@ -469,6 +473,8 @@ fn parse_event_type_filter(event_types: &[i32]) -> Result<BTreeSet<i32>, Status>
             | proto::BgpEventType::SessionLost
             | proto::BgpEventType::PeerEnabled
             | proto::BgpEventType::PeerDisabled
+            | proto::BgpEventType::PeerAdded
+            | proto::BgpEventType::PeerRemoved
             | proto::BgpEventType::NotificationSent
             | proto::BgpEventType::NotificationReceived
             | proto::BgpEventType::PolicyChanged
@@ -553,6 +559,8 @@ fn parse_policy_event_type_filter(event_types: &[i32]) -> Result<(), Status> {
             | proto::BgpEventType::SessionLost
             | proto::BgpEventType::PeerEnabled
             | proto::BgpEventType::PeerDisabled
+            | proto::BgpEventType::PeerAdded
+            | proto::BgpEventType::PeerRemoved
             | proto::BgpEventType::NotificationSent
             | proto::BgpEventType::NotificationReceived
             | proto::BgpEventType::DataplaneStatusChanged
@@ -604,6 +612,8 @@ fn parse_evpn_event_type_filter(event_types: &[i32]) -> Result<BTreeSet<RouteEve
             | proto::BgpEventType::SessionLost
             | proto::BgpEventType::PeerEnabled
             | proto::BgpEventType::PeerDisabled
+            | proto::BgpEventType::PeerAdded
+            | proto::BgpEventType::PeerRemoved
             | proto::BgpEventType::NotificationSent
             | proto::BgpEventType::NotificationReceived
             | proto::BgpEventType::PolicyChanged
@@ -658,6 +668,8 @@ pub(super) fn session_lifecycle_event_type_to_bgp_event_type(
         SessionLifecycleEventType::Lost => proto::BgpEventType::SessionLost,
         SessionLifecycleEventType::PeerEnabled => proto::BgpEventType::PeerEnabled,
         SessionLifecycleEventType::PeerDisabled => proto::BgpEventType::PeerDisabled,
+        SessionLifecycleEventType::PeerAdded => proto::BgpEventType::PeerAdded,
+        SessionLifecycleEventType::PeerRemoved => proto::BgpEventType::PeerRemoved,
     }
 }
 
@@ -744,6 +756,8 @@ fn live_event_type_mask(event_type: proto::BgpEventType) -> u8 {
         | proto::BgpEventType::SessionLost
         | proto::BgpEventType::PeerEnabled
         | proto::BgpEventType::PeerDisabled
+        | proto::BgpEventType::PeerAdded
+        | proto::BgpEventType::PeerRemoved
         | proto::BgpEventType::NotificationSent
         | proto::BgpEventType::NotificationReceived => 2,
         proto::BgpEventType::PolicyChanged => 4,
@@ -837,7 +851,7 @@ mod compatibility_tests {
             };
             let expected = match raw {
                 1..=4 => 1,
-                10..=14 | 20..=21 => 2,
+                10..=16 | 20..=21 => 2,
                 22 => 4,
                 30..=33 => 8,
                 40..=42 => 16,

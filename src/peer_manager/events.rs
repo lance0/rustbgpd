@@ -247,7 +247,10 @@ impl PeerManager {
                     new.as_str()
                 )
             }
-            SessionLifecycleEventType::PeerEnabled | SessionLifecycleEventType::PeerDisabled => {
+            SessionLifecycleEventType::PeerAdded
+            | SessionLifecycleEventType::PeerRemoved
+            | SessionLifecycleEventType::PeerEnabled
+            | SessionLifecycleEventType::PeerDisabled => {
                 unreachable!("peer lifecycle events are emitted by publish_peer_lifecycle_event")
             }
         };

@@ -100,6 +100,10 @@ impl ReconcileResult {
 /// Session lifecycle event type published by `PeerManager`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SessionLifecycleEventType {
+    /// Peer was authoritatively added to the managed peer set.
+    PeerAdded,
+    /// Peer was authoritatively removed from the managed peer set.
+    PeerRemoved,
     /// BGP FSM state changed.
     StateChanged,
     /// Session reached Established.
