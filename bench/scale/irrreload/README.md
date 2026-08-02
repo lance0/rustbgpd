@@ -53,6 +53,32 @@ and pinned inputs. Padding prefixes are /24s from
 30.0.0.0–99.255.255.0 (disjoint from the announced table, the churn range,
 and the bogon list).
 
+## BMP Loc-RIB dump buffer receipt
+
+`run-bmp-buffer-receipt.sh` reuses the canonical 320-member, 183,040-route,
+seed-61 dataset (3,218,965 filter entries) with one BMP v3 RFC 9069 Loc-RIB collector.
+It connects before 16-prefix/125 ms churn; two fresh daemons must match outcome class.
+
+The sink accepts one TCP generation, caps each RFC 7854 frame at 1 MiB, caps
+the total capture at 1 GiB, and has a 600-second deadline. It verifies the
+exact Loc-RIB peer/table/capability identity, rejects base duplicates and
+withdrawals, limits churn to the harness roster, and checks ordered IPv4/IPv6
+unicast-plus-VPN EoRs. The manifest pins endpoint, version, and `loc_rib` view.
+Complete requires every base prefix once, four EoRs, post-EoR churn, and a
+scrape while the sole socket remains open. Overflow requires earlier EOF,
+high-watermark 8,193, exactly 8,193 `live_buffer_full` drops, depth zero, and no
+other drop. Both require one replay. This locates the 8,192-row boundary, not
+general collector capacity or throughput.
+
+The full run requires clean `origin/main`, quiet-host mutexes, and unused ports:
+
+```bash
+CONFIRM_BENCH_CRON_PAUSED=1 CONFIRM_NO_MAIN_PUSHES=1 ARTIFACTS_DIR=/tmp/bmp-buffer-receipt \
+  bench/scale/irrreload/run-bmp-buffer-receipt.sh
+```
+
+`tests/bmp_buffer_receipt_check.rs` runs corrupt-fixture parser, inventory/order, metrics, and repeat proofs; full fleet remains a quiet-host receipt.
+
 ## Cells and reload mechanisms
 
 | Cell | Policy representation | Reload mechanism |

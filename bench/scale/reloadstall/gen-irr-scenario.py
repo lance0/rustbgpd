@@ -195,6 +195,9 @@ def write_manifest(out: pathlib.Path, args, members, files: list[str]) -> None:
         "path_hiding_requested": args.path_hiding,
         "path_hiding_applicable": path_hiding_applicable,
         "admit_churn": args.admit_churn,
+        "bmp_collector": args.bmp_collector,
+        "bmp_version": 3 if args.bmp_collector is not None else None,
+        "bmp_view": "loc_rib" if args.bmp_collector is not None else None,
         "dataset_sha256": dataset_digest.hexdigest(),
         "list_sizes": [len(policy_prefixes(m, "a", args.admit_churn)) for m in members],
         "total_filter_entries": sum(
@@ -363,7 +366,28 @@ def bench_telemetry_block(rundir: pathlib.Path) -> str:
     )
 
 
-def patch_rendered_config(text: str, n: int, port: int, rundir: pathlib.Path) -> str:
+def bench_bmp_block(collector: str | None) -> str:
+    if collector is None:
+        return ""
+    return (
+        "\n[bmp]\n"
+        'sys_name = "rustbgpd-irr-buffer-receipt"\n'
+        'sys_descr = "IRR-scale Loc-RIB dump buffer receipt"\n'
+        "\n"
+        "[[bmp.collectors]]\n"
+        f'address = "{collector}"\n'
+        "reconnect_interval = 1\n"
+        'monitor = ["loc_rib"]\n'
+    )
+
+
+def patch_rendered_config(
+    text: str,
+    n: int,
+    port: int,
+    rundir: pathlib.Path,
+    bmp_collector: str | None = None,
+) -> str:
     """Adapt rs-config-render output to the loopback bench contract.
 
     Every edit is asserted so renderer-output drift fails loudly instead of
@@ -406,7 +430,7 @@ def patch_rendered_config(text: str, n: int, port: int, rundir: pathlib.Path) ->
         'export_chain = ["irr-member-out"]\n',
     )
     assert "max_prefixes" not in text, "unexpected max-prefix ceilings in bench render"
-    return text
+    return text.rstrip() + "\n" + bench_bmp_block(bmp_collector)
 
 
 def emit_rustbgpd(args, members: list[Member], out: pathlib.Path) -> list[str]:
@@ -443,7 +467,13 @@ def emit_rustbgpd(args, members: list[Member], out: pathlib.Path) -> list[str]:
         (out / f"gen-{gen}.rpol").write_text("".join(parts) + marker_policy_rpol(gen))
         if gen == "a":
             (out / "config.toml").write_text(
-                patch_rendered_config(rendered_config, len(members), args.port, rundir)
+                patch_rendered_config(
+                    rendered_config,
+                    len(members),
+                    args.port,
+                    rundir,
+                    args.bmp_collector,
+                )
             )
     (out / "member.rpol").write_text((out / "gen-a.rpol").read_text())
     return ["config.toml", "member.rpol", "gen-a.rpol", "gen-b.rpol"]
@@ -745,6 +775,10 @@ def main() -> None:
     parser.add_argument("--threads", type=int, default=8, help="BIRD threads knob")
     parser.add_argument("--conf-dir", help="config dir as seen by the running daemon")
     parser.add_argument(
+        "--bmp-collector",
+        help="optional host:port for one v3 Loc-RIB-only BMP collector",
+    )
+    parser.add_argument(
         "--path-hiding",
         choices=("true", "false"),
         default="true",
@@ -765,6 +799,8 @@ def main() -> None:
     args.path_hiding = args.path_hiding == "true"
     args.admit_churn = args.admit_churn == "true"
 
+    if args.bmp_collector is not None and args.cell != "rustbgpd":
+        sys.exit("--bmp-collector is supported only by the rustbgpd cell")
     if args.n_members < CHURNERS:
         sys.exit(f"n_members must be >= {CHURNERS} (harness churner contract)")
     if args.total_prefixes % args.n_members:
