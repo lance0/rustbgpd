@@ -615,12 +615,18 @@ impl rustbgpd_api::proto::config_service_server::ConfigService for MockConfigSer
                     timestamp_unix_seconds: 1_787_000_000,
                     sha256: "aa".repeat(32),
                     summary: "asn 65001, router-id 10.0.0.1, 2 neighbor(s)".to_string(),
+                    source_sha256: String::new(),
+                    provenance_status: server_proto::ConfigHistoryProvenanceStatus::LegacyTomlOnly
+                        .into(),
                 },
                 server_proto::ConfigHistoryEntry {
                     index: 1,
                     timestamp_unix_seconds: 1_786_000_000,
                     sha256: "bb".repeat(32),
                     summary: "asn 65001, router-id 10.0.0.1, 1 neighbor(s)".to_string(),
+                    source_sha256: String::new(),
+                    provenance_status: server_proto::ConfigHistoryProvenanceStatus::LegacyTomlOnly
+                        .into(),
                 },
             ],
             human_text: "2 applied config(s) retained.\n".to_string(),

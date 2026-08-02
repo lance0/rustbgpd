@@ -333,6 +333,15 @@ version them alongside the TOML. Keep `runtime_state_dir` on owner-controlled
 local storage and protect backups as secret-bearing configuration, not as
 ordinary operational telemetry.
 
+`ListConfigHistory` exposes explicit provenance status without inferring trust
+from a readable file or filename digest. Its additive config-source digest is
+defined over the normalized-TOML digest plus the canonical accepted rpol/dataset
+source roster. Storage/runtime v2 activation has not shipped: current verified
+rows are `LEGACY_TOML_ONLY` with an empty config-source digest. Unreadable rows
+return `UNREADABLE`, empty TOML and source digests, and a constant summary so
+paths, filenames, raw errors, and unverified digest claims do not cross the API
+boundary.
+
 ## Linux EVPN VTEP — `CAP_NET_ADMIN` requirement
 
 Running rustbgpd in **EVPN VTEP mode** on Linux (a non-empty

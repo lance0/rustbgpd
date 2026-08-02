@@ -228,8 +228,14 @@ rbgp config rollback 1 --confirm-id undo-1 --confirm-timeout 120
 rbgp config confirm undo-1
 ```
 
-`config history` lists index, timestamp, content hash, and a one-line summary
-per entry — never config document contents. Index 0 means newest recorded, not
+`config history` lists index, timestamp, normalized-TOML content hash,
+provenance status, and—when recorded—a config-source hash over that TOML digest
+plus the canonical accepted rpol/dataset source roster. It also shows a one-line
+summary per entry, never config document contents. The provenance schema is
+present before its storage/runtime v2 activation: current readable rows are
+`legacy_toml_only` with no source digest, while corrupt rows are `unreadable`
+with both digests withheld. No production row is yet reported as `recorded`.
+Index 0 means newest recorded, not
 necessarily the running or currently persisted config. `config rollback N`
 resolves entry N server-side, verifies that its bytes match the SHA-256 in its
 file name, and routes it through the **same transaction path as

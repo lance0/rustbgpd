@@ -11,6 +11,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Config-history provenance schema and rendering.** `ListConfigHistory` and
+  `rbgp config history` now expose an additive config-source digest over the
+  normalized-TOML digest plus the canonical accepted rpol/dataset source roster,
+  together with an explicit provenance status. Storage/runtime v2 activation
+  has not shipped, so current readable rows are reported as legacy-TOML-only
+  with no source digest; unreadable rows withhold both digests and use a
+  constant redacted summary.
+
 - Native `.deb` and `.rpm` packages on every tagged release, for
   Debian 11+/Ubuntu 22.04+ and RHEL/Rocky/Alma 9+ on amd64 and arm64.
   The package installs the daemon, `rbgp`, and `rs-config-render` to

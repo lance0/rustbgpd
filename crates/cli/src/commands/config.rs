@@ -314,6 +314,8 @@ fn history_to_json(resp: &ListConfigHistoryResponse) -> serde_json::Value {
             "timestamp": format_unix_utc(entry.timestamp_unix_seconds),
             "sha256": entry.sha256,
             "summary": entry.summary,
+            "source_sha256": entry.source_sha256,
+            "provenance_status": history_provenance_label(entry.provenance_status),
         })).collect::<Vec<_>>(),
         "human_text": resp.human_text,
     })
@@ -321,18 +323,40 @@ fn history_to_json(resp: &ListConfigHistoryResponse) -> serde_json::Value {
 
 fn print_history_human(resp: &ListConfigHistoryResponse) {
     for entry in &resp.entries {
-        let short_hash = entry.sha256.get(..12).unwrap_or(&entry.sha256);
-        let marker = history_index_marker(entry.index);
-        println!(
-            "{:>3}  {}  {}  {}{}",
-            entry.index,
-            format_unix_utc(entry.timestamp_unix_seconds),
-            short_hash,
-            entry.summary,
-            marker,
-        );
+        println!("{}", history_human_line(entry));
     }
     print!("{}", resp.human_text);
+}
+
+fn history_human_line(entry: &crate::proto::ConfigHistoryEntry) -> String {
+    let short_hash = if entry.sha256.is_empty() {
+        "-"
+    } else {
+        entry.sha256.get(..12).unwrap_or(&entry.sha256)
+    };
+    format!(
+        "{:>3}  {}  {}  {}{}  provenance={} source_sha256={}",
+        entry.index,
+        format_unix_utc(entry.timestamp_unix_seconds),
+        short_hash,
+        entry.summary,
+        history_index_marker(entry.index),
+        history_provenance_label(entry.provenance_status),
+        if entry.source_sha256.is_empty() {
+            "-"
+        } else {
+            &entry.source_sha256
+        },
+    )
+}
+
+fn history_provenance_label(status: i32) -> &'static str {
+    match crate::proto::ConfigHistoryProvenanceStatus::try_from(status) {
+        Ok(crate::proto::ConfigHistoryProvenanceStatus::Recorded) => "recorded",
+        Ok(crate::proto::ConfigHistoryProvenanceStatus::LegacyTomlOnly) => "legacy_toml_only",
+        Ok(crate::proto::ConfigHistoryProvenanceStatus::Unreadable) => "unreadable",
+        Ok(crate::proto::ConfigHistoryProvenanceStatus::Unspecified) | Err(_) => "unknown",
+    }
 }
 
 fn history_index_marker(index: u32) -> &'static str {
@@ -1351,26 +1375,83 @@ mod tests {
     #[test]
     fn history_json_shape_is_stable() {
         let value = history_to_json(&ListConfigHistoryResponse {
-            entries: vec![crate::proto::ConfigHistoryEntry {
-                index: 0,
-                timestamp_unix_seconds: 1_787_000_000,
-                sha256: "ab".repeat(32),
-                summary: "asn 65001, router-id 10.0.0.1, 2 neighbor(s)".to_string(),
-            }],
-            human_text: "1 recorded config snapshot(s) retained.\n".to_string(),
+            entries: [
+                crate::proto::ConfigHistoryProvenanceStatus::Recorded as i32,
+                crate::proto::ConfigHistoryProvenanceStatus::LegacyTomlOnly as i32,
+                crate::proto::ConfigHistoryProvenanceStatus::Unreadable as i32,
+                crate::proto::ConfigHistoryProvenanceStatus::Unspecified as i32,
+                999,
+            ]
+            .into_iter()
+            .enumerate()
+            .map(
+                |(index, provenance_status)| crate::proto::ConfigHistoryEntry {
+                    index: u32::try_from(index).unwrap(),
+                    timestamp_unix_seconds: 1_787_000_000,
+                    sha256: "ab".repeat(32),
+                    summary: "asn 65001, router-id 10.0.0.1, 2 neighbor(s)".to_string(),
+                    source_sha256: "cd".repeat(32),
+                    provenance_status,
+                },
+            )
+            .collect(),
+            human_text: "5 recorded config snapshot(s) retained.\n".to_string(),
         });
 
+        // Red proof: removing an old key, either additive key, or any exact
+        // status mapping changes these assertions against rendered JSON.
         assert_eq!(value["entries"][0]["index"], 0);
         assert_eq!(value["entries"][0]["timestamp_unix_seconds"], 1_787_000_000);
         assert_eq!(value["entries"][0]["timestamp"], "2026-08-17T20:53:20Z");
         assert_eq!(value["entries"][0]["sha256"], "ab".repeat(32));
+        assert_eq!(value["entries"][0]["source_sha256"], "cd".repeat(32));
+        assert_eq!(value["entries"][0]["provenance_status"], "recorded");
+        assert_eq!(value["entries"][1]["provenance_status"], "legacy_toml_only");
+        assert_eq!(value["entries"][2]["provenance_status"], "unreadable");
+        assert_eq!(value["entries"][3]["provenance_status"], "unknown");
+        assert_eq!(value["entries"][4]["provenance_status"], "unknown");
         assert_eq!(
             value["entries"][0]["summary"],
             "asn 65001, router-id 10.0.0.1, 2 neighbor(s)"
         );
         assert_eq!(
             value["human_text"],
-            "1 recorded config snapshot(s) retained.\n"
+            "5 recorded config snapshot(s) retained.\n"
+        );
+    }
+
+    #[test]
+    fn history_human_line_retains_toml_hash_and_adds_provenance() {
+        // Red proof: removing the old 12-character TOML hash or either new
+        // human field changes these exact rendered lines.
+        let recorded = crate::proto::ConfigHistoryEntry {
+            index: 0,
+            timestamp_unix_seconds: 1_787_000_000,
+            sha256: "ab".repeat(32),
+            summary: "asn 65001".to_string(),
+            source_sha256: "cd".repeat(32),
+            provenance_status: crate::proto::ConfigHistoryProvenanceStatus::Recorded.into(),
+        };
+        assert_eq!(
+            history_human_line(&recorded),
+            format!(
+                "  0  2026-08-17T20:53:20Z  {}  asn 65001 (latest)  provenance=recorded source_sha256={}",
+                "ab".repeat(6),
+                "cd".repeat(32)
+            )
+        );
+
+        let unreadable = crate::proto::ConfigHistoryEntry {
+            index: 1,
+            timestamp_unix_seconds: 0,
+            sha256: String::new(),
+            summary: "(unreadable config history entry)".to_string(),
+            source_sha256: String::new(),
+            provenance_status: crate::proto::ConfigHistoryProvenanceStatus::Unreadable.into(),
+        };
+        assert_eq!(
+            history_human_line(&unreadable),
+            "  1  1970-01-01T00:00:00Z  -  (unreadable config history entry)  provenance=unreadable source_sha256=-"
         );
     }
 
