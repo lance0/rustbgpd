@@ -153,7 +153,9 @@ service ConfigService {
   // Roll back to an eligible legacy or provenance-verified v2 row (index >= 1). The daemon
   // resolves it server-side and routes it through the exact same transaction
   // executor as ApplyConfigTransaction — same plan/impact classification,
-  // receipts. Unreadable rows and v2 provenance mismatches fail closed.
+  // receipts, and optional confirmed-commit window when neither the running nor
+  // target config declares external inputs. Unreadable rows and v2 provenance
+  // mismatches fail closed.
   rpc RollbackConfigTransaction(RollbackConfigTransactionRequest) returns (ConfigTransactionApplyResponse);
 }
 
