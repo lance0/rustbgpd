@@ -174,17 +174,21 @@ operator-drain reason).
 
 ### 7. Gate 8b BUM-state — `run-gate8b-soak.sh` (`analyze-gate8b-soak.py`)
 
-DF flips via in-container daemon process restart (SIGTERM; opt-in
-SIGKILL via `KILL_MODE=kill`). Gates: per-PE RSS slope < 1.5 MB/h;
+DF flips via PE2 container stop/start, including setup-script replay, current
+session recovery, and log-tail reattachment. Gates: per-PE RSS slope < 1.5 MB/h;
 peak RSS < 512 MB; DF transition counters (`evpn_df_role_changes_total`)
 monotone — a reset means an unplanned daemon restart; ≥ 1 full flip
-cycle (window floor 0.9× applies); `verify_topology_link` passes before
-and after every flip (fail-loud exit 4 — the tripwire for the
-veth-destroyed false positive documented in the README).
+cycle (window floor 0.9× applies); the single terminal row has
+`pe2_running = 1` and both `pe*_session_established = 1`.
 
 ### 8. Gate 8b MAC-churn — `run-gate8b-mac-churn-soak.sh`
 
 Scenario 7 plus sustained FDB churn and RFC 7432 §15.1 mobility moves.
+This runner flips only the in-container daemon process (SIGTERM; opt-in SIGKILL)
+so the netns and FDB survive, and retains its before/after
+`verify_topology_link` tripwire. Its terminal recovery must restore the current
+sessions and preserve that topology; cumulative establishment counters are
+diagnostic only.
 Analyzer coverage is scenario 7's (`analyze-gate8b-soak.py`); the
 MAC-churn-specific gates are precommitted here and read from
 `samples.csv`: `evpn_local_origination_errors_total` == 0 (CSV

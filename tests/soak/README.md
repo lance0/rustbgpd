@@ -448,6 +448,11 @@ the BUM-suppression rtnetlink path is exercised on every flip.
 - iBGP L2VPN/EVPN session between PE1 (10.0.0.1) and PE2
   (10.0.0.2).
 
+This base runner deliberately exercises **container restart** (`docker stop` /
+`docker start`), reruns the container setup script, waits for the current BGP
+session gauge, and reattaches its log tail. The MAC-churn runner below uses a
+daemon-process restart instead because its kernel FDB and netns must survive.
+
 ## Run
 
 ```bash
@@ -476,8 +481,14 @@ pe1_rss_mb, pe2_rss_mb,
 pe1_df_role, pe2_df_role,
 pe1_df_changes, pe2_df_changes,
 pe1_bum_flags, pe2_bum_flags,    # df / nondf / mixed / unreachable
-pe2_running                       # 1 / 0 driven by harness
+pe2_running,                      # 1 / 0 driven by harness
+pe1_session_established, pe2_session_established  # current-session gauges
 ```
+
+The current-gauge columns are an intentional schema boundary and sit directly
+after `pe2_running`. At duration expiry the runner recovers PE2 if the final
+flip left it down, then always appends exactly one terminal evidence row. A
+failed recovery leaves that row in the receipt and makes the runner fail.
 
 Plus per-PE daemon logs streamed to `pe1.log` / `pe2.log` and
 flip events recorded in `flips.log` so post-mortem of any anomaly
@@ -502,7 +513,8 @@ python3 tests/soak/analyze-gate8b-soak.py \
 
 Gates: per-PE memory slope < 1.5 MB/h, peak RSS < 512 MB, DF
 transition counters monotone (no daemon restart inside the
-window), at least one full flip cycle observed.
+window), at least one full flip cycle observed, and the terminal row reports
+`pe2_running = 1` with both current-session gauges equal to 1.
 
 ## When to run Gate 8b soak
 
@@ -628,7 +640,8 @@ pe1_df_role, pe2_df_role,
 pe1_df_changes, pe2_df_changes,
 pe1_bum_flags, pe2_bum_flags,
 pe2_running,
-pe1_established_seen, pe2_established_seen,         # sum of bgp_session_established_total — per-sample observability after the pre-churn gate
+pe1_session_established, pe2_session_established,   # current bgp_peer_session_established gauges
+pe1_established_seen, pe2_established_seen,         # cumulative diagnostic only; cannot prove current recovery
 pe1_pool_size, pe2_pool_size,                       # harness-tracked
 pe1_fdb_total, pe2_fdb_total,                       # kernel `bridge fdb show | wc -l`
 pe1_fdb_extern_learn, pe2_fdb_extern_learn,         # daemon-programmed remote rows
@@ -643,6 +656,13 @@ pe1_drift_orphans_cleaned, pe2_drift_orphans_cleaned,
 pe1_drift_disabled, pe2_drift_disabled,             # ADR-0059 drift counters
 churn_adds_total, churn_dels_total, churn_moves_total
 ```
+
+The two current-gauge columns immediately after `pe2_running` are a deliberate
+schema boundary. Every row derives both current and cumulative session values
+from the same single scrape per PE. At expiry this process-restart runner
+recovers PE2, rechecks current establishment and topology preservation, and
+appends exactly one terminal row; cumulative counters never substitute for the
+current-state evidence.
 
 Plus per-PE daemon logs (`pe1.log` / `pe2.log`), flip events
 (`flips.log`), churn batches (`churn.log`), and live pool state

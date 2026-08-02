@@ -143,6 +143,8 @@ exec > >(tee -a "$SOAK_LOG") 2>&1
 # shellcheck source=./host-lock.sh
 source "$SOAK_SCRIPT_DIR/host-lock.sh"
 acquire_rustbgpd_host_lock
+# shellcheck source=./gate8b-terminal-recovery.sh
+source "$SOAK_SCRIPT_DIR/gate8b-terminal-recovery.sh"
 
 # ---------------------------------------------------------------------------
 # Helpers (shared shape with run-gate8b-soak.sh)
@@ -262,14 +264,8 @@ nh_count() {
     docker exec "$container" sh -c 'ip nexthop show 2>/dev/null | wc -l' 2>/dev/null || echo ""
 }
 
-# Sum every `bgp_session_established_total{...}` row this PE exports.
-# Each successful entry into the Established FSM state increments
-# the counter by 1 (see `rustbgpd_telemetry::metrics`), so > 0 means
-# the BGP session has been up at least once. Returns 0 if the scrape
-# is empty or the metric is absent.
-pe_established_total() {
-    local container="$1" prom
-    prom="$(prom_scrape "$container")"
+prom_established_total() {
+    local prom="$1"
     [ -z "$prom" ] && { echo 0; return; }
     printf '%s' "$prom" | awk '
         $0 ~ /^bgp_session_established_total\{/ { sum += $NF }
@@ -277,8 +273,21 @@ pe_established_total() {
     '
 }
 
-# Refuse to start churn until both PEs have reached Established at
-# least once. The OPEN-collision-race recovery time on simultaneous
+prom_established_current() {
+    local prom="$1"
+    [ -z "$prom" ] && { echo 0; return; }
+    printf '%s' "$prom" | awk '
+        $0 ~ /^bgp_peer_session_established\{/ { sum += $NF }
+        END { print sum + 0 }
+    '
+}
+
+pe_established_current() {
+    prom_established_current "$(prom_scrape "$1")"
+}
+
+# Refuse to start churn until both PEs are currently Established.
+# The OPEN-collision-race recovery time on simultaneous
 # clab deploy can exceed the fixed warmup window; gating here keeps
 # the validation honest — without it the soak can pass with
 # `extern_learn = 0` and miss the entire remote-Type-2 receive path.
@@ -288,10 +297,10 @@ wait_established() {
     log "waiting up to ${timeout_sec}s for both PEs to reach BGP Established"
     while [ "$(date +%s)" -lt "$deadline" ]; do
         local p1 p2
-        p1="$(pe_established_total "$PE1_NAME")"
-        p2="$(pe_established_total "$PE2_NAME")"
+        p1="$(pe_established_current "$PE1_NAME")"
+        p2="$(pe_established_current "$PE2_NAME")"
         if [ "${p1:-0}" -ge 1 ] && [ "${p2:-0}" -ge 1 ]; then
-            log "BGP Established gate passed (pe1_established_total=${p1} pe2_established_total=${p2})"
+            log "BGP Established gate passed (pe1_current=${p1} pe2_current=${p2})"
             return 0
         fi
         sleep 5
@@ -351,14 +360,10 @@ verify_topology_link() {
     return "$ok"
 }
 
-# Wait for a freshly restarted PE's daemon to reach Established at
-# least once. `bgp_session_established_total` is an in-process
-# counter — it resets to 0 every time the daemon process restarts,
-# so `>= 1` post-restart is the right "the new process actually
-# peered" gate. (A pre-flip baseline would be meaningless because
-# the counter doesn't survive the restart.) During the bind window
+# Wait for a freshly restarted PE's daemon to be currently Established.
+# During the bind window
 # right after the new daemon launches, `curl` to :9179 returns
-# "connection refused" and `pe_established_total` falls back to 0,
+# "connection refused" and `pe_established_current` falls back to 0,
 # which simply keeps the poll loop running until the listener is
 # up and the OPEN exchange completes.
 wait_established_post_flip() {
@@ -367,9 +372,9 @@ wait_established_post_flip() {
     local deadline=$(($(date +%s) + timeout_sec))
     while [ "$(date +%s)" -lt "$deadline" ]; do
         local cur
-        cur="$(pe_established_total "$pe")"
+        cur="$(pe_established_current "$pe")"
         if [ "${cur:-0}" -ge 1 ]; then
-            log "post-flip re-established: $pe established_total=$cur"
+            log "post-flip re-established: $pe current=$cur"
             return 0
         fi
         sleep 5
@@ -668,6 +673,47 @@ churn_loop() {
     done
 }
 
+recover_terminal_pe2() {
+    start_pe2_daemon || return
+    verify_topology_link || return
+}
+
+sample_row() {
+    local NOW="${1:-$(date +%s)}" ELAPSED PE1_PROM PE2_PROM
+    local PE1_RSS PE2_RSS PE1_DF PE2_DF PE1_DF_CHANGES PE2_DF_CHANGES
+    local PE1_FLAGS PE2_FLAGS PE1_CURRENT PE2_CURRENT PE1_ESTAB PE2_ESTAB
+    local PE1_POOL_N PE2_POOL_N PE1_FDB_TOTAL PE2_FDB_TOTAL PE1_FDB_EXT PE2_FDB_EXT
+    local PE1_NH PE2_NH PE1_ORIGS PE2_ORIGS PE1_ORIG_ERR PE2_ORIG_ERR
+    local PE1_OBS_DROPS PE2_OBS_DROPS PE1_DUP_MOVES PE2_DUP_MOVES
+    local PE1_REPAIRED PE2_REPAIRED PE1_REPLACED PE2_REPLACED
+    local PE1_ORPHANS PE2_ORPHANS PE1_DDISABLED PE2_DDISABLED
+    ELAPSED="${2:-$((NOW - START_UNIX))}"
+    PE1_PROM="$(prom_scrape "$PE1_NAME")"; PE2_PROM="$(prom_scrape "$PE2_NAME")"
+    PE1_RSS="$(container_rss_mb "$PE1_NAME" || echo "")"; PE2_RSS="$(container_rss_mb "$PE2_NAME" || echo "")"
+    PE1_DF="$(prom_extract "$PE1_PROM" evpn_df_role 'role="df"')"; PE2_DF="$(prom_extract "$PE2_PROM" evpn_df_role 'role="df"')"
+    PE1_DF_CHANGES="$(prom_extract "$PE1_PROM" evpn_df_role_changes_total)"; PE2_DF_CHANGES="$(prom_extract "$PE2_PROM" evpn_df_role_changes_total)"
+    PE1_FLAGS="$(bridge_flag_state "$PE1_NAME")"; PE2_FLAGS="$(bridge_flag_state "$PE2_NAME" 2>/dev/null || echo unreachable)"
+    PE1_CURRENT="$(prom_established_current "$PE1_PROM")"; PE2_CURRENT="$(prom_established_current "$PE2_PROM")"
+    PE1_ESTAB="$(prom_established_total "$PE1_PROM")"; PE2_ESTAB="$(prom_established_total "$PE2_PROM")"
+    PE1_POOL_N="$(pool_size 1)"; PE2_POOL_N="$(pool_size 2)"
+    PE1_FDB_TOTAL="$(fdb_total_count "$PE1_NAME")"; PE2_FDB_TOTAL="$(fdb_total_count "$PE2_NAME")"
+    PE1_FDB_EXT="$(fdb_extern_learn_count "$PE1_NAME")"; PE2_FDB_EXT="$(fdb_extern_learn_count "$PE2_NAME")"
+    PE1_NH="$(nh_count "$PE1_NAME")"; PE2_NH="$(nh_count "$PE2_NAME")"
+    PE1_ORIGS="$(prom_extract "$PE1_PROM" evpn_local_originations_total)"; PE2_ORIGS="$(prom_extract "$PE2_PROM" evpn_local_originations_total)"
+    PE1_ORIG_ERR="$(prom_extract "$PE1_PROM" evpn_local_origination_errors_total)"; PE2_ORIG_ERR="$(prom_extract "$PE2_PROM" evpn_local_origination_errors_total)"
+    PE1_OBS_DROPS="$(prom_extract "$PE1_PROM" evpn_local_observations_dropped_total)"; PE2_OBS_DROPS="$(prom_extract "$PE2_PROM" evpn_local_observations_dropped_total)"
+    PE1_DUP_MOVES="$(prom_extract "$PE1_PROM" evpn_duplicate_mac_moves_total)"; PE2_DUP_MOVES="$(prom_extract "$PE2_PROM" evpn_duplicate_mac_moves_total)"
+    PE1_REPAIRED="$(prom_extract "$PE1_PROM" evpn_fdb_nhg_drift_members_repaired_total)"; PE2_REPAIRED="$(prom_extract "$PE2_PROM" evpn_fdb_nhg_drift_members_repaired_total)"
+    PE1_REPLACED="$(prom_extract "$PE1_PROM" evpn_fdb_nhg_drift_groups_replaced_total)"; PE2_REPLACED="$(prom_extract "$PE2_PROM" evpn_fdb_nhg_drift_groups_replaced_total)"
+    PE1_ORPHANS="$(prom_extract "$PE1_PROM" evpn_fdb_nhg_orphans_cleaned_total)"; PE2_ORPHANS="$(prom_extract "$PE2_PROM" evpn_fdb_nhg_orphans_cleaned_total)"
+    PE1_DDISABLED="$(prom_extract "$PE1_PROM" evpn_fdb_nhg_drift_disabled_total)"; PE2_DDISABLED="$(prom_extract "$PE2_PROM" evpn_fdb_nhg_drift_disabled_total)"
+    {
+        printf '%s' "$NOW"
+        printf ',%s' "$ELAPSED" "${PE1_RSS:-NaN}" "${PE2_RSS:-NaN}" "${PE1_DF:-NaN}" "${PE2_DF:-NaN}" "${PE1_DF_CHANGES:-NaN}" "${PE2_DF_CHANGES:-NaN}" "${PE1_FLAGS:-unknown}" "${PE2_FLAGS:-unknown}" "$PE2_RUNNING" "${PE1_CURRENT:-NaN}" "${PE2_CURRENT:-NaN}" "${PE1_ESTAB:-NaN}" "${PE2_ESTAB:-NaN}" "$PE1_POOL_N" "$PE2_POOL_N" "${PE1_FDB_TOTAL:-NaN}" "${PE2_FDB_TOTAL:-NaN}" "${PE1_FDB_EXT:-NaN}" "${PE2_FDB_EXT:-NaN}" "${PE1_NH:-NaN}" "${PE2_NH:-NaN}" "${PE1_ORIGS:-NaN}" "${PE2_ORIGS:-NaN}" "${PE1_ORIG_ERR:-NaN}" "${PE2_ORIG_ERR:-NaN}" "${PE1_OBS_DROPS:-NaN}" "${PE2_OBS_DROPS:-NaN}" "${PE1_DUP_MOVES:-NaN}" "${PE2_DUP_MOVES:-NaN}" "${PE1_REPAIRED:-NaN}" "${PE2_REPAIRED:-NaN}" "${PE1_REPLACED:-NaN}" "${PE2_REPLACED:-NaN}" "${PE1_ORPHANS:-NaN}" "${PE2_ORPHANS:-NaN}" "${PE1_DDISABLED:-NaN}" "${PE2_DDISABLED:-NaN}" "$(< "$CHURN_ADDS_FILE")" "$(< "$CHURN_DELS_FILE")" "$(< "$CHURN_MOVES_FILE")"
+        printf '\n'
+    } >>"$SAMPLES_CSV"
+}
+
 # ---------------------------------------------------------------------------
 # Pre-flight
 # ---------------------------------------------------------------------------
@@ -748,7 +794,7 @@ trap cleanup EXIT INT TERM
 # ---------------------------------------------------------------------------
 
 cat >"$SAMPLES_CSV" <<'EOF'
-ts_unix,elapsed_sec,pe1_rss_mb,pe2_rss_mb,pe1_df_role,pe2_df_role,pe1_df_changes,pe2_df_changes,pe1_bum_flags,pe2_bum_flags,pe2_running,pe1_established_seen,pe2_established_seen,pe1_pool_size,pe2_pool_size,pe1_fdb_total,pe2_fdb_total,pe1_fdb_extern_learn,pe2_fdb_extern_learn,pe1_nh_count,pe2_nh_count,pe1_local_origs,pe2_local_origs,pe1_local_orig_errors,pe2_local_orig_errors,pe1_local_obs_drops,pe2_local_obs_drops,pe1_dup_mac_moves,pe2_dup_mac_moves,pe1_drift_members_repaired,pe2_drift_members_repaired,pe1_drift_groups_replaced,pe2_drift_groups_replaced,pe1_drift_orphans_cleaned,pe2_drift_orphans_cleaned,pe1_drift_disabled,pe2_drift_disabled,churn_adds_total,churn_dels_total,churn_moves_total
+ts_unix,elapsed_sec,pe1_rss_mb,pe2_rss_mb,pe1_df_role,pe2_df_role,pe1_df_changes,pe2_df_changes,pe1_bum_flags,pe2_bum_flags,pe2_running,pe1_session_established,pe2_session_established,pe1_established_seen,pe2_established_seen,pe1_pool_size,pe2_pool_size,pe1_fdb_total,pe2_fdb_total,pe1_fdb_extern_learn,pe2_fdb_extern_learn,pe1_nh_count,pe2_nh_count,pe1_local_origs,pe2_local_origs,pe1_local_orig_errors,pe2_local_orig_errors,pe1_local_obs_drops,pe2_local_obs_drops,pe1_dup_mac_moves,pe2_dup_mac_moves,pe1_drift_members_repaired,pe2_drift_members_repaired,pe1_drift_groups_replaced,pe2_drift_groups_replaced,pe1_drift_orphans_cleaned,pe2_drift_orphans_cleaned,pe1_drift_disabled,pe2_drift_disabled,churn_adds_total,churn_dels_total,churn_moves_total
 EOF
 
 # ---------------------------------------------------------------------------
@@ -799,74 +845,7 @@ while [ "$(date +%s)" -lt "$END_UNIX" ]; do
     NOW="$(date +%s)"
     ELAPSED="$((NOW - START_UNIX))"
 
-    # Scrape per-PE.
-    PE1_PROM="$(prom_scrape "$PE1_NAME")"
-    PE2_PROM="$(prom_scrape "$PE2_NAME")"
-
-    PE1_RSS="$(container_rss_mb "$PE1_NAME" || echo "")"
-    PE2_RSS="$(container_rss_mb "$PE2_NAME" || echo "")"
-
-    PE1_DF="$(prom_extract "$PE1_PROM" evpn_df_role 'role="df"')"
-    PE2_DF="$(prom_extract "$PE2_PROM" evpn_df_role 'role="df"')"
-    PE1_DF_CHANGES="$(prom_extract "$PE1_PROM" evpn_df_role_changes_total)"
-    PE2_DF_CHANGES="$(prom_extract "$PE2_PROM" evpn_df_role_changes_total)"
-
-    PE1_FLAGS="$(bridge_flag_state "$PE1_NAME")"
-    PE2_FLAGS="$(bridge_flag_state "$PE2_NAME" 2>/dev/null || echo unreachable)"
-
-    PE1_ESTAB="$(pe_established_total "$PE1_NAME")"
-    PE2_ESTAB="$(pe_established_total "$PE2_NAME")"
-
-    PE1_POOL_N="$(pool_size 1)"
-    PE2_POOL_N="$(pool_size 2)"
-
-    PE1_FDB_TOTAL="$(fdb_total_count "$PE1_NAME")"
-    PE2_FDB_TOTAL="$(fdb_total_count "$PE2_NAME")"
-    PE1_FDB_EXT="$(fdb_extern_learn_count "$PE1_NAME")"
-    PE2_FDB_EXT="$(fdb_extern_learn_count "$PE2_NAME")"
-    PE1_NH="$(nh_count "$PE1_NAME")"
-    PE2_NH="$(nh_count "$PE2_NAME")"
-
-    PE1_ORIGS="$(prom_extract "$PE1_PROM" evpn_local_originations_total)"
-    PE2_ORIGS="$(prom_extract "$PE2_PROM" evpn_local_originations_total)"
-    PE1_ORIG_ERR="$(prom_extract "$PE1_PROM" evpn_local_origination_errors_total)"
-    PE2_ORIG_ERR="$(prom_extract "$PE2_PROM" evpn_local_origination_errors_total)"
-    PE1_OBS_DROPS="$(prom_extract "$PE1_PROM" evpn_local_observations_dropped_total)"
-    PE2_OBS_DROPS="$(prom_extract "$PE2_PROM" evpn_local_observations_dropped_total)"
-    PE1_DUP_MOVES="$(prom_extract "$PE1_PROM" evpn_duplicate_mac_moves_total)"
-    PE2_DUP_MOVES="$(prom_extract "$PE2_PROM" evpn_duplicate_mac_moves_total)"
-
-    PE1_REPAIRED="$(prom_extract "$PE1_PROM" evpn_fdb_nhg_drift_members_repaired_total)"
-    PE2_REPAIRED="$(prom_extract "$PE2_PROM" evpn_fdb_nhg_drift_members_repaired_total)"
-    PE1_REPLACED="$(prom_extract "$PE1_PROM" evpn_fdb_nhg_drift_groups_replaced_total)"
-    PE2_REPLACED="$(prom_extract "$PE2_PROM" evpn_fdb_nhg_drift_groups_replaced_total)"
-    PE1_ORPHANS="$(prom_extract "$PE1_PROM" evpn_fdb_nhg_orphans_cleaned_total)"
-    PE2_ORPHANS="$(prom_extract "$PE2_PROM" evpn_fdb_nhg_orphans_cleaned_total)"
-    PE1_DDISABLED="$(prom_extract "$PE1_PROM" evpn_fdb_nhg_drift_disabled_total)"
-    PE2_DDISABLED="$(prom_extract "$PE2_PROM" evpn_fdb_nhg_drift_disabled_total)"
-
-    printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
-        "$NOW" "$ELAPSED" \
-        "${PE1_RSS:-NaN}" "${PE2_RSS:-NaN}" \
-        "${PE1_DF:-NaN}" "${PE2_DF:-NaN}" \
-        "${PE1_DF_CHANGES:-NaN}" "${PE2_DF_CHANGES:-NaN}" \
-        "${PE1_FLAGS:-unknown}" "${PE2_FLAGS:-unknown}" \
-        "$PE2_RUNNING" \
-        "${PE1_ESTAB:-NaN}" "${PE2_ESTAB:-NaN}" \
-        "$PE1_POOL_N" "$PE2_POOL_N" \
-        "${PE1_FDB_TOTAL:-NaN}" "${PE2_FDB_TOTAL:-NaN}" \
-        "${PE1_FDB_EXT:-NaN}" "${PE2_FDB_EXT:-NaN}" \
-        "${PE1_NH:-NaN}" "${PE2_NH:-NaN}" \
-        "${PE1_ORIGS:-NaN}" "${PE2_ORIGS:-NaN}" \
-        "${PE1_ORIG_ERR:-NaN}" "${PE2_ORIG_ERR:-NaN}" \
-        "${PE1_OBS_DROPS:-NaN}" "${PE2_OBS_DROPS:-NaN}" \
-        "${PE1_DUP_MOVES:-NaN}" "${PE2_DUP_MOVES:-NaN}" \
-        "${PE1_REPAIRED:-NaN}" "${PE2_REPAIRED:-NaN}" \
-        "${PE1_REPLACED:-NaN}" "${PE2_REPLACED:-NaN}" \
-        "${PE1_ORPHANS:-NaN}" "${PE2_ORPHANS:-NaN}" \
-        "${PE1_DDISABLED:-NaN}" "${PE2_DDISABLED:-NaN}" \
-        "$(< "$CHURN_ADDS_FILE")" "$(< "$CHURN_DELS_FILE")" "$(< "$CHURN_MOVES_FILE")" \
-        >>"$SAMPLES_CSV"
+    sample_row "$NOW" "$ELAPSED"
 
     # Flip PE2 if it's time.
     if [ "$NOW" -ge "$NEXT_FLIP_UNIX" ]; then
@@ -889,12 +868,9 @@ while [ "$(date +%s)" -lt "$END_UNIX" ]; do
             log "flip: starting PE2 daemon"
             # Wait for re-establishment so the next sample isn't
             # credited as a nominal steady-state row when the
-            # session has actually failed to come back. The fresh
-            # daemon's counter starts at 0; we just need it to hit
-            # 1 (i.e., the new process has reached Established
-            # once). No cross-restart baseline survives — the
-            # counter is in-process — so a `>= 1` gate is the
-            # right invariant.
+            # session has actually failed to come back. The current
+            # gauge must reach 1; a cumulative counter cannot prove
+            # that the restarted session is still Established.
             if ! start_pe2_daemon; then
                 log "FATAL: PE2 daemon start or session recovery failed"
                 exit 4
@@ -921,6 +897,11 @@ while [ "$(date +%s)" -lt "$END_UNIX" ]; do
 
     sleep "$SAMPLE_INTERVAL"
 done
+
+if ! gate8b_terminal_recovery "$PE2_RUNNING" recover_terminal_pe2 sample_row; then
+    log "FATAL: terminal PE2 recovery failed; final evidence row retained"
+    exit 4
+fi
 
 log "soak loop completed; final samples in $SAMPLES_CSV"
 log "totals: adds=$(< "$CHURN_ADDS_FILE") dels=$(< "$CHURN_DELS_FILE") moves=$(< "$CHURN_MOVES_FILE")"
