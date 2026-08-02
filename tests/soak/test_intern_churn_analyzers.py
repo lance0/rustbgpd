@@ -99,6 +99,78 @@ class AnalyzerContracts(unittest.TestCase):
             run_analyzer("analyze-soak-inject-churn.py", fields, rows).returncode, 1
         )
 
+    # Destructive proof: restoring tail.count("1") > 0 makes the terminal-down
+    # cases return 0 instead of 1.
+    def test_terminal_established_requires_final_sample_up(self):
+        cases = [
+            (
+                "analyze-soak-gr-restart.py",
+                [*BASE, "elapsed_sec", "gr_active_peers", "gr_stale_routes",
+                 "restart_cycles"],
+                [
+                    {**BASE, "elapsed_sec": "0", "gr_active_peers": "0",
+                     "gr_stale_routes": "0", "restart_cycles": "0"},
+                    {**BASE, "elapsed_sec": "3600", "gr_active_peers": "1",
+                     "gr_stale_routes": "2", "restart_cycles": "0"},
+                    {**BASE, "elapsed_sec": "7200", "gr_active_peers": "0",
+                     "gr_stale_routes": "0", "restart_cycles": "1"},
+                ],
+            ),
+            (
+                "analyze-soak-hot-reload.py",
+                [*BASE, "elapsed_sec", "apply_cycles", "apply_ok", "apply_fail",
+                 "flap_count", "uptime_seconds"],
+                [
+                    {**BASE, "elapsed_sec": "0", "apply_cycles": "0", "apply_ok": "0",
+                     "apply_fail": "0", "flap_count": "3", "uptime_seconds": "10"},
+                    {**BASE, "elapsed_sec": "3600", "apply_cycles": "1", "apply_ok": "1",
+                     "apply_fail": "0", "flap_count": "3", "uptime_seconds": "3610"},
+                    {**BASE, "elapsed_sec": "7200", "apply_cycles": "1", "apply_ok": "1",
+                     "apply_fail": "0", "flap_count": "3", "uptime_seconds": "7210"},
+                ],
+            ),
+            (
+                "analyze-soak-inject-churn.py",
+                [*BASE, "elapsed_sec", "live_target", "frr_route_count",
+                 "churn_cycles", "add_total", "del_total", "flap_count",
+                 "uptime_seconds"],
+                [
+                    {**BASE, "elapsed_sec": "0", "live_target": "1024",
+                     "frr_route_count": "0", "churn_cycles": "0", "add_total": "1024",
+                     "del_total": "0", "flap_count": "0", "uptime_seconds": "10"},
+                    {**BASE, "elapsed_sec": "3600", "live_target": "1024",
+                     "frr_route_count": "1024", "churn_cycles": "1", "add_total": "1049",
+                     "del_total": "25", "flap_count": "0", "uptime_seconds": "3610"},
+                    {**BASE, "elapsed_sec": "7200", "live_target": "1024",
+                     "frr_route_count": "1024", "churn_cycles": "1", "add_total": "1049",
+                     "del_total": "25", "flap_count": "0", "uptime_seconds": "7210"},
+                ],
+            ),
+        ]
+        scenarios = (
+            ("three_up", ["1", "1", "1"], True),
+            ("recovered", ["0", "1", "1"], True),
+            ("two_up", ["1", "1"], True),
+            ("down_for_two", ["1", "0", "0"], False),
+            ("terminal_down", ["1", "1", "0"], False),
+        )
+        for analyzer, fields, valid_rows in cases:
+            for scenario, states, expected_pass in scenarios:
+                with self.subTest(analyzer=analyzer, scenario=scenario):
+                    rows = [dict(row) for row in valid_rows[-len(states):]]
+                    for row, state in zip(rows, states):
+                        row["bgp_established"] = state
+                    result = run_analyzer(analyzer, fields, rows)
+                    payload = json.loads(result.stdout)
+                    target = payload["gates"]["final_session_established"]
+                    self.assertEqual(result.returncode, 0 if expected_pass else 1,
+                                     result.stderr)
+                    self.assertEqual(target["pass"], expected_pass)
+                    self.assertTrue(all(
+                        gate["pass"] for name, gate in payload["gates"].items()
+                        if expected_pass or name != "final_session_established"
+                    ), payload)
+
     def test_missing_or_malformed_required_evidence_is_input_error(self):
         cases = [
             ("analyze-soak-gr-restart.py", "gr_stale_routes",

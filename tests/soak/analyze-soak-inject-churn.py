@@ -7,7 +7,7 @@ verdict against the soak-specific gates:
   - RSS slope (steady state, MB/hour) < 1.0
   - intern table size (bgp_rib_attr_intern_global_size) slope per hour < 1.0
   - peak RSS < 512 MB
-  - session established in final 3 samples (no flap)
+  - session established in the final CSV sample (no flap)
   - at least one churn cycle recorded
   - final consumer route count exactly matches the live target
   - unchanged flap count and nondecreasing session uptime
@@ -95,8 +95,7 @@ def analyze(rows: list[dict[str, str]]) -> dict:
     )
     peak_rss = max((r for _, r in rss_pts), default=float("nan"))
 
-    tail = established_final[-3:] if established_final else []
-    final_established = tail.count("1") > 0 if tail else False
+    final_established = bool(established_final) and established_final[-1] == "1"
 
     gates = {
         "intern_slope_per_hour": {
