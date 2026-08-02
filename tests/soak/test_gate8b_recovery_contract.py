@@ -110,7 +110,10 @@ rc=$?; cat "$events"; exit "$rc"
         ):
             with self.subTest(mode=mode):
                 result = subprocess.run(
-                    ["bash", "-c", f"source {helper}\nMODE={mode} INITIAL={initial}\n{body}"],
+                    [
+                        "bash", "-c", f'source "$1"\nMODE={mode} INITIAL={initial}\n{body}',
+                        "gate8b-recovery-test", str(helper),
+                    ],
                     text=True, capture_output=True, check=False,
                 )
                 self.assertEqual(result.returncode, code)
