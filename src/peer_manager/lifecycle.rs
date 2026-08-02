@@ -481,7 +481,7 @@ impl PeerManager {
         config: PeerManagerNeighborConfig,
         sync_config_snapshot: bool,
     ) -> Result<(), PeerLifecycleError> {
-        self.add_peer_with_admin_state(config, sync_config_snapshot, true)
+        self.add_peer_impl(config, sync_config_snapshot, true, true)
             .await
     }
 
@@ -531,15 +531,26 @@ impl PeerManager {
         }
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "peer add wires transport, policy, BFD desired state, persistence, and events"
-    )]
     pub(super) async fn add_peer_with_admin_state(
         &mut self,
         config: PeerManagerNeighborConfig,
         sync_config_snapshot: bool,
         enabled: bool,
+    ) -> Result<(), PeerLifecycleError> {
+        self.add_peer_impl(config, sync_config_snapshot, enabled, false)
+            .await
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "peer add wires transport, policy, BFD desired state, persistence, and events"
+    )]
+    async fn add_peer_impl(
+        &mut self,
+        config: PeerManagerNeighborConfig,
+        sync_config_snapshot: bool,
+        enabled: bool,
+        emit_presence: bool,
     ) -> Result<(), PeerLifecycleError> {
         let peer_key = PeerKey::new(config.address, config.interface.clone());
         let enabled = enabled && !self.max_prefix_latches.contains_key(&peer_key);
@@ -724,12 +735,9 @@ impl PeerManager {
             // and keep the BFD desired session disabled until EnablePeer.
             self.set_bfd_peer_disabled(address, true);
         }
-        // Publish only after the new incarnation is authoritatively installed
-        // and registered. Any config snapshot update owned by this call and
-        // the BFD bookkeeping above are already complete. Reusing the existing
-        // admin events gives retained-history consumers an incarnation fence
-        // for delete/re-add and reconfigure without changing FSM behavior or
-        // the protobuf surface.
+        if emit_presence {
+            self.publish_peer_added_event(&peer_key);
+        }
         let current_enabled = self
             .peers
             .get(&peer_key)
@@ -1390,9 +1398,14 @@ impl PeerManager {
     /// reap covers them all. Call only after the peer has been removed
     /// from `self.peers` and its session task joined or was aborted and
     /// awaited by bounded shutdown.
-    pub(super) async fn reap_deleted_peer_metric_series_for_key(&self, peer: &PeerKey) {
+    pub(super) async fn reap_deleted_peer_metric_series_for_key(&mut self, peer: &PeerKey) {
         let address = peer.address;
         let peer_label = rustbgpd_telemetry::peer_label(address);
+        self.publish_peer_lifecycle_event(
+            peer,
+            SessionLifecycleEventType::PeerRemoved,
+            format!("peer {peer} removed"),
+        );
         self.metrics
             .reap_peer_identity_series(&peer_label, peer.interface.as_deref().unwrap_or(""));
         // The label can be shared with a surviving peer (the same

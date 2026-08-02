@@ -568,6 +568,8 @@ impl PeerManager {
                 // external classification and its resolved chains.
                 self.refresh_rfc8212_policy_metrics(&peer_key);
 
+                self.publish_peer_added_event(&peer_key);
+
                 // Restore any dead-lettered hot-apply / Route Refresh
                 // intent left behind by a prior dynamic-peer auto-
                 // removal at this address. Carries the retry across

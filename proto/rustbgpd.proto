@@ -2408,6 +2408,8 @@ enum BgpEventType {
   BGP_EVENT_TYPE_SESSION_LOST = 12;
   BGP_EVENT_TYPE_PEER_ENABLED = 13;
   BGP_EVENT_TYPE_PEER_DISABLED = 14;
+  BGP_EVENT_TYPE_PEER_ADDED = 15;
+  BGP_EVENT_TYPE_PEER_REMOVED = 16;
   BGP_EVENT_TYPE_NOTIFICATION_SENT = 20;
   BGP_EVENT_TYPE_NOTIFICATION_RECEIVED = 21;
   BGP_EVENT_TYPE_POLICY_CHANGED = 22;
@@ -2588,15 +2590,15 @@ message SessionEvent {
   string peer_address = 2;
   // Unix epoch seconds, matching existing RouteEvent timestamp shape.
   string timestamp = 3;
-  // BGP FSM state names from the transport layer (`Idle`, `Connect`,
-  // `Active`, `OpenSent`, `OpenConfirm`, `Established`). Empty for
-  // peer enable/disable events that are not tied to a specific FSM
-  // transition.
+  // Lowercase BGP FSM state names from the transport layer (`idle`, `connect`,
+  // `active`, `open_sent`, `open_confirm`, `established`). PeerAdded has
+  // empty old_state and `idle` new_state; PeerRemoved and peer
+  // enable/disable events leave both empty.
   string old_state = 4;
   string new_state = 5;
   // `primary` for the managed peer session, `inbound_candidate` for a
-  // collision-resolution candidate, empty for peer enable/disable
-  // events.
+  // collision-resolution candidate, empty for peer presence and
+  // enable/disable events.
   string session_role = 6;
   // Stable operator-facing reason/summary string for this event.
   string reason = 7;

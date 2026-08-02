@@ -28,6 +28,8 @@ pub fn route_event_to_bgp_event(event: rustbgpd_rib::RouteEvent) -> proto::BgpEv
             | proto::BgpEventType::SessionLost
             | proto::BgpEventType::PeerEnabled
             | proto::BgpEventType::PeerDisabled
+            | proto::BgpEventType::PeerAdded
+            | proto::BgpEventType::PeerRemoved
             | proto::BgpEventType::NotificationSent
             | proto::BgpEventType::NotificationReceived
             | proto::BgpEventType::PolicyChanged
@@ -203,6 +205,8 @@ fn session_lifecycle_event_to_bgp_event(event: SessionLifecycleEvent) -> proto::
         SessionLifecycleEventType::Lost => proto::EventSeverity::Warning,
         SessionLifecycleEventType::StateChanged
         | SessionLifecycleEventType::Established
+        | SessionLifecycleEventType::PeerAdded
+        | SessionLifecycleEventType::PeerRemoved
         | SessionLifecycleEventType::PeerEnabled
         | SessionLifecycleEventType::PeerDisabled => proto::EventSeverity::Info,
     };
@@ -447,6 +451,54 @@ pub(super) fn dataplane_summary_to_bgp_event(
 mod tests {
     use super::*;
     use std::net::Ipv4Addr;
+
+    #[test]
+    fn peer_presence_events_lower_with_exact_state_and_classification() {
+        let peer = std::net::IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        for (kind, expected_type, new_state) in [
+            (
+                SessionLifecycleEventType::PeerAdded,
+                proto::BgpEventType::PeerAdded,
+                Some(rustbgpd_fsm::SessionState::Idle),
+            ),
+            (
+                SessionLifecycleEventType::PeerRemoved,
+                proto::BgpEventType::PeerRemoved,
+                None,
+            ),
+        ] {
+            let event =
+                session_event_to_bgp_event(SessionEvent::Lifecycle(SessionLifecycleEvent {
+                    event_type: kind,
+                    peer,
+                    peer_label: Some("10.0.0.2".to_string()),
+                    timestamp: "123".to_string(),
+                    old_state: None,
+                    new_state,
+                    session_role: None,
+                    reason: format!(
+                        "peer 10.0.0.2 {}",
+                        if new_state.is_some() {
+                            "added"
+                        } else {
+                            "removed"
+                        }
+                    ),
+                }));
+            assert_eq!(event.category, proto::EventCategory::Session as i32);
+            assert_eq!(event.event_type, expected_type as i32);
+            assert_eq!(event.severity, proto::EventSeverity::Info as i32);
+            let Some(proto::bgp_event::Payload::Session(session)) = event.payload else {
+                panic!("expected session payload");
+            };
+            assert!(session.old_state.is_empty());
+            assert_eq!(
+                session.new_state,
+                if new_state.is_some() { "idle" } else { "" }
+            );
+            assert!(session.session_role.is_empty());
+        }
+    }
 
     #[test]
     fn otc_route_blocked_event_lowers_with_full_context() {

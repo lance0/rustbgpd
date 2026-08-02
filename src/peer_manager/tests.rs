@@ -6923,7 +6923,7 @@ async fn primary_max_prefix_breach_drains_pending_collision_candidate() {
 /// that ordering (or handling `BackToIdle` first) auto-removes this dynamic peer
 /// or promotes its candidate before the shutdown latch is installed.
 #[tokio::test]
-async fn queued_max_prefix_precedes_back_to_idle_and_retains_dynamic_latch() {
+async fn peer_presence_retained_max_prefix_emits_no_removed() {
     let mut mgr = test_peer_manager();
     let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 37));
     insert_test_managed_peer(
@@ -6975,6 +6975,16 @@ async fn queued_max_prefix_precedes_back_to_idle_and_retains_dynamic_latch() {
     assert_eq!(mgr.dynamic_peer_count, 1);
     assert!(mgr.max_prefix_latches.contains_key(&key(addr)));
     assert_eq!(candidate.shutdown.load(Ordering::SeqCst), 1);
+    let removed = query_session_event_history(
+        &mgr,
+        Some(addr),
+        [SessionLifecycleEventType::PeerRemoved]
+            .into_iter()
+            .collect(),
+        0,
+    )
+    .await;
+    assert!(removed.is_empty());
 }
 
 /// A candidate-owned breach is fail-closed for the whole peer. Removing the
@@ -7650,7 +7660,7 @@ async fn notification_event_reason_includes_bounded_failure_cause() {
 /// Successful configured-peer installs publish their current admin event only
 /// after installation; failed duplicate adds must not fabricate one.
 #[tokio::test]
-async fn peer_add_and_readd_publish_current_admin_state_without_failed_add_noise() {
+async fn peer_presence_add_and_readd_publish_current_admin_state_without_failed_add_noise() {
     let mut mgr = test_peer_manager();
     let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let metrics = mgr.metrics.clone();
@@ -7693,6 +7703,36 @@ async fn peer_add_and_readd_publish_current_admin_state_without_failed_add_noise
         ]
     );
     assert!(!mgr.list_peers().await[0].enabled);
+
+    let presence_types = [
+        SessionLifecycleEventType::PeerAdded,
+        SessionLifecycleEventType::PeerRemoved,
+    ]
+    .into_iter()
+    .collect();
+    let presence = query_session_event_history(&mgr, Some(addr), presence_types, 0).await;
+    assert_eq!(
+        presence
+            .iter()
+            .map(|event| (event.event_type, event.reason.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            (SessionLifecycleEventType::PeerAdded, "peer 10.0.0.2 added"),
+            (
+                SessionLifecycleEventType::PeerRemoved,
+                "peer 10.0.0.2 removed"
+            ),
+            (SessionLifecycleEventType::PeerAdded, "peer 10.0.0.2 added"),
+            (
+                SessionLifecycleEventType::PeerRemoved,
+                "peer 10.0.0.2 removed"
+            ),
+        ]
+    );
+    assert_eq!(presence[0].old_state, None);
+    assert_eq!(presence[0].new_state, Some(SessionState::Idle));
+    assert_eq!(presence[1].old_state, None);
+    assert_eq!(presence[1].new_state, None);
 }
 
 #[tokio::test]
@@ -8284,7 +8324,7 @@ async fn delete_peer_reaps_metric_series() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn timed_out_dynamic_rollback_exact_reaps_and_preserves_scoped_sibling() {
+async fn peer_presence_rollback_reap_after_shutdown_preserves_scoped_sibling() {
     let mut mgr = dynamic_test_manager();
     mgr.dynamic_ranges.clear();
     let metrics = mgr.metrics.clone();
@@ -8320,6 +8360,17 @@ async fn timed_out_dynamic_rollback_exact_reaps_and_preserves_scoped_sibling() {
         1
     );
     assert_eq!(dropped.load(Ordering::SeqCst), 1);
+    let removed = query_session_event_history(
+        &mgr,
+        Some(address),
+        [SessionLifecycleEventType::PeerRemoved]
+            .into_iter()
+            .collect(),
+        0,
+    )
+    .await;
+    assert_eq!(removed.len(), 1);
+    assert_eq!(removed[0].peer_label.as_deref(), Some("fe80::1%eth0"));
     assert_eq!(
         peer_identity_gauge(&metrics, "bgp_peer_session_established", "fe80::1", "eth0"),
         None
@@ -8338,6 +8389,60 @@ async fn timed_out_dynamic_rollback_exact_reaps_and_preserves_scoped_sibling() {
     );
     assert!(mgr.peers.contains_key(&sibling));
     mgr.delete_peer(sibling, false).await.unwrap();
+}
+
+#[tokio::test]
+async fn peer_presence_scoped_siblings_remove_exactly_and_reap_bare_address_last() {
+    let (_tx, rx) = mpsc::channel(16);
+    let (rib_tx, mut rib_rx) = mpsc::channel(64);
+    let mut mgr = PeerManager::new(
+        rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    let address = "fe80::1".parse().unwrap();
+    let first = scoped_key(address, "eth0");
+    let last = scoped_key(address, "eth1");
+    for (interface, scope_id) in [("eth0", 1), ("eth1", 2)] {
+        let mut config = make_config(address, 65002);
+        config.interface = Some(interface.to_string());
+        config.scope_id = Some(scope_id);
+        mgr.add_peer_with_admin_state(config, false, false)
+            .await
+            .unwrap();
+    }
+
+    mgr.delete_peer(first, false).await.unwrap();
+    assert!(
+        rib_rx.try_recv().is_err(),
+        "surviving sibling owns bare address"
+    );
+    mgr.delete_peer(last, false).await.unwrap();
+    assert!(matches!(
+        rib_rx.try_recv(),
+        Ok(RibUpdate::PeerDeleted { peer }) if peer == address
+    ));
+    let removed = query_session_event_history(
+        &mgr,
+        Some(address),
+        [SessionLifecycleEventType::PeerRemoved]
+            .into_iter()
+            .collect(),
+        0,
+    )
+    .await;
+    assert_eq!(
+        removed
+            .iter()
+            .map(|event| event.peer_label.as_deref())
+            .collect::<Vec<_>>(),
+        vec![Some("fe80::1%eth0"), Some("fe80::1%eth1")]
+    );
 }
 
 #[tokio::test]
@@ -8383,7 +8488,7 @@ async fn session_flap_does_not_reap_metric_series() {
 }
 
 #[tokio::test]
-async fn reconfigure_peer_does_not_reap_metric_series() {
+async fn peer_presence_reconfigure_keeps_admin_event_but_stays_presence_silent() {
     let (_cmd_tx, cmd_rx) = mpsc::channel(16);
     let (rib_tx, mut rib_rx) = mpsc::channel(64);
     let metrics = BgpMetrics::new();
@@ -8421,6 +8526,88 @@ async fn reconfigure_peer_does_not_reap_metric_series() {
     assert!(
         rib_rx.try_recv().is_err(),
         "no PeerDeleted on a reconfigure"
+    );
+    let presence = query_session_event_history(
+        &mgr,
+        Some(peer_addr),
+        [
+            SessionLifecycleEventType::PeerAdded,
+            SessionLifecycleEventType::PeerRemoved,
+        ]
+        .into_iter()
+        .collect(),
+        0,
+    )
+    .await;
+    assert!(presence.is_empty(), "reconfigure must be presence-silent");
+    let admin = query_session_event_history(
+        &mgr,
+        Some(peer_addr),
+        [SessionLifecycleEventType::PeerEnabled]
+            .into_iter()
+            .collect(),
+        0,
+    )
+    .await;
+    assert_eq!(admin.len(), 1, "reconfigure keeps its incarnation fence");
+}
+
+#[test]
+fn peer_presence_source_ordering_contracts() {
+    let lifecycle = include_str!("lifecycle.rs");
+    let public_add = lifecycle
+        .split_once("pub(super) async fn add_peer(")
+        .unwrap()
+        .1
+        .split_once("pub(super) async fn runtime_create_peer")
+        .unwrap()
+        .0;
+    let public_add = public_add.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(public_add.contains("add_peer_impl(config, sync_config_snapshot, true, true)"));
+    let internal_add = lifecycle
+        .split_once("pub(super) async fn add_peer_with_admin_state(")
+        .unwrap()
+        .1
+        .split_once("async fn add_peer_impl")
+        .unwrap()
+        .0;
+    let internal_add = internal_add
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(internal_add.contains("add_peer_impl(config, sync_config_snapshot, enabled, false)"));
+
+    let reap = lifecycle
+        .split_once("reap_deleted_peer_metric_series_for_key")
+        .unwrap()
+        .1;
+    assert!(reap.find("PeerRemoved").unwrap() < reap.find("peer_keys_for_address").unwrap());
+    let deletion = lifecycle
+        .split_once("pub(super) async fn delete_peer_checked")
+        .unwrap()
+        .1
+        .split_once("pub(super) async fn reap_deleted_peer_metric_series_for_key")
+        .unwrap()
+        .0;
+    assert!(
+        deletion.rfind("quiesce_retiring_session").unwrap()
+            < deletion
+                .find("reap_deleted_peer_metric_series_for_key")
+                .unwrap()
+    );
+    assert!(!deletion.contains("PeerRemoved"));
+
+    let publisher = include_str!("events.rs")
+        .split_once("pub(super) fn publish_session_event")
+        .unwrap()
+        .1
+        .split_once("pub(super) fn publish_lifecycle_event")
+        .unwrap()
+        .0;
+    assert!(publisher.find("push_back").unwrap() < publisher.find("try_send_envelope").unwrap());
+    assert!(
+        publisher.find("try_send_envelope").unwrap()
+            < publisher.find("session_events_tx.send").unwrap()
     );
 }
 
@@ -18515,7 +18702,7 @@ async fn inbound_during_established_dropped() {
 /// successful-accept refresh, or the ordinary `BackToIdle` removal refresh
 /// breaks the exact 0 → 1 → 0 process-global gauge sequence.
 #[tokio::test]
-async fn dynamic_inbound_peer_is_created_and_removed_on_back_to_idle() {
+async fn peer_presence_dynamic_inbound_added_then_back_to_idle_removed_fifo() {
     let (_tx, rx) = mpsc::channel(16);
     let (rib_tx, _rib_rx) = mpsc::channel(64);
     let metrics = BgpMetrics::new();
@@ -18534,6 +18721,7 @@ async fn dynamic_inbound_peer_is_created_and_removed_on_back_to_idle() {
         make_dynamic_manager_config(),
     );
     assert_dynamic_neighbor_capacity(&metrics_view, 0.0, 100.0, 100.0, 0.0);
+
     mgr.tcp_ao_rotation = TcpAoRotationStatus {
         desired: rustbgpd_transport::TcpAoRotationGeneration::STARTUP
             .next()
@@ -18572,6 +18760,13 @@ async fn dynamic_inbound_peer_is_created_and_removed_on_back_to_idle() {
     assert_eq!(peers.len(), 1);
     assert!(peers[0].is_dynamic);
 
+    mgr.publish_state_lifecycle_event(
+        &key(peer_addr),
+        rustbgpd_transport::SessionRole::Primary,
+        SessionState::Idle,
+        SessionState::Connect,
+    );
+
     let session_id = mgr.peers.get(&key(peer_addr)).unwrap().session_id;
     mgr.handle_session_notification(SessionNotification::BackToIdle {
         session_id,
@@ -18590,6 +18785,18 @@ async fn dynamic_inbound_peer_is_created_and_removed_on_back_to_idle() {
     );
     assert!(mgr.peers.is_empty(), "dynamic peer table should be empty");
     assert_dynamic_neighbor_capacity(&metrics_view, 0.0, 100.0, 100.0, 0.0);
+    let presence = query_session_event_history(&mgr, Some(peer_addr), BTreeSet::new(), 0).await;
+    assert_eq!(
+        presence
+            .iter()
+            .map(|event| event.event_type)
+            .collect::<Vec<_>>(),
+        vec![
+            SessionLifecycleEventType::PeerAdded,
+            SessionLifecycleEventType::StateChanged,
+            SessionLifecycleEventType::PeerRemoved,
+        ]
+    );
 
     drop(client_stream);
 }
