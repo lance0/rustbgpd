@@ -75,6 +75,8 @@ exec > >(tee -a "$SOAK_LOG") 2>&1
 # shellcheck source=./host-lock.sh
 source "$SOAK_SCRIPT_DIR/host-lock.sh"
 acquire_rustbgpd_host_lock
+# shellcheck source=./gate8b-terminal-recovery.sh
+source "$SOAK_SCRIPT_DIR/gate8b-terminal-recovery.sh"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -208,6 +210,38 @@ restart_pe2() {
     PE2_RUNNING=1
 }
 
+reattach_pe2_log() {
+    kill "$PE2_TAIL_PID" 2>/dev/null || true
+    docker logs -f "$PE2_NAME" >>"$PE2_LOG" 2>&1 &
+    PE2_TAIL_PID=$!
+}
+
+recover_terminal_pe2() {
+    restart_pe2 || return
+    reattach_pe2_log
+}
+
+sample_row() {
+    local now="${1:-$(date +%s)}" elapsed pe1_prom pe2_prom
+    elapsed="${2:-$((now - START_UNIX))}"
+    pe1_prom="$(prom_scrape "$PE1_NAME")"
+    pe2_prom="$(prom_scrape "$PE2_NAME")"
+    printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+        "$now" "$elapsed" \
+        "$(container_rss_mb "$PE1_NAME" || echo NaN)" \
+        "$(container_rss_mb "$PE2_NAME" || echo NaN)" \
+        "$(prom_extract "$pe1_prom" evpn_df_role 'role="df"' || echo NaN)" \
+        "$(prom_extract "$pe2_prom" evpn_df_role 'role="df"' || echo NaN)" \
+        "$(prom_extract "$pe1_prom" evpn_df_role_changes_total || echo NaN)" \
+        "$(prom_extract "$pe2_prom" evpn_df_role_changes_total || echo NaN)" \
+        "$(bridge_flag_state "$PE1_NAME")" \
+        "$(bridge_flag_state "$PE2_NAME" 2>/dev/null || echo unreachable)" \
+        "$PE2_RUNNING" \
+        "$(prom_extract "$pe1_prom" bgp_peer_session_established || echo NaN)" \
+        "$(prom_extract "$pe2_prom" bgp_peer_session_established || echo NaN)" \
+        >>"$SAMPLES_CSV"
+}
+
 # ---------------------------------------------------------------------------
 # Pre-flight
 # ---------------------------------------------------------------------------
@@ -276,7 +310,7 @@ trap cleanup EXIT INT TERM
 # ---------------------------------------------------------------------------
 
 cat >"$SAMPLES_CSV" <<'EOF'
-ts_unix,elapsed_sec,pe1_rss_mb,pe2_rss_mb,pe1_df_role,pe2_df_role,pe1_df_changes,pe2_df_changes,pe1_bum_flags,pe2_bum_flags,pe2_running
+ts_unix,elapsed_sec,pe1_rss_mb,pe2_rss_mb,pe1_df_role,pe2_df_role,pe1_df_changes,pe2_df_changes,pe1_bum_flags,pe2_bum_flags,pe2_running,pe1_session_established,pe2_session_established
 EOF
 
 # ---------------------------------------------------------------------------
@@ -301,27 +335,7 @@ while [ "$(date +%s)" -lt "$END_UNIX" ]; do
     NOW="$(date +%s)"
     ELAPSED="$((NOW - START_UNIX))"
 
-    # Sample.
-    PE1_PROM="$(prom_scrape "$PE1_NAME")"
-    PE2_PROM="$(prom_scrape "$PE2_NAME")"
-    PE1_RSS="$(container_rss_mb "$PE1_NAME" || echo "")"
-    PE2_RSS="$(container_rss_mb "$PE2_NAME" || echo "")"
-
-    PE1_DF="$(prom_extract "$PE1_PROM" evpn_df_role 'role="df"')"
-    PE2_DF="$(prom_extract "$PE2_PROM" evpn_df_role 'role="df"')"
-    PE1_DF_CHANGES="$(prom_extract "$PE1_PROM" evpn_df_role_changes_total)"
-    PE2_DF_CHANGES="$(prom_extract "$PE2_PROM" evpn_df_role_changes_total)"
-
-    PE1_FLAGS="$(bridge_flag_state "$PE1_NAME")"
-    PE2_FLAGS="$(bridge_flag_state "$PE2_NAME" 2>/dev/null || echo unreachable)"
-
-    printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
-        "$NOW" "$ELAPSED" \
-        "${PE1_RSS:-NaN}" "${PE2_RSS:-NaN}" \
-        "${PE1_DF:-NaN}" "${PE2_DF:-NaN}" \
-        "${PE1_DF_CHANGES:-NaN}" "${PE2_DF_CHANGES:-NaN}" \
-        "${PE1_FLAGS:-unknown}" "${PE2_FLAGS:-unknown}" \
-        "$PE2_RUNNING" >>"$SAMPLES_CSV"
+    sample_row "$NOW" "$ELAPSED"
 
     # Flip PE2 if it's time.
     if [ "$NOW" -ge "$NEXT_FLIP_UNIX" ]; then
@@ -343,14 +357,17 @@ while [ "$(date +%s)" -lt "$END_UNIX" ]; do
             fi
             # Re-attach the docker-logs tail since `docker start`
             # invalidated the prior tail's underlying stream.
-            kill "$PE2_TAIL_PID" 2>/dev/null || true
-            docker logs -f "$PE2_NAME" >>"$PE2_LOG" 2>&1 &
-            PE2_TAIL_PID=$!
+            reattach_pe2_log
         fi
         NEXT_FLIP_UNIX="$((NOW + FLIP_INTERVAL_SEC))"
     fi
 
     sleep "$SAMPLE_INTERVAL"
 done
+
+if ! gate8b_terminal_recovery "$PE2_RUNNING" recover_terminal_pe2 sample_row; then
+    log "FATAL: terminal PE2 recovery failed; final evidence row retained"
+    exit 4
+fi
 
 log "soak loop completed; final samples in $SAMPLES_CSV"

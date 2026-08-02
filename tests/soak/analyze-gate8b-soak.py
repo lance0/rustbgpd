@@ -82,7 +82,18 @@ def main():
 
     try:
         with open(args.samples_csv) as f:
-            rows = list(csv.DictReader(f))
+            reader = csv.DictReader(f)
+            required = {
+                "elapsed_sec", "pe1_rss_mb", "pe2_rss_mb",
+                "pe1_df_changes", "pe2_df_changes", "pe1_bum_flags",
+                "pe2_running", "pe1_session_established",
+                "pe2_session_established",
+            }
+            missing = required - set(reader.fieldnames or ())
+            if missing:
+                print(f"ERROR: missing required columns: {sorted(missing)}", file=sys.stderr)
+                sys.exit(2)
+            rows = list(reader)
     except OSError as e:
         print(f"ERROR: cannot read {args.samples_csv}: {e}", file=sys.stderr)
         sys.exit(2)
@@ -158,6 +169,9 @@ def main():
     pe1_flag_states = {r["pe1_bum_flags"] for r in rows if r["pe1_bum_flags"]}
     pe2_running_samples = sum(1 for r in rows if r["pe2_running"] == "1")
     pe2_stopped_samples = sum(1 for r in rows if r["pe2_running"] == "0")
+    terminal = rows[-1]
+    terminal_pe1_current = safe_float(terminal["pe1_session_established"])
+    terminal_pe2_current = safe_float(terminal["pe2_session_established"])
 
     gates = []
 
@@ -181,6 +195,14 @@ def main():
     gate("ran_through_at_least_one_full_flip_cycle",
          pe2_running_samples > 0 and pe2_stopped_samples > 0,
          f"pe2 running={pe2_running_samples} stopped={pe2_stopped_samples}")
+    gate(
+        "terminal_sessions_recovered",
+        terminal["pe2_running"] == "1"
+        and terminal_pe1_current == 1
+        and terminal_pe2_current == 1,
+        f"pe2_running={terminal['pe2_running']!r} "
+        f"current=({terminal_pe1_current!r}, {terminal_pe2_current!r})",
+    )
 
     verdict_pass = all(g["pass"] for g in gates)
     out = {
