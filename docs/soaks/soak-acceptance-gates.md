@@ -167,9 +167,10 @@ Gates (analyzer defaults): verdict `pass`; per-node RSS slope
 < 512 MB; measured failover blackout ≤ 30 000 ms and drain release
 ≤ 30 000 ms per cycle (a `-1` unmeasured sentinel fails the cycle —
 a missing prober log can never read as a perfect 0 ms failover);
-cycle count ≥ floor; session transients ≤ 2 samples; docker restart
-counters flat; `pe1_operator_drain` stays 0 (the link stimulus must
-not leak into the operator-drain reason).
+cycle count ≥ floor; session transients ≤ 2 samples and both sessions
+Established in the final CSV row; docker restart counters flat;
+`pe1_operator_drain` stays 0 (the link stimulus must not leak into the
+operator-drain reason).
 
 ### 7. Gate 8b BUM-state — `run-gate8b-soak.sh` (`analyze-gate8b-soak.py`)
 
