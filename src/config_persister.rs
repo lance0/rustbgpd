@@ -87,13 +87,18 @@ impl ConfigPersister {
         current: Arc<AcceptedConfigSnapshot>,
         state_dir: Option<PathBuf>,
     ) -> Self {
-        Self {
+        let persister = Self {
             rx,
             config_path,
             current,
             state_dir,
             staged: None,
-        }
+        };
+        // The v2 writer owns the one-time legacy-directory permission
+        // tightening. Do it synchronously so read-only services can never
+        // observe the directory before that ownership boundary is established.
+        persister.record_current_history();
+        persister
     }
 
     #[cfg(test)]
@@ -112,13 +117,9 @@ impl ConfigPersister {
     }
 
     pub async fn run(mut self) {
-        // Record the boot-time config as the newest history entry so the
-        // first-ever rollback can restore what was running before the first
-        // apply. Content-hash dedup keeps restarts from growing history.
-        // Serialize the already-validated runtime snapshot. Re-reading the
-        // source here would create a validation-to-read race if an operator
-        // edits the file between startup validation and this task starting.
-        self.record_current_history();
+        // Boot recording already happened synchronously in `new_accepted` so
+        // readers cannot race directory migration. This task handles later
+        // accepted mutations without rereading external sources.
         while let Some(mutation) = self.rx.recv().await {
             match mutation {
                 ConfigMutation::ReplaceConfigAck(new_config, ack) => {
@@ -292,7 +293,7 @@ impl ConfigPersister {
         // Every durable config write funnels through this method, so recording
         // here gives the applied-config history exactly one choke point:
         // transaction commits, gRPC CRUD mutations, and boot all land in it.
-        self.record_history(self.current.normalized_toml());
+        self.record_current_history();
         Ok(())
     }
 
@@ -308,13 +309,12 @@ impl ConfigPersister {
     /// current — boot, every durable write, and a SIGHUP snapshot refresh —
     /// already funnels here, which is why the marker is recorded here too
     /// rather than at each call site.
-    fn record_history(&self, toml_str: &str) {
+    fn record_history(&self) {
         self.record_last_persist();
         if let Some(dir) = self.history_dir()
-            && let Err(error) = crate::config_history::record(&dir, toml_str)
+            && let Err(error) = crate::config_history::record_accepted(&dir, &self.current)
         {
             warn!(
-                dir = %dir.display(),
                 error = %error,
                 "failed to record applied config in the config history"
             );
@@ -361,7 +361,7 @@ impl ConfigPersister {
     }
 
     fn record_current_history(&self) {
-        self.record_history(self.current.normalized_toml());
+        self.record_history();
     }
 }
 
@@ -591,6 +591,9 @@ remote_asn = 65002
         assert_eq!(reloaded.neighbors[0].address, "10.0.0.2");
     }
 
+    /// Red proof: removing constructor recording, routing persistence back to
+    /// the legacy writer, or removing exact v2 dedupe changes the asserted
+    /// two-row roster or its byte-identical payloads after restart.
     #[tokio::test]
     async fn persister_records_history_at_boot_and_on_every_persist() {
         let dir = tempfile::tempdir().unwrap();
@@ -614,12 +617,24 @@ remote_asn = 65002
 
         // Boot config + mutated config = two entries, newest first, and the
         // newest entry is byte-for-byte the config the persister wrote.
-        let entries = crate::config_history::list(&history).unwrap();
+        let entries = crate::config_history::v2::scan_mixed(&history).unwrap();
         assert_eq!(entries.len(), 2);
-        let (_, newest) = crate::config_history::read_entry(&history, 0).unwrap();
-        assert_eq!(newest, std::fs::read_to_string(&path).unwrap());
-        let (_, previous) = crate::config_history::read_entry(&history, 1).unwrap();
-        assert_eq!(previous, persisted_config_document(&config).unwrap());
+        let read_v2 = |row: &crate::config_history::v2::StoredRow| {
+            let crate::config_history::v2::StoredPayload::V2(envelope) =
+                crate::config_history::v2::read_mixed(&history, row).unwrap()
+            else {
+                panic!("persister history rows must be v2");
+            };
+            envelope.normalized_toml
+        };
+        assert_eq!(
+            read_v2(&entries[0]),
+            std::fs::read_to_string(&path).unwrap()
+        );
+        assert_eq!(
+            read_v2(&entries[1]),
+            persisted_config_document(&config).unwrap()
+        );
 
         // "Restart": a fresh persister over the same state boot-records the
         // unchanged config — dedup keeps history from growing.
@@ -629,7 +644,10 @@ remote_asn = 65002
         let handle = tokio::spawn(persister.run());
         drop(tx);
         handle.await.unwrap();
-        assert_eq!(crate::config_history::list(&history).unwrap().len(), 2);
+        assert_eq!(
+            crate::config_history::list_mixed(&history).unwrap().len(),
+            2
+        );
     }
 
     /// Load-bearing SIGHUP-history proof: refreshing the validated desired
@@ -654,10 +672,17 @@ remote_asn = 65002
         let refreshed_snapshot = persister.current.derive_config(refreshed.clone()).unwrap();
         assert!(!persister.apply(ConfigMutation::RefreshSnapshotNoPersist(refreshed_snapshot)));
 
-        let entries = crate::config_history::list(&history).unwrap();
+        let entries = crate::config_history::v2::scan_mixed(&history).unwrap();
         assert_eq!(entries.len(), 2);
-        let newest = crate::config_history::read(&entries[0]).unwrap();
-        assert_eq!(newest, persisted_config_document(&refreshed).unwrap());
+        let crate::config_history::v2::StoredPayload::V2(newest) =
+            crate::config_history::v2::read_mixed(&history, &entries[0]).unwrap()
+        else {
+            panic!("refreshed history row must be v2");
+        };
+        assert_eq!(
+            newest.normalized_toml,
+            persisted_config_document(&refreshed).unwrap()
+        );
     }
 
     #[tokio::test]
@@ -890,6 +915,117 @@ log_format = "json"
             "`rbgp doctor` reads a different marker filename than the persister \
              writes — the config-freshness check will silently fall back to \
              process start and warn forever after the first runtime mutation"
+        );
+    }
+
+    #[cfg(unix)]
+    /// Red proof: moving boot recording from `new_accepted` into `run`, removing
+    /// the writer's 0700 tightening, or making the reader chmod turns one of
+    /// the pre-run mode/row assertions red.
+    #[test]
+    fn constructor_tightens_legacy_directory_and_records_exact_v2_boot_snapshot() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+        let dir = tempfile::tempdir().unwrap();
+        let state_dir = dir.path().join("state");
+        let history = crate::config_history::history_dir(&state_dir);
+        std::fs::create_dir_all(&history).unwrap();
+        std::fs::set_permissions(&history, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::config_history::record(&history, "[global]\nasn = 64512\n").unwrap();
+        assert!(
+            crate::config_history::list_mixed(&history).is_err(),
+            "the reader must not chmod a legacy directory"
+        );
+        assert_eq!(std::fs::metadata(&history).unwrap().mode() & 0o777, 0o755);
+
+        let snapshot = AcceptedConfigSnapshot::from_config_for_test(minimal_config());
+        let exact = snapshot.normalized_toml().as_bytes().to_vec();
+        let (_tx, rx) = mpsc::channel(1);
+        let _persister = ConfigPersister::new_accepted(
+            rx,
+            dir.path().join("config.toml"),
+            Arc::clone(&snapshot),
+            Some(state_dir),
+        );
+
+        assert_eq!(std::fs::metadata(&history).unwrap().mode() & 0o777, 0o700);
+        let rows = crate::config_history::v2::scan_mixed(&history).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(
+            rows.iter().any(|row| {
+                row.status == crate::config_history::v2::StoredStatus::LegacyTomlOnly
+            })
+        );
+        let recorded = rows
+            .iter()
+            .find(|row| row.status == crate::config_history::v2::StoredStatus::Recorded)
+            .unwrap();
+        let crate::config_history::v2::StoredPayload::V2(envelope) =
+            crate::config_history::v2::read_mixed(&history, recorded).unwrap()
+        else {
+            panic!("recorded row must decode as v2");
+        };
+        assert_eq!(envelope.normalized_toml.as_bytes(), exact);
+    }
+
+    /// Red proof: propagating either the constructor-time or post-persist
+    /// best-effort history failure rejects the acknowledgement; adopting any
+    /// snapshot other than the exact accepted Arc breaks pointer or disk-byte
+    /// identity.
+    #[tokio::test]
+    async fn history_failure_preserves_durable_mutation_ack_and_accepted_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_dir = dir.path().join("state");
+        std::fs::create_dir(&state_dir).unwrap();
+        std::fs::write(
+            crate::config_history::history_dir(&state_dir),
+            "not a directory",
+        )
+        .unwrap();
+        let snapshot = AcceptedConfigSnapshot::from_config_for_test(minimal_config());
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(&config_path, snapshot.normalized_toml()).unwrap();
+        let (tx, rx) = mpsc::channel(1);
+
+        let persister = ConfigPersister::new_accepted(
+            rx,
+            config_path.clone(),
+            Arc::clone(&snapshot),
+            Some(state_dir),
+        );
+        assert!(Arc::ptr_eq(&persister.current, &snapshot));
+
+        let mut changed = minimal_config();
+        changed.neighbors.push(test_neighbor("10.0.0.2", 65002));
+        let changed = snapshot.derive_config(changed).unwrap();
+        let (ack_tx, ack_rx) = oneshot::channel();
+        let handle = tokio::spawn(persister.run());
+        tx.send(ConfigMutation::ReplaceConfigAck(
+            Arc::clone(&changed),
+            ack_tx,
+        ))
+        .await
+        .unwrap();
+        assert_eq!(ack_rx.await.unwrap(), Ok(()));
+
+        // A following mutation must build from the accepted replacement,
+        // proving the warning-only history failure did not roll it back.
+        tx.send(ConfigMutation::AddNeighbor(Box::new(test_neighbor(
+            "10.0.0.3", 65003,
+        ))))
+        .await
+        .unwrap();
+        drop(tx);
+        handle.await.unwrap();
+        let disk_config: Config =
+            toml::from_str(&std::fs::read_to_string(config_path).unwrap()).unwrap();
+        assert_eq!(
+            disk_config
+                .neighbors
+                .iter()
+                .map(|neighbor| neighbor.address.clone())
+                .collect::<Vec<_>>(),
+            ["10.0.0.2".to_string(), "10.0.0.3".to_string()]
         );
     }
 }

@@ -207,38 +207,42 @@ For operators coming from Junos, the four verbs map directly:
 | `commit confirmed` | `rbgp config apply --confirm-id ... --confirm-timeout ...` |
 | `rollback N` | `rbgp config rollback N` |
 
-The daemon retains a bounded on-disk history of recorded config snapshots (the
-last 20 distinct normalized TOML documents, content-hash-deduplicated and
-timestamped) under `<runtime_state_dir>/config-history/`. Transaction applies
+The daemon retains a bounded, best-effort history of up to 20 recognized rows
+under `<runtime_state_dir>/config-history/`. A new valid v2 row is suppressed
+only when its normalized TOML and complete source manifest exactly match the
+newest valid v2 row; legacy, unreadable, and duplicate-sequence rows still
+count toward the bound. Transaction applies
 and gRPC neighbor/FIB/policy CRUD record after their durable write. Boot and
 successful SIGHUP reload also record the canonical validated snapshot on a
 best-effort basis; SIGHUP does not rewrite the operator's file. History
 survives restarts:
 
 ```bash
-# What has been recorded? Newest first; index 0 is the newest snapshot.
+# What is retained? Newest first; index 0 is the newest config-history row.
 rbgp config history
 rbgp -j config history
 
-# Restore the next older recorded config snapshot (Junos `rollback 1`)
-rbgp config rollback 1
+# Restore an eligible legacy TOML-only row selected from the listing
+LEGACY_INDEX=3
+rbgp config rollback "$LEGACY_INDEX"
 
 # A cautious rollback: auto-reverts the rollback itself unless confirmed
-rbgp config rollback 1 --confirm-id undo-1 --confirm-timeout 120
+rbgp config rollback "$LEGACY_INDEX" --confirm-id undo-1 --confirm-timeout 120
 rbgp config confirm undo-1
 ```
 
 `config history` lists index, timestamp, normalized-TOML content hash,
 provenance status, and—when recorded—a config-source hash over that TOML digest
 plus the canonical accepted rpol/dataset source roster. It also shows a one-line
-summary per entry, never config document contents. The provenance schema is
-present before its storage/runtime v2 activation: current readable rows are
-`legacy_toml_only` with no source digest, while corrupt rows are `unreadable`
-with both digests withheld. No production row is yet reported as `recorded`.
-Index 0 means newest recorded, not
+summary per entry, never config document contents. New owner-private JSON rows
+are `recorded`; older TOML rows are `legacy_toml_only`, while corrupt or
+duplicate-sequence rows are `unreadable` with both digests withheld. Both
+generations share one newest-first index.
+Index 0 means the newest config-history row, not
 necessarily the running or currently persisted config. `config rollback N`
-resolves entry N server-side, verifies that its bytes match the SHA-256 in its
-file name, and routes it through the **same transaction path as
+temporarily accepts legacy rows only; v2 and unreadable rows fail closed before
+planning or mutation until external-source restore lands. An eligible legacy
+row is verified and routed through the **same transaction path as
 `config apply`**: the same plan classification, the same reload-impact and
 update-group annotations, the same receipts, and the same
 `--confirm-id`/`--confirm-timeout` confirmed-commit window (journal, timeout
@@ -248,13 +252,14 @@ commit live (for example restart-required `[global]` fields) is rejected
 without mutation, exactly like an apply of that file would be. Rolling back
 past the retained history fails cleanly, naming how many entries exist.
 
-Each retained payload and its SHA-256 cover only the normalized TOML snapshot.
-The main and imported `.rpol` source files and `[policy.datasets]` file contents
-referenced by that TOML are not archived or hashed. Rollback validates and
-re-reads those paths from the current filesystem, so changed or missing
-external inputs can make the restored policy differ or make rollback fail.
-Keep the operator-authored TOML, `.rpol` graph, and datasets under version
-control or another coordinated deployment system.
+Each retained row includes the normalized-TOML digest. V2 rows also hash the
+canonical accepted `.rpol` and dataset source roster, lengths, and content
+digests, but do not archive those external bytes. V2 rollback is therefore
+refused before any source reread until the restore tranche can verify the live
+sources against the recorded manifest. Legacy rows retain only TOML and remain
+subject to the transaction executor's existing external-input fence. Keep the
+operator-authored TOML, `.rpol` graph, and datasets under version control or
+another coordinated deployment system.
 
 Do not use native config apply/rollback or gNMI Set for a full-candidate change
 while either side references `.rpol` or `[policy.datasets]` files. Those bytes

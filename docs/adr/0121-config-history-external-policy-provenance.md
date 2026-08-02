@@ -1,23 +1,25 @@
 # ADR-0121: Config-history external-policy provenance
 
-**Status:** Accepted
-**Implementation:** Pending; not shipped
+**Status:** Accepted, partially implemented
+**Implementation:** v2 recording and mixed listing shipped; v2 restore pending
 **Date:** 2026-08-01
 
 ## Context
 
-Applied-config history currently retains one normalized TOML document per
-entry. Its `sha256` covers those bytes, and `rollback N` reparses the document
-through the ordinary transaction path. That is sufficient only while TOML is
-the complete input.
+Before v2 activation, applied-config history retained one normalized TOML
+document per entry. Its `sha256` covered those bytes, and `rollback N` reparsed
+the document through the ordinary transaction path. That was sufficient only
+while TOML was the complete input.
 
 An accepted config may also depend on `[policy].rpol_files`, their transitive
-imports, and `[policy.datasets]`. History retains none of that source identity.
-A later rollback therefore reads whatever those paths contain at that time,
-not necessarily the sources accepted with the recorded TOML. The native
-transaction fence added in #1370 correctly rejects full-snapshot transactions
-when either side has these external inputs; history must not route around that
-fence by presenting a TOML-only snapshot as complete.
+imports, and `[policy.datasets]`. Legacy rows retain none of that source
+identity, so a later rollback would read whatever those paths contain at that
+time rather than necessarily the sources accepted with the recorded TOML. V2
+rows now retain the accepted manifest and source digest, but restore remains
+refused until the loader can revalidate that identity. The native transaction
+fence added in #1370 correctly rejects full-snapshot transactions when either
+side has these external inputs; history must not route around that fence by
+presenting a TOML-only snapshot as complete.
 
 There is a second distinction to preserve. Config history records the
 validated **desired/source snapshot** accepted at boot, persistence, or reload.
@@ -274,6 +276,12 @@ logs do not expose the manifest or paths.
 
 ### 8. Rollback verifies once under the coordinator lock
 
+The current partial activation stops before this final restore model: v2 and
+unreadable rows are refused under the coordinator lock before a
+rollback-specific payload reopen, candidate construction, planning,
+persistence, events, or runtime mutation. The steps below remain the pending
+external-source restore tranche; legacy TOML-only rollback is unchanged.
+
 `rollback N` resolves and reads the exact entry while holding the existing
 runtime-config coordinator lock. For v2 it then:
 
@@ -520,8 +528,9 @@ identity contract.
 
 ## Current validation gate
 
-Executable destructive proof is N/A for this docs-only ADR. The decision is
-accepted, but none of the v2 envelope, provenance capture, rollback, API, or
-commit-confirm behavior described here is shipped. Current validation is
-structural: ADR/index/roadmap consistency, source-contract review, link and
-terminology checks, and `git diff --check`.
+V2 recording, immutable accepted-source capture, mixed listing, additive API
+status/digests, filesystem hardening, and fail-closed pre-restore refusal are
+shipped with executable destructive proofs. V2 restore and provenance-bearing
+commit-confirm remain pending and retain the final-design proof requirements
+above. Documentation consistency, source-contract review, link and terminology
+checks, and `git diff --check` remain part of every tranche.

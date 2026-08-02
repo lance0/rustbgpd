@@ -1,8 +1,8 @@
-//! Dormant, bounded ADR-0121 v2 history codec and descriptor-relative store.
+//! Bounded ADR-0121 v2 history codec and descriptor-relative store.
 
 #![allow(
     dead_code,
-    reason = "ADR-0121 deliberately lands v2 storage before runtime/public activation"
+    reason = "v2 storage is active while external-source restoration remains deferred"
 )]
 
 use std::collections::HashMap;
@@ -46,14 +46,14 @@ enum WriteStep {
     FinalSync,
 }
 
-/// Dormant v2 writer. Deliberately private and unreachable from v1 callers.
-fn record_v2(dir: &Path, normalized_toml: &str, manifest: Manifest) -> io::Result<bool> {
+/// Record one accepted snapshot in the v2 store.
+pub(crate) fn record_v2(dir: &Path, normalized_toml: &str, manifest: Manifest) -> io::Result<bool> {
     record_v2_with(dir, normalized_toml, manifest, |_| Ok(()))
 }
 
 #[allow(
     clippy::too_many_lines,
-    reason = "the dormant writer keeps one ordered crash-consistency transaction visible"
+    reason = "the writer keeps one ordered crash-consistency transaction visible"
 )]
 fn record_v2_with(
     dir: &Path,
@@ -303,36 +303,37 @@ fn parse_stage_name(name: &OsStr) -> Option<ParsedName> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum StoredFormat {
+pub(crate) enum StoredFormat {
     Legacy,
     V2,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum StoredStatus {
+pub(crate) enum StoredStatus {
     LegacyTomlOnly,
     Recorded,
     Unreadable,
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct StoredRow {
+pub(crate) struct StoredRow {
     pub(super) format: StoredFormat,
     pub(super) index: usize,
     pub(super) filename: OsString,
     pub(super) sequence: u64,
     pub(super) timestamp_unix_seconds: u64,
     pub(super) path: PathBuf,
-    pub(super) status: StoredStatus,
+    pub(crate) status: StoredStatus,
     pub(super) verified_sha256: Option<[u8; 32]>,
     pub(super) verified_source_sha256: Option<[u8; 32]>,
+    pub(super) redacted_summary: Option<String>,
     identity: Option<EntryIdentity>,
 }
 
 type EntryIdentity = (u64, u64, u64, i64, i64);
 
 #[derive(Debug)]
-pub(super) enum StoredPayload {
+pub(crate) enum StoredPayload {
     Legacy(String),
     V2(Envelope),
 }
@@ -345,7 +346,7 @@ struct ParsedName {
 }
 
 /// Scan both generations without exposing v2 entries to the legacy rollback API.
-pub(super) fn scan_mixed(dir: &Path) -> io::Result<Vec<StoredRow>> {
+pub(crate) fn scan_mixed(dir: &Path) -> io::Result<Vec<StoredRow>> {
     let directory = match open_directory(dir) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -377,6 +378,7 @@ fn scan_pinned(directory: &File, display_path: &Path) -> io::Result<Vec<StoredRo
             status: StoredStatus::Unreadable,
             verified_sha256: None,
             verified_source_sha256: None,
+            redacted_summary: None,
             identity: None,
         };
         if let Ok((payload, identity)) = open_and_decode(directory, &row, false) {
@@ -384,12 +386,14 @@ fn scan_pinned(directory: &File, display_path: &Path) -> io::Result<Vec<StoredRo
             match payload {
                 StoredPayload::Legacy(bytes) => {
                     row.status = StoredStatus::LegacyTomlOnly;
-                    row.verified_sha256 = Some(Sha256::digest(bytes).into());
+                    row.verified_sha256 = Some(Sha256::digest(&bytes).into());
+                    row.redacted_summary = Some(super::summarize(&bytes));
                 }
                 StoredPayload::V2(envelope) => {
                     row.status = StoredStatus::Recorded;
                     row.verified_sha256 = Some(envelope.sha256);
                     row.verified_source_sha256 = Some(envelope.source_sha256);
+                    row.redacted_summary = Some(super::summarize(&envelope.normalized_toml));
                 }
             }
         }
@@ -411,13 +415,14 @@ fn scan_pinned(directory: &File, display_path: &Path) -> io::Result<Vec<StoredRo
             row.status = StoredStatus::Unreadable;
             row.verified_sha256 = None;
             row.verified_source_sha256 = None;
+            row.redacted_summary = None;
         }
     }
     Ok(rows)
 }
 
 /// Reopen and revalidate the exact object observed by [`scan_mixed`].
-pub(super) fn read_mixed(dir: &Path, row: &StoredRow) -> io::Result<StoredPayload> {
+pub(crate) fn read_mixed(dir: &Path, row: &StoredRow) -> io::Result<StoredPayload> {
     if row.status == StoredStatus::Unreadable || row.path != dir.join(&row.filename) {
         return Err(invalid("config history entry is not readable"));
     }
@@ -611,56 +616,56 @@ fn errno(error: nix::errno::Errno) -> io::Error {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct Envelope {
-    pub(super) version: u32,
-    pub(super) sequence: u64,
-    pub(super) timestamp_unix_seconds: u64,
+pub(crate) struct Envelope {
+    pub(crate) version: u32,
+    pub(crate) sequence: u64,
+    pub(crate) timestamp_unix_seconds: u64,
     #[serde(with = "hex_digest")]
-    pub(super) sha256: [u8; 32],
+    pub(crate) sha256: [u8; 32],
     #[serde(with = "hex_digest")]
-    pub(super) source_sha256: [u8; 32],
-    pub(super) normalized_toml: String,
-    pub(super) manifest: Manifest,
+    pub(crate) source_sha256: [u8; 32],
+    pub(crate) normalized_toml: String,
+    pub(crate) manifest: Manifest,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct Manifest {
+pub(crate) struct Manifest {
     #[serde(with = "hex_digest")]
-    pub(super) toml_sha256: [u8; 32],
-    pub(super) rpol_units: Vec<RpolUnit>,
-    pub(super) datasets: Vec<Dataset>,
+    pub(crate) toml_sha256: [u8; 32],
+    pub(crate) rpol_units: Vec<RpolUnit>,
+    pub(crate) datasets: Vec<Dataset>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct RpolUnit {
-    pub(super) modules: Vec<RpolModule>,
+pub(crate) struct RpolUnit {
+    pub(crate) modules: Vec<RpolModule>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct RpolModule {
-    pub(super) path: LosslessPath,
-    pub(super) length: u64,
+pub(crate) struct RpolModule {
+    pub(crate) path: LosslessPath,
+    pub(crate) length: u64,
     #[serde(with = "hex_digest")]
-    pub(super) sha256: [u8; 32],
-    pub(super) imports: Vec<u32>,
+    pub(crate) sha256: [u8; 32],
+    pub(crate) imports: Vec<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct Dataset {
-    pub(super) name: String,
-    pub(super) kind: DatasetKind,
-    pub(super) path: LosslessPath,
-    pub(super) length: u64,
+pub(crate) struct Dataset {
+    pub(crate) name: String,
+    pub(crate) kind: DatasetKind,
+    pub(crate) path: LosslessPath,
+    pub(crate) length: u64,
     #[serde(with = "hex_digest")]
-    pub(super) sha256: [u8; 32],
+    pub(crate) sha256: [u8; 32],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub(super) enum DatasetKind {
+pub(crate) enum DatasetKind {
     #[serde(rename = "prefix-set")]
     Prefix,
     #[serde(rename = "asn-set")]
@@ -670,7 +675,7 @@ pub(super) enum DatasetKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct LosslessPath(pub(super) Vec<u8>);
+pub(crate) struct LosslessPath(pub(crate) Vec<u8>);
 
 impl Serialize for LosslessPath {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
@@ -833,7 +838,7 @@ fn dataset_kind_name(kind: DatasetKind) -> &'static str {
     }
 }
 
-fn encode_hex(bytes: &[u8]) -> String {
+pub(crate) fn encode_hex(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
     bytes
         .iter()

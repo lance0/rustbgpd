@@ -142,19 +142,19 @@ service ConfigService {
   // secret-bearing config cannot silently boot as-is.
   rpc GetEffectiveConfig(GetEffectiveConfigRequest) returns (GetEffectiveConfigResponse);
 
-  // List the daemon's bounded on-disk history of recorded config snapshots
-  // (newest first; index 0 is the newest recorded config). The response
-  // carries timestamps, content hashes, and one-line summaries only — never
-  // config document contents. A retained SHA-256 covers normalized TOML only,
-  // not referenced external .rpol or dataset file contents.
+  // List the daemon's bounded mixed-generation config history (newest row
+  // first; index 0 may be recorded, legacy, or unreadable). The response
+  // carries timestamps, verified hashes, provenance status, and one-line
+  // summaries only — never config document contents. Every verified row hashes
+  // normalized TOML; v2 rows also hash the canonical accepted .rpol/dataset
+  // source identity, but do not archive those external bytes.
   rpc ListConfigHistory(ListConfigHistoryRequest) returns (ListConfigHistoryResponse);
 
-  // Roll back to a retained history entry (index >= 1). The daemon resolves
-  // the entry's config snapshot server-side and routes it through the exact
-  // same transaction executor as ApplyConfigTransaction — same plan/impact
-  // classification, same receipts, and the same optional confirmed-commit
-  // window (confirm_id / confirm_timeout_seconds), so a rollback can itself
-  // auto-revert unless confirmed.
+  // Roll back to an eligible legacy TOML-only row (index >= 1). The daemon
+  // resolves it server-side and routes it through the exact same transaction
+  // executor as ApplyConfigTransaction — same plan/impact classification,
+  // receipts, and optional confirmed-commit window. V2 and unreadable rows are
+  // refused until provenance-aware external-source restore lands.
   rpc RollbackConfigTransaction(RollbackConfigTransactionRequest) returns (ConfigTransactionApplyResponse);
 }
 
@@ -168,11 +168,13 @@ enum ConfigHistoryProvenanceStatus {
 }
 
 message ConfigHistoryEntry {
-  // 0 = the newest recorded config, 1 = the next older entry, and so on.
+  // 0 = the newest config-history row, 1 = the next older row, and so on.
   uint32 index = 1;
-  // When this config was recorded (unix seconds).
+  // Timestamp metadata from the retained row (unix seconds); an UNREADABLE
+  // row's timestamp is parsed from its filename and is not verified.
   uint64 timestamp_unix_seconds = 2;
-  // SHA-256 of the retained normalized TOML document only, hex-encoded.
+  // Verified SHA-256 of retained normalized TOML, hex-encoded; empty for an
+  // UNREADABLE row.
   string sha256 = 3;
   // One-line redacted summary (ASN, router id, object counts) — never the
   // config document itself.
@@ -185,19 +187,20 @@ message ConfigHistoryEntry {
 }
 
 message ListConfigHistoryResponse {
-  // Newest first; entries[0] is the newest recorded config.
+  // Newest first; entries[0] is the newest config-history row.
   repeated ConfigHistoryEntry entries = 1;
   string human_text = 2;
 }
 
 message RollbackConfigTransactionRequest {
-  // History entry to restore; must be >= 1 (index 0 is newest recorded).
+  // Eligible legacy TOML-only row to restore; must be >= 1 (index 0 is newest).
   uint32 index = 1;
   // Optional optimistic-concurrency token from PlanConfigTransaction /
   // ListConfigHistory-time planning. Empty skips the stale-snapshot guard —
-  // the candidate is resolved server-side from proven history, not supplied
-  // by the caller. Referenced external .rpol and dataset files are not retained
-  // in history; rollback reads their current filesystem contents during apply.
+  // the candidate is resolved server-side from history, not supplied by the
+  // caller. Legacy rows do not retain external .rpol or dataset bytes, so the
+  // transaction path validates their current filesystem contents. V2 rows
+  // retain source identity but are refused until restore can verify it.
   string expected_runtime_snapshot_token = 2;
   // Optional audit/correlation identifier supplied by automation.
   string client_request_id = 3;

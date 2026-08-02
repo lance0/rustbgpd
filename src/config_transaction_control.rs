@@ -750,39 +750,36 @@ impl ConfigTransactionController {
 
     fn history(&self) -> Result<proto::ListConfigHistoryResponse, ConfigTransactionApplyError> {
         let dir = self.history_dir()?;
-        let entries = crate::config_history::list(dir).map_err(|error| {
-            ConfigTransactionApplyError::Internal(format!(
-                "failed to read the recorded config history at {}: {error}",
-                dir.display()
-            ))
+        let entries = crate::config_history::list_mixed(dir).map_err(|error| {
+            warn!(
+                error_kind = ?error.kind(),
+                "failed to list config history"
+            );
+            ConfigTransactionApplyError::Internal(
+                "config history storage is unavailable or unsafe; inspect daemon logs".to_string(),
+            )
         })?;
         let mut proto_entries = Vec::with_capacity(entries.len());
         for entry in &entries {
-            // Summaries come from the entry contents; a per-entry read
-            // failure degrades that one summary instead of failing the list.
-            let (sha256, summary, provenance_status) = crate::config_history::read(entry)
-                .map_or_else(
-                    |_| {
-                        (
-                            String::new(),
-                            "(unreadable config history entry)".to_string(),
-                            proto::ConfigHistoryProvenanceStatus::Unreadable,
-                        )
-                    },
-                    |toml_str| {
-                        (
-                            entry.sha256.clone(),
-                            crate::config_history::summarize(&toml_str),
-                            proto::ConfigHistoryProvenanceStatus::LegacyTomlOnly,
-                        )
-                    },
-                );
+            // The pinned mixed scan derives each redacted summary from the
+            // same decoded object as its status and digests.
+            let provenance_status = match entry.status {
+                crate::config_history::HistoryStatus::Recorded => {
+                    proto::ConfigHistoryProvenanceStatus::Recorded
+                }
+                crate::config_history::HistoryStatus::LegacyTomlOnly => {
+                    proto::ConfigHistoryProvenanceStatus::LegacyTomlOnly
+                }
+                crate::config_history::HistoryStatus::Unreadable => {
+                    proto::ConfigHistoryProvenanceStatus::Unreadable
+                }
+            };
             proto_entries.push(proto::ConfigHistoryEntry {
                 index: u32::try_from(entry.index).unwrap_or(u32::MAX),
                 timestamp_unix_seconds: entry.timestamp_unix_seconds,
-                sha256,
-                summary,
-                source_sha256: String::new(),
+                sha256: entry.sha256.clone().unwrap_or_default(),
+                summary: entry.summary.clone(),
+                source_sha256: entry.source_sha256.clone().unwrap_or_default(),
                 provenance_status: provenance_status.into(),
             });
         }
@@ -790,7 +787,7 @@ impl ConfigTransactionController {
             "No config snapshots recorded yet.\n".to_string()
         } else {
             format!(
-                "{} recorded config snapshot(s) retained; index 0 is the newest recorded config. Restore an older one with RollbackConfigTransaction (rbgp config rollback N).\n",
+                "{} config history row(s) retained; index 0 is newest. Eligible legacy TOML-only rows can currently be restored with RollbackConfigTransaction (rbgp config rollback N); v2 and unreadable rows are refused.\n",
                 proto_entries.len()
             )
         };
@@ -812,7 +809,7 @@ impl ConfigTransactionController {
         self.history_dir()?;
         if request.index == 0 {
             return Err(ConfigTransactionApplyError::InvalidArgument(
-                "rollback index must be >= 1: index 0 is the newest recorded config".to_string(),
+                "rollback index must be >= 1: index 0 is the newest config-history row".to_string(),
             ));
         }
         if request.confirm_id.is_empty() && request.confirm_timeout_seconds > 0 {
@@ -826,11 +823,42 @@ impl ConfigTransactionController {
             // commit cannot shift indexes between resolution and apply.
             let dir = self.history_dir()?;
             let index = usize::try_from(request.index).unwrap_or(usize::MAX);
-            let (entry, candidate_toml) =
-                crate::config_history::read_entry(dir, index).map_err(|error| {
-                    ConfigTransactionApplyError::FailedPrecondition(format!(
-                        "cannot roll back: {error}"
-                    ))
+            let entries = crate::config_history::list_mixed(dir).map_err(|_| {
+                ConfigTransactionApplyError::FailedPrecondition(
+                    "cannot roll back: config history storage is unavailable or unsafe".to_string(),
+                )
+            })?;
+            let Some(entry) = entries.get(index) else {
+                let noun = if entries.len() == 1 {
+                    "entry"
+                } else {
+                    "entries"
+                };
+                return Err(ConfigTransactionApplyError::FailedPrecondition(format!(
+                    "cannot roll back: config history has {} retained {noun}; index {index} is out of range",
+                    entries.len(),
+                )));
+            };
+            match entry.status {
+                crate::config_history::HistoryStatus::Recorded => {
+                    return Err(ConfigTransactionApplyError::FailedPrecondition(
+                        "cannot roll back this v2 config history entry until external-source restore is available"
+                            .to_string(),
+                    ));
+                }
+                crate::config_history::HistoryStatus::Unreadable => {
+                    return Err(ConfigTransactionApplyError::FailedPrecondition(
+                        "cannot roll back an unreadable config history entry".to_string(),
+                    ));
+                }
+                crate::config_history::HistoryStatus::LegacyTomlOnly => {}
+            }
+            let candidate_toml =
+                crate::config_history::read_mixed_legacy(dir, entry).map_err(|_| {
+                    ConfigTransactionApplyError::FailedPrecondition(
+                        "cannot roll back: config history entry became unavailable or unsafe"
+                            .to_string(),
+                    )
                 })?;
             let client_request_id = if request.client_request_id.is_empty() {
                 format!("config-rollback:{index}")
@@ -854,7 +882,8 @@ impl ConfigTransactionController {
                 let _ = writeln!(
                     response.human_text,
                     "Rolled back to applied config {index} (recorded {}, sha256 {}).",
-                    entry.timestamp_unix_seconds, entry.sha256
+                    entry.timestamp_unix_seconds,
+                    entry.sha256.as_deref().unwrap_or("unavailable")
                 );
             }
             Ok(response)
@@ -8435,6 +8464,11 @@ log_format = "json"
         Arc<Mutex<String>>,
         tokio::task::JoinHandle<()>,
     ) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(history_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
         let snapshot_toml = Arc::new(Mutex::new(current_toml));
         let peers = Arc::new(Mutex::new(Vec::new()));
         let (peer_tx, peer_rx) = mpsc::channel(8);
@@ -8460,6 +8494,10 @@ log_format = "json"
         (controller, snapshot_toml, ack_task)
     }
 
+    /// Red proof: deleting the controller's v2 status arm changes the exact
+    /// actionable refusal to the storage-boundary fallback; using a
+    /// legacy-only index restores a row other than the exact legacy row at
+    /// common index 3.
     #[tokio::test]
     async fn rollback_restores_the_previous_applied_config() {
         let dir = tempfile::tempdir().unwrap();
@@ -8469,14 +8507,53 @@ log_format = "json"
         // then the newer recorded config.
         crate::config_history::record(dir.path(), &previous_toml).unwrap();
         crate::config_history::record(dir.path(), &current_toml).unwrap();
+        let v2 = AcceptedConfigSnapshot::from_config_for_test(
+            Config::load_toml_with_diagnostics(&current_toml, "v2 history test").unwrap(),
+        );
+        crate::config_history::record_accepted(dir.path(), &v2).unwrap();
+        let v2_newest = AcceptedConfigSnapshot::from_config_for_test(
+            Config::load_toml_with_diagnostics(&previous_toml, "newest v2 history test").unwrap(),
+        );
+        crate::config_history::record_accepted(dir.path(), &v2_newest).unwrap();
         let (controller, snapshot_toml, ack_task) =
             rollback_controller(dir.path(), None, current_toml.clone());
+        assert_eq!(*snapshot_toml.lock().await, current_toml);
+        let listed = controller.history().unwrap();
+        assert_eq!(listed.entries.len(), 4);
+        assert_eq!(listed.entries[0].index, 0);
+        assert_eq!(
+            listed.entries[0].provenance_status,
+            proto::ConfigHistoryProvenanceStatus::Recorded as i32
+        );
+        assert_eq!(
+            listed.entries[3].provenance_status,
+            proto::ConfigHistoryProvenanceStatus::LegacyTomlOnly as i32
+        );
+        assert!(!listed.entries[0].source_sha256.is_empty());
+
+        let refused = controller
+            .clone()
+            .rollback(proto::RollbackConfigTransactionRequest {
+                index: 1,
+                expected_runtime_snapshot_token: String::new(),
+                client_request_id: String::new(),
+                comment: String::new(),
+                confirm_id: String::new(),
+                confirm_timeout_seconds: 0,
+            })
+            .await
+            .expect_err("v2 rollback must stop before the apply path");
+        assert!(matches!(
+            refused,
+            ConfigTransactionApplyError::FailedPrecondition(ref message)
+                if message.contains("v2 config history")
+        ));
         assert_eq!(*snapshot_toml.lock().await, current_toml);
 
         let response = controller
             .clone()
             .rollback(proto::RollbackConfigTransactionRequest {
-                index: 1,
+                index: 3,
                 expected_runtime_snapshot_token: String::new(),
                 client_request_id: String::new(),
                 comment: String::new(),
@@ -8498,7 +8575,7 @@ log_format = "json"
         assert!(
             response
                 .human_text
-                .contains("Rolled back to applied config 1"),
+                .contains("Rolled back to applied config 3"),
             "{}",
             response.human_text
         );
@@ -8673,20 +8750,16 @@ log_format = "json"
             "{}",
             response.entries[0].summary
         );
+        assert!(response.human_text.contains("2 config history row(s)"));
         assert!(
-            response
-                .human_text
-                .contains("2 recorded config snapshot(s)")
-        );
-        assert!(
-            response
-                .human_text
-                .contains("index 0 is the newest recorded config"),
+            response.human_text.contains("index 0 is newest"),
             "{}",
             response.human_text
         );
         assert!(
-            !response.human_text.contains("currently persisted"),
+            response
+                .human_text
+                .contains("Eligible legacy TOML-only rows"),
             "{}",
             response.human_text
         );
@@ -8696,20 +8769,24 @@ log_format = "json"
     #[tokio::test]
     async fn history_redacts_unreadable_entry_metadata() {
         // Red proof: retaining either unverified digest or interpolating the
-        // raw read error/path changes the exact redacted row assertions.
+        // raw read error/path changes the exact redacted row assertions;
+        // removing the controller's unreadable arm changes the exact refusal
+        // to the storage-boundary fallback.
         let dir = tempfile::tempdir().unwrap();
+        let previous_toml = base_toml("");
         let current_toml = dynamic_candidate_toml();
+        crate::config_history::record(dir.path(), &previous_toml).unwrap();
         crate::config_history::record(dir.path(), &current_toml).unwrap();
-        let entry = crate::config_history::list(dir.path()).unwrap().remove(0);
+        let entry = crate::config_history::list(dir.path()).unwrap().remove(1);
         std::fs::write(&entry.path, "corrupt secret material").unwrap();
-        let (controller, _snapshot_toml, ack_task) =
-            rollback_controller(dir.path(), None, current_toml);
+        let (controller, snapshot_toml, ack_task) =
+            rollback_controller(dir.path(), None, current_toml.clone());
 
         let response = controller
             .history()
             .expect("listing must degrade per entry");
-        assert_eq!(response.entries.len(), 1);
-        let row = &response.entries[0];
+        assert_eq!(response.entries.len(), 2);
+        let row = &response.entries[1];
         assert!(row.sha256.is_empty());
         assert!(row.source_sha256.is_empty());
         assert_eq!(
@@ -8720,6 +8797,50 @@ log_format = "json"
         assert!(!row.summary.contains(entry.path.to_string_lossy().as_ref()));
         assert!(!row.summary.contains("corrupt secret material"));
 
+        let error = controller
+            .rollback(proto::RollbackConfigTransactionRequest {
+                index: 1,
+                expected_runtime_snapshot_token: String::new(),
+                client_request_id: String::new(),
+                comment: String::new(),
+                confirm_id: String::new(),
+                confirm_timeout_seconds: 0,
+            })
+            .await
+            .expect_err("unreadable rollback must stop before the apply path");
+        assert!(matches!(
+            error,
+            ConfigTransactionApplyError::FailedPrecondition(ref message)
+                if message.contains("unreadable config history entry")
+        ));
+        assert_eq!(*snapshot_toml.lock().await, current_toml);
+
+        ack_task.abort();
+    }
+
+    #[cfg(unix)]
+    /// Red proof: interpolating the scanner error, directory, or filename into
+    /// the public history error exposes the sensitive fixture strings below.
+    #[tokio::test]
+    async fn history_storage_errors_redact_paths() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempfile::Builder::new()
+            .prefix("sensitive-history-path-")
+            .tempdir()
+            .unwrap();
+        let history = root.path().join("private-filename");
+        std::fs::create_dir(&history).unwrap();
+        std::fs::set_permissions(&history, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let current = dynamic_candidate_toml();
+        let (controller, _snapshot, ack_task) = rollback_controller(&history, None, current);
+        std::fs::set_permissions(&history, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let error = controller.history().unwrap_err();
+        let rendered = format!("{error:?}");
+        assert!(rendered.contains("storage is unavailable or unsafe"));
+        assert!(!rendered.contains(root.path().to_string_lossy().as_ref()));
+        assert!(!rendered.contains("private-filename"));
         ack_task.abort();
     }
 

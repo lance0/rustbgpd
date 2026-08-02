@@ -496,23 +496,24 @@ enum ConfigAction {
     /// Show pending or last confirmed-transaction lifecycle state
     Status,
 
-    /// List retained recorded config snapshots (newest first)
+    /// List retained config-history rows (newest first)
     ///
-    /// The daemon keeps a bounded, content-deduplicated on-disk history of
-    /// recorded config snapshots under its runtime state directory. Each line
-    /// shows the rollback index (0 = newest recorded), timestamp, content hash,
-    /// and a one-line summary. Restore an older one with `config rollback N`.
+    /// The daemon keeps a bounded mixed-generation history under its runtime
+    /// state directory. Each line shows the index (0 = newest config-history
+    /// row), timestamp, content hash, provenance status, and one-line summary.
+    /// Restore an eligible legacy row with `config rollback N`; v2 and
+    /// unreadable rows are refused until provenance-aware restore lands.
     History,
 
-    /// Roll back to an older recorded config snapshot (Junos `rollback N`)
+    /// Roll back to an eligible legacy config snapshot (Junos `rollback N`)
     ///
-    /// Restores history entry N (see `config history`; N >= 1) through the
-    /// same transaction path as `config apply`: same plan classification,
-    /// reload-impact annotations, and receipts. Pass --confirm-id /
+    /// Restores eligible legacy history entry N (see `config history`; N >= 1)
+    /// through the same transaction path as `config apply`: same plan
+    /// classification, reload-impact annotations, and receipts. Pass --confirm-id /
     /// --confirm-timeout to make the rollback itself auto-revert unless
     /// confirmed.
     Rollback {
-        /// History entry to restore (1 = next older recorded config)
+        /// History row to restore (N >= 1; eligible legacy rows only)
         index: u32,
 
         /// Optional runtime snapshot token to guard against concurrent changes
@@ -3515,7 +3516,7 @@ mod tests {
     }
 
     #[test]
-    fn config_history_help_calls_zero_newest_recorded() {
+    fn config_history_help_calls_zero_the_newest_row() {
         let mut command = cli_command(BINARY_NAME);
         let help = command
             .find_subcommand_mut("config")
@@ -3527,7 +3528,7 @@ mod tests {
         let normalized = help.split_whitespace().collect::<Vec<_>>().join(" ");
 
         assert!(
-            normalized.contains("0 = newest recorded"),
+            normalized.contains("0 = newest config-history row"),
             "config history help was: {help}"
         );
         assert!(

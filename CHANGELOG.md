@@ -14,10 +14,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Config-history provenance schema and rendering.** `ListConfigHistory` and
   `rbgp config history` now expose an additive config-source digest over the
   normalized-TOML digest plus the canonical accepted rpol/dataset source roster,
-  together with an explicit provenance status. Storage/runtime v2 activation
-  has not shipped, so current readable rows are reported as legacy-TOML-only
-  with no source digest; unreadable rows withhold both digests and use a
-  constant redacted summary.
+  together with an explicit provenance status. Successful best-effort history
+  records of newly accepted snapshots use owner-private v2 JSON; legacy and v2
+  rows share one index. Until external-source restore lands, rollback accepts
+  legacy rows only and fails closed for v2 or unreadable rows.
 
 - Native `.deb` and `.rpm` packages on every tagged release, for
   Debian 11+/Ubuntu 22.04+ and RHEL/Rocky/Alma 9+ on amd64 and arm64.
@@ -147,9 +147,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   changes, and `.rpol` diffs also cover roots and graph-budget settings.
 
 - Config history now counts TOML `[policy.definitions.*]` tables correctly and
-  describes index 0 as the newest recorded normalized TOML snapshot instead of
-  implying it must be the running or persisted config; operator docs now state
-  that rollback re-reads unarchived external `.rpol` and dataset inputs.
+  describes index 0 as the newest mixed-generation row instead of implying it
+  must be a verified, running, or persisted config. Eligible legacy rollback
+  still validates current unarchived external inputs; v2 rows hash accepted
+  source identity and remain refused until provenance-aware restore lands.
 
 - Advertised RIB diffs now fence one live capture across every page and peer
   with the route API's process-local `page_version`, rejecting changed or

@@ -3,7 +3,7 @@ mod parse;
 pub mod profiles;
 mod resolution;
 mod schema;
-mod source_provenance;
+pub(crate) mod source_provenance;
 pub(crate) use source_provenance::AcceptedConfigSnapshot;
 mod validation;
 
