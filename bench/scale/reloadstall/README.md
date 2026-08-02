@@ -71,7 +71,7 @@ exits 2):
 ```text
 reloadstall <n_peers> <total_prefixes> <daemon_port> <daemon_pid> \
     <policy_live> <policy_a> <policy_b> <reloads> <control_secs> \
-    [changed_peers] [reload_cmd] [--flapstorm K]
+    [changed_peers] [reload_cmd] [--flapstorm K] [--convergence-only]
 ```
 
 - `n_peers` — stub sessions to establish (`total_prefixes` must divide evenly).
@@ -97,9 +97,13 @@ reloadstall <n_peers> <total_prefixes> <daemon_port> <daemon_pid> \
   timestamps receipt of all `K` slices' withdrawals, the `K` reconnect after
   10 s and re-announce, and survivors timestamp re-announce completion.
   3 rounds, per-round percentiles plus `flapstorm_csv` records.
+- `--convergence-only` — fail-closed capture mode. It requires `reloads=0`, `control_secs=0`, no flapstorm or
+  reload command, an empty `RELOADSTALL_EVIDENCE_DIR`, and no `RELOADSTALL_PRE_CHURN_EVIDENCE_DIR`.
+  It verifies exact table-minus-own-slice coverage, healthy sessions, and zero parse errors; signals `ready`;
+  waits up to 15 seconds for `ack`; rechecks; emits `convergence_only_receipt`; and exits before churn work.
 
 `daemon_pid` may be `0` when an outer sampler owns RSS measurement (RSS
-columns report 0); that requires `reload_cmd` or `--flapstorm`. The
+columns report 0); that requires `reload_cmd`, `--flapstorm`, or `--convergence-only`. The
 9/10-positional-arg SIGHUP invocation above is a frozen contract and behaves
 exactly as before.
 

@@ -8,7 +8,7 @@
 //! Usage:
 //!   reloadstall <n_peers> <total_prefixes> <daemon_port> <daemon_pid> \
 //!       <policy_live> <policy_a> <policy_b> <reloads> <control_secs> \
-//!       [changed_peers] [reload_cmd] [--flapstorm K]
+//!       [changed_peers] [reload_cmd] [--flapstorm K] [--convergence-only]
 //!
 //! Stubs bind distinct 127.1.x.y source addresses (matching the
 //! generated [[neighbors]] blocks) and connect to 127.0.0.1:<port>.
@@ -985,9 +985,63 @@ fn needs_first_exact_bitmap(reloads: u32, flapstorm: Option<u32>) -> bool {
     reloads > 0 || flapstorm.is_some()
 }
 
+fn take_single_flag(args: &mut Vec<String>, flag: &str) -> bool {
+    let count = args.iter().filter(|arg| arg.as_str() == flag).count();
+    assert!(count <= 1, "{flag} may be specified only once");
+    args.retain(|arg| arg != flag);
+    count == 1
+}
+
+fn convergence_only_allowed(
+    enabled: bool,
+    reloads: u32,
+    control_secs: u64,
+    flapstorm: Option<u32>,
+    reload_cmd: Option<&str>,
+    evidence_dir: Option<&Path>,
+    pre_churn_evidence_dir: Option<&Path>,
+) -> bool {
+    !enabled
+        || (reloads == 0
+            && control_secs == 0
+            && flapstorm.is_none()
+            && reload_cmd.is_none()
+            && evidence_dir.is_some()
+            && pre_churn_evidence_dir.is_none())
+}
+
+fn convergence_integrity(ctx: &Ctx) -> (usize, u64, u64, u64) {
+    let counts: Vec<u64> = ctx
+        .obs
+        .iter()
+        .map(|observer| observer.generation.lock().unwrap().unique)
+        .collect();
+    (
+        ctx.obs
+            .iter()
+            .filter(|observer| observer.established.load(Ordering::Relaxed))
+            .count(),
+        ctx.parse_errors.load(Ordering::Relaxed),
+        *counts.iter().min().unwrap_or(&0),
+        *counts.iter().max().unwrap_or(&0),
+    )
+}
+
+fn convergence_integrity_valid(
+    n_peers: usize,
+    expected: u64,
+    up: usize,
+    parse_errors: u64,
+    min_unique: u64,
+    max_unique: u64,
+) -> bool {
+    up == n_peers && parse_errors == 0 && min_unique == expected && max_unique == expected
+}
+
 #[allow(clippy::too_many_lines)]
 fn main() {
     let mut a: Vec<String> = std::env::args().collect();
+    let convergence_only = take_single_flag(&mut a, "--convergence-only");
     // --flapstorm K may appear anywhere; strip it before positional parsing.
     let mut flapstorm: Option<u32> = None;
     if let Some(pos) = a.iter().position(|s| s == "--flapstorm") {
@@ -1006,9 +1060,10 @@ fn main() {
             "usage: reloadstall <n_peers> <total_prefixes> <daemon_port> <daemon_pid> \
              <policy_live> <policy_a> <policy_b> <reloads> <control_secs> \
              [changed_peers] [reload_cmd] [--flapstorm K]\n\
+             [--convergence-only]\n\
              reload_cmd: run `sh -c <reload_cmd>` per reload instead of SIGHUP-ing <daemon_pid>\n\
              daemon_pid 0: skip in-harness RSS sampling (outer sampler owns it); \
-             requires reload_cmd or --flapstorm\n\
+             requires reload_cmd, --flapstorm, or --convergence-only\n\
              --flapstorm K: flap the first K stubs for {FLAP_ROUNDS} rounds instead of reloading"
         );
         std::process::exit(2);
@@ -1033,8 +1088,20 @@ fn main() {
         "changed_peers must be in 1..={n_peers}"
     );
     assert!(
-        pid != 0 || reload_cmd.is_some() || flapstorm.is_some(),
-        "daemon_pid 0 (outer RSS sampler) requires reload_cmd or --flapstorm"
+        pid != 0 || convergence_only || reload_cmd.is_some() || flapstorm.is_some(),
+        "daemon_pid 0 (outer RSS sampler) requires --convergence-only, reload_cmd, or --flapstorm"
+    );
+    assert!(
+        convergence_only_allowed(
+            convergence_only,
+            reloads,
+            control_secs,
+            flapstorm,
+            reload_cmd.as_deref(),
+            evidence_dir.as_deref(),
+            pre_churn_evidence_dir.as_deref(),
+        ),
+        "--convergence-only requires reloads=0, control_secs=0, no --flapstorm, no reload_cmd, RELOADSTALL_EVIDENCE_DIR, and no pre-churn evidence directory"
     );
     assert!(
         evidence_dir.is_none() || final_evidence_allowed(reloads, flapstorm),
@@ -1108,7 +1175,7 @@ fn main() {
         );
 
         let expected = u64::from(total - per_peer);
-        let exact_initial = needs_first_exact_bitmap(reloads, flapstorm); // FIRST_EXACT_ARM:
+        let exact_initial = convergence_only || needs_first_exact_bitmap(reloads, flapstorm); // FIRST_EXACT_ARM:
         if exact_initial {
             for (i, observer) in ctx.obs.iter().enumerate() {
                 let own_start = u32::try_from(i).unwrap() * per_peer;
@@ -1175,13 +1242,21 @@ fn main() {
             }
         };
         if exact_initial {
-            for observer in &ctx.obs {
-                let _g = observer.generation.lock().unwrap();
-                observer.flap_mode.store(FLAP_OFF, Ordering::Release);
+            if !convergence_only {
+                for observer in &ctx.obs {
+                    let _g = observer.generation.lock().unwrap();
+                    observer.flap_mode.store(FLAP_OFF, Ordering::Release);
+                }
             } // FIRST_EXACT_RECEIPT
             println!(
                 "first_exact_bitmap,mode={},peers={n_peers},total={total},per_peer={per_peer},expected={expected},completed={},min_unique={},max_unique={}",
-                if flapstorm.is_some() { "flapstorm" } else { "reload" },
+                if convergence_only {
+                    "convergence-only"
+                } else if flapstorm.is_some() {
+                    "flapstorm"
+                } else {
+                    "reload"
+                },
                 unique.iter().filter(|&&count| count >= expected).count(),
                 unique.iter().min().unwrap(),
                 unique.iter().max().unwrap()
@@ -1192,6 +1267,43 @@ fn main() {
             ctx.t0.elapsed().as_secs_f64(),
             rss_mib(pid)
         );
+
+        if convergence_only {
+            let evidence_dir = evidence_dir.as_deref().unwrap();
+            let check = |stage| {
+                let (up, parse_errors, min_unique, max_unique) =
+                    convergence_integrity(&ctx);
+                if !convergence_integrity_valid(
+                    n_peers as usize,
+                    expected,
+                    up,
+                    parse_errors,
+                    min_unique,
+                    max_unique,
+                ) {
+                    eprintln!(
+                        "FAIL: convergence-only {stage} integrity check failed: unique={min_unique}..{max_unique} expected={expected}, sessions_up={up}/{n_peers}, parse_errors={parse_errors}"
+                    );
+                    std::process::exit(1);
+                }
+                (up, parse_errors, min_unique, max_unique)
+            };
+            check("pre-ack"); // CONVERGENCE_ONLY_INTEGRITY_CALL
+            if let Err(error) = await_evidence_capture(evidence_dir, EVIDENCE_TIMEOUT).await {
+                eprintln!("FAIL: convergence-only evidence handshake failed: {error}");
+                std::process::exit(1);
+            }
+            let (up, parse_errors, min_unique, max_unique) =
+                check("post-ack"); // CONVERGENCE_ONLY_INTEGRITY_CALL
+            for observer in &ctx.obs {
+                let _generation = observer.generation.lock().unwrap();
+                observer.flap_mode.store(FLAP_OFF, Ordering::Release);
+            } // CONVERGENCE_ONLY_DISARM
+            println!(
+                "convergence_only_receipt,peers={n_peers},prefixes={total},per_peer={per_peer},expected={expected},min_unique={min_unique},max_unique={max_unique},sessions_up={up},parse_errors={parse_errors}"
+            );
+            std::process::exit(0);
+        }
 
         if let Some(evidence_dir) = pre_churn_evidence_dir.as_deref() {
             if let Err(error) =
@@ -1645,8 +1757,8 @@ mod tests {
         let recheck_source = ["flap_mode.load(Ordering::Acquire) == ", "flap_mode"].concat();
         assert_eq!(source.matches(&recheck_source).count(), 1);
         let count_source = "observer.generation.lock().unwrap().unique";
-        assert_eq!(source.matches(count_source).count(), 2);
-        assert_eq!(source.matches(&disarm_source).count(), 3);
+        assert_eq!(source.matches(count_source).count(), 3);
+        assert_eq!(source.matches(&disarm_source).count(), 4);
         let opt_in = ["RELOADSTALL_PRE_", "CHURN_EVIDENCE_DIR"].concat();
         assert_eq!(
             source.matches(&opt_in).count(),
@@ -1669,6 +1781,73 @@ mod tests {
         assert!(needs_first_exact_bitmap(1, None));
         assert!(needs_first_exact_bitmap(0, Some(1)));
         assert!(needs_first_exact_bitmap(1, Some(1)));
+    }
+
+    #[test]
+    fn convergence_only_mode_matrix_is_fail_closed() {
+        let evidence = Path::new("evidence");
+        let pre_churn = Path::new("pre-churn");
+        assert!(convergence_only_allowed(
+            true,
+            0,
+            0,
+            None,
+            None,
+            Some(evidence),
+            None
+        ));
+        for rejected in [
+            convergence_only_allowed(true, 1, 0, None, None, Some(evidence), None),
+            convergence_only_allowed(true, 0, 1, None, None, Some(evidence), None),
+            convergence_only_allowed(true, 0, 0, Some(1), None, Some(evidence), None),
+            convergence_only_allowed(true, 0, 0, None, Some("reload"), Some(evidence), None),
+            convergence_only_allowed(true, 0, 0, None, None, None, None),
+            convergence_only_allowed(true, 0, 0, None, None, Some(evidence), Some(pre_churn)),
+        ] {
+            assert!(!rejected);
+        }
+        let mut duplicate = vec!["--convergence-only".to_owned(); 2];
+        assert!(std::panic::catch_unwind(move || take_single_flag(
+            &mut duplicate,
+            "--convergence-only"
+        ))
+        .is_err());
+    }
+
+    #[test]
+    fn convergence_only_integrity_requires_exact_equality_and_health() {
+        assert!(convergence_integrity_valid(8, 700, 8, 0, 700, 700));
+        assert!(!convergence_integrity_valid(8, 700, 8, 0, 699, 700));
+        assert!(!convergence_integrity_valid(8, 700, 8, 0, 700, 701));
+        assert!(!convergence_integrity_valid(8, 700, 7, 0, 700, 700));
+        assert!(!convergence_integrity_valid(8, 700, 8, 1, 700, 700));
+    }
+
+    #[test]
+    fn convergence_only_source_arms_and_checks_around_ack_before_churn() {
+        let source = include_str!("main.rs");
+        let exact_arm = [
+            "let exact_initial = convergence_only || ",
+            "needs_first_exact_bitmap(reloads, flapstorm)",
+        ]
+        .concat();
+        assert!(source.contains(&exact_arm));
+        let call_marker = ["CONVERGENCE_ONLY_", "INTEGRITY_CALL"].concat();
+        assert_eq!(source.matches(&call_marker).count(), 2);
+        let first_check = source.find("check(\"pre-ack\")").unwrap();
+        let ack_marker = ["await_evidence_", "capture(evidence_dir, EVIDENCE_TIMEOUT)"].concat();
+        let ack = source.find(&ack_marker).unwrap();
+        let second_check = source.find("check(\"post-ack\")").unwrap();
+        let disarm = source.find("CONVERGENCE_ONLY_DISARM").unwrap();
+        let receipt = source.find("convergence_only_receipt,").unwrap();
+        let exit = source[receipt..].find("std::process::exit(0)").unwrap() + receipt;
+        let pre_churn = source
+            .find("if let Some(evidence_dir) = pre_churn_evidence_dir")
+            .unwrap();
+        let churn = source.find("// --- Start churn:").unwrap();
+        assert!(first_check < ack && ack < second_check && second_check < disarm);
+        assert!(disarm < receipt);
+        assert!(receipt < exit && exit < pre_churn && pre_churn < churn);
     }
 
     #[test]
