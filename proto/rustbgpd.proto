@@ -150,11 +150,12 @@ service ConfigService {
   // source identity, but do not archive those external bytes.
   rpc ListConfigHistory(ListConfigHistoryRequest) returns (ListConfigHistoryResponse);
 
-  // Roll back to an eligible legacy TOML-only row (index >= 1). The daemon
+  // Roll back to an eligible legacy or provenance-verified v2 row (index >= 1). The daemon
   // resolves it server-side and routes it through the exact same transaction
   // executor as ApplyConfigTransaction — same plan/impact classification,
-  // receipts, and optional confirmed-commit window. V2 and unreadable rows are
-  // refused until provenance-aware external-source restore lands.
+  // receipts, and optional confirmed-commit window when neither the running nor
+  // target config declares external inputs. Unreadable rows and v2 provenance
+  // mismatches fail closed.
   rpc RollbackConfigTransaction(RollbackConfigTransactionRequest) returns (ConfigTransactionApplyResponse);
 }
 
@@ -193,14 +194,13 @@ message ListConfigHistoryResponse {
 }
 
 message RollbackConfigTransactionRequest {
-  // Eligible legacy TOML-only row to restore; must be >= 1 (index 0 is newest).
+  // Eligible history row to restore; must be >= 1 (index 0 is newest).
   uint32 index = 1;
   // Optional optimistic-concurrency token from PlanConfigTransaction /
   // ListConfigHistory-time planning. Empty skips the stale-snapshot guard —
   // the candidate is resolved server-side from history, not supplied by the
-  // caller. Legacy rows do not retain external .rpol or dataset bytes, so the
-  // transaction path validates their current filesystem contents. V2 rows
-  // retain source identity but are refused until restore can verify it.
+  // caller. Legacy rows declaring external inputs are refused. V2 rows retain
+  // source identity and restore only after live inputs reproduce it exactly.
   string expected_runtime_snapshot_token = 2;
   // Optional audit/correlation identifier supplied by automation.
   string client_request_id = 3;

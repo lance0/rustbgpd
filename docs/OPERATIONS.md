@@ -222,7 +222,7 @@ survives restarts:
 rbgp config history
 rbgp -j config history
 
-# Restore an eligible legacy TOML-only row selected from the listing
+# Restore an eligible row selected from the listing
 LEGACY_INDEX=3
 rbgp config rollback "$LEGACY_INDEX"
 
@@ -240,13 +240,15 @@ duplicate-sequence rows are `unreadable` with both digests withheld. Both
 generations share one newest-first index.
 Index 0 means the newest config-history row, not
 necessarily the running or currently persisted config. `config rollback N`
-temporarily accepts legacy rows only; v2 and unreadable rows fail closed before
-planning or mutation until external-source restore lands. An eligible legacy
-row is verified and routed through the **same transaction path as
+accepts legacy rows without external declarations and v2 rows only when one
+detached load exactly reproduces recorded TOML, manifest, and source digests;
+unreadable or mismatched rows fail closed before planning or mutation. An eligible
+row is routed through the **same transaction path as
 `config apply`**: the same plan classification, the same reload-impact and
-update-group annotations, the same receipts, and the same
-`--confirm-id`/`--confirm-timeout` confirmed-commit window (journal, timeout
-auto-revert, and boot revert included). There is no second apply engine —
+update-group annotations, and the same receipts. Confirmed rollback remains
+available only when neither the current nor target config declares external
+inputs; provenance-aware commit-confirm journal support is a later tranche.
+There is no second apply engine —
 a rollback whose entry contains sections the transaction executor cannot
 commit live (for example restart-required `[global]` fields) is rejected
 without mutation, exactly like an apply of that file would be. Rolling back
@@ -254,9 +256,9 @@ past the retained history fails cleanly, naming how many entries exist.
 
 Each retained row includes the normalized-TOML digest. V2 rows also hash the
 canonical accepted `.rpol` and dataset source roster, lengths, and content
-digests, but do not archive those external bytes. V2 rollback is therefore
-refused before any source reread until the restore tranche can verify the live
-sources against the recorded manifest. Legacy rows retain only TOML and remain
+digests, but do not archive those external bytes. V2 rollback performs one
+detached load and requires the live sources to reproduce that identity exactly.
+Legacy rows retain only TOML and remain
 subject to the transaction executor's existing external-input fence. Keep the
 operator-authored TOML, `.rpol` graph, and datasets under version control or
 another coordinated deployment system.

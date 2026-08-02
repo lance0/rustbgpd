@@ -248,9 +248,9 @@ pub async fn history(connection: Connection, json: bool) -> Result<(), CliError>
     Ok(())
 }
 
-/// Junos-style `rollback N`: the daemon resolves an eligible legacy history
-/// row and routes it through the same transaction path as apply — same
-/// receipts, and the rollback itself can be commit-confirmed.
+/// Junos-style `rollback N`: the daemon resolves an eligible legacy or
+/// provenance-verified v2 history row and routes it through the same
+/// transaction path as apply with the same receipts.
 pub async fn rollback(
     connection: Connection,
     options: RollbackOptions<'_>,

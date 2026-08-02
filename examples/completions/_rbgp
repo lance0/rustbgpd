@@ -179,7 +179,7 @@ _arguments "${_arguments_options[@]}" : \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
-':index -- History row to restore (N >= 1; eligible legacy rows only):_default' \
+':index -- History row to restore (N >= 1):_default' \
 && ret=0
 ;;
 (effective)
@@ -3714,7 +3714,7 @@ _rbgp__subcmd__config_commands() {
 'abort:Abort a pending confirmed config transaction and roll back immediately' \
 'status:Show pending or last confirmed-transaction lifecycle state' \
 'history:List retained config-history rows (newest first)' \
-'rollback:Roll back to an eligible legacy config snapshot (Junos \`rollback N\`)' \
+'rollback:Roll back to an eligible config snapshot (Junos \`rollback N\`)' \
 'effective:Dump the daemon'\''s effective running config (defaults materialized)' \
 'import:Import a BIRD 2 / FRR / GoBGP config into a rustbgpd config.toml' \
 'help:Print this message or the help of the given subcommand(s)' \
@@ -3756,7 +3756,7 @@ _rbgp__subcmd__config__subcmd__help_commands() {
 'abort:Abort a pending confirmed config transaction and roll back immediately' \
 'status:Show pending or last confirmed-transaction lifecycle state' \
 'history:List retained config-history rows (newest first)' \
-'rollback:Roll back to an eligible legacy config snapshot (Junos \`rollback N\`)' \
+'rollback:Roll back to an eligible config snapshot (Junos \`rollback N\`)' \
 'effective:Dump the daemon'\''s effective running config (defaults materialized)' \
 'import:Import a BIRD 2 / FRR / GoBGP config into a rustbgpd config.toml' \
 'help:Print this message or the help of the given subcommand(s)' \
@@ -4511,7 +4511,7 @@ _rbgp__subcmd__help__subcmd__config_commands() {
 'abort:Abort a pending confirmed config transaction and roll back immediately' \
 'status:Show pending or last confirmed-transaction lifecycle state' \
 'history:List retained config-history rows (newest first)' \
-'rollback:Roll back to an eligible legacy config snapshot (Junos \`rollback N\`)' \
+'rollback:Roll back to an eligible config snapshot (Junos \`rollback N\`)' \
 'effective:Dump the daemon'\''s effective running config (defaults materialized)' \
 'import:Import a BIRD 2 / FRR / GoBGP config into a rustbgpd config.toml' \
     )

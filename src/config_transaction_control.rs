@@ -32,6 +32,7 @@ use crate::fib_table_control::{
     FibTableControlDeps, commit_fib_tables_locked, runtime_unavailable_error,
 };
 use crate::gnmi_set_bridge;
+use crate::peer_manager::InternalCommand;
 use crate::reload::transaction_config_snapshot_accepted;
 
 const PERSIST_RESERVE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -56,6 +57,7 @@ pub struct ConfigTransactionController {
     metrics: BgpMetrics,
     state: Arc<Mutex<ConfirmedState>>,
     accepted_rx: Option<watch::Receiver<Arc<AcceptedConfigSnapshot>>>,
+    peer_mgr_internal_tx: Option<mpsc::UnboundedSender<InternalCommand>>,
 }
 
 #[derive(Debug, Default)]
@@ -119,6 +121,7 @@ impl ConfigTransactionController {
             metrics,
             state: Arc::new(Mutex::new(ConfirmedState::default())),
             accepted_rx: None,
+            peer_mgr_internal_tx: None,
         }
     }
 
@@ -133,6 +136,186 @@ impl ConfigTransactionController {
             metrics,
             state: Arc::new(Mutex::new(ConfirmedState::default())),
             accepted_rx: Some(accepted_rx),
+            peer_mgr_internal_tx: None,
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn with_preloaded_planner(
+        mut self,
+        tx: mpsc::UnboundedSender<InternalCommand>,
+    ) -> Self {
+        self.peer_mgr_internal_tx = Some(tx);
+        self
+    }
+
+    async fn plan_preloaded_snapshot(
+        &self,
+        snapshot: Arc<AcceptedConfigSnapshot>,
+        expected_runtime_snapshot_token: String,
+    ) -> Result<rustbgpd_api::peer_types::RuntimeConfigTransactionPlan, ConfigTransactionApplyError>
+    {
+        let (barrier_tx, barrier_rx) = oneshot::channel();
+        self.deps
+            .peer_mgr_tx
+            .send(PeerManagerCommand::RuntimeConfigSnapshot { reply: barrier_tx })
+            .await
+            .map_err(|_| {
+                ConfigTransactionApplyError::Unavailable("peer manager is unavailable".to_string())
+            })?;
+        barrier_rx
+            .await
+            .map_err(|_| {
+                ConfigTransactionApplyError::Unavailable(
+                    "peer manager dropped runtime snapshot barrier".to_string(),
+                )
+            })?
+            .map_err(ConfigTransactionApplyError::Unavailable)?;
+        let tx = self.peer_mgr_internal_tx.as_ref().ok_or_else(|| {
+            ConfigTransactionApplyError::Unavailable(
+                "preloaded config transaction planner is unavailable".to_string(),
+            )
+        })?;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(InternalCommand::PlanAcceptedSnapshot {
+            snapshot,
+            expected_runtime_snapshot_token: Some(expected_runtime_snapshot_token),
+            reply: reply_tx,
+        })
+        .map_err(|_| {
+            ConfigTransactionApplyError::Unavailable("peer manager is unavailable".to_string())
+        })?;
+        reply_rx
+            .await
+            .map_err(|_| {
+                ConfigTransactionApplyError::Unavailable(
+                    "peer manager dropped preloaded plan reply".to_string(),
+                )
+            })?
+            .map_err(plan_error_to_status)
+    }
+
+    async fn prepare_rollback_payload(
+        &self,
+        payload: crate::config_history::RollbackPayload,
+        request: &proto::RollbackConfigTransactionRequest,
+    ) -> Result<
+        (
+            String,
+            Option<(
+                rustbgpd_api::peer_types::RuntimeConfigTransactionPlan,
+                Arc<AcceptedConfigSnapshot>,
+            )>,
+        ),
+        ConfigTransactionApplyError,
+    > {
+        match payload {
+            crate::config_history::RollbackPayload::Legacy(candidate_toml) => {
+                if AcceptedConfigSnapshot::toml_declares_external_sources(&candidate_toml)
+                    .map_err(ConfigTransactionApplyError::InvalidArgument)?
+                {
+                    return Err(ConfigTransactionApplyError::FailedPrecondition(
+                        "cannot roll back a legacy history row that declares external rpol or datasets"
+                            .to_string(),
+                    ));
+                }
+                Ok((candidate_toml, None))
+            }
+            crate::config_history::RollbackPayload::V2 {
+                normalized_toml,
+                manifest,
+                source_sha256,
+            } => {
+                if !request.confirm_id.is_empty() {
+                    validate_confirm_id(&request.confirm_id)?;
+                    if request.confirm_timeout_seconds > 0 {
+                        validate_confirm_timeout_seconds(request.confirm_timeout_seconds)?;
+                    }
+                    self.reject_confirmed_external_sources(&normalized_toml)
+                        .await?;
+                }
+                let accepted = self.accepted_rx.as_ref().ok_or_else(|| {
+                    ConfigTransactionApplyError::Unavailable(
+                        "accepted-config authority unavailable".to_string(),
+                    )
+                })?;
+                let config_path = accepted
+                    .borrow()
+                    .config_ref()
+                    .file_path
+                    .clone()
+                    .ok_or_else(|| {
+                        ConfigTransactionApplyError::FailedPrecondition(
+                            "cannot restore external provenance without a daemon config path"
+                                .to_string(),
+                        )
+                    })?;
+                let snapshot = AcceptedConfigSnapshot::load_retained(&normalized_toml, &config_path)
+                    .map_err(|_| {
+                        ConfigTransactionApplyError::FailedPrecondition(
+                            "cannot restore retained external-source snapshot: a declared external source is missing, unreadable, or changed"
+                                .to_string(),
+                        )
+                    })?;
+                crate::config_history::verify_retained_snapshot(
+                    &snapshot,
+                    &normalized_toml,
+                    &manifest,
+                    source_sha256,
+                )
+                .map_err(|_| {
+                    ConfigTransactionApplyError::FailedPrecondition(
+                        "cannot restore retained external-source snapshot: a declared external source is missing, unreadable, or changed"
+                            .to_string(),
+                    )
+                })?;
+                let plan = self
+                    .plan_preloaded_snapshot(
+                        snapshot.clone(),
+                        request.expected_runtime_snapshot_token.clone(),
+                    )
+                    .await?;
+                Ok((normalized_toml, Some((plan, snapshot))))
+            }
+        }
+    }
+
+    async fn apply_prepared_rollback(
+        &self,
+        request: proto::ApplyConfigTransactionRequest,
+        preloaded: Option<(
+            rustbgpd_api::peer_types::RuntimeConfigTransactionPlan,
+            Arc<AcceptedConfigSnapshot>,
+        )>,
+    ) -> Result<proto::ConfigTransactionApplyResponse, ConfigTransactionApplyError> {
+        let confirmed = parse_confirmed_apply_mode(&request)?;
+        if let Some(confirmed) = confirmed {
+            if preloaded.is_none() {
+                self.reject_confirmed_external_sources(&request.candidate_toml)
+                    .await?;
+            }
+            self.begin_confirmed_apply(&confirmed.confirm_id).await?;
+            let result = self
+                .apply_confirmed_locked(request, confirmed.clone(), preloaded)
+                .await;
+            if !matches!(
+                result,
+                Ok(proto::ConfigTransactionApplyResponse {
+                    confirmation: Some(_),
+                    ..
+                })
+            ) {
+                self.clear_applying_confirm_id(&confirmed.confirm_id).await;
+            }
+            result
+        } else if let Some(preloaded) = preloaded {
+            self.reject_if_pending("ConfigService.RollbackConfigTransaction")
+                .await?;
+            apply_config_transaction_locked_with_preloaded(&self.deps, request, Some(preloaded))
+                .await
+                .map_err(|failure| failure.error)
+        } else {
+            self.apply_locked(request, None).await
         }
     }
 
@@ -301,7 +484,18 @@ impl ConfigTransactionController {
                         .map_err(apply_error_to_gnmi_set_error)?;
                     return Ok(GnmiSetOutcome::default());
                 }
-                Some(GnmiSetCommitAction::Commit { .. }) | None => {
+                Some(GnmiSetCommitAction::Commit { .. }) => {
+                    self.reject_if_pending("gnmi.gNMI/Set")
+                        .await
+                        .map_err(apply_error_to_gnmi_set_error)?;
+                    // A confirmed gNMI candidate is derived from the live
+                    // config. Fence external declarations before that
+                    // construction can consult any rpol or dataset path.
+                    self.reject_confirmed_current_external_sources()
+                        .await
+                        .map_err(apply_error_to_gnmi_set_error)?;
+                }
+                None => {
                     self.reject_if_pending("gnmi.gNMI/Set")
                         .await
                         .map_err(apply_error_to_gnmi_set_error)?;
@@ -366,9 +560,11 @@ impl ConfigTransactionController {
         confirmed: Option<ConfirmedApplyMode>,
     ) -> Result<proto::ConfigTransactionApplyResponse, ConfigTransactionApplyError> {
         if let Some(confirmed) = confirmed {
+            self.reject_confirmed_external_sources(&request.candidate_toml)
+                .await?;
             self.begin_confirmed_apply(&confirmed.confirm_id).await?;
             let result = self
-                .apply_confirmed_locked(request, confirmed.clone())
+                .apply_confirmed_locked(request, confirmed.clone(), None)
                 .await;
             if !matches!(
                 result,
@@ -393,6 +589,10 @@ impl ConfigTransactionController {
         &self,
         request: proto::ApplyConfigTransactionRequest,
         confirmed: ConfirmedApplyMode,
+        preloaded: Option<(
+            rustbgpd_api::peer_types::RuntimeConfigTransactionPlan,
+            Arc<AcceptedConfigSnapshot>,
+        )>,
     ) -> Result<proto::ConfigTransactionApplyResponse, ConfigTransactionApplyError> {
         let rollback_config = self
             .accepted_runtime_snapshot()
@@ -454,7 +654,11 @@ impl ConfigTransactionController {
             })?;
         }
 
-        let mut response = match apply_config_transaction_locked(&self.deps, request).await {
+        let mut response = match apply_config_transaction_locked_with_preloaded(
+            &self.deps, request, preloaded,
+        )
+        .await
+        {
             Ok(response) => response,
             Err(failure) => {
                 if failure.ambiguous {
@@ -514,6 +718,52 @@ impl ConfigTransactionController {
             "Confirmed transaction pending; call ConfirmConfigTransaction before the timeout or it will be rolled back.\n",
         );
         Ok(response)
+    }
+
+    async fn reject_confirmed_external_sources(
+        &self,
+        candidate_toml: &str,
+    ) -> Result<(), ConfigTransactionApplyError> {
+        let current_external = self.current_runtime_declares_external_sources().await?;
+        let target_external =
+            AcceptedConfigSnapshot::toml_declares_external_sources(candidate_toml)
+                .map_err(ConfigTransactionApplyError::InvalidArgument)?;
+        if current_external || target_external {
+            return Err(confirmed_external_sources_error());
+        }
+        Ok(())
+    }
+
+    async fn reject_confirmed_current_external_sources(
+        &self,
+    ) -> Result<(), ConfigTransactionApplyError> {
+        if self.current_runtime_declares_external_sources().await? {
+            return Err(confirmed_external_sources_error());
+        }
+        Ok(())
+    }
+
+    async fn current_runtime_declares_external_sources(
+        &self,
+    ) -> Result<bool, ConfigTransactionApplyError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.deps
+            .peer_mgr_tx
+            .send(PeerManagerCommand::RuntimeConfigSnapshot { reply: reply_tx })
+            .await
+            .map_err(|_| {
+                ConfigTransactionApplyError::Unavailable("peer manager is unavailable".to_string())
+            })?;
+        let runtime = reply_rx
+            .await
+            .map_err(|_| {
+                ConfigTransactionApplyError::Unavailable(
+                    "peer manager dropped runtime config snapshot reply".to_string(),
+                )
+            })?
+            .map_err(ConfigTransactionApplyError::Unavailable)?;
+        AcceptedConfigSnapshot::toml_declares_external_sources(&runtime.toml)
+            .map_err(ConfigTransactionApplyError::Internal)
     }
 
     async fn confirm(
@@ -787,7 +1037,7 @@ impl ConfigTransactionController {
             "No config snapshots recorded yet.\n".to_string()
         } else {
             format!(
-                "{} config history row(s) retained; index 0 is newest. Eligible legacy TOML-only rows can currently be restored with RollbackConfigTransaction (rbgp config rollback N); v2 and unreadable rows are refused.\n",
+                "{} config history row(s) retained; index 0 is newest. Eligible legacy TOML-only or provenance-verified v2 rows can be restored with RollbackConfigTransaction (rbgp config rollback N); unreadable rows are refused.\n",
                 proto_entries.len()
             )
         };
@@ -839,27 +1089,19 @@ impl ConfigTransactionController {
                     entries.len(),
                 )));
             };
-            match entry.status {
-                crate::config_history::HistoryStatus::Recorded => {
-                    return Err(ConfigTransactionApplyError::FailedPrecondition(
-                        "cannot roll back this v2 config history entry until external-source restore is available"
-                            .to_string(),
-                    ));
-                }
-                crate::config_history::HistoryStatus::Unreadable => {
-                    return Err(ConfigTransactionApplyError::FailedPrecondition(
-                        "cannot roll back an unreadable config history entry".to_string(),
-                    ));
-                }
-                crate::config_history::HistoryStatus::LegacyTomlOnly => {}
+            if entry.status == crate::config_history::HistoryStatus::Unreadable {
+                return Err(ConfigTransactionApplyError::FailedPrecondition(
+                    "cannot roll back an unreadable config history entry".to_string(),
+                ));
             }
-            let candidate_toml =
-                crate::config_history::read_mixed_legacy(dir, entry).map_err(|_| {
-                    ConfigTransactionApplyError::FailedPrecondition(
-                        "cannot roll back: config history entry became unavailable or unsafe"
-                            .to_string(),
-                    )
-                })?;
+            let payload = crate::config_history::read_mixed_rollback(dir, entry).map_err(|_| {
+                ConfigTransactionApplyError::FailedPrecondition(
+                    "cannot roll back: config history entry became unavailable or unsafe"
+                        .to_string(),
+                )
+            })?;
+            let (candidate_toml, preloaded) =
+                self.prepare_rollback_payload(payload, &request).await?;
             let client_request_id = if request.client_request_id.is_empty() {
                 format!("config-rollback:{index}")
             } else {
@@ -873,8 +1115,9 @@ impl ConfigTransactionController {
                 confirm_id: request.confirm_id,
                 confirm_timeout_seconds: request.confirm_timeout_seconds,
             };
-            let confirmed = parse_confirmed_apply_mode(&apply_request)?;
-            let mut response = self.apply_locked(apply_request, confirmed).await?;
+            let mut response = self
+                .apply_prepared_rollback(apply_request, preloaded)
+                .await?;
             // Name the restored entry only when something actually committed;
             // a noop ("already running that config") or rejected plan keeps
             // the executor's own receipt text.
@@ -1453,12 +1696,28 @@ async fn apply_config_transaction_locked(
     deps: &FibTableControlDeps,
     request: proto::ApplyConfigTransactionRequest,
 ) -> Result<proto::ConfigTransactionApplyResponse, ApplyFailure> {
-    let plan = plan_candidate(
-        &deps.peer_mgr_tx,
-        request.candidate_toml.clone(),
-        request.expected_runtime_snapshot_token.clone(),
-    )
-    .await?;
+    apply_config_transaction_locked_with_preloaded(deps, request, None).await
+}
+
+async fn apply_config_transaction_locked_with_preloaded(
+    deps: &FibTableControlDeps,
+    request: proto::ApplyConfigTransactionRequest,
+    preloaded: Option<(
+        rustbgpd_api::peer_types::RuntimeConfigTransactionPlan,
+        Arc<AcceptedConfigSnapshot>,
+    )>,
+) -> Result<proto::ConfigTransactionApplyResponse, ApplyFailure> {
+    let plan = match &preloaded {
+        Some((plan, _)) => plan.clone(),
+        None => {
+            plan_candidate(
+                &deps.peer_mgr_tx,
+                request.candidate_toml.clone(),
+                request.expected_runtime_snapshot_token.clone(),
+            )
+            .await?
+        }
+    };
 
     match plan.status {
         RuntimeConfigTransactionStatus::Noop => {
@@ -1483,9 +1742,14 @@ async fn apply_config_transaction_locked(
         return Ok(rejected_response(plan.runtime_snapshot_token));
     };
 
-    let candidate =
-        Config::load_toml_with_diagnostics(&request.candidate_toml, "candidate config transaction")
-            .map_err(ConfigTransactionApplyError::InvalidArgument)?;
+    let candidate = match preloaded {
+        Some((_, snapshot)) => snapshot.config(),
+        None => Config::load_toml_with_diagnostics(
+            &request.candidate_toml,
+            "candidate config transaction",
+        )
+        .map_err(ConfigTransactionApplyError::InvalidArgument)?,
+    };
     let config_tx = deps.config_tx.clone().ok_or_else(|| {
         ConfigTransactionApplyError::FailedPrecondition(
             "config transactions are unavailable: this daemon is running without config \
@@ -2856,6 +3120,13 @@ fn apply_error_to_gnmi_set_error(error: ConfigTransactionApplyError) -> GnmiSetE
         ConfigTransactionApplyError::Unavailable(message) => GnmiSetError::Unavailable(message),
         ConfigTransactionApplyError::Internal(message) => GnmiSetError::Internal(message),
     }
+}
+
+fn confirmed_external_sources_error() -> ConfigTransactionApplyError {
+    ConfigTransactionApplyError::FailedPrecondition(
+        "confirmed config transactions involving external rpol or dataset declarations are unavailable until commit-confirm provenance restore lands"
+            .to_string(),
+    )
 }
 
 fn gnmi_set_outcome_from_apply_response(
@@ -4833,6 +5104,85 @@ remote_asn = 65010
             config_rx.try_recv(),
             Err(tokio::sync::mpsc::error::TryRecvError::Empty)
         ));
+    }
+
+    /// Red proof: sourcing the current-side fence from accepted authority,
+    /// skipping either native/gNMI entry point or the target-side declaration,
+    /// loading the declared file, or moving the fence after journal creation
+    /// makes this fixture proceed, leak its secret path, or leave a journal.
+    #[tokio::test]
+    async fn confirmed_apply_refuses_live_external_declaration_without_io_or_journal() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret = dir.path().join("secret-customer-policy.rpol");
+        let live_toml = format!(
+            "{}\n[policy]\nrpol_files = [{:?}]\n",
+            base_toml(""),
+            secret.display().to_string()
+        );
+        let snapshot_toml = Arc::new(Mutex::new(live_toml.clone()));
+        let peers = Arc::new(Mutex::new(Vec::new()));
+        let (peer_tx, peer_rx) = mpsc::channel(8);
+        tokio::spawn(fake_snapshot_peer_manager(
+            peer_rx,
+            plan(RuntimeConfigTransactionStatus::Noop, Vec::new()),
+            snapshot_toml.clone(),
+            peers,
+        ));
+        let journal_path = dir.path().join("confirm.json");
+        let controller = ConfigTransactionController::new(
+            FibTableControlDeps {
+                confirm_journal_path: Some(journal_path.clone()),
+                ..deps_value(None, peer_tx, None, Vec::new())
+            },
+            BgpMetrics::new(),
+        );
+        let error = controller
+            .clone()
+            .apply(confirmed_dynamic_request(
+                base_toml(""),
+                "external-live",
+                60,
+            ))
+            .await
+            .unwrap_err();
+        let rendered = error.to_string();
+        assert!(rendered.contains("external rpol or dataset declarations"));
+        assert!(!rendered.contains("secret-customer-policy"), "{rendered}");
+        assert!(
+            !secret.exists(),
+            "the declaration-only fence performs no I/O"
+        );
+        assert!(!journal_path.exists(), "refusal precedes journal creation");
+
+        let Err(error) = controller
+            .clone()
+            .apply_gnmi_set(gnmi_set_add_neighbor_confirmed(
+                "10.0.0.3",
+                65003,
+                "external-gnmi",
+                60,
+            ))
+            .await
+        else {
+            panic!("confirmed gNMI mutation with live external inputs must refuse");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("external rpol or dataset declarations"),
+            "{error}"
+        );
+        assert!(!journal_path.exists(), "gNMI refusal precedes journaling");
+
+        *snapshot_toml.lock().await = base_toml("");
+        let error = controller
+            .apply(confirmed_dynamic_request(live_toml, "external-target", 60))
+            .await
+            .unwrap_err();
+        let rendered = error.to_string();
+        assert!(rendered.contains("external rpol or dataset declarations"));
+        assert!(!rendered.contains("secret-customer-policy"), "{rendered}");
+        assert!(!journal_path.exists(), "target refusal precedes journaling");
     }
 
     /// Shared body for the LAN-277 ambiguous-completion apply tests: run one
@@ -8453,6 +8803,67 @@ log_format = "json"
     // Recorded config history + rollback (Junos `rollback N`)
     // -----------------------------------------------------------------
 
+    /// Red proof: removing the public snapshot barrier, sending the private
+    /// command first, cloning a replacement snapshot, or routing through the
+    /// public TOML planner breaks the ordering and pointer assertions below.
+    #[tokio::test]
+    async fn preloaded_plan_waits_for_public_barrier_and_carries_same_arc() {
+        let config = Config::load_toml_with_diagnostics(&base_toml(""), "barrier test").unwrap();
+        let snapshot = AcceptedConfigSnapshot::from_config_for_test(config);
+        let (peer_tx, mut peer_rx) = mpsc::channel(2);
+        let (internal_tx, mut internal_rx) = mpsc::unbounded_channel();
+        let controller = ConfigTransactionController::new(
+            deps_value(None, peer_tx, None, Vec::new()),
+            BgpMetrics::new(),
+        )
+        .with_preloaded_planner(internal_tx);
+        let planned_snapshot = snapshot.clone();
+        let task = tokio::spawn(async move {
+            controller
+                .plan_preloaded_snapshot(planned_snapshot, "expected-token".to_string())
+                .await
+        });
+
+        let Some(PeerManagerCommand::RuntimeConfigSnapshot { reply }) = peer_rx.recv().await else {
+            panic!("public runtime snapshot barrier must be first");
+        };
+        assert!(
+            matches!(
+                internal_rx.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ),
+            "private preloaded planning must wait for the public barrier reply"
+        );
+        reply
+            .send(Ok(rustbgpd_api::peer_types::RuntimeConfigSnapshotReply {
+                toml: snapshot.normalized_toml().to_string(),
+                rpol_files: Vec::new(),
+                rpol: snapshot.config_ref().policy.rpol.clone(),
+            }))
+            .unwrap();
+        let command = internal_rx.recv().await.unwrap();
+        let InternalCommand::PlanAcceptedSnapshot {
+            snapshot: received,
+            expected_runtime_snapshot_token,
+            reply,
+        } = command
+        else {
+            panic!("private lane must receive a preloaded plan command");
+        };
+        assert!(Arc::ptr_eq(&snapshot, &received));
+        assert_eq!(
+            expected_runtime_snapshot_token.as_deref(),
+            Some("expected-token")
+        );
+        reply
+            .send(Ok(plan(RuntimeConfigTransactionStatus::Noop, Vec::new())))
+            .unwrap();
+        assert_eq!(
+            task.await.unwrap().unwrap().status,
+            RuntimeConfigTransactionStatus::Noop
+        );
+    }
+
     /// Controller wired with a real on-disk history dir and the dynamic
     /// snapshot harness. Returns (controller, live runtime snapshot).
     fn rollback_controller(
@@ -8469,7 +8880,7 @@ log_format = "json"
             use std::os::unix::fs::PermissionsExt as _;
             std::fs::set_permissions(history_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
         }
-        let snapshot_toml = Arc::new(Mutex::new(current_toml));
+        let snapshot_toml = Arc::new(Mutex::new(current_toml.clone()));
         let peers = Arc::new(Mutex::new(Vec::new()));
         let (peer_tx, peer_rx) = mpsc::channel(8);
         tokio::spawn(fake_snapshot_peer_manager(
@@ -8483,21 +8894,38 @@ log_format = "json"
         ));
         let (config_tx, config_rx) = mpsc::channel(8);
         let ack_task = tokio::spawn(ack_config_transaction_commits(config_rx));
-        let controller = ConfigTransactionController::new(
+        let config_path = history_dir.join("runtime.toml");
+        std::fs::write(&config_path, current_toml).unwrap();
+        let accepted = Arc::new(AcceptedConfigSnapshot::load(&config_path, None).unwrap());
+        let (_accepted_tx, accepted_rx) = watch::channel(accepted);
+        let (internal_tx, mut internal_rx) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Some(command) = internal_rx.recv().await {
+                let InternalCommand::PlanAcceptedSnapshot { reply, .. } = command else {
+                    panic!("rollback planner received unexpected reload command");
+                };
+                let _ = reply.send(Ok(plan(
+                    RuntimeConfigTransactionStatus::Committable,
+                    vec!["[[dynamic_neighbors]]".to_string()],
+                )));
+            }
+        });
+        let controller = ConfigTransactionController::new_accepted(
             FibTableControlDeps {
                 confirm_journal_path: journal_path,
                 config_history_dir: Some(history_dir.to_path_buf()),
                 ..deps_value(None, peer_tx, Some(config_tx), Vec::new())
             },
             BgpMetrics::new(),
-        );
+            accepted_rx,
+        )
+        .with_preloaded_planner(internal_tx);
         (controller, snapshot_toml, ack_task)
     }
 
-    /// Red proof: deleting the controller's v2 status arm changes the exact
-    /// actionable refusal to the storage-boundary fallback; using a
-    /// legacy-only index restores a row other than the exact legacy row at
-    /// common index 3.
+    /// Red proof: removing the v2 preloaded planning lane makes index 1 fail;
+    /// using a legacy-only index restores a row other than the exact legacy
+    /// row at common index 3.
     #[tokio::test]
     async fn rollback_restores_the_previous_applied_config() {
         let dir = tempfile::tempdir().unwrap();
@@ -8531,7 +8959,7 @@ log_format = "json"
         );
         assert!(!listed.entries[0].source_sha256.is_empty());
 
-        let refused = controller
+        let v2_response = controller
             .clone()
             .rollback(proto::RollbackConfigTransactionRequest {
                 index: 1,
@@ -8542,13 +8970,12 @@ log_format = "json"
                 confirm_timeout_seconds: 0,
             })
             .await
-            .expect_err("v2 rollback must stop before the apply path");
-        assert!(matches!(
-            refused,
-            ConfigTransactionApplyError::FailedPrecondition(ref message)
-                if message.contains("v2 config history")
-        ));
-        assert_eq!(*snapshot_toml.lock().await, current_toml);
+            .expect("verified v2 rollback must use the preloaded plan lane");
+        assert_eq!(
+            v2_response.status,
+            proto::ConfigTransactionPlanStatus::Committable as i32
+        );
+        assert_eq!(*snapshot_toml.lock().await, v2.normalized_toml());
 
         let response = controller
             .clone()
@@ -8583,6 +9010,105 @@ log_format = "json"
             response.human_text.contains(&expected_hash),
             "receipt must name the restored entry hash: {}",
             response.human_text
+        );
+        ack_task.abort();
+    }
+
+    /// Red proof: deleting the legacy declaration fence reaches candidate
+    /// loading and changes the stable refusal; consulting the missing path or
+    /// exposing it changes the no-I/O and redaction assertions.
+    #[tokio::test]
+    async fn legacy_external_rollback_refuses_without_source_access() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret = dir.path().join("legacy-secret-never-read.rpol");
+        let legacy = format!(
+            "{}\n[policy]\nrpol_files = [{:?}]\n",
+            base_toml(""),
+            secret.display().to_string()
+        );
+        let current = dynamic_candidate_toml();
+        crate::config_history::record(dir.path(), &legacy).unwrap();
+        crate::config_history::record(dir.path(), &current).unwrap();
+        let journal = dir.path().join("legacy-confirm.json");
+        let (controller, runtime, ack_task) =
+            rollback_controller(dir.path(), Some(journal.clone()), current.clone());
+
+        let error = controller
+            .rollback(proto::RollbackConfigTransactionRequest {
+                index: 1,
+                expected_runtime_snapshot_token: String::new(),
+                client_request_id: String::new(),
+                comment: String::new(),
+                confirm_id: String::new(),
+                confirm_timeout_seconds: 0,
+            })
+            .await
+            .unwrap_err();
+        let rendered = error.to_string();
+        assert!(rendered.contains("legacy history row"), "{rendered}");
+        assert!(!rendered.contains("legacy-secret-never-read"), "{rendered}");
+        assert!(
+            !secret.exists(),
+            "legacy refusal must not access the source"
+        );
+        assert!(!journal.exists());
+        assert_eq!(*runtime.lock().await, current);
+        assert_eq!(
+            crate::config_history::list_mixed(dir.path()).unwrap().len(),
+            2
+        );
+        ack_task.abort();
+    }
+
+    /// Red proof: moving the confirmed external fence after detached loading
+    /// changes this declaration-only refusal to a missing-source error and can
+    /// create the journal before the target is rejected.
+    #[tokio::test]
+    async fn confirmed_v2_rollback_refuses_before_source_access_or_journal() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret = dir.path().join("v2-secret-never-reread.rpol");
+        std::fs::write(&secret, "policy external { term rest { accept } }\n").unwrap();
+        let source_config = dir.path().join("v2-source.toml");
+        let external = format!(
+            "{}\n[policy]\nrpol_files = [{:?}]\n",
+            base_toml(""),
+            secret.display().to_string()
+        );
+        std::fs::write(&source_config, &external).unwrap();
+        let retained = AcceptedConfigSnapshot::load(&source_config, None).unwrap();
+        crate::config_history::record_accepted(dir.path(), &retained).unwrap();
+        let current = dynamic_candidate_toml();
+        let current_snapshot = AcceptedConfigSnapshot::from_config_for_test(
+            Config::load_toml_with_diagnostics(&current, "current v2 history test").unwrap(),
+        );
+        crate::config_history::record_accepted(dir.path(), &current_snapshot).unwrap();
+        std::fs::remove_file(&secret).unwrap();
+        let journal = dir.path().join("v2-confirm.json");
+        let (controller, runtime, ack_task) =
+            rollback_controller(dir.path(), Some(journal.clone()), current.clone());
+
+        let error = controller
+            .rollback(proto::RollbackConfigTransactionRequest {
+                index: 1,
+                expected_runtime_snapshot_token: String::new(),
+                client_request_id: String::new(),
+                comment: String::new(),
+                confirm_id: "external-history".to_string(),
+                confirm_timeout_seconds: 60,
+            })
+            .await
+            .unwrap_err();
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("external rpol or dataset declarations"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("v2-secret-never-reread"), "{rendered}");
+        assert!(!journal.exists(), "refusal must precede journal creation");
+        assert_eq!(*runtime.lock().await, current);
+        assert_eq!(
+            crate::config_history::list_mixed(dir.path()).unwrap().len(),
+            2
         );
         ack_task.abort();
     }
@@ -8759,7 +9285,7 @@ log_format = "json"
         assert!(
             response
                 .human_text
-                .contains("Eligible legacy TOML-only rows"),
+                .contains("Eligible legacy TOML-only or provenance-verified v2 rows"),
             "{}",
             response.human_text
         );

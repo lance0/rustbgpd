@@ -129,7 +129,7 @@ consequences so future contributors understand *why*, not just *what*.
 | [0118](0118-presence-preserving-runtime-neighbor-create.md) | Presence-preserving runtime neighbor creation | Accepted — fully shipped | 2026-07-29 |
 | [0119](0119-rfc-8212-secure-default-config-epoch.md) | RFC 8212 secure-default config epoch | Proposed (representation contract and secure-default activation deferred; owner gate required) | 2026-07-29 |
 | [0120](0120-inbound-connection-admission.md) | Inbound connection admission rate limiting | Accepted | 2026-07-30 |
-| [0121](0121-config-history-external-policy-provenance.md) | Config-history external-policy provenance | Accepted — v2 recording/listing shipped; restore pending | 2026-08-01 |
+| [0121](0121-config-history-external-policy-provenance.md) | Config-history external-policy provenance | Accepted — v2 history restore shipped; commit-confirm pending | 2026-08-01 |
 
 ## Template
 

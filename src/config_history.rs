@@ -9,15 +9,11 @@
 //! Legacy TOML and v2 JSON entries share one newest-first sequence namespace
 //! and one [`HISTORY_LIMIT`]-entry bound under
 //! `<runtime_state_dir>/config-history/`. Listing verifies and redacts both
-//! generations. Until external-source restore lands, rollback accepts only a
-//! verified legacy row and refuses v2 or unreadable rows before a
-//! rollback-specific payload reopen, candidate construction, or transaction
-//! planning.
+//! generations. Rollback pins one exact mixed row, refuses unreadable rows,
+//! and exposes a verified legacy or v2 payload to the provenance-aware caller.
 
 #![deny(unsafe_code)]
 
-// ADR-0121 v2 storage and mixed listing are active; v2 restore remains
-// deliberately deferred.
 pub(crate) mod v2;
 
 #[cfg(test)]
@@ -53,8 +49,12 @@ pub struct MixedHistoryEntry {
 }
 
 pub fn record_accepted(dir: &Path, snapshot: &AcceptedConfigSnapshot) -> io::Result<bool> {
+    v2::record_v2(dir, snapshot.normalized_toml(), stored_manifest(snapshot))
+}
+
+fn stored_manifest(snapshot: &AcceptedConfigSnapshot) -> v2::Manifest {
     let manifest = snapshot.source_manifest();
-    let manifest = v2::Manifest {
+    v2::Manifest {
         toml_sha256: manifest.toml_sha256,
         rpol_units: manifest
             .rpol_units
@@ -91,8 +91,7 @@ pub fn record_accepted(dir: &Path, snapshot: &AcceptedConfigSnapshot) -> io::Res
                 sha256: dataset.sha256,
             })
             .collect(),
-    };
-    v2::record_v2(dir, snapshot.normalized_toml(), manifest)
+    }
 }
 
 pub fn list_mixed(dir: &Path) -> io::Result<Vec<MixedHistoryEntry>> {
@@ -120,6 +119,7 @@ pub fn list_mixed(dir: &Path) -> io::Result<Vec<MixedHistoryEntry>> {
     })
 }
 
+#[cfg(test)]
 pub fn read_mixed_legacy(dir: &Path, entry: &MixedHistoryEntry) -> io::Result<String> {
     if entry.status != HistoryStatus::LegacyTomlOnly {
         return Err(io::Error::new(
@@ -134,6 +134,55 @@ pub fn read_mixed_legacy(dir: &Path, entry: &MixedHistoryEntry) -> io::Result<St
             "v2 config history rollback requires the external-source restore tranche",
         )),
     }
+}
+
+pub(crate) enum RollbackPayload {
+    Legacy(String),
+    V2 {
+        normalized_toml: String,
+        manifest: v2::Manifest,
+        source_sha256: [u8; 32],
+    },
+}
+
+/// Reopen the exact row captured by [`list_mixed`]. The v2 codec verifies the
+/// pinned identity, envelope, TOML digest, manifest, and source digest before
+/// returning this payload.
+pub(crate) fn read_mixed_rollback(
+    dir: &Path,
+    entry: &MixedHistoryEntry,
+) -> io::Result<RollbackPayload> {
+    match v2::read_mixed(dir, &entry.row)? {
+        v2::StoredPayload::Legacy(toml) => Ok(RollbackPayload::Legacy(toml)),
+        v2::StoredPayload::V2(envelope) => Ok(RollbackPayload::V2 {
+            normalized_toml: envelope.normalized_toml,
+            manifest: envelope.manifest,
+            source_sha256: envelope.source_sha256,
+        }),
+    }
+}
+
+pub(crate) fn verify_retained_snapshot(
+    snapshot: &AcceptedConfigSnapshot,
+    normalized_toml: &str,
+    manifest: &v2::Manifest,
+    source_sha256: [u8; 32],
+) -> Result<(), String> {
+    if snapshot.normalized_toml().as_bytes() != normalized_toml.as_bytes() {
+        return Err("normalized TOML does not match the retained history snapshot".to_string());
+    }
+    let accepted_manifest = stored_manifest(snapshot);
+    if &accepted_manifest != manifest {
+        return Err(
+            "external-source manifest does not match the retained history snapshot".to_string(),
+        );
+    }
+    if snapshot.source_sha256() != source_sha256 {
+        return Err(
+            "external-source digest does not match the retained history snapshot".to_string(),
+        );
+    }
+    Ok(())
 }
 
 /// Directory name under `runtime_state_dir`.
@@ -476,6 +525,48 @@ path = "customers.txt"
         assert_eq!(envelope.manifest.datasets.len(), 1);
         assert_eq!(envelope.manifest.datasets[0].name, "customers");
         assert_eq!(envelope.manifest.datasets[0].kind, v2::DatasetKind::Asn);
+    }
+
+    /// Red proof: removing any of the three exact equality checks in
+    /// `verify_retained_snapshot` makes its corresponding corrupted input
+    /// succeed instead of producing the asserted stable category.
+    #[test]
+    fn retained_snapshot_verification_rejects_toml_manifest_and_source_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let snapshot =
+            AcceptedConfigSnapshot::load(&external_source_fixture(dir.path()), None).unwrap();
+        let manifest = stored_manifest(&snapshot);
+        let source_sha256 = snapshot.source_sha256();
+
+        assert!(
+            verify_retained_snapshot(&snapshot, "changed", &manifest, source_sha256)
+                .unwrap_err()
+                .contains("normalized TOML")
+        );
+        let mut changed_manifest = manifest.clone();
+        changed_manifest.datasets[0].length += 1;
+        assert!(
+            verify_retained_snapshot(
+                &snapshot,
+                snapshot.normalized_toml(),
+                &changed_manifest,
+                source_sha256,
+            )
+            .unwrap_err()
+            .contains("manifest")
+        );
+        let mut changed_source = source_sha256;
+        changed_source[0] ^= 0xff;
+        assert!(
+            verify_retained_snapshot(
+                &snapshot,
+                snapshot.normalized_toml(),
+                &manifest,
+                changed_source,
+            )
+            .unwrap_err()
+            .contains("source digest")
+        );
     }
 
     /// Red proof: removing the status guard in `read_mixed_legacy` makes this

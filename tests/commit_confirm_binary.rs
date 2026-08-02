@@ -9,7 +9,7 @@
 //!   loud banner;
 //! - confirm + SIGKILL → the new config is retained and no journal remains;
 //! - in-process timeout auto-revert → the journal is consumed;
-//! - v2 history survives restart and refuses restore until source verification
+//! - v2 history survives restart and restores only after source verification
 //!   is available;
 //! - torn journal on disk → boot refuses, naming both files.
 
@@ -418,19 +418,43 @@ fn torn_journal_refuses_boot_naming_both_files() {
     );
 }
 
-/// Red proof: removing v2 provenance, restart deduplication, or the v2 refusal
-/// changes the exact history/error assertions; reaching the apply path changes
-/// disk bytes or the live dynamic-neighbor roster.
+/// Red proof: removing v2 provenance, restart deduplication, or the verified
+/// v2 restore changes the exact history/receipt assertions and leaves disk or
+/// the live dynamic-neighbor roster on the candidate generation.
 #[test]
-fn v2_history_survives_restart_and_refuses_restore_before_source_verification() {
+fn v2_history_survives_restart_and_restores_after_source_verification() {
     // End-to-end proof over the real binary: apply a config, restart the daemon
     // (history must survive without a duplicate boot row), then prove a v2 row
-    // is refused before restore mutates either disk or runtime state.
+    // is verified and restored through the normal transaction path.
     let temp = tempfile::tempdir().expect("failed to create temp dir");
     let lab = lab(temp.path());
+    std::fs::write(
+        lab.dir.join("external.rpol"),
+        "policy external { term rest { accept } }\n",
+    )
+    .unwrap();
+    let runtime_dir = lab.dir.join("runtime");
+    let external = format!(
+        "\n[policy]\nrpol_files = [{:?}]\n",
+        lab.dir.join("external.rpol").display().to_string()
+    );
+    let base_extra = format!(
+        "{external}\n[[fib_tables]]\nname = \"history-proof\"\ntable_id = 1001\nmetric = 200\nfamilies = [\"ipv4_unicast\"]\n"
+    );
+    std::fs::write(&lab.config_path, base_toml(&runtime_dir, &base_extra)).unwrap();
+    std::fs::write(
+        &lab.candidate_path,
+        base_toml(
+            &runtime_dir,
+            &format!(
+                "{external}\n[[fib_tables]]\nname = \"history-proof\"\ntable_id = 1001\nmetric = 201\nfamilies = [\"ipv4_unicast\"]\n"
+            ),
+        ),
+    )
+    .unwrap();
 
     let daemon = lab.spawn("first.stderr.log");
-    // Plain (unconfirmed) apply of the dynamic-neighbor candidate.
+    // Plain (unconfirmed) pure-FIB apply while external policy is declared.
     let plan = rbgp_json(
         &lab.grpc_addr,
         &[
@@ -495,51 +519,63 @@ fn v2_history_survives_restart_and_refuses_restore_before_source_verification() 
         "out-of-range rollback must say so:\n{stderr}"
     );
     // ...and must not have changed anything.
+    let after_failed = std::fs::read_to_string(&lab.config_path).unwrap();
     assert!(
-        std::fs::read_to_string(&lab.config_path)
-            .unwrap()
-            .contains("192.0.2.0/24"),
-        "failed rollback must not touch the config"
+        after_failed.contains("metric = 201"),
+        "failed rollback must not touch the config:\n{after_failed}"
     );
 
     let on_disk = std::fs::read_to_string(&lab.config_path).unwrap();
     assert!(
-        on_disk.contains("192.0.2.0/24"),
-        "candidate must still be active before the refusal:\n{on_disk}"
+        on_disk.contains("metric = 201"),
+        "candidate must still be active before rollback:\n{on_disk}"
     );
     assert!(!lab.journal_path.exists());
-    let ranges = rbgp_json(&lab.grpc_addr, &["--json", "dynamic-neighbor", "list"]);
-    assert_eq!(
-        ranges.as_array().map(Vec::len),
-        Some(1),
-        "candidate must be live before the refusal: {ranges}"
-    );
 
-    let rollback = rbgp(&lab.grpc_addr, &["--json", "config", "rollback", "1"]);
-    assert!(!rollback.status.success(), "v2 rollback must be refused");
-    let stderr = String::from_utf8_lossy(&rollback.stderr);
+    // The retained manifest is verification authority, not adoption authority:
+    // changed live external bytes refuse without touching runtime or disk.
+    std::fs::write(
+        lab.dir.join("external.rpol"),
+        "policy external { term rest { reject } }\n",
+    )
+    .unwrap();
+    let changed = rbgp(&lab.grpc_addr, &["--json", "config", "rollback", "1"]);
+    assert!(!changed.status.success(), "changed provenance must refuse");
+    let changed_error = String::from_utf8_lossy(&changed.stderr);
     assert!(
-        stderr.contains("v2 config history entry") && stderr.contains("external-source restore"),
-        "v2 refusal must be actionable:\n{stderr}"
+        changed_error.contains("missing, unreadable, or changed"),
+        "{changed_error}"
+    );
+    assert!(!changed_error.contains(lab.dir.to_string_lossy().as_ref()));
+    assert_eq!(std::fs::read_to_string(&lab.config_path).unwrap(), on_disk);
+    std::fs::write(
+        lab.dir.join("external.rpol"),
+        "policy external { term rest { accept } }\n",
+    )
+    .unwrap();
+
+    let rollback = rbgp_json(&lab.grpc_addr, &["--json", "config", "rollback", "1"]);
+    assert!(
+        rollback["human_text"]
+            .as_str()
+            .is_some_and(|text| text.contains("Rolled back to applied config 1")),
+        "v2 rollback receipt must name the exact common index: {rollback}"
     );
 
-    // MUTATION PROOF: refusal changes neither durable config, live runtime,
-    // history, nor the commit-confirm journal.
-    assert_eq!(
-        std::fs::read_to_string(&lab.config_path).unwrap(),
-        on_disk,
-        "refused v2 rollback must not touch the persisted config"
-    );
-    let ranges = rbgp_json(&lab.grpc_addr, &["--json", "dynamic-neighbor", "list"]);
-    assert_eq!(
-        ranges.as_array().map(Vec::len),
-        Some(1),
-        "refused v2 rollback must not change live dynamic neighbors: {ranges}"
+    // MUTATION PROOF: verified rollback changes durable and live state to the
+    // older accepted generation without opening a commit-confirm journal.
+    assert!(
+        !std::fs::read_to_string(&lab.config_path)
+            .unwrap()
+            .contains("metric = 201"),
+        "verified v2 rollback must persist metric 200"
     );
     assert_eq!(
-        rbgp_json(&lab.grpc_addr, &["--json", "config", "history"]),
-        expected_history,
-        "refused v2 rollback must not append history"
+        rbgp_json(&lab.grpc_addr, &["--json", "config", "history"])["entries"]
+            .as_array()
+            .map(Vec::len),
+        Some(3),
+        "restoring a non-newest generation must append an accepted receipt"
     );
     assert!(!lab.journal_path.exists());
     daemon.assert_still_running();

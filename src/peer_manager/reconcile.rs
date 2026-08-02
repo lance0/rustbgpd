@@ -135,6 +135,43 @@ impl PeerManager {
         candidate_toml: &str,
         expected_runtime_snapshot_token: Option<&str>,
     ) -> Result<RuntimeConfigTransactionPlan, RuntimeConfigTransactionPlanError> {
+        let (live_snapshot, live_snapshot_identity, runtime_snapshot_token) = self
+            .config_transaction_plan_context(expected_runtime_snapshot_token)
+            .await?;
+        let candidate =
+            Config::load_toml_with_diagnostics(candidate_toml, "candidate runtime config")
+                .map_err(RuntimeConfigTransactionPlanError::InvalidCandidate)?;
+        self.finish_config_transaction_plan(
+            &candidate,
+            live_snapshot,
+            live_snapshot_identity,
+            runtime_snapshot_token,
+        )
+    }
+
+    pub(super) async fn plan_preloaded_config_transaction(
+        &self,
+        candidate: &Config,
+        expected_runtime_snapshot_token: Option<&str>,
+    ) -> Result<RuntimeConfigTransactionPlan, RuntimeConfigTransactionPlanError> {
+        let (live_snapshot, live_snapshot_identity, runtime_snapshot_token) = self
+            .config_transaction_plan_context(expected_runtime_snapshot_token)
+            .await?;
+        self.finish_config_transaction_plan(
+            candidate,
+            live_snapshot,
+            live_snapshot_identity,
+            runtime_snapshot_token,
+        )
+    }
+
+    async fn config_transaction_plan_context(
+        &self,
+        expected_runtime_snapshot_token: Option<&str>,
+    ) -> Result<
+        (rustbgpd_rib::UpdateGroupSnapshot, [u8; 8], String),
+        RuntimeConfigTransactionPlanError,
+    > {
         // Query once and retain the exact snapshot used for both optimistic
         // concurrency and impact planning. This lets stale callers fail before
         // candidate parsing and the per-peer planning pass without introducing
@@ -156,11 +193,22 @@ impl PeerManager {
                 current: runtime_snapshot_token,
             });
         }
-        let candidate =
-            Config::load_toml_with_diagnostics(candidate_toml, "candidate runtime config")
-                .map_err(RuntimeConfigTransactionPlanError::InvalidCandidate)?;
+        Ok((
+            live_snapshot,
+            live_snapshot_identity,
+            runtime_snapshot_token,
+        ))
+    }
+
+    fn finish_config_transaction_plan(
+        &self,
+        candidate: &Config,
+        live_snapshot: rustbgpd_rib::UpdateGroupSnapshot,
+        live_snapshot_identity: [u8; 8],
+        runtime_snapshot_token: String,
+    ) -> Result<RuntimeConfigTransactionPlan, RuntimeConfigTransactionPlanError> {
         let update_group_impact = self
-            .plan_update_group_impact(&candidate, live_snapshot)
+            .plan_update_group_impact(candidate, live_snapshot)
             .map_err(|error| match error {
                 super::update_group_plan::UpdateGroupImpactPlanError::InvalidCandidate(message) => {
                     RuntimeConfigTransactionPlanError::InvalidCandidate(message)
@@ -177,9 +225,9 @@ impl PeerManager {
         // the one staged family (FIB), which the candidate already reflects.
         let post_commit_runtime_snapshot_token = self
             .snapshot_key
-            .token_with_context(&candidate, &live_snapshot_identity)
+            .token_with_context(candidate, &live_snapshot_identity)
             .map_err(RuntimeConfigTransactionPlanError::Internal)?;
-        let diff = crate::config::diff_config(&self.current_config, &candidate);
+        let diff = crate::config::diff_config(&self.current_config, candidate);
         let classification = crate::config::classify_config_transaction_v1(&diff);
         let status = if classification.is_noop() {
             RuntimeConfigTransactionStatus::Noop

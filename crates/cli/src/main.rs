@@ -501,19 +501,19 @@ enum ConfigAction {
     /// The daemon keeps a bounded mixed-generation history under its runtime
     /// state directory. Each line shows the index (0 = newest config-history
     /// row), timestamp, content hash, provenance status, and one-line summary.
-    /// Restore an eligible legacy row with `config rollback N`; v2 and
-    /// unreadable rows are refused until provenance-aware restore lands.
+    /// Restore an eligible legacy or provenance-verified v2 row with
+    /// `config rollback N`; unreadable rows are refused.
     History,
 
-    /// Roll back to an eligible legacy config snapshot (Junos `rollback N`)
+    /// Roll back to an eligible config snapshot (Junos `rollback N`)
     ///
-    /// Restores eligible legacy history entry N (see `config history`; N >= 1)
+    /// Restores eligible history entry N (see `config history`; N >= 1)
     /// through the same transaction path as `config apply`: same plan
     /// classification, reload-impact annotations, and receipts. Pass --confirm-id /
     /// --confirm-timeout to make the rollback itself auto-revert unless
     /// confirmed.
     Rollback {
-        /// History row to restore (N >= 1; eligible legacy rows only)
+        /// History row to restore (N >= 1)
         index: u32,
 
         /// Optional runtime snapshot token to guard against concurrent changes

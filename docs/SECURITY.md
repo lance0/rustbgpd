@@ -327,8 +327,9 @@ secrets; the redacted `rbgp config history` summary does not make the files
 themselves safe to publish. Files are owner-only (`0600`) in an owner-private
 directory (`0700`). Normal history output never exposes paths, filenames, or
 raw filesystem errors. V2 hashes external-source identity but does not archive
-source bytes, so v2 and unreadable rows fail closed for rollback until restore
-support lands. Keep `runtime_state_dir` on owner-controlled
+source bytes, so rollback requires one detached load to reproduce the recorded
+TOML, manifest, and source digest exactly. Unreadable rows and legacy rows with
+external declarations fail closed. Keep `runtime_state_dir` on owner-controlled
 local storage and protect backups as secret-bearing configuration, not as
 ordinary operational telemetry.
 

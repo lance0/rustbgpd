@@ -996,8 +996,8 @@ export_policy_chain = ["dataset-export"]
         orf_installed: false,
     };
     let live_classification = rustbgpd_rib::classify_update_group(live_input.clone());
-    let (_tx, rx) = mpsc::channel(4);
-    let (_internal_tx, internal_rx) = mpsc::unbounded_channel();
+    let (tx, rx) = mpsc::channel(4);
+    let (internal_tx, internal_rx) = mpsc::unbounded_channel();
     let (rib_tx, mut rib_rx) = mpsc::channel(4);
     let mgr = PeerManager::new_with_config(
         rx,
@@ -1013,7 +1013,7 @@ export_policy_chain = ["dataset-export"]
         current,
     );
     let responder = tokio::spawn(async move {
-        for _ in 0..2 {
+        for _ in 0..3 {
             let Some(RibUpdate::QueryUpdateGroupSnapshot { reply }) = rib_rx.recv().await else {
                 panic!("plan snapshot query missing");
             };
@@ -1065,6 +1065,34 @@ export_policy_chain = ["dataset-export"]
     assert_eq!(fib.update_group_impact.rollup.affected_families, 0);
     assert_eq!(fib.update_group_impact.rollup.local_resyncs, 0);
     assert_eq!(fib.update_group_impact.rollup.no_op, 1);
+
+    // Capture one accepted candidate, then remove both external sources before
+    // the real actor consumes the private command. Any planner reparse or
+    // deferred handle read now fails; the captured Arc remains authoritative.
+    let retained_path = dir.path().join("retained.toml");
+    std::fs::write(&retained_path, &fib_candidate).unwrap();
+    let accepted =
+        Arc::new(crate::config::AcceptedConfigSnapshot::load(&retained_path, None).unwrap());
+    std::fs::remove_file(&rpol_path).unwrap();
+    std::fs::remove_file(&dataset_path).unwrap();
+    let task = tokio::spawn(mgr.run());
+    let (reply_tx, reply_rx) = oneshot::channel();
+    internal_tx
+        .send(InternalCommand::PlanAcceptedSnapshot {
+            snapshot: accepted.clone(),
+            expected_runtime_snapshot_token: None,
+            reply: reply_tx,
+        })
+        .unwrap();
+    let preloaded = reply_rx.await.unwrap().unwrap();
+    assert_eq!(
+        preloaded.status,
+        rustbgpd_api::peer_types::RuntimeConfigTransactionStatus::Committable
+    );
+    assert_eq!(preloaded.supported_sections, vec!["[[fib_tables]]"]);
+    assert_eq!(preloaded.update_group_impact.rollup.no_op, 1);
+    tx.send(PeerManagerCommand::Shutdown).await.unwrap();
+    task.await.unwrap();
     responder.await.unwrap();
 }
 

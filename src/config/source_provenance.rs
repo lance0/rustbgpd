@@ -190,6 +190,62 @@ impl AcceptedConfigSnapshot {
         Self::load_with_hook(path, prior, || {})
     }
 
+    /// Load a retained normalized document while resolving its declared
+    /// external inputs relative to the daemon's real config path. The retained
+    /// TOML bytes are already pinned by the history reader; this performs the
+    /// one detached external-source capture used by provenance-aware restore.
+    pub(crate) fn load_retained(content: &str, config_path: &Path) -> Result<Arc<Self>, String> {
+        Self::load_retained_with_hook(content, config_path, || {})
+    }
+
+    fn load_retained_with_hook(
+        content: &str,
+        config_path: &Path,
+        after_capture: impl FnOnce(),
+    ) -> Result<Arc<Self>, String> {
+        let base_dir = config_path.parent().map(PathBuf::from);
+        let mut capture = SourceCapture::default();
+        let mut config = Config::load_from_toml_source_with_capture(
+            content,
+            "retained config history snapshot",
+            base_dir.as_deref(),
+            None,
+            DatasetBindMode::Stage,
+            Some(&mut capture),
+            None,
+        )?;
+        config.file_path = Some(config_path.to_path_buf());
+        after_capture();
+        config.policy.dataset_bindings = config.policy.dataset_bindings.detached_clone();
+        let normalized_toml: Arc<str> = persisted_config_document(&config)
+            .map_err(|error| format!("failed to normalize retained config: {error}"))?
+            .into();
+        let sha256 = Sha256::digest(normalized_toml.as_bytes()).into();
+        let manifest = capture.finish(sha256);
+        let source_sha256 = manifest.source_sha256();
+        Ok(Arc::new(Self {
+            config: Arc::new(config),
+            normalized_toml,
+            manifest,
+            sha256,
+            source_sha256,
+        }))
+    }
+
+    pub(crate) fn declares_external_sources(&self) -> bool {
+        Self::config_declares_external_sources(&self.config)
+    }
+
+    pub(crate) fn toml_declares_external_sources(content: &str) -> Result<bool, String> {
+        let config: Config = toml::from_str(content)
+            .map_err(|error| format!("invalid config transaction document: {error}"))?;
+        Ok(Self::config_declares_external_sources(&config))
+    }
+
+    fn config_declares_external_sources(config: &Config) -> bool {
+        !config.policy.rpol_files.is_empty() || !config.policy.datasets.is_empty()
+    }
+
     pub(crate) fn load_for_reload(
         path: &Path,
         prior: &Self,
@@ -696,6 +752,48 @@ log_format = "json"
             snapshot.manifest.datasets[0].sha256,
             <[u8; 32]>::from(Sha256::digest(b"64500\n"))
         );
+    }
+
+    /// Red proof: moving the hook before external capture, omitting detached
+    /// bindings, or rereading a source after the hook changes the captured
+    /// digest and makes the first/second generation assertions collapse.
+    #[test]
+    fn retained_load_captures_one_detached_external_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = fixture(dir.path());
+        let retained = fs::read_to_string(&config_path).unwrap();
+        let first =
+            AcceptedConfigSnapshot::load_retained_with_hook(&retained, &config_path, || {
+                fs::write(dir.path().join("customers.txt"), "64501\n").unwrap();
+            })
+            .unwrap();
+        let second = AcceptedConfigSnapshot::load_retained(&retained, &config_path).unwrap();
+        assert_ne!(first.source_sha256(), second.source_sha256());
+        let first_handle = first
+            .config_ref()
+            .policy
+            .dataset_bindings
+            .handles()
+            .next()
+            .unwrap();
+        let second_handle = second
+            .config_ref()
+            .policy
+            .dataset_bindings
+            .handles()
+            .next()
+            .unwrap();
+        assert!(!Arc::ptr_eq(first_handle, second_handle));
+        let DatasetData::Asn(first_data) = &first_handle.pin().data else {
+            panic!("fixture dataset must be an ASN set");
+        };
+        assert!(first_data.contains(64500));
+        assert!(!first_data.contains(64501));
+        let DatasetData::Asn(second_data) = &second_handle.pin().data else {
+            panic!("fixture dataset must be an ASN set");
+        };
+        assert!(!second_data.contains(64500));
+        assert!(second_data.contains(64501));
     }
 
     #[test]
