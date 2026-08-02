@@ -16,7 +16,7 @@ fn run(command: &mut std::process::Command, what: &str) -> String {
 fn assert_proofs(output: &str, proofs: &str) {
     for proof in proofs.split_ascii_whitespace() {
         assert!(
-            output.contains(&format!("proof:{proof}")),
+            output.lines().any(|line| line == format!("proof:{proof}")),
             "missing proof: {proof}"
         );
     }
@@ -28,6 +28,7 @@ fn assert_proofs(output: &str, proofs: &str) {
 /// gate makes the verifier accept its named corrupt fixture.
 fn bmp_buffer_components_reject_their_guarded_failures() {
     let root = env!("CARGO_MANIFEST_DIR");
+    assert!(std::panic::catch_unwind(|| assert_proofs("proof:long-name\n", "long")).is_err());
     let sink = run(
         std::process::Command::new("python3").args([
             &format!("{root}/bench/scale/irrreload/bmp-loc-rib-sink.py"),
@@ -55,7 +56,7 @@ fn bmp_buffer_components_reject_their_guarded_failures() {
          post-eor-churn overflow-metrics overflow-discard-count same-outcome-class \
          fresh-process-identity canonical-shape canonical-policy-shape scenario-roster \
          sealed-artifact missing-checksum-seal missing-completed-marker provenance-order \
-         provenance-commit checksum-drift symlink-artifact cli-requires-seal \
+         provenance-commit checksum-drift symlink-artifact non-finite-metric cli-requires-seal \
          cli-allows-runner-preseal cli-sealed-pass",
     );
 }

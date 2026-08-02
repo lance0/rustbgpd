@@ -101,10 +101,9 @@ def drop_samples(
 
 
 def require_integer(value: float, what: str) -> int:
-    integer = int(value)
-    if value != integer:
+    if not value.is_integer():
         raise VerifyError(f"{what} is not an integer: {value}")
-    return integer
+    return int(value)
 
 
 def verify_manifest(manifest: dict) -> str:
@@ -473,6 +472,11 @@ def self_test() -> int:
             "post-eor-churn",
             base,
             lambda root: _mutate_json(root / "run-a" / "summary.json", "post_eor_churn", False),
+        )
+        expect_rejected(
+            "non-finite-metric", base, lambda root: (root / "run-a" / "metrics.prom").write_text(
+                metric_fixture("complete", 7).replace(" 7\n", " 1e999\n")
+            ),
         )
 
         overflow = pathlib.Path(temporary) / "overflow"

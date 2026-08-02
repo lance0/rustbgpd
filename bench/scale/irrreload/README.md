@@ -56,9 +56,8 @@ and the bogon list).
 ## BMP Loc-RIB dump buffer receipt
 
 `run-bmp-buffer-receipt.sh` reuses the canonical 320-member, 183,040-route,
-seed-61 dataset (3,218,965 filter entries) with one BMP v3 RFC 9069 Loc-RIB
-collector. It connects after base convergence, before eight peers begin
-16-prefix/125 ms churn. Two fresh daemon processes must match outcome class.
+seed-61 dataset (3,218,965 filter entries) with one BMP v3 RFC 9069 Loc-RIB collector.
+It connects before 16-prefix/125 ms churn; two fresh daemons must match outcome class.
 
 The sink accepts one TCP generation, caps each RFC 7854 frame at 1 MiB, caps
 the total capture at 1 GiB, and has a 600-second deadline. It verifies the
@@ -74,15 +73,11 @@ general collector capacity or throughput.
 The full run requires clean `origin/main`, quiet-host mutexes, and unused ports:
 
 ```bash
-CONFIRM_BENCH_CRON_PAUSED=1 CONFIRM_NO_MAIN_PUSHES=1 \
-  ARTIFACTS_DIR=/tmp/bmp-buffer-receipt \
+CONFIRM_BENCH_CRON_PAUSED=1 CONFIRM_NO_MAIN_PUSHES=1 ARTIFACTS_DIR=/tmp/bmp-buffer-receipt \
   bench/scale/irrreload/run-bmp-buffer-receipt.sh
-
-python3 bench/scale/irrreload/verify-bmp-buffer-receipt.py verify /tmp/bmp-buffer-receipt
 ```
 
-`tests/bmp_buffer_receipt_check.rs` runs corrupt-fixture proofs for parser,
-inventory/order, metrics, and repeat gates; full fleet remains a quiet-host receipt.
+`tests/bmp_buffer_receipt_check.rs` runs corrupt-fixture parser, inventory/order, metrics, and repeat proofs; full fleet remains a quiet-host receipt.
 
 ## Cells and reload mechanisms
 
