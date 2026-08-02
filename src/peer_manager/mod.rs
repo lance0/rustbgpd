@@ -293,7 +293,7 @@ pub struct PeerManager {
     /// commands remain on `rx` and therefore stay ordered behind a policy
     /// transaction until it either commits or rolls back.
     readiness_rx: Option<mpsc::Receiver<PeerManagerReadinessQuery>>,
-    internal_rx: mpsc::UnboundedReceiver<InternalCommand>,
+    internal_rx: Option<mpsc::UnboundedReceiver<InternalCommand>>,
     local_asn: u32,
     router_id: Ipv4Addr,
     /// Local cluster ID for route reflection (RFC 4456). `None` when not an RR.
@@ -557,6 +557,20 @@ impl PeerManager {
         }
     }
 
+    async fn receive_internal_command(
+        internal_rx: &mut Option<mpsc::UnboundedReceiver<InternalCommand>>,
+    ) -> Option<InternalCommand> {
+        let command = match internal_rx.as_mut() {
+            Some(rx) => rx.recv().await,
+            None => std::future::pending().await,
+        };
+        if command.is_none() {
+            *internal_rx = None;
+            debug!("peer manager internal command channel closed");
+        }
+        command
+    }
+
     #[expect(
         clippy::too_many_arguments,
         reason = "configured peer construction keeps all explicit lifecycle dependencies visible"
@@ -598,7 +612,7 @@ impl PeerManager {
             session_index: HashMap::new(),
             rx,
             readiness_rx: None,
-            internal_rx,
+            internal_rx: Some(internal_rx),
             local_asn,
             router_id,
             cluster_id,
@@ -1511,7 +1525,7 @@ impl PeerManager {
                         }
                     }
                 }
-                internal = self.internal_rx.recv() => {
+                internal = Self::receive_internal_command(&mut self.internal_rx) => {
                     match internal {
                         Some(InternalCommand::ReplaceConfigSnapshot { config, ack }) => {
                             self.current_config = *config;

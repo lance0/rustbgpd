@@ -153,6 +153,68 @@ fn test_peer_manager() -> PeerManager {
     )
 }
 
+#[tokio::test]
+async fn closed_internal_command_lane_disables_after_first_poll() {
+    // Load-bearing: removing the close-to-disabled transition leaves the
+    // receiver present and makes every later receive immediately ready.
+    let (internal_tx, internal_rx) = mpsc::unbounded_channel();
+    drop(internal_tx);
+    let mut internal_rx = Some(internal_rx);
+
+    assert!(
+        PeerManager::receive_internal_command(&mut internal_rx)
+            .await
+            .is_none()
+    );
+    assert!(internal_rx.is_none());
+
+    let mut second = Box::pin(PeerManager::receive_internal_command(&mut internal_rx));
+    assert!(matches!(
+        futures::poll!(second.as_mut()),
+        std::task::Poll::Pending
+    ));
+}
+
+#[tokio::test]
+async fn closed_internal_command_lane_keeps_public_actor_live() {
+    // Load-bearing: treating private-lane closure as actor shutdown makes the
+    // initial poll Ready and prevents the bounded public command round-trip.
+    let (tx, rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let manager = PeerManager::new(
+        rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    let mut actor = Box::pin(manager.run());
+    assert!(matches!(
+        futures::poll!(actor.as_mut()),
+        std::task::Poll::Pending
+    ));
+    let handle = tokio::spawn(actor);
+
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(PeerManagerCommand::ListDynamicRanges { reply: reply_tx })
+        .await
+        .unwrap();
+    let ranges = tokio::time::timeout(Duration::from_secs(1), reply_rx)
+        .await
+        .expect("public command stalled after the private lane closed")
+        .unwrap();
+    assert!(ranges.is_empty());
+
+    tx.send(PeerManagerCommand::Shutdown).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(1), handle)
+        .await
+        .expect("peer manager did not shut down")
+        .unwrap();
+}
+
 fn blocked_snapshot_query_handle(
     peer: IpAddr,
     release: oneshot::Receiver<()>,
