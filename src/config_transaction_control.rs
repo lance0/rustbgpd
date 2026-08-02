@@ -8,7 +8,7 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::sync::{Mutex, mpsc, oneshot, watch};
 
 use rustbgpd_api::peer_types::{
     ConfigEvent, ConfigPersistAck, DynamicPeerBounceOutcome, DynamicRangeTarget, PeerKey,
@@ -24,12 +24,15 @@ use rustbgpd_api::server::{
 use rustbgpd_telemetry::BgpMetrics;
 use tracing::{error, info, warn};
 
-use crate::config::{Config, EffectiveNeighborImpactKind, Neighbor, diff_config, diff_neighbors};
+use crate::config::{
+    AcceptedConfigSnapshot, Config, EffectiveNeighborImpactKind, Neighbor, diff_config,
+    diff_neighbors,
+};
 use crate::fib_table_control::{
     FibTableControlDeps, commit_fib_tables_locked, runtime_unavailable_error,
 };
 use crate::gnmi_set_bridge;
-use crate::reload::runtime_config_snapshot;
+use crate::reload::transaction_config_snapshot_accepted;
 
 const PERSIST_RESERVE_TIMEOUT: Duration = Duration::from_secs(2);
 const DEFAULT_CONFIRM_TIMEOUT_SECONDS: u32 = 600;
@@ -52,6 +55,7 @@ pub struct ConfigTransactionController {
     deps: Arc<FibTableControlDeps>,
     metrics: BgpMetrics,
     state: Arc<Mutex<ConfirmedState>>,
+    accepted_rx: Option<watch::Receiver<Arc<AcceptedConfigSnapshot>>>,
 }
 
 #[derive(Debug, Default)]
@@ -107,13 +111,40 @@ struct ConfirmedApplyMode {
 }
 
 impl ConfigTransactionController {
+    #[cfg(test)]
     #[must_use]
     pub fn new(deps: FibTableControlDeps, metrics: BgpMetrics) -> Self {
         Self {
             deps: Arc::new(deps),
             metrics,
             state: Arc::new(Mutex::new(ConfirmedState::default())),
+            accepted_rx: None,
         }
+    }
+
+    #[must_use]
+    pub(crate) fn new_accepted(
+        deps: FibTableControlDeps,
+        metrics: BgpMetrics,
+        accepted_rx: watch::Receiver<Arc<AcceptedConfigSnapshot>>,
+    ) -> Self {
+        Self {
+            deps: Arc::new(deps),
+            metrics,
+            state: Arc::new(Mutex::new(ConfirmedState::default())),
+            accepted_rx: Some(accepted_rx),
+        }
+    }
+
+    async fn accepted_runtime_snapshot(&self) -> Result<Config, String> {
+        let Some(accepted_rx) = &self.accepted_rx else {
+            #[cfg(test)]
+            return crate::reload::runtime_config_snapshot(&self.deps.peer_mgr_tx).await;
+            #[cfg(not(test))]
+            return Err("accepted-config authority unavailable".to_string());
+        };
+        let accepted = accepted_rx.borrow().clone();
+        transaction_config_snapshot_accepted(&self.deps.peer_mgr_tx, &accepted).await
     }
 
     #[must_use]
@@ -276,7 +307,8 @@ impl ConfigTransactionController {
                         .map_err(apply_error_to_gnmi_set_error)?;
                 }
             }
-            let current = runtime_config_snapshot(&self.deps.peer_mgr_tx)
+            let current = self
+                .accepted_runtime_snapshot()
                 .await
                 .map_err(GnmiSetError::Unavailable)?;
             let candidate = gnmi_set_bridge::apply_transaction_to_config(current, &transaction)?;
@@ -362,7 +394,8 @@ impl ConfigTransactionController {
         request: proto::ApplyConfigTransactionRequest,
         confirmed: ConfirmedApplyMode,
     ) -> Result<proto::ConfigTransactionApplyResponse, ConfigTransactionApplyError> {
-        let rollback_config = runtime_config_snapshot(&self.deps.peer_mgr_tx)
+        let rollback_config = self
+            .accepted_runtime_snapshot()
             .await
             .map_err(ConfigTransactionApplyError::Unavailable)?;
         // Rendered as a persisted document, not a bare snapshot: the boot-time
@@ -2986,6 +3019,126 @@ remote_asn = 65002
 {extra}
 "#
         ))
+    }
+
+    #[test]
+    fn production_snapshot_callers_are_fenced_to_the_accepted_helper() {
+        let source = include_str!("config_transaction_control.rs");
+        let production = source.split("#[cfg(test)]\nmod tests {").next().unwrap();
+        assert_eq!(
+            production.matches(".accepted_runtime_snapshot()").count(),
+            2,
+            "gNMI Set and confirmed rollback must independently use accepted authority"
+        );
+        assert!(!production.contains("use crate::reload::runtime_config_snapshot;"));
+
+        let reload = include_str!("reload.rs");
+        let legacy = reload
+            .find("pub(crate) async fn runtime_config_snapshot(")
+            .unwrap();
+        assert!(reload[..legacy].ends_with("#[cfg(test)]\n"));
+    }
+
+    #[tokio::test]
+    async fn accepted_runtime_snapshot_keeps_split_runtime_external_state_document_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime_rpol = dir.path().join("runtime.rpol");
+        let runtime_dataset = dir.path().join("runtime-customers.txt");
+        let desired_rpol = dir.path().join("desired.rpol");
+        let desired_dataset = dir.path().join("desired-customers.txt");
+        for path in [
+            &runtime_rpol,
+            &runtime_dataset,
+            &desired_rpol,
+            &desired_dataset,
+        ] {
+            std::fs::write(path, "captured then deleted\n").unwrap();
+        }
+
+        let mut runtime = Config::load_toml_with_diagnostics(&base_toml(""), "runtime").unwrap();
+        runtime.policy.rpol_files = vec![runtime_rpol.display().to_string()];
+        runtime.policy.import_chain = vec!["runtime-in".to_string()];
+        runtime.policy.datasets.insert(
+            "runtime-customers".to_string(),
+            crate::config::DatasetFileConfig {
+                path: runtime_dataset.display().to_string(),
+            },
+        );
+
+        let mut desired = Config::load_toml_with_diagnostics(&base_toml(""), "desired").unwrap();
+        desired.policy.rpol_files = vec![desired_rpol.display().to_string()];
+        desired.policy.import_chain = vec!["desired-in".to_string()];
+        desired.policy.datasets.insert(
+            "desired-customers".to_string(),
+            crate::config::DatasetFileConfig {
+                path: desired_dataset.display().to_string(),
+            },
+        );
+        let desired_handle = Arc::new(rustbgpd_policy::datasets::DatasetHandle::new(
+            "desired-customers",
+            rustbgpd_policy::datasets::DatasetKind::Asn,
+            rustbgpd_policy::datasets::DatasetData::Asn(rustbgpd_policy::sets::AsnSet::new([
+                64500,
+            ])),
+        ));
+        desired
+            .policy
+            .dataset_bindings
+            .insert(Arc::clone(&desired_handle));
+        let desired = AcceptedConfigSnapshot::from_config_for_test(desired);
+        let (_accepted_tx, accepted_rx) = watch::channel(desired);
+
+        let runtime_toml = crate::config::persisted_config_document(&runtime).unwrap();
+        let runtime_rpol_files = runtime.policy.rpol_files.clone();
+        for path in [runtime_rpol, runtime_dataset, desired_rpol, desired_dataset] {
+            std::fs::remove_file(path).unwrap();
+        }
+        let (peer_tx, mut peer_rx) = mpsc::channel(1);
+        tokio::spawn(async move {
+            for _ in 0..2 {
+                let Some(PeerManagerCommand::RuntimeConfigSnapshot { reply }) =
+                    peer_rx.recv().await
+                else {
+                    panic!("accepted snapshot helper must request the PM runtime TOML");
+                };
+                reply
+                    .send(Ok(rustbgpd_api::peer_types::RuntimeConfigSnapshotReply {
+                        toml: runtime_toml.clone(),
+                        rpol_files: runtime_rpol_files.clone(),
+                        rpol: rustbgpd_policy::rpol::RpolPolicySet::default(),
+                    }))
+                    .unwrap();
+            }
+        });
+        let controller = ConfigTransactionController::new_accepted(
+            deps_value(None, peer_tx, None, Vec::new()),
+            BgpMetrics::new(),
+            accepted_rx,
+        );
+
+        let gnmi_construction = controller.accepted_runtime_snapshot().await.unwrap();
+        let confirmed_rollback = controller.accepted_runtime_snapshot().await.unwrap();
+        for snapshot in [&gnmi_construction, &confirmed_rollback] {
+            assert_eq!(snapshot.policy.import_chain, ["runtime-in"]);
+            assert!(snapshot.policy.datasets.contains_key("runtime-customers"));
+            assert!(!snapshot.policy.datasets.contains_key("desired-customers"));
+            assert!(
+                snapshot
+                    .policy
+                    .dataset_bindings
+                    .get("runtime-customers")
+                    .is_none()
+            );
+            assert!(
+                snapshot
+                    .policy
+                    .dataset_bindings
+                    .get("desired-customers")
+                    .is_none()
+            );
+            assert!(snapshot.policy.rpol.policies.is_empty());
+        }
+        assert!(Arc::strong_count(&desired_handle) >= 1);
     }
 
     fn config_transaction_lifecycle_metric(
