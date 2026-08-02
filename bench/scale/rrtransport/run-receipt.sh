@@ -30,27 +30,62 @@ classify_rss() {
   fi
 }
 
-observe_direct_rss() {
-  local status_file=$1 status state rss
+read_direct_rss_observation() {
+  local process=$1 status
+  direct_start_before=absent
+  direct_state=absent
+  direct_rss=absent
+  direct_start_after=absent
+  if child_identity "$process"; then direct_start_before=$identity_starttime; fi
+  status=$(command cat -- "/proc/$process/status" 2>/dev/null || true)
+  direct_state=$(awk '$1=="State:" {print substr($2,1,1)}' <<<"$status")
+  [[ -n $direct_state ]] || direct_state=absent
+  direct_rss=$(awk '/VmRSS:/ {print $2}' <<<"$status")
+  [[ $direct_rss =~ ^[0-9]+$ ]] || direct_rss=absent
+  if child_identity "$process"; then direct_start_after=$identity_starttime; fi
+}
+
+read_scripted_direct_rss_observation() {
+  local _process=$1 snapshot
+  snapshot=${scripted_direct_observations[$scripted_direct_index]}
+  (( scripted_direct_index += 1 ))
+  IFS=, read -r direct_start_before direct_state direct_rss direct_start_after <<<"$snapshot"
+}
+
+resolve_direct_rss() {
+  local process=$1 expected_start=$2 attempt
   direct_rss_action=reject
   direct_rss_kib=0
-  if ! status=$(command cat -- "$status_file" 2>/dev/null); then
-    direct_rss_action=exited
-    return
-  fi
-  state=$(awk '$1=="State:" {print substr($2,1,1)}' <<<"$status")
-  rss=$(awk '/VmRSS:/ {print $2}' <<<"$status")
-  if [[ $state == X || $state == Z ]]; then
-    direct_rss_action=exited
-  elif [[ -n $state && $rss =~ ^[0-9]+$ ]]; then
-    direct_rss_action=sample
-    direct_rss_kib=$rss
-  fi
+  for attempt in 1 2 3; do
+    "$direct_rss_observation_reader" "$process"
+    if [[ $direct_start_before == absent && $direct_start_after == absent ]]; then
+      direct_rss_action=exited
+      return
+    fi
+    if [[ $direct_start_before == "$expected_start" && $direct_start_after == absent ]]; then
+      direct_rss_action=exited
+      return
+    fi
+    if [[ $direct_start_before != "$expected_start" ||
+      $direct_start_after != "$expected_start" ]]; then
+      return
+    fi
+    if [[ $direct_state == X || $direct_state == Z ]]; then
+      direct_rss_action=exited
+      return
+    fi
+    if [[ $direct_rss =~ ^[0-9]+$ ]]; then
+      direct_rss_action=sample
+      direct_rss_kib=$direct_rss
+      return
+    fi
+    (( attempt < 3 )) && sleep 0.01
+  done
 }
 
 sample_direct_rss() {
-  local status_file=$1 output=$2
-  observe_direct_rss "$status_file"
+  local process=$1 expected_start=$2 output=$3
+  resolve_direct_rss "$process" "$expected_start"
   case $direct_rss_action in
     exited) ;;
     sample)
@@ -280,6 +315,7 @@ validate_tiny_gate_identity() {
     $start_before == "$start_after" && $pgrp_before == "$supervisor" &&
     $pgrp_after == "$supervisor" ]] || return 1
   tiny_validated_rss=$rss
+  tiny_validated_starttime=$start_after
 }
 
 await_tiny_startup_gate() {
@@ -577,7 +613,7 @@ stop_reap_fixture() {
 
 check_seam() {
   local script=$1 outer verify_call verify_body checksums_call checksums_body
-  local direct_rss_call direct_rss_exit
+  local direct_rss_call direct_rss_exit direct_rss_resolver
   outer="timeout -k 10 1200 \"\$scr"
   outer+="ipt\" --campaign-inner \"\$output\""
   verify_call="full_ver"
@@ -588,12 +624,15 @@ check_seam() {
   checksums_call+="sums \"\$receipt\""
   checksums_body="sha256sum -c SHA"
   checksums_body+="256SUMS --strict"
-  direct_rss_call="sample_direct_rss \"/proc/\$pid/status\" \"\$receipt\""
+  direct_rss_call="sample_direct_rss \"\$pid\" \"\$tiny_validated_starttime\" \"\$receipt\""
   direct_rss_exit="[[ \$direct_rss_action != exited ]] || break"
+  direct_rss_resolver='resolve_direct_'
+  direct_rss_resolver+="rss \"\$process\" \"\$expected_start\""
   if ! grep -Fq "$outer" "$script" || ! grep -Fq "$verify_call" "$script" ||
     ! grep -Fq "$verify_body" "$script" || ! grep -Fq "$checksums_call" "$script" ||
     ! grep -Fq "$checksums_body" "$script" || ! grep -Fq "$direct_rss_call" "$script" ||
-    ! grep -Fq "$direct_rss_exit" "$script"; then
+    ! grep -Fq "$direct_rss_exit" "$script" ||
+    ! grep -Fq "$direct_rss_resolver" "$script"; then
     echo "runner lacks production verifier/checksum/RSS seam" >&2
     return 1
   fi
@@ -691,21 +730,18 @@ case ${1:-} in
     classify_child_exe "$2" "$3" "$4"
     exit
     ;;
-  --observe-direct-rss)
-    [[ $# == 2 ]] || exit 2
-    observe_direct_rss "$2"
-    printf '%s\t%s\n' "$direct_rss_action" "$direct_rss_kib"
-    exit
-    ;;
-  --sample-direct-rss-fixture)
-    [[ $# == 3 ]] || exit 2
-    receipt=$3
+  --sample-direct-rss-observations)
+    (( $# >= 4 )) || exit 2
+    receipt=$2; sample_status=0
     mkdir -p "$receipt"
     printf 'checkpoint\trss_kib\n' >"$receipt/rss.tsv"
     max_rss=0
-    sample_direct_rss "$2" "$receipt"
+    scripted_direct_observations=("${@:4}")
+    scripted_direct_index=0
+    direct_rss_observation_reader=read_scripted_direct_rss_observation
+    sample_direct_rss 4242 "$3" "$receipt" || sample_status=$?
     printf '%s\t%s\t%s\n' "$direct_rss_action" "$direct_rss_kib" "$max_rss"
-    exit
+    exit "$sample_status"
     ;;
   --resolve-child-observations)
     (( $# >= 4 )) || exit 2
@@ -766,8 +802,9 @@ case ${1:-} in
       report_tiny_startup_failure "$receipt" || true
       exit 1
     fi
+    direct_rss_observation_reader=read_direct_rss_observation
     while kill -0 "$pid" 2>/dev/null; do
-      sample_direct_rss "/proc/$pid/status" "$receipt" || exit 1
+      sample_direct_rss "$pid" "$tiny_validated_starttime" "$receipt" || exit 1
       [[ $direct_rss_action != exited ]] || break
       sleep 0.05
     done
