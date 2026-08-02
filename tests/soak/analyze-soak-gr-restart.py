@@ -11,7 +11,7 @@ JSON verdict against the soak-specific gates:
   - peak RSS < 512 MB
   - at least one restart cycle recorded
   - positive GR-active and stale-route evidence followed by both clearing
-  - BGP established observed in the final 3 samples (session recovered)
+  - BGP established in the final CSV sample (session recovered)
 
 Stdlib only. Exit code 0 on pass, 1 on any gate failure, 2 on
 harness/input error.
@@ -97,9 +97,7 @@ def analyze(rows: list[dict[str, str]]) -> dict:
 
     peak_rss = max((r for _, r in rss), default=float("nan"))
 
-    # Last 3 samples established?
-    tail = established_final[-3:] if established_final else []
-    final_established = tail.count("1") > 0 if tail else False
+    final_established = bool(established_final) and established_final[-1] == "1"
 
     gates = {
         "intern_slope_per_hour": {

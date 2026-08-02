@@ -92,7 +92,7 @@ intern GC. Analyzer: `analyze-soak-gr-restart.py`.
 | Peak RSS | < 512 MB | CSV `rss_mb` max | Same. |
 | Restart cycles completed | ≥ 0.8 × (duration ÷ `RESTART_INTERVAL_SEC`) | CSV `restart_cycles` max | Incremented by the harness on every completed cycle. Analyzer floor is ≥ 1; the window floor (chosen here) rejects a run that silently stalled mid-window. 0.8× rather than 1.0× because per-cycle work (GR polling + re-establish, ~15–45 s) rides on top of the interval — a 72 h run at the 300 s default must show ≥ 691 cycles. |
 | GR evidence ordered | positive `gr_active`+`stale` observed, then both clear, every cycle | `bgp_gr_active_peers`, `bgp_gr_stale_routes` → CSV columns | Set by GR entry on peer death; cleared by EoR + stale-clear. Harness fails closed mid-run if either phase is not observed within 30 s. |
-| Session recovered at end | Established in final samples | FRR `show bgp neighbors` → CSV `bgp_established` | Every restart flips it 1→0→1. |
+| Session recovered at end | Final CSV `bgp_established` == 1 | FRR `show bgp neighbors` → CSV `bgp_established` | Every restart flips it 1→0→1. |
 | Re-establish latency | ≤ 60 s after peer returns | harness `wait_established 60` (fail-closed), `cycles.log` | Checked every cycle. |
 | Zero crash | no daemon restart | `bgp_messages_sent_total` monotone across samples (abort criterion) | Counter advances with every keepalive/update. |
 
@@ -111,7 +111,7 @@ Analyzer: `analyze-soak-hot-reload.py`.
 | Apply cycles completed | ≥ 0.9 × (duration ÷ `APPLY_INTERVAL_SEC`) | CSV `apply_cycles` | Window floor, same stall rationale as scenario 1; 0.9× (tighter than scenario 1) because an apply cycle is seconds of work against a 120 s interval. |
 | Session-flap budget | flap delta == 0 across the whole run | `rbgp neighbor -j` `flap_count` → CSV `flap_count` (backed by `bgp_session_flaps_total`) | Sampled every interval; a live-apply that bounces the session moves it immediately. |
 | Session uptime | nondecreasing | CSV `uptime_seconds` | Resets on any reconnect — catches a flap that lands between flap-count samples. |
-| Session established at end | yes | CSV `bgp_established` | Scraped from FRR every sample. |
+| Session established at end | Final CSV `bgp_established` == 1 | CSV `bgp_established` | Scraped from FRR every sample. |
 
 ### 3. Inject-churn (gRPC route injection) — `run-soak-inject-churn.sh`
 
@@ -127,7 +127,7 @@ Injection: sustained `InjectionService` AddPath/DeletePath churn
 | Churn cycles completed | ≥ 0.5 × ((duration − warmup) ÷ `CHURN_INTERVAL_SEC`) | CSV `churn_cycles` | Window floor. 0.5× of nominal because each batch is 2 × `CHURN_BATCH` sequential `docker exec` RPCs whose wall time rides on top of the 5 s interval; the receipt must state the achieved cadence. At defaults a 72 h run must show ≥ 25 908 cycles. |
 | Final consumer convergence | FRR route count == live target, exactly, within 30 s of churn end | FRR `show bgp ipv4 unicast` → CSV `frr_route_count` vs `live_target` | The consumer count tracks every add/delete batch; an off-by-anything at terminal means a lost announce or withdraw. |
 | Session-flap budget | flap delta == 0 | CSV `flap_count` / `uptime_seconds` (as scenario 2) | Sampled every interval. |
-| Session established at end | yes | CSV `bgp_established` | Every sample. |
+| Session established at end | Final CSV `bgp_established` == 1 | CSV `bgp_established` | Every sample. |
 | Injection RPC failures | 0 (fail-closed) | harness exit path + `churn.log` | Every `rbgp rib` call is checked; a failed RPC aborts the run. |
 
 ## Additional shipped scenarios
