@@ -34,7 +34,7 @@ use rustbgpd_event_history::{
 };
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::Afi;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio_stream::Stream;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::Status;
@@ -456,12 +456,13 @@ fn stamp_durable_ids(event: &mut proto::BgpEvent, durable_event_id: u64) {
 /// `out_rx` in a [`ReceiverStream`] and returns it as the tonic
 /// response. The task exits when the subscriber's output channel
 /// closes (gRPC client disconnect, server drop) or when EHM's
-/// drain task signals end-of-stream.
+/// drain task signals end-of-stream or post-admission producer loss.
 async fn run_drain(
     filter: ProtoFilter,
     cursor: Option<u64>,
     mut committed_rx: mpsc::Receiver<EventSubscriptionItem>,
     out_tx: mpsc::Sender<Result<proto::BgpEvent, Status>>,
+    mut loss_rx: watch::Receiver<u64>,
     metrics: BgpMetrics,
 ) {
     // Forward committed events. Retention-gap detection happens
@@ -470,41 +471,92 @@ async fn run_drain(
     // floor read + first chunk read as one storage op makes the gap
     // signal race-free against retention. Live broadcast lag arrives
     // as `EventSubscriptionItem::Lagged(missed)`.
-    while let Some(item) = committed_rx.recv().await {
-        let committed = match item {
-            EventSubscriptionItem::Event(committed) => committed,
-            EventSubscriptionItem::Lagged(missed) => {
-                let lag = build_live_lag_event(missed);
-                if out_tx.send(Ok(lag)).await.is_err() {
-                    return;
+    loop {
+        let item = tokio::select! {
+            biased;
+            changed = loss_rx.changed() => {
+                if changed.is_ok() {
+                    let _ = out_tx.send(Err(producer_loss_status())).await;
                 }
-                continue;
+                return;
             }
+            item = committed_rx.recv() => {
+                let Some(item) = item else {
+                    return;
+                };
+                item
+            }
+        };
+        let event = match item {
+            EventSubscriptionItem::Event(committed) => {
+                if !filter.matches_committed(&committed) {
+                    continue;
+                }
+                let Some(mut event) = decode_payload_as_bgp_event(&committed, &metrics) else {
+                    continue;
+                };
+                if !filter.matches_event_type(&event) {
+                    continue;
+                }
+                stamp_durable_ids(&mut event, committed.event_id);
+                event
+            }
+            EventSubscriptionItem::Lagged(missed) => build_live_lag_event(missed),
             EventSubscriptionItem::RetentionGap(missed) => {
                 let from = cursor.unwrap_or(0);
                 let oldest_retained = from.saturating_add(missed.saturating_add(1));
-                let lag = build_cursor_gap_event(from, oldest_retained);
                 metrics.record_event_outbox_cursor_gap();
-                if out_tx.send(Ok(lag)).await.is_err() {
-                    return;
-                }
-                continue;
+                build_cursor_gap_event(from, oldest_retained)
             }
         };
-        if !filter.matches_committed(&committed) {
-            continue;
-        }
-        let Some(mut event) = decode_payload_as_bgp_event(&committed, &metrics) else {
-            continue;
-        };
-        if !filter.matches_event_type(&event) {
-            continue;
-        }
-        stamp_durable_ids(&mut event, committed.event_id);
-        if out_tx.send(Ok(event)).await.is_err() {
+        if !send_with_loss(Ok(event), &out_tx, &mut loss_rx).await {
             return;
         }
     }
+}
+
+fn producer_loss_status() -> Status {
+    Status::data_loss(
+        "durable event history lost producer events after cursor admission; reconcile against authoritative state before resuming from the last received event_id",
+    )
+}
+
+async fn send_with_loss(
+    item: Result<proto::BgpEvent, Status>,
+    out_tx: &mpsc::Sender<Result<proto::BgpEvent, Status>>,
+    loss_rx: &mut watch::Receiver<u64>,
+) -> bool {
+    tokio::select! {
+        biased;
+        changed = loss_rx.changed() => {
+            if changed.is_ok() {
+                let _ = out_tx.send(Err(producer_loss_status())).await;
+            }
+            false
+        }
+        permit = out_tx.reserve() => {
+            let Ok(permit) = permit else {
+                return false;
+            };
+            finish_reserved_send(permit, item, loss_rx)
+        }
+    }
+}
+
+fn finish_reserved_send(
+    permit: mpsc::Permit<'_, Result<proto::BgpEvent, Status>>,
+    item: Result<proto::BgpEvent, Status>,
+    loss_rx: &watch::Receiver<u64>,
+) -> bool {
+    let Ok(lost) = loss_rx.has_changed() else {
+        return false;
+    };
+    permit.send(if lost {
+        Err(producer_loss_status())
+    } else {
+        item
+    });
+    !lost
 }
 
 /// Stream type returned by [`subscribe`]. Aliased to keep the
@@ -522,6 +574,14 @@ fn parse_filter_when_available(
         ));
     }
     ProtoFilter::from_request(request)
+}
+
+fn baseline_then_subscribe<T, E>(
+    baseline: impl FnOnce() -> watch::Receiver<u64>,
+    subscribe: impl FnOnce() -> Result<T, E>,
+) -> Result<(T, watch::Receiver<u64>), E> {
+    let loss_rx = baseline();
+    Ok((subscribe()?, loss_rx))
 }
 
 /// Public entry point called by the tonic handler. Performs the
@@ -542,13 +602,22 @@ pub(crate) fn subscribe(
         filter: filter.cursor_subset(),
         output_capacity: OUTPUT_CAPACITY,
     };
-    let subscription = handle
-        .subscribe_from_event(subscribe_req)
-        .map_err(map_ehm_err_to_status)?;
+    let (subscription, loss_rx) = baseline_then_subscribe(
+        || handle.state().subscribe_loss_generation(),
+        || handle.subscribe_from_event(subscribe_req),
+    )
+    .map_err(map_ehm_err_to_status)?;
     let committed_rx = subscription.into_receiver();
 
     let (out_tx, out_rx) = mpsc::channel(OUTPUT_CAPACITY);
-    tokio::spawn(run_drain(filter, cursor, committed_rx, out_tx, metrics));
+    tokio::spawn(run_drain(
+        filter,
+        cursor,
+        committed_rx,
+        out_tx,
+        loss_rx,
+        metrics,
+    ));
 
     Ok(Box::pin(ReceiverStream::new(out_rx)))
 }
@@ -556,6 +625,61 @@ pub(crate) fn subscribe(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn producer_loss_preempts_blocked_cursor_delivery() {
+        // Load-bearing breaks: reversing baseline/admission hides the first loss;
+        // plain send or no reserved-permit recheck emits the pending item below.
+        let (loss_tx, _) = watch::channel(0_u64);
+        let ((), loss_rx) = baseline_then_subscribe(
+            || loss_tx.subscribe(),
+            || {
+                loss_tx.send_modify(|generation| *generation += 1);
+                Ok::<(), ()>(())
+            },
+        )
+        .unwrap();
+        assert!(loss_rx.has_changed().unwrap());
+
+        let filter = ProtoFilter::from_request(&proto::SubscribeFromEventRequest::default())
+            .expect("wildcard filter");
+        let (committed_tx, committed_rx) = mpsc::channel(1);
+        committed_tx
+            .try_send(EventSubscriptionItem::RetentionGap(1))
+            .unwrap();
+        let (out_tx, mut out_rx) = mpsc::channel(1);
+        out_tx.try_send(Ok(proto::BgpEvent::default())).unwrap();
+        let (loss_tx, loss_rx) = watch::channel(0_u64);
+        let mut drain = tokio::spawn(run_drain(
+            filter,
+            Some(0),
+            committed_rx,
+            out_tx,
+            loss_rx,
+            BgpMetrics::new(),
+        ));
+        let blocked = tokio::time::timeout(std::time::Duration::from_millis(50), &mut drain)
+            .await
+            .is_err();
+        assert!(blocked, "cursor delivery must block behind the filler");
+
+        loss_tx.send_modify(|generation| *generation += 1);
+        assert!(out_rx.recv().await.unwrap().is_ok(), "drain the filler");
+        let status = out_rx.recv().await.unwrap().unwrap_err();
+        assert_eq!(status.code(), tonic::Code::DataLoss);
+        drain.await.unwrap();
+        assert!(out_rx.recv().await.is_none(), "DATA_LOSS must terminate");
+
+        // A loss after reserve but before finalization must replace the item.
+        let (out_tx, mut out_rx) = mpsc::channel(1);
+        let permit = out_tx.reserve().await.unwrap();
+        let (loss_tx, loss_rx) = watch::channel(0_u64);
+        loss_tx.send_modify(|generation| *generation += 1);
+        let delivered = finish_reserved_send(permit, Ok(proto::BgpEvent::default()), &loss_rx);
+        assert!(!delivered);
+        let status = out_rx.recv().await.unwrap().unwrap_err();
+        assert_eq!(status.code(), tonic::Code::DataLoss);
+    }
 
     #[test]
     fn from_request_rejects_unknown_category() {

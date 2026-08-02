@@ -678,6 +678,48 @@ mod tests {
             .expect("test operation timed out")
     }
 
+    async fn cursor_test_service() -> (
+        tempfile::TempDir,
+        rustbgpd_event_history::EventHistoryManager,
+        EventService,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = rustbgpd_event_history::EventHistoryManager::start(
+            rustbgpd_event_history::EventHistoryConfig {
+                path: dir.path().join("events.db"),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("EHM start");
+        let (rib_tx, _) = spawn_fake_rib();
+        let (peer_tx, _, _) = spawn_fake_peer_manager();
+        let service = EventService::new(rib_tx, peer_tx).with_event_history(Some(manager.handle()));
+        (dir, manager, service)
+    }
+
+    async fn cursor_test_stream(
+        service: &EventService,
+        from_event_id: Option<u64>,
+    ) -> cursor::SubscribeFromEventStream {
+        service
+            .subscribe_from_event(Request::new(proto::SubscribeFromEventRequest {
+                from_event_id,
+                ..Default::default()
+            }))
+            .await
+            .expect("cursor admission")
+            .into_inner()
+    }
+
+    async fn assert_cursor_data_loss(stream: &mut cursor::SubscribeFromEventStream) {
+        let status = within_test_deadline(stream.next())
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(status.code(), tonic::Code::DataLoss);
+    }
+
     async fn invoke_watch_event_admission(
         service: &EventService,
         source: WatchEventAdmission,
@@ -2518,6 +2560,42 @@ mod tests {
     }
 
     // ── ADR-0072 PR5 — SubscribeFromEvent handler tests ────────
+
+    #[tokio::test]
+    async fn subscribe_from_event_quiet_stream_fails_on_producer_loss() {
+        // Load-bearing break: removing the producer-loss branch leaves the
+        // quiet stream pending until this test's deadline expires.
+        let (_dir, manager, service) = cursor_test_service().await;
+        let mut stream = cursor_test_stream(&service, None).await;
+
+        manager.state().record_loss();
+        assert_cursor_data_loss(&mut stream).await;
+        assert!(
+            within_test_deadline(stream.next()).await.is_none(),
+            "DATA_LOSS must terminate the admitted cursor"
+        );
+        manager.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn subscribe_from_event_baselines_pre_admission_loss() {
+        // Load-bearing breaks: rejecting a prior loss terminates before the
+        // short quiet-window control; removing live loss detection leaves the
+        // second receive pending until the outer deadline.
+        let (_dir, manager, service) = cursor_test_service().await;
+        manager.state().record_loss();
+        let mut stream = cursor_test_stream(&service, None).await;
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), stream.next())
+                .await
+                .is_err(),
+            "a pre-admission loss must not terminate the new stream"
+        );
+
+        manager.state().record_loss();
+        assert_cursor_data_loss(&mut stream).await;
+        manager.shutdown().await;
+    }
 
     #[tokio::test]
     async fn subscribe_from_event_unavailable_returns_failed_precondition() {
