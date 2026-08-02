@@ -20,6 +20,10 @@
 
 #![deny(unsafe_code)]
 
+// ADR-0121 tranche 2: the v2 codec is intentionally dormant until the
+// filesystem migration tranche wires it into history reads and writes.
+mod v2;
+
 use std::fs;
 use std::io::{self, Read as _};
 use std::path::{Path, PathBuf};
