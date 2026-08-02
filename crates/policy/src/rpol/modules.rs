@@ -88,23 +88,33 @@ pub struct ModuleSource {
 
 impl ModuleSource {
     pub(super) fn inline(text: &str) -> Self {
+        let raw_sha256 = Sha256::digest(text.as_bytes()).into();
         Self {
             path: "<inline>".to_string(),
             text: text.to_string(),
             imports: Vec::new(),
-            digest: digest_hex(text),
+            digest: digest_hex(&raw_sha256),
         }
     }
 }
 
-/// Lowercase-hex SHA-256 of a module text.
-fn digest_hex(text: &str) -> String {
+/// Lowercase-hex rendering of a SHA-256 digest.
+fn digest_hex(digest: &[u8; 32]) -> String {
     let mut hex = String::with_capacity(64);
-    for byte in Sha256::digest(text.as_bytes()) {
+    for byte in digest {
         use std::fmt::Write;
         write!(hex, "{byte:02x}").expect("writing to a String cannot fail");
     }
     hex
+}
+
+fn read_source(path: &Path) -> std::io::Result<(String, u64, [u8; 32])> {
+    let bytes = std::fs::read(path)?;
+    let raw_len = u64::try_from(bytes.len()).expect("source length fits u64");
+    let raw_sha256 = Sha256::digest(&bytes).into();
+    let text = String::from_utf8(bytes)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    Ok((text, raw_len, raw_sha256))
 }
 
 /// Why a file-based `.rpol` load failed.
@@ -156,7 +166,15 @@ impl LoadError {
 /// compilation unit.
 pub(super) struct ResolvedGraph {
     pub(super) modules: Vec<ModuleSource>,
+    pub(super) fingerprints: Vec<ModuleFingerprint>,
     pub(super) merged: ast::SourceFile,
+}
+
+#[derive(Debug)]
+pub(super) struct ModuleFingerprint {
+    pub(super) path: PathBuf,
+    pub(super) raw_len: u64,
+    pub(super) raw_sha256: [u8; 32],
 }
 
 /// Resolve `main_path`'s import graph. `roots` are the configured
@@ -197,6 +215,7 @@ pub(super) fn resolve(
     let mut resolver = Resolver {
         confine,
         modules: Vec::new(),
+        fingerprints: Vec::new(),
         asts: Vec::new(),
         canon: Vec::new(),
         index: HashMap::new(),
@@ -206,9 +225,9 @@ pub(super) fn resolve(
         max_graph_bytes,
         diags: Vec::new(),
     };
-    let text = std::fs::read_to_string(&main_canon)
-        .map_err(|e| io(main_path, format!("failed to read: {e}")))?;
-    resolver.visit(main_canon, text, 0);
+    let (text, raw_len, raw_sha256) =
+        read_source(&main_canon).map_err(|e| io(main_path, format!("failed to read: {e}")))?;
+    resolver.visit(main_canon, text, raw_len, raw_sha256, 0);
 
     let sources: Vec<(String, String)> = resolver
         .modules
@@ -240,6 +259,7 @@ pub(super) fn resolve(
     }
     Ok(ResolvedGraph {
         modules: resolver.modules,
+        fingerprints: resolver.fingerprints,
         merged,
     })
 }
@@ -249,6 +269,8 @@ struct Resolver {
     confine: Vec<PathBuf>,
     /// Per-module metadata, indexed by module (`file`) id.
     modules: Vec<ModuleSource>,
+    /// Same-read lossless identities, indexed by module id.
+    fingerprints: Vec<ModuleFingerprint>,
     /// Parsed ASTs, same indexing (consumed by the merge).
     asts: Vec<ast::SourceFile>,
     /// Canonical paths, same indexing.
@@ -270,21 +292,33 @@ struct Resolver {
 impl Resolver {
     /// Load, parse, and recurse into one module whose canonical path
     /// and text are already in hand. Returns its module id.
-    fn visit(&mut self, canon: PathBuf, text: String, depth: u32) -> u32 {
+    fn visit(
+        &mut self,
+        canon: PathBuf,
+        text: String,
+        raw_len: u64,
+        raw_sha256: [u8; 32],
+        depth: u32,
+    ) -> u32 {
         let id = u32::try_from(self.modules.len()).expect("MAX_MODULE_FILES bounds the count");
         let display = canon.display().to_string();
         self.index.insert(canon.clone(), id);
-        self.canon.push(canon);
+        self.canon.push(canon.clone());
         let text_len = text.len();
         self.total_bytes += text_len;
         let (ast, mut parse_diags) = parser::parse_module(&text, id);
         self.diags.append(&mut parse_diags);
-        let digest = digest_hex(&text);
+        let digest = digest_hex(&raw_sha256);
         self.modules.push(ModuleSource {
             path: display,
             text,
             imports: Vec::new(),
             digest,
+        });
+        self.fingerprints.push(ModuleFingerprint {
+            path: canon,
+            raw_len,
+            raw_sha256,
         });
         self.asts.push(ast::SourceFile::default());
         self.in_progress.push(true);
@@ -425,8 +459,8 @@ impl Resolver {
             ));
             return None;
         }
-        let text = match std::fs::read_to_string(&canon) {
-            Ok(text) => text,
+        let (text, raw_len, raw_sha256) = match read_source(&canon) {
+            Ok(source) => source,
             Err(e) => {
                 self.diags.push(Diagnostic::new(
                     import.span,
@@ -436,7 +470,7 @@ impl Resolver {
                 return None;
             }
         };
-        Some(self.visit(canon, text, depth + 1))
+        Some(self.visit(canon, text, raw_len, raw_sha256, depth + 1))
     }
 }
 

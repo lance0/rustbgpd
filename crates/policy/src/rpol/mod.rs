@@ -72,6 +72,8 @@ pub struct RpolFile {
     /// Per-module `(path, text, imports, digest)`, indexed by the
     /// `file` field of every [`Span`]; index 0 is the main file.
     modules: Vec<ModuleSource>,
+    /// Lossless same-read identities parallel to file-loaded `modules`.
+    module_fingerprints: Vec<modules::ModuleFingerprint>,
     /// The merged compilation unit (imports dissolved).
     file: ast::SourceFile,
     /// Lazily-built interned set tables for high-fanout compilation.
@@ -97,6 +99,7 @@ impl RpolFile {
         let (file, _) = front(source)?;
         Ok(Self {
             modules: vec![ModuleSource::inline(source)],
+            module_fingerprints: Vec::new(),
             file,
             tables: std::sync::OnceLock::new(),
         })
@@ -131,6 +134,7 @@ impl RpolFile {
         }
         Ok(Self {
             modules: graph.modules,
+            module_fingerprints: graph.fingerprints,
             file: graph.merged,
             tables: std::sync::OnceLock::new(),
         })
@@ -155,6 +159,14 @@ impl RpolFile {
     #[must_use]
     pub fn modules(&self) -> &[ModuleSource] {
         &self.modules
+    }
+
+    /// Lossless path and byte identity in resolver/file-index order.
+    #[doc(hidden)]
+    pub fn source_fingerprints(&self) -> impl ExactSizeIterator<Item = (&Path, u64, [u8; 32])> {
+        self.module_fingerprints
+            .iter()
+            .map(|source| (source.path.as_path(), source.raw_len, source.raw_sha256))
     }
 
     /// Resolved-content equality (ADR-0103 Decision 5.3): pairwise

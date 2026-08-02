@@ -1,0 +1,522 @@
+//! Dormant accepted-config same-read source identity (ADR-0121 tranche 1).
+
+#![allow(
+    dead_code,
+    reason = "ADR-0121 tranche 1 deliberately lands a dormant loader handoff"
+)]
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use rustbgpd_policy::datasets::{DatasetFileFingerprint, DatasetKind};
+use rustbgpd_policy::rpol::RpolFile;
+use sha2::{Digest, Sha256};
+
+use super::{Config, DatasetBindMode, persisted_config_document};
+
+const SOURCE_DIGEST_DOMAIN: &[u8] = b"rustbgpd.config-source.v2\0";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct SourceManifest {
+    toml_sha256: [u8; 32],
+    rpol_units: Vec<RpolUnitSource>,
+    datasets: Vec<DatasetSource>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RpolUnitSource {
+    modules: Vec<RpolModuleSource>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RpolModuleSource {
+    path: PathBuf,
+    length: u64,
+    sha256: [u8; 32],
+    imports: Vec<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DatasetSource {
+    name: String,
+    kind: DatasetKind,
+    path: PathBuf,
+    length: u64,
+    sha256: [u8; 32],
+}
+
+#[derive(Default)]
+pub(super) struct SourceCapture {
+    rpol_units: Vec<RpolUnitSource>,
+    datasets: Vec<DatasetSource>,
+}
+
+impl SourceCapture {
+    pub(super) fn push_rpol_unit(&mut self, file: &RpolFile) {
+        let fingerprints = file.source_fingerprints();
+        assert_eq!(file.modules().len(), fingerprints.len());
+        let modules = file
+            .modules()
+            .iter()
+            .zip(fingerprints)
+            .map(|(module, (path, length, sha256))| RpolModuleSource {
+                path: path.to_path_buf(),
+                length,
+                sha256,
+                imports: module.imports.clone(),
+            })
+            .collect();
+        self.rpol_units.push(RpolUnitSource { modules });
+    }
+
+    pub(super) fn push_dataset(
+        &mut self,
+        name: &str,
+        kind: DatasetKind,
+        source: &DatasetFileFingerprint,
+    ) {
+        self.datasets.push(DatasetSource {
+            name: name.to_string(),
+            kind,
+            path: source.canonical_path.clone(),
+            length: source.raw_len,
+            sha256: source.raw_sha256,
+        });
+    }
+
+    pub(super) fn retain_dataset(
+        &mut self,
+        name: &str,
+        prior: Option<&SourceManifest>,
+    ) -> Result<(), &'static str> {
+        let source = prior
+            .and_then(|manifest| manifest.datasets.iter().find(|source| source.name == name))
+            .ok_or("failed staged dataset refresh has no prior accepted provenance")?;
+        self.datasets.push(source.clone());
+        Ok(())
+    }
+
+    fn finish(mut self, toml_sha256: [u8; 32]) -> SourceManifest {
+        self.datasets
+            .sort_by(|left, right| left.name.as_bytes().cmp(right.name.as_bytes()));
+        SourceManifest {
+            toml_sha256,
+            rpol_units: self.rpol_units,
+            datasets: self.datasets,
+        }
+    }
+}
+
+impl SourceManifest {
+    fn source_sha256(&self) -> [u8; 32] {
+        let mut digest = Sha256::new();
+        digest.update(SOURCE_DIGEST_DOMAIN);
+        frame(&mut digest, &self.toml_sha256);
+        frame_u64(&mut digest, self.rpol_units.len());
+        for unit in &self.rpol_units {
+            frame_u64(&mut digest, unit.modules.len());
+            for module in &unit.modules {
+                frame_path(&mut digest, &module.path);
+                frame_u64_value(&mut digest, module.length);
+                frame(&mut digest, &module.sha256);
+                frame_u64(&mut digest, module.imports.len());
+                for &import in &module.imports {
+                    frame(&mut digest, &import.to_be_bytes());
+                }
+            }
+        }
+        frame_u64(&mut digest, self.datasets.len());
+        for dataset in &self.datasets {
+            frame(&mut digest, dataset.name.as_bytes());
+            frame(&mut digest, dataset.kind.as_str().as_bytes());
+            frame_path(&mut digest, &dataset.path);
+            frame_u64_value(&mut digest, dataset.length);
+            frame(&mut digest, &dataset.sha256);
+        }
+        digest.finalize().into()
+    }
+}
+
+fn frame(digest: &mut Sha256, bytes: &[u8]) {
+    digest.update(
+        u64::try_from(bytes.len())
+            .expect("field length fits u64")
+            .to_be_bytes(),
+    );
+    digest.update(bytes);
+}
+
+fn frame_u64(digest: &mut Sha256, value: usize) {
+    frame_u64_value(digest, u64::try_from(value).expect("roster count fits u64"));
+}
+
+fn frame_u64_value(digest: &mut Sha256, value: u64) {
+    frame(digest, &value.to_be_bytes());
+}
+
+fn frame_path(digest: &mut Sha256, path: &Path) {
+    let (encoding, bytes) = lossless_path_bytes(path);
+    frame(digest, encoding);
+    frame(digest, &bytes);
+}
+
+#[cfg(unix)]
+fn lossless_path_bytes(path: &Path) -> (&'static [u8], Vec<u8>) {
+    use std::os::unix::ffi::OsStrExt;
+    (b"unix-os-bytes", path.as_os_str().as_bytes().to_vec())
+}
+
+#[cfg(windows)]
+fn lossless_path_bytes(path: &Path) -> (&'static [u8], Vec<u8>) {
+    use std::os::windows::ffi::OsStrExt;
+    let bytes = path
+        .as_os_str()
+        .encode_wide()
+        .flat_map(u16::to_be_bytes)
+        .collect();
+    (b"windows-wide-be", bytes)
+}
+
+struct AcceptedConfigSnapshot {
+    config: Arc<Config>,
+    normalized_toml: Arc<str>,
+    manifest: SourceManifest,
+    sha256: [u8; 32],
+    source_sha256: [u8; 32],
+}
+
+impl AcceptedConfigSnapshot {
+    fn load(path: &Path, prior: Option<&Self>) -> Result<Self, String> {
+        Self::load_with_hook(path, prior, || {})
+    }
+
+    fn load_with_hook(
+        path: &Path,
+        prior: Option<&Self>,
+        after_capture: impl FnOnce(),
+    ) -> Result<Self, String> {
+        let bytes = std::fs::read(path)
+            .map_err(|error| format!("error: failed to read {}: {error}", path.display()))?;
+        let content = String::from_utf8(bytes)
+            .map_err(|error| format!("error: failed to read {}: {error}", path.display()))?;
+        let base_dir = path.parent().map(PathBuf::from);
+        let mut capture = SourceCapture::default();
+        let mut config = Config::load_from_toml_source_with_capture(
+            &content,
+            &path.display().to_string(),
+            base_dir.as_deref(),
+            prior.map(|snapshot| &snapshot.config.policy.dataset_bindings),
+            DatasetBindMode::Stage,
+            Some(&mut capture),
+            prior.map(|snapshot| &snapshot.manifest),
+        )?;
+        config.file_path = Some(path.to_path_buf());
+        after_capture();
+        config.policy.dataset_bindings = config.policy.dataset_bindings.detached_clone();
+
+        let normalized_toml: Arc<str> = persisted_config_document(&config)
+            .map_err(|error| format!("failed to normalize accepted config: {error}"))?
+            .into();
+        let sha256 = Sha256::digest(normalized_toml.as_bytes()).into();
+        let manifest = capture.finish(sha256);
+        let source_sha256 = manifest.source_sha256();
+        Ok(Self {
+            config: Arc::new(config),
+            normalized_toml,
+            manifest,
+            sha256,
+            source_sha256,
+        })
+    }
+
+    fn config(&self) -> Config {
+        let mut config = (*self.config).clone();
+        config.policy.dataset_bindings = config.policy.dataset_bindings.detached_clone();
+        config
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use rustbgpd_policy::datasets::DatasetData;
+    use rustbgpd_policy::sets::AsnSet;
+
+    use super::*;
+    use crate::test_support::tier_authorized_uds_test_config;
+
+    const MAIN_RPOL: &str =
+        "import \"lib.rpol\"\nimport \"a-child.rpol\"\npolicy outbound { term rest { accept } }\n";
+    const LIB_RPOL: &str = "dataset asn-set customers\npolicy inbound {\n  term customer { if route.origin-as in customers { accept } }\n  term rest { reject }\n}\n";
+
+    fn fixture(dir: &Path) -> PathBuf {
+        fs::write(dir.join("policy.rpol"), MAIN_RPOL).expect("main rpol");
+        fs::write(dir.join("lib.rpol"), LIB_RPOL).expect("import rpol");
+        fs::write(
+            dir.join("a-child.rpol"),
+            "policy child { term rest { accept } }\n",
+        )
+        .expect("second import");
+        fs::write(
+            dir.join("a-unit.rpol"),
+            "policy second-unit { term rest { accept } }\n",
+        )
+        .expect("second unit");
+        fs::write(dir.join("customers.txt"), "64500\n").expect("dataset");
+        let config = tier_authorized_uds_test_config(
+            r#"
+[global]
+asn = 65000
+router_id = "192.0.2.1"
+listen_port = 179
+[global.telemetry]
+log_format = "json"
+[policy]
+rpol_files = ["policy.rpol", "a-unit.rpol"]
+[policy.datasets.customers]
+path = "customers.txt"
+"#,
+        );
+        let path = dir.join("config.toml");
+        fs::write(&path, config).expect("config");
+        path
+    }
+
+    fn fingerprint(path: &Path, bytes: &[u8]) -> DatasetFileFingerprint {
+        DatasetFileFingerprint {
+            canonical_path: path.to_path_buf(),
+            raw_len: u64::try_from(bytes.len()).unwrap(),
+            raw_sha256: Sha256::digest(bytes).into(),
+        }
+    }
+
+    fn dataset(snapshot: &AcceptedConfigSnapshot) -> Arc<rustbgpd_policy::datasets::DatasetHandle> {
+        Arc::clone(
+            snapshot
+                .config
+                .policy
+                .dataset_bindings
+                .get("customers")
+                .unwrap(),
+        )
+    }
+
+    fn module_names(unit: &RpolUnitSource) -> Vec<&str> {
+        unit.modules
+            .iter()
+            .map(|module| module.path.file_name().unwrap().to_str().unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn digest_canonical_framing_is_stable() {
+        let manifest = SourceManifest {
+            toml_sha256: [0x11; 32],
+            rpol_units: vec![RpolUnitSource {
+                modules: vec![RpolModuleSource {
+                    path: PathBuf::from("/policy"),
+                    length: 3,
+                    sha256: [0x22; 32],
+                    imports: vec![0, 1],
+                }],
+            }],
+            datasets: vec![DatasetSource {
+                name: "customers".to_string(),
+                kind: DatasetKind::Asn,
+                path: PathBuf::from("/dataset"),
+                length: 4,
+                sha256: [0x33; 32],
+            }],
+        };
+        // Golden over the ADR-0121 domain, every roster count, and every
+        // field length. Removing any one of those production frames changes
+        // this digest and makes the test red.
+        assert_eq!(
+            manifest.source_sha256(),
+            [
+                0xea, 0x0d, 0x43, 0x50, 0x1b, 0x20, 0x1f, 0xce, 0xc9, 0x72, 0x4d, 0x17, 0xad, 0xa9,
+                0x60, 0x3e, 0x72, 0xa6, 0x35, 0xcc, 0x9c, 0x04, 0x85, 0x23, 0xb6, 0x44, 0x9f, 0x0e,
+                0x4c, 0x7e, 0x60, 0x09,
+            ]
+        );
+    }
+
+    #[test]
+    fn datasets_finish_in_name_byte_order_not_insertion_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut left = SourceCapture::default();
+        left.push_dataset(
+            "zeta",
+            DatasetKind::Asn,
+            &fingerprint(&dir.path().join("z"), b"1"),
+        );
+        left.push_dataset(
+            "alpha",
+            DatasetKind::Prefix,
+            &fingerprint(&dir.path().join("a"), b"2"),
+        );
+        let mut right = SourceCapture::default();
+        right.push_dataset(
+            "alpha",
+            DatasetKind::Prefix,
+            &fingerprint(&dir.path().join("a"), b"2"),
+        );
+        right.push_dataset(
+            "zeta",
+            DatasetKind::Asn,
+            &fingerprint(&dir.path().join("z"), b"1"),
+        );
+        let left = left.finish([7; 32]);
+        let right = right.finish([7; 32]);
+        assert_eq!(left.datasets[0].name, "alpha");
+        assert_eq!(left, right);
+        assert_eq!(left.source_sha256(), right.source_sha256());
+    }
+
+    #[test]
+    fn capture_keeps_configured_rpol_unit_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let snapshot = AcceptedConfigSnapshot::load(&fixture(dir.path()), None).unwrap();
+        let units = &snapshot.manifest.rpol_units;
+        assert_eq!(module_names(&units[0])[0], "policy.rpol");
+        assert_eq!(module_names(&units[1])[0], "a-unit.rpol");
+    }
+
+    #[test]
+    fn capture_keeps_resolver_file_index_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let snapshot = AcceptedConfigSnapshot::load(&fixture(dir.path()), None).unwrap();
+        assert_eq!(
+            module_names(&snapshot.manifest.rpol_units[0]),
+            ["policy.rpol", "lib.rpol", "a-child.rpol"]
+        );
+    }
+
+    #[test]
+    fn capture_keeps_import_edge_declaration_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let snapshot = AcceptedConfigSnapshot::load(&fixture(dir.path()), None).unwrap();
+        let unit = &snapshot.manifest.rpol_units[0];
+        let names = module_names(unit);
+        let targets: Vec<_> = unit.modules[0]
+            .imports
+            .iter()
+            .map(|&index| names[index as usize])
+            .collect();
+        assert_eq!(targets, ["lib.rpol", "a-child.rpol"]);
+    }
+
+    #[test]
+    fn semantically_equal_dataset_rewrite_changes_source_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = fixture(dir.path());
+        let before = AcceptedConfigSnapshot::load(&config_path, None).unwrap();
+        fs::write(dir.path().join("customers.txt"), "# same set\n64500\n").unwrap();
+        let after = AcceptedConfigSnapshot::load(&config_path, Some(&before)).unwrap();
+
+        assert_eq!(dataset(&before).pin().data, dataset(&after).pin().data);
+        assert_ne!(
+            before.manifest.datasets[0].sha256,
+            after.manifest.datasets[0].sha256
+        );
+        assert_ne!(before.source_sha256, after.source_sha256);
+    }
+
+    #[test]
+    fn capture_never_rereads_external_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = fixture(dir.path());
+        let snapshot = AcceptedConfigSnapshot::load_with_hook(&config_path, None, || {
+            fs::remove_file(dir.path().join("policy.rpol")).unwrap();
+            fs::remove_file(dir.path().join("lib.rpol")).unwrap();
+            fs::remove_file(dir.path().join("a-child.rpol")).unwrap();
+            fs::remove_file(dir.path().join("a-unit.rpol")).unwrap();
+            fs::remove_file(dir.path().join("customers.txt")).unwrap();
+        })
+        .unwrap();
+
+        assert_eq!(snapshot.manifest.rpol_units[0].modules.len(), 3);
+        assert_eq!(snapshot.manifest.datasets[0].length, 6);
+        assert_eq!(
+            snapshot.manifest.datasets[0].sha256,
+            <[u8; 32]>::from(Sha256::digest(b"64500\n"))
+        );
+    }
+
+    #[test]
+    fn failed_staged_refresh_retains_prior_accepted_provenance() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = fixture(dir.path());
+        let before = AcceptedConfigSnapshot::load(&config_path, None).unwrap();
+        fs::write(dir.path().join("customers.txt"), "not-an-asn\n").unwrap();
+        let after = AcceptedConfigSnapshot::load(&config_path, Some(&before)).unwrap();
+
+        assert_eq!(after.config.policy.dataset_events.failed.len(), 1);
+        assert_eq!(after.manifest.datasets, before.manifest.datasets);
+        assert_eq!(after.source_sha256, before.source_sha256);
+        let after_handle = dataset(&after);
+        let generation = after_handle.pin().generation;
+        dataset(&before).refresh(DatasetData::Asn(AsnSet::new([64501])));
+        assert_eq!(after_handle.pin().generation, generation);
+        assert_eq!(
+            after_handle.pin().data,
+            DatasetData::Asn(AsnSet::new([64500]))
+        );
+
+        after
+            .config()
+            .policy
+            .dataset_bindings
+            .get("customers")
+            .unwrap()
+            .refresh(DatasetData::Asn(AsnSet::new([64502])));
+        assert_eq!(after_handle.pin().generation, generation);
+        assert_eq!(
+            after_handle.pin().data,
+            DatasetData::Asn(AsnSet::new([64500]))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonical_rpol_path_preserves_invalid_utf8_bytes() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = fixture(dir.path());
+        fs::remove_file(dir.path().join("policy.rpol")).unwrap();
+        let first_target = dir
+            .path()
+            .join(OsString::from_vec(b"policy-\xff.rpol".to_vec()));
+        let second_target = dir
+            .path()
+            .join(OsString::from_vec(b"policy-\xfe.rpol".to_vec()));
+        fs::write(&first_target, MAIN_RPOL).unwrap();
+        fs::write(&second_target, MAIN_RPOL).unwrap();
+        let entry = dir.path().join("policy.rpol");
+        symlink(&first_target, &entry).unwrap();
+
+        let first = AcceptedConfigSnapshot::load(&config_path, None).unwrap();
+        fs::remove_file(&entry).unwrap();
+        symlink(&second_target, &entry).unwrap();
+        let second = AcceptedConfigSnapshot::load(&config_path, None).unwrap();
+        let first_raw_path = first.manifest.rpol_units[0].modules[0]
+            .path
+            .as_os_str()
+            .as_bytes();
+        assert!(first_raw_path.contains(&0xff));
+        assert!(
+            second.manifest.rpol_units[0].modules[0]
+                .path
+                .as_os_str()
+                .as_bytes()
+                .contains(&0xfe)
+        );
+        // Lossy display renders both bytes as U+FFFD; if digest identity uses it,
+        // snapshots collapse and this assertion goes red.
+        assert_ne!(first.source_sha256, second.source_sha256);
+    }
+}
