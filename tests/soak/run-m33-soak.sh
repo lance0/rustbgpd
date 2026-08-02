@@ -156,14 +156,14 @@ parse_mem_to_mb() {
 # ---------------------------------------------------------------------------
 # Prometheus metric extraction — one curl + awk per sample.
 # Returns a single space-delimited line:
-#   rib_loc_evpn  adj_out_evpn_total  flaps_total  drops_total  msgs_sent  msgs_recv
+#   rib_loc_evpn  adj_out_evpn_total  flaps_total  drops_total  msgs_sent  msgs_recv  sessions_ok
 # Any field that fails to parse yields "NaN" (gauges) or "0" (counters).
 # ---------------------------------------------------------------------------
 
 sample_metrics() {
     local body
     body=$(curl -s --max-time 5 "http://${RR_IP}:9179/metrics" 2>/dev/null) || {
-        echo "NaN NaN NaN NaN NaN NaN"
+        echo "NaN NaN NaN NaN NaN NaN NaN"
         return
     }
     awk '
@@ -173,14 +173,23 @@ sample_metrics() {
         /^bgp_outbound_route_drops_total\{/                                 { drops   += $2 }
         /^bgp_messages_sent_total\{/                                        { sent    += $2 }
         /^bgp_messages_received_total\{/                                    { recv    += $2 }
+        /^bgp_peer_session_established\{/ {
+            sessions++
+            if ($2 !~ /^([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][+-]?[0-9]+)?$/ \
+                    || ($2 + 0) < 0 || ($2 + 0) > 1 \
+                    || ($2 + 0) != int($2 + 0)) sessions_invalid=1
+            established += $2
+        }
         END {
-            printf "%s %s %s %s %s %s\n",
+            sessions_ok = (sessions != 3 || sessions_invalid) ? "NaN" \
+                : (established == 3 ? "1" : "0")
+            printf "%s %s %s %s %s %s %s\n",
                 (rib_loc==""?"NaN":rib_loc),
                 (adj_out==""?"NaN":adj_out),
                 (flaps==""?0:flaps),
                 (drops==""?0:drops),
                 (sent==""?0:sent),
-                (recv==""?0:recv)
+                (recv==""?0:recv), sessions_ok
         }
     ' <<<"$body"
 }
@@ -295,7 +304,7 @@ done
 log "[stage 4] starting sampler — ${SAMPLE_INTERVAL}s cadence"
 
 # Header on first write.
-echo "timestamp,uptime_sec,mem_mb,cpu_pct,grpc_ok,rib_loc_evpn,adj_out_evpn_total,session_flaps_total,outbound_drops_total,msgs_sent_total,msgs_recv_total" > "$CSV"
+echo "timestamp,uptime_sec,mem_mb,cpu_pct,grpc_ok,rib_loc_evpn,adj_out_evpn_total,session_flaps_total,outbound_drops_total,msgs_sent_total,msgs_recv_total,bgp_sessions_established" > "$CSV"
 
 SOAK_START=$(date +%s)
 SAMPLER_RUN_FLAG="$RUN_DIR/.sampler-running"
@@ -333,12 +342,13 @@ touch "$SAMPLER_RUN_FLAG"
             grpc_ok=1
         fi
 
-        read -r rib_loc adj_out flaps drops sent recv <<<"$(sample_metrics)"
+        read -r rib_loc adj_out flaps drops sent recv sessions_ok <<<"$(sample_metrics)"
 
-        printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+        printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
             "$ts" "$uptime" "${mem_mb:-NaN}" "${cpu_pct:-NaN}" "$grpc_ok" \
             "${rib_loc:-NaN}" "${adj_out:-NaN}" \
             "${flaps:-0}" "${drops:-0}" "${sent:-0}" "${recv:-0}" \
+            "${sessions_ok:-NaN}" \
             >> "$CSV"
 
         sleep "$SAMPLE_INTERVAL"

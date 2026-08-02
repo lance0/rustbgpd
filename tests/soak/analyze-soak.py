@@ -13,6 +13,7 @@ Gates (defaults, all CLI-overridable):
   - session flap delta                    == 0
   - outbound route drop delta             == 0
   - gRPC health failures                  == 0
+  - all three BGP sessions established in final sample
   - daemon unhealthy in final 3 samples   false
   - process restart detected              false (counter monotonicity)
 
@@ -164,6 +165,7 @@ def main() -> int:
         "uptime_sec",
         "mem_mb",
         "grpc_ok",
+        "bgp_sessions_established",
         "session_flaps_total",
         "outbound_drops_total",
         "msgs_sent_total",
@@ -228,6 +230,17 @@ def main() -> int:
     # gRPC health rollup.
     grpc_failures = sum(1 for r in rows if r.get("grpc_ok") == "0")
 
+    terminal_sessions = rows[-1].get("bgp_sessions_established")
+    terminal_sessions_healthy = terminal_sessions == "1"
+    if terminal_sessions_healthy:
+        terminal_sessions_reason = "all 3 BGP sessions established"
+    elif terminal_sessions == "0":
+        terminal_sessions_reason = "one or more of 3 BGP sessions not established"
+    else:
+        terminal_sessions_reason = (
+            f"terminal BGP session evidence unavailable or invalid: {terminal_sessions!r}"
+        )
+
     # Daemon unhealthy at end: last 3 samples with grpc_ok==0 OR mem_mb==NaN.
     tail = rows[-3:]
     daemon_unhealthy_at_end = len(tail) >= 1 and all(
@@ -255,6 +268,8 @@ def main() -> int:
         fails.append(f"{drop_delta} outbound route drop(s) during soak")
     if grpc_failures > 0:
         fails.append(f"gRPC health failed on {grpc_failures}/{total_samples} samples")
+    if not terminal_sessions_healthy:
+        fails.append(terminal_sessions_reason)
     if daemon_unhealthy_at_end:
         fails.append("daemon unhealthy in final 3 samples (likely crashed)")
     if restart_detected:
@@ -271,6 +286,7 @@ def main() -> int:
         and flap_delta == 0
         and drop_delta == 0
         and grpc_failures == 0
+        and terminal_sessions_healthy
         and not daemon_unhealthy_at_end
         and not restart_detected
     ):
@@ -324,6 +340,11 @@ def main() -> int:
             "recv_delta": msgs_recv_last - msgs_recv_first,
         },
         "grpc_health_failures": grpc_failures,
+        "terminal_session_health": {
+            "healthy": terminal_sessions_healthy,
+            "value": terminal_sessions,
+            "reason": terminal_sessions_reason,
+        },
         "daemon_unhealthy_at_end": daemon_unhealthy_at_end,
         "restart_detected": restart_detected,
         "thresholds": {

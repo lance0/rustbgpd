@@ -94,7 +94,7 @@ Each run creates `tests/soak/runs/<UTC-timestamp>/` containing:
 
 | File | Content |
 |------|---------|
-| `samples.csv` | One row per sample interval (timestamp, uptime, RSS, CPU, gRPC health, EVPN RIB sizes, flap/drop/message counters) |
+| `samples.csv` | One row per sample interval (timestamp, uptime, RSS, CPU, gRPC health, three-session BGP health, EVPN RIB sizes, flap/drop/message counters) |
 | `soak.log` | Mirrored stdout/stderr from the runner |
 | `monitor.json` | Final report from the synthetic observer peer |
 | `monitor.log` | Tracing logs from the observer peer |
@@ -113,7 +113,8 @@ The runner exits non-zero if the analyzer fails any gate.
 | Session flap delta | `== 0` |
 | Outbound route drop delta | `== 0` |
 | gRPC health failures | `0` across all samples |
-| Daemon unhealthy at end (last 3 samples) | false |
+| BGP sessions established at end | Final sample is `1` only when exactly three valid peer gauges are present and all are established |
+| Daemon unavailable in all final 3 samples (gRPC failed or RSS missing) | false |
 | Process restart detected (counter monotonicity) | false |
 
 Verdicts: `clean` (slope < 0.5 MB/h and all gates pass), `pass` (gates pass
