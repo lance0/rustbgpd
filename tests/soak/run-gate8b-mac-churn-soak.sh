@@ -395,12 +395,21 @@ flip_stop_daemon() {
     esac
     docker exec "$container" sh -c \
         "pid=\$(pidof rustbgpd) && [ -n \"\$pid\" ] && kill ${signal} \$pid" \
-        2>/dev/null || true
-    local i
-    for i in $(seq 1 30); do
-        if ! docker exec "$container" pidof rustbgpd >/dev/null 2>&1; then
-            return 0
-        fi
+        2>/dev/null || return
+    local i state
+    for ((i = 0; i < 30; i++)); do
+        state="$(docker exec "$container" sh -c '
+            if pidof rustbgpd >/dev/null 2>&1; then
+                printf running
+            else
+                printf stopped
+            fi
+        ')" || return
+        case "$state" in
+            stopped) return 0 ;;
+            running) ;;
+            *) log "ERROR: $container returned unknown daemon state: $state"; return 1 ;;
+        esac
         sleep 1
     done
     log "WARN: $container rustbgpd did not exit within 30s of ${KILL_MODE} signal"
@@ -410,7 +419,16 @@ flip_stop_daemon() {
 flip_start_daemon() {
     local container="$1" local_ip="$2" remote_ip="$3"
     docker exec "$container" /usr/local/bin/start-rustbgpd-soak-gate8b.sh \
-        "$local_ip" "$remote_ip" "$VNI" || true
+        "$local_ip" "$remote_ip" "$VNI" || return
+}
+
+stop_pe2_daemon() {
+    flip_stop_daemon "$PE2_NAME" || return; PE2_RUNNING=0
+}
+
+start_pe2_daemon() {
+    flip_start_daemon "$PE2_NAME" 10.0.0.2 10.0.0.1 || return
+    wait_established_post_flip "$PE2_NAME" || return; PE2_RUNNING=1
 }
 
 # ---------------------------------------------------------------------------
@@ -862,12 +880,13 @@ while [ "$(date +%s)" -lt "$END_UNIX" ]; do
         if [ "$PE2_RUNNING" = "1" ]; then
             flip_log "stopping PE2 daemon (mode=${KILL_MODE})"
             log "flip: stopping PE2 daemon (mode=${KILL_MODE})"
-            flip_stop_daemon "$PE2_NAME" || true
-            PE2_RUNNING=0
+            if ! stop_pe2_daemon; then
+                log "FATAL: PE2 daemon stop failed"
+                exit 4
+            fi
         else
             flip_log "starting PE2 daemon"
             log "flip: starting PE2 daemon"
-            flip_start_daemon "$PE2_NAME" 10.0.0.2 10.0.0.1
             # Wait for re-establishment so the next sample isn't
             # credited as a nominal steady-state row when the
             # session has actually failed to come back. The fresh
@@ -876,13 +895,15 @@ while [ "$(date +%s)" -lt "$END_UNIX" ]; do
             # once). No cross-restart baseline survives — the
             # counter is in-process — so a `>= 1` gate is the
             # right invariant.
-            wait_established_post_flip "$PE2_NAME" || true
+            if ! start_pe2_daemon; then
+                log "FATAL: PE2 daemon start or session recovery failed"
+                exit 4
+            fi
             # Kernel netns survives a process restart, so the
             # bridge / VXLAN / CE veth / FDB rows are still in
             # place — the churn pool tracking remains accurate.
             # (The old `: >$PE2_POOL` reset was only needed when
             # the container itself was destroyed by `docker stop`.)
-            PE2_RUNNING=1
         fi
         # Post-flip guard: assert the clab veth + 10.0.0.x is
         # still intact. With process-restart this is defense in

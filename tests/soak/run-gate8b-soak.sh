@@ -47,6 +47,7 @@ SOAK_HOURS="${SOAK_HOURS:-24}"
 SAMPLE_INTERVAL="${SAMPLE_INTERVAL:-60}"          # seconds between CSV rows
 FLIP_INTERVAL_SEC="${FLIP_INTERVAL_SEC:-600}"     # 10-minute DF flips by default
 WARMUP_SEC="${WARMUP_SEC:-120}"                   # discard first 2 min of samples for slope
+BGP_ESTABLISHED_TIMEOUT_SEC="${BGP_ESTABLISHED_TIMEOUT_SEC:-300}"
 PE1_NAME="${PE1_NAME:-clab-gate8b-soak-pe1}"
 PE2_NAME="${PE2_NAME:-clab-gate8b-soak-pe2}"
 CLEANUP="${CLEANUP:-0}"                           # 1 = destroy topology on EXIT
@@ -189,6 +190,24 @@ bridge_flag_state() {
     fi
 }
 
+wait_current_established() {
+    local pe="$1" deadline current
+    deadline=$(($(date +%s) + BGP_ESTABLISHED_TIMEOUT_SEC))
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        current="$(prom_extract "$(prom_scrape "$pe")" bgp_peer_session_established)"
+        [ "${current:-0}" = "1" ] && return 0
+        sleep 5
+    done
+    log "ERROR: $pe did not return to Established within ${BGP_ESTABLISHED_TIMEOUT_SEC}s"; return 1
+}
+
+restart_pe2() {
+    docker start "$PE2_NAME" >/dev/null || return
+    docker exec "$PE2_NAME" /usr/local/bin/start-rustbgpd-soak-gate8b.sh 10.0.0.2 10.0.0.1 100 || return
+    wait_current_established "$PE2_NAME" || return
+    PE2_RUNNING=1
+}
+
 # ---------------------------------------------------------------------------
 # Pre-flight
 # ---------------------------------------------------------------------------
@@ -314,19 +333,19 @@ while [ "$(date +%s)" -lt "$END_UNIX" ]; do
         else
             flip_log "starting PE2"
             log "flip: starting PE2"
-            docker start "$PE2_NAME" >/dev/null
             # Re-exec the start script after `docker start` since
             # exec entries from the topology only fire on initial
             # deploy. Without this PE2 wouldn't bring up its bridge
             # / VXLAN on the second start.
-            docker exec "$PE2_NAME" /usr/local/bin/start-rustbgpd-soak-gate8b.sh \
-                10.0.0.2 10.0.0.1 100 || true
+            if ! restart_pe2; then
+                log "FATAL: PE2 restart or session recovery failed"
+                exit 4
+            fi
             # Re-attach the docker-logs tail since `docker start`
             # invalidated the prior tail's underlying stream.
             kill "$PE2_TAIL_PID" 2>/dev/null || true
             docker logs -f "$PE2_NAME" >>"$PE2_LOG" 2>&1 &
             PE2_TAIL_PID=$!
-            PE2_RUNNING=1
         fi
         NEXT_FLIP_UNIX="$((NOW + FLIP_INTERVAL_SEC))"
     fi
