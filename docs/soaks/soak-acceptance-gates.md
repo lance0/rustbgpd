@@ -141,8 +141,9 @@ values; window floors follow the same 0.9× rule as above.
 50 k EVPN Type 2 routes + continuous tester churn. Gates: RSS slope
 < 1.0 MB/h fail / < 0.5 clean; peak RSS < 512 MB; session-flap delta
 == 0 (flap/drop counters in `samples.csv`); outbound route-drop delta
-== 0; zero gRPC health failures; healthy at end; restart detection via
-counter monotonicity (`bgp_messages_sent_total`). Abort: two
+== 0; zero gRPC health failures; exactly three valid peer-session gauges
+and all Established in the final sample; restart detection via counter
+monotonicity (`bgp_messages_sent_total`). Abort: two
 consecutive gRPC health-check failures.
 
 ### 5. M37 local-origination MAC churn — `run-m37-local-origination-churn-soak.sh`
