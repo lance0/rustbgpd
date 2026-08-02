@@ -3,6 +3,7 @@ mod parse;
 pub mod profiles;
 mod resolution;
 mod schema;
+mod source_provenance;
 mod validation;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -139,6 +140,26 @@ impl Config {
         prior_datasets: Option<&rustbgpd_policy::datasets::DatasetBindings>,
         dataset_bind_mode: DatasetBindMode,
     ) -> Result<Self, String> {
+        Self::load_from_toml_source_with_capture(
+            content,
+            source_name,
+            base_dir,
+            prior_datasets,
+            dataset_bind_mode,
+            None,
+            None,
+        )
+    }
+
+    fn load_from_toml_source_with_capture(
+        content: &str,
+        source_name: &str,
+        base_dir: Option<&std::path::Path>,
+        prior_datasets: Option<&rustbgpd_policy::datasets::DatasetBindings>,
+        dataset_bind_mode: DatasetBindMode,
+        mut capture: Option<&mut source_provenance::SourceCapture>,
+        prior_manifest: Option<&source_provenance::SourceManifest>,
+    ) -> Result<Self, String> {
         let mut config: Config = match toml::from_str(content) {
             Ok(c) => c,
             Err(e) => {
@@ -158,7 +179,11 @@ impl Config {
         // namespace, and rpol compile diagnostics (already
         // ariadne-rendered against the .rpol source) are config load
         // errors in their own right.
-        if let Err(error) = config.load_rpol_files(base_dir) {
+        let rpol_result = match capture.as_deref_mut() {
+            Some(capture) => config.load_rpol_files_capturing(base_dir, Some(capture)),
+            None => config.load_rpol_files(base_dir),
+        };
+        if let Err(error) = rpol_result {
             return Err(match &error {
                 ConfigError::InvalidRpolFile { .. } => format!("error: {error}"),
                 other => diagnostic::render_diagnostic(content, source_name, other)
@@ -171,7 +196,17 @@ impl Config {
         // SIGHUP reload path) existing handles are reused — content
         // swaps happen inside them and a failed refresh keeps the
         // prior snapshot instead of failing the load.
-        if let Err(error) = config.bind_datasets(base_dir, prior_datasets, dataset_bind_mode) {
+        let dataset_result = match capture {
+            Some(capture) => config.bind_datasets_capturing(
+                base_dir,
+                prior_datasets,
+                dataset_bind_mode,
+                Some(capture),
+                prior_manifest,
+            ),
+            None => config.bind_datasets(base_dir, prior_datasets, dataset_bind_mode),
+        };
+        if let Err(error) = dataset_result {
             return Err(format!("error: {error}"));
         }
         if let Err(error) = config.validate() {
@@ -224,6 +259,14 @@ impl Config {
     /// entry's directory or a configured `[policy] rpol_roots` entry
     /// (enforced by `RpolFile::load`).
     fn load_rpol_files(&mut self, base_dir: Option<&std::path::Path>) -> Result<(), ConfigError> {
+        self.load_rpol_files_capturing(base_dir, None)
+    }
+
+    fn load_rpol_files_capturing(
+        &mut self,
+        base_dir: Option<&std::path::Path>,
+        mut capture: Option<&mut source_provenance::SourceCapture>,
+    ) -> Result<(), ConfigError> {
         use rustbgpd_policy::rpol::{LoadError, RpolFile, RpolPolicyEntry};
 
         // Bounds-check the graph budget here rather than in
@@ -269,7 +312,7 @@ impl Config {
             // (LAN-300) as one compilation unit — a missing or broken
             // import anywhere rejects the whole load.
             let file = match RpolFile::load(&path, &roots, max_graph_bytes) {
-                Ok(file) => Arc::new(file),
+                Ok(file) => file,
                 Err(LoadError::Io { path, reason }) => {
                     return Err(ConfigError::InvalidRpolFile { path, reason });
                 }
@@ -280,6 +323,10 @@ impl Config {
                     });
                 }
             };
+            if let Some(capture) = capture.as_deref_mut() {
+                capture.push_rpol_unit(&file);
+            }
+            let file = Arc::new(file);
             for (name, params) in file.policies() {
                 if self.policy.definitions.contains_key(name) {
                     return Err(ConfigError::InvalidRpolFile {
@@ -327,17 +374,30 @@ impl Config {
     /// 8.5). Datasets with no prior handle (initial load, new
     /// declarations, kind changes) must load cleanly or the whole load
     /// fails — introducing a dataset is a config transaction.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "declaration collection, two-way coverage checks, and the load/refresh state machine in one linear pass"
-    )]
     fn bind_datasets(
         &mut self,
         base_dir: Option<&std::path::Path>,
         prior: Option<&rustbgpd_policy::datasets::DatasetBindings>,
         mode: DatasetBindMode,
     ) -> Result<(), ConfigError> {
-        use rustbgpd_policy::datasets::{DatasetHandle, DatasetKind, load_dataset_file};
+        self.bind_datasets_capturing(base_dir, prior, mode, None, None)
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the dormant provenance handoff preserves the existing linear load state machine"
+    )]
+    fn bind_datasets_capturing(
+        &mut self,
+        base_dir: Option<&std::path::Path>,
+        prior: Option<&rustbgpd_policy::datasets::DatasetBindings>,
+        mode: DatasetBindMode,
+        mut capture: Option<&mut source_provenance::SourceCapture>,
+        prior_manifest: Option<&source_provenance::SourceManifest>,
+    ) -> Result<(), ConfigError> {
+        use rustbgpd_policy::datasets::{
+            DatasetHandle, DatasetKind, load_dataset_file, load_dataset_file_captured,
+        };
 
         // Declarations across every loaded unit: name → (kind, owner
         // path), kind conflicts rejected. Iterate registry entries
@@ -401,15 +461,33 @@ impl Config {
 
         // Load / refresh, deterministically ordered for stable logs.
         let mut names: Vec<&String> = declared.keys().collect();
-        names.sort();
+        names.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
         for name in names {
             let (kind, _) = declared[name.as_str()];
             let path = PathBuf::from(&self.policy.datasets[name.as_str()].path);
             let existing = prior
                 .and_then(|bindings| bindings.get(name))
                 .filter(|handle| handle.kind() == kind);
-            match (existing, load_dataset_file(&path, kind), mode) {
-                (Some(handle), Ok(data), DatasetBindMode::Stage) => {
+            let loaded = if capture.is_some() {
+                load_dataset_file_captured(&path, kind).map(|(data, source)| (data, Some(source)))
+            } else {
+                load_dataset_file(&path, kind)
+                    .map(|data| (data, None))
+                    .map_err(|reason| (reason, None))
+            };
+            if let Some(capture) = capture.as_deref_mut() {
+                match &loaded {
+                    Ok((_, Some(source))) => capture.push_dataset(name, kind, source),
+                    Err(_) if existing.is_some() => capture
+                        .retain_dataset(name, prior_manifest)
+                        .map_err(|reason| ConfigError::InvalidPolicyEntry {
+                            reason: format!("dataset {name:?}: {reason}"),
+                        })?,
+                    _ => {}
+                }
+            }
+            match (existing, loaded, mode) {
+                (Some(handle), Ok((data, _)), DatasetBindMode::Stage) => {
                     if handle.pin().data != data {
                         self.policy.dataset_events.swapped.push(name.clone());
                     }
@@ -420,7 +498,7 @@ impl Config {
                         .dataset_bindings
                         .insert(Arc::new(DatasetHandle::new(name, kind, data)));
                 }
-                (Some(handle), Err(reason), DatasetBindMode::Stage) => {
+                (Some(handle), Err((reason, _)), DatasetBindMode::Stage) => {
                     // A failed reload read retains the prior snapshot. Defer
                     // recording the operational error on the live handle too:
                     // an otherwise rejected config must have no side effects.
@@ -430,7 +508,7 @@ impl Config {
                         .push((name.clone(), reason));
                     self.policy.dataset_bindings.insert(Arc::clone(handle));
                 }
-                (Some(handle), Ok(data), DatasetBindMode::Apply) => {
+                (Some(handle), Ok((data, _)), DatasetBindMode::Apply) => {
                     if let Some(generation) = handle.refresh(data) {
                         tracing::info!(
                             dataset = %name,
@@ -441,7 +519,7 @@ impl Config {
                     }
                     self.policy.dataset_bindings.insert(Arc::clone(handle));
                 }
-                (Some(handle), Err(reason), DatasetBindMode::Apply) => {
+                (Some(handle), Err((reason, _)), DatasetBindMode::Apply) => {
                     // Keep the prior snapshot serving probes; surface
                     // the failure (WARN here, counter + `rbgp policy
                     // stats` via the recorded error).
@@ -457,12 +535,12 @@ impl Config {
                         .push((name.clone(), reason));
                     self.policy.dataset_bindings.insert(Arc::clone(handle));
                 }
-                (None, Ok(data), _) => {
+                (None, Ok((data, _)), _) => {
                     self.policy
                         .dataset_bindings
                         .insert(Arc::new(DatasetHandle::new(name, kind, data)));
                 }
-                (None, Err(reason), _) => {
+                (None, Err((reason, _)), _) => {
                     return Err(ConfigError::InvalidPolicyEntry {
                         reason: format!(
                             "dataset {name:?}: cannot load {}: {reason}",

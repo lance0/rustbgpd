@@ -36,10 +36,12 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::path::Path;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use arc_swap::ArcSwap;
+use sha2::{Digest, Sha256};
 
 use crate::sets::{AsnSet, CommunitySet, PrefixSet};
 
@@ -331,6 +333,22 @@ impl DatasetBindings {
     pub fn is_empty(&self) -> bool {
         self.handles.is_empty()
     }
+
+    /// Deep-copy current snapshots into independent handles. This is
+    /// for immutable config-source evidence, never config diffing.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn detached_clone(&self) -> Self {
+        let mut detached = Self::new();
+        for handle in self.handles.values() {
+            detached.insert(Arc::new(DatasetHandle::new(
+                handle.name(),
+                handle.kind(),
+                handle.pin().data.clone(),
+            )));
+        }
+        detached
+    }
 }
 
 impl PartialEq for DatasetBindings {
@@ -393,6 +411,64 @@ pub fn load_dataset_file(path: &Path, kind: DatasetKind) -> Result<DatasetData, 
     let text = std::fs::read_to_string(path)
         .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     crate::rpol::parse_dataset_text(&text, kind)
+}
+
+/// Lossless path and byte identity captured by the dataset loader.
+#[doc(hidden)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DatasetFileFingerprint {
+    pub canonical_path: PathBuf,
+    pub raw_len: u64,
+    pub raw_sha256: [u8; 32],
+}
+
+/// Canonicalize, open, and read a dataset once, then parse and return
+/// metadata derived from those same bytes.
+#[doc(hidden)]
+pub fn load_dataset_file_captured(
+    path: &Path,
+    kind: DatasetKind,
+) -> Result<(DatasetData, DatasetFileFingerprint), (String, Option<DatasetFileFingerprint>)> {
+    let failure = |message| (message, None);
+    let canonical_path = path
+        .canonicalize()
+        .map_err(|e| failure(format!("cannot stat {}: {e}", path.display())))?;
+    let file = std::fs::File::open(&canonical_path)
+        .map_err(|e| failure(format!("cannot read {}: {e}", path.display())))?;
+    let meta = file
+        .metadata()
+        .map_err(|e| failure(format!("cannot stat {}: {e}", path.display())))?;
+    if meta.len() > MAX_DATASET_BYTES {
+        return Err(failure(format!(
+            "{} is {} bytes — larger than the {MAX_DATASET_BYTES}-byte dataset bound",
+            path.display(),
+            meta.len()
+        )));
+    }
+    let mut bytes = Vec::with_capacity(usize::try_from(meta.len()).unwrap_or(0));
+    file.take(MAX_DATASET_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| failure(format!("cannot read {}: {e}", path.display())))?;
+    if bytes.len() as u64 > MAX_DATASET_BYTES {
+        return Err(failure(format!(
+            "{} grew larger than the {MAX_DATASET_BYTES}-byte dataset bound while reading",
+            path.display()
+        )));
+    }
+    let source = DatasetFileFingerprint {
+        canonical_path,
+        raw_len: u64::try_from(bytes.len()).expect("bounded source length fits u64"),
+        raw_sha256: Sha256::digest(&bytes).into(),
+    };
+    let text = String::from_utf8(bytes).map_err(|error| {
+        (
+            format!("cannot read {}: {error}", path.display()),
+            Some(source.clone()),
+        )
+    })?;
+    let data = crate::rpol::parse_dataset_text(&text, kind)
+        .map_err(|message| (message, Some(source.clone())))?;
+    Ok((data, source))
 }
 
 #[cfg(test)]
