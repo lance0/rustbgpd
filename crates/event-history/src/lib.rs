@@ -104,6 +104,7 @@ pub const DEFAULT_RETENTION_INTERVAL: Duration = Duration::from_secs(60);
 /// authoritative for allocator recovery because it may lag the committed DB.
 pub const DEFAULT_SIDECAR_FLUSH_INTERVAL_BATCHES: u64 = 100;
 
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 /// SQLite `PRAGMA synchronous` mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SynchronousMode {
@@ -521,19 +522,13 @@ pub struct EventHistoryManager {
     storage_join: Option<JoinHandle<()>>,
     daemon_boot_id: Arc<str>,
     state: Arc<EhmState>,
+    shutdown_progress: Arc<ShutdownProgress>,
     /// Configured retention caps, kept so
     /// [`Self::run_retention_pass`] submits the same pass the actor's
     /// interval timer would.
     max_events: u64,
     max_bytes: u64,
-    /// Shared shutdown signal. `shutdown()` flips the watch value to
-    /// `true`; every storage await + producer-receive in the actor
-    /// loop is wrapped in a `tokio::select!` that races
-    /// `shutdown_rx.changed()`, so a wedged storage op can NOT hold
-    /// the actor past shutdown. Producers can keep
-    /// [`EventHistorySender`] clones alive across shutdown without
-    /// deadlocking the actor on `rx.recv()`.
-    shutdown_tx: watch::Sender<bool>,
+    shutdown_tx: watch::Sender<Option<tokio::time::Instant>>,
 }
 
 impl std::fmt::Debug for EventHistoryManager {
@@ -760,7 +755,7 @@ impl EventHistoryManager {
 
         let (producer_tx, producer_rx) = mpsc::channel(config.queue_capacity);
         let (broadcast_tx, _) = broadcast::channel(config.broadcast_capacity);
-        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let (shutdown_tx, shutdown_rx) = watch::channel(None);
         let queue_depths = Arc::new(QueueDepths::default());
         initialize_queue_depth_metrics(config.metrics.as_ref());
 
@@ -770,6 +765,8 @@ impl EventHistoryManager {
         let actor_boot_id = daemon_boot_id.clone();
         let actor_config = config.clone();
         let actor_queue_depths = queue_depths.clone();
+        let shutdown_progress = Arc::new(ShutdownProgress::default());
+        let actor_shutdown_progress = Arc::clone(&shutdown_progress);
 
         let actor = tokio::spawn(async move {
             run_actor(
@@ -780,6 +777,7 @@ impl EventHistoryManager {
                     broadcast_tx: actor_broadcast,
                     daemon_boot_id: actor_boot_id,
                     queue_depths: actor_queue_depths,
+                    shutdown_progress: actor_shutdown_progress,
                 },
                 producer_rx,
                 shutdown_rx,
@@ -806,6 +804,7 @@ impl EventHistoryManager {
             storage_join: Some(storage_join),
             daemon_boot_id,
             state,
+            shutdown_progress,
             max_events: config.max_events,
             max_bytes: config.max_bytes,
             shutdown_tx,
@@ -912,33 +911,40 @@ impl EventHistoryManager {
     /// Safe to call while producer-held [`EventHistorySender`] clones
     /// are still alive — shutdown is `watch::channel`-driven, not
     /// channel-drop-driven. Producers calling `try_send` after
-    /// shutdown will see `TrySendError::Closed` once the storage
-    /// thread exits.
+    /// shutdown will see `TrySendError::Closed` once the actor closes
+    /// producer admission.
     ///
-    /// **Bounded by `shutdown_timeout`**: the actor wraps its storage
-    /// awaits in a `tokio::select!` with `shutdown_rx.changed()`, so
-    /// a wedged SQLite/disk operation can NOT hold us past the
-    /// shutdown signal. After the actor exits, we send
-    /// `StoreOp::Shutdown` to the storage thread and await its join
-    /// handle with a hard timeout so a wedged blocking thread can't
-    /// stall the daemon binary exit (we log and abandon the blocking
-    /// thread if it doesn't return — the OS reclaims it on process
-    /// exit).
+    /// One five-second deadline bounds drain and storage finalization.
     pub async fn shutdown(mut self) {
-        // Signal the actor first. `watch::Sender::send` ignores the
-        // closed-receiver error because the actor may already have
-        // exited (e.g., DB-open failure during start).
-        let _ = self.shutdown_tx.send(true);
-        if let Some(actor) = self.actor.take() {
-            let _ = actor.await;
+        let deadline = tokio::time::Instant::now() + SHUTDOWN_TIMEOUT;
+        let _ = self.shutdown_tx.send(Some(deadline));
+        if let Some(mut actor) = self.actor.take() {
+            let result = match tokio::time::timeout_at(deadline, &mut actor).await {
+                Ok(result) => result,
+                Err(_) => {
+                    actor.abort();
+                    actor.await
+                }
+            };
+            if let Err(error) = result {
+                warn!(%error, "event-history actor did not complete cleanly during shutdown");
+                reconcile_abandoned_queue(&self.sender.queue_depths, self.sender.metrics.as_ref());
+                if !self
+                    .shutdown_progress
+                    .accepted_complete
+                    .load(Ordering::Acquire)
+                {
+                    record_shutdown_loss(
+                        &self.state,
+                        &self.shutdown_progress,
+                        self.sender.metrics.as_ref(),
+                    );
+                }
+            }
         }
-        // Now drain the storage thread. Best-effort with a bounded
-        // timeout so a wedged spawn_blocking task doesn't hold the
-        // caller forever.
-        let _ =
-            tokio::time::timeout(std::time::Duration::from_secs(5), self.storage.shutdown()).await;
+        let _ = tokio::time::timeout_at(deadline, self.storage.shutdown()).await;
         if let Some(j) = self.storage_join.take() {
-            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), j).await;
+            let _ = tokio::time::timeout_at(deadline, j).await;
         }
     }
 }
@@ -950,12 +956,100 @@ struct ActorContext {
     broadcast_tx: broadcast::Sender<CommittedEvent>,
     daemon_boot_id: Arc<str>,
     queue_depths: Arc<QueueDepths>,
+    shutdown_progress: Arc<ShutdownProgress>,
+}
+
+#[derive(Debug, Default)]
+struct ShutdownProgress {
+    loss_recorded: AtomicBool,
+    accepted_complete: AtomicBool,
+    #[cfg(test)]
+    loss_latches: AtomicU64,
+}
+
+fn record_shutdown_loss(
+    state: &EhmState,
+    progress: &ShutdownProgress,
+    metrics: Option<&BgpMetrics>,
+) {
+    if !progress.loss_recorded.swap(true, Ordering::AcqRel) {
+        #[cfg(test)]
+        progress.loss_latches.fetch_add(1, Ordering::AcqRel);
+        state.flip_degraded();
+        if let Some(metrics) = metrics {
+            metrics.mark_event_outbox_degraded();
+        }
+    }
+}
+
+fn mark_accepted_complete(progress: &ShutdownProgress) {
+    progress.accepted_complete.store(true, Ordering::Release);
+}
+
+fn shutdown_deadline_from(
+    changed: Result<(), watch::error::RecvError>,
+    rx: &watch::Receiver<Option<tokio::time::Instant>>,
+) -> tokio::time::Instant {
+    changed
+        .ok()
+        .and_then(|()| *rx.borrow())
+        .unwrap_or_else(|| tokio::time::Instant::now() + SHUTDOWN_TIMEOUT)
+}
+
+fn receive_event(
+    env: EventEnvelope,
+    buffer: &mut Vec<EventEnvelope>,
+    queue_depths: &QueueDepths,
+    metrics: Option<&BgpMetrics>,
+) {
+    let depth = queue_depths.decrement(env.category);
+    set_queue_depth_metric(metrics, env.category, depth);
+    buffer.push(env);
+}
+
+fn begin_actor_shutdown(
+    deadline: tokio::time::Instant,
+    current: &mut Option<tokio::time::Instant>,
+    rx: &mut mpsc::Receiver<EventEnvelope>,
+    retention_task: &mut Option<JoinHandle<Result<RetentionOutcome, EventHistoryError>>>,
+) {
+    if current.is_none() {
+        *current = Some(deadline);
+        rx.close();
+        if let Some(task) = retention_task.take() {
+            task.abort();
+        }
+    }
+}
+
+fn discard_accepted_queue(
+    rx: &mut mpsc::Receiver<EventEnvelope>,
+    queue_depths: &QueueDepths,
+    metrics: Option<&BgpMetrics>,
+) -> usize {
+    let mut dropped = 0;
+    while let Ok(env) = rx.try_recv() {
+        let depth = queue_depths.decrement(env.category);
+        set_queue_depth_metric(metrics, env.category, depth);
+        if let Some(metrics) = metrics {
+            metrics.record_event_outbox_drop(env.category.as_str(), "shutdown_timeout");
+        }
+        dropped += 1;
+    }
+    dropped
+}
+
+fn reconcile_abandoned_queue(queue_depths: &QueueDepths, metrics: Option<&BgpMetrics>) {
+    for category in Category::ALL {
+        queue_depths.counter(category).store(0, Ordering::Release);
+        set_queue_depth_metric(metrics, category, 0);
+    }
 }
 
 async fn run_actor(
     ctx: ActorContext,
     mut rx: mpsc::Receiver<EventEnvelope>,
-    mut shutdown_rx: watch::Receiver<bool>,
+    mut shutdown_rx: watch::Receiver<Option<tokio::time::Instant>>,
 ) {
     let ActorContext {
         config,
@@ -964,6 +1058,7 @@ async fn run_actor(
         broadcast_tx,
         daemon_boot_id,
         queue_depths,
+        shutdown_progress,
     } = ctx;
 
     let mut buffer: Vec<EventEnvelope> = Vec::with_capacity(config.batch_size);
@@ -972,98 +1067,106 @@ async fn run_actor(
     let mut retention_task: Option<
         JoinHandle<Result<storage::RetentionOutcome, EventHistoryError>>,
     > = None;
+    let mut shutdown_deadline = None;
+    let mut accepted_drained = false;
     retention_interval.tick().await; // skip the immediate tick
 
-    loop {
-        // Fast-path bail: shutdown_rx already saw the flip.
-        if *shutdown_rx.borrow() {
-            break;
-        }
-
-        let deadline = tokio::time::sleep(config.batch_interval);
-        tokio::pin!(deadline);
-
-        // Phase 1: gather a batch.
-        let mut shutdown_requested = false;
-        loop {
-            tokio::select! {
-                maybe = rx.recv() => {
-                    match maybe {
-                        Some(env) => {
-                            let depth = queue_depths.decrement(env.category);
-                            set_queue_depth_metric(config.metrics.as_ref(), env.category, depth);
-                            buffer.push(env);
-                            if buffer.len() >= config.batch_size {
-                                break;
-                            }
-                        }
-                        // All senders dropped — also a valid shutdown
-                        // signal, distinct from the explicit watch
-                        // (which works while clones remain alive).
-                        None => { shutdown_requested = true; break; }
+    'actor: loop {
+        if let Some(deadline) = shutdown_deadline {
+            while buffer.len() < config.batch_size && !accepted_drained {
+                match tokio::time::timeout_at(deadline, rx.recv()).await {
+                    Ok(Some(env)) => {
+                        receive_event(env, &mut buffer, &queue_depths, config.metrics.as_ref())
                     }
-                }
-                () = &mut deadline => {
-                    break;
-                }
-                changed = shutdown_rx.changed() => {
-                    if changed.is_err() || *shutdown_rx.borrow() {
-                        shutdown_requested = true;
-                        break;
-                    }
-                }
-                _ = retention_interval.tick() => {
-                    if retention_task.as_ref().is_some_and(|task| !task.is_finished()) {
-                        continue;
-                    }
-                    if let Some(task) = retention_task.take()
-                    {
-                        match task.await {
-                            Ok(Ok(outcome)) => {
-                                record_retention_metrics(config.metrics.as_ref(), outcome);
-                            }
-                            Ok(Err(e)) => warn!(error = %e, "retention pass failed"),
-                            Err(e) => warn!(error = %e, "retention task join failed"),
-                        }
-                    }
-                    let store = store.clone();
-                    let max_events = config.max_events;
-                    let max_bytes = config.max_bytes;
-                    retention_task = Some(tokio::spawn(async move {
-                        store.retain(max_events, max_bytes).await
-                    }));
-                }
-            }
-        }
-
-        // If shutdown was signaled mid-gather, drain any events the
-        // producer queue still has buffered before committing the
-        // final batch. Bounded by `batch_size * 2` so a wedged
-        // producer can't keep us in this loop forever.
-        if shutdown_requested {
-            let drain_cap = config.batch_size.saturating_mul(2);
-            while buffer.len() < drain_cap {
-                match rx.try_recv() {
-                    Ok(env) => {
-                        let depth = queue_depths.decrement(env.category);
-                        set_queue_depth_metric(config.metrics.as_ref(), env.category, depth);
-                        buffer.push(env);
-                    }
+                    Ok(None) => accepted_drained = true,
                     Err(_) => break,
                 }
             }
+        } else {
+            let batch_deadline = tokio::time::sleep(config.batch_interval);
+            tokio::pin!(batch_deadline);
+            while buffer.len() < config.batch_size {
+                tokio::select! {
+                    maybe = rx.recv() => match maybe {
+                        Some(env) => receive_event(
+                            env,
+                            &mut buffer,
+                            &queue_depths,
+                            config.metrics.as_ref(),
+                        ),
+                        None => {
+                            let deadline = tokio::time::Instant::now() + SHUTDOWN_TIMEOUT;
+                            begin_actor_shutdown(
+                                deadline,
+                                &mut shutdown_deadline,
+                                &mut rx,
+                                &mut retention_task,
+                            );
+                            accepted_drained = true;
+                            break;
+                        }
+                    },
+                    () = &mut batch_deadline => break,
+                    changed = shutdown_rx.changed() => {
+                        let deadline = shutdown_deadline_from(changed, &shutdown_rx);
+                        begin_actor_shutdown(
+                            deadline,
+                            &mut shutdown_deadline,
+                            &mut rx,
+                            &mut retention_task,
+                        );
+                        break;
+                    }
+                    _ = retention_interval.tick() => {
+                        if retention_task.as_ref().is_some_and(|task| !task.is_finished()) {
+                            continue;
+                        }
+                        if let Some(task) = retention_task.take() {
+                            match task.await {
+                                Ok(Ok(outcome)) => record_retention_metrics(
+                                    config.metrics.as_ref(),
+                                    outcome,
+                                ),
+                                Ok(Err(e)) => warn!(error = %e, "retention pass failed"),
+                                Err(e) => warn!(error = %e, "retention task join failed"),
+                            }
+                        }
+                        let store = store.clone();
+                        let max_events = config.max_events;
+                        let max_bytes = config.max_bytes;
+                        retention_task = Some(tokio::spawn(async move {
+                            store.retain(max_events, max_bytes).await
+                        }));
+                    }
+                }
+            }
+        }
+
+        if buffer.is_empty() && accepted_drained {
+            mark_accepted_complete(&shutdown_progress);
+            break;
+        }
+
+        if buffer.is_empty()
+            && shutdown_deadline.is_some_and(|deadline| deadline <= tokio::time::Instant::now())
+        {
+            let dropped = discard_accepted_queue(&mut rx, &queue_depths, config.metrics.as_ref());
+            if dropped > 0 {
+                record_shutdown_loss(&state, &shutdown_progress, config.metrics.as_ref());
+                warn!(
+                    dropped,
+                    "event-history shutdown deadline expired; accepted events lost"
+                );
+            } else {
+                mark_accepted_complete(&shutdown_progress);
+            }
+            break;
         }
 
         // Phase 2: commit, broadcast, update state.
         //
-        // `store.append()` is a spawn_blocking-backed operation that
-        // can wedge behind a slow/locked SQLite or a stalled disk. We
-        // race it against
-        // `shutdown_rx.changed()` so a stalled append can't hold the
-        // actor past shutdown. The committed-side guarantee still
-        // holds — if shutdown cancels the await before append
-        // returns, the events are NEITHER persisted NOR broadcast,
-        // matching the "no live event without durability" contract.
+        // Shutdown keeps polling the same submitted append future until the
+        // shared deadline; timeout makes persistence unknown.
         if !buffer.is_empty() {
             // Project the gathered envelopes into Arcs ONCE. The same
             // Arcs are handed to the storage thread (for the INSERT
@@ -1074,35 +1177,29 @@ async fn run_actor(
                 .into_iter()
                 .map(Arc::new)
                 .collect();
-            let len = shared.len();
             let append_input = shared.clone(); // Vec<Arc<...>> clone: pointer-bump only
-
-            let append_result = tokio::select! {
-                res = store.append(append_input) => res,
-                changed = shutdown_rx.changed() => {
-                    if changed.is_err() || *shutdown_rx.borrow() {
-                        warn!(
-                            pending = len,
-                            "shutdown requested mid-batch; pending events lost (not persisted, not broadcast)"
+            let mut append = Box::pin(store.append(append_input));
+            let append_result = if let Some(deadline) = shutdown_deadline {
+                tokio::time::timeout_at(deadline, &mut append).await
+            } else {
+                tokio::select! {
+                    biased;
+                    changed = shutdown_rx.changed() => {
+                        let deadline = shutdown_deadline_from(changed, &shutdown_rx);
+                        begin_actor_shutdown(
+                            deadline,
+                            &mut shutdown_deadline,
+                            &mut rx,
+                            &mut retention_task,
                         );
-                        state.flip_degraded();
-                        break;
-                    } else {
-                        // Spurious wake (shouldn't happen for a
-                        // boolean watch we never write again).
-                        // Re-stash the envelopes back into buffer
-                        // and continue around the outer loop.
-                        buffer = shared
-                            .iter()
-                            .map(|e| (**e).clone())
-                            .collect();
-                        continue;
+                        tokio::time::timeout_at(deadline, &mut append).await
                     }
+                    res = &mut append => Ok(res),
                 }
             };
 
             match append_result {
-                Ok(outcome) => {
+                Ok(Ok(outcome)) => {
                     state
                         .latest_event_id
                         .store(outcome.new_high_water, Ordering::Release);
@@ -1121,45 +1218,306 @@ async fn run_actor(
                         let _ = broadcast_tx.send(committed);
                     }
                     batches_since_sidecar_flush += 1;
-                    if batches_since_sidecar_flush >= config.sidecar_flush_interval_batches {
+                    if batches_since_sidecar_flush >= config.sidecar_flush_interval_batches
+                        && shutdown_deadline.is_none()
+                    {
                         batches_since_sidecar_flush = 0;
+                        let mut flush = Box::pin(store.flush_sidecar());
                         let flush_result = tokio::select! {
-                            res = store.flush_sidecar() => res,
-                            _ = shutdown_rx.changed() => Ok(0),  // shutdown will flush again below
+                            biased;
+                            changed = shutdown_rx.changed() => {
+                                let deadline = shutdown_deadline_from(changed, &shutdown_rx);
+                                begin_actor_shutdown(
+                                    deadline,
+                                    &mut shutdown_deadline,
+                                    &mut rx,
+                                    &mut retention_task,
+                                );
+                                if rx.is_empty() {
+                                    accepted_drained = true;
+                                    mark_accepted_complete(&shutdown_progress);
+                                }
+                                tokio::time::timeout_at(deadline, &mut flush).await.ok()
+                            }
+                            result = &mut flush => Some(result),
                         };
-                        if let Err(e) = flush_result {
+                        if let Some(Err(e)) = flush_result {
                             warn!(error = %e, "sidecar flush failed; will retry next batch");
+                        } else if flush_result.is_none() {
+                            let dropped = discard_accepted_queue(
+                                &mut rx,
+                                &queue_depths,
+                                config.metrics.as_ref(),
+                            );
+                            if dropped > 0 {
+                                record_shutdown_loss(
+                                    &state,
+                                    &shutdown_progress,
+                                    config.metrics.as_ref(),
+                                );
+                            } else {
+                                mark_accepted_complete(&shutdown_progress);
+                            }
+                            warn!(
+                                dropped,
+                                "event-history shutdown deadline expired during sidecar flush"
+                            );
+                            break 'actor;
                         }
                     }
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     error!(error = %e, "batch commit failed; events dropped");
                     record_commit_failure_metrics(config.metrics.as_ref(), &shared);
                     state.flip_degraded();
                 }
+                Err(_) => {
+                    let queued =
+                        discard_accepted_queue(&mut rx, &queue_depths, config.metrics.as_ref());
+                    record_shutdown_loss(&state, &shutdown_progress, config.metrics.as_ref());
+                    warn!(
+                        pending = shared.len(),
+                        queued,
+                        "event-history shutdown deadline expired with an append outcome unknown"
+                    );
+                    break;
+                }
             }
         }
+    }
 
-        if shutdown_requested || *shutdown_rx.borrow() {
-            // Final sidecar flush so the recovery ladder has the most
-            // up-to-date anchor in case the next start opens against a
-            // corrupted DB. Bounded by a short timeout so a wedged
-            // sidecar write can't hold the actor here.
-            let flush_result =
-                tokio::time::timeout(std::time::Duration::from_secs(2), store.flush_sidecar())
-                    .await;
-            match flush_result {
-                Ok(Ok(_)) => {}
-                Ok(Err(e)) => warn!(error = %e, "final sidecar flush failed"),
-                Err(_) => warn!("final sidecar flush timed out"),
-            }
-            info!(
-                daemon_boot_id = %daemon_boot_id.as_ref(),
-                final_event_id = state.latest_event_id(),
-                broadcast_subscribers = broadcast_tx.receiver_count(),
-                "event history actor shutting down"
+    if let Some(deadline) = shutdown_deadline {
+        match tokio::time::timeout_at(deadline, store.flush_sidecar()).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => warn!(error = %e, "final sidecar flush failed"),
+            Err(_) => warn!("final sidecar flush timed out"),
+        }
+    }
+    info!(
+        daemon_boot_id = %daemon_boot_id.as_ref(),
+        final_event_id = state.latest_event_id(),
+        broadcast_subscribers = broadcast_tx.receiver_count(),
+        "event history actor shutting down"
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use storage::TestStoreOp::{Append, Flush, Shutdown};
+
+    fn test_config(path: PathBuf, batch_size: usize) -> EventHistoryConfig {
+        EventHistoryConfig {
+            path,
+            batch_size,
+            batch_interval: Duration::from_secs(60),
+            ..EventHistoryConfig::default()
+        }
+    }
+
+    fn event(category: Category, value: u8) -> EventEnvelope {
+        EventEnvelope {
+            timestamp_ns: i64::from(value),
+            category,
+            event_type: "test".into(),
+            peers: EnvelopePeers::default(),
+            afi_safi: None,
+            prefix: None,
+            rd: None,
+            evpn_route_type: None,
+            severity: Severity::Info,
+            payload_codec: PayloadCodec::Opaque,
+            payload: vec![value],
+        }
+    }
+
+    async fn wait_for_store(store: &storage::StoreHandle, op: storage::TestStoreOp) {
+        tokio::time::timeout(Duration::from_secs(1), store.test_wait_for_send(op))
+            .await
+            .expect("storage request backstop elapsed");
+    }
+
+    #[tokio::test]
+    async fn shutdown_drains_every_accepted_event_with_live_sender() {
+        // Load-bearing breaks: the old batch_size*2 cap loses five events;
+        // omitting receiver close exceeds the one-second backstop.
+        let dir = tempfile::tempdir().unwrap();
+        let manager = EventHistoryManager::start(test_config(dir.path().join("events.db"), 4))
+            .await
+            .unwrap();
+        let sender = manager.sender();
+        let state = manager.state();
+        let queue_depths = Arc::clone(&manager.sender.queue_depths);
+        let mut committed = manager.subscribe();
+        let categories = Category::ALL;
+        for value in 0..13 {
+            sender
+                .try_send(event(
+                    categories[usize::from(value) % categories.len()],
+                    value,
+                ))
+                .unwrap();
+        }
+
+        tokio::time::timeout(Duration::from_secs(1), manager.shutdown())
+            .await
+            .expect("finite accepted queue did not drain within the aggregate bound");
+        assert_eq!(state.latest_event_id(), 13);
+        for expected in 0..13 {
+            let observed = committed.try_recv().unwrap();
+            assert_eq!(observed.envelope.payload, vec![expected]);
+        }
+        for category in Category::ALL {
+            assert_eq!(
+                queue_depths.counter(category).load(Ordering::Acquire),
+                0,
+                "{category:?} queue depth did not drain"
             );
-            break;
+        }
+        assert!(matches!(
+            sender.try_send(event(Category::Route, 99)),
+            Err(mpsc::error::TrySendError::Closed(_))
+        ));
+        drop(sender);
+    }
+
+    #[tokio::test]
+    async fn shutdown_continues_the_same_append_after_store_send() {
+        // Load-bearing breaks: canceling the in-flight append at shutdown loses
+        // the broadcast/state update; recreating it increments append_calls.
+        let dir = tempfile::tempdir().unwrap();
+        let manager = EventHistoryManager::start(test_config(dir.path().join("events.db"), 1))
+            .await
+            .unwrap();
+        let store = manager.storage.clone();
+        let state = manager.state();
+        let mut committed = manager.subscribe();
+        store.test_pause_after_send(Append);
+        manager
+            .sender()
+            .try_send(event(Category::Session, 7))
+            .unwrap();
+        wait_for_store(&store, Append).await;
+
+        let shutdown = tokio::spawn(manager.shutdown());
+        tokio::task::yield_now().await;
+        store.test_release(Append);
+        tokio::time::timeout(Duration::from_secs(6), shutdown)
+            .await
+            .expect("submitted append was not continued within the shutdown bound")
+            .unwrap();
+
+        assert_eq!(store.test_append_calls(), 1);
+        assert_eq!(state.latest_event_id(), 1);
+        assert_eq!(committed.try_recv().unwrap().envelope.payload, vec![7]);
+        assert!(!state.degraded());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn actor_uses_shared_deadline_and_latches_unknown_append_once() {
+        // Load-bearing breaks: a reset deadline stays pending; missing the
+        // latch/gauge or counting an unknown DB outcome makes assertions red.
+        let dir = tempfile::tempdir().unwrap();
+        let metrics = BgpMetrics::new();
+        let mut config = test_config(dir.path().join("events.db"), 1);
+        config.metrics = Some(metrics.clone());
+        let mut manager = EventHistoryManager::start(config).await.unwrap();
+        let store = manager.storage.clone();
+        let state = manager.state();
+        let progress = Arc::clone(&manager.shutdown_progress);
+        store.test_pause_after_send(Append);
+        manager
+            .sender()
+            .try_send(event(Category::Policy, 9))
+            .unwrap();
+        wait_for_store(&store, Append).await;
+        manager
+            .sender()
+            .try_send(event(Category::Route, 10))
+            .unwrap();
+
+        let deadline = tokio::time::Instant::now() + SHUTDOWN_TIMEOUT;
+        tokio::time::advance(Duration::from_secs(2)).await;
+        manager.shutdown_tx.send(Some(deadline)).unwrap();
+        let actor = manager.actor.take().unwrap();
+        tokio::time::advance(Duration::from_secs(3)).await;
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        let finished = actor.is_finished();
+        store.test_release(Append);
+        actor.await.unwrap();
+        assert!(finished, "actor reset the shared deadline");
+        assert!(state.degraded());
+        assert!(metrics.event_outbox_degraded());
+        let families = metrics.registry().gather();
+        let dropped = families
+            .iter()
+            .find(|family| family.name() == "bgp_event_outbox_dropped_total")
+            .expect("queued expiry must report one definite drop");
+        assert_eq!(dropped.get_metric().len(), 1);
+        let dropped = &dropped.get_metric()[0];
+        let labels = dropped.get_label();
+        let has_label = |name, value| {
+            labels
+                .iter()
+                .any(|label| label.name() == name && label.value() == value)
+        };
+        assert!(has_label("category", "route"));
+        assert!(has_label("reason", "shutdown_timeout"));
+        assert_eq!(dropped.get_counter().value(), 1.0);
+        assert_eq!(progress.loss_latches.load(Ordering::Acquire), 1);
+        record_shutdown_loss(&state, &progress, Some(&metrics));
+        assert_eq!(progress.loss_latches.load(Ordering::Acquire), 1);
+        assert_eq!(store.test_append_calls(), 1);
+        manager.shutdown().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn finalization_timeouts_share_deadline_without_recording_event_loss() {
+        // Load-bearing breaks: a reset storage deadline stays pending; treating
+        // periodic Flush or storage finalization as loss flips the latch.
+        for op in [Flush, Shutdown] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut config = test_config(dir.path().join("events.db"), 1);
+            config.sidecar_flush_interval_batches = if matches!(op, Flush) { 1 } else { u64::MAX };
+            let manager = EventHistoryManager::start(config).await.unwrap();
+            let store = manager.storage.clone();
+            let state = manager.state();
+            let progress = Arc::clone(&manager.shutdown_progress);
+            let mut committed = manager.subscribe();
+            store.test_pause_after_send(op);
+            if matches!(op, Shutdown) {
+                store.test_pause_after_send(Flush);
+            }
+            manager.sender().try_send(event(Category::Bfd, 3)).unwrap();
+            tokio::time::timeout(Duration::from_secs(1), committed.recv())
+                .await
+                .expect("committed event backstop elapsed")
+                .unwrap();
+
+            let shutdown = tokio::spawn(manager.shutdown());
+            tokio::task::yield_now().await;
+            if matches!(op, Shutdown) {
+                wait_for_store(&store, Flush).await;
+                tokio::time::advance(Duration::from_secs(2)).await;
+                store.test_release(Flush);
+            }
+            wait_for_store(&store, op).await;
+            tokio::time::advance(if matches!(op, Shutdown) {
+                Duration::from_secs(3)
+            } else {
+                SHUTDOWN_TIMEOUT
+            })
+            .await;
+            tokio::task::yield_now().await;
+            let finished = shutdown.is_finished();
+            store.test_release(op);
+            shutdown.await.unwrap();
+            assert!(finished, "{op:?} reset the shared deadline");
+            assert_eq!(state.latest_event_id(), 1);
+            assert!(!state.degraded());
+            assert_eq!(progress.loss_latches.load(Ordering::Acquire), 0);
         }
     }
 }

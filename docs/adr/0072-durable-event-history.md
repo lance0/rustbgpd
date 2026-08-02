@@ -604,6 +604,17 @@ degraded flag flips. Route installs / FSM transitions are
 unaffected — there is no shared lock or blocking call between the
 producer hot path and the SQLite writer.
 
+**Orderly shutdown**: one absolute five-second deadline closes producer admission,
+aborts retention, and drains the finite accepted queue to `recv() == None` in
+`batch_size` chunks. Live sender clones receive `Closed`; they cannot extend the
+drain. A submitted append keeps the same future rather than being resubmitted. The
+deadline also bounds final sidecar flush, storage shutdown, and the wait for thread
+join; non-waiting runtime teardown bounds process exit if that thread stays wedged.
+
+Actor-observed queued expiry is definite `shutdown_timeout` loss; the manager's
+outer abort latches degradation without turning racy depth gauges into drop counts.
+Submitted append outcome is unknown; post-confirmation timeout is finalization only.
+
 ### Observability
 
 Prometheus counters and gauges added by this work:
@@ -612,7 +623,7 @@ Prometheus counters and gauges added by this work:
   committed.
 - `bgp_event_outbox_dropped_total{category, reason}` — drops by
   category and reason (`queue_full`, `closed`, `db_error`,
-  `decode_failure`, `opaque_codec`).
+  `shutdown_timeout`, `decode_failure`, `opaque_codec`).
 - `bgp_event_outbox_queue_depth{category}` — pending in-memory
   queue per category (gauge).
 - `bgp_event_outbox_db_size_bytes` — current

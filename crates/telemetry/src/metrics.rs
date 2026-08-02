@@ -4392,7 +4392,7 @@ impl BgpMetrics {
     }
 
     /// Record an outbox drop or cursor-delivery skip. `reason` is
-    /// bounded by caller: `queue_full`, `closed`, `db_error`,
+    /// bounded by caller: `queue_full`, `closed`, `db_error`, `shutdown_timeout`,
     /// `decode_failure`, `opaque_codec`, or `source_lagged`. Call
     /// [`Self::mark_event_outbox_degraded`] separately when the drop
     /// represents an operator-visible outbox degradation; shutdown-time

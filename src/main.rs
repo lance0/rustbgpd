@@ -2640,6 +2640,7 @@ fn main() -> ExitCode {
         .build()
         .unwrap_or_else(|e| fatal_startup_error("failed to create tokio runtime", e));
     let grpc_server_failed = rt.block_on(run(config, boot_revert_notice, profiler));
+    shutdown_daemon_runtime(rt);
     if grpc_server_failed {
         // The coordinated teardown already ran (NOTIFICATIONs, GR marker,
         // checkpoints); the non-zero code tells supervisors (e.g. systemd
@@ -2647,6 +2648,10 @@ fn main() -> ExitCode {
         process::exit(1);
     }
     ExitCode::SUCCESS
+}
+
+fn shutdown_daemon_runtime(runtime: tokio::runtime::Runtime) {
+    runtime.shutdown_background();
 }
 
 /// Number of panic reports retained in `<runtime_state_dir>/crash/`;
@@ -5275,12 +5280,11 @@ async fn run<T>(
     // producers and gRPC have drained. The RIB-event conversion stage
     // drains its snapshot queue into EHM first, so route/EVPN events
     // accepted before shutdown still reach EHM's drain-then-commit
-    // shutdown. EHM owns its own bounded 5-second hard timeout on the
-    // storage thread; we don't await unconditionally because a wedged
-    // SQLite must not stall the daemon exit. Holding EHM alive across
-    // the producer + gRPC drain means any final SubscribeFromEvent
-    // observers see their last committed events and any in-flight
-    // `try_send` reaches disk before shutdown.
+    // shutdown. EHM closes admission and owns one absolute 5-second
+    // deadline for accepted-event commits plus storage finalization;
+    // a wedged SQLite must not stall daemon exit. Holding EHM alive
+    // across the producer + gRPC drain lets final subscribers observe
+    // every accepted event whose commit is confirmed before that bound.
     if let Some(stage) = rib_event_stage {
         stage.shutdown().await;
     }
@@ -5301,6 +5305,29 @@ mod tests {
     use crate::test_support::{
         assert_tier_authorized_test_config, tier_authorized_uds_test_config,
     };
+
+    #[test]
+    fn daemon_runtime_shutdown_does_not_wait_for_blocking_tasks() {
+        // Load-bearing break: replacing shutdown_background with Runtime drop
+        // blocks the helper until released, so recv_timeout turns red safely.
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        runtime.spawn_blocking(move || {
+            started_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let helper = std::thread::spawn(move || {
+            shutdown_daemon_runtime(runtime);
+            done_tx.send(())
+        });
+        let result = done_rx.recv_timeout(Duration::from_secs(1));
+        release_tx.send(()).unwrap();
+        helper.join().unwrap().unwrap();
+        assert!(result.is_ok(), "runtime teardown blocked");
+    }
 
     #[derive(Default)]
     struct FlushFailure {
