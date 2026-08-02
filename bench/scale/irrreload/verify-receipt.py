@@ -55,7 +55,7 @@ FLOAT_VALUE = re.compile(
     r"(?:[-+]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][-+]?[0-9]+)?|NaN|[+-]Inf)"
 )
 INT64_TIMESTAMP = re.compile(r"[+-]?[0-9]+")
-WATCHED = ("bgp_rib_", "bgp_peer_", "bgp_update_group")
+WATCHED = ("bgp_rib_", "bgp_peer_", "bgp_update_group", "bgp_session_")
 
 
 class InvalidReceipt(ValueError):
@@ -238,6 +238,20 @@ def validate_topology(
         if any(value != 1 for _, value in sessions):
             fail("not every expected session is established")
         identities = {labels["peer"] for labels, _ in sessions}
+        established = peer_rows(data, "bgp_session_established_total", peers)
+        if {labels["peer"] for labels, _ in established} != identities:
+            fail("session establishment counter roster mismatch")
+        if any(value != 1 for _, value in established):
+            fail("session establishment counter value mismatch")
+        flaps = rows(data, "bgp_session_flaps_total")
+        if any(
+            set(labels) != {"peer"}
+            or labels["peer"] not in identities
+            for labels, _ in flaps
+        ):
+            fail("session flap counter roster/labels mismatch")
+        if any(value != 0 for _, value in flaps):
+            fail("session flap counter value mismatch")
         queues = peer_rows(data, "bgp_peer_outbound_queue_depth", peers)
         if {labels["peer"] for labels, _ in queues} != identities or any(
             value != 0 for _, value in queues
@@ -957,6 +971,7 @@ def make_fixture(root: Path, kind: str, started: int, identity_seed: int) -> Non
             metrics = ["bgp_rib_outbound_registered_peers 320", "bgp_rib_ingest_channel_depth 0", "bgp_rib_policy_transition_in_progress 0", 'bgp_rib_loc_prefixes{afi_safi="all"} 183040']
             for peer in range(320):
                 metrics += [f'bgp_peer_session_established{{interface="eth0",peer="p{peer}"}} 1', f'bgp_peer_outbound_queue_depth{{peer="p{peer}"}} 0']
+                metrics += [f'bgp_session_established_total{{peer="p{peer}"}} 1']
                 metrics += [f'bgp_rib_prefixes{{afi_safi="{family}",peer="p{peer}"}} {572 if family == "all" else 0}' for family in ("all", "flowspec")]
                 metrics += [f'bgp_rib_adj_out_prefixes{{afi_safi="{family}",peer="p{peer}"}} {182468 if family == "all" else 0}' for family in ("all", "bgpls", "evpn", "flowspec", "labeled", "rtc", "vpn")]
             if topology_mode == "private":
@@ -1085,10 +1100,21 @@ def self_test() -> None:
                 f'bgp_rib_loc_prefixes{{afi_safi="all"}} {7 if bad == "route-gauge" else 8}',
             ]
             for peer in ("p0", "p1"):
+                established_peer = (
+                    "unexpected" if bad == "establishment-roster" and peer == "p1"
+                    else peer
+                )
                 lines += [
-                    f'bgp_peer_session_established{{interface="eth0",peer="{peer}"}} 1',
+                    f'bgp_peer_session_established{{interface="eth0",peer="{peer}"}} {0 if bad == "current-down" else 1}',
+                    f'bgp_session_established_total{{peer="{established_peer}"}} {2 if bad == "reestablished" else 1}',
                     f'bgp_peer_outbound_queue_depth{{peer="{peer}"}} 0',
                 ]
+                if peer == "p0":
+                    flap_peer = "unexpected" if bad == "flap-roster" else peer
+                    lines.append(
+                        f'bgp_session_flaps_total{{peer="{flap_peer}"}} '
+                        f'{1 if bad == "flapped" else 0}'
+                    )
                 lines += [
                     f'bgp_rib_prefixes{{afi_safi="{family}",peer="{peer}"}} '
                     f'{4 if family == "all" else int(bad == "route-family" and peer == "p1")}'
@@ -1099,6 +1125,8 @@ def self_test() -> None:
                     f'{4 if family == "all" else 0}'
                     for family in ("all", "bgpls", "evpn", "flowspec", "labeled", "rtc", "vpn")
                 ]
+            if bad == "counter-malformed":
+                lines.append('bgp_session_flaps_total{peer="p0"} broken')
             if mode == "private":
                 lines += ["bgp_update_groups 0", "bgp_update_group_fallback_peers 2"]
                 lines += [f'bgp_peer_update_group{{peer="p{index}"}} -1' for index in range(2)]
@@ -1121,7 +1149,12 @@ def self_test() -> None:
             paths = []
             for sample in range(1, 4):
                 path = topology_dir / f"{name}-{sample}.prom"
-                effective_bad = bad if bad != "drift" or sample == 3 else None
+                if bad in {"drift", "current-down", "counter-malformed", "establishment-roster", "flap-roster"}:
+                    effective_bad = bad if sample == 3 else None
+                elif bad in {"reestablished", "flapped"}:
+                    effective_bad = bad if sample > 1 else None
+                else:
+                    effective_bad = bad
                 path.write_text(metric_text("grouped", effective_bad))
                 paths.append(path)
             try:
@@ -1133,6 +1166,12 @@ def self_test() -> None:
         topology_rejected("route-gauge", "route-gauge")
         topology_rejected("route-family", "route-family")
         topology_rejected("one-scrape-drift", "drift")
+        topology_rejected("current-down", "current-down")
+        topology_rejected("reestablished", "reestablished")
+        topology_rejected("flapped", "flapped")
+        topology_rejected("counter-malformed", "counter-malformed")
+        topology_rejected("establishment-roster", "establishment-roster")
+        topology_rejected("flap-roster", "flap-roster")
         add_path = topology_dir / "add-path.toml"
         add_path.write_text("[neighbors.add_path]\nsend = true\n")
         topology_rejected("add-path", "none", add_path)
@@ -1282,6 +1321,20 @@ def self_test() -> None:
                 path = root / relative
                 path.write_text(path.read_text().replace(",320,320,0,183040,", ",320,319,0,183040,", 1))
         rejected("row-invariants", break_row_invariant)
+        def break_row_sessions(root):
+            for relative in ("rows.csv", "bird/rows.csv", "bird/reloadstall.log"):
+                path = root / relative
+                lines = path.read_text().splitlines()
+                path.write_text(
+                    "\n".join(
+                        line.rsplit(",320,0", 1)[0] + ",319,0"
+                        if line.startswith(("bird,", "reloadstall_csv,"))
+                        else line
+                        for line in lines
+                    )
+                    + "\n"
+                )
+        rejected("row-session-loss", break_row_sessions)
         rejected("rss-raw", lambda root: (root / "bird/rss.csv").write_text("epoch_s,total_rss_kib,pids\n1,0,1\n"))
         def break_top_checksum_only(root):
             daemon_log = root / "bird/daemon.log"
@@ -1365,6 +1418,7 @@ def self_test() -> None:
         grouped_pair_drift("cross-role-environment", "environment", "cpu_model", "other-platform")
         grouped_pair_drift("cross-role-source-identity", "binaries", "rbgp", "a" * 64)
         expected = {"default-roster", "mixed-roster", "mode-flags", "topology-mutation", "barrier-marker", "final-barrier-marker", "live-topology-gauge", "route-gauge", "route-family", "one-scrape-drift", "add-path", "config-count", "dirty-commit", "origin-only", "head-matches-false", "mismatched-commit", "commit-malformed", "scripts-null", "scripts-empty-map", "binary-malformed", "fingerprint-recompute", "canonical-changed-fraction", "canonical-control-secs", "canonical-bird-threads", "repeat-image-identity", "cell-root-provenance", "nonoverlap-order", "quiet-spacing", "preflight-raw", "cell-status", "cell-provenance", "evidence-roster", "scenario-roster", "scenario-duplicate", "scenario-unsafe-path", "scenario-retained-config", "cell-root-rows", "reload-log-rows", "percentile-order", "percentile-positive", "first-generation-bound", "observer-gap-bound", "row-invariants", "rss-raw", "seal-checksum", "exact-root-roster", "symlink-anywhere", "writable-root", "grouped-output-isolation", "output-exact-roster", "output-audit-call", "ordering", "reused-identity", "cross-role-environment", "cross-role-source-identity"}
+        expected |= {"current-down", "reestablished", "flapped", "counter-malformed", "establishment-roster", "flap-roster", "row-session-loss"}
         missing = expected - proofs.keys()
         if missing:
             fail(f"self-test proofs did not reject: {sorted(missing)}")
