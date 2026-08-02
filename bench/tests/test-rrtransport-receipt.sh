@@ -152,6 +152,9 @@ expect_red nlri-count mutate -c 'import pathlib,sys;p=pathlib.Path(sys.argv[1])/
 expect_red corrupt-prefix mutate -c 'import pathlib,sys;p=pathlib.Path(sys.argv[1])/"per-peer.tsv";s=p.read_text();p.write_text(s.replace("7c50a897bc4a4e51","0000000000000000",1))'
 expect_red staged-is-wire mutate -c 'import json,pathlib,sys;p=pathlib.Path(sys.argv[1])/"phase.json";d=json.loads(p.read_text());d["wire_ms"]=2;p.write_text(json.dumps(d))'
 expect_red group-key mutate -c 'import json,pathlib,sys;p=pathlib.Path(sys.argv[1])/"phase.json";d=json.loads(p.read_text());d["groups"]=2;p.write_text(json.dumps(d))'
+for field in sessions established_before established_after; do
+  expect_red "phase-$field" mutate -c "import json,pathlib,sys;p=pathlib.Path(sys.argv[1])/'phase.json';d=json.loads(p.read_text());d['$field']=999;p.write_text(json.dumps(d))"
+done
 expect_red sessions-999 mutate -c 'import pathlib,sys;p=pathlib.Path(sys.argv[1])/"per-peer.tsv";p.write_text("\n".join(p.read_text().splitlines()[:-1])+"\n")'
 for field in withdrawals duplicates outside decode_failures; do
   expect_red "$field" mutate -c "import pathlib,sys;p=pathlib.Path(sys.argv[1])/'per-peer.tsv';s=p.read_text();h=s.splitlines()[0].split('\\t').index('$field');r=s.splitlines();x=r[1].split('\\t');x[h]='1';r[1]='\\t'.join(x);p.write_text('\\n'.join(r)+'\\n')"

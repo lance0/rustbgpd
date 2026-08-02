@@ -106,6 +106,12 @@ def validate(phase, metrics, baseline):
     require(metrics, "bgp_session_established_total", {"peer": PEER}, 1)
     require(
         metrics,
+        "bgp_peer_session_established",
+        {"interface": "", "peer": PEER},
+        1,
+    )
+    require(
+        metrics,
         "bgp_session_flaps_total",
         {"peer": PEER},
         0,
@@ -152,6 +158,7 @@ def validate(phase, metrics, baseline):
         "refresh_stale": stale,
         "max_prefix_usage": rib,
         "session_established_total": 1,
+        "session_established": 1,
         "session_flaps_total": 0,
         "actor_begin_count": expected_counts["begin"],
         "actor_eorr_count": expected_counts["eorr"],
