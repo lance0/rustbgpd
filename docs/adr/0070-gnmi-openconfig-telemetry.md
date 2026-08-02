@@ -155,7 +155,19 @@ the spec makes it the fallback when a client omits the encoding.
     `EventHistoryManager::subscribe_live()` and renders each FSM
     transition as an OpenConfig leaf Update with the short-form state
     name (`IDLE` / `CONNECT` / `ACTIVE` / `OPENSENT` / `OPENCONFIRM` /
-    `ESTABLISHED`). Other leaves under `ON_CHANGE` return
+    `ESTABLISHED`). The stream keeps a per-path delivered-presence roster:
+    authoritative peer removal emits an exact leaf delete and removes that
+    identity from the roster; a later add/update makes it present again. The
+    roster retains no absent tombstones, so a healthy, event-complete wildcard
+    stream scales with its delivered/current peer set rather than lifetime
+    address churn. Normal streams seed presence only after successful delivery;
+    `updates_only` streams skip that read and treat the first post-sync removal
+    as the next observable change. Heartbeat absence reconciliation is limited
+    to its exact due-path roster, and a covered live event cancels a pending
+    actor render before delivery so stale heartbeat state cannot overtake it.
+    Exact deletes are idempotent; an event/heartbeat race may expose the same
+    delete twice without changing the collector's resulting state.
+    Other leaves under `ON_CHANGE` return
     `Unimplemented`. `ON_CHANGE` on `ONCE` or `POLL` outer modes is
     rejected — the v1 contract requires `STREAM`. `FailedPrecondition`
     when `[event_history]` is disabled or EHM is in pass-through.

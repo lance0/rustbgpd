@@ -242,11 +242,26 @@ accepted.
   without an initial peer snapshot; later events and heartbeats remain active.
 - **Live stream.** For every FSM transition committed to EHM under
   `EVENT_CATEGORY_SESSION`, the handler emits a single
-  `session-state` leaf `Update` with the new short-form state.
+  `session-state` leaf `Update` with the new short-form state. An authoritative
+  peer removal emits that exact leaf in `Notification.delete`; the producer
+  emits one removal per managed-peer lifecycle, and a later peer add or state
+  transition makes the path present again. Exact deletes are idempotent: an
+  event racing a due heartbeat may expose the same delete twice.
+  A normal stream seeds presence only after its initial Update is accepted by
+  the response channel, so removing a peer absent from that baseline is silent.
+  An `updates_only` stream deliberately has no baseline: its first post-sync
+  peer-removal event is therefore emitted as a delete, as the next observed
+  `ON_CHANGE` transition.
 - **Heartbeat.** A nonzero per-path `heartbeat_interval` from 1 second through
   1 hour emits the current leaf value on a fixed monotonic cadence anchored
   after initial sync. Co-due paths share one peer snapshot, missed periods are
   skipped without bursts, and live events neither satisfy nor rearm heartbeats.
+  A due snapshot deletes only previously delivered leaves covered by those due
+  paths that are now absent. A newer live event cancels any overlapping pending
+  actor snapshot before delivery; the still-due heartbeat is then rendered
+  afresh, preventing stale state from overtaking the event. Presence tracking
+  retains no absent tombstones, so a healthy, event-complete wildcard stream
+  scales with its delivered/current roster rather than lifetime address churn.
 - **Reconnect.** gNMI carries no cursor on reconnect, so a fresh
   subscription gets a fresh initial snapshot — the disconnect
   window is **not** replayed. Collectors that need historical

@@ -103,13 +103,11 @@ type PeerSnapshotFn = Arc<dyn Fn() -> PeerSnapshotFuture + Send + Sync>;
 type HeartbeatSnapshotFuture<'a> =
     Pin<Box<dyn Future<Output = Result<Vec<gnmi::SubscribeResponse>, Status>> + Send + 'a>>;
 
-fn render_heartbeat_snapshot<'a>(
-    service: &'a GnmiService,
-    plan: &'a SubscriptionPlan,
+fn due_heartbeat_indices(
     deadlines: &[Option<tokio::time::Instant>; MAX_SUBSCRIPTIONS],
-) -> HeartbeatSnapshotFuture<'a> {
+) -> Vec<usize> {
     let now = tokio::time::Instant::now();
-    let due = deadlines
+    deadlines
         .iter()
         .enumerate()
         .filter_map(|(index, deadline)| {
@@ -117,7 +115,14 @@ fn render_heartbeat_snapshot<'a>(
                 .is_some_and(|deadline| deadline <= now)
                 .then_some(index)
         })
-        .collect::<Vec<_>>();
+        .collect()
+}
+
+fn render_heartbeat_snapshot<'a>(
+    service: &'a GnmiService,
+    plan: &'a SubscriptionPlan,
+    due: Vec<usize>,
+) -> HeartbeatSnapshotFuture<'a> {
     Box::pin(async move {
         service
             .render_subscription_snapshot(plan, Some(&due), false)
@@ -412,7 +417,7 @@ impl GnmiService {
 
         let mut responses = Vec::new();
         if !updates.is_empty() {
-            responses.push(update_response(updates));
+            responses.push(update_response(updates, Vec::new()));
         }
         if include_sync {
             responses.push(sync_response());
@@ -646,6 +651,10 @@ impl GnmiService {
     /// that need historical replay use `SubscribeFromEvent` directly.
     /// On broadcast `Lagged`, the stream closes with `DataLoss` so
     /// the collector reconnects and resyncs from a fresh snapshot.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "presence-aware live events and heartbeat reconciliation share one select loop"
+    )]
     async fn run_on_change(
         self,
         mut plan: SubscriptionPlan,
@@ -686,7 +695,12 @@ impl GnmiService {
         // non-Established peers; the contract is "baseline the world,
         // then stream transitions"). Empty peer set is fine; the
         // sync_response still flushes downstream.
-        if !self.forward_on_change_snapshot(&plan, &tx).await {
+        let started_updates_only = plan.updates_only;
+        let mut presence = HashMap::new();
+        if !self
+            .forward_on_change_snapshot(&plan, &tx, &mut presence)
+            .await
+        {
             return;
         }
         if tx.send(Ok(sync_response())).await.is_err() {
@@ -697,6 +711,7 @@ impl GnmiService {
         // Heartbeats anchor after sync; live events neither satisfy nor rearm them.
         let mut heartbeat_deadlines = initial_heartbeat_deadlines(&plan);
         let mut heartbeat_snapshot: Option<HeartbeatSnapshotFuture<'_>> = None;
+        let mut heartbeat_due = Vec::new();
         loop {
             let heartbeat_deadline =
                 next_heartbeat_deadline(heartbeat_snapshot.is_some(), &heartbeat_deadlines);
@@ -710,9 +725,35 @@ impl GnmiService {
                             continue;
                         }
                         match build_session_state_on_change(&plan, &committed, self.asn) {
-                            Ok(Some(response)) => {
+                            Ok(Some(observation)) => {
+                                let (path, update) = match observation {
+                                    SessionStateObservation::Update(update) => (
+                                        update.path.clone().expect("session-state Update has a path"),
+                                        Some(update),
+                                    ),
+                                    SessionStateObservation::Delete(path) => (path, None),
+                                };
+                                let identity = CanonicalPath::from(&path);
+                                if heartbeat_snapshot.is_some()
+                                    && due_paths_cover(&plan, &heartbeat_due, &identity)
+                                {
+                                    heartbeat_snapshot = None;
+                                }
+                                let is_update = update.is_some();
+                                let response = match update {
+                                    Some(update) => update_response(vec![update], Vec::new()),
+                                    None if presence.contains_key(&identity) || started_updates_only => {
+                                        update_response(Vec::new(), vec![path.clone()])
+                                    }
+                                    None => continue,
+                                };
                                 if tx.send(Ok(response)).await.is_err() {
                                     return;
+                                }
+                                if is_update {
+                                    presence.insert(identity, path);
+                                } else {
+                                    presence.remove(&identity);
                                 }
                             }
                             Ok(None) => {}
@@ -744,8 +785,32 @@ impl GnmiService {
                         .await
                 }, if heartbeat_snapshot.is_some() => {
                     heartbeat_snapshot = None;
-                    if !forward_responses(rendered, &tx).await {
+                    let mut responses = match rendered {
+                        Ok(responses) => responses,
+                        Err(error) => {
+                            let _ = tx.send(Err(error)).await;
+                            return;
+                        }
+                    };
+                    let refreshed = update_paths(&responses);
+                    let removed = presence
+                        .iter()
+                        .filter(|(identity, _)| {
+                            due_paths_cover(&plan, &heartbeat_due, identity)
+                                && !refreshed.contains_key(identity)
+                        })
+                        .map(|(identity, path)| (identity.clone(), path.clone()))
+                        .collect::<Vec<_>>();
+                    if !removed.is_empty() {
+                        let paths = removed.iter().map(|(_, path)| path.clone()).collect();
+                        responses.push(update_response(Vec::new(), paths));
+                    }
+                    if !forward_responses(Ok(responses), &tx).await {
                         return;
+                    }
+                    presence.extend(refreshed);
+                    for (identity, _) in removed {
+                        presence.remove(&identity);
                     }
                     let completed = tokio::time::Instant::now();
                     rearm_heartbeat_deadlines(
@@ -761,10 +826,11 @@ impl GnmiService {
                         heartbeat_deadline.expect("heartbeat arm is guarded"),
                     ).await;
                 }, if heartbeat_deadline.is_some() => {
+                    heartbeat_due = due_heartbeat_indices(&heartbeat_deadlines);
                     heartbeat_snapshot = Some(render_heartbeat_snapshot(
                         &self,
                         &plan,
-                        &heartbeat_deadlines,
+                        heartbeat_due.clone(),
                     ));
                 },
                 () = tx.closed() => return,
@@ -780,6 +846,7 @@ impl GnmiService {
         &self,
         plan: &SubscriptionPlan,
         tx: &tokio::sync::mpsc::Sender<Result<gnmi::SubscribeResponse, Status>>,
+        presence: &mut HashMap<CanonicalPath, gnmi::Path>,
     ) -> bool {
         if plan.updates_only {
             return true;
@@ -825,19 +892,13 @@ impl GnmiService {
         if updates.is_empty() {
             return true;
         }
-        let response = gnmi::SubscribeResponse {
-            response: Some(gnmi::subscribe_response::Response::Update(
-                gnmi::Notification {
-                    timestamp: now_nanos(),
-                    prefix: None,
-                    update: updates,
-                    delete: Vec::new(),
-                    atomic: false,
-                },
-            )),
-            extension: Vec::new(),
-        };
-        tx.send(Ok(response)).await.is_ok()
+        let response = update_response(updates, Vec::new());
+        let present = update_paths(std::slice::from_ref(&response));
+        if tx.send(Ok(response)).await.is_err() {
+            return false;
+        }
+        presence.extend(present);
+        true
     }
 
     /// Spawn the STREAM-mode subscription described by `list` and return the
@@ -1923,17 +1984,20 @@ fn parse_session_state_lowercase(s: &str) -> Option<SessionState> {
     }
 }
 
-/// Build a single `SubscribeResponse` Update for one committed
-/// session-state transition, returning `None` if the event doesn't
-/// target the plan's peer scope or is not a lifecycle event with a
-/// new state to surface. Errors map to debug-log + skip (the
-/// envelope is malformed enough that we couldn't read what state
-/// changed — the next event will resync).
+enum SessionStateObservation {
+    Update(gnmi::Update),
+    Delete(gnmi::Path),
+}
+
+/// Classify one committed session event as a leaf Update or authoritative
+/// peer-removal delete, returning `None` when it is outside the plan's peer
+/// scope or does not change the supported leaf. Decode errors map to debug-log
+/// plus skip; a later event or configured heartbeat can resync the leaf.
 fn build_session_state_on_change(
     plan: &SubscriptionPlan,
     committed: &rustbgpd_event_history::CommittedEvent,
     _local_as: u32,
-) -> Result<Option<gnmi::SubscribeResponse>, prost::DecodeError> {
+) -> Result<Option<SessionStateObservation>, prost::DecodeError> {
     // Peer scope filter — quick check before paying the prost decode.
     // The envelope's `EnvelopePeers.peer` carries the IP for the
     // session that changed. The plan's paths target either one
@@ -1965,27 +2029,21 @@ fn build_session_state_on_change(
         // do not carry a session-state transition.
         return Ok(None);
     };
+    let path = neighbor_leaf_path(peer, NeighborLeaf::SessionState);
+    let removed = proto::BgpEventType::PeerRemoved as i32;
+    if (bgp_event.event_type, session.event_type) == (removed, removed) {
+        return Ok(Some(SessionStateObservation::Delete(path)));
+    }
     let Some(new_state) = parse_session_state_lowercase(session.new_state.as_str()) else {
         return Ok(None);
     };
 
     let update = leaf_update(
-        neighbor_leaf_path(peer, NeighborLeaf::SessionState),
+        path.clone(),
         &LeafValue::Str(session_state_name(new_state).to_string()),
         plan.encoding,
     );
-    Ok(Some(gnmi::SubscribeResponse {
-        response: Some(gnmi::subscribe_response::Response::Update(
-            gnmi::Notification {
-                timestamp: now_nanos(),
-                prefix: None,
-                update: vec![update],
-                delete: Vec::new(),
-                atomic: false,
-            },
-        )),
-        extension: Vec::new(),
-    }))
+    Ok(Some(SessionStateObservation::Update(update)))
 }
 
 fn global_leaf_path(leaf: &str) -> gnmi::Path {
@@ -2191,6 +2249,30 @@ impl From<&gnmi::Path> for CanonicalPath {
     }
 }
 
+fn due_paths_cover(plan: &SubscriptionPlan, due: &[usize], identity: &CanonicalPath) -> bool {
+    due.iter().any(|index| match &plan.paths[*index] {
+        SupportedPath::Neighbor { address, .. } => {
+            identity
+                == &CanonicalPath::from(&neighbor_leaf_path(*address, NeighborLeaf::SessionState))
+        }
+        SupportedPath::AllNeighbors { .. } => true,
+        SupportedPath::Global { .. } => false,
+    })
+}
+
+fn update_paths(responses: &[gnmi::SubscribeResponse]) -> HashMap<CanonicalPath, gnmi::Path> {
+    responses
+        .iter()
+        .filter_map(|response| match response.response.as_ref() {
+            Some(gnmi::subscribe_response::Response::Update(notification)) => Some(notification),
+            _ => None,
+        })
+        .flat_map(|notification| &notification.update)
+        .filter_map(|update| update.path.as_ref())
+        .map(|path| (CanonicalPath::from(path), path.clone()))
+        .collect()
+}
+
 /// Collapse duplicate fully resolved paths within one Notification. The first
 /// path position is stable, while the final rendered Update supplies its value.
 fn deduplicate_update_paths(updates: Vec<gnmi::Update>) -> Vec<gnmi::Update> {
@@ -2229,12 +2311,13 @@ fn leaf_update(path: gnmi::Path, value: &LeafValue, encoding: gnmi::Encoding) ->
     }
 }
 
-fn update_response(updates: Vec<gnmi::Update>) -> gnmi::SubscribeResponse {
+fn update_response(updates: Vec<gnmi::Update>, delete: Vec<gnmi::Path>) -> gnmi::SubscribeResponse {
     gnmi::SubscribeResponse {
         response: Some(gnmi::subscribe_response::Response::Update(
             gnmi::Notification {
                 timestamp: now_nanos(),
                 update: updates,
+                delete,
                 ..Default::default()
             },
         )),
@@ -3796,12 +3879,20 @@ mod tests {
         );
     }
 
-    fn subscribe_updates(response: gnmi::SubscribeResponse) -> Vec<gnmi::Update> {
+    fn subscribe_notification(response: gnmi::SubscribeResponse) -> gnmi::Notification {
         let Some(gnmi::subscribe_response::Response::Update(notification)) = response.response
         else {
             panic!("expected Subscribe Update, got {response:?}");
         };
-        notification.update
+        notification
+    }
+
+    fn subscribe_updates(response: gnmi::SubscribeResponse) -> Vec<gnmi::Update> {
+        subscribe_notification(response).update
+    }
+
+    fn subscribe_deletes(response: gnmi::SubscribeResponse) -> Vec<gnmi::Path> {
+        subscribe_notification(response).delete
     }
 
     fn subscribe_paths(response: gnmi::SubscribeResponse) -> Vec<Option<gnmi::Path>> {
@@ -4997,6 +5088,45 @@ mod tests {
         manager
     }
 
+    fn session_envelope(
+        event_type: crate::peer_types::SessionLifecycleEventType,
+        new_state: Option<SessionState>,
+    ) -> rustbgpd_event_history::EventEnvelope {
+        use crate::peer_types::{SessionEvent, SessionLifecycleEvent};
+        use rustbgpd_event_history::{EnvelopePeers, EventEnvelope, Severity};
+
+        let peer = "10.0.0.2".parse().unwrap();
+        let event = crate::event_service::convert::session_event_to_bgp_event(
+            SessionEvent::Lifecycle(SessionLifecycleEvent {
+                event_type,
+                peer,
+                peer_label: None,
+                timestamp: "1".to_string(),
+                old_state: Some(SessionState::Established),
+                new_state,
+                session_role: Some("primary".to_string()),
+                reason: "gNMI test event".to_string(),
+            }),
+        );
+        EventEnvelope {
+            timestamp_ns: 1,
+            category: Category::Session,
+            event_type: format!("{event_type:?}"),
+            peers: EnvelopePeers {
+                peer: Some(peer),
+                previous_peer: None,
+                target_peer: None,
+            },
+            afi_safi: None,
+            prefix: None,
+            rd: None,
+            evpn_route_type: None,
+            severity: Severity::Info,
+            payload_codec: PayloadCodec::Proto,
+            payload: event.encode_to_vec(),
+        }
+    }
+
     async fn ehm_service(
         peers: Vec<PeerInfo>,
     ) -> (GnmiService, rustbgpd_event_history::EventHistoryManager) {
@@ -5146,6 +5276,66 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn on_change_heartbeat_deletes_only_due_absent_present_paths() {
+        // Load-bearing breaks: removing heartbeat absence reconciliation emits
+        // nothing; reconciling every subscribed path also deletes the 2s peer.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let snapshot_calls = Arc::clone(&calls);
+        let initial = vec![
+            test_peer("10.0.0.2".parse().unwrap()),
+            test_peer("10.0.0.3".parse().unwrap()),
+        ];
+        let manager = event_history_manager().await;
+        let service = GnmiService::with_peer_snapshot(65001, "192.0.2.1", move || {
+            let peers = if snapshot_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                initial.clone()
+            } else {
+                Vec::new()
+            };
+            async move { Ok(peers) }
+        })
+        .with_event_history(Some(manager.handle()));
+        let fast = neighbor_session_state_path("10.0.0.2");
+        let slow = neighbor_session_state_path("10.0.0.3");
+        let mut list = stream_on_change_list(fast.clone());
+        list.subscription[0].heartbeat_interval = 1_000_000_000;
+        let mut second = list.subscription[0].clone();
+        second.path = Some(slow.clone());
+        second.heartbeat_interval = 2_000_000_000;
+        list.subscription.push(second);
+        let plan = parse_subscription_list(&list).unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(SUBSCRIBE_CHANNEL_DEPTH);
+        tokio::spawn(service.run_on_change(plan, tx));
+        tokio::task::yield_now().await;
+        assert_eq!(subscribe_updates(rx.try_recv().unwrap().unwrap()).len(), 2);
+        assert!(matches!(
+            rx.try_recv().unwrap().unwrap().response,
+            Some(gnmi::subscribe_response::Response::SyncResponse(true))
+        ));
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            subscribe_deletes(rx.try_recv().unwrap().unwrap()),
+            vec![fast]
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            subscribe_deletes(rx.try_recv().unwrap().unwrap()),
+            vec![slow]
+        );
+        assert!(rx.try_recv().is_err(), "1s path delete repeated at 2s");
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        drop(rx);
+        manager.shutdown().await;
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn on_change_updates_only_reads_first_snapshot_at_heartbeat() {
         // Load-bearing break: retaining updates_only after sync drops the first
         // heartbeat; reading the baseline before sync increments the call count.
@@ -5266,8 +5456,13 @@ mod tests {
         list.subscription.push(concrete);
         let plan = parse_subscription_list(&list).unwrap();
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let mut presence = HashMap::new();
 
-        assert!(service.forward_on_change_snapshot(&plan, &tx).await);
+        assert!(
+            service
+                .forward_on_change_snapshot(&plan, &tx, &mut presence)
+                .await
+        );
         drop(tx);
         assert_eq!(
             subscribe_paths(rx.recv().await.unwrap().unwrap()),
@@ -5277,17 +5472,156 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn on_change_failed_initial_send_does_not_seed_presence() {
+        // Load-bearing break: inserting the initial paths before the channel
+        // send leaves both rosters populated after this forced send failure.
+        let service = test_service(vec![test_peer("10.0.0.2".parse().unwrap())]);
+        let plan = parse_subscription_list(&stream_on_change_list(neighbor_session_state_path(
+            "10.0.0.2",
+        )))
+        .unwrap();
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        drop(rx);
+        let mut presence = HashMap::new();
+
+        assert!(
+            !service
+                .forward_on_change_snapshot(&plan, &tx, &mut presence)
+                .await
+        );
+        assert!(presence.is_empty());
+    }
+
+    #[tokio::test]
     #[expect(
         clippy::too_many_lines,
-        reason = "one end-to-end event/heartbeat ordering receipt"
+        reason = "one end-to-end presence lifecycle receipt"
     )]
-    async fn subscribe_on_change_streams_session_transitions() {
-        // Load-bearing break: rejecting an absent initial concrete neighbor
-        // prevents sync and the later EHM transition Update from arriving;
-        // awaiting the heartbeat snapshot inline blocks that live Update.
-        use rustbgpd_event_history::{
-            Category, EnvelopePeers, EventEnvelope, PayloadCodec, Severity,
+    async fn tcp_removal_presence_is_bounded_and_rearms_after_add() {
+        // Load-bearing breaks: removing Unknown+updates_only suppresses the
+        // first delete; retaining Present after it queues another heartbeat
+        // delete; failing to mark PeerAdded Present suppresses the final delete.
+        // Treating another empty-state event as removal exposes PeerDisabled.
+        // Emitting Unknown on a normal empty baseline exposes the second stream.
+        use crate::peer_types::SessionLifecycleEventType::{
+            PeerAdded, PeerDisabled, PeerRemoved, StateChanged,
         };
+
+        let manager = event_history_manager().await;
+        let service =
+            GnmiService::with_peer_snapshot(65001, "192.0.2.1", || async { Ok(Vec::new()) })
+                .with_event_history(Some(manager.handle()));
+        let path = neighbor_session_state_path("10.0.0.2");
+        let mut list = stream_on_change_list(path.clone());
+        list.updates_only = true;
+        list.subscription[0].heartbeat_interval = 1_000_000_000;
+        let mut harness = serve(service).await;
+        let mut stream = harness
+            .client
+            .subscribe(tokio_stream::iter(vec![subscribe_msg(list)]))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_sync(&mut stream).await;
+
+        manager
+            .handle()
+            .sender()
+            .try_send(session_envelope(PeerRemoved, None))
+            .unwrap();
+        assert_eq!(
+            subscribe_deletes(next_bounded(&mut stream).await.unwrap().unwrap()),
+            vec![path.clone()]
+        );
+
+        manager
+            .handle()
+            .sender()
+            .try_send(session_envelope(PeerAdded, Some(SessionState::Idle)))
+            .unwrap();
+        let updates = subscribe_updates(next_bounded(&mut stream).await.unwrap().unwrap());
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].path, Some(path.clone()));
+        let gnmi::typed_value::Value::JsonIetfVal(value) =
+            updates[0].val.as_ref().unwrap().value.as_ref().unwrap()
+        else {
+            panic!("expected JSON_IETF session state")
+        };
+        assert_eq!(value, b"\"IDLE\"");
+
+        for envelope in [
+            session_envelope(PeerDisabled, None),
+            session_envelope(StateChanged, Some(SessionState::Established)),
+        ] {
+            manager.handle().sender().try_send(envelope).unwrap();
+        }
+        let updates = subscribe_updates(next_bounded(&mut stream).await.unwrap().unwrap());
+        let gnmi::typed_value::Value::JsonIetfVal(value) =
+            updates[0].val.as_ref().unwrap().value.as_ref().unwrap()
+        else {
+            panic!("expected JSON_IETF session state")
+        };
+        assert_eq!(value, b"\"ESTABLISHED\"");
+
+        manager
+            .handle()
+            .sender()
+            .try_send(session_envelope(PeerRemoved, None))
+            .unwrap();
+        assert_eq!(
+            subscribe_deletes(next_bounded(&mut stream).await.unwrap().unwrap()),
+            vec![path.clone()]
+        );
+        tokio::time::sleep(Duration::from_millis(1_100)).await;
+        manager
+            .handle()
+            .sender()
+            .try_send(session_envelope(PeerAdded, Some(SessionState::Idle)))
+            .unwrap();
+        assert_eq!(
+            subscribe_paths(next_bounded(&mut stream).await.unwrap().unwrap()),
+            vec![Some(path.clone())]
+        );
+        drop(stream);
+
+        let mut stream = harness
+            .client
+            .subscribe(tokio_stream::iter(vec![subscribe_msg(
+                stream_on_change_list(path.clone()),
+            )]))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_sync(&mut stream).await;
+        for envelope in [
+            session_envelope(PeerRemoved, None),
+            session_envelope(PeerAdded, Some(SessionState::Idle)),
+        ] {
+            manager.handle().sender().try_send(envelope).unwrap();
+        }
+        assert_eq!(
+            subscribe_paths(next_bounded(&mut stream).await.unwrap().unwrap()),
+            vec![Some(path.clone())]
+        );
+        manager
+            .handle()
+            .sender()
+            .try_send(session_envelope(PeerRemoved, None))
+            .unwrap();
+        assert_eq!(
+            subscribe_deletes(next_bounded(&mut stream).await.unwrap().unwrap()),
+            vec![path]
+        );
+        drop(stream);
+        drop(harness);
+        manager.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn subscribe_on_change_streams_session_transitions() {
+        // Load-bearing break: retaining the pending actor heartbeat lets its
+        // stale ESTABLISHED render block and then overwrite the live IDLE event.
+        use crate::peer_types::SessionLifecycleEventType::Lost;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         let calls = Arc::new(AtomicUsize::new(0));
@@ -5302,12 +5636,19 @@ mod tests {
             let started = Arc::clone(&snapshot_started);
             let release = Arc::clone(&snapshot_release);
             async move {
+                let mut peer = test_peer("10.0.0.2".parse().unwrap());
                 if call == 0 {
-                    return Ok(Vec::new());
+                    peer.state = SessionState::Established;
+                    return Ok(vec![peer]);
                 }
-                started.notify_one();
-                release.notified().await;
-                Ok(vec![test_peer("10.0.0.2".parse().unwrap())])
+                if call == 1 {
+                    peer.state = SessionState::Established;
+                    started.notify_one();
+                    release.notified().await;
+                } else {
+                    peer.state = SessionState::Idle;
+                }
+                Ok(vec![peer])
             }
         })
         .with_event_history(Some(manager.handle()));
@@ -5322,63 +5663,21 @@ mod tests {
             .unwrap()
             .into_inner();
 
-        // The absent peer produces no initial Update, but sync completes.
-        let sync = stream.message().await.unwrap().unwrap();
         assert_eq!(
-            sync.response,
-            Some(gnmi::subscribe_response::Response::SyncResponse(true))
+            subscribe_paths(next_bounded(&mut stream).await.unwrap().unwrap()).len(),
+            1
         );
+        assert_sync(&mut stream).await;
         tokio::time::timeout(Duration::from_secs(2), render_started.notified())
             .await
             .expect("heartbeat snapshot did not start");
         assert_eq!(calls.load(Ordering::SeqCst), 2);
 
-        // Build a synthetic proto::BgpEvent representing a session
-        // lifecycle transition to Idle (peer down). Encode it and
-        // shove it through EHM's producer channel; the broadcast
-        // will deliver it to the ON_CHANGE task.
-        let payload = proto::SessionEvent {
-            event_type: proto::BgpEventType::SessionLost as i32,
-            peer_address: "10.0.0.2".to_string(),
-            old_state: "established".to_string(),
-            new_state: "idle".to_string(),
-            timestamp: "1".to_string(),
-            session_role: "primary".to_string(),
-            reason: String::new(),
-        };
-        let bgp_event = proto::BgpEvent {
-            timestamp: "1".to_string(),
-            category: proto::EventCategory::Session as i32,
-            event_type: proto::BgpEventType::SessionLost as i32,
-            severity: proto::EventSeverity::Warning as i32,
-            peer_address: "10.0.0.2".to_string(),
-            previous_peer_address: String::new(),
-            prefix: String::new(),
-            prefix_length: 0,
-            afi_safi: proto::AddressFamily::Unspecified as i32,
-            summary: "session lost".to_string(),
-            target_peer_address: String::new(),
-            event_id: None,
-            payload: Some(proto::bgp_event::Payload::Session(payload)),
-        };
-        let envelope = EventEnvelope {
-            timestamp_ns: 1,
-            category: Category::Session,
-            event_type: "BGP_EVENT_TYPE_SESSION_LOST".to_string(),
-            peers: EnvelopePeers {
-                peer: Some("10.0.0.2".parse().unwrap()),
-                previous_peer: None,
-                target_peer: None,
-            },
-            afi_safi: None,
-            prefix: None,
-            rd: None,
-            evpn_route_type: None,
-            severity: Severity::Warn,
-            payload_codec: PayloadCodec::Proto,
-            payload: bgp_event.encode_to_vec(),
-        };
-        manager.handle().sender().try_send(envelope).unwrap();
+        manager
+            .handle()
+            .sender()
+            .try_send(session_envelope(Lost, Some(SessionState::Idle)))
+            .unwrap();
 
         // The event must remain deliverable while the actor-backed heartbeat
         // snapshot is deliberately held. EHM rides a real SQLite commit, so
@@ -5407,9 +5706,15 @@ mod tests {
         };
         assert_eq!(val, "\"IDLE\"");
 
-        release_render.notify_one();
         let heartbeat = next_bounded(&mut stream).await.unwrap().unwrap();
-        assert_eq!(subscribe_updates(heartbeat).len(), 1);
+        let replacement = subscribe_updates(heartbeat);
+        let gnmi::typed_value::Value::JsonIetfVal(value) =
+            replacement[0].val.as_ref().unwrap().value.as_ref().unwrap()
+        else {
+            panic!("expected JSON_IETF session state")
+        };
+        assert_eq!(value, b"\"IDLE\"");
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
 
         drop(stream);
         drop(harness);

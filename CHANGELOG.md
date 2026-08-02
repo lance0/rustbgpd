@@ -62,6 +62,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- gNMI STREAM/ON_CHANGE now emits the exact `session-state` leaf delete when a
+  subscribed peer disappears. The idempotent delete works after `updates_only`
+  synchronization, the path becomes present again when the peer reappears, and
+  an older in-flight heartbeat snapshot cannot overtake a newer live event.
+
 - Batched gNMI Subscribe notifications now emit each fully resolved Update path
   once when identical or overlapping subscriptions select the same leaf.
 
