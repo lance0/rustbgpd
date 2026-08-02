@@ -62,6 +62,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- gNMI STREAM/ON_CHANGE now fails with `DATA_LOSS` on producer-side
+  event-history loss during snapshot, synchronization, or live delivery and on
+  live broadcast lag; reconnecting without `updates_only` and consuming a full
+  initial snapshot establishes a fresh recoverable baseline.
+
 - Coordinated shutdown drains event history under one five-second deadline and
   latches abandoned work; submitted-append timeouts remain unknown, not drops.
 

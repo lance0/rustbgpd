@@ -270,10 +270,13 @@ accepted.
   `UNIMPLEMENTED` with a message naming the supported leaf. The
   counter leaves (`messages/*`) and the `enabled` leaf stay
   SAMPLE/POLL-only in v1.
-- **Lag.** When the EHM broadcast receiver falls behind, the stream
-  closes with `DATA_LOSS` so the collector reconnects and resyncs
-  from a fresh initial snapshot. `Subscribe ON_CHANGE` does not
-  paper over gaps.
+- **Loss.** Broadcast lag or a later producer-side EHM loss closes the stream
+  with `DATA_LOSS`, including during the initial snapshot or `sync_response`.
+  To repair the gap, reconnect without `updates_only` and consume a full initial
+  snapshot. A fresh subscription baselines prior loss; it is not permanently
+  poisoned by the process-lifetime degraded latch.
+  The producer signal is service-wide, so loss in any event category closes
+  every ON_CHANGE stream rather than risking a silently incomplete view.
 - **Mixed-mode subscriptions.** A `SubscriptionList` that mixes
   `SAMPLE` and `ON_CHANGE` subscriptions is rejected with
   `UNIMPLEMENTED` — the v1 dispatch picks one mode per stream.

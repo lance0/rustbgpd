@@ -763,9 +763,14 @@ reference bridge at `examples/event-bridge/`:
   `Category::Session`), decodes each `CommittedEvent`'s
   prost-encoded `BgpEvent` payload, and emits one OpenConfig leaf
   Update per transition. `FailedPrecondition` when EHM is disabled.
-  Reconnect = fresh initial snapshot (no replay); broadcast `Lagged`
-  closes with `DataLoss` so the collector reconnects. The gNMI
-  Subscribe surface stays at the `SensitiveRead` authz tier
+  Reconnect = fresh initial snapshot (no replay). A process-local watched loss
+  generation advances on every irreversible producer loss, including repeated
+  loss after the degraded latch is set. gNMI subscribes before its baseline and
+  closes with `DataLoss` on later producer loss or broadcast `Lagged`; recovery
+  reconnects without `updates_only` and consumes a full initial snapshot.
+  Normal shutdown `Closed` paths do not advance the generation. It is
+  service-wide, coalescing, and intentionally not an exact missed-event count.
+  The gNMI Subscribe surface stays at the `SensitiveRead` authz tier
   regardless of internal EHM backing — the external contract is
   still gNMI Subscribe. See [ADR-0070](0070-gnmi-openconfig-telemetry.md)
   for the v1 scope contract.

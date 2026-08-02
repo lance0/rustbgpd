@@ -663,6 +663,9 @@ pub struct EhmState {
     /// when EHM enters pass-through. Never auto-clears in v1 — the
     /// operator restarts to clear.
     degraded: AtomicBool,
+    /// Process-local wake boundary for irreversible event loss. Unlike
+    /// `degraded`, every detected loss advances this generation.
+    loss_generation: watch::Sender<u64>,
     /// True when EHM is in pass-through (no persistence, broadcasts
     /// only). Set when the allocator anchor is unrecoverable AND a
     /// prior stale file exists.
@@ -685,13 +688,21 @@ impl EhmState {
         self.pass_through.load(Ordering::Acquire)
     }
 
-    /// Flip the degraded flag to `true`. Public so out-of-crate
-    /// producers (the EHM-backed RIB sink, the BFD bridge, etc.) can
-    /// signal that they had to drop an event before it reached the
-    /// outbox. Idempotent: re-flipping a true flag is a no-op. Never
-    /// auto-clears in v1; operator restarts to clear.
-    pub fn flip_degraded(&self) {
+    /// Record an irreversible event loss. Public so out-of-crate producers
+    /// (the EHM-backed RIB sink, the BFD bridge, etc.) can signal loss before
+    /// it reaches the outbox. The degraded latch never auto-clears, while the
+    /// process-local generation advances on every call to wake live consumers.
+    pub fn record_loss(&self) {
         self.degraded.store(true, Ordering::Release);
+        self.loss_generation
+            .send_modify(|generation| *generation = generation.wrapping_add(1));
+    }
+
+    /// Subscribe to losses detected after this call. Earlier generations are
+    /// considered seen, allowing a fresh snapshot to establish a new baseline.
+    #[must_use]
+    pub fn subscribe_loss_generation(&self) -> watch::Receiver<u64> {
+        self.loss_generation.subscribe()
     }
 }
 
@@ -723,7 +734,7 @@ impl EventHistoryManager {
                     "event outbox cannot recover allocator anchor; entering pass-through mode"
                 );
                 state.pass_through.store(true, Ordering::Release);
-                state.flip_degraded();
+                state.record_loss();
                 // The crate-level API returns PassThrough here; the daemon
                 // wiring decides whether to create a live-only manager for
                 // required=false.
@@ -733,7 +744,7 @@ impl EventHistoryManager {
         };
 
         if init.had_quarantine {
-            state.flip_degraded();
+            state.record_loss();
             if let Some(metrics) = &config.metrics {
                 metrics.mark_event_outbox_degraded();
             }
@@ -975,7 +986,7 @@ fn record_shutdown_loss(
     if !progress.loss_recorded.swap(true, Ordering::AcqRel) {
         #[cfg(test)]
         progress.loss_latches.fetch_add(1, Ordering::AcqRel);
-        state.flip_degraded();
+        state.record_loss();
         if let Some(metrics) = metrics {
             metrics.mark_event_outbox_degraded();
         }
@@ -1269,7 +1280,7 @@ async fn run_actor(
                 Ok(Err(e)) => {
                     error!(error = %e, "batch commit failed; events dropped");
                     record_commit_failure_metrics(config.metrics.as_ref(), &shared);
-                    state.flip_degraded();
+                    state.record_loss();
                 }
                 Err(_) => {
                     let queued =
@@ -1335,6 +1346,33 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), store.test_wait_for_send(op))
             .await
             .expect("storage request backstop elapsed");
+    }
+
+    #[tokio::test]
+    async fn append_error_advances_loss_generation() {
+        // Load-bearing break: replacing `record_loss` in the actor's append-error
+        // branch with only the degraded latch exceeds the generation backstop.
+        let dir = tempfile::tempdir().unwrap();
+        let manager = EventHistoryManager::start(test_config(dir.path().join("events.db"), 1))
+            .await
+            .unwrap();
+        let state = manager.state();
+        let mut losses = state.subscribe_loss_generation();
+
+        manager.storage.shutdown().await;
+        manager
+            .sender()
+            .try_send(event(Category::Route, 1))
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), losses.changed())
+            .await
+            .expect("append-error loss generation backstop elapsed")
+            .unwrap();
+        assert_eq!(*losses.borrow_and_update(), 1);
+        assert!(state.degraded());
+        assert_eq!(state.latest_event_id(), 0);
+
+        manager.shutdown().await;
     }
 
     #[tokio::test]
@@ -1424,6 +1462,7 @@ mod tests {
         let mut manager = EventHistoryManager::start(config).await.unwrap();
         let store = manager.storage.clone();
         let state = manager.state();
+        let mut losses = state.subscribe_loss_generation();
         let progress = Arc::clone(&manager.shutdown_progress);
         store.test_pause_after_send(Append);
         manager
@@ -1467,8 +1506,11 @@ mod tests {
         assert!(has_label("reason", "shutdown_timeout"));
         assert_eq!(dropped.get_counter().value(), 1.0);
         assert_eq!(progress.loss_latches.load(Ordering::Acquire), 1);
+        assert!(losses.has_changed().unwrap());
+        assert_eq!(*losses.borrow_and_update(), 1);
         record_shutdown_loss(&state, &progress, Some(&metrics));
         assert_eq!(progress.loss_latches.load(Ordering::Acquire), 1);
+        assert!(!losses.has_changed().unwrap());
         assert_eq!(store.test_append_calls(), 1);
         manager.shutdown().await;
     }

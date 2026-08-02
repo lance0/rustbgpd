@@ -174,9 +174,13 @@ the spec makes it the fallback when a client omits the encoding.
     Reconnect semantics: gNMI carries no cursor on reconnect, so each
     fresh subscription gets a fresh initial snapshot — the disconnect
     window is NOT replayed. Collectors that need historical replay
-    use `SubscribeFromEvent` directly. On broadcast `Lagged` the
-    stream closes with `DataLoss` so the collector reconnects and
-    resyncs. Counter leaves (`messages/*`) and the `enabled` leaf
+    use `SubscribeFromEvent` directly. The handler subscribes to EHM's
+    process-local loss generation before baseline work. Broadcast `Lagged` or
+    any later producer loss during snapshot, sync, or live delivery closes with
+    `DataLoss`; recovery requires reconnecting without `updates_only` and
+    consuming a full initial snapshot. A new subscription baselines prior loss.
+    The loss generation is service-wide and coalescing, not a missed-event count.
+    Counter leaves (`messages/*`) and the `enabled` leaf
     remain SAMPLE/POLL-only — counters need a separate event source,
     and `enabled` is not on the lifecycle-event payload today.
 
