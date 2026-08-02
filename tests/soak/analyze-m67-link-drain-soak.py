@@ -5,7 +5,8 @@ Reads the CSV emitted by run-m67-link-drain-churn-soak.sh and produces a JSON
 verdict for the soak-specific gates:
 
   - no recorded harness failures,
-  - vtep sessions to both PEs have no sustained non-Established window,
+  - vtep sessions to both PEs have no sustained non-Established window and are
+    Established in the final CSV row,
   - container restart counters stay flat,
   - the run observes both drained and recovered phases,
   - pe1/pe2 DF role and link-drain gauges transition through the expected states,
@@ -202,6 +203,12 @@ def main() -> None:
          f"transient samples: pe1={pe1_session_stats[0]} across "
          f"{pe1_session_stats[1]} run(s), pe2={pe2_session_stats[0]} "
          f"across {pe2_session_stats[1]} run(s))")
+    gate("sessions_established_at_end",
+         rows[-1].get("pe1_session_established") == "1"
+         and rows[-1].get("pe2_session_established") == "1",
+         "final CSV vtep neighbor states "
+         f"(pe1={rows[-1].get('pe1_session_established')}, "
+         f"pe2={rows[-1].get('pe2_session_established')})")
     gate("restart_counts_flat",
          is_flat(rows, "pe1_restart_count")
          and is_flat(rows, "pe2_restart_count")
