@@ -471,6 +471,10 @@ the existing `WatchEvents`, `WatchRoutes`, `WatchRouteEvents`. The
 existing watch RPCs route through EHM internally with the cursor
 absent.
 
+The RPC baselines EHM's loss generation before delivery; later loss wins replay
+or blocked-delivery races and terminates with `DATA_LOSS`. Unlike a retention
+gap, pre-commit loss requires authoritative reconciliation before resuming.
+
 ### Retention — small, hard-capped, two dimensions
 
 Defaults are **deliberately small** so that when an operator enables

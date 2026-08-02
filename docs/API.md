@@ -1568,6 +1568,9 @@ enabled. When event history is disabled or unavailable, the RPC returns
 `FAILED_PRECONDITION`; legacy live and `List*Events` RPCs are unaffected.
 That availability result takes precedence over filter validation.
 
+Pre-admission loss is the baseline; later loss wins delivery races and ends with
+`DATA_LOSS`. Cursors cannot replay pre-commit loss, so reconcile state first.
+
 Filters compose AND-wise across category, type, peer, family, and exact prefix.
 Repeated categories are ORed, repeated types are ORed, and the two dimensions
 are ANDed. A request is accepted when any selected category/type pair is real;
