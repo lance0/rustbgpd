@@ -1,35 +1,140 @@
 //! Bounded on-disk history of recorded config snapshots (Junos-style `rollback N`).
 //!
-//! [`crate::config_persister`] records each canonical, validated config snapshot
-//! here on a best-effort basis — durable mutations, the boot snapshot, and
-//! successful SIGHUP refreshes — one entry per distinct config,
-//! content-hash-deduplicated against the newest entry and bounded to
-//! [`HISTORY_LIMIT`] snapshots under
-//! `<runtime_state_dir>/config-history/`. Rollback resolves an entry by
-//! index and routes it through the ordinary config transaction path (see
-//! `config_transaction_control`); this module only stores and lists.
-//! Retained bytes and their SHA-256 cover only normalized TOML. Referenced
-//! external `.rpol` main/import files and policy datasets are not archived or
-//! hashed here, so rollback may observe different external inputs or fail.
+//! [`crate::config_persister`] records each canonical, validated accepted
+//! snapshot here on a best-effort basis after durable mutations, at boot, and
+//! after successful SIGHUP refreshes. New v2 JSON entries retain normalized
+//! TOML plus an integrity manifest for the accepted external-source roster;
+//! they hash but do not archive referenced `.rpol` or dataset bytes.
 //!
-//! Entries are individual files named `<seq>-<unix_ts>-<sha256>.toml`,
-//! written with the commit-confirm journal's fsync'd atomic-write primitive.
-//! The monotonic sequence number orders entries (newest = highest); the
-//! content hash lives in the file name and is verified against the retained
-//! bytes before deduplication or rollback.
+//! Legacy TOML and v2 JSON entries share one newest-first sequence namespace
+//! and one [`HISTORY_LIMIT`]-entry bound under
+//! `<runtime_state_dir>/config-history/`. Listing verifies and redacts both
+//! generations. Until external-source restore lands, rollback accepts only a
+//! verified legacy row and refuses v2 or unreadable rows before a
+//! rollback-specific payload reopen, candidate construction, or transaction
+//! planning.
 
 #![deny(unsafe_code)]
 
-// ADR-0121 tranche 2: the v2 codec is intentionally dormant until the
-// filesystem migration tranche wires it into history reads and writes.
-mod v2;
+// ADR-0121 v2 storage and mixed listing are active; v2 restore remains
+// deliberately deferred.
+pub(crate) mod v2;
 
+#[cfg(test)]
 use std::fs;
-use std::io::{self, Read as _};
+use std::io;
+#[cfg(test)]
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(test)]
 use sha2::{Digest as _, Sha256};
+
+use crate::config::AcceptedConfigSnapshot;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HistoryStatus {
+    Recorded,
+    LegacyTomlOnly,
+    Unreadable,
+}
+
+#[derive(Debug, Clone)]
+pub struct MixedHistoryEntry {
+    pub index: usize,
+    pub timestamp_unix_seconds: u64,
+    pub sha256: Option<String>,
+    pub source_sha256: Option<String>,
+    pub status: HistoryStatus,
+    pub summary: String,
+    row: v2::StoredRow,
+}
+
+pub fn record_accepted(dir: &Path, snapshot: &AcceptedConfigSnapshot) -> io::Result<bool> {
+    let manifest = snapshot.source_manifest();
+    let manifest = v2::Manifest {
+        toml_sha256: manifest.toml_sha256,
+        rpol_units: manifest
+            .rpol_units
+            .iter()
+            .map(|unit| v2::RpolUnit {
+                modules: unit
+                    .modules
+                    .iter()
+                    .map(|module| v2::RpolModule {
+                        path: v2::LosslessPath(
+                            crate::config::source_provenance::lossless_path_bytes(&module.path).1,
+                        ),
+                        length: module.length,
+                        sha256: module.sha256,
+                        imports: module.imports.clone(),
+                    })
+                    .collect(),
+            })
+            .collect(),
+        datasets: manifest
+            .datasets
+            .iter()
+            .map(|dataset| v2::Dataset {
+                name: dataset.name.clone(),
+                kind: match dataset.kind {
+                    rustbgpd_policy::datasets::DatasetKind::Prefix => v2::DatasetKind::Prefix,
+                    rustbgpd_policy::datasets::DatasetKind::Asn => v2::DatasetKind::Asn,
+                    rustbgpd_policy::datasets::DatasetKind::Community => v2::DatasetKind::Community,
+                },
+                path: v2::LosslessPath(
+                    crate::config::source_provenance::lossless_path_bytes(&dataset.path).1,
+                ),
+                length: dataset.length,
+                sha256: dataset.sha256,
+            })
+            .collect(),
+    };
+    v2::record_v2(dir, snapshot.normalized_toml(), manifest)
+}
+
+pub fn list_mixed(dir: &Path) -> io::Result<Vec<MixedHistoryEntry>> {
+    v2::scan_mixed(dir).map(|rows| {
+        rows.into_iter()
+            .map(|row| MixedHistoryEntry {
+                index: row.index,
+                timestamp_unix_seconds: row.timestamp_unix_seconds,
+                sha256: row.verified_sha256.map(|digest| v2::encode_hex(&digest)),
+                source_sha256: row
+                    .verified_source_sha256
+                    .map(|digest| v2::encode_hex(&digest)),
+                status: match row.status {
+                    v2::StoredStatus::Recorded => HistoryStatus::Recorded,
+                    v2::StoredStatus::LegacyTomlOnly => HistoryStatus::LegacyTomlOnly,
+                    v2::StoredStatus::Unreadable => HistoryStatus::Unreadable,
+                },
+                summary: row
+                    .redacted_summary
+                    .clone()
+                    .unwrap_or_else(|| "(unreadable config history entry)".to_string()),
+                row,
+            })
+            .collect()
+    })
+}
+
+pub fn read_mixed_legacy(dir: &Path, entry: &MixedHistoryEntry) -> io::Result<String> {
+    if entry.status != HistoryStatus::LegacyTomlOnly {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "only legacy TOML-only history entries are rollback-readable",
+        ));
+    }
+    match v2::read_mixed(dir, &entry.row)? {
+        v2::StoredPayload::Legacy(toml) => Ok(toml),
+        v2::StoredPayload::V2(_) => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "v2 config history rollback requires the external-source restore tranche",
+        )),
+    }
+}
 
 /// Directory name under `runtime_state_dir`.
 pub const HISTORY_DIR_NAME: &str = "config-history";
@@ -45,9 +150,10 @@ pub const HISTORY_LIMIT: usize = 20;
 const MAX_ENTRY_BYTES: u64 = 10 * 1024 * 1024;
 
 /// Metadata for one retained config snapshot (no document contents).
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoryEntry {
-    /// 0 = newest recorded config, 1 = the next older entry, …
+    /// 0 = newest config-history row, 1 = the next older row, …
     pub index: usize,
     /// Monotonic on-disk sequence number (newest = highest).
     pub sequence: u64,
@@ -65,6 +171,7 @@ pub fn history_dir(runtime_state_dir: &Path) -> PathBuf {
 }
 
 #[must_use]
+#[cfg(test)]
 pub fn sha256_hex(toml_str: &str) -> String {
     let digest = Sha256::digest(toml_str.as_bytes());
     let mut hex = String::with_capacity(64);
@@ -86,6 +193,7 @@ pub fn sha256_hex(toml_str: &str) -> String {
 /// Returns any io error from creating the directory, listing existing
 /// entries, or atomically writing the new entry. Eviction failures are
 /// returned too — a history that cannot honor its bound should be loud.
+#[cfg(test)]
 pub fn record(dir: &Path, toml_str: &str) -> io::Result<bool> {
     fs::create_dir_all(dir)?;
     let hash = sha256_hex(toml_str);
@@ -127,6 +235,7 @@ pub fn record(dir: &Path, toml_str: &str) -> io::Result<bool> {
 /// # Errors
 ///
 /// Returns any io error from reading the directory.
+#[cfg(test)]
 pub fn list(dir: &Path) -> io::Result<Vec<HistoryEntry>> {
     let read_dir = match fs::read_dir(dir) {
         Ok(read_dir) => read_dir,
@@ -160,6 +269,7 @@ pub fn list(dir: &Path) -> io::Result<Vec<HistoryEntry>> {
 ///
 /// `NotFound` when the index is beyond the retained history (the message
 /// names how many entries exist); other io errors from the bounded read.
+#[cfg(test)]
 pub fn read_entry(dir: &Path, index: usize) -> io::Result<(HistoryEntry, String)> {
     let entries = list(dir)?;
     let count = entries.len();
@@ -189,6 +299,7 @@ pub fn read_entry(dir: &Path, index: usize) -> io::Result<(HistoryEntry, String)
 ///
 /// Returns `InvalidData` for a non-regular, oversized, non-UTF-8, or
 /// digest-mismatched entry, plus ordinary filesystem errors.
+#[cfg(test)]
 pub fn read(entry: &HistoryEntry) -> io::Result<String> {
     let metadata = fs::symlink_metadata(&entry.path)?;
     if !metadata.file_type().is_file() {
@@ -286,10 +397,118 @@ fn parse_entry_name(name: &str) -> Option<(u64, u64, String)> {
 mod tests {
     use super::*;
 
+    const MAIN_RPOL: &str =
+        "import \"lib.rpol\"\nimport \"a-child.rpol\"\npolicy outbound { term rest { accept } }\n";
+    const LIB_RPOL: &str = "dataset asn-set customers\npolicy inbound {\n  term customer { if route.origin-as in customers { accept } }\n  term rest { reject }\n}\n";
+
+    fn external_source_fixture(dir: &Path) -> PathBuf {
+        fs::write(dir.join("policy.rpol"), MAIN_RPOL).unwrap();
+        fs::write(dir.join("lib.rpol"), LIB_RPOL).unwrap();
+        fs::write(
+            dir.join("a-child.rpol"),
+            "policy child { term rest { accept } }\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("a-unit.rpol"),
+            "policy second-unit { term rest { accept } }\n",
+        )
+        .unwrap();
+        fs::write(dir.join("customers.txt"), "64500\n").unwrap();
+        let config = crate::test_support::tier_authorized_uds_test_config(
+            r#"
+[global]
+asn = 65000
+router_id = "192.0.2.1"
+listen_port = 179
+[global.telemetry]
+log_format = "json"
+[policy]
+rpol_files = ["policy.rpol", "a-unit.rpol"]
+[policy.datasets.customers]
+path = "customers.txt"
+"#,
+        );
+        let path = dir.join("config.toml");
+        fs::write(&path, config).unwrap();
+        path
+    }
+
     fn config_toml(asn: u32) -> String {
         format!(
             "[global]\nasn = {asn}\nrouter_id = \"10.0.0.1\"\nlisten_port = 179\n\n[[neighbors]]\naddress = \"10.0.0.2\"\nremote_asn = 65002\n"
         )
+    }
+
+    /// Red proof: dropping or reordering any rpol unit, import edge, dataset,
+    /// kind, path, length, or digest in the storage conversion changes the
+    /// stored roster or source digest and makes this full-fixture test fail.
+    #[test]
+    fn history_manifest_preserves_the_full_accepted_source_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let snapshot =
+            AcceptedConfigSnapshot::load(&external_source_fixture(dir.path()), None).unwrap();
+        let history = dir.path().join("history");
+
+        // History must serialize the accepted snapshot, not reopen mutable
+        // external sources after acceptance.
+        for name in [
+            "policy.rpol",
+            "lib.rpol",
+            "a-child.rpol",
+            "a-unit.rpol",
+            "customers.txt",
+        ] {
+            fs::remove_file(dir.path().join(name)).unwrap();
+        }
+
+        record_accepted(&history, &snapshot).unwrap();
+        let row = v2::scan_mixed(&history).unwrap().remove(0);
+        let v2::StoredPayload::V2(envelope) = v2::read_mixed(&history, &row).unwrap() else {
+            panic!("accepted snapshot must produce a v2 history row");
+        };
+
+        assert_eq!(envelope.normalized_toml, snapshot.normalized_toml());
+        assert_eq!(envelope.source_sha256, snapshot.source_sha256());
+        assert_eq!(envelope.manifest.rpol_units.len(), 2);
+        assert_eq!(envelope.manifest.rpol_units[0].modules.len(), 3);
+        assert_eq!(envelope.manifest.rpol_units[0].modules[0].imports, [1, 2]);
+        assert_eq!(envelope.manifest.datasets.len(), 1);
+        assert_eq!(envelope.manifest.datasets[0].name, "customers");
+        assert_eq!(envelope.manifest.datasets[0].kind, v2::DatasetKind::Asn);
+    }
+
+    /// Red proof: removing the status guard in `read_mixed_legacy` makes this
+    /// deleted v2 payload reach the second read and return `NotFound` instead
+    /// of the status-only refusal asserted here.
+    #[test]
+    fn mixed_legacy_reader_refuses_v2_before_reopening_the_payload() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = crate::test_support::tier_authorized_uds_test_config(
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+"#,
+        );
+        let snapshot = AcceptedConfigSnapshot::from_config_for_test(
+            crate::config::Config::load_toml_with_diagnostics(&content, "mixed reader test")
+                .unwrap(),
+        );
+        record_accepted(dir.path(), &snapshot).unwrap();
+        let entry = list_mixed(dir.path()).unwrap().remove(0);
+        std::fs::remove_file(&entry.row.path).unwrap();
+
+        let error = read_mixed_legacy(dir.path(), &entry).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+        assert_eq!(
+            error.to_string(),
+            "only legacy TOML-only history entries are rollback-readable"
+        );
     }
 
     #[test]

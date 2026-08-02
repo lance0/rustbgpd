@@ -9,6 +9,8 @@
 //!   loud banner;
 //! - confirm + SIGKILL → the new config is retained and no journal remains;
 //! - in-process timeout auto-revert → the journal is consumed;
+//! - v2 history survives restart and refuses restore until source verification
+//!   is available;
 //! - torn journal on disk → boot refuses, naming both files.
 
 use std::fs::File;
@@ -416,12 +418,14 @@ fn torn_journal_refuses_boot_naming_both_files() {
     );
 }
 
+/// Red proof: removing v2 provenance, restart deduplication, or the v2 refusal
+/// changes the exact history/error assertions; reaching the apply path changes
+/// disk bytes or the live dynamic-neighbor roster.
 #[test]
-fn history_and_rollback_restore_previous_config_across_restart() {
-    // End-to-end quartet proof over the real binary: apply a config, restart
-    // the daemon (history must survive and not grow via dedup), then
-    // `config rollback 1` must restore the pre-apply config — proven on the
-    // on-disk config AND the daemon's runtime state, not just the receipt.
+fn v2_history_survives_restart_and_refuses_restore_before_source_verification() {
+    // End-to-end proof over the real binary: apply a config, restart the daemon
+    // (history must survive without a duplicate boot row), then prove a v2 row
+    // is refused before restore mutates either disk or runtime state.
     let temp = tempfile::tempdir().expect("failed to create temp dir");
     let lab = lab(temp.path());
 
@@ -457,11 +461,17 @@ fn history_and_rollback_restore_previous_config_across_restart() {
     let history = rbgp_json(&lab.grpc_addr, &["--json", "config", "history"]);
     let entries = history["entries"].as_array().expect("entries array");
     assert_eq!(entries.len(), 2, "boot + apply must be recorded: {history}");
+    assert!(entries.iter().all(|entry| {
+        entry["provenance_status"] == "recorded"
+            && entry["source_sha256"]
+                .as_str()
+                .is_some_and(|digest| !digest.is_empty())
+    }));
     assert_ne!(
         entries[0]["sha256"], entries[1]["sha256"],
         "distinct configs must have distinct hashes: {history}"
     );
-    let boot_hash = entries[1]["sha256"].as_str().unwrap().to_string();
+    let expected_history = history.clone();
 
     // Restart: history survives on disk, and the boot-time re-record of the
     // unchanged running config deduplicates instead of growing history.
@@ -469,9 +479,8 @@ fn history_and_rollback_restore_previous_config_across_restart() {
     let mut daemon = lab.spawn("second.stderr.log");
     let history = rbgp_json(&lab.grpc_addr, &["--json", "config", "history"]);
     assert_eq!(
-        history["entries"].as_array().map(Vec::len),
-        Some(2),
-        "history must survive a restart without duplicate boot entries: {history}"
+        history, expected_history,
+        "history must survive a restart without duplicate boot entries"
     );
 
     // Rolling back past the retained history fails cleanly.
@@ -493,38 +502,45 @@ fn history_and_rollback_restore_previous_config_across_restart() {
         "failed rollback must not touch the config"
     );
 
-    // rollback 1 restores the pre-apply (boot) config through the
-    // transaction path.
-    let rollback = rbgp_json(&lab.grpc_addr, &["--json", "config", "rollback", "1"]);
-    assert_eq!(rollback["status"], "committable", "rollback: {rollback}");
-    // MUTATION PROOF (disk): the candidate's dynamic-neighbor range is gone
-    // from the persisted config.
     let on_disk = std::fs::read_to_string(&lab.config_path).unwrap();
     assert!(
-        !on_disk.contains("192.0.2.0/24"),
-        "rollback must restore the pre-apply config on disk:\n{on_disk}"
+        on_disk.contains("192.0.2.0/24"),
+        "candidate must still be active before the refusal:\n{on_disk}"
     );
-    // MUTATION PROOF (runtime): the daemon no longer runs the candidate's
-    // dynamic-neighbor range.
+    assert!(!lab.journal_path.exists());
     let ranges = rbgp_json(&lab.grpc_addr, &["--json", "dynamic-neighbor", "list"]);
     assert_eq!(
         ranges.as_array().map(Vec::len),
-        Some(0),
-        "rolled-back daemon must not run the candidate's dynamic neighbors: {ranges}"
+        Some(1),
+        "candidate must be live before the refusal: {ranges}"
     );
-    // The rollback commit is itself recorded as the newest history entry,
-    // with the boot config's content hash.
-    let history = rbgp_json(&lab.grpc_addr, &["--json", "config", "history"]);
-    let entries = history["entries"].as_array().expect("entries array");
+
+    let rollback = rbgp(&lab.grpc_addr, &["--json", "config", "rollback", "1"]);
+    assert!(!rollback.status.success(), "v2 rollback must be refused");
+    let stderr = String::from_utf8_lossy(&rollback.stderr);
+    assert!(
+        stderr.contains("v2 config history entry") && stderr.contains("external-source restore"),
+        "v2 refusal must be actionable:\n{stderr}"
+    );
+
+    // MUTATION PROOF: refusal changes neither durable config, live runtime,
+    // history, nor the commit-confirm journal.
     assert_eq!(
-        entries.len(),
-        3,
-        "rollback commit is a new entry: {history}"
+        std::fs::read_to_string(&lab.config_path).unwrap(),
+        on_disk,
+        "refused v2 rollback must not touch the persisted config"
+    );
+    let ranges = rbgp_json(&lab.grpc_addr, &["--json", "dynamic-neighbor", "list"]);
+    assert_eq!(
+        ranges.as_array().map(Vec::len),
+        Some(1),
+        "refused v2 rollback must not change live dynamic neighbors: {ranges}"
     );
     assert_eq!(
-        entries[0]["sha256"].as_str().unwrap(),
-        boot_hash,
-        "newest entry must be the restored boot config: {history}"
+        rbgp_json(&lab.grpc_addr, &["--json", "config", "history"]),
+        expected_history,
+        "refused v2 rollback must not append history"
     );
+    assert!(!lab.journal_path.exists());
     daemon.assert_still_running();
 }

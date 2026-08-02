@@ -17,32 +17,32 @@ use super::{Config, DatasetBindMode, persisted_config_document};
 const SOURCE_DIGEST_DOMAIN: &[u8] = b"rustbgpd.config-source.v2\0";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct SourceManifest {
-    toml_sha256: [u8; 32],
-    rpol_units: Vec<RpolUnitSource>,
-    datasets: Vec<DatasetSource>,
+pub(crate) struct SourceManifest {
+    pub(crate) toml_sha256: [u8; 32],
+    pub(crate) rpol_units: Vec<RpolUnitSource>,
+    pub(crate) datasets: Vec<DatasetSource>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct RpolUnitSource {
-    modules: Vec<RpolModuleSource>,
+pub(crate) struct RpolUnitSource {
+    pub(crate) modules: Vec<RpolModuleSource>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct RpolModuleSource {
-    path: PathBuf,
-    length: u64,
-    sha256: [u8; 32],
-    imports: Vec<u32>,
+pub(crate) struct RpolModuleSource {
+    pub(crate) path: PathBuf,
+    pub(crate) length: u64,
+    pub(crate) sha256: [u8; 32],
+    pub(crate) imports: Vec<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct DatasetSource {
-    name: String,
-    kind: DatasetKind,
-    path: PathBuf,
-    length: u64,
-    sha256: [u8; 32],
+pub(crate) struct DatasetSource {
+    pub(crate) name: String,
+    pub(crate) kind: DatasetKind,
+    pub(crate) path: PathBuf,
+    pub(crate) length: u64,
+    pub(crate) sha256: [u8; 32],
 }
 
 #[derive(Default)]
@@ -161,13 +161,13 @@ fn frame_path(digest: &mut Sha256, path: &Path) {
 }
 
 #[cfg(unix)]
-fn lossless_path_bytes(path: &Path) -> (&'static [u8], Vec<u8>) {
+pub(crate) fn lossless_path_bytes(path: &Path) -> (&'static [u8], Vec<u8>) {
     use std::os::unix::ffi::OsStrExt;
     (b"unix-os-bytes", path.as_os_str().as_bytes().to_vec())
 }
 
 #[cfg(windows)]
-fn lossless_path_bytes(path: &Path) -> (&'static [u8], Vec<u8>) {
+pub(crate) fn lossless_path_bytes(path: &Path) -> (&'static [u8], Vec<u8>) {
     use std::os::windows::ffi::OsStrExt;
     let bytes = path
         .as_os_str()
@@ -375,6 +375,14 @@ impl AcceptedConfigSnapshot {
 
     pub(crate) fn normalized_toml(&self) -> &str {
         &self.normalized_toml
+    }
+
+    pub(crate) fn source_manifest(&self) -> &SourceManifest {
+        &self.manifest
+    }
+
+    pub(crate) fn source_sha256(&self) -> [u8; 32] {
+        self.source_sha256
     }
 }
 

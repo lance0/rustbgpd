@@ -229,9 +229,9 @@ pub async fn status(connection: Connection, json: bool) -> Result<(), CliError> 
     Ok(())
 }
 
-/// List the daemon's bounded on-disk recorded config history: index,
-/// timestamp, content hash, and a one-line summary per retained entry
-/// (never config document contents).
+/// List the daemon's bounded mixed-generation config history: index,
+/// timestamp, content hash, provenance status, and a one-line summary per
+/// retained row (never config document contents).
 pub async fn history(connection: Connection, json: bool) -> Result<(), CliError> {
     let mut client =
         ConfigServiceClient::with_interceptor(connection.channel(), connection.interceptor());
@@ -248,9 +248,9 @@ pub async fn history(connection: Connection, json: bool) -> Result<(), CliError>
     Ok(())
 }
 
-/// Junos-style `rollback N`: the daemon resolves history entry N and routes
-/// it through the same transaction path as apply — same receipts, and the
-/// rollback itself can be commit-confirmed.
+/// Junos-style `rollback N`: the daemon resolves an eligible legacy history
+/// row and routes it through the same transaction path as apply — same
+/// receipts, and the rollback itself can be commit-confirmed.
 pub async fn rollback(
     connection: Connection,
     options: RollbackOptions<'_>,
@@ -258,7 +258,7 @@ pub async fn rollback(
 ) -> Result<(), CliError> {
     if options.index == 0 {
         return Err(CliError::Argument(
-            "rollback index must be >= 1 (index 0 is the newest recorded config)".to_string(),
+            "rollback index must be >= 1 (index 0 is the newest config-history row)".to_string(),
         ));
     }
     if options.confirm_id.is_none() && options.confirm_timeout_seconds.is_some() {
@@ -1528,7 +1528,7 @@ mod tests {
         assert!(
             matches!(err, CliError::Argument(ref message)
                 if message.contains("index must be >= 1")
-                    && message.contains("newest recorded config")
+                    && message.contains("newest config-history row")
                     && !message.contains("running")),
             "{err:?}"
         );

@@ -320,24 +320,23 @@ and Unix socket; owner-only permissions do not make cross-process sharing safe.
 
 ## Recorded config history confidentiality
 
-`<runtime_state_dir>/config-history/*.toml` and a pending
+`<runtime_state_dir>/config-history/` (legacy TOML plus v2 JSON) and a pending
 `commit-confirm-journal.json` contain normalized TOML configuration snapshots.
 That can include TCP-MD5 passwords, TCP-AO keys, API credentials, and other
 secrets; the redacted `rbgp config history` summary does not make the files
-themselves safe to publish. Snapshot files are created owner-only (`0600`), and
-history reads verify their filename SHA-256 before they are eligible for
-rollback. The hash covers only the retained TOML: referenced external `.rpol`
-main/import sources and policy dataset contents are neither archived nor
-hashed. Rollback re-reads those current filesystem inputs, so protect and
-version them alongside the TOML. Keep `runtime_state_dir` on owner-controlled
+themselves safe to publish. Files are owner-only (`0600`) in an owner-private
+directory (`0700`). Normal history output never exposes paths, filenames, or
+raw filesystem errors. V2 hashes external-source identity but does not archive
+source bytes, so v2 and unreadable rows fail closed for rollback until restore
+support lands. Keep `runtime_state_dir` on owner-controlled
 local storage and protect backups as secret-bearing configuration, not as
 ordinary operational telemetry.
 
 `ListConfigHistory` exposes explicit provenance status without inferring trust
 from a readable file or filename digest. Its additive config-source digest is
 defined over the normalized-TOML digest plus the canonical accepted rpol/dataset
-source roster. Storage/runtime v2 activation has not shipped: current verified
-rows are `LEGACY_TOML_ONLY` with an empty config-source digest. Unreadable rows
+source roster. New rows are `RECORDED`; retained legacy rows remain
+`LEGACY_TOML_ONLY` with an empty config-source digest. Unreadable rows
 return `UNREADABLE`, empty TOML and source digests, and a constant summary so
 paths, filenames, raw errors, and unverified digest claims do not cross the API
 boundary.

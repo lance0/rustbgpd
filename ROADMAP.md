@@ -212,10 +212,11 @@ Levenshtein machinery as the `.rpol` suggestions (LAN-481);
 ~~config version history + `rollback N`~~ **Shipped (#1016):** retained applied
 versions and rollback share the same transaction/validation path, completing
 the check/compare/confirm/rollback workflow for TOML-complete snapshots
-(LAN-483). External-policy source provenance is **not shipped**: ADR-0121 is
-accepted with implementation pending. Even after it lands, provenance is
+(LAN-483). ADR-0121 provenance recording and mixed legacy/v2 listing are
+**shipped**; full v2 external-source restore remains pending. Provenance is
 audit and verification evidence, not authority to adopt external-policy state;
-#1370 keeps full external-policy rollback fenced; ~~a bounded
+#1370 keeps full external-policy rollback fenced, and v2 rows are temporarily
+refused by `rollback N`; ~~a bounded
 BIRD/FRR/GoBGP config importer~~ **Shipped (#1015):** structure-only conversion
 with a fail-stop unsupported-directive report and shadow-trial workflow
 (LAN-484).

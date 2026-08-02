@@ -417,16 +417,15 @@ before it leaves the daemon (`rbgp config effective`).
 | `AbortConfigTransaction` | Abort a pending confirmed transaction and roll back immediately |
 | `GetConfigTransactionStatus` | Return redacted confirmed-transaction lifecycle state |
 | `GetEffectiveConfig` | Return the effective running config as normalized TOML — defaults materialized, secrets redacted (`rbgp config effective`) |
-| `ListConfigHistory` | List the bounded on-disk recorded config history — newest recorded config at index 0, then older entries; per-entry timestamp, normalized-TOML SHA-256, config-source SHA-256 over that TOML digest plus the canonical accepted rpol/dataset source roster, provenance status, and one-line summary; never config documents (`rbgp config history`). The provenance fields are additive schema only: storage/runtime v2 activation has not shipped, so current readable rows are `LEGACY_TOML_ONLY` with no source digest and corrupt rows are `UNREADABLE` with both digests empty. |
-| `RollbackConfigTransaction` | Restore a retained recorded config snapshot through the same transaction executor as apply — same plan/impact classification, receipts, and optional confirmed-commit window (`rbgp config rollback N`) |
+| `ListConfigHistory` | List the bounded mixed-generation config history — newest row at index 0, then older entries; per-entry timestamp, normalized-TOML SHA-256, config-source SHA-256 over that TOML digest plus the canonical accepted rpol/dataset source roster, provenance status, and one-line summary; never config documents (`rbgp config history`). Valid v2 rows are `RECORDED`; retained legacy rows are `LEGACY_TOML_ONLY` with no source digest; corrupt or duplicate-sequence rows are `UNREADABLE` with both digests empty. |
+| `RollbackConfigTransaction` | Restore an eligible legacy TOML-only row through the same transaction executor as apply — same plan/impact classification, receipts, and optional confirmed-commit window (`rbgp config rollback N`). V2 and unreadable rows fail closed before a rollback-specific payload reopen, candidate construction, or planning until external-source restore lands. |
 
-The currently active v1 config-history payloads and populated SHA-256 values
-cover normalized TOML only; their additive source-digest field remains empty.
-Index 0 means newest recorded, not necessarily the running or currently
-persisted config. Referenced external `.rpol` main/import sources and policy
-dataset contents are not archived by v1 or hashed in its rows; rollback re-reads
-their current filesystem contents and can therefore produce different policy or
-fail validation if those inputs changed or disappeared.
+Legacy and v2 rows share one newest-first index; index 0 is not necessarily the
+running or currently persisted config. Legacy rows cover normalized TOML only.
+V2 rows also hash the accepted external-source identity, but do not archive the
+`.rpol` or dataset bytes. Until the restore tranche can verify those live bytes
+against the manifest, v2 rollback is refused before any source reread. Eligible
+legacy rows retain the existing transaction executor and external-input fence.
 
 `DiffRuntimeConfigResponse` contains boolean summary fields, a
 plain-text `human_text` rendering, and `diff_json` using the
