@@ -114,6 +114,21 @@ fn transport_config(addr: SocketAddr) -> TransportConfig {
     }
 }
 
+async fn wait_for_fsm_state(handle: &PeerHandle, expected: SessionState) {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Some(state) = handle.query_state_timeout(Duration::from_millis(100)).await
+                && state.fsm_state == expected
+            {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("FSM did not reach {expected:?} within 2s"));
+}
+
 #[tokio::test]
 async fn full_handshake_reaches_established() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -150,15 +165,7 @@ async fn full_handshake_reaches_established() {
     let msg = read_bgp_message(&mut peer_stream, &mut buf).await;
     assert!(matches!(msg, Message::Keepalive));
 
-    // Session should now be Established — verify via metrics
-    // Give a moment for the FSM to process
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    let families = metrics.registry().gather();
-    let established = families
-        .iter()
-        .find(|f| f.name() == "bgp_session_established_total");
-    assert!(established.is_some(), "established metric should exist");
+    wait_for_fsm_state(&handle, SessionState::Established).await;
 
     // Clean shutdown
     handle.shutdown().await.unwrap().unwrap();
@@ -232,6 +239,7 @@ async fn inbound_session_handshakes_when_open_already_buffered() {
         matches!(msg, Message::Open(_)),
         "expected OPEN, got {msg:?}"
     );
+    wait_for_fsm_state(&handle, SessionState::Established).await;
     let msg = tokio::time::timeout(read_to, read_bgp_message(&mut peer_stream, &mut buf))
         .await
         .expect(
@@ -242,14 +250,6 @@ async fn inbound_session_handshakes_when_open_already_buffered() {
         matches!(msg, Message::Keepalive),
         "expected KEEPALIVE, got {msg:?}"
     );
-
-    // FSM should reach Established.
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    let families = metrics.registry().gather();
-    let established = families
-        .iter()
-        .find(|f| f.name() == "bgp_session_established_total");
-    assert!(established.is_some(), "session should reach Established");
 
     handle.shutdown().await.unwrap().unwrap();
 }
@@ -402,8 +402,7 @@ async fn notification_from_peer_tears_down() {
     let notif = NotificationMessage::new(NotificationCode::Cease, 0, Bytes::new());
     send_bgp_message(&mut peer_stream, &Message::Notification(notif)).await;
 
-    // Give time for FSM to process and retry
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    wait_for_fsm_state(&handle, SessionState::Idle).await;
 
     // Verify notification received metric
     let families = metrics.registry().gather();
