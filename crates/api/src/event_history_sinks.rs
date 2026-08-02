@@ -99,7 +99,7 @@ impl EhmRibSink {
                 self.metrics
                     .record_event_outbox_drop(category.as_str(), "queue_full");
                 self.metrics.mark_event_outbox_degraded();
-                self.state.flip_degraded();
+                self.state.record_loss();
                 warn!(
                     category = category.as_str(),
                     "event outbox producer queue full; dropping event"
@@ -385,7 +385,7 @@ pub fn record_source_lag(
 ) {
     metrics.record_event_outbox_drops_by(category, "source_lagged", missed);
     metrics.mark_event_outbox_degraded();
-    handle.state().flip_degraded();
+    handle.state().record_loss();
 }
 
 /// Try-send convenience for producers that already have a built
@@ -401,7 +401,7 @@ pub fn try_send_envelope(
         Err(TrySendError::Full(_)) => {
             metrics.record_event_outbox_drop(category.as_str(), "queue_full");
             metrics.mark_event_outbox_degraded();
-            handle.state().flip_degraded();
+            handle.state().record_loss();
             warn!(
                 category = category.as_str(),
                 "event outbox producer queue full; dropping event"
@@ -709,11 +709,45 @@ mod tests {
         manager.shutdown().await;
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn direct_queue_full_advances_loss_generation() {
+        // Load-bearing break: removing `record_loss` from
+        // `try_send_envelope`'s Full branch leaves both generation assertions red.
+        // The current-thread runtime prevents the actor from draining between sends.
+        let dir = tempfile::tempdir().unwrap();
+        let metrics = BgpMetrics::new();
+        let mut config = small_ehm_config(&dir, &metrics);
+        config.queue_capacity = 1;
+        let manager = EventHistoryManager::start(config).await.expect("EHM start");
+        let handle = manager.handle();
+        let mut losses = handle.state().subscribe_loss_generation();
+
+        try_send_envelope(
+            &handle,
+            &metrics,
+            route_event_envelope(sample_route_event(RouteEventType::Added, 0), 0),
+        );
+        assert!(!losses.has_changed().unwrap());
+        assert_eq!(drop_counter(&metrics, "route", "queue_full"), 0);
+
+        try_send_envelope(
+            &handle,
+            &metrics,
+            route_event_envelope(sample_route_event(RouteEventType::Added, 1), 0),
+        );
+        assert!(losses.has_changed().unwrap());
+        assert_eq!(*losses.borrow_and_update(), 1);
+        assert_eq!(drop_counter(&metrics, "route", "queue_full"), 1);
+
+        manager.shutdown().await;
+    }
+
     /// Queue-full pin: a full snapshot channel drops with the same
     /// counters and degraded flips the direct EHM enqueue had.
     #[test]
     fn snapshot_queue_full_drops_and_degrades() {
         let state = Arc::new(EhmState::default());
+        let mut losses = state.subscribe_loss_generation();
         let metrics = BgpMetrics::new();
         let (snapshot_tx, _snapshot_rx) = mpsc::channel(1);
         let sink = EhmRibSink {
@@ -724,15 +758,23 @@ mod tests {
 
         sink.publish_route_event(&sample_route_event(RouteEventType::Added, 0));
         assert!(!state.degraded(), "accepted publish must not degrade");
+        assert!(!losses.has_changed().unwrap());
         assert_eq!(drop_counter(&metrics, "route", "queue_full"), 0);
 
         sink.publish_route_event(&sample_route_event(RouteEventType::Added, 1));
         assert!(state.degraded(), "queue-full drop must flip EHM state");
+        assert!(losses.has_changed().unwrap());
+        assert_eq!(*losses.borrow_and_update(), 1);
         assert!(
             metrics.event_outbox_degraded(),
             "queue-full drop must flip the Prometheus gauge"
         );
         assert_eq!(drop_counter(&metrics, "route", "queue_full"), 1);
+
+        sink.publish_route_event(&sample_route_event(RouteEventType::Added, 2));
+        assert!(losses.has_changed().unwrap());
+        assert_eq!(*losses.borrow_and_update(), 2);
+        assert_eq!(drop_counter(&metrics, "route", "queue_full"), 2);
     }
 
     /// Closed pin: a closed snapshot channel (teardown) records the
@@ -741,6 +783,7 @@ mod tests {
     #[test]
     fn snapshot_channel_closed_records_drop_without_degraded() {
         let state = Arc::new(EhmState::default());
+        let losses = state.subscribe_loss_generation();
         let metrics = BgpMetrics::new();
         let (snapshot_tx, snapshot_rx) = mpsc::channel(1);
         drop(snapshot_rx);
@@ -752,6 +795,7 @@ mod tests {
 
         sink.publish_evpn_event(&sample_evpn_event());
         assert!(!state.degraded(), "closed drop must not flip EHM state");
+        assert!(!losses.has_changed().unwrap());
         assert!(
             !metrics.event_outbox_degraded(),
             "closed drop must not flip the Prometheus gauge"
@@ -770,6 +814,7 @@ mod tests {
             .await
             .expect("EHM start");
         let handle = manager.handle();
+        let losses = handle.state().subscribe_loss_generation();
         let mut committed_rx = handle.subscribe_live();
         let (sink, stage) = make_rib_event_sink(handle.clone(), metrics.clone());
 
@@ -792,16 +837,24 @@ mod tests {
             !handle.state().degraded(),
             "late publish after stage shutdown must not degrade"
         );
+        assert!(!losses.has_changed().unwrap());
 
         manager.shutdown().await;
         assert_eq!(handle.state().latest_event_id(), 16);
+        try_send_envelope(
+            &handle,
+            &metrics,
+            route_event_envelope(sample_route_event(RouteEventType::Added, 100), 0),
+        );
+        assert_eq!(drop_counter(&metrics, "route", "closed"), 2);
+        assert!(!losses.has_changed().unwrap());
     }
 
     #[tokio::test]
     async fn record_source_lag_flips_metric_and_in_process_state() {
         // Regression for the dual-signal bug the PR #291 second
         // review pass caught: `mark_event_outbox_degraded()` was
-        // called but `handle.state().flip_degraded()` was not, so
+        // called but `handle.state().record_loss()` was not, so
         // any health probe reading the in-process EHM state would
         // see `degraded() == false` even after a real source lag.
         let dir = tempfile::tempdir().unwrap();
@@ -822,6 +875,7 @@ mod tests {
         .await
         .expect("EHM start");
         let handle = manager.handle();
+        let mut losses = handle.state().subscribe_loss_generation();
         let metrics = BgpMetrics::new();
 
         // Baseline: nothing is degraded, no drops recorded.
@@ -844,10 +898,17 @@ mod tests {
             handle.state().degraded(),
             "EHM in-process state must flip on source_lagged drop"
         );
+        assert!(losses.has_changed().unwrap());
+        assert_eq!(*losses.borrow_and_update(), 1);
         assert!(
             metrics.event_outbox_degraded(),
             "Prometheus degraded gauge must flip on source_lagged drop"
         );
+
+        record_source_lag(&handle, &metrics, "dataplane", 3);
+        assert!(losses.has_changed().unwrap());
+        assert_eq!(*losses.borrow_and_update(), 2);
+        assert_eq!(drop_counter(&metrics, "dataplane", "source_lagged"), 10);
 
         manager.shutdown().await;
     }

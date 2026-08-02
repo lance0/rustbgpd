@@ -172,6 +172,38 @@ async fn forward_responses(
     true
 }
 
+async fn send_on_change_response(
+    response: Result<gnmi::SubscribeResponse, Status>,
+    tx: &tokio::sync::mpsc::Sender<Result<gnmi::SubscribeResponse, Status>>,
+    loss_rx: &mut tokio::sync::watch::Receiver<u64>,
+) -> bool {
+    tokio::select! {
+        biased;
+        changed = loss_rx.changed() => {
+            if changed.is_ok() {
+                let _ = tx.send(Err(on_change_loss_status())).await;
+            }
+            false
+        }
+        permit = tx.reserve() => {
+            let Ok(permit) = permit else {
+                return false;
+            };
+            match loss_rx.has_changed() {
+                Ok(true) => {
+                    permit.send(Err(on_change_loss_status()));
+                    false
+                }
+                Ok(false) => {
+                    permit.send(response);
+                    true
+                }
+                Err(_) => false,
+            }
+        }
+    }
+}
+
 impl GnmiService {
     /// Create a gNMI service backed by the daemon's peer manager.
     #[must_use]
@@ -649,8 +681,9 @@ impl GnmiService {
     /// fresh subscription starts a fresh initial snapshot. The
     /// disconnect window is intentionally NOT replayed — collectors
     /// that need historical replay use `SubscribeFromEvent` directly.
-    /// On broadcast `Lagged`, the stream closes with `DataLoss` so
-    /// the collector reconnects and resyncs from a fresh snapshot.
+    /// Broadcast lag or producer-side loss closes with `DataLoss` so the
+    /// collector reconnects without `updates_only` and resyncs from a full
+    /// initial snapshot.
     #[allow(
         clippy::too_many_lines,
         reason = "presence-aware live events and heartbeat reconciliation share one select loop"
@@ -684,11 +717,9 @@ impl GnmiService {
             return;
         }
 
-        // Subscribe to the live broadcast BEFORE the initial snapshot.
-        // Any transition that lands between snapshot capture and
-        // attach would otherwise be silently lost; the broadcast
-        // attach happens first, then the snapshot dedup-overrides
-        // anything stale the broadcast might also carry.
+        // Subscribe to loss and live events before the initial snapshot. The watch
+        // baselines prior loss; the next loss or transition must wake this stream.
+        let mut loss_rx = handle.state().subscribe_loss_generation();
         let mut broadcast_rx = handle.subscribe_live();
 
         // Initial snapshot — one Update per configured peer (including
@@ -697,14 +728,33 @@ impl GnmiService {
         // sync_response still flushes downstream.
         let started_updates_only = plan.updates_only;
         let mut presence = HashMap::new();
-        if !self
-            .forward_on_change_snapshot(&plan, &tx, &mut presence)
-            .await
-        {
-            return;
+        tokio::select! {
+            biased;
+            changed = loss_rx.changed() => {
+                if changed.is_ok() {
+                    let _ = tx.send(Err(on_change_loss_status())).await;
+                }
+                return;
+            }
+            completed = self.forward_on_change_snapshot(&plan, &tx, &mut presence) => {
+                if !completed {
+                    return;
+                }
+            }
         }
-        if tx.send(Ok(sync_response())).await.is_err() {
-            return;
+        tokio::select! {
+            biased;
+            changed = loss_rx.changed() => {
+                if changed.is_ok() {
+                    let _ = tx.send(Err(on_change_loss_status())).await;
+                }
+                return;
+            }
+            sent = tx.send(Ok(sync_response())) => {
+                if sent.is_err() {
+                    return;
+                }
+            }
         }
         plan.updates_only = false;
 
@@ -747,7 +797,7 @@ impl GnmiService {
                                     }
                                     None => continue,
                                 };
-                                if tx.send(Ok(response)).await.is_err() {
+                                if !send_on_change_response(Ok(response), &tx, &mut loss_rx).await {
                                     return;
                                 }
                                 if is_update {
@@ -765,13 +815,13 @@ impl GnmiService {
                     Err(RecvError::Lagged(missed)) => {
                         // Per the contract, ON_CHANGE does not paper
                         // over gaps. Close with DataLoss so the
-                        // collector reconnects and gets a fresh
-                        // initial snapshot. SubscribeFromEvent is the
-                        // RPC for historical replay.
+                        // collector reconnects without updates_only and
+                        // gets a full initial snapshot. SubscribeFromEvent
+                        // is the RPC for historical replay.
                         let _ = tx
                             .send(Err(Status::data_loss(format!(
                                 "gNMI ON_CHANGE broadcast lagged by {missed} events; \
-                                 reconnect to resync from a fresh snapshot"
+                                 reconnect without updates_only to resync from a full initial snapshot"
                             ))))
                             .await;
                         return;
@@ -788,7 +838,7 @@ impl GnmiService {
                     let mut responses = match rendered {
                         Ok(responses) => responses,
                         Err(error) => {
-                            let _ = tx.send(Err(error)).await;
+                            let _ = send_on_change_response(Err(error), &tx, &mut loss_rx).await;
                             return;
                         }
                     };
@@ -805,8 +855,10 @@ impl GnmiService {
                         let paths = removed.iter().map(|(_, path)| path.clone()).collect();
                         responses.push(update_response(Vec::new(), paths));
                     }
-                    if !forward_responses(Ok(responses), &tx).await {
-                        return;
+                    for response in responses {
+                        if !send_on_change_response(Ok(response), &tx, &mut loss_rx).await {
+                            return;
+                        }
                     }
                     presence.extend(refreshed);
                     for (identity, _) in removed {
@@ -832,6 +884,12 @@ impl GnmiService {
                         &plan,
                         heartbeat_due.clone(),
                     ));
+                },
+                changed = loss_rx.changed() => {
+                    if changed.is_ok() {
+                        let _ = tx.send(Err(on_change_loss_status())).await;
+                    }
+                    return;
                 },
                 () = tx.closed() => return,
             }
@@ -2330,6 +2388,12 @@ fn sync_response() -> gnmi::SubscribeResponse {
         response: Some(gnmi::subscribe_response::Response::SyncResponse(true)),
         extension: Vec::new(),
     }
+}
+
+fn on_change_loss_status() -> Status {
+    Status::data_loss(
+        "gNMI ON_CHANGE event history lost producer events; reconnect without updates_only to resync from a full initial snapshot",
+    )
 }
 
 fn now_nanos() -> i64 {
@@ -4899,6 +4963,23 @@ mod tests {
         }
     }
 
+    async fn next_on_change(
+        rx: &mut tokio::sync::mpsc::Receiver<Result<gnmi::SubscribeResponse, Status>>,
+    ) -> Result<gnmi::SubscribeResponse, Status> {
+        tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("ON_CHANGE response timed out")
+            .expect("ON_CHANGE stream closed without status")
+    }
+
+    fn assert_on_change_loss(error: &Status) {
+        assert_eq!(error.code(), tonic::Code::DataLoss);
+        assert_eq!(
+            error.message(),
+            "gNMI ON_CHANGE event history lost producer events; reconnect without updates_only to resync from a full initial snapshot"
+        );
+    }
+
     #[test]
     fn path_parser_accepts_wildcard_neighbor_address() {
         // Regression: gnmic and most OpenConfig collectors emit
@@ -5191,6 +5272,169 @@ mod tests {
 
         drop(stream);
         drop(harness);
+        manager.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn on_change_baselines_prior_loss_and_fails_on_the_next_loss() {
+        // Load-bearing breaks: rejecting the degraded baseline suppresses the
+        // snapshot; removing the live loss arm leaves the final receive pending.
+        let (service, manager) = ehm_service(vec![test_peer("10.0.0.2".parse().unwrap())]).await;
+        let state = manager.state();
+        state.record_loss();
+        let prior_loss = state.subscribe_loss_generation();
+        assert_eq!(*prior_loss.borrow(), 1);
+        assert!(!prior_loss.has_changed().unwrap());
+        let plan = parse_subscription_list(&stream_on_change_list(
+            neighbor_session_state_wildcard_path(),
+        ))
+        .unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(SUBSCRIBE_CHANNEL_DEPTH);
+        let task = tokio::spawn(service.run_on_change(plan, tx));
+
+        assert!(matches!(
+            next_on_change(&mut rx).await.unwrap().response,
+            Some(gnmi::subscribe_response::Response::Update(_))
+        ));
+        assert!(matches!(
+            next_on_change(&mut rx).await.unwrap().response,
+            Some(gnmi::subscribe_response::Response::SyncResponse(true))
+        ));
+        state.record_loss();
+        assert_on_change_loss(&next_on_change(&mut rx).await.unwrap_err());
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("ON_CHANGE stream did not terminate after producer loss")
+            .unwrap();
+        manager.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn on_change_loss_preempts_a_blocked_initial_snapshot() {
+        // Load-bearing break: subscribing after or not racing the snapshot lets
+        // the two-second guard expire without a terminal status.
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let snapshot_entered = Arc::clone(&entered);
+        let snapshot_release = Arc::clone(&release);
+        let manager = event_history_manager().await;
+        let state = manager.state();
+        let service = GnmiService::with_peer_snapshot(65001, "192.0.2.1", move || {
+            let entered = Arc::clone(&snapshot_entered);
+            let release = Arc::clone(&snapshot_release);
+            async move {
+                entered.notify_one();
+                release.notified().await;
+                Ok(vec![test_peer("10.0.0.2".parse().unwrap())])
+            }
+        })
+        .with_event_history(Some(manager.handle()));
+        let plan = parse_subscription_list(&stream_on_change_list(
+            neighbor_session_state_wildcard_path(),
+        ))
+        .unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(SUBSCRIBE_CHANNEL_DEPTH);
+        let task = tokio::spawn(service.run_on_change(plan, tx));
+        tokio::time::timeout(Duration::from_secs(2), entered.notified())
+            .await
+            .expect("initial snapshot did not start");
+
+        state.record_loss();
+        assert_on_change_loss(&next_on_change(&mut rx).await.unwrap_err());
+        release.notify_waiters();
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("ON_CHANGE stream did not terminate after snapshot loss")
+            .unwrap();
+        manager.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn on_change_loss_preempts_a_blocked_updates_only_sync() {
+        // Load-bearing break: removing the sync race emits sync_response after
+        // the filler drains instead of the terminal DATA_LOSS status.
+        let (service, manager) = ehm_service(Vec::new()).await;
+        let state = manager.state();
+        let mut list = stream_on_change_list(neighbor_session_state_wildcard_path());
+        list.updates_only = true;
+        let plan = parse_subscription_list(&list).unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        tx.try_send(Ok(sync_response())).unwrap();
+        let mut run = Box::pin(service.run_on_change(plan, tx));
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(run.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+
+        state.record_loss();
+        assert!(matches!(
+            next_on_change(&mut rx).await.unwrap().response,
+            Some(gnmi::subscribe_response::Response::SyncResponse(true))
+        ));
+        let task = tokio::spawn(run);
+        assert_on_change_loss(&next_on_change(&mut rx).await.unwrap_err());
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("ON_CHANGE stream did not terminate after blocked sync loss")
+            .unwrap();
+        manager.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn on_change_loss_preempts_a_blocked_live_delivery() {
+        // Load-bearing break: replacing the loss-aware send with a plain
+        // `tx.send` delivers the committed IDLE update before DATA_LOSS.
+        use crate::peer_types::SessionLifecycleEventType::Lost;
+
+        let (service, manager) = ehm_service(Vec::new()).await;
+        let state = manager.state();
+        let mut list = stream_on_change_list(neighbor_session_state_wildcard_path());
+        list.updates_only = true;
+        let plan = parse_subscription_list(&list).unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let filler_tx = tx.clone();
+        let mut run = Box::pin(service.run_on_change(plan, tx));
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(run.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        assert!(matches!(
+            next_on_change(&mut rx).await.unwrap().response,
+            Some(gnmi::subscribe_response::Response::SyncResponse(true))
+        ));
+
+        manager
+            .handle()
+            .sender()
+            .try_send(session_envelope(Lost, Some(SessionState::Idle)))
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while state.latest_event_id() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("session event was not committed");
+        filler_tx.try_send(Ok(sync_response())).unwrap();
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(run.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+
+        state.record_loss();
+        assert!(matches!(
+            next_on_change(&mut rx).await.unwrap().response,
+            Some(gnmi::subscribe_response::Response::SyncResponse(true))
+        ));
+        let task = tokio::spawn(run);
+        assert_on_change_loss(&next_on_change(&mut rx).await.unwrap_err());
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("ON_CHANGE stream did not terminate after blocked live loss")
+            .unwrap();
         manager.shutdown().await;
     }
 
