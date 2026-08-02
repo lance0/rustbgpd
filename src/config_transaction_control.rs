@@ -727,15 +727,30 @@ impl ConfigTransactionController {
         for entry in &entries {
             // Summaries come from the entry contents; a per-entry read
             // failure degrades that one summary instead of failing the list.
-            let summary = crate::config_history::read(entry).map_or_else(
-                |error| format!("(unreadable entry: {error})"),
-                |toml_str| crate::config_history::summarize(&toml_str),
-            );
+            let (sha256, summary, provenance_status) = crate::config_history::read(entry)
+                .map_or_else(
+                    |_| {
+                        (
+                            String::new(),
+                            "(unreadable config history entry)".to_string(),
+                            proto::ConfigHistoryProvenanceStatus::Unreadable,
+                        )
+                    },
+                    |toml_str| {
+                        (
+                            entry.sha256.clone(),
+                            crate::config_history::summarize(&toml_str),
+                            proto::ConfigHistoryProvenanceStatus::LegacyTomlOnly,
+                        )
+                    },
+                );
             proto_entries.push(proto::ConfigHistoryEntry {
                 index: u32::try_from(entry.index).unwrap_or(u32::MAX),
                 timestamp_unix_seconds: entry.timestamp_unix_seconds,
-                sha256: entry.sha256.clone(),
+                sha256,
                 summary,
+                source_sha256: String::new(),
+                provenance_status: provenance_status.into(),
             });
         }
         let human_text = if proto_entries.is_empty() {
@@ -8467,6 +8482,8 @@ log_format = "json"
 
     #[tokio::test]
     async fn history_lists_entries_newest_first_with_summaries() {
+        // Red proof: reporting a readable v1 row as recorded (or populating a
+        // source digest) breaks the legacy-only assertions below.
         let dir = tempfile::tempdir().unwrap();
         let previous_toml = base_toml("");
         let current_toml = dynamic_candidate_toml();
@@ -8487,6 +8504,11 @@ log_format = "json"
             response.entries[1].sha256,
             crate::config_history::sha256_hex(&previous_toml)
         );
+        assert!(response.entries.iter().all(|entry| {
+            entry.source_sha256.is_empty()
+                && entry.provenance_status
+                    == proto::ConfigHistoryProvenanceStatus::LegacyTomlOnly as i32
+        }));
         // Summaries carry identity + counts, never document contents.
         assert!(
             response.entries[0].summary.contains("asn 65001"),
@@ -8515,6 +8537,36 @@ log_format = "json"
             "{}",
             response.human_text
         );
+        ack_task.abort();
+    }
+
+    #[tokio::test]
+    async fn history_redacts_unreadable_entry_metadata() {
+        // Red proof: retaining either unverified digest or interpolating the
+        // raw read error/path changes the exact redacted row assertions.
+        let dir = tempfile::tempdir().unwrap();
+        let current_toml = dynamic_candidate_toml();
+        crate::config_history::record(dir.path(), &current_toml).unwrap();
+        let entry = crate::config_history::list(dir.path()).unwrap().remove(0);
+        std::fs::write(&entry.path, "corrupt secret material").unwrap();
+        let (controller, _snapshot_toml, ack_task) =
+            rollback_controller(dir.path(), None, current_toml);
+
+        let response = controller
+            .history()
+            .expect("listing must degrade per entry");
+        assert_eq!(response.entries.len(), 1);
+        let row = &response.entries[0];
+        assert!(row.sha256.is_empty());
+        assert!(row.source_sha256.is_empty());
+        assert_eq!(
+            row.provenance_status,
+            proto::ConfigHistoryProvenanceStatus::Unreadable as i32
+        );
+        assert_eq!(row.summary, "(unreadable config history entry)");
+        assert!(!row.summary.contains(entry.path.to_string_lossy().as_ref()));
+        assert!(!row.summary.contains("corrupt secret material"));
+
         ack_task.abort();
     }
 

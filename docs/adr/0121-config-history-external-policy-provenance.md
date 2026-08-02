@@ -320,8 +320,10 @@ actionable message; it is never reread and blessed as v2. History files are
 never backfilled or rewritten in place.
 
 `ConfigHistoryEntry` adds `source_sha256` and a provenance-status enum with
-exact values `PROVENANCE_STATUS_UNSPECIFIED = 0`, `RECORDED = 1`,
-`LEGACY_TOML_ONLY = 2`, and `UNREADABLE = 3`. Existing `sha256` is preserved.
+exact values `CONFIG_HISTORY_PROVENANCE_STATUS_UNSPECIFIED = 0`,
+`CONFIG_HISTORY_PROVENANCE_STATUS_RECORDED = 1`,
+`CONFIG_HISTORY_PROVENANCE_STATUS_LEGACY_TOML_ONLY = 2`, and
+`CONFIG_HISTORY_PROVENANCE_STATUS_UNREADABLE = 3`. Existing `sha256` is preserved.
 Valid v2 rows report `RECORDED`; legacy rows leave `source_sha256` empty;
 unreadable rows expose no unverified source digest. A new client reading an old
 server therefore sees `UNSPECIFIED`, never a false `RECORDED`; an old client

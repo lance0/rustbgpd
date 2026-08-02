@@ -380,10 +380,115 @@ impl proto::config_service_server::ConfigService for ConfigService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use prost::Message as _;
     use std::sync::Arc;
 
     use crate::audit::GrpcAuditHandle;
     use proto::config_service_server::ConfigService as _;
+
+    #[derive(Clone, PartialEq, prost::Message)]
+    struct LegacyConfigHistoryEntry {
+        #[prost(uint32, tag = "1")]
+        index: u32,
+        #[prost(uint64, tag = "2")]
+        timestamp_unix_seconds: u64,
+        #[prost(string, tag = "3")]
+        sha256: String,
+        #[prost(string, tag = "4")]
+        summary: String,
+    }
+
+    #[derive(Clone, PartialEq, prost::Message)]
+    struct FrozenCurrentConfigHistoryEntry {
+        #[prost(uint32, tag = "1")]
+        index: u32,
+        #[prost(uint64, tag = "2")]
+        timestamp_unix_seconds: u64,
+        #[prost(string, tag = "3")]
+        sha256: String,
+        #[prost(string, tag = "4")]
+        summary: String,
+        #[prost(string, tag = "5")]
+        source_sha256: String,
+        #[prost(enumeration = "proto::ConfigHistoryProvenanceStatus", tag = "6")]
+        provenance_status: i32,
+    }
+
+    #[test]
+    fn config_history_wire_additions_are_backward_compatible() {
+        // Red proof: moving any old field changes the legacy/current decode;
+        // removing additive defaults changes the old-wire assertions below.
+        let legacy = LegacyConfigHistoryEntry {
+            index: 7,
+            timestamp_unix_seconds: 1_787_000_000,
+            sha256: "ab".repeat(32),
+            summary: "asn 65001".to_string(),
+        };
+        let old_wire = legacy.encode_to_vec();
+        let decoded = proto::ConfigHistoryEntry::decode(old_wire.as_slice()).unwrap();
+        assert_eq!(decoded.index, 7);
+        assert_eq!(decoded.timestamp_unix_seconds, 1_787_000_000);
+        assert_eq!(decoded.sha256, "ab".repeat(32));
+        assert_eq!(decoded.summary, "asn 65001");
+        assert!(decoded.source_sha256.is_empty());
+        assert_eq!(
+            decoded.provenance_status,
+            proto::ConfigHistoryProvenanceStatus::Unspecified as i32
+        );
+
+        let current = proto::ConfigHistoryEntry {
+            index: 8,
+            timestamp_unix_seconds: 1_787_000_001,
+            sha256: "cd".repeat(32),
+            summary: "asn 65002".to_string(),
+            source_sha256: "ef".repeat(32),
+            provenance_status: proto::ConfigHistoryProvenanceStatus::Recorded.into(),
+        };
+        let decoded_by_legacy =
+            LegacyConfigHistoryEntry::decode(current.encode_to_vec().as_slice()).unwrap();
+        assert_eq!(decoded_by_legacy.index, 8);
+        assert_eq!(decoded_by_legacy.timestamp_unix_seconds, 1_787_000_001);
+        assert_eq!(decoded_by_legacy.sha256, "cd".repeat(32));
+        assert_eq!(decoded_by_legacy.summary, "asn 65002");
+
+        // Red proof: changing source_sha256 from tag 5 or provenance_status
+        // from tag 6 leaves the corresponding frozen field at its default.
+        let frozen =
+            FrozenCurrentConfigHistoryEntry::decode(current.encode_to_vec().as_slice()).unwrap();
+        assert_eq!(frozen.source_sha256, "ef".repeat(32));
+        assert_eq!(
+            frozen.provenance_status,
+            proto::ConfigHistoryProvenanceStatus::Recorded as i32
+        );
+    }
+
+    #[test]
+    fn config_history_provenance_discriminants_are_stable() {
+        // Red proof: renumbering any enum value changes its literal assertion.
+        assert_eq!(proto::ConfigHistoryProvenanceStatus::Unspecified as i32, 0);
+        assert_eq!(proto::ConfigHistoryProvenanceStatus::Recorded as i32, 1);
+        assert_eq!(
+            proto::ConfigHistoryProvenanceStatus::LegacyTomlOnly as i32,
+            2
+        );
+        assert_eq!(proto::ConfigHistoryProvenanceStatus::Unreadable as i32, 3);
+        // Red proof: reverting any raw proto symbol to an unprefixed spelling
+        // changes the generated as_str_name value and fails this assertion.
+        assert_eq!(
+            [
+                proto::ConfigHistoryProvenanceStatus::Unspecified.as_str_name(),
+                proto::ConfigHistoryProvenanceStatus::Recorded.as_str_name(),
+                proto::ConfigHistoryProvenanceStatus::LegacyTomlOnly.as_str_name(),
+                proto::ConfigHistoryProvenanceStatus::Unreadable.as_str_name(),
+            ],
+            [
+                "CONFIG_HISTORY_PROVENANCE_STATUS_UNSPECIFIED",
+                "CONFIG_HISTORY_PROVENANCE_STATUS_RECORDED",
+                "CONFIG_HISTORY_PROVENANCE_STATUS_LEGACY_TOML_ONLY",
+                "CONFIG_HISTORY_PROVENANCE_STATUS_UNREADABLE",
+            ]
+        );
+    }
 
     #[tokio::test]
     async fn diff_runtime_config_forwards_candidate_to_peer_manager() {
@@ -875,6 +980,9 @@ mod tests {
                             timestamp_unix_seconds: 1_787_000_000,
                             sha256: "ab".repeat(32),
                             summary: "asn 65001, 2 neighbor(s)".to_string(),
+                            source_sha256: String::new(),
+                            provenance_status: proto::ConfigHistoryProvenanceStatus::LegacyTomlOnly
+                                .into(),
                         }],
                         human_text: "1 applied config(s) retained.\n".to_string(),
                     })

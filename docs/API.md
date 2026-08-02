@@ -417,15 +417,16 @@ before it leaves the daemon (`rbgp config effective`).
 | `AbortConfigTransaction` | Abort a pending confirmed transaction and roll back immediately |
 | `GetConfigTransactionStatus` | Return redacted confirmed-transaction lifecycle state |
 | `GetEffectiveConfig` | Return the effective running config as normalized TOML — defaults materialized, secrets redacted (`rbgp config effective`) |
-| `ListConfigHistory` | List the bounded on-disk recorded config history — newest recorded config at index 0, then older entries; per-entry timestamp, SHA-256, one-line summary; never config documents (`rbgp config history`) |
+| `ListConfigHistory` | List the bounded on-disk recorded config history — newest recorded config at index 0, then older entries; per-entry timestamp, normalized-TOML SHA-256, config-source SHA-256 over that TOML digest plus the canonical accepted rpol/dataset source roster, provenance status, and one-line summary; never config documents (`rbgp config history`). The provenance fields are additive schema only: storage/runtime v2 activation has not shipped, so current readable rows are `LEGACY_TOML_ONLY` with no source digest and corrupt rows are `UNREADABLE` with both digests empty. |
 | `RollbackConfigTransaction` | Restore a retained recorded config snapshot through the same transaction executor as apply — same plan/impact classification, receipts, and optional confirmed-commit window (`rbgp config rollback N`) |
 
-Config-history payloads and their SHA-256 values cover normalized TOML only.
+The currently active v1 config-history payloads and populated SHA-256 values
+cover normalized TOML only; their additive source-digest field remains empty.
 Index 0 means newest recorded, not necessarily the running or currently
 persisted config. Referenced external `.rpol` main/import sources and policy
-dataset contents are not archived or hashed; rollback re-reads their current
-filesystem contents and can therefore produce different policy or fail
-validation if those inputs changed or disappeared.
+dataset contents are not archived by v1 or hashed in its rows; rollback re-reads
+their current filesystem contents and can therefore produce different policy or
+fail validation if those inputs changed or disappeared.
 
 `DiffRuntimeConfigResponse` contains boolean summary fields, a
 plain-text `human_text` rendering, and `diff_json` using the

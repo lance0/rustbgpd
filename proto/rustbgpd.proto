@@ -160,6 +160,13 @@ service ConfigService {
 
 message ListConfigHistoryRequest {}
 
+enum ConfigHistoryProvenanceStatus {
+  CONFIG_HISTORY_PROVENANCE_STATUS_UNSPECIFIED = 0;
+  CONFIG_HISTORY_PROVENANCE_STATUS_RECORDED = 1;
+  CONFIG_HISTORY_PROVENANCE_STATUS_LEGACY_TOML_ONLY = 2;
+  CONFIG_HISTORY_PROVENANCE_STATUS_UNREADABLE = 3;
+}
+
 message ConfigHistoryEntry {
   // 0 = the newest recorded config, 1 = the next older entry, and so on.
   uint32 index = 1;
@@ -170,6 +177,11 @@ message ConfigHistoryEntry {
   // One-line redacted summary (ASN, router id, object counts) — never the
   // config document itself.
   string summary = 4;
+  // Config-source SHA-256 over the normalized-TOML digest plus the canonical
+  // accepted rpol/dataset source roster. Empty unless that provenance was
+  // recorded; always empty for legacy and unreadable entries.
+  string source_sha256 = 5;
+  ConfigHistoryProvenanceStatus provenance_status = 6;
 }
 
 message ListConfigHistoryResponse {
