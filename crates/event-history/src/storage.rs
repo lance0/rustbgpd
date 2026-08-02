@@ -24,6 +24,11 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+#[cfg(test)]
+use tokio::sync::Notify;
+
 use crate::error::EventHistoryError;
 use crate::migrations::{CURRENT_SCHEMA_VERSION, META_LAST_BOOT_ID, META_LAST_EVENT_ID, bootstrap};
 use crate::quarantine::{
@@ -189,6 +194,43 @@ pub struct PersistedEvent {
 #[derive(Debug, Clone)]
 pub(crate) struct StoreHandle {
     tx: mpsc::Sender<StoreOp>,
+    #[cfg(test)]
+    test_hooks: Arc<StoreTestHooks>,
+}
+
+#[cfg(test)]
+#[derive(Debug, Default)]
+struct StoreTestHooks {
+    append: PauseHook,
+    append_calls: AtomicUsize,
+    flush: PauseHook,
+    shutdown: PauseHook,
+}
+
+#[cfg(test)]
+#[derive(Debug, Default)]
+struct PauseHook {
+    armed: AtomicBool,
+    sent: Notify,
+    release: Notify,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum TestStoreOp {
+    Append,
+    Flush,
+    Shutdown,
+}
+
+#[cfg(test)]
+impl PauseHook {
+    async fn after_send(&self) {
+        if self.armed.swap(false, Ordering::AcqRel) {
+            self.sent.notify_one();
+            self.release.notified().await;
+        }
+    }
 }
 
 impl StoreHandle {
@@ -196,11 +238,15 @@ impl StoreHandle {
         &self,
         envelopes: Vec<Arc<EventEnvelope>>,
     ) -> Result<AppendOutcome, EventHistoryError> {
+        #[cfg(test)]
+        self.test_hooks.append_calls.fetch_add(1, Ordering::AcqRel);
         let (reply, rx) = oneshot::channel();
         self.tx
             .send(StoreOp::Append { envelopes, reply })
             .await
             .map_err(|_| EventHistoryError::PassThrough)?;
+        #[cfg(test)]
+        self.test_hooks.append.after_send().await;
         rx.await.map_err(|_| EventHistoryError::PassThrough)?
     }
 
@@ -274,6 +320,8 @@ impl StoreHandle {
             .send(StoreOp::FlushSidecar { reply })
             .await
             .map_err(|_| EventHistoryError::PassThrough)?;
+        #[cfg(test)]
+        self.test_hooks.flush.after_send().await;
         rx.await.map_err(|_| EventHistoryError::PassThrough)?
     }
 
@@ -292,8 +340,39 @@ impl StoreHandle {
     pub(crate) async fn shutdown(&self) {
         let (reply, rx) = oneshot::channel();
         if self.tx.send(StoreOp::Shutdown { reply }).await.is_ok() {
+            #[cfg(test)]
+            self.test_hooks.shutdown.after_send().await;
             let _ = rx.await;
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_append_calls(&self) -> usize {
+        self.test_hooks.append_calls.load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    fn test_hook(&self, op: TestStoreOp) -> &PauseHook {
+        match op {
+            TestStoreOp::Append => &self.test_hooks.append,
+            TestStoreOp::Flush => &self.test_hooks.flush,
+            TestStoreOp::Shutdown => &self.test_hooks.shutdown,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_pause_after_send(&self, op: TestStoreOp) {
+        self.test_hook(op).armed.store(true, Ordering::Release);
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn test_wait_for_send(&self, op: TestStoreOp) {
+        self.test_hook(op).sent.notified().await;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_release(&self, op: TestStoreOp) {
+        self.test_hook(op).release.notify_one();
     }
 }
 
@@ -325,7 +404,15 @@ pub(crate) fn spawn_store(
             rx,
         );
     });
-    Ok((StoreHandle { tx }, join, init))
+    Ok((
+        StoreHandle {
+            tx,
+            #[cfg(test)]
+            test_hooks: Arc::new(StoreTestHooks::default()),
+        },
+        join,
+        init,
+    ))
 }
 
 /// Snapshot of how `open_with_recovery` resolved the DB state. Used by

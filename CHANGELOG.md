@@ -62,6 +62,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Coordinated shutdown drains event history under one five-second deadline and
+  latches abandoned work; submitted-append timeouts remain unknown, not drops.
+
 - gNMI STREAM/ON_CHANGE now emits the exact `session-state` leaf delete when a
   subscribed peer disappears. The idempotent delete works after `updates_only`
   synchronization, the path becomes present again when the peer reappears, and
