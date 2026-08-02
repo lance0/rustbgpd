@@ -3,9 +3,8 @@ use std::collections::BTreeSet;
 use rustbgpd_api::peer_types::{
     ConfigEvent, DynamicPeerBounceOutcome, DynamicRangeTarget, NeighborCreateSpec,
     OutboundRefreshError, PeerKey, PeerLifecycleError, PeerManagerNeighborConfig,
-    SessionLifecycleEvent, SessionLifecycleEventType, SetGshutError,
+    SessionLifecycleEventType, SetGshutError,
 };
-use rustbgpd_fsm::SessionState;
 use rustbgpd_rib::{RibCommandError, RibUpdate};
 use rustbgpd_transport::{PeerCommand, PeerCommandError};
 use rustbgpd_transport::{PeerHandle, SessionIdentity, TcpAoKeyring};
@@ -737,16 +736,7 @@ impl PeerManager {
             self.set_bfd_peer_disabled(address, true);
         }
         if emit_presence {
-            self.publish_lifecycle_event(SessionLifecycleEvent {
-                event_type: SessionLifecycleEventType::PeerAdded,
-                peer: peer_key.address,
-                peer_label: Some(peer_key.label()),
-                timestamp: Self::session_event_timestamp(),
-                old_state: None,
-                new_state: Some(SessionState::Idle),
-                session_role: None,
-                reason: format!("peer {peer_key} added"),
-            });
+            self.publish_peer_added_event(&peer_key);
         }
         let current_enabled = self
             .peers

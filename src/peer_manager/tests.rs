@@ -8562,6 +8562,7 @@ fn peer_presence_source_ordering_contracts() {
         .split_once("pub(super) async fn runtime_create_peer")
         .unwrap()
         .0;
+    let public_add = public_add.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(public_add.contains("add_peer_impl(config, sync_config_snapshot, true, true)"));
     let internal_add = lifecycle
         .split_once("pub(super) async fn add_peer_with_admin_state(")
@@ -8570,6 +8571,10 @@ fn peer_presence_source_ordering_contracts() {
         .split_once("async fn add_peer_impl")
         .unwrap()
         .0;
+    let internal_add = internal_add
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
     assert!(internal_add.contains("add_peer_impl(config, sync_config_snapshot, enabled, false)"));
 
     let reap = lifecycle

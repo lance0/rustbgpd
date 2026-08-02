@@ -220,6 +220,19 @@ impl PeerManager {
         });
     }
 
+    pub(super) fn publish_peer_added_event(&mut self, peer: &PeerKey) {
+        self.publish_lifecycle_event(SessionLifecycleEvent {
+            event_type: SessionLifecycleEventType::PeerAdded,
+            peer: peer.address,
+            peer_label: Some(peer.label()),
+            timestamp: Self::session_event_timestamp(),
+            old_state: None,
+            new_state: Some(SessionState::Idle),
+            session_role: None,
+            reason: format!("peer {peer} added"),
+        });
+    }
+
     pub(super) fn publish_state_lifecycle_event(
         &mut self,
         peer: &PeerKey,
@@ -251,7 +264,7 @@ impl PeerManager {
             | SessionLifecycleEventType::PeerRemoved
             | SessionLifecycleEventType::PeerEnabled
             | SessionLifecycleEventType::PeerDisabled => {
-                unreachable!("peer lifecycle events are emitted by publish_peer_lifecycle_event")
+                unreachable!("non-state lifecycle events use dedicated publishers")
             }
         };
         self.publish_lifecycle_event(SessionLifecycleEvent {

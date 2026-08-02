@@ -2590,9 +2590,9 @@ message SessionEvent {
   string peer_address = 2;
   // Unix epoch seconds, matching existing RouteEvent timestamp shape.
   string timestamp = 3;
-  // BGP FSM state names from the transport layer (`Idle`, `Connect`,
-  // `Active`, `OpenSent`, `OpenConfirm`, `Established`). PeerAdded has
-  // empty old_state and `Idle` new_state; PeerRemoved and peer
+  // Lowercase BGP FSM state names from the transport layer (`idle`, `connect`,
+  // `active`, `open_sent`, `open_confirm`, `established`). PeerAdded has
+  // empty old_state and `idle` new_state; PeerRemoved and peer
   // enable/disable events leave both empty.
   string old_state = 4;
   string new_state = 5;

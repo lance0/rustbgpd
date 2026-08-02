@@ -1,6 +1,6 @@
 use std::net::{Ipv4Addr, SocketAddr};
 
-use rustbgpd_api::peer_types::{PeerKey, SessionLifecycleEvent, SessionLifecycleEventType};
+use rustbgpd_api::peer_types::PeerKey;
 use rustbgpd_fsm::SessionState;
 use rustbgpd_telemetry::reason_labels::InboundConnectionDropReason;
 use rustbgpd_transport::{
@@ -568,16 +568,7 @@ impl PeerManager {
                 // external classification and its resolved chains.
                 self.refresh_rfc8212_policy_metrics(&peer_key);
 
-                self.publish_lifecycle_event(SessionLifecycleEvent {
-                    event_type: SessionLifecycleEventType::PeerAdded,
-                    peer: peer_key.address,
-                    peer_label: Some(peer_key.label()),
-                    timestamp: Self::session_event_timestamp(),
-                    old_state: None,
-                    new_state: Some(SessionState::Idle),
-                    session_role: None,
-                    reason: format!("peer {peer_key} added"),
-                });
+                self.publish_peer_added_event(&peer_key);
 
                 // Restore any dead-lettered hot-apply / Route Refresh
                 // intent left behind by a prior dynamic-peer auto-
