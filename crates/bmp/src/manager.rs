@@ -148,6 +148,7 @@ impl CollectorPhase {
 
 struct Collector {
     addr: SocketAddr,
+    addr_label: String,
     filter: BmpMonitorFilter,
     version: BmpVersion,
     phase: CollectorPhase,
@@ -205,6 +206,7 @@ impl BmpManager {
                 .into_iter()
                 .map(|(addr, filter, version)| Collector {
                     addr,
+                    addr_label: addr.to_string(),
                     filter,
                     version,
                     phase: CollectorPhase::Disconnected,
@@ -238,6 +240,7 @@ impl BmpManager {
                     let loc_rib_peer_up = filter.loc_rib;
                     Collector {
                         addr,
+                        addr_label: addr.to_string(),
                         filter,
                         version,
                         phase: CollectorPhase::Active {
@@ -462,15 +465,15 @@ impl BmpManager {
             let msg = memo[version.idx()]
                 .get_or_insert_with(|| encode(version))
                 .clone();
-            let addr = self.collectors[idx].addr;
-            match &mut self.collectors[idx].phase {
+            let collector = &mut self.collectors[idx];
+            let addr = collector.addr;
+            let addr_label = collector.addr_label.as_str();
+            match &mut collector.phase {
                 CollectorPhase::Disconnected => {}
                 CollectorPhase::BootstrapPending { loc_rib_buffer, .. } => {
                     let overflow = buffer_loc_rib_message(loc_rib_buffer, msg);
-                    self.metrics.observe_bmp_loc_rib_dump_live_buffer(
-                        &addr.to_string(),
-                        loc_rib_buffer.len(),
-                    );
+                    self.metrics
+                        .observe_bmp_loc_rib_dump_live_buffer(addr_label, loc_rib_buffer.len());
                     if overflow {
                         overflowed.push(idx);
                     }
@@ -482,7 +485,7 @@ impl BmpManager {
                         if *generation == dump.generation {
                             let overflow = buffer_loc_rib_message(&mut dump.buffered, msg);
                             self.metrics.observe_bmp_loc_rib_dump_live_buffer(
-                                &addr.to_string(),
+                                addr_label,
                                 dump.buffered.len(),
                             );
                             if overflow {
@@ -491,12 +494,8 @@ impl BmpManager {
                         }
                     } else if let Err(e) = sender.try_send(msg) {
                         let reason = trysend_reason(&e);
-                        self.metrics.record_bmp_collector_drop(
-                            &addr.to_string(),
-                            "fan_out",
-                            reason,
-                            1,
-                        );
+                        self.metrics
+                            .record_bmp_collector_drop(addr_label, "fan_out", reason, 1);
                         warn!(collector = %addr, error = %e, "BMP collector channel full or closed, dropping message");
                     }
                 }
