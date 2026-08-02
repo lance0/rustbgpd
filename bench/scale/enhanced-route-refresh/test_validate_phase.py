@@ -14,7 +14,7 @@ def line(name, value, **labels):
     return f"{name}{suffix} {value}\n"
 
 
-def metrics(rib, active, stale, begin, eorr, timeout):
+def metrics(rib, active, stale, begin, eorr, timeout, *, current=1, established=1, flaps=0):
     text = ""
     text += line(
         "bgp_rib_prefixes",
@@ -43,10 +43,17 @@ def metrics(rib, active, stale, begin, eorr, timeout):
     )
     text += line(
         "bgp_session_established_total",
-        1,
+        established,
         peer=validate_phase.PEER,
     )
-    text += line("bgp_session_flaps_total", 0, peer=validate_phase.PEER)
+    text += line(
+        "bgp_peer_session_established",
+        current,
+        peer=validate_phase.PEER,
+        interface="",
+    )
+    if flaps is not None:
+        text += line("bgp_session_flaps_total", flaps, peer=validate_phase.PEER)
     for operation, count in (
         ("begin", begin),
         ("eorr", eorr),
@@ -88,6 +95,24 @@ class PhaseValidatorTests(unittest.TestCase):
             )
             summary = validate_phase.validate(phase, candidate, baseline)
             self.assertEqual(summary["phase"], phase)
+
+    def test_later_phase_requires_current_uninterrupted_session(self):
+        baseline = self.parse(metrics(100_000, 0, 0, 7, 11, 13))
+        candidate = dict(rib=100_000, active=0, stale=0, begin=9, eorr=12, timeout=13)
+        summary = validate_phase.validate(
+            "restored", self.parse(metrics(**candidate, flaps=None)), baseline
+        )
+        self.assertEqual(summary["session_established"], 1)
+        for name, change, metric in (
+            ("current-down", {"current": 0}, "bgp_peer_session_established"),
+            ("reestablished", {"established": 2}, "bgp_session_established_total"),
+            ("flapped", {"flaps": 1}, "bgp_session_flaps_total"),
+        ):
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(AssertionError, metric):
+                    validate_phase.validate(
+                        "restored", self.parse(metrics(**candidate, **change)), baseline
+                    )
 
     def test_missing_eorr_sweep_is_red(self):
         baseline = self.parse(metrics(100_000, 0, 0, 0, 0, 0))
