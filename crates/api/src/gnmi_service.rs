@@ -28,20 +28,20 @@ const DEFAULT_NETWORK_INSTANCE: &str = "DEFAULT";
 const DEFAULT_PROTOCOL_NAME: &str = "BGP";
 const MAX_SUBSCRIPTIONS: usize = 16;
 const SUBSCRIBE_CHANNEL_DEPTH: usize = 16;
-const MIN_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
-/// Upper bound on a client-requested `STREAM` `SAMPLE` interval. Rejects absurd
-/// values (a client could otherwise request an interval of centuries) so a
-/// subscription always resamples within a sane bound.
-const MAX_SAMPLE_INTERVAL: Duration = Duration::from_hours(1);
+const MIN_PERIODIC_INTERVAL: Duration = Duration::from_secs(1);
+/// Upper bound on a client-requested `STREAM` sample or heartbeat interval.
+/// Rejects absurd values (a client could otherwise request an interval of
+/// centuries) so a subscription always refreshes within a sane bound.
+const MAX_PERIODIC_INTERVAL: Duration = Duration::from_hours(1);
 /// Application-level ceiling on concurrent `Subscribe` streams. `MAX_SUBSCRIPTIONS`
 /// bounds the paths within a single request; this bounds how many open streams the
 /// target will service at once so a flood of collectors cannot exhaust resources.
 const MAX_CONCURRENT_SUBSCRIPTIONS: usize = 64;
 
-/// Preserve a SAMPLE path's monotonic phase while skipping every deadline that
-/// passed during a delayed render. The remainder avoids an unbounded catch-up
+/// Preserve a periodic path's monotonic phase while skipping every deadline
+/// that passed during delayed work. The remainder avoids an unbounded catch-up
 /// loop even after a long stall.
-fn rearm_sample_deadline(
+fn rearm_periodic_deadline(
     deadline: tokio::time::Instant,
     interval: Duration,
     completed: tokio::time::Instant,
@@ -51,13 +51,79 @@ fn rearm_sample_deadline(
     let until_next = interval_nanos - elapsed.as_nanos() % interval_nanos;
     completed
         + Duration::new(
-            u64::try_from(until_next / 1_000_000_000).expect("sample interval fits u64 seconds"),
+            u64::try_from(until_next / 1_000_000_000).expect("periodic interval fits u64 seconds"),
             (until_next % 1_000_000_000) as u32,
         )
 }
 
+fn rearm_heartbeat_deadlines(
+    deadlines: &mut [Option<tokio::time::Instant>],
+    controls: &[StreamControl; MAX_SUBSCRIPTIONS],
+    completed: tokio::time::Instant,
+) {
+    for (index, deadline) in deadlines.iter_mut().enumerate() {
+        if let Some(expired) = *deadline
+            && expired <= completed
+        {
+            *deadline = Some(rearm_periodic_deadline(
+                expired,
+                controls[index]
+                    .heartbeat_interval
+                    .expect("heartbeat deadline has interval"),
+                completed,
+            ));
+        }
+    }
+}
+
+fn initial_heartbeat_deadlines(
+    plan: &SubscriptionPlan,
+) -> [Option<tokio::time::Instant>; MAX_SUBSCRIPTIONS] {
+    let now = tokio::time::Instant::now();
+    let mut deadlines = [None; MAX_SUBSCRIPTIONS];
+    if let Some(controls) = plan.stream_controls.as_deref() {
+        for (deadline, control) in deadlines.iter_mut().zip(controls).take(plan.paths.len()) {
+            *deadline = control.heartbeat_interval.map(|interval| now + interval);
+        }
+    }
+    deadlines
+}
+
+fn next_heartbeat_deadline(
+    snapshot_pending: bool,
+    deadlines: &[Option<tokio::time::Instant>],
+) -> Option<tokio::time::Instant> {
+    (!snapshot_pending)
+        .then(|| deadlines.iter().flatten().copied().min())
+        .flatten()
+}
+
 type PeerSnapshotFuture = Pin<Box<dyn Future<Output = Result<Vec<PeerInfo>, Status>> + Send>>;
 type PeerSnapshotFn = Arc<dyn Fn() -> PeerSnapshotFuture + Send + Sync>;
+type HeartbeatSnapshotFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<Vec<gnmi::SubscribeResponse>, Status>> + Send + 'a>>;
+
+fn render_heartbeat_snapshot<'a>(
+    service: &'a GnmiService,
+    plan: &'a SubscriptionPlan,
+    deadlines: &[Option<tokio::time::Instant>; MAX_SUBSCRIPTIONS],
+) -> HeartbeatSnapshotFuture<'a> {
+    let now = tokio::time::Instant::now();
+    let due = deadlines
+        .iter()
+        .enumerate()
+        .filter_map(|(index, deadline)| {
+            deadline
+                .is_some_and(|deadline| deadline <= now)
+                .then_some(index)
+        })
+        .collect::<Vec<_>>();
+    Box::pin(async move {
+        service
+            .render_subscription_snapshot(plan, Some(&due), false)
+            .await
+    })
+}
 
 /// gNMI target for the supported `OpenConfig` telemetry and Set subset.
 #[derive(Clone)]
@@ -427,7 +493,7 @@ impl GnmiService {
         mut plan: SubscriptionPlan,
         tx: tokio::sync::mpsc::Sender<Result<gnmi::SubscribeResponse, Status>>,
     ) {
-        if plan.sample_controls.is_some() {
+        if plan.stream_controls.is_some() {
             self.run_controlled_stream_sample(plan, tx).await;
             return;
         }
@@ -461,7 +527,7 @@ impl GnmiService {
             // missed during a delayed render.
             let completed = tokio::time::Instant::now();
             for index in due {
-                deadlines[index] = rearm_sample_deadline(
+                deadlines[index] = rearm_periodic_deadline(
                     deadlines[index],
                     plan.sample_intervals[index],
                     completed,
@@ -476,7 +542,7 @@ impl GnmiService {
         tx: tokio::sync::mpsc::Sender<Result<gnmi::SubscribeResponse, Status>>,
     ) {
         let controls = plan
-            .sample_controls
+            .stream_controls
             .take()
             .expect("controlled SAMPLE plan has controls");
         let mut caches = controls
@@ -546,7 +612,7 @@ impl GnmiService {
             let completed = tokio::time::Instant::now();
             for index in 0..sample_deadlines.len() {
                 if sample_deadlines[index] <= completed {
-                    sample_deadlines[index] = rearm_sample_deadline(
+                    sample_deadlines[index] = rearm_periodic_deadline(
                         sample_deadlines[index],
                         plan.sample_intervals[index],
                         completed,
@@ -555,7 +621,7 @@ impl GnmiService {
                 if let Some(deadline) = heartbeat_deadlines[index]
                     && deadline <= completed
                 {
-                    heartbeat_deadlines[index] = Some(rearm_sample_deadline(
+                    heartbeat_deadlines[index] = Some(rearm_periodic_deadline(
                         deadline,
                         controls[index]
                             .heartbeat_interval
@@ -582,7 +648,7 @@ impl GnmiService {
     /// the collector reconnects and resyncs from a fresh snapshot.
     async fn run_on_change(
         self,
-        plan: SubscriptionPlan,
+        mut plan: SubscriptionPlan,
         tx: tokio::sync::mpsc::Sender<Result<gnmi::SubscribeResponse, Status>>,
     ) {
         // FailedPrecondition when EHM is unavailable — matches the
@@ -626,8 +692,14 @@ impl GnmiService {
         if tx.send(Ok(sync_response())).await.is_err() {
             return;
         }
+        plan.updates_only = false;
 
+        // Heartbeats anchor after sync; live events neither satisfy nor rearm them.
+        let mut heartbeat_deadlines = initial_heartbeat_deadlines(&plan);
+        let mut heartbeat_snapshot: Option<HeartbeatSnapshotFuture<'_>> = None;
         loop {
+            let heartbeat_deadline =
+                next_heartbeat_deadline(heartbeat_snapshot.is_some(), &heartbeat_deadlines);
             tokio::select! {
                 event = broadcast_rx.recv() => match event {
                     Ok(committed) => {
@@ -664,6 +736,36 @@ impl GnmiService {
                         return;
                     }
                     Err(RecvError::Closed) => return,
+                },
+                rendered = async {
+                    heartbeat_snapshot
+                        .as_mut()
+                        .expect("heartbeat snapshot arm is guarded")
+                        .await
+                }, if heartbeat_snapshot.is_some() => {
+                    heartbeat_snapshot = None;
+                    if !forward_responses(rendered, &tx).await {
+                        return;
+                    }
+                    let completed = tokio::time::Instant::now();
+                    rearm_heartbeat_deadlines(
+                        &mut heartbeat_deadlines,
+                        plan.stream_controls
+                            .as_deref()
+                            .expect("heartbeat plan has stream controls"),
+                        completed,
+                    );
+                },
+                () = async {
+                    tokio::time::sleep_until(
+                        heartbeat_deadline.expect("heartbeat arm is guarded"),
+                    ).await;
+                }, if heartbeat_deadline.is_some() => {
+                    heartbeat_snapshot = Some(render_heartbeat_snapshot(
+                        &self,
+                        &plan,
+                        &heartbeat_deadlines,
+                    ));
                 },
                 () = tx.closed() => return,
             }
@@ -916,12 +1018,12 @@ pub(crate) struct SubscriptionPlan {
     updates_only: bool,
     /// Accepted interval for each path in a STREAM/SAMPLE plan, in `paths` order.
     sample_intervals: Vec<Duration>,
-    sample_controls: Option<Box<[SampleControl; MAX_SUBSCRIPTIONS]>>,
+    stream_controls: Option<Box<[StreamControl; MAX_SUBSCRIPTIONS]>>,
     encoding: gnmi::Encoding,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-struct SampleControl {
+struct StreamControl {
     suppress_redundant: bool,
     heartbeat_interval: Option<Duration>,
 }
@@ -1225,8 +1327,8 @@ fn parse_subscription_list(list: &gnmi::SubscriptionList) -> Result<Subscription
     let mut paths = Vec::with_capacity(list.subscription.len());
     let mut sample_intervals = Vec::with_capacity(list.subscription.len());
     let mut stream_mode: Option<gnmi::SubscriptionMode> = None;
-    let mut has_sample_controls = false;
-    let mut sample_controls = [SampleControl::default(); MAX_SUBSCRIPTIONS];
+    let mut has_stream_controls = false;
+    let mut stream_controls = [StreamControl::default(); MAX_SUBSCRIPTIONS];
     for (index, subscription) in list.subscription.iter().enumerate() {
         let path = subscription
             .path
@@ -1246,27 +1348,26 @@ fn parse_subscription_list(list: &gnmi::SubscriptionList) -> Result<Subscription
             }
             let requested = if this_mode == gnmi::SubscriptionMode::Sample && raw_nanos != 0 {
                 let requested = Duration::from_nanos(raw_nanos);
-                if !(MIN_SAMPLE_INTERVAL..=MAX_SAMPLE_INTERVAL).contains(&requested) {
+                if !(MIN_PERIODIC_INTERVAL..=MAX_PERIODIC_INTERVAL).contains(&requested) {
                     return Err(Status::invalid_argument(format!(
                         "gNMI subscription {} sample_interval {raw_nanos}ns is outside supported \
                          range [{}ns, {}ns]",
                         index + 1,
-                        MIN_SAMPLE_INTERVAL.as_nanos(),
-                        MAX_SAMPLE_INTERVAL.as_nanos()
+                        MIN_PERIODIC_INTERVAL.as_nanos(),
+                        MAX_PERIODIC_INTERVAL.as_nanos()
                     )));
                 }
                 requested
             } else {
-                MIN_SAMPLE_INTERVAL
+                MIN_PERIODIC_INTERVAL
             };
             sample_intervals.push(requested);
         }
 
         validate_subscription_controls(mode, this_mode, subscription)?;
-        has_sample_controls |= mode == gnmi::subscription_list::Mode::Stream
-            && this_mode == gnmi::SubscriptionMode::Sample
+        has_stream_controls |= mode == gnmi::subscription_list::Mode::Stream
             && (subscription.suppress_redundant || subscription.heartbeat_interval != 0);
-        sample_controls[index] = SampleControl {
+        stream_controls[index] = StreamControl {
             suppress_redundant: subscription.suppress_redundant,
             heartbeat_interval: (subscription.heartbeat_interval != 0)
                 .then(|| Duration::from_nanos(subscription.heartbeat_interval)),
@@ -1302,7 +1403,7 @@ fn parse_subscription_list(list: &gnmi::SubscriptionList) -> Result<Subscription
         paths,
         updates_only: list.updates_only,
         sample_intervals,
-        sample_controls: has_sample_controls.then(|| Box::new(sample_controls)),
+        stream_controls: has_stream_controls.then(|| Box::new(stream_controls)),
         encoding,
     })
 }
@@ -1319,35 +1420,27 @@ fn validate_subscription_controls(
     ) && nondefault
     {
         return Err(Status::invalid_argument(
-            "gNMI suppress_redundant and heartbeat_interval require STREAM/SAMPLE",
+            "gNMI suppress_redundant and heartbeat_interval require STREAM",
         ));
     }
     if mode == gnmi::SubscriptionMode::TargetDefined {
         return Ok(());
     }
-    if mode == gnmi::SubscriptionMode::OnChange {
-        if subscription.suppress_redundant {
-            return Err(Status::invalid_argument(
-                "gNMI ON_CHANGE suppress_redundant is not supported",
-            ));
-        }
-        if subscription.heartbeat_interval != 0 {
-            return Err(Status::unimplemented(
-                "gNMI ON_CHANGE heartbeat_interval is not implemented",
-            ));
-        }
-        return Ok(());
+    if mode == gnmi::SubscriptionMode::OnChange && subscription.suppress_redundant {
+        return Err(Status::invalid_argument(
+            "gNMI ON_CHANGE suppress_redundant is not supported",
+        ));
     }
     let requested = Duration::from_nanos(subscription.heartbeat_interval);
     if subscription.heartbeat_interval != 0
-        && !(MIN_SAMPLE_INTERVAL..=MAX_SAMPLE_INTERVAL).contains(&requested)
+        && !(MIN_PERIODIC_INTERVAL..=MAX_PERIODIC_INTERVAL).contains(&requested)
     {
         return Err(Status::invalid_argument(format!(
             "gNMI heartbeat_interval {}ns is outside supported range \
              [{}ns, {}ns]",
             subscription.heartbeat_interval,
-            MIN_SAMPLE_INTERVAL.as_nanos(),
-            MAX_SAMPLE_INTERVAL.as_nanos()
+            MIN_PERIODIC_INTERVAL.as_nanos(),
+            MAX_PERIODIC_INTERVAL.as_nanos()
         )));
     }
     Ok(())
@@ -3310,7 +3403,7 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(stream.mode, gnmi::subscription_list::Mode::Stream);
-        assert_eq!(stream.sample_intervals, vec![MIN_SAMPLE_INTERVAL]);
+        assert_eq!(stream.sample_intervals, vec![MIN_PERIODIC_INTERVAL]);
     }
 
     #[test]
@@ -3538,14 +3631,14 @@ mod tests {
     #[test]
     fn stream_sample_intervals_accept_zero_and_supported_range() {
         for (raw_nanos, expected) in [
-            (0, MIN_SAMPLE_INTERVAL),
+            (0, MIN_PERIODIC_INTERVAL),
             (1_000_000_000, Duration::from_secs(1)),
             (5_000_000_000, Duration::from_secs(5)),
-            (3_600_000_000_000, MAX_SAMPLE_INTERVAL),
+            (3_600_000_000_000, MAX_PERIODIC_INTERVAL),
         ] {
             let plan = parse_subscription_list(&stream_sample_list(raw_nanos)).unwrap();
             assert_eq!(plan.sample_intervals, vec![expected]);
-            assert!(plan.sample_controls.is_none());
+            assert!(plan.stream_controls.is_none());
         }
     }
 
@@ -3565,12 +3658,12 @@ mod tests {
     }
 
     #[test]
-    fn sample_controls_validate_bounds_and_subscription_modes() {
+    fn stream_controls_validate_bounds_and_subscription_modes() {
         let path = neighbor_session_state_path("10.0.0.2");
         for heartbeat in [1_000_000_000, 3_600_000_000_000] {
             let list = controlled_sample_list(path.clone(), true, 1_000_000_000, heartbeat);
             let plan = parse_subscription_list(&list).unwrap();
-            let controls = plan.sample_controls.unwrap();
+            let controls = plan.stream_controls.unwrap();
             assert!(controls[0].suppress_redundant);
             assert_eq!(
                 controls[0].heartbeat_interval,
@@ -3605,14 +3698,22 @@ mod tests {
             parse_subscription_list(&on_change).unwrap_err().code(),
             tonic::Code::InvalidArgument
         );
-        let mut on_change = stream_on_change_list(path);
-        on_change.subscription[0].heartbeat_interval = 1_000_000_000;
-        let error = parse_subscription_list(&on_change).unwrap_err();
-        assert_eq!(error.code(), tonic::Code::Unimplemented);
-        assert_eq!(
-            error.message(),
-            "gNMI ON_CHANGE heartbeat_interval is not implemented"
-        );
+        for heartbeat in [1_000_000_000, 3_600_000_000_000] {
+            let mut on_change = stream_on_change_list(path.clone());
+            on_change.subscription[0].heartbeat_interval = heartbeat;
+            let plan = parse_subscription_list(&on_change).unwrap();
+            assert_eq!(
+                plan.stream_controls.unwrap()[0].heartbeat_interval,
+                Some(Duration::from_nanos(heartbeat))
+            );
+        }
+        for heartbeat in [1, 999_999_999, 3_600_000_000_001, u64::MAX] {
+            let mut on_change = stream_on_change_list(path.clone());
+            on_change.subscription[0].heartbeat_interval = heartbeat;
+            let error = parse_subscription_list(&on_change).unwrap_err();
+            assert_eq!(error.code(), tonic::Code::InvalidArgument);
+            assert!(error.message().contains("heartbeat_interval"));
+        }
     }
 
     // --- Subscribe RPC-level harness ---------------------------------------
@@ -4087,7 +4188,7 @@ mod tests {
         });
         let (list, fast_path, slow_path) = two_interval_neighbor_sample_list();
         let plan = parse_subscription_list(&list).unwrap();
-        assert!(plan.sample_controls.is_none());
+        assert!(plan.stream_controls.is_none());
         let (tx, mut rx) = tokio::sync::mpsc::channel(SUBSCRIBE_CHANNEL_DEPTH);
         tokio::spawn(service.run_stream_sample(plan, tx));
         tokio::task::yield_now().await;
@@ -4382,7 +4483,7 @@ mod tests {
         wildcard.heartbeat_interval = 0;
         list.subscription.push(wildcard);
         let plan = parse_subscription_list(&list).unwrap();
-        let controls = plan.sample_controls.as_ref().unwrap();
+        let controls = plan.stream_controls.as_ref().unwrap();
         let mut caches = controls
             .iter()
             .map(|control| control.suppress_redundant.then(SampleValueCache::default))
@@ -4963,6 +5064,198 @@ mod tests {
         manager.shutdown().await;
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn on_change_heartbeats_batch_co_due_paths_and_skip_late_periods() {
+        // Load-bearing breaks: bypassing ON_CHANGE timer dispatch loses the 1s
+        // Update; completion-relative rearm loses the fixed-phase 5s Update;
+        // rendering co-due paths separately raises the snapshot call count.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let snapshot_calls = Arc::clone(&calls);
+        let peers = vec![
+            test_peer("10.0.0.2".parse().unwrap()),
+            test_peer("10.0.0.3".parse().unwrap()),
+        ];
+        let manager = event_history_manager().await;
+        let service = GnmiService::with_peer_snapshot(65001, "192.0.2.1", move || {
+            snapshot_calls.fetch_add(1, Ordering::SeqCst);
+            let peers = peers.clone();
+            async move { Ok(peers) }
+        })
+        .with_event_history(Some(manager.handle()));
+        let fast_path = neighbor_session_state_path("10.0.0.2");
+        let slow_path = neighbor_session_state_path("10.0.0.3");
+        let mut list = stream_on_change_list(fast_path.clone());
+        list.subscription[0].heartbeat_interval = 1_000_000_000;
+        let mut slow = list.subscription[0].clone();
+        slow.path = Some(slow_path.clone());
+        slow.heartbeat_interval = 2_000_000_000;
+        list.subscription.push(slow);
+        let mut absent = list.subscription[0].clone();
+        absent.path = Some(neighbor_session_state_path("10.0.0.4"));
+        list.subscription.push(absent);
+        let plan = parse_subscription_list(&list).unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(SUBSCRIBE_CHANNEL_DEPTH);
+        tokio::spawn(service.run_on_change(plan, tx));
+        tokio::task::yield_now().await;
+
+        assert_eq!(subscribe_updates(rx.try_recv().unwrap().unwrap()).len(), 2);
+        assert_eq!(
+            rx.try_recv().unwrap().unwrap().response,
+            Some(gnmi::subscribe_response::Response::SyncResponse(true))
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let started = tokio::time::Instant::now();
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            subscribe_paths(rx.try_recv().unwrap().unwrap()),
+            vec![Some(fast_path.clone())]
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            subscribe_paths(rx.try_recv().unwrap().unwrap()),
+            vec![Some(fast_path.clone()), Some(slow_path.clone())]
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+
+        tokio::time::advance(Duration::from_millis(2_500)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(subscribe_updates(rx.try_recv().unwrap().unwrap()).len(), 2);
+        assert!(rx.try_recv().is_err(), "late wake burst more than once");
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
+
+        tokio::time::advance(Duration::from_millis(500)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            subscribe_paths(rx.try_recv().unwrap().unwrap()),
+            vec![Some(fast_path)]
+        );
+        assert_eq!(
+            tokio::time::Instant::now() - started,
+            Duration::from_secs(5)
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 5);
+        drop(rx);
+        manager.shutdown().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn on_change_updates_only_reads_first_snapshot_at_heartbeat() {
+        // Load-bearing break: retaining updates_only after sync drops the first
+        // heartbeat; reading the baseline before sync increments the call count.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let snapshot_calls = Arc::clone(&calls);
+        let peer = test_peer("10.0.0.2".parse().unwrap());
+        let manager = event_history_manager().await;
+        let service = GnmiService::with_peer_snapshot(65001, "192.0.2.1", move || {
+            snapshot_calls.fetch_add(1, Ordering::SeqCst);
+            let peer = peer.clone();
+            async move { Ok(vec![peer]) }
+        })
+        .with_event_history(Some(manager.handle()));
+        let path = neighbor_session_state_path("10.0.0.2");
+        let mut list = stream_on_change_list(path.clone());
+        list.updates_only = true;
+        list.subscription[0].heartbeat_interval = 1_000_000_000;
+        let plan = parse_subscription_list(&list).unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(SUBSCRIBE_CHANNEL_DEPTH);
+        tokio::spawn(service.run_on_change(plan, tx));
+        tokio::task::yield_now().await;
+
+        assert_eq!(
+            rx.try_recv().unwrap().unwrap().response,
+            Some(gnmi::subscribe_response::Response::SyncResponse(true))
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            subscribe_paths(rx.try_recv().unwrap().unwrap()),
+            vec![Some(path)]
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        drop(rx);
+        manager.shutdown().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn on_change_heartbeat_preserves_actor_error_status() {
+        let manager = event_history_manager().await;
+        let service = GnmiService::with_peer_snapshot(65001, "192.0.2.1", || async {
+            Err(Status::unavailable("heartbeat snapshot unavailable"))
+        })
+        .with_event_history(Some(manager.handle()));
+        let mut list = stream_on_change_list(neighbor_session_state_path("10.0.0.2"));
+        list.updates_only = true;
+        list.subscription[0].heartbeat_interval = 1_000_000_000;
+        let plan = parse_subscription_list(&list).unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(SUBSCRIBE_CHANNEL_DEPTH);
+        tokio::spawn(service.run_on_change(plan, tx));
+        tokio::task::yield_now().await;
+
+        assert!(matches!(
+            rx.try_recv().unwrap().unwrap().response,
+            Some(gnmi::subscribe_response::Response::SyncResponse(true))
+        ));
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        let error = rx.try_recv().unwrap().unwrap_err();
+        assert_eq!(error.code(), tonic::Code::Unavailable);
+        assert_eq!(error.message(), "heartbeat snapshot unavailable");
+        assert!(rx.recv().await.is_none());
+        manager.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn tcp_on_change_dispatches_accepted_heartbeat() {
+        // Real TCP control/dispatch proof: the parsed ON_CHANGE control must
+        // reach its timer branch and cause a second actor-backed Update.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let snapshot_calls = Arc::clone(&calls);
+        let peer = test_peer("10.0.0.2".parse().unwrap());
+        let manager = event_history_manager().await;
+        let service = GnmiService::with_peer_snapshot(65001, "192.0.2.1", move || {
+            snapshot_calls.fetch_add(1, Ordering::SeqCst);
+            let peer = peer.clone();
+            async move { Ok(vec![peer]) }
+        })
+        .with_event_history(Some(manager.handle()));
+        let path = neighbor_session_state_path("10.0.0.2");
+        let mut list = stream_on_change_list(path.clone());
+        list.subscription[0].heartbeat_interval = 1_000_000_000;
+        let mut harness = serve(service).await;
+        let mut stream = harness
+            .client
+            .subscribe(tokio_stream::iter(vec![subscribe_msg(list)]))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(
+            subscribe_paths(next_bounded(&mut stream).await.unwrap().unwrap()),
+            vec![Some(path.clone())]
+        );
+        assert_sync(&mut stream).await;
+        assert_eq!(
+            subscribe_paths(next_bounded(&mut stream).await.unwrap().unwrap()),
+            vec![Some(path)]
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        drop(stream);
+        drop(harness);
+        manager.shutdown().await;
+    }
+
     #[tokio::test]
     async fn on_change_initial_snapshot_deduplicates_wildcard_and_concrete_paths() {
         let address = "10.0.0.2";
@@ -4984,20 +5277,47 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one end-to-end event/heartbeat ordering receipt"
+    )]
     async fn subscribe_on_change_streams_session_transitions() {
         // Load-bearing break: rejecting an absent initial concrete neighbor
-        // prevents sync and the later EHM transition Update from arriving.
+        // prevents sync and the later EHM transition Update from arriving;
+        // awaiting the heartbeat snapshot inline blocks that live Update.
         use rustbgpd_event_history::{
             Category, EnvelopePeers, EventEnvelope, PayloadCodec, Severity,
         };
-        let (service, manager) = ehm_service(Vec::new()).await;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let snapshot_calls = Arc::clone(&calls);
+        let render_started = Arc::new(tokio::sync::Notify::new());
+        let snapshot_started = Arc::clone(&render_started);
+        let release_render = Arc::new(tokio::sync::Notify::new());
+        let snapshot_release = Arc::clone(&release_render);
+        let manager = event_history_manager().await;
+        let service = GnmiService::with_peer_snapshot(65001, "192.0.2.1", move || {
+            let call = snapshot_calls.fetch_add(1, Ordering::SeqCst);
+            let started = Arc::clone(&snapshot_started);
+            let release = Arc::clone(&snapshot_release);
+            async move {
+                if call == 0 {
+                    return Ok(Vec::new());
+                }
+                started.notify_one();
+                release.notified().await;
+                Ok(vec![test_peer("10.0.0.2".parse().unwrap())])
+            }
+        })
+        .with_event_history(Some(manager.handle()));
         let mut harness = serve(service).await;
 
+        let mut list = stream_on_change_list(neighbor_session_state_path("10.0.0.2"));
+        list.subscription[0].heartbeat_interval = 1_000_000_000;
         let mut stream = harness
             .client
-            .subscribe(tokio_stream::iter(vec![subscribe_msg(
-                stream_on_change_list(neighbor_session_state_path("10.0.0.2")),
-            )]))
+            .subscribe(tokio_stream::iter(vec![subscribe_msg(list)]))
             .await
             .unwrap()
             .into_inner();
@@ -5008,6 +5328,10 @@ mod tests {
             sync.response,
             Some(gnmi::subscribe_response::Response::SyncResponse(true))
         );
+        tokio::time::timeout(Duration::from_secs(2), render_started.notified())
+            .await
+            .expect("heartbeat snapshot did not start");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
 
         // Build a synthetic proto::BgpEvent representing a session
         // lifecycle transition to Idle (peer down). Encode it and
@@ -5056,11 +5380,9 @@ mod tests {
         };
         manager.handle().sender().try_send(envelope).unwrap();
 
-        // The ON_CHANGE task forwards the transition with the new
-        // OpenConfig short-form state name. Delivery is race-free (the
-        // broadcast attach happens-before the sync_response drained
-        // above) but rides a real SQLite commit + broadcast hop, so the
-        // bound is a generous hang guard, not a latency assertion.
+        // The event must remain deliverable while the actor-backed heartbeat
+        // snapshot is deliberately held. EHM rides a real SQLite commit, so
+        // this is a generous hang guard rather than a latency assertion.
         let response = tokio::time::timeout(Duration::from_secs(30), stream.message())
             .await
             .expect("ON_CHANGE Update did not arrive (hang guard)")
@@ -5084,6 +5406,10 @@ mod tests {
             other => panic!("unexpected encoding {other:?}"),
         };
         assert_eq!(val, "\"IDLE\"");
+
+        release_render.notify_one();
+        let heartbeat = next_bounded(&mut stream).await.unwrap().unwrap();
+        assert_eq!(subscribe_updates(heartbeat).len(), 1);
 
         drop(stream);
         drop(harness);

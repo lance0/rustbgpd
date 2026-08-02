@@ -104,7 +104,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   fixed-cadence heartbeats from 1 second through 1 hour. Heartbeats force current
   leaves, coalesce with coincident samples, and skip missed periods; suppressed
   `updates_only` streams seed their hidden baseline before the initial sync.
-  ON_CHANGE heartbeat support remains deferred.
+
+- gNMI STREAM/ON_CHANGE now supports per-path fixed-cadence heartbeats from 1
+  second through 1 hour. Co-due paths share one peer snapshot, missed periods
+  are skipped without bursts, and live EHM events retain their immediate
+  delivery cadence. With `updates_only`, the first heartbeat performs the first
+  peer snapshot after the initial sync.
 
 - Graceful Restart and Long-Lived Graceful Restart now retain an iBGP route
   source's route-reflector-client classification for as long as its stale

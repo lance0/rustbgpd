@@ -238,10 +238,15 @@ accepted.
 - **Initial sync.** The handler emits one OpenConfig leaf `Update`
   per configured peer (including non-Established peers — `IDLE` /
   `CONNECT` / `ACTIVE` / `OPENSENT` / `OPENCONFIRM` / `ESTABLISHED`)
-  followed by `sync_response`.
+  followed by `sync_response`. With `updates_only`, it emits the sync
+  without an initial peer snapshot; later events and heartbeats remain active.
 - **Live stream.** For every FSM transition committed to EHM under
   `EVENT_CATEGORY_SESSION`, the handler emits a single
   `session-state` leaf `Update` with the new short-form state.
+- **Heartbeat.** A nonzero per-path `heartbeat_interval` from 1 second through
+  1 hour emits the current leaf value on a fixed monotonic cadence anchored
+  after initial sync. Co-due paths share one peer snapshot, missed periods are
+  skipped without bursts, and live events neither satisfy nor rearm heartbeats.
 - **Reconnect.** gNMI carries no cursor on reconnect, so a fresh
   subscription gets a fresh initial snapshot — the disconnect
   window is **not** replayed. Collectors that need historical
@@ -472,9 +477,9 @@ paths are read into the hidden comparison baseline before `sync_response`, but
 their initial values are withheld.
 
 Nondefault controls on ONCE/POLL return `INVALID_ARGUMENT`. ON_CHANGE rejects
-`suppress_redundant` with `INVALID_ARGUMENT`; ON_CHANGE heartbeat support is
-not implemented and returns `UNIMPLEMENTED`. STREAM/TARGET_DEFINED remains
-unsupported.
+`suppress_redundant` with `INVALID_ARGUMENT` but accepts the same nonzero
+1-second-through-1-hour `heartbeat_interval` bounds as SAMPLE. STREAM/
+TARGET_DEFINED remains unsupported.
 
 ## Troubleshooting
 
