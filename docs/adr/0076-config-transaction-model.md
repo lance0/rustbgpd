@@ -260,3 +260,12 @@ SIGKILL mid-window then restart boots the previous config with the candidate
 saved aside; confirm-then-SIGKILL retains the new config with no journal;
 in-process timeout auto-revert consumes the journal; a torn journal refuses
 boot naming both files.
+
+ADR-0121 supersedes only the **designed v2 discovery and provenance contract**:
+v2 pending authority will use an owner-only locator adjacent to the stable
+lexical launch-config path, so boot need not trust the candidate to find its
+revert journal. Its journal carries the immutable prior source manifest and is
+verified before candidate access. That v2 design is implementation-pending.
+The v1 TOML-only journal, candidate-derived `runtime_state_dir` discovery, boot
+revert, and live confirm/abort/timeout behavior described in this amendment
+remain the shipped behavior until that implementation lands.

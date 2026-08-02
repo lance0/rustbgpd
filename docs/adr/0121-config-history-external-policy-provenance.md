@@ -1,7 +1,7 @@
 # ADR-0121: Config-history external-policy provenance
 
 **Status:** Accepted, partially implemented
-**Implementation:** v2 recording, mixed listing, and verified restore shipped
+**Implementation:** v2 history restore shipped; commit-confirm v2 designed, implementation pending
 **Date:** 2026-08-01
 
 ## Context
@@ -348,53 +348,175 @@ must not relabel `RECORDED` as "rollback ready."
 
 ### 10. Commit-confirm uses the same immutable provenance
 
-A new commit-confirm journal version embeds one inline prior rollback state:
-normalized TOML plus its immutable source manifest and both digests. It stores
-no external source bytes or sidecars. The v2 journal deliberately omits the
-legacy required `rollback_toml` field, so an older binary cannot deserialize it
-as a valid old journal and fails boot closed instead of reverting without
-provenance.
+A v2 commit-confirm journal embeds one inline prior rollback state: normalized
+TOML plus its immutable source manifest and both digests. It stores no external
+source bytes or sidecars. It deliberately omits the v1 `rollback_toml` field,
+so an older binary cannot deserialize it as a valid old journal and fails boot
+closed instead of reverting without provenance.
 
 The v2 journal is compact UTF-8 JSON with fixed-order, `deny_unknown_fields`
 structs and exactly one trailing LF. Its first bytes are the exact dispatch
 prefix `{"version":2,`; the remaining top-level fields are `confirm_id`,
 `deadline_unix_seconds`, `rollback_failed`, and `prior`, in that order. `prior`
 contains `sha256`, `source_sha256`, `normalized_toml`, and `manifest`, using the
-same encodings, field order, component caps, and canonical re-encoding check as
-the history envelope. `confirm_id` retains its existing 128-character bound.
+history envelope's encoding, field order, component caps, and canonical
+re-encoding check. `confirm_id` retains its 128-character bound.
 
-The complete v2 journal cap is 34 MiB, covering a maximum 32 MiB prior-state
-envelope plus the bounded journal wrapper. Before creating a staging file, the
-writer validates every component cap, encodes once, and refuses a confirmed
-apply if the encoded journal exceeds that total cap. This happens before any
-candidate persistence or runtime mutation. The max-valid prior-state proof must
-also establish that the wrapper remains within 34 MiB; write success can never
-create a journal that the same binary's boot reader rejects for size.
+The complete journal cap is 34 MiB. The writer checks every component and the
+encoded total before any candidate persistence or runtime mutation. The boot
+reader reads at most 34 MiB + 1 byte solely to detect oversize input and rejects
+anything larger than 34 MiB; it then enforces component caps before TOML parsing
+or manifest use. A max-valid write must round-trip through that reader.
 
-Boot retains the legacy v1 10 MiB preparse limit. It opens one regular,
-owner-matching journal with non-following semantics, then obtains metadata,
-reads the dispatch prefix, and reads the complete journal through that same
-already-opened file descriptor. Only the exact v2 prefix authorizes a bounded
-read of at most 34 MiB + 1; every legacy, unknown, or malformed prefix is
-refused before a full read when the file exceeds 10 MiB. V2 component caps and
-canonical form are checked after bounded JSON decode and before TOML parsing or
-manifest use. The manifest-bearing journal inherits the history envelope's
-owner-only modes and path-redaction rules.
+#### Boot authority is adjacent to the launch config
 
-Live abort and timeout rollback verify the prior external identity and pass
-the same loaded object to the #1370-gated planning path; detached external state
-is not installed. A mismatch is a rollback failure: the mutation fence stays
-closed and the journal stays in place. Confirm behavior is unchanged.
+Candidate-derived discovery is forbidden for v2: the unconfirmed candidate is
+exactly the input boot must not trust. At process start, the daemon retains one
+stable **lexical launch identity** for the positional config argument. It makes
+the path absolute against the original working directory, rejects any remaining
+`..` (`ParentDir`) component, and may remove `.` only where that preserves path
+semantics. It never normalizes through a symlinked ancestor or follows the final
+component. Reload, persistence, or a changed working directory cannot rebase
+this identity.
 
-Current boot has a bootstrap limitation: it fully loads the on-disk
-unconfirmed candidate to discover `runtime_state_dir` before checking for a
-journal. V2 external rollback must not be called shipped until bounded,
-schema-minimal journal-path discovery can run before external config loading.
-Once a journal is found, boot must read and verify the complete prior
-config/provenance object **before** saving the candidate aside, rewriting the
-config, or removing the journal. A provenance mismatch leaves both config and
-journal untouched and refuses boot. A legacy journal whose rollback TOML
-references external inputs likewise fails closed.
+The sole v2 pending-authority locator is:
+
+```text
+<absolute lexical CONFIG_PATH>.commit-confirm-locator.json
+```
+
+Its presence means a v2 confirmed commit is pending. Boot checks it before
+opening, sizing, parsing, or otherwise trusting the candidate config. There is
+no global candidate-config size cap in this design; the existing loader caps
+still apply after pending-state resolution.
+
+The locator is compact UTF-8 JSON with exactly one trailing LF and these fields
+in this order: `version` (exactly `2`), `confirm_id`, `journal_path`,
+`config_target`, `prior_sha256`, and `prior_source_sha256`. The paths are
+lossless absolute Unix paths encoded as the manifest path object; each decoded
+path is at most 64 KiB. Digests are exactly 64 lowercase hexadecimal
+characters, and `confirm_id` retains its 128-character bound. The complete
+locator is at most 512 KiB. Unknown or duplicate fields, noncanonical JSON,
+alternate encodings, trailing bytes, or a byte-different compact re-encoding
+plus LF are invalid.
+
+`journal_path` names the exact v2 journal. `config_target` is the lossless real
+target to which the lexical config path resolved when the confirmed commit was
+accepted. If the lexical final component still resolves at boot, it must resolve
+to that same target; retargeting a config symlink never redirects a pending
+revert. If the final component is a dangling symlink, boot uses `lstat` and
+`readlink` on that leaf itself, derives its lossless absolute target identity
+relative to the pinned real parent, and requires it to equal `config_target`.
+A retargeted dangling link refuses. When the original recorded target is
+missing, boot restores to that target and places any saved `.unconfirmed`
+candidate adjacent to it. Retargeting an ancestor or launching with a different
+lexical `CONFIG_PATH` is unsupported. The two digests must equal the journal's
+embedded prior state before any prior-source load.
+
+The locator, journal, and their stages are regular files owned by the daemon
+uid and mode `0600` from their first byte. Their real parent directories are
+pinned by descriptor, owned by that uid, and neither group- nor
+world-writable. Reads and cleanup are descriptor-relative with `O_NOFOLLOW`:
+open once, `fstat`, bound, and read through that same descriptor. No check may
+be followed by a path reopen. The lexical config parent and journal parent may
+differ, so each has its own pinned descriptor and durability sync.
+
+The only staging names are `<journal>.tmp` and `<locator>.tmp`. Each is created
+in the same pinned directory as its final with owner-only mode and `O_EXCL`;
+neither cross-directory staging nor an alternate suffix is recognized.
+
+#### Writer admissibility and crash order
+
+A confirmed writer may start only while it still owns the stable lexical launch
+identity, both pinned directories pass the checks above, and the final locator
+is absent. Exact owned regular `0600` staging or journal residue may be removed
+and its directory synced before proceeding; an unsafe, ambiguous, differently
+owned, non-regular, noncanonical, or unremovable residue refuses the apply.
+Cleanup may touch only the exact journal and locator final basenames and the two
+exact staging basenames above, under the same descriptor, owner, type, and mode
+checks. A published locator is authority, not residue. No wider directory scan
+or suffix match is permitted.
+
+Publication order is load-bearing:
+
+1. encode and validate the journal and locator completely;
+2. stage, write, `fsync`, rename the journal, then `fsync` its directory;
+3. stage, write, `fsync`, rename the locator, then `fsync` its directory; and
+4. only then persist and apply the unconfirmed candidate.
+
+A crash before locator publication leaves the prior config authoritative; the
+exact journal is safe residue and cannot trigger a revert. A crash after
+locator publication invokes the verified prior-state path even if candidate
+persistence had not begun. Any publication failure cleans only exact safe
+residue when that cleanup can be proven; otherwise it refuses the candidate
+and leaves diagnostics for operator repair.
+
+#### Six boot states
+
+Locator presence takes precedence; legacy fallback is considered only when the
+locator is absent.
+
+| Locator | Journal selected by that discovery lane | Boot result |
+|---|---|---|
+| absent | absent | Load the candidate normally. |
+| absent | valid v1 | Preserve the existing v1 bounded boot revert. |
+| absent | v2 | Never revert; durably clean exact safe residue and proceed, or refuse if it is unsafe. |
+| present | absent | Refuse boot; pending authority has lost its journal. |
+| present | v1 or non-v2 | Refuse boot; the locator authorizes only its exact v2 journal. |
+| present | matching valid v2 | Verify prior provenance, then revert before candidate load. |
+
+An invalid, unsafe, oversized, mismatched, or unreadable locator occupies the
+`present` rows and fails closed; it never falls back to v1. A valid locator
+whose journal path, `confirm_id`, digests, config target, or journal contents do
+not match also touches neither candidate nor pending files. V1 discovery keeps
+its existing 10 MiB preparse cap and exact format, and a v1 prior containing
+external inputs remains refused. A v2 journal without a locator is never boot
+revert authority. It is either prepublication residue or residue after the
+locator's terminal removal. An exact canonical, owned, regular `0600` journal
+may be removed and its directory synced before boot proceeds; unsafe,
+malformed, or unremovable residue refuses boot. Locator-absent plus
+journal-present never reconstructs or re-arms pending state.
+
+#### Revert and terminal cleanup
+
+Boot reads and verifies the locator, complete journal, prior TOML, and prior
+external provenance before saving the candidate aside, rewriting config, or
+removing pending state. Live abort and timeout use the same loaded immutable
+object and #1370-gated planner; detached external state is not installed. A
+mismatch keeps the mutation fence closed and leaves pending state untouched.
+
+For boot, abort, and timeout, the verified prior config is durably restored
+while both files remain. They then remove the locator and `fsync` its parent;
+only durable locator absence is terminal. Confirm does not load or verify prior
+sources: a matching `confirm_id` durably removes and syncs the locator first,
+making the accepted candidate permanent. This intentionally strengthens and
+changes shipped v1 durability semantics in ADR-0076: after locator unlink and
+parent `fsync` are durable, confirm is successful. A later journal-cleanup
+failure can only warn; it cannot fail the RPC or re-arm pending state.
+
+For every terminal path, journal removal follows durable locator removal and is
+best-effort. Failure warns but cannot fail the completed RPC, re-arm the fence,
+or revive pending state. A retry that finds the locator already absent must
+still `fsync` its parent before reporting terminal success, then may clean the
+exact safe journal residue. A locator unlink or parent-`fsync` failure is
+nonterminal: the running daemon retains its mutation fence and reports failure.
+Boot then applies the six-row table rather than guessing. A crash before the
+terminal point leaves locator authority and repeats or fails closed; a crash
+after it leaves only non-authoritative cleanup residue.
+
+Ordinary logs and viewer surfaces expose only a bounded failure class.
+Operator and `sensitive_read` status may include the bounded `confirm_id` and
+redacted path **roles**, never values. No API, log, or normal CLI output renders
+`journal_path` or `config_target` decoded from the locator, even locally. A
+startup diagnostic may name only the deterministic locator path derived from
+the launch argument. Digests and prior source paths are never logged.
+
+Writable downgrade remains unsupported: old binaries do not understand the
+locator or v2 journal. Re-upgrade accepts only the exact states above; it never
+blesses or migrates a residue produced by a downgrade. A live v1 pending
+transaction must be confirmed, aborted, timed out, or boot-reverted before an
+upgrade. Rewriting it out of band is unsupported; v2 never converts a live v1
+journal and never dual-writes v1 plus v2 pending state.
 
 ### 11. Writable downgrade after v2 publication is unsupported
 
@@ -431,6 +553,9 @@ candidate. There is no in-place migration or automatic deletion.
   object rather than reparse TOML at each layer.
 - Host paths are retained as sensitive local state, increasing the importance
   of owner-only storage and bounded, non-following reads.
+- V2 commit-confirm boot authority no longer depends on parsing the
+  unconfirmed candidate, but it adds one config-adjacent owner-only locator and
+  makes writable downgrade across that locator unsupported.
 
 ## Rejected alternatives
 
@@ -452,6 +577,10 @@ candidate. There is no in-place migration or automatic deletion.
 - **Relax the external-input transaction fence.** Provenance authentication is
   useful audit evidence, but this ADR does not authorize external-policy state
   adoption through any transaction or history executor.
+- **Discover v2 through `runtime_state_dir` in the candidate.** A candidate can
+  redirect or prevent discovery of the state that must decide whether that
+  candidate is authoritative. Only the launch-config-adjacent locator breaks
+  that dependency without imposing a global candidate cap.
 
 ## Future load-bearing proof matrix
 
@@ -503,19 +632,36 @@ Implementation must demonstrate each named production break goes red:
 12. **Commit-confirm live:** omit prior provenance, let an older parser accept
     the v2 journal, make writer and reader v2 caps differ, accept a 34 MiB + 1
     journal or over-cap component, let a max-valid v2 journal fail its
-    round-trip/boot read, mutate the candidate before an over-cap write is
-    refused, or clear the fence/journal after a source mismatch.
-13. **Commit-confirm boot:** touch the candidate or journal before prior-source
-    verification, let a non-v2 prefix bypass the legacy 10 MiB preparse cap,
-    reopen or substitute the journal path between prefix dispatch and the
-    complete read, proceed on mismatch, accept legacy external rollback, or
-    claim support while journal discovery still requires full candidate load.
-14. **#1370 regression:** make an ordinary full-snapshot native/gNMI candidate
+    round-trip/boot read, mutate the candidate before the journal and locator
+    are each published and directory-synced, accept an occupied/unsafe locator
+    or residue, stage under another name/directory or without `O_EXCL`, clean a
+    suffix match instead of an exact staging/final name, or clear the fence
+    after a source mismatch.
+13. **Commit-confirm boot authority:** discover v2 from candidate
+    `runtime_state_dir`, open/size/parse the candidate before checking the
+    locator, accept a locator over 512 KiB or path over 64 KiB, use a lossy or
+    relative path, accept or normalize through a `ParentDir`, accept
+    noncanonical JSON, follow a symlink, reopen after a check, tolerate an
+    unsafe parent or changed resolved target, fail to inspect a dangling leaf,
+    accept a retargeted dangling link, fail to restore a missing recorded
+    target, place `.unconfirmed` elsewhere, tolerate a locator/journal field
+    mismatch, or expose a locator-carried path/digest.
+14. **Commit-confirm state/cleanup:** let an absent locator authorize v2 or
+    refuse exact safe cleanup residue, let a present/invalid locator fall back
+    to v1, reject exact legacy v1 when no locator exists, bypass the legacy
+    10 MiB preparse cap, touch candidate or pending files before prior
+    verification, remove the locator before durable abort/timeout/boot restore,
+    treat confirm as terminal before locator removal+sync, preserve the v1 rule
+    that journal cleanup can fail a durably terminal v2 confirm, skip the
+    locator-dir sync after `NotFound`, fail/re-arm after post-terminal journal
+    cleanup fails, proceed on mismatch, accept legacy external rollback,
+    convert a live v1 journal, or dual-write pending formats.
+15. **#1370 regression:** make an ordinary full-snapshot native/gNMI candidate
     or a provenance-verified history candidate with external inputs committable
     merely because provenance support exists, adopt detached verification
     state, or make a true no-op / targeted pure-FIB unchanged-external-input
     candidate fail merely because provenance support exists.
-15. **Writable downgrade:** after a legacy writer creates a sequence that
+16. **Writable downgrade:** after a legacy writer creates a sequence that
     collides with retained v2, let re-upgrade resolve to either entry, omit one
     from retention, choose the next sequence from only one namespace, or
     rewrite/delete the collision instead of listing both `UNREADABLE`.
@@ -529,6 +675,8 @@ identity contract.
 V2 recording, immutable accepted-source capture, mixed listing, additive API
 status/digests, filesystem hardening, and verified v2 history restore are
 shipped with executable destructive proofs. Provenance-bearing commit-confirm
-remains pending and retains the final-design proof requirements above.
+v2 remains implementation-pending; its locator, journal, state-machine, and
+cleanup proofs above are the implementation gate. Documentation-only design
+changes have no executable red proof.
 Documentation consistency, source-contract review, link and terminology
 checks, and `git diff --check` remain part of every tranche.
