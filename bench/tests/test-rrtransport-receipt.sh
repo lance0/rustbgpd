@@ -206,33 +206,47 @@ expect_red changed-hash mutate -c 'import pathlib,sys;(pathlib.Path(sys.argv[1])
 [[ $("$runner" --classify-child-exe /expected /expected Z) == exited ]]
 [[ $("$runner" --classify-child-exe /expected /expected absent) == retry_expected_absent ]]
 
-printf 'Name:\trrtiny\nState:\tR (running)\nVmRSS:\t1234 kB\n' >"$tmp/live.status"
-printf 'Name:\trrtiny\nState:\tZ (zombie)\n' >"$tmp/zombie.status"
-printf 'Name:\trrtiny\nState:\tR (running)\n' >"$tmp/missing-rss.status"
-printf 'Name:\trrtiny\nVmRSS:\t1234 kB\n' >"$tmp/missing-state.status"
-printf 'Name:\trrtiny\nState:\tR (running)\nVmRSS:\t2097153 kB\n' >"$tmp/over-limit.status"
-[[ $("$runner" --observe-direct-rss "$tmp/live.status") == $'sample\t1234' ]]
-[[ $("$runner" --observe-direct-rss "$tmp/zombie.status") == $'exited\t0' ]]
-[[ $("$runner" --observe-direct-rss "$tmp/missing-rss.status") == $'reject\t0' ]]
-[[ $("$runner" --observe-direct-rss "$tmp/missing-state.status") == $'reject\t0' ]]
-[[ $("$runner" --observe-direct-rss "$tmp/absent.status") == $'exited\t0' ]]
-[[ $("$runner" --sample-direct-rss-fixture "$tmp/live.status" "$tmp/live-rss") == \
-  $'sample\t1234\t1234' ]]
-[[ $(<"$tmp/live-rss/rss.tsv") == \
+direct_fixture() {
+  local name=$1 expected=$2 expected_status=$3 actual status=0 stderr; shift 3
+  stderr=$tmp/$name.stderr
+  actual=$("$runner" --sample-direct-rss-observations "$tmp/$name" 11 "$@" \
+    2>"$stderr") || status=$?
+  [[ $actual == "$expected" && $status == "$expected_status" ]]
+  if (( expected_status == 0 )); then
+    [[ ! -s $stderr ]]
+  else
+    [[ $(<"$stderr") == "tiny sampler observed live process without numeric VmRSS" ]]
+  fi
+}
+direct_fixture exit-after-miss $'exited\t0\t0' 0 \
+  11,R,absent,11 11,Z,absent,11
+[[ $(<"$tmp/exit-after-miss/rss.tsv") == $'checkpoint\trss_kib' ]]
+direct_fixture exit-during-bracket $'exited\t0\t0' 0 \
+  11,R,absent,absent
+[[ $(<"$tmp/exit-during-bracket/rss.tsv") == $'checkpoint\trss_kib' ]]
+direct_fixture sample-after-miss $'sample\t1234\t1234' 0 \
+  11,R,absent,11 11,R,1234,11
+[[ $(<"$tmp/sample-after-miss/rss.tsv") == \
   $'checkpoint\trss_kib\nprocess_tree_target_rss_sample\t1234' ]]
-[[ $("$runner" --sample-direct-rss-fixture "$tmp/zombie.status" "$tmp/zombie-rss") == \
-  $'exited\t0\t0' ]]
-[[ $(<"$tmp/zombie-rss/rss.tsv") == $'checkpoint\trss_kib' ]]
-if "$runner" --sample-direct-rss-fixture "$tmp/missing-rss.status" "$tmp/missing-rss" \
-  2>"$tmp/missing-rss.stderr"; then
-  echo "live process without VmRSS was accepted" >&2
-  exit 1
-fi
-[[ $(<"$tmp/missing-rss/rss.tsv") == $'checkpoint\trss_kib' ]]
-grep -Fxq "tiny sampler observed live process without numeric VmRSS" \
-  "$tmp/missing-rss.stderr"
-if "$runner" --sample-direct-rss-fixture "$tmp/over-limit.status" "$tmp/over-limit" \
-  >"$tmp/over-limit.stdout" 2>"$tmp/over-limit.stderr"; then
+direct_fixture sample-after-missing-state $'sample\t1234\t1234' 0 \
+  11,absent,absent,11 11,R,1234,11
+[[ $(<"$tmp/sample-after-missing-state/rss.tsv") == \
+  $'checkpoint\trss_kib\nprocess_tree_target_rss_sample\t1234' ]]
+direct_fixture persistent-miss $'reject\t0\t0' 1 \
+  11,R,absent,11 11,S,absent,11 11,D,absent,11
+[[ $(<"$tmp/persistent-miss/rss.tsv") == $'checkpoint\trss_kib' ]]
+direct_fixture persistent-missing-state $'reject\t0\t0' 1 \
+  11,absent,absent,11 11,absent,absent,11 11,absent,absent,11
+[[ $(<"$tmp/persistent-missing-state/rss.tsv") == $'checkpoint\trss_kib' ]]
+direct_fixture reused-pid $'reject\t0\t0' 1 \
+  11,R,absent,11 12,R,1234,12
+[[ $(<"$tmp/reused-pid/rss.tsv") == $'checkpoint\trss_kib' ]]
+direct_fixture foreign-then-absent $'reject\t0\t0' 1 12,R,absent,absent
+direct_fixture absent-then-expected $'reject\t0\t0' 1 absent,R,absent,11
+direct_fixture incoherent-bracket $'reject\t0\t0' 1 11,R,absent,12
+if "$runner" --sample-direct-rss-observations "$tmp/over-limit" 11 \
+  11,R,absent,11 11,R,2097153,11 >"$tmp/over-limit.stdout" \
+  2>"$tmp/over-limit.stderr"; then
   echo "production direct sampler bypassed the RSS ceiling" >&2
   exit 1
 fi
@@ -378,7 +392,8 @@ for seam in \
   "python3 \"\$verifier\" \"\$receipt\" --full | tee \"\$receipt/verifier.txt\"" \
   "full_checksums \"\$receipt\"" \
   "sha256sum -c SHA256SUMS --strict" \
-  "sample_direct_rss \"/proc/\$pid/status\" \"\$receipt\"" \
+  "sample_direct_rss \"\$pid\" \"\$tiny_validated_starttime\" \"\$receipt\"" \
+  "resolve_direct_rss \"\$process\" \"\$expected_start\"" \
   "[[ \$direct_rss_action != exited ]] || break"; do
   cp "$runner" "$tmp/runner"
   grep -Fv "$seam" "$tmp/runner" >"$tmp/mutated"
