@@ -12199,6 +12199,12 @@ stable track (Tokio's policy) — gated in PR-CI so it doesn't drift.
   healthy. Operators can now alert on BMP loss without a log scraper.
   Closes the [BMP drop/replay counters](KNOWN_ISSUES.md) gap.
 
+- **BMP Loc-RIB live-buffer gauges.** Per-collector current depth and
+  generation high-water mark now expose pressure behind bootstrap and table
+  dumps, including the overflowing row before the existing 8192-row bound
+  closes the incomplete generation. This is instrumentation only; a separate
+  live-scale measurement will determine whether the fixed bound needs resizing.
+
 ### Fixed
 
 - **Per-peer outbound writer task; eliminates `GetHealth` wedge under

@@ -115,6 +115,13 @@ live RouteMonitoring deltas. From the daemon side the collector
 connection state is visible in the logs (`log_format = "json"`) and
 the BMP metrics below.
 
+During a Loc-RIB bootstrap or dump, watch
+`bmp_loc_rib_dump_live_buffer_depth{collector}` for the current queued live
+rows and `bmp_loc_rib_dump_live_buffer_high_watermark{collector}` for the
+connection generation's peak. The `collector` value is the configured socket
+address including port. A high-water mark near the fixed 8192-row bound means
+the collector or dump path needs investigation before the next burst.
+
 **Event replay (the bridge contract):** live tail plus durable replay
 from a cursor. `--from-event-id 0` replays everything retained, then
 tails; your bridge persists the last `event_id` it processed and

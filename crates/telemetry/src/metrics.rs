@@ -395,6 +395,8 @@ pub struct BgpMetrics {
     bmp_collector_drops: IntCounterVec,
     bmp_replay_attempts: IntCounterVec,
     bmp_control_event_drops: IntCounterVec,
+    bmp_loc_rib_dump_live_buffer_depth: IntGaugeVec,
+    bmp_loc_rib_dump_live_buffer_high_watermark: IntGaugeVec,
 
     // ── Event history outbox (ADR-0072) ───────────────────────
     event_outbox_committed: IntCounterVec,
@@ -1817,6 +1819,23 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
+        let bmp_loc_rib_dump_live_buffer_depth = IntGaugeVec::new(
+            Opts::new(
+                "bmp_loc_rib_dump_live_buffer_depth",
+                "Current live Loc-RIB rows buffered behind collector bootstrap or dump",
+            ),
+            &["collector"],
+        )
+        .expect("valid metric definition");
+        let bmp_loc_rib_dump_live_buffer_high_watermark = IntGaugeVec::new(
+            Opts::new(
+                "bmp_loc_rib_dump_live_buffer_high_watermark",
+                "Highest live Loc-RIB buffer depth observed in the current collector generation",
+            ),
+            &["collector"],
+        )
+        .expect("valid metric definition");
+
         // ── Event history outbox (ADR-0072) ─────────────────────
         let event_outbox_committed = IntCounterVec::new(
             Opts::new(
@@ -2344,6 +2363,14 @@ impl BgpMetrics {
             .register(Box::new(bmp_control_event_drops.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(bmp_loc_rib_dump_live_buffer_depth.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(
+                bmp_loc_rib_dump_live_buffer_high_watermark.clone(),
+            ))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(event_outbox_committed.clone()))
             .expect("metric not already registered");
         registry
@@ -2530,6 +2557,8 @@ impl BgpMetrics {
             bmp_collector_drops,
             bmp_replay_attempts,
             bmp_control_event_drops,
+            bmp_loc_rib_dump_live_buffer_depth,
+            bmp_loc_rib_dump_live_buffer_high_watermark,
             event_outbox_committed,
             event_outbox_dropped,
             event_outbox_queue_depth,
@@ -4310,6 +4339,48 @@ impl BgpMetrics {
             .inc();
     }
 
+    /// Reset live-buffer gauges for a newly validated collector generation.
+    pub fn reset_bmp_loc_rib_dump_live_buffer(&self, collector: &str) {
+        self.bmp_loc_rib_dump_live_buffer_depth
+            .with_label_values(&[collector])
+            .set(0);
+        self.bmp_loc_rib_dump_live_buffer_high_watermark
+            .with_label_values(&[collector])
+            .set(0);
+    }
+
+    /// Observe a live-buffer depth, updating both current and generation HWM.
+    pub fn observe_bmp_loc_rib_dump_live_buffer(&self, collector: &str, depth: usize) {
+        let value = i64::try_from(depth).unwrap_or(i64::MAX);
+        self.bmp_loc_rib_dump_live_buffer_depth
+            .with_label_values(&[collector])
+            .set(value);
+        let high = self
+            .bmp_loc_rib_dump_live_buffer_high_watermark
+            .with_label_values(&[collector]);
+        if value > high.get() {
+            high.set(value);
+        }
+    }
+
+    /// Clear only the current live-buffer depth after storage is discarded.
+    pub fn clear_bmp_loc_rib_dump_live_buffer(&self, collector: &str) {
+        self.bmp_loc_rib_dump_live_buffer_depth
+            .with_label_values(&[collector])
+            .set(0);
+    }
+
+    /// Remove the exact collector's live-buffer series.
+    pub fn reap_bmp_loc_rib_dump_live_buffer(&self, collector: &str) {
+        let labels = &[collector];
+        let _ = self
+            .bmp_loc_rib_dump_live_buffer_depth
+            .remove_label_values(labels);
+        let _ = self
+            .bmp_loc_rib_dump_live_buffer_high_watermark
+            .remove_label_values(labels);
+    }
+
     // ── Event history outbox (ADR-0072) ─────────────────────────
 
     /// Record a successful durable commit. Called by EHM after each
@@ -5920,6 +5991,58 @@ mod tests {
             .with_label_values(&["10.0.0.2", "channel_closed"])
             .get();
         assert_eq!(closed, 1);
+    }
+
+    #[test]
+    fn bmp_live_buffer_gauges_reset_observe_clear_and_reap_exact_series() {
+        let m = BgpMetrics::new();
+        let first = "127.0.0.1:11000";
+        let sibling = "127.0.0.1:11001";
+        for collector in [first, sibling] {
+            m.reset_bmp_loc_rib_dump_live_buffer(collector);
+        }
+        m.observe_bmp_loc_rib_dump_live_buffer(first, 1);
+        m.observe_bmp_loc_rib_dump_live_buffer(first, 3);
+        m.observe_bmp_loc_rib_dump_live_buffer(first, 2);
+        m.observe_bmp_loc_rib_dump_live_buffer(sibling, 7);
+        assert_eq!(
+            m.bmp_loc_rib_dump_live_buffer_depth
+                .with_label_values(&[first])
+                .get(),
+            2
+        );
+        assert_eq!(
+            m.bmp_loc_rib_dump_live_buffer_high_watermark
+                .with_label_values(&[first])
+                .get(),
+            3
+        );
+
+        m.clear_bmp_loc_rib_dump_live_buffer(first);
+        assert_eq!(
+            m.bmp_loc_rib_dump_live_buffer_depth
+                .with_label_values(&[first])
+                .get(),
+            0
+        );
+        assert_eq!(
+            m.bmp_loc_rib_dump_live_buffer_high_watermark
+                .with_label_values(&[first])
+                .get(),
+            3
+        );
+        m.reset_bmp_loc_rib_dump_live_buffer(first);
+        assert_eq!(
+            m.bmp_loc_rib_dump_live_buffer_high_watermark
+                .with_label_values(&[first])
+                .get(),
+            0
+        );
+
+        m.reap_bmp_loc_rib_dump_live_buffer(first);
+        let text = gather_text(&m);
+        assert!(!text.contains("collector=\"127.0.0.1:11000\""));
+        assert!(text.contains("collector=\"127.0.0.1:11001\""));
     }
 
     #[test]

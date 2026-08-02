@@ -132,6 +132,18 @@ impl CollectorPhase {
             }
         }
     }
+
+    const fn loc_rib_peer_up(&self) -> bool {
+        match self {
+            Self::BootstrapPending {
+                loc_rib_peer_up, ..
+            }
+            | Self::Active {
+                loc_rib_peer_up, ..
+            } => *loc_rib_peer_up,
+            Self::Disconnected => false,
+        }
+    }
 }
 
 struct Collector {
@@ -454,7 +466,12 @@ impl BmpManager {
             match &mut self.collectors[idx].phase {
                 CollectorPhase::Disconnected => {}
                 CollectorPhase::BootstrapPending { loc_rib_buffer, .. } => {
-                    if buffer_loc_rib_message(loc_rib_buffer, msg) {
+                    let overflow = buffer_loc_rib_message(loc_rib_buffer, msg);
+                    self.metrics.observe_bmp_loc_rib_dump_live_buffer(
+                        &addr.to_string(),
+                        loc_rib_buffer.len(),
+                    );
+                    if overflow {
                         overflowed.push(idx);
                     }
                 }
@@ -462,10 +479,15 @@ impl BmpManager {
                     generation, sender, ..
                 } => {
                     if let Some(dump) = self.active_dumps.get_mut(&idx) {
-                        if *generation == dump.generation
-                            && buffer_loc_rib_message(&mut dump.buffered, msg)
-                        {
-                            overflowed.push(idx);
+                        if *generation == dump.generation {
+                            let overflow = buffer_loc_rib_message(&mut dump.buffered, msg);
+                            self.metrics.observe_bmp_loc_rib_dump_live_buffer(
+                                &addr.to_string(),
+                                dump.buffered.len(),
+                            );
+                            if overflow {
+                                overflowed.push(idx);
+                            }
                         }
                     } else if let Err(e) = sender.try_send(msg) {
                         let reason = trysend_reason(&e);
@@ -511,6 +533,8 @@ impl BmpManager {
                 "live_buffer_full",
                 u64::try_from(discarded).unwrap_or(u64::MAX),
             );
+            self.metrics
+                .clear_bmp_loc_rib_dump_live_buffer(&self.collectors[idx].addr.to_string());
             warn!(collector = %self.collectors[idx].addr, discarded, "live Loc-RIB buffer exceeded its bound; closing incomplete BMP generation");
         }
         for task in &tasks {
@@ -635,6 +659,10 @@ impl BmpManager {
                 // Dropping the last sender for every active generation lets
                 // clients drain Peer Down before emitting Termination.
                 for collector in &mut self.collectors {
+                    if collector.phase.loc_rib_peer_up() {
+                        self.metrics
+                            .clear_bmp_loc_rib_dump_live_buffer(&collector.addr.to_string());
+                    }
                     collector.phase = CollectorPhase::Disconnected;
                 }
                 true
@@ -648,6 +676,10 @@ impl BmpManager {
     async fn fence_and_abort_dumps(&mut self) {
         for collector in &self.collectors {
             collector.generation.fetch_add(1, Ordering::SeqCst);
+            if collector.phase.loc_rib_peer_up() {
+                self.metrics
+                    .clear_bmp_loc_rib_dump_live_buffer(&collector.addr.to_string());
+            }
         }
         let tasks: Vec<_> = self
             .active_dumps
@@ -705,6 +737,9 @@ impl BmpManager {
                 .map(|(_, encoded)| encoded[collector.version.idx()].clone()),
         );
         let loc_rib_peer_up = collector.filter.loc_rib && self.loc_rib.is_some();
+        if loc_rib_peer_up {
+            self.metrics.reset_bmp_loc_rib_dump_live_buffer(&addr_label);
+        }
         if let Some(cfg) = self.loc_rib.as_ref().filter(|_| loc_rib_peer_up) {
             messages.push(codec::encode_loc_rib_peer_up(
                 cfg,
@@ -798,6 +833,10 @@ impl BmpManager {
         self.cancel_dump(collector_id);
         let collector = &mut self.collectors[collector_id];
         if collector.phase.generation() == Some(generation) {
+            if collector.filter.loc_rib && self.loc_rib.is_some() {
+                self.metrics
+                    .clear_bmp_loc_rib_dump_live_buffer(&collector.addr.to_string());
+            }
             collector.generation.fetch_add(1, Ordering::SeqCst);
             collector.phase = CollectorPhase::Disconnected;
         }
@@ -824,6 +863,7 @@ impl BmpManager {
             return;
         };
         let addr_label = collector.addr.to_string();
+        self.metrics.clear_bmp_loc_rib_dump_live_buffer(&addr_label);
         if let DumpOutcome::Failed(failure) = done.outcome {
             self.loc_rib_suppressed.insert(done.collector_id);
             self.metrics.record_bmp_collector_drop(
@@ -962,6 +1002,15 @@ impl BmpManager {
                     "BMP collector channel full or closed, dropping message"
                 );
             }
+        }
+    }
+}
+
+impl Drop for BmpManager {
+    fn drop(&mut self) {
+        for collector in &self.collectors {
+            self.metrics
+                .reap_bmp_loc_rib_dump_live_buffer(&collector.addr.to_string());
         }
     }
 }
@@ -1679,6 +1728,160 @@ mod tests {
                 })
             })
             .map_or(0, |m| m.counter.value() as u64)
+    }
+
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "test gauges use small exact integer values"
+    )]
+    fn gauge_value(metrics: &BgpMetrics, name: &str, collector: SocketAddr) -> i64 {
+        metrics
+            .registry()
+            .gather()
+            .into_iter()
+            .find(|f| f.name() == name)
+            .and_then(|mut f| {
+                f.take_metric().into_iter().find(|m| {
+                    m.label
+                        .iter()
+                        .any(|l| l.name() == "collector" && l.value() == collector.to_string())
+                })
+            })
+            .map_or(0, |m| m.gauge.value() as i64)
+    }
+
+    fn gauge_series_exists(metrics: &BgpMetrics, name: &str, collector: SocketAddr) -> bool {
+        metrics.registry().gather().into_iter().any(|f| {
+            f.name() == name
+                && f.metric.iter().any(|m| {
+                    m.label
+                        .iter()
+                        .any(|l| l.name() == "collector" && l.value() == collector.to_string())
+                })
+        })
+    }
+
+    fn assert_live_buffer_gauges(
+        metrics: &BgpMetrics,
+        collector: SocketAddr,
+        depth: i64,
+        hwm: i64,
+    ) {
+        assert_eq!(
+            gauge_value(metrics, "bmp_loc_rib_dump_live_buffer_depth", collector),
+            depth
+        );
+        assert_eq!(
+            gauge_value(
+                metrics,
+                "bmp_loc_rib_dump_live_buffer_high_watermark",
+                collector
+            ),
+            hwm
+        );
+    }
+
+    #[tokio::test]
+    async fn loc_rib_live_buffer_metrics_follow_generation_storage_lifecycle() {
+        let (_event_tx, event_rx) = mpsc::channel(1);
+        let (_control_tx, control_rx) = mpsc::channel(1);
+        let (dump_tx, _dump_rx) = mpsc::channel(1);
+        let metrics = BgpMetrics::new();
+        let addr = collector_addr(0);
+        let mut manager = BmpManager::new(
+            event_rx,
+            control_rx,
+            vec![(addr, loc_rib_filter(), BmpVersion::V3)],
+            metrics.clone(),
+        )
+        .with_loc_rib(loc_rib_config(), dump_tx);
+        let (bad_sender, _bad_receiver) = mpsc::channel(1);
+        let (bad_bootstrap, _bad_bootstrap_rx) = tokio::sync::oneshot::channel();
+        manager.handle_collector_connected(0, collector_addr(1), bad_sender, bad_bootstrap);
+        assert!(!gauge_series_exists(
+            &metrics,
+            "bmp_loc_rib_dump_live_buffer_depth",
+            addr
+        ));
+        let (sender, _receiver) = mpsc::channel(4);
+        let (bootstrap_tx, bootstrap_rx) = tokio::sync::oneshot::channel();
+        manager.handle_collector_connected(0, addr, sender, bootstrap_tx);
+        let generation = bootstrap_rx.await.unwrap().generation;
+        assert_live_buffer_gauges(&metrics, addr, 0, 0);
+
+        manager
+            .handle_loc_rib_event(&BmpEvent::LocRibStats { per_family: vec![] })
+            .await;
+        assert_live_buffer_gauges(&metrics, addr, 1, 1);
+        manager.handle_bootstrap_complete(0, generation);
+        assert_eq!(
+            gauge_value(&metrics, "bmp_loc_rib_dump_live_buffer_depth", addr),
+            1
+        );
+        manager.handle_collector_disconnected(0, addr, generation + 1);
+        assert_eq!(
+            gauge_value(&metrics, "bmp_loc_rib_dump_live_buffer_depth", addr),
+            1
+        );
+
+        manager.handle_dump_done(&DumpDone {
+            collector_id: 0,
+            generation,
+            outcome: DumpOutcome::Complete,
+        });
+        assert_live_buffer_gauges(&metrics, addr, 0, 1);
+    }
+
+    #[test]
+    fn manager_drop_reaps_only_its_exact_collector_series() {
+        let metrics = BgpMetrics::new();
+        let addr0 = collector_addr(0);
+        let addr1 = collector_addr(1);
+        metrics.reset_bmp_loc_rib_dump_live_buffer(&addr0.to_string());
+        metrics.reset_bmp_loc_rib_dump_live_buffer(&addr1.to_string());
+        metrics.observe_bmp_loc_rib_dump_live_buffer(&addr0.to_string(), 3);
+        metrics.observe_bmp_loc_rib_dump_live_buffer(&addr1.to_string(), 5);
+        let (_event_tx, event_rx) = mpsc::channel(1);
+        let (_control_tx, control_rx) = mpsc::channel(1);
+        let manager = BmpManager::new(
+            event_rx,
+            control_rx,
+            vec![(addr0, loc_rib_filter(), BmpVersion::V3)],
+            metrics.clone(),
+        );
+
+        drop(manager);
+
+        for name in [
+            "bmp_loc_rib_dump_live_buffer_depth",
+            "bmp_loc_rib_dump_live_buffer_high_watermark",
+        ] {
+            assert!(!gauge_series_exists(&metrics, name, addr0));
+            assert!(gauge_series_exists(&metrics, name, addr1));
+        }
+        assert_eq!(
+            gauge_value(&metrics, "bmp_loc_rib_dump_live_buffer_depth", addr1),
+            5
+        );
+    }
+
+    #[test]
+    fn manager_drop_does_not_materialize_never_connected_series() {
+        let metrics = BgpMetrics::new();
+        let addr = collector_addr(0);
+        let (_event_tx, event_rx) = mpsc::channel(1);
+        let (_control_tx, control_rx) = mpsc::channel(1);
+        drop(BmpManager::new(
+            event_rx,
+            control_rx,
+            vec![(addr, loc_rib_filter(), BmpVersion::V3)],
+            metrics.clone(),
+        ));
+        assert!(!gauge_series_exists(
+            &metrics,
+            "bmp_loc_rib_dump_live_buffer_depth",
+            addr
+        ));
     }
 
     /// Collector channel saturates during regular fan-out → manager
@@ -2605,6 +2808,7 @@ mod tests {
             ),
             1
         );
+        assert_live_buffer_gauges(&metrics, collector_addr(0), 0, 1);
         event_tx
             .send(BmpEvent::LocRibRouteMonitoring {
                 update_pdu: Bytes::from_static(&[0xCF; 23]),
@@ -2629,6 +2833,7 @@ mod tests {
 
         let (bootstrap2, mut c_rx2) =
             connect_collector(&control_tx, 0, collector_addr(0), 16).await;
+        assert_live_buffer_gauges(&metrics, collector_addr(0), 0, 0);
         complete_bootstrap(&control_tx, 0, bootstrap2.generation).await;
         let request = dump_rx.recv().await.unwrap();
         request
@@ -2850,6 +3055,8 @@ mod tests {
             ),
             (LOC_RIB_DUMP_LIVE_BUFFER_CAP + 1) as u64
         );
+        assert_live_buffer_gauges(&metrics, collector_addr(0), 0, 8193);
+        assert_eq!(LOC_RIB_DUMP_LIVE_BUFFER_CAP, 8192);
     }
 
     /// Production mutations: awaiting one task before fencing collector 1
