@@ -1141,6 +1141,14 @@ event-history rings, bounded stream broadcasts, subscriber gauges, and lag
 counters. Keep accepted clients on a management network and use separate
 listeners when monitoring, automation, and operators need different ceilings.
 
+For BMP Loc-RIB collectors,
+`bmp_loc_rib_dump_live_buffer_depth{collector}` reports live rows currently
+held behind bootstrap or a table dump, while
+`bmp_loc_rib_dump_live_buffer_high_watermark{collector}` retains that
+connection generation's peak. The label is the configured `SocketAddr`
+including port. Current depth returns to zero when storage is released; the
+high-water mark resets only after the next validated connection.
+
 The RPCs that deserve the most attention are:
 
 | Class | Examples | Guardrail |
