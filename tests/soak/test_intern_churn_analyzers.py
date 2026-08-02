@@ -206,6 +206,83 @@ class AnalyzerContracts(unittest.TestCase):
             text=True, capture_output=True, check=False,
         )
 
+    def bash_functions(self, script, names, body):
+        source = (HERE / script).read_text()
+        functions = []
+        for name in names:
+            start = source.index(f"{name}() {{")
+            end = source.index("\n}\n", start) + 3
+            functions.append(source[start:end])
+        return subprocess.run(["bash", "-c", "\n".join([*functions, body])],
+                              text=True, capture_output=True, check=False)
+
+    def test_gate8b_recovery_transitions_fail_closed(self):
+        base = r'''
+PE2_NAME=pe2; PE2_RUNNING=0
+docker() { case "$MODE:$1" in start:start) return 11;; setup:exec) return 12;; esac; }
+wait_current_established() { [ "$MODE" != established ]; }
+restart_pe2; rc=$?; printf '%s' "$PE2_RUNNING"; exit "$rc"
+'''
+        for mode, code, state in (("start", 11, "0"), ("setup", 12, "0"),
+                                  ("established", 1, "0"), ("good", 0, "1")):
+            with self.subTest(runner="base", mode=mode):
+                result = self.bash_functions(
+                    "run-gate8b-soak.sh", ("restart_pe2",), f"MODE={mode}\n{base}"
+                )
+                self.assertEqual((result.returncode, result.stdout), (code, state))
+        wait = r'''
+clock=$(mktemp); echo 0 >"$clock"; BGP_ESTABLISHED_TIMEOUT_SEC=2
+date() { n=$(cat "$clock"); echo "$n"; echo $((n + 1)) >"$clock"; }
+prom_scrape() { :; }; prom_extract() { [ "$MODE" = current ] && echo 1 || echo 0; }
+sleep() { :; }; log() { :; }
+wait_current_established pe2
+'''
+        for mode, code in (("current", 0), ("down", 1)):
+            with self.subTest(runner="base-wait", mode=mode):
+                result = self.bash_functions("run-gate8b-soak.sh", ("wait_current_established",), f"MODE={mode}\n{wait}")
+                self.assertEqual(result.returncode, code)
+        stop = r'''
+KILL_MODE=term; PE2_NAME=pe2; PE2_RUNNING=1
+docker() { case "$MODE:$*" in stop:*kill*) return 1;; transport:*printf\ running*) return 2;; unknown:*printf\ running*) echo unknown;; running:*printf\ running*) echo running;; *:*printf\ running*) echo stopped;; esac; }
+sleep() { :; }; log() { :; }
+stop_pe2_daemon; rc=$?; printf '%s' "$PE2_RUNNING"; exit "$rc"
+'''
+        start = r'''
+VNI=100; PE2_NAME=pe2; PE2_RUNNING=0
+docker() { [ "$MODE" != start ]; }
+wait_established_post_flip() { [ "$MODE" != established ]; }
+start_pe2_daemon; rc=$?; printf '%s' "$PE2_RUNNING"; exit "$rc"
+'''
+        for mode, functions, body, code, state in (
+            ("stop", ("flip_stop_daemon", "stop_pe2_daemon"), stop, 1, "1"),
+            ("transport", ("flip_stop_daemon", "stop_pe2_daemon"), stop, 2, "1"),
+            ("unknown", ("flip_stop_daemon", "stop_pe2_daemon"), stop, 1, "1"),
+            ("running", ("flip_stop_daemon", "stop_pe2_daemon"), stop, 1, "1"),
+            ("good", ("flip_stop_daemon", "stop_pe2_daemon"), stop, 0, "0"),
+            ("start", ("flip_start_daemon", "start_pe2_daemon"), start, 1, "0"),
+            ("established", ("flip_start_daemon", "start_pe2_daemon"), start, 1, "0"),
+            ("good", ("flip_start_daemon", "start_pe2_daemon"), start, 0, "1")):
+            with self.subTest(runner="mac", mode=mode, function=functions[-1]):
+                result = self.bash_functions(
+                    "run-gate8b-mac-churn-soak.sh", functions, f"MODE={mode}\n{body}"
+                )
+                self.assertEqual((result.returncode, result.stdout), (code, state))
+
+    def test_gate8b_recovery_callers_preserve_ordering(self):
+        base = (HERE / "run-gate8b-soak.sh").read_text()
+        restart = base[base.index("restart_pe2() {"):base.index("\n}\n", base.index("restart_pe2() {"))]
+        self.assertIn("if ! restart_pe2; then", base)
+        for before, after in (("docker start", "docker exec"),
+                              ("docker exec", "wait_current_established"),
+                              ("wait_current_established", "PE2_RUNNING=1")):
+            self.assertLess(restart.index(before), restart.index(after))
+        self.assertIn("bgp_peer_session_established", base)
+        mac = (HERE / "run-gate8b-mac-churn-soak.sh").read_text()
+        for call in ("stop_pe2_daemon", "start_pe2_daemon"):
+            self.assertIn(f"if ! {call}; then", mac)
+        self.assertLess(mac.index("flip_stop_daemon \"$PE2_NAME\""), mac.index("PE2_RUNNING=0"))
+        self.assertLess(mac.index("wait_established_post_flip \"$PE2_NAME\""), mac.index("PE2_RUNNING=1"))
+
     def test_gr_runner_requires_complete_ordered_restart(self):
         # The restart kills only bgpd (never the container's PID 1) and
         # supervises the comeback itself when watchfrr abandons the
