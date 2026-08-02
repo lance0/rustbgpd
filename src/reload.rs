@@ -7296,6 +7296,9 @@ peer_group = "secure"
                     }
                     config.global.asn
                 }
+                Some(InternalCommand::PlanAcceptedSnapshot { .. }) => {
+                    panic!("reload test expected only ReplaceConfigSnapshot")
+                }
                 None => panic!("peer manager must receive the snapshot"),
             }
         });

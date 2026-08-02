@@ -1,7 +1,7 @@
 # ADR-0121: Config-history external-policy provenance
 
 **Status:** Accepted, partially implemented
-**Implementation:** v2 recording and mixed listing shipped; v2 restore pending
+**Implementation:** v2 recording, mixed listing, and verified restore shipped
 **Date:** 2026-08-01
 
 ## Context
@@ -15,8 +15,8 @@ An accepted config may also depend on `[policy].rpol_files`, their transitive
 imports, and `[policy.datasets]`. Legacy rows retain none of that source
 identity, so a later rollback would read whatever those paths contain at that
 time rather than necessarily the sources accepted with the recorded TOML. V2
-rows now retain the accepted manifest and source digest, but restore remains
-refused until the loader can revalidate that identity. The native transaction
+rows now retain the accepted manifest and source digest. Restore therefore
+requires the loader to revalidate that identity. The native transaction
 fence added in #1370 correctly rejects full-snapshot transactions when either
 side has these external inputs; history must not route around that fence by
 presenting a TOML-only snapshot as complete.
@@ -276,11 +276,9 @@ logs do not expose the manifest or paths.
 
 ### 8. Rollback verifies once under the coordinator lock
 
-The current partial activation stops before this final restore model: v2 and
-unreadable rows are refused under the coordinator lock before a
-rollback-specific payload reopen, candidate construction, planning,
-persistence, events, or runtime mutation. The steps below remain the pending
-external-source restore tranche; legacy TOML-only rollback is unchanged.
+The restore model is active. Unreadable rows refuse under the coordinator lock;
+legacy rows declaring external inputs refuse without external file access.
+Verified v2 restore follows the ordered steps below.
 
 `rollback N` resolves and reads the exact entry while holding the existing
 runtime-config coordinator lock. For v2 it then:
@@ -529,8 +527,8 @@ identity contract.
 ## Current validation gate
 
 V2 recording, immutable accepted-source capture, mixed listing, additive API
-status/digests, filesystem hardening, and fail-closed pre-restore refusal are
-shipped with executable destructive proofs. V2 restore and provenance-bearing
-commit-confirm remain pending and retain the final-design proof requirements
-above. Documentation consistency, source-contract review, link and terminology
+status/digests, filesystem hardening, and verified v2 history restore are
+shipped with executable destructive proofs. Provenance-bearing commit-confirm
+remains pending and retains the final-design proof requirements above.
+Documentation consistency, source-contract review, link and terminology
 checks, and `git diff --check` remain part of every tranche.

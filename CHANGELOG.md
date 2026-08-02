@@ -16,8 +16,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   normalized-TOML digest plus the canonical accepted rpol/dataset source roster,
   together with an explicit provenance status. Successful best-effort history
   records of newly accepted snapshots use owner-private v2 JSON; legacy and v2
-  rows share one index. Until external-source restore lands, rollback accepts
-  legacy rows only and fails closed for v2 or unreadable rows.
+  rows share one index. Rollback now accepts v2 rows only after one detached
+  load exactly reproduces the recorded TOML, manifest, and source digests;
+  unreadable rows and legacy rows with external declarations fail closed.
 
 - Native `.deb` and `.rpm` packages on every tagged release, for
   Debian 11+/Ubuntu 22.04+ and RHEL/Rocky/Alma 9+ on amd64 and arm64.
@@ -148,9 +149,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Config history now counts TOML `[policy.definitions.*]` tables correctly and
   describes index 0 as the newest mixed-generation row instead of implying it
-  must be a verified, running, or persisted config. Eligible legacy rollback
-  still validates current unarchived external inputs; v2 rows hash accepted
-  source identity and remain refused until provenance-aware restore lands.
+  must be a verified, running, or persisted config. Legacy rows with external
+  declarations remain refused; v2 rows hash accepted source identity and are
+  rollback-eligible only when one detached load reproduces that identity.
 
 - Advertised RIB diffs now fence one live capture across every page and peer
   with the route API's process-local `page_version`, rejecting changed or

@@ -117,6 +117,16 @@ pub(crate) enum InternalCommand {
         /// snapshot overtaken by this (stale) one on the separate channel.
         ack: Option<oneshot::Sender<()>>,
     },
+    PlanAcceptedSnapshot {
+        snapshot: std::sync::Arc<crate::config::AcceptedConfigSnapshot>,
+        expected_runtime_snapshot_token: Option<String>,
+        reply: oneshot::Sender<
+            Result<
+                rustbgpd_api::peer_types::RuntimeConfigTransactionPlan,
+                rustbgpd_api::peer_types::RuntimeConfigTransactionPlanError,
+            >,
+        >,
+    },
 }
 
 #[allow(
@@ -1502,9 +1512,10 @@ impl PeerManager {
                     }
                 }
                 internal = self.internal_rx.recv() => {
-                    if let Some(InternalCommand::ReplaceConfigSnapshot { config, ack }) = internal {
-                        self.current_config = *config;
-                        self.config_snapshot_staged = false;
+                    match internal {
+                        Some(InternalCommand::ReplaceConfigSnapshot { config, ack }) => {
+                            self.current_config = *config;
+                            self.config_snapshot_staged = false;
                         // #338: rebuild the live dynamic-neighbor accept-matcher so
                         // [[dynamic_neighbors]] edits applied via SIGHUP take effect
                         // (previously only `current_config` was swapped). The shared
@@ -1519,9 +1530,24 @@ impl PeerManager {
                         // (the daemon re-accepted the artifacts). A rejected
                         // reload aborts before this command is ever sent.
                         self.metrics.record_policy_generation_loaded();
-                        if let Some(ack) = ack {
-                            let _ = ack.send(());
+                            if let Some(ack) = ack {
+                                let _ = ack.send(());
+                            }
                         }
+                        Some(InternalCommand::PlanAcceptedSnapshot {
+                            snapshot,
+                            expected_runtime_snapshot_token,
+                            reply,
+                        }) => {
+                            let result = self
+                                .plan_preloaded_config_transaction(
+                                    snapshot.config_ref(),
+                                    expected_runtime_snapshot_token.as_deref(),
+                                )
+                                .await;
+                            let _ = reply.send(result);
+                        }
+                        None => {}
                     }
                 }
                 notification = self.session_notify_rx.recv() => {

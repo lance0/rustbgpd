@@ -4319,7 +4319,8 @@ async fn run<T>(
                 .as_ref()
                 .expect("daemon config transactions require accepted-config authority")
                 .clone(),
-        );
+        )
+        .with_preloaded_planner(peer_mgr_internal_tx.clone());
     // Process-wide availability gate (LAN-286): BGP-listener bind failure
     // turns readiness red; coordinated shutdown turns readiness red AND
     // stops admitting persisted config mutations and inbound BGP sessions.
