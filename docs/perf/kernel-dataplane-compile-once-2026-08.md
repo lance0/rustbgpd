@@ -4,9 +4,9 @@ Status: measurement in progress. Local correctness is green; there is no hosted 
 
 ## Boundary and candidate
 
-The predeclared five-run control median is 422 seconds for the complete privileged
-netns job. Within that boundary, FIB took 273 seconds and the redundant BFD
-compile took 51 seconds; these observations are not acceptance evidence.
+The predeclared controls were run/job `30806738909/91663744751`, `30815271882/91691417967`, `30823070482/91717624804`,
+`30833928077/91754355578`, and `30781164612/91585922738`: 409/412/422/424/427 seconds (median 422).
+Within that cohort, FIB's median was 273 seconds and redundant BFD's was 51 seconds.
 
 The candidate adds one internal `rustbgpd_prepare` selector immediately before
 FIB. It runs the only
@@ -35,11 +35,11 @@ changes. Its destructive mutation suite executes each of those red paths.
 
 ## Hosted acceptance
 
-Two GitHub-hosted attempts are required. Each must keep BFD at or below 15
-seconds and the total netns job at or below 390 seconds. The candidate must
-improve the five-control median by at least 8% or 35 seconds, keep all selectors
-green, and show no more than 5% aggregate workflow-compute regression. A seed,
-retry after unrelated runner failure, or local result cannot satisfy the gate.
+Two hosted attempts must each keep BFD <=15 seconds and netns <=390 seconds, save at least 35 seconds against the 422-second median, and keep every selector green.
+For each attempt, `C(run)` is the sum of raw `completed_at - started_at` seconds across the identical 31-job Kernel Dataplane roster; queue time is excluded.
+Both attempts must keep `C(run) <= 2912`, or 105% of the 2774-second control-aggregate median; the verdict uses the slower candidate aggregate.
+Any failed, cancelled, missing-timestamp, runner-failure, or roster-mismatched attempt is invalid; jobs are never spliced across attempts.
+A seed, retry after unrelated runner failure, or local result cannot satisfy the gate.
 
 Until both hosted attempts and aggregate-compute accounting pass, the verdict
 remains measurement in progress.

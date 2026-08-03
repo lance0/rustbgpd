@@ -278,6 +278,12 @@ class PrimerContractTests(unittest.TestCase):
                 reuse,
                 standalone,
             ),
+            (
+                "an alternate second compile is inserted",
+                runner,
+                'exec docker run "${DOCKER_ARGS[@]}" "$IMAGE_TAG" "${TEST_ARGS[@]}"',
+                'docker run "${DOCKER_ARGS[@]}" "$IMAGE_TAG" cargo test --package rustbgpd --no-run\nexec docker run "${DOCKER_ARGS[@]}" "$IMAGE_TAG" "${TEST_ARGS[@]}"',
+            ),
             ("standalone FIB/BFD skip the conservative clean", runner, standalone, reuse),
             (
                 "FIB selects the wrong tests",

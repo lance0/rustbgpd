@@ -37,6 +37,7 @@ GOBGP_CHECKSUMS = {
 }
 NETNS_SELECTOR_HASH = "0278940b2953d00c57398b3545141144afb4f0e7673b20cffe2599521c37b9ff"
 NETNS_COMPILE_ONCE_HASH = "384d95c6b7449ba345be55aea4ed890c78958467f4140abf327e80be39309d76"
+NETNS_EXECUTION_HASH = "f7279b3aeb46ec8a4594f942b977251c3c094b06e32b681a906158989f6da1fd"
 NETNS_WORKFLOW_SELECTORS = tuple(
     "fdb_nhg rustbgpd_prepare fib_runtime bfd_runtime dataplane_vlan_fdb "
     "macip_vlan_attribution svd_fdb_vni managed_bridge managed_vxlan "
@@ -184,6 +185,10 @@ def check(root: Path) -> list[str]:
     )[0]
     if _hash(validation) != NETNS_COMPILE_ONCE_HASH:
         errors.append("run-netns-tests.sh: compile-once validation drifted")
+    execution_marker = "# `--test-threads=1`:"
+    execution = execution_marker + runner.split(execution_marker, 1)[-1]
+    if _hash(execution) != NETNS_EXECUTION_HASH:
+        errors.append("run-netns-tests.sh: command selection/execution drifted")
 
     workflow_selectors = tuple(
         re.findall(
@@ -208,8 +213,6 @@ def check(root: Path) -> list[str]:
         errors.append("run-netns-tests.sh: standalone FIB/BFD clean-build drifted")
     if runner.count("cargo clean -p rustbgpd-api") != 2:
         errors.append("run-netns-tests.sh: rustbgpd-api clean roster drifted")
-    if runner.count("cargo test -p rustbgpd --no-run") != 1:
-        errors.append("run-netns-tests.sh: rustbgpd must be compiled exactly once")
     if runner.count(runtime) != 1:
         errors.append("run-netns-tests.sh: FIB/BFD prepared-artifact reuse drifted")
 
