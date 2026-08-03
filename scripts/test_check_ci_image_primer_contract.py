@@ -24,6 +24,9 @@ class PrimerContractTests(unittest.TestCase):
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copytree(source, target)
             shutil.copy2(ROOT / "Dockerfile", root / "Dockerfile")
+            gobgp = root / "tests" / "interop" / "Dockerfile.gobgp"
+            gobgp.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(ROOT / "tests" / "interop" / "Dockerfile.gobgp", gobgp)
             path = root / relative
             text = path.read_text()
             start = 0
@@ -244,6 +247,43 @@ class PrimerContractTests(unittest.TestCase):
                     f"COPY --from=builder /out/{binary} /usr/local/bin/{binary}",
                     "# removed",
                 )
+
+    def test_gobgp_release_archive_contract_is_load_bearing(self):
+        relative = "tests/interop/Dockerfile.gobgp"
+        cases = (
+            ("ENV GOBGP_VERSION=3.37.0", "ENV GOBGP_VERSION=latest"),
+            (
+                'amd64) checksum="e20b2a155fe14450b9fe37e5c1a1d1bfe101eb479645f5bbea860a8fde30e522" ;;',
+                'amd64) checksum="f20b2a155fe14450b9fe37e5c1a1d1bfe101eb479645f5bbea860a8fde30e522" ;;',
+            ),
+            (
+                'arm64) checksum="0aaa2da6e4dcaaf57e3d0e64eae14946292b0a5894d80ef3b7ebde3bf52beb29" ;;',
+                'arm64) checksum="1aaa2da6e4dcaaf57e3d0e64eae14946292b0a5894d80ef3b7ebde3bf52beb29" ;;',
+            ),
+            (
+                '*) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;;',
+                "*) exit 1 ;;",
+            ),
+            (
+                'test "$(gobgp --version)" = "gobgp version ${GOBGP_VERSION}"',
+                "true # removed gobgp assertion",
+            ),
+            (
+                'test "$(gobgpd --version)" = "gobgpd version ${GOBGP_VERSION}"',
+                "true # removed gobgpd assertion",
+            ),
+            (
+                "FROM debian:bookworm-slim AS gobgp-release",
+                "FROM golang:1.23-bookworm AS gobgp-release",
+            ),
+            (
+                "\nFROM debian:bookworm-slim\n",
+                "\nFROM debian:trixie-slim\n",
+            ),
+        )
+        for old, new in cases:
+            with self.subTest(seam=old):
+                self.mutate(relative, old, new)
 
 
 if __name__ == "__main__":
