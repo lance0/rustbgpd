@@ -765,28 +765,26 @@ impl PeerSession {
     pub(super) fn aspa_validation_context(&self) -> AspaValidationContext {
         let local_role = self.config.peer.local_role;
         AspaValidationContext {
-            neighbor_asn: local_role.map(|_| {
+            neighbor_asn: Some(
                 self.negotiated
                     .as_ref()
-                    .map_or(self.config.peer.remote_asn, |n| n.peer_asn)
-            }),
+                    .map_or(self.config.peer.remote_asn, |n| n.peer_asn),
+            ),
             local_role,
-            first_as_check_exempt: matches!(local_role, Some(BgpRole::RouteServerClient)),
+            first_as_check_exempt: self.config.route_server_client
+                || matches!(local_role, Some(BgpRole::RouteServerClient)),
         }
     }
     /// Return the received and negotiated ASNs when an IPv4/IPv6-unicast
-    /// UPDATE between role-aware, four-octet-AS-capable eBGP speakers fails
-    /// the ASPA first-AS precondition. Roleless sessions keep their
-    /// compatibility behavior, and an RS-client remains exempt for a
-    /// transparent route server / IX.
+    /// UPDATE from an eBGP peer fails the ASPA first-AS precondition. An
+    /// RS-client remains exempt for a transparent route server / IX.
     pub(super) fn aspa_first_as_mismatch(
         &self,
-        four_octet_as: bool,
         is_ebgp: bool,
         has_unicast_announcements: bool,
         attrs: &[PathAttribute],
     ) -> Option<(Option<u32>, u32)> {
-        if !four_octet_as || !is_ebgp || !has_unicast_announcements {
+        if !is_ebgp || !has_unicast_announcements {
             return None;
         }
         let context = self.aspa_validation_context();
@@ -1383,10 +1381,11 @@ impl PeerSession {
             self.metrics
                 .record_update_malformed(&self.peer_label, malformed_disposition_label(applied));
         }
-        // draft-ietf-sidrops-aspa-verification-26 §5: between role-aware,
-        // four-octet-AS-capable eBGP speakers, an AS_PATH whose most recently
-        // added AS is not the negotiated neighbor AS is semantically invalid
-        // and SHALL use RFC 7606 treat-as-withdraw. Section 6.2 scopes ASPA
+        // draft-ietf-sidrops-aspa-verification-27 §5: an AS_PATH whose most
+        // recently added AS is not the negotiated eBGP neighbor AS is
+        // semantically invalid and SHALL use RFC 7606 treat-as-withdraw. For
+        // an RFC 6793 OLD peer, `parse_revised` has already reconstructed the
+        // effective path before this check. Section 6.2 scopes ASPA
         // verification to IPv4/IPv6 unicast. Apply this before policy/ASPA
         // state so the disposition cannot depend on an operator policy or
         // cache snapshot.
@@ -1400,12 +1399,9 @@ impl PeerSession {
                             && !mp.announced.is_empty()
                 )
             });
-        if let Some((received_first_as, neighbor_asn)) = self.aspa_first_as_mismatch(
-            four_octet_as,
-            is_ebgp,
-            has_unicast_announcements,
-            &parsed.attributes,
-        ) {
+        if let Some((received_first_as, neighbor_asn)) =
+            self.aspa_first_as_mismatch(is_ebgp, has_unicast_announcements, &parsed.attributes)
+        {
             warn!(
                 peer = %self.peer_label,
                 received_first_as = ?received_first_as,
@@ -1763,22 +1759,30 @@ impl PeerSession {
         // Compute ASPA state once per UPDATE for the IPv4-unicast body NLRI
         // surface. Other families compute their own state inside the
         // MP_REACH_NLRI handling below — draft-ietf-sidrops-aspa-
-        // verification-25 §6.2 limits verification to IPv4/IPv6 unicast,
+        // verification-27 §6.2 limits verification to IPv4/IPv6 unicast,
         // and `ValidationSnapshot::validate_aspa` returns `Unknown` for
         // every other family.
         //
-        // draft v25 §5.4 step 2 also requires the most-recent AS in `AS_PATH`
+        // draft v27 §5.4 step 2 also requires the most-recent AS in `AS_PATH`
         // to equal the negotiated neighbor ASN, with a transparent-route-
-        // server-client exception. That leftmost-AS precondition is enforced
-        // here whenever a local BGP Role is configured (the role-aware
-        // context carries the neighbor ASN and the RS-client exemption); the
-        // roleless case keeps the legacy behavior and skips it.
+        // server-client exception. The context always carries the neighbor
+        // ASN; a configured role selects verification direction, not whether
+        // the first-AS precondition applies.
         let aspa_context = self.aspa_validation_context();
-        let body_aspa_state = validation
-            .as_ref()
-            .map_or(rustbgpd_wire::AspaValidation::Unknown, |v| {
-                v.validate_aspa(parsed_as_path, (Afi::Ipv4, Safi::Unicast), aspa_context)
-            });
+        // ASPA is an edge-ingress signal. Draft -27 §6.2 says applying it to
+        // iBGP is NOT RECOMMENDED, so rustbgpd deliberately presents Unknown
+        // to import policy and stores Unknown for every iBGP unicast route.
+        let validate_aspa = |family| {
+            if !is_ebgp {
+                return rustbgpd_wire::AspaValidation::Unknown;
+            }
+            validation
+                .as_ref()
+                .map_or(rustbgpd_wire::AspaValidation::Unknown, |v| {
+                    v.validate_aspa(parsed_as_path, family, aspa_context)
+                })
+        };
+        let body_aspa_state = validate_aspa((Afi::Ipv4, Safi::Unicast));
         let unnumbered_ipv4_body_forbidden = self.is_scoped_link_local_peer();
         if unnumbered_ipv4_body_forbidden
             && (!parsed.announced.is_empty() || !parsed.withdrawn.is_empty())
@@ -1998,16 +2002,12 @@ impl PeerSession {
                         );
                         continue;
                     }
-                    // ASPA state for this MP_REACH family. Per draft v25 §6.2,
+                    // ASPA state for this MP_REACH family. Per draft v27 §6.2,
                     // `ValidationSnapshot::validate_aspa` returns `Unknown` for
                     // anything outside IPv4/IPv6 unicast — so FlowSpec and
                     // EVPN announcements below propagate `Unknown` even when
                     // an ASPA table is loaded, without any extra branching.
-                    let mp_aspa_state = validation
-                        .as_ref()
-                        .map_or(rustbgpd_wire::AspaValidation::Unknown, |v| {
-                            v.validate_aspa(parsed_as_path, family, aspa_context)
-                        });
+                    let mp_aspa_state = validate_aspa(family);
                     if mp.safi == Safi::FlowSpec {
                         // FlowSpec announced routes — no next-hop (NH len = 0)
                         for rule in &mp.flowspec_announced {

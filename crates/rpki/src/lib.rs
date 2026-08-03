@@ -94,7 +94,7 @@ impl ValidationSnapshot {
 
     /// Validate a route's `AS_PATH` against the ASPA table.
     ///
-    /// Per `draft-ietf-sidrops-aspa-verification-26` §6.2, ASPA
+    /// Per `draft-ietf-sidrops-aspa-verification-27` §6.2, ASPA
     /// verification is applied only to `{AFI 1 (IPv4), SAFI 1 (Unicast)}`
     /// and `{AFI 2 (IPv6), SAFI 1 (Unicast)}`. For any other family this
     /// returns `Unknown` immediately without consulting the table — the

@@ -2508,6 +2508,16 @@ same entry are ANDed.
 `match_med_ge`, `match_med_le`, `match_next_hop`, or
 `match_rpki_validation` / `match_aspa_validation` is required.
 
+ASPA verification is an IPv4/IPv6-unicast edge-ingress signal. eBGP routes
+are verified even when no BGP Role is configured; a Role selects verification
+direction. Transparent sessions retain the first-AS exception when configured
+with either `route_server_client = true` or the local `rs-client` Role. RFC 6793
+OLD peers are checked after AS_PATH reconstruction. Routes learned over iBGP
+always present `aspa = "unknown"` to import policy and keep that state across
+ASPA cache revalidation, following
+`draft-ietf-sidrops-aspa-verification-27` §6.2's recommendation against
+internal-session verification.
+
 ### Route modifications (set actions)
 
 These fields modify matching routes. Only valid with `action = "permit"`.

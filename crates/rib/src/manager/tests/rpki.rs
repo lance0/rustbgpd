@@ -410,6 +410,84 @@ async fn rpki_no_table_all_not_found() {
     handle.await.unwrap();
 }
 
+/// Load-bearing RIB replay proof: removing the `!route.is_ebgp()` guard makes
+/// insertion evaluate Valid and the cache update evaluate Invalid, so both
+/// exact Unknown assertions fail.
+#[tokio::test]
+async fn ibgp_aspa_stays_unknown_on_insert_and_cache_revalidation() {
+    use rustbgpd_rpki::{AspaRecord, AspaTable};
+
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+    let peer = IpAddr::V4(Ipv4Addr::new(1, 0, 0, 5));
+    let valid_table = Arc::new(AspaTable::new(vec![AspaRecord {
+        customer_asn: 65003,
+        provider_asns: vec![65002],
+    }]));
+    tx.send(RibUpdate::AspaTableUpdate { table: valid_table })
+        .await
+        .unwrap();
+
+    let mut route = make_route_with_as_path(
+        Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24),
+        Ipv4Addr::new(1, 0, 0, 5),
+        vec![65002, 65003],
+    );
+    route.origin_type = crate::route::RouteOrigin::Ibgp;
+    route.aspa_context = rustbgpd_wire::AspaValidationContext {
+        neighbor_asn: Some(65002),
+        local_role: None,
+        first_as_check_exempt: false,
+    };
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer,
+        announced: vec![route],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let query = async |tx: &mpsc::Sender<RibUpdate>| {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(RibUpdate::QueryReceivedRoutes {
+            peer: Some(peer),
+            reply: reply_tx,
+        })
+        .await
+        .unwrap();
+        reply_rx.await.unwrap()
+    };
+    let inserted = query(&tx).await;
+    assert_eq!(
+        inserted[0].aspa_state,
+        rustbgpd_wire::AspaValidation::Unknown
+    );
+
+    let invalid_table = Arc::new(AspaTable::new(vec![AspaRecord {
+        customer_asn: 65003,
+        provider_asns: vec![65099],
+    }]));
+    tx.send(RibUpdate::AspaTableUpdate {
+        table: invalid_table,
+    })
+    .await
+    .unwrap();
+    let revalidated = query(&tx).await;
+    assert_eq!(
+        revalidated[0].aspa_state,
+        rustbgpd_wire::AspaValidation::Unknown
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
 #[tokio::test]
 async fn aspa_cache_update_revalidates_with_stored_downstream_context() {
     use rustbgpd_rpki::{AspaRecord, AspaTable};

@@ -271,9 +271,9 @@ pub(super) fn validate_route_rpki(route: &crate::route::Route, table: &VrpTable)
 /// Validate a route's `AS_PATH` against the ASPA table.
 ///
 /// Runs the same role-aware ASPA verification that was used at import time.
-/// Returns `Unknown` if no `AS_PATH` is present.
+/// Returns `Unknown` for iBGP routes or if no `AS_PATH` is present.
 ///
-/// Per `draft-ietf-sidrops-aspa-verification-26` §6.2, ASPA applies only
+/// Per `draft-ietf-sidrops-aspa-verification-27` §6.2, ASPA applies only
 /// to IPv4/IPv6 unicast. This helper is invoked from unicast-RIB contexts
 /// only (distribution and graceful-restart revalidation of unicast
 /// routes), so the §6.2 precondition is satisfied by construction. If
@@ -284,6 +284,9 @@ pub(super) fn validate_route_aspa(
     route: &crate::route::Route,
     table: &AspaTable,
 ) -> AspaValidation {
+    if !route.is_ebgp() {
+        return AspaValidation::Unknown;
+    }
     match route.as_path() {
         Some(path) => rustbgpd_rpki::aspa_verify::verify(path, table, route.aspa_context),
         None => AspaValidation::Unknown,
