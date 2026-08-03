@@ -8,7 +8,9 @@
 //! so a thousand-entry customer list costs one hash probe per route
 //! instead of a thousand-statement walk.
 
+use std::fmt;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use rustbgpd_wire::{Ipv4Prefix, Ipv6Prefix, Prefix};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -123,6 +125,99 @@ type PrefixEntryKey = (u8, u128, u8, Option<u8>, Option<u8>);
 /// Canonical ordering/interning key for a community criterion.
 type CommunityKey = (u8, u32, u32, u32);
 
+/// Exact set-content equality is hot during an `.rpol` generation swap: every
+/// peer compares a chain compiled from the live file with one compiled from the
+/// freshly loaded file. The two files cannot share allocation identity, but all
+/// peers compare the same old/new set pairs. Cache the exact result on the
+/// immutable set values so the canonical member lists are walked once per pair,
+/// not once per peer.
+///
+/// One packed atomic keeps `(other identity, verdict)` coherent under racing
+/// comparisons. IDs represent immutable value lineages: cloning a set preserves
+/// its ID because no public API can mutate either clone's canonical contents.
+/// Relaxed ordering is sufficient: the packed atom is the only published state,
+/// and both canonical member lists are immutable for their entire lifetime.
+#[derive(Debug)]
+struct SetEqualityMemo {
+    id: u64,
+    /// `(other_id << 1) | equal`; zero means no cached comparison.
+    cached: AtomicU64,
+    #[cfg(test)]
+    exact_scans: AtomicU64,
+}
+
+const MAX_SET_EQUALITY_ID: u64 = u64::MAX >> 1;
+static NEXT_SET_EQUALITY_ID: AtomicU64 = AtomicU64::new(1);
+
+fn allocate_set_equality_id(counter: &AtomicU64) -> u64 {
+    counter
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            (current < MAX_SET_EQUALITY_ID).then_some(current + 1)
+        })
+        .expect("exhausted immutable set equality identities")
+}
+
+impl SetEqualityMemo {
+    fn new() -> Self {
+        Self {
+            id: allocate_set_equality_id(&NEXT_SET_EQUALITY_ID),
+            cached: AtomicU64::new(0),
+            #[cfg(test)]
+            exact_scans: AtomicU64::new(0),
+        }
+    }
+
+    fn cached_verdict(&self, other_id: u64) -> Option<bool> {
+        let packed = self.cached.load(Ordering::Relaxed);
+        (packed >> 1 == other_id).then_some(packed & 1 == 1)
+    }
+
+    fn remember(&self, other_id: u64, equal: bool) {
+        self.cached
+            .store((other_id << 1) | u64::from(equal), Ordering::Relaxed);
+    }
+
+    fn exact_eq(&self, other: &Self, compare: impl FnOnce() -> bool) -> bool {
+        if self.id == other.id {
+            return true;
+        }
+        if let Some(equal) = self.cached_verdict(other.id) {
+            return equal;
+        }
+
+        #[cfg(test)]
+        self.exact_scans.fetch_add(1, Ordering::Relaxed);
+        let equal = compare();
+        // Seed both operand orders. A concurrent comparison with a third set
+        // may replace either one-entry cache, but the packed key+verdict can
+        // never be torn into a false answer; eviction only costs another exact
+        // comparison.
+        self.remember(other.id, equal);
+        other.remember(self.id, equal);
+        equal
+    }
+}
+
+impl Clone for SetEqualityMemo {
+    fn clone(&self) -> Self {
+        // Set contents are immutable, so a clone is the same value lineage.
+        // Start its one-entry cache empty; peers already compared with the
+        // source clone can still answer symmetrically from their cache.
+        Self {
+            id: self.id,
+            cached: AtomicU64::new(0),
+            #[cfg(test)]
+            exact_scans: AtomicU64::new(0),
+        }
+    }
+}
+
+impl Default for SetEqualityMemo {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// An indexed prefix set: membership is one hash probe per *distinct
 /// member prefix length* instead of a scan over every member.
 ///
@@ -137,12 +232,13 @@ type CommunityKey = (u8, u32, u32, u32);
 /// *longer* than the candidate can still match when `ge` reaches below
 /// the member length. The per-length mask groups reproduce that
 /// exactly; a trie ancestor-walk would not.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PrefixSet {
     /// Canonically sorted, deduplicated members — the set's identity.
     entries: Vec<PrefixSetEntry>,
     v4: Vec<LenGroup<u32>>,
     v6: Vec<LenGroup<u128>>,
+    equality: SetEqualityMemo,
 }
 
 #[derive(Debug, Clone)]
@@ -178,7 +274,12 @@ impl PrefixSet {
                 }
             }
         }
-        Self { entries, v4, v6 }
+        Self {
+            entries,
+            v4,
+            v6,
+            equality: SetEqualityMemo::new(),
+        }
     }
 
     /// Whether any member matches the candidate — equivalent to
@@ -218,17 +319,37 @@ impl PrefixSet {
     pub fn entries(&self) -> &[PrefixSetEntry] {
         &self.entries
     }
+
+    #[cfg(test)]
+    pub(crate) fn content_equality_scans(&self) -> u64 {
+        self.equality.exact_scans.load(Ordering::Relaxed)
+    }
 }
 
 impl PartialEq for PrefixSet {
     fn eq(&self, other: &Self) -> bool {
         // The index is derived deterministically from the canonical
         // member list, so members alone are the identity.
-        self.entries == other.entries
+        self.equality
+            .exact_eq(&other.equality, || self.entries == other.entries)
     }
 }
 
 impl Eq for PrefixSet {}
+
+#[expect(
+    clippy::missing_fields_in_debug,
+    reason = "the equality memo is derived process-local state, not set content"
+)]
+impl fmt::Debug for PrefixSet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PrefixSet")
+            .field("entries", &self.entries)
+            .field("v4", &self.v4)
+            .field("v6", &self.v6)
+            .finish()
+    }
+}
 
 fn push_group<B: std::hash::Hash + Eq>(
     groups: &mut Vec<LenGroup<B>>,
@@ -253,7 +374,7 @@ fn push_group<B: std::hash::Hash + Eq>(
 /// route community satisfies any member criterion. Standard, RT, RO,
 /// and large criteria are partitioned into hash sets so each route
 /// community is one probe against its own kind.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct CommunitySet {
     /// Canonically sorted, deduplicated criteria — the set's identity.
     criteria: Vec<CommunityMatch>,
@@ -262,6 +383,7 @@ pub struct CommunitySet {
     route_origins: FxHashSet<(u32, u32)>,
     large: FxHashSet<(u32, u32, u32)>,
     exact_ext: FxHashSet<u64>,
+    equality: SetEqualityMemo,
 }
 
 impl CommunitySet {
@@ -350,24 +472,48 @@ impl CommunitySet {
     pub fn criteria(&self) -> &[CommunityMatch] {
         &self.criteria
     }
+
+    #[cfg(test)]
+    pub(crate) fn content_equality_scans(&self) -> u64 {
+        self.equality.exact_scans.load(Ordering::Relaxed)
+    }
 }
 
 impl PartialEq for CommunitySet {
     fn eq(&self, other: &Self) -> bool {
-        self.criteria == other.criteria
+        self.equality
+            .exact_eq(&other.equality, || self.criteria == other.criteria)
     }
 }
 
 impl Eq for CommunitySet {}
 
+#[expect(
+    clippy::missing_fields_in_debug,
+    reason = "the equality memo is derived process-local state, not set content"
+)]
+impl fmt::Debug for CommunitySet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CommunitySet")
+            .field("criteria", &self.criteria)
+            .field("standard", &self.standard)
+            .field("route_targets", &self.route_targets)
+            .field("route_origins", &self.route_origins)
+            .field("large", &self.large)
+            .field("exact_ext", &self.exact_ext)
+            .finish()
+    }
+}
+
 /// An indexed ASN set (`asn-set` in `.rpol`): membership is one hash
 /// probe regardless of member count. Probed by `route.origin-as in`
 /// and `peer.asn in` guards.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct AsnSet {
     /// Canonically sorted, deduplicated members — the set's identity.
     asns: Vec<u32>,
     set: FxHashSet<u32>,
+    equality: SetEqualityMemo,
 }
 
 impl AsnSet {
@@ -380,7 +526,11 @@ impl AsnSet {
         asns.sort_unstable();
         asns.dedup();
         let set = asns.iter().copied().collect();
-        Self { asns, set }
+        Self {
+            asns,
+            set,
+            equality: SetEqualityMemo::new(),
+        }
     }
 
     /// Whether `asn` is a member — one hash probe, no allocation.
@@ -395,17 +545,36 @@ impl AsnSet {
     pub fn asns(&self) -> &[u32] {
         &self.asns
     }
+
+    #[cfg(test)]
+    pub(crate) fn content_equality_scans(&self) -> u64 {
+        self.equality.exact_scans.load(Ordering::Relaxed)
+    }
 }
 
 impl PartialEq for AsnSet {
     fn eq(&self, other: &Self) -> bool {
         // The hash set is derived from the canonical member list, so
         // members alone are the identity.
-        self.asns == other.asns
+        self.equality
+            .exact_eq(&other.equality, || self.asns == other.asns)
     }
 }
 
 impl Eq for AsnSet {}
+
+#[expect(
+    clippy::missing_fields_in_debug,
+    reason = "the equality memo is derived process-local state, not set content"
+)]
+impl fmt::Debug for AsnSet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AsnSet")
+            .field("asns", &self.asns)
+            .field("set", &self.set)
+            .finish()
+    }
+}
 
 /// Canonical ordering/interning key for a community criterion.
 fn community_key(cm: CommunityMatch) -> CommunityKey {
@@ -665,5 +834,90 @@ mod tests {
             &store.as_path_regex(&re),
             &store.as_path_regex(&AsPathRegex::new("_65001_").unwrap())
         ));
+    }
+
+    /// Fresh `.rpol` generations own different set allocations. The first
+    /// comparison must still be exact, then both operand orders must reuse that
+    /// verdict instead of walking the same canonical members once per peer.
+    ///
+    /// Red proof: replacing any set's `SetEqualityMemo::exact_eq` call with its
+    /// prior direct member-vector comparison leaves its scan count at zero;
+    /// removing the cache lookup makes the repeated comparisons raise it above
+    /// one. Returning a hash/ID verdict without the exact comparison makes the
+    /// unequal assertion red.
+    #[test]
+    fn immutable_set_equality_is_exact_symmetric_and_memoized() {
+        let prefix_a = PrefixSet::new([
+            entry(v4([10, 0, 0, 0], 8), Some(16), Some(24)),
+            entry(v4([192, 0, 2, 0], 24), None, None),
+        ]);
+        let prefix_b = PrefixSet::new([
+            entry(v4([192, 0, 2, 0], 24), None, None),
+            entry(v4([10, 0, 0, 0], 8), Some(16), Some(24)),
+        ]);
+        let community_a = CommunitySet::new([
+            CommunityMatch::Standard { value: 65_000 },
+            CommunityMatch::LargeCommunity {
+                global_admin: 65_000,
+                local_data1: 1,
+                local_data2: 2,
+            },
+        ]);
+        let community_b = CommunitySet::new([
+            CommunityMatch::LargeCommunity {
+                global_admin: 65_000,
+                local_data1: 1,
+                local_data2: 2,
+            },
+            CommunityMatch::Standard { value: 65_000 },
+        ]);
+        let asn_a = AsnSet::new([64_512, 64_513, 64_514]);
+        let asn_b = AsnSet::new([64_514, 64_512, 64_513]);
+
+        assert_eq!(prefix_a, prefix_b);
+        assert_eq!(community_a, community_b);
+        assert_eq!(asn_a, asn_b);
+        assert_eq!(prefix_a.content_equality_scans(), 1);
+        assert_eq!(community_a.content_equality_scans(), 1);
+        assert_eq!(asn_a.content_equality_scans(), 1);
+
+        for _ in 0..65 {
+            assert_eq!(prefix_b, prefix_a);
+            assert_eq!(community_b, community_a);
+            assert_eq!(asn_b, asn_a);
+        }
+        assert_eq!(prefix_a.content_equality_scans(), 1);
+        assert_eq!(prefix_b.content_equality_scans(), 0);
+        assert_eq!(community_a.content_equality_scans(), 1);
+        assert_eq!(community_b.content_equality_scans(), 0);
+        assert_eq!(asn_a.content_equality_scans(), 1);
+        assert_eq!(asn_b.content_equality_scans(), 0);
+
+        // Clones preserve an immutable value identity, so no exact scan is
+        // needed even though cloning creates a distinct Rust allocation.
+        let prefix_clone = prefix_a.clone();
+        assert_eq!(prefix_clone, prefix_a);
+        assert_eq!(prefix_clone.content_equality_scans(), 0);
+
+        let unequal = PrefixSet::new([
+            entry(v4([10, 0, 0, 0], 8), Some(16), Some(25)),
+            entry(v4([192, 0, 2, 0], 24), None, None),
+        ]);
+        assert_ne!(prefix_a, unequal);
+        assert_ne!(unequal, prefix_a);
+        assert_eq!(prefix_a.content_equality_scans(), 2);
+        assert_eq!(unequal.content_equality_scans(), 0);
+    }
+
+    /// The packed cache reserves one bit for the verdict. Exhaustion must
+    /// fail without wrapping the process-unique identity back onto a live set.
+    #[test]
+    fn immutable_set_equality_identity_exhaustion_fails_closed() {
+        let counter = AtomicU64::new(MAX_SET_EQUALITY_ID);
+        assert!(
+            std::panic::catch_unwind(|| allocate_set_equality_id(&counter)).is_err(),
+            "identity exhaustion must panic instead of aliasing an existing set"
+        );
+        assert_eq!(counter.load(Ordering::Relaxed), MAX_SET_EQUALITY_ID);
     }
 }

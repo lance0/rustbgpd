@@ -73,7 +73,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the neighbor count (previously one full copy of the set data per
   resolved neighbor). Policy equality gets the standard `Arc`
   same-allocation fast path for chains from the same compiled unit;
-  content-equal sets from separate generations still compare by value.
+  content-equal sets from separate generations still compare exactly by value,
+  but cache that exact verdict for the remaining peers instead of rescanning
+  millions of members once per peer. The public `RpolFile` compiler also keeps
+  its caller-owned `SetStore` sharing contract across separately parsed files;
+  the daemon opts into the whole-file cache explicitly for roster fan-out.
   (#1346)
 
 - IRR reload campaign receipts now measure first generation output only from

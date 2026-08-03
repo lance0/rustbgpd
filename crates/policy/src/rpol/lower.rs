@@ -324,11 +324,10 @@ impl SetTables {
 impl<'a> Lowerer<'a> {
     /// Build the chain tables over `file`, interning its sets through
     /// the caller-owned store.
-    /// Callers holding an [`RpolFile`](super::RpolFile) should go
-    /// through its cached tables instead (via
-    /// [`Self::from_tables`]) — this entry is for one-shot compiles
-    /// that own no file handle and may share content with other
-    /// one-shot compiles using the same store.
+    /// One-shot compiles and the general [`RpolFile`](super::RpolFile)
+    /// API use this path so separately parsed sources can share content
+    /// through the same store. High-fanout callers deliberately use
+    /// [`Self::from_tables`] and the file-owned cache instead.
     pub(super) fn new(file: &'a SourceFile, store: &mut SetStore) -> Self {
         Self::from_tables(file, &SetTables::build_with_store(file, store))
     }
