@@ -50,7 +50,7 @@ not by itself make it v1-stable.
 | Service | RPCs | Purpose |
 |---------|------|---------|
 | `GlobalService` | `GetGlobal` | Daemon identity |
-| `ConfigService` | `DiffRuntimeConfig`, `PlanConfigTransaction`, `ApplyConfigTransaction`, `ConfirmConfigTransaction`, `AbortConfigTransaction`, `GetConfigTransactionStatus`, `GetEffectiveConfig`, `ListConfigHistory`, `RollbackConfigTransaction` | Candidate-vs-live config diff, effective running config with defaults materialized and secrets redacted, plus the v1 config-transaction lifecycle: validate/plan, commit/apply (incl. commit-confirmed), confirm, abort, status, and the bounded recorded config history with Junos-style `rollback N` through the same transaction executor |
+| `ConfigService` | `DiffRuntimeConfig`, `PlanConfigTransaction`, `StreamPlanConfigTransaction`, `ApplyConfigTransaction`, `ConfirmConfigTransaction`, `AbortConfigTransaction`, `GetConfigTransactionStatus`, `GetEffectiveConfig`, `ListConfigHistory`, `RollbackConfigTransaction` | Candidate-vs-live config diff, effective running config with defaults materialized and secrets redacted, plus the v1 config-transaction lifecycle: validate/plan, commit/apply (incl. commit-confirmed), confirm, abort, status, and the bounded recorded config history with Junos-style `rollback N` through the same transaction executor; the outside-v1 stream is plan-only large-candidate ingress |
 | `NeighborService` | `AddNeighbor`, `DeleteNeighbor`, `ListNeighbors`, `GetNeighborState`, `EnableNeighbor`, `DisableNeighbor`, `SoftResetIn`, `RefreshOutbound`, `SetGracefulShutdown`, `AddDynamicNeighbor`, `DeleteDynamicNeighbor`, `ListDynamicNeighbors` | Peer lifecycle, inbound soft reset, single-peer outbound re-advertisement, RFC 8326 graceful-shutdown toggle, and dynamic-neighbor CRUD — `AddDynamicNeighbor` / `DeleteDynamicNeighbor` add and remove `[[dynamic_neighbors]]` prefix ranges at runtime (queued to the config file), `ListDynamicNeighbors` for visibility |
 | `PolicyService` | `ListPolicies`, `GetPolicy`, `SetPolicy`, `DeletePolicy`, `ListNeighborSets`, `GetNeighborSet`, `SetNeighborSet`, `DeleteNeighborSet`, `GetGlobalPolicyChains`, `GetNeighborPolicyChains`, `SetGlobalImportChain`, `SetGlobalExportChain`, `ClearGlobalImportChain`, `ClearGlobalExportChain`, `SetNeighborImportChain`, `SetNeighborExportChain`, `ClearNeighborImportChain`, `ClearNeighborExportChain`, `ExplainImportPolicy`, `ListRejectedRoutes`, `TestPolicy`, `GetPolicyStats` | Named policy CRUD, neighbor sets, global/per-neighbor chain attachment, import-policy decision explain (per-term traces for `.rpol` members), retained rejected-route views with reject reasons, read-only candidate-policy dry runs over the live RIB, and live per-term hit counters |
 | `PeerGroupService` | `ListPeerGroups`, `GetPeerGroup`, `SetPeerGroup`, `DeletePeerGroup`, `SetNeighborPeerGroup`, `ClearNeighborPeerGroup` | Peer-group CRUD and neighbor membership assignment |
@@ -156,7 +156,9 @@ Credential-bearing request summaries are masked before entering `grpc_authz`
 logs; `DiffRuntimeConfigRequest.candidate_toml`,
 `PlanConfigTransactionRequest.candidate_toml`, and
 `ApplyConfigTransactionRequest.candidate_toml` are always summarized as
-redacted metadata, transaction apply comments are not logged verbatim, and
+redacted metadata. `StreamPlanConfigTransaction` logs only framing version,
+bounded counts, token presence, and outcome — never candidate bytes, digest,
+plan token, path, or spool name. Transaction apply comments are not logged verbatim, and
 `SetPeerGroup` logs MD5 state without the MD5 value.
 Operators declare `[security.grpc.roles]` and set explicit listener
 `principal` labels for bearer-token TCP and UDS listeners; those labels are
@@ -198,7 +200,7 @@ for `grpc_authz` logs and the related Prometheus metrics live in
 | Service | Read-only RPCs | Mutating RPCs rejected on `read_only` |
 |---------|----------------|---------------------------------------|
 | `GlobalService` | `GetGlobal` | — |
-| `ConfigService` | `DiffRuntimeConfig`, `PlanConfigTransaction`, `GetConfigTransactionStatus`, `GetEffectiveConfig`, `ListConfigHistory` | `ApplyConfigTransaction` (pure `[[fib_tables]]`, pure `[[dynamic_neighbors]]`, static `[[neighbors]]` add/delete/modify, catalog-only policy/neighbor-set/peer-group/global-chain changes, pure live policy-chain impact for static neighbors and accepted dynamic peers, or peer-group/session reshape impact for static members and live dynamic sessions; mixed or unsupported candidates rejected without mutation), `ConfirmConfigTransaction`, `AbortConfigTransaction`, `RollbackConfigTransaction` |
+| `ConfigService` | `DiffRuntimeConfig`, `PlanConfigTransaction`, `StreamPlanConfigTransaction`, `GetConfigTransactionStatus`, `GetEffectiveConfig`, `ListConfigHistory` | `ApplyConfigTransaction` (pure `[[fib_tables]]`, pure `[[dynamic_neighbors]]`, static `[[neighbors]]` add/delete/modify, catalog-only policy/neighbor-set/peer-group/global-chain changes, pure live policy-chain impact for static neighbors and accepted dynamic peers, or peer-group/session reshape impact for static members and live dynamic sessions; mixed or unsupported candidates rejected without mutation), `ConfirmConfigTransaction`, `AbortConfigTransaction`, `RollbackConfigTransaction` |
 | `NeighborService` | `ListNeighbors`, `GetNeighborState`, `ListDynamicNeighbors` | `AddNeighbor`, `DeleteNeighbor`, `EnableNeighbor`, `DisableNeighbor`, `SoftResetIn`, `RefreshOutbound`, `AddDynamicNeighbor`, `DeleteDynamicNeighbor`, `SetGracefulShutdown` |
 | `PolicyService` | `ListPolicies`, `GetPolicy`, `ListNeighborSets`, `GetNeighborSet`, `GetGlobalPolicyChains`, `GetNeighborPolicyChains`, `ExplainImportPolicy`, `ListRejectedRoutes`, `TestPolicy`, `GetPolicyStats` | `SetPolicy`, `DeletePolicy`, `SetNeighborSet`, `DeleteNeighborSet`, `SetGlobalImportChain`, `SetGlobalExportChain`, `ClearGlobalImportChain`, `ClearGlobalExportChain`, `SetNeighborImportChain`, `SetNeighborExportChain`, `ClearNeighborImportChain`, `ClearNeighborExportChain` |
 | `PeerGroupService` | `ListPeerGroups`, `GetPeerGroup` | `SetPeerGroup`, `DeletePeerGroup`, `SetNeighborPeerGroup`, `ClearNeighborPeerGroup` |
@@ -434,6 +436,7 @@ before it leaves the daemon (`rbgp config effective`).
 |-----|-------------|
 | `DiffRuntimeConfig` | Validate candidate TOML and compare it against the daemon's live runtime config snapshot |
 | `PlanConfigTransaction` | Validate candidate TOML, return a runtime snapshot token, and classify v1 transaction support without mutating daemon state |
+| `StreamPlanConfigTransaction` | Outside-v1 authenticated client stream for plan-only candidates larger than the unary ceiling; returns the unchanged plan plus an optional ephemeral plan token |
 | `ApplyConfigTransaction` | Operator-tier commit entry point for ADR-0076 config transactions; currently commits one pure runtime family at a time: full-set `[[fib_tables]]`, full-set `[[dynamic_neighbors]]`, static `[[neighbors]]` add/delete/modify changes, catalog-only policy/neighbor-set/peer-group/global-chain changes, pure live policy-chain impact for static neighbors and accepted dynamic peers, or peer-group/session reshape impact for static members with post-persist best-effort reset of live dynamic sessions |
 | `ConfirmConfigTransaction` | Confirm a pending confirmed transaction before its timer expires |
 | `AbortConfigTransaction` | Abort a pending confirmed transaction and roll back immediately |
@@ -462,10 +465,27 @@ encoded protobuf request only when it exceeds the 4,194,304-byte tonic unary
 message limit. The check includes every request field, not just
 `candidate_toml`, and reports sizes and the candidate path without echoing
 candidate, token, or metadata contents. This is a CLI preflight only; the proto
-and server behavior are unchanged. Oversized candidates must be validated with
-`rustbgpd --check`, deployed through coordinated config-file replacement, and
-loaded with SIGHUP; that fallback has no transactional apply or commit-confirm
-semantics.
+and unary server behavior are unchanged. API clients can use
+`StreamPlanConfigTransaction` for plan-only candidates: metadata version 1
+must appear first and once, followed by zero or more non-empty chunks no larger
+than 1 MiB, then one end frame carrying the exact aggregate length and raw
+32-byte SHA-256, immediately followed by EOF. Aggregate input is capped at
+384 MiB, idle input at 60 seconds, and the whole admission through planner
+reply at 30 minutes. One stream is admitted process-wide across all listeners;
+a concurrent call returns `RESOURCE_EXHAUSTED` without queueing. The listener
+must authenticate clients (mTLS, bearer token, or the owner-only UDS identity).
+The owner-only descriptor-relative spool file is unlinked immediately after
+open, before any candidate bytes are accepted, so candidate bytes never survive
+at a pathname. A crash between exclusive creation and unlink can leave an empty
+owner-only stub; unlink failure rejects the request before ingress.
+No stream apply or CLI fallback exists yet, so oversized candidates still use
+coordinated config-file replacement and SIGHUP for deployment.
+
+A `COMMITTABLE` streamed plan additionally carries `plan_token`, a UUIDv4
+bound in memory to the runtime token, candidate digest, and length for 30
+minutes. At most 256 bindings are live and oldest bindings are evicted at the
+cap. `NOOP`, `REJECTED`, and failed plans never issue one. The token has no
+consumer in this slice and grants no authority by itself.
 
 `ConfigTransactionPlanResponse` wraps the same redacted diff with:
 

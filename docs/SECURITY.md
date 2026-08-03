@@ -79,6 +79,8 @@ Preferred posture:
   `DiffRuntimeConfigRequest.candidate_toml`,
   `PlanConfigTransactionRequest.candidate_toml`, and
   `ApplyConfigTransactionRequest.candidate_toml` are never logged verbatim, and
+  streamed planning logs only bounded frame/byte counts and outcome — never
+  candidate bytes, SHA-256, plan token, path, or spool name — and
   `SetPeerGroup` records only MD5 state (`set_redacted`, `preserve`, or
   `clear`) rather than secret material. TCP-AO keys embedded in candidate TOML
   are covered by the same `candidate_toml=<redacted>` summary; transaction
@@ -318,6 +320,20 @@ partial clock identity.
 Use a separate `runtime_state_dir` for every concurrently running daemon.
 The directory is single-writer state for the marker, checkpoint, FIB receipt,
 and Unix socket; owner-only permissions do not make cross-process sharing safe.
+
+`StreamPlanConfigTransaction` uses `<runtime_state_dir>/stream-plan-v1` only
+through the already pinned runtime-state directory descriptor. The child is
+owner-only (`0700`); each exclusive, no-follow temporary file is regular and
+owner-only (`0600`) and is unlinked immediately after open, before candidate
+bytes are accepted, so candidate bytes never survive at a pathname. A crash
+between exclusive creation and unlink can leave an empty owner-only stub;
+unlink failure disables that request before ingress. The RPC is
+disabled when its authority is unavailable, admits one stream process-wide
+without queueing, and rejects listeners that have neither mTLS/bearer
+authentication nor owner-only UDS authentication before admission or storage
+access. A client disconnect after handoff cannot release the admission slot or
+candidate before the existing planner replies or the original 30-minute
+deadline expires.
 
 ## Recorded config history confidentiality
 

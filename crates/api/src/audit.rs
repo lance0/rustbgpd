@@ -101,6 +101,23 @@ pub(crate) fn plan_config_transaction_summary(
     ))
 }
 
+/// Bounded summary for streaming config-plan ingress. Candidate bytes,
+/// digests, plan tokens, and storage identifiers are intentionally absent.
+pub(crate) fn stream_plan_config_transaction_summary(
+    version: u32,
+    chunk_count: u64,
+    candidate_bytes: u64,
+    expected_runtime_snapshot_token_present: bool,
+    outcome: &'static str,
+) -> GrpcRequestSummary {
+    debug_assert!(
+        CREDENTIAL_MASK_TABLE.contains(&"StreamPlanConfigTransactionRequest.candidate_chunk")
+    );
+    GrpcRequestSummary::new(format!(
+        "version={version} chunk_count={chunk_count} candidate_bytes={candidate_bytes} expected_runtime_snapshot_token_present={expected_runtime_snapshot_token_present} outcome={outcome}"
+    ))
+}
+
 /// Summary for `ApplyConfigTransaction`. Candidate TOML and free-form comments
 /// are not logged verbatim.
 pub(crate) fn apply_config_transaction_summary(
@@ -228,6 +245,7 @@ pub(crate) fn set_peer_group_summary(
 pub(crate) const CREDENTIAL_MASK_TABLE: &[&str] = &[
     "DiffRuntimeConfigRequest.candidate_toml",
     "PlanConfigTransactionRequest.candidate_toml",
+    "StreamPlanConfigTransactionRequest.candidate_chunk",
     "ApplyConfigTransactionRequest.candidate_toml",
     "ApplyEvpnRuntimeRequest.candidate_toml",
     "PeerGroupDefinition.md5_password",
@@ -351,6 +369,9 @@ mod tests {
     fn credential_mask_table_lists_current_secret_ingress() {
         assert!(CREDENTIAL_MASK_TABLE.contains(&"DiffRuntimeConfigRequest.candidate_toml"));
         assert!(CREDENTIAL_MASK_TABLE.contains(&"PlanConfigTransactionRequest.candidate_toml"));
+        assert!(
+            CREDENTIAL_MASK_TABLE.contains(&"StreamPlanConfigTransactionRequest.candidate_chunk")
+        );
         assert!(CREDENTIAL_MASK_TABLE.contains(&"ApplyConfigTransactionRequest.candidate_toml"));
         assert!(CREDENTIAL_MASK_TABLE.contains(&"ApplyEvpnRuntimeRequest.candidate_toml"));
         assert!(CREDENTIAL_MASK_TABLE.contains(&"PeerGroupDefinition.md5_password"));

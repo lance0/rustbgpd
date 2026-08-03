@@ -44,6 +44,8 @@ bytes.workspace = true
 x509-parser.workspace = true
 serde_json.workspace = true
 sha2 = "0.11"
+nix = { workspace = true, features = ["fs", "user"] }
+uuid.workspace = true
 zeroize.workspace = true
 
 [build-dependencies]

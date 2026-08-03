@@ -114,6 +114,11 @@ service ConfigService {
   // the current runtime snapshot and a section-level v1 support plan.
   rpc PlanConfigTransaction(PlanConfigTransactionRequest) returns (ConfigTransactionPlanResponse);
 
+  // Stream a large candidate through bounded daemon-private storage, then
+  // invoke the same read-only planner as PlanConfigTransaction. This surface
+  // is outside the v1 compatibility contract while adoption is evaluated.
+  rpc StreamPlanConfigTransaction(stream StreamPlanConfigTransactionRequest) returns (StreamPlanConfigTransactionResponse);
+
   // Commit a previously planned candidate transaction. V1 commits one pure
   // runtime family at a time: full-set `[[fib_tables]]`, full-set
   // `[[dynamic_neighbors]]`, static `[[neighbors]]` add/delete/modify, or
@@ -248,6 +253,33 @@ message PlanConfigTransactionRequest {
   // Optional optimistic-concurrency token from a previous plan response.
   // Empty means "plan against whatever runtime snapshot is current now".
   string expected_runtime_snapshot_token = 2;
+}
+
+message StreamPlanConfigTransactionRequest {
+  oneof frame {
+    StreamPlanConfigMetadata metadata = 1;
+    bytes candidate_chunk = 2;
+    StreamPlanConfigEnd end = 3;
+  }
+}
+
+message StreamPlanConfigMetadata {
+  // Framing version. The only accepted value is 1.
+  uint32 version = 1;
+  optional string expected_runtime_snapshot_token = 2;
+}
+
+message StreamPlanConfigEnd {
+  // Exact aggregate byte length of all candidate_chunk frames.
+  uint64 candidate_length = 1;
+  // Raw 32-byte SHA-256 of the aggregate candidate bytes.
+  bytes candidate_sha256 = 2;
+}
+
+message StreamPlanConfigTransactionResponse {
+  ConfigTransactionPlanResponse plan = 1;
+  // Ephemeral process-local binding issued only for a COMMITTABLE plan.
+  optional string plan_token = 2;
 }
 
 enum ConfigTransactionPlanStatus {

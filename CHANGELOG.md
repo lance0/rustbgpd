@@ -9,6 +9,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- An outside-v1, plan-only `StreamPlanConfigTransaction` gRPC ingress for
+  large config candidates. It requires an authenticated listener, accepts
+  1 MiB candidate chunks up to 384 MiB total with length/SHA-256 framing, and
+  admits one stream process-wide without queueing. Temporary bytes stay in an
+  owner-private, immediately unlinked descriptor-relative file beneath
+  `runtime_state_dir`; successful
+  committable plans receive a bounded 30-minute process-local UUID token for a
+  future apply-token slice. The existing unary planner and apply surface are
+  unchanged, and no CLI command uses the stream yet.
+
 ### Removed
 
 - Expired migration pointers for `[global.telemetry.looking_glass]` and the
