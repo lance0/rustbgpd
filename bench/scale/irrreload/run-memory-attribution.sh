@@ -17,6 +17,30 @@ METRICS_PORT=${METRICS_PORT:-9179}
 die() { echo "$*" >&2; exit 1; }
 uint() { [[ $1 =~ ^[0-9]+$ ]]; }
 hash_file() { sha256sum -- "$1" | awk '{print $1}'; }
+dirty_hash() {
+    local stream untracked path
+    stream=$(mktemp) || return 1; untracked=$(mktemp) || { rm -f "$stream"; return 1; }
+    git -C "$REPO" status --porcelain=v1 -z >"$stream" || { rm -f "$stream" "$untracked"; return 1; }
+    git -C "$REPO" diff --binary HEAD -- >>"$stream" || { rm -f "$stream" "$untracked"; return 1; }
+    git -C "$REPO" ls-files --others --exclude-standard -z >"$untracked" || { rm -f "$stream" "$untracked"; return 1; }
+    # shellcheck disable=SC2094 # distinct mktemp files; ShellCheck cannot infer that.
+    while IFS= read -r -d '' -u 3 path; do printf 'untracked %s\0' "$path" >>"$stream"; (cd "$REPO" && sha256sum -- "$path") >>"$stream" || { rm -f "$stream" "$untracked"; return 1; }; done 3<"$untracked"
+    sha256sum "$stream" | awk '{print $1}'; local rc=${PIPESTATUS[0]}; rm -f "$stream" "$untracked"; return "$rc"
+}
+capture_source_identity() {
+    COMMIT=$(git -C "$REPO" rev-parse 'HEAD^{commit}') && DIRTY_STATE_SHA256=$(dirty_hash)
+}
+full_source_admission() {
+    GIT_TERMINAL_PROMPT=0 timeout -k 5 60 git -C "$REPO" fetch origin '+refs/heads/main:refs/remotes/origin/main' >/dev/null 2>&1 || return 1
+    local head remote status; head=$(git -C "$REPO" rev-parse 'HEAD^{commit}') || return 1
+    remote=$(git -C "$REPO" rev-parse 'refs/remotes/origin/main^{commit}') || return 1
+    status=$(git -C "$REPO" status --porcelain=v1) || return 1
+    [[ $head == "$remote" && -z $status ]] || return 1
+    capture_source_identity
+}
+source_admission() {
+    if [[ $1 == full ]]; then full_source_admission; else capture_source_identity; fi
+}
 monotonic() { awk '{print $1}' /proc/uptime; }
 validate_protocol() {
     [[ $# == 4 && $1 == private && $2 == grouped && $3 == grouped && $4 == private ]]
@@ -284,6 +308,30 @@ self_test() (
     validate_protocol "${PROTOCOL[@]}" || return
     expect_reject leg-reordered validate_protocol private grouped private grouped
     expect_reject leg-omitted validate_protocol private grouped grouped
+    local origin=$tmp/origin.git publisher=$tmp/publisher clone=$tmp/clone cached real_git canonical aliased
+    real_git=$(command -v git)
+    git init -q --bare "$origin"; git init -q -b main "$publisher"
+    git -C "$publisher" config user.email self@test; git -C "$publisher" config user.name self-test
+    echo initial >"$publisher/source"; git -C "$publisher" add source; git -C "$publisher" commit -qm initial
+    git -C "$publisher" remote add origin "$origin"; git -C "$publisher" push -q -u origin main
+    git clone -q --branch main "$origin" "$clone"
+    env REPO="$clone" bash -c "$(declare -f dirty_hash capture_source_identity full_source_admission source_admission); source_admission smoke; [[ -n \$COMMIT && -n \$DIRTY_STATE_SHA256 ]]"; echo "positive-proof source-bounded-capture=pass"
+    env REPO="$clone" bash -c "$(declare -f dirty_hash capture_source_identity full_source_admission); full_source_admission"; echo "positive-proof source-aligned-clean=pass"
+    echo untracked >"$clone/untracked"; canonical=$(env REPO="$clone" bash -c "$(declare -f dirty_hash); dirty_hash")
+    aliased=$(env REPO="$clone/../clone" bash -c "$(declare -f dirty_hash); dirty_hash")
+    [[ $canonical == "$aliased" ]] || return 1; rm "$clone/untracked"; echo "positive-proof source-path-alias-stable=pass"
+    mkdir "$tmp/bin"; printf "#!/bin/sh\ncase \" \$* \" in *\" \$FAIL_GIT \"*) exit 9;; esac\nexec %q \"\$@\"\n" "$real_git" >"$tmp/bin/git"; chmod +x "$tmp/bin/git"
+    for failure_case in status:status diff:diff untracked:ls-files; do
+        IFS=: read -r proof failure <<<"$failure_case"
+        expect_reject "source-$proof-failure" env FAIL_GIT="$failure" PATH="$tmp/bin:$PATH" REPO="$clone" bash -c "$(declare -f dirty_hash capture_source_identity source_admission); source_admission smoke"
+    done
+    echo dirty >>"$clone/source"; expect_reject source-dirty env REPO="$clone" bash -c "$(declare -f dirty_hash full_source_admission); full_source_admission"
+    git -C "$clone" restore source; echo divergent >"$clone/local"; git -C "$clone" add local; git -C "$clone" -c user.email=self@test -c user.name=self-test commit -qm divergent
+    expect_reject source-head-not-origin-main env REPO="$clone" bash -c "$(declare -f dirty_hash full_source_admission); full_source_admission"; git -C "$clone" reset -q --hard origin/main
+    cached=$(git -C "$clone" rev-parse origin/main); echo advanced >>"$publisher/source"; git -C "$publisher" commit -qam advanced; git -C "$publisher" push -q
+    [[ $(git -C "$clone" rev-parse origin/main) == "$cached" ]] || return 1
+    expect_reject source-remote-main-advanced env REPO="$clone" bash -c "$(declare -f dirty_hash full_source_admission); full_source_admission"
+    [[ $(git -C "$clone" rev-parse origin/main) != "$cached" ]] || return 1
     python3 - "$GEN" "$tmp" <<'PY'
 import importlib.util, json, pathlib, subprocess, sys
 gen, root = sys.argv[1], pathlib.Path(sys.argv[2]); spec = importlib.util.spec_from_file_location("gen", gen)
@@ -426,22 +474,12 @@ fi
 
 [[ -n ${ARTIFACT_ROOT:-} && ! -e $ARTIFACT_ROOT ]] || die "ARTIFACT_ROOT must name a fresh path"
 for tool in cargo curl flock git jq python3 setsid sha256sum ss timeout; do command -v "$tool" >/dev/null || die "missing tool: $tool"; done
+source_admission "$MODE" || die "source admission failed"
 mkdir -p "$(dirname "$ARTIFACT_ROOT")"
 umask 077; mkdir "$ARTIFACT_ROOT"; ART=$(cd "$ARTIFACT_ROOT" && pwd)
 if [[ $MODE == full ]]; then "$REPO/tests/soak/preflight.sh" >"$ART/full-preflight.log" 2>&1 || exit 75; fi
 LOCK=${RUSTBGPD_HOST_LOCK:-$HOME/.local/state/rustbgpd-host.lock}; mkdir -p "$(dirname "$LOCK")"; exec {LOCK_FD}>"$LOCK"
 flock -n "$LOCK_FD" || exit 75
-COMMIT=$(git -C "$REPO" rev-parse HEAD)
-dirty_hash() {
-    (cd "$REPO" && {
-        git status --porcelain=v1 -z
-        git diff --binary HEAD --
-        git ls-files --others --exclude-standard -z | while IFS= read -r -d '' path; do
-            printf 'untracked %s\0' "$path"; sha256sum -- "$path"
-        done
-    }) | sha256sum | awk '{print $1}'
-}
-DIRTY_STATE_SHA256=$(dirty_hash)
 printf 'phase\tmonotonic\tutc\tload1\tmem_available_kib\tports_free\n' >"$ART/preflight.tsv"
 ports_free=true; ss -H -ltn | awk -v a=":$PORT" -v b=":$METRICS_PORT" '$4~a"$"||$4~b"$"{found=1} END{exit found?0:1}' && ports_free=false
 printf 'prebuild\t%s\t%s\t%s\t%s\t%s\n' "$(monotonic)" "$(date -u +%FT%TZ)" "$(awk '{print $1}' /proc/loadavg)" \
