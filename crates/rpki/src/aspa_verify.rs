@@ -55,9 +55,10 @@ fn leftmost_as_matches_neighbor(hops: &[u32], neighbor_asn: Option<u32>) -> bool
 /// Verify an `AS_PATH` using the role-aware ASPA procedures from
 /// `draft-ietf-sidrops-aspa-verification-27` §5.4 and §5.5.
 ///
-/// With no configured role, this preserves rustbgpd's legacy upstream-only
-/// behavior. When the local role is [`BgpRole::Customer`], routes are treated
-/// as received from a provider and downstream verification is applied.
+/// With no configured role, rustbgpd uses upstream verification; the session
+/// boundary independently enforces the current draft's first-AS precondition.
+/// When the local role is [`BgpRole::Customer`], routes are treated as received
+/// from a provider and downstream verification is applied.
 #[must_use]
 pub fn verify(path: &AsPath, table: &AspaTable, context: AspaValidationContext) -> AspaValidation {
     match direction_for_role(context.local_role) {

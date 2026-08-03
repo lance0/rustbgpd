@@ -259,8 +259,9 @@ The implementation is aligned with
 `draft-ietf-sidrops-aspa-verification-27` on three applicability boundaries:
 
 - The §5 neighbor-AS check applies to eligible eBGP unicast routes even when no
-  BGP Role is configured. Roles select upstream versus downstream verification;
-  they are not a prerequisite for the neighbor-AS check. A local
+  BGP Role is configured. Roleless sessions continue to use upstream
+  verification; configured roles select upstream versus downstream verification
+  and are not a prerequisite for the neighbor-AS check. A local
   `rs-client` remains exempt for a transparent IX as required by §5.
 - A peer that did not negotiate the four-octet-AS capability is not exempt.
   rustbgpd is the RFC 6793 NEW speaker and applies the check to the effective
