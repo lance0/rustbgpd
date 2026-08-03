@@ -823,7 +823,7 @@ mod tests {
         let server = spawn_mock_server(None).await;
         let connection = connect(&server.addr, None).await.unwrap();
         let (enabled_tx, enabled_rx) = watch::channel(false);
-        let (event_tx, _event_rx) = mpsc::channel(1);
+        let (event_tx, mut event_rx) = mpsc::channel(1);
         let (data_tx, mut data_rx) = mpsc::channel(1);
         let task = spawn_fetcher(
             connection,
@@ -840,6 +840,10 @@ mod tests {
         enabled_tx.send(true).unwrap();
         wait_for(|| server.state.watch_events_calls.load(Ordering::SeqCst) == 1).await;
         wait_for(|| server.state.watch_events_active.load(Ordering::SeqCst) == 1).await;
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), event_rx.recv()).await,
+            Ok(Some(RouteEventUpdate::StreamStatus(None)))
+        ));
 
         enabled_tx.send(false).unwrap();
         wait_for(|| server.state.watch_events_active.load(Ordering::SeqCst) == 0).await;
@@ -847,6 +851,10 @@ mod tests {
 
         enabled_tx.send(true).unwrap();
         wait_for(|| server.state.watch_events_active.load(Ordering::SeqCst) == 1).await;
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), event_rx.recv()).await,
+            Ok(Some(RouteEventUpdate::StreamStatus(None)))
+        ));
         drop(task);
         wait_for(|| server.state.watch_events_active.load(Ordering::SeqCst) == 0).await;
     }

@@ -1583,7 +1583,7 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
   categories; WatchRoutes missed-event signaling if it gains an envelope;
   precomputed dataplane summary counters / watch channels if status-snapshot
   polling becomes expensive; subscription-side indexing or a dedicated event bus
-  if subscriber count / event rate makes post-broadcast filtering expensive; a
+  if subscriber count / event rate makes post-broadcast filtering expensive;
   additional TUI event categories beyond the shipped lag-aware route view.
 - **EVPN adjacent standards.** PBB-EVPN (RFC 7623), RFC 9251 IGMP/MLD proxy
   multicast EVPN routes (types 6/7/8), RFC 9572 BUM segmentation

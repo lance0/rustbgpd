@@ -79,7 +79,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **Lag-aware `rbgp top` route events.** The optional event panel now uses the
   typed `WatchEvents` route stream, renders policy source/target/reason and
-  Add-Path ID, and shows exact stream-gap counts. Older daemons fall back only
+  Add-Path ID, and shows exact missed-event counts. Older daemons fall back only
   when `WatchEvents` is unimplemented and retain an explicit degraded warning.
 
 - **Actionable authorization denials and `rbgp doctor` authz triage.** gRPC
