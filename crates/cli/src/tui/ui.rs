@@ -10,7 +10,7 @@ use crate::commands::neighbor::{
 };
 use crate::output::{format_duration, format_state_with_stale, neighbor_source_label};
 use crate::tui::app::{App, SortColumn, View, neighbor_key};
-use crate::tui::data::Freshness;
+use crate::tui::data::{Freshness, RouteEventEntry, RouteEventKind};
 use crate::tui::theme::Theme;
 
 pub fn draw(f: &mut Frame, app: &mut App, theme: &Theme) {
@@ -275,35 +275,59 @@ fn draw_events(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let max_lines = inner.height as usize;
-    let lines: Vec<Line> = app
-        .route_events
-        .iter()
-        .take(max_lines)
-        .map(|e| {
-            let color = theme.event_color(&e.event_type);
-            let path_id = if e.path_id > 0 {
-                format!(" path_id={}", e.path_id)
-            } else {
-                String::new()
-            };
-            Line::from(vec![
-                Span::styled(
-                    format!("[{}] ", e.timestamp),
-                    Style::default().fg(theme.text_dim),
-                ),
-                Span::styled(format!("{:<10}", e.event_type), Style::default().fg(color)),
-                Span::styled(format!("{:<20}", e.prefix), Style::default().fg(theme.text)),
-                Span::styled(
-                    format!("from {}{}", e.peer_address, path_id),
-                    Style::default().fg(theme.text_dim),
-                ),
-            ])
-        })
-        .collect();
+    let mut lines = Vec::new();
+    if let Some(status) = &app.route_event_stream_status {
+        lines.push(Line::styled(
+            format!("warning: {status}"),
+            Style::default().fg(theme.error),
+        ));
+    }
+    lines.extend(
+        app.route_events
+            .iter()
+            .take((inner.height as usize).saturating_sub(lines.len()))
+            .map(|e| {
+                let color = theme.event_color(&e.event_type);
+                Line::from(vec![
+                    Span::styled(
+                        format!("[{}] ", e.timestamp),
+                        Style::default().fg(theme.text_dim),
+                    ),
+                    Span::styled(format!("{:<10}", e.event_type), Style::default().fg(color)),
+                    Span::styled(format!("{:<20}", e.prefix), Style::default().fg(theme.text)),
+                    Span::styled(route_event_context(e), Style::default().fg(theme.text_dim)),
+                ])
+            }),
+    );
 
     let paragraph = Paragraph::new(lines);
     f.render_widget(paragraph, inner);
+}
+
+fn route_event_context(event: &RouteEventEntry) -> String {
+    if matches!(&event.kind, RouteEventKind::StreamLag) {
+        let reason = if event.reason.is_empty() {
+            String::new()
+        } else {
+            format!(" reason={}", event.reason)
+        };
+        return format!("missed={}{}", event.missed_count, reason);
+    }
+
+    let mut fields = vec![format!("from {}", event.peer_address)];
+    if !event.previous_peer_address.is_empty() {
+        fields.push(format!("previous={}", event.previous_peer_address));
+    }
+    if !event.target_peer_address.is_empty() {
+        fields.push(format!("to={}", event.target_peer_address));
+    }
+    if !event.reason.is_empty() {
+        fields.push(format!("reason={}", event.reason));
+    }
+    if event.path_id > 0 {
+        fields.push(format!("path_id={}", event.path_id));
+    }
+    fields.join(" ")
 }
 
 fn draw_footer(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
@@ -714,6 +738,63 @@ mod tests {
         assert_eq!(format_number(1000), "1,000");
         assert_eq!(format_number(12345), "12,345");
         assert_eq!(format_number(1234567), "1,234,567");
+    }
+
+    /// Red proof: restoring the source-only event row or storing the degraded
+    /// warning in the bounded route rows removes these strings from the real
+    /// rendered event panel.
+    #[test]
+    fn event_panel_test_backend_renders_context_lag_and_degraded_status() {
+        let mut app = App::new();
+        app.show_events = true;
+        app.on_data(snapshot(Vec::new(), Freshness::Fresh));
+        app.on_route_event(crate::tui::data::RouteEventUpdate::StreamStatus(Some(
+            "DEGRADED: WatchEvents unsupported; using legacy WatchRoutes; missed-event counts unavailable".into(),
+        )));
+        let lag = |missed_count| RouteEventEntry {
+            kind: RouteEventKind::StreamLag,
+            timestamp: "12:00:01".into(),
+            event_type: "stream_lagged".into(),
+            prefix: String::new(),
+            peer_address: String::new(),
+            previous_peer_address: String::new(),
+            target_peer_address: String::new(),
+            reason: "receiver_lagged".into(),
+            path_id: 0,
+            missed_count,
+        };
+        app.on_route_event(crate::tui::data::RouteEventUpdate::Event(lag(7)));
+        app.on_route_event(crate::tui::data::RouteEventUpdate::Event(lag(0)));
+        app.on_route_event(crate::tui::data::RouteEventUpdate::Event(RouteEventEntry {
+            kind: RouteEventKind::Route,
+            timestamp: "12:00:00".into(),
+            event_type: "policy_filtered".into(),
+            prefix: "203.0.113.0/24".into(),
+            peer_address: "192.0.2.1".into(),
+            previous_peer_address: "192.0.2.2".into(),
+            target_peer_address: "192.0.2.3".into(),
+            reason: "policy_denied".into(),
+            path_id: 77,
+            missed_count: 0,
+        }));
+        let mut terminal = Terminal::new(TestBackend::new(180, 18)).unwrap();
+        terminal
+            .draw(|frame| draw(frame, &mut app, &Theme::default()))
+            .unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(rendered.contains("DEGRADED: WatchEvents unsupported"));
+        assert!(rendered.contains(
+            "from 192.0.2.1 previous=192.0.2.2 to=192.0.2.3 reason=policy_denied path_id=77"
+        ));
+        assert!(rendered.contains("missed=7 reason=receiver_lagged"));
+        assert!(rendered.contains("missed=0 reason=receiver_lagged"));
     }
 
     fn snapshot(neighbors: Vec<NeighborState>, freshness: Freshness) -> DataSnapshot {

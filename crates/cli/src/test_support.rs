@@ -38,11 +38,20 @@ pub(crate) struct MockState {
     pub(crate) list_neighbors_calls: AtomicUsize,
     pub(crate) list_neighbors_failures_remaining: AtomicUsize,
     pub(crate) list_dynamic_neighbors_calls: AtomicUsize,
+    pub(crate) watch_events_calls: AtomicUsize,
+    pub(crate) watch_events_active: AtomicUsize,
+    pub(crate) watch_events_terminations: AtomicUsize,
+    pub(crate) watch_events_clean_end: AtomicBool,
+    pub(crate) watch_events_admission_error: Mutex<Option<(Code, String)>>,
+    pub(crate) watch_events_stream_error: Mutex<Option<(Code, String)>>,
+    pub(crate) watch_events_response: Mutex<Vec<server_proto::BgpEvent>>,
+    pub(crate) last_watch_events: Mutex<Option<server_proto::WatchEventsRequest>>,
     pub(crate) watch_routes_calls: AtomicUsize,
     pub(crate) watch_routes_active: AtomicUsize,
     pub(crate) watch_routes_clean_end: AtomicBool,
     pub(crate) watch_routes_failures_remaining: AtomicUsize,
     pub(crate) watch_routes_terminations: AtomicUsize,
+    pub(crate) watch_routes_response: Mutex<Vec<server_proto::RouteEvent>>,
     pub(crate) list_session_events_calls: AtomicUsize,
     pub(crate) list_policy_events_calls: AtomicUsize,
     pub(crate) config_diff_calls: AtomicUsize,
@@ -1109,17 +1118,47 @@ impl rustbgpd_api::proto::injection_service_server::InjectionService for MockInj
 
 struct MockWatchRoutesStream {
     state: Arc<MockState>,
+    events: std::collections::VecDeque<server_proto::RouteEvent>,
     clean_end: bool,
+}
+
+struct MockWatchEventsStream {
+    state: Arc<MockState>,
+    events: std::collections::VecDeque<Result<server_proto::BgpEvent, Status>>,
+    clean_end: bool,
+}
+
+impl Stream for MockWatchEventsStream {
+    type Item = Result<server_proto::BgpEvent, Status>;
+
+    fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match self.events.pop_front() {
+            Some(event) => Poll::Ready(Some(event)),
+            None if self.clean_end => Poll::Ready(None),
+            None => Poll::Pending,
+        }
+    }
+}
+
+impl Drop for MockWatchEventsStream {
+    fn drop(&mut self) {
+        self.state
+            .watch_events_active
+            .fetch_sub(1, Ordering::SeqCst);
+        self.state
+            .watch_events_terminations
+            .fetch_add(1, Ordering::SeqCst);
+    }
 }
 
 impl Stream for MockWatchRoutesStream {
     type Item = Result<server_proto::RouteEvent, Status>;
 
-    fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        if self.clean_end {
-            Poll::Ready(None)
-        } else {
-            Poll::Pending
+    fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match self.events.pop_front() {
+            Some(event) => Poll::Ready(Some(Ok(event))),
+            None if self.clean_end => Poll::Ready(None),
+            None => Poll::Pending,
         }
     }
 }
@@ -1370,9 +1409,34 @@ impl rustbgpd_api::proto::event_service_server::EventService for MockEventServic
 
     async fn watch_events(
         &self,
-        _request: Request<server_proto::WatchEventsRequest>,
+        request: Request<server_proto::WatchEventsRequest>,
     ) -> Result<Response<Self::WatchEventsStream>, Status> {
-        Err(Status::unimplemented("not used in CLI tests"))
+        self.state.watch_events_calls.fetch_add(1, Ordering::SeqCst);
+        *self.state.last_watch_events.lock().await = Some(request.into_inner());
+        if let Some((code, message)) = self.state.watch_events_admission_error.lock().await.clone()
+        {
+            return Err(Status::new(code, message));
+        }
+
+        let mut events = self
+            .state
+            .watch_events_response
+            .lock()
+            .await
+            .drain(..)
+            .map(Ok)
+            .collect::<std::collections::VecDeque<_>>();
+        if let Some((code, message)) = self.state.watch_events_stream_error.lock().await.take() {
+            events.push_back(Err(Status::new(code, message)));
+        }
+        self.state
+            .watch_events_active
+            .fetch_add(1, Ordering::SeqCst);
+        Ok(Response::new(Box::pin(MockWatchEventsStream {
+            state: Arc::clone(&self.state),
+            events,
+            clean_end: self.state.watch_events_clean_end.load(Ordering::SeqCst),
+        })))
     }
 
     async fn subscribe_from_event(
@@ -1830,8 +1894,16 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
         self.state
             .watch_routes_active
             .fetch_add(1, Ordering::SeqCst);
+        let events = self
+            .state
+            .watch_routes_response
+            .lock()
+            .await
+            .drain(..)
+            .collect();
         Ok(Response::new(Box::pin(MockWatchRoutesStream {
             state: Arc::clone(&self.state),
+            events,
             clean_end: self.state.watch_routes_clean_end.load(Ordering::SeqCst),
         })))
     }

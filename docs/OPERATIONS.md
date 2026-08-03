@@ -1901,7 +1901,13 @@ rbgp top -i 5     # 5s poll interval
 
 Shows sessions, prefix counts, message rates, RPKI VRP counts, and
 streaming route events in a terminal UI. The route-event subscription is
-opened only while the events panel is visible (`e`). Global identity is retried
+opened only while the events panel is visible (`e`).
+The panel uses the lag-aware `WatchEvents` route stream, including exact missed
+counts and policy-filter source/target/reason/Add-Path context. With an older
+daemon that rejects `WatchEvents` as unimplemented, it uses legacy
+`WatchRoutes` and keeps a `DEGRADED` warning visible because that stream cannot
+report missed events. Other admission and stream errors do not downgrade.
+Global identity is retried
 on each normal poll until the first successful fetch, then cached; the
 Prometheus metrics scrape runs on a separate 60-second cadence. Before either
 optional source succeeds, the status line reports `global unavailable` or
