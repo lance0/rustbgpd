@@ -1341,9 +1341,8 @@ mod tests {
             assert!(!summary.as_str().contains(secret));
         }
     }
-
     #[tokio::test]
-    async fn authenticated_client_on_unauthenticated_transport_preserves_token_and_hook() {
+    async fn pre_admission_capability_and_transport_failures_preserve_token_and_hook() {
         let runtime = TempDir::new().unwrap();
         let state = state_at(runtime.path(), StreamLimits::default());
         let candidate = b"candidate";
@@ -1354,6 +1353,40 @@ mod tests {
                 candidate.len() as u64,
             )
             .unwrap();
+        let (missing_peer_tx, _missing_peer_rx) = mpsc::channel(1);
+        let missing_executor = spawn_listener_with_apply(
+            Arc::clone(&state),
+            missing_peer_tx,
+            true,
+            None,
+            AuthTier::OperatorOnly,
+            PrincipalRole::Operator,
+        )
+        .await;
+        let held = state.try_admit().unwrap();
+        let error = missing_executor
+            .client
+            .clone()
+            .stream_apply_config_transaction(futures::stream::iter(apply_frames(
+                candidate,
+                &token.to_string(),
+                "kv1:runtime:7",
+            )))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(
+            error.message(),
+            "ConfigService.StreamApplyConfigTransaction executor is unavailable"
+        );
+        assert!(has_token(&state, token));
+        let observer = &missing_executor.audit_observer;
+        let handle = observer.lock().unwrap().clone().unwrap();
+        assert_eq!(
+            handle.summary().unwrap().as_str(),
+            "version=0 chunk_count=0 candidate_bytes=0 expected_runtime_snapshot_token_present=false confirm_id_present=false outcome=executor_unavailable"
+        );
+        drop(held);
         let calls = Arc::new(AtomicUsize::new(0));
         let hook_calls = Arc::clone(&calls);
         let hook: ConfigTransactionApplyFn = Arc::new(move |_request| {
@@ -1370,7 +1403,6 @@ mod tests {
             PrincipalRole::Operator,
         )
         .await;
-
         let error = listener
             .client
             .clone()

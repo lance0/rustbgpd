@@ -80,6 +80,12 @@ pub(crate) async fn stream_apply_config_transaction(
             "streamed config apply storage is unavailable",
         ));
     };
+    let Some(transaction_apply) = transaction_apply else {
+        audit.outcome = "executor_unavailable";
+        return Err(Status::failed_precondition(
+            "ConfigService.StreamApplyConfigTransaction executor is unavailable",
+        ));
+    };
     let permit = state.try_admit()?;
     let deadline = Instant::now() + state.limits.total_timeout;
     let mut stream = request.into_inner();
@@ -309,20 +315,15 @@ async fn read_candidate(
 }
 
 async fn run_detached_apply(
-    transaction_apply: Option<ConfigTransactionApplyFn>,
+    transaction_apply: ConfigTransactionApplyFn,
     request: proto::ApplyConfigTransactionRequest,
     _permit: OwnedSemaphorePermit,
     mut audit: ApplyAudit,
     response_tx: oneshot::Sender<Result<proto::ConfigTransactionApplyResponse, Status>>,
 ) {
-    let response = match transaction_apply {
-        Some(apply) => apply(request)
-            .await
-            .map_err(crate::server::ConfigTransactionApplyError::into_status),
-        None => Err(Status::failed_precondition(
-            "ConfigService.ApplyConfigTransaction executor is unavailable",
-        )),
-    };
+    let response = transaction_apply(request)
+        .await
+        .map_err(crate::server::ConfigTransactionApplyError::into_status);
     audit.outcome = if response.is_ok() {
         "applied"
     } else {

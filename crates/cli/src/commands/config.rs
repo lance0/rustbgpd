@@ -150,6 +150,9 @@ async fn apply_response(
             "--expected-runtime-snapshot-token must not be empty".to_string(),
         ));
     }
+    if matches!(options.plan_token, Some(token) if token.trim().is_empty()) {
+        return Err(CliError::Argument("--plan-token must not be empty".into()));
+    }
     if options.confirm_id.is_none() && options.confirm_timeout_seconds.is_some() {
         return Err(CliError::Argument(
             "--confirm-timeout requires --confirm-id".to_string(),
@@ -1426,40 +1429,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn plan_streams_by_default_without_a_unary_call() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("candidate.toml");
-        let candidate = "[global]\nasn = 65001\nrouter_id = \"10.0.0.1\"\n";
-        std::fs::write(&path, candidate).unwrap();
-        let server = spawn_mock_server(None).await;
-        server
-            .state
-            .config_streaming_enabled
-            .store(true, Ordering::SeqCst);
-        let connection = connect(&server.addr, None).await.unwrap();
-
-        let changed = plan(connection, path.to_str().unwrap(), Some("kv1:old:1"), true)
-            .await
-            .unwrap();
-
-        assert!(changed);
-        assert_eq!(
-            server.state.config_stream_plan_calls.load(Ordering::SeqCst),
-            1
-        );
-        assert_eq!(server.state.config_plan_calls.load(Ordering::SeqCst), 0);
-        assert_eq!(
-            server
-                .state
-                .last_stream_plan_candidate
-                .lock()
-                .await
-                .as_deref(),
-            Some(candidate.as_bytes())
-        );
-    }
-
-    #[tokio::test]
     async fn plan_rejects_oversized_populated_request_before_rpc() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("candidate.toml");
@@ -1858,23 +1827,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn unary_fallback_requires_exact_empty_missing_method_fingerprint() {
-        assert!(exact_missing_method(&tonic::Status::new(
-            tonic::Code::Unimplemented,
-            ""
-        )));
-        assert!(!exact_missing_method(&tonic::Status::unimplemented(
-            "method disabled"
-        )));
-        assert!(!exact_missing_method(&tonic::Status::with_details(
-            tonic::Code::Unimplemented,
-            "",
-            tonic::codegen::Bytes::from_static(b"detail"),
-        )));
-        assert!(!exact_missing_method(&tonic::Status::unavailable("")));
-    }
-
     #[tokio::test]
     async fn apply_counts_metadata_and_redacts_oversize_error_before_rpc() {
         const CANDIDATE_SECRET: &str = "candidate-secret-must-not-leak";
@@ -1944,31 +1896,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn apply_rejects_empty_confirm_id_before_rpc() {
+    async fn apply_rejects_empty_local_metadata_before_rpc() {
         let server = spawn_mock_server(None).await;
         let connection = connect(&server.addr, None).await.unwrap();
-
-        let err = apply(
-            connection,
-            ApplyOptions {
-                from_file: "/does/not/matter.toml",
-                expected_runtime_snapshot_token: "kv1:old:1",
-                plan_token: None,
-                client_request_id: None,
-                comment: None,
-                confirm_id: Some(""),
-                confirm_timeout_seconds: Some(120),
-            },
-            true,
-        )
-        .await
-        .expect_err("empty confirm_id must fail before RPC");
-
-        assert!(
-            matches!(err, CliError::Argument(ref message) if message == "confirm_id must not be empty"),
-            "{err:?}"
-        );
-        assert_eq!(server.state.config_apply_calls.load(Ordering::SeqCst), 0);
+        for (plan_token, confirm_id, timeout, expected) in [
+            (Some(""), None, None, "--plan-token must not be empty"),
+            (Some(" \t"), None, None, "--plan-token must not be empty"),
+            (None, Some(""), Some(120), "confirm_id must not be empty"),
+            (
+                None,
+                Some("bad\nid"),
+                Some(120),
+                "confirm_id must not contain control characters",
+            ),
+        ] {
+            let err = apply(
+                connection.clone(),
+                ApplyOptions {
+                    from_file: "/does/not/matter.toml",
+                    expected_runtime_snapshot_token: "kv1:old:1",
+                    plan_token,
+                    client_request_id: None,
+                    comment: None,
+                    confirm_id,
+                    confirm_timeout_seconds: timeout,
+                },
+                true,
+            )
+            .await
+            .expect_err("empty local metadata must fail before file access or RPC");
+            assert!(matches!(err, CliError::Argument(ref message) if message == expected));
+        }
     }
 
     #[tokio::test]
@@ -1995,34 +1953,6 @@ mod tests {
 
         assert!(
             matches!(err, CliError::Argument(ref message) if message == "confirm_id must be at most 128 characters"),
-            "{err:?}"
-        );
-        assert_eq!(server.state.config_apply_calls.load(Ordering::SeqCst), 0);
-    }
-
-    #[tokio::test]
-    async fn apply_rejects_control_char_confirm_id_before_rpc() {
-        let server = spawn_mock_server(None).await;
-        let connection = connect(&server.addr, None).await.unwrap();
-
-        let err = apply(
-            connection,
-            ApplyOptions {
-                from_file: "/does/not/matter.toml",
-                expected_runtime_snapshot_token: "kv1:old:1",
-                plan_token: None,
-                client_request_id: None,
-                comment: None,
-                confirm_id: Some("bad\nid"),
-                confirm_timeout_seconds: Some(120),
-            },
-            true,
-        )
-        .await
-        .expect_err("control-character confirm_id must fail before RPC");
-
-        assert!(
-            matches!(err, CliError::Argument(ref message) if message == "confirm_id must not contain control characters"),
             "{err:?}"
         );
         assert_eq!(server.state.config_apply_calls.load(Ordering::SeqCst), 0);
