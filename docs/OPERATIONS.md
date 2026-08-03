@@ -129,6 +129,19 @@ rbgp config apply /tmp/new-config.toml \
   --expected-runtime-snapshot-token kv1:...
 ```
 
+`rbgp config diff`, `plan`, and `apply` preflight the fully encoded protobuf
+request against tonic's 4,194,304-byte unary-message limit. A request exactly at
+the limit is allowed; a larger request fails locally before any RPC and reports
+the encoded size and candidate path. Apply metadata counts too, including the
+runtime snapshot token, request ID, comment, and commit-confirm fields.
+
+For a candidate that cannot fit, first validate it offline with `rustbgpd
+--check /path/to/candidate.toml`. Then coordinate replacement of the daemon's
+config file (and any external inputs) and send SIGHUP with `systemctl reload
+rustbgpd` or `kill -HUP $(pidof rustbgpd)`. This file-deployment fallback does
+**not** provide the transactional apply, optimistic-token, rollback-on-failure,
+or commit-confirm semantics of `rbgp config apply`.
+
 For a safe deploy that should roll back unless explicitly confirmed, provide a
 confirm handle and timeout on the same apply. The daemon applies the candidate
 immediately, starts the timer, and rolls back when the timer expires unless the

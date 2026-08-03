@@ -43,6 +43,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `rbgp config diff`, `plan`, and `apply` now preflight the fully populated
+  protobuf request against tonic's 4,194,304-byte unary-message limit. Oversized
+  requests fail locally with the encoded size, limit, candidate path, and
+  explicit offline-check plus coordinated file-deployment/SIGHUP guidance;
+  candidate, token, and apply-metadata contents are never echoed.
+
 - IRR-scale `.rpol` policies now load. Previously any `.rpol`
   compilation unit whose resolved module graph exceeded a fixed 8 MiB
   (or any single file over 1 MiB) was rejected at config load — a
