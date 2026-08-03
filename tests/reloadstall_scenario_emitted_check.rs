@@ -1174,6 +1174,12 @@ fn irr_memory_protocol_self_test_exercises_semantic_rejections() {
         "start-timeout-cap",
         "settle-timeout-cap",
         "leg-timeout-cap",
+        "source-dirty",
+        "source-diff-failure",
+        "source-status-failure",
+        "source-untracked-failure",
+        "source-head-not-origin-main",
+        "source-remote-main-advanced",
     ] {
         assert!(
             stdout.contains(&format!("red-proof {proof}=pass")),
@@ -1181,7 +1187,23 @@ fn irr_memory_protocol_self_test_exercises_semantic_rejections() {
         );
     }
     assert!(stdout.contains("positive-proof prometheus-syntax=pass"));
+    assert!(stdout.contains("positive-proof source-aligned-clean=pass"));
+    assert!(stdout.contains("positive-proof source-bounded-capture=pass"));
+    assert!(stdout.contains("positive-proof source-path-alias-stable=pass"));
     assert!(stdout.contains("SELF_TEST pass"));
+
+    let script = std::fs::read_to_string(&runner).expect("runner source");
+    let (_, after_start) = script.split_once("full_source_admission() {").unwrap();
+    let (admission_body, _) = after_start.split_once("source_admission() {").unwrap();
+    let exact_fetch = "GIT_TERMINAL_PROMPT=0 timeout -k 5 60 git -C \"$REPO\" fetch origin '+refs/heads/main:refs/remotes/origin/main'";
+    assert!(admission_body.contains(exact_fetch));
+    let admission = script.find("source_admission \"$MODE\" || die").unwrap();
+    for later in r#"mkdir -p "$(dirname "$ARTIFACT_ROOT")"|mkdir "$ARTIFACT_ROOT"|tests/soak/preflight.sh|RUSTBGPD_HOST_LOCK|flock -n "$LOCK_FD"|cargo build --locked --profile|cargo build --locked --release --manifest-path"#.split('|') {
+        assert!(
+            admission < script.find(later).unwrap(),
+            "admission must precede {later}"
+        );
+    }
 
     let failed_tmp = tempfile::tempdir().expect("failed self-test TMPDIR");
     let failed = std::process::Command::new("bash")
