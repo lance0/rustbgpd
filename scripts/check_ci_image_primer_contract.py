@@ -35,6 +35,15 @@ GOBGP_CHECKSUMS = {
     "amd64": "e20b2a155fe14450b9fe37e5c1a1d1bfe101eb479645f5bbea860a8fde30e522",
     "arm64": "0aaa2da6e4dcaaf57e3d0e64eae14946292b0a5894d80ef3b7ebde3bf52beb29",
 }
+NETNS_SELECTOR_HASH = "0278940b2953d00c57398b3545141144afb4f0e7673b20cffe2599521c37b9ff"
+NETNS_COMPILE_ONCE_HASH = "384d95c6b7449ba345be55aea4ed890c78958467f4140abf327e80be39309d76"
+NETNS_WORKFLOW_SELECTORS = tuple(
+    "fdb_nhg rustbgpd_prepare fib_runtime bfd_runtime dataplane_vlan_fdb "
+    "macip_vlan_attribution svd_fdb_vni managed_bridge managed_vxlan "
+    "managed_svd_vxlan managed_vlan_upper managed_ready l3_multipath "
+    "managed_ip_vrf_ready l3_all_active_writer".split()
+)
+NETNS_SECCOMP_HASH = "2c2fc7d46458574b4fe2d820cb82697b3ff9e4a31083de518bdb2993b0ed9fcb"
 
 TRIGGER_HASHES = {
     "ci.yml": "65951f4c4d1d6c4d3aae2c33705d14cdc144b3efd8bcc01653049e6d7f2fb5f8",
@@ -158,8 +167,114 @@ def check(root: Path) -> list[str]:
         if _hash(calls) != CALL_HASHES[name]:
             errors.append(f"{name}: existing test/setup calls drifted")
     kernel_jobs = _jobs(texts["kernel-dataplane.yml"])
-    if "needs: prime_dev_image" in kernel_jobs.get("netns", ""):
+    netns_job = kernel_jobs.get("netns", "")
+    if "needs: prime_dev_image" in netns_job:
         errors.append("kernel-dataplane.yml:netns must remain independent")
+
+    runner = (
+        root / "crates" / "evpn-linux" / "tests" / "docker" / "run-netns-tests.sh"
+    ).read_text()
+    selector_body = runner.split('case "${1:-all}" in', 1)[-1].split("\nesac", 1)[0]
+    if _hash(selector_body) != NETNS_SELECTOR_HASH:
+        errors.append("run-netns-tests.sh: selector semantics drifted")
+
+    validation_marker = 'RUSTBGPD_COMPILE_ONCE="${RUSTBGPD_COMPILE_ONCE:-0}"'
+    validation = validation_marker + runner.split(validation_marker, 1)[-1].split(
+        "\n\nSECCOMP_ARGS=()", 1
+    )[0]
+    if _hash(validation) != NETNS_COMPILE_ONCE_HASH:
+        errors.append("run-netns-tests.sh: compile-once validation drifted")
+
+    workflow_selectors = tuple(
+        re.findall(
+            r"run: bash crates/evpn-linux/tests/docker/run-netns-tests\.sh ([\w-]+)",
+            netns_job,
+        )
+    )
+    if workflow_selectors != NETNS_WORKFLOW_SELECTORS:
+        errors.append("kernel-dataplane.yml:netns selector calls/order drifted")
+
+    prepare = (
+        'sh -c "cargo clean -p rustbgpd-api && ' 'cargo test -p rustbgpd --no-run"'
+    )
+    runtime = 'cargo test -p rustbgpd "$RUSTBGPD_TEST_FILTER"'
+    standalone = (
+        'sh -c "cargo clean -p rustbgpd-api && cargo test -p rustbgpd '
+        "'${RUSTBGPD_TEST_FILTER}' -- --test-threads=1 --nocapture\""
+    )
+    if runner.count(prepare) != 1:
+        errors.append("run-netns-tests.sh: rustbgpd prepare command drifted")
+    if runner.count(standalone) != 1:
+        errors.append("run-netns-tests.sh: standalone FIB/BFD clean-build drifted")
+    if runner.count("cargo clean -p rustbgpd-api") != 2:
+        errors.append("run-netns-tests.sh: rustbgpd-api clean roster drifted")
+    if runner.count("cargo test -p rustbgpd --no-run") != 1:
+        errors.append("run-netns-tests.sh: rustbgpd must be compiled exactly once")
+    if runner.count(runtime) != 1:
+        errors.append("run-netns-tests.sh: FIB/BFD prepared-artifact reuse drifted")
+
+    docker_args = runner.split("\nDOCKER_ARGS=(\n", 1)[-1].split("\n)\n", 1)[0]
+    effective_docker_args = tuple(
+        line.strip()
+        for line in docker_args.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    )
+    expected_docker_args = (
+        "--rm",
+        "--cap-add=NET_ADMIN",
+        "--cap-add=SYS_ADMIN",
+        "--security-opt apparmor=unconfined",
+        '"${SECCOMP_ARGS[@]}"',
+        "-e EVPN_LINUX_NETNS=1",
+        "-e RUST_BACKTRACE=1",
+        "-e CARGO_TERM_COLOR=always",
+        '-v "${REPO_ROOT}:/work"',
+        '-v "${CARGO_CACHE_VOL}:/usr/local/cargo/registry"',
+        '-v "${TARGET_CACHE_VOL}:/work/target"',
+        "-w /work",
+    )
+    if effective_docker_args != expected_docker_args:
+        errors.append(
+            "run-netns-tests.sh: container cleanup/privileges/volumes drifted"
+        )
+    for seam in (
+        "RUSTBGPD_PREPARE=0",
+        'RUSTBGPD_COMPILE_ONCE="${RUSTBGPD_COMPILE_ONCE:-0}"',
+        'if [ "$RUSTBGPD_PREPARE" = "1" ]; then',
+        'elif [ -n "$RUSTBGPD_TEST_FILTER" ]; then',
+        'CARGO_CACHE_VOL="${CARGO_CACHE_VOL:-rustbgpd-netns-tests-cargo}"',
+        'TARGET_CACHE_VOL="${TARGET_CACHE_VOL:-rustbgpd-netns-tests-target}"',
+        'SECCOMP_ARGS+=("--security-opt=seccomp=$SECCOMP_PROFILE_RESOLVED")',
+    ):
+        if runner.count(seam) != 1:
+            errors.append(f"run-netns-tests.sh: harness seam drifted: {seam}")
+    if "TARGET_CACHE_VOL:" in netns_job or "docker volume rm" in netns_job:
+        errors.append("kernel-dataplane.yml:netns named target-volume lifetime drifted")
+
+    seccomp_path = "crates/evpn-linux/tests/docker/seccomp-deny-af-inet6.json"
+    compile_once = 'RUSTBGPD_COMPILE_ONCE: "1"'
+    for step_name in (
+        "Prepare rustbgpd runtime netns test binaries",
+        "ADR-0061 FIB runtime netns test",
+        "ADR-0067 BFD runtime netns test",
+    ):
+        step = netns_job.split(f"- name: {step_name}", 1)[-1].split(
+            "\n      - name:", 1
+        )[0]
+        if compile_once not in step:
+            errors.append(f"kernel-dataplane.yml:netns {step_name} opt-in drifted")
+    if netns_job.count(compile_once) != 3:
+        errors.append("kernel-dataplane.yml:netns compile-once opt-in roster drifted")
+    bfd_step = netns_job.split("- name: ADR-0067 BFD runtime", 1)[-1].split(
+        "\n      - name:", 1
+    )[0]
+    if (
+        netns_job.count(f"SECCOMP_PROFILE: {seccomp_path}") != 1
+        or f"SECCOMP_PROFILE: {seccomp_path}" not in bfd_step
+    ):
+        errors.append("kernel-dataplane.yml:netns BFD seccomp profile drifted")
+    if _hash((root / seccomp_path).read_text()) != NETNS_SECCOMP_HASH:
+        errors.append("seccomp-deny-af-inet6.json: AF_INET6 denial drifted")
 
     action = (
         root / ".github" / "actions" / "setup-dataplane-host" / "action.yml"

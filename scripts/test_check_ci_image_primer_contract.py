@@ -18,6 +18,7 @@ class PrimerContractTests(unittest.TestCase):
             for fixture in (
                 ".github/workflows",
                 ".github/actions/setup-dataplane-host",
+                "crates/evpn-linux/tests/docker",
             ):
                 source = ROOT / fixture
                 target = root / fixture
@@ -233,6 +234,89 @@ class PrimerContractTests(unittest.TestCase):
             ),
         ):
             with self.subTest(old=old):
+                self.mutate(relative, old, new)
+
+    def test_netns_compile_once_contract_is_load_bearing(self):
+        workflow = ".github/workflows/kernel-dataplane.yml"
+        runner = "crates/evpn-linux/tests/docker/run-netns-tests.sh"
+        seccomp = "crates/evpn-linux/tests/docker/seccomp-deny-af-inet6.json"
+        reuse = 'cargo test -p rustbgpd "$RUSTBGPD_TEST_FILTER"'
+        standalone = 'sh -c "cargo clean -p rustbgpd-api && cargo test -p rustbgpd \'${RUSTBGPD_TEST_FILTER}\' -- --test-threads=1 --nocapture"'
+        prepare_then_fib = """\
+      - name: Prepare rustbgpd runtime netns test binaries
+        env:
+          RUSTBGPD_COMPILE_ONCE: "1"
+        run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh rustbgpd_prepare
+
+      - name: ADR-0061 FIB runtime netns test
+        env:
+          RUSTBGPD_COMPILE_ONCE: "1"
+        run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh fib_runtime
+"""
+        fib_then_prepare = """\
+      - name: ADR-0061 FIB runtime netns test
+        env:
+          RUSTBGPD_COMPILE_ONCE: "1"
+        run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh fib_runtime
+
+      - name: Prepare rustbgpd runtime netns test binaries
+        env:
+          RUSTBGPD_COMPILE_ONCE: "1"
+        run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh rustbgpd_prepare
+"""
+        cases = (
+            ("prepare runs after FIB", workflow, prepare_then_fib, fib_then_prepare),
+            (
+                "prepare is omitted",
+                workflow,
+                "run-netns-tests.sh rustbgpd_prepare",
+                "run-netns-tests.sh fib_runtime",
+            ),
+            (
+                "FIB/BFD clean and compile a second time",
+                runner,
+                reuse,
+                standalone,
+            ),
+            ("standalone FIB/BFD skip the conservative clean", runner, standalone, reuse),
+            (
+                "FIB selects the wrong tests",
+                runner,
+                "fib_runtime::tests::netns_general_unicast_fib_",
+                "fib_runtime::tests::wrong_",
+            ),
+            (
+                "BFD selects the wrong tests",
+                runner,
+                "bfd_runtime::tests::netns::",
+                "bfd_runtime::tests::wrong::",
+            ),
+            (
+                "compile-once opt-in is removed",
+                workflow,
+                'RUSTBGPD_COMPILE_ONCE: "1"',
+                'RUSTBGPD_COMPILE_ONCE: "0"',
+            ),
+            ("prepare becomes callable without opt-in", runner, 'if [ "$RUSTBGPD_PREPARE" = "1" ] && [ "$RUSTBGPD_COMPILE_ONCE" != "1" ]; then', "if false; then"),
+            ("compile-once becomes valid on unrelated selectors", runner, 'if [ "$RUSTBGPD_COMPILE_ONCE" = "1" ] && [ "$RUSTBGPD_PREPARE" != "1" ] && [ -z "$RUSTBGPD_TEST_FILTER" ]; then', "if false; then"),
+            ("target volume identity changes", runner, "rustbgpd-netns-tests-target", "rustbgpd-netns-tests-target-prepare"),
+            ("container cleanup is removed", runner, "    --rm\n", ""),
+            ("NET_ADMIN privilege is removed", runner, "    --cap-add=NET_ADMIN\n", ""),
+            (
+                "BFD no longer denies AF_INET6",
+                seccomp,
+                '"value": 10',
+                '"value": 2',
+            ),
+            (
+                "the public selector roster changes",
+                runner,
+                "    managed_ready)",
+                "    removed_managed_ready)",
+            ),
+        )
+        for breakage, relative, old, new in cases:
+            with self.subTest(breakage=breakage):
                 self.mutate(relative, old, new)
 
     def test_dockerfile_exact_source_bridge(self):

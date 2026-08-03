@@ -98,6 +98,7 @@ EXACT_FILTER=1
 # Module-path filter for `-p rustbgpd` daemon netns tests (fib/bfd);
 # empty means the default `netns_*` evpn-linux integration binary.
 RUSTBGPD_TEST_FILTER=""
+RUSTBGPD_PREPARE=0
 case "${1:-all}" in
     spike)      FILTER="bum_filter_spike_validates_kernel_primitive" ;;
     roundtrip)  FILTER="linux_dataplane_set_bum_port_flags_round_trip" ;;
@@ -105,6 +106,7 @@ case "${1:-all}" in
     fdb_nhg)    TEST_BIN="netns_fdb_nhg"; FILTER="" ;;
     fdb_nhg_roundtrip)  TEST_BIN="netns_fdb_nhg"; FILTER="round_trip_install_and_remove_fdb_nhg" ;;
     fdb_nhg_cve)        TEST_BIN="netns_fdb_nhg"; FILTER="cve_guard_blocks_install_when_learning_enabled" ;;
+    rustbgpd_prepare)   FILTER=""; RUSTBGPD_PREPARE=1 ;;
     fib_runtime)        FILTER=""; RUSTBGPD_TEST_FILTER="fib_runtime::tests::netns_general_unicast_fib_" ;;
     bfd_runtime)        FILTER=""; RUSTBGPD_TEST_FILTER="bfd_runtime::tests::netns::" ;;
     bgp_unnumbered)     TEST_BIN="netns_bgp_unnumbered"; FILTER="" ;;
@@ -126,6 +128,20 @@ case "${1:-all}" in
         exit 2
         ;;
 esac
+
+RUSTBGPD_COMPILE_ONCE="${RUSTBGPD_COMPILE_ONCE:-0}"
+if [ "$RUSTBGPD_COMPILE_ONCE" != "0" ] && [ "$RUSTBGPD_COMPILE_ONCE" != "1" ]; then
+    echo "ERROR: RUSTBGPD_COMPILE_ONCE must be 0 or 1" >&2
+    exit 2
+fi
+if [ "$RUSTBGPD_PREPARE" = "1" ] && [ "$RUSTBGPD_COMPILE_ONCE" != "1" ]; then
+    echo "ERROR: rustbgpd_prepare is internal; set RUSTBGPD_COMPILE_ONCE=1" >&2
+    exit 2
+fi
+if [ "$RUSTBGPD_COMPILE_ONCE" = "1" ] && [ "$RUSTBGPD_PREPARE" != "1" ] && [ -z "$RUSTBGPD_TEST_FILTER" ]; then
+    echo "ERROR: RUSTBGPD_COMPILE_ONCE=1 is only valid for rustbgpd_prepare, fib_runtime, or bfd_runtime" >&2
+    exit 2
+fi
 
 SECCOMP_ARGS=()
 if [ -n "${SECCOMP_PROFILE:-}" ]; then
@@ -217,21 +233,33 @@ DOCKER_ARGS=(
 # netnses and re-exec into them; running them in parallel inside
 # the same container risks them clobbering each other on the
 # `/proc/$$/ns` namespace inheritance the inner re-exec depends on.
-if [ -n "$RUSTBGPD_TEST_FILTER" ]; then
+if [ "$RUSTBGPD_PREPARE" = "1" ]; then
     # The rustbgpd binary's gRPC types are generated from
     # `proto/rustbgpd.proto` by `rustbgpd-api`'s build script into that crate's
     # OUT_DIR. The persistent `$TARGET_CACHE_VOL` can retain a stale generated
     # module when the proto changes but cargo's incremental fingerprint does not
     # re-run the build script (the proto lives outside the crate dir), which
     # surfaces as "struct FibRouteStatus has no field named ..." compile errors.
-    # Force a regeneration of just that crate before building so the cached
-    # volume can't ship a stale proto. Cheap: only `rustbgpd-api` is rebuilt.
-    # Single-quote the filter inside the `sh -c` program so it reaches
-    # `cargo test` verbatim even if it ever gains whitespace / shell
-    # metacharacters (today it is a plain module path).
+    # Force a regeneration of just that crate before compiling the rustbgpd
+    # test binaries once. The FIB and BFD selectors below reuse those prepared
+    # artifacts through the same named target volume.
     TEST_ARGS=(
-        sh -c "cargo clean -p rustbgpd-api && cargo test -p rustbgpd '${RUSTBGPD_TEST_FILTER}' -- --test-threads=1 --nocapture"
+        sh -c "cargo clean -p rustbgpd-api && cargo test -p rustbgpd --no-run"
     )
+elif [ -n "$RUSTBGPD_TEST_FILTER" ]; then
+    if [ "$RUSTBGPD_COMPILE_ONCE" = "1" ]; then
+        TEST_ARGS=(
+            cargo test -p rustbgpd "$RUSTBGPD_TEST_FILTER"
+            --
+            --test-threads=1 --nocapture
+        )
+    else
+        # Preserve conservative standalone behavior: regenerate the external
+        # proto and compile before running either filtered runtime selector.
+        TEST_ARGS=(
+            sh -c "cargo clean -p rustbgpd-api && cargo test -p rustbgpd '${RUSTBGPD_TEST_FILTER}' -- --test-threads=1 --nocapture"
+        )
+    fi
 else
     TEST_ARGS=(
         cargo test -p rustbgpd-evpn-linux --test "$TEST_BIN"

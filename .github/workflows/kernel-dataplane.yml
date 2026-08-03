@@ -700,7 +700,16 @@ jobs:
       - name: ADR-0059 FDB nexthop group netns tests
         run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh fdb_nhg
 
+      # Compile the rustbgpd test binaries once into the harness's named target
+      # volume. The FIB and BFD selectors below reuse those exact artifacts.
+      - name: Prepare rustbgpd runtime netns test binaries
+        env:
+          RUSTBGPD_COMPILE_ONCE: "1"
+        run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh rustbgpd_prepare
+
       - name: ADR-0061 FIB runtime netns test
+        env:
+          RUSTBGPD_COMPILE_ONCE: "1"
         run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh fib_runtime
 
       # This ephemeral hosted invocation denies AF_INET6 to prove the current
@@ -708,6 +717,7 @@ jobs:
       # that open address families can reuse the same opt-in harness profile.
       - name: ADR-0067 BFD runtime netns test (IPv4-only, AF_INET6 absent)
         env:
+          RUSTBGPD_COMPILE_ONCE: "1"
           SECCOMP_PROFILE: crates/evpn-linux/tests/docker/seccomp-deny-af-inet6.json
         run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh bfd_runtime
 
