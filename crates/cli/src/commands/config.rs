@@ -11,9 +11,11 @@ use crate::proto::{
     ListConfigHistoryResponse, PlanConfigTransactionRequest, RollbackConfigTransactionRequest,
     UpdateGroupImpactPlan,
 };
+use prost::Message;
 
 const MAX_CONFIRM_ID_CHARS: usize = 128;
 const MAX_CONFIRM_TIMEOUT_SECONDS: u32 = 86_400;
+const MAX_UNARY_CONFIG_REQUEST_BYTES: usize = 4_194_304;
 
 pub struct ApplyOptions<'a> {
     pub from_file: &'a str,
@@ -44,12 +46,11 @@ pub fn change_status_exit_code(has_changes: bool) -> i32 {
 /// 0 (no changes) / 2 (changes present) exit-code contract.
 pub async fn diff(connection: Connection, from_file: &str, json: bool) -> Result<bool, CliError> {
     let candidate_toml = read_candidate_toml(from_file)?;
+    let request = DiffRuntimeConfigRequest { candidate_toml };
+    preflight_config_request(&request, from_file)?;
     let mut client =
         ConfigServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let resp = client
-        .diff_runtime_config(DiffRuntimeConfigRequest { candidate_toml })
-        .await?
-        .into_inner();
+    let resp = client.diff_runtime_config(request).await?.into_inner();
 
     if json {
         output::print_serialized_json_line(&resp.diff_json)?;
@@ -68,17 +69,16 @@ pub async fn plan(
     json: bool,
 ) -> Result<bool, CliError> {
     let candidate_toml = read_candidate_toml(from_file)?;
+    let request = PlanConfigTransactionRequest {
+        candidate_toml,
+        expected_runtime_snapshot_token: expected_runtime_snapshot_token
+            .unwrap_or_default()
+            .to_string(),
+    };
+    preflight_config_request(&request, from_file)?;
     let mut client =
         ConfigServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let resp = client
-        .plan_config_transaction(PlanConfigTransactionRequest {
-            candidate_toml,
-            expected_runtime_snapshot_token: expected_runtime_snapshot_token
-                .unwrap_or_default()
-                .to_string(),
-        })
-        .await?
-        .into_inner();
+    let resp = client.plan_config_transaction(request).await?.into_inner();
 
     if json {
         print_json(plan_to_json(&resp))?;
@@ -115,19 +115,18 @@ pub async fn apply(
         )));
     }
     let candidate_toml = read_candidate_toml(options.from_file)?;
+    let request = ApplyConfigTransactionRequest {
+        candidate_toml,
+        expected_runtime_snapshot_token: options.expected_runtime_snapshot_token.to_string(),
+        client_request_id: options.client_request_id.unwrap_or_default().to_string(),
+        comment: options.comment.unwrap_or_default().to_string(),
+        confirm_id: options.confirm_id.unwrap_or_default().to_string(),
+        confirm_timeout_seconds: options.confirm_timeout_seconds.unwrap_or_default(),
+    };
+    preflight_config_request(&request, options.from_file)?;
     let mut client =
         ConfigServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let resp = client
-        .apply_config_transaction(ApplyConfigTransactionRequest {
-            candidate_toml,
-            expected_runtime_snapshot_token: options.expected_runtime_snapshot_token.to_string(),
-            client_request_id: options.client_request_id.unwrap_or_default().to_string(),
-            comment: options.comment.unwrap_or_default().to_string(),
-            confirm_id: options.confirm_id.unwrap_or_default().to_string(),
-            confirm_timeout_seconds: options.confirm_timeout_seconds.unwrap_or_default(),
-        })
-        .await?
-        .into_inner();
+    let resp = client.apply_config_transaction(request).await?.into_inner();
 
     if json {
         print_json(apply_to_json(&resp))?;
@@ -424,6 +423,17 @@ fn read_candidate_toml(from_file: &str) -> Result<String, CliError> {
         .map_err(|error| CliError::Argument(format!("failed to read {from_file}: {error}")))
 }
 
+fn preflight_config_request(request: &impl Message, from_file: &str) -> Result<(), CliError> {
+    let encoded_size = request.encoded_len();
+    if encoded_size <= MAX_UNARY_CONFIG_REQUEST_BYTES {
+        return Ok(());
+    }
+
+    Err(CliError::Argument(format!(
+        "config request encoded size {encoded_size} bytes exceeds the {MAX_UNARY_CONFIG_REQUEST_BYTES}-byte gRPC unary request limit for candidate file {from_file}; run `rustbgpd --check` against that candidate, then coordinate replacement of the daemon config file and send SIGHUP. This fallback does not provide transactional apply or commit-confirm semantics"
+    )))
+}
+
 fn validate_confirm_id(confirm_id: &str) -> Result<(), CliError> {
     if confirm_id.trim().is_empty() {
         return Err(CliError::Argument(
@@ -683,6 +693,14 @@ mod tests {
     use crate::connection::connect;
     use crate::test_support::spawn_mock_server;
 
+    // Field 1's one-byte tag plus the four-byte length varint used by a
+    // candidate whose encoded request reaches the 4 MiB boundary.
+    const PROTOBUF_STRING_FIELD_OVERHEAD_AT_LIMIT: usize = 5;
+
+    fn candidate_at_diff_request_limit() -> String {
+        "x".repeat(MAX_UNARY_CONFIG_REQUEST_BYTES - PROTOBUF_STRING_FIELD_OVERHEAD_AT_LIMIT)
+    }
+
     #[tokio::test]
     async fn diff_sends_candidate_file() {
         let dir = tempfile::tempdir().unwrap();
@@ -701,6 +719,58 @@ mod tests {
             server.state.last_config_diff.lock().await.as_deref(),
             Some("[global]\nasn = 65001\nrouter_id = \"10.0.0.1\"\n")
         );
+    }
+
+    #[tokio::test]
+    async fn diff_accepts_request_at_exact_unary_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("candidate.toml");
+        let candidate = candidate_at_diff_request_limit();
+        let request = DiffRuntimeConfigRequest {
+            candidate_toml: candidate.clone(),
+        };
+        assert_eq!(request.encoded_len(), MAX_UNARY_CONFIG_REQUEST_BYTES);
+        std::fs::write(&path, candidate).unwrap();
+        let server = spawn_mock_server(None).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+
+        diff(connection, path.to_str().unwrap(), true)
+            .await
+            .expect("an exactly-at-limit request must reach the RPC");
+
+        assert_eq!(server.state.config_diff_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn diff_rejects_plus_one_before_rpc() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("candidate.toml");
+        let mut candidate = candidate_at_diff_request_limit();
+        candidate.push('x');
+        let request = DiffRuntimeConfigRequest {
+            candidate_toml: candidate.clone(),
+        };
+        assert_eq!(request.encoded_len(), MAX_UNARY_CONFIG_REQUEST_BYTES + 1);
+        std::fs::write(&path, candidate).unwrap();
+        let server = spawn_mock_server(None).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+
+        let err = diff(connection, path.to_str().unwrap(), true)
+            .await
+            .expect_err("a plus-one request must fail before RPC");
+
+        assert!(
+            matches!(err, CliError::Argument(ref message)
+                if message.contains("4194305 bytes")
+                    && message.contains("4194304-byte")
+                    && message.contains(path.to_str().unwrap())
+                    && message.contains("rustbgpd --check")
+                    && message.contains("replacement")
+                    && message.contains("SIGHUP")
+                    && message.contains("does not provide transactional apply or commit-confirm semantics")),
+            "{err:?}"
+        );
+        assert_eq!(server.state.config_diff_calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
@@ -825,6 +895,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn plan_rejects_oversized_populated_request_before_rpc() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("candidate.toml");
+        std::fs::write(&path, candidate_at_diff_request_limit()).unwrap();
+        let server = spawn_mock_server(None).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+
+        let err = plan(
+            connection,
+            path.to_str().unwrap(),
+            Some("plan-token-must-not-leak"),
+            true,
+        )
+        .await
+        .expect_err("an oversized plan request must fail before RPC");
+
+        let CliError::Argument(message) = err else {
+            panic!("expected a local argument error, got {err:?}");
+        };
+        assert!(!message.contains("plan-token-must-not-leak"));
+        assert_eq!(server.state.config_plan_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
     async fn plan_noop_reports_no_changes_for_exit_code_0() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("candidate.toml");
@@ -874,6 +968,73 @@ mod tests {
         assert_eq!(request.comment, "roll candidate");
         assert_eq!(request.confirm_id, "confirm-123");
         assert_eq!(request.confirm_timeout_seconds, 120);
+    }
+
+    #[tokio::test]
+    async fn apply_counts_metadata_and_redacts_oversize_error_before_rpc() {
+        const CANDIDATE_SECRET: &str = "candidate-secret-must-not-leak";
+        const TOKEN_SECRET: &str = "token-secret-must-not-leak";
+        const COMMENT_SECRET: &str = "comment-secret-must-not-leak";
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("candidate.toml");
+        let mut candidate = "x".repeat(
+            MAX_UNARY_CONFIG_REQUEST_BYTES
+                - PROTOBUF_STRING_FIELD_OVERHEAD_AT_LIMIT
+                - CANDIDATE_SECRET.len(),
+        );
+        candidate.push_str(CANDIDATE_SECRET);
+        assert_eq!(
+            DiffRuntimeConfigRequest {
+                candidate_toml: candidate.clone(),
+            }
+            .encoded_len(),
+            MAX_UNARY_CONFIG_REQUEST_BYTES,
+            "candidate-only arithmetic would admit this payload"
+        );
+        let populated_request = ApplyConfigTransactionRequest {
+            candidate_toml: candidate.clone(),
+            expected_runtime_snapshot_token: TOKEN_SECRET.to_string(),
+            client_request_id: "deploy-secret-must-not-leak".to_string(),
+            comment: COMMENT_SECRET.to_string(),
+            confirm_id: "confirm-secret-must-not-leak".to_string(),
+            confirm_timeout_seconds: 120,
+        };
+        let populated_size = populated_request.encoded_len();
+        assert!(populated_size > MAX_UNARY_CONFIG_REQUEST_BYTES);
+        std::fs::write(&path, candidate).unwrap();
+        let server = spawn_mock_server(None).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+
+        let err = apply(
+            connection,
+            ApplyOptions {
+                from_file: path.to_str().unwrap(),
+                expected_runtime_snapshot_token: TOKEN_SECRET,
+                client_request_id: Some("deploy-secret-must-not-leak"),
+                comment: Some(COMMENT_SECRET),
+                confirm_id: Some("confirm-secret-must-not-leak"),
+                confirm_timeout_seconds: Some(120),
+            },
+            true,
+        )
+        .await
+        .expect_err("metadata must push the populated apply request over the limit");
+
+        let CliError::Argument(message) = err else {
+            panic!("expected a local argument error, got {err:?}");
+        };
+        assert!(message.contains(&format!("{populated_size} bytes")));
+        for secret in [
+            CANDIDATE_SECRET,
+            TOKEN_SECRET,
+            "deploy-secret-must-not-leak",
+            COMMENT_SECRET,
+            "confirm-secret-must-not-leak",
+        ] {
+            assert!(!message.contains(secret), "error leaked {secret}");
+        }
+        assert_eq!(server.state.config_apply_calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

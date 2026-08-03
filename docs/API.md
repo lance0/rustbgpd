@@ -435,6 +435,16 @@ The corresponding `grpc_authz` request summaries never log `candidate_toml`
 content; they record only redacted metadata such as request body size and token
 presence.
 
+The `rbgp config diff`, `plan`, and `apply` client commands reject a fully
+encoded protobuf request only when it exceeds the 4,194,304-byte tonic unary
+message limit. The check includes every request field, not just
+`candidate_toml`, and reports sizes and the candidate path without echoing
+candidate, token, or metadata contents. This is a CLI preflight only; the proto
+and server behavior are unchanged. Oversized candidates must be validated with
+`rustbgpd --check`, deployed through coordinated config-file replacement, and
+loaded with SIGHUP; that fallback has no transactional apply or commit-confirm
+semantics.
+
 `ConfigTransactionPlanResponse` wraps the same redacted diff with:
 
 - `runtime_snapshot_token`: an optimistic-concurrency token for the live runtime
