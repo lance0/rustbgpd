@@ -1138,7 +1138,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         let routes = reply
             .entries
             .into_iter()
-            .map(|(key, entry)| {
+            .map(|(key, mut entry)| {
                 let (prefix, prefix_length) = match key.prefix {
                     Prefix::V4(p) => (p.addr.to_string(), u32::from(p.len)),
                     Prefix::V6(p) => (p.addr.to_string(), u32::from(p.len)),
@@ -1154,7 +1154,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
                     path_id: key.path_id,
                     afi_safi,
                     reason: entry.reason.as_str().to_string(),
-                    reason_detail: entry.rendered_reason_detail(),
+                    reason_detail: entry.take_rendered_reason_detail(),
                     next_hop: entry.next_hop.map(|nh| nh.to_string()).unwrap_or_default(),
                     as_path: entry.as_path,
                     communities: entry.communities,

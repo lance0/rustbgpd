@@ -156,21 +156,23 @@ impl RejectedRouteEntry {
     }
 
     #[must_use]
-    pub fn rendered_reason_detail(&self) -> String {
+    pub fn take_rendered_reason_detail(&mut self) -> String {
+        let detail = self.detail.take();
         let Some(hop) = self.aspa_invalid_hop else {
-            return self.detail.clone().unwrap_or_default();
+            return detail.unwrap_or_default();
         };
         let suffix = format!(
             "aspa_not_provider customer={} provider={}",
             hop.customer_asn, hop.provider_asn
         );
-        let Some(detail) = self.detail.as_deref() else {
+        let Some(mut detail) = detail else {
             return suffix;
         };
-        let mut prefix = detail.to_owned();
         let prefix_budget = MAX_RENDERED_REASON_DETAIL_BYTES - suffix.len() - 3;
-        truncate_marked(&mut prefix, prefix_budget);
-        format!("{prefix} | {suffix}")
+        truncate_marked(&mut detail, prefix_budget);
+        detail.push_str(" | ");
+        detail.push_str(&suffix);
+        detail
     }
 
     /// Enforce the per-entry byte bound: truncate the string fields
@@ -367,19 +369,21 @@ mod tests {
         assert_eq!(snap[0].1.reason, ImportRejectReason::PolicyReject);
     }
 
-    /// Red proof: omitting the suffix/prefix or its cap breaks exact assertions;
-    /// the no-hop detail must remain byte-identical.
+    /// Red proof: suffix/prefix/cap and no-hop bytes are exact; detail must move, not clone.
     #[test]
     fn reason_detail_appends_bounded_aspa_hop_suffix() {
         let mut rejected = entry(ImportRejectReason::PolicyReject);
         rejected.detail = Some("member-import".to_owned());
-        assert_eq!(rejected.rendered_reason_detail(), "member-import");
-        rejected.aspa_invalid_hop = Some(AspaInvalidHop {
-            customer_asn: u32::MAX,
-            provider_asn: u32::MAX,
-        });
+        assert_eq!(rejected.take_rendered_reason_detail(), "member-import");
+        assert_eq!(rejected.detail, None);
+        rejected.set_aspa_invalid_hop(u32::MAX, u32::MAX);
+        rejected.detail = Some(String::new());
+        assert_eq!(
+            rejected.take_rendered_reason_detail(),
+            " | aspa_not_provider customer=4294967295 provider=4294967295"
+        );
         rejected.detail = Some("p".repeat(500));
-        let rendered = rejected.rendered_reason_detail();
+        let rendered = rejected.take_rendered_reason_detail();
         assert!(rendered.len() <= MAX_RENDERED_REASON_DETAIL_BYTES);
         assert!(rendered.starts_with('p'));
         assert!(rendered.contains(" | aspa_not_provider customer=4294967295 provider=4294967295"));
