@@ -5,7 +5,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::TableState;
 
 use crate::proto::{GlobalState, HealthResponse, NeighborState};
-use crate::tui::data::{DataSnapshot, Freshness, RouteEventEntry};
+use crate::tui::data::{DataSnapshot, Freshness, RouteEventEntry, RouteEventUpdate};
 
 const MAX_EVENTS: usize = 100;
 
@@ -85,6 +85,7 @@ pub struct App {
     pub dynamic_range_count: Option<usize>,
     pub dynamic_ranges_freshness: Option<Freshness>,
     pub route_events: VecDeque<RouteEventEntry>,
+    pub route_event_stream_status: Option<String>,
     pub rpki_vrp_count: Option<u64>,
     pub metrics_freshness: Option<Freshness>,
 
@@ -120,6 +121,7 @@ impl App {
             dynamic_range_count: None,
             dynamic_ranges_freshness: None,
             route_events: VecDeque::new(),
+            route_event_stream_status: None,
             rpki_vrp_count: None,
             metrics_freshness: None,
             prev_counters: HashMap::new(),
@@ -348,10 +350,17 @@ impl App {
         self.peer_table_state.select(Some(selected_idx));
     }
 
-    pub fn on_route_event(&mut self, event: RouteEventEntry) {
-        self.route_events.push_front(event);
-        if self.route_events.len() > MAX_EVENTS {
-            self.route_events.pop_back();
+    pub fn on_route_event(&mut self, update: RouteEventUpdate) {
+        match update {
+            RouteEventUpdate::Event(event) => {
+                self.route_events.push_front(event);
+                if self.route_events.len() > MAX_EVENTS {
+                    self.route_events.pop_back();
+                }
+            }
+            RouteEventUpdate::StreamStatus(status) => {
+                self.route_event_stream_status = status;
+            }
         }
     }
 
@@ -517,6 +526,34 @@ mod tests {
         ]));
 
         assert_eq!(app.view, View::PeerDetail("198.51.100.1".into()));
+    }
+
+    /// Red proof: storing compatibility state in the bounded event deque (or
+    /// clearing it while evicting rows) loses the warning after 101 events.
+    #[test]
+    fn degraded_stream_warning_survives_event_deque_eviction() {
+        let mut app = App::new();
+        let warning = "DEGRADED: WatchEvents unsupported; using legacy WatchRoutes; missed-event counts unavailable";
+        app.on_route_event(RouteEventUpdate::StreamStatus(Some(warning.into())));
+        for index in 0..=MAX_EVENTS {
+            app.on_route_event(RouteEventUpdate::Event(RouteEventEntry {
+                kind: crate::tui::data::RouteEventKind::Route,
+                timestamp: index.to_string(),
+                event_type: "added".into(),
+                prefix: "203.0.113.0/24".into(),
+                peer_address: "192.0.2.1".into(),
+                previous_peer_address: String::new(),
+                target_peer_address: String::new(),
+                reason: String::new(),
+                path_id: 0,
+                missed_count: 0,
+            }));
+        }
+
+        assert_eq!(app.route_events.len(), MAX_EVENTS);
+        assert_eq!(app.route_event_stream_status.as_deref(), Some(warning));
+        app.on_route_event(RouteEventUpdate::StreamStatus(None));
+        assert!(app.route_event_stream_status.is_none());
     }
 
     #[test]

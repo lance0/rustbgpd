@@ -1584,7 +1584,7 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
   precomputed dataplane summary counters / watch channels if status-snapshot
   polling becomes expensive; subscription-side indexing or a dedicated event bus
   if subscriber count / event rate makes post-broadcast filtering expensive; a
-  TUI live event view.
+  additional TUI event categories beyond the shipped lag-aware route view.
 - **EVPN adjacent standards.** PBB-EVPN (RFC 7623), RFC 9251 IGMP/MLD proxy
   multicast EVPN routes (types 6/7/8), RFC 9572 BUM segmentation
   (types 9/10/11), EVPN optimized ingress replication (RFC 9574),
