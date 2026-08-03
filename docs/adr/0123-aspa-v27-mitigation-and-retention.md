@@ -13,9 +13,9 @@ changes.
 The mitigation recommendation changed after the original decision. Section
 5.6 of `draft-ietf-sidrops-aspa-verification-27` couples three requirements:
 
-- an Invalid route should be ineligible for route selection;
+- an `Invalid` route should be ineligible for route selection;
 - that route must remain in Adj-RIB-In for later re-evaluation; and
-- Valid and Unknown routes should have equal preference.
+- `Valid` and `Unknown` routes should have equal preference.
 
 The retention clause points to RFC 9324. Its Sections 4 and 5 require a BGP
 speaker applying RPKI-based drop policy to keep a full Adj-RIB-In or at least

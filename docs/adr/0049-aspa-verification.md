@@ -280,9 +280,9 @@ Invalid states with Unknown; no best-path algorithm or retention rule changed.
 ### 2026-08-03 — Draft-v27 mitigation is retention-gated
 
 [ADR-0123](0123-aspa-v27-mitigation-and-retention.md) records the target from
-`draft-ietf-sidrops-aspa-verification-27` §5.6: Invalid routes become
-ineligible, Valid and Unknown receive equal preference, and Invalid routes stay
-available for future local re-evaluation. It also records a behavior NO-GO
+`draft-ietf-sidrops-aspa-verification-27` §5.6: `Invalid` routes become
+ineligible, `Valid` and `Unknown` receive equal preference, and `Invalid` routes
+stay available for future local re-evaluation. It also records a behavior NO-GO
 until rustbgpd has a lossless pre-import-policy Adj-RIB-In view and can
 re-evaluate it on ASPA dataset changes without Route Refresh.
 
