@@ -656,6 +656,9 @@ pub struct ServeConfig {
     /// Daemon hook for rolling back to a retained applied config through the
     /// transaction executor. `None` fails closed with `FAILED_PRECONDITION`.
     pub config_rollback: Option<ConfigRollbackFn>,
+    /// Descriptor-pinned runtime-state authority used only for temporary
+    /// streamed config-plan ingress. `None` keeps that RPC fail-closed.
+    pub stream_plan_runtime_state_directory: Option<Arc<std::fs::File>>,
     /// Daemon hook used to reject persisted runtime-config mutations while a
     /// confirmed transaction is pending.
     pub config_mutation_gate: Option<ConfigMutationGateFn>,
@@ -832,10 +835,12 @@ fn uds_audit_context(
 }
 
 #[derive(Clone, Debug)]
-struct AuthInterceptor {
+pub(crate) struct AuthInterceptor {
     credential_store: Option<CredentialStore>,
     credential_index: usize,
     static_bearer: Option<crate::authz_runtime::BearerAuthSecret>,
+    #[cfg(test)]
+    audit_observer: Option<Arc<std::sync::Mutex<Option<crate::audit::GrpcAuditHandle>>>>,
 }
 
 impl AuthInterceptor {
@@ -844,16 +849,28 @@ impl AuthInterceptor {
             credential_store: Some(credential_store),
             credential_index,
             static_bearer: None,
+            #[cfg(test)]
+            audit_observer: None,
         }
     }
 
     #[cfg(test)]
-    fn from_token(token: Option<&str>) -> Self {
+    pub(crate) fn from_token(token: Option<&str>) -> Self {
         Self {
             credential_store: None,
             credential_index: 0,
             static_bearer: token.map(crate::authz_runtime::BearerAuthSecret::from_token),
+            audit_observer: None,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_audit_observer(
+        mut self,
+        observer: Arc<std::sync::Mutex<Option<crate::audit::GrpcAuditHandle>>>,
+    ) -> Self {
+        self.audit_observer = Some(observer);
+        self
     }
 }
 
@@ -889,8 +906,37 @@ impl Interceptor for AuthInterceptor {
         } else if let Some(bearer_auth) = &self.static_bearer {
             bearer_auth.authenticate_metadata(request.metadata())?;
         }
+        #[cfg(test)]
+        if let (Some(observer), Some(handle)) = (
+            self.audit_observer.as_ref(),
+            request.extensions().get::<crate::audit::GrpcAuditHandle>(),
+        ) {
+            *observer.lock().expect("audit observer mutex poisoned") = Some(handle.clone());
+        }
         Ok(request)
     }
+}
+
+const fn tcp_stream_plan_authenticated(tls_enabled: bool, bearer_enabled: bool) -> bool {
+    tls_enabled || bearer_enabled
+}
+
+const fn uds_stream_plan_authenticated(bearer_enabled: bool, mode: u32) -> bool {
+    bearer_enabled || uds_mode_is_owner_only(mode)
+}
+
+fn prepare_stream_plan_state(
+    runtime_state_directory: Option<&Arc<std::fs::File>>,
+) -> Option<Arc<crate::config_service::stream::StreamPlanState>> {
+    runtime_state_directory.and_then(|directory| {
+        match crate::config_service::stream::StreamPlanState::prepare(directory.as_ref()) {
+            Ok(state) => Some(state),
+            Err(error) => {
+                warn!(%error, "streamed config-plan storage unavailable");
+                None
+            }
+        }
+    })
 }
 
 /// Start all configured gRPC listeners. Runs until the shutdown signal fires
@@ -920,6 +966,8 @@ pub async fn serve(
     let (listener_shutdown_tx, listener_shutdown_rx) = watch::channel(false);
     let mut listener_tasks = JoinSet::new();
     let dataplane_events = dataplane_event_broadcaster();
+    let stream_plan =
+        prepare_stream_plan_state(config.stream_plan_runtime_state_directory.as_ref());
 
     // ADR-0072 PR-FU1: when the durable outbox is enabled, eagerly
     // spawn the dataplane poller so SubscribeFromEvent collectors
@@ -954,6 +1002,7 @@ pub async fn serve(
         let rpc_shutdown_tx = rpc_shutdown_tx.clone();
         let config_tx = config_tx.clone();
         let shutdown_rx = listener_shutdown_rx.clone();
+        let stream_plan = stream_plan.clone();
         listener_tasks.spawn(async move {
             Box::pin(run_listener(
                 listener,
@@ -965,6 +1014,7 @@ pub async fn serve(
                 shutdown_rx,
                 rpc_shutdown_tx,
                 config_tx,
+                stream_plan,
             ))
             .await
         });
@@ -1010,6 +1060,7 @@ async fn run_listener(
     shutdown_rx: watch::Receiver<bool>,
     rpc_shutdown_tx: watch::Sender<bool>,
     config_tx: Option<mpsc::Sender<ConfigEvent>>,
+    stream_plan: Option<Arc<crate::config_service::stream::StreamPlanState>>,
 ) -> Result<(), String> {
     let asn = config.asn;
     let router_id = config.router_id;
@@ -1116,6 +1167,7 @@ async fn run_listener(
                 shutdown_rx,
                 rpc_shutdown_tx,
                 config_tx,
+                stream_plan,
             ))
             .await
         }
@@ -1175,6 +1227,7 @@ async fn run_listener(
                 shutdown_rx,
                 rpc_shutdown_tx,
                 config_tx,
+                stream_plan,
             ))
             .await
         }
@@ -1240,11 +1293,13 @@ async fn run_tcp_listener(
     shutdown_rx: watch::Receiver<bool>,
     rpc_shutdown_tx: watch::Sender<bool>,
     config_tx: Option<mpsc::Sender<ConfigEvent>>,
+    stream_plan: Option<Arc<crate::config_service::stream::StreamPlanState>>,
 ) -> Result<(), String> {
     let initial_generation = credential_store.load();
     let credentials = initial_generation.listener(credential_index);
     let tls_enabled = credentials.tls.is_some();
     let auth_enabled = credentials.bearer.is_some();
+    let stream_authenticated_transport = tcp_stream_plan_authenticated(tls_enabled, auth_enabled);
     let tcp_listener = TcpListener::bind(addr)
         .await
         .map_err(|e| format!("failed to bind gRPC TCP listener {addr}: {e}"))?;
@@ -1375,14 +1430,16 @@ async fn run_tcp_listener(
         interceptor.clone(),
     ));
     routes.add_service(ConfigServiceServer::with_interceptor(
-        ConfigService::new(peer_mgr_tx.clone()).with_transaction_hooks(
-            config_transaction_apply.clone(),
-            config_transaction_confirm.clone(),
-            config_transaction_abort.clone(),
-            config_transaction_status.clone(),
-            config_history_list.clone(),
-            config_rollback.clone(),
-        ),
+        ConfigService::new(peer_mgr_tx.clone())
+            .with_transaction_hooks(
+                config_transaction_apply.clone(),
+                config_transaction_confirm.clone(),
+                config_transaction_abort.clone(),
+                config_transaction_status.clone(),
+                config_history_list.clone(),
+                config_rollback.clone(),
+            )
+            .with_stream_plan(stream_plan, stream_authenticated_transport),
         interceptor.clone(),
     ));
     routes.add_service(EvpnServiceServer::with_interceptor(
@@ -1499,6 +1556,7 @@ async fn run_uds_listener(
     shutdown_rx: watch::Receiver<bool>,
     rpc_shutdown_tx: watch::Sender<bool>,
     config_tx: Option<mpsc::Sender<ConfigEvent>>,
+    stream_plan: Option<Arc<crate::config_service::stream::StreamPlanState>>,
 ) -> Result<(), String> {
     let uds_listener = bind_uds_listener(&path, mode)?;
     let auth_enabled = credential_store
@@ -1506,6 +1564,7 @@ async fn run_uds_listener(
         .listener(credential_index)
         .bearer
         .is_some();
+    let stream_authenticated_transport = uds_stream_plan_authenticated(auth_enabled, mode);
     let audit_context = uds_audit_context(
         &path,
         mode,
@@ -1595,14 +1654,16 @@ async fn run_uds_listener(
         interceptor.clone(),
     ));
     routes.add_service(ConfigServiceServer::with_interceptor(
-        ConfigService::new(peer_mgr_tx.clone()).with_transaction_hooks(
-            config_transaction_apply.clone(),
-            config_transaction_confirm.clone(),
-            config_transaction_abort.clone(),
-            config_transaction_status.clone(),
-            config_history_list.clone(),
-            config_rollback.clone(),
-        ),
+        ConfigService::new(peer_mgr_tx.clone())
+            .with_transaction_hooks(
+                config_transaction_apply.clone(),
+                config_transaction_confirm.clone(),
+                config_transaction_abort.clone(),
+                config_transaction_status.clone(),
+                config_history_list.clone(),
+                config_rollback.clone(),
+            )
+            .with_stream_plan(stream_plan, stream_authenticated_transport),
         interceptor.clone(),
     ));
     routes.add_service(EvpnServiceServer::with_interceptor(
@@ -1732,6 +1793,53 @@ mod tests {
     use crate::proto::global_service_client::GlobalServiceClient;
     use crate::proto::{EventCategory, WatchEventsRequest};
     use crate::test_support::{session_event, spawn_fake_peer_manager, spawn_fake_rib};
+
+    #[test]
+    fn streamed_plan_production_wiring_is_singleton_and_authentication_is_explicit() {
+        const PREPARE: &str =
+            "prepare_stream_plan_state(config.stream_plan_runtime_state_directory.as_ref())";
+        assert_eq!(
+            (
+                tcp_stream_plan_authenticated(false, false),
+                tcp_stream_plan_authenticated(true, false),
+                tcp_stream_plan_authenticated(false, true),
+                uds_stream_plan_authenticated(false, 0o660),
+                uds_stream_plan_authenticated(false, 0o600),
+                uds_stream_plan_authenticated(true, 0o660)
+            ),
+            (false, true, true, false, true, true)
+        );
+        let source = include_str!("server.rs");
+        let production = source.split_once("\n#[cfg(test)]\nmod tests").unwrap().0;
+        let (_, listener_loop) = production.split_once("for listener in listeners").unwrap();
+        assert_eq!(production.matches(PREPARE).count(), 1);
+        for absent in ["prepare_stream_plan_state(", "StreamPlanState::prepare("] {
+            assert!(!listener_loop.contains(absent));
+        }
+        assert_eq!(production.matches("StreamPlanState::prepare(").count(), 1);
+        assert!(listener_loop.contains("let stream_plan = stream_plan.clone();"));
+        assert!(
+            [
+                "tcp_stream_plan_authenticated(tls_enabled, auth_enabled)",
+                "uds_stream_plan_authenticated(auth_enabled, mode)"
+            ]
+            .iter()
+            .all(|present| production.contains(present))
+        );
+        assert!(!production.contains("with_stream_plan(stream_plan, true)"));
+        let handler = include_str!("config_service/stream.rs")
+            .split_once("pub(super) async fn stream_plan_config_transaction")
+            .unwrap()
+            .1;
+        let positions = [
+            "if !authenticated_transport",
+            "let Some(state) = state.cloned()",
+            "let permit = state.try_admit()?",
+            "let mut spool = state.create_spool()?",
+        ]
+        .map(|needle| handler.find(needle).unwrap());
+        assert!(positions.is_sorted());
+    }
 
     fn tier_authz(principal: &str) -> Arc<BTreeMap<String, PrincipalRole>> {
         Arc::new(BTreeMap::from([(

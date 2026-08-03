@@ -442,6 +442,15 @@ struct MockConfigService {
 
 #[tonic::async_trait]
 impl rustbgpd_api::proto::config_service_server::ConfigService for MockConfigService {
+    async fn stream_plan_config_transaction(
+        &self,
+        _request: Request<tonic::Streaming<server_proto::StreamPlanConfigTransactionRequest>>,
+    ) -> Result<Response<server_proto::StreamPlanConfigTransactionResponse>, Status> {
+        Err(Status::unimplemented(
+            "streamed config planning is not used by CLI tests",
+        ))
+    }
+
     async fn diff_runtime_config(
         &self,
         request: Request<server_proto::DiffRuntimeConfigRequest>,

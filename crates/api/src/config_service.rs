@@ -1,5 +1,7 @@
 //! gRPC config diagnostics service.
 
+pub(crate) mod stream;
+
 use tokio::sync::{mpsc, oneshot};
 use tonic::{Request, Response, Status};
 
@@ -28,6 +30,8 @@ pub struct ConfigService {
     transaction_status: Option<ConfigTransactionStatusFn>,
     history_list: Option<ConfigHistoryListFn>,
     rollback: Option<ConfigRollbackFn>,
+    stream_plan: Option<std::sync::Arc<stream::StreamPlanState>>,
+    stream_plan_authenticated_transport: bool,
 }
 
 impl ConfigService {
@@ -41,6 +45,8 @@ impl ConfigService {
             transaction_status: None,
             history_list: None,
             rollback: None,
+            stream_plan: None,
+            stream_plan_authenticated_transport: false,
         }
     }
 
@@ -59,6 +65,16 @@ impl ConfigService {
         self.transaction_status = transaction_status;
         self.history_list = history_list;
         self.rollback = rollback;
+        self
+    }
+
+    pub(crate) fn with_stream_plan(
+        mut self,
+        stream_plan: Option<std::sync::Arc<stream::StreamPlanState>>,
+        authenticated_transport: bool,
+    ) -> Self {
+        self.stream_plan = stream_plan;
+        self.stream_plan_authenticated_transport = authenticated_transport;
         self
     }
 }
@@ -226,6 +242,19 @@ impl proto::config_service_server::ConfigService for ConfigService {
             Ok(plan) => Ok(Response::new(transaction_plan_to_proto(plan))),
             Err(error) => Err(plan_error_to_status(error)),
         }
+    }
+
+    async fn stream_plan_config_transaction(
+        &self,
+        request: Request<tonic::Streaming<proto::StreamPlanConfigTransactionRequest>>,
+    ) -> Result<Response<proto::StreamPlanConfigTransactionResponse>, Status> {
+        stream::stream_plan_config_transaction(
+            self.stream_plan.as_ref(),
+            self.stream_plan_authenticated_transport,
+            self.peer_mgr_tx.clone(),
+            request,
+        )
+        .await
     }
 
     async fn apply_config_transaction(

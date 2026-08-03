@@ -2965,6 +2965,7 @@ dependencies = [
  "bytes",
  "criterion",
  "futures",
+ "nix 0.31.3",
  "prometheus",
  "prost",
  "prost-types",
@@ -2991,6 +2992,7 @@ dependencies = [
  "tonic-prost-build",
  "tower",
  "tracing",
+ "uuid",
  "x509-parser",
  "zeroize",
 ]

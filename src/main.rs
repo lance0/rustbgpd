@@ -402,6 +402,18 @@ impl PinnedRuntimeStateDirectory {
     }
 }
 
+fn stream_plan_runtime_state_authority(
+    directory: Option<&PinnedRuntimeStateDirectory>,
+) -> Option<Arc<File>> {
+    directory.and_then(|directory| match directory.file.try_clone() {
+        Ok(file) => Some(Arc::new(file)),
+        Err(error) => {
+            warn!(%error, "streamed config-plan runtime-state authority unavailable");
+            None
+        }
+    })
+}
+
 /// Serialized descriptor-relative restart marker I/O. The shared lock closes
 /// the boot-expiry versus coordinated-shutdown publication race inside this
 /// process; exact identity comparison prevents an inherited timer from
@@ -4589,6 +4601,9 @@ async fn run<T>(
         config_transaction_status: Some(config_transaction_controller.status_fn()),
         config_history_list: Some(config_transaction_controller.history_fn()),
         config_rollback: Some(config_transaction_controller.rollback_fn()),
+        stream_plan_runtime_state_directory: stream_plan_runtime_state_authority(
+            runtime_state_directory.as_deref(),
+        ),
         config_mutation_gate: Some(config_mutation_gate.clone()),
         runtime_config_lock: runtime_config_lock.clone(),
         dataplane_route_events: Some(fib_bgp_event_tx),
@@ -5404,12 +5419,37 @@ async fn run<T>(
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::PermissionsExt as _;
     use std::path::PathBuf;
 
     use super::*;
     use crate::test_support::{
         assert_tier_authorized_test_config, tier_authorized_uds_test_config,
     };
+
+    #[test]
+    fn streamed_plan_authority_is_the_pinned_runtime_descriptor() {
+        let parent = tempfile::TempDir::new().unwrap();
+        let original = parent.path().join("runtime");
+        let moved = parent.path().join("runtime-pinned");
+        std::fs::create_dir(&original).unwrap();
+        std::fs::set_permissions(&original, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let pinned = PinnedRuntimeStateDirectory::prepare(&original).unwrap();
+        std::fs::rename(&original, &moved).unwrap();
+        std::fs::create_dir(&original).unwrap();
+        let authority = stream_plan_runtime_state_authority(Some(&pinned)).unwrap();
+        let authority_inode = authority.metadata().unwrap().ino();
+        assert_eq!(authority_inode, pinned.file.metadata().unwrap().ino());
+        assert_eq!(authority_inode, moved.metadata().unwrap().ino());
+        assert_ne!(authority_inode, original.metadata().unwrap().ino());
+        let source = include_str!("main.rs");
+        let production = source.split_once("\n#[cfg(test)]\nmod tests").unwrap().0;
+        assert!(
+            production.contains(
+                "stream_plan_runtime_state_directory: stream_plan_runtime_state_authority("
+            )
+        );
+    }
 
     #[test]
     fn daemon_runtime_shutdown_does_not_wait_for_blocking_tasks() {
