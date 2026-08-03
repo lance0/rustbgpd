@@ -45,6 +45,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Actionable authorization denials and `rbgp doctor` authz triage.** gRPC
+  PERMISSION_DENIED messages now name the principal, its current role (or
+  that it is unmapped), the required tier, and the exact
+  `[security.grpc.roles]` / listener `max_tier` config change (restart
+  required) that would permit the call; `rbgp` appends a one-line hint
+  pointing at the config surface. `rbgp doctor` gains a `daemon.authz.*`
+  check family: read-RPC reachability with denial as a first-class
+  diagnosed FAIL, the client-side connection identity shape, and the
+  daemon's enforcement mode from the effective config (skipped against
+  daemons that do not expose it).
+
 - **Config-history provenance schema and rendering.** `ListConfigHistory` and
   `rbgp config history` now expose an additive config-source digest over the
   normalized-TOML digest plus the canonical accepted rpol/dataset source roster,

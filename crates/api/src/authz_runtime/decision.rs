@@ -23,18 +23,40 @@ impl RoleDenial {
         }
     }
 
-    pub(super) fn status(self, tier: AuthTier, path: &str) -> Status {
+    pub(super) fn status(self, principal: &str, tier: AuthTier, path: &str) -> Status {
+        // The principal is the client-supplied identity label (listener
+        // `principal`, mTLS SAN, ...) and is safe to echo; never include
+        // token or certificate material here.
+        let required = minimal_sufficient_role(tier);
         match self {
             Self::PrincipalUnmapped => Status::permission_denied(format!(
-                "principal is not mapped to a gRPC role for {tier} RPC {path}",
-                tier = tier.as_str()
+                "principal \"{principal}\" has no [security.grpc.roles] entry; \
+                 {path} is a {tier} RPC requiring at least role {required} — \
+                 add \"{principal}\" = \"{required}\" under [security.grpc.roles] \
+                 in the daemon config and restart the daemon",
+                tier = tier.as_str(),
+                required = required.as_str()
             )),
             Self::RoleTierDenied { role } => Status::permission_denied(format!(
-                "principal role {role} does not permit {tier} RPC {path}",
+                "principal \"{principal}\" has role {role}; \
+                 {path} is a {tier} RPC requiring at least role {required} — \
+                 raise the role in [security.grpc.roles] \
+                 in the daemon config and restart the daemon",
                 role = role.as_str(),
-                tier = tier.as_str()
+                tier = tier.as_str(),
+                required = required.as_str()
             )),
         }
+    }
+}
+
+/// Smallest role whose ceiling reaches `tier`, used to phrase the
+/// exact fix in denial messages.
+const fn minimal_sufficient_role(tier: AuthTier) -> PrincipalRole {
+    match tier {
+        AuthTier::Read | AuthTier::SensitiveRead => PrincipalRole::Observer,
+        AuthTier::Mutating => PrincipalRole::Automation,
+        AuthTier::OperatorOnly => PrincipalRole::Operator,
     }
 }
 
