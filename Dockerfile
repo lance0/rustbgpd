@@ -17,13 +17,13 @@
 #     the fat-LTO serial link would slow every lab run.
 #
 # Multi-stage build with cargo-chef separating dep compilation from
-# workspace compilation. Two builder stages share the planner recipe
-# and the BuildKit cache mounts; only the stages a given --target
-# needs are built.
+# workspace compilation. The dev dependency target is an ordinary layer
+# so an external BuildKit cache can hand it to every source-only build;
+# only registry/git downloads remain mutable cache mounts.
 #
 # Cache levers:
-#   - cargo-chef: dep build layer invalidates only on Cargo.lock change
-#   - BuildKit cache mounts: registry + target persist across builds
+#   - cargo-chef: dep build layer invalidates only on dependency metadata changes
+#   - BuildKit cache mounts: registry + git downloads persist across builds
 #   - mold linker: parallel final link, faster than the default GNU ld
 #
 # Build:
@@ -53,27 +53,29 @@ COPY . .
 RUN cargo chef prepare --recipe-path recipe.json
 
 # ── builder: fast `ci`-profile build for the dev image ───────────────
-FROM chef AS builder
+# Keep dependency objects in an ordinary image layer: the primer exports
+# that layer and each fan-out consumer imports it on another runner.
+FROM chef AS builder-deps
 COPY --from=planner /build/recipe.json recipe.json
-# Cook deps under cache mounts. Dep layer invalidates only when
-# Cargo.lock changes; everyday source-only commits skip this step.
+# Only downloaded registries are mutable mounts. target/ must remain in
+# this layer so the external cache carries the cooked dependencies.
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,target=/build/target,sharing=locked \
-    cargo chef cook --profile ci --recipe-path recipe.json
+    cargo chef cook --workspace --profile ci --recipe-path recipe.json
+
+FROM builder-deps AS builder
 COPY . .
-# Build workspace + stash binaries outside the cache mount so the
-# final-stage COPY can find them. The target/ cache directory is a
-# tmpfs-style mount that the next stage cannot read directly.
+# Build only the workspace against the inherited dependency layer. Copy
+# the four dev binaries out, then discard target/ from the source layer.
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,target=/build/target,sharing=locked \
     cargo build --workspace --profile ci && \
     mkdir -p /out && \
     cp target/ci/rustbgpd /out/ && \
     cp target/ci/rbgp /out/ && \
     cp target/ci/evpn-tester /out/ && \
-    cp target/ci/evpn-monitor /out/
+    cp target/ci/evpn-monitor /out/ && \
+    rm -rf target
 
 # ── builder-release: benchmarked-profile build for the runtime image ─
 # Full `release` profile (fat-LTO, codegen-units=1) with jemalloc as

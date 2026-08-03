@@ -35,6 +35,9 @@ GOBGP_CHECKSUMS = {
     "amd64": "e20b2a155fe14450b9fe37e5c1a1d1bfe101eb479645f5bbea860a8fde30e522",
     "arm64": "0aaa2da6e4dcaaf57e3d0e64eae14946292b0a5894d80ef3b7ebde3bf52beb29",
 }
+RELEASE_BUILDER_HASH = (
+    "6a9846c742e01d75dc791b5ea84fcc882d463c34c77fb8f64d3f63881cf15fd2"
+)
 
 TRIGGER_HASHES = {
     "ci.yml": "65951f4c4d1d6c4d3aae2c33705d14cdc144b3efd8bcc01653049e6d7f2fb5f8",
@@ -85,6 +88,13 @@ def _jobs(text: str) -> dict[str, str]:
         ]
         for i, m in enumerate(matches)
     }
+
+
+def _docker_stage(text: str, declaration: str) -> str:
+    marker = f"FROM {declaration}\n"
+    if marker not in text:
+        return ""
+    return text.split(marker, 1)[1].split("\nFROM ", 1)[0]
 
 
 def check(root: Path) -> list[str]:
@@ -189,16 +199,41 @@ def check(root: Path) -> list[str]:
         errors.append("external action pins/counts drifted")
 
     dockerfile = (root / "Dockerfile").read_text()
-    builder = dockerfile.split("FROM chef AS builder\n", 1)[-1].split("\nFROM ", 1)[0]
-    dev = dockerfile.split("FROM debian:bookworm-slim AS dev\n", 1)[-1].split(
-        "\nFROM ", 1
-    )[0]
+    builder_deps = _docker_stage(dockerfile, "chef AS builder-deps")
+    builder = _docker_stage(dockerfile, "builder-deps AS builder")
+    builder_release = _docker_stage(dockerfile, "chef AS builder-release")
+    dev = _docker_stage(dockerfile, "debian:bookworm-slim AS dev")
     binaries = ("rustbgpd", "rbgp", "evpn-tester", "evpn-monitor")
-    for binary in binaries:
-        if f"cp target/ci/{binary} /out/" not in builder:
+    expected_mounts = ["/usr/local/cargo/registry", "/usr/local/cargo/git"]
+    for stage, body in (("builder-deps", builder_deps), ("builder", builder)):
+        mounts = re.findall(r"--mount=type=cache,target=([^,\\\s]+)", body)
+        if mounts != expected_mounts:
             errors.append(
-                f"Dockerfile: builder does not bridge target/ci/{binary} to /out"
+                f"Dockerfile: {stage} must mount registry/git only, got {mounts}"
             )
+    if (
+        "cargo chef cook --workspace --profile ci --recipe-path recipe.json"
+        not in builder_deps
+    ):
+        errors.append("Dockerfile: builder-deps is missing the ci dependency cook")
+    if "cargo build --workspace --profile ci" not in builder:
+        errors.append("Dockerfile: builder is missing the workspace source build")
+    copies = tuple(re.findall(r"\bcp target/ci/([\w-]+) /out/", builder))
+    if copies != binaries:
+        errors.append(f"Dockerfile: builder binary bridge drifted: {copies}")
+    cleanup = "rm -rf target"
+    cleanup_at = builder.find(cleanup)
+    last_copy_at = max(
+        (builder.find(f"cp target/ci/{binary} /out/") for binary in binaries),
+        default=-1,
+    )
+    if builder.count(cleanup) != 1 or cleanup_at < last_copy_at:
+        errors.append(
+            "Dockerfile: builder must remove target exactly once after binary copies"
+        )
+    if _hash(builder_release) != RELEASE_BUILDER_HASH:
+        errors.append("Dockerfile: release builder changed with the dev cache handoff")
+    for binary in binaries:
         if f"COPY --from=builder /out/{binary} /usr/local/bin/{binary}" not in dev:
             errors.append(f"Dockerfile: dev does not copy builder /out/{binary}")
 

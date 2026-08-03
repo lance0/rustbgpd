@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 from scripts.check_ci_image_primer_contract import check
+from scripts.validate_ci_image_cache_handoff import validate_log
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -296,6 +297,79 @@ class PrimerContractTests(unittest.TestCase):
         for old, new in cases:
             with self.subTest(seam=old):
                 self.mutate(relative, old, new)
+
+    def test_dockerfile_cache_handoff_is_load_bearing(self):
+        target_mount = (
+            "    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \\\n"
+        )
+        cases = (
+            (
+                "FROM builder-deps AS builder",
+                "FROM chef AS builder",
+                0,
+            ),
+            (
+                target_mount,
+                target_mount
+                + "    --mount=type=cache,target=/build/target,sharing=locked \\\n",
+                0,
+            ),
+            (
+                target_mount,
+                target_mount
+                + "    --mount=type=cache,target=/build/target,sharing=locked \\\n",
+                1,
+            ),
+            (
+                "cargo chef cook --workspace --profile ci --recipe-path recipe.json",
+                "true # cook removed",
+                0,
+            ),
+            ("    rm -rf target\n", "", 0),
+            (
+                "    cp target/ci/evpn-monitor /out/ && \\\n"
+                "    rm -rf target\n",
+                "    rm -rf target && \\\n"
+                "    cp target/ci/evpn-monitor /out/\n",
+                0,
+            ),
+            (
+                "--mount=type=cache,target=/build/target,sharing=locked",
+                "--mount=type=cache,target=/build/release-target,sharing=locked",
+                0,
+            ),
+        )
+        for old, new, occurrence in cases:
+            with self.subTest(seam=old, occurrence=occurrence):
+                self.mutate("Dockerfile", old, new, occurrence)
+
+    def test_cache_handoff_build_log_validator(self):
+        good = """\
+#10 [builder-deps 2/2] RUN --mount=x cargo chef cook --workspace --profile ci --recipe-path recipe.json
+#10 CACHED
+#12 [builder 2/2] RUN --mount=x cargo build --workspace --profile ci && cp outputs
+#12 0.100    Compiling rustbgpd-wire v0.16.1 (/build/crates/wire)
+#12 DONE 1.0s
+"""
+        crates = {"rustbgpd-wire"}
+        self.assertEqual([], validate_log(good, crates))
+
+        uncached_cook = good.replace("#10 CACHED", "#10 DONE 1.0s")
+        self.assertTrue(validate_log(uncached_cook, crates))
+
+        all_cached = good.replace(
+            "#12 0.100    Compiling rustbgpd-wire v0.16.1 (/build/crates/wire)\n"
+            "#12 DONE 1.0s",
+            "#12 CACHED",
+        )
+        self.assertTrue(validate_log(all_cached, crates))
+
+        external = good.replace(
+            "#12 DONE 1.0s",
+            "#12 0.200    Compiling tokio v1.50.0\n#12 DONE 1.0s",
+        )
+        errors = validate_log(external, crates)
+        self.assertTrue(any("tokio" in error for error in errors))
 
 
 if __name__ == "__main__":
