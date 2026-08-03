@@ -1154,7 +1154,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
                     path_id: key.path_id,
                     afi_safi,
                     reason: entry.reason.as_str().to_string(),
-                    reason_detail: entry.detail.unwrap_or_default(),
+                    reason_detail: entry.rendered_reason_detail(),
                     next_hop: entry.next_hop.map(|nh| nh.to_string()).unwrap_or_default(),
                     as_path: entry.as_path,
                     communities: entry.communities,
@@ -2250,7 +2250,7 @@ mod tests {
             )),
             path_id: 0,
         };
-        let entry = RejectedRouteEntry {
+        let mut entry = RejectedRouteEntry {
             reason: ImportRejectReason::PolicyReject,
             detail: Some("member-import".to_string()),
             next_hop: Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 2))),
@@ -2261,8 +2261,10 @@ mod tests {
             large_communities_dropped: 0,
             rpki: rustbgpd_wire::RpkiValidation::Invalid,
             aspa: rustbgpd_wire::AspaValidation::Unknown,
+            aspa_invalid_hop: None,
             rejected_at: std::time::UNIX_EPOCH + Duration::from_secs(1),
         };
+        entry.set_aspa_invalid_hop(65010, 65002);
         let resp = list_rejected_routes_response(Some(RejectedRoutesReply {
             enabled: true,
             capacity: 1024,
@@ -2278,7 +2280,10 @@ mod tests {
         assert_eq!(r.prefix_length, 24);
         assert_eq!(r.afi_safi, proto::AddressFamily::Ipv4Unicast as i32);
         assert_eq!(r.reason, "policy_reject");
-        assert_eq!(r.reason_detail, "member-import");
+        assert_eq!(
+            r.reason_detail,
+            "member-import | aspa_not_provider customer=65010 provider=65002"
+        );
         assert_eq!(r.next_hop, "10.0.0.2");
         assert_eq!(r.as_path, "65002 65010");
         assert_eq!(r.communities, vec![999]);

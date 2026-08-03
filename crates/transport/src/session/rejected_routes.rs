@@ -51,6 +51,7 @@ use std::num::NonZeroUsize;
 use std::time::SystemTime;
 
 use lru::LruCache;
+use rustbgpd_rpki::AspaInvalidHop;
 use rustbgpd_telemetry::reason_labels::ImportRejectReason;
 use rustbgpd_wire::{AspaValidation, LargeCommunity, RpkiValidation};
 
@@ -71,6 +72,9 @@ pub const MAX_RETAINED_AS_PATH_BYTES: usize = 96;
 /// Byte cap on a retained entry's `detail` string, marker included.
 /// Policy names and gate sub-reason tokens fit comfortably.
 pub const MAX_RETAINED_DETAIL_BYTES: usize = 64;
+
+/// Wire/API bound after appending an ASPA hop to `reason_detail`.
+pub const MAX_RENDERED_REASON_DETAIL_BYTES: usize = 128;
 
 /// Cap on retained standard communities; the excess is counted in
 /// [`RejectedRouteEntry::communities_dropped`].
@@ -137,11 +141,38 @@ pub struct RejectedRouteEntry {
     pub rpki: RpkiValidation,
     /// ASPA path-verification state at rejection time.
     pub aspa: AspaValidation,
+    /// First proven ASPA `NotProviderPlus` hop at rejection time.
+    pub aspa_invalid_hop: Option<AspaInvalidHop>,
     /// Wall-clock time of the rejection.
     pub rejected_at: SystemTime,
 }
 
 impl RejectedRouteEntry {
+    pub fn set_aspa_invalid_hop(&mut self, customer_asn: u32, provider_asn: u32) {
+        self.aspa_invalid_hop = Some(AspaInvalidHop {
+            customer_asn,
+            provider_asn,
+        });
+    }
+
+    #[must_use]
+    pub fn rendered_reason_detail(&self) -> String {
+        let Some(hop) = self.aspa_invalid_hop else {
+            return self.detail.clone().unwrap_or_default();
+        };
+        let suffix = format!(
+            "aspa_not_provider customer={} provider={}",
+            hop.customer_asn, hop.provider_asn
+        );
+        let Some(detail) = self.detail.as_deref() else {
+            return suffix;
+        };
+        let mut prefix = detail.to_owned();
+        let prefix_budget = MAX_RENDERED_REASON_DETAIL_BYTES - suffix.len() - 3;
+        truncate_marked(&mut prefix, prefix_budget);
+        format!("{prefix} | {suffix}")
+    }
+
     /// Enforce the per-entry byte bound: truncate the string fields
     /// (marker appended) and cap the community vectors, recording the
     /// dropped counts. `RejectedRouteStore::insert` applies this to
@@ -321,6 +352,7 @@ mod tests {
             large_communities_dropped: 0,
             rpki: RpkiValidation::NotFound,
             aspa: AspaValidation::Unknown,
+            aspa_invalid_hop: None,
             rejected_at: SystemTime::UNIX_EPOCH,
         }
     }
@@ -333,6 +365,24 @@ mod tests {
         assert_eq!(snap.len(), 1);
         assert_eq!(snap[0].0, key(1));
         assert_eq!(snap[0].1.reason, ImportRejectReason::PolicyReject);
+    }
+
+    /// Red proof: omitting the suffix/prefix or its cap breaks exact assertions;
+    /// the no-hop detail must remain byte-identical.
+    #[test]
+    fn reason_detail_appends_bounded_aspa_hop_suffix() {
+        let mut rejected = entry(ImportRejectReason::PolicyReject);
+        rejected.detail = Some("member-import".to_owned());
+        assert_eq!(rejected.rendered_reason_detail(), "member-import");
+        rejected.aspa_invalid_hop = Some(AspaInvalidHop {
+            customer_asn: u32::MAX,
+            provider_asn: u32::MAX,
+        });
+        rejected.detail = Some("p".repeat(500));
+        let rendered = rejected.rendered_reason_detail();
+        assert!(rendered.len() <= MAX_RENDERED_REASON_DETAIL_BYTES);
+        assert!(rendered.starts_with('p'));
+        assert!(rendered.contains(" | aspa_not_provider customer=4294967295 provider=4294967295"));
     }
 
     #[test]

@@ -14063,7 +14063,7 @@ async fn import_policy_filters_aspa_invalid_with_snapshot() {
     };
     let (_watch_tx, watch_rx) = watch::channel(snapshot);
     // Import policy: deny ASPA-invalid routes
-    let deny_invalid = PolicyChain::new(vec![Policy {
+    let mut deny_invalid = PolicyChain::new(vec![Policy {
         entries: vec![PolicyStatement {
             prefix: None,
             ge: None,
@@ -14087,6 +14087,7 @@ async fn import_policy_filters_aspa_invalid_with_snapshot() {
         }],
         default_action: PolicyAction::Permit,
     }]);
+    deny_invalid.policies[0].name = Some("member-import".to_owned());
     let mut session = PeerSession::new(
         config,
         metrics,
@@ -14178,6 +14179,19 @@ async fn import_policy_filters_aspa_invalid_with_snapshot() {
         }
         _ => panic!("unexpected RibUpdate variant"),
     }
+    // Load-bearing pair propagation proof: dropping the detailed verifier
+    // result at ingress, swapping pair order, or losing policy attribution
+    // makes these exact assertions fail.
+    let retained = session.rejected_routes.snapshot();
+    assert_eq!(retained.len(), 1);
+    assert_eq!(retained[0].1.detail.as_deref(), Some("member-import"));
+    assert_eq!(
+        retained[0].1.aspa_invalid_hop,
+        Some(rustbgpd_rpki::AspaInvalidHop {
+            customer_asn: 65004,
+            provider_asn: 65002,
+        })
+    );
 }
 /// Regression: when an inbound UPDATE is discarded due to RFC 4456
 /// loop detection (our cluster-id present in `CLUSTER_LIST`), any EVPN

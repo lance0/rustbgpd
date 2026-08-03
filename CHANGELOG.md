@@ -11,6 +11,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- ASPA-invalid policy rejections retain the first proven `NotProviderPlus` hop;
+  cache refresh emits one bounded top-eight summary without changing routing.
+
 - Outside-v1 `StreamPlanConfigTransaction` and `StreamApplyConfigTransaction`
   gRPC ingress for
   large config candidates. It requires an authenticated listener, accepts

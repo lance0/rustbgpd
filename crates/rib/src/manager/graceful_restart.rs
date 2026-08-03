@@ -7,7 +7,10 @@ use rustbgpd_wire::{Afi, EvpnRouteKey, Prefix, Safi};
 use tracing::info;
 
 use super::RibManager;
-use super::helpers::{LlgrPeerConfig, gauge_val, validate_route_aspa, validate_route_rpki};
+use super::helpers::{
+    AspaInvalidHopSummary, LlgrPeerConfig, gauge_val, validate_route_aspa_detailed,
+    validate_route_rpki,
+};
 use crate::route::{BgpLsFamily, BgpLsRouteKey};
 
 impl RibManager {
@@ -338,35 +341,46 @@ impl RibManager {
     }
 
     pub(super) fn handle_aspa_cache_update(&mut self, table: Arc<rustbgpd_rpki::AspaTable>) {
-        info!(
-            records = table.len(),
-            "ASPA cache update — re-validating routes"
-        );
         self.aspa_table = Some(table);
         let Some(table) = self.aspa_table.as_ref() else {
             return;
         };
-        self.metrics.set_aspa_records(gauge_val(table.len()));
+        let records = table.len();
+        self.metrics.set_aspa_records(gauge_val(records));
 
         let mut affected = HashSet::new();
+        let mut routes_scanned = 0_u64;
+        let mut changed_routes = 0_u64;
+        let mut invalid_hops = AspaInvalidHopSummary::default();
         for rib in self.ribs.values_mut() {
             for route in rib.iter_mut() {
-                let new_state = validate_route_aspa(route, table);
-                if route.aspa_state != new_state {
-                    route.aspa_state = new_state;
+                routes_scanned += 1;
+                let result = validate_route_aspa_detailed(route, table);
+                if let Some(hop) = result.invalid_hop {
+                    invalid_hops.observe(hop);
+                }
+                if route.aspa_state != result.state {
+                    route.aspa_state = result.state;
+                    changed_routes += 1;
                     affected.insert(route.prefix);
                 }
             }
         }
 
         if !affected.is_empty() {
-            info!(
-                changed = affected.len(),
-                "ASPA re-validation changed routes"
-            );
             let changed = self.recompute_best(&affected);
             self.distribute_changes(&changed, &affected);
         }
+        info!(
+            records,
+            routes_scanned,
+            changed_routes,
+            affected_prefixes = affected.len(),
+            invalid_hop_routes = invalid_hops.routes,
+            suppressed_routes = invalid_hops.suppressed_routes,
+            invalid_hops = %invalid_hops.render(),
+            "ASPA cache update re-validation complete"
+        );
     }
 
     /// Sweep stale routes for a peer whose GR timer has expired.

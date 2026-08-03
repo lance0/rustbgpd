@@ -7,6 +7,39 @@ use rustbgpd_wire::{AsPath, AsPathSegment, AspaValidation, AspaValidationContext
 
 use crate::aspa::{AspaTable, ProviderAuth};
 
+/// Proven customer/provider pair that made an ASPA path invalid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct AspaInvalidHop {
+    pub customer_asn: u32,
+    pub provider_asn: u32,
+}
+
+/// ASPA verdict plus the first proven `NotProviderPlus` hop, when one exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AspaVerificationResult {
+    pub state: AspaValidation,
+    pub invalid_hop: Option<AspaInvalidHop>,
+}
+
+impl AspaVerificationResult {
+    pub(crate) const fn state(state: AspaValidation) -> Self {
+        Self {
+            state,
+            invalid_hop: None,
+        }
+    }
+
+    const fn invalid(customer_asn: u32, provider_asn: u32) -> Self {
+        Self {
+            state: AspaValidation::Invalid,
+            invalid_hop: Some(AspaInvalidHop {
+                customer_asn,
+                provider_asn,
+            }),
+        }
+    }
+}
+
 /// Compress an `AS_PATH` into a flat list of ASNs with consecutive duplicates
 /// removed (`AS_PATH` preload compression per the ASPA verification spec).
 ///
@@ -61,9 +94,22 @@ fn leftmost_as_matches_neighbor(hops: &[u32], neighbor_asn: Option<u32>) -> bool
 /// from a provider and downstream verification is applied.
 #[must_use]
 pub fn verify(path: &AsPath, table: &AspaTable, context: AspaValidationContext) -> AspaValidation {
+    verify_detailed(path, table, context).state
+}
+
+/// Verify an `AS_PATH`, retaining the first `NotProviderPlus` hop. Invalid
+/// structural/precondition outcomes deliberately carry no pair.
+#[must_use]
+pub fn verify_detailed(
+    path: &AsPath,
+    table: &AspaTable,
+    context: AspaValidationContext,
+) -> AspaVerificationResult {
     match direction_for_role(context.local_role) {
-        VerificationDirection::Upstream => verify_upstream_with_context(path, table, context),
-        VerificationDirection::Downstream => verify_downstream(path, table, context),
+        VerificationDirection::Upstream => {
+            verify_upstream_with_context_detailed(path, table, context)
+        }
+        VerificationDirection::Downstream => verify_downstream_detailed(path, table, context),
     }
 }
 
@@ -107,32 +153,32 @@ pub fn verify(path: &AsPath, table: &AspaTable, context: AspaValidationContext) 
 /// that introduces a non-zero `max_down_ramp`) fires the corpus test.
 #[must_use]
 pub fn verify_upstream(path: &AsPath, table: &AspaTable) -> AspaValidation {
-    verify_upstream_with_context(path, table, AspaValidationContext::default())
+    verify_upstream_with_context_detailed(path, table, AspaValidationContext::default()).state
 }
 
-fn verify_upstream_with_context(
+fn verify_upstream_with_context_detailed(
     path: &AsPath,
     table: &AspaTable,
     context: AspaValidationContext,
-) -> AspaValidation {
+) -> AspaVerificationResult {
     let Some(compressed) = compress_as_path(path) else {
-        return AspaValidation::Invalid; // AS_SET present
+        return AspaVerificationResult::state(AspaValidation::Invalid); // AS_SET present
     };
 
     // Empty AS_PATH is Invalid per spec step 1.
     if compressed.is_empty() {
-        return AspaValidation::Invalid;
+        return AspaVerificationResult::state(AspaValidation::Invalid);
     }
 
     if !context.first_as_check_exempt
         && !leftmost_as_matches_neighbor(&compressed, context.neighbor_asn)
     {
-        return AspaValidation::Invalid;
+        return AspaVerificationResult::state(AspaValidation::Invalid);
     }
 
     // Single-hop path: only origin AS, no pairs to verify → Valid.
     if compressed.len() == 1 {
-        return AspaValidation::Valid;
+        return AspaVerificationResult::state(AspaValidation::Valid);
     }
 
     // Walk from origin (last element) toward neighbor (first element).
@@ -152,7 +198,7 @@ fn verify_upstream_with_context(
             }
             ProviderAuth::NotProviderPlus => {
                 // Proven non-provider relationship — path is invalid.
-                return AspaValidation::Invalid;
+                return AspaVerificationResult::invalid(customer, provider);
             }
             ProviderAuth::NoAttestation => {
                 // Cannot verify this hop — mark as incomplete.
@@ -162,23 +208,23 @@ fn verify_upstream_with_context(
     }
 
     if has_no_attestation {
-        AspaValidation::Unknown
+        AspaVerificationResult::state(AspaValidation::Unknown)
     } else {
-        AspaValidation::Valid
+        AspaVerificationResult::state(AspaValidation::Valid)
     }
 }
 
-fn verify_downstream(
+fn verify_downstream_detailed(
     path: &AsPath,
     table: &AspaTable,
     context: AspaValidationContext,
-) -> AspaValidation {
+) -> AspaVerificationResult {
     let Some(compressed) = compress_as_path(path) else {
-        return AspaValidation::Invalid; // AS_SET present
+        return AspaVerificationResult::state(AspaValidation::Invalid); // AS_SET present
     };
 
     if compressed.is_empty() {
-        return AspaValidation::Invalid;
+        return AspaVerificationResult::state(AspaValidation::Invalid);
     }
 
     // Downstream verification always enforces the leftmost-AS precondition:
@@ -187,26 +233,32 @@ fn verify_downstream(
     // exemption never applies downstream — an RS-client uses upstream
     // verification. `direction_for_role` is the single source of that mapping.
     if !leftmost_as_matches_neighbor(&compressed, context.neighbor_asn) {
-        return AspaValidation::Invalid;
+        return AspaVerificationResult::state(AspaValidation::Invalid);
     }
 
     if compressed.len() == 1 {
-        return AspaValidation::Valid;
+        return AspaVerificationResult::state(AspaValidation::Valid);
     }
 
     let origin_to_neighbor: Vec<u32> = compressed.iter().rev().copied().collect();
     let n = origin_to_neighbor.len();
-    let max_up = ramp_up_bound(&origin_to_neighbor, table, BoundMode::Max);
-    let min_up = ramp_up_bound(&origin_to_neighbor, table, BoundMode::Min);
+    let (max_up, invalid_hop) = ramp_up_bound(&origin_to_neighbor, table, BoundMode::Max);
+    let (min_up, _) = ramp_up_bound(&origin_to_neighbor, table, BoundMode::Min);
     let max_down = ramp_down_bound(&origin_to_neighbor, table, BoundMode::Max);
     let min_down = ramp_down_bound(&origin_to_neighbor, table, BoundMode::Min);
 
     if max_up + max_down < n {
-        AspaValidation::Invalid
+        AspaVerificationResult {
+            state: AspaValidation::Invalid,
+            // The downstream Invalid inequality guarantees that the max-up
+            // walk encountered `NotProviderPlus`; there is no max-down
+            // fallback because it would report a different traversal.
+            invalid_hop,
+        }
     } else if min_up + min_down < n {
-        AspaValidation::Unknown
+        AspaVerificationResult::state(AspaValidation::Unknown)
     } else {
-        AspaValidation::Valid
+        AspaVerificationResult::state(AspaValidation::Valid)
     }
 }
 
@@ -216,16 +268,27 @@ enum BoundMode {
     Min,
 }
 
-fn ramp_up_bound(origin_to_neighbor: &[u32], table: &AspaTable, mode: BoundMode) -> usize {
+fn ramp_up_bound(
+    origin_to_neighbor: &[u32],
+    table: &AspaTable,
+    mode: BoundMode,
+) -> (usize, Option<AspaInvalidHop>) {
     let n = origin_to_neighbor.len();
     for i in 0..n.saturating_sub(1) {
         let customer = origin_to_neighbor[i];
         let provider = origin_to_neighbor[i + 1];
-        if stops_ramp(table.authorized(customer, provider), mode) {
-            return i + 1;
+        let auth = table.authorized(customer, provider);
+        if stops_ramp(auth, mode) {
+            return (
+                i + 1,
+                (auth == ProviderAuth::NotProviderPlus).then_some(AspaInvalidHop {
+                    customer_asn: customer,
+                    provider_asn: provider,
+                }),
+            );
         }
     }
-    n
+    (n, None)
 }
 
 fn ramp_down_bound(origin_to_neighbor: &[u32], table: &AspaTable, mode: BoundMode) -> usize {
@@ -276,6 +339,47 @@ mod tests {
             neighbor_asn: Some(neighbor_asn),
             local_role,
             first_as_check_exempt: matches!(local_role, Some(BgpRole::RouteServerClient)),
+        }
+    }
+
+    /// Red proof: choosing the last/swapped hop or attaching one to any other
+    /// outcome breaks an exact pair/no-pair assertion.
+    #[test]
+    fn detailed_result_reports_only_first_not_provider_hop() {
+        let all_bad = make_table(vec![(1, vec![99]), (2, vec![99]), (3, vec![99])]);
+        let path = make_path(&[3, 2, 1]);
+        let expected = Some(AspaInvalidHop {
+            customer_asn: 1,
+            provider_asn: 2,
+        });
+        assert_eq!(
+            verify_detailed(&path, &all_bad, context(None, 3)),
+            AspaVerificationResult {
+                state: AspaValidation::Invalid,
+                invalid_hop: expected,
+            }
+        );
+        assert_eq!(
+            verify_detailed(&path, &all_bad, context(Some(BgpRole::Customer), 3)),
+            AspaVerificationResult {
+                state: AspaValidation::Invalid,
+                invalid_hop: expected,
+            }
+        );
+
+        let empty = make_table(vec![]);
+        let valid = make_table(vec![(1, vec![2])]);
+        let as_set = AsPath {
+            segments: vec![AsPathSegment::AsSet(vec![2, 1])],
+        };
+        for result in [
+            verify_detailed(&make_path(&[2, 1]), &valid, context(None, 2)),
+            verify_detailed(&make_path(&[2, 1]), &empty, context(None, 2)),
+            verify_detailed(&as_set, &empty, context(None, 2)),
+            verify_detailed(&make_path(&[]), &empty, context(None, 2)),
+            verify_detailed(&make_path(&[2, 1]), &empty, context(None, 9)),
+        ] {
+            assert_eq!(result.invalid_hop, None, "state={:?}", result.state);
         }
     }
 
@@ -529,6 +633,16 @@ mod tests {
             ),
             expected,
             "neighbor={neighbor_asn} role={local_role:?} path={as_path:?}"
+        );
+        assert_eq!(
+            verify_detailed(
+                &make_path(as_path),
+                table,
+                context(local_role, neighbor_asn)
+            )
+            .state,
+            expected,
+            "detailed neighbor={neighbor_asn} role={local_role:?} path={as_path:?}"
         );
     }
 
@@ -933,12 +1047,14 @@ mod tests {
                     let table = build_table_from_states(hops, states);
                     let path = make_path(hops);
                     let prod = verify_upstream(&path, &table);
+                    let detailed = verify_detailed(&path, &table, AspaValidationContext::default());
                     let refr = verify_upstream_bounds_v25(&path, &table);
                     assert_eq!(
                         prod, refr,
                         "divergence: hops={hops:?} states={states:?} \
                          prod={prod:?} ref={refr:?}"
                     );
+                    assert_eq!(detailed.state, prod, "detailed verdict drifted");
                     cases_checked += 1;
                 }
             }
