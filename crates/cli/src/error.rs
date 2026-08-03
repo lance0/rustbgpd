@@ -53,7 +53,17 @@ impl From<tonic::Status> for CliError {
             tonic::Code::NotFound => "not found",
             tonic::Code::InvalidArgument => "invalid argument",
             tonic::Code::FailedPrecondition => "precondition failed",
-            tonic::Code::PermissionDenied => "permission denied",
+            // Authorization denials carry the daemon's actionable message
+            // (principal, role, and the exact config fix); the hint adds
+            // only where that surface lives and how changes take effect.
+            tonic::Code::PermissionDenied => {
+                return CliError::Rpc(format!(
+                    "permission denied: {}\n  \
+                     hint: gRPC authorization is [security.grpc] daemon config; changes need a \
+                     daemon restart, not a reload — see docs/CONFIGURATION.md",
+                    s.message()
+                ));
+            }
             tonic::Code::Unauthenticated => "unauthenticated",
             tonic::Code::AlreadyExists => "already exists",
             tonic::Code::ResourceExhausted => "resource exhausted",
@@ -147,11 +157,13 @@ mod tests {
     }
 
     #[test]
-    fn permission_denied_gets_short_prefix() {
+    fn permission_denied_keeps_server_message_and_adds_config_hint() {
         let err = CliError::from(Status::permission_denied("token lacks write scope"));
         assert_eq!(
             err.to_string(),
-            "permission denied: token lacks write scope"
+            "permission denied: token lacks write scope\n  \
+             hint: gRPC authorization is [security.grpc] daemon config; changes need a \
+             daemon restart, not a reload — see docs/CONFIGURATION.md"
         );
     }
 

@@ -103,7 +103,10 @@ where
             let max_tier = self.context.max_tier.as_str();
             let tier = decision.tier.as_str();
             let response = Status::permission_denied(format!(
-                "listener max_tier {max_tier} does not permit {tier} RPC {path}"
+                "listener max_tier {max_tier} does not permit {tier} RPC {path}; \
+                 this cap is an intentional per-listener ceiling — raise max_tier \
+                 on this listener in the daemon config and restart the daemon, \
+                 or use a listener without the cap"
             ))
             .into_http::<Body>();
             return Box::pin(async move { Ok(response) });
@@ -134,7 +137,9 @@ where
                 denial.result_label(),
                 None,
             );
-            let response = denial.status(decision.tier, &path).into_http::<Body>();
+            let response = denial
+                .status(principal.as_ref(), decision.tier, &path)
+                .into_http::<Body>();
             return Box::pin(async move { Ok(response) });
         }
         let audit_handle = GrpcAuditHandle::default();

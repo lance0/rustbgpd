@@ -1466,6 +1466,103 @@ fn config_freshness_check(
     }
 }
 
+/// `daemon.authz.reachable`: the `GetHealth` probe outcome viewed through
+/// an authorization lens. `GetHealth` is the least-privileged RPC doctor
+/// issues (`sensitive_read`, within every role's ceiling), so a
+/// PERMISSION_DENIED there means this connection's identity cannot use the
+/// gRPC surface at all, and the check surfaces the daemon's actionable
+/// denial message as a first-class FAIL instead of a generic RPC error.
+/// Transport/handler failures stay owned by `daemon.healthy` (skip).
+fn authz_reachable_check(health_error: Option<&tonic::Status>) -> Option<Check> {
+    let name = "daemon.authz.reachable".to_string();
+    match health_error {
+        None => Some(Check {
+            name,
+            status: CheckStatus::Ok,
+            detail: "GetHealth (sensitive_read) permitted on this connection".to_string(),
+        }),
+        Some(status) if status.code() == tonic::Code::PermissionDenied => Some(Check {
+            name,
+            status: CheckStatus::Fail,
+            detail: format!(
+                "daemon denied GetHealth (sensitive_read): {}",
+                status.message()
+            ),
+        }),
+        Some(status) if status.code() == tonic::Code::Unauthenticated => Some(Check {
+            name,
+            status: CheckStatus::Fail,
+            detail: format!(
+                "daemon rejected this connection's credentials on GetHealth: {}",
+                status.message()
+            ),
+        }),
+        Some(_) => None,
+    }
+}
+
+/// `daemon.authz.identity`: what this connection looks like from the
+/// client side. The daemon does not expose the resolved principal/role
+/// over any RPC, so the check reports the transport and credential shape
+/// it can prove locally and says so honestly; the daemon's `grpc_authz`
+/// log records the authoritative per-request mapping.
+fn authz_identity_check(daemon_address: &str, token_file_configured: bool) -> Check {
+    let transport = if daemon_address.starts_with("unix://") {
+        "a unix socket"
+    } else if token_file_configured {
+        "TCP with a bearer token"
+    } else {
+        "TCP without a bearer token"
+    };
+    Check {
+        name: "daemon.authz.identity".to_string(),
+        status: CheckStatus::Ok,
+        detail: format!(
+            "connected via {transport}; the daemon assigns the principal from its listener \
+             config and does not expose the resolved principal/role over RPC — its \
+             grpc_authz log records the authoritative mapping"
+        ),
+    }
+}
+
+/// `daemon.authz.enforcement`: enforcement mode as already exposed by the
+/// daemon's own redacted effective-config dump. An older daemon whose dump
+/// lacks `[security.grpc]` yields `None` (check skipped), never a FAIL.
+fn authz_enforcement_check(effective_toml: &str) -> Option<Check> {
+    let value: toml::Value = toml::from_str(effective_toml).ok()?;
+    let grpc = value.get("security")?.get("grpc")?;
+    let enforcement = grpc.get("enforcement")?.as_str()?;
+    let mapped_roles = grpc
+        .get("roles")
+        .and_then(toml::Value::as_table)
+        .map_or(0, toml::map::Map::len);
+    let (status, detail) = match enforcement {
+        "tier" => (
+            CheckStatus::Ok,
+            format!(
+                "per-principal tier enforcement is active \
+                 ({mapped_roles} principal(s) mapped in [security.grpc.roles])"
+            ),
+        ),
+        "legacy" => (
+            CheckStatus::Warn,
+            "enforcement = \"legacy\": principal roles are audit-only and the listener \
+             max_tier authorizes calls; migrate to enforcement = \"tier\" \
+             (see docs/CONFIGURATION.md)"
+                .to_string(),
+        ),
+        other => (
+            CheckStatus::Warn,
+            format!("unrecognized [security.grpc] enforcement mode \"{other}\""),
+        ),
+    };
+    Some(Check {
+        name: "daemon.authz.enforcement".to_string(),
+        status,
+        detail,
+    })
+}
+
 pub(crate) async fn run(
     connection: Result<Connection, CliError>,
     opts: &DoctorOptions<'_>,
@@ -1511,8 +1608,16 @@ pub(crate) async fn run(
                 connection.interceptor(),
             );
 
-            // system/health.json + the healthy check.
-            match control.get_health(HealthRequest {}).await {
+            // system/health.json + the healthy check. The same probe outcome
+            // feeds the daemon.authz.* triage: a PERMISSION_DENIED here is an
+            // authorization finding, not a health one.
+            let health_result = control.get_health(HealthRequest {}).await;
+            if let Some(check) = authz_reachable_check(health_result.as_ref().err()) {
+                reporter.record(check.name, check.status, check.detail);
+            }
+            let identity = authz_identity_check(opts.daemon_address, opts.token_file_configured);
+            reporter.record(identity.name, identity.status, identity.detail);
+            match health_result {
                 Ok(resp) => {
                     let health = resp.into_inner();
                     if !health.daemon_version.is_empty() {
@@ -1610,6 +1715,9 @@ pub(crate) async fn run(
                         !deploy_targets(&toml_text).rpki_caches.is_empty(),
                         metrics_text.as_deref(),
                     ) {
+                        reporter.record(check.name, check.status, check.detail);
+                    }
+                    if let Some(check) = authz_enforcement_check(&toml_text) {
                         reporter.record(check.name, check.status, check.detail);
                     }
                     state_dir = parse_state_dir(&toml_text);
@@ -2799,6 +2907,65 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
         assert_eq!(parse_state_dir(toml), Some("/tmp/x".to_string()));
         assert_eq!(parse_state_dir("[global]\nasn = 65000\n"), None);
         assert_eq!(parse_state_dir("not toml ["), None);
+    }
+
+    #[test]
+    fn authz_reachable_maps_denial_to_fail_with_server_message() {
+        let ok = authz_reachable_check(None).unwrap();
+        assert_eq!(ok.name, "daemon.authz.reachable");
+        assert_eq!(ok.status, CheckStatus::Ok);
+
+        let denied = tonic::Status::permission_denied(
+            "principal \"ci-bot\" has no [security.grpc.roles] entry",
+        );
+        let check = authz_reachable_check(Some(&denied)).unwrap();
+        assert_eq!(check.status, CheckStatus::Fail);
+        assert!(check.detail.contains("principal \"ci-bot\""));
+
+        let unauthenticated = tonic::Status::unauthenticated("invalid bearer token");
+        let check = authz_reachable_check(Some(&unauthenticated)).unwrap();
+        assert_eq!(check.status, CheckStatus::Fail);
+        assert!(check.detail.contains("invalid bearer token"));
+
+        // Transport/handler failures are daemon.healthy's finding.
+        assert!(authz_reachable_check(Some(&tonic::Status::internal("boom"))).is_none());
+    }
+
+    #[test]
+    fn authz_identity_reports_transport_and_names_the_limitation() {
+        let uds = authz_identity_check("unix:///run/rustbgpd/grpc.sock", false);
+        assert_eq!(uds.name, "daemon.authz.identity");
+        assert_eq!(uds.status, CheckStatus::Ok);
+        assert!(uds.detail.contains("unix socket"));
+        assert!(
+            uds.detail
+                .contains("not expose the resolved principal/role")
+        );
+
+        let tcp_token = authz_identity_check("127.0.0.1:50051", true);
+        assert!(tcp_token.detail.contains("TCP with a bearer token"));
+
+        let tcp_plain = authz_identity_check("127.0.0.1:50051", false);
+        assert!(tcp_plain.detail.contains("TCP without a bearer token"));
+    }
+
+    #[test]
+    fn authz_enforcement_reads_effective_config_and_skips_when_absent() {
+        let tier = "[security.grpc]\nenforcement = \"tier\"\n\
+                    [security.grpc.roles]\nadmin = \"operator\"\n";
+        let check = authz_enforcement_check(tier).unwrap();
+        assert_eq!(check.name, "daemon.authz.enforcement");
+        assert_eq!(check.status, CheckStatus::Ok);
+        assert!(check.detail.contains("1 principal(s) mapped"));
+
+        let legacy = "[security.grpc]\nenforcement = \"legacy\"\n";
+        let check = authz_enforcement_check(legacy).unwrap();
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(check.detail.contains("audit-only"));
+
+        // Older daemons without the section in the dump: skip, never FAIL.
+        assert!(authz_enforcement_check("[global]\nasn = 65000\n").is_none());
+        assert!(authz_enforcement_check("not toml [").is_none());
     }
 
     #[test]

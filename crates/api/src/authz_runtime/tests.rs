@@ -654,6 +654,118 @@ async fn listener_cap_remains_stricter_than_operator_role() {
     assert!(!text.contains("result=\"role_tier_denied\""));
 }
 
+// The three denial messages are an operator-facing contract: each must
+// name the principal in play and the smallest sufficient fix. Dropping
+// the fix clause (the "add ... and restart" / "raise ..." tail) from
+// any message turns the matching assertion red.
+
+#[tokio::test]
+async fn unmapped_denial_names_principal_and_roles_entry_fix() {
+    let metrics = BgpMetrics::new();
+    let context = GrpcAuthAuditContext::new(
+        "unix:///run/rustbgpd/grpc.sock",
+        "read_write",
+        AuthTier::OperatorOnly,
+        GrpcAuthnKind::Uds,
+        "ci-bot",
+    )
+    .with_role_enforcement(AuthEnforcement::Tier, roles(&[]));
+    let layer = GrpcAuthzLayer::new(context, metrics);
+    let mut service = layer.layer(EchoService);
+    let request = Request::builder()
+        .uri("/rustbgpd.v1.ConfigService/DiffRuntimeConfig")
+        .body(Body::empty())
+        .unwrap();
+
+    let response = service.call(request).await.unwrap();
+    let status = tonic::Status::from_header_map(response.headers()).unwrap();
+    assert_eq!(status.code(), tonic::Code::PermissionDenied);
+    let message = status.message();
+    assert!(
+        message.contains("principal \"ci-bot\" has no [security.grpc.roles] entry"),
+        "message must name the unmapped principal: {message}"
+    );
+    assert!(
+        message.contains(
+            "add \"ci-bot\" = \"observer\" under [security.grpc.roles] \
+             in the daemon config and restart the daemon"
+        ),
+        "message must carry the smallest sufficient fix: {message}"
+    );
+}
+
+#[tokio::test]
+async fn role_tier_denial_names_principal_current_and_required_role() {
+    let metrics = BgpMetrics::new();
+    let context = tier_test_context(
+        "tcp://127.0.0.1:50051",
+        "read_write",
+        AuthTier::OperatorOnly,
+        GrpcAuthnKind::BearerToken,
+        "ci-bot",
+        PrincipalRole::Observer,
+    );
+    let layer = GrpcAuthzLayer::new(context, metrics);
+    let mut service = layer.layer(EchoService);
+    let request = Request::builder()
+        .uri("/rustbgpd.v1.NeighborService/AddNeighbor")
+        .body(Body::empty())
+        .unwrap();
+
+    let response = service.call(request).await.unwrap();
+    let status = tonic::Status::from_header_map(response.headers()).unwrap();
+    assert_eq!(status.code(), tonic::Code::PermissionDenied);
+    let message = status.message();
+    assert!(
+        message.contains("principal \"ci-bot\" has role observer"),
+        "message must name the principal and its current role: {message}"
+    );
+    assert!(
+        message.contains(
+            "is a mutating RPC requiring at least role automation — \
+             raise the role in [security.grpc.roles] \
+             in the daemon config and restart the daemon"
+        ),
+        "message must carry the smallest sufficient fix: {message}"
+    );
+}
+
+#[tokio::test]
+async fn listener_cap_denial_names_cap_and_listener_fix() {
+    let metrics = BgpMetrics::new();
+    let context = tier_test_context(
+        "tcp://127.0.0.1:50051",
+        "read_write",
+        AuthTier::SensitiveRead,
+        GrpcAuthnKind::BearerToken,
+        "ci-bot",
+        PrincipalRole::Operator,
+    );
+    let layer = GrpcAuthzLayer::new(context, metrics);
+    let mut service = layer.layer(EchoService);
+    let request = Request::builder()
+        .uri("/rustbgpd.v1.NeighborService/AddNeighbor")
+        .body(Body::empty())
+        .unwrap();
+
+    let response = service.call(request).await.unwrap();
+    let status = tonic::Status::from_header_map(response.headers()).unwrap();
+    assert_eq!(status.code(), tonic::Code::PermissionDenied);
+    let message = status.message();
+    assert!(
+        message.contains("listener max_tier sensitive_read does not permit mutating RPC"),
+        "message must name the listener cap: {message}"
+    );
+    assert!(
+        message.contains(
+            "this cap is an intentional per-listener ceiling — raise max_tier \
+             on this listener in the daemon config and restart the daemon, \
+             or use a listener without the cap"
+        ),
+        "message must carry the smallest sufficient fix: {message}"
+    );
+}
+
 #[test]
 fn audit_context_debug_redacts_bearer_secret() {
     let context = GrpcAuthAuditContext::new(
