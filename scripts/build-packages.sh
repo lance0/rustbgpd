@@ -71,17 +71,19 @@ grep -q '^runtime_state_dir = "/tmp/rustbgpd"$' examples/minimal/config.toml || 
     echo "error: examples/minimal/config.toml runtime_state_dir no longer matches /tmp/rustbgpd; update this script" >&2
     exit 1
 }
-grep -q '^path = "/tmp/rustbgpd/grpc.sock"$' examples/minimal/config.toml || {
-    echo "error: examples/minimal/config.toml grpc_uds path no longer matches /tmp/rustbgpd; update this script" >&2
+if grep -Eq '^\[global\.telemetry\.grpc_uds\]|^\[security\.grpc(\.roles)?\]|^principal[[:space:]]*=' \
+        examples/minimal/config.toml; then
+    echo "error: examples/minimal/config.toml must use the implicit owner-only gRPC UDS; update this script" >&2
     exit 1
-}
+fi
 grep -q '^# For local development' examples/minimal/config.toml || {
     echo "error: examples/minimal/config.toml dev-paths comment paragraph moved; update this script" >&2
     exit 1
 }
 mkdir -p "$pkgroot/etc/rustbgpd"
 # Swap the dev-paths comment paragraph for a package-accurate one, then
-# point the state paths at the production directory.
+# point the runtime state at the production directory. The implicit gRPC UDS
+# follows runtime_state_dir, so it needs no independent rewrite or drift fence.
 sed -e '/^# For local development/,/^# systemd unit (examples\/systemd\/)/c\
 # Installed by the rustbgpd package. State lives in /var/lib/rustbgpd,\
 # created and owned by the systemd unit (StateDirectory=rustbgpd).' \

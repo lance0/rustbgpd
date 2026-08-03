@@ -218,15 +218,18 @@ fn isolated_config(source: &str, runtime_dir: &Path) -> String {
         "prometheus_addr".into(),
         toml::Value::String("127.0.0.1:0".into()),
     );
-    let grpc_uds = telemetry
+    // Preserve absence so minimal exercises the production implicit listener;
+    // explicit starter listeners still need their path isolated.
+    if let Some(grpc_uds) = telemetry
         .get_mut("grpc_uds")
         .and_then(toml::Value::as_table_mut)
-        .expect("starter has [global.telemetry.grpc_uds]");
-    grpc_uds.insert(
-        "path".into(),
-        toml::Value::String(runtime_dir.join("grpc.sock").display().to_string()),
-    );
-    grpc_uds.insert("enabled".into(), toml::Value::Boolean(true));
+    {
+        grpc_uds.insert(
+            "path".into(),
+            toml::Value::String(runtime_dir.join("grpc.sock").display().to_string()),
+        );
+        grpc_uds.insert("enabled".into(), toml::Value::Boolean(true));
+    }
     toml::to_string_pretty(&config).expect("serialize isolated starter")
 }
 

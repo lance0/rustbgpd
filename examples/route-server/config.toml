@@ -38,23 +38,17 @@ prometheus_addr = "127.0.0.1:9179"
 log_format = "json"
 
 # For remote management, prefer an mTLS proxy (see examples/envoy-mtls/).
-# Uncomment below only for trusted management networks:
+# For a loopback-only bearer listener, create the token file and uncomment
+# this complete principal-to-role mapping:
 # [global.telemetry.grpc_tcp]
 # address = "127.0.0.1:50051"
+# token_file = "/etc/rustbgpd/grpc-token"
+# principal = "remote-operator"
+# [security.grpc.roles]
+# remote-operator = "operator"
 
-[global.telemetry.grpc_uds]
-path = "/var/lib/rustbgpd/grpc.sock"
-# Audit principal for this local socket (UDS access is gated by file perms);
-# mapped to a role in [security.grpc.roles] below.
-principal = "operator"
-
-[security.grpc]
-# Per-principal gRPC authorization (ADR-0064; default since v0.24.0).
-# Roles: observer (sensitive_read) | automation (mutating) | operator (operator_only)
-enforcement = "tier"
-
-[security.grpc.roles]
-operator = "operator"
+# Local gRPC uses the implicit owner-only socket at
+# <runtime_state_dir>/grpc.sock and the local-operator identity.
 
 # --- RPKI origin validation ---
 

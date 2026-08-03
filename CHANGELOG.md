@@ -49,6 +49,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The ordinary example configs now rely on the default owner-only gRPC Unix
+  socket instead of repeating an explicit principal and role map. Socket
+  access and operator authority are unchanged; audit identity changes from
+  `operator` / `authn=uds` to `local-operator` / `authn=uds_owner`. The
+  route-collector example keeps its explicit observer boundary, Docker Compose
+  keeps authenticated TCP, and the three commented TCP recipes now include a
+  complete token, principal, and role mapping.
+
 - **Implicit `local-operator` identity for owner-only UDS listeners
   (ADR-0064 amendment).** Under the default tier enforcement, a UDS
   listener (implicit or declared) with no `principal` and an owner-only
