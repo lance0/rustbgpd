@@ -1920,7 +1920,7 @@ fn write_rejected_routes_table(
             r.as_path,
         )?;
     }
-    Ok(())
+    writer.flush()
 }
 
 fn print_rejected_routes(resp: &ListRejectedRoutesResponse, json: bool) -> Result<(), CliError> {
@@ -2221,9 +2221,28 @@ mod tests {
     }
 
     /// The two validation columns are independent facts; using the RPKI value
-    /// for both, or omitting ASPA, makes the exact token proof red.
+    /// for both, omitting ASPA, or skipping the final flush makes the
+    /// corresponding assertion red.
     #[test]
     fn rejected_route_table_distinguishes_rpki_and_aspa() {
+        #[derive(Default)]
+        struct FlushWriter {
+            bytes: Vec<u8>,
+            flushed: bool,
+        }
+
+        impl Write for FlushWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.bytes.extend_from_slice(buf);
+                Ok(buf.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                self.flushed = true;
+                Ok(())
+            }
+        }
+
         let response = ListRejectedRoutesResponse {
             routes: vec![
                 crate::proto::RejectedRoute {
@@ -2244,9 +2263,10 @@ mod tests {
             ],
             ..Default::default()
         };
-        let mut rendered = Vec::new();
+        let mut rendered = FlushWriter::default();
         write_rejected_routes_table(&mut rendered, &response).unwrap();
-        let rendered = String::from_utf8(rendered).unwrap();
+        assert!(rendered.flushed);
+        let rendered = String::from_utf8(rendered.bytes).unwrap();
         let mut lines = rendered.lines();
         assert!(lines.next().unwrap().contains("RPKI       ASPA"));
         lines.next();
