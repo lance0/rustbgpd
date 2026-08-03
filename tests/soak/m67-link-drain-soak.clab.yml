@@ -89,6 +89,7 @@ topology:
       cmd: sleep infinity
       binds:
         - ../interop/configs/rustbgpd-m67-vtep.toml:/etc/rustbgpd/config.toml:ro
+        - ../fixtures/grpc-test-only-operator.token:/run/rustbgpd/grpc-test-only-operator.token:ro
         - ../interop/scripts/start-rustbgpd-vtep.sh:/usr/local/bin/start-rustbgpd-vtep.sh:ro
       exec:
         - sh -c "echo 1 > /proc/sys/net/ipv6/conf/all/disable_ipv6"
@@ -117,6 +118,7 @@ topology:
         - bridge fdb append 00:00:00:00:00:00 dev vxlan100 dst 10.0.2.2 self permanent
       env:
         RUST_LOG: info,rustbgpd_evpn_linux=debug,rustbgpd::evpn_dataplane=debug
+        RUSTBGPD_TOKEN_FILE: /run/rustbgpd/grpc-test-only-operator.token
 
     pe1:
       kind: linux

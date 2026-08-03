@@ -111,10 +111,10 @@ route_reflector_client = true
 orr_vantage = "192.0.2.7"
 "#;
 
-/// The pre-ADR-0064 gRPC authorization mode. A genuine risk in the
-/// operator's own config, so `--check` reports it and `--strict` fails on
-/// it; iBGP and no ORR vantage, so it is the only warning.
-const LEGACY_GRPC_WARNS: &str = r#"
+/// The pre-ADR-0064 gRPC authorization mode, removed in v0.63.0: the
+/// config no longer loads at all, so `--check` fails with the migration
+/// message rather than warning.
+const LEGACY_GRPC_REJECTED: &str = r#"
 [global]
 asn = 65001
 router_id = "10.0.0.1"
@@ -132,11 +132,11 @@ address = "10.0.0.2"
 remote_asn = 65001
 "#;
 
-/// Three distinct warning kinds at once: an unpoliced eBGP neighbor, an
-/// unresolvable ORR vantage, and legacy gRPC enforcement. The count is what
-/// `--strict` gates on, so a fix that surfaced each warning without summing
-/// them into one total would still report the wrong number here.
-const THREE_KINDS: &str = r#"
+/// Two distinct warning kinds at once: an unpoliced eBGP neighbor and an
+/// unresolvable ORR vantage. The count is what `--strict` gates on, so a
+/// fix that surfaced each warning without summing them into one total
+/// would still report the wrong number here.
+const TWO_KINDS: &str = r#"
 [global]
 asn = 65001
 router_id = "10.0.0.1"
@@ -145,9 +145,6 @@ runtime_state_dir = "/tmp/rustbgpd-check-strict"
 
 [global.telemetry]
 log_format = "json"
-
-[security.grpc]
-enforcement = "legacy"
 
 [[neighbors]]
 address = "10.0.0.2"
@@ -321,54 +318,42 @@ fn check_strict_fails_on_a_validation_origin_warning() {
     );
 }
 
-/// Legacy gRPC enforcement is a risk in the operator's own config, not an
-/// unfinished feature of the release, so `--check` reports it and it must
-/// state the migration action rather than only the state.
+/// Legacy gRPC enforcement was removed in v0.63.0: `--check` (strict or
+/// not) fails at load with the one-shot migration message. Restoring the
+/// old validation acceptance makes this red.
 #[test]
-fn check_reports_legacy_grpc_enforcement() {
-    let (code, stdout, stderr) = run(LEGACY_GRPC_WARNS, &["--check"]);
-    assert_eq!(code, Some(0), "stdout:\n{stdout}\nstderr:\n{stderr}");
-    assert!(
-        stdout.contains("config VALID, 1 WARNING — NOT a clean check"),
-        "summary line did not count the legacy-enforcement warning:\n{stdout}"
-    );
-    assert!(
-        stderr.contains("security.grpc.enforcement = \"legacy\""),
-        "warning did not name the condition:\n{stderr}"
-    );
-    assert!(
-        stderr.contains("max_tier cap"),
-        "warning did not name the consequence:\n{stderr}"
-    );
-    assert!(
-        stderr.contains("To migrate:")
-            && stderr.contains("[security.grpc.roles]")
-            && stderr.contains("security.grpc.enforcement = \"tier\""),
-        "warning did not give the migration action:\n{stderr}"
-    );
-}
-
-#[test]
-fn check_strict_fails_on_legacy_grpc_enforcement() {
-    let (code, stdout, stderr) = run(LEGACY_GRPC_WARNS, &["--check", "--strict"]);
-    assert_eq!(code, Some(1), "stdout:\n{stdout}\nstderr:\n{stderr}");
+fn check_rejects_legacy_grpc_enforcement() {
+    for args in [&["--check"][..], &["--check", "--strict"][..]] {
+        let (code, stdout, stderr) = run(LEGACY_GRPC_REJECTED, args);
+        assert_eq!(code, Some(1), "stdout:\n{stdout}\nstderr:\n{stderr}");
+        assert!(
+            stderr.contains("security.grpc.enforcement = \"legacy\" was removed in v0.63.0"),
+            "rejection did not name the removal:\n{stderr}"
+        );
+        assert!(
+            stderr.contains("delete the whole [security.grpc] block"),
+            "rejection did not give the delete-the-block guidance:\n{stderr}"
+        );
+        assert!(
+            stderr.contains("enforcement = \"tier\"")
+                && stderr.contains("[security.grpc.roles]")
+                && stderr.contains("\"<your-principal>\" = \"operator\""),
+            "rejection did not carry the paste block:\n{stderr}"
+        );
+    }
 }
 
 /// The aggregate. `--strict` gates on the total, so every kind has to be
 /// summed into the one count — the case a per-warning fix gets wrong.
 #[test]
 fn check_counts_every_warning_kind_together() {
-    let (code, stdout, stderr) = run(THREE_KINDS, &["--check"]);
+    let (code, stdout, stderr) = run(TWO_KINDS, &["--check"]);
     assert_eq!(code, Some(0), "stdout:\n{stdout}\nstderr:\n{stderr}");
     assert!(
-        stdout.contains("config VALID, 3 WARNINGS — NOT a clean check"),
-        "the three warning kinds were not summed into one total:\n{stdout}"
+        stdout.contains("config VALID, 2 WARNINGS — NOT a clean check"),
+        "the two warning kinds were not summed into one total:\n{stdout}"
     );
-    for expected in [
-        "eBGP neighbor",
-        "orr_vantage",
-        "security.grpc.enforcement = \"legacy\"",
-    ] {
+    for expected in ["eBGP neighbor", "orr_vantage"] {
         assert!(
             stderr.contains(expected),
             "{expected:?} missing from the framed warnings:\n{stderr}"
@@ -376,11 +361,11 @@ fn check_counts_every_warning_kind_together() {
     }
     assert_eq!(
         stderr.matches("WARNING:").count(),
-        3,
+        2,
         "each kind gets its own framed block:\n{stderr}"
     );
 
-    let (code, _, _) = run(THREE_KINDS, &["--check", "--strict"]);
+    let (code, _, _) = run(TWO_KINDS, &["--check", "--strict"]);
     assert_eq!(code, Some(1), "strict must fail the same config");
 }
 

@@ -36,9 +36,6 @@ prometheus_addr = "127.0.0.1:{metrics_port}"
 [global.telemetry.grpc_uds]
 path = "{socket}"
 
-[security.grpc]
-enforcement = "legacy"
-
 [[neighbors]]
 address = "127.1.0.1"
 remote_asn = 64512

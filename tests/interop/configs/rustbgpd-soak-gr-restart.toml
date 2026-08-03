@@ -11,8 +11,8 @@ listen_port = 179
 prometheus_addr = "0.0.0.0:9179"
 log_format = "json"
 
-[global.telemetry.grpc_tcp]
-address = "0.0.0.0:50051"
+# No gRPC listener: this soak observes via Prometheus and FRR only. The
+# implicit owner-only UDS listener satisfies default tier enforcement.
 
 [[neighbors]]
 address = "10.0.0.2"
@@ -23,7 +23,3 @@ graceful_restart = true
 gr_restart_time = 15
 gr_stale_routes_time = 20
 llgr_stale_time = 60
-
-# Legacy: the GR-restart soak observes via Prometheus and FRR only, with no gRPC client or token.
-[security.grpc]
-enforcement = "legacy"

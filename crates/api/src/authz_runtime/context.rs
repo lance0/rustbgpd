@@ -8,7 +8,7 @@ use tonic::codegen::http;
 use tonic::transport::server::{TcpConnectInfo, TlsConnectInfo};
 use tracing::debug;
 
-use crate::authz::{AuthEnforcement, AuthTier, LOCAL_OPERATOR_PRINCIPAL, PrincipalRole};
+use crate::authz::{AuthTier, LOCAL_OPERATOR_PRINCIPAL, PrincipalRole};
 use crate::authz_principal::{PrincipalExtractionError, principal_from_peer_certs};
 use crate::connect_info::RustbgpdTcpConnectInfo;
 use crate::credentials::{CredentialStore, PinnedCredentialGeneration};
@@ -53,7 +53,6 @@ pub struct GrpcAuthAuditContext {
     pub(super) max_tier: AuthTier,
     pub(super) authn: GrpcAuthnKind,
     principal: String,
-    pub(super) enforcement: AuthEnforcement,
     roles: Arc<BTreeMap<String, PrincipalRole>>,
     // Role granted to the reserved `local-operator` principal on an
     // owner-only UDS listener without consulting the roles map — the
@@ -80,7 +79,6 @@ impl GrpcAuthAuditContext {
             max_tier,
             authn,
             principal: principal.into(),
-            enforcement: AuthEnforcement::Legacy,
             roles: Arc::new(BTreeMap::new()),
             implicit_role: None,
             resolve_mtls_principal: false,
@@ -89,14 +87,11 @@ impl GrpcAuthAuditContext {
         }
     }
 
-    /// Attach the global ADR-0064 enforcement mode and principal-role map.
+    /// Attach the global ADR-0064 principal-role map. Role ceilings are
+    /// enforced unconditionally — the removed "legacy" mode was the only
+    /// way to skip them.
     #[must_use]
-    pub fn with_role_enforcement(
-        mut self,
-        enforcement: AuthEnforcement,
-        roles: Arc<BTreeMap<String, PrincipalRole>>,
-    ) -> Self {
-        self.enforcement = enforcement;
+    pub fn with_roles(mut self, roles: Arc<BTreeMap<String, PrincipalRole>>) -> Self {
         self.roles = roles;
         self
     }
@@ -174,9 +169,6 @@ impl GrpcAuthAuditContext {
     }
 
     pub(super) fn role_denial(&self, principal: &str, tier: AuthTier) -> Option<RoleDenial> {
-        if self.enforcement != AuthEnforcement::Tier {
-            return None;
-        }
         let Some(role) = self.resolve_role(principal) else {
             return Some(RoleDenial::PrincipalUnmapped);
         };
@@ -187,9 +179,6 @@ impl GrpcAuthAuditContext {
     }
 
     pub(super) fn role_label(&self, principal: &str) -> &'static str {
-        if self.enforcement != AuthEnforcement::Tier {
-            return "legacy";
-        }
         self.resolve_role(principal)
             .map_or("unmapped", PrincipalRole::as_str)
     }

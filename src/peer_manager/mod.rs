@@ -448,20 +448,14 @@ impl PeerManager {
                 },
                 // PeerManager::new constructs an in-memory baseline
                 // Config before the operator's TOML is applied. The
-                // schema default is `enforcement = "tier"` after the
-                // v0.24.0 flip, but a defaulted Config has no
-                // [security.grpc.roles], which would fail
-                // post-apply validation in `apply_config_event`.
-                // Use the explicit legacy posture here so the
-                // baseline is internally consistent; the real
-                // config arrives via reload / config-bridge with
-                // its own [security.grpc] block.
-                security: crate::config::SecurityConfig {
-                    grpc: crate::config::GrpcSecurityConfig {
-                        enforcement: crate::config::GrpcEnforcementConfig::Legacy,
-                        roles: std::collections::HashMap::new(),
-                    },
-                },
+                // tier default with no listeners and no roles is valid
+                // since the implicit local-operator amendment (the
+                // implicit owner-only UDS listener needs no
+                // [security.grpc.roles]), so the baseline can carry
+                // the plain schema default; the real config arrives
+                // via reload / config-bridge with its own
+                // [security.grpc] block.
+                security: crate::config::SecurityConfig::default(),
                 neighbors: Vec::new(),
                 peer_groups: HashMap::new(),
                 policy: crate::config::PolicyConfig::default(),

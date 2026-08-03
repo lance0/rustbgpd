@@ -138,12 +138,12 @@ machine-readable export for auditors and generated clients; the Rust `authz`
 tests verify it against the source-of-truth matrix. The runtime records tier
 decisions for every RPC via structured `grpc_authz` logs and
 `bgp_grpc_authz_decisions_total{tier,result,authn,access_mode}`. Listener
-`max_tier` caps are enforced in all modes. When
-`[security.grpc].enforcement = "tier"` is enabled, the same runtime layer also
-enforces the authenticated principal's configured role ceiling before the
-handler runs; `"tier"` is the default since v0.24.0, and `"legacy"` is the
-temporary migration mode. In Legacy, configured roles are audit context only
-and the listener's `max_tier` remains the authoritative authorization boundary.
+`max_tier` caps are always enforced. The same runtime layer also enforces the
+authenticated principal's configured role ceiling before the handler runs —
+unconditionally: `"tier"` has been the default since v0.24.0 and is the only
+mode since v0.63.0. The former `"legacy"` migration mode (roles recorded as
+audit context but never enforced) was removed; a config that still sets it is
+rejected at boot, `--check`, and reload with a migration message.
 Forwarded calls emit result-aware labels such as `result="handler_ok"` or
 `result="handler_invalid_argument"` after the handler returns. Rejected calls use
 bounded pre-handler labels: `result="listener_tier_denied"` means the method was
@@ -158,32 +158,36 @@ logs; `DiffRuntimeConfigRequest.candidate_toml`,
 `ApplyConfigTransactionRequest.candidate_toml` are always summarized as
 redacted metadata, transaction apply comments are not logged verbatim, and
 `SetPeerGroup` logs MD5 state without the MD5 value.
-Operators can now predeclare `[security.grpc.roles]` and set explicit
-listener `principal` labels for bearer-token TCP and UDS listeners. In legacy
-mode those labels improve audit identity only; in tier mode they are the
-principal strings looked up in `[security.grpc.roles]`.
+Operators declare `[security.grpc.roles]` and set explicit listener
+`principal` labels for bearer-token TCP and UDS listeners; those labels are
+the principal strings looked up in `[security.grpc.roles]`.
 Native mTLS listeners derive the audit principal from the client certificate
 using ADR-0064 precedence: `rustbgpd:` URI SAN, then email SAN, then Subject
-CN. A validated cert without those fields falls back to `mtls-unresolved` while
-legacy mode remains active. Extracted principal values must fit the bounded
+CN. Extracted principal values must fit the bounded
 audit label form and must not contain embedded control characters; unsupported
-values also fall back to `mtls-unresolved`.
+values fall back to `mtls-unresolved`, which cannot be mapped in
+`[security.grpc.roles]` and is therefore denied.
 
-Tier enforcement is the default since v0.24.0. When upgrading from an older
-release (or from `enforcement = "legacy"`), stage `[security.grpc.roles]` plus
-explicit listener principals, validate the candidate config with
-`rustbgpd --check`, then move to `enforcement = "tier"` (or rely on the
-default). The implicit default UDS listener needs no staging: it is
-owner-only, so under tier its clients are authorized as the implicit
-`local-operator` principal at operator tier without a roles entry. Only
-group/world-accessible UDS sockets require an explicit `principal` mapped in
-`[security.grpc.roles]`.
-Explicit Legacy remains accepted today only for temporary migration; it emits
-a validation warning and fails `rustbgpd --check --strict`. The original
-startup deprecation warning shipped in v0.51.0 on 2026-07-11; validation and
-strict-check enforcement followed in v0.61.0. The two-minor/90-day
-compatibility floor is therefore approximately 2026-10-09. That floor is
-eligibility for a later removal decision, not a promised removal date.
+Tier enforcement is the default since v0.24.0 and mandatory since v0.63.0.
+When upgrading from an older release, stage `[security.grpc.roles]` plus
+explicit listener principals and validate the candidate config with
+`rustbgpd --check`. The implicit default UDS listener needs no staging: it is
+owner-only, so its clients are authorized as the implicit
+`local-operator` principal at operator tier without a roles entry — a config
+whose only management surface is a local socket needs no `[security.grpc]`
+block at all. Only group/world-accessible UDS sockets require an explicit
+`principal` mapped in `[security.grpc.roles]`.
+`enforcement = "legacy"` was removed in v0.63.0 and is rejected at
+validation. Earlier editions of this document projected a two-minor/90-day
+compatibility floor (approximately 2026-10-09) as the earliest *eligibility*
+for removal; that guidance is superseded. The removal landed earlier as an
+explicit owner decision under the project's pre-1.0 alpha stability posture
+(see `README`/`ROADMAP` on version stability), taken once the implicit
+`local-operator` identity removed the migration burden for local-only
+deployments: for them the migration is deleting the `[security.grpc]` block.
+A stuck operator keeps a named-principal setup working with three lines —
+`enforcement = "tier"` plus a `[security.grpc.roles]` entry mapping the
+listener's `principal`; the rejection message carries the exact paste block.
 [`docs/SECURITY.md`](SECURITY.md) covers deployment hardening for this surface,
 and [ADR-0064](adr/0064-grpc-authorization.md) records the tier model itself and
 which of its slices remain open.

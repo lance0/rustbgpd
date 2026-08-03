@@ -153,12 +153,9 @@ config = [
     'prometheus_addr = "127.0.0.1:9179"',
     "",
     "[global.telemetry.grpc_uds]",
-    f'path = "{rundir}/grpc.sock"',  # the `rbgp health` control-query probe dials this
-    "",
-    "[security.grpc]",
-    # Loopback benchmark: UDS access is gated by file perms; legacy mode lets
-    # the control-query probe dial without a per-method role map.
-    'enforcement = "legacy"',
+    # The `rbgp health` control-query probe dials this owner-only socket and
+    # authorizes as the implicit local-operator — no [security.grpc] needed.
+    f'path = "{rundir}/grpc.sock"',
     "",
     "[policy]",
     'rpol_files = ["member.rpol"]',

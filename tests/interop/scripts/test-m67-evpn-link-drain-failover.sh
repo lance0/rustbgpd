@@ -83,6 +83,7 @@ TOPO="m67-evpn-link-drain-failover"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 RUSTBGPD="clab-${TOPO}-vtep"
 export RUSTBGPD
+INTEROP_TEST_OPERATOR_AUTH=1
 # shellcheck source=tests/interop/scripts/test-lib.sh
 source "$SCRIPT_DIR/test-lib.sh"
 

@@ -41,8 +41,13 @@ INTEROP_SCRIPT_DIR="$(cd "$SOAK_SCRIPT_DIR/../interop/scripts" && pwd)"
 # `containerlab destroy` to find the right topology file.
 SCRIPT_DIR="$INTEROP_SCRIPT_DIR"
 
+INTEROP_TEST_OPERATOR_AUTH=1
 # shellcheck source=../interop/scripts/test-lib.sh
 source "$INTEROP_SCRIPT_DIR/test-lib.sh"
+# The inlined grpcurl probes below run under `timeout` where test-lib
+# functions are invisible, so carry the shared bearer header as a string.
+IFS= read -r _SOAK_TOKEN < "$INTEROP_TEST_OPERATOR_TOKEN_FILE"
+GRPC_AUTH_HEADER="authorization: Bearer $_SOAK_TOKEN"
 
 # ---------------------------------------------------------------------------
 # Config (env-overridable)
@@ -337,7 +342,7 @@ touch "$SAMPLER_RUN_FLAG"
         # plus an outer `timeout` ceiling.
         grpc_ok=0
         if timeout 10 grpcurl -plaintext -connect-timeout 5 -import-path . \
-            -proto "$PROTO" "$GRPC_ADDR" \
+            -proto "$PROTO" -H "$GRPC_AUTH_HEADER" "$GRPC_ADDR" \
             rustbgpd.v1.ControlService/GetHealth >/dev/null 2>&1; then
             grpc_ok=1
         fi
@@ -378,7 +383,7 @@ while true; do
     # should be detected as a failure, not block here for hours.
     if [ $(( now - last_health_log )) -ge "$HEALTH_CHECK_INTERVAL" ]; then
         if timeout 10 grpcurl -plaintext -connect-timeout 5 -import-path . \
-            -proto "$PROTO" "$GRPC_ADDR" \
+            -proto "$PROTO" -H "$GRPC_AUTH_HEADER" "$GRPC_ADDR" \
             rustbgpd.v1.ControlService/GetHealth >/dev/null 2>&1; then
             consecutive_health_fails=0
             elapsed_h=$(awk -v s=$((now - SOAK_START)) 'BEGIN { printf "%.2f", s/3600.0 }')

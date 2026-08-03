@@ -66,9 +66,9 @@ Preferred posture:
   client certificate (`rustbgpd:` URI SAN, then email SAN, then Subject CN);
   unsafe or overlong cert values fall back to `mtls-unresolved` rather than
   entering structured logs verbatim.
-  In the temporary Legacy migration mode these roles are audit context only
-  and listener `max_tier` is authoritative; in Tier mode they authorize or
-  deny calls by method tier.
+  Roles authorize or deny calls by method tier unconditionally: the former
+  Legacy migration mode (roles as audit context only) was removed in v0.63.0
+  and its config value is rejected at validation.
 - Listener `max_tier` caps are enforced now and should be used to bound remote
   TCP listeners to the smallest required method tier. `access_mode =
   "read_only"` remains a compatibility ceiling equivalent to
@@ -444,16 +444,19 @@ the roadmap:
 
 ## Current gaps
 
-- Authorization defaults to per-principal tier enforcement
-  (`security.grpc.enforcement = "tier"`, default since v0.24.0) layered on
-  listener `access_mode` (`read_only` vs `read_write`) and `max_tier` caps.
-  `enforcement = "legacy"` remains accepted today only as a temporary
-  migration mode: roles are audit-only, the listener cap authorizes calls,
-  validation warns, and `--check --strict` fails. The original startup
-  deprecation warning shipped in v0.51.0 on 2026-07-11; validation and
-  strict-check enforcement followed in v0.61.0. The two-minor/90-day floor is
-  therefore approximately 2026-10-09. That is only eligibility for a later
-  removal decision, not a promised removal date. Under tier enforcement, an
+- Authorization is per-principal tier enforcement
+  (`security.grpc.enforcement = "tier"`, default since v0.24.0, mandatory
+  since v0.63.0) layered on listener `access_mode` (`read_only` vs
+  `read_write`) and `max_tier` caps.
+  `enforcement = "legacy"` was removed in v0.63.0: validation rejects it at
+  boot, `--check`, and reload. Earlier editions of this document stated a
+  two-minor/90-day floor (≈2026-10-09) as removal *eligibility*; that
+  guidance is superseded — the removal landed earlier as an explicit owner
+  decision under the pre-1.0 alpha stability posture, once the implicit
+  `local-operator` identity reduced the migration for local-only deployments
+  to deleting the `[security.grpc]` block (named-principal setups keep a
+  three-line tier config; the rejection message carries the paste block).
+  Under tier enforcement, an
   owner-only UDS socket (no group/world mode bits, e.g. the default `0o600`)
   with no `principal` — including the implicit default listener — authorizes
   its clients as the reserved implicit `local-operator` principal at operator

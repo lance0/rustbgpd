@@ -20,7 +20,7 @@ fence, even though some lines are short:
 
 ```toml
 [security.grpc]
-enforcement = "legacy"
+enforcement = "tier"
 roles = { admin = "spki-sha256:..." }
 ```
 

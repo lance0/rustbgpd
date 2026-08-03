@@ -14,7 +14,3 @@ address = "10.0.0.2"
 remote_asn = 65099
 description = "frr-badopen"
 hold_time = 90
-
-# Legacy: no gRPC listener is configured here, so tier roles would govern nothing.
-[security.grpc]
-enforcement = "legacy"

@@ -9,6 +9,38 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Removed
+
+- **BREAKING: `security.grpc.enforcement = "legacy"` no longer boots.** The
+  pre-v0.24.0 gRPC authorization mode — roles recorded as audit context but
+  never enforced, listener `max_tier` as the only ceiling — is removed as a
+  functioning mode. The value still parses (the v1 config surface keeps the
+  enum variant, now deprecated) but validation rejects it at boot, `--check`,
+  and SIGHUP/transaction reload with a one-shot message carrying the
+  migration steps. The runtime legacy path, its startup advisory, and the
+  `enforcement` audit-log label are gone; ADR-0064 per-principal role
+  ceilings are now enforced unconditionally.
+
+  Migration: if your only management surface is a local socket (`rbgp` over
+  UDS, including the implicit default at `<runtime_state_dir>/grpc.sock`),
+  delete the whole `[security.grpc]` block — the owner-only socket authorizes
+  its clients as the implicit `local-operator` identity. A listener with a
+  declared `principal` keeps working with three lines:
+
+  ```toml
+  [security.grpc]
+  enforcement = "tier"
+
+  [security.grpc.roles]
+  "<your-principal>" = "operator"
+  ```
+
+  Supersession note: docs previously projected a two-minor/90-day floor
+  (≈2026-10-09) as the earliest *eligibility* for this removal. The cut lands
+  earlier as an explicit owner decision under the project's pre-1.0 alpha
+  stability posture, taken once the implicit `local-operator` identity
+  (below) removed the migration burden for local-only deployments.
+
 ### Changed
 
 - **Implicit `local-operator` identity for owner-only UDS listeners

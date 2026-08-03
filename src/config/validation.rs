@@ -1339,33 +1339,6 @@ impl Config {
             });
         }
 
-        // Pre-ADR-0064 gRPC authorization. Tier enforcement has been the
-        // default since v0.24.0 and becomes mandatory, so an operator still
-        // pinned to `legacy` is carrying both an open management surface and
-        // a config that a future release will reject.
-        if matches!(
-            self.security.grpc.enforcement,
-            GrpcEnforcementConfig::Legacy
-        ) {
-            advisories.push(ConfigAdvisory {
-                headline: "security.grpc.enforcement = \"legacy\" disables per-method tier \
-                           authorization.",
-                detail: "Every authenticated client of a read_write listener may call every\n\
-                         method up to that listener's max_tier cap, including the\n\
-                         operator_only methods that reconfigure the daemon; the\n\
-                         [security.grpc.roles] entries are recorded as audit context and deny\n\
-                         nothing. Tier enforcement is the default since v0.24.0 and becomes\n\
-                         mandatory in a future release, which will reject this config.\n\
-                         \n\
-                         To migrate: give every listener a role identity — mTLS listeners\n\
-                         derive it from the client certificate, bearer-token TCP and UDS\n\
-                         listeners need an explicit `principal` — map each principal in\n\
-                         [security.grpc.roles] to observer, automation, or operator, then set\n\
-                         security.grpc.enforcement = \"tier\". See\n\
-                         docs/adr/0064-grpc-authorization.md and docs/SECURITY.md.",
-            });
-        }
-
         advisories
     }
 }
@@ -2691,8 +2664,34 @@ fn validate_grpc_security(security: &SecurityConfig) -> Result<(), ConfigError> 
     reason = "one linear diagnosis pass per listener kind plus message assembly"
 )]
 fn validate_grpc_tier_enforcement(config: &Config) -> Result<(), ConfigError> {
-    if config.security.grpc.enforcement != GrpcEnforcementConfig::Tier {
-        return Ok(());
+    // `enforcement = "legacy"` is rejected outright: the runtime path it
+    // selected (role ceilings recorded but never enforced) was removed in
+    // v0.63.0 as an explicit owner decision under the pre-1.0 stability
+    // posture, ahead of the sunset window docs/API.md once projected. The
+    // enum variant survives only so the v1 config surface stays parseable.
+    if config.security.grpc.enforcement == GrpcEnforcementConfig::Legacy {
+        return Err(ConfigError::InvalidGrpcConfig {
+            reason: "security.grpc.enforcement = \"legacy\" was removed in v0.63.0 and no \
+                     longer boots:\n  \
+                     1. legacy mode recorded [security.grpc.roles] as audit context but \
+                     enforced nothing; that runtime path no longer exists, so there is \
+                     nothing to opt back into\n  \
+                     2. if your clients are local (rbgp over a UDS socket, including the \
+                     implicit default at <runtime_state_dir>/grpc.sock), tier enforcement \
+                     needs no configuration at all — the owner-only socket authorizes them \
+                     as the implicit \"local-operator\": simply delete the whole \
+                     [security.grpc] block\n  \
+                     3. a listener with a declared principal keeps working under tier with \
+                     a role entry; keep this instead:\n\
+                     [security.grpc]\n\
+                     enforcement = \"tier\"\n\
+                     \n\
+                     [security.grpc.roles]\n\
+                     \"<your-principal>\" = \"operator\"\n\
+                     (migration: docs/CONFIGURATION.md [security.grpc]; removal decision: \
+                     docs/adr/0064-grpc-authorization.md)"
+                .to_string(),
+        });
     }
     let telemetry = &config.global.telemetry;
     let tcp = telemetry.grpc_tcp.as_ref().filter(|cfg| cfg.enabled);
@@ -2819,10 +2818,7 @@ fn validate_grpc_tier_enforcement(config: &Config) -> Result<(), ConfigError> {
             reason.push('\n');
         }
     }
-    reason.push_str(
-        "or opt back into legacy with security.grpc.enforcement = \"legacy\" \
-         (migration checklist: docs/CONFIGURATION.md, [security.grpc])",
-    );
+    reason.push_str("(migration checklist: docs/CONFIGURATION.md, [security.grpc])");
     Err(ConfigError::InvalidGrpcConfig { reason })
 }
 

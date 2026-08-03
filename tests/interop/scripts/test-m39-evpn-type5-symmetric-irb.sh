@@ -45,6 +45,7 @@ PE2="clab-${TOPO}-pe2"
 RUSTBGPD="$PE1"
 export RUSTBGPD
 
+INTEROP_TEST_OPERATOR_AUTH=1
 # shellcheck source=test-lib.sh
 source "$SCRIPT_DIR/test-lib.sh"
 
@@ -81,7 +82,7 @@ PE1_ROUTER_MAC="02:00:00:00:01:01"
 # ---------------------------------------------------------------------------
 
 grpc_list_evpn() {
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         -d '{}' \
         "$GRPC_ADDR" rustbgpd.v1.RibService/ListEvpnRoutes 2>/dev/null
 }
@@ -179,7 +180,7 @@ wait_pe1_installed_count() {
     local attempts=$((timeout / 2))
     for _ in $(seq 1 "$attempts"); do
         local got
-        got=$(grpcurl -plaintext -import-path . -proto "$PROTO" \
+        got=$(grpcurl_call \
             -d '{"name":"vrf1"}' \
             "$GRPC_ADDR" rustbgpd.v1.EvpnService/GetIpVrf 2>/dev/null \
             | jq -r '.installedRoutesCount // 0')
@@ -279,7 +280,7 @@ if wait_pe1_installed_count 1 30; then
     ok "installed_routes_count=1 on vrf1"
 else
     fail "installed_routes_count did not reach 1 within 30s"
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         -d '{"name":"vrf1"}' \
         "$GRPC_ADDR" rustbgpd.v1.EvpnService/GetIpVrf >&2 || true
 fi
@@ -385,7 +386,7 @@ if wait_pe1_installed_count 0 30; then
     ok "installed_routes_count converged to 0 on vrf1"
 else
     fail "installed_routes_count never reached 0"
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         -d '{"name":"vrf1"}' \
         "$GRPC_ADDR" rustbgpd.v1.EvpnService/GetIpVrf >&2 || true
 fi

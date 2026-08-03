@@ -122,7 +122,6 @@ pub(super) fn record_audit_decision(
     let access_mode = context.access_mode;
     let max_tier = context.max_tier.as_str();
     let authn = context.authn.as_str();
-    let enforcement = context.enforcement.as_str();
     let role = context.role_label(principal);
     let request_summary = request_summary.map_or("", GrpcRequestSummary::as_str);
 
@@ -139,7 +138,6 @@ pub(super) fn record_audit_decision(
             access_mode,
             max_tier,
             authn,
-            enforcement,
             role,
             principal,
             request_summary,
@@ -158,7 +156,6 @@ pub(super) fn record_audit_decision(
             access_mode,
             max_tier,
             authn,
-            enforcement,
             role,
             principal,
             request_summary,

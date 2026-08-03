@@ -44,7 +44,9 @@ RUSTBGPD="${RUSTBGPD:-clab-${TOPO}-rustbgpd}"
 FRR="${FRR:-clab-${TOPO}-frr}"
 RUSTBGPD_IP="${RUSTBGPD_IP:-10.0.0.1}"
 FRR_IP="${FRR_IP:-10.0.0.2}"
-GRPC_ADDR="${GRPC_ADDR:-http://127.0.0.1:50051}"
+# Default UDS socket: owner-only, so the in-container rbgp calls
+# authorize as the implicit local-operator under tier enforcement.
+GRPC_ADDR="${GRPC_ADDR:-unix:///var/lib/rustbgpd/grpc.sock}"
 NEXTHOP="${NEXTHOP:-10.0.0.1}"
 
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"

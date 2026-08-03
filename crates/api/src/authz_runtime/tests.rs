@@ -23,7 +23,7 @@ use tower::{Layer, Service};
 
 use super::*;
 use crate::audit::{GrpcAuditHandle, GrpcRequestSummary};
-use crate::authz::{AuthEnforcement, AuthTier, LOCAL_OPERATOR_PRINCIPAL, PrincipalRole};
+use crate::authz::{AuthTier, LOCAL_OPERATOR_PRINCIPAL, PrincipalRole};
 use crate::connect_info::{RustbgpdTcpConnectInfo, RustbgpdTcpStream};
 use crate::test_support::metrics_text as gather_text;
 
@@ -104,7 +104,7 @@ fn tier_test_context(
     role: PrincipalRole,
 ) -> GrpcAuthAuditContext {
     GrpcAuthAuditContext::new(listener, access_mode, max_tier, authn, principal)
-        .with_role_enforcement(AuthEnforcement::Tier, roles(&[(principal, role)]))
+        .with_roles(roles(&[(principal, role)]))
 }
 
 fn private_key(key: &KeyPair) -> PrivateKeyDer<'static> {
@@ -459,10 +459,7 @@ async fn tier_enforcement_allows_observer_sensitive_read() {
         GrpcAuthnKind::BearerToken,
         "observer.example",
     )
-    .with_role_enforcement(
-        AuthEnforcement::Tier,
-        roles(&[("observer.example", PrincipalRole::Observer)]),
-    )
+    .with_roles(roles(&[("observer.example", PrincipalRole::Observer)]))
     .with_bearer_token(Some("secret"));
     let layer = GrpcAuthzLayer::new(context, metrics.clone());
     let mut service = layer.layer(EchoService);
@@ -520,10 +517,7 @@ async fn tier_enforcement_denies_operator_only_for_automation() {
         GrpcAuthnKind::Uds,
         "automation.example",
     )
-    .with_role_enforcement(
-        AuthEnforcement::Tier,
-        roles(&[("automation.example", PrincipalRole::Automation)]),
-    );
+    .with_roles(roles(&[("automation.example", PrincipalRole::Automation)]));
     let layer = GrpcAuthzLayer::new(context, metrics.clone());
     let mut service = layer.layer(EchoService);
     let request = Request::builder()
@@ -549,10 +543,7 @@ async fn tier_enforcement_allows_operator_only_for_operator() {
         GrpcAuthnKind::Uds,
         "operator.example",
     )
-    .with_role_enforcement(
-        AuthEnforcement::Tier,
-        roles(&[("operator.example", PrincipalRole::Operator)]),
-    );
+    .with_roles(roles(&[("operator.example", PrincipalRole::Operator)]));
     let layer = GrpcAuthzLayer::new(context, metrics.clone());
     let mut service = layer.layer(EchoService);
     let request = Request::builder()
@@ -577,7 +568,7 @@ async fn tier_enforcement_denies_unmapped_principal() {
         GrpcAuthnKind::Uds,
         "unmapped.example",
     )
-    .with_role_enforcement(AuthEnforcement::Tier, roles(&[]));
+    .with_roles(roles(&[]));
     let layer = GrpcAuthzLayer::new(context, metrics.clone());
     let mut service = layer.layer(EchoService);
     let request = Request::builder()
@@ -607,7 +598,7 @@ async fn tier_enforcement_authorizes_implicit_local_operator_with_empty_roles() 
         GrpcAuthnKind::UdsOwner,
         LOCAL_OPERATOR_PRINCIPAL,
     )
-    .with_role_enforcement(AuthEnforcement::Tier, roles(&[]))
+    .with_roles(roles(&[]))
     .with_implicit_local_operator();
     let layer = GrpcAuthzLayer::new(context, metrics.clone());
     let mut service = layer.layer(EchoService);
@@ -636,7 +627,7 @@ async fn tier_enforcement_still_caps_implicit_local_operator_by_listener_tier() 
         GrpcAuthnKind::UdsOwner,
         LOCAL_OPERATOR_PRINCIPAL,
     )
-    .with_role_enforcement(AuthEnforcement::Tier, roles(&[]))
+    .with_roles(roles(&[]))
     .with_implicit_local_operator();
     let layer = GrpcAuthzLayer::new(context, metrics.clone());
     let mut service = layer.layer(EchoService);
@@ -663,10 +654,7 @@ async fn tier_enforcement_authenticates_bearer_before_role_denial() {
         GrpcAuthnKind::BearerToken,
         "observer.example",
     )
-    .with_role_enforcement(
-        AuthEnforcement::Tier,
-        roles(&[("observer.example", PrincipalRole::Observer)]),
-    )
+    .with_roles(roles(&[("observer.example", PrincipalRole::Observer)]))
     .with_bearer_token(Some("secret"));
     let layer = GrpcAuthzLayer::new(context, metrics.clone());
     let mut service = layer.layer(EchoService);
@@ -694,10 +682,7 @@ async fn listener_cap_remains_stricter_than_operator_role() {
         GrpcAuthnKind::Uds,
         "operator.example",
     )
-    .with_role_enforcement(
-        AuthEnforcement::Tier,
-        roles(&[("operator.example", PrincipalRole::Operator)]),
-    );
+    .with_roles(roles(&[("operator.example", PrincipalRole::Operator)]));
     let layer = GrpcAuthzLayer::new(context, metrics.clone());
     let mut service = layer.layer(EchoService);
     let request = Request::builder()
@@ -729,7 +714,7 @@ async fn unmapped_denial_names_principal_and_roles_entry_fix() {
         GrpcAuthnKind::Uds,
         "ci-bot",
     )
-    .with_role_enforcement(AuthEnforcement::Tier, roles(&[]));
+    .with_roles(roles(&[]));
     let layer = GrpcAuthzLayer::new(context, metrics);
     let mut service = layer.layer(EchoService);
     let request = Request::builder()

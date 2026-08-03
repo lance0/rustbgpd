@@ -34,8 +34,13 @@ PROBE_LOG="$RUN_DIR/probe.log"
 REPORT="$RUN_DIR/report.json"
 
 TOPO="$CHAOS_TOPO"
+INTEROP_TEST_OPERATOR_AUTH=1
 # shellcheck source=../interop/scripts/test-lib.sh
 source "$SCRIPT_DIR/../interop/scripts/test-lib.sh"
+# Arrays cannot be exported to the xargs subshells running shot(), so
+# the shared bearer header travels as a plain string.
+IFS= read -r _CHAOS_TOKEN < "$INTEROP_TEST_OPERATOR_TOKEN_FILE"
+GRPC_AUTH_HEADER="authorization: Bearer $_CHAOS_TOKEN"
 resolve_grpc_addr
 
 log "[chaos-grpc-churn] duration=${CHAOS_DURATION_SEC}s parallelism=$CHAOS_PARALLELISM"
@@ -53,18 +58,21 @@ shot() {
     case $op in
         0)
             grpcurl -plaintext -import-path . -proto "$PROTO" \
+                -H "$GRPC_AUTH_HEADER" \
                 -d "{\"config\":{\"address\":\"$ip\",\"remote_asn\":65999,\"families\":[\"ipv4_unicast\"]}}" \
                 "$GRPC_ADDR" rustbgpd.v1.NeighborService/AddNeighbor 2>&1 \
                 | head -1 >>"$DRIVER_LOG"
             ;;
         1)
             grpcurl -plaintext -import-path . -proto "$PROTO" \
+                -H "$GRPC_AUTH_HEADER" \
                 -d "{\"address\":\"$ip\"}" \
                 "$GRPC_ADDR" rustbgpd.v1.NeighborService/DeleteNeighbor 2>&1 \
                 | head -1 >>"$DRIVER_LOG"
             ;;
         2)
             grpcurl -plaintext -import-path . -proto "$PROTO" \
+                -H "$GRPC_AUTH_HEADER" \
                 -d "{\"address\":\"$ip\"}" \
                 "$GRPC_ADDR" rustbgpd.v1.NeighborService/SoftResetIn 2>&1 \
                 | head -1 >>"$DRIVER_LOG"
@@ -72,7 +80,7 @@ shot() {
     esac
 }
 export -f shot
-export GRPC_ADDR PROTO DRIVER_LOG
+export GRPC_ADDR PROTO DRIVER_LOG GRPC_AUTH_HEADER
 
 # Probe daemon health every 2 s in the background.
 probe_pid=

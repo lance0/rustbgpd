@@ -14,7 +14,7 @@ A configuration example that must stay byte-for-byte verbatim inside the fence, 
 
 ```toml
 [security.grpc]
-enforcement = "legacy"
+enforcement = "tier"
 roles = { admin = "spki-sha256:..." }
 ```
 

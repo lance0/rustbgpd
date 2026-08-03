@@ -31,6 +31,8 @@ log_format = "json"
 
 [global.telemetry.grpc_tcp]
 address = "0.0.0.0:50051"
+token_file = "/run/rustbgpd/grpc-test-only-operator.token"
+principal = "rustbgpd://operator/test-only"
 
 [[neighbors]]
 address = "10.0.0.2"
@@ -53,6 +55,8 @@ vrf_device = "vrf1"
 l3vxlan_device = "l3vxlan100"
 table_id = 100
 
-# Legacy: the M39 driver reads the RIB over plaintext grpcurl; the Gate 9 soak reuses this config.
 [security.grpc]
-enforcement = "legacy"
+enforcement = "tier"
+
+[security.grpc.roles]
+"rustbgpd://operator/test-only" = "operator"
