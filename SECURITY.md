@@ -59,9 +59,9 @@ input from the network. It runs under continuous fuzzing in CI.
   external-source identity. The locator is confidential because it carries
   paths and digests. Both are bounded canonical records in daemon-owned regular
   `0600` files; a writer or present v2 object requires a daemon-owned parent
-  that is not group- or world-writable. Locator absence may be established in
-  a non-writable root-owned config parent, preserving the packaged read-only
-  SIGHUP deployment. Reads are descriptor-relative, no-follow, same-FD operations;
+  that is not group- or world-writable. Locator absence carries no authority
+  and therefore adds no v2 ownership or mode requirement to an ordinary
+  launch path. Reads are descriptor-relative, no-follow, same-FD operations;
   unsafe, changed, oversized, or mismatched state fails closed before candidate
   contents are opened and before candidate or backup mutation. Launch-target
   metadata may be inspected to bind the authority. Diagnostics do not expose

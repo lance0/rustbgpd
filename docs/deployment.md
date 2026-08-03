@@ -823,9 +823,9 @@ processes is unsupported even when their configuration files differ.
 
 The lexical config and journal paths are resolved to absolute identities. A
 writer or present v2 object requires daemon-owned real parents that are not
-group- or world-writable. Locator absence may be established in the packaged
-root-owned, read-only config parent, so ordinary SIGHUP-only startup is
-unchanged; confirmed writes still require the documented ownership change.
+group- or world-writable. Locator absence carries no authority and therefore
+adds no v2 ownership or mode requirement to ordinary startup; confirmed writes
+still require the documented ownership change.
 Locator, journal, and exact staging files must be daemon-owned regular files
 with mode `0600`; symlinks and special files fail closed. Do not downgrade or start an
 older binary until both the v2 locator and locator-free v2 journal residue are

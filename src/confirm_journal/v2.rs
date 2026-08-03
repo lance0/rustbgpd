@@ -111,17 +111,16 @@ impl LaunchIdentity {
         max_journal_bytes: usize,
         mut step: impl FnMut(BootStep) -> io::Result<()>,
     ) -> io::Result<Option<BootRevert>> {
-        // The packaged SIGHUP-only deployment intentionally keeps
-        // /etc/rustbgpd root-owned and read-only to the daemon.  Establishing
-        // locator absence there must not make an ordinary boot depend on
-        // daemon ownership.  The parent still cannot admit untrusted writers;
-        // any present locator is subject to the full owner-private contract.
+        // Locator absence carries no v2 authority, so it must not impose a
+        // new parent-ownership/mode contract on ordinary pre-v2 launch paths.
+        // Any present locator is subject to the full owner-private contract
+        // below, and every writer applies that contract before publication.
         let locator = Entry::pin_for_absence(&self.locator_path())?;
-        locator.directory.validate_no_untrusted_writers()?;
         if !locator.exists()? {
             return Ok(None);
         }
         locator.directory.validate_private()?;
+        step(BootStep::LocatorParentValidated)?;
         let (locator_bytes, locator_identity) =
             locator.read_bounded_identified(max_locator_bytes)?;
         let wire = decode_locator_with_cap(&locator_bytes, max_locator_bytes)?;
@@ -272,6 +271,7 @@ impl LaunchIdentity {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BootStep {
+    LocatorParentValidated,
     CandidateSave,
     ConfigRestore,
     LocatorUnlink,
@@ -656,20 +656,6 @@ impl Directory {
             metadata.uid(),
             metadata.mode(),
             geteuid().as_raw(),
-            true,
-        )
-    }
-
-    fn validate_no_untrusted_writers(&self) -> io::Result<()> {
-        use nix::unistd::geteuid;
-
-        let metadata = self.file.metadata()?;
-        validate_directory_metadata_values(
-            metadata.is_dir(),
-            metadata.uid(),
-            metadata.mode(),
-            geteuid().as_raw(),
-            false,
         )
     }
 }
@@ -679,20 +665,12 @@ fn validate_directory_metadata_values(
     owner: u32,
     mode: u32,
     expected_owner: u32,
-    require_owner: bool,
 ) -> io::Result<()> {
-    if !is_dir || mode & 0o022 != 0 || require_owner && owner != expected_owner {
-        if require_owner {
-            return Err(invalid(format!(
-                "unsafe pending parent owner, type, or mode (dir={}, owner_match={}, mode={:o})",
-                is_dir,
-                owner == expected_owner,
-                mode & 0o7777
-            )));
-        }
+    if !is_dir || mode & 0o022 != 0 || owner != expected_owner {
         return Err(invalid(format!(
-            "unsafe pending parent type or mode (dir={}, mode={:o})",
+            "unsafe pending parent owner, type, or mode (dir={}, owner_match={}, mode={:o})",
             is_dir,
+            owner == expected_owner,
             mode & 0o7777
         )));
     }
@@ -1704,6 +1682,7 @@ log_format = "json"
         assert_eq!(
             observed,
             [
+                BootStep::LocatorParentValidated,
                 BootStep::CandidateSave,
                 BootStep::ConfigRestore,
                 BootStep::LocatorUnlink,
@@ -1759,8 +1738,10 @@ log_format = "json"
         let result = launch.boot_revert_check_io_with_limits(
             locator_bytes.len(),
             journal_bytes.len() - 1,
-            |_| {
-                candidate_steps.set(candidate_steps.get() + 1);
+            |step| {
+                if step != BootStep::LocatorParentValidated {
+                    candidate_steps.set(candidate_steps.get() + 1);
+                }
                 Ok(())
             },
         );
@@ -1777,6 +1758,7 @@ log_format = "json"
         // restore-before-unlink edge, or cleaning the journal before durable
         // locator absence changes the per-step filesystem state below.
         let steps = [
+            BootStep::LocatorParentValidated,
             BootStep::CandidateSave,
             BootStep::ConfigRestore,
             BootStep::LocatorUnlink,
@@ -1816,6 +1798,12 @@ log_format = "json"
 
             let backup = config.with_file_name("rustbgpd.toml.unconfirmed");
             match fail {
+                BootStep::LocatorParentValidated => {
+                    assert_eq!(fs::read(&config).unwrap(), candidate);
+                    assert!(!backup.exists());
+                    assert!(launch.locator_path().exists());
+                    assert!(journal.exists());
+                }
                 BootStep::CandidateSave => {
                     assert_eq!(fs::read(&config).unwrap(), candidate);
                     assert!(!backup.exists());
@@ -1890,7 +1878,13 @@ log_format = "json"
         let locator_before = fs::read(launch.locator_path()).unwrap();
         drop(files);
 
-        assert!(launch.boot_revert_check().is_err());
+        let result = launch.boot_revert_check_io_with(|step| {
+            if step == BootStep::LocatorParentValidated {
+                fs::set_permissions(&config_dir, fs::Permissions::from_mode(0o700))?;
+            }
+            Ok(())
+        });
+        assert!(result.is_err());
         assert_eq!(fs::read(&config).unwrap(), candidate);
         assert!(!config.with_file_name("rustbgpd.toml.unconfirmed").exists());
         assert_eq!(fs::read(&journal).unwrap(), journal_before);
@@ -2070,6 +2064,42 @@ log_format = "json"
     }
 
     #[test]
+    fn present_locator_rejects_changed_unsafe_lexical_parent_before_candidate_work() {
+        // Destructive proof: removing the present-locator parent validation
+        // restores the candidate through the distinct still-private target
+        // parent, removes authority, and makes the refusal assertion fail.
+        let root = tempfile::tempdir().unwrap();
+        let config_dir = private_dir(root.path(), "config");
+        let target_dir = private_dir(root.path(), "target");
+        let state_dir = private_dir(root.path(), "state");
+        let target = target_dir.join("real.toml");
+        fs::write(&target, config_toml(64_500)).unwrap();
+        let link = config_dir.join("config.toml");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let prior = Arc::new(AcceptedConfigSnapshot::load(&link, None).unwrap());
+        let launch = LaunchIdentity::resolve(&link).unwrap();
+        let journal = state_dir.join(super::super::JOURNAL_FILE_NAME);
+        let files = launch.publish(&journal, "deploy-1", 9, &prior).unwrap();
+        let candidate = b"unconfirmed candidate under changed lexical parent";
+        fs::write(&target, candidate).unwrap();
+        fs::set_permissions(&config_dir, fs::Permissions::from_mode(0o777)).unwrap();
+
+        let result = launch.boot_revert_check_io_with(|step| {
+            if step == BootStep::LocatorParentValidated {
+                fs::set_permissions(&config_dir, fs::Permissions::from_mode(0o700))?;
+            }
+            Ok(())
+        });
+        assert!(result.is_err());
+        assert_eq!(fs::read(&target).unwrap(), candidate);
+        assert!(launch.locator_path().exists());
+        assert!(journal.exists());
+
+        fs::set_permissions(&config_dir, fs::Permissions::from_mode(0o700)).unwrap();
+        files.terminal_cleanup().unwrap();
+    }
+
+    #[test]
     fn dangling_target_keeps_canonical_identity_through_symlinked_intermediate() {
         // Destructive proof: replacing `canonicalize_allow_missing` with
         // lexical normalization makes the dangling target compare as
@@ -2213,28 +2243,36 @@ log_format = "json"
     }
 
     #[test]
-    fn lexical_parentdir_unsafe_parent_and_unsafe_metadata_refuse() {
+    fn lexical_parentdir_present_state_and_unsafe_metadata_refuse() {
         // Destructive proof: normalizing ParentDir or a terminal `/.`, omitting
-        // parent mode enforcement, requiring daemon ownership merely to prove
-        // locator absence, or accepting journal mode 0640 makes a named
-        // assertion fail.  The owner distinction preserves the packaged
-        // root-owned, read-only config directory while every present v2 object
-        // and writer still require daemon ownership.
+        // writer parent enforcement, restricting the authority-free
+        // absent-locator lane, or accepting journal mode 0640 makes a named
+        // assertion fail.  Every present v2 object and writer still requires
+        // a daemon-owned private parent.
         assert!(LaunchIdentity::resolve(Path::new("/etc/rustbgpd/../config.toml")).is_err());
         assert!(LaunchIdentity::resolve(Path::new("/etc/rustbgpd/.")).is_err());
-        assert!(validate_directory_metadata_values(true, 0, 0o750, 1000, false).is_ok());
-        assert!(validate_directory_metadata_values(true, 0, 0o750, 1000, true).is_err());
+        assert!(validate_directory_metadata_values(true, 0, 0o750, 1000).is_err());
+        assert!(validate_directory_metadata_values(true, 1000, 0o750, 1000).is_ok());
 
         let (_root, config, journal, launch, prior) = fixture();
         fs::set_permissions(config.parent().unwrap(), fs::Permissions::from_mode(0o777)).unwrap();
         assert!(
-            launch.boot_revert_check().is_err(),
-            "locator absence must be established under a pinned safe parent"
+            launch.boot_revert_check().unwrap().is_none(),
+            "locator absence cannot impose v2 storage policy on the launch path"
         );
         assert!(launch.publish(&journal, "deploy-1", 9, &prior).is_err());
         fs::set_permissions(config.parent().unwrap(), fs::Permissions::from_mode(0o700)).unwrap();
 
         let files = launch.publish(&journal, "deploy-1", 9, &prior).unwrap();
+        let candidate = b"unconfirmed candidate under changed parent";
+        fs::write(&config, candidate).unwrap();
+        fs::set_permissions(config.parent().unwrap(), fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(launch.boot_revert_check().is_err());
+        assert_eq!(fs::read(&config).unwrap(), candidate);
+        assert!(launch.locator_path().exists());
+        assert!(journal.exists());
+        fs::set_permissions(config.parent().unwrap(), fs::Permissions::from_mode(0o700)).unwrap();
+
         fs::set_permissions(&journal, fs::Permissions::from_mode(0o640)).unwrap();
         assert!(launch.boot_revert_check().is_err());
         fs::set_permissions(&journal, fs::Permissions::from_mode(0o600)).unwrap();

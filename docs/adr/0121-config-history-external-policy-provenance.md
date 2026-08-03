@@ -417,10 +417,11 @@ The locator, journal, and their stages are regular files owned by the daemon
 uid and mode `0600` from their first byte. For a writer or any present v2
 object, their real parent directories are pinned by descriptor, owned by that
 uid, and neither group- nor world-writable. Establishing locator absence alone
-allows a differently owned parent only when it is neither group- nor
-world-writable; this preserves the packaged root-owned, read-only config
-directory without allowing a v2 writer there. Reads and cleanup are
-descriptor-relative with `O_NOFOLLOW`:
+pins the real parent descriptor but applies no v2 ownership or mode policy:
+absence carries no authority, so ordinary pre-v2 launch paths remain valid.
+Any present locator immediately enters the full private-parent checks, and a
+writer cannot publish there unless the parent meets that contract. Reads and
+cleanup are descriptor-relative with `O_NOFOLLOW`:
 open once, `fstat`, bound, and read through that same descriptor. No check may
 be followed by a path reopen. The lexical config parent and journal parent may
 differ, so each has its own pinned descriptor and durability sync.

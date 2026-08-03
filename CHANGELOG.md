@@ -104,9 +104,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   transaction must terminate before upgrade and production never converts or
   dual-writes it. Before downgrade, both the v2 locator and locator-free v2
   journal residue must be absent; v2 config history separately requires moving
-  the complete history directory aside. Locator absence remains compatible
-  with the packaged root-owned, read-only config directory; confirmed writes
-  still require the documented daemon-owned writable config directory.
+  the complete history directory aside. Locator absence is authority-free and
+  does not impose v2 ownership or mode policy on an ordinary launch path;
+  confirmed writes and any present v2 object still require the documented
+  daemon-owned private directory.
 
 - **Config-history provenance schema and rendering.** `ListConfigHistory` and
   `rbgp config history` now expose an additive config-source digest over the

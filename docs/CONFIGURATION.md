@@ -3252,8 +3252,8 @@ later exact journal-residue cleanup is warning-only. Files and their parent
 directories must satisfy the storage contract: v2 locator, journal, and staging
 files are daemon-owned regular files with mode `0600`. A writer or present v2
 object requires daemon-owned real parents that are not group- or
-world-writable; locator absence may be established in the packaged root-owned,
-read-only config parent. Before downgrade, both the
+world-writable. Locator absence carries no authority and does not impose this
+v2 storage policy on an ordinary launch path. Before downgrade, both the
 v2 locator and any locator-free v2 journal residue must be absent; v2 config
 history separately requires moving the complete history directory aside. A
 locator-free v1 journal remains a fail-closed compatibility lane, but a live v1

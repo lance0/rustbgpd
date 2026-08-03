@@ -233,10 +233,10 @@ backend.
 
 The lexical config and journal paths are resolved to absolute identities. A
 writer or present v2 object requires daemon-owned real parents that are not
-group- or world-writable. An absent locator may be established under a
-non-writable root-owned config parent, so the packaged SIGHUP-only deployment
-continues to boot; confirmed writes there remain unavailable until the config
-directory is made writable and daemon-owned. Locator, journal, and staging
+group- or world-writable. Locator absence carries no authority and therefore
+does not impose that v2 storage policy on an ordinary launch path; confirmed
+writes remain unavailable until the config directory is private, writable,
+and daemon-owned. Locator, journal, and staging
 files must be regular files owned by the daemon UID with mode `0600`; symlinks
 and special files fail closed. Keep writable state private and on local storage.
 
