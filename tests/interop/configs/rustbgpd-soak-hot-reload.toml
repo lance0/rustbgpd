@@ -12,15 +12,11 @@ listen_port = 179
 prometheus_addr = "0.0.0.0:9179"
 log_format = "json"
 
-[global.telemetry.grpc_tcp]
-address = "0.0.0.0:50051"
+# No gRPC listener: the soak's rbgp calls run inside the container and
+# use the implicit owner-only UDS socket (local-operator identity).
 
 [[neighbors]]
 address = "10.0.0.2"
 remote_asn = 65002
 description = "frr-soak-hot-reload-cycle-0"
 hold_time = 90
-
-# Legacy: the soak's generated candidates pin this same block, and its rbgp calls carry no token.
-[security.grpc]
-enforcement = "legacy"

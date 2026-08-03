@@ -38,6 +38,7 @@
 
 TOPO="m33-evpn-scale"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+INTEROP_TEST_OPERATOR_AUTH=1
 # shellcheck source=test-lib.sh
 source "$SCRIPT_DIR/test-lib.sh"
 
@@ -58,7 +59,7 @@ TESTER_LINGER=240
 
 grpc_list_evpn() {
     # 50k EVPN routes blow past grpcurl's default 4 MiB message size.
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
+    grpcurl_call \
         -max-msg-sz 134217728 \
         -d '{}' \
         "$GRPC_ADDR" rustbgpd.v1.RibService/ListEvpnRoutes 2>/dev/null || true
@@ -230,7 +231,7 @@ else
 fi
 
 log "[check] tester peers stayed Established without mid-run flaps"
-neighbors_json=$(grpcurl -plaintext -import-path . -proto "$PROTO" \
+neighbors_json=$(grpcurl_call \
     "$GRPC_ADDR" rustbgpd.v1.NeighborService/ListNeighbors 2>/dev/null)
 # `jq` is mandatory — the prior awk parser was fragile to JSON layout
 # changes and could miscount under proto3 default-field elision.

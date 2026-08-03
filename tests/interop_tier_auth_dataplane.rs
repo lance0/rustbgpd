@@ -12,19 +12,14 @@ const TOKEN_BIND: &str =
     "../fixtures/grpc-test-only-operator.token:/run/rustbgpd/grpc-test-only-operator.token:ro";
 const CI_PRINCIPAL: &str = "rustbgpd://operator/ci";
 
-// In-range configs pinned to `enforcement = "legacy"`. Each records its reason
-// at its own `[security.grpc]` block, and the equality allowlist in
-// interop_tier_auth_rr.rs owns the legacy inventory. Excluded here because the
-// identity assertions below describe a listener that enforces tier ceilings,
-// which these deliberately do not:
+// In-range configs whose only management surface is an owner-only UDS
+// socket (the implicit default listener): no `[security.grpc]` block and no
+// TCP listener at all, so the token/principal assertions below have nothing
+// to describe. Tier enforcement still governs them — their clients authorize
+// as the implicit `local-operator` (the shape that let LAN-547 retire the
+// legacy allowlist):
 //   m37-originator — asserted via FRR's RIB, kernel bridge fdb, and Prometheus
-//   m39-pe1 — plaintext grpcurl driver; the Gate 9 soak reuses the config
-//   m67-vtep — M67 mounts its operator token on pe1/pe2 only
-const LEGACY_EXCEPTIONS: &[&str] = &[
-    "rustbgpd-m37-originator.toml",
-    "rustbgpd-m39-pe1.toml",
-    "rustbgpd-m67-vtep.toml",
-];
+const IMPLICIT_LOCAL_OPERATOR_EXCEPTIONS: &[&str] = &["rustbgpd-m37-originator.toml"];
 
 // In-range configs that DO enforce tier, but authenticate with a lab-owned
 // credential rather than the shared test-only operator identity, so the
@@ -51,7 +46,7 @@ fn in_scope(name: &str) -> bool {
     let digits: String = suffix.chars().take_while(char::is_ascii_digit).collect();
     name.ends_with(".toml")
         && digits.parse::<u8>().is_ok_and(|n| (36..=69).contains(&n))
-        && !LEGACY_EXCEPTIONS.contains(&name)
+        && !IMPLICIT_LOCAL_OPERATOR_EXCEPTIONS.contains(&name)
         && !LAB_CREDENTIAL_EXCEPTIONS.contains(&name)
 }
 
@@ -105,7 +100,7 @@ fn active_dataplane_interop_is_tier_authenticated_end_to_end() {
         );
         configs.insert(name.to_owned());
     }
-    assert_eq!(configs.len(), 37, "classify the changed config inventory");
+    assert_eq!(configs.len(), 39, "classify the changed config inventory");
 
     let mut topologies = BTreeSet::new();
     let mut mounted = BTreeSet::new();
@@ -148,7 +143,7 @@ fn active_dataplane_interop_is_tier_authenticated_end_to_end() {
         unmounted,
         BTreeSet::from(["rustbgpd-m47-teardown.toml".into()])
     );
-    assert_eq!(topologies.len(), 29, "topology inventory changed");
+    assert_eq!(topologies.len(), 31, "topology inventory changed");
 
     let standalone = [
         "m38-evpn-df-election",
@@ -195,9 +190,9 @@ fn active_dataplane_interop_is_tier_authenticated_end_to_end() {
 }
 
 /// Both exception lists are proven, not merely trusted: a stale entry naming a
-/// renamed or deleted config, a legacy pin that silently moved to tier, or a
-/// lab config that adopted the shared identity and should rejoin the scoped
-/// assertions each make this red.
+/// renamed or deleted config, an implicit-local-operator config that grew a
+/// declared security surface, or a lab config that adopted the shared identity
+/// and should rejoin the scoped assertions each make this red.
 #[test]
 fn auth_exceptions_still_match_their_declared_category() {
     let config_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/interop/configs");
@@ -214,12 +209,18 @@ fn auth_exceptions_still_match_their_declared_category() {
             .map(str::to_owned)
     };
 
-    for name in LEGACY_EXCEPTIONS {
+    for name in IMPLICIT_LOCAL_OPERATOR_EXCEPTIONS {
         let source = read(name);
-        assert_eq!(
-            enforcement(name, &source).as_deref(),
-            Some("legacy"),
-            "{name} is listed as a legacy exception but no longer pins legacy"
+        let value: toml::Value =
+            toml::from_str(&source).unwrap_or_else(|error| panic!("{name}: {error}"));
+        assert!(
+            value.get("security").is_none(),
+            "{name} is listed as implicit-local-operator but declares [security]"
+        );
+        assert!(
+            value["global"]["telemetry"].get("grpc_tcp").is_none(),
+            "{name} is listed as implicit-local-operator but declares a TCP \
+             listener, which tier validation would reject unauthenticated"
         );
     }
 

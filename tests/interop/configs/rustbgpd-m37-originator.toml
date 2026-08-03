@@ -8,8 +8,9 @@ listen_port = 179
 log_format = "json"
 prometheus_addr = "0.0.0.0:9179"
 
-[global.telemetry.grpc_tcp]
-address = "0.0.0.0:50051"
+# No gRPC listener: M37 asserts via FRR's RIB, kernel bridge fdb, and
+# Prometheus. The implicit owner-only UDS listener satisfies default tier
+# enforcement with the implicit local-operator identity.
 
 # Single EVPN instance bound to br100 / vxlan100 — the start script
 # pre-creates the bridge + VXLAN port + a non-VXLAN bridge port
@@ -29,7 +30,3 @@ remote_asn = 65000
 description = "consumer-frr"
 hold_time = 30
 families = ["l2vpn_evpn"]
-
-# Legacy: M37 asserts via FRR's RIB, kernel bridge fdb, and Prometheus — never this gRPC listener.
-[security.grpc]
-enforcement = "legacy"

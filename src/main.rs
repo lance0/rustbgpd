@@ -79,8 +79,8 @@ use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
 use crate::config::{
-    AcceptedConfigSnapshot, Config, GrpcAccessMode, GrpcEnforcementConfig, GrpcListener,
-    GrpcMaxTier, GrpcRoleConfig, UnpolicedEbgpBoundary,
+    AcceptedConfigSnapshot, Config, GrpcAccessMode, GrpcListener, GrpcMaxTier, GrpcRoleConfig,
+    UnpolicedEbgpBoundary,
 };
 use crate::config_persister::{ConfigMutation, ConfigPersister};
 use crate::peer_manager::PeerManager;
@@ -1041,15 +1041,6 @@ fn spawn_bfd_event_bridge(
     })
 }
 
-const fn grpc_enforcement_to_auth_enforcement(
-    value: GrpcEnforcementConfig,
-) -> rustbgpd_api::authz::AuthEnforcement {
-    match value {
-        GrpcEnforcementConfig::Legacy => rustbgpd_api::authz::AuthEnforcement::Legacy,
-        GrpcEnforcementConfig::Tier => rustbgpd_api::authz::AuthEnforcement::Tier,
-    }
-}
-
 const fn grpc_role_to_principal_role(value: GrpcRoleConfig) -> rustbgpd_api::authz::PrincipalRole {
     match value {
         GrpcRoleConfig::Observer => rustbgpd_api::authz::PrincipalRole::Observer,
@@ -1475,7 +1466,6 @@ fn marker_fail_if(selected: MarkerFaultPoint, current: MarkerFaultPoint) -> std:
 
 fn resolve_grpc_listeners(config: &Config) -> Result<Vec<GrpcListenerConfig>, String> {
     use rustbgpd_api::credentials::{CredentialSource, CredentialStore, TlsSource};
-    let enforcement = grpc_enforcement_to_auth_enforcement(config.security.grpc.enforcement);
     let roles = Arc::new(grpc_principal_roles(config));
     let declared = config.grpc_listeners();
     let sources = declared
@@ -1515,7 +1505,6 @@ fn resolve_grpc_listeners(config: &Config) -> Result<Vec<GrpcListenerConfig>, St
                     endpoint: ListenerEndpoint::Tcp(addr),
                     access_mode: access_mode.into(),
                     max_tier: grpc_max_tier_to_auth_tier(max_tier),
-                    enforcement,
                     roles: Arc::clone(&roles),
                     credential_store: credential_store.clone(),
                     credential_index,
@@ -1533,7 +1522,6 @@ fn resolve_grpc_listeners(config: &Config) -> Result<Vec<GrpcListenerConfig>, St
                 endpoint: ListenerEndpoint::Uds { path, mode },
                 access_mode: access_mode.into(),
                 max_tier: grpc_max_tier_to_auth_tier(max_tier),
-                enforcement,
                 roles: Arc::clone(&roles),
                 credential_store: credential_store.clone(),
                 credential_index,

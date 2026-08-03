@@ -624,33 +624,33 @@ RPCs continue. Invalid or missing material rejects the whole credential reload.
 Changing the path or enabling/disabling token auth remains restart-required.
 
 **ADR-0064 principals:** `principal` gives `grpc_authz` records a stable
-operator-controlled identity. Under the default tier enforcement it is also
-the identity looked up in `[security.grpc.roles]`; under legacy enforcement it
-is audit context only. On UDS listeners it labels the listener identity
+operator-controlled identity, and it is
+the identity looked up in `[security.grpc.roles]`. On UDS listeners it labels the listener identity
 established by filesystem permissions and/or the optional token. On TCP
 listeners it is accepted only when `token_file` is configured and native mTLS
 is not configured. Native mTLS listeners derive the audit principal from the
 peer certificate in ADR-0064 order: first `rustbgpd:`
 URI SAN, then email SAN, then Subject CN. If a validated client certificate has
 none of those fields, or if the selected value is too long or contains embedded
-control characters, the request remains allowed in legacy mode and the audit
-principal falls back to `mtls-unresolved`.
+control characters, the audit
+principal falls back to `mtls-unresolved`, which cannot be mapped in
+`[security.grpc.roles]` and is therefore denied.
 
 ### `[security.grpc]`
 
-ADR-0064 per-method authorization defaults to `"tier"` since v0.24.0. Tier
+ADR-0064 per-method authorization is `"tier"` — the default since v0.24.0
+and the only mode since v0.63.0. Tier
 mode enforces `[security.grpc.roles]` for the authenticated principal before
 the handler runs, in addition to listener `max_tier` caps; a declared
 principal without a matching `[security.grpc.roles]` entry fails validation at
 startup, while owner-only UDS listeners with no principal need no roles block
-at all (implicit `local-operator`). Legacy mode remains
-accepted today only as a temporary migration mode: role mappings are audit
-context only and the listener's `max_tier` is the authoritative authorization
-boundary.
+at all (implicit `local-operator`). The former `"legacy"` migration mode was
+removed in v0.63.0: the value still parses but is rejected at boot,
+`--check`, and reload with a message carrying the migration steps.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `enforcement` | string | no | `"tier"` | ADR-0064 enforcement mode (default since v0.24.0). `"tier"` enables per-principal role enforcement in addition to listener `max_tier` caps. `"legacy"` is the temporary migration mode in which roles are audit-only and the listener cap authorizes calls |
+| `enforcement` | string | no | `"tier"` | ADR-0064 enforcement mode. `"tier"` (default since v0.24.0, the only mode since v0.63.0) enforces per-principal role ceilings in addition to listener `max_tier` caps. `"legacy"` was removed in v0.63.0 and is rejected at validation |
 
 `[security.grpc.roles]` maps an authenticated principal string to one of the
 built-in roles:
@@ -684,19 +684,22 @@ that specific config.
 **Default changed to `tier` in v0.24.0.** Upgrading a deployment that
 uses TCP listeners, group/world-accessible UDS sockets, or declared
 principals without staging the migration first will fail validation at
-startup; the error lists every problem, ends with a paste-ready fix,
-and points at the `enforcement = "legacy"` escape hatch. Deployments
+startup; the error lists every problem and ends with a paste-ready
+fix. Deployments
 that only use an owner-only UDS socket (including the implicit default)
 boot without any staging via the implicit `local-operator` identity.
 Already-staged operators see no behavior change.
 
-Explicit `enforcement = "legacy"` emits a validation warning, and
-`rustbgpd --check --strict` rejects any config that retains it. The original
-startup deprecation warning shipped in v0.51.0 on 2026-07-11; validation and
-strict-check enforcement followed in v0.61.0. The two-minor/90-day
-compatibility floor is therefore approximately 2026-10-09; reaching that floor
-makes Legacy eligible for a later removal decision, but does not promise
-removal on that date.
+**`enforcement = "legacy"` was removed in v0.63.0** and is rejected at boot,
+`--check`, and reload. Earlier editions of this document projected a
+two-minor/90-day floor (≈2026-10-09) as the earliest *eligibility* for
+removal; that guidance is superseded — the removal landed earlier as an
+explicit owner decision under the project's pre-1.0 alpha stability posture,
+once the implicit `local-operator` identity removed the migration burden for
+local-only deployments. If an upgrade hits the rejection: local-only configs
+delete the whole `[security.grpc]` block; named-principal setups keep the
+three-line tier config shown in the rejection message (`enforcement =
+"tier"` plus a `[security.grpc.roles]` entry for the listener principal).
 
 The safe migration sequence (run against a pre-upgrade daemon if
 possible):
@@ -709,15 +712,11 @@ possible):
 3. For remote TCP, prefer native mTLS so the principal is derived from the
    client certificate; otherwise use `token_file` plus a non-secret
    `principal` label.
-4. Set `enforcement = "legacy"` only while staging labels and roles, then run
-   `rustbgpd --check` against the candidate TOML. This intentionally warns and
-   cannot pass `--check --strict` until the explicit Legacy setting is removed.
-5. Remove the explicit `enforcement = "legacy"` (or change it to
-   `"tier"`) and monitor `grpc_authz` logs/metrics for
+4. Run `rustbgpd --check` against the candidate TOML; a config that fails
+   the tier rules is rejected with a single error listing every problem and
+   a paste-ready fix.
+5. Deploy and monitor `grpc_authz` logs/metrics for
    `principal_unmapped` and `role_tier_denied`.
-6. If migration cannot finish in one change window, keep explicit Legacy as a
-   documented, time-bounded exception and retain the narrowest practical
-   listener `max_tier` until Tier can be restored.
 
 ```toml
 # The v0.24.0 default — equivalent to omitting [security.grpc]
@@ -729,12 +728,6 @@ enforcement = "tier"
 "observer-readonly" = "observer"
 "automation.example" = "automation"
 "operator.example" = "operator"
-```
-
-```toml
-# Temporary migration mode for pre-v0.24.0 behavior; warns under --check.
-[security.grpc]
-enforcement = "legacy"
 ```
 
 ```toml

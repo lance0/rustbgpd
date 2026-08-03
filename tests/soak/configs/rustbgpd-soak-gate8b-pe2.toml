@@ -17,8 +17,8 @@ listen_port = 179
 log_format = "json"
 prometheus_addr = "0.0.0.0:9179"
 
-[global.telemetry.grpc_tcp]
-address = "0.0.0.0:50051"
+# No gRPC listener: the Gate 8b soaks observe via Prometheus only. The
+# implicit owner-only UDS listener satisfies default tier enforcement.
 
 [[evpn_instances]]
 vni = 100
@@ -41,7 +41,3 @@ remote_asn = 65000
 description = "pe1"
 hold_time = 30
 families = ["l2vpn_evpn"]
-
-# Legacy: the Gate 8b soaks observe via Prometheus only; no gRPC client or operator token is wired.
-[security.grpc]
-enforcement = "legacy"

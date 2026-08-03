@@ -54,6 +54,7 @@ topology:
       cmd: sleep infinity
       binds:
         - ./configs/rustbgpd-m39-pe1.toml:/etc/rustbgpd/config.toml:ro
+        - ../fixtures/grpc-test-only-operator.token:/run/rustbgpd/grpc-test-only-operator.token:ro
         - ./scripts/start-rustbgpd-m39-pe1.sh:/usr/local/bin/start-rustbgpd-m39-pe1.sh:ro
         - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
       exec:

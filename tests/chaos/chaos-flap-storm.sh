@@ -36,6 +36,7 @@ REPORT="$RUN_DIR/report.json"
 
 # Reuse interop test-lib for resolve_grpc_addr / grpc_health
 TOPO="$CHAOS_TOPO"
+INTEROP_TEST_OPERATOR_AUTH=1
 # shellcheck source=../interop/scripts/test-lib.sh
 source "$SCRIPT_DIR/../interop/scripts/test-lib.sh"
 resolve_grpc_addr
@@ -64,7 +65,7 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
     cycles=$((cycles + 1))
 
     # Disable
-    if ! grpcurl -plaintext -import-path . -proto "$PROTO" \
+    if ! grpcurl_call \
         -d "{\"address\":\"$PEER_TARGET\"}" \
         "$GRPC_ADDR" rustbgpd.v1.NeighborService/DisableNeighbor \
         >>"$DRIVER_LOG" 2>&1; then
@@ -81,7 +82,7 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
     fi
 
     # Re-enable
-    if ! grpcurl -plaintext -import-path . -proto "$PROTO" \
+    if ! grpcurl_call \
         -d "{\"address\":\"$PEER_TARGET\"}" \
         "$GRPC_ADDR" rustbgpd.v1.NeighborService/EnableNeighbor \
         >>"$DRIVER_LOG" 2>&1; then
@@ -90,7 +91,7 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
 
     # Wait briefly for re-Establish; check state.
     sleep "$CHAOS_INTERVAL_SEC"
-    state=$(grpcurl -plaintext -import-path . -proto "$PROTO" \
+    state=$(grpcurl_call \
         -d "{\"address\":\"$PEER_TARGET\"}" \
         "$GRPC_ADDR" rustbgpd.v1.NeighborService/GetNeighborState 2>/dev/null \
         | jq -r '.state // empty')
@@ -133,7 +134,7 @@ fi
 log "[chaos-flap-storm] post-storm: waiting up to 30s for $PEER_TARGET to re-Establish"
 post_storm_established=0
 for _ in $(seq 1 30); do
-    state=$(grpcurl -plaintext -import-path . -proto "$PROTO" \
+    state=$(grpcurl_call \
         -d "{\"address\":\"$PEER_TARGET\"}" \
         "$GRPC_ADDR" rustbgpd.v1.NeighborService/GetNeighborState 2>/dev/null \
         | jq -r '.state // empty')

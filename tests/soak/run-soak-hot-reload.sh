@@ -41,7 +41,9 @@ RUSTBGPD="${RUSTBGPD:-clab-${TOPO}-rustbgpd}"
 FRR="${FRR:-clab-${TOPO}-frr}"
 RUSTBGPD_IP="${RUSTBGPD_IP:-10.0.0.1}"
 FRR_IP="${FRR_IP:-10.0.0.2}"
-GRPC_ADDR="${GRPC_ADDR:-http://127.0.0.1:50051}"
+# Default UDS socket: owner-only, so the in-container rbgp calls
+# authorize as the implicit local-operator under tier enforcement.
+GRPC_ADDR="${GRPC_ADDR:-unix:///var/lib/rustbgpd/grpc.sock}"
 
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
 RUN_DIR="${RUN_DIR_OVERRIDE:-$SOAK_SCRIPT_DIR/runs/soak-hot-reload-$RUN_ID}"
@@ -179,17 +181,11 @@ listen_port = 179
 prometheus_addr = "0.0.0.0:9179"
 log_format = "json"
 
-[global.telemetry.grpc_tcp]
-address = "0.0.0.0:50051"
-
 [[neighbors]]
 address = "10.0.0.2"
 remote_asn = 65002
 description = "frr-soak-hot-reload-cycle-${cycle}"
 hold_time = 90
-
-[security.grpc]
-enforcement = "legacy"
 EOF
 }
 

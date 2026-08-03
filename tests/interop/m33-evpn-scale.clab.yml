@@ -38,6 +38,7 @@ topology:
       cmd: sleep infinity
       binds:
         - ./configs/rustbgpd-m33-scale.toml:/etc/rustbgpd/config.toml:ro
+        - ../fixtures/grpc-test-only-operator.token:/run/rustbgpd/grpc-test-only-operator.token:ro
         - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
       exec:
         - ip addr add 10.1.1.1/30 dev eth1

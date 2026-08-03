@@ -20,9 +20,7 @@ use tonic::transport::Server;
 use tonic::{Request, Status};
 use tracing::{error, info, warn};
 
-use crate::authz::{
-    AuthEnforcement, AuthTier, LOCAL_OPERATOR_PRINCIPAL, PrincipalRole, uds_mode_is_owner_only,
-};
+use crate::authz::{AuthTier, LOCAL_OPERATOR_PRINCIPAL, PrincipalRole, uds_mode_is_owner_only};
 use crate::authz_runtime::{GrpcAuthAuditContext, GrpcAuthnKind, GrpcAuthzLayer};
 use crate::bfd_service::BfdService;
 use crate::config_service::ConfigService;
@@ -691,9 +689,8 @@ pub struct ListenerConfig {
     pub access_mode: AccessMode,
     /// Effective ADR-0064 listener method-tier ceiling.
     pub max_tier: AuthTier,
-    /// ADR-0064 principal-role enforcement mode.
-    pub enforcement: AuthEnforcement,
-    /// Global principal-to-role map used when `enforcement = tier`.
+    /// Global ADR-0064 principal-to-role map; role ceilings are
+    /// enforced unconditionally.
     pub roles: Arc<BTreeMap<String, PrincipalRole>>,
     pub credential_store: CredentialStore,
     pub credential_index: usize,
@@ -742,17 +739,11 @@ pub enum ListenerEndpoint {
     Uds { path: PathBuf, mode: u32 },
 }
 
-#[derive(Clone)]
-struct RuntimeAuthzConfig {
-    enforcement: AuthEnforcement,
-    roles: Arc<BTreeMap<String, PrincipalRole>>,
-}
-
 fn tcp_audit_context(
     addr: SocketAddr,
     access_mode: AccessMode,
     max_tier: AuthTier,
-    role_config: RuntimeAuthzConfig,
+    roles: Arc<BTreeMap<String, PrincipalRole>>,
     bearer_enabled: bool,
     tls_enabled: bool,
     configured_principal: Option<&str>,
@@ -778,7 +769,7 @@ fn tcp_audit_context(
         authn,
         principal,
     )
-    .with_role_enforcement(role_config.enforcement, role_config.roles);
+    .with_roles(roles);
     if tls_enabled {
         context.with_mtls_peer_principal()
     } else {
@@ -791,7 +782,7 @@ fn uds_audit_context(
     mode: u32,
     access_mode: AccessMode,
     max_tier: AuthTier,
-    role_config: RuntimeAuthzConfig,
+    roles: Arc<BTreeMap<String, PrincipalRole>>,
     auth_token: Option<&str>,
     configured_principal: Option<&str>,
 ) -> GrpcAuthAuditContext {
@@ -831,7 +822,7 @@ fn uds_audit_context(
         authn,
         principal,
     )
-    .with_role_enforcement(role_config.enforcement, role_config.roles)
+    .with_roles(roles)
     .with_bearer_token(auth_token);
     if implicit_operator {
         context.with_implicit_local_operator()
@@ -1063,7 +1054,6 @@ async fn run_listener(
         endpoint,
         access_mode,
         max_tier,
-        enforcement,
         roles,
         credential_store,
         credential_index,
@@ -1076,7 +1066,6 @@ async fn run_listener(
                 addr,
                 access_mode,
                 max_tier,
-                enforcement,
                 roles,
                 credential_store,
                 credential_index,
@@ -1136,7 +1125,6 @@ async fn run_listener(
                 mode,
                 access_mode,
                 max_tier,
-                enforcement,
                 roles,
                 credential_store,
                 credential_index,
@@ -1202,7 +1190,6 @@ async fn run_tcp_listener(
     addr: SocketAddr,
     access_mode: AccessMode,
     max_tier: AuthTier,
-    enforcement: AuthEnforcement,
     roles: Arc<BTreeMap<String, PrincipalRole>>,
     credential_store: CredentialStore,
     credential_index: usize,
@@ -1274,7 +1261,7 @@ async fn run_tcp_listener(
         bound_addr,
         access_mode,
         max_tier,
-        RuntimeAuthzConfig { enforcement, roles },
+        roles,
         auth_enabled,
         tls_enabled,
         principal.as_deref(),
@@ -1462,7 +1449,6 @@ async fn run_uds_listener(
     mode: u32,
     access_mode: AccessMode,
     max_tier: AuthTier,
-    enforcement: AuthEnforcement,
     roles: Arc<BTreeMap<String, PrincipalRole>>,
     credential_store: CredentialStore,
     credential_index: usize,
@@ -1525,7 +1511,7 @@ async fn run_uds_listener(
         mode,
         access_mode,
         max_tier,
-        RuntimeAuthzConfig { enforcement, roles },
+        roles,
         None,
         principal.as_deref(),
     );
@@ -1747,24 +1733,22 @@ mod tests {
     use crate::proto::{EventCategory, WatchEventsRequest};
     use crate::test_support::{session_event, spawn_fake_peer_manager, spawn_fake_rib};
 
-    fn tier_authz(principal: &str) -> RuntimeAuthzConfig {
-        RuntimeAuthzConfig {
-            enforcement: AuthEnforcement::Tier,
-            roles: Arc::new(BTreeMap::from([(
-                principal.to_string(),
-                PrincipalRole::Operator,
-            )])),
-        }
+    fn tier_authz(principal: &str) -> Arc<BTreeMap<String, PrincipalRole>> {
+        Arc::new(BTreeMap::from([(
+            principal.to_string(),
+            PrincipalRole::Operator,
+        )]))
     }
 
-    /// Mutation proof: restoring the old Legacy test builder or dropping its
-    /// principal mapping makes one of these exact assertions red.
+    /// Tier enforcement is unconditional: `AuthEnforcement` no longer
+    /// exists, so a legacy allow-all context cannot be constructed at the
+    /// type level. This pins the builder's principal mapping — dropping it
+    /// makes the assertion red.
     #[test]
     fn test_authz_builder_uses_tier_operator_role() {
-        let config = tier_authz("rustbgpd://operator/api-test");
-        assert_eq!(config.enforcement, AuthEnforcement::Tier);
+        let roles = tier_authz("rustbgpd://operator/api-test");
         assert_eq!(
-            config.roles.get("rustbgpd://operator/api-test"),
+            roles.get("rustbgpd://operator/api-test"),
             Some(&PrincipalRole::Operator)
         );
     }
@@ -2062,10 +2046,7 @@ mod tests {
             0o600,
             AccessMode::ReadWrite,
             AuthTier::OperatorOnly,
-            RuntimeAuthzConfig {
-                enforcement: AuthEnforcement::Tier,
-                roles: Arc::new(BTreeMap::new()),
-            },
+            Arc::new(BTreeMap::new()),
             None,
             None,
         );
@@ -2083,10 +2064,7 @@ mod tests {
             0o660,
             AccessMode::ReadWrite,
             AuthTier::OperatorOnly,
-            RuntimeAuthzConfig {
-                enforcement: AuthEnforcement::Tier,
-                roles: Arc::new(BTreeMap::new()),
-            },
+            Arc::new(BTreeMap::new()),
             None,
             None,
         );

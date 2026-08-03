@@ -1861,58 +1861,36 @@ fn grpc_listener_max_tier_can_be_stricter_than_access_mode() {
 }
 
 #[test]
-fn explicit_legacy_grpc_enforcement_loads_roles_and_warns() {
-    // After the v0.24.0 default flip, operators who want the prior
-    // pre-enforcement posture must set `enforcement = "legacy"`
-    // explicitly. This test pins that the explicit opt-out still
-    // parses cleanly alongside a populated roles map (operators
-    // staging roles ahead of flipping enforcement to "tier").
+fn explicit_legacy_grpc_enforcement_is_rejected() {
+    // v0.63.0 removed the legacy runtime path outright: the value still
+    // parses (the v1 surface keeps the variant) but validation rejects it
+    // on every load path — boot, `--check`, and reload all route through
+    // here. Restoring the old acceptance makes this red.
     let toml_str = format!(
-        "{}\n[security.grpc]\nenforcement = \"legacy\"\n\n[security.grpc.roles]\n\"observer-readonly\" = \"observer\"\n\"automation.example\" = \"automation\"\n\"operator.example\" = \"operator\"\n",
+        "{}\n[security.grpc]\nenforcement = \"legacy\"\n\n[security.grpc.roles]\n\"operator.example\" = \"operator\"\n",
         valid_toml_no_grpc_security()
     );
-    let config = Config::load_toml_with_diagnostics(&toml_str, "legacy compatibility").unwrap();
-    assert_eq!(
-        config.security.grpc.enforcement,
-        GrpcEnforcementConfig::Legacy
-    );
-    assert_eq!(
-        config.security.grpc.roles["observer-readonly"],
-        GrpcRoleConfig::Observer
-    );
-    assert_eq!(
-        config.security.grpc.roles["automation.example"],
-        GrpcRoleConfig::Automation
-    );
-    assert_eq!(
-        config.security.grpc.roles["operator.example"],
-        GrpcRoleConfig::Operator
-    );
-    let advisory = config
-        .advisories()
-        .into_iter()
-        .find(|a| a.headline.contains("security.grpc.enforcement"))
-        .expect("legacy enforcement must raise an advisory");
-    let text = advisory.one_line();
+    let err = Config::load_toml_with_diagnostics(&toml_str, "legacy removal")
+        .expect_err("legacy enforcement must fail validation");
     assert!(
-        text.contains("mandatory in a future release"),
-        "advisory must name the sunset: {text}"
+        err.contains("security.grpc.enforcement = \"legacy\" was removed in v0.63.0"),
+        "rejection must name the removal decision: {err}"
     );
-    // Condition, consequence, action — an advisory that only restates the
-    // setting leaves the operator with nothing to do about it.
+    // Local-only operators get the zero-config exit: the implicit
+    // local-operator identity covers owner-only UDS clients.
     assert!(
-        text.contains("max_tier cap"),
-        "advisory must name the consequence: {text}"
+        err.contains("delete the whole [security.grpc] block") && err.contains("local-operator"),
+        "rejection must give the delete-the-block guidance: {err}"
+    );
+    // Named-principal setups get the paste block for the tier config to keep.
+    assert!(
+        err.contains("[security.grpc]\nenforcement = \"tier\"")
+            && err.contains("[security.grpc.roles]\n\"<your-principal>\" = \"operator\""),
+        "rejection must carry the copy-pasteable tier fix: {err}"
     );
     assert!(
-        text.contains("enforcement = \"tier\"")
-            && text.contains("[security.grpc.roles]")
-            && text.contains("principal"),
-        "advisory must give the migration action: {text}"
-    );
-    assert!(
-        text.contains("docs/adr/0064-grpc-authorization.md"),
-        "advisory must cite the migration reference: {text}"
+        err.contains("docs/CONFIGURATION.md") && err.contains("docs/adr/0064"),
+        "rejection must cite the migration references: {err}"
     );
 }
 
@@ -2056,9 +2034,15 @@ fn grpc_security_tier_diagnoses_uds_principal_missing_from_roles() {
             && reason.contains("\"local-admin\" = \"operator\""),
         "error must end with a paste-ready fix: {reason}"
     );
+    // v0.63.0 removed the legacy escape hatch; the fix must not
+    // resurrect it.
     assert!(
-        reason.contains("enforcement = \"legacy\""),
-        "error must mention the legacy escape hatch: {reason}"
+        !reason.contains("enforcement = \"legacy\""),
+        "error must not offer the removed legacy mode: {reason}"
+    );
+    assert!(
+        reason.contains("docs/CONFIGURATION.md"),
+        "error must point at the migration checklist: {reason}"
     );
 }
 
@@ -16859,7 +16843,7 @@ fn retired_looking_glass_fails_load_with_migration_error() {
     );
 }
 
-// ── Legacy gRPC enforcement sunset warning ───────────────────────────
+// ── Tier gRPC enforcement (legacy mode removed in v0.63.0) ───────────
 
 #[test]
 fn tier_grpc_enforcement_does_not_warn() {
@@ -16941,7 +16925,7 @@ fn config_loader_has_no_test_only_legacy_bypass() {
         "production loader source must not contain a test-only auth seam"
     );
     // The loader itself never branches on Legacy: the only production code
-    // that selects it is the operator-facing advisory in `validation.rs`.
+    // that selects it is the v0.63.0 removal rejection in `validation.rs`.
     assert_eq!(
         source.matches("GrpcEnforcementConfig::Legacy").count(),
         0,
@@ -16957,7 +16941,7 @@ fn config_loader_has_no_test_only_legacy_bypass() {
             .matches("GrpcEnforcementConfig::Legacy")
             .count(),
         1,
-        "only the compatibility advisory may select Legacy"
+        "only the removal rejection may select Legacy"
     );
 }
 

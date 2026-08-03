@@ -1,6 +1,6 @@
 # ADR-0064: gRPC per-method authorization
 
-**Status:** Accepted (amended 2026-08-03: implicit `local-operator` for owner-only UDS, §4)
+**Status:** Accepted (amended 2026-08-03: implicit `local-operator` for owner-only UDS, §4; addendum 2026-08-03: legacy mode removed, see "Status addendum" below)
 **Date:** 2026-05-18
 
 ## Context
@@ -447,3 +447,21 @@ proto credential markers remain deferred.
 | 5. Enforcement + default flip | Done in v0.24.0: opt-in `tier` role enforcement (slice 5a) + migration prep + default flip from `legacy` to `tier` (slice 5b, closes #164) |
 | 6. Audit log hardening | Partial: result-aware records + explicit credential masking table + operations guidance for audit retention and resource guardrails |
 | 7. External-review prep | Partial: current enforced-system threat model; external sign-off and auditor packet remain |
+
+## Status addendum (2026-08-03): legacy mode removed in v0.63.0
+
+The `enforcement = "legacy"` migration mode described above completed its
+purpose and was removed as a functioning mode in v0.63.0. The value still
+parses (the v1 config surface keeps the enum variant) but validation rejects
+it at boot, `--check`, and reload with a one-shot migration message; the
+runtime no longer carries the roles-as-audit-context-only path, so tier role
+ceilings are enforced unconditionally.
+
+Earlier sunset language in this repository projected a two-minor/90-day floor
+(≈2026-10-09) as the earliest *eligibility* for removal. The removal landed
+before that date as an explicit owner decision under the project's pre-1.0
+alpha stability posture, taken once the implicit `local-operator` identity
+(§4 amendment) reduced the migration for local-only deployments to deleting
+the `[security.grpc]` block entirely. Named-principal deployments keep a
+three-line tier config; the rejection message carries the exact paste block.
+References to `legacy` elsewhere in this ADR are historical design record.

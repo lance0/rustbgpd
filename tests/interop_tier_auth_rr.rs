@@ -62,32 +62,6 @@ const TOPOLOGIES: &[&str] = &[
     "m92-gobgp-v47-rs-differential",
     "m93-required-families-bird",
 ];
-// Configs deliberately held on `enforcement = "legacy"`. Each states its own
-// reason at its `[security.grpc]` block; the tags below are the short form.
-// Adding an entry means recording the reason in the config too.
-const LEGACY_ALLOWLIST: &[&str] = &[
-    // no gRPC listener to govern
-    "tests/interop/configs/rustbgpd-frr-badopen.toml",
-    // driver and soak call grpcurl directly, uncredentialed
-    "tests/interop/configs/rustbgpd-m33-scale.toml",
-    // asserted through FRR, bridge fdb, and Prometheus
-    "tests/interop/configs/rustbgpd-m37-originator.toml",
-    // plaintext grpcurl driver; shared with the Gate 9 soak
-    "tests/interop/configs/rustbgpd-m39-pe1.toml",
-    // operator token on pe1/pe2 only; vtep read over plain rbgp
-    "tests/interop/configs/rustbgpd-m67-vtep.toml",
-    // soak observes via Prometheus and FRR, no gRPC client
-    "tests/interop/configs/rustbgpd-soak-gr-restart.toml",
-    // soak's generated candidates pin the same legacy block
-    "tests/interop/configs/rustbgpd-soak-hot-reload.toml",
-    // soak drives rbgp rib add/delete without a token
-    "tests/interop/configs/rustbgpd-soak-inject-churn.toml",
-    // Gate 8b soaks observe via Prometheus only
-    "tests/soak/configs/rustbgpd-soak-gate8b-pe1.toml",
-    // Gate 8b soaks observe via Prometheus only
-    "tests/soak/configs/rustbgpd-soak-gate8b-pe2.toml",
-];
-
 fn is_rr_slice(name: &str) -> bool {
     let Some(suffix) = name.strip_prefix("rustbgpd-m") else {
         return false;
@@ -97,16 +71,6 @@ fn is_rr_slice(name: &str) -> bool {
         && digits
             .parse::<u8>()
             .is_ok_and(|n| (70..=93).contains(&n) && n != 90)
-}
-
-fn has_legacy_enforcement(source: &str) -> bool {
-    let value: toml::Value = toml::from_str(source).expect("config must be valid TOML");
-    value
-        .get("security")
-        .and_then(|security| security.get("grpc"))
-        .and_then(|grpc| grpc.get("enforcement"))
-        .and_then(toml::Value::as_str)
-        == Some("legacy")
 }
 
 /// Reverting tier auth, a node bind/env, or driver helper wiring makes this
@@ -259,47 +223,56 @@ fn rr_and_route_server_interop_is_tier_authenticated_end_to_end() {
     assert_eq!(drivers.len(), 23, "driver inventory changed");
 }
 
-/// Adding an unowned legacy config or removing a stale allowlist entry makes
-/// this red: equality deliberately fences both sides of the inventory.
+/// v0.63.0 retired `enforcement = "legacy"` (validation rejects it), so no
+/// live config, config generator, or lab fixture may still pin it. This
+/// replaces the LAN-546 legacy allowlist: the allowlist existed only to
+/// tolerate legacy, and its former entries are all migrated. Scanned:
+/// every git-tracked text file under tests/, bench/, and scripts/,
+/// except
+/// - `.rs` sources (the rejection tests carry the literal on purpose),
+/// - `artifacts-*` directories (byte-exact captures of past bench runs).
+///
+/// Only tracked files are scanned (`git ls-files`): untracked local run
+/// outputs — old campaign artifacts, soak scratch — are not config
+/// producers and must not flake this gate on a dev box.
+///
+/// Both TOML quote styles are matched so a single-quoted pin cannot slip
+/// past the gate.
 #[test]
-fn legacy_auth_inventory_is_exactly_the_owned_exceptions() {
+fn no_config_producer_still_pins_legacy_enforcement() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let mut live = BTreeSet::new();
-    for relative_dir in ["tests/interop/configs", "tests/soak/configs"] {
-        for entry in fs::read_dir(root.join(relative_dir)).unwrap() {
-            let file = entry.unwrap().path();
-            if file.extension().and_then(|ext| ext.to_str()) != Some("toml") {
-                continue;
-            }
-            if has_legacy_enforcement(&fs::read_to_string(&file).expect("config readable")) {
-                live.insert(
-                    file.strip_prefix(root)
-                        .unwrap()
-                        .to_str()
-                        .unwrap()
-                        .to_owned(),
-                );
-            }
+    let tracked = std::process::Command::new("git")
+        .args(["ls-files", "-z", "--", "tests", "bench", "scripts"])
+        .current_dir(root)
+        .output()
+        .expect("git ls-files enumerates the tracked scan set");
+    assert!(tracked.status.success(), "git ls-files failed");
+    let mut offenders = Vec::new();
+    for rel in String::from_utf8(tracked.stdout)
+        .expect("tracked paths are UTF-8")
+        .split('\0')
+        .filter(|rel| !rel.is_empty())
+    {
+        let path = root.join(rel);
+        if rel.split('/').any(|part| part.starts_with("artifacts-")) {
+            continue;
+        }
+        if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
+            continue;
+        }
+        let Ok(source) = fs::read_to_string(&path) else {
+            continue; // binary fixture
+        };
+        if source.contains("enforcement = \"legacy\"") || source.contains("enforcement = 'legacy'")
+        {
+            offenders.push(rel.to_string());
         }
     }
+    offenders.sort();
     assert_eq!(
-        live,
-        LEGACY_ALLOWLIST
-            .iter()
-            .map(|path| (*path).to_owned())
-            .collect()
+        offenders,
+        Vec::<String>::new(),
+        "enforcement = \"legacy\" was removed in v0.63.0; migrate these to \
+         tier (or delete their [security.grpc] block for owner-only UDS)"
     );
-}
-
-/// Replacing semantic TOML inspection with a text search makes this red: the
-/// legacy value uses equivalent single-quote syntax and the tier value names
-/// legacy only in a comment.
-#[test]
-fn legacy_inventory_classification_is_semantic() {
-    assert!(has_legacy_enforcement(
-        "[security.grpc]\nenforcement = 'legacy'\n"
-    ));
-    assert!(!has_legacy_enforcement(
-        "[security.grpc]\nenforcement = 'tier' # enforcement = \"legacy\"\n"
-    ));
 }

@@ -357,11 +357,9 @@ def bench_telemetry_block(rundir: pathlib.Path) -> str:
         'prometheus_addr = "127.0.0.1:9179"\n'
         "\n"
         "[global.telemetry.grpc_uds]\n"
+        "# Owner-only socket: clients authorize as the implicit\n"
+        "# local-operator, so no [security.grpc] block is needed.\n"
         f'path = "{rundir}/grpc.sock"\n'
-        "\n"
-        "[security.grpc]\n"
-        "# Loopback benchmark: UDS access is gated by file perms.\n"
-        'enforcement = "legacy"\n'
         "\n"
     )
 
