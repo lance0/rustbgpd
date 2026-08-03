@@ -100,6 +100,15 @@ impl LaunchIdentity {
 
     fn boot_revert_check_io_with(
         &self,
+        step: impl FnMut(BootStep) -> io::Result<()>,
+    ) -> io::Result<Option<BootRevert>> {
+        self.boot_revert_check_io_with_limits(MAX_LOCATOR_BYTES, MAX_JOURNAL_BYTES, step)
+    }
+
+    fn boot_revert_check_io_with_limits(
+        &self,
+        max_locator_bytes: usize,
+        max_journal_bytes: usize,
         mut step: impl FnMut(BootStep) -> io::Result<()>,
     ) -> io::Result<Option<BootRevert>> {
         // The packaged SIGHUP-only deployment intentionally keeps
@@ -114,8 +123,8 @@ impl LaunchIdentity {
         }
         locator.directory.validate_private()?;
         let (locator_bytes, locator_identity) =
-            locator.read_bounded_identified(MAX_LOCATOR_BYTES)?;
-        let wire = decode_locator(&locator_bytes)?;
+            locator.read_bounded_identified(max_locator_bytes)?;
+        let wire = decode_locator_with_cap(&locator_bytes, max_locator_bytes)?;
 
         let journal_path = path_from_wire(&wire.journal_path)?;
         let journal = Entry::pin(&journal_path)?;
@@ -123,8 +132,8 @@ impl LaunchIdentity {
             return Err(invalid("journal identity is not canonical"));
         }
         let (journal_bytes, journal_identity) =
-            journal.read_bounded_identified(MAX_JOURNAL_BYTES)?;
-        let journal_wire = decode_journal(&journal_bytes)?;
+            journal.read_bounded_identified(max_journal_bytes)?;
+        let journal_wire = decode_journal_with_cap(&journal_bytes, max_journal_bytes)?;
         validate_locator_journal(&wire, &journal_wire, &journal)?;
 
         let recorded_target = path_from_wire(&wire.config_target)?;
@@ -463,18 +472,26 @@ struct Locator {
 }
 
 fn encode_journal(journal: &Journal) -> io::Result<Vec<u8>> {
+    encode_journal_with_cap(journal, MAX_JOURNAL_BYTES)
+}
+
+fn encode_journal_with_cap(journal: &Journal, max_bytes: usize) -> io::Result<Vec<u8>> {
     validate_journal(journal)?;
     let mut bytes = serde_json::to_vec(journal).map_err(invalid)?;
     bytes.push(b'\n');
     if !bytes.starts_with(b"{\"version\":2,") {
         return Err(invalid("v2 journal dispatch prefix changed"));
     }
-    enforce_total_cap("journal", bytes.len(), MAX_JOURNAL_BYTES)?;
+    enforce_total_cap("journal", bytes.len(), max_bytes)?;
     Ok(bytes)
 }
 
 fn decode_journal(bytes: &[u8]) -> io::Result<Journal> {
-    enforce_total_cap("journal", bytes.len(), MAX_JOURNAL_BYTES)?;
+    decode_journal_with_cap(bytes, MAX_JOURNAL_BYTES)
+}
+
+fn decode_journal_with_cap(bytes: &[u8], max_bytes: usize) -> io::Result<Journal> {
+    enforce_total_cap("journal", bytes.len(), max_bytes)?;
     if !bytes.starts_with(b"{\"version\":2,") {
         return Err(invalid("journal is not canonical v2"));
     }
@@ -520,15 +537,23 @@ fn verify_prior_snapshot(snapshot: &AcceptedConfigSnapshot, prior: &Prior) -> io
 }
 
 fn encode_locator(locator: &Locator) -> io::Result<Vec<u8>> {
+    encode_locator_with_cap(locator, MAX_LOCATOR_BYTES)
+}
+
+fn encode_locator_with_cap(locator: &Locator, max_bytes: usize) -> io::Result<Vec<u8>> {
     validate_locator(locator)?;
     let mut bytes = serde_json::to_vec(locator).map_err(invalid)?;
     bytes.push(b'\n');
-    enforce_total_cap("locator", bytes.len(), MAX_LOCATOR_BYTES)?;
+    enforce_total_cap("locator", bytes.len(), max_bytes)?;
     Ok(bytes)
 }
 
 fn decode_locator(bytes: &[u8]) -> io::Result<Locator> {
-    enforce_total_cap("locator", bytes.len(), MAX_LOCATOR_BYTES)?;
+    decode_locator_with_cap(bytes, MAX_LOCATOR_BYTES)
+}
+
+fn decode_locator_with_cap(bytes: &[u8], max_bytes: usize) -> io::Result<Locator> {
+    enforce_total_cap("locator", bytes.len(), max_bytes)?;
     let locator: Locator = serde_json::from_slice(bytes).map_err(invalid)?;
     validate_locator(&locator)?;
     if encode_locator(&locator)? != bytes {
@@ -1006,6 +1031,10 @@ impl Entry {
 
         let stage = self.stage_name()?;
         self.cleanup_stage()?;
+        let stage_entry = Self {
+            directory: Arc::clone(&self.directory),
+            name: stage.clone(),
+        };
         let fd = openat(
             &self.directory.file,
             Path::new(&stage),
@@ -1044,7 +1073,10 @@ impl Entry {
             self.directory.file.sync_all()
         })();
         if result.is_err() {
-            let _ = remove_named_safe(&self.directory.file, &stage);
+            // A hook or same-uid actor can replace the stage name after this
+            // attempt captured its inode.  Error cleanup may remove only the
+            // inode this publication created, never the replacement.
+            let _ = stage_entry.remove_matching(identity);
             if !replace {
                 let _ = self.remove_matching(identity);
             }
@@ -1427,10 +1459,9 @@ log_format = "json"
     }
 
     #[test]
-    fn component_and_total_caps_accept_maximum_and_reject_plus_one() {
-        // Destructive proof: changing either `>` to `>=`, dropping the
-        // confirm/path check, or decoding before the total cap breaks a named
-        // boundary below.
+    fn component_caps_accept_maximum_and_reject_plus_one() {
+        // Destructive proof: changing either component `>` to `>=` or
+        // dropping the confirm/path check breaks a named boundary below.
         let mut prior = small_prior();
         prior.normalized_toml = "x".repeat(history_v2::MAX_TOML);
         prior.sha256 = Sha256::digest(prior.normalized_toml.as_bytes()).into();
@@ -1452,14 +1483,6 @@ log_format = "json"
         assert!(encode_journal(&journal).is_err());
         journal.confirm_id = "   ".to_string();
         assert!(encode_journal(&journal).is_err());
-        assert!(enforce_total_cap("journal", MAX_JOURNAL_BYTES, MAX_JOURNAL_BYTES).is_ok());
-        let journal_error =
-            enforce_total_cap("journal", MAX_JOURNAL_BYTES + 1, MAX_JOURNAL_BYTES).unwrap_err();
-        assert!(journal_error.to_string().contains("journal exceeds"));
-        assert!(enforce_total_cap("locator", MAX_LOCATOR_BYTES, MAX_LOCATOR_BYTES).is_ok());
-        let locator_error =
-            enforce_total_cap("locator", MAX_LOCATOR_BYTES + 1, MAX_LOCATOR_BYTES).unwrap_err();
-        assert!(locator_error.to_string().contains("locator exceeds"));
 
         let path = format!("/{}", "x".repeat(MAX_PATH_BYTES - 1));
         let mut locator = Locator {
@@ -1473,6 +1496,55 @@ log_format = "json"
         assert!(validate_locator(&locator).is_ok());
         locator.journal_path.0.push(b'x');
         assert!(validate_locator(&locator).is_err());
+    }
+
+    #[test]
+    fn journal_and_locator_codec_total_caps_are_load_bearing() {
+        // Destructive proof: removing the encoder cap makes the N-1 encode
+        // succeed; removing the decoder cap makes the identical canonical
+        // N-byte wire decode successfully under N-1.  These call the same
+        // helpers as the production-constant wrappers above.
+        let prior = small_prior();
+        let journal = Journal {
+            version: VERSION,
+            confirm_id: "deploy-1".into(),
+            deadline_unix_seconds: 9,
+            rollback_failed: false,
+            prior: prior.clone(),
+        };
+        let journal_wire = encode_journal(&journal).unwrap();
+        let journal_max = journal_wire.len();
+        assert_eq!(
+            encode_journal_with_cap(&journal, journal_max).unwrap(),
+            journal_wire
+        );
+        assert_eq!(
+            decode_journal_with_cap(&journal_wire, journal_max).unwrap(),
+            journal
+        );
+        assert!(encode_journal_with_cap(&journal, journal_max - 1).is_err());
+        assert!(decode_journal_with_cap(&journal_wire, journal_max - 1).is_err());
+
+        let locator = Locator {
+            version: VERSION,
+            confirm_id: "deploy-1".into(),
+            journal_path: LosslessPath(b"/state/commit-confirm-journal.json".to_vec()),
+            config_target: LosslessPath(b"/etc/rustbgpd/config.toml".to_vec()),
+            prior_sha256: prior.sha256,
+            prior_source_sha256: prior.source_sha256,
+        };
+        let locator_wire = encode_locator(&locator).unwrap();
+        let locator_max = locator_wire.len();
+        assert_eq!(
+            encode_locator_with_cap(&locator, locator_max).unwrap(),
+            locator_wire
+        );
+        assert_eq!(
+            decode_locator_with_cap(&locator_wire, locator_max).unwrap(),
+            locator
+        );
+        assert!(encode_locator_with_cap(&locator, locator_max - 1).is_err());
+        assert!(decode_locator_with_cap(&locator_wire, locator_max - 1).is_err());
     }
 
     #[test]
@@ -1539,6 +1611,30 @@ log_format = "json"
         assert!(result.is_err());
         assert!(!launch.locator_path().exists());
         assert!(journal.exists(), "replacement journal must survive cleanup");
+    }
+
+    #[test]
+    fn publication_failure_preserves_same_name_stage_replacement() {
+        // Destructive proof: name-only stage cleanup deletes this replacement
+        // after the publisher has captured a different inode.  Error cleanup
+        // must be bound to the exact stage identity created by this attempt.
+        let (_root, _config, journal, launch, prior) = fixture();
+        let stage =
+            journal.with_file_name(append_name(journal.file_name().unwrap(), b".tmp").unwrap());
+        let replacement = b"same-name replacement stage";
+        let result = launch.publish_with(&journal, "deploy-1", 9, &prior, |step| {
+            if step == PublishStep::JournalStageSync {
+                fs::remove_file(&stage).unwrap();
+                fs::write(&stage, replacement).unwrap();
+                fs::set_permissions(&stage, fs::Permissions::from_mode(0o600)).unwrap();
+                return Err(io::Error::other("injected journal stage failure"));
+            }
+            Ok(())
+        });
+        assert!(result.is_err());
+        assert!(!launch.locator_path().exists());
+        assert!(!journal.exists());
+        assert_eq!(fs::read(stage).unwrap(), replacement);
     }
 
     #[test]
@@ -1626,6 +1722,53 @@ log_format = "json"
         );
         assert!(!launch.locator_path().exists());
         assert!(!journal.exists());
+    }
+
+    #[test]
+    fn boot_reader_accepts_exact_journal_cap_and_rejects_plus_one_before_candidate_work() {
+        // Destructive proof: removing the boot reader's journal cap lets the
+        // N-byte journal pass an N-1 limit, increments the candidate-work
+        // hook, and replaces the candidate.  The exact N boundary traverses
+        // the real reader, provenance check, restore, and terminal cleanup.
+        let (_root, config, journal, launch, prior) = fixture();
+        let prior_bytes = prior.normalized_toml().as_bytes().to_vec();
+        let files = launch.publish(&journal, "deploy-1", 9, &prior).unwrap();
+        let locator_bytes = fs::read(launch.locator_path()).unwrap();
+        let journal_bytes = fs::read(&journal).unwrap();
+        fs::write(&config, b"unconfirmed candidate").unwrap();
+        drop(files);
+
+        let reverted = launch
+            .boot_revert_check_io_with_limits(locator_bytes.len(), journal_bytes.len(), |_| Ok(()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(reverted.accepted.normalized_toml().as_bytes(), prior_bytes);
+        assert_eq!(fs::read(&config).unwrap(), prior_bytes);
+        assert!(!launch.locator_path().exists());
+        assert!(!journal.exists());
+
+        let (_root, config, journal, launch, prior) = fixture();
+        let files = launch.publish(&journal, "deploy-2", 9, &prior).unwrap();
+        let locator_bytes = fs::read(launch.locator_path()).unwrap();
+        let journal_bytes = fs::read(&journal).unwrap();
+        let candidate = b"second unconfirmed candidate";
+        fs::write(&config, candidate).unwrap();
+        drop(files);
+        let candidate_steps = std::cell::Cell::new(0usize);
+
+        let result = launch.boot_revert_check_io_with_limits(
+            locator_bytes.len(),
+            journal_bytes.len() - 1,
+            |_| {
+                candidate_steps.set(candidate_steps.get() + 1);
+                Ok(())
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(candidate_steps.get(), 0);
+        assert_eq!(fs::read(&config).unwrap(), candidate);
+        assert!(launch.locator_path().exists());
+        assert!(journal.exists());
     }
 
     #[test]
