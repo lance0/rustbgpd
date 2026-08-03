@@ -1,6 +1,6 @@
 # Kernel dataplane compile-once receipt — 2026-08
 
-Status: measurement in progress. Local correctness is green; there is no hosted performance claim yet.
+Status: NO-GO. Local correctness is green, but the predeclared two-attempt aggregate gate did not pass.
 
 ## Boundary and candidate
 
@@ -41,5 +41,5 @@ Both attempts must keep `C(run) <= 2912`, or 105% of the 2774-second control-agg
 Any failed, cancelled, missing-timestamp, runner-failure, or roster-mismatched attempt is invalid; jobs are never spliced across attempts.
 A seed, retry after unrelated runner failure, or local result cannot satisfy the gate.
 
-Until both hosted attempts and aggregate-compute accounting pass, the verdict
-remains measurement in progress.
+Run/job `30849663483/91806407214` passed at 355 seconds (FIB 1, BFD 3; `C=2758`); `30849975385/91807352207` passed at 354 seconds (FIB 1, BFD 3) but `C=3016` exceeded 2912.
+The affected lane saved 67–68 seconds twice, but the full-workflow attempts disagreed under the frozen guard. The candidate is closed without a performance claim or merge.
