@@ -119,6 +119,11 @@ service ConfigService {
   // is outside the v1 compatibility contract while adoption is evaluated.
   rpc StreamPlanConfigTransaction(stream StreamPlanConfigTransactionRequest) returns (StreamPlanConfigTransactionResponse);
 
+  // Commit a candidate previously accepted by StreamPlanConfigTransaction.
+  // The ephemeral plan token binds the exact candidate bytes and runtime
+  // snapshot; this surface remains outside the v1 compatibility contract.
+  rpc StreamApplyConfigTransaction(stream StreamApplyConfigTransactionRequest) returns (ConfigTransactionApplyResponse);
+
   // Commit a previously planned candidate transaction. V1 commits one pure
   // runtime family at a time: full-set `[[fib_tables]]`, full-set
   // `[[dynamic_neighbors]]`, static `[[neighbors]]` add/delete/modify, or
@@ -280,6 +285,27 @@ message StreamPlanConfigTransactionResponse {
   ConfigTransactionPlanResponse plan = 1;
   // Ephemeral process-local binding issued only for a COMMITTABLE plan.
   optional string plan_token = 2;
+}
+
+message StreamApplyConfigTransactionRequest {
+  oneof frame {
+    StreamApplyConfigMetadata metadata = 1;
+    bytes candidate_chunk = 2;
+    StreamPlanConfigEnd end = 3;
+  }
+}
+
+message StreamApplyConfigMetadata {
+  // Framing version. The only accepted value is 1.
+  uint32 version = 1;
+  // Ephemeral token returned by StreamPlanConfigTransaction for these exact
+  // bytes and expected runtime snapshot.
+  string plan_token = 2;
+  string expected_runtime_snapshot_token = 3;
+  string client_request_id = 4;
+  string comment = 5;
+  string confirm_id = 6;
+  uint32 confirm_timeout_seconds = 7;
 }
 
 enum ConfigTransactionPlanStatus {

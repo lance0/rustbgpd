@@ -257,6 +257,19 @@ impl proto::config_service_server::ConfigService for ConfigService {
         .await
     }
 
+    async fn stream_apply_config_transaction(
+        &self,
+        request: Request<tonic::Streaming<proto::StreamApplyConfigTransactionRequest>>,
+    ) -> Result<Response<proto::ConfigTransactionApplyResponse>, Status> {
+        stream::apply::stream_apply_config_transaction(
+            self.stream_plan.as_ref(),
+            self.stream_plan_authenticated_transport,
+            self.transaction_apply.clone(),
+            request,
+        )
+        .await
+    }
+
     async fn apply_config_transaction(
         &self,
         request: Request<proto::ApplyConfigTransactionRequest>,

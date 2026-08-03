@@ -159,6 +159,12 @@ pub const METHODS: &[GrpcMethodAuthz] = &[
     ),
     method(
         "rustbgpd.v1.ConfigService",
+        "StreamApplyConfigTransaction",
+        "/rustbgpd.v1.ConfigService/StreamApplyConfigTransaction",
+        AuthTier::OperatorOnly,
+    ),
+    method(
+        "rustbgpd.v1.ConfigService",
         "ApplyConfigTransaction",
         "/rustbgpd.v1.ConfigService/ApplyConfigTransaction",
         AuthTier::OperatorOnly,
@@ -955,7 +961,7 @@ mod tests {
             .collect::<BTreeSet<_>>();
 
         assert_eq!(matrix_methods, proto_methods);
-        assert_eq!(METHODS.len(), 103);
+        assert_eq!(METHODS.len(), 104);
     }
 
     #[test]
@@ -998,7 +1004,7 @@ mod tests {
         assert_eq!(method_count_by_tier(AuthTier::Read), 0);
         assert_eq!(method_count_by_tier(AuthTier::SensitiveRead), 60);
         assert_eq!(method_count_by_tier(AuthTier::Mutating), 20);
-        assert_eq!(method_count_by_tier(AuthTier::OperatorOnly), 23);
+        assert_eq!(method_count_by_tier(AuthTier::OperatorOnly), 24);
     }
 
     #[test]
@@ -1128,6 +1134,10 @@ mod tests {
         assert_eq!(
             method_authz("/rustbgpd.v1.ConfigService/StreamPlanConfigTransaction").map(|m| m.tier),
             Some(AuthTier::SensitiveRead)
+        );
+        assert_eq!(
+            method_authz("/rustbgpd.v1.ConfigService/StreamApplyConfigTransaction").map(|m| m.tier),
+            Some(AuthTier::OperatorOnly)
         );
         assert_eq!(
             method_authz("/rustbgpd.v1.ConfigService/ApplyConfigTransaction").map(|m| m.tier),

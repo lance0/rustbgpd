@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 
 use tokio::net::TcpListener;
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::{Mutex, Notify, oneshot};
 use tokio_stream::Stream;
 use tokio_stream::wrappers::{TcpListenerStream, UnixListenerStream};
 use tonic::metadata::MetadataValue;
@@ -57,6 +57,18 @@ pub(crate) struct MockState {
     pub(crate) config_diff_calls: AtomicUsize,
     pub(crate) config_plan_calls: AtomicUsize,
     pub(crate) config_apply_calls: AtomicUsize,
+    pub(crate) config_streaming_enabled: AtomicBool,
+    pub(crate) config_stream_plan_calls: AtomicUsize,
+    pub(crate) config_stream_apply_calls: AtomicUsize,
+    pub(crate) config_stream_plan_pause_after_metadata: AtomicBool,
+    pub(crate) config_stream_apply_pause_after_metadata: AtomicBool,
+    pub(crate) config_stream_plan_metadata_seen: Notify,
+    pub(crate) config_stream_apply_metadata_seen: Notify,
+    pub(crate) config_stream_plan_resume: Notify,
+    pub(crate) config_stream_apply_resume: Notify,
+    pub(crate) config_stream_plan_status: AtomicUsize,
+    pub(crate) config_stream_plan_error: Mutex<Option<(Code, String, Vec<u8>)>>,
+    pub(crate) config_stream_apply_error: Mutex<Option<(Code, String, Vec<u8>)>>,
     pub(crate) config_confirm_calls: AtomicUsize,
     pub(crate) config_abort_calls: AtomicUsize,
     pub(crate) add_neighbor_calls: AtomicUsize,
@@ -90,6 +102,9 @@ pub(crate) struct MockState {
     pub(crate) last_config_diff: Mutex<Option<String>>,
     pub(crate) last_config_plan: Mutex<Option<server_proto::PlanConfigTransactionRequest>>,
     pub(crate) last_config_apply: Mutex<Option<server_proto::ApplyConfigTransactionRequest>>,
+    pub(crate) last_stream_plan_candidate: Mutex<Option<Vec<u8>>>,
+    pub(crate) last_stream_apply_candidate: Mutex<Option<Vec<u8>>>,
+    pub(crate) last_stream_apply_metadata: Mutex<Option<server_proto::StreamApplyConfigMetadata>>,
     pub(crate) last_config_confirm: Mutex<Option<server_proto::ConfirmConfigTransactionRequest>>,
     pub(crate) last_config_abort: Mutex<Option<server_proto::AbortConfigTransactionRequest>>,
     pub(crate) last_add_neighbor: Mutex<Option<server_proto::AddNeighborRequest>>,
@@ -444,10 +459,116 @@ struct MockConfigService {
 impl rustbgpd_api::proto::config_service_server::ConfigService for MockConfigService {
     async fn stream_plan_config_transaction(
         &self,
-        _request: Request<tonic::Streaming<server_proto::StreamPlanConfigTransactionRequest>>,
+        request: Request<tonic::Streaming<server_proto::StreamPlanConfigTransactionRequest>>,
     ) -> Result<Response<server_proto::StreamPlanConfigTransactionResponse>, Status> {
-        Err(Status::unimplemented(
-            "streamed config planning is not used by CLI tests",
+        if let Some((code, message, details)) =
+            self.state.config_stream_plan_error.lock().await.clone()
+        {
+            return Err(Status::with_details(code, message, details.into()));
+        }
+        if !self.state.config_streaming_enabled.load(Ordering::SeqCst) {
+            return Err(Status::new(Code::Unimplemented, ""));
+        }
+        self.state
+            .config_stream_plan_calls
+            .fetch_add(1, Ordering::SeqCst);
+        let mut stream = request.into_inner();
+        let mut candidate = Vec::new();
+        while let Some(frame) = stream.message().await? {
+            if matches!(
+                frame.frame.as_ref(),
+                Some(server_proto::stream_plan_config_transaction_request::Frame::Metadata(_))
+            ) && self
+                .state
+                .config_stream_plan_pause_after_metadata
+                .load(Ordering::SeqCst)
+            {
+                self.state.config_stream_plan_metadata_seen.notify_one();
+                self.state.config_stream_plan_resume.notified().await;
+            }
+            if let Some(
+                server_proto::stream_plan_config_transaction_request::Frame::CandidateChunk(chunk),
+            ) = frame.frame
+            {
+                candidate.extend_from_slice(&chunk);
+            }
+        }
+        *self.state.last_stream_plan_candidate.lock().await = Some(candidate);
+        let configured_status = self.state.config_stream_plan_status.load(Ordering::SeqCst);
+        let status = if configured_status == 0 {
+            server_proto::ConfigTransactionPlanStatus::Committable as i32
+        } else {
+            configured_status as i32
+        };
+        Ok(Response::new(
+            server_proto::StreamPlanConfigTransactionResponse {
+                plan: Some(server_proto::ConfigTransactionPlanResponse {
+                    status,
+                    runtime_snapshot_token: "kv1:planned:1".to_string(),
+                    diff: None,
+                    supported_sections: vec!["[[fib_tables]]".to_string()],
+                    unsupported_sections: Vec::new(),
+                    restart_required_sections: Vec::new(),
+                    human_text: "Config transaction is committable by v1.\n".to_string(),
+                    update_group_impact: None,
+                }),
+                plan_token: (status
+                    == server_proto::ConfigTransactionPlanStatus::Committable as i32)
+                    .then(|| "stream-plan-token".to_string()),
+            },
+        ))
+    }
+
+    async fn stream_apply_config_transaction(
+        &self,
+        request: Request<tonic::Streaming<server_proto::StreamApplyConfigTransactionRequest>>,
+    ) -> Result<Response<server_proto::ConfigTransactionApplyResponse>, Status> {
+        if let Some((code, message, details)) =
+            self.state.config_stream_apply_error.lock().await.clone()
+        {
+            return Err(Status::with_details(code, message, details.into()));
+        }
+        if !self.state.config_streaming_enabled.load(Ordering::SeqCst) {
+            return Err(Status::new(Code::Unimplemented, ""));
+        }
+        self.state
+            .config_stream_apply_calls
+            .fetch_add(1, Ordering::SeqCst);
+        let mut stream = request.into_inner();
+        let mut candidate = Vec::new();
+        while let Some(frame) = stream.message().await? {
+            match frame.frame {
+                Some(server_proto::stream_apply_config_transaction_request::Frame::Metadata(
+                    metadata,
+                )) => {
+                    *self.state.last_stream_apply_metadata.lock().await = Some(metadata);
+                    if self
+                        .state
+                        .config_stream_apply_pause_after_metadata
+                        .load(Ordering::SeqCst)
+                    {
+                        self.state.config_stream_apply_metadata_seen.notify_one();
+                        self.state.config_stream_apply_resume.notified().await;
+                    }
+                }
+                Some(
+                    server_proto::stream_apply_config_transaction_request::Frame::CandidateChunk(
+                        chunk,
+                    ),
+                ) => candidate.extend_from_slice(&chunk),
+                _ => {}
+            }
+        }
+        *self.state.last_stream_apply_candidate.lock().await = Some(candidate);
+        Ok(Response::new(
+            server_proto::ConfigTransactionApplyResponse {
+                status: server_proto::ConfigTransactionPlanStatus::Committable as i32,
+                runtime_snapshot_token: "kv1:committed:2".to_string(),
+                committed_sections: vec!["[[fib_tables]]".to_string()],
+                human_text: "Committed [[fib_tables]] transaction.\n".to_string(),
+                confirmation: None,
+                update_group_impact: None,
+            },
         ))
     }
 

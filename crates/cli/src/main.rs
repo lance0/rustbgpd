@@ -460,6 +460,10 @@ enum ConfigAction {
         #[arg(long, value_name = "TOKEN")]
         expected_runtime_snapshot_token: String,
 
+        /// Ephemeral token returned by a streamed config plan
+        #[arg(long, value_name = "TOKEN")]
+        plan_token: Option<String>,
+
         /// Optional audit/correlation identifier
         #[arg(long, value_name = "ID")]
         client_request_id: Option<String>,
@@ -2242,6 +2246,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                 candidate,
                 from_file,
                 expected_runtime_snapshot_token,
+                plan_token,
                 client_request_id,
                 comment,
                 confirm_id,
@@ -2253,6 +2258,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                     commands::config::ApplyOptions {
                         from_file: &from_file,
                         expected_runtime_snapshot_token: &expected_runtime_snapshot_token,
+                        plan_token: plan_token.as_deref(),
                         client_request_id: client_request_id.as_deref(),
                         comment: comment.as_deref(),
                         confirm_id: confirm_id.as_deref(),

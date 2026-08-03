@@ -125,22 +125,27 @@ rbgp --json config diff /tmp/new-config.toml
 rbgp config plan /tmp/new-config.toml
 rbgp --json config plan /tmp/new-config.toml
 
+# Apply can plan the same candidate automatically, or consume the exact token
+# printed by `config plan` when a separate review/approval step is required:
 rbgp config apply /tmp/new-config.toml \
+  --expected-runtime-snapshot-token kv1:...
+rbgp config apply /tmp/new-config.toml \
+  --plan-token 550e8400-e29b-41d4-a716-446655440000 \
   --expected-runtime-snapshot-token kv1:...
 ```
 
-`rbgp config diff`, `plan`, and `apply` preflight the fully encoded protobuf
-request against tonic's 4,194,304-byte unary-message limit. A request exactly at
-the limit is allowed; a larger request fails locally before any RPC and reports
-the encoded size and candidate path. Apply metadata counts too, including the
-runtime snapshot token, request ID, comment, and commit-confirm fields.
-
-For a candidate that cannot fit, first validate it offline with `rustbgpd
---check /path/to/candidate.toml`. Then coordinate replacement of the daemon's
-config file (and any external inputs) and send SIGHUP with `systemctl reload
-rustbgpd` or `kill -HUP $(pidof rustbgpd)`. This file-deployment fallback does
-**not** provide the transactional apply, optimistic-token, rollback-on-failure,
-or commit-confirm semantics of `rbgp config apply`.
+`rbgp config plan` and `config apply` stream the candidate in bounded frames;
+they are not limited by tonic's 4,194,304-byte unary-message ceiling. The plan
+receipt includes a single-use `plan_token` bound to the candidate digest,
+length, and runtime snapshot. Supplying it with `--plan-token` skips the
+automatic plan and applies only that exact reviewed candidate. Without it,
+`config apply` first streams a plan for the same bytes and applies only a
+`COMMITTABLE` result. `NOOP` and `REJECTED` return a non-mutating status without
+calling Apply. Older daemons are supported only when the streaming method is
+explicitly `UNIMPLEMENTED`; Plan and automatically planned Apply then retry the
+legacy unary RPC if the encoded request fits its four-MiB ceiling. An explicit
+`--plan-token` fails closed when streamed Apply is unavailable because unary
+Apply cannot honor the reviewed binding. Other streaming errors are terminal.
 
 For a safe deploy that should roll back unless explicitly confirmed, provide a
 confirm handle and timeout on the same apply. The daemon applies the candidate
@@ -149,6 +154,7 @@ same handle is confirmed:
 
 ```bash
 rbgp config apply /tmp/new-config.toml \
+  --plan-token 550e8400-e29b-41d4-a716-446655440000 \
   --expected-runtime-snapshot-token kv1:... \
   --confirm-id deploy-20260605-1 \
   --confirm-timeout 120

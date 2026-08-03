@@ -111,6 +111,57 @@ impl std::fmt::Display for ConfigTransactionApplyError {
 
 impl std::error::Error for ConfigTransactionApplyError {}
 
+const MAX_CONFIG_CONFIRM_ID_CHARS: usize = 128;
+const MAX_CONFIG_CONFIRM_TIMEOUT_SECONDS: u32 = 86_400;
+
+/// Validate the request metadata shared by unary and streamed config apply.
+///
+/// Streamed apply calls this before consuming its single-use plan token, so a
+/// caller can correct malformed metadata without losing a valid candidate
+/// binding.
+///
+/// # Errors
+///
+/// Returns the same validation error used by unary apply when the runtime
+/// token or confirmed-commit metadata is invalid.
+pub fn validate_config_transaction_apply_metadata(
+    request: &crate::proto::ApplyConfigTransactionRequest,
+) -> Result<(), ConfigTransactionApplyError> {
+    if request.expected_runtime_snapshot_token.is_empty() {
+        return Err(ConfigTransactionApplyError::InvalidArgument(
+            "expected_runtime_snapshot_token is required for ApplyConfigTransaction".to_string(),
+        ));
+    }
+    if request.confirm_id.is_empty() && request.confirm_timeout_seconds > 0 {
+        return Err(ConfigTransactionApplyError::InvalidArgument(
+            "confirm_id is required when confirm_timeout_seconds is set".to_string(),
+        ));
+    }
+    if !request.confirm_id.is_empty() {
+        if request.confirm_id.trim().is_empty() {
+            return Err(ConfigTransactionApplyError::InvalidArgument(
+                "confirm_id is required".to_string(),
+            ));
+        }
+        if request.confirm_id.chars().count() > MAX_CONFIG_CONFIRM_ID_CHARS {
+            return Err(ConfigTransactionApplyError::InvalidArgument(format!(
+                "confirm_id must be at most {MAX_CONFIG_CONFIRM_ID_CHARS} characters"
+            )));
+        }
+        if request.confirm_id.chars().any(char::is_control) {
+            return Err(ConfigTransactionApplyError::InvalidArgument(
+                "confirm_id must not contain control characters".to_string(),
+            ));
+        }
+        if request.confirm_timeout_seconds > MAX_CONFIG_CONFIRM_TIMEOUT_SECONDS {
+            return Err(ConfigTransactionApplyError::InvalidArgument(format!(
+                "confirm_timeout_seconds must be <= {MAX_CONFIG_CONFIRM_TIMEOUT_SECONDS}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn catalog_mutation_error_to_status(error: &CatalogMutationError) -> Status {
     match error {
         CatalogMutationError::NotFound(_) => Status::not_found(error.to_string()),
@@ -1795,7 +1846,7 @@ mod tests {
     use crate::test_support::{session_event, spawn_fake_peer_manager, spawn_fake_rib};
 
     #[test]
-    fn streamed_plan_production_wiring_is_singleton_and_authentication_is_explicit() {
+    fn streamed_config_production_wiring_is_singleton_and_authentication_is_explicit() {
         const PREPARE: &str =
             "prepare_stream_plan_state(config.stream_plan_runtime_state_directory.as_ref())";
         assert_eq!(

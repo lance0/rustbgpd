@@ -99,6 +99,7 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '()--from-file=[Hidden compatibility alias for the positional \`CANDIDATE\`]:PATH:_default' \
 '--expected-runtime-snapshot-token=[Runtime snapshot token returned by config plan]:TOKEN:_default' \
+'--plan-token=[Ephemeral token returned by a streamed config plan]:TOKEN:_default' \
 '--client-request-id=[Optional audit/correlation identifier]:ID:_default' \
 '--comment=[Optional human change note; not logged verbatim by the daemon]:TEXT:_default' \
 '--confirm-id=[Optional confirmed-commit handle; requires explicit confirm/abort]:ID:_default' \

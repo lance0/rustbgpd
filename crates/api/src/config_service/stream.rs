@@ -1,5 +1,7 @@
 //! Bounded client-streaming ingress for config transaction planning.
 
+pub(super) mod apply;
+
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io;
@@ -66,29 +68,8 @@ pub(crate) struct StreamPlanState {
 
 struct PlanTokenBinding {
     token: Uuid,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "stored now for the follow-on apply-token consumer"
-        )
-    )]
     runtime_snapshot_token: String,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "stored now for the follow-on apply-token consumer"
-        )
-    )]
     candidate_sha256: [u8; 32],
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "stored now for the follow-on apply-token consumer"
-        )
-    )]
     candidate_length: u64,
     expires_at: Instant,
 }
@@ -173,6 +154,44 @@ impl StreamPlanState {
         if let Ok(mut tokens) = self.tokens.lock() {
             tokens.retain(|binding| binding.token != token);
         }
+    }
+
+    fn consume_token(
+        &self,
+        token: &str,
+        runtime_snapshot_token: &str,
+        candidate_sha256: &[u8; 32],
+        candidate_length: u64,
+    ) -> Result<(), Status> {
+        let token = Uuid::parse_str(token)
+            .map_err(|_| Status::invalid_argument("plan_token is malformed"))?;
+        let now = Instant::now();
+        let mut tokens = self
+            .tokens
+            .lock()
+            .map_err(|_| Status::internal("streamed config plan-token state is unavailable"))?;
+        let Some(index) = tokens.iter().position(|binding| binding.token == token) else {
+            return Err(Status::failed_precondition(
+                "plan_token is unknown, expired, or evicted; plan again",
+            ));
+        };
+        if tokens[index].expires_at <= now {
+            tokens.remove(index);
+            return Err(Status::failed_precondition(
+                "plan_token is unknown, expired, or evicted; plan again",
+            ));
+        }
+        let binding = &tokens[index];
+        if binding.runtime_snapshot_token != runtime_snapshot_token
+            || &binding.candidate_sha256 != candidate_sha256
+            || binding.candidate_length != candidate_length
+        {
+            return Err(Status::failed_precondition(
+                "plan_token does not match the runtime snapshot or candidate bytes",
+            ));
+        }
+        tokens.remove(index);
+        Ok(())
     }
 
     fn create_spool(&self) -> Result<Spool, Status> {
@@ -547,6 +566,7 @@ fn io_error(error: Errno) -> io::Error {
 mod tests {
     use std::collections::BTreeMap;
     use std::path::Path;
+    use std::sync::atomic::AtomicUsize;
 
     use sha2::{Digest as _, Sha256};
     use tempfile::TempDir;
@@ -564,10 +584,13 @@ mod tests {
     use crate::config_service::ConfigService;
     use crate::proto::config_service_client::ConfigServiceClient;
     use crate::proto::config_service_server::ConfigServiceServer;
-    use crate::server::AuthInterceptor;
+    use crate::server::{AuthInterceptor, ConfigTransactionApplyFn};
     use rustbgpd_telemetry::BgpMetrics;
 
     type AuthClient = ConfigServiceClient<InterceptedService<Channel, ClientAuth>>;
+    type HookReply = oneshot::Sender<
+        Result<proto::ConfigTransactionApplyResponse, crate::server::ConfigTransactionApplyError>,
+    >;
 
     #[derive(Clone)]
     struct ClientAuth;
@@ -613,28 +636,49 @@ mod tests {
         StreamPlanState::prepare_with_limits(&directory, limits).expect("prepare stream state")
     }
 
+    fn consume_error_code(result: Result<(), Status>) -> tonic::Code {
+        result.unwrap_err().code()
+    }
+
     async fn spawn_listener(
         state: Arc<StreamPlanState>,
         peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
         authenticated_transport: bool,
     ) -> ListenerHandle {
+        spawn_listener_with_apply(
+            state,
+            peer_mgr_tx,
+            authenticated_transport,
+            None,
+            AuthTier::SensitiveRead,
+            PrincipalRole::Observer,
+        )
+        .await
+    }
+
+    async fn spawn_listener_with_apply(
+        state: Arc<StreamPlanState>,
+        peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
+        authenticated_transport: bool,
+        transaction_apply: Option<ConfigTransactionApplyFn>,
+        max_tier: AuthTier,
+        role: PrincipalRole,
+    ) -> ListenerHandle {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let roles = Arc::new(BTreeMap::from([(
-            "stream-test".to_string(),
-            PrincipalRole::Observer,
-        )]));
+        let roles = Arc::new(BTreeMap::from([("stream-test".to_string(), role)]));
         let context = GrpcAuthAuditContext::new(
             format!("tcp://{addr}"),
             "read_write",
-            AuthTier::SensitiveRead,
+            max_tier,
             GrpcAuthnKind::BearerToken,
             "stream-test",
         )
         .with_roles(roles)
         .with_bearer_token(Some("stream-secret"));
-        let service =
-            ConfigService::new(peer_mgr_tx).with_stream_plan(Some(state), authenticated_transport);
+        let service = ConfigService::new(peer_mgr_tx)
+            .with_transaction_hooks(transaction_apply, None, None, None, None, None)
+            .with_stream_plan(Some(state), authenticated_transport);
         let audit_observer = Arc::new(Mutex::new(None));
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let server_audit_observer = Arc::clone(&audit_observer);
@@ -740,6 +784,67 @@ mod tests {
         );
         frames.push(end(bytes));
         frames
+    }
+
+    fn apply_frames(
+        bytes: &[u8],
+        plan_token: &str,
+        runtime_token: &str,
+    ) -> Vec<proto::StreamApplyConfigTransactionRequest> {
+        let mut frames = vec![apply_metadata_frame(plan_token, runtime_token)];
+        frames.extend(
+            bytes
+                .chunks(MAX_CHUNK_BYTES)
+                .map(|chunk| apply_chunk_frame(chunk.to_vec())),
+        );
+        frames.push(apply_end_frame(
+            bytes.len() as u64,
+            Sha256::digest(bytes).to_vec(),
+        ));
+        frames
+    }
+
+    fn apply_metadata_frame(
+        plan_token: &str,
+        runtime_token: &str,
+    ) -> proto::StreamApplyConfigTransactionRequest {
+        proto::StreamApplyConfigTransactionRequest {
+            frame: Some(
+                proto::stream_apply_config_transaction_request::Frame::Metadata(
+                    proto::StreamApplyConfigMetadata {
+                        version: FRAME_VERSION,
+                        plan_token: plan_token.to_string(),
+                        expected_runtime_snapshot_token: runtime_token.to_string(),
+                        client_request_id: "stream-deploy".to_string(),
+                        comment: "streamed apply".to_string(),
+                        confirm_id: "stream-confirm".to_string(),
+                        confirm_timeout_seconds: 120,
+                    },
+                ),
+            ),
+        }
+    }
+
+    fn apply_chunk_frame(bytes: Vec<u8>) -> proto::StreamApplyConfigTransactionRequest {
+        proto::StreamApplyConfigTransactionRequest {
+            frame: Some(
+                proto::stream_apply_config_transaction_request::Frame::CandidateChunk(bytes),
+            ),
+        }
+    }
+
+    fn apply_end_frame(
+        candidate_length: u64,
+        candidate_sha256: Vec<u8>,
+    ) -> proto::StreamApplyConfigTransactionRequest {
+        proto::StreamApplyConfigTransactionRequest {
+            frame: Some(proto::stream_apply_config_transaction_request::Frame::End(
+                proto::StreamPlanConfigEnd {
+                    candidate_length,
+                    candidate_sha256,
+                },
+            )),
+        }
     }
 
     fn sample_plan(
@@ -881,6 +986,705 @@ mod tests {
             "version=1 chunk_count=9 candidate_bytes=8388625 expected_runtime_snapshot_token_present=true outcome=planned"
         );
         assert!(spool_is_anonymous(runtime.path()));
+    }
+
+    fn applied_response() -> proto::ConfigTransactionApplyResponse {
+        proto::ConfigTransactionApplyResponse {
+            status: proto::ConfigTransactionPlanStatus::Committable.into(),
+            runtime_snapshot_token: "kv1:runtime:8".to_string(),
+            committed_sections: vec!["[[neighbors]]".to_string()],
+            human_text: "committed\n".to_string(),
+            confirmation: None,
+            update_group_impact: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn authenticated_real_tcp_apply_above_eight_mib_is_exact_and_once_only() {
+        let runtime = TempDir::new().unwrap();
+        let state = state_at(runtime.path(), StreamLimits::default());
+        let (peer_tx, _peer_rx) = mpsc::channel(1);
+        let (hook_tx, mut hook_rx) =
+            mpsc::channel::<(proto::ApplyConfigTransactionRequest, HookReply)>(2);
+        let hook: ConfigTransactionApplyFn = Arc::new(move |request| {
+            let hook_tx = hook_tx.clone();
+            Box::pin(async move {
+                let (reply, receive) = oneshot::channel();
+                hook_tx.send((request, reply)).await.unwrap();
+                receive.await.unwrap()
+            })
+        });
+        let listener = spawn_listener_with_apply(
+            Arc::clone(&state),
+            peer_tx,
+            true,
+            Some(hook),
+            AuthTier::OperatorOnly,
+            PrincipalRole::Operator,
+        )
+        .await;
+        let marker = b"STREAM_APPLY_CANDIDATE_MARKER";
+        let mut candidate = vec![b'z'; 8 * 1024 * 1024 + 31];
+        candidate[..marker.len()].copy_from_slice(marker);
+        let digest: [u8; 32] = Sha256::digest(&candidate).into();
+        let token = state
+            .issue_token("kv1:runtime:7".to_string(), digest, candidate.len() as u64)
+            .unwrap();
+        let mut client = listener.client.clone();
+        let sent = candidate.clone();
+        let token_text = token.to_string();
+        let apply = tokio::spawn(async move {
+            client
+                .stream_apply_config_transaction(futures::stream::iter(apply_frames(
+                    &sent,
+                    &token_text,
+                    "kv1:runtime:7",
+                )))
+                .await
+        });
+        let (request, reply) = hook_rx.recv().await.unwrap();
+        assert_eq!(request.candidate_toml.as_bytes(), candidate);
+        assert_eq!(request.expected_runtime_snapshot_token, "kv1:runtime:7");
+        assert_eq!(request.client_request_id, "stream-deploy");
+        assert_eq!(request.comment, "streamed apply");
+        assert_eq!(request.confirm_id, "stream-confirm");
+        assert_eq!(request.confirm_timeout_seconds, 120);
+        reply.send(Ok(applied_response())).unwrap();
+        assert_eq!(
+            apply
+                .await
+                .unwrap()
+                .unwrap()
+                .into_inner()
+                .runtime_snapshot_token,
+            "kv1:runtime:8"
+        );
+        assert!(!has_token(&state, token));
+
+        let error = listener
+            .client
+            .clone()
+            .stream_apply_config_transaction(futures::stream::iter(apply_frames(
+                &candidate,
+                &token.to_string(),
+                "kv1:runtime:7",
+            )))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+        assert!(hook_rx.try_recv().is_err());
+        assert!(spool_is_anonymous(runtime.path()));
+    }
+
+    type ApplyFailureCase = (
+        Vec<proto::StreamApplyConfigTransactionRequest>,
+        tonic::Code,
+        &'static str,
+    );
+
+    fn apply_initial_failure_cases(candidate: &[u8], token_text: &str) -> Vec<ApplyFailureCase> {
+        let mut wrong_version = apply_frames(candidate, token_text, "kv1:runtime:7");
+        let Some(proto::stream_apply_config_transaction_request::Frame::Metadata(metadata)) =
+            wrong_version[0].frame.as_mut()
+        else {
+            unreachable!()
+        };
+        metadata.version = 2;
+        let mut duplicate_metadata = apply_frames(candidate, token_text, "kv1:runtime:7");
+        duplicate_metadata.insert(1, apply_metadata_frame(token_text, "kv1:runtime:7"));
+        vec![
+            (
+                Vec::new(),
+                tonic::Code::InvalidArgument,
+                "metadata frame is required first",
+            ),
+            (
+                vec![apply_chunk_frame(b"a".to_vec())],
+                tonic::Code::InvalidArgument,
+                "metadata frame is required first",
+            ),
+            (
+                wrong_version,
+                tonic::Code::InvalidArgument,
+                "unsupported stream framing version",
+            ),
+            (
+                vec![
+                    apply_metadata_frame(token_text, "kv1:runtime:7"),
+                    apply_chunk_frame(Vec::new()),
+                ],
+                tonic::Code::InvalidArgument,
+                "candidate chunks must be non-empty",
+            ),
+            (
+                vec![
+                    apply_metadata_frame(token_text, "kv1:runtime:7"),
+                    apply_chunk_frame(b"abcde".to_vec()),
+                ],
+                tonic::Code::ResourceExhausted,
+                "candidate chunk exceeds limit",
+            ),
+            (
+                vec![
+                    apply_metadata_frame(token_text, "kv1:runtime:7"),
+                    apply_chunk_frame(b"abcd".to_vec()),
+                    apply_chunk_frame(b"efgh".to_vec()),
+                ],
+                tonic::Code::ResourceExhausted,
+                "candidate exceeds limit",
+            ),
+            (
+                duplicate_metadata,
+                tonic::Code::InvalidArgument,
+                "metadata frame may appear only once",
+            ),
+            (
+                vec![
+                    apply_metadata_frame(token_text, "kv1:runtime:7"),
+                    apply_chunk_frame(candidate.to_vec()),
+                ],
+                tonic::Code::InvalidArgument,
+                "end frame is required",
+            ),
+        ]
+    }
+
+    fn apply_end_failure_cases(candidate: &[u8], token_text: &str) -> Vec<ApplyFailureCase> {
+        let mut trailing = apply_frames(candidate, token_text, "kv1:runtime:7");
+        trailing.push(apply_chunk_frame(b"d".to_vec()));
+        let invalid_utf8 = vec![
+            apply_metadata_frame(token_text, "kv1:runtime:7"),
+            apply_chunk_frame(vec![0xff]),
+            apply_end_frame(1, Sha256::digest([0xff]).to_vec()),
+        ];
+        vec![
+            (
+                vec![
+                    apply_metadata_frame(token_text, "kv1:runtime:7"),
+                    apply_chunk_frame(candidate.to_vec()),
+                    apply_end_frame(3, vec![0; 31]),
+                ],
+                tonic::Code::InvalidArgument,
+                "candidate SHA-256 must be exactly 32 bytes",
+            ),
+            (
+                vec![
+                    apply_metadata_frame(token_text, "kv1:runtime:7"),
+                    apply_chunk_frame(candidate.to_vec()),
+                    apply_end_frame(3, vec![0; 32]),
+                ],
+                tonic::Code::InvalidArgument,
+                "candidate SHA-256 does not match",
+            ),
+            (
+                vec![
+                    apply_metadata_frame(token_text, "kv1:runtime:7"),
+                    apply_chunk_frame(candidate.to_vec()),
+                    apply_end_frame(2, Sha256::digest(candidate).to_vec()),
+                ],
+                tonic::Code::InvalidArgument,
+                "candidate length does not match end frame",
+            ),
+            (
+                invalid_utf8,
+                tonic::Code::InvalidArgument,
+                "candidate config is not valid UTF-8",
+            ),
+            (
+                trailing,
+                tonic::Code::InvalidArgument,
+                "end frame must be followed by EOF",
+            ),
+            (
+                vec![
+                    apply_metadata_frame(token_text, "kv1:runtime:7"),
+                    proto::StreamApplyConfigTransactionRequest { frame: None },
+                ],
+                tonic::Code::InvalidArgument,
+                "stream frame is empty",
+            ),
+            (
+                apply_frames(candidate, "not-a-uuid", "kv1:runtime:7"),
+                tonic::Code::InvalidArgument,
+                "plan_token is malformed",
+            ),
+        ]
+    }
+
+    fn apply_failure_cases(candidate: &[u8], token_text: &str) -> Vec<ApplyFailureCase> {
+        let mut invalid_confirm = apply_frames(candidate, token_text, "kv1:runtime:7");
+        let Some(proto::stream_apply_config_transaction_request::Frame::Metadata(metadata)) =
+            invalid_confirm[0].frame.as_mut()
+        else {
+            unreachable!()
+        };
+        metadata.confirm_id.clear();
+        let metadata_case = |mutate: fn(&mut proto::StreamApplyConfigMetadata)| {
+            let mut frames = apply_frames(candidate, token_text, "kv1:runtime:7");
+            let Some(proto::stream_apply_config_transaction_request::Frame::Metadata(metadata)) =
+                frames[0].frame.as_mut()
+            else {
+                unreachable!()
+            };
+            mutate(metadata);
+            frames
+        };
+        let mut cases = apply_initial_failure_cases(candidate, token_text);
+        cases.extend(apply_end_failure_cases(candidate, token_text));
+        cases.extend([
+            (
+                invalid_confirm,
+                tonic::Code::InvalidArgument,
+                "confirm_id is required when confirm_timeout_seconds is set",
+            ),
+            (
+                metadata_case(|metadata| metadata.plan_token.clear()),
+                tonic::Code::InvalidArgument,
+                "plan_token is required",
+            ),
+            (
+                metadata_case(|metadata| metadata.expected_runtime_snapshot_token.clear()),
+                tonic::Code::InvalidArgument,
+                "expected_runtime_snapshot_token is required for ApplyConfigTransaction",
+            ),
+            (
+                metadata_case(|metadata| metadata.confirm_id = "   ".to_string()),
+                tonic::Code::InvalidArgument,
+                "confirm_id is required",
+            ),
+            (
+                metadata_case(|metadata| metadata.confirm_id = "x".repeat(129)),
+                tonic::Code::InvalidArgument,
+                "confirm_id must be at most 128 characters",
+            ),
+            (
+                metadata_case(|metadata| metadata.confirm_id = "bad\nid".to_string()),
+                tonic::Code::InvalidArgument,
+                "confirm_id must not contain control characters",
+            ),
+            (
+                metadata_case(|metadata| metadata.confirm_timeout_seconds = 86_401),
+                tonic::Code::InvalidArgument,
+                "confirm_timeout_seconds must be <= 86400",
+            ),
+        ]);
+        cases
+    }
+
+    #[tokio::test]
+    async fn apply_framing_and_metadata_failures_preserve_token_and_never_call_hook() {
+        let runtime = TempDir::new().unwrap();
+        let state = state_at(runtime.path(), limits(4, 7));
+        let candidate = b"abc";
+        let token = state
+            .issue_token(
+                "kv1:runtime:7".to_string(),
+                Sha256::digest(candidate).into(),
+                candidate.len() as u64,
+            )
+            .unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let hook_calls = Arc::clone(&calls);
+        let hook: ConfigTransactionApplyFn = Arc::new(move |_request| {
+            hook_calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Ok(applied_response()) })
+        });
+        let (peer_tx, _peer_rx) = mpsc::channel(1);
+        let listener = spawn_listener_with_apply(
+            Arc::clone(&state),
+            peer_tx,
+            true,
+            Some(hook),
+            AuthTier::OperatorOnly,
+            PrincipalRole::Operator,
+        )
+        .await;
+        let token_text = token.to_string();
+        for (frames, code, message) in apply_failure_cases(candidate, &token_text) {
+            let error = listener
+                .client
+                .clone()
+                .stream_apply_config_transaction(futures::stream::iter(frames))
+                .await
+                .unwrap_err();
+            assert_eq!(error.code(), code);
+            assert_eq!(error.message(), message);
+            assert!(has_token(&state, token));
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+        }
+
+        listener
+            .client
+            .clone()
+            .stream_apply_config_transaction(futures::stream::iter(apply_frames(
+                candidate,
+                &token_text,
+                "kv1:runtime:7",
+            )))
+            .await
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(!has_token(&state, token));
+        let summary = listener
+            .audit_observer
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap()
+            .summary()
+            .unwrap();
+        assert_eq!(
+            summary.as_str(),
+            "version=1 chunk_count=1 candidate_bytes=3 expected_runtime_snapshot_token_present=true confirm_id_present=true outcome=applied"
+        );
+        for secret in ["abc", token_text.as_str(), "streamed apply"] {
+            assert!(!summary.as_str().contains(secret));
+        }
+    }
+    #[tokio::test]
+    async fn pre_admission_capability_and_transport_failures_preserve_token_and_hook() {
+        let runtime = TempDir::new().unwrap();
+        let state = state_at(runtime.path(), StreamLimits::default());
+        let candidate = b"candidate";
+        let token = state
+            .issue_token(
+                "kv1:runtime:7".to_string(),
+                Sha256::digest(candidate).into(),
+                candidate.len() as u64,
+            )
+            .unwrap();
+        let (missing_peer_tx, _missing_peer_rx) = mpsc::channel(1);
+        let missing_executor = spawn_listener_with_apply(
+            Arc::clone(&state),
+            missing_peer_tx,
+            true,
+            None,
+            AuthTier::OperatorOnly,
+            PrincipalRole::Operator,
+        )
+        .await;
+        let held = state.try_admit().unwrap();
+        let error = missing_executor
+            .client
+            .clone()
+            .stream_apply_config_transaction(futures::stream::iter(apply_frames(
+                candidate,
+                &token.to_string(),
+                "kv1:runtime:7",
+            )))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(
+            error.message(),
+            "ConfigService.StreamApplyConfigTransaction executor is unavailable"
+        );
+        assert!(has_token(&state, token));
+        let observer = &missing_executor.audit_observer;
+        let handle = observer.lock().unwrap().clone().unwrap();
+        assert_eq!(
+            handle.summary().unwrap().as_str(),
+            "version=0 chunk_count=0 candidate_bytes=0 expected_runtime_snapshot_token_present=false confirm_id_present=false outcome=executor_unavailable"
+        );
+        drop(held);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let hook_calls = Arc::clone(&calls);
+        let hook: ConfigTransactionApplyFn = Arc::new(move |_request| {
+            hook_calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Ok(applied_response()) })
+        });
+        let (peer_tx, _peer_rx) = mpsc::channel(1);
+        let listener = spawn_listener_with_apply(
+            Arc::clone(&state),
+            peer_tx,
+            false,
+            Some(hook),
+            AuthTier::OperatorOnly,
+            PrincipalRole::Operator,
+        )
+        .await;
+        let error = listener
+            .client
+            .clone()
+            .stream_apply_config_transaction(futures::stream::iter(apply_frames(
+                candidate,
+                &token.to_string(),
+                "kv1:runtime:7",
+            )))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            (error.code(), error.message()),
+            (
+                tonic::Code::Unauthenticated,
+                "streamed config apply requires an authenticated listener"
+            )
+        );
+        assert!(has_token(&state, token));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(state.try_admit().is_ok());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn apply_idle_and_absolute_deadlines_preserve_token_before_handoff() {
+        let runtime = TempDir::new().unwrap();
+        let state = state_at(
+            runtime.path(),
+            StreamLimits {
+                max_chunk_bytes: 4,
+                max_candidate_bytes: 32,
+                idle_timeout: Duration::from_secs(10),
+                total_timeout: Duration::from_secs(30),
+            },
+        );
+        let candidate = b"abc";
+        let token = state
+            .issue_token(
+                "kv1:runtime:7".to_string(),
+                Sha256::digest(candidate).into(),
+                candidate.len() as u64,
+            )
+            .unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let hook_calls = Arc::clone(&calls);
+        let hook: ConfigTransactionApplyFn = Arc::new(move |_request| {
+            hook_calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Ok(applied_response()) })
+        });
+        let (peer_tx, _peer_rx) = mpsc::channel(1);
+        let listener = spawn_listener_with_apply(
+            Arc::clone(&state),
+            peer_tx,
+            true,
+            Some(hook),
+            AuthTier::OperatorOnly,
+            PrincipalRole::Operator,
+        )
+        .await;
+        let token_text = token.to_string();
+
+        let (idle_tx, idle_rx) = mpsc::channel(2);
+        idle_tx
+            .send(apply_metadata_frame(&token_text, "kv1:runtime:7"))
+            .await
+            .unwrap();
+        let mut idle_client = listener.client.clone();
+        let idle = tokio::spawn(async move {
+            idle_client
+                .stream_apply_config_transaction(ReceiverStream::new(idle_rx))
+                .await
+        });
+        yield_until(|| state.try_admit().is_err()).await;
+        tokio::time::advance(Duration::from_secs(11)).await;
+        drop(idle_tx);
+        let error = idle.await.unwrap().unwrap_err();
+        assert_eq!(
+            (error.code(), error.message()),
+            (
+                tonic::Code::DeadlineExceeded,
+                "streamed config apply exceeded idle deadline"
+            )
+        );
+
+        let (total_tx, total_rx) = mpsc::channel(8);
+        total_tx
+            .send(apply_metadata_frame(&token_text, "kv1:runtime:7"))
+            .await
+            .unwrap();
+        let mut total_client = listener.client.clone();
+        let total = tokio::spawn(async move {
+            total_client
+                .stream_apply_config_transaction(ReceiverStream::new(total_rx))
+                .await
+        });
+        yield_until(|| state.try_admit().is_err()).await;
+        for byte in *candidate {
+            tokio::time::advance(Duration::from_secs(9)).await;
+            total_tx.send(apply_chunk_frame(vec![byte])).await.unwrap();
+            tokio::task::yield_now().await;
+        }
+        tokio::time::advance(Duration::from_secs(4)).await;
+        let error = total.await.unwrap().unwrap_err();
+        assert_eq!(
+            (error.code(), error.message()),
+            (
+                tonic::Code::DeadlineExceeded,
+                "streamed config apply exceeded total deadline"
+            )
+        );
+        assert!(has_token(&state, token));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn binding_mismatch_preserves_token_but_cancelled_handoff_never_restores_it() {
+        let runtime = TempDir::new().unwrap();
+        let state = state_at(runtime.path(), StreamLimits::default());
+        let (peer_tx, _peer_rx) = mpsc::channel(1);
+        let (hook_tx, mut hook_rx) =
+            mpsc::channel::<(proto::ApplyConfigTransactionRequest, HookReply)>(1);
+        let hook: ConfigTransactionApplyFn = Arc::new(move |request| {
+            let hook_tx = hook_tx.clone();
+            Box::pin(async move {
+                let (reply, receive) = oneshot::channel();
+                hook_tx.send((request, reply)).await.unwrap();
+                receive.await.unwrap()
+            })
+        });
+        let listener = spawn_listener_with_apply(
+            Arc::clone(&state),
+            peer_tx,
+            true,
+            Some(hook),
+            AuthTier::OperatorOnly,
+            PrincipalRole::Operator,
+        )
+        .await;
+        let candidate = b"candidate";
+        let token = state
+            .issue_token(
+                "kv1:runtime:7".to_string(),
+                Sha256::digest(candidate).into(),
+                candidate.len() as u64,
+            )
+            .unwrap();
+        let mismatch = listener
+            .client
+            .clone()
+            .stream_apply_config_transaction(futures::stream::iter(apply_frames(
+                candidate,
+                &token.to_string(),
+                "kv1:wrong",
+            )))
+            .await
+            .unwrap_err();
+        assert_eq!(mismatch.code(), tonic::Code::FailedPrecondition);
+        assert!(has_token(&state, token));
+        assert!(hook_rx.try_recv().is_err());
+
+        let same_length_other_candidate = b"candidaXe";
+        assert_eq!(same_length_other_candidate.len(), candidate.len());
+        let digest_mismatch = listener
+            .client
+            .clone()
+            .stream_apply_config_transaction(futures::stream::iter(apply_frames(
+                same_length_other_candidate,
+                &token.to_string(),
+                "kv1:runtime:7",
+            )))
+            .await
+            .unwrap_err();
+        assert_eq!(digest_mismatch.code(), tonic::Code::FailedPrecondition);
+        assert!(has_token(&state, token));
+        assert!(hook_rx.try_recv().is_err());
+
+        let mut client = listener.client.clone();
+        let token_text = token.to_string();
+        let apply = tokio::spawn(async move {
+            client
+                .stream_apply_config_transaction(futures::stream::iter(apply_frames(
+                    candidate,
+                    &token_text,
+                    "kv1:runtime:7",
+                )))
+                .await
+        });
+        let (_request, reply) = hook_rx.recv().await.unwrap();
+        apply.abort();
+        assert!(!has_token(&state, token));
+        assert_eq!(
+            state.try_admit().unwrap_err().code(),
+            tonic::Code::ResourceExhausted
+        );
+        reply.send(Ok(applied_response())).unwrap();
+        yield_until(|| state.try_admit().is_ok()).await;
+        let replay_error = listener
+            .client
+            .clone()
+            .stream_apply_config_transaction(futures::stream::iter(apply_frames(
+                candidate,
+                &token.to_string(),
+                "kv1:runtime:7",
+            )))
+            .await
+            .unwrap_err();
+        assert_eq!(replay_error.code(), tonic::Code::FailedPrecondition);
+        assert!(hook_rx.try_recv().is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn response_deadline_keeps_apply_and_cross_method_admission_until_settlement() {
+        let runtime = TempDir::new().unwrap();
+        let state = state_at(
+            runtime.path(),
+            StreamLimits {
+                max_chunk_bytes: 16,
+                max_candidate_bytes: 64,
+                idle_timeout: Duration::from_secs(10),
+                total_timeout: Duration::from_secs(30),
+            },
+        );
+        let (peer_tx, mut peer_rx) = mpsc::channel(1);
+        let (hook_tx, mut hook_rx) =
+            mpsc::channel::<(proto::ApplyConfigTransactionRequest, HookReply)>(1);
+        let hook: ConfigTransactionApplyFn = Arc::new(move |request| {
+            let hook_tx = hook_tx.clone();
+            Box::pin(async move {
+                let (reply, receive) = oneshot::channel();
+                hook_tx.send((request, reply)).await.unwrap();
+                receive.await.unwrap()
+            })
+        });
+        let listener = spawn_listener_with_apply(
+            Arc::clone(&state),
+            peer_tx,
+            true,
+            Some(hook),
+            AuthTier::OperatorOnly,
+            PrincipalRole::Operator,
+        )
+        .await;
+        let candidate = b"candidate";
+        let token = state
+            .issue_token(
+                "kv1:runtime:7".to_string(),
+                Sha256::digest(candidate).into(),
+                candidate.len() as u64,
+            )
+            .unwrap();
+        let mut client = listener.client.clone();
+        let token_text = token.to_string();
+        let apply = tokio::spawn(async move {
+            client
+                .stream_apply_config_transaction(futures::stream::iter(apply_frames(
+                    candidate,
+                    &token_text,
+                    "kv1:runtime:7",
+                )))
+                .await
+        });
+        let (_request, reply) = hook_rx.recv().await.unwrap();
+        assert!(!has_token(&state, token));
+
+        let blocked_plan = listener
+            .client
+            .clone()
+            .stream_plan_config_transaction(futures::stream::iter(frames(b"other", None)))
+            .await
+            .unwrap_err();
+        assert_eq!(blocked_plan.code(), tonic::Code::ResourceExhausted);
+        assert!(peer_rx.try_recv().is_err());
+        tokio::time::advance(Duration::from_secs(31)).await;
+        let deadline = apply.await.unwrap().unwrap_err();
+        assert_eq!(deadline.code(), tonic::Code::DeadlineExceeded);
+        assert!(deadline.message().contains("apply continues to settlement"));
+        assert_eq!(
+            state.try_admit().unwrap_err().code(),
+            tonic::Code::ResourceExhausted
+        );
+        reply.send(Ok(applied_response())).unwrap();
+        yield_until(|| state.try_admit().is_ok()).await;
+        assert!(!has_token(&state, token));
     }
 
     #[tokio::test]
@@ -1168,5 +1972,27 @@ mod tests {
         let response = request.await.unwrap().unwrap().into_inner();
         assert!(response.plan_token.is_none());
         assert_eq!(state.tokens.lock().unwrap().len(), 256);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn length_mismatch_preserves_token_but_expiry_removes_it() {
+        let runtime = TempDir::new().unwrap();
+        let state = state_at(runtime.path(), StreamLimits::default());
+        let digest = [7; 32];
+        let token = state
+            .issue_token("kv1:runtime:7".to_string(), digest, 7)
+            .unwrap();
+        let token_text = token.to_string();
+        assert_eq!(
+            consume_error_code(state.consume_token(&token_text, "kv1:runtime:7", &digest, 8)),
+            tonic::Code::FailedPrecondition
+        );
+        assert!(has_token(&state, token));
+        tokio::time::advance(PLAN_TOKEN_TTL + Duration::from_secs(1)).await;
+        assert_eq!(
+            consume_error_code(state.consume_token(&token_text, "kv1:runtime:7", &digest, 7)),
+            tonic::Code::FailedPrecondition
+        );
+        assert!(!has_token(&state, token));
     }
 }

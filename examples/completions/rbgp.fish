@@ -94,6 +94,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from plan" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from apply" -l from-file -d 'Hidden compatibility alias for the positional `CANDIDATE`' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from apply" -l expected-runtime-snapshot-token -d 'Runtime snapshot token returned by config plan' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from apply" -l plan-token -d 'Ephemeral token returned by a streamed config plan' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from apply" -l client-request-id -d 'Optional audit/correlation identifier' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from apply" -l comment -d 'Optional human change note; not logged verbatim by the daemon' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from apply" -l confirm-id -d 'Optional confirmed-commit handle; requires explicit confirm/abort' -r

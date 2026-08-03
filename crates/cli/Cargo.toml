@@ -35,6 +35,7 @@ clap_mangen.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
+sha2.workspace = true
 tower = { workspace = true, features = ["util"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 # `rbgp doctor` bundle output (one gzipped tarball).

@@ -11,15 +11,22 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- An outside-v1, plan-only `StreamPlanConfigTransaction` gRPC ingress for
+- Outside-v1 `StreamPlanConfigTransaction` and `StreamApplyConfigTransaction`
+  gRPC ingress for
   large config candidates. It requires an authenticated listener, accepts
   1 MiB candidate chunks up to 384 MiB total with length/SHA-256 framing, and
   admits one stream process-wide without queueing. Temporary bytes stay in an
   owner-private, immediately unlinked descriptor-relative file beneath
   `runtime_state_dir`; successful
-  committable plans receive a bounded 30-minute process-local UUID token for a
-  future apply-token slice. The existing unary planner and apply surface are
-  unchanged, and no CLI command uses the stream yet.
+  committable plans receive a bounded 30-minute process-local UUID token that
+  streamed Apply atomically consumes only when the runtime snapshot, digest,
+  and length still match. Apply reuses the existing cancellation-shielded
+  transaction executor and rollback path. `rbgp config plan/apply` now stream
+  candidates by default. Plan and automatically planned Apply use a unary
+  compatibility fallback only for the exact generated missing-method response
+  from an older daemon; explicit `--plan-token` Apply fails closed when the
+  daemon cannot honor that binding. Existing unary request/response behavior
+  remains unchanged.
 
 ### Removed
 

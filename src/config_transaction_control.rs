@@ -1732,17 +1732,7 @@ fn append_error_context(
 fn validate_apply_request(
     request: &proto::ApplyConfigTransactionRequest,
 ) -> Result<(), ConfigTransactionApplyError> {
-    if request.expected_runtime_snapshot_token.is_empty() {
-        return Err(ConfigTransactionApplyError::InvalidArgument(
-            "expected_runtime_snapshot_token is required for ApplyConfigTransaction".to_string(),
-        ));
-    }
-    if request.confirm_id.is_empty() && request.confirm_timeout_seconds > 0 {
-        return Err(ConfigTransactionApplyError::InvalidArgument(
-            "confirm_id is required when confirm_timeout_seconds is set".to_string(),
-        ));
-    }
-    Ok(())
+    rustbgpd_api::server::validate_config_transaction_apply_metadata(request)
 }
 
 fn parse_confirmed_apply_mode(
