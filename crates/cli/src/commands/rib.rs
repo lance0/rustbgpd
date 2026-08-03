@@ -2249,6 +2249,8 @@ mod tests {
                     prefix: "198.51.100.0".into(),
                     prefix_length: 24,
                     reason: "policy_reject".into(),
+                    reason_detail: "missing required community".into(),
+                    next_hop: "192.0.2.1".into(),
                     rpki_validation: "invalid".into(),
                     aspa_validation: "unknown".into(),
                     as_path: "65002 65010".into(),
@@ -2270,10 +2272,12 @@ mod tests {
         let mut lines = rendered.lines();
         assert!(lines.next().unwrap().contains("RPKI       ASPA"));
         lines.next();
-        let distinct: Vec<_> = lines.next().unwrap().split_whitespace().collect();
-        assert_eq!(&distinct[5..7], &["invalid", "unknown"]);
-        let unavailable: Vec<_> = lines.next().unwrap().split_whitespace().collect();
-        assert_eq!(&unavailable[5..7], &["-", "-"]);
+        let distinct = lines.next().unwrap();
+        assert_eq!(distinct[99..109].trim(), "invalid");
+        assert_eq!(distinct[110..120].trim(), "unknown");
+        let unavailable = lines.next().unwrap();
+        assert_eq!(unavailable[99..109].trim(), "-");
+        assert_eq!(unavailable[110..120].trim(), "-");
     }
 
     #[tokio::test]
