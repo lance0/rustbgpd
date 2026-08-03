@@ -22,9 +22,10 @@ credential reaches the entire read-write surface.
 
 ## Scope and assumptions
 
-- `security.grpc.enforcement = "tier"` is the default. `legacy` remains an
-  explicit compatibility opt-out and deliberately does not get the principal
-  role check; listener caps still apply.
+- `security.grpc.enforcement = "tier"` is the default since v0.24.0. `legacy`
+  remains accepted today only as a temporary migration mode and deliberately
+  does not get the principal role check: roles are audit context only and the
+  listener's `max_tier` is authoritative.
 - The daemon is deployed on a management network. Network reachability,
   certificate issuance, bearer-token distribution, UDS permissions, and log
   collection are operator responsibilities outside this process.
@@ -122,7 +123,7 @@ flowchart LR
 | TM-005 | Authorization or credential material changes while accepted calls, streams, or TLS connections remain live. | Listener shape, auth mode, principal, roles, and access settings are restart-required and remain pinned to the startup generation. SIGHUP rotates bearer and mTLS material at unchanged paths; new bearer RPCs use the new token generation and new TLS connections use the new certificate generation. | Admitted streams continue, and an existing mTLS connection remains accepted and can make further calls. **Medium**: immediate role revocation requires restart; immediate mTLS revocation also requires ending existing connections. Client deadlines can bound cooperative streams but are not forced revocation. |
 | TM-006 | An unauthenticated network-reachable caller floods bearer requests, TLS connections, or malformed paths, consuming request processing and audit/log capacity. | Invalid bearer requests fail authentication; mTLS handshakes have concurrency and time bounds; unknown paths are `operator_only`. | There is no general connection or request rate limiter, and bearer failures still emit `grpc_authz` records. **Medium** when a listener is broadly reachable; keep it on a restricted management network and enforce upstream connection/request limits. |
 | TM-007 | A new RPC or generated route evades a low-risk classification and is exposed through a less restrictive listener. | The static matrix is checked against both protobuf inputs and the JSON/Markdown exports; unknown paths fail closed as `operator_only`. | Classification correctness still depends on review of a new method's semantics. **Low**: the structural fence makes omission fail closed, but a wrongly chosen known tier remains a review risk. |
-| TM-008 | An operator enables the supported `legacy` compatibility mode and assumes configured roles still constrain calls. Any authenticated identity can instead use every method permitted by that listener's `max_tier`. | `legacy` is an explicit non-default opt-out; validation and `--check` warn about the weaker posture; listener caps and authentication remain enforced. | Role mappings are audit context only in this mode. **Medium**: activation is deliberate, but a broad listener can give one accepted credential the full capped surface. Keep `legacy` time-bounded for migration and set a deliberately narrow `max_tier`. |
+| TM-008 | An operator enables the temporary `legacy` migration mode and assumes configured roles still constrain calls. Any authenticated identity can instead use every method permitted by that listener's `max_tier`. | Legacy is explicit and non-default; validation warns, `--check --strict` fails, and listener caps and authentication remain enforced. | Role mappings are audit context only in this mode. **Medium**: activation is deliberate, but a broad listener can give one accepted credential the full capped surface. Keep Legacy time-bounded for migration and set a deliberately narrow `max_tier`. The original startup warning shipped in v0.51.0 on 2026-07-11; validation and strict-check enforcement followed in v0.61.0. The approximately 2026-10-09 two-minor/90-day floor creates only eligibility for a later removal decision, not a promised date. |
 
 ## Operational mitigations and detection
 
@@ -131,7 +132,7 @@ flowchart LR
   actions.
 - Treat `[security.grpc.roles]`, listener `principal`, mTLS client issuance,
   bearer-token files, and UDS permissions as privileged configuration. Do not
-  use `legacy` except as a documented migration exception.
+  use Legacy except as a documented, time-bounded migration exception.
 - Collect and protect `grpc_authz` structured records; alert on
   `listener_tier_denied`, `principal_unmapped`, `role_tier_denied`,
   both `authn_failed` and `handler_unauthenticated` authentication failures,
@@ -175,6 +176,8 @@ red-proof is **N/A**. The factual baseline was checked directly against:
 
 The key review rule is therefore explicit: under the default `tier` mode, a
 valid accepted management-plane identity can use only the method tiers granted
-by both its role and listener. Under the supported `legacy` opt-out, the
+by both its role and listener. Under the temporary Legacy migration mode, the
 listener ceiling is the authorization boundary and role mappings are audit
-context only. Neither baseline assumes an audit-only listener-cap layer.
+context only; explicit Legacy warns and fails `--check --strict`. Neither
+baseline assumes an audit-only listener-cap layer. These current-status notes
+do not alter ADR-0064's historical decision record.

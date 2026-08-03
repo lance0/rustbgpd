@@ -66,8 +66,9 @@ Preferred posture:
   client certificate (`rustbgpd:` URI SAN, then email SAN, then Subject CN);
   unsafe or overlong cert values fall back to `mtls-unresolved` rather than
   entering structured logs verbatim.
-  In legacy mode these roles are audit context only; in tier mode they
-  authorize or deny calls by method tier.
+  In the temporary Legacy migration mode these roles are audit context only
+  and listener `max_tier` is authoritative; in Tier mode they authorize or
+  deny calls by method tier.
 - Listener `max_tier` caps are enforced now and should be used to bound remote
   TCP listeners to the smallest required method tier. `access_mode =
   "read_only"` remains a compatibility ceiling equivalent to
@@ -446,7 +447,13 @@ the roadmap:
 - Authorization defaults to per-principal tier enforcement
   (`security.grpc.enforcement = "tier"`, default since v0.24.0) layered on
   listener `access_mode` (`read_only` vs `read_write`) and `max_tier` caps.
-  `enforcement = "legacy"` remains a supported opt-out. Configs that rely on the
+  `enforcement = "legacy"` remains accepted today only as a temporary
+  migration mode: roles are audit-only, the listener cap authorizes calls,
+  validation warns, and `--check --strict` fails. The original startup
+  deprecation warning shipped in v0.51.0 on 2026-07-11; validation and
+  strict-check enforcement followed in v0.61.0. The two-minor/90-day floor is
+  therefore approximately 2026-10-09. That is only eligibility for a later
+  removal decision, not a promised removal date. Configs that rely on the
   implicit UDS listener must declare `[global.telemetry.grpc_uds]` with a
   `principal` to run under tier enforcement.
 - Per-principal request-rate and stream-count budgets are not implemented in
