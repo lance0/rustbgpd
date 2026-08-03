@@ -453,9 +453,16 @@ the roadmap:
   deprecation warning shipped in v0.51.0 on 2026-07-11; validation and
   strict-check enforcement followed in v0.61.0. The two-minor/90-day floor is
   therefore approximately 2026-10-09. That is only eligibility for a later
-  removal decision, not a promised removal date. Configs that rely on the
-  implicit UDS listener must declare `[global.telemetry.grpc_uds]` with a
-  `principal` to run under tier enforcement.
+  removal decision, not a promised removal date. Under tier enforcement, an
+  owner-only UDS socket (no group/world mode bits, e.g. the default `0o600`)
+  with no `principal` — including the implicit default listener — authorizes
+  its clients as the reserved implicit `local-operator` principal at operator
+  tier: the socket's filesystem permissions are the authentication, so no
+  `[security.grpc.roles]` entry is needed. Group- or world-accessible UDS
+  sockets still require an explicit `principal` plus a matching role entry,
+  and `local-operator` is reserved (rejected in roles and listener
+  `principal` fields, like `mtls-unresolved`). Audit records label the
+  implicit path distinctly (`authn = "uds_owner"`).
 - Per-principal request-rate and stream-count budgets are not implemented in
   the daemon. Use listener tier caps, role enforcement, management-network
   controls, client deadlines, and the documented `grpc_authz` / stream metrics

@@ -33,15 +33,10 @@ dynamic_neighbor_limit = 1024  # cap for the auto-accept range below
 prometheus_addr = "127.0.0.1:9179"
 log_format = "json"
 
+# Owner-only local socket (default mode 0600): clients are authorized as the
+# implicit "local-operator" principal — no [security.grpc] block needed.
 [global.telemetry.grpc_uds]
 path = "/var/lib/rustbgpd/grpc.sock"
-principal = "operator"
-
-[security.grpc]
-enforcement = "tier"
-
-[security.grpc.roles]
-operator = "operator"
 
 # One template for the whole client fleet. Uniform clients group
 # automatically (ADR-0098) — there is no update-group knob.

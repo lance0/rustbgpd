@@ -233,6 +233,14 @@ The boot config file (TOML) provides initial state. At startup, the daemon loads
 
 ### Minimal Config Example
 
+A bare config boots. No gRPC listener or `[security.grpc]` section is needed
+for local operation: the daemon synthesizes an owner-only Unix socket at
+`<runtime_state_dir>/grpc.sock`, and under the default tier authorization its
+clients are authorized as the implicit `local-operator` principal — the
+socket's filesystem permissions are the authentication. Declaring listeners,
+principals, and roles only becomes necessary for remote (TCP) or
+group-accessible access; see `docs/CONFIGURATION.md` under `[security.grpc]`.
+
 ```toml
 [global]
 asn = 65001
@@ -242,6 +250,18 @@ listen_port = 179
 [global.telemetry]
 prometheus_addr = "0.0.0.0:9179"
 log_format = "json"
+
+# Explicit, labeled permit-all. An eBGP neighbor with no policy is not a
+# smaller config, it is an unfiltered one.
+[policy.definitions.permit-all-import]
+default_action = "permit"
+
+[policy.definitions.permit-all-export]
+default_action = "permit"
+
+[policy]
+import_chain = ["permit-all-import"]
+export_chain = ["permit-all-export"]
 
 [[neighbors]]
 address = "10.0.0.2"
@@ -255,10 +275,6 @@ address = "10.0.0.3"
 remote_asn = 65001
 description = "ibgp-reflector"
 hold_time = 90
-
-[[neighbors.policy]]
-import = "allow-all"
-export = "deny-all"
 ```
 
 ### Graceful Shutdown

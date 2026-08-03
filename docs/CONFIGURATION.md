@@ -640,8 +640,10 @@ principal falls back to `mtls-unresolved`.
 
 ADR-0064 per-method authorization defaults to `"tier"` since v0.24.0. Tier
 mode enforces `[security.grpc.roles]` for the authenticated principal before
-the handler runs, in addition to listener `max_tier` caps; upgrading without a
-`[security.grpc.roles]` block fails validation at startup. Legacy mode remains
+the handler runs, in addition to listener `max_tier` caps; a declared
+principal without a matching `[security.grpc.roles]` entry fails validation at
+startup, while owner-only UDS listeners with no principal need no roles block
+at all (implicit `local-operator`). Legacy mode remains
 accepted today only as a temporary migration mode: role mappings are audit
 context only and the listener's `max_tier` is the authoritative authorization
 boundary.
@@ -740,18 +742,28 @@ enforcement = "legacy"
 prometheus_addr = "0.0.0.0:9179"
 log_format = "json"
 
+# Group-accessible socket (0o660): wider than owner-only, so under tier it
+# requires an explicit principal with a matching role entry below. An
+# owner-only socket (default 0o600) with no principal would instead ride the
+# implicit local-operator identity and need neither.
 [global.telemetry.grpc_uds]
 path = "/var/lib/rustbgpd/grpc.sock"
 mode = 0o660
 access_mode = "read_write"
 principal = "local-admin"
 
+# Under tier a TCP listener must authenticate: bearer token + principal
+# (create the token file first) or native mTLS.
 [global.telemetry.grpc_tcp]
 address = "127.0.0.1:50051"
 access_mode = "read_only"
 max_tier = "sensitive_read"
-# token_file = "/etc/rustbgpd/grpc.token"
-# principal = "observer-readonly"
+token_file = "/etc/rustbgpd/grpc.token"
+principal = "observer-readonly"
+
+[security.grpc.roles]
+"local-admin" = "operator"
+"observer-readonly" = "observer"
 ```
 
 ---

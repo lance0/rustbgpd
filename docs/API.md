@@ -20,12 +20,22 @@ grpcurl -plaintext -unix /var/lib/rustbgpd/grpc.sock \
 
 The remaining examples below use
 [grpcurl](https://github.com/fullstorydev/grpcurl) against an explicit local
-TCP listener for readability. Those examples require `grpc_tcp` to be enabled:
+TCP listener for readability. Those examples require `grpc_tcp` to be
+enabled, and under the default tier authorization a TCP listener must
+authenticate — bearer token plus a role-mapped `principal`, or native mTLS:
 
 ```toml
 [global.telemetry.grpc_tcp]
 address = "127.0.0.1:50051"
+token_file = "/etc/rustbgpd/grpc.token"
+principal = "automation.example"
+
+[security.grpc.roles]
+"automation.example" = "operator"
 ```
+
+For readability the examples omit the accompanying
+`-H "authorization: bearer <token>"` metadata header.
 
 The proto definition lives at `proto/rustbgpd.proto`.
 
@@ -163,10 +173,11 @@ Tier enforcement is the default since v0.24.0. When upgrading from an older
 release (or from `enforcement = "legacy"`), stage `[security.grpc.roles]` plus
 explicit listener principals, validate the candidate config with
 `rustbgpd --check`, then move to `enforcement = "tier"` (or rely on the
-default). The implicit default UDS listener is safe for local access under
-legacy mode, but tier mode requires an explicit
-`[global.telemetry.grpc_uds]` block with `principal` so requests can be mapped
-to a role.
+default). The implicit default UDS listener needs no staging: it is
+owner-only, so under tier its clients are authorized as the implicit
+`local-operator` principal at operator tier without a roles entry. Only
+group/world-accessible UDS sockets require an explicit `principal` mapped in
+`[security.grpc.roles]`.
 Explicit Legacy remains accepted today only for temporary migration; it emits
 a validation warning and fails `rustbgpd --check --strict`. The original
 startup deprecation warning shipped in v0.51.0 on 2026-07-11; validation and

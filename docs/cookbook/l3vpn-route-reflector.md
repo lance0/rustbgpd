@@ -39,15 +39,10 @@ cluster_id = "10.0.0.1"
 prometheus_addr = "127.0.0.1:9179"
 log_format = "json"
 
+# Owner-only local socket (default mode 0600): clients are authorized as the
+# implicit "local-operator" principal — no [security.grpc] block needed.
 [global.telemetry.grpc_uds]
 path = "/var/lib/rustbgpd/grpc.sock"
-principal = "operator"
-
-[security.grpc]
-enforcement = "tier"
-
-[security.grpc.roles]
-operator = "operator"
 
 # PE clients: VPN families plus "rtc" (RFC 4684, AFI 1 / SAFI 132).
 # Each PE advertises its RT membership as RTC NLRIs; the RR filters
