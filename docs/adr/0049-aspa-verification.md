@@ -261,8 +261,9 @@ The implementation is aligned with
 - The §5 neighbor-AS check applies to eligible eBGP unicast routes even when no
   BGP Role is configured. Roleless sessions continue to use upstream
   verification; configured roles select upstream versus downstream verification
-  and are not a prerequisite for the neighbor-AS check. A local
-  `rs-client` remains exempt for a transparent IX as required by §5.
+  and are not a prerequisite for the neighbor-AS check. Transparent sessions
+  remain exempt when identified by either the existing
+  `route_server_client = true` knob or a local `rs-client` Role.
 - A peer that did not negotiate the four-octet-AS capability is not exempt.
   rustbgpd is the RFC 6793 NEW speaker and applies the check to the effective
   AS_PATH after `AS_PATH` / `AS4_PATH` reconstruction.
