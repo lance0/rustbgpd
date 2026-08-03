@@ -197,6 +197,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `rbgp rib received <peer> --rejected` now shows the retained ASPA
+  validation state beside RPKI in its human-readable table; unavailable
+  validation facts render as `-`, matching the existing RPKI convention.
+
 - gNMI STREAM/ON_CHANGE now fails with `DATA_LOSS` on producer-side
   event-history loss during snapshot, synchronization, or live delivery and on
   live broadcast lag; reconnecting without `updates_only` and consuming a full
