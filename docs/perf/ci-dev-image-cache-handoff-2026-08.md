@@ -1,7 +1,8 @@
 # CI dev-image cache handoff — 2026-08
 
-Status: measurement in progress. The only candidate row below is the excluded
-cache seed; it is not a performance claim.
+Status: measured NO-GO. The first source-only treatment missed the predeclared
+hard gate, so the candidate stops without a second treatment and does not
+merge.
 
 ## Boundary and acceptance
 
@@ -87,11 +88,21 @@ separate target-cache mount is outside this change.
 | row | run / job | head | primer job / action | dependency cook | source build | compile roster | cache export | verdict |
 |---|---|---|---:|---|---:|---|---:|---|
 | seed | [30844189627 / 91788297406](https://github.com/lance0/rustbgpd/actions/runs/30844189627/job/91788297406) | `c906aab9` | 469 / 442 s | cold, 138.4 s | 207.8 s | 20 workspace, 0 external | 57.5 s; preparation 25.2 s | excluded, establishes the new graph |
+| treatment 1 | [30847178451 / 91798212885](https://github.com/lance0/rustbgpd/actions/runs/30847178451/job/91798212885) | `5b84eea3` | 525 / 490 s | remote layer restore, 192.4 s | 269.8 s | 20 workspace, 0 external | 6.5 s; preparation 3.8 s | **NO-GO**, exceeds 316.2 s |
 
 The seed finished successfully in a 469-second job. It cold-built the ordinary
 dependency layer by design, then proved that the source step itself contained
-only workspace compilation. The next push changes only this receipt and its
-CSV; Dockerfile and Cargo metadata remain byte-identical, so it is treatment 1.
+only workspace compilation.
+
+Treatment 1 changed only the receipt and CSV; its Dockerfile and Cargo metadata
+were byte-identical to the seed. Restoring the 296.38 MB cooked layer stalled at
+171.97 MB, hit a TCP read timeout, retried, and consumed 192.4 seconds. The
+source step then compiled the expected 20 workspace packages and no external
+packages, but took 269.8 seconds. The 525-second full job is effectively the
+527-second control median, not the required 40% reduction. This is a hard
+failure of the predeclared acceptance contract, independent of the transient
+network timeout: removing the entire 192.4-second restore would still leave a
+332.6-second job above the 316.2-second limit.
 
 ## Cache-capacity risk
 
@@ -105,6 +116,14 @@ recently accessed; it explicitly warns this can cause cache thrashing.
 The final verdict must compare the post-seed inventory, verify that hot mainline
 caches and every consumer remain effective, and disclose any eviction. A fast
 primer that merely transfers work to other jobs does not pass.
+
+After treatment 1, the repository reported 10,755,266,918 active cache bytes
+across 1,002 entries: 52 fewer entries than the pre-seed inventory while active
+bytes remained above the configured 10 GB limit. Other concurrent workflows
+mean that delta is not attributable solely to this candidate, but it confirms
+that the capacity risk was live rather than theoretical. The failed hard timing
+gate is sufficient for the NO-GO; no eviction attribution is needed to reject
+the change.
 
 ## Retained artifact
 
