@@ -1696,6 +1696,19 @@ Cross-cutting cleanups that don't move user-facing capability on their own but
 lower the cost of every future PR. None block a release — grab one when your
 branch is between features.
 
+- [ ] **Compatibility-debt removal schedule (ADR-0122).**
+  [docs/adr/0122-compatibility-debt-inventory.md](docs/adr/0122-compatibility-debt-inventory.md)
+  is the single inventory of retained compat shims under the alpha
+  posture, grouped by surface with per-item removal releases and
+  mechanics. Immediate remove-now items: the two v0.51.0 retired-key
+  migration pointers and the redundant example-config UDS authorization
+  ceremony made unnecessary by #1429. Scheduled: the dead
+  `enforcement = "legacy"` enum variant, the `rbgp rib diff`
+  older-daemon fallbacks, and three superseded proto fields. Two calls
+  are owner-gated there (legacy config-history reader EOL, unary vs
+  streaming Plan/Apply fate); new compat retentions add a row to the
+  ADR in the PR that introduces them.
+
 - [x] **Legacy GR/LLGR RFC gaps in unicast/FlowSpec/EVPN — RESOLVED.**
   The RR families (VPN/BGP-LS/RTC, #636–#638) implement the strict
   semantics; the pre-existing paths had three documented divergences,
