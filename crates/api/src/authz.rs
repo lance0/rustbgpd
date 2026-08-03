@@ -88,6 +88,24 @@ impl PrincipalRole {
     }
 }
 
+/// Reserved implicit principal granted to clients of an owner-only UDS
+/// listener that declares no `principal`. The socket's filesystem
+/// permissions are the authentication; config validation rejects this
+/// name in `[security.grpc.roles]` and listener `principal` fields so
+/// the implicit identity can never be confused with a declared one.
+pub const LOCAL_OPERATOR_PRINCIPAL: &str = "local-operator";
+
+/// True when a UDS socket mode grants no group/world access
+/// (the 0600/0700 class), i.e. only the socket owner can connect.
+#[must_use]
+#[expect(
+    clippy::verbose_bit_mask,
+    reason = "the permission-bit mask is clearer than trailing_zeros() here"
+)]
+pub const fn uds_mode_is_owner_only(mode: u32) -> bool {
+    mode & 0o077 == 0
+}
+
 /// Static authorization metadata for one generated gRPC method path.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GrpcMethodAuthz {

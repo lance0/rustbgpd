@@ -1,6 +1,6 @@
 # ADR-0064: gRPC per-method authorization
 
-**Status:** Accepted
+**Status:** Accepted (amended 2026-08-03: implicit `local-operator` for owner-only UDS, §4)
 **Date:** 2026-05-18
 
 ## Context
@@ -157,13 +157,43 @@ principal source:
 - Bearer-token listeners must configure an explicit token principal
   label before tier enforcement can be enabled, because the token value
   itself is not a stable audit identity.
-- UDS listeners must configure an explicit listener principal or rely
-  only on `max_tier`; filesystem permissions authenticate the client
-  but do not identify a per-client role.
+- UDS listeners may configure an explicit listener principal;
+  filesystem permissions authenticate the client but do not identify a
+  per-client role.
 
 If tier enforcement is enabled on a listener without either mTLS
 principal extraction or an explicit non-mTLS principal, startup rejects
-the configuration instead of falling back open.
+the configuration instead of falling back open — with one amended
+exception for owner-only UDS listeners:
+
+**Amendment (2026-08-03): implicit `local-operator` for owner-only
+UDS.** A UDS listener (implicit or declared) with no `principal` and an
+owner-only socket mode (`mode & 0o077 == 0`, the 0600/0700 class) is
+authorized as the reserved principal `local-operator` at the `operator`
+role ceiling, without a `[security.grpc.roles]` entry. Rationale: the
+socket's filesystem permissions *are* the authentication, and because a
+UDS principal is listener-wide, a roles entry adds zero per-client
+discrimination there — it was pure ceremony blocking zero-config local
+operation. Rules:
+
+- Group/world-accessible modes keep the explicit-principal requirement;
+  wider modes buy real scoping, so they keep the ceremony.
+- A declared `principal` behaves exactly as before (must be mapped in
+  `[security.grpc.roles]`).
+- The listener `max_tier` cap applies to the implicit identity
+  unchanged.
+- `local-operator` is reserved: declaring it in
+  `[security.grpc.roles]` or as a listener `principal` is rejected at
+  config load (like `mtls-unresolved`), so the implicit identity can
+  never be confused with a declared one.
+- Audit records label the implicit path distinctly
+  (`authn = "uds_owner"`, principal `local-operator`).
+
+Per-uid identities via `SO_PEERCRED` were considered and deferred: they
+would give multi-user sockets real per-client roles, but owner-only
+sockets — the only mode the implicit grant covers — have exactly one
+authorized uid by construction, so peer-cred lookup adds surface
+without adding discrimination there.
 
 Roles are configured per-principal in `[security.grpc.roles]`:
 

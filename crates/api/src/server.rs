@@ -20,7 +20,9 @@ use tonic::transport::Server;
 use tonic::{Request, Status};
 use tracing::{error, info, warn};
 
-use crate::authz::{AuthEnforcement, AuthTier, PrincipalRole};
+use crate::authz::{
+    AuthEnforcement, AuthTier, LOCAL_OPERATOR_PRINCIPAL, PrincipalRole, uds_mode_is_owner_only,
+};
 use crate::authz_runtime::{GrpcAuthAuditContext, GrpcAuthnKind, GrpcAuthzLayer};
 use crate::bfd_service::BfdService;
 use crate::config_service::ConfigService;
@@ -786,6 +788,7 @@ fn tcp_audit_context(
 
 fn uds_audit_context(
     path: &Path,
+    mode: u32,
     access_mode: AccessMode,
     max_tier: AuthTier,
     role_config: RuntimeAuthzConfig,
@@ -793,7 +796,7 @@ fn uds_audit_context(
     configured_principal: Option<&str>,
 ) -> GrpcAuthAuditContext {
     let auth_enabled = auth_token.is_some();
-    let (authn, principal) = if let Some(principal) = configured_principal {
+    let (authn, principal, implicit_operator) = if let Some(principal) = configured_principal {
         (
             if auth_enabled {
                 GrpcAuthnKind::BearerToken
@@ -801,13 +804,27 @@ fn uds_audit_context(
                 GrpcAuthnKind::Uds
             },
             principal.to_string(),
+            false,
+        )
+    } else if uds_mode_is_owner_only(mode) {
+        // ADR-0064 amendment: the owner-only socket mode is the
+        // authentication, so clients are authorized as the implicit
+        // `local-operator` operator identity without a roles entry.
+        (
+            GrpcAuthnKind::UdsOwner,
+            LOCAL_OPERATOR_PRINCIPAL.to_string(),
+            true,
         )
     } else if auth_enabled {
-        (GrpcAuthnKind::BearerToken, "bearer-token".to_string())
+        (
+            GrpcAuthnKind::BearerToken,
+            "bearer-token".to_string(),
+            false,
+        )
     } else {
-        (GrpcAuthnKind::Uds, format!("uds:{}", path.display()))
+        (GrpcAuthnKind::Uds, format!("uds:{}", path.display()), false)
     };
-    GrpcAuthAuditContext::new(
+    let context = GrpcAuthAuditContext::new(
         format!("unix://{}", path.display()),
         access_mode.as_str(),
         max_tier,
@@ -815,7 +832,12 @@ fn uds_audit_context(
         principal,
     )
     .with_role_enforcement(role_config.enforcement, role_config.roles)
-    .with_bearer_token(auth_token)
+    .with_bearer_token(auth_token);
+    if implicit_operator {
+        context.with_implicit_local_operator()
+    } else {
+        context
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1500,6 +1522,7 @@ async fn run_uds_listener(
         .is_some();
     let audit_context = uds_audit_context(
         &path,
+        mode,
         access_mode,
         max_tier,
         RuntimeAuthzConfig { enforcement, roles },
@@ -2017,6 +2040,7 @@ mod tests {
     fn uds_audit_context_uses_configured_principal() {
         let context = uds_audit_context(
             Path::new("/run/rustbgpd/grpc.sock"),
+            0o600,
             AccessMode::ReadWrite,
             AuthTier::SensitiveRead,
             tier_authz("local-admin"),
@@ -2026,5 +2050,47 @@ mod tests {
         assert_eq!(context.authn(), GrpcAuthnKind::Uds);
         assert_eq!(context.principal(), "local-admin");
         assert_eq!(context.max_tier(), AuthTier::SensitiveRead);
+    }
+
+    #[test]
+    fn uds_audit_context_owner_only_socket_resolves_implicit_local_operator() {
+        // Red proof: dropping the implicit-identity resolution turns the
+        // principal back into the unmapped `uds:<path>` placeholder and
+        // fails these assertions (and the zero-config boot smoke).
+        let context = uds_audit_context(
+            Path::new("/run/rustbgpd/grpc.sock"),
+            0o600,
+            AccessMode::ReadWrite,
+            AuthTier::OperatorOnly,
+            RuntimeAuthzConfig {
+                enforcement: AuthEnforcement::Tier,
+                roles: Arc::new(BTreeMap::new()),
+            },
+            None,
+            None,
+        );
+        assert_eq!(context.authn(), GrpcAuthnKind::UdsOwner);
+        assert_eq!(context.principal(), LOCAL_OPERATOR_PRINCIPAL);
+    }
+
+    #[test]
+    fn uds_audit_context_group_accessible_socket_stays_unmapped() {
+        // Red proof: widening the owner-only check to accept group
+        // bits (e.g. 0o660) makes this listener resolve the implicit
+        // identity and fails this test.
+        let context = uds_audit_context(
+            Path::new("/run/rustbgpd/grpc.sock"),
+            0o660,
+            AccessMode::ReadWrite,
+            AuthTier::OperatorOnly,
+            RuntimeAuthzConfig {
+                enforcement: AuthEnforcement::Tier,
+                roles: Arc::new(BTreeMap::new()),
+            },
+            None,
+            None,
+        );
+        assert_eq!(context.authn(), GrpcAuthnKind::Uds);
+        assert_eq!(context.principal(), "uds:/run/rustbgpd/grpc.sock");
     }
 }

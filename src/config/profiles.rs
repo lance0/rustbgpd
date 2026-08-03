@@ -27,10 +27,12 @@ pub fn profile_toml(name: &str) -> Option<&'static str> {
 
 /// `lab` — a minimal single-box setup for experimenting locally: one
 /// eBGP neighbor, gRPC over a local Unix socket, runtime state under
-/// `/tmp`. Local gRPC access is authenticated by Unix-socket filesystem
-/// permissions and authorized through a stable operator principal. Its
-/// permit-all policy is written out and labeled rather than left to
-/// omission, so `--check --strict` is clean and the posture is a choice.
+/// `/tmp`. Local gRPC access rides the owner-only socket: filesystem
+/// permissions authenticate, and the socket owner is authorized as the
+/// implicit `local-operator` principal, so no explicit security block
+/// is needed. Its permit-all policy is written out and labeled rather
+/// than left to omission, so `--check --strict` is clean and the
+/// posture is a choice.
 const LAB: &str = r#"# rustbgpd "lab" profile — a minimal local setup for experimenting on
 # one machine. Edit the ASNs and addresses for your topology, then:
 #   rustbgpd config-lab.toml          # (after saving this output)
@@ -54,23 +56,16 @@ ebgp_requires_policy = true
 prometheus_addr = "127.0.0.1:9179"
 log_format = "json"
 
-# Local control socket for rbgp. Filesystem permissions authenticate access to
-# the socket; the stable principal below drives authorization and audit logs.
-# When adapting this profile, change the example path and principal label for
-# your deployment, and keep the matching role key below in sync.
+# Local control socket for rbgp. The socket is owner-only (mode 0600), so
+# filesystem permissions authenticate access and the socket owner is
+# authorized as the implicit "local-operator" principal at operator tier —
+# no [security.grpc] block needed for local operation. To add remote or
+# named access (more principals, TCP, mTLS), see docs/CONFIGURATION.md
+# under [security.grpc].
 [global.telemetry.grpc_uds]
 enabled = true
 path = "/tmp/rustbgpd/grpc.sock"
 mode = 0o600
-principal = "operator"
-
-[security.grpc]
-# Per-principal authorization. The UDS principal is not a credential: socket
-# filesystem permissions authenticate access, and this role grants its ceiling.
-enforcement = "tier"
-
-[security.grpc.roles]
-operator = "operator"
 
 # ==========================================================================
 # DELIBERATE LAB POSTURE: PERMIT ALL, BOTH DIRECTIONS. NOT FOR PRODUCTION.
@@ -139,23 +134,16 @@ ebgp_requires_policy = true
 prometheus_addr = "0.0.0.0:9179"
 log_format = "json"
 
-# Local control socket for rbgp. Filesystem permissions authenticate access to
-# the socket; the stable principal below drives authorization and audit logs.
-# When adapting this profile, change the example path and principal label for
-# your deployment, and keep the matching role key below in sync.
+# Local control socket for rbgp. The socket is owner-only (mode 0600), so
+# filesystem permissions authenticate access and the socket owner is
+# authorized as the implicit "local-operator" principal at operator tier —
+# no [security.grpc] block needed for local operation. To add remote or
+# named access (more principals, TCP, mTLS), see docs/CONFIGURATION.md
+# under [security.grpc].
 [global.telemetry.grpc_uds]
 enabled = true
 path = "/var/lib/rustbgpd/grpc.sock"
 mode = 0o600
-principal = "operator"
-
-[security.grpc]
-# Per-principal authorization. The UDS principal is not a credential: socket
-# filesystem permissions authenticate access, and this role grants its ceiling.
-enforcement = "tier"
-
-[security.grpc.roles]
-operator = "operator"
 
 # Named import policy: permit by default, but drop the IPv4 default
 # route from upstream. Add more statements (RPKI, AS_PATH, communities)
@@ -206,7 +194,7 @@ hold_time = 90
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Config, GrpcEnforcementConfig, GrpcRoleConfig};
+    use crate::config::{Config, GrpcEnforcementConfig};
 
     #[test]
     fn every_profile_validates() {
@@ -221,11 +209,14 @@ mod tests {
     }
 
     #[test]
-    fn every_profile_has_an_explicit_tier_authorized_uds_operator() {
-        // Load-bearing bootstrap contract: restoring legacy enforcement,
-        // removing the UDS principal or its matching role, downgrading that
-        // role, or disabling the only listener makes this test or the strict
-        // config load fail instead of shipping an unsafe or unusable profile.
+    fn every_profile_relies_on_the_implicit_local_operator_uds() {
+        // Load-bearing bootstrap contract: profiles validate clean under
+        // the default tier enforcement with NO explicit security block —
+        // the owner-only UDS grants the implicit `local-operator`
+        // identity. Restoring legacy enforcement, widening the socket
+        // mode, adding a principal back, or dropping the explanatory
+        // comment makes this test fail instead of shipping ceremony (or
+        // an unexplained implicit grant) to new operators.
         for name in PROFILE_NAMES {
             let toml = profile_toml(name).expect("listed profile must resolve");
             let config = Config::load_toml_with_diagnostics(toml, name)
@@ -235,6 +226,10 @@ mod tests {
                 config.security.grpc.enforcement,
                 GrpcEnforcementConfig::Tier,
                 "--init-config {name} must use tier gRPC enforcement"
+            );
+            assert!(
+                config.security.grpc.roles.is_empty(),
+                "--init-config {name} must not need a [security.grpc.roles] block"
             );
 
             let uds = config
@@ -247,17 +242,18 @@ mod tests {
                 uds.enabled,
                 "--init-config {name} must enable its declared grpc_uds listener"
             );
-            let principal = uds.principal.as_deref().unwrap_or_else(|| {
-                panic!("--init-config {name} grpc_uds must declare a stable principal")
-            });
             assert_eq!(
-                principal, "operator",
-                "--init-config {name} must preserve its stable UDS audit principal"
+                uds.principal, None,
+                "--init-config {name} grpc_uds must rely on the implicit identity"
             );
             assert_eq!(
-                config.security.grpc.roles.get(principal),
-                Some(&GrpcRoleConfig::Operator),
-                "--init-config {name} grpc_uds principal must map to the operator role"
+                uds.mode & 0o077,
+                0,
+                "--init-config {name} grpc_uds must stay owner-only for the implicit grant"
+            );
+            assert!(
+                toml.contains("local-operator"),
+                "--init-config {name} must explain the implicit local-operator rule"
             );
         }
     }

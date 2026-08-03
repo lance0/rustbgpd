@@ -8,7 +8,7 @@ use tonic::codegen::http;
 use tonic::transport::server::{TcpConnectInfo, TlsConnectInfo};
 use tracing::debug;
 
-use crate::authz::{AuthEnforcement, AuthTier, PrincipalRole};
+use crate::authz::{AuthEnforcement, AuthTier, LOCAL_OPERATOR_PRINCIPAL, PrincipalRole};
 use crate::authz_principal::{PrincipalExtractionError, principal_from_peer_certs};
 use crate::connect_info::RustbgpdTcpConnectInfo;
 use crate::credentials::{CredentialStore, PinnedCredentialGeneration};
@@ -24,6 +24,9 @@ pub enum GrpcAuthnKind {
     BearerToken,
     /// Unix domain socket protected by filesystem permissions.
     Uds,
+    /// Owner-only Unix domain socket whose clients are authorized as
+    /// the implicit `local-operator` principal (ADR-0064 amendment).
+    UdsOwner,
     /// No listener authentication configured.
     None,
 }
@@ -36,6 +39,7 @@ impl GrpcAuthnKind {
             Self::Mtls => "mtls",
             Self::BearerToken => "bearer_token",
             Self::Uds => "uds",
+            Self::UdsOwner => "uds_owner",
             Self::None => "none",
         }
     }
@@ -51,6 +55,10 @@ pub struct GrpcAuthAuditContext {
     principal: String,
     pub(super) enforcement: AuthEnforcement,
     roles: Arc<BTreeMap<String, PrincipalRole>>,
+    // Role granted to the reserved `local-operator` principal on an
+    // owner-only UDS listener without consulting the roles map — the
+    // socket's filesystem permissions are the authentication.
+    implicit_role: Option<PrincipalRole>,
     resolve_mtls_principal: bool,
     expected_bearer_header: Option<BearerAuthSecret>,
     dynamic_bearer: Option<(CredentialStore, usize)>,
@@ -74,6 +82,7 @@ impl GrpcAuthAuditContext {
             principal: principal.into(),
             enforcement: AuthEnforcement::Legacy,
             roles: Arc::new(BTreeMap::new()),
+            implicit_role: None,
             resolve_mtls_principal: false,
             expected_bearer_header: None,
             dynamic_bearer: None,
@@ -89,6 +98,15 @@ impl GrpcAuthAuditContext {
     ) -> Self {
         self.enforcement = enforcement;
         self.roles = roles;
+        self
+    }
+
+    /// Authorize the reserved `local-operator` principal at operator
+    /// tier without a `[security.grpc.roles]` entry. Only owner-only
+    /// UDS listeners with no declared principal get this.
+    #[must_use]
+    pub fn with_implicit_local_operator(mut self) -> Self {
+        self.implicit_role = Some(PrincipalRole::Operator);
         self
     }
 
@@ -159,7 +177,7 @@ impl GrpcAuthAuditContext {
         if self.enforcement != AuthEnforcement::Tier {
             return None;
         }
-        let Some(role) = self.roles.get(principal).copied() else {
+        let Some(role) = self.resolve_role(principal) else {
             return Some(RoleDenial::PrincipalUnmapped);
         };
         if tier > role.max_tier() {
@@ -172,9 +190,18 @@ impl GrpcAuthAuditContext {
         if self.enforcement != AuthEnforcement::Tier {
             return "legacy";
         }
-        self.roles
-            .get(principal)
-            .map_or("unmapped", |role| role.as_str())
+        self.resolve_role(principal)
+            .map_or("unmapped", PrincipalRole::as_str)
+    }
+
+    fn resolve_role(&self, principal: &str) -> Option<PrincipalRole> {
+        // Validation rejects `local-operator` in the roles map, so the
+        // implicit fallback can never shadow a declared entry.
+        self.roles.get(principal).copied().or_else(|| {
+            (principal == LOCAL_OPERATOR_PRINCIPAL)
+                .then_some(self.implicit_role)
+                .flatten()
+        })
     }
 
     pub(crate) fn principal_for_extensions<'a>(
