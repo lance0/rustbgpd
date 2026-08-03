@@ -1,7 +1,27 @@
-FROM golang:1.23-bookworm AS builder
+FROM debian:bookworm-slim AS gobgp-release
 
-RUN go install github.com/osrg/gobgp/v3/cmd/gobgpd@latest && \
-    go install github.com/osrg/gobgp/v3/cmd/gobgp@latest
+ARG TARGETARCH
+ENV GOBGP_VERSION=3.37.0
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN set -eux; \
+    case "${TARGETARCH}" in \
+        amd64) checksum="e20b2a155fe14450b9fe37e5c1a1d1bfe101eb479645f5bbea860a8fde30e522" ;; \
+        arm64) checksum="0aaa2da6e4dcaaf57e3d0e64eae14946292b0a5894d80ef3b7ebde3bf52beb29" ;; \
+        *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    archive="gobgp_${GOBGP_VERSION}_linux_${TARGETARCH}.tar.gz"; \
+    curl --fail --location --silent --show-error \
+        "https://github.com/osrg/gobgp/releases/download/v${GOBGP_VERSION}/${archive}" \
+        --output "/tmp/${archive}"; \
+    echo "${checksum}  /tmp/${archive}" | sha256sum --check --strict; \
+    tar --extract --gzip --file "/tmp/${archive}" --directory /usr/local/bin gobgp gobgpd; \
+    test "$(gobgp --version)" = "gobgp version ${GOBGP_VERSION}"; \
+    test "$(gobgpd --version)" = "gobgpd version ${GOBGP_VERSION}"
 
 FROM debian:bookworm-slim
 
@@ -9,7 +29,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     iproute2 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /go/bin/gobgpd /usr/local/bin/gobgpd
-COPY --from=builder /go/bin/gobgp /usr/local/bin/gobgp
+COPY --from=gobgp-release /usr/local/bin/gobgpd /usr/local/bin/gobgpd
+COPY --from=gobgp-release /usr/local/bin/gobgp /usr/local/bin/gobgp
 
 CMD ["sleep", "infinity"]

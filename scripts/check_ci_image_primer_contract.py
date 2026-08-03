@@ -30,6 +30,11 @@ BUILDX = (
 BUILD_PUSH = (
     "uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7"
 )
+GOBGP_VERSION = "3.37.0"
+GOBGP_CHECKSUMS = {
+    "amd64": "e20b2a155fe14450b9fe37e5c1a1d1bfe101eb479645f5bbea860a8fde30e522",
+    "arm64": "0aaa2da6e4dcaaf57e3d0e64eae14946292b0a5894d80ef3b7ebde3bf52beb29",
+}
 
 TRIGGER_HASHES = {
     "ci.yml": "65951f4c4d1d6c4d3aae2c33705d14cdc144b3efd8bcc01653049e6d7f2fb5f8",
@@ -196,6 +201,31 @@ def check(root: Path) -> list[str]:
             )
         if f"COPY --from=builder /out/{binary} /usr/local/bin/{binary}" not in dev:
             errors.append(f"Dockerfile: dev does not copy builder /out/{binary}")
+
+    gobgp = (root / "tests" / "interop" / "Dockerfile.gobgp").read_text()
+    for seam in (
+        "FROM debian:bookworm-slim AS gobgp-release",
+        "ARG TARGETARCH",
+        f"ENV GOBGP_VERSION={GOBGP_VERSION}",
+        'archive="gobgp_${GOBGP_VERSION}_linux_${TARGETARCH}.tar.gz"',
+        '*) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;;',
+        'https://github.com/osrg/gobgp/releases/download/v${GOBGP_VERSION}/${archive}',
+        'echo "${checksum}  /tmp/${archive}" | sha256sum --check --strict',
+        'tar --extract --gzip --file "/tmp/${archive}" --directory /usr/local/bin gobgp gobgpd',
+        'test "$(gobgp --version)" = "gobgp version ${GOBGP_VERSION}"',
+        'test "$(gobgpd --version)" = "gobgpd version ${GOBGP_VERSION}"',
+    ):
+        if seam not in gobgp:
+            errors.append(f"Dockerfile.gobgp: pinned release seam missing: {seam}")
+    if gobgp.count("FROM debian:bookworm-slim") != 2:
+        errors.append("Dockerfile.gobgp: rolling bookworm stage roster drifted")
+    for arch, checksum in GOBGP_CHECKSUMS.items():
+        if f'{arch}) checksum="{checksum}" ;;' not in gobgp:
+            errors.append(f"Dockerfile.gobgp: {arch} checksum drifted")
+    if re.search(r"(?:@latest|releases/(?:latest|download/latest)|GOBGP_VERSION=latest)", gobgp):
+        errors.append("Dockerfile.gobgp: floating GoBGP release is forbidden")
+    if "go install github.com/osrg/gobgp" in gobgp or "FROM golang:" in gobgp:
+        errors.append("Dockerfile.gobgp: source build replaced pinned release archives")
     return errors
 
 
