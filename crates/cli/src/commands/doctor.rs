@@ -257,6 +257,7 @@ struct DynamicNeighborSnapshot {
 struct NeighborDoctorRecord {
     support: JsonNeighbor,
     identity: String,
+    update_group: String,
     max_prefix_restart_remaining_millis: Option<u64>,
 }
 
@@ -622,6 +623,7 @@ fn peer_checks(
     stale: bool,
     max_prefix_restart_remaining_millis: Option<u64>,
     slow_peer: bool,
+    update_group: &str,
     uptime_seconds: u64,
     flap_count: u64,
     session_evidence: SessionHistoryEvidence,
@@ -704,12 +706,19 @@ fn peer_checks(
         });
     }
     if slow_peer {
+        let detail = if update_group == "slow_peer" {
+            format!(
+                "peer {address} is flagged slow and already isolated from shared update groups: outbound queue persistently backlogged; inspect bgp_peer_outbound_queue_depth{{peer=\"{address}\"}} and troubleshoot the member's receive path"
+            )
+        } else {
+            format!(
+                "peer {address} is flagged slow: outbound queue persistently backlogged; inspect bgp_peer_outbound_queue_depth{{peer=\"{address}\"}} and enable slow_peer_isolation for chronic single-peer lag"
+            )
+        };
         checks.push(Check {
             name: format!("peer.{address}.slow_peer"),
             status: CheckStatus::Warn,
-            detail: format!(
-                "peer {address} is flagged slow: outbound queue persistently backlogged; inspect bgp_peer_outbound_queue_depth{{peer=\"{address}\"}} and enable slow_peer_isolation for chronic single-peer lag"
-            ),
+            detail,
         });
     }
     if flap_count >= FLAP_REPORT_THRESHOLD {
@@ -1792,6 +1801,7 @@ pub(crate) async fn run(
                                 ),
                             },
                             identity,
+                            update_group: n.update_group.clone(),
                             max_prefix_restart_remaining_millis: n
                                 .max_prefix_restart_remaining_millis,
                         });
@@ -1835,6 +1845,7 @@ pub(crate) async fn run(
                             record.support.stale,
                             record.max_prefix_restart_remaining_millis,
                             record.support.slow_peer,
+                            &record.update_group,
                             record.support.uptime_seconds,
                             record.support.flap_count,
                             session_evidence,
@@ -2352,6 +2363,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             false,
             None,
             false,
+            "",
             3600,
             0,
             retained_session_evidence(None, None),
@@ -2374,7 +2386,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
         };
         let diagnose = |stale, countdown, evidence| {
             peer_checks(
-                "10.0.0.2", "Connect", stale, countdown, false, 0, 0, evidence, 1_000_000, "",
+                "10.0.0.2", "Connect", stale, countdown, false, "", 0, 0, evidence, 1_000_000, "",
             )
         };
 
@@ -2515,6 +2527,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             false,
             None,
             false,
+            "",
             0,
             0,
             retained_session_evidence(Some(transitioned), None),
@@ -2539,6 +2552,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             false,
             None,
             false,
+            "",
             0,
             0,
             retained_session_evidence(Some(now - STUCK_PEER_SECS + 1), None),
@@ -2560,6 +2574,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             false,
             None,
             true,
+            "",
             0,
             FLAP_REPORT_THRESHOLD,
             retained_session_evidence_with_admin(
@@ -2596,6 +2611,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             false,
             None,
             false,
+            "",
             0,
             0,
             retained_session_evidence_with_admin(Some(1), None, Some(RetainedAdminState::Enabled)),
@@ -2619,6 +2635,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             false,
             None,
             false,
+            "",
             0,
             0,
             retained_session_evidence(None, None),
@@ -2640,6 +2657,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             false,
             None,
             false,
+            "",
             60,
             FLAP_REPORT_THRESHOLD,
             retained_session_evidence(None, None),
@@ -2667,6 +2685,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             false,
             None,
             false,
+            "",
             60,
             FLAP_REPORT_THRESHOLD,
             retained_session_evidence(Some(now - 30), Some(now - 30)),
@@ -2686,6 +2705,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             true,
             None,
             false,
+            "",
             0,
             0,
             retained_session_evidence_with_admin(Some(1), None, Some(RetainedAdminState::Disabled)),
@@ -2698,17 +2718,19 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
         assert!(checks[0].detail.contains("stale"));
     }
 
-    /// Load-bearing mutation proof: deleting the `if slow_peer` branch, or
-    /// changing the predicate to false, removes the named warning and makes
-    /// these assertions red while the ordinary Established check stays green.
+    /// Load-bearing mutation proof: deleting the `if slow_peer` branch removes
+    /// the named warning, while treating every slow peer as isolated changes
+    /// the exact remediation for this ordinary update group.
     #[test]
     fn established_slow_peer_warns_with_queue_remediation() {
+        let expected = r#"peer 10.0.0.2 is flagged slow: outbound queue persistently backlogged; inspect bgp_peer_outbound_queue_depth{peer="10.0.0.2"} and enable slow_peer_isolation for chronic single-peer lag"#;
         let checks = peer_checks(
             "10.0.0.2",
             "Established",
             false,
             None,
             true,
+            "group:7",
             3600,
             0,
             retained_session_evidence(None, None),
@@ -2720,15 +2742,22 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
         assert!(checks[0].status == CheckStatus::Ok);
         assert_eq!(checks[1].name, "peer.10.0.0.2.slow_peer");
         assert!(checks[1].status == CheckStatus::Warn);
-        assert!(checks[1].detail.contains("slow_peer_isolation"));
-        // The `peer` label is the bare neighbor address across every
-        // family, so the remediation can hand over a selector that
-        // actually resolves. Dropping the label makes this red.
-        assert!(
-            checks[1]
-                .detail
-                .contains(r#"bgp_peer_outbound_queue_depth{peer="10.0.0.2"}"#)
+        assert_eq!(checks[1].detail, expected);
+
+        let ungrouped = peer_checks(
+            "10.0.0.2",
+            "Established",
+            false,
+            None,
+            true,
+            "",
+            3600,
+            0,
+            retained_session_evidence(None, None),
+            1_000_000,
+            "",
         );
+        assert_eq!(ungrouped[1].detail, expected);
     }
 
     #[test]
@@ -3309,6 +3338,7 @@ paths = ["x"]
             "core peer",
         );
         slow.slow_peer = true;
+        slow.update_group = "slow_peer".to_string();
         slow.is_dynamic = true;
         slow.accepted_dynamic_range = Some(rustbgpd_api::proto::AcceptedDynamicNeighborRange {
             prefix: "10.0.0.0/24".to_string(),
@@ -3436,14 +3466,15 @@ paths = ["x"]
                     .as_str()
                     .is_some_and(|detail| detail.contains("BGP is permitted"))
         }));
-        // Load-bearing mutation proof: deleting the slow-peer doctor predicate
-        // removes this warning from the manifest and makes the assertion red.
-        assert!(manifest["checks"].as_array().unwrap().iter().any(|check| {
-            let detail = check["detail"].as_str().unwrap();
-            check["name"] == "peer.10.0.0.2.slow_peer"
-                && check["status"] == "warn"
-                && detail.contains(r#"bgp_peer_outbound_queue_depth{peer="10.0.0.2"}"#)
-        }));
+        // Load-bearing mutation proof: dropping the live update-group handoff,
+        // or disabling the isolation predicate, restores the enable-isolation
+        // guidance and makes this exact already-isolated assertion red.
+        let slow_check = manifest_check(&manifest, "peer.10.0.0.2.slow_peer");
+        assert_eq!(slow_check["status"], "warn");
+        assert_eq!(
+            slow_check["detail"],
+            r#"peer 10.0.0.2 is flagged slow and already isolated from shared update groups: outbound queue persistently backlogged; inspect bgp_peer_outbound_queue_depth{peer="10.0.0.2"} and troubleshoot the member's receive path"#
+        );
         // LAN-668 destructive red proof: the retained disable affects only
         // the session disposition; removing its Ok branch makes this red.
         assert!(manifest["checks"].as_array().unwrap().iter().any(|check| {
@@ -3563,6 +3594,7 @@ paths = ["x"]
         for forbidden in [
             "support",
             "identity",
+            "update_group",
             "max_prefix_restart_remaining_millis",
             "outbound_prefix_limits",
         ] {
