@@ -1723,6 +1723,8 @@ fn grpc_listeners_default_to_uds() {
 
 #[test]
 fn grpc_tcp_listener_parses_when_enabled() {
+    // An explicit TCP listener no longer suppresses the implicit local
+    // UDS listener; it rides alongside.
     let toml_str = format!(
         "{}\n[global.telemetry.grpc_tcp]\naddress = \"127.0.0.1:50051\"\n",
         valid_toml()
@@ -1730,15 +1732,43 @@ fn grpc_tcp_listener_parses_when_enabled() {
     let config = parse_schema_only(&toml_str).unwrap();
     assert_eq!(
         config.grpc_listeners(),
-        vec![GrpcListener::Tcp {
-            addr: "127.0.0.1:50051".parse().unwrap(),
-            access_mode: GrpcAccessMode::ReadWrite,
-            max_tier: GrpcMaxTier::OperatorOnly,
-            token_file: None,
-            principal: None,
-            tls: None,
-        }]
+        vec![
+            GrpcListener::Tcp {
+                addr: "127.0.0.1:50051".parse().unwrap(),
+                access_mode: GrpcAccessMode::ReadWrite,
+                max_tier: GrpcMaxTier::OperatorOnly,
+                token_file: None,
+                principal: None,
+                tls: None,
+            },
+            implicit_uds_listener(&config),
+        ]
     );
+}
+
+/// The implicit owner-only UDS listener synthesized whenever
+/// `[global.telemetry.grpc_uds]` is not declared.
+fn implicit_uds_listener(config: &Config) -> GrpcListener {
+    GrpcListener::Uds {
+        path: config.default_grpc_uds_path(),
+        mode: 0o600,
+        access_mode: GrpcAccessMode::ReadWrite,
+        max_tier: GrpcMaxTier::OperatorOnly,
+        token_file: None,
+        principal: None,
+    }
+}
+
+#[test]
+fn grpc_explicit_uds_opt_out_disables_the_implicit_listener() {
+    let toml_str = format!(
+        "{}\n[global.telemetry.grpc_tcp]\naddress = \"127.0.0.1:50051\"\n\n[global.telemetry.grpc_uds]\nenabled = false\n",
+        valid_toml()
+    );
+    let config = parse_schema_only(&toml_str).unwrap();
+    let listeners = config.grpc_listeners();
+    assert_eq!(listeners.len(), 1);
+    assert!(matches!(listeners[0], GrpcListener::Tcp { .. }));
 }
 
 #[test]
@@ -1750,14 +1780,17 @@ fn grpc_listener_access_mode_parses() {
     let config = parse_schema_only(&toml_str).unwrap();
     assert_eq!(
         config.grpc_listeners(),
-        vec![GrpcListener::Tcp {
-            addr: "127.0.0.1:50051".parse().unwrap(),
-            access_mode: GrpcAccessMode::ReadOnly,
-            max_tier: GrpcMaxTier::SensitiveRead,
-            token_file: None,
-            principal: None,
-            tls: None,
-        }]
+        vec![
+            GrpcListener::Tcp {
+                addr: "127.0.0.1:50051".parse().unwrap(),
+                access_mode: GrpcAccessMode::ReadOnly,
+                max_tier: GrpcMaxTier::SensitiveRead,
+                token_file: None,
+                principal: None,
+                tls: None,
+            },
+            implicit_uds_listener(&config),
+        ]
     );
 }
 
@@ -1770,14 +1803,17 @@ fn grpc_listener_max_tier_parses() {
     let config = parse_schema_only(&toml_str).unwrap();
     assert_eq!(
         config.grpc_listeners(),
-        vec![GrpcListener::Tcp {
-            addr: "127.0.0.1:50051".parse().unwrap(),
-            access_mode: GrpcAccessMode::ReadWrite,
-            max_tier: GrpcMaxTier::Mutating,
-            token_file: None,
-            principal: None,
-            tls: None,
-        }]
+        vec![
+            GrpcListener::Tcp {
+                addr: "127.0.0.1:50051".parse().unwrap(),
+                access_mode: GrpcAccessMode::ReadWrite,
+                max_tier: GrpcMaxTier::Mutating,
+                token_file: None,
+                principal: None,
+                tls: None,
+            },
+            implicit_uds_listener(&config),
+        ]
     );
 }
 
@@ -1790,14 +1826,17 @@ fn grpc_listener_access_mode_read_only_caps_max_tier() {
     let config = parse_schema_only(&toml_str).unwrap();
     assert_eq!(
         config.grpc_listeners(),
-        vec![GrpcListener::Tcp {
-            addr: "127.0.0.1:50051".parse().unwrap(),
-            access_mode: GrpcAccessMode::ReadOnly,
-            max_tier: GrpcMaxTier::SensitiveRead,
-            token_file: None,
-            principal: None,
-            tls: None,
-        }]
+        vec![
+            GrpcListener::Tcp {
+                addr: "127.0.0.1:50051".parse().unwrap(),
+                access_mode: GrpcAccessMode::ReadOnly,
+                max_tier: GrpcMaxTier::SensitiveRead,
+                token_file: None,
+                principal: None,
+                tls: None,
+            },
+            implicit_uds_listener(&config),
+        ]
     );
 }
 
@@ -1881,10 +1920,9 @@ fn explicit_legacy_grpc_enforcement_loads_roles_and_warns() {
 fn grpc_security_default_is_tier_since_v0_24() {
     // Pinned by the v0.24.0 ADR-0064 slice 4b default flip. If this
     // regresses to Legacy without a deliberate schema change, the
-    // production security posture has silently rolled back. Builds
-    // a minimal tier-ready config (no [security.grpc] block — relies
-    // entirely on the default — plus one role + grpc_uds with
-    // matching principal) so validation passes.
+    // production security posture has silently rolled back. The
+    // owner-only UDS listener needs no principal or roles: the
+    // implicit `local-operator` identity authorizes it under tier.
     let toml_str = r#"
 [global]
 asn = 65001
@@ -1897,10 +1935,6 @@ log_format = "json"
 
 [global.telemetry.grpc_uds]
 path = "/tmp/rustbgpd-default-tier-test.sock"
-principal = "local-operator"
-
-[security.grpc.roles]
-"local-operator" = "operator"
 
 [[neighbors]]
 address = "10.0.0.2"
@@ -1920,13 +1954,12 @@ hold_time = 90
 }
 
 #[test]
-fn grpc_security_empty_config_fails_tier_validation_with_legacy_hint() {
-    // After the v0.24.0 default flip, an operator who upgrades
-    // without staging [security.grpc.roles] should see a clean
-    // validation failure whose error message points at the
-    // migration checklist AND the legacy escape hatch. Uses a TOML
-    // without any [security.grpc] block to exercise the bare-upgrade
-    // path.
+fn grpc_security_zero_config_boots_under_tier_with_implicit_local_operator() {
+    // Red proof for the implicit local-operator rule: a config with no
+    // [security.grpc] block and no declared listener is valid under the
+    // default tier enforcement — the implicit owner-only UDS listener
+    // authorizes the socket owner as `local-operator`. Removing the
+    // implicit rule (or the implicit listener) fails this test.
     let toml_str = r#"
 [global]
 asn = 65001
@@ -1943,18 +1976,10 @@ remote_asn = 65002
 description = "peer-1"
 hold_time = 90
 "#;
-    // Strict parsing leaves the raw config untouched so this test sees the
-    // v0.24.0 production-default Tier validation path.
-    let result = parse_strict(toml_str);
-    let err = result.expect_err("default-tier mode with no roles must fail validation");
-    let msg = format!("{err}");
-    assert!(
-        msg.contains("v0.24.0 default"),
-        "validation error should call out the v0.24.0 default flip: {msg}"
-    );
-    assert!(
-        msg.contains("enforcement = \\\"legacy\\\"") || msg.contains("enforcement = \"legacy\""),
-        "validation error should mention the legacy escape hatch: {msg}"
+    let config = parse_strict(toml_str).expect("zero-config boot must validate under tier");
+    assert_eq!(
+        config.grpc_listeners(),
+        vec![implicit_uds_listener(&config)]
     );
 }
 
@@ -2008,7 +2033,11 @@ fn grpc_security_reserved_unresolved_mtls_role_rejected() {
 }
 
 #[test]
-fn grpc_security_tier_requires_roles() {
+fn grpc_security_tier_diagnoses_uds_principal_missing_from_roles() {
+    // WP1 one-shot diagnosis: a declared UDS principal with no roles
+    // entry gets one error ending in a paste-ready fix built from the
+    // operator's own principal string. Red proof: dropping the paste
+    // block from the message fails this test.
     let toml_str = format!(
         "{}\n[security.grpc]\nenforcement = \"tier\"\n\n[global.telemetry.grpc_uds]\npath = \"/tmp/rustbgpd-test.sock\"\nprincipal = \"local-admin\"\n",
         valid_toml_no_grpc_security()
@@ -2018,31 +2047,51 @@ fn grpc_security_tier_requires_roles() {
         panic!("expected InvalidGrpcConfig");
     };
     assert!(
-        reason.contains("requires at least one"),
+        reason.contains("grpc_uds.principal \"local-admin\" has no"),
         "got unexpected reason: {reason}"
+    );
+    assert!(
+        reason.contains("add this to fix it:")
+            && reason.contains("[security.grpc.roles]")
+            && reason.contains("\"local-admin\" = \"operator\""),
+        "error must end with a paste-ready fix: {reason}"
+    );
+    assert!(
+        reason.contains("enforcement = \"legacy\""),
+        "error must mention the legacy escape hatch: {reason}"
     );
 }
 
 #[test]
-fn grpc_security_tier_rejects_implicit_uds_without_principal() {
+fn grpc_security_tier_accepts_implicit_uds_via_local_operator() {
+    // Tier enforcement with roles staged but no declared listener:
+    // the implicit owner-only UDS authorizes as `local-operator`.
     let toml_str = format!(
         "{}\n[security.grpc]\nenforcement = \"tier\"\n\n[security.grpc.roles]\n\"local-admin\" = \"operator\"\n",
         valid_toml_no_grpc_security()
     );
-    let err = parse_strict(&toml_str).unwrap_err();
-    let ConfigError::InvalidGrpcConfig { reason } = err else {
-        panic!("expected InvalidGrpcConfig");
-    };
-    assert!(
-        reason.contains("implicit UDS listener"),
-        "got unexpected reason: {reason}"
-    );
+    parse_strict(&toml_str).expect("implicit UDS must validate under tier");
 }
 
 #[test]
-fn grpc_security_tier_rejects_uds_without_principal() {
+fn grpc_security_tier_accepts_owner_only_uds_without_principal() {
+    // A declared UDS listener with the default owner-only mode and no
+    // principal relies on the implicit `local-operator` identity.
     let toml_str = format!(
-        "{}\n[security.grpc]\nenforcement = \"tier\"\n\n[security.grpc.roles]\n\"local-admin\" = \"operator\"\n\n[global.telemetry.grpc_uds]\npath = \"/tmp/rustbgpd-test.sock\"\n",
+        "{}\n[security.grpc]\nenforcement = \"tier\"\n\n[global.telemetry.grpc_uds]\npath = \"/tmp/rustbgpd-test.sock\"\n",
+        valid_toml_no_grpc_security()
+    );
+    parse_strict(&toml_str).expect("owner-only UDS without principal must validate under tier");
+}
+
+#[test]
+fn grpc_security_tier_rejects_group_accessible_uds_without_principal() {
+    // Red proof for the owner-only gate: widening the implicit rule to
+    // accept group-accessible modes (e.g. 0o660) makes this config
+    // valid and fails this test. Group/world access buys real scoping,
+    // so it keeps the explicit principal ceremony.
+    let toml_str = format!(
+        "{}\n[security.grpc]\nenforcement = \"tier\"\n\n[global.telemetry.grpc_uds]\npath = \"/tmp/rustbgpd-test.sock\"\nmode = 0o660\n",
         valid_toml_no_grpc_security()
     );
     let err = parse_strict(&toml_str).unwrap_err();
@@ -2050,13 +2099,19 @@ fn grpc_security_tier_rejects_uds_without_principal() {
         panic!("expected InvalidGrpcConfig");
     };
     assert!(
-        reason.contains("requires grpc_uds.principal"),
+        reason.contains("group/world-accessible (mode 0o660)") && reason.contains("local-operator"),
         "got unexpected reason: {reason}"
+    );
+    assert!(
+        reason.contains("add this to fix it:")
+            && reason.contains("principal = \"local-admin\"")
+            && reason.contains("\"local-admin\" = \"operator\""),
+        "error must end with a paste-ready fix: {reason}"
     );
 }
 
 #[test]
-fn grpc_security_tier_rejects_bearer_tcp_without_principal() {
+fn grpc_security_tier_diagnoses_bearer_tcp_without_principal() {
     let token_file = NamedTempFile::new().unwrap();
     fs::write(token_file.path(), "secret").unwrap();
     let toml_str = format!(
@@ -2069,13 +2124,19 @@ fn grpc_security_tier_rejects_bearer_tcp_without_principal() {
         panic!("expected InvalidGrpcConfig");
     };
     assert!(
-        reason.contains("requires grpc_tcp.principal"),
+        reason.contains("bearer-token TCP listener has no grpc_tcp.principal"),
         "got unexpected reason: {reason}"
+    );
+    assert!(
+        reason.contains("add this to fix it:")
+            && reason.contains("[global.telemetry.grpc_tcp]")
+            && reason.contains("principal = \"automation\""),
+        "error must end with a paste-ready fix: {reason}"
     );
 }
 
 #[test]
-fn grpc_security_tier_rejects_non_mtls_principal_absent_from_roles() {
+fn grpc_security_tier_diagnoses_non_mtls_principal_absent_from_roles() {
     let token_file = NamedTempFile::new().unwrap();
     fs::write(token_file.path(), "secret").unwrap();
     let toml_str = format!(
@@ -2088,13 +2149,18 @@ fn grpc_security_tier_rejects_non_mtls_principal_absent_from_roles() {
         panic!("expected InvalidGrpcConfig");
     };
     assert!(
-        reason.contains("to be present in [security.grpc.roles]"),
+        reason.contains("grpc_tcp.principal \"automation.example\" has no"),
         "got unexpected reason: {reason}"
+    );
+    assert!(
+        reason.contains("add this to fix it:")
+            && reason.contains("\"automation.example\" = \"operator\""),
+        "error must interpolate the operator's own principal into the fix: {reason}"
     );
 }
 
 #[test]
-fn grpc_security_tier_rejects_unauthenticated_tcp() {
+fn grpc_security_tier_diagnoses_unauthenticated_tcp() {
     let toml_str = format!(
         "{}\n[security.grpc]\nenforcement = \"tier\"\n\n[security.grpc.roles]\n\"automation.example\" = \"automation\"\n\n[global.telemetry.grpc_tcp]\naddress = \"127.0.0.1:50051\"\n",
         valid_toml_no_grpc_security()
@@ -2104,7 +2170,63 @@ fn grpc_security_tier_rejects_unauthenticated_tcp() {
         panic!("expected InvalidGrpcConfig");
     };
     assert!(
-        reason.contains("rejects unauthenticated TCP"),
+        reason.contains("TCP listener is unauthenticated"),
+        "got unexpected reason: {reason}"
+    );
+    assert!(
+        reason.contains("add this to fix it:") && reason.contains("token_file = "),
+        "error must end with a paste-ready fix: {reason}"
+    );
+}
+
+#[test]
+fn grpc_security_tier_reports_all_problems_in_one_error() {
+    // The whole point of the one-shot diagnosis: two independent
+    // problems surface in one numbered error, not one per boot attempt.
+    let toml_str = format!(
+        "{}\n[security.grpc]\nenforcement = \"tier\"\n\n[global.telemetry.grpc_tcp]\naddress = \"127.0.0.1:50051\"\n\n[global.telemetry.grpc_uds]\npath = \"/tmp/rustbgpd-test.sock\"\nmode = 0o660\n",
+        valid_toml_no_grpc_security()
+    );
+    let err = parse_strict(&toml_str).unwrap_err();
+    let ConfigError::InvalidGrpcConfig { reason } = err else {
+        panic!("expected InvalidGrpcConfig");
+    };
+    assert!(
+        reason.contains("2 problem(s)") && reason.contains("  1. ") && reason.contains("  2. "),
+        "both problems must appear in one error: {reason}"
+    );
+}
+
+#[test]
+fn grpc_security_reserved_local_operator_role_rejected() {
+    // Red proof: dropping the reserved-name rejection lets an operator
+    // map "local-operator" in roles and fails this test.
+    let toml_str = format!(
+        "{}\n[security.grpc.roles]\n\"local-operator\" = \"observer\"\n",
+        valid_toml()
+    );
+    let err = parse_strict(&toml_str).unwrap_err();
+    let ConfigError::InvalidGrpcConfig { reason } = err else {
+        panic!("expected InvalidGrpcConfig");
+    };
+    assert!(
+        reason.contains("reserved principal") && reason.contains("local-operator"),
+        "got unexpected reason: {reason}"
+    );
+}
+
+#[test]
+fn grpc_listener_reserved_local_operator_principal_rejected() {
+    let toml_str = format!(
+        "{}\n[global.telemetry.grpc_uds]\npath = \"/tmp/rustbgpd-test.sock\"\nprincipal = \"local-operator\"\n",
+        valid_toml()
+    );
+    let err = parse_strict(&toml_str).unwrap_err();
+    let ConfigError::InvalidGrpcConfig { reason } = err else {
+        panic!("expected InvalidGrpcConfig");
+    };
+    assert!(
+        reason.contains("reserved principal") && reason.contains("grpc_uds.principal"),
         "got unexpected reason: {reason}"
     );
 }
@@ -2162,14 +2284,17 @@ fn grpc_tcp_bearer_principal_parses() {
     let config = parse_schema_only(&toml_str).unwrap();
     assert_eq!(
         config.grpc_listeners(),
-        vec![GrpcListener::Tcp {
-            addr: "127.0.0.1:50051".parse().unwrap(),
-            access_mode: GrpcAccessMode::ReadWrite,
-            max_tier: GrpcMaxTier::OperatorOnly,
-            token_file: Some(token_file.path().to_path_buf()),
-            principal: Some("automation.example".to_string()),
-            tls: None,
-        }]
+        vec![
+            GrpcListener::Tcp {
+                addr: "127.0.0.1:50051".parse().unwrap(),
+                access_mode: GrpcAccessMode::ReadWrite,
+                max_tier: GrpcMaxTier::OperatorOnly,
+                token_file: Some(token_file.path().to_path_buf()),
+                principal: Some("automation.example".to_string()),
+                tls: None,
+            },
+            implicit_uds_listener(&config),
+        ]
     );
 }
 
@@ -2193,14 +2318,17 @@ fn grpc_security_tier_accepts_bearer_tcp_with_principal_role() {
     );
     assert_eq!(
         config.grpc_listeners(),
-        vec![GrpcListener::Tcp {
-            addr: "127.0.0.1:50051".parse().unwrap(),
-            access_mode: GrpcAccessMode::ReadWrite,
-            max_tier: GrpcMaxTier::Mutating,
-            token_file: Some(token_file.path().to_path_buf()),
-            principal: Some("automation.example".to_string()),
-            tls: None,
-        }]
+        vec![
+            GrpcListener::Tcp {
+                addr: "127.0.0.1:50051".parse().unwrap(),
+                access_mode: GrpcAccessMode::ReadWrite,
+                max_tier: GrpcMaxTier::Mutating,
+                token_file: Some(token_file.path().to_path_buf()),
+                principal: Some("automation.example".to_string()),
+                tls: None,
+            },
+            implicit_uds_listener(&config),
+        ]
     );
 }
 
@@ -2304,7 +2432,7 @@ fn grpc_tls_full_config_accepted() {
     );
     let config = parse_strict(&toml_str).unwrap();
     let listeners = config.grpc_listeners();
-    assert_eq!(listeners.len(), 1);
+    assert_eq!(listeners.len(), 2, "TCP plus the implicit UDS listener");
     let GrpcListener::Tcp { tls, .. } = &listeners[0] else {
         panic!("expected Tcp listener");
     };
@@ -16755,16 +16883,26 @@ fn assert_raw_default_tier_rejected(error: &str) {
     );
 }
 
+/// A raw config that fails default-Tier validation: a declared UDS
+/// principal with no `[security.grpc.roles]` entry. Proves the
+/// production loaders run Tier validation with no test-only bypass.
+fn raw_tier_invalid_toml() -> String {
+    format!(
+        "{}\n[global.telemetry.grpc_uds]\npath = \"/tmp/rustbgpd-test.sock\"\nprincipal = \"local-admin\"\n",
+        valid_toml()
+    )
+}
+
 #[test]
 fn production_text_loader_preserves_default_tier_validation() {
-    let error = Config::load_toml_with_diagnostics(valid_toml(), "raw-text.toml")
-        .expect_err("raw text without gRPC authorization must fail closed");
+    let error = Config::load_toml_with_diagnostics(&raw_tier_invalid_toml(), "raw-text.toml")
+        .expect_err("raw text with an unmapped principal must fail closed");
     assert_raw_default_tier_rejected(&error);
 }
 
 fn raw_default_tier_config_file() -> NamedTempFile {
     let file = NamedTempFile::new().expect("temp config");
-    fs::write(file.path(), valid_toml()).expect("write raw config");
+    fs::write(file.path(), raw_tier_invalid_toml()).expect("write raw config");
     file
 }
 

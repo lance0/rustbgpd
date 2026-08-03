@@ -693,23 +693,14 @@ impl Config {
 
     /// Resolve the configured gRPC listeners.
     ///
-    /// If neither TCP nor UDS is configured explicitly, a secure local-only UDS
-    /// listener is enabled at `<runtime_state_dir>/grpc.sock`.
+    /// Unless `[global.telemetry.grpc_uds]` is declared explicitly (which
+    /// includes `enabled = false` as an opt-out), a secure local-only UDS
+    /// listener is enabled at `<runtime_state_dir>/grpc.sock` — including
+    /// alongside an explicit TCP listener.
     pub fn grpc_listeners(&self) -> Vec<GrpcListener> {
         let telemetry = &self.global.telemetry;
         let tcp = telemetry.grpc_tcp.as_ref().filter(|cfg| cfg.enabled);
         let uds = telemetry.grpc_uds.as_ref().filter(|cfg| cfg.enabled);
-
-        if tcp.is_none() && uds.is_none() {
-            return vec![GrpcListener::Uds {
-                path: self.default_grpc_uds_path(),
-                mode: 0o600,
-                access_mode: GrpcAccessMode::ReadWrite,
-                max_tier: GrpcMaxTier::OperatorOnly,
-                token_file: None,
-                principal: None,
-            }];
-        }
 
         let mut listeners = Vec::new();
         if let Some(cfg) = tcp {
@@ -761,6 +752,17 @@ impl Config {
                 max_tier: effective_grpc_max_tier(access_mode, cfg.max_tier),
                 token_file: cfg.token_file.as_ref().map(PathBuf::from),
                 principal: cfg.principal.clone(),
+            });
+        } else if telemetry.grpc_uds.is_none() {
+            // Implicit owner-only local socket; its clients authorize as
+            // the implicit `local-operator` identity (ADR-0064 amendment).
+            listeners.push(GrpcListener::Uds {
+                path: self.default_grpc_uds_path(),
+                mode: 0o600,
+                access_mode: GrpcAccessMode::ReadWrite,
+                max_tier: GrpcMaxTier::OperatorOnly,
+                token_file: None,
+                principal: None,
             });
         }
         listeners

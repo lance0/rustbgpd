@@ -9,6 +9,40 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Implicit `local-operator` identity for owner-only UDS listeners
+  (ADR-0064 amendment).** Under the default tier enforcement, a UDS
+  listener (implicit or declared) with no `principal` and an owner-only
+  socket mode (no group/world bits, e.g. the default `0o600`) now
+  authorizes its clients as the reserved `local-operator` principal at
+  operator tier — no `[security.grpc.roles]` entry needed. The socket's
+  filesystem permissions are the authentication; a listener-wide UDS
+  principal added no per-client discrimination. Group/world-accessible
+  sockets still require an explicit role-mapped `principal`, the
+  listener `max_tier` cap still applies, `local-operator` is rejected
+  as a declared principal or roles key, and audit records label the
+  implicit path `authn = "uds_owner"`. A zero-config daemon now boots
+  under tier enforcement, and `--init-config lab|edge` no longer emit a
+  `[security.grpc]` block.
+
+- **The implicit UDS listener now survives an explicit TCP listener.**
+  Previously declaring `[global.telemetry.grpc_tcp]` silently dropped
+  the default local socket, breaking local `rbgp` access. The implicit
+  owner-only UDS at `<runtime_state_dir>/grpc.sock` is now enabled
+  whenever `[global.telemetry.grpc_uds]` is not declared; opt out with
+  `[global.telemetry.grpc_uds] enabled = false`. Migration note: a
+  TCP-only config now also binds the local socket — declare the opt-out
+  if that path must not exist.
+
+- **Tier-enforcement config failures are now diagnosed in one shot.**
+  Instead of a sequential ladder surfacing one problem per boot
+  attempt, validation collects every problem (unmapped principals,
+  missing bearer principals, unauthenticated TCP, group-accessible UDS
+  without a principal, mTLS with empty roles) into a single error that
+  ends with a minimal copy-pasteable TOML block fixing that specific
+  config, with the operator's own principal strings interpolated.
+
 ### Added
 
 - **Config-history provenance schema and rendering.** `ListConfigHistory` and

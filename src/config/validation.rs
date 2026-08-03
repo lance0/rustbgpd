@@ -1,7 +1,9 @@
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::Path;
 
+use rustbgpd_api::authz::{LOCAL_OPERATOR_PRINCIPAL, uds_mode_is_owner_only};
 use rustbgpd_transport::TCP_AO_MAX_INSPECT_KEYS;
 
 use super::parse::{
@@ -2668,101 +2670,178 @@ fn validate_grpc_security(security: &SecurityConfig) -> Result<(), ConfigError> 
                     .to_string(),
             });
         }
+        if principal == LOCAL_OPERATOR_PRINCIPAL {
+            return Err(ConfigError::InvalidGrpcConfig {
+                reason: format!(
+                    "security.grpc.roles must not map reserved principal \
+                     {LOCAL_OPERATOR_PRINCIPAL:?}; it is granted implicitly \
+                     to clients of an owner-only UDS listener"
+                ),
+            });
+        }
     }
     Ok(())
 }
 
+/// One-shot tier-enforcement diagnosis: collect every problem in a
+/// single pass, then emit one error that ends with a copy-pasteable
+/// minimal TOML fix, instead of surfacing one rung per boot attempt.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one linear diagnosis pass per listener kind plus message assembly"
+)]
 fn validate_grpc_tier_enforcement(config: &Config) -> Result<(), ConfigError> {
     if config.security.grpc.enforcement != GrpcEnforcementConfig::Tier {
         return Ok(());
     }
-    if config.security.grpc.roles.is_empty() {
-        return Err(ConfigError::InvalidGrpcConfig {
-            reason: "security.grpc.enforcement = \"tier\" (the v0.24.0 \
-                     default) requires at least one [security.grpc.roles] \
-                     entry — see docs/CONFIGURATION.md for the migration \
-                     checklist, or opt back into legacy with \
-                     `security.grpc.enforcement = \"legacy\"`"
-                .to_string(),
-        });
-    }
-
     let telemetry = &config.global.telemetry;
     let tcp = telemetry.grpc_tcp.as_ref().filter(|cfg| cfg.enabled);
     let uds = telemetry.grpc_uds.as_ref().filter(|cfg| cfg.enabled);
-    if tcp.is_none() && uds.is_none() {
-        return Err(ConfigError::InvalidGrpcConfig {
-            reason: "security.grpc.enforcement = \"tier\" (the v0.24.0 \
-                     default) requires an explicit gRPC listener with mTLS \
-                     or a configured principal; the implicit UDS listener \
-                     has no role identity. Configure \
-                     [global.telemetry.grpc_uds] with `principal`, or opt \
-                     back into legacy with \
-                     `security.grpc.enforcement = \"legacy\"`"
-                .to_string(),
-        });
-    }
+    let roles = &config.security.grpc.roles;
+
+    let mut problems: Vec<String> = Vec::new();
+    // Fix lines the operator adds inside an existing listener table.
+    let mut listener_fixes: Vec<String> = Vec::new();
+    // Pre-formatted `"principal" = "role"` lines for the fix block's
+    // [security.grpc.roles] table.
+    let mut role_fixes: Vec<String> = Vec::new();
 
     if let Some(cfg) = tcp {
         let mtls_enabled = cfg.tls_cert_file.is_some()
             && cfg.tls_key_file.is_some()
             && cfg.tls_client_ca_file.is_some();
-        if !mtls_enabled && cfg.principal.is_none() {
-            if cfg.token_file.is_some() {
-                return Err(ConfigError::InvalidGrpcConfig {
-                    reason: "security.grpc.enforcement = \"tier\" requires \
-                             grpc_tcp.principal for bearer-token TCP listeners"
+        if mtls_enabled {
+            if roles.is_empty() {
+                problems.push(
+                    "the mTLS TCP listener derives a per-client principal from \
+                     each client certificate, but [security.grpc.roles] is \
+                     empty, so every client would be denied as \
+                     principal_unmapped"
                         .to_string(),
-                });
+                );
+                role_fixes.push(
+                    "# one entry per client certificate principal \
+                     (rustbgpd: URI SAN, then email SAN, then Subject CN):\n\
+                     \"rustbgpd://operator/alice\" = \"operator\""
+                        .to_string(),
+                );
             }
-            return Err(ConfigError::InvalidGrpcConfig {
-                reason: "security.grpc.enforcement = \"tier\" rejects \
-                         unauthenticated TCP listeners; configure native mTLS \
-                         or grpc_tcp.token_file plus grpc_tcp.principal"
+        } else if let Some(principal) = cfg.principal.as_deref() {
+            if !roles.contains_key(principal) {
+                problems.push(format!(
+                    "grpc_tcp.principal {principal:?} has no \
+                     [security.grpc.roles] entry"
+                ));
+                role_fixes.push(format!("{principal:?} = \"operator\""));
+            }
+        } else if cfg.token_file.is_some() {
+            problems.push(
+                "the bearer-token TCP listener has no grpc_tcp.principal, so \
+                 its clients have no role identity"
                     .to_string(),
-            });
-        }
-        if let Some(principal) = cfg.principal.as_deref() {
-            validate_grpc_role_principal(config, principal, "grpc_tcp.principal")?;
+            );
+            listener_fixes.push(
+                "# add to your [global.telemetry.grpc_tcp] table:\n\
+                 principal = \"automation\""
+                    .to_string(),
+            );
+            role_fixes.push("\"automation\" = \"automation\"".to_string());
+        } else {
+            problems.push(
+                "the TCP listener is unauthenticated; tier enforcement \
+                 requires native mTLS (tls_cert_file + tls_key_file + \
+                 tls_client_ca_file) or grpc_tcp.token_file plus \
+                 grpc_tcp.principal"
+                    .to_string(),
+            );
+            listener_fixes.push(
+                "# add to your [global.telemetry.grpc_tcp] table:\n\
+                 token_file = \"/etc/rustbgpd/grpc.token\"\n\
+                 principal = \"automation\""
+                    .to_string(),
+            );
+            role_fixes.push("\"automation\" = \"automation\"".to_string());
         }
     }
 
     if let Some(cfg) = uds {
-        let Some(principal) = cfg.principal.as_deref() else {
-            return Err(ConfigError::InvalidGrpcConfig {
-                reason: "security.grpc.enforcement = \"tier\" requires \
-                         grpc_uds.principal for UDS listeners"
+        if let Some(principal) = cfg.principal.as_deref() {
+            if !roles.contains_key(principal) {
+                problems.push(format!(
+                    "grpc_uds.principal {principal:?} has no \
+                     [security.grpc.roles] entry"
+                ));
+                role_fixes.push(format!("{principal:?} = \"operator\""));
+            }
+        } else if !uds_mode_is_owner_only(cfg.mode) {
+            problems.push(format!(
+                "the UDS listener is group/world-accessible (mode 0o{:o}) \
+                 with no grpc_uds.principal; only an owner-only socket (no \
+                 group/world mode bits, e.g. mode = 0o600) gets the implicit \
+                 {LOCAL_OPERATOR_PRINCIPAL:?} identity",
+                cfg.mode
+            ));
+            listener_fixes.push(
+                "# add to your [global.telemetry.grpc_uds] table \
+                 (or set mode = 0o600 to keep it owner-only):\n\
+                 principal = \"local-admin\""
                     .to_string(),
-            });
-        };
-        validate_grpc_role_principal(config, principal, "grpc_uds.principal")?;
+            );
+            role_fixes.push("\"local-admin\" = \"operator\"".to_string());
+        }
+        // Owner-only UDS with no declared principal authorizes as the
+        // implicit `local-operator` identity — nothing to require. The
+        // same rule covers the implicit default listener.
     }
-    Ok(())
-}
 
-fn validate_grpc_role_principal(
-    config: &Config,
-    principal: &str,
-    field_name: &str,
-) -> Result<(), ConfigError> {
-    if config.security.grpc.roles.contains_key(principal) {
+    if problems.is_empty() {
         return Ok(());
     }
-    Err(ConfigError::InvalidGrpcConfig {
-        reason: format!(
-            "security.grpc.enforcement = \"tier\" requires {field_name} \
-             principal {principal:?} to be present in [security.grpc.roles]"
-        ),
-    })
+
+    role_fixes.dedup();
+    let mut reason = format!(
+        "security.grpc.enforcement = \"tier\" (the v0.24.0 default) found \
+         {} problem(s) with this config:\n",
+        problems.len()
+    );
+    for (idx, problem) in problems.iter().enumerate() {
+        let _ = writeln!(reason, "  {}. {problem}", idx + 1);
+    }
+    reason.push_str("add this to fix it:\n");
+    for fix in &listener_fixes {
+        reason.push_str(fix);
+        reason.push('\n');
+    }
+    if !role_fixes.is_empty() {
+        reason.push_str("[security.grpc.roles]\n");
+        for fix in &role_fixes {
+            reason.push_str(fix);
+            reason.push('\n');
+        }
+    }
+    reason.push_str(
+        "or opt back into legacy with security.grpc.enforcement = \"legacy\" \
+         (migration checklist: docs/CONFIGURATION.md, [security.grpc])",
+    );
+    Err(ConfigError::InvalidGrpcConfig { reason })
 }
 
 fn validate_grpc_principal(principal: Option<&str>, field_name: &str) -> Result<(), ConfigError> {
-    if let Some(principal) = principal
-        && principal.trim().is_empty()
-    {
-        return Err(ConfigError::InvalidGrpcConfig {
-            reason: format!("{field_name} must not be empty"),
-        });
+    if let Some(principal) = principal {
+        if principal.trim().is_empty() {
+            return Err(ConfigError::InvalidGrpcConfig {
+                reason: format!("{field_name} must not be empty"),
+            });
+        }
+        if principal == LOCAL_OPERATOR_PRINCIPAL {
+            return Err(ConfigError::InvalidGrpcConfig {
+                reason: format!(
+                    "{field_name} must not use reserved principal \
+                     {LOCAL_OPERATOR_PRINCIPAL:?}; it is granted implicitly \
+                     to clients of an owner-only UDS listener"
+                ),
+            });
+        }
     }
     Ok(())
 }

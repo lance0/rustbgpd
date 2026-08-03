@@ -535,9 +535,19 @@ gRPC listeners are configured with optional subtables:
 
 ### `[global.telemetry.grpc_uds]`
 
-Preferred local-only gRPC transport. If neither `grpc_uds` nor `grpc_tcp` is
-configured, rustbgpd enables this listener by default at
-`<runtime_state_dir>/grpc.sock`.
+Preferred local-only gRPC transport. Unless this table is declared explicitly
+(including `enabled = false` as an opt-out), rustbgpd enables this listener by
+default at `<runtime_state_dir>/grpc.sock` — also alongside an explicit
+`grpc_tcp` listener, so local `rbgp` access keeps working when TCP is added.
+
+An owner-only socket (no group/world mode bits, e.g. the default `0o600`) with
+no `principal` authorizes its clients as the implicit, reserved
+`local-operator` principal at operator tier — the socket's filesystem
+permissions are the authentication, so no `[security.grpc.roles]` entry is
+needed. A greenfield config therefore needs no security block at all for
+local operation. Group/world-accessible modes still require an explicit
+`principal` plus a matching role entry, and `local-operator` itself is
+reserved (rejected in roles and listener `principal` fields).
 
 | Field        | Type   | Required | Default | Description |
 |--------------|--------|----------|---------|-------------|
@@ -651,24 +661,32 @@ built-in roles:
 
 When `enforcement = "tier"` is configured:
 
-- `[security.grpc.roles]` must contain at least one principal mapping.
 - Bearer-token TCP listeners must set both `token_file` and an explicit
   `principal`; the token value itself is never used as an identity. That
   principal must have a matching `[security.grpc.roles]` entry.
-- UDS listeners must set an explicit `principal`; filesystem permissions
-  authenticate access but do not identify the client role. That principal must
-  have a matching `[security.grpc.roles]` entry.
+- Owner-only UDS listeners (no group/world mode bits) with no `principal`
+  authorize as the implicit `local-operator` principal at operator tier — no
+  roles entry needed. Group/world-accessible UDS listeners must set an
+  explicit `principal` with a matching `[security.grpc.roles]` entry.
 - Native mTLS TCP listeners derive the principal from the verified client
-  certificate and do not set `grpc_tcp.principal`.
+  certificate and do not set `grpc_tcp.principal`; the roles table must map
+  each expected certificate principal.
 - Unauthenticated TCP listeners are rejected at config load.
 - Requests from principals absent from `[security.grpc.roles]` fail closed with
   `PERMISSION_DENIED`.
 
-**Default changed to `tier` in v0.24.0.** Upgrading an existing
-deployment without staging the migration first will fail validation
-at startup; the error message points at this section and at the
-`enforcement = "legacy"` escape hatch. Already-staged operators see
-no behavior change.
+A config that fails these rules is rejected with a single error listing every
+detected problem, ending with a minimal copy-pasteable TOML block that fixes
+that specific config.
+
+**Default changed to `tier` in v0.24.0.** Upgrading a deployment that
+uses TCP listeners, group/world-accessible UDS sockets, or declared
+principals without staging the migration first will fail validation at
+startup; the error lists every problem, ends with a paste-ready fix,
+and points at the `enforcement = "legacy"` escape hatch. Deployments
+that only use an owner-only UDS socket (including the implicit default)
+boot without any staging via the implicit `local-operator` identity.
+Already-staged operators see no behavior change.
 
 Explicit `enforcement = "legacy"` emits a validation warning, and
 `rustbgpd --check --strict` rejects any config that retains it. The original
@@ -682,9 +700,10 @@ The safe migration sequence (run against a pre-upgrade daemon if
 possible):
 
 1. Add `[security.grpc.roles]` entries for every expected gRPC principal.
-2. Set an explicit `principal` on each UDS listener and each bearer-token TCP
-   listener. The implicit default UDS listener has no principal identity, so
-   tier-ready configs must declare `[global.telemetry.grpc_uds]` explicitly.
+2. Set an explicit `principal` on each bearer-token TCP listener and each
+   group/world-accessible UDS listener. Owner-only UDS listeners (including
+   the implicit default listener) need nothing: their clients are authorized
+   as the implicit `local-operator` principal.
 3. For remote TCP, prefer native mTLS so the principal is derived from the
    client certificate; otherwise use `token_file` plus a non-secret
    `principal` label.
@@ -4050,8 +4069,8 @@ starting:
 | `grpc_*.token_file` must exist, be readable, and contain a non-empty token when configured | `invalid gRPC config` |
 | `grpc_*.principal` must not be empty when configured | `invalid gRPC config` |
 | `grpc_tcp.principal` requires `grpc_tcp.token_file` and is rejected on mTLS listeners because mTLS principals are derived from client certificates | `invalid gRPC config` |
-| `security.grpc.enforcement = "tier"` requires at least one role mapping and every enabled listener must have mTLS or an explicit principal | `invalid gRPC config` |
-| `[security.grpc.roles]` principal keys must not be empty; role values must be `observer`, `automation`, or `operator` | `invalid gRPC config` / TOML parse error |
+| `security.grpc.enforcement = "tier"` requires every enabled listener to have mTLS, an explicit role-mapped principal, or an owner-only UDS mode (implicit `local-operator`); all problems are reported in one error with a paste-ready fix | `invalid gRPC config` |
+| `[security.grpc.roles]` principal keys must not be empty and must not use the reserved `mtls-unresolved` / `local-operator` names; role values must be `observer`, `automation`, or `operator` | `invalid gRPC config` / TOML parse error |
 | If `grpc_tcp`/`grpc_uds` tables are present, at least one listener must be enabled | `invalid gRPC config` |
 | `hold_time` must be 0 (disabled) or >= 3 seconds | `invalid hold_time` |
 | `min_hold_time` must be 3..=65535 and no greater than a non-zero effective `hold_time` | `invalid min_hold_time` |

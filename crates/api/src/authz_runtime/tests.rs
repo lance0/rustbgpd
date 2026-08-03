@@ -23,7 +23,7 @@ use tower::{Layer, Service};
 
 use super::*;
 use crate::audit::{GrpcAuditHandle, GrpcRequestSummary};
-use crate::authz::{AuthEnforcement, AuthTier, PrincipalRole};
+use crate::authz::{AuthEnforcement, AuthTier, LOCAL_OPERATOR_PRINCIPAL, PrincipalRole};
 use crate::connect_info::{RustbgpdTcpConnectInfo, RustbgpdTcpStream};
 use crate::test_support::metrics_text as gather_text;
 
@@ -591,6 +591,66 @@ async fn tier_enforcement_denies_unmapped_principal() {
 
     let text = gather_text(&metrics);
     assert!(text.contains("result=\"principal_unmapped\""));
+}
+
+#[tokio::test]
+async fn tier_enforcement_authorizes_implicit_local_operator_with_empty_roles() {
+    // Owner-only UDS listener with no declared principal: the implicit
+    // `local-operator` identity is operator-tier without any
+    // [security.grpc.roles] entry. Red proof: removing the implicit
+    // resolution denies this as principal_unmapped.
+    let metrics = BgpMetrics::new();
+    let context = GrpcAuthAuditContext::new(
+        "unix:///run/rustbgpd/grpc.sock",
+        "read_write",
+        AuthTier::OperatorOnly,
+        GrpcAuthnKind::UdsOwner,
+        LOCAL_OPERATOR_PRINCIPAL,
+    )
+    .with_role_enforcement(AuthEnforcement::Tier, roles(&[]))
+    .with_implicit_local_operator();
+    let layer = GrpcAuthzLayer::new(context, metrics.clone());
+    let mut service = layer.layer(EchoService);
+    let request = Request::builder()
+        .uri("/rustbgpd.v1.ControlService/Shutdown")
+        .body(Body::empty())
+        .unwrap();
+
+    let response = service.call(request).await.unwrap();
+    assert_eq!(response.status(), http::StatusCode::OK);
+
+    let text = gather_text(&metrics);
+    assert!(text.contains("result=\"handler_ok\""));
+    assert!(text.contains("authn=\"uds_owner\""));
+}
+
+#[tokio::test]
+async fn tier_enforcement_still_caps_implicit_local_operator_by_listener_tier() {
+    // The listener max_tier ceiling applies to the implicit identity
+    // exactly as it does to declared principals.
+    let metrics = BgpMetrics::new();
+    let context = GrpcAuthAuditContext::new(
+        "unix:///run/rustbgpd/grpc.sock",
+        "read_write",
+        AuthTier::SensitiveRead,
+        GrpcAuthnKind::UdsOwner,
+        LOCAL_OPERATOR_PRINCIPAL,
+    )
+    .with_role_enforcement(AuthEnforcement::Tier, roles(&[]))
+    .with_implicit_local_operator();
+    let layer = GrpcAuthzLayer::new(context, metrics.clone());
+    let mut service = layer.layer(EchoService);
+    let request = Request::builder()
+        .uri("/rustbgpd.v1.ControlService/Shutdown")
+        .body(Body::empty())
+        .unwrap();
+
+    let response = service.call(request).await.unwrap();
+    let status = tonic::Status::from_header_map(response.headers()).unwrap();
+    assert_eq!(status.code(), tonic::Code::PermissionDenied);
+
+    let text = gather_text(&metrics);
+    assert!(text.contains("result=\"listener_tier_denied\""));
 }
 
 #[tokio::test]
