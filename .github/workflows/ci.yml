@@ -222,11 +222,6 @@ jobs:
             docs/perf/bgperf-rustbgpd-ehm-wrapper.sh \
             docs/perf/test-event-history-host-fence.sh \
             docs/perf/test-event-history-naming.sh
-      - run: cargo test --workspace
-      - run: cargo doc --workspace --lib --no-deps
-        env:
-          RUSTDOCFLAGS: "-D warnings"
-
       - name: Wire crate README freshness gate
         # Catches the common omission where someone bumps
         # `crates/wire/Cargo.toml` version without revisiting
@@ -258,6 +253,24 @@ jobs:
             fi
             echo "wire bump + README touched — gate passed"
           fi
+
+  core_tests:
+    name: core tests / rustdoc
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # stable
+        with:
+          toolchain: stable
+      - uses: ./.github/actions/install-protobuf
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - run: cargo test --workspace
+      - run: cargo doc --workspace --lib --no-deps
+        env:
+          RUSTDOCFLAGS: "-D warnings"
 
   scale_receipts:
     name: scale / receipt checks
@@ -361,17 +374,19 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: ${{ always() }}
-    needs: [core, scale_receipts]
+    needs: [core, core_tests, scale_receipts]
     env:
       CORE_RESULT: ${{ needs.core.result }}
+      CORE_TESTS_RESULT: ${{ needs.core_tests.result }}
       SCALE_RECEIPTS_RESULT: ${{ needs.scale_receipts.result }}
     steps:
       - name: Aggregate required CI result
         run: |
           set -euo pipefail
           printf 'core=%s\n' "$CORE_RESULT"
+          printf 'core_tests=%s\n' "$CORE_TESTS_RESULT"
           printf 'scale_receipts=%s\n' "$SCALE_RECEIPTS_RESULT"
-          if [[ "$CORE_RESULT" != "success" || "$SCALE_RECEIPTS_RESULT" != "success" ]]; then
+          if [[ "$CORE_RESULT" != "success" || "$CORE_TESTS_RESULT" != "success" || "$SCALE_RECEIPTS_RESULT" != "success" ]]; then
             exit 1
           fi
 

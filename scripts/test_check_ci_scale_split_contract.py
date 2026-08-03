@@ -38,11 +38,13 @@ class ScaleSplitContractTests(unittest.TestCase):
     def test_destructive_roster_and_preserved_bodies(self) -> None:
         cases = (
             ("  core:\n", "  renamed_core:\n"),
+            ("  core_tests:\n", "  renamed_core_tests:\n"),
             ("  scale_receipts:\n", "  renamed_scale:\n"),
             ("  check:\n", "  renamed_check:\n"),
             ("  msrv:\n", "  renamed_msrv:\n"),
             ("  evpn_bum_filter_kernel:\n", "  renamed_evpn:\n"),
             ("timeout-minutes: 45", "timeout-minutes: 44"),
+            ("Wire crate README freshness gate", "changed final core step"),
             ("key: msrv-1.95", "key: msrv-drift"),
             ("IMAGE_TAG: rustbgpd-netns-tests:latest", "IMAGE_TAG: drift"),
             ("branches: [main]", "branches: [other]"),
@@ -71,9 +73,9 @@ class ScaleSplitContractTests(unittest.TestCase):
         cases = (
             ("name: scale / receipt checks", "name: changed"),
             ("timeout-minutes: 30", "timeout-minutes: 29"),
-            ("fetch-depth: 0", "fetch-depth: 1", 1),
+            ("fetch-depth: 0", "fetch-depth: 1", 2),
             ("components: rustfmt, clippy", "components: rustfmt"),
-            ("uses: ./.github/actions/install-protobuf", "uses: ./changed", 1),
+            ("uses: ./.github/actions/install-protobuf", "uses: ./changed", 2),
             ("sudo apt-get install -y ripgrep", "sudo apt-get install -y grep"),
             (
                 "cargo fmt --manifest-path bench/scale/rrharness/Cargo.toml -- --check",
@@ -91,27 +93,70 @@ class ScaleSplitContractTests(unittest.TestCase):
             with self.subTest(seam=old):
                 self.mutate(old, new, occurrence[0] if occurrence else 0)
         for pin, occurrence in (
-            ("actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1", 1),
-            ("dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c", 1),
-            ("Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32", 1),
+            ("actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1", 2),
+            ("dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c", 2),
+            ("Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32", 2),
         ):
             with self.subTest(pin=pin):
                 self.mutate(pin, "changed@main", occurrence)
+
+    def test_destructive_core_tests_extraction_and_setup(self) -> None:
+        cases = (
+            ("name: core tests / rustdoc", "name: changed"),
+            ("timeout-minutes: 30", "timeout-minutes: 29"),
+            ("fetch-depth: 0", "fetch-depth: 1", 1),
+            ("uses: ./.github/actions/install-protobuf", "uses: ./changed", 1),
+            ("- run: cargo test --workspace", "- run: true"),
+            ("- run: cargo doc --workspace --lib --no-deps", "- run: true"),
+            ('RUSTDOCFLAGS: "-D warnings"', 'RUSTDOCFLAGS: ""'),
+        )
+        for case in cases:
+            old, new, *occurrence = case
+            with self.subTest(seam=old):
+                self.mutate(old, new, occurrence[0] if occurrence else 0)
+        for pin in (
+            "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+            "dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c",
+            "Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32",
+        ):
+            with self.subTest(pin=pin):
+                self.mutate(pin, "changed@main", 1)
+        self.mutate(
+            "      - name: Wire crate README freshness gate",
+            "      - run: cargo test --workspace\n"
+            "      - run: cargo doc --workspace --lib --no-deps\n"
+            "        env:\n"
+            '          RUSTDOCFLAGS: "-D warnings"\n'
+            "      - name: Wire crate README freshness gate",
+        )
 
     def test_destructive_aggregate_seams(self) -> None:
         cases = (
             ("name: check", "name: changed"),
             ("timeout-minutes: 5", "timeout-minutes: 6"),
             ("if: ${{ always() }}", "if: ${{ success() }}"),
-            ("needs: [core, scale_receipts]", "needs: [core]"),
+            (
+                "needs: [core, core_tests, scale_receipts]",
+                "needs: [core_tests, scale_receipts]",
+            ),
+            (
+                "needs: [core, core_tests, scale_receipts]",
+                "needs: [core, scale_receipts]",
+            ),
+            ("needs: [core, core_tests, scale_receipts]", "needs: [core, core_tests]"),
             ("CORE_RESULT: ${{ needs.core.result }}", "CORE_RESULT: success"),
+            (
+                "CORE_TESTS_RESULT: ${{ needs.core_tests.result }}",
+                "CORE_TESTS_RESULT: success",
+            ),
             (
                 "SCALE_RECEIPTS_RESULT: ${{ needs.scale_receipts.result }}",
                 "SCALE_RECEIPTS_RESULT: success",
             ),
             ("printf 'core=%s\\n' \"$CORE_RESULT\"", "true"),
+            ("printf 'core_tests=%s\\n' \"$CORE_TESTS_RESULT\"", "true"),
             (
-                '[[ "$CORE_RESULT" != "success" || "$SCALE_RECEIPTS_RESULT" != "success" ]]',
+                '[[ "$CORE_RESULT" != "success" || "$CORE_TESTS_RESULT" != "success" || "$SCALE_RECEIPTS_RESULT" != "success" ]]',
                 "[[ false ]]",
             ),
         )
@@ -124,26 +169,32 @@ class ScaleSplitContractTests(unittest.TestCase):
         shell = aggregate_shell(_jobs(workflow)["check"])
         self.assertTrue(shell)
 
-        def run(core=None, scale=None):
+        def run(core=None, core_tests=None, scale=None):
             env = os.environ.copy()
             env.pop("CORE_RESULT", None)
+            env.pop("CORE_TESTS_RESULT", None)
             env.pop("SCALE_RECEIPTS_RESULT", None)
             if core is not None:
                 env["CORE_RESULT"] = core
+            if core_tests is not None:
+                env["CORE_TESTS_RESULT"] = core_tests
             if scale is not None:
                 env["SCALE_RECEIPTS_RESULT"] = scale
             return subprocess.run(
                 ["bash", "-c", shell], env=env, capture_output=True, text=True
             )
 
-        self.assertEqual(0, run("success", "success").returncode)
+        self.assertEqual(0, run("success", "success", "success").returncode)
         for bad in ("failure", "cancelled", "skipped", ""):
             with self.subTest(child="core", result=bad):
-                self.assertNotEqual(0, run(bad, "success").returncode)
+                self.assertNotEqual(0, run(bad, "success", "success").returncode)
+            with self.subTest(child="core_tests", result=bad):
+                self.assertNotEqual(0, run("success", bad, "success").returncode)
             with self.subTest(child="scale_receipts", result=bad):
-                self.assertNotEqual(0, run("success", bad).returncode)
-        self.assertNotEqual(0, run(None, "success").returncode)
-        self.assertNotEqual(0, run("success", None).returncode)
+                self.assertNotEqual(0, run("success", "success", bad).returncode)
+        self.assertNotEqual(0, run(None, "success", "success").returncode)
+        self.assertNotEqual(0, run("success", None, "success").returncode)
+        self.assertNotEqual(0, run("success", "success", None).returncode)
 
 
 if __name__ == "__main__":

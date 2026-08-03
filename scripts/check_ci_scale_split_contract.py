@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail closed when the CI scale/receipt split contract drifts."""
+"""Fail closed when the CI core/scale split contract drifts."""
 
 from __future__ import annotations
 
@@ -9,13 +9,21 @@ import re
 import sys
 from pathlib import Path
 
-ROSTER = ["core", "scale_receipts", "check", "msrv", "evpn_bum_filter_kernel"]
+ROSTER = [
+    "core",
+    "core_tests",
+    "scale_receipts",
+    "check",
+    "msrv",
+    "evpn_bum_filter_kernel",
+]
 TRIGGER_HASH = "65951f4c4d1d6c4d3aae2c33705d14cdc144b3efd8bcc01653049e6d7f2fb5f8"
 PERMISSION_HASH = "9691400b3b1036bcdfe724926816dbe71b0aa22ed9b5eb89627e2eeb75079898"
 JOB_HASHES = {
-    "core": "81bea34b590cff22f28e437e20dd15ba200d1bfb2424b9158ecdc1c61ac4b2e9",
+    "core": "91977c62f11648ed94441920df8c21d7a86eb07130b5f57fca8c970eec450edd",
+    "core_tests": "2e5d0d9268a7af2503d76c094a1305501ec861812091cec43b18eaf99ba89a09",
     "scale_receipts": "91d5396ba46147fd7a489b49cbc6207f8588f350df3308c92f236f3936dbcf4f",
-    "check": "afc9629a32cc7c3194ccf0417aaf2623e7a01a8dc95fd0194c2cbfbb29068b57",
+    "check": "cfc655ca80392ab0699390b461e5e8e9b41410cc724201aafe75ae6da7d83213",
     "msrv": "db1ae833d9c8fbbc47dbf2969ac291b90cf413ba9eed2b95dd4cfe34e0a4ba5d",
     "evpn_bum_filter_kernel": "f965e7f95f30772d9d335104dda9e30c53816098bd5f1225a3cadabe7d9a23b3",
 }
@@ -28,9 +36,9 @@ TOOLCHAIN = (
 RUST_CACHE = "uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2"
 PINS = collections.Counter(
     {
-        "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7": 4,
-        "Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2": 3,
-        "dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # stable": 2,
+        "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7": 5,
+        "Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2": 4,
+        "dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # stable": 3,
         "dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # 1.95": 1,
         "docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4": 1,
         "docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7": 1,
@@ -82,6 +90,30 @@ def check(root: Path) -> list[str]:
         if _hash(jobs.get(name, "")) != expected:
             errors.append(f"{name} job body drifted")
 
+    core_tests = jobs.get("core_tests", "")
+    for seam in (
+        "name: core tests / rustdoc",
+        "runs-on: ubuntu-latest",
+        "timeout-minutes: 30",
+        CHECKOUT,
+        "fetch-depth: 0",
+        TOOLCHAIN,
+        "toolchain: stable",
+        "uses: ./.github/actions/install-protobuf",
+        RUST_CACHE,
+        "- run: cargo test --workspace",
+        "- run: cargo doc --workspace --lib --no-deps",
+        'RUSTDOCFLAGS: "-D warnings"',
+    ):
+        if seam not in core_tests:
+            errors.append(f"core_tests missing {seam}")
+    for command in (
+        "- run: cargo test --workspace",
+        "- run: cargo doc --workspace --lib --no-deps",
+    ):
+        if text.count(command) != 1 or command in jobs.get("core", ""):
+            errors.append(f"{command} must exist only in core_tests")
+
     if text.count(f"- name: {STEP_NAME}") != 1:
         errors.append("extracted scale/receipt step must appear exactly once")
     scale = jobs.get("scale_receipts", "")
@@ -114,12 +146,14 @@ def check(root: Path) -> list[str]:
         "runs-on: ubuntu-latest",
         "timeout-minutes: 5",
         "if: ${{ always() }}",
-        "needs: [core, scale_receipts]",
+        "needs: [core, core_tests, scale_receipts]",
         "CORE_RESULT: ${{ needs.core.result }}",
+        "CORE_TESTS_RESULT: ${{ needs.core_tests.result }}",
         "SCALE_RECEIPTS_RESULT: ${{ needs.scale_receipts.result }}",
         "printf 'core=%s\\n' \"$CORE_RESULT\"",
+        "printf 'core_tests=%s\\n' \"$CORE_TESTS_RESULT\"",
         "printf 'scale_receipts=%s\\n' \"$SCALE_RECEIPTS_RESULT\"",
-        '[[ "$CORE_RESULT" != "success" || "$SCALE_RECEIPTS_RESULT" != "success" ]]',
+        '[[ "$CORE_RESULT" != "success" || "$CORE_TESTS_RESULT" != "success" || "$SCALE_RECEIPTS_RESULT" != "success" ]]',
     ):
         if seam not in aggregate:
             errors.append(f"aggregate check missing {seam}")
