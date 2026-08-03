@@ -276,3 +276,17 @@ The first two corrections can newly treat a roleless or RFC 6793 OLD-peer
 eBGP UPDATE with a mismatched first AS as withdraw. The iBGP correction can
 change prior ASPA-derived best-path rankings by replacing computed Valid or
 Invalid states with Unknown; no best-path algorithm or retention rule changed.
+
+### 2026-08-03 — Draft-v27 mitigation is retention-gated
+
+[ADR-0123](0123-aspa-v27-mitigation-and-retention.md) records the target from
+`draft-ietf-sidrops-aspa-verification-27` §5.6: Invalid routes become
+ineligible, Valid and Unknown receive equal preference, and Invalid routes stay
+available for future local re-evaluation. It also records a behavior NO-GO
+until rustbgpd has a lossless pre-import-policy Adj-RIB-In view and can
+re-evaluate it on ASPA dataset changes without Route Refresh.
+
+This amendment does not change the accepted or shipped ADR-0049 behavior.
+`crates/rib/src/best_path.rs` still ranks `Valid > Unknown > Invalid`;
+`crates/transport/src/session/rejected_routes.rs` remains a bounded, lossy
+diagnostic LRU rather than authoritative route retention.
