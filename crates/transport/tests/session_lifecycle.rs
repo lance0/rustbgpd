@@ -654,7 +654,7 @@ async fn state_changed_uses_bounded_lifecycle_channel() {
 }
 
 #[tokio::test]
-async fn legacy_identity_constructor_preserves_state_changed_notifications() {
+async fn constructor_without_lifecycle_sender_keeps_state_changes_off_lossless_lane() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let metrics = BgpMetrics::new();
@@ -676,18 +676,24 @@ async fn legacy_identity_constructor_preserves_state_changed_notifications() {
     );
     handle.start().await.unwrap();
 
-    let (_peer_stream, _) = listener.accept().await.unwrap();
-    let notification = tokio::time::timeout(Duration::from_secs(5), notify_rx.recv())
+    let (mut peer_stream, _) = listener.accept().await.unwrap();
+    let mut buf = BytesMut::with_capacity(4096);
+    let message = tokio::time::timeout(
+        Duration::from_secs(5),
+        read_bgp_message(&mut peer_stream, &mut buf),
+    )
+    .await
+    .expect("real FSM should send OPEN within timeout");
+    assert!(matches!(message, Message::Open(_)));
+    let state = handle
+        .query_state_timeout(Duration::from_secs(1))
         .await
-        .expect("legacy StateChanged notification should arrive")
-        .expect("notification channel should stay open");
+        .expect("real FSM should answer after reaching OpenSent");
+    assert_eq!(state.fsm_state, SessionState::OpenSent);
 
     assert!(
-        matches!(
-            notification,
-            SessionNotification::StateChanged { session_id: 7, .. }
-        ),
-        "legacy constructor must keep StateChanged on the notification channel"
+        notify_rx.try_recv().is_err(),
+        "a constructor without a lifecycle sender must not copy state changes onto the lossless lane"
     );
 
     handle.shutdown().await.unwrap().unwrap();
@@ -813,16 +819,10 @@ async fn open_confirm_sends_session_notification() {
     // The OpenReceived notification should arrive before Established (no
     // KEEPALIVE sent yet). Ordinary StateChanged events use the bounded
     // lifecycle channel rather than this lossless collision channel.
-    let notification = loop {
-        let notification = tokio::time::timeout(Duration::from_secs(5), notify_rx.recv())
-            .await
-            .expect("should receive notification within timeout")
-            .expect("channel should not be closed");
-        if matches!(notification, SessionNotification::StateChanged { .. }) {
-            continue;
-        }
-        break notification;
-    };
+    let notification = tokio::time::timeout(Duration::from_secs(5), notify_rx.recv())
+        .await
+        .expect("should receive notification within timeout")
+        .expect("channel should not be closed");
 
     match notification {
         SessionNotification::OpenReceived {
@@ -887,16 +887,10 @@ async fn query_state_returns_router_id_at_open_confirm() {
     // Wait for the OpenReceived notification to confirm we're in OpenConfirm.
     // Ordinary StateChanged events use the bounded lifecycle channel rather
     // than this lossless collision channel.
-    let notification = loop {
-        let notification = tokio::time::timeout(Duration::from_secs(5), notify_rx.recv())
-            .await
-            .expect("should receive notification within timeout")
-            .expect("channel should not be closed");
-        if matches!(notification, SessionNotification::StateChanged { .. }) {
-            continue;
-        }
-        break notification;
-    };
+    let notification = tokio::time::timeout(Duration::from_secs(5), notify_rx.recv())
+        .await
+        .expect("should receive notification within timeout")
+        .expect("channel should not be closed");
     assert!(matches!(
         notification,
         SessionNotification::OpenReceived { .. }

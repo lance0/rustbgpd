@@ -650,8 +650,8 @@ pub enum PeerManagerCommand {
     },
     /// Create a runtime peer from a presence-preserving raw specification.
     RuntimeCreatePeer {
-        /// Raw create intent; the actor rejects non-presence-aware variants.
-        spec: NeighborCreateSpec,
+        /// Boxed raw create intent resolved only inside the actor.
+        spec: Box<PresenceAwareNeighborCreate>,
         /// Reply channel for success/failure.
         reply: oneshot::Sender<Result<(), PeerLifecycleError>>,
     },
@@ -1682,15 +1682,6 @@ pub struct PresenceAwareNeighborCreate {
     pub add_path: Option<NeighborCreateAddPath>,
 }
 
-/// Internal compatibility discriminator for runtime neighbor creation.
-#[derive(Clone)]
-pub enum NeighborCreateSpec {
-    /// Existing resolved legacy payload.
-    Legacy(Box<PeerManagerNeighborConfig>),
-    /// Raw presence-aware payload.
-    PresenceAware(Box<PresenceAwareNeighborCreate>),
-}
-
 /// Configuration for adding a peer dynamically.
 #[derive(Clone)]
 #[expect(
@@ -1960,8 +1951,8 @@ pub enum ConfigEvent {
     /// A presence-aware neighbor create whose raw intent must reach disk and
     /// the peer-manager actor unchanged.
     PresenceAwareNeighborAdded {
-        /// Compatibility-discriminated create specification.
-        spec: NeighborCreateSpec,
+        /// Boxed raw create intent, preserved without default materialization.
+        spec: Box<PresenceAwareNeighborCreate>,
         /// Optional two-phase persistence acknowledgement.
         ack: Option<ConfigPersistAck>,
     },

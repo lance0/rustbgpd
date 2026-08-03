@@ -96,15 +96,6 @@ impl PeerManager {
     )]
     pub(super) async fn handle_session_notification(&mut self, notification: SessionNotification) {
         match notification {
-            SessionNotification::StateChanged {
-                session_id,
-                role,
-                peer_addr,
-                old,
-                new,
-            } => {
-                self.handle_state_changed_notification(session_id, role, peer_addr, None, old, new);
-            }
             SessionNotification::OpenReceived {
                 session_id,
                 role,

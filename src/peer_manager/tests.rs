@@ -17691,18 +17691,10 @@ async fn simultaneous_active_open_runs_inbound_candidate_before_primary_idle() {
     )
     .await;
 
-    let notification = loop {
-        let notification =
-            tokio::time::timeout(Duration::from_secs(2), mgr.session_notify_rx.recv())
-                .await
-                .expect("candidate should notify OpenReceived")
-                .expect("notification channel should stay open");
-        if matches!(notification, SessionNotification::StateChanged { .. }) {
-            mgr.handle_session_notification(notification).await;
-            continue;
-        }
-        break notification;
-    };
+    let notification = tokio::time::timeout(Duration::from_secs(2), mgr.session_notify_rx.recv())
+        .await
+        .expect("candidate should notify OpenReceived")
+        .expect("notification channel should stay open");
     match &notification {
         SessionNotification::OpenReceived {
             role,
@@ -17715,7 +17707,6 @@ async fn simultaneous_active_open_runs_inbound_candidate_before_primary_idle() {
             assert_eq!(*peer_asn, 65002);
         }
         other @ (SessionNotification::BackToIdle { .. }
-        | SessionNotification::StateChanged { .. }
         | SessionNotification::MaxPrefixExceeded { .. }) => {
             panic!("expected OpenReceived from candidate, got {other:?}");
         }
@@ -21706,7 +21697,7 @@ async fn presence_create_rejections_leave_no_disk_history_or_live_half_state() {
 }
 
 #[test]
-fn presence_create_policy_event_keeps_the_legacy_neighbor_sentinel() {
+fn presence_create_policy_event_keeps_the_neighbor_sentinel() {
     let raw = rustbgpd_api::peer_types::PresenceAwareNeighborCreate {
         address: "10.0.0.9".parse().unwrap(),
         interface: None,
@@ -21728,7 +21719,7 @@ fn presence_create_policy_event_keeps_the_legacy_neighbor_sentinel() {
         add_path: None,
     };
     let event = ConfigEvent::PresenceAwareNeighborAdded {
-        spec: rustbgpd_api::peer_types::NeighborCreateSpec::PresenceAware(Box::new(raw)),
+        spec: Box::new(raw),
         ack: None,
     };
     assert_eq!(

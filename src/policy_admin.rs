@@ -5,8 +5,8 @@ use std::net::IpAddr;
 use rustbgpd_api::peer_types::{
     AddPathDefinition, CatalogMutationError, ConfigEvent, FibTableSnapshot,
     NamedNeighborSetSnapshot, NamedPeerGroupSnapshot, NamedPolicyDefinition, NamedPolicySnapshot,
-    NeighborCreateSpec, NeighborSetDefinition, PeerGroupDefinition, PolicyAsPathPrependConfig,
-    PolicyChainAssignment, PolicyStatementDefinition, PresenceAwareNeighborCreate,
+    NeighborSetDefinition, PeerGroupDefinition, PolicyAsPathPrependConfig, PolicyChainAssignment,
+    PolicyStatementDefinition, PresenceAwareNeighborCreate,
 };
 
 use crate::config::{
@@ -438,20 +438,6 @@ pub(crate) fn catalog_config_error(error: ConfigError) -> CatalogMutationError {
     }
 }
 
-fn presence_aware_neighbor(spec: &NeighborCreateSpec) -> Result<Neighbor, ConfigError> {
-    let NeighborCreateSpec::PresenceAware(raw) = spec else {
-        let NeighborCreateSpec::Legacy(config) = spec else {
-            unreachable!()
-        };
-        return Err(ConfigError::InvalidNeighborConfig {
-            address: config.address.to_string(),
-            field: "runtime_create".to_string(),
-            reason: "presence-aware event requires a presence-aware spec".to_string(),
-        });
-    };
-    Ok(raw_neighbor(raw))
-}
-
 fn raw_neighbor(raw: &PresenceAwareNeighborCreate) -> Neighbor {
     let family_name = |(afi, safi): &(rustbgpd_wire::Afi, rustbgpd_wire::Safi)| match (afi, safi) {
         (rustbgpd_wire::Afi::Ipv4, rustbgpd_wire::Safi::Unicast) => "ipv4_unicast".to_string(),
@@ -656,7 +642,7 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
             }
         }
         ConfigEvent::PresenceAwareNeighborAdded { spec, .. } => {
-            let neighbor = presence_aware_neighbor(spec)?;
+            let neighbor = raw_neighbor(spec);
             if !config.neighbors.iter().any(|configured| {
                 configured.address == neighbor.address && configured.interface == neighbor.interface
             }) {
