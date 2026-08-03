@@ -209,6 +209,9 @@ def check(root: Path) -> list[str]:
         f"ENV GOBGP_VERSION={GOBGP_VERSION}",
         'archive="gobgp_${GOBGP_VERSION}_linux_${TARGETARCH}.tar.gz"',
         '*) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;;',
+        'https://github.com/osrg/gobgp/releases/download/v${GOBGP_VERSION}/${archive}',
+        'echo "${checksum}  /tmp/${archive}" | sha256sum --check --strict',
+        'tar --extract --gzip --file "/tmp/${archive}" --directory /usr/local/bin gobgp gobgpd',
         'test "$(gobgp --version)" = "gobgp version ${GOBGP_VERSION}"',
         'test "$(gobgpd --version)" = "gobgpd version ${GOBGP_VERSION}"',
     ):

@@ -265,6 +265,18 @@ class PrimerContractTests(unittest.TestCase):
                 "*) exit 1 ;;",
             ),
             (
+                'https://github.com/osrg/gobgp/releases/download/v${GOBGP_VERSION}/${archive}',
+                "https://example.invalid/${archive}",
+            ),
+            (
+                'echo "${checksum}  /tmp/${archive}" | sha256sum --check --strict',
+                "true # skipped checksum verification",
+            ),
+            (
+                'tar --extract --gzip --file "/tmp/${archive}" --directory /usr/local/bin gobgp gobgpd',
+                'tar --extract --gzip --file "/tmp/${archive}" --directory /usr/local/bin',
+            ),
+            (
                 'test "$(gobgp --version)" = "gobgp version ${GOBGP_VERSION}"',
                 "true # removed gobgp assertion",
             ),
