@@ -1,4 +1,5 @@
 use std::fs::File;
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::thread;
@@ -225,6 +226,8 @@ fn removed_adoption_accept_legacy_env_hard_errors_at_boot() {
 #[test]
 fn daemon_binary_surfaces_configured_evpn_instances_through_rbgp() {
     let temp = tempfile::tempdir().expect("failed to create temp dir");
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))
+        .expect("make temp dir private");
     let config_path = write_config(temp.path());
     let grpc_sock = temp.path().join("runtime").join("grpc.sock");
     let grpc_addr = format!("unix://{}", grpc_sock.display());

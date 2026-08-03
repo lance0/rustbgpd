@@ -27,6 +27,7 @@
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
@@ -427,6 +428,8 @@ fn epoch_from_timestamp(s: &str) -> u64 {
 #[test]
 fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_subset() {
     let temp = tempfile::tempdir().expect("create temp dir");
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))
+        .expect("make temp dir private");
     let adapter_port = free_port();
 
     // Spawn the daemon (serves gRPC). Structured logs go to stdout,

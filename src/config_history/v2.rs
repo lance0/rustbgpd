@@ -22,8 +22,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 const VERSION: u32 = 2;
-const MAX_ENVELOPE: usize = 32 * 1024 * 1024;
-const MAX_TOML: usize = 10 * 1024 * 1024;
+pub(crate) const MAX_ENVELOPE: usize = 32 * 1024 * 1024;
+pub(crate) const MAX_TOML: usize = 10 * 1024 * 1024;
 const MAX_MANIFEST: usize = 16 * 1024 * 1024;
 const MAX_UNITS: usize = 4096;
 const MAX_MODULES: usize = 64;
@@ -751,7 +751,7 @@ fn validate(envelope: &Envelope) -> io::Result<()> {
     Ok(())
 }
 
-fn validate_manifest(manifest: &Manifest) -> io::Result<()> {
+pub(crate) fn validate_manifest(manifest: &Manifest) -> io::Result<()> {
     if manifest.rpol_units.len() > MAX_UNITS {
         return Err(limit("RPOL units", MAX_UNITS));
     }
@@ -791,7 +791,7 @@ fn validate_manifest(manifest: &Manifest) -> io::Result<()> {
     Ok(())
 }
 
-fn manifest_source_sha256(manifest: &Manifest) -> [u8; 32] {
+pub(crate) fn manifest_source_sha256(manifest: &Manifest) -> [u8; 32] {
     let mut digest = Sha256::new();
     digest.update(SOURCE_DIGEST_DOMAIN);
     frame(&mut digest, &manifest.toml_sha256);

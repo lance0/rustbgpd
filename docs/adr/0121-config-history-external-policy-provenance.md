@@ -1,7 +1,7 @@
 # ADR-0121: Config-history external-policy provenance
 
-**Status:** Accepted, partially implemented
-**Implementation:** v2 history restore shipped; commit-confirm v2 designed, implementation pending
+**Status:** Accepted, implemented
+**Implementation:** v2 history restore and provenance-bearing commit-confirm v2 shipped
 **Date:** 2026-08-01
 
 ## Context
@@ -414,9 +414,14 @@ lexical `CONFIG_PATH` is unsupported. The two digests must equal the journal's
 embedded prior state before any prior-source load.
 
 The locator, journal, and their stages are regular files owned by the daemon
-uid and mode `0600` from their first byte. Their real parent directories are
-pinned by descriptor, owned by that uid, and neither group- nor
-world-writable. Reads and cleanup are descriptor-relative with `O_NOFOLLOW`:
+uid and mode `0600` from their first byte. For a writer or any present v2
+object, their real parent directories are pinned by descriptor, owned by that
+uid, and neither group- nor world-writable. Establishing locator absence alone
+pins the real parent descriptor but applies no v2 ownership or mode policy:
+absence carries no authority, so ordinary pre-v2 launch paths remain valid.
+Any present locator immediately enters the full private-parent checks, and a
+writer cannot publish there unless the parent meets that contract. Reads and
+cleanup are descriptor-relative with `O_NOFOLLOW`:
 open once, `fstat`, bound, and read through that same descriptor. No check may
 be followed by a path reopen. The lexical config parent and journal parent may
 differ, so each has its own pinned descriptor and durability sync.
@@ -428,8 +433,9 @@ neither cross-directory staging nor an alternate suffix is recognized.
 #### Writer admissibility and crash order
 
 A confirmed writer may start only while it still owns the stable lexical launch
-identity, both pinned directories pass the checks above, and the final locator
-is absent. Exact owned regular `0600` staging or journal residue may be removed
+identity, the locator, journal, and resolved config-target parents pass the full
+owner-private checks above, and the final locator is absent. Exact owned regular
+`0600` staging or journal residue may be removed
 and its directory synced before proceeding; an unsafe, ambiguous, differently
 owned, non-regular, noncanonical, or unremovable residue refuses the apply.
 Cleanup may touch only the exact journal and locator final basenames and the two
@@ -468,11 +474,13 @@ locator is absent.
 An invalid, unsafe, oversized, mismatched, or unreadable locator occupies the
 `present` rows and fails closed; it never falls back to v1. A valid locator
 whose journal path, `confirm_id`, digests, config target, or journal contents do
-not match also touches neither candidate nor pending files. V1 discovery keeps
-its existing 10 MiB preparse cap and exact format, and a v1 prior containing
-external inputs remains refused. A v2 journal without a locator is never boot
-revert authority. It is either prepublication residue or residue after the
-locator's terminal removal. An exact canonical, owned, regular `0600` journal
+not match does not open candidate contents or mutate candidate, backup, or
+pending files; launch-target metadata may already have been inspected to bind
+authority. V1 discovery keeps its existing 10 MiB preparse cap and exact format,
+and a v1 prior containing external inputs remains refused. A v2 journal without
+a locator is never boot revert authority. It is either prepublication residue
+or residue after the locator's terminal removal. An exact canonical, owned,
+regular `0600` journal
 may be removed and its directory synced before boot proceeds; unsafe,
 malformed, or unremovable residue refuses boot. Locator-absent plus
 journal-present never reconstructs or re-arms pending state.
@@ -511,9 +519,11 @@ redacted path **roles**, never values. No API, log, or normal CLI output renders
 startup diagnostic may name only the deterministic locator path derived from
 the launch argument. Digests and prior source paths are never logged.
 
-Writable downgrade remains unsupported: old binaries do not understand the
-locator or v2 journal. Re-upgrade accepts only the exact states above; it never
-blesses or migrates a residue produced by a downgrade. A live v1 pending
+Writable downgrade remains unsupported until both the locator and locator-free
+v2 journal residue are absent: old binaries do not understand either format.
+This pending-state rule is separate from the v2 history-directory move-aside
+rule below. Re-upgrade accepts only the exact states above; it never blesses or
+migrates a residue produced by a downgrade. A live v1 pending
 transaction must be confirmed, aborted, timed out, or boot-reverted before an
 upgrade. Rewriting it out of band is unsupported; v2 never converts a live v1
 journal and never dual-writes v1 plus v2 pending state.
@@ -553,9 +563,10 @@ candidate. There is no in-place migration or automatic deletion.
   object rather than reparse TOML at each layer.
 - Host paths are retained as sensitive local state, increasing the importance
   of owner-only storage and bounded, non-following reads.
-- V2 commit-confirm boot authority no longer depends on parsing the
-  unconfirmed candidate, but it adds one config-adjacent owner-only locator and
-  makes writable downgrade across that locator unsupported.
+- V2 commit-confirm boot authority no longer depends on parsing unconfirmed
+  candidate contents, but it adds one config-adjacent owner-only locator and
+  makes writable downgrade unsupported until both the locator and locator-free
+  v2 journal residue are absent.
 
 ## Rejected alternatives
 
@@ -673,10 +684,15 @@ identity contract.
 ## Current validation gate
 
 V2 recording, immutable accepted-source capture, mixed listing, additive API
-status/digests, filesystem hardening, and verified v2 history restore are
-shipped with executable destructive proofs. Provenance-bearing commit-confirm
-v2 remains implementation-pending; its locator, journal, state-machine, and
-cleanup proofs above are the implementation gate. Documentation-only design
-changes have no executable red proof.
+status/digests, filesystem hardening, verified v2 history restore, and
+provenance-bearing commit-confirm v2 are shipped with executable destructive
+proofs. The production writer emits only v2 pending state. Locator-free v1
+state remains a fail-closed compatibility lane; a live v1 transaction must
+terminate before upgrade, and v2 never converts or dual-writes it. The
+locator/journal publication order, exact caps and canonical
+encoding, descriptor-relative filesystem checks, six-state boot matrix,
+same-object live rollback, boot-before-candidate restore, terminal locator
+ordering, and post-terminal warning-only residue cleanup remain regression
+gates. Documentation-only design changes have no executable red proof.
 Documentation consistency, source-contract review, link and terminology
 checks, and `git diff --check` remain part of every tranche.

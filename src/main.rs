@@ -2507,11 +2507,59 @@ fn main() -> ExitCode {
         process::exit(1);
     }
 
-    let mut accepted = match AcceptedConfigSnapshot::load(Path::new(&config_path), None) {
-        Ok(snapshot) => Arc::new(snapshot),
-        Err(diagnostic) => {
-            eprintln!("{diagnostic}");
-            process::exit(1);
+    // The v2 locator is config-adjacent and must be resolved before a real
+    // daemon boot opens, sizes, or parses the candidate.  One-shot validation
+    // and diff modes remain read-only and therefore do not inspect or consume
+    // pending commit-confirm state.
+    let launch_identity = if !check_only && diff_path.is_none() {
+        Some(
+            confirm_journal::v2::LaunchIdentity::resolve(Path::new(&config_path)).unwrap_or_else(
+                |error| {
+                    eprintln!(
+                        "error: invalid launch config identity for commit-confirm authority: {error}"
+                    );
+                    process::exit(1);
+                },
+            ),
+        )
+    } else {
+        None
+    };
+    let mut boot_revert_notice = None;
+    let mut accepted = if let Some(identity) = &launch_identity {
+        match identity.boot_revert_check() {
+            Ok(Some(revert)) => {
+                boot_revert_notice = Some(confirm_journal::BootRevertNotice {
+                    confirm_id: revert.notice.confirm_id,
+                    backup_path: PathBuf::new(),
+                    rollback_failed: revert.notice.rollback_failed,
+                    redact_paths: true,
+                    journal_cleanup_failed: revert.notice.journal_cleanup_failed,
+                });
+                revert.accepted
+            }
+            Ok(None) => match AcceptedConfigSnapshot::load(Path::new(&config_path), None) {
+                Ok(snapshot) => Arc::new(snapshot),
+                Err(diagnostic) => {
+                    eprintln!("{diagnostic}");
+                    process::exit(1);
+                }
+            },
+            Err(message) => {
+                eprintln!(
+                    "error: {message}; locator: {}",
+                    identity.locator_path().display()
+                );
+                process::exit(1);
+            }
+        }
+    } else {
+        match AcceptedConfigSnapshot::load(Path::new(&config_path), None) {
+            Ok(snapshot) => Arc::new(snapshot),
+            Err(diagnostic) => {
+                eprintln!("{diagnostic}");
+                process::exit(1);
+            }
         }
     };
     let mut config = accepted.config();
@@ -2586,28 +2634,30 @@ fn main() -> ExitCode {
     // journal that exists but cannot drive a revert refuses boot (fail
     // closed). Runs only for real daemon startup: --check/--diff returned
     // above and must never mutate config files.
-    let boot_revert_notice = match confirm_journal::boot_revert_check(
-        &confirm_journal::journal_path(&config.runtime_state_dir()),
-        Path::new(&config_path),
-    ) {
-        Ok(None) => None,
-        Ok(Some(revert)) => {
-            drop(revert.config);
-            accepted = match AcceptedConfigSnapshot::load(Path::new(&config_path), None) {
-                Ok(snapshot) => Arc::new(snapshot),
-                Err(diagnostic) => {
-                    eprintln!("{diagnostic}");
-                    process::exit(1);
-                }
-            };
-            config = accepted.config();
-            Some(revert.notice)
-        }
-        Err(message) => {
-            eprintln!("error: {message}");
-            process::exit(1);
-        }
-    };
+    if boot_revert_notice.is_none() {
+        boot_revert_notice = match confirm_journal::boot_revert_check(
+            &confirm_journal::journal_path(&config.runtime_state_dir()),
+            Path::new(&config_path),
+        ) {
+            Ok(None) => None,
+            Ok(Some(revert)) => {
+                drop(revert.config);
+                accepted = match AcceptedConfigSnapshot::load(Path::new(&config_path), None) {
+                    Ok(snapshot) => Arc::new(snapshot),
+                    Err(diagnostic) => {
+                        eprintln!("{diagnostic}");
+                        process::exit(1);
+                    }
+                };
+                config = accepted.config();
+                Some(revert.notice)
+            }
+            Err(message) => {
+                eprintln!("error: {message}");
+                process::exit(1);
+            }
+        };
+    }
 
     let log_directives = config.per_peer_log_directives();
     if let Err(e) = init_logging(&log_directives) {
@@ -2637,7 +2687,12 @@ fn main() -> ExitCode {
         .enable_all()
         .build()
         .unwrap_or_else(|e| fatal_startup_error("failed to create tokio runtime", e));
-    let grpc_server_failed = rt.block_on(run(accepted, boot_revert_notice, profiler));
+    let grpc_server_failed = rt.block_on(run(
+        accepted,
+        boot_revert_notice,
+        launch_identity.expect("daemon boot resolved launch config identity"),
+        profiler,
+    ));
     shutdown_daemon_runtime(rt);
     if grpc_server_failed {
         // The coordinated teardown already ran (NOTIFICATIONs, GR marker,
@@ -2856,6 +2911,7 @@ fn resolve_rib_channel_capacity_from(env: Option<&str>) -> usize {
 async fn run<T>(
     accepted: Arc<AcceptedConfigSnapshot>,
     boot_revert_notice: Option<confirm_journal::BootRevertNotice>,
+    launch_identity: confirm_journal::v2::LaunchIdentity,
     profiler: Option<T>,
 ) -> bool {
     let mut config = accepted.config();
@@ -3106,12 +3162,20 @@ async fn run<T>(
         // Boot-time revert of an unconfirmed commit-confirmed transaction
         // (ADR-0076 Decision 6). Loud on purpose: the operator's last change
         // was undone and its candidate saved aside.
-        error!(
-            confirm_id = %notice.confirm_id,
-            unconfirmed_candidate = %notice.backup_path.display(),
-            rollback_failed = notice.rollback_failed,
-            "commit-confirmed transaction was never confirmed before the last shutdown — reverted to the pre-transaction config at boot; the unconfirmed candidate config was saved aside"
-        );
+        if notice.redact_paths {
+            error!(
+                confirm_id = %notice.confirm_id,
+                rollback_failed = notice.rollback_failed,
+                "commit-confirmed transaction was never confirmed before the last shutdown — verified and reverted to the pre-transaction config at boot; the unconfirmed candidate was saved beside its recorded target"
+            );
+        } else {
+            error!(
+                confirm_id = %notice.confirm_id,
+                unconfirmed_candidate = %notice.backup_path.display(),
+                rollback_failed = notice.rollback_failed,
+                "commit-confirmed transaction was never confirmed before the last shutdown — reverted to the pre-transaction config at boot; the unconfirmed candidate config was saved aside"
+            );
+        }
         eprintln!(
             "!! commit-confirm boot revert: transaction {:?} was never confirmed before the last shutdown.",
             notice.confirm_id
@@ -3124,13 +3188,24 @@ async fn run<T>(
                 "!! A live rollback of this transaction FAILED before the restart, so the pre-restart on-disk state was uncertain."
             );
         }
-        eprintln!(
-            "!! Booted from the pre-transaction config; the unconfirmed candidate was saved to {}.",
-            notice.backup_path.display()
-        );
-        // A `BootRevertNotice` only exists when the revert fully succeeded
-        // (config restored AND journal consumed); a journal-cleanup failure
-        // fails startup upstream (LAN-219), so there is no failure branch here.
+        if notice.redact_paths {
+            eprintln!(
+                "!! Booted from the verified pre-transaction config; the unconfirmed candidate was saved beside its recorded target."
+            );
+        } else {
+            eprintln!(
+                "!! Booted from the pre-transaction config; the unconfirmed candidate was saved to {}.",
+                notice.backup_path.display()
+            );
+        }
+        if notice.journal_cleanup_failed {
+            warn!(
+                "commit-confirm boot revert reached durable terminal locator removal, but exact journal residue cleanup failed"
+            );
+        }
+        // A `BootRevertNotice` exists only after the revert is terminal. V1
+        // still requires journal consumption; v2 becomes terminal at durable
+        // locator absence and reports later journal cleanup as a warning.
         metrics.record_config_transaction_lifecycle("boot_revert", "success");
     }
     let router_id: Ipv4Addr = config.global.router_id.parse().unwrap_or_else(|e| {
@@ -4308,7 +4383,8 @@ async fn run<T>(
                 .expect("daemon config transactions require accepted-config authority")
                 .clone(),
         )
-        .with_preloaded_planner(peer_mgr_internal_tx.clone());
+        .with_preloaded_planner(peer_mgr_internal_tx.clone())
+        .with_confirm_v2_launch(launch_identity);
     // Process-wide availability gate (LAN-286): BGP-listener bind failure
     // turns readiness red; coordinated shutdown turns readiness red AND
     // stops admitting persisted config mutations and inbound BGP sessions.

@@ -213,9 +213,20 @@ Levenshtein machinery as the `.rpol` suggestions (LAN-481);
 versions and rollback share the same transaction/validation path, completing
 the check/compare/confirm/rollback workflow for TOML-complete snapshots
 (LAN-483). ADR-0121 provenance recording and mixed legacy/v2 listing are
-**shipped**, including exact v2 external-source verification and restore. Provenance is
-audit and verification evidence, not authority to adopt external-policy state;
-#1370 keeps changed external-policy rollback fenced; ~~a bounded
+**shipped**, including exact v2 external-source verification and restore.
+**Shipped (LAN-798):** commit-confirm v2 now journals that same immutable prior
+snapshot behind a config-adjacent locator. Crash boot restore verifies and
+directly adopts the accepted prior snapshot; live abort and timeout reuse the
+same prior object through the normal planner and apply path. Locator removal is
+the durable terminal point. The locator-free v1 lane is fail-closed upgrade
+compatibility: a live v1 transaction must terminate before upgrade, and v2
+never converts or dual-writes it. Downgrade requires both the v2 locator and
+locator-free v2 journal residue to be absent, plus the separate v2-history
+move-aside procedure. Provenance is audit and verification evidence, not
+authority to adopt external-policy state. #1370 fences every full-snapshot
+external-input rollback; its only exceptions remain a true no-op and a targeted
+pure-`[[fib_tables]]` transaction whose external inputs are unchanged;
+~~a bounded
 BIRD/FRR/GoBGP config importer~~ **Shipped (#1015):** structure-only conversion
 with a fail-stop unsupported-directive report and shadow-trial workflow
 (LAN-484).

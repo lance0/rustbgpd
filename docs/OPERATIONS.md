@@ -184,19 +184,41 @@ failure, or compound rollback failure) likewise retains the journal and blocks
 all config mutations until a restart boot-reverts.
 
 Commit-confirmed also survives a daemon restart or crash inside the confirm
-window. Before the candidate commits, the daemon journals the pre-commit config
-snapshot to `<runtime_state_dir>/commit-confirm-journal.json` (atomic
-write-tmp+rename+fsync); confirm, abort, and timeout auto-revert consume the
-journal. If the daemon starts and finds an unconfirmed journal, it reverts at
-boot — before adopting the on-disk config, and regardless of how much confirm
-time was left, because the operator's confirming session died with the old
-process (the NETCONF RFC 6241 §8.4 rule: session loss cancels a confirmed
-commit). The unconfirmed candidate config file is saved aside as
-`<config>.unconfirmed` and the boot banner + an ERROR log name the transaction
-and that file; re-plan and re-apply to retry it. A torn or unreadable journal,
-or one whose embedded config no longer parses, refuses boot with a message
-naming both the journal and the config file — delete the journal manually only
-if you are sure the on-disk config is the one you want.
+window. Before the candidate commits, the daemon writes the exact accepted
+pre-commit snapshot to
+`<runtime_state_dir>/commit-confirm-journal.json`, including normalized TOML,
+the external-source manifest, and both digests. It then publishes the sole v2
+pending authority at `<absolute lexical config path>.commit-confirm-locator.json`.
+Both files use write-temp + `fsync` + rename + parent-directory `fsync`, and
+the locator is never published before the journal is durable. A publication
+failure refuses the confirmed apply before candidate persistence.
+
+Startup checks the config-adjacent locator before opening or parsing candidate
+contents. It may inspect launch-target metadata while pinning and binding the
+authority. If the locator is present, the daemon verifies it, the complete
+journal, config-target binding, retained TOML, external sources, and digests,
+then directly adopts that accepted snapshot for boot restore. The revert is
+unconditional, regardless of how much confirm time remained, because the
+operator's confirming session died with the old process (the NETCONF RFC 6241
+§8.4 rule: session loss cancels a confirmed commit). The unconfirmed candidate is saved once as
+`<recorded-target>.unconfirmed`; the loud boot banner names the transaction but
+redacts locator-carried paths and digests. A damaged, unsafe, oversized, or
+mismatched locator/journal refuses boot before candidate contents are opened
+and before candidate or backup mutation.
+
+Abort, timeout, and boot restore durably restore the verified prior config while
+both files remain. They then unlink the locator and `fsync` its parent; only
+that durable locator absence is terminal. Confirm performs no restore and
+starts by unlinking and syncing the locator. Exact journal cleanup follows all
+terminal paths; failure there is a warning and safe residue cannot re-arm the
+transaction. An exact canonical v2 journal found without its locator is
+likewise residue and is removed only after all owner/mode/path checks. Production does
+not scan directories, infer another journal, convert v1, or dual-write. With no
+locator, an existing v1 TOML-only journal is handled by the fail-closed legacy
+boot lane, but a live v1 transaction must terminate before upgrade. Before
+downgrade or starting an older binary, both the v2 locator and locator-free v2
+journal residue must be absent. Separately move the complete v2 config-history
+directory aside before the older binary starts.
 
 The boot-revert save-aside moves the unconfirmed candidate to
 `<config>.unconfirmed` with an atomic hard-link + unlink, so it never clobbers
@@ -208,6 +230,15 @@ intact, rather than risk an unsafe revert. Keep the config and
 `runtime_state_dir` on a local filesystem (the default); this mainly matters
 for containerized deployments that bind-mount the config from an exotic
 backend.
+
+The lexical config and journal paths are resolved to absolute identities. A
+writer or present v2 object requires daemon-owned real parents that are not
+group- or world-writable. Locator absence carries no authority and therefore
+does not impose that v2 storage policy on an ordinary launch path; confirmed
+writes remain unavailable until the config directory is private, writable,
+and daemon-owned. Locator, journal, and staging
+files must be regular files owned by the daemon UID with mode `0600`; symlinks
+and special files fail closed. Keep writable state private and on local storage.
 
 ### The transactional quartet: check, compare, commit confirmed, rollback
 
@@ -259,8 +290,9 @@ unreadable or mismatched rows fail closed before planning or mutation. An eligib
 row is routed through the **same transaction path as
 `config apply`**: the same plan classification, the same reload-impact and
 update-group annotations, and the same receipts. Confirmed rollback remains
-available only when neither the current nor target config declares external
-inputs; provenance-aware commit-confirm journal support is a later tranche.
+subject to that planner: full-snapshot external-policy adoption is still
+fenced, while an unchanged-external-input pure-`[[fib_tables]]` rollback can
+use the provenance-bearing v2 journal and exact accepted prior snapshot.
 There is no second apply engine —
 a rollback whose entry contains sections the transaction executor cannot
 commit live (for example restart-required `[global]` fields) is rejected

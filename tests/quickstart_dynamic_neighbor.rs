@@ -5,6 +5,7 @@
 //! itself, and proves runtime apply plus durable persistence.
 
 use std::fs::File;
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::thread;
@@ -249,6 +250,8 @@ fn strict_check(config_path: &Path) -> Output {
 
 fn run_starter(label: &str, source: &str, group_json: &str, commands: &[String]) {
     let temp = tempfile::tempdir().expect("create scenario tempdir");
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))
+        .expect("make temp dir private");
     let runtime_dir = temp.path().join(format!("{label}-runtime"));
     std::fs::create_dir_all(&runtime_dir).expect("create runtime dir");
     let config_path = temp.path().join("config.toml");

@@ -257,15 +257,26 @@ daemon down) was the one the mechanism could not revert. That hole is closed:
 
 Proven by real-binary SIGKILL tests in `tests/commit_confirm_binary.rs`:
 SIGKILL mid-window then restart boots the previous config with the candidate
-saved aside; confirm-then-SIGKILL retains the new config with no journal;
-in-process timeout auto-revert consumes the journal; a torn journal refuses
-boot naming both files.
+saved aside; confirm-then-SIGKILL retains the new config with no pending
+authority; in-process timeout auto-revert consumes the pending state; and a
+torn locator-free v1 journal still refuses boot naming both legacy files.
 
-ADR-0121 supersedes only the **designed v2 discovery and provenance contract**:
-v2 pending authority will use an owner-only locator adjacent to the stable
-lexical launch-config path, so boot need not trust the candidate to find its
-revert journal. Its journal carries the immutable prior source manifest and is
-verified before candidate access. That v2 design is implementation-pending.
-The v1 TOML-only journal, candidate-derived `runtime_state_dir` discovery, boot
-revert, and live confirm/abort/timeout behavior described in this amendment
-remain the shipped behavior until that implementation lands.
+ADR-0121 now supersedes the v1 **discovery, payload, and terminal-cleanup
+contract** above. The shipped v2 writer stores the immutable accepted prior
+snapshot, including its external-source manifest and digests, in the
+owner-private runtime-state journal, then publishes an owner-private locator
+adjacent to the stable lexical launch-config path. The locator is the sole v2
+pending authority and is checked before candidate contents are parsed. Boot and live
+rollback verify the same accepted prior snapshot, but the execution paths are
+distinct: boot directly adopts the verified accepted object before opening
+candidate contents or mutating candidate/backup, while live abort and timeout
+reuse it through the ordinary #1370-gated planner and apply path. Launch-target
+metadata may be inspected while binding boot authority. Abort, timeout, and
+boot restore durably restore while both files remain, then remove and sync the
+locator. Confirm starts with that locator removal. Exact journal cleanup after
+the terminal point is warning-only. Production writes only v2. The
+locator-free v1 reader is a fail-closed compatibility lane; a live v1
+transaction must terminate before upgrade and v2 never converts or dual-writes
+it. Before downgrade, both the v2 locator and locator-free v2 journal residue
+must be absent; v2 config history separately requires its complete directory
+to be moved aside.

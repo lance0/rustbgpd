@@ -8,10 +8,18 @@
 //! failing to bind, and the metrics/readiness listener failing to bind.
 
 use std::net::{TcpListener, TcpStream};
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
+
+fn private_tempdir() -> tempfile::TempDir {
+    let temp = tempfile::tempdir().expect("create temp dir");
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))
+        .expect("make temp dir private");
+    temp
+}
 
 struct Daemon {
     child: Child,
@@ -133,7 +141,7 @@ fn free_port() -> u16 {
 
 #[test]
 fn grpc_bind_failure_exits_nonzero() {
-    let temp = tempfile::tempdir().expect("create temp dir");
+    let temp = private_tempdir();
     // Hold the gRPC port so the daemon's listener bind fails with
     // AddrInUse — the gRPC server task exits, which must shut the
     // daemon down with a non-zero exit code.
@@ -153,7 +161,7 @@ fn grpc_bind_failure_exits_nonzero() {
 
 #[test]
 fn metrics_listener_bind_failure_exits_nonzero() {
-    let temp = tempfile::tempdir().expect("create temp dir");
+    let temp = private_tempdir();
     let occupied = TcpListener::bind("127.0.0.1:0").expect("bind occupied metrics port");
     let metrics_port = occupied.local_addr().unwrap().port();
     let config_path =
@@ -183,7 +191,7 @@ fn metrics_listener_bind_failure_exits_nonzero() {
 
 #[test]
 fn bgp_listener_bind_failure_exits_nonzero() {
-    let temp = tempfile::tempdir().expect("create temp dir");
+    let temp = private_tempdir();
     // Hold the BGP listen port with a live listener. SO_REUSEADDR lets a
     // new generation rebind over a closed-but-lingering endpoint, never
     // over an active LISTEN, so this bind genuinely fails — and a daemon
@@ -208,7 +216,7 @@ fn bgp_listener_bind_failure_exits_nonzero() {
 
 #[test]
 fn sigterm_exits_zero() {
-    let temp = tempfile::tempdir().expect("create temp dir");
+    let temp = private_tempdir();
 
     // `free_port()` is bind-then-release, so a parallel workspace test can
     // steal the port before the daemon binds it; the daemon then exits

@@ -54,6 +54,19 @@ input from the network. It runs under continuous fuzzing in CI.
 - **No unbounded allocations.** All channels are bounded. Per-peer
   prefix limits enforced at insertion. UPDATE attribute sizes enforced
   at decode time.
+- **Commit-confirm state is authenticated local authority.** The v2 pending
+  journal is secret-bearing because it contains normalized config and accepted
+  external-source identity. The locator is confidential because it carries
+  paths and digests. Both are bounded canonical records in daemon-owned regular
+  `0600` files; a writer or present v2 object requires a daemon-owned parent
+  that is not group- or world-writable. Locator absence carries no authority
+  and therefore adds no v2 ownership or mode requirement to an ordinary
+  launch path. Reads are descriptor-relative, no-follow, same-FD operations;
+  unsafe, changed, oversized, or mismatched state fails closed before candidate
+  contents are opened and before candidate or backup mutation. Launch-target
+  metadata may be inspected to bind the authority. Diagnostics do not expose
+  locator-carried paths or digests. Durable locator removal, not journal
+  deletion, is the terminal transaction boundary.
 - **No `unsafe` code in shipped paths, with two scoped exceptions.** Every
   workspace crate root carries `#![deny(unsafe_code)]`, so `unsafe` cannot enter
   a crate without a visible, reviewed opt-out. There are two:

@@ -18,6 +18,8 @@
 
 #![deny(unsafe_code)]
 
+pub(crate) mod v2;
+
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read as _, Write as _};
 use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
@@ -79,6 +81,13 @@ pub struct BootRevertNotice {
     /// state the daemon was in before this restart is uncertain (the banner
     /// says so), even though the boot revert itself succeeded.
     pub rollback_failed: bool,
+    /// V2 locator-carried target paths are sensitive and must not be rendered
+    /// by ordinary startup logs or banners.
+    pub redact_paths: bool,
+    /// V2 journal cleanup follows the durable terminal locator removal and is
+    /// warning-only.  V1 never reports this state because its cleanup remains
+    /// part of its legacy terminal operation.
+    pub journal_cleanup_failed: bool,
 }
 
 #[must_use]
@@ -125,10 +134,26 @@ pub fn remove(path: &Path) -> io::Result<()> {
 ///   config the operator applies on each restart. The recovery copy at
 ///   `<config_path>.unconfirmed` is preserved; the next boot fails identically
 ///   until the operator removes/fixes the journal.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the legacy v1 boot-revert lane remains intentionally unchanged and linear"
+)]
 pub fn boot_revert_check(
     journal_path: &Path,
     config_path: &Path,
 ) -> Result<Option<BootRevert>, String> {
+    match v2::inspect_locator_absent_journal(journal_path) {
+        Ok(v2::LocatorAbsentJournal::Absent | v2::LocatorAbsentJournal::V2ResidueRemoved) => {
+            return Ok(None);
+        }
+        Ok(v2::LocatorAbsentJournal::LegacyV1) => {}
+        Err(error) => {
+            return Err(format!(
+                "refusing to boot: locator-absent commit-confirm journal state is unsafe or invalid ({:?}: {error}); inspect the owner-only runtime-state journal",
+                error.kind(),
+            ));
+        }
+    }
     // Resolve a symlinked config up front (operators legitimately symlink
     // configs into place): every operation below — save-aside, restore
     // write, refusal messages — then targets the REAL file, so the revert
@@ -248,6 +273,8 @@ pub fn boot_revert_check(
             confirm_id: journal.confirm_id,
             backup_path,
             rollback_failed: journal.rollback_failed,
+            redact_paths: false,
+            journal_cleanup_failed: false,
         },
     }))
 }
@@ -562,6 +589,24 @@ log_format = "json"
         let outcome = boot_revert_check(&journal_path(dir.path()), &config_path).unwrap();
         assert!(outcome.is_none());
         assert_eq!(fs::read_to_string(&config_path).unwrap(), "candidate");
+    }
+
+    #[test]
+    fn boot_check_without_runtime_state_directory_is_normal_boot() {
+        // Destructive proof: pinning the locator-free journal parent before
+        // establishing path absence makes this fresh-install boot fail before
+        // the daemon can create its runtime-state directory.
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("rustbgpd.toml");
+        fs::write(&config_path, "candidate").unwrap();
+        let runtime_state_dir = dir.path().join("missing/runtime");
+        let path = journal_path(&runtime_state_dir);
+
+        let outcome = boot_revert_check(&path, &config_path).unwrap();
+
+        assert!(outcome.is_none());
+        assert_eq!(fs::read_to_string(&config_path).unwrap(), "candidate");
+        assert!(!runtime_state_dir.exists());
     }
 
     #[test]

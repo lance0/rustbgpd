@@ -58,9 +58,10 @@ pub struct ConfigTransactionController {
     state: Arc<Mutex<ConfirmedState>>,
     accepted_rx: Option<watch::Receiver<Arc<AcceptedConfigSnapshot>>>,
     peer_mgr_internal_tx: Option<mpsc::UnboundedSender<InternalCommand>>,
+    confirm_v2_launch: Option<crate::confirm_journal::v2::LaunchIdentity>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct ConfirmedState {
     applying_confirm_id: Option<String>,
     pending: Option<PendingConfirmedTransaction>,
@@ -77,7 +78,7 @@ struct ConfirmedState {
     ambiguous_failure_confirm_id: Option<String>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 struct PendingConfirmedTransaction {
     confirm_id: String,
     rollback_toml: String,
@@ -93,6 +94,13 @@ struct PendingConfirmedTransaction {
     /// not repair; the operator resolves it by retrying abort, confirming the
     /// candidate, or restarting (boot revert from the retained journal).
     rollback_failed: Option<proto::ConfigTransactionConfirmationStatus>,
+    /// The exact immutable pre-transaction object encoded in the v2 journal
+    /// and reused by live abort/timeout planning.  `None` is test-only legacy
+    /// v1 coverage.
+    prior_snapshot: Option<Arc<AcceptedConfigSnapshot>>,
+    /// Pinned locator/journal descriptors retained through the live pending
+    /// lifecycle.  The locator is the terminal authority.
+    v2_files: Option<Arc<crate::confirm_journal::v2::PendingFiles>>,
 }
 
 #[derive(Clone, Debug)]
@@ -122,6 +130,7 @@ impl ConfigTransactionController {
             state: Arc::new(Mutex::new(ConfirmedState::default())),
             accepted_rx: None,
             peer_mgr_internal_tx: None,
+            confirm_v2_launch: None,
         }
     }
 
@@ -137,6 +146,7 @@ impl ConfigTransactionController {
             state: Arc::new(Mutex::new(ConfirmedState::default())),
             accepted_rx: Some(accepted_rx),
             peer_mgr_internal_tx: None,
+            confirm_v2_launch: None,
         }
     }
 
@@ -146,6 +156,15 @@ impl ConfigTransactionController {
         tx: mpsc::UnboundedSender<InternalCommand>,
     ) -> Self {
         self.peer_mgr_internal_tx = Some(tx);
+        self
+    }
+
+    #[must_use]
+    pub(crate) fn with_confirm_v2_launch(
+        mut self,
+        launch: crate::confirm_journal::v2::LaunchIdentity,
+    ) -> Self {
+        self.confirm_v2_launch = Some(launch);
         self
     }
 
@@ -231,8 +250,10 @@ impl ConfigTransactionController {
                     if request.confirm_timeout_seconds > 0 {
                         validate_confirm_timeout_seconds(request.confirm_timeout_seconds)?;
                     }
-                    self.reject_confirmed_external_sources(&normalized_toml)
-                        .await?;
+                    if self.confirm_v2_launch.is_none() {
+                        self.reject_confirmed_external_sources(&normalized_toml)
+                            .await?;
+                    }
                 }
                 let accepted = self.accepted_rx.as_ref().ok_or_else(|| {
                     ConfigTransactionApplyError::Unavailable(
@@ -290,7 +311,7 @@ impl ConfigTransactionController {
     ) -> Result<proto::ConfigTransactionApplyResponse, ConfigTransactionApplyError> {
         let confirmed = parse_confirmed_apply_mode(&request)?;
         if let Some(confirmed) = confirmed {
-            if preloaded.is_none() {
+            if preloaded.is_none() && self.confirm_v2_launch.is_none() {
                 self.reject_confirmed_external_sources(&request.candidate_toml)
                     .await?;
             }
@@ -328,6 +349,25 @@ impl ConfigTransactionController {
         };
         let accepted = accepted_rx.borrow().clone();
         transaction_config_snapshot_accepted(&self.deps.peer_mgr_tx, &accepted).await
+    }
+
+    async fn accepted_prior_snapshot(&self) -> Result<Arc<AcceptedConfigSnapshot>, String> {
+        if let Some(accepted_rx) = &self.accepted_rx {
+            // Bind provenance before awaiting the peer-manager snapshot.  A
+            // concurrent SIGHUP may advance the watch channel while that reply
+            // is in flight; re-borrowing afterwards could otherwise relabel an
+            // older runtime config with a newer external-source manifest.
+            let accepted = accepted_rx.borrow().clone();
+            let runtime =
+                transaction_config_snapshot_accepted(&self.deps.peer_mgr_tx, &accepted).await?;
+            return accepted.derive_config(runtime);
+        }
+        #[cfg(test)]
+        return Ok(AcceptedConfigSnapshot::from_config_for_test(
+            self.accepted_runtime_snapshot().await?,
+        ));
+        #[cfg(not(test))]
+        Err("accepted-config authority unavailable".to_string())
     }
 
     #[must_use]
@@ -491,9 +531,11 @@ impl ConfigTransactionController {
                     // A confirmed gNMI candidate is derived from the live
                     // config. Fence external declarations before that
                     // construction can consult any rpol or dataset path.
-                    self.reject_confirmed_current_external_sources()
-                        .await
-                        .map_err(apply_error_to_gnmi_set_error)?;
+                    if self.confirm_v2_launch.is_none() {
+                        self.reject_confirmed_current_external_sources()
+                            .await
+                            .map_err(apply_error_to_gnmi_set_error)?;
+                    }
                 }
                 None => {
                     self.reject_if_pending("gnmi.gNMI/Set")
@@ -560,8 +602,10 @@ impl ConfigTransactionController {
         confirmed: Option<ConfirmedApplyMode>,
     ) -> Result<proto::ConfigTransactionApplyResponse, ConfigTransactionApplyError> {
         if let Some(confirmed) = confirmed {
-            self.reject_confirmed_external_sources(&request.candidate_toml)
-                .await?;
+            if self.confirm_v2_launch.is_none() {
+                self.reject_confirmed_external_sources(&request.candidate_toml)
+                    .await?;
+            }
             self.begin_confirmed_apply(&confirmed.confirm_id).await?;
             let result = self
                 .apply_confirmed_locked(request, confirmed.clone(), None)
@@ -585,6 +629,10 @@ impl ConfigTransactionController {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "confirmed apply keeps one auditable publication-to-pending-state sequence"
+    )]
     async fn apply_confirmed_locked(
         &self,
         request: proto::ApplyConfigTransactionRequest,
@@ -594,19 +642,15 @@ impl ConfigTransactionController {
             Arc<AcceptedConfigSnapshot>,
         )>,
     ) -> Result<proto::ConfigTransactionApplyResponse, ConfigTransactionApplyError> {
-        let rollback_config = self
-            .accepted_runtime_snapshot()
+        let prior_snapshot = self
+            .accepted_prior_snapshot()
             .await
             .map_err(ConfigTransactionApplyError::Unavailable)?;
-        // Rendered as a persisted document, not a bare snapshot: the boot-time
-        // revert writes these bytes straight back over the operator's config
-        // file, so they have to be a file the daemon would have written.
-        let rollback_toml =
-            crate::config::persisted_config_document(&rollback_config).map_err(|error| {
-                ConfigTransactionApplyError::Internal(format!(
-                    "failed to serialize confirmed transaction rollback snapshot: {error}"
-                ))
-            })?;
+        let rollback_config = prior_snapshot.config();
+        // The immutable accepted snapshot owns the exact normalized bytes and
+        // source manifest used by both the journal and live rollback.  Never
+        // rerender or reconstruct provenance after this point.
+        let rollback_toml = prior_snapshot.normalized_toml().to_string();
 
         // ADR-0113: a confirmed transaction may TIGHTEN an outbound prefix
         // maximum, because its automatic undo only loosens and a loosening is
@@ -636,7 +680,28 @@ impl ConfigTransactionController {
         // inside the confirm window is repaired by the boot-time revert. If
         // the journal cannot be written, refuse the confirmed apply up front
         // (nothing has committed yet) rather than run an unprotected window.
-        if let Some(journal_path) = &self.deps.confirm_journal_path {
+        let v2_files = if let Some(launch) = &self.confirm_v2_launch {
+            let journal_path = self.deps.confirm_journal_path.as_ref().ok_or_else(|| {
+                ConfigTransactionApplyError::Internal(
+                    "refusing confirmed apply: v2 journal storage is unavailable".to_string(),
+                )
+            })?;
+            Some(Arc::new(
+                launch
+                    .publish(
+                        journal_path,
+                        &confirmed.confirm_id,
+                        deadline_unix_seconds,
+                        &prior_snapshot,
+                    )
+                    .map_err(|error| {
+                        ConfigTransactionApplyError::Internal(format!(
+                            "refusing confirmed apply: v2 pending authority publication failed ({:?}); inspect owner-only pending storage",
+                            error.kind()
+                        ))
+                    })?,
+            ))
+        } else if let Some(journal_path) = &self.deps.confirm_journal_path {
             crate::confirm_journal::write(
                 journal_path,
                 &crate::confirm_journal::ConfirmJournal {
@@ -652,7 +717,10 @@ impl ConfigTransactionController {
                     journal_path.display()
                 ))
             })?;
-        }
+            None
+        } else {
+            None
+        };
 
         let mut response = match apply_config_transaction_locked_with_preloaded(
             &self.deps, request, preloaded,
@@ -686,12 +754,22 @@ impl ConfigTransactionController {
                 // Provably nothing committed — a stale journal would only
                 // trigger a harmless same-content boot revert, but clean it
                 // up anyway.
-                self.remove_confirm_journal_best_effort("confirmed apply failed");
+                self.cleanup_uncommitted_authority(
+                    &confirmed.confirm_id,
+                    v2_files.as_deref(),
+                    "confirmed apply failed",
+                )
+                .await?;
                 return Err(failure.error);
             }
         };
         if response.status != proto::ConfigTransactionPlanStatus::Committable as i32 {
-            self.remove_confirm_journal_best_effort("confirmed apply did not commit");
+            self.cleanup_uncommitted_authority(
+                &confirmed.confirm_id,
+                v2_files.as_deref(),
+                "confirmed apply did not commit",
+            )
+            .await?;
             return Ok(response);
         }
 
@@ -706,6 +784,8 @@ impl ConfigTransactionController {
             committed_sections: response.committed_sections.clone(),
             runtime_snapshot_token: response.runtime_snapshot_token.clone(),
             rollback_failed: None,
+            prior_snapshot: self.confirm_v2_launch.as_ref().map(|_| prior_snapshot),
+            v2_files,
         };
         let confirmation = pending_confirmation_proto(
             &pending,
@@ -791,8 +871,20 @@ impl ConfigTransactionController {
         // state: if deletion fails the confirm must fail while the fence and
         // timer stay armed — a leftover journal would boot-revert a config
         // the operator explicitly confirmed.
-        let _ = self.matching_pending(&confirm_id).await?;
-        if let Some(journal_path) = &self.deps.confirm_journal_path {
+        let matched = self.matching_pending(&confirm_id).await?;
+        if let Some(files) = &matched.v2_files {
+            let journal_cleanup_failed = files.terminal_cleanup().map_err(|error| {
+                ConfigTransactionApplyError::Internal(format!(
+                    "confirm not recorded: durable v2 locator removal failed ({:?}); the transaction is still pending and will roll back on timeout",
+                    error.kind()
+                ))
+            })?;
+            if journal_cleanup_failed {
+                warn!(
+                    "confirmed transaction is terminal, but exact v2 journal residue cleanup failed"
+                );
+            }
+        } else if let Some(journal_path) = &self.deps.confirm_journal_path {
             crate::confirm_journal::remove(journal_path).map_err(|error| {
                 ConfigTransactionApplyError::Internal(format!(
                     "confirm not recorded: failed to remove the commit-confirm revert journal {}: {error}; \
@@ -851,7 +943,7 @@ impl ConfigTransactionController {
                         "Aborted confirmed config transaction and restored the previous runtime config.",
                         true,
                     )
-                    .await;
+                    .await?;
                 self.metrics
                     .record_config_transaction_lifecycle("abort", "success");
                 Ok(proto::AbortConfigTransactionResponse {
@@ -1258,7 +1350,7 @@ impl ConfigTransactionController {
                         "Confirmed config transaction timed out and was automatically rolled back.",
                         false,
                     )
-                    .await;
+                    .await?;
                     self.metrics
                         .record_config_transaction_lifecycle("auto_revert", "success");
                     info!(confirm_id, "confirmed config transaction auto-reverted");
@@ -1345,23 +1437,36 @@ impl ConfigTransactionController {
         &self,
         pending: &PendingConfirmedTransaction,
     ) -> Result<proto::ConfigTransactionApplyResponse, ConfigTransactionApplyError> {
-        let response = apply_config_transaction_locked(
-            &self.deps,
-            proto::ApplyConfigTransactionRequest {
-                candidate_toml: pending.rollback_toml.clone(),
-                expected_runtime_snapshot_token: pending
-                    .rollback_expected_runtime_snapshot_token
-                    .clone(),
-                client_request_id: format!("confirmed-rollback:{}", pending.confirm_id),
-                comment: "confirmed transaction rollback".to_string(),
-                confirm_id: String::new(),
-                confirm_timeout_seconds: 0,
-            },
-        )
-        .await
-        // A failed rollback keeps the transaction pending with the journal
-        // retained regardless of ambiguity, so the flag adds nothing here.
-        .map_err(|failure| failure.error)?;
+        let request = proto::ApplyConfigTransactionRequest {
+            candidate_toml: pending.rollback_toml.clone(),
+            expected_runtime_snapshot_token: pending
+                .rollback_expected_runtime_snapshot_token
+                .clone(),
+            client_request_id: format!("confirmed-rollback:{}", pending.confirm_id),
+            comment: "confirmed transaction rollback".to_string(),
+            confirm_id: String::new(),
+            confirm_timeout_seconds: 0,
+        };
+        let result = if let Some(prior) = &pending.prior_snapshot {
+            let plan = self
+                .plan_preloaded_snapshot(
+                    prior.clone(),
+                    pending.rollback_expected_runtime_snapshot_token.clone(),
+                )
+                .await?;
+            apply_config_transaction_locked_with_preloaded(
+                &self.deps,
+                request,
+                Some((plan, prior.clone())),
+            )
+            .await
+        } else {
+            apply_config_transaction_locked(&self.deps, request).await
+        };
+        let response = result
+            // A failed rollback keeps the transaction pending with the journal
+            // retained regardless of ambiguity, so the flag adds nothing here.
+            .map_err(|failure| failure.error)?;
         // A rollback whose re-apply plan did not commit leaves the
         // aborted/expired candidate running — that is a rollback failure,
         // not a success, and the caller must record AbortFailed /
@@ -1405,6 +1510,37 @@ impl ConfigTransactionController {
         }
     }
 
+    async fn cleanup_uncommitted_authority(
+        &self,
+        confirm_id: &str,
+        v2_files: Option<&crate::confirm_journal::v2::PendingFiles>,
+        context: &'static str,
+    ) -> Result<(), ConfigTransactionApplyError> {
+        let Some(files) = v2_files else {
+            self.remove_confirm_journal_best_effort(context);
+            return Ok(());
+        };
+        match files.terminal_cleanup() {
+            Ok(journal_cleanup_failed) => {
+                if journal_cleanup_failed {
+                    warn!(
+                        context,
+                        "v2 commit-confirm locator is durably absent, but exact journal residue cleanup failed"
+                    );
+                }
+                Ok(())
+            }
+            Err(error) => {
+                let mut state = self.state.lock().await;
+                state.ambiguous_failure_confirm_id = Some(confirm_id.to_string());
+                Err(ConfigTransactionApplyError::Internal(format!(
+                    "v2 commit-confirm operation is nonterminal because durable locator removal failed ({:?}); config mutations remain blocked",
+                    error.kind()
+                )))
+            }
+        }
+    }
+
     /// Consume the pending transaction after a SUCCESSFUL abort/auto-revert
     /// rollback. The rollback re-persisted the pre-transaction config, so the
     /// journal is consumed. A FAILED rollback never reaches here — it keeps
@@ -1417,15 +1553,28 @@ impl ConfigTransactionController {
         runtime_snapshot_token: String,
         human_text: &'static str,
         abort_timer: bool,
-    ) {
-        self.remove_confirm_journal_best_effort("post-rollback cleanup");
+    ) -> Result<(), ConfigTransactionApplyError> {
+        let matched = self.matching_pending(confirm_id).await?;
+        if let Some(files) = &matched.v2_files {
+            let journal_cleanup_failed = files.terminal_cleanup().map_err(|error| {
+                ConfigTransactionApplyError::Internal(format!(
+                    "rollback restored the prior config but remains nonterminal because durable v2 locator removal failed ({:?})",
+                    error.kind()
+                ))
+            })?;
+            if journal_cleanup_failed {
+                warn!("rollback is terminal, but exact v2 journal residue cleanup failed");
+            }
+        } else {
+            self.remove_confirm_journal_best_effort("post-rollback cleanup");
+        }
         let mut state = self.state.lock().await;
         let Some(pending) = state.pending.take() else {
-            return;
+            return Ok(());
         };
         if pending.confirm_id != confirm_id {
             state.pending = Some(pending);
-            return;
+            return Ok(());
         }
         let timer = state.timer.take();
         if abort_timer && let Some(timer) = timer {
@@ -1440,6 +1589,7 @@ impl ConfigTransactionController {
             runtime_snapshot_token,
             human_text: human_text.to_string(),
         });
+        Ok(())
     }
 
     /// LAN-277: record a FAILED abort/auto-revert rollback on the still-pending
@@ -1463,7 +1613,14 @@ impl ConfigTransactionController {
             // generic never-confirmed message. Best-effort: the journal
             // (with the proven rollback snapshot) is already on disk, and
             // failing to annotate it must not mask the rollback failure.
-            if let Some(journal_path) = &self.deps.confirm_journal_path
+            if let Some(files) = &pending.v2_files {
+                if let Err(error) = files.record_rollback_failed() {
+                    warn!(
+                        error_kind = ?error.kind(),
+                        "failed to record rollback failure in the v2 commit-confirm journal"
+                    );
+                }
+            } else if let Some(journal_path) = &self.deps.confirm_journal_path
                 && let Err(error) = crate::confirm_journal::write(
                     journal_path,
                     &crate::confirm_journal::ConfirmJournal {
@@ -3328,7 +3485,12 @@ remote_asn = 65002
         assert_eq!(
             production.matches(".accepted_runtime_snapshot()").count(),
             2,
-            "gNMI Set and confirmed rollback must independently use accepted authority"
+            "gNMI Set construction plus the test-only authority fallback use the accepted helper"
+        );
+        assert_eq!(
+            production.matches(".accepted_prior_snapshot()").count(),
+            1,
+            "confirmed rollback must bind one accepted provenance generation"
         );
         assert!(!production.contains("use crate::reload::runtime_config_snapshot;"));
 
@@ -3439,6 +3601,60 @@ remote_asn = 65002
             assert!(snapshot.policy.rpol.policies.is_empty());
         }
         assert!(Arc::strong_count(&desired_handle) >= 1);
+    }
+
+    #[tokio::test]
+    async fn accepted_prior_snapshot_keeps_one_provenance_generation_across_await() {
+        // Destructive proof: borrowing accepted_rx after the peer-manager await
+        // labels the old runtime config with the replacement source manifest
+        // sent while the reply is in flight, changing source_sha256 below.
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("policy.rpol");
+        let config_path = dir.path().join("rustbgpd.toml");
+        std::fs::write(&source, "policy p { term rest { accept } }\n").unwrap();
+        std::fs::write(
+            &config_path,
+            base_toml(&format!(
+                "[policy]\nrpol_files = [{:?}]\n",
+                source.display().to_string()
+            )),
+        )
+        .unwrap();
+        let prior = Arc::new(AcceptedConfigSnapshot::load(&config_path, None).unwrap());
+        std::fs::write(&source, "policy p { term rest { reject } }\n").unwrap();
+        let replacement = Arc::new(AcceptedConfigSnapshot::load(&config_path, None).unwrap());
+        assert_ne!(prior.source_sha256(), replacement.source_sha256());
+
+        let runtime_toml = prior.normalized_toml().to_string();
+        let runtime_rpol_files = prior.config_ref().policy.rpol_files.clone();
+        let runtime_rpol = prior.config_ref().policy.rpol.clone();
+        let prior_source_sha256 = prior.source_sha256();
+        let replacement_source_sha256 = replacement.source_sha256();
+        let (accepted_tx, accepted_rx) = watch::channel(prior);
+        let (peer_tx, mut peer_rx) = mpsc::channel(1);
+        tokio::spawn(async move {
+            let Some(PeerManagerCommand::RuntimeConfigSnapshot { reply }) = peer_rx.recv().await
+            else {
+                panic!("accepted prior helper must request the runtime snapshot");
+            };
+            accepted_tx.send(replacement).unwrap();
+            reply
+                .send(Ok(rustbgpd_api::peer_types::RuntimeConfigSnapshotReply {
+                    toml: runtime_toml,
+                    rpol_files: runtime_rpol_files,
+                    rpol: runtime_rpol,
+                }))
+                .unwrap();
+        });
+        let controller = ConfigTransactionController::new_accepted(
+            deps_value(None, peer_tx, None, Vec::new()),
+            BgpMetrics::new(),
+            accepted_rx,
+        );
+
+        let snapshot = controller.accepted_prior_snapshot().await.unwrap();
+        assert_eq!(snapshot.source_sha256(), prior_source_sha256);
+        assert_ne!(snapshot.source_sha256(), replacement_source_sha256);
     }
 
     fn config_transaction_lifecycle_metric(
@@ -4853,6 +5069,431 @@ remote_asn = 65010
     fn read_journal(path: &std::path::Path) -> crate::confirm_journal::ConfirmJournal {
         serde_json::from_str(&std::fs::read_to_string(path).expect("journal must be readable"))
             .expect("journal must parse")
+    }
+
+    struct V2FibHarness {
+        _root: tempfile::TempDir,
+        controller: ConfigTransactionController,
+        source: std::path::PathBuf,
+        journal: std::path::PathBuf,
+        locator: std::path::PathBuf,
+        fib_state: Arc<Mutex<Vec<FibTableConfig>>>,
+        seen_preloaded: Arc<Mutex<Option<Arc<AcceptedConfigSnapshot>>>>,
+        ack_task: tokio::task::JoinHandle<()>,
+    }
+
+    struct V2ExternalFenceHarness {
+        _root: tempfile::TempDir,
+        controller: ConfigTransactionController,
+        current_toml: String,
+        journal: std::path::PathBuf,
+        locator: std::path::PathBuf,
+    }
+
+    fn v2_external_fence_harness(status: RuntimeConfigTransactionStatus) -> V2ExternalFenceHarness {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempfile::tempdir().unwrap();
+        let config_dir = root.path().join("config");
+        let state_dir = root.path().join("state");
+        std::fs::create_dir(&config_dir).unwrap();
+        std::fs::create_dir(&state_dir).unwrap();
+        std::fs::set_permissions(&config_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let source = config_dir.join("policy.rpol");
+        std::fs::write(&source, "policy p { term rest { accept } }\n").unwrap();
+        let config_path = config_dir.join("rustbgpd.toml");
+        std::fs::write(
+            &config_path,
+            base_toml(&format!(
+                "[policy]\nrpol_files = [{:?}]\n",
+                source.display().to_string()
+            )),
+        )
+        .unwrap();
+        let accepted = Arc::new(AcceptedConfigSnapshot::load(&config_path, None).unwrap());
+        let current_toml = accepted.normalized_toml().to_string();
+        let runtime_rpol_files = accepted.config_ref().policy.rpol_files.clone();
+        let runtime_rpol = accepted.config_ref().policy.rpol.clone();
+        let (_accepted_tx, accepted_rx) = watch::channel(accepted);
+        let mut plan = plan(status, vec!["[[neighbors]] modify".to_string()]);
+        if status == RuntimeConfigTransactionStatus::Rejected {
+            plan.unsupported_sections = vec!["[policy] external inputs".to_string()];
+        }
+        let (peer_tx, mut peer_rx) = mpsc::channel(8);
+        let runtime_toml = current_toml.clone();
+        tokio::spawn(async move {
+            while let Some(command) = peer_rx.recv().await {
+                match command {
+                    PeerManagerCommand::RuntimeConfigSnapshot { reply } => {
+                        let _ =
+                            reply.send(Ok(rustbgpd_api::peer_types::RuntimeConfigSnapshotReply {
+                                toml: runtime_toml.clone(),
+                                rpol_files: runtime_rpol_files.clone(),
+                                rpol: runtime_rpol.clone(),
+                            }));
+                    }
+                    PeerManagerCommand::PlanConfigTransaction { reply, .. } => {
+                        let _ = reply.send(Ok(plan.clone()));
+                    }
+                    _ => panic!("unexpected peer-manager command in v2 external fence harness"),
+                }
+            }
+        });
+        let journal = state_dir.join(crate::confirm_journal::JOURNAL_FILE_NAME);
+        let launch = crate::confirm_journal::v2::LaunchIdentity::resolve(&config_path).unwrap();
+        let locator = launch.locator_path();
+        let controller = ConfigTransactionController::new_accepted(
+            FibTableControlDeps {
+                confirm_journal_path: Some(journal.clone()),
+                ..deps_value(None, peer_tx, None, Vec::new())
+            },
+            BgpMetrics::new(),
+            accepted_rx,
+        )
+        .with_confirm_v2_launch(launch);
+        V2ExternalFenceHarness {
+            _root: root,
+            controller,
+            current_toml,
+            journal,
+            locator,
+        }
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the focused harness keeps one complete external-source FIB transaction fixture"
+    )]
+    async fn v2_external_fib_harness(timeout_seconds: u32) -> V2FibHarness {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempfile::tempdir().unwrap();
+        let config_dir = root.path().join("config");
+        let state_dir = root.path().join("state");
+        std::fs::create_dir(&config_dir).unwrap();
+        std::fs::create_dir(&state_dir).unwrap();
+        std::fs::set_permissions(&config_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let source = config_dir.join("policy.rpol");
+        std::fs::write(&source, "policy p { term rest { accept } }\n").unwrap();
+        let source_text = source.display();
+        let previous_toml = base_toml(&format!(
+            r#"
+[policy]
+rpol_files = ["{source_text}"]
+
+[[fib_tables]]
+name = "edge"
+table_id = 1000
+metric = 200
+families = ["ipv4_unicast"]
+"#
+        ));
+        let candidate_toml = base_toml(&format!(
+            r#"
+[policy]
+rpol_files = ["{source_text}"]
+
+[[fib_tables]]
+name = "core"
+table_id = 1001
+metric = 200
+families = ["ipv4_unicast"]
+"#
+        ));
+        let config_path = config_dir.join("rustbgpd.toml");
+        std::fs::write(&config_path, &previous_toml).unwrap();
+        let accepted = Arc::new(AcceptedConfigSnapshot::load(&config_path, None).unwrap());
+        let runtime_rpol_files = accepted.config_ref().policy.rpol_files.clone();
+        let (_accepted_tx, accepted_rx) = watch::channel(accepted);
+
+        let original = table("edge", 1000);
+        let replacement = table("core", 1001);
+        let fib_state = Arc::new(Mutex::new(vec![original.clone()]));
+        let (fib_tx, fib_rx) = mpsc::channel(8);
+        tokio::spawn(fake_fib_actor(fib_rx, fib_state.clone(), None));
+
+        let staged = Arc::new(Mutex::new(vec![snapshot(&original)]));
+        let (peer_tx, mut peer_rx) = mpsc::channel(16);
+        let runtime_toml = previous_toml.clone();
+        tokio::spawn(async move {
+            while let Some(command) = peer_rx.recv().await {
+                match command {
+                    PeerManagerCommand::RuntimeConfigSnapshot { reply } => {
+                        let _ =
+                            reply.send(Ok(rustbgpd_api::peer_types::RuntimeConfigSnapshotReply {
+                                toml: runtime_toml.clone(),
+                                rpol_files: runtime_rpol_files.clone(),
+                                rpol: rustbgpd_policy::rpol::RpolPolicySet::default(),
+                            }));
+                    }
+                    PeerManagerCommand::PlanConfigTransaction { reply, .. } => {
+                        let _ = reply.send(Ok(plan(
+                            RuntimeConfigTransactionStatus::Committable,
+                            vec!["[[fib_tables]]".to_string()],
+                        )));
+                    }
+                    PeerManagerCommand::StageFibTables { tables, reply } => {
+                        *staged.lock().await = tables;
+                        let _ = reply.send(Ok(()));
+                    }
+                    PeerManagerCommand::SetFibTablesSnapshot { tables, reply } => {
+                        *staged.lock().await = tables;
+                        let _ = reply.send(());
+                    }
+                    _ => panic!("unexpected peer-manager command in v2 FIB harness"),
+                }
+            }
+        });
+
+        let seen_preloaded = Arc::new(Mutex::new(None));
+        let seen = seen_preloaded.clone();
+        let (internal_tx, mut internal_rx) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Some(command) = internal_rx.recv().await {
+                let InternalCommand::PlanAcceptedSnapshot {
+                    snapshot,
+                    expected_runtime_snapshot_token,
+                    reply,
+                } = command
+                else {
+                    panic!("unexpected private command in v2 FIB harness");
+                };
+                *seen.lock().await = Some(snapshot);
+                let mut response = plan(
+                    RuntimeConfigTransactionStatus::Committable,
+                    vec!["[[fib_tables]]".to_string()],
+                );
+                response.runtime_snapshot_token =
+                    expected_runtime_snapshot_token.unwrap_or_else(|| "kv1:new:2".to_string());
+                response.post_commit_runtime_snapshot_token = "kv1:rollback:3".to_string();
+                let _ = reply.send(Ok(response));
+            }
+        });
+
+        let (config_tx, mut config_rx) = mpsc::channel(8);
+        let ack_task = tokio::spawn(async move {
+            while let Some(event) = config_rx.recv().await {
+                match event {
+                    ConfigEvent::FibTablesReplaced { ack: Some(ack), .. }
+                    | ConfigEvent::ConfigTransactionCommitted { ack: Some(ack), .. } => {
+                        ack.accept().await;
+                    }
+                    _ => panic!("unexpected persistence event in v2 FIB harness"),
+                }
+            }
+        });
+
+        let journal = state_dir.join(crate::confirm_journal::JOURNAL_FILE_NAME);
+        let launch = crate::confirm_journal::v2::LaunchIdentity::resolve(&config_path).unwrap();
+        let locator = launch.locator_path();
+        let controller = ConfigTransactionController::new_accepted(
+            FibTableControlDeps {
+                fib_cmd_tx: Some(fib_tx),
+                peer_mgr_tx: peer_tx,
+                rib_tx: None,
+                config_tx: Some(config_tx),
+                lock: Arc::new(Mutex::new(())),
+                config_mutation_gate: None,
+                startup_tables: vec![original],
+                confirm_journal_path: Some(journal.clone()),
+                config_history_dir: None,
+            },
+            BgpMetrics::new(),
+            accepted_rx,
+        )
+        .with_preloaded_planner(internal_tx)
+        .with_confirm_v2_launch(launch);
+        let response = controller
+            .clone()
+            .apply(confirmed_dynamic_request(
+                candidate_toml,
+                "external-fib",
+                timeout_seconds,
+            ))
+            .await
+            .expect("external pure-FIB confirmed apply must remain committable");
+        assert_eq!(
+            response.status,
+            proto::ConfigTransactionPlanStatus::Committable as i32
+        );
+        assert_eq!(*fib_state.lock().await, vec![replacement]);
+
+        V2FibHarness {
+            _root: root,
+            controller,
+            source,
+            journal,
+            locator,
+            fib_state,
+            seen_preloaded,
+            ack_task,
+        }
+    }
+
+    #[tokio::test]
+    async fn v2_external_fib_abort_reuses_exact_prior_and_is_terminal() {
+        // Destructive proof: restoring from rollback TOML instead of the
+        // retained Arc rereads the mutated rpol file and fails; dual-writing
+        // v1 changes the dispatch prefix; journal-first cleanup leaves the
+        // locator present at successful return.
+        let harness = v2_external_fib_harness(60).await;
+        assert!(
+            std::fs::read(&harness.journal)
+                .unwrap()
+                .starts_with(b"{\"version\":2,")
+        );
+        assert!(harness.locator.exists());
+        let prior = harness
+            .controller
+            .state
+            .lock()
+            .await
+            .pending
+            .as_ref()
+            .unwrap()
+            .prior_snapshot
+            .clone()
+            .unwrap();
+        std::fs::write(&harness.source, "policy p { term rest { reject } }\n").unwrap();
+        harness
+            .controller
+            .clone()
+            .abort(proto::AbortConfigTransactionRequest {
+                confirm_id: "external-fib".to_string(),
+            })
+            .await
+            .expect("live abort must reuse verified prior state without source reread");
+        let seen = harness.seen_preloaded.lock().await.clone().unwrap();
+        assert!(Arc::ptr_eq(&prior, &seen));
+        assert_eq!(*harness.fib_state.lock().await, vec![table("edge", 1000)]);
+        assert!(!harness.locator.exists());
+        assert!(!harness.journal.exists());
+        harness.ack_task.abort();
+    }
+
+    #[tokio::test]
+    async fn v2_activation_preserves_native_and_gnmi_full_snapshot_fence() {
+        // Destructive proof: bypassing the ordinary planner after v2 activation
+        // makes either full-snapshot request committable. Publishing after the
+        // verdict or skipping terminal cleanup leaves one of the two authority
+        // files behind after the planner's #1370 rejection.
+        let harness = v2_external_fence_harness(RuntimeConfigTransactionStatus::Rejected);
+        let mut candidate: Config = toml::from_str(&harness.current_toml).unwrap();
+        candidate.neighbors[0].description = Some("must remain fenced".to_string());
+        let response = harness
+            .controller
+            .clone()
+            .apply(confirmed_dynamic_request(
+                toml::to_string_pretty(&candidate).unwrap(),
+                "native-full-snapshot",
+                60,
+            ))
+            .await
+            .expect("#1370 refusal is a rejected plan");
+        assert_eq!(
+            response.status,
+            proto::ConfigTransactionPlanStatus::Rejected as i32
+        );
+        assert!(!harness.locator.exists());
+        assert!(!harness.journal.exists());
+
+        let Err(error) = harness
+            .controller
+            .clone()
+            .apply_gnmi_set(gnmi_set_add_neighbor_confirmed(
+                "10.0.0.3",
+                65003,
+                "gnmi-full-snapshot",
+                60,
+            ))
+            .await
+        else {
+            panic!("confirmed gNMI full-snapshot mutation remains fenced");
+        };
+        assert!(matches!(error, GnmiSetError::FailedPrecondition(_)));
+        assert!(!harness.locator.exists());
+        assert!(!harness.journal.exists());
+    }
+
+    #[tokio::test]
+    async fn v2_activation_preserves_external_true_noop_exception() {
+        // Destructive proof: restoring the pre-v2 declaration fence rejects
+        // this before planning; treating Noop as pending leaves authority or a
+        // confirmation window for a transaction that changed nothing.
+        let harness = v2_external_fence_harness(RuntimeConfigTransactionStatus::Noop);
+        let response = harness
+            .controller
+            .clone()
+            .apply(confirmed_dynamic_request(
+                harness.current_toml.clone(),
+                "external-noop",
+                60,
+            ))
+            .await
+            .expect("true no-op with unchanged external inputs remains allowed");
+        assert_eq!(
+            response.status,
+            proto::ConfigTransactionPlanStatus::Noop as i32
+        );
+        assert!(response.confirmation.is_none());
+        assert!(!harness.locator.exists());
+        assert!(!harness.journal.exists());
+        assert!(harness.controller.state.lock().await.pending.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn v2_external_fib_timeout_reuses_prior_after_source_mutation() {
+        // Destructive proof: removing the preloaded timeout lane or rebuilding
+        // provenance from current external bytes leaves the replacement table
+        // active and the locator armed after the timer fires.
+        let harness = v2_external_fib_harness(1).await;
+        let prior = harness
+            .controller
+            .state
+            .lock()
+            .await
+            .pending
+            .as_ref()
+            .unwrap()
+            .prior_snapshot
+            .clone()
+            .unwrap();
+        std::fs::write(&harness.source, "policy p { term rest { reject } }\n").unwrap();
+        tokio::time::sleep(Duration::from_millis(1_100)).await;
+        let status = harness.controller.status().await.unwrap();
+        assert_eq!(
+            status.confirmation.unwrap().status,
+            proto::ConfigTransactionConfirmationStatus::AutoReverted as i32
+        );
+        let seen = harness.seen_preloaded.lock().await.clone().unwrap();
+        assert!(Arc::ptr_eq(&prior, &seen));
+        assert_eq!(*harness.fib_state.lock().await, vec![table("edge", 1000)]);
+        assert!(!harness.locator.exists());
+        assert!(!harness.journal.exists());
+        harness.ack_task.abort();
+    }
+
+    #[tokio::test]
+    async fn v2_confirm_is_terminal_before_journal_cleanup() {
+        // Destructive proof: retaining v1's journal-as-authority rule or
+        // clearing in-memory pending state before locator durability leaves
+        // the locator present when the RPC reports permanent success.
+        let harness = v2_external_fib_harness(60).await;
+        harness
+            .controller
+            .clone()
+            .confirm(proto::ConfirmConfigTransactionRequest {
+                confirm_id: "external-fib".to_string(),
+            })
+            .await
+            .expect("confirm must durably remove v2 locator authority");
+        assert!(!harness.locator.exists());
+        assert!(!harness.journal.exists());
+        assert_eq!(*harness.fib_state.lock().await, vec![table("core", 1001)]);
+        harness.ack_task.abort();
     }
 
     #[tokio::test]

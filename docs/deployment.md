@@ -803,20 +803,36 @@ a field rename, edit the config file by hand.
 
 ### Persistent state on disk
 
-Everything in `runtime_state_dir` (default `/var/lib/rustbgpd`):
+Runtime state lives in `runtime_state_dir` (default `/var/lib/rustbgpd`). One
+commit-confirm v2 authority file instead lives beside the lexical launch config
+so startup can find it before trusting the unconfirmed candidate:
 
 Assign a distinct `runtime_state_dir` to every concurrently running rustbgpd
 daemon. The directory is single-writer runtime state; sharing it between live
 processes is unsupported even when their configuration files differ.
 
-| File | Purpose | Survives restart |
+| Path | Purpose | Survives restart |
 |---|---|---|
 | `gr-restart.toml` | Graceful Restart coordination marker. Written on clean shutdown, read on startup to set the R-bit in OPEN. | Yes |
 | `warm-bundle-v1/` | Optional owner-private shutdown checkpoint (`manifest.json` plus a content-addressed MRT artifact). Published only when `warm_cache_checkpoint_on_shutdown = true`; not restored on startup. | Yes |
-| `commit-confirm-journal.json` | Owner-private pre-transaction config snapshot for crash-safe confirmed commits; consumed by confirm/abort/timeout or boot revert. | Until the transaction is terminal |
+| `<absolute lexical config path>.commit-confirm-locator.json` | Sole v2 pending authority, published only after the journal is durable and checked before candidate contents are parsed. Launch-target metadata may be inspected while binding authority. Durable removal is the terminal point. | Until the transaction is terminal |
+| `<runtime_state_dir>/commit-confirm-journal.json` | Owner-private accepted prior snapshot: normalized TOML, external-source manifest, and digests. Exact residue cleanup after terminal locator removal is warning-only. | Until terminal cleanup; safe residue may remain |
 | `config-history/*` | Last 20 owner-private, secret-bearing legacy TOML and v2 JSON records for `rbgp config history`; newest is index 0. V2 records hash but do not archive external sources and are rollback-eligible only when live sources exactly reproduce recorded provenance. Move this directory aside before downgrading to a version without v2 support. | Yes |
 | `fib-owned.json` | FIB ownership receipt — which kernel routes the daemon installed (ADR-0061). Used to drain orphan installs on next start. | Yes |
 | `grpc.sock` | gRPC UDS endpoint (if `[global.telemetry.grpc_uds]` configured). | Recreated on start |
+
+The lexical config and journal paths are resolved to absolute identities. A
+writer or present v2 object requires daemon-owned real parents that are not
+group- or world-writable. Locator absence carries no authority and therefore
+adds no v2 ownership or mode requirement to ordinary startup; confirmed writes
+still require the documented ownership change.
+Locator, journal, and exact staging files must be daemon-owned regular files
+with mode `0600`; symlinks and special files fail closed. Do not downgrade or start an
+older binary until both the v2 locator and locator-free v2 journal residue are
+absent. Separately move the complete v2 config-history directory aside before
+the older binary starts. Production writes only v2 pending state; locator-free
+v1 journals remain a fail-closed compatibility lane, but a live v1 transaction
+must terminate before upgrade. V2 never converts or dual-writes it.
 
 Routing state is **not restored**. The optional shutdown checkpoint contains
 only eligible post-import-policy Adj-RIB-In views for future use; Loc-RIB,
