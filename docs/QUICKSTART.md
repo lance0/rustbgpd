@@ -13,10 +13,11 @@ Grab the pre-built release tarball — no Rust toolchain, no compile:
 <!-- release-install-contract:tarball:start -->
 ```bash
 SUFFIX=linux-amd64   # or linux-arm64
-curl -fLO "https://github.com/lance0/rustbgpd/releases/latest/download/rustbgpd-${SUFFIX}.tar.gz"
+TARBALL="rustbgpd-${SUFFIX}.tar.gz"
+curl -fLO "https://github.com/lance0/rustbgpd/releases/latest/download/${TARBALL}"
 curl -fLO "https://github.com/lance0/rustbgpd/releases/latest/download/checksums-${SUFFIX}.txt"
-sha256sum -c "checksums-${SUFFIX}.txt"
-tar -xzf "rustbgpd-${SUFFIX}.tar.gz"
+awk -v file="$TARBALL" '$2 == file || $2 == "./" file { print }' "checksums-${SUFFIX}.txt" | sha256sum -c -
+tar -xzf "$TARBALL"
 sudo install -m 0755 rustbgpd rbgp rs-config-render /usr/local/bin/
 
 sudo useradd --system --home-dir /var/lib/rustbgpd \

@@ -611,8 +611,8 @@ docker run --rm --entrypoint rbgp rustbgpd:dev --help
     [GitHub Releases](https://github.com/lance0/rustbgpd/releases) — each
     tag should publish version-less `rustbgpd-linux-amd64.tar.gz` and
     `rustbgpd-linux-arm64.tar.gz`, per-arch `.deb`/`.rpm` packages, the
-    `rustbgpd.cdx.json` SBOM, plus per-arch `checksums-<arch>.txt`
-    (covering tarball + packages).
+    standalone config schema, plus per-arch `checksums-<arch>.txt`
+    (covering the tarball and packages).
     Each tarball contains `rustbgpd`, `rbgp`, `rs-config-render`,
     `birdwatcher-adapter`, `LICENSE-MIT`, and `LICENSE-APACHE` plus the
     systemd unit under `share/systemd/` (presence is asserted by the
@@ -620,10 +620,14 @@ docker run --rm --entrypoint rbgp rustbgpd:dev --help
     The version-less filenames are what powers the static
     `releases/latest/download/` URLs in `docs/deployment.md`; if the
     filenames drift, deployment.md silently breaks for new operators.
-    Spot-check provenance on one asset and the image:
-    `gh attestation verify rustbgpd-linux-amd64.tar.gz --repo lance0/rustbgpd`
-    and `gh attestation verify oci://ghcr.io/lance0/rustbgpd:X.Y.Z --repo
-    lance0/rustbgpd`.
+    Download one tarball and its checksum manifest, then spot-check only that
+    file:
+
+    ```sh
+    awk -v file=rustbgpd-linux-amd64.tar.gz '$2 == file || $2 == "./" file { print }' \
+      checksums-linux-amd64.txt | sha256sum -c -
+    ```
+
 11. **Verify GitHub release notes**: check that the release created by CI has
     accurate notes. The `release` workflow extracts the matching
     `## [X.Y.Z]` block out of `CHANGELOG.md` via awk and fails the tag build

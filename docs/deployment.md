@@ -69,6 +69,10 @@ TARBALL=rustbgpd-${SUFFIX}.tar.gz
 
 curl -fL -o "$TARBALL" \
   "https://github.com/lance0/rustbgpd/releases/latest/download/${TARBALL}"
+curl -fLO \
+  "https://github.com/lance0/rustbgpd/releases/latest/download/checksums-${SUFFIX}.txt"
+awk -v file="$TARBALL" '$2 == file || $2 == "./" file { print }' \
+  "checksums-${SUFFIX}.txt" | sha256sum -c -
 tar -xzf "$TARBALL"
 sudo install -m 0755 rustbgpd rbgp rs-config-render /usr/local/bin/
 sudo install -m 0644 share/man/man1/rbgp.1 /usr/local/share/man/man1/
@@ -165,40 +169,25 @@ mutation.
 
 ### Verifying release artifacts
 
-Every release asset — both tarballs, all `.deb`/`.rpm` packages, and
-the SBOM — carries a GitHub build-provenance attestation ([SLSA
-provenance](https://slsa.dev/) signed via GitHub OIDC), created by the
-release workflow at tag time. Verify with the `gh` CLI (≥ 2.49)
-before installing:
+Each architecture has a `checksums-<arch>.txt` manifest covering its
+tarball and native packages. Select the exact downloaded filename before
+passing the row to `sha256sum`; checking the whole manifest fails when the
+other package formats have not also been downloaded:
 
 ```sh
-gh attestation verify rustbgpd-linux-amd64.tar.gz --repo lance0/rustbgpd
-gh attestation verify rustbgpd_X.Y.Z_amd64.deb --repo lance0/rustbgpd
+SUFFIX=linux-amd64
+ARTIFACT=rustbgpd-linux-amd64.tar.gz
+curl -fLO "https://github.com/lance0/rustbgpd/releases/latest/download/${ARTIFACT}"
+curl -fLO "https://github.com/lance0/rustbgpd/releases/latest/download/checksums-${SUFFIX}.txt"
+awk -v file="$ARTIFACT" '$2 == file || $2 == "./" file { print }' \
+  "checksums-${SUFFIX}.txt" | sha256sum -c -
 ```
 
-The container image is attested by digest, with the attestation pushed
-to GHCR alongside the image:
-
-```sh
-gh attestation verify oci://ghcr.io/lance0/rustbgpd:latest --repo lance0/rustbgpd
-```
-
-A successful verification proves the artifact was built by this
-repository's release workflow from the tagged commit — not rebuilt or
-modified by anyone else, including a compromised release-asset upload.
-
-A CycloneDX SBOM covering the full workspace dependency graph is
-published with each release under the stable asset name
-`rustbgpd.cdx.json` (one per release; the dependency set is identical
-across architectures and package formats):
-
-```sh
-curl -fLO https://github.com/lance0/rustbgpd/releases/latest/download/rustbgpd.cdx.json
-```
-
-The separately published crates.io libraries (`rustbgpd-wire`,
-`rustbgpd-fsm`) appear in that SBOM as workspace components; their
-crates.io releases do not carry their own SBOM documents.
+This detects a download that differs from the manifest published with the
+GitHub release; it does not independently authenticate GitHub. The committed
+`Cargo.lock` is the exact Rust dependency inventory for a tagged source tree.
+Release binaries and containers are provided under the repository's license
+terms and warranty disclaimers.
 
 ### From source
 

@@ -106,17 +106,17 @@ in CI and fails when the inventory drifts from the reviewed list.
 
 ### Notes for Integrators
 
-Manufacturers integrating rustbgpd who need to document upstream
-open-source handling (for example under the EU Cyber Resilience Act) can
-point at:
+Integrators documenting rustbgpd's upstream open-source handling can point at:
 
 - This coordinated disclosure policy, including the response timelines
   above.
 - Private vulnerability intake via GitHub private vulnerability
   reporting, enabled on the repository.
 - CVE assignment for qualifying vulnerabilities via the GHSA flow.
-- Machine-readable dependency inventory: from v0.63 onward, release
-  artifacts include an SBOM.
+- Exact dependency inventory in the committed `Cargo.lock` for every tagged
+  source tree.
+- MIT or Apache-2.0 licensing; software and release artifacts are provided
+  as-is under those licenses.
 
 ### Authentication (v1)
 
