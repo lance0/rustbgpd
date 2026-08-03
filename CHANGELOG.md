@@ -28,14 +28,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   starter config at `/etc/rustbgpd/config.toml` — install, edit the
   config, `systemctl enable --now rustbgpd`.
 
-- Release supply-chain verification: every release asset (tarballs,
-  packages, SBOM) and the GHCR image digest now carry GitHub
-  build-provenance attestations — `gh attestation verify <asset>
-  --repo lance0/rustbgpd` proves an artifact came out of this
-  repository's release workflow at the tagged commit. Each release
-  also publishes a CycloneDX SBOM of the full dependency graph as
-  `rustbgpd.cdx.json`. See "Verifying release artifacts" in
-  `docs/deployment.md`.
+- Per-architecture SHA-256 manifests cover each release tarball and its native
+  packages. The install docs select the exact downloaded filename from the
+  manifest, so tarball-only verification does not fail on absent `.deb` or
+  `.rpm` files.
 
 - The container image declares a `HEALTHCHECK` probing `rbgp --json
   health` over the daemon's local gRPC socket, so `docker ps` and

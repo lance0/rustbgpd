@@ -4,9 +4,8 @@ on:
   push:
     tags: ["v*"]
 
-# Read-only default; the `release` job alone escalates to the scopes
-# release publication needs (contents to create the release, id-token +
-# attestations for build provenance).
+# Read-only default; the `release` job alone escalates to the
+# contents scope needed to create the release.
 permissions:
   contents: read
 
@@ -223,9 +222,7 @@ jobs:
     needs: [verify-tag-version, test, build]
     runs-on: ubuntu-latest
     permissions:
-      contents: write      # create the GitHub release
-      id-token: write      # OIDC identity for provenance attestation
-      attestations: write  # store the provenance attestation
+      contents: write  # create the GitHub release
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
@@ -234,48 +231,6 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
-
-      - name: Generate CycloneDX SBOM
-        # One SBOM per release, from the workspace Cargo.lock — the
-        # dependency set is identical across both arch tarballs and the
-        # deb/rpm packages, so a single arch-independent document
-        # covers all of them. The `rustbgpd-wire` / `rustbgpd-fsm`
-        # crates published separately on crates.io appear here as
-        # workspace components; their own crates.io releases carry no
-        # separate SBOM. Published under the stable asset name
-        # `rustbgpd.cdx.json` (works with releases/latest/download/).
-        run: |
-          set -euo pipefail
-          curl -sSfL -o /tmp/syft.tgz \
-            https://github.com/anchore/syft/releases/download/v1.50.0/syft_1.50.0_linux_amd64.tar.gz
-          echo "bf7b29ff57f06da30918266a0e1c2885a8f99784798d1bdb1628886aa015d788  /tmp/syft.tgz" | sha256sum -c
-          tar -C /tmp -xzf /tmp/syft.tgz syft
-          /tmp/syft scan dir:. --select-catalogers rust \
-            -o cyclonedx-json=artifacts/rustbgpd.cdx.json
-          # Fail closed on a degenerate SBOM (catalogers drifting,
-          # lockfile not picked up).
-          python3 - <<'EOF'
-          import json, sys
-          doc = json.load(open("artifacts/rustbgpd.cdx.json"))
-          names = {c["name"] for c in doc.get("components", [])}
-          missing = {"rustbgpd", "rustbgpd-wire", "rustbgpd-fsm"} - names
-          if missing or len(names) < 100:
-              sys.exit(f"SBOM implausible: {len(names)} components, missing {missing}")
-          print(f"SBOM OK: {len(names)} components")
-          EOF
-
-      - name: Attest build provenance for release artifacts
-        # SLSA build provenance for every downloadable build product:
-        # both arch tarballs, all deb/rpm packages, and the SBOM.
-        # Operators verify with `gh attestation verify` — see
-        # docs/deployment.md "Verifying release artifacts".
-        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4
-        with:
-          subject-path: |
-            artifacts/*.tar.gz
-            artifacts/*.deb
-            artifacts/*.rpm
-            artifacts/rustbgpd.cdx.json
 
       - name: Extract CHANGELOG section for this tag
         # Pull the matching `## [X.Y.Z]` block out of CHANGELOG.md so

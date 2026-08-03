@@ -8,8 +8,7 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 
-# Read-only default; `build-and-push` alone escalates to the scopes
-# image publication + provenance attestation need.
+# Read-only default; `build-and-push` alone adds package publication.
 permissions:
   contents: read
 
@@ -54,8 +53,6 @@ jobs:
     permissions:
       contents: read
       packages: write
-      id-token: write      # OIDC identity for provenance attestation
-      attestations: write  # store the provenance attestation
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -93,21 +90,9 @@ jobs:
             'test -f /LICENSE-MIT && test -f /LICENSE-APACHE'
 
       - name: Build and push
-        id: push
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
         with:
           context: .
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-
-      - name: Attest build provenance for the image
-        # SLSA build provenance for the pushed image digest, stored in
-        # the GHCR registry so `gh attestation verify
-        # oci://ghcr.io/...` works — see docs/deployment.md
-        # "Verifying release artifacts".
-        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4
-        with:
-          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          subject-digest: ${{ steps.push.outputs.digest }}
-          push-to-registry: true
