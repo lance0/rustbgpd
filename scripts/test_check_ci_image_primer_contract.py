@@ -325,6 +325,11 @@ class PrimerContractTests(unittest.TestCase):
                 "true # cook removed",
                 0,
             ),
+            (
+                "cargo build --workspace --profile ci",
+                "true # source build removed",
+                0,
+            ),
             ("    rm -rf target\n", "", 0),
             (
                 "    cp target/ci/evpn-monitor /out/ && \\\n"
@@ -370,6 +375,16 @@ class PrimerContractTests(unittest.TestCase):
         )
         errors = validate_log(external, crates)
         self.assertTrue(any("tokio" in error for error in errors))
+
+        step_id_collision = """\
+#20 [builder-deps 2/2] RUN --mount=x cargo chef cook --workspace --profile ci --recipe-path recipe.json
+#20 CACHED
+#1 [builder 2/2] RUN --mount=x cargo build --workspace --profile ci && cp outputs
+#1 0.100    Compiling rustbgpd-wire v0.16.1 (/build/crates/wire)
+#1 DONE 1.0s
+#10 0.200    Compiling tokio v1.50.0
+"""
+        self.assertEqual([], validate_log(step_id_collision, crates))
 
 
 if __name__ == "__main__":

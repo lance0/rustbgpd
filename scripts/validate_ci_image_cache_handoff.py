@@ -34,7 +34,9 @@ def _step(log: str, stage: str, command: str) -> tuple[str, list[str]] | None:
         label = match.group("label").split()
         if stage in label and command in match.group("command"):
             step_id = match.group("id")
-            lines = [line for line in log.splitlines() if line.startswith(step_id)]
+            lines = [
+                line for line in log.splitlines() if line.startswith(f"{step_id} ")
+            ]
             return step_id, lines
     return None
 
