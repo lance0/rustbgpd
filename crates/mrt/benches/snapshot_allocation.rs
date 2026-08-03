@@ -224,6 +224,29 @@ enum Shape {
     DualFullFeed,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ScratchVariant {
+    Control,
+    Candidate,
+}
+
+impl ScratchVariant {
+    fn parse(value: &str) -> AnyResult<Self> {
+        match value {
+            "control" => Ok(Self::Control),
+            "candidate" => Ok(Self::Candidate),
+            _ => Err(invalid("scratch variant must be control or candidate")),
+        }
+    }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Control => "control",
+            Self::Candidate => "candidate",
+        }
+    }
+}
+
 impl Shape {
     const ALL: [Self; 2] = [Self::Ixp700, Self::DualFullFeed];
 
@@ -277,6 +300,7 @@ fn prove_shape_contract() {
 struct Args {
     mode: Mode,
     candidate: bool,
+    scratch_variant: Option<ScratchVariant>,
     smoke: bool,
     shape: Option<Shape>,
     commit: String,
@@ -288,6 +312,7 @@ impl Args {
         let mut raw = std::env::args().skip(1);
         let mut mode = None;
         let mut candidate = false;
+        let mut scratch_variant = None;
         let mut smoke = false;
         let mut shape = None;
         let mut commit = None;
@@ -301,6 +326,12 @@ impl Args {
                     mode = Some(Mode::parse(&argument)?);
                 }
                 "--candidate" => candidate = true,
+                "--scratch-variant" => {
+                    scratch_variant =
+                        Some(ScratchVariant::parse(&raw.next().ok_or_else(|| {
+                            invalid("--scratch-variant requires a value")
+                        })?)?);
+                }
                 "--smoke" => smoke = true,
                 "--shape" => {
                     shape = Some(Shape::parse(
@@ -322,7 +353,7 @@ impl Args {
                 }
                 "--help" | "-h" => {
                     println!(
-                        "snapshot_allocation <timing|diagnostic> [--candidate] [--smoke] \
+                        "snapshot_allocation <timing|diagnostic> [--candidate] [--scratch-variant <control|candidate>] [--smoke] \
                          [--shape <ixp-700|dual-full-feed>] [--commit SHA] \
                          [--output FILE]"
                     );
@@ -337,6 +368,7 @@ impl Args {
         Ok(Self {
             mode,
             candidate,
+            scratch_variant,
             smoke,
             shape,
             commit,
@@ -552,6 +584,7 @@ struct EncodedSample {
     elapsed_ns: Option<u64>,
     allocator: Option<AllocatorReceipt>,
     growth: Option<GrowthReceipt>,
+    attribute_scratch: Option<AttributeScratchReceipt>,
 }
 
 fn encode(fixture: &Fixture, mode: Mode, fixed_originated_time: u32) -> AnyResult<EncodedSample> {
@@ -573,6 +606,7 @@ fn encode(fixture: &Fixture, mode: Mode, fixed_originated_time: u32) -> AnyResul
                 elapsed_ns: Some(elapsed_ns),
                 allocator: None,
                 growth: None,
+                attribute_scratch: None,
             })
         }
         Mode::Diagnostic => {
@@ -610,6 +644,13 @@ fn encode(fixture: &Fixture, mode: Mode, fixed_originated_time: u32) -> AnyResul
                     growth: Some(GrowthReceipt {
                         top_level_unbounded_capacity_misses: diagnostics
                             .ordinary_output_growth_reservations,
+                    }),
+                    attribute_scratch: Some(AttributeScratchReceipt {
+                        eligible_opportunities: diagnostics
+                            .ordinary_attribute_scratch_opportunities,
+                        reuse_count: diagnostics.ordinary_attribute_scratch_reuses,
+                        retained_capacity_bytes: diagnostics
+                            .retained_attribute_scratch_capacity_bytes,
                     }),
                 })
             }
@@ -873,10 +914,19 @@ struct GrowthReceipt {
     top_level_unbounded_capacity_misses: u64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct AttributeScratchReceipt {
+    eligible_opportunities: u64,
+    reuse_count: u64,
+    retained_capacity_bytes: usize,
+}
+
 #[derive(Debug, Serialize)]
 struct ReceiptRow<'a> {
     schema_version: u8,
     variant: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scratch_variant: Option<&'static str>,
     commit: &'a str,
     mode: &'static str,
     shape: &'static str,
@@ -894,6 +944,8 @@ struct ReceiptRow<'a> {
     semantic_sha256: String,
     allocator: Option<AllocatorReceipt>,
     growth: Option<GrowthReceipt>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attribute_scratch: Option<AttributeScratchReceipt>,
     growth_path_assertion: Option<&'static str>,
 }
 
@@ -1033,13 +1085,30 @@ fn run_shape(args: &Args, shape: Shape, output: &mut dyn Write) -> AnyResult<()>
             )
             .expect("diagnostic growth path must match the declared variant")
         });
+        if let (Some(scratch), Some(variant)) = (&encoded.attribute_scratch, args.scratch_variant) {
+            assert_eq!(
+                scratch.eligible_opportunities,
+                fixture.routes.len() as u64 * 6
+            );
+            if variant == ScratchVariant::Candidate {
+                assert_eq!(scratch.reuse_count, scratch.eligible_opportunities);
+                assert!(scratch.retained_capacity_bytes <= 131_072);
+            } else {
+                assert_eq!(scratch.reuse_count, 0, "control must not reuse scratch");
+                assert_eq!(
+                    scratch.retained_capacity_bytes, 0,
+                    "control retains no scratch"
+                );
+            }
+        }
         let row = ReceiptRow {
-            schema_version: 2,
+            schema_version: if args.scratch_variant.is_some() { 3 } else { 2 },
             variant: if args.candidate {
                 "candidate"
             } else {
                 "control"
             },
+            scratch_variant: args.scratch_variant.map(ScratchVariant::as_str),
             commit: &args.commit,
             mode: args.mode.as_str(),
             shape: shape.as_str(),
@@ -1057,6 +1126,7 @@ fn run_shape(args: &Args, shape: Shape, output: &mut dyn Write) -> AnyResult<()>
             semantic_sha256: validation.semantic_sha256,
             allocator: encoded.allocator,
             growth: encoded.growth,
+            attribute_scratch: args.scratch_variant.and(encoded.attribute_scratch),
             growth_path_assertion,
         };
         serde_json::to_writer(&mut *output, &row)?;

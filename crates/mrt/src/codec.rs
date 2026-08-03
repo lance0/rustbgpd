@@ -61,6 +61,12 @@ pub struct SnapshotAllocationDiagnostics {
     /// Attribute child buffers and every buffer carrying a warm-snapshot
     /// budget are excluded.
     pub ordinary_output_growth_reservations: u64,
+    /// Ordinary non-MP attributes that could use a reusable scratch buffer.
+    pub ordinary_attribute_scratch_opportunities: u64,
+    /// Opportunities served by retained scratch storage (zero in the control).
+    pub ordinary_attribute_scratch_reuses: u64,
+    /// Retained attribute scratch capacity after the snapshot (zero in control).
+    pub retained_attribute_scratch_capacity_bytes: usize,
 }
 
 /// Shared hard bound and cooperative cancellation contract for warm encoding.
@@ -215,6 +221,8 @@ struct EncodeBuffer<'a> {
     snapshot_output: bool,
     #[cfg(any(test, feature = "snapshot-allocation-diagnostics"))]
     snapshot_allocation_probe: Option<&'a Cell<u64>>,
+    #[cfg(any(test, feature = "snapshot-allocation-diagnostics"))]
+    attribute_scratch_opportunities_probe: Option<&'a Cell<u64>>,
 }
 
 impl<'a> EncodeBuffer<'a> {
@@ -226,6 +234,8 @@ impl<'a> EncodeBuffer<'a> {
             snapshot_output: false,
             #[cfg(any(test, feature = "snapshot-allocation-diagnostics"))]
             snapshot_allocation_probe: None,
+            #[cfg(any(test, feature = "snapshot-allocation-diagnostics"))]
+            attribute_scratch_opportunities_probe: None,
         }
     }
 
@@ -237,6 +247,8 @@ impl<'a> EncodeBuffer<'a> {
             snapshot_output: true,
             #[cfg(any(test, feature = "snapshot-allocation-diagnostics"))]
             snapshot_allocation_probe: None,
+            #[cfg(any(test, feature = "snapshot-allocation-diagnostics"))]
+            attribute_scratch_opportunities_probe: None,
         }
     }
 
@@ -252,12 +264,20 @@ impl<'a> EncodeBuffer<'a> {
             snapshot_output: false,
             #[cfg(any(test, feature = "snapshot-allocation-diagnostics"))]
             snapshot_allocation_probe: None,
+            #[cfg(any(test, feature = "snapshot-allocation-diagnostics"))]
+            attribute_scratch_opportunities_probe: None,
         }
     }
 
     #[cfg(any(test, feature = "snapshot-allocation-diagnostics"))]
     fn with_snapshot_allocation_probe(mut self, probe: &'a Cell<u64>) -> Self {
         self.snapshot_allocation_probe = Some(probe);
+        self
+    }
+
+    #[cfg(any(test, feature = "snapshot-allocation-diagnostics"))]
+    fn with_attribute_scratch_opportunities_probe(mut self, probe: &'a Cell<u64>) -> Self {
+        self.attribute_scratch_opportunities_probe = Some(probe);
         self
     }
 
@@ -805,8 +825,18 @@ fn encode_route_mrt_attributes(
             let IpAddr::V4(next_hop) = route.next_hop else {
                 unreachable!("IPv4 next-hop profile checked above")
             };
+            #[cfg(any(test, feature = "snapshot-allocation-diagnostics"))]
+            if let Some(probe) = buf.attribute_scratch_opportunities_probe {
+                probe.set(probe.get().saturating_add(1));
+            }
             encode_one_mrt_rib_attribute(&PathAttribute::NextHop(next_hop), buf)?;
             injected = true;
+        }
+        #[cfg(any(test, feature = "snapshot-allocation-diagnostics"))]
+        if !matches!(attr, PathAttribute::MpReachNlri(_))
+            && let Some(probe) = buf.attribute_scratch_opportunities_probe
+        {
+            probe.set(probe.get().saturating_add(1));
         }
         encode_one_mrt_rib_attribute(attr, buf)?;
     }
@@ -814,6 +844,10 @@ fn encode_route_mrt_attributes(
         let IpAddr::V4(next_hop) = route.next_hop else {
             unreachable!("IPv4 next-hop profile checked above")
         };
+        #[cfg(any(test, feature = "snapshot-allocation-diagnostics"))]
+        if let Some(probe) = buf.attribute_scratch_opportunities_probe {
+            probe.set(probe.get().saturating_add(1));
+        }
         encode_one_mrt_rib_attribute(&PathAttribute::NextHop(next_hop), buf)?;
     } else if !inject_ipv4_next_hop {
         encode_mrt_mp_reach(route.next_hop, route.link_local_next_hop, buf)?;
@@ -1138,6 +1172,7 @@ pub fn encode_snapshot_with_allocation_diagnostics(
     fixed_originated_time: u32,
 ) -> Result<(Vec<u8>, SnapshotAllocationDiagnostics), EncodeError> {
     let ordinary_output_growth_reservations = Cell::new(0);
+    let ordinary_attribute_scratch_opportunities = Cell::new(0);
     let snapshot = encode_snapshot_inner::<true>(
         collector_bgp_id,
         "",
@@ -1148,12 +1183,19 @@ pub fn encode_snapshot_with_allocation_diagnostics(
         None,
         None,
         fixed_originated_time,
-        Some(&ordinary_output_growth_reservations),
+        Some((
+            &ordinary_output_growth_reservations,
+            &ordinary_attribute_scratch_opportunities,
+        )),
     )?;
     Ok((
         snapshot,
         SnapshotAllocationDiagnostics {
             ordinary_output_growth_reservations: ordinary_output_growth_reservations.get(),
+            ordinary_attribute_scratch_opportunities: ordinary_attribute_scratch_opportunities
+                .get(),
+            ordinary_attribute_scratch_reuses: 0,
+            retained_attribute_scratch_capacity_bytes: 0,
         },
     ))
 }
@@ -1350,13 +1392,15 @@ fn encode_snapshot_inner<const FIX_ORIGINATED_TIME: bool>(
     budget: Option<&WarmSnapshotBudget>,
     fixed_originated_time: u32,
     #[cfg(any(test, feature = "snapshot-allocation-diagnostics"))]
-    snapshot_allocation_probe: Option<&Cell<u64>>,
+    snapshot_allocation_probes: Option<(&Cell<u64>, &Cell<u64>)>,
 ) -> Result<Vec<u8>, EncodeError> {
     let mut buf = Vec::new();
     let mut output = EncodeBuffer::snapshot_output(&mut buf, budget);
     #[cfg(any(test, feature = "snapshot-allocation-diagnostics"))]
-    if let Some(probe) = snapshot_allocation_probe {
-        output = output.with_snapshot_allocation_probe(probe);
+    if let Some((growth, attributes)) = snapshot_allocation_probes {
+        output = output
+            .with_snapshot_allocation_probe(growth)
+            .with_attribute_scratch_opportunities_probe(attributes);
     }
     output.check()?;
     // 1. Build effective peer list from explicit peers + any route-origin peers.
@@ -1731,6 +1775,25 @@ mod tests {
             .with_snapshot_allocation_probe(&probe);
         bounded.push(1).unwrap();
         assert_eq!(probe.get(), 1, "bounded top-level growth is excluded");
+    }
+
+    #[test]
+    fn attribute_scratch_probe_excludes_standalone_and_direct_mp_reach_paths() {
+        let probe = Cell::new(0);
+        let mut bytes = Vec::new();
+        let mut output =
+            EncodeBuffer::new(&mut bytes, None).with_attribute_scratch_opportunities_probe(&probe);
+        encode_mrt_rib_attributes(
+            &[PathAttribute::Origin(rustbgpd_wire::Origin::Igp)],
+            &mut output,
+        )
+        .unwrap();
+        encode_mrt_mp_reach(IpAddr::V4(Ipv4Addr::LOCALHOST), None, &mut output).unwrap();
+        assert_eq!(
+            probe.get(),
+            0,
+            "standalone and direct MP_REACH call sites do not opt in"
+        );
     }
 
     #[test]
@@ -2344,6 +2407,7 @@ mod tests {
             peer_addr,
             peer_addr,
         );
+        let expected_ordinary_opportunities = route.attributes.len() as u64 + 1;
         let evpn = make_evpn_macip(peer_addr, peer_addr);
         let (data, diagnostics) = encode_snapshot_with_allocation_diagnostics(
             Ipv4Addr::new(192, 0, 2, 1),
@@ -2355,6 +2419,10 @@ mod tests {
         )
         .unwrap();
         assert!(diagnostics.ordinary_output_growth_reservations > 0);
+        assert_eq!(
+            diagnostics.ordinary_attribute_scratch_opportunities, expected_ordinary_opportunities,
+            "EVPN attributes and MP_REACH must not enter the ordinary-route probe"
+        );
 
         let mut reader = SnapshotReader::new(&data).unwrap();
         let mut saw_unicast = false;
