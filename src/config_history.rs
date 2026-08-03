@@ -52,7 +52,7 @@ pub fn record_accepted(dir: &Path, snapshot: &AcceptedConfigSnapshot) -> io::Res
     v2::record_v2(dir, snapshot.normalized_toml(), stored_manifest(snapshot))
 }
 
-fn stored_manifest(snapshot: &AcceptedConfigSnapshot) -> v2::Manifest {
+pub(crate) fn stored_manifest(snapshot: &AcceptedConfigSnapshot) -> v2::Manifest {
     let manifest = snapshot.source_manifest();
     v2::Manifest {
         toml_sha256: manifest.toml_sha256,

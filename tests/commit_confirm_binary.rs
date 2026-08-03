@@ -4,22 +4,26 @@
 //! default runtime-dir UDS listener, then SIGKILLs the daemon to prove the
 //! boot-time revert journal closes the "confirmed-by-restart" hole:
 //!
-//! - unconfirmed window + SIGKILL → restart boots the PREVIOUS config, saves
-//!   the unconfirmed candidate aside, consumes the journal, and prints the
-//!   loud banner;
-//! - confirm + SIGKILL → the new config is retained and no journal remains;
-//! - in-process timeout auto-revert → the journal is consumed;
+//! - unconfirmed window + SIGKILL → restart follows the config-adjacent v2
+//!   locator, boots the PREVIOUS config, saves the unconfirmed candidate aside,
+//!   consumes both pending files, and prints a path-redacted loud banner;
+//! - confirm + SIGKILL → the new config is retained and no v2 pending files
+//!   remain;
+//! - in-process timeout auto-revert → both v2 pending files are consumed;
 //! - v2 history survives restart and restores only after source verification
 //!   is available;
-//! - torn journal on disk → boot refuses, naming both files.
+//! - a torn legacy journal with no v2 locator → boot still refuses, naming
+//!   both legacy files.
 
 use std::fs::File;
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
 const JOURNAL_FILE_NAME: &str = "commit-confirm-journal.json";
+const LOCATOR_SUFFIX: &str = ".commit-confirm-locator.json";
 
 struct Daemon {
     child: Child,
@@ -128,6 +132,7 @@ struct Lab {
     config_path: PathBuf,
     candidate_path: PathBuf,
     journal_path: PathBuf,
+    locator_path: PathBuf,
     grpc_addr: String,
     dir: PathBuf,
 }
@@ -170,9 +175,19 @@ remote_asn = 65010
 
 /// Set up config + candidate files in `dir` and return the paths.
 fn lab(dir: &Path) -> Lab {
+    // Causal destructive-red proof: removing either privacy clamp makes the
+    // real v2 publisher reject the locator or journal parent before candidate
+    // persistence, so every confirmed-apply scenario fails at `apply`.
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+        .expect("failed to make config parent owner-only");
     let runtime_dir = dir.join("runtime");
     std::fs::create_dir_all(&runtime_dir).expect("failed to create runtime dir");
+    std::fs::set_permissions(&runtime_dir, std::fs::Permissions::from_mode(0o700))
+        .expect("failed to make runtime state dir owner-only");
     let config_path = dir.join("rustbgpd.toml");
+    let mut locator_path = config_path.clone().into_os_string();
+    locator_path.push(LOCATOR_SUFFIX);
+    let locator_path = PathBuf::from(locator_path);
     let base = base_toml(&runtime_dir, "");
     let parsed: toml::Value = toml::from_str(&base).expect("base config must parse");
     let principal = "rustbgpd://operator/commit-confirm-test";
@@ -200,6 +215,7 @@ fn lab(dir: &Path) -> Lab {
         config_path,
         candidate_path,
         journal_path: runtime_dir.join(JOURNAL_FILE_NAME),
+        locator_path,
         grpc_addr: format!("unix://{}", runtime_dir.join("grpc.sock").display()),
         dir: dir.to_path_buf(),
     }
@@ -258,7 +274,21 @@ impl Lab {
         );
         assert!(
             self.journal_path.exists(),
-            "confirmed apply must write the revert journal"
+            "confirmed apply must write the v2 revert journal"
+        );
+        assert!(
+            self.locator_path.exists(),
+            "confirmed apply must publish the v2 locator last"
+        );
+        let journal = std::fs::read(&self.journal_path).unwrap();
+        let locator = std::fs::read(&self.locator_path).unwrap();
+        assert!(
+            journal.starts_with(b"{\"version\":2,"),
+            "real-binary writer must emit only the canonical v2 journal"
+        );
+        assert!(
+            locator.starts_with(b"{\"version\":2,"),
+            "real-binary writer must emit the canonical v2 locator"
         );
     }
 }
@@ -291,13 +321,27 @@ fn sigkill_in_confirm_window_boots_previous_config_and_saves_candidate_aside() {
         !lab.journal_path.exists(),
         "boot revert must consume the journal"
     );
+    assert!(
+        !lab.locator_path.exists(),
+        "boot revert must durably remove locator authority first"
+    );
     let stderr = daemon.stderr();
     assert!(
         stderr.contains("commit-confirm boot revert")
             && stderr.contains("kill-window")
-            && stderr.contains("rustbgpd.toml.unconfirmed"),
-        "boot banner must name the transaction and the saved-aside file:\n{stderr}"
+            && stderr.contains("saved beside its recorded target"),
+        "boot banner must name the transaction without exposing paths:\n{stderr}"
     );
+    for secret in [
+        backup_path.to_string_lossy().as_ref(),
+        lab.config_path.to_string_lossy().as_ref(),
+        lab.journal_path.to_string_lossy().as_ref(),
+    ] {
+        assert!(
+            !stderr.contains(secret),
+            "v2 boot banner must redact persisted path {secret:?}:\n{stderr}"
+        );
+    }
 
     // The reverted daemon is running the previous config.
     let ranges = rbgp_json(&lab.grpc_addr, &["--json", "dynamic-neighbor", "list"]);
@@ -324,6 +368,10 @@ fn confirm_then_sigkill_retains_new_config_and_leaves_no_journal() {
     assert!(
         !lab.journal_path.exists(),
         "confirm must consume the revert journal"
+    );
+    assert!(
+        !lab.locator_path.exists(),
+        "confirm must durably remove locator authority"
     );
     daemon.sigkill();
 
@@ -373,6 +421,10 @@ fn in_process_timeout_auto_revert_consumes_journal() {
         !lab.journal_path.exists(),
         "timeout auto-revert must consume the revert journal"
     );
+    assert!(
+        !lab.locator_path.exists(),
+        "timeout auto-revert must durably remove locator authority"
+    );
     let on_disk = std::fs::read_to_string(&lab.config_path).unwrap();
     assert!(
         !on_disk.contains("192.0.2.0/24"),
@@ -385,6 +437,9 @@ fn in_process_timeout_auto_revert_consumes_journal() {
 fn torn_journal_refuses_boot_naming_both_files() {
     let temp = tempfile::tempdir().expect("failed to create temp dir");
     let lab = lab(temp.path());
+    // Causal destructive-red proof for the retained compatibility lane: if
+    // locator absence stops dispatching v1, this truncated legacy journal no
+    // longer produces the exact fail-closed refusal below.
     // Truncated mid-JSON, as a crash during a non-atomic write would leave.
     std::fs::write(&lab.journal_path, "{\"confirm_id\": \"deploy-1\", \"dead")
         .expect("failed to write torn journal");
@@ -531,6 +586,7 @@ fn v2_history_survives_restart_and_restores_after_source_verification() {
         "candidate must still be active before rollback:\n{on_disk}"
     );
     assert!(!lab.journal_path.exists());
+    assert!(!lab.locator_path.exists());
 
     // The retained manifest is verification authority, not adoption authority:
     // changed live external bytes refuse without touching runtime or disk.
@@ -578,5 +634,6 @@ fn v2_history_survives_restart_and_restores_after_source_verification() {
         "restoring a non-newest generation must append an accepted receipt"
     );
     assert!(!lab.journal_path.exists());
+    assert!(!lab.locator_path.exists());
     daemon.assert_still_running();
 }

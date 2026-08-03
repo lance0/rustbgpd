@@ -88,6 +88,26 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   daemon's enforcement mode from the effective config (skipped against
   daemons that do not expose it).
 
+- **Provenance-bearing commit-confirm v2 (LAN-798, ADR-0121).** New confirmed
+  transactions persist the exact accepted prior snapshot—normalized TOML,
+  external-source manifest, and both digests—in a canonical owner-private v2
+  journal, then publish a config-adjacent locator as the sole pending
+  authority before committing the candidate. Crash/restart restore verifies
+  and directly adopts that retained accepted snapshot before opening candidate
+  contents or mutating the candidate or backup; launch-target metadata may be
+  inspected while binding the authority. Live abort and timeout instead reuse
+  the same prior object through the ordinary #1370-gated planner and apply
+  path. Abort, timeout, and boot restore durably restore while both authority
+  files remain, then remove and sync the locator; confirm begins with that
+  durable locator removal. Later exact journal cleanup is warning-only. The
+  locator-free v1 lane remains fail-closed upgrade compatibility, but a live v1
+  transaction must terminate before upgrade and production never converts or
+  dual-writes it. Before downgrade, both the v2 locator and locator-free v2
+  journal residue must be absent; v2 config history separately requires moving
+  the complete history directory aside. Locator absence remains compatible
+  with the packaged root-owned, read-only config directory; confirmed writes
+  still require the documented daemon-owned writable config directory.
+
 - **Config-history provenance schema and rendering.** `ListConfigHistory` and
   `rbgp config history` now expose an additive config-source digest over the
   normalized-TOML digest plus the canonical accepted rpol/dataset source roster,

@@ -18,6 +18,7 @@
 //! work.
 
 use std::fs::File;
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::thread;
@@ -200,6 +201,8 @@ principal = "rustbgpd://operator/evpn-rr-test"
 #[test]
 fn rr_only_deployment_does_not_spawn_evpn_dataplane_actor() {
     let temp = tempfile::tempdir().expect("failed to create temp dir");
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))
+        .expect("make temp dir private");
     let config_path = write_config(temp.path());
     let grpc_sock = temp.path().join("runtime").join("grpc.sock");
     let grpc_addr = format!("unix://{}", grpc_sock.display());

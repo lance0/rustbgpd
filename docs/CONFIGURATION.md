@@ -3240,11 +3240,27 @@ most 128 characters, and free of control characters; the CLI validates those
 constraints before reading the candidate file or calling the daemon.
 
 The confirm window is durable: the daemon journals the pre-commit config
-snapshot to `<runtime_state_dir>/commit-confirm-journal.json` before the
-candidate commits, and a restart that finds an unconfirmed journal reverts to
-the journaled config at boot, saving the unconfirmed candidate aside as
-`<config>.unconfirmed`. See `docs/OPERATIONS.md` (config transactions) for the
-boot-revert semantics.
+snapshot to `<runtime_state_dir>/commit-confirm-journal.json`, including its
+accepted external-source manifest and digests, then publishes
+`<absolute lexical config path>.commit-confirm-locator.json` before the
+candidate commits. That config-adjacent locator is the sole v2 pending
+authority and is checked before candidate contents are parsed. A restart verifies and
+reuses the exact accepted prior snapshot, restores its recorded config target,
+and saves the unconfirmed candidate as `<recorded-target>.unconfirmed`.
+Confirm and successful rollback become terminal after durable locator removal;
+later exact journal-residue cleanup is warning-only. Files and their parent
+directories must satisfy the storage contract: v2 locator, journal, and staging
+files are daemon-owned regular files with mode `0600`. A writer or present v2
+object requires daemon-owned real parents that are not group- or
+world-writable; locator absence may be established in the packaged root-owned,
+read-only config parent. Before downgrade, both the
+v2 locator and any locator-free v2 journal residue must be absent; v2 config
+history separately requires moving the complete history directory aside. A
+locator-free v1 journal remains a fail-closed compatibility lane, but a live v1
+transaction must terminate before upgrade. Production writes only v2 and never
+converts or dual-writes v1 state.
+See `docs/OPERATIONS.md` (config transactions) for the boot-revert and storage
+semantics.
 
 ```console
 $ rbgp fib-table set edge --table-id 1000 --metric 200 \
