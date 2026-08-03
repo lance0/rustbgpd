@@ -227,42 +227,45 @@ fn rr_and_route_server_interop_is_tier_authenticated_end_to_end() {
 /// live config, config generator, or lab fixture may still pin it. This
 /// replaces the LAN-546 legacy allowlist: the allowlist existed only to
 /// tolerate legacy, and its former entries are all migrated. Scanned:
-/// every text file under tests/, bench/, and scripts/, except
+/// every git-tracked text file under tests/, bench/, and scripts/,
+/// except
 /// - `.rs` sources (the rejection tests carry the literal on purpose),
-/// - `artifacts-*` directories (byte-exact captures of past bench runs),
-/// - `runs` directories (local soak/chaos run outputs, untracked).
+/// - `artifacts-*` directories (byte-exact captures of past bench runs).
+///
+/// Only tracked files are scanned (`git ls-files`): untracked local run
+/// outputs — old campaign artifacts, soak scratch — are not config
+/// producers and must not flake this gate on a dev box.
 ///
 /// Both TOML quote styles are matched so a single-quoted pin cannot slip
 /// past the gate.
 #[test]
 fn no_config_producer_still_pins_legacy_enforcement() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let mut stack: Vec<_> = ["tests", "bench", "scripts"]
-        .iter()
-        .map(|dir| root.join(dir))
-        .collect();
+    let tracked = std::process::Command::new("git")
+        .args(["ls-files", "-z", "--", "tests", "bench", "scripts"])
+        .current_dir(root)
+        .output()
+        .expect("git ls-files enumerates the tracked scan set");
+    assert!(tracked.status.success(), "git ls-files failed");
     let mut offenders = Vec::new();
-    while let Some(dir) = stack.pop() {
-        for entry in fs::read_dir(&dir).unwrap() {
-            let path = entry.unwrap().path();
-            let name = path.file_name().unwrap().to_str().unwrap();
-            if path.is_dir() {
-                if !name.starts_with("artifacts-") && name != "runs" && name != "target" {
-                    stack.push(path);
-                }
-                continue;
-            }
-            if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
-                continue;
-            }
-            let Ok(source) = fs::read_to_string(&path) else {
-                continue; // binary fixture
-            };
-            if source.contains("enforcement = \"legacy\"")
-                || source.contains("enforcement = 'legacy'")
-            {
-                offenders.push(path.strip_prefix(root).unwrap().display().to_string());
-            }
+    for rel in String::from_utf8(tracked.stdout)
+        .expect("tracked paths are UTF-8")
+        .split('\0')
+        .filter(|rel| !rel.is_empty())
+    {
+        let path = root.join(rel);
+        if rel.split('/').any(|part| part.starts_with("artifacts-")) {
+            continue;
+        }
+        if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
+            continue;
+        }
+        let Ok(source) = fs::read_to_string(&path) else {
+            continue; // binary fixture
+        };
+        if source.contains("enforcement = \"legacy\"") || source.contains("enforcement = 'legacy'")
+        {
+            offenders.push(rel.to_string());
         }
     }
     offenders.sort();
