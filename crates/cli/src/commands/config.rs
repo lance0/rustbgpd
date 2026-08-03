@@ -9,17 +9,33 @@ use crate::proto::{
     ConfirmConfigTransactionRequest, DiffRuntimeConfigRequest, DiffRuntimeConfigResponse,
     GetConfigTransactionStatusRequest, GetEffectiveConfigRequest, ListConfigHistoryRequest,
     ListConfigHistoryResponse, PlanConfigTransactionRequest, RollbackConfigTransactionRequest,
-    UpdateGroupImpactPlan,
+    StreamApplyConfigMetadata, StreamApplyConfigTransactionRequest, StreamPlanConfigEnd,
+    StreamPlanConfigMetadata, StreamPlanConfigTransactionRequest, UpdateGroupImpactPlan,
 };
 use prost::Message;
+use sha2::{Digest as _, Sha256};
+use std::pin::Pin;
+use std::sync::Arc;
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
+use std::task::{Context, Poll};
 
 const MAX_CONFIRM_ID_CHARS: usize = 128;
 const MAX_CONFIRM_TIMEOUT_SECONDS: u32 = 86_400;
 const MAX_UNARY_CONFIG_REQUEST_BYTES: usize = 4_194_304;
+const STREAM_CONFIG_FRAME_VERSION: u32 = 1;
+const STREAM_CONFIG_CHUNK_BYTES: usize = 1024 * 1024;
+#[cfg(test)]
+static PLAN_FRAME_POLLS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static APPLY_FRAME_POLLS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+const LAZY_PULL_PROOF_MARKER: &str = "LAZY_PULL_PROOF";
 
 pub struct ApplyOptions<'a> {
     pub from_file: &'a str,
     pub expected_runtime_snapshot_token: &'a str,
+    pub plan_token: Option<&'a str>,
     pub client_request_id: Option<&'a str>,
     pub comment: Option<&'a str>,
     pub confirm_id: Option<&'a str>,
@@ -68,24 +84,52 @@ pub async fn plan(
     expected_runtime_snapshot_token: Option<&str>,
     json: bool,
 ) -> Result<bool, CliError> {
-    let candidate_toml = read_candidate_toml(from_file)?;
-    let request = PlanConfigTransactionRequest {
-        candidate_toml,
-        expected_runtime_snapshot_token: expected_runtime_snapshot_token
-            .unwrap_or_default()
-            .to_string(),
-    };
-    preflight_config_request(&request, from_file)?;
+    let candidate_toml = Arc::new(read_candidate_toml(from_file)?);
     let mut client =
         ConfigServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let resp = client.plan_config_transaction(request).await?.into_inner();
+    let streamed = client
+        .stream_plan_config_transaction(PlanFrameStream::new(
+            Arc::clone(&candidate_toml),
+            expected_runtime_snapshot_token,
+        ))
+        .await;
+    let (resp, plan_token) = match streamed {
+        Ok(response) => {
+            let response = response.into_inner();
+            let plan = response.plan.ok_or_else(|| {
+                CliError::Argument("daemon returned streamed plan without a plan".to_string())
+            })?;
+            (plan, response.plan_token)
+        }
+        Err(status) if exact_missing_method(&status) => {
+            let request = PlanConfigTransactionRequest {
+                candidate_toml: candidate_toml.to_string(),
+                expected_runtime_snapshot_token: expected_runtime_snapshot_token
+                    .unwrap_or_default()
+                    .to_string(),
+            };
+            preflight_config_request(&request, from_file)?;
+            (
+                client.plan_config_transaction(request).await?.into_inner(),
+                None,
+            )
+        }
+        Err(status) => return Err(status.into()),
+    };
 
     if json {
-        print_json(plan_to_json(&resp))?;
+        print_json(plan_to_json(&resp, plan_token.as_deref()))?;
     } else {
         print_plan_human(&resp);
+        if let Some(line) = plan_token_human_line(plan_token.as_deref()) {
+            println!("{line}");
+        }
     }
     Ok(resp.status != ConfigTransactionPlanStatus::Noop as i32)
+}
+
+fn plan_token_human_line(plan_token: Option<&str>) -> Option<String> {
+    plan_token.map(|token| format!("plan_token: {token}"))
 }
 
 pub async fn apply(
@@ -93,6 +137,14 @@ pub async fn apply(
     options: ApplyOptions<'_>,
     json: bool,
 ) -> Result<(), CliError> {
+    let response = apply_response(connection, options).await?;
+    print_apply_response(&response, json)
+}
+
+async fn apply_response(
+    connection: Connection,
+    options: ApplyOptions<'_>,
+) -> Result<ConfigTransactionApplyResponse, CliError> {
     if options.expected_runtime_snapshot_token.is_empty() {
         return Err(CliError::Argument(
             "--expected-runtime-snapshot-token must not be empty".to_string(),
@@ -114,29 +166,328 @@ pub async fn apply(
             "--confirm-timeout must be <= {MAX_CONFIRM_TIMEOUT_SECONDS}"
         )));
     }
-    let candidate_toml = read_candidate_toml(options.from_file)?;
-    let request = ApplyConfigTransactionRequest {
-        candidate_toml,
+    let candidate_toml = Arc::new(read_candidate_toml(options.from_file)?);
+    let mut client =
+        ConfigServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let plan_token = match options.plan_token {
+        Some(token) => token.to_string(),
+        None => {
+            let plan = client
+                .stream_plan_config_transaction(PlanFrameStream::new(
+                    Arc::clone(&candidate_toml),
+                    Some(options.expected_runtime_snapshot_token),
+                ))
+                .await;
+            match plan {
+                Ok(response) => {
+                    let response = response.into_inner();
+                    let plan = response.plan.ok_or_else(|| {
+                        CliError::Argument(
+                            "daemon returned streamed plan without a plan".to_string(),
+                        )
+                    })?;
+                    match ConfigTransactionPlanStatus::try_from(plan.status) {
+                        Ok(
+                            ConfigTransactionPlanStatus::Noop
+                            | ConfigTransactionPlanStatus::Rejected,
+                        ) => {
+                            return Ok(plan_as_apply_response(plan));
+                        }
+                        Ok(ConfigTransactionPlanStatus::Committable) => {}
+                        Ok(ConfigTransactionPlanStatus::Unspecified) | Err(_) => {
+                            return Err(CliError::Argument(
+                                "daemon returned an invalid streamed plan status".to_string(),
+                            ));
+                        }
+                    }
+                    response.plan_token.ok_or_else(|| {
+                        CliError::Argument(
+                            "daemon returned a committable streamed plan without a plan token"
+                                .to_string(),
+                        )
+                    })?
+                }
+                Err(status) if exact_missing_method(&status) => {
+                    return unary_apply_response(
+                        &mut client,
+                        apply_request(&candidate_toml, &options),
+                        options.from_file,
+                    )
+                    .await;
+                }
+                Err(status) => return Err(status.into()),
+            }
+        }
+    };
+    let metadata = StreamApplyConfigMetadata {
+        version: STREAM_CONFIG_FRAME_VERSION,
+        plan_token,
         expected_runtime_snapshot_token: options.expected_runtime_snapshot_token.to_string(),
         client_request_id: options.client_request_id.unwrap_or_default().to_string(),
         comment: options.comment.unwrap_or_default().to_string(),
         confirm_id: options.confirm_id.unwrap_or_default().to_string(),
         confirm_timeout_seconds: options.confirm_timeout_seconds.unwrap_or_default(),
     };
-    preflight_config_request(&request, options.from_file)?;
-    let mut client =
-        ConfigServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let resp = client.apply_config_transaction(request).await?.into_inner();
+    let resp = match client
+        .stream_apply_config_transaction(ApplyFrameStream::new(
+            Arc::clone(&candidate_toml),
+            metadata,
+        ))
+        .await
+    {
+        Ok(response) => response.into_inner(),
+        Err(status) if options.plan_token.is_none() && exact_missing_method(&status) => {
+            return unary_apply_response(
+                &mut client,
+                apply_request(&candidate_toml, &options),
+                options.from_file,
+            )
+            .await;
+        }
+        Err(status) => return Err(status.into()),
+    };
 
+    Ok(resp)
+}
+
+fn plan_as_apply_response(plan: ConfigTransactionPlanResponse) -> ConfigTransactionApplyResponse {
+    ConfigTransactionApplyResponse {
+        status: plan.status,
+        runtime_snapshot_token: plan.runtime_snapshot_token,
+        committed_sections: Vec::new(),
+        human_text: plan.human_text,
+        confirmation: None,
+        update_group_impact: plan.update_group_impact,
+    }
+}
+
+fn apply_request(
+    candidate_toml: &str,
+    options: &ApplyOptions<'_>,
+) -> ApplyConfigTransactionRequest {
+    ApplyConfigTransactionRequest {
+        candidate_toml: candidate_toml.to_string(),
+        expected_runtime_snapshot_token: options.expected_runtime_snapshot_token.to_string(),
+        client_request_id: options.client_request_id.unwrap_or_default().to_string(),
+        comment: options.comment.unwrap_or_default().to_string(),
+        confirm_id: options.confirm_id.unwrap_or_default().to_string(),
+        confirm_timeout_seconds: options.confirm_timeout_seconds.unwrap_or_default(),
+    }
+}
+
+async fn unary_apply_response<T>(
+    client: &mut ConfigServiceClient<T>,
+    request: ApplyConfigTransactionRequest,
+    from_file: &str,
+) -> Result<ConfigTransactionApplyResponse, CliError>
+where
+    T: tonic::client::GrpcService<tonic::body::Body>,
+    T::ResponseBody: tonic::codegen::Body<Data = tonic::codegen::Bytes> + Send + 'static,
+    T::Error: Into<tonic::codegen::StdError>,
+    <T::ResponseBody as tonic::codegen::Body>::Error: Into<tonic::codegen::StdError> + Send,
+{
+    preflight_config_request(&request, from_file)?;
+    Ok(client.apply_config_transaction(request).await?.into_inner())
+}
+
+fn print_apply_response(resp: &ConfigTransactionApplyResponse, json: bool) -> Result<(), CliError> {
     if json {
-        print_json(apply_to_json(&resp))?;
+        print_json(apply_to_json(resp))?;
     } else {
-        print_apply_human(&resp);
+        print_apply_human(resp);
     }
     if let Some(footer) = confirm_window_footer(resp.confirmation.as_ref()) {
         crate::output::print_next_step(json, &footer);
     }
     Ok(())
+}
+
+fn exact_missing_method(status: &tonic::Status) -> bool {
+    status.code() == tonic::Code::Unimplemented
+        && status.message().is_empty()
+        && status.details().is_empty()
+}
+
+struct FrameCursor {
+    candidate: Arc<String>,
+    offset: usize,
+    digest: [u8; 32],
+    stage: u8,
+    #[cfg(test)]
+    delay: Option<Pin<Box<tokio::time::Sleep>>>,
+}
+
+impl FrameCursor {
+    fn new(candidate: Arc<String>) -> Self {
+        let digest = Sha256::digest(candidate.as_bytes()).into();
+        Self {
+            candidate,
+            offset: 0,
+            digest,
+            stage: 0,
+            #[cfg(test)]
+            delay: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn poll_proof_delay(&mut self, cx: &mut Context<'_>) -> Poll<()> {
+        use std::future::Future as _;
+
+        if !self.candidate.starts_with(LAZY_PULL_PROOF_MARKER) {
+            return Poll::Ready(());
+        }
+        let delay = self.delay.get_or_insert_with(|| {
+            Box::pin(tokio::time::sleep(std::time::Duration::from_millis(1)))
+        });
+        match delay.as_mut().poll(cx) {
+            Poll::Ready(()) => {
+                self.delay = None;
+                Poll::Ready(())
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
+    fn next_chunk(&mut self) -> Option<Vec<u8>> {
+        let bytes = self.candidate.as_bytes();
+        if self.offset >= bytes.len() {
+            return None;
+        }
+        let end = self
+            .offset
+            .saturating_add(STREAM_CONFIG_CHUNK_BYTES)
+            .min(bytes.len());
+        let chunk = bytes[self.offset..end].to_vec();
+        self.offset = end;
+        Some(chunk)
+    }
+
+    fn end(&self) -> StreamPlanConfigEnd {
+        StreamPlanConfigEnd {
+            candidate_length: self.candidate.len() as u64,
+            candidate_sha256: self.digest.to_vec(),
+        }
+    }
+}
+
+struct PlanFrameStream {
+    cursor: FrameCursor,
+    expected_runtime_snapshot_token: Option<String>,
+}
+
+impl PlanFrameStream {
+    fn new(candidate: Arc<String>, expected_runtime_snapshot_token: Option<&str>) -> Self {
+        Self {
+            cursor: FrameCursor::new(candidate),
+            expected_runtime_snapshot_token: expected_runtime_snapshot_token.map(str::to_string),
+        }
+    }
+}
+
+impl tonic::codegen::tokio_stream::Stream for PlanFrameStream {
+    type Item = StreamPlanConfigTransactionRequest;
+
+    fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        #[cfg(test)]
+        if self.cursor.poll_proof_delay(_cx).is_pending() {
+            return Poll::Pending;
+        }
+        let frame = match self.cursor.stage {
+            0 => {
+                self.cursor.stage = 1;
+                crate::proto::stream_plan_config_transaction_request::Frame::Metadata(
+                    StreamPlanConfigMetadata {
+                        version: STREAM_CONFIG_FRAME_VERSION,
+                        expected_runtime_snapshot_token: self
+                            .expected_runtime_snapshot_token
+                            .clone(),
+                    },
+                )
+            }
+            1 => match self.cursor.next_chunk() {
+                Some(chunk) => {
+                    crate::proto::stream_plan_config_transaction_request::Frame::CandidateChunk(
+                        chunk,
+                    )
+                }
+                None => {
+                    self.cursor.stage = 2;
+                    crate::proto::stream_plan_config_transaction_request::Frame::End(
+                        self.cursor.end(),
+                    )
+                }
+            },
+            _ => return Poll::Ready(None),
+        };
+        if self.cursor.stage == 2 {
+            self.cursor.stage = 3;
+        }
+        #[cfg(test)]
+        if self.cursor.candidate.starts_with(LAZY_PULL_PROOF_MARKER) {
+            PLAN_FRAME_POLLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        Poll::Ready(Some(StreamPlanConfigTransactionRequest {
+            frame: Some(frame),
+        }))
+    }
+}
+
+struct ApplyFrameStream {
+    cursor: FrameCursor,
+    metadata: Option<StreamApplyConfigMetadata>,
+}
+
+impl ApplyFrameStream {
+    fn new(candidate: Arc<String>, metadata: StreamApplyConfigMetadata) -> Self {
+        Self {
+            cursor: FrameCursor::new(candidate),
+            metadata: Some(metadata),
+        }
+    }
+}
+
+impl tonic::codegen::tokio_stream::Stream for ApplyFrameStream {
+    type Item = StreamApplyConfigTransactionRequest;
+
+    fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        #[cfg(test)]
+        if self.cursor.poll_proof_delay(_cx).is_pending() {
+            return Poll::Pending;
+        }
+        let frame = match self.cursor.stage {
+            0 => {
+                self.cursor.stage = 1;
+                crate::proto::stream_apply_config_transaction_request::Frame::Metadata(
+                    self.metadata.take().expect("metadata stage owns metadata"),
+                )
+            }
+            1 => match self.cursor.next_chunk() {
+                Some(chunk) => {
+                    crate::proto::stream_apply_config_transaction_request::Frame::CandidateChunk(
+                        chunk,
+                    )
+                }
+                None => {
+                    self.cursor.stage = 2;
+                    crate::proto::stream_apply_config_transaction_request::Frame::End(
+                        self.cursor.end(),
+                    )
+                }
+            },
+            _ => return Poll::Ready(None),
+        };
+        if self.cursor.stage == 2 {
+            self.cursor.stage = 3;
+        }
+        #[cfg(test)]
+        if self.cursor.candidate.starts_with(LAZY_PULL_PROOF_MARKER) {
+            APPLY_FRAME_POLLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        Poll::Ready(Some(StreamApplyConfigTransactionRequest {
+            frame: Some(frame),
+        }))
+    }
 }
 
 /// "What next" footer for an apply that opened a confirmed-commit window:
@@ -500,7 +851,10 @@ fn diff_to_json(diff: Option<&DiffRuntimeConfigResponse>) -> serde_json::Value {
     })
 }
 
-fn plan_to_json(resp: &ConfigTransactionPlanResponse) -> serde_json::Value {
+fn plan_to_json(
+    resp: &ConfigTransactionPlanResponse,
+    plan_token: Option<&str>,
+) -> serde_json::Value {
     serde_json::json!({
         "status": status_label(resp.status),
         "runtime_snapshot_token": resp.runtime_snapshot_token,
@@ -510,6 +864,7 @@ fn plan_to_json(resp: &ConfigTransactionPlanResponse) -> serde_json::Value {
         "restart_required_sections": resp.restart_required_sections,
         "human_text": resp.human_text,
         "update_group_impact": update_group_impact_to_json(resp.update_group_impact.as_ref()),
+        "plan_token": plan_token,
     })
 }
 
@@ -692,10 +1047,186 @@ mod tests {
     use super::*;
     use crate::connection::connect;
     use crate::test_support::spawn_mock_server;
+    use tonic::codegen::tokio_stream::StreamExt as _;
 
     // Field 1's one-byte tag plus the four-byte length varint used by a
     // candidate whose encoded request reaches the 4 MiB boundary.
     const PROTOBUF_STRING_FIELD_OVERHEAD_AT_LIMIT: usize = 5;
+
+    #[tokio::test]
+    async fn frame_streams_share_candidate_and_materialize_one_bounded_chunk_at_a_time() {
+        let candidate = Arc::new("x".repeat(8 * 1024 * 1024 + 17));
+        let mut stream = PlanFrameStream::new(Arc::clone(&candidate), Some("kv1:old:1"));
+        assert!(Arc::ptr_eq(&candidate, &stream.cursor.candidate));
+        assert_eq!(Arc::strong_count(&candidate), 2);
+        let metadata = stream.next().await.unwrap();
+        assert!(matches!(
+            metadata.frame,
+            Some(crate::proto::stream_plan_config_transaction_request::Frame::Metadata(_))
+        ));
+        assert_eq!(stream.cursor.offset, 0);
+        let chunk = stream.next().await.unwrap();
+        let Some(crate::proto::stream_plan_config_transaction_request::Frame::CandidateChunk(
+            chunk,
+        )) = chunk.frame
+        else {
+            panic!("expected first candidate chunk");
+        };
+        assert_eq!(chunk.len(), STREAM_CONFIG_CHUNK_BYTES);
+        assert_eq!(stream.cursor.offset, STREAM_CONFIG_CHUNK_BYTES);
+        assert!(Arc::ptr_eq(&candidate, &stream.cursor.candidate));
+        let mut streamed_bytes = chunk.len();
+        drop(chunk);
+        let mut end = None;
+        while let Some(frame) = stream.next().await {
+            match frame.frame.unwrap() {
+                crate::proto::stream_plan_config_transaction_request::Frame::CandidateChunk(
+                    chunk,
+                ) => {
+                    assert!(!chunk.is_empty());
+                    assert!(chunk.len() <= STREAM_CONFIG_CHUNK_BYTES);
+                    streamed_bytes += chunk.len();
+                }
+                crate::proto::stream_plan_config_transaction_request::Frame::End(value) => {
+                    assert!(end.replace(value).is_none());
+                }
+                crate::proto::stream_plan_config_transaction_request::Frame::Metadata(_) => {
+                    panic!("metadata repeated")
+                }
+            }
+        }
+        let end = end.expect("end frame");
+        assert_eq!(streamed_bytes, candidate.len());
+        assert_eq!(end.candidate_length, candidate.len() as u64);
+        assert_eq!(
+            end.candidate_sha256,
+            Sha256::digest(candidate.as_bytes()).to_vec()
+        );
+
+        let metadata = StreamApplyConfigMetadata {
+            version: STREAM_CONFIG_FRAME_VERSION,
+            plan_token: "plan".to_string(),
+            expected_runtime_snapshot_token: "runtime".to_string(),
+            client_request_id: String::new(),
+            comment: String::new(),
+            confirm_id: String::new(),
+            confirm_timeout_seconds: 0,
+        };
+        let mut apply_stream = ApplyFrameStream::new(Arc::clone(&candidate), metadata.clone());
+        let first = apply_stream.next().await.unwrap();
+        assert!(matches!(
+            first.frame,
+            Some(crate::proto::stream_apply_config_transaction_request::Frame::Metadata(value))
+                if value == metadata
+        ));
+        assert!(Arc::ptr_eq(&candidate, &apply_stream.cursor.candidate));
+        let mut apply_bytes = 0usize;
+        let mut apply_end = None;
+        while let Some(frame) = apply_stream.next().await {
+            match frame.frame.unwrap() {
+                crate::proto::stream_apply_config_transaction_request::Frame::CandidateChunk(
+                    chunk,
+                ) => {
+                    assert!(!chunk.is_empty());
+                    assert!(chunk.len() <= STREAM_CONFIG_CHUNK_BYTES);
+                    apply_bytes += chunk.len();
+                }
+                crate::proto::stream_apply_config_transaction_request::Frame::End(value) => {
+                    assert!(apply_end.replace(value).is_none());
+                }
+                crate::proto::stream_apply_config_transaction_request::Frame::Metadata(_) => {
+                    panic!("apply metadata repeated")
+                }
+            }
+        }
+        let apply_end = apply_end.expect("apply end frame");
+        assert_eq!(apply_bytes, candidate.len());
+        assert_eq!(apply_end.candidate_length, candidate.len() as u64);
+        assert_eq!(
+            apply_end.candidate_sha256,
+            Sha256::digest(candidate.as_bytes()).to_vec()
+        );
+    }
+
+    #[tokio::test]
+    async fn actual_rpcs_pull_plan_and_apply_frames_incrementally_under_backpressure() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("candidate.toml");
+        let candidate_len = 16 * 1024 * 1024 + 17;
+        let candidate = format!(
+            "{LAZY_PULL_PROOF_MARKER}{}",
+            "x".repeat(candidate_len - LAZY_PULL_PROOF_MARKER.len())
+        );
+        std::fs::write(&path, candidate).unwrap();
+        let expected_frames = 1 + 17 + 1;
+        let server = spawn_mock_server(None).await;
+        server
+            .state
+            .config_streaming_enabled
+            .store(true, Ordering::SeqCst);
+
+        PLAN_FRAME_POLLS.store(0, Ordering::SeqCst);
+        server
+            .state
+            .config_stream_plan_pause_after_metadata
+            .store(true, Ordering::SeqCst);
+        let connection = connect(&server.addr, None).await.unwrap();
+        let plan_path = path.to_string_lossy().into_owned();
+        let plan_task =
+            tokio::spawn(
+                async move { plan(connection, &plan_path, Some("kv1:planned:1"), true).await },
+            );
+        server
+            .state
+            .config_stream_plan_metadata_seen
+            .notified()
+            .await;
+        tokio::task::yield_now().await;
+        assert!(
+            PLAN_FRAME_POLLS.load(Ordering::SeqCst) < expected_frames,
+            "the Plan stream was fully materialized before the RPC accepted its first frame"
+        );
+        server.state.config_stream_plan_resume.notify_one();
+        assert!(plan_task.await.unwrap().unwrap());
+        assert_eq!(PLAN_FRAME_POLLS.load(Ordering::SeqCst), expected_frames);
+
+        APPLY_FRAME_POLLS.store(0, Ordering::SeqCst);
+        server
+            .state
+            .config_stream_apply_pause_after_metadata
+            .store(true, Ordering::SeqCst);
+        let connection = connect(&server.addr, None).await.unwrap();
+        let apply_path = path.to_string_lossy().into_owned();
+        let apply_task = tokio::spawn(async move {
+            apply(
+                connection,
+                ApplyOptions {
+                    from_file: &apply_path,
+                    expected_runtime_snapshot_token: "kv1:planned:1",
+                    plan_token: Some("stream-plan-token"),
+                    client_request_id: None,
+                    comment: None,
+                    confirm_id: None,
+                    confirm_timeout_seconds: None,
+                },
+                true,
+            )
+            .await
+        });
+        server
+            .state
+            .config_stream_apply_metadata_seen
+            .notified()
+            .await;
+        tokio::task::yield_now().await;
+        assert!(
+            APPLY_FRAME_POLLS.load(Ordering::SeqCst) < expected_frames,
+            "the Apply stream was fully materialized before the RPC accepted its first frame"
+        );
+        server.state.config_stream_apply_resume.notify_one();
+        apply_task.await.unwrap().unwrap();
+        assert_eq!(APPLY_FRAME_POLLS.load(Ordering::SeqCst), expected_frames);
+    }
 
     fn candidate_at_diff_request_limit() -> String {
         "x".repeat(MAX_UNARY_CONFIG_REQUEST_BYTES - PROTOBUF_STRING_FIELD_OVERHEAD_AT_LIMIT)
@@ -895,6 +1426,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn plan_streams_by_default_without_a_unary_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("candidate.toml");
+        let candidate = "[global]\nasn = 65001\nrouter_id = \"10.0.0.1\"\n";
+        std::fs::write(&path, candidate).unwrap();
+        let server = spawn_mock_server(None).await;
+        server
+            .state
+            .config_streaming_enabled
+            .store(true, Ordering::SeqCst);
+        let connection = connect(&server.addr, None).await.unwrap();
+
+        let changed = plan(connection, path.to_str().unwrap(), Some("kv1:old:1"), true)
+            .await
+            .unwrap();
+
+        assert!(changed);
+        assert_eq!(
+            server.state.config_stream_plan_calls.load(Ordering::SeqCst),
+            1
+        );
+        assert_eq!(server.state.config_plan_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            server
+                .state
+                .last_stream_plan_candidate
+                .lock()
+                .await
+                .as_deref(),
+            Some(candidate.as_bytes())
+        );
+    }
+
+    #[tokio::test]
     async fn plan_rejects_oversized_populated_request_before_rpc() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("candidate.toml");
@@ -947,6 +1512,7 @@ mod tests {
             ApplyOptions {
                 from_file: path.to_str().unwrap(),
                 expected_runtime_snapshot_token: "kv1:old:1",
+                plan_token: None,
                 client_request_id: Some("deploy-123"),
                 comment: Some("roll candidate"),
                 confirm_id: Some("confirm-123"),
@@ -968,6 +1534,345 @@ mod tests {
         assert_eq!(request.comment, "roll candidate");
         assert_eq!(request.confirm_id, "confirm-123");
         assert_eq!(request.confirm_timeout_seconds, 120);
+    }
+
+    #[tokio::test]
+    async fn apply_auto_plans_and_streams_more_than_eight_mib_without_unary_calls() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("candidate.toml");
+        let marker = b"STREAM_CLI_CANDIDATE_MARKER";
+        let mut candidate = vec![b'x'; 8 * 1024 * 1024 + 19];
+        candidate[..marker.len()].copy_from_slice(marker);
+        std::fs::write(&path, &candidate).unwrap();
+        let server = spawn_mock_server(None).await;
+        server
+            .state
+            .config_streaming_enabled
+            .store(true, Ordering::SeqCst);
+        let connection = connect(&server.addr, None).await.unwrap();
+
+        apply(
+            connection,
+            ApplyOptions {
+                from_file: path.to_str().unwrap(),
+                expected_runtime_snapshot_token: "kv1:planned:1",
+                plan_token: None,
+                client_request_id: None,
+                comment: None,
+                confirm_id: None,
+                confirm_timeout_seconds: None,
+            },
+            true,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            server.state.config_stream_plan_calls.load(Ordering::SeqCst),
+            1
+        );
+        assert_eq!(
+            server
+                .state
+                .config_stream_apply_calls
+                .load(Ordering::SeqCst),
+            1
+        );
+        assert_eq!(server.state.config_plan_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(server.state.config_apply_calls.load(Ordering::SeqCst), 0);
+        let metadata = server
+            .state
+            .last_stream_apply_metadata
+            .lock()
+            .await
+            .clone()
+            .unwrap();
+        assert_eq!(metadata.plan_token, "stream-plan-token");
+        assert_eq!(metadata.expected_runtime_snapshot_token, "kv1:planned:1");
+        assert_eq!(
+            server
+                .state
+                .last_stream_apply_candidate
+                .lock()
+                .await
+                .as_deref(),
+            Some(candidate.as_slice())
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_with_explicit_plan_token_skips_plan_and_preserves_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("candidate.toml");
+        std::fs::write(&path, "[global]\nasn = 65001\nrouter_id = \"10.0.0.1\"\n").unwrap();
+        let server = spawn_mock_server(None).await;
+        server
+            .state
+            .config_streaming_enabled
+            .store(true, Ordering::SeqCst);
+        let connection = connect(&server.addr, None).await.unwrap();
+
+        apply(
+            connection,
+            ApplyOptions {
+                from_file: path.to_str().unwrap(),
+                expected_runtime_snapshot_token: "kv1:planned:1",
+                plan_token: Some("manual-plan-token"),
+                client_request_id: Some("stream-deploy"),
+                comment: Some("safe rollout"),
+                confirm_id: Some("stream-confirm"),
+                confirm_timeout_seconds: Some(321),
+            },
+            true,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            server.state.config_stream_plan_calls.load(Ordering::SeqCst),
+            0
+        );
+        assert_eq!(
+            server
+                .state
+                .config_stream_apply_calls
+                .load(Ordering::SeqCst),
+            1
+        );
+        let metadata = server
+            .state
+            .last_stream_apply_metadata
+            .lock()
+            .await
+            .clone()
+            .unwrap();
+        assert_eq!(metadata.plan_token, "manual-plan-token");
+        assert_eq!(metadata.expected_runtime_snapshot_token, "kv1:planned:1");
+        assert_eq!(metadata.client_request_id, "stream-deploy");
+        assert_eq!(metadata.comment, "safe rollout");
+        assert_eq!(metadata.confirm_id, "stream-confirm");
+        assert_eq!(metadata.confirm_timeout_seconds, 321);
+    }
+
+    #[tokio::test]
+    async fn implicit_plan_noop_or_rejected_returns_structured_success_without_apply() {
+        for status in [
+            ConfigTransactionPlanStatus::Noop,
+            ConfigTransactionPlanStatus::Rejected,
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("candidate.toml");
+            std::fs::write(&path, "[global]\nasn = 65001\nrouter_id = \"10.0.0.1\"\n").unwrap();
+            let server = spawn_mock_server(None).await;
+            server
+                .state
+                .config_streaming_enabled
+                .store(true, Ordering::SeqCst);
+            server
+                .state
+                .config_stream_plan_status
+                .store(status as usize, Ordering::SeqCst);
+            let connection = connect(&server.addr, None).await.unwrap();
+
+            let response = apply_response(
+                connection,
+                ApplyOptions {
+                    from_file: path.to_str().unwrap(),
+                    expected_runtime_snapshot_token: "kv1:planned:1",
+                    plan_token: None,
+                    client_request_id: None,
+                    comment: None,
+                    confirm_id: None,
+                    confirm_timeout_seconds: None,
+                },
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(response.status, status as i32);
+            assert_eq!(response.runtime_snapshot_token, "kv1:planned:1");
+            assert!(response.committed_sections.is_empty());
+            assert_eq!(
+                response.human_text,
+                "Config transaction is committable by v1.\n"
+            );
+            assert!(response.confirmation.is_none());
+            assert!(response.update_group_impact.is_none());
+
+            assert_eq!(
+                server.state.config_stream_plan_calls.load(Ordering::SeqCst),
+                1
+            );
+            assert_eq!(
+                server
+                    .state
+                    .config_stream_apply_calls
+                    .load(Ordering::SeqCst),
+                0
+            );
+            assert_eq!(server.state.config_apply_calls.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn implicit_plan_unknown_status_is_terminal_without_apply() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("candidate.toml");
+        std::fs::write(&path, "[global]\nasn = 65001\nrouter_id = \"10.0.0.1\"\n").unwrap();
+        let server = spawn_mock_server(None).await;
+        server
+            .state
+            .config_streaming_enabled
+            .store(true, Ordering::SeqCst);
+        server
+            .state
+            .config_stream_plan_status
+            .store(999, Ordering::SeqCst);
+        let connection = connect(&server.addr, None).await.unwrap();
+
+        let error = apply(
+            connection,
+            ApplyOptions {
+                from_file: path.to_str().unwrap(),
+                expected_runtime_snapshot_token: "kv1:planned:1",
+                plan_token: None,
+                client_request_id: None,
+                comment: None,
+                confirm_id: None,
+                confirm_timeout_seconds: None,
+            },
+            true,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("invalid streamed plan status"));
+        assert_eq!(
+            server
+                .state
+                .config_stream_apply_calls
+                .load(Ordering::SeqCst),
+            0
+        );
+        assert_eq!(server.state.config_apply_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn streaming_call_sites_fallback_only_for_exact_empty_unimplemented() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("candidate.toml");
+        std::fs::write(&path, "[global]\nasn = 65001\nrouter_id = \"10.0.0.1\"\n").unwrap();
+
+        let exact = spawn_mock_server(None).await;
+        exact
+            .state
+            .config_streaming_enabled
+            .store(true, Ordering::SeqCst);
+        *exact.state.config_stream_apply_error.lock().await =
+            Some((tonic::Code::Unimplemented, String::new(), Vec::new()));
+        let connection = connect(&exact.addr, None).await.unwrap();
+        apply(
+            connection,
+            ApplyOptions {
+                from_file: path.to_str().unwrap(),
+                expected_runtime_snapshot_token: "kv1:planned:1",
+                plan_token: None,
+                client_request_id: None,
+                comment: None,
+                confirm_id: None,
+                confirm_timeout_seconds: None,
+            },
+            true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            exact.state.config_stream_plan_calls.load(Ordering::SeqCst),
+            1
+        );
+        assert_eq!(exact.state.config_apply_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            exact
+                .state
+                .last_config_apply
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .expected_runtime_snapshot_token,
+            "kv1:planned:1"
+        );
+
+        for error in [
+            (tonic::Code::Unimplemented, String::new(), Vec::new()),
+            (
+                tonic::Code::Unimplemented,
+                "disabled".to_string(),
+                Vec::new(),
+            ),
+            (tonic::Code::Unimplemented, String::new(), vec![1]),
+            (tonic::Code::Unavailable, String::new(), Vec::new()),
+        ] {
+            let server = spawn_mock_server(None).await;
+            *server.state.config_stream_apply_error.lock().await = Some(error);
+            let connection = connect(&server.addr, None).await.unwrap();
+            let result = apply(
+                connection,
+                ApplyOptions {
+                    from_file: path.to_str().unwrap(),
+                    expected_runtime_snapshot_token: "kv1:planned:1",
+                    plan_token: Some("must-not-fallback"),
+                    client_request_id: None,
+                    comment: None,
+                    confirm_id: None,
+                    confirm_timeout_seconds: None,
+                },
+                true,
+            )
+            .await;
+            assert!(result.is_err());
+            assert_eq!(server.state.config_apply_calls.load(Ordering::SeqCst), 0);
+        }
+
+        for error in [
+            (
+                tonic::Code::Unimplemented,
+                "disabled".to_string(),
+                Vec::new(),
+            ),
+            (tonic::Code::Unimplemented, String::new(), vec![1]),
+            (tonic::Code::Unavailable, String::new(), Vec::new()),
+        ] {
+            let server = spawn_mock_server(None).await;
+            *server.state.config_stream_plan_error.lock().await = Some(error);
+            let connection = connect(&server.addr, None).await.unwrap();
+            let result = plan(
+                connection,
+                path.to_str().unwrap(),
+                Some("kv1:planned:1"),
+                true,
+            )
+            .await;
+            assert!(result.is_err());
+            assert_eq!(server.state.config_plan_calls.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    #[test]
+    fn unary_fallback_requires_exact_empty_missing_method_fingerprint() {
+        assert!(exact_missing_method(&tonic::Status::new(
+            tonic::Code::Unimplemented,
+            ""
+        )));
+        assert!(!exact_missing_method(&tonic::Status::unimplemented(
+            "method disabled"
+        )));
+        assert!(!exact_missing_method(&tonic::Status::with_details(
+            tonic::Code::Unimplemented,
+            "",
+            tonic::codegen::Bytes::from_static(b"detail"),
+        )));
+        assert!(!exact_missing_method(&tonic::Status::unavailable("")));
     }
 
     #[tokio::test]
@@ -1011,6 +1916,7 @@ mod tests {
             ApplyOptions {
                 from_file: path.to_str().unwrap(),
                 expected_runtime_snapshot_token: TOKEN_SECRET,
+                plan_token: None,
                 client_request_id: Some("deploy-secret-must-not-leak"),
                 comment: Some(COMMENT_SECRET),
                 confirm_id: Some("confirm-secret-must-not-leak"),
@@ -1047,6 +1953,7 @@ mod tests {
             ApplyOptions {
                 from_file: "/does/not/matter.toml",
                 expected_runtime_snapshot_token: "kv1:old:1",
+                plan_token: None,
                 client_request_id: None,
                 comment: None,
                 confirm_id: Some(""),
@@ -1075,6 +1982,7 @@ mod tests {
             ApplyOptions {
                 from_file: "/does/not/matter.toml",
                 expected_runtime_snapshot_token: "kv1:old:1",
+                plan_token: None,
                 client_request_id: None,
                 comment: None,
                 confirm_id: Some(confirm_id.as_str()),
@@ -1102,6 +2010,7 @@ mod tests {
             ApplyOptions {
                 from_file: "/does/not/matter.toml",
                 expected_runtime_snapshot_token: "kv1:old:1",
+                plan_token: None,
                 client_request_id: None,
                 comment: None,
                 confirm_id: Some("bad\nid"),
@@ -1129,6 +2038,7 @@ mod tests {
             ApplyOptions {
                 from_file: "/does/not/matter.toml",
                 expected_runtime_snapshot_token: "kv1:old:1",
+                plan_token: None,
                 client_request_id: None,
                 comment: None,
                 confirm_id: None,
@@ -1156,6 +2066,7 @@ mod tests {
             ApplyOptions {
                 from_file: "/does/not/matter.toml",
                 expected_runtime_snapshot_token: "kv1:old:1",
+                plan_token: None,
                 client_request_id: None,
                 comment: None,
                 confirm_id: Some("deploy-123"),
@@ -1388,55 +2299,59 @@ mod tests {
 
     #[test]
     fn plan_json_shape_is_stable() {
-        let value = plan_to_json(&ConfigTransactionPlanResponse {
-            status: ConfigTransactionPlanStatus::Committable as i32,
-            runtime_snapshot_token: "kv1:planned:1".to_string(),
-            diff: Some(DiffRuntimeConfigResponse {
-                has_actionable_changes: true,
-                has_reload_applied_changes: true,
-                has_restart_required_changes: false,
-                has_informational_changes: false,
-                has_any_changes: true,
-                human_text: "Reload-applied changes:\n".to_string(),
-                diff_json: "{\"reload_applied\":{}}".to_string(),
-            }),
-            supported_sections: vec!["[[fib_tables]]".to_string()],
-            unsupported_sections: vec!["[policy]".to_string()],
-            restart_required_sections: vec!["[global]".to_string()],
-            human_text: "Config transaction is rejected.\n".to_string(),
-            update_group_impact: Some(UpdateGroupImpactPlan {
-                schema_version: 1,
-                entries: vec![crate::proto::UpdateGroupFamilyImpact {
-                    peer: "192.0.2.1".to_string(),
-                    afi: 1,
-                    safi: 1,
-                    current: "plan-group-001".to_string(),
-                    candidate: "policy_peer_context".to_string(),
-                    transition: "private_resync".to_string(),
-                    reason: "policy_peer_context".to_string(),
-                    provenance: "runtime_groupability_classifier".to_string(),
-                    local_resync: true,
-                    remote_route_refresh: false,
-                }],
-                rollup: Some(crate::proto::UpdateGroupImpactRollup {
-                    affected_peers: 1,
-                    affected_families: 1,
-                    no_op: 0,
-                    regroup: 0,
-                    shared_migration: 0,
-                    private_resync: 1,
-                    indeterminate: 0,
-                    projected_shared_groups: 0,
-                    projected_private_views: 1,
-                    local_resyncs: 1,
-                    remote_route_refreshes: 0,
+        let value = plan_to_json(
+            &ConfigTransactionPlanResponse {
+                status: ConfigTransactionPlanStatus::Committable as i32,
+                runtime_snapshot_token: "kv1:planned:1".to_string(),
+                diff: Some(DiffRuntimeConfigResponse {
+                    has_actionable_changes: true,
+                    has_reload_applied_changes: true,
+                    has_restart_required_changes: false,
+                    has_informational_changes: false,
+                    has_any_changes: true,
+                    human_text: "Reload-applied changes:\n".to_string(),
+                    diff_json: "{\"reload_applied\":{}}".to_string(),
                 }),
-                capacity_class: "within_mixed".to_string(),
-                capacity_basis: "receipt envelope".to_string(),
-            }),
-        });
+                supported_sections: vec!["[[fib_tables]]".to_string()],
+                unsupported_sections: vec!["[policy]".to_string()],
+                restart_required_sections: vec!["[global]".to_string()],
+                human_text: "Config transaction is rejected.\n".to_string(),
+                update_group_impact: Some(UpdateGroupImpactPlan {
+                    schema_version: 1,
+                    entries: vec![crate::proto::UpdateGroupFamilyImpact {
+                        peer: "192.0.2.1".to_string(),
+                        afi: 1,
+                        safi: 1,
+                        current: "plan-group-001".to_string(),
+                        candidate: "policy_peer_context".to_string(),
+                        transition: "private_resync".to_string(),
+                        reason: "policy_peer_context".to_string(),
+                        provenance: "runtime_groupability_classifier".to_string(),
+                        local_resync: true,
+                        remote_route_refresh: false,
+                    }],
+                    rollup: Some(crate::proto::UpdateGroupImpactRollup {
+                        affected_peers: 1,
+                        affected_families: 1,
+                        no_op: 0,
+                        regroup: 0,
+                        shared_migration: 0,
+                        private_resync: 1,
+                        indeterminate: 0,
+                        projected_shared_groups: 0,
+                        projected_private_views: 1,
+                        local_resyncs: 1,
+                        remote_route_refreshes: 0,
+                    }),
+                    capacity_class: "within_mixed".to_string(),
+                    capacity_basis: "receipt envelope".to_string(),
+                }),
+            },
+            None,
+        );
 
         assert_eq!(value["status"], "committable");
+        assert!(value["plan_token"].is_null());
         assert_eq!(value["runtime_snapshot_token"], "kv1:planned:1");
         assert_eq!(value["supported_sections"][0], "[[fib_tables]]");
         assert_eq!(value["unsupported_sections"][0], "[policy]");

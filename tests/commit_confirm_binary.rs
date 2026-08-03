@@ -221,6 +221,17 @@ fn lab(dir: &Path) -> Lab {
     }
 }
 
+fn large_candidate_lab(dir: &Path) -> Lab {
+    let lab = lab(dir);
+    let candidate = format!(
+        "{}\n# {}",
+        std::fs::read_to_string(&lab.candidate_path).unwrap(),
+        "x".repeat(8 * 1024 * 1024 + 1)
+    );
+    std::fs::write(&lab.candidate_path, candidate).expect("failed to write large candidate");
+    lab
+}
+
 impl Lab {
     fn spawn(&self, stderr_name: &str) -> Daemon {
         let mut daemon = Daemon::spawn(&self.config_path, self.dir.join(stderr_name));
@@ -242,6 +253,13 @@ impl Lab {
             ],
         );
         assert_eq!(plan["status"], "committable", "plan: {plan}");
+        let plan_token = plan["plan_token"]
+            .as_str()
+            .expect("streamed plan JSON must expose its single-use plan token");
+        assert!(
+            !plan_token.is_empty(),
+            "streamed plan token must not be empty"
+        );
         let token = plan["runtime_snapshot_token"]
             .as_str()
             .expect("plan must return a runtime snapshot token");
@@ -291,6 +309,59 @@ impl Lab {
             "real-binary writer must emit the canonical v2 locator"
         );
     }
+}
+
+#[test]
+fn streamed_confirmed_apply_above_eight_mib_aborts_to_previous_config() {
+    let temp = tempfile::tempdir().expect("failed to create temp dir");
+    let lab = large_candidate_lab(temp.path());
+    // Load-bearing streamed-path proof: this candidate cannot traverse the
+    // legacy unary RPC's four-MiB decoder. Reverting either CLI streaming call
+    // site makes the confirmed apply fail before commit.
+    assert!(
+        std::fs::metadata(&lab.candidate_path).unwrap().len() > 8 * 1024 * 1024,
+        "confirmed-apply fixture must stay above eight MiB"
+    );
+
+    let mut daemon = lab.spawn("daemon.stderr.log");
+    let human_plan = rbgp(
+        &lab.grpc_addr,
+        &[
+            "config",
+            "plan",
+            "--from-file",
+            lab.candidate_path.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(human_plan.status.code(), Some(2));
+    let human_stdout = String::from_utf8(human_plan.stdout).unwrap();
+    let exposed_token = human_stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("plan_token: "))
+        .expect("streamed plan human output must expose its single-use plan token");
+    assert!(!exposed_token.is_empty());
+    lab.apply_confirmed("stream-abort", "600");
+    let abort = rbgp_json(
+        &lab.grpc_addr,
+        &["--json", "config", "abort", "stream-abort"],
+    );
+    assert_eq!(abort["confirmation"]["status"], "aborted", "{abort}");
+    let persisted = std::fs::read_to_string(&lab.config_path).unwrap();
+    assert!(
+        !persisted.contains("192.0.2.0/24"),
+        "abort must restore the pre-transaction config"
+    );
+    assert!(
+        !lab.journal_path.exists() && !lab.locator_path.exists(),
+        "abort must consume journal and locator authority"
+    );
+    let ranges = rbgp_json(&lab.grpc_addr, &["--json", "dynamic-neighbor", "list"]);
+    assert_eq!(
+        ranges.as_array().map(Vec::len),
+        Some(0),
+        "aborted daemon must run the previous config: {ranges}"
+    );
+    daemon.assert_still_running();
 }
 
 #[test]

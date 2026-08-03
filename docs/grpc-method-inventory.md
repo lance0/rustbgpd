@@ -88,13 +88,14 @@ shape itself does not raise the tier.
 |-----|------|-------|
 | `GetGlobal` | `sensitive_read` | Returns `GlobalState`: `asn`, `router_id`, `listen_port`, TCP-AO kernel-support probe. Topology disclosure. |
 
-### ConfigService (10 RPCs)
+### ConfigService (11 RPCs)
 
 | RPC | Tier | Notes |
 |-----|------|-------|
 | `DiffRuntimeConfig` | `sensitive_read` | Response is redacted by design (per RPC comment), but the diff structure exposes policy layout, peer-group inheritance, and which fields differ between candidate and runtime. Request `candidate_toml` can contain credentials and is audit-redacted (size and presence only, never the body) by `diff_runtime_config_summary`. |
 | `PlanConfigTransaction` | `sensitive_read` | Validate-only transaction planner. It returns a redacted diff, runtime snapshot token, v1 section classification, and `update_group_impact` topology projection without mutating daemon state. Request `candidate_toml` can contain credentials and must be audit-redacted. |
 | `StreamPlanConfigTransaction` (stream) | `sensitive_read` | Outside-v1 bounded client-streaming ingress for large plan-only candidates. Requires an authenticated listener, admits one stream process-wide without queueing, and stores only owner-private descriptor-relative temporary bytes beneath `runtime_state_dir`; audit output carries counts/outcome only. |
+| `StreamApplyConfigTransaction` (stream) | `operator_only` | Outside-v1 bounded client-streaming commit ingress. Atomically consumes the exact candidate/runtime binding issued by streamed Plan, then hands the unchanged unary apply request to the existing cancellation-shielded transaction executor. |
 | `ApplyConfigTransaction` | `operator_only` | Commit entry point for ADR-0076 config transactions. Currently commits one pure runtime family at a time: full-set `[[fib_tables]]`, full-set `[[dynamic_neighbors]]`, static `[[neighbors]]` add/delete/modify, catalog-only policy/neighbor-set/peer-group/global-chain changes, pure live policy-chain impact for static neighbors and accepted dynamic peers, or peer-group/session reshape impact for static members and post-persist best-effort reset of live dynamic sessions. Live policy-chain impact requires impacted Established peers to have negotiated Route Refresh. Mixed-family and unsupported candidates are rejected without mutation. Request TOML and comment are audit-redacted. |
 | `ConfirmConfigTransaction` | `operator_only` | Confirm a pending confirmed config transaction before its timeout expires. Confirms deployment reachability rather than reading config contents. |
 | `AbortConfigTransaction` | `operator_only` | Abort a pending confirmed config transaction and roll back immediately through the transaction executor. |
@@ -252,11 +253,11 @@ shape itself does not raise the tier.
 | `read` | 0 | 0.0% |
 | `sensitive_read` | 60 | 58.3% |
 | `mutating` | 20 | 19.4% |
-| `operator_only` | 23 | 22.3% |
-| **Total** | **103** | **100%** |
+| `operator_only` | 24 | 23.1% |
+| **Total** | **104** | **100%** |
 
-(Counts include `SetGracefulShutdown` as one `NeighborService` RPC; the 103
-total is 99 native `rustbgpd.v1` RPCs plus 4 `gnmi.gNMI` RPCs.)
+(Counts include `SetGracefulShutdown` as one `NeighborService` RPC; the 104
+total is 100 native `rustbgpd.v1` RPCs plus 4 `gnmi.gNMI` RPCs.)
 
 ## Notes for ADR-0064
 
@@ -277,7 +278,7 @@ specific method if the model warrants it.
    (including `SetFibTable` / `DeleteFibTable`). The 4-tier scheme allows
    richer enforcement (e.g., per-method capability tokens) but the
    per-service split is the cheapest first step.
-2. **`operator_only` is small enough to gate by principal role.** 23
+2. **`operator_only` is small enough to gate by principal role.** 24
    methods total; carving these out into a separate listener or
    requiring a distinct principal role (`operator` vs. `automation`) has
    low operational cost and high blast-radius reduction.
@@ -333,7 +334,7 @@ specific method if the model warrants it.
 
 ## Code matrix
 
-`crates/api/src/authz.rs` contains the same 103-method classification
+`crates/api/src/authz.rs` contains the same 104-method classification
 as a static Rust table. `docs/grpc-method-inventory.json` is the
 machine-readable export for auditors, tooling, and generated clients. The
 `authz` tests parse `proto/rustbgpd.proto` and fail if a new RPC is added
