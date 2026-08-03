@@ -41,9 +41,12 @@ this inventory before the handler runs, and applies two checks in order:
 Principals come from the listener's authenticated identity: native mTLS
 listeners derive them from the validated client certificate (`rustbgpd:`
 URI SAN, then email SAN, then Subject CN), while bearer-token and UDS
-listeners carry an explicit configured `principal` label. Under tier
-enforcement, startup validation rejects a listener that offers neither
-rather than falling back open.
+listeners carry an explicit configured `principal` label — except that an
+owner-only UDS listener (no group/world mode bits) with no `principal` is
+authorized as the reserved implicit `local-operator` principal at operator
+tier (`authn = "uds_owner"`). Under tier enforcement, startup validation
+rejects any other listener that offers no principal source rather than
+falling back open.
 
 The tier assigned to each RPC below is therefore load-bearing: it is the
 floor a caller's role must reach and the value a listener cap is compared

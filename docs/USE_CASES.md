@@ -104,11 +104,27 @@ listen_port = 179
 prometheus_addr = "127.0.0.1:9179"
 log_format = "json"
 
-# Enable TCP listener for mitigation platform to reach gRPC
-[global.telemetry.grpc_tcp]
-enabled = true
-address = "127.0.0.1:50051"
+# Local gRPC over a filesystem-gated Unix socket — the working default under
+# the tier authorization mode.
+[global.telemetry.grpc_uds]
+path = "/var/lib/rustbgpd/grpc.sock"
+# Audit principal for this socket; mapped to a role in [security.grpc.roles].
+principal = "operator"
+
+[security.grpc]
+enforcement = "tier"
+
+[security.grpc.roles]
+operator = "operator"
+
+# Remote mitigation-platform access over TCP. Under tier a TCP listener needs
+# a bearer token + matching principal (or native mTLS); create the token file
+# first, then uncomment.
+# [global.telemetry.grpc_tcp]
+# enabled = true
+# address = "127.0.0.1:50051"
 # token_file = "/etc/rustbgpd/grpc-token"
+# principal = "operator"
 
 # Edge routers that enforce FlowSpec rules
 [[neighbors]]
@@ -140,7 +156,7 @@ grpcurl -plaintext -d '{
   "actions": {
     "traffic_rate_bytes": 1250000
   }
-}' localhost:50051 rustbgpd.v1.InjectionService/AddFlowSpec
+}' -unix /var/lib/rustbgpd/grpc.sock rustbgpd.v1.InjectionService/AddFlowSpec
 ```
 
 ```bash
@@ -149,14 +165,14 @@ grpcurl -plaintext -d '{
   "prefix": "203.0.113.10/32",
   "next_hop": "192.0.2.1",
   "communities": ["65535:666"]
-}' localhost:50051 rustbgpd.v1.InjectionService/AddPath
+}' -unix /var/lib/rustbgpd/grpc.sock rustbgpd.v1.InjectionService/AddPath
 ```
 
 ```bash
 # Withdraw when the attack subsides
 grpcurl -plaintext -d '{
   "prefix": "203.0.113.10/32"
-}' localhost:50051 rustbgpd.v1.InjectionService/DeletePath
+}' -unix /var/lib/rustbgpd/grpc.sock rustbgpd.v1.InjectionService/DeletePath
 ```
 
 **Monitoring:** Prometheus metrics track FlowSpec rule counts per peer. BMP

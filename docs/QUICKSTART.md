@@ -109,7 +109,12 @@ rustbgpd config.toml
 ## 4. Verify
 
 The minimal example uses `/tmp/rustbgpd` as its runtime state directory, so point
-the CLI at that socket:
+the CLI at that socket. gRPC access and authorization need no configuration
+here: the local socket is owner-only, so its clients are authorized as the
+implicit `local-operator` principal — even a config with no gRPC or
+`[security.grpc]` section at all gets this listener by default. Remote (TCP)
+or named access needs explicit principals and roles; see
+[CONFIGURATION.md](CONFIGURATION.md#securitygrpc).
 
 <!-- rbgp-cli-conformance -->
 ```bash
