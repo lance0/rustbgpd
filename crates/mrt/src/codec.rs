@@ -767,6 +767,7 @@ fn encode_route_rib_entry(
     peer_index: u16,
     originated_time: u32,
     add_path: bool,
+    attribute_scratch: Option<&mut (Vec<u8>, u64)>,
 ) -> Result<(), EncodeError> {
     if add_path {
         buf.extend_from_slice(&route.path_id.to_be_bytes())?;
@@ -776,7 +777,7 @@ fn encode_route_rib_entry(
     let attr_len_offset = buf.len();
     buf.extend_from_slice(&0u16.to_be_bytes())?;
     let attr_start = buf.len();
-    encode_route_mrt_attributes(route, buf)?;
+    encode_route_mrt_attributes(route, buf, attribute_scratch)?;
     let attr_len = buf.len().saturating_sub(attr_start);
     let attr_len = u16::try_from(attr_len).map_err(|_| EncodeError::FieldTooLarge {
         field: "RIB entry attribute length",
@@ -798,7 +799,7 @@ fn encode_evpn_route_rib_entry(
     buf.extend_from_slice(&0u16.to_be_bytes())?;
     let attr_start = buf.len();
     for attr in route.attributes.iter() {
-        encode_one_mrt_rib_attribute(attr, buf)?;
+        encode_one_mrt_rib_attribute(attr, buf, None)?;
     }
     encode_mrt_mp_reach(route.next_hop, route.link_local_next_hop, buf)?;
     let attr_len = buf.len().saturating_sub(attr_start);
@@ -813,6 +814,7 @@ fn encode_evpn_route_rib_entry(
 fn encode_route_mrt_attributes(
     route: &Route,
     buf: &mut EncodeBuffer<'_>,
+    mut attribute_scratch: Option<&mut (Vec<u8>, u64)>,
 ) -> Result<(), EncodeError> {
     let inject_ipv4_next_hop =
         matches!(route.prefix, Prefix::V4(_)) && matches!(route.next_hop, IpAddr::V4(_));
@@ -829,7 +831,8 @@ fn encode_route_mrt_attributes(
             if let Some(probe) = buf.attribute_scratch_opportunities_probe {
                 probe.set(probe.get().saturating_add(1));
             }
-            encode_one_mrt_rib_attribute(&PathAttribute::NextHop(next_hop), buf)?;
+            let scratch = attribute_scratch.as_deref_mut();
+            encode_one_mrt_rib_attribute(&PathAttribute::NextHop(next_hop), buf, scratch)?;
             injected = true;
         }
         #[cfg(any(test, feature = "snapshot-allocation-diagnostics"))]
@@ -838,7 +841,7 @@ fn encode_route_mrt_attributes(
         {
             probe.set(probe.get().saturating_add(1));
         }
-        encode_one_mrt_rib_attribute(attr, buf)?;
+        encode_one_mrt_rib_attribute(attr, buf, attribute_scratch.as_deref_mut())?;
     }
     if inject_ipv4_next_hop && !injected {
         let IpAddr::V4(next_hop) = route.next_hop else {
@@ -848,7 +851,8 @@ fn encode_route_mrt_attributes(
         if let Some(probe) = buf.attribute_scratch_opportunities_probe {
             probe.set(probe.get().saturating_add(1));
         }
-        encode_one_mrt_rib_attribute(&PathAttribute::NextHop(next_hop), buf)?;
+        let scratch = attribute_scratch;
+        encode_one_mrt_rib_attribute(&PathAttribute::NextHop(next_hop), buf, scratch)?;
     } else if !inject_ipv4_next_hop {
         encode_mrt_mp_reach(route.next_hop, route.link_local_next_hop, buf)?;
     }
@@ -867,7 +871,7 @@ fn encode_mrt_rib_attributes(
 ) -> Result<(), EncodeError> {
     for attr in attrs {
         buf.check()?;
-        encode_one_mrt_rib_attribute(attr, buf)?;
+        encode_one_mrt_rib_attribute(attr, buf, None)?;
     }
     Ok(())
 }
@@ -875,6 +879,7 @@ fn encode_mrt_rib_attributes(
 fn encode_one_mrt_rib_attribute(
     attr: &PathAttribute,
     buf: &mut EncodeBuffer<'_>,
+    attribute_scratch: Option<&mut (Vec<u8>, u64)>,
 ) -> Result<(), EncodeError> {
     buf.check()?;
     if let PathAttribute::MpReachNlri(mp) = attr {
@@ -883,9 +888,19 @@ fn encode_one_mrt_rib_attribute(
         // The wire encoder is Vec-based. One received BGP attribute is
         // protocol-bounded to u16 bytes; append it immediately rather than
         // retaining owned attributes for a complete prefix record.
-        let mut encoded = Vec::new();
-        encode_path_attributes(std::slice::from_ref(attr), &mut encoded, true, false)?;
-        buf.extend_from_slice(&encoded)
+        let mut local = (Vec::new(), 0);
+        let (encoded, reuses) = attribute_scratch.unwrap_or(&mut local);
+        encoded.clear();
+        let result = encode_path_attributes(std::slice::from_ref(attr), encoded, true, false)
+            .map_err(EncodeError::from)
+            .and_then(|()| buf.extend_from_slice(encoded));
+        if result.is_ok() {
+            *reuses = reuses.saturating_add(1);
+        }
+        if encoded.capacity() > 131_072 {
+            *encoded = Vec::new();
+        }
+        result
     }
 }
 /// Append a single `MP_REACH_NLRI` attribute in MRT-reduced form.
@@ -1030,6 +1045,10 @@ fn route_uses_add_path(
     })
 }
 
+fn new_scratch(profiled: bool, budget: Option<&WarmSnapshotBudget>) -> Option<(Vec<u8>, u64)> {
+    (!profiled && budget.is_none()).then(|| (Vec::new(), 0))
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "borrowed route records need explicit MRT identity, selection, and timing inputs"
@@ -1047,6 +1066,7 @@ fn encode_route_entries_profile<const FIX_ORIGINATED_TIME: bool>(
     add_path: bool,
     now_secs: u64,
     fixed_originated_time: u32,
+    mut attribute_scratch: Option<&mut (Vec<u8>, u64)>,
 ) -> Result<(), EncodeError> {
     let subtype = match (prefix, add_path) {
         (Prefix::V4(_), false) => RIB_IPV4_UNICAST,
@@ -1082,7 +1102,8 @@ fn encode_route_entries_profile<const FIX_ORIGINATED_TIME: bool>(
             } else {
                 originated
             };
-            encode_route_rib_entry(buf, route, peer_index, originated, add_path)?;
+            let scratch = attribute_scratch.as_deref_mut();
+            encode_route_rib_entry(buf, route, peer_index, originated, add_path, scratch)?;
             encoded_count = encoded_count
                 .checked_add(1)
                 .ok_or(EncodeError::FieldTooLarge {
@@ -1173,6 +1194,7 @@ pub fn encode_snapshot_with_allocation_diagnostics(
 ) -> Result<(Vec<u8>, SnapshotAllocationDiagnostics), EncodeError> {
     let ordinary_output_growth_reservations = Cell::new(0);
     let ordinary_attribute_scratch_opportunities = Cell::new(0);
+    let attribute_scratch_result = Cell::new((0, 0));
     let snapshot = encode_snapshot_inner::<true>(
         collector_bgp_id,
         "",
@@ -1186,16 +1208,19 @@ pub fn encode_snapshot_with_allocation_diagnostics(
         Some((
             &ordinary_output_growth_reservations,
             &ordinary_attribute_scratch_opportunities,
+            &attribute_scratch_result,
         )),
     )?;
+    let (ordinary_attribute_scratch_reuses, retained_attribute_scratch_capacity_bytes) =
+        attribute_scratch_result.get();
     Ok((
         snapshot,
         SnapshotAllocationDiagnostics {
             ordinary_output_growth_reservations: ordinary_output_growth_reservations.get(),
             ordinary_attribute_scratch_opportunities: ordinary_attribute_scratch_opportunities
                 .get(),
-            ordinary_attribute_scratch_reuses: 0,
-            retained_attribute_scratch_capacity_bytes: 0,
+            ordinary_attribute_scratch_reuses,
+            retained_attribute_scratch_capacity_bytes,
         },
     ))
 }
@@ -1381,6 +1406,7 @@ fn is_ipv6_link_local(address: IpAddr) -> bool {
     clippy::too_many_arguments,
     reason = "snapshot identity, route families, Add-Path profile, and work budget are independent inputs"
 )]
+#[allow(clippy::type_complexity, reason = "diagnostic probes are test-only")]
 fn encode_snapshot_inner<const FIX_ORIGINATED_TIME: bool>(
     collector_bgp_id: Ipv4Addr,
     view_name: &str,
@@ -1392,15 +1418,15 @@ fn encode_snapshot_inner<const FIX_ORIGINATED_TIME: bool>(
     budget: Option<&WarmSnapshotBudget>,
     fixed_originated_time: u32,
     #[cfg(any(test, feature = "snapshot-allocation-diagnostics"))]
-    snapshot_allocation_probes: Option<(&Cell<u64>, &Cell<u64>)>,
+    snapshot_allocation_probes: Option<(&Cell<u64>, &Cell<u64>, &Cell<(u64, usize)>)>,
 ) -> Result<Vec<u8>, EncodeError> {
     let mut buf = Vec::new();
     let mut output = EncodeBuffer::snapshot_output(&mut buf, budget);
     #[cfg(any(test, feature = "snapshot-allocation-diagnostics"))]
-    if let Some((growth, attributes)) = snapshot_allocation_probes {
+    if let Some((growth, opportunities, _)) = snapshot_allocation_probes {
         output = output
             .with_snapshot_allocation_probe(growth)
-            .with_attribute_scratch_opportunities_probe(attributes);
+            .with_attribute_scratch_opportunities_probe(opportunities);
     }
     output.check()?;
     // 1. Build effective peer list from explicit peers + any route-origin peers.
@@ -1544,6 +1570,7 @@ fn encode_snapshot_inner<const FIX_ORIGINATED_TIME: bool>(
             .then(a_index.cmp(&b_index))
             .then(a.path_id.cmp(&b.path_id))
     })?;
+    let mut scratch = new_scratch(add_path_receive.is_some(), budget);
 
     // 5. Encode each contiguous prefix group.
     let mut seq_num: u32 = 0;
@@ -1583,6 +1610,7 @@ fn encode_snapshot_inner<const FIX_ORIGINATED_TIME: bool>(
                 add_path,
                 now_secs,
                 fixed_originated_time,
+                scratch.as_mut(),
             )?;
             seq_num = seq_num.wrapping_add(1);
             group_start = group_end;
@@ -1624,6 +1652,7 @@ fn encode_snapshot_inner<const FIX_ORIGINATED_TIME: bool>(
                 false,
                 now_secs,
                 fixed_originated_time,
+                scratch.as_mut(),
             )?;
             seq_num = seq_num.wrapping_add(1);
         }
@@ -1645,6 +1674,7 @@ fn encode_snapshot_inner<const FIX_ORIGINATED_TIME: bool>(
                 true,
                 now_secs,
                 fixed_originated_time,
+                scratch.as_mut(),
             )?;
             seq_num = seq_num.wrapping_add(1);
         }
@@ -1682,6 +1712,13 @@ fn encode_snapshot_inner<const FIX_ORIGINATED_TIME: bool>(
         seq_num = seq_num.wrapping_add(1);
     }
     output.check()?;
+    #[cfg(any(test, feature = "snapshot-allocation-diagnostics"))]
+    if let Some((_, _, result)) = snapshot_allocation_probes {
+        let value = scratch
+            .as_ref()
+            .map_or((0, 0), |(buf, n)| (*n, buf.capacity()));
+        result.set(value);
+    }
     Ok(buf)
 }
 #[cfg(test)]
@@ -1775,25 +1812,32 @@ mod tests {
             .with_snapshot_allocation_probe(&probe);
         bounded.push(1).unwrap();
         assert_eq!(probe.get(), 1, "bounded top-level growth is excluded");
+        assert!(new_scratch(false, Some(&budget)).is_none());
     }
 
     #[test]
     fn attribute_scratch_probe_excludes_standalone_and_direct_mp_reach_paths() {
         let probe = Cell::new(0);
+        let attrs = [PathAttribute::LocalPref(1), PathAttribute::LocalPref(2)];
         let mut bytes = Vec::new();
         let mut output =
             EncodeBuffer::new(&mut bytes, None).with_attribute_scratch_opportunities_probe(&probe);
-        encode_mrt_rib_attributes(
-            &[PathAttribute::Origin(rustbgpd_wire::Origin::Igp)],
-            &mut output,
-        )
-        .unwrap();
+        encode_mrt_rib_attributes(&attrs, &mut output).unwrap();
         encode_mrt_mp_reach(IpAddr::V4(Ipv4Addr::LOCALHOST), None, &mut output).unwrap();
         assert_eq!(
             probe.get(),
             0,
             "standalone and direct MP_REACH call sites do not opt in"
         );
+        assert!(new_scratch(true, None).is_none());
+        let mut scratch = (vec![0xff; 131_073], 0);
+        let mut reused = Vec::new();
+        let mut output = EncodeBuffer::new(&mut reused, None);
+        for attr in &attrs {
+            encode_one_mrt_rib_attribute(attr, &mut output, Some(&mut scratch)).unwrap();
+        }
+        assert_eq!(reused, bytes[..reused.len()]);
+        assert_eq!((scratch.1, scratch.0.capacity() <= 131_072), (2, true));
     }
 
     #[test]
@@ -2423,6 +2467,12 @@ mod tests {
             diagnostics.ordinary_attribute_scratch_opportunities, expected_ordinary_opportunities,
             "EVPN attributes and MP_REACH must not enter the ordinary-route probe"
         );
+        let d = &diagnostics;
+        assert_eq!(
+            d.ordinary_attribute_scratch_reuses,
+            expected_ordinary_opportunities
+        );
+        assert!(d.retained_attribute_scratch_capacity_bytes <= 131_072);
 
         let mut reader = SnapshotReader::new(&data).unwrap();
         let mut saw_unicast = false;
