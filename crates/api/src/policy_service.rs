@@ -2285,6 +2285,7 @@ mod tests {
         assert_eq!(r.communities_dropped, 3);
         assert_eq!(r.large_communities_dropped, 0);
         assert_eq!(r.rpki_validation, "invalid");
+        assert_eq!(r.aspa_validation, "unknown");
         assert_eq!(r.rejected_at_unix_ns, 1_000_000_000);
     }
 

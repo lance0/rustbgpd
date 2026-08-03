@@ -20,6 +20,7 @@ use crate::proto::{
 use serde::Serialize;
 use serde::ser::{SerializeMap, SerializeSeq, Serializer};
 use std::collections::HashSet;
+use std::io::Write;
 
 /// Parsed route filter options from CLI flags.
 pub struct RouteFilterOpts {
@@ -1891,6 +1892,37 @@ struct JsonRejectedRoutes<'a> {
     rejected_routes: Vec<JsonRejectedRoute<'a>>,
 }
 
+fn rejected_route_cell(value: &str) -> &str {
+    if value.is_empty() { "-" } else { value }
+}
+
+fn write_rejected_routes_table(
+    writer: &mut dyn Write,
+    resp: &ListRejectedRoutesResponse,
+) -> std::io::Result<()> {
+    writeln!(
+        writer,
+        "{:<22} {:<8} {:<18} {:<28} {:<18} {:<10} {:<10} AS Path",
+        "Prefix", "PathId", "Reason", "Detail", "Next Hop", "RPKI", "ASPA"
+    )?;
+    writeln!(writer, "{}", "-".repeat(131))?;
+    for r in &resp.routes {
+        writeln!(
+            writer,
+            "{:<22} {:<8} {:<18} {:<28} {:<18} {:<10} {:<10} {}",
+            format!("{}/{}", r.prefix, r.prefix_length),
+            r.path_id,
+            r.reason,
+            rejected_route_cell(&r.reason_detail),
+            rejected_route_cell(&r.next_hop),
+            rejected_route_cell(&r.rpki_validation),
+            rejected_route_cell(&r.aspa_validation),
+            r.as_path,
+        )?;
+    }
+    Ok(())
+}
+
 fn print_rejected_routes(resp: &ListRejectedRoutesResponse, json: bool) -> Result<(), CliError> {
     if json {
         let rejected_routes = resp
@@ -1930,35 +1962,7 @@ fn print_rejected_routes(resp: &ListRejectedRoutesResponse, json: bool) -> Resul
         println!("No rejected routes retained for {}", resp.peer_address);
         return Ok(());
     }
-    println!(
-        "{:<22} {:<8} {:<18} {:<28} {:<18} {:<10} AS Path",
-        "Prefix", "PathId", "Reason", "Detail", "Next Hop", "RPKI"
-    );
-    println!("{}", "-".repeat(120));
-    for r in &resp.routes {
-        println!(
-            "{:<22} {:<8} {:<18} {:<28} {:<18} {:<10} {}",
-            format!("{}/{}", r.prefix, r.prefix_length),
-            r.path_id,
-            r.reason,
-            if r.reason_detail.is_empty() {
-                "-"
-            } else {
-                &r.reason_detail
-            },
-            if r.next_hop.is_empty() {
-                "-"
-            } else {
-                &r.next_hop
-            },
-            if r.rpki_validation.is_empty() {
-                "-"
-            } else {
-                &r.rpki_validation
-            },
-            r.as_path,
-        );
-    }
+    write_rejected_routes_table(&mut std::io::stdout().lock(), resp)?;
     let shown = resp.routes.len();
     if u32::try_from(shown).unwrap_or(u32::MAX) >= resp.capacity {
         println!(
@@ -2214,6 +2218,42 @@ mod tests {
             received_at_epoch_seconds: 1_750_000_000,
             ..Default::default()
         }
+    }
+
+    /// The two validation columns are independent facts; using the RPKI value
+    /// for both, or omitting ASPA, makes the exact token proof red.
+    #[test]
+    fn rejected_route_table_distinguishes_rpki_and_aspa() {
+        let response = ListRejectedRoutesResponse {
+            routes: vec![
+                crate::proto::RejectedRoute {
+                    prefix: "198.51.100.0".into(),
+                    prefix_length: 24,
+                    reason: "policy_reject".into(),
+                    rpki_validation: "invalid".into(),
+                    aspa_validation: "unknown".into(),
+                    as_path: "65002 65010".into(),
+                    ..Default::default()
+                },
+                crate::proto::RejectedRoute {
+                    prefix: "203.0.113.0".into(),
+                    prefix_length: 24,
+                    reason: "as_path_loop".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let mut rendered = Vec::new();
+        write_rejected_routes_table(&mut rendered, &response).unwrap();
+        let rendered = String::from_utf8(rendered).unwrap();
+        let mut lines = rendered.lines();
+        assert!(lines.next().unwrap().contains("RPKI       ASPA"));
+        lines.next();
+        let distinct: Vec<_> = lines.next().unwrap().split_whitespace().collect();
+        assert_eq!(&distinct[5..7], &["invalid", "unknown"]);
+        let unavailable: Vec<_> = lines.next().unwrap().split_whitespace().collect();
+        assert_eq!(&unavailable[5..7], &["-", "-"]);
     }
 
     #[tokio::test]
