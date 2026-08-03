@@ -11,6 +11,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Removed
 
+- Expired migration pointers for `[global.telemetry.looking_glass]` and the
+  global `[[policy.import]]` / `[[policy.export]]` fallback. These keys were
+  removed in v0.51.0 and now produce the ordinary unknown-field diagnostic;
+  the supported external looking-glass adapter and named-policy surfaces are
+  unchanged.
+
 - **BREAKING: `security.grpc.enforcement = "legacy"` no longer boots.** The
   pre-v0.24.0 gRPC authorization mode — roles recorded as audit context but
   never enforced, listener `max_tier` as the only ceiling — is removed as a
@@ -42,6 +48,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (below) removed the migration burden for local-only deployments.
 
 ### Changed
+
+- The ordinary example configs now rely on the default owner-only gRPC Unix
+  socket instead of repeating an explicit principal and role map. Socket
+  access and operator authority are unchanged; audit identity changes from
+  `operator` / `authn=uds` to `local-operator` / `authn=uds_owner`. The
+  route-collector example keeps its explicit observer boundary, Docker Compose
+  keeps authenticated TCP, and the three commented TCP recipes now include a
+  complete token, principal, and role mapping.
 
 - **Implicit `local-operator` identity for owner-only UDS listeners
   (ADR-0064 amendment).** Under the default tier enforcement, a UDS

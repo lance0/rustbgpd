@@ -115,6 +115,8 @@ fn valid_config_parses() {
 fn config_examples_parse() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut examples = Vec::new();
+    let mut explicit_uds_examples = Vec::new();
+    let mut authenticated_tcp_examples = Vec::new();
     collect_example_toml_files(&root.join("examples"), &mut examples);
     examples.sort();
 
@@ -136,11 +138,9 @@ fn config_examples_parse() {
         // proves the shipped config without weakening token-file checks.
         let source = materialize_shared_test_only_grpc_token(&source);
         // Strict parse keeps the shipped auth config intact, so every example
-        // is validated under the production Tier default. Test-helper fixture
-        // preparation would mask examples that cannot actually start — the gap
-        // that shipped all
-        // examples unstartable until the v0.33.0 fixup. This guard fails
-        // closed if a new example omits the gRPC authorization config.
+        // is validated under the production Tier default. An omitted listener
+        // intentionally exercises the implicit owner-only UDS path; explicit
+        // listeners must carry their own valid authorization boundary.
         // Referenced .rpol files compile against the example's directory,
         // exactly like the production load path, so chains resolve against
         // the combined TOML + rpol namespace (e.g. route-server's
@@ -154,7 +154,63 @@ fn config_examples_parse() {
         config.validate().unwrap_or_else(|err| {
             panic!("example config {label} failed validation under the tier default: {err}");
         });
+
+        let relative = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
+        if let Some(uds) = config.global.telemetry.grpc_uds.as_ref() {
+            if relative == Path::new("examples/route-collector/config.toml") {
+                assert_eq!(
+                    uds.principal.as_deref(),
+                    Some("looking-glass"),
+                    "{label} must preserve the route-collector observer principal"
+                );
+                assert_eq!(
+                    config.security.grpc.roles.get("looking-glass"),
+                    Some(&GrpcRoleConfig::Observer),
+                    "{label} must preserve the route-collector observer ceiling"
+                );
+            }
+            explicit_uds_examples.push(relative.clone());
+        }
+        if let Some(tcp) = config
+            .global
+            .telemetry
+            .grpc_tcp
+            .as_ref()
+            .filter(|tcp| tcp.enabled)
+        {
+            assert!(
+                tcp.token_file.is_some() || tcp.tls_cert_file.is_some(),
+                "example config {label} must authenticate its explicit TCP listener"
+            );
+            assert_eq!(
+                tcp.principal.as_deref(),
+                Some(TEST_ONLY_GRPC_OPERATOR_PRINCIPAL),
+                "{label} must preserve the Docker test-only principal"
+            );
+            assert_eq!(
+                config
+                    .security
+                    .grpc
+                    .roles
+                    .get(TEST_ONLY_GRPC_OPERATOR_PRINCIPAL),
+                Some(&GrpcRoleConfig::Operator),
+                "{label} must preserve the Docker operator ceiling"
+            );
+            authenticated_tcp_examples.push(relative);
+        }
     }
+
+    // Load-bearing ADR-0122 E1 inventory. Reintroducing explicit UDS ceremony
+    // to an ordinary example, removing the collector's observer boundary, or
+    // weakening/removing the Compose TCP boundary makes these exact rosters red.
+    assert_eq!(
+        explicit_uds_examples,
+        [PathBuf::from("examples/route-collector/config.toml")]
+    );
+    assert_eq!(
+        authenticated_tcp_examples,
+        [PathBuf::from("examples/docker-compose/rustbgpd.toml")]
+    );
 }
 
 #[test]
@@ -16781,26 +16837,24 @@ fn send_hold_time_change_is_a_runtime_neighbor_change() {
     );
 }
 
-// ── Retired config keys (LAN-194 removal wave) ──────
+// ── Expired retired-key pointers (ADR-0122) ─────────
 
 #[test]
-fn retired_global_inline_policy_fails_load_with_migration_error() {
+fn retired_global_inline_policy_uses_generic_unknown_field_error() {
     let toml_str = format!(
         "{}\n[[policy.import]]\nprefix = \"10.0.0.0/8\"\nge = 8\nle = 24\naction = \"permit\"\n",
         valid_toml()
     );
     let err = Config::load_toml_with_diagnostics(&toml_str, "test.toml").unwrap_err();
     assert!(
-        err.contains("has been removed"),
-        "must say the surface is removed: {err}"
+        err.contains("unknown field") && err.contains("import"),
+        "must use the ordinary typed-config diagnostic: {err}"
     );
     assert!(
-        err.contains("[[policy.import]]") && err.contains("[[policy.export]]"),
-        "must name the retired keys: {err}"
-    );
-    assert!(
-        err.contains("import_chain") && err.contains("rpol"),
-        "must point at the migration targets: {err}"
+        !err.contains("global inline policy fallback")
+            && !err.contains("Named policy definitions")
+            && !err.contains("Per-neighbor and per-group"),
+        "the expired bespoke migration pointer must stay removed: {err}"
     );
 }
 
@@ -16820,26 +16874,22 @@ fn per_neighbor_inline_policy_still_loads() {
     assert!(!config.neighbors[0].import_policy.is_empty());
 }
 
-// ── In-daemon looking glass removal (Item: surface reduction) ────────
+// ── In-daemon looking glass pointer expiry ───────────────────────────
 
 #[test]
-fn retired_looking_glass_fails_load_with_migration_error() {
+fn retired_looking_glass_uses_generic_unknown_field_error() {
     let toml_str = format!(
         "{}\n[global.telemetry.looking_glass]\naddr = \"127.0.0.1:8080\"\n",
         valid_toml()
     );
     let err = Config::load_toml_with_diagnostics(&toml_str, "test.toml").unwrap_err();
     assert!(
-        err.contains("has been removed"),
-        "must say the surface is removed: {err}"
+        err.contains("unknown field") && err.contains("looking_glass"),
+        "must use the ordinary typed-config diagnostic: {err}"
     );
     assert!(
-        err.contains("[global.telemetry.looking_glass]"),
-        "must name the retired key: {err}"
-    );
-    assert!(
-        err.contains("birdwatcher-adapter"),
-        "must point at the external adapter: {err}"
+        !err.contains("birdwatcher-adapter") && !err.contains("has been removed"),
+        "the expired bespoke migration pointer must stay removed: {err}"
     );
 }
 

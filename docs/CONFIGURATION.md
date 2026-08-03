@@ -528,8 +528,9 @@ view (`/routes/filtered/{id}`, from `PolicyService.ListRejectedRoutes` with
 structured reject reasons) and a noexport view (`/routes/noexport/{id}`,
 best-routes-minus-advertised with each suppression explained by
 `RibService.ExplainAdvertisedRoute`). A
-config that still sets `[global.telemetry.looking_glass]` fails to load with a
-migration error. See the adapter README for the endpoint→gRPC mapping.
+config that still sets `[global.telemetry.looking_glass]` fails to load with an
+ordinary unknown-field diagnostic. See the adapter README for the endpoint→gRPC
+mapping.
 
 gRPC listeners are configured with optional subtables:
 
@@ -2180,7 +2181,7 @@ The global inline fallback (`[[policy.import]]` / `[[policy.export]]`)
 has been removed: it predated the current policy architecture, was
 restart-required on change (no SIGHUP hot-apply), and was invisible to
 config transactions and the impact planner. A config that still sets it
-fails to load with a migration error. Move the statements to
+fails to load with an ordinary unknown-field diagnostic. Move the statements to
 [named policy definitions](#named-policy-definitions) referenced from
 `import_chain` / `export_chain`, or to
 [`.rpol` policy files](rpol-language.md) via `policy.rpol_files`.

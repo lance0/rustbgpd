@@ -9,15 +9,8 @@ ebgp_requires_policy = true
 [global.telemetry]
 log_format = "json"
 
-[global.telemetry.grpc_uds]
-path = "/var/lib/rustbgpd/grpc.sock"
-principal = "operator"
-
-[security.grpc]
-enforcement = "tier"
-
-[security.grpc.roles]
-operator = "operator"
+# Local gRPC uses the implicit owner-only socket at
+# <runtime_state_dir>/grpc.sock and the local-operator identity.
 
 [rpki]
 [[rpki.cache_servers]]

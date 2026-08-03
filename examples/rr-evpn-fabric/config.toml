@@ -24,19 +24,9 @@ cluster_id = "10.0.0.100"         # route-reflector cluster identifier
 prometheus_addr = "127.0.0.1:9179"
 log_format = "json"
 
-[global.telemetry.grpc_uds]
-path = "/var/lib/rustbgpd/grpc.sock"
-# Audit principal for this local socket (UDS access is gated by file perms);
-# mapped to a role in [security.grpc.roles] below.
-principal = "operator"
-
-[security.grpc]
-# Per-principal gRPC authorization (ADR-0064; default since v0.24.0).
-# Roles: observer (sensitive_read) | automation (mutating) | operator (operator_only)
-enforcement = "tier"
-
-[security.grpc.roles]
-operator = "operator"
+# Local gRPC uses the implicit owner-only socket at
+# <runtime_state_dir>/grpc.sock; filesystem ownership authenticates the
+# implicit local-operator identity at operator tier.
 
 # Import-decision explain, off. Stated rather than inherited so the
 # reason is on the page: the cache covers IPv4 / IPv6 unicast only
