@@ -771,7 +771,8 @@ impl PeerSession {
                     .map_or(self.config.peer.remote_asn, |n| n.peer_asn),
             ),
             local_role,
-            first_as_check_exempt: matches!(local_role, Some(BgpRole::RouteServerClient)),
+            first_as_check_exempt: self.config.route_server_client
+                || matches!(local_role, Some(BgpRole::RouteServerClient)),
         }
     }
     /// Return the received and negotiated ASNs when an IPv4/IPv6-unicast

@@ -1266,13 +1266,15 @@ async fn aspa_first_as_mismatch_enforced_without_configured_role() {
 async fn aspa_first_as_mismatch_enforced_for_old_peer() {
     assert_aspa_first_as_mismatch_withdraws_replacement(false).await;
 }
-/// Load-bearing transparent-IX control: removing the RS-client exemption (or
-/// applying the first-AS check to every eBGP session) makes this mismatched
-/// route disappear instead of being announced.
+/// Load-bearing transparent-IX control: removing the legacy
+/// `route_server_client` exemption (or applying the first-AS check to every
+/// eBGP session) makes this mismatched route disappear instead of being
+/// announced. This is the configuration seam used by existing route-server
+/// deployments that do not also negotiate an RFC 9234 role.
 #[tokio::test]
-async fn aspa_first_as_mismatch_exempts_route_server_client() {
+async fn aspa_first_as_mismatch_exempts_legacy_route_server_client() {
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
-    session.config.peer.local_role = Some(BgpRole::RouteServerClient);
+    session.config.route_server_client = true;
     install_test_negotiated_session(&mut session, negotiated_session(65002, false));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
 
