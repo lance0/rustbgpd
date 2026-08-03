@@ -132,7 +132,8 @@ decisions for every RPC via structured `grpc_authz` logs and
 `[security.grpc].enforcement = "tier"` is enabled, the same runtime layer also
 enforces the authenticated principal's configured role ceiling before the
 handler runs; `"tier"` is the default since v0.24.0, and `"legacy"` is the
-supported opt-out.
+temporary migration mode. In Legacy, configured roles are audit context only
+and the listener's `max_tier` remains the authoritative authorization boundary.
 Forwarded calls emit result-aware labels such as `result="handler_ok"` or
 `result="handler_invalid_argument"` after the handler returns. Rejected calls use
 bounded pre-handler labels: `result="listener_tier_denied"` means the method was
@@ -166,6 +167,12 @@ default). The implicit default UDS listener is safe for local access under
 legacy mode, but tier mode requires an explicit
 `[global.telemetry.grpc_uds]` block with `principal` so requests can be mapped
 to a role.
+Explicit Legacy remains accepted today only for temporary migration; it emits
+a validation warning and fails `rustbgpd --check --strict`. The original
+startup deprecation warning shipped in v0.51.0 on 2026-07-11; validation and
+strict-check enforcement followed in v0.61.0. The two-minor/90-day
+compatibility floor is therefore approximately 2026-10-09. That floor is
+eligibility for a later removal decision, not a promised removal date.
 [`docs/SECURITY.md`](SECURITY.md) covers deployment hardening for this surface,
 and [ADR-0064](adr/0064-grpc-authorization.md) records the tier model itself and
 which of its slices remain open.

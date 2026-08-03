@@ -613,12 +613,14 @@ on existing HTTP/2 connections use the new token; already-admitted streaming
 RPCs continue. Invalid or missing material rejects the whole credential reload.
 Changing the path or enabling/disabling token auth remains restart-required.
 
-**ADR-0064 audit principals:** `principal` gives the audit-only
-`grpc_authz` log line a stable operator-controlled identity. On UDS listeners
-it labels the listener identity established by filesystem permissions and/or
-the optional token. On TCP listeners it is accepted only when `token_file` is
-configured and native mTLS is not configured. Native mTLS listeners derive the
-audit principal from the peer certificate in ADR-0064 order: first `rustbgpd:`
+**ADR-0064 principals:** `principal` gives `grpc_authz` records a stable
+operator-controlled identity. Under the default tier enforcement it is also
+the identity looked up in `[security.grpc.roles]`; under legacy enforcement it
+is audit context only. On UDS listeners it labels the listener identity
+established by filesystem permissions and/or the optional token. On TCP
+listeners it is accepted only when `token_file` is configured and native mTLS
+is not configured. Native mTLS listeners derive the audit principal from the
+peer certificate in ADR-0064 order: first `rustbgpd:`
 URI SAN, then email SAN, then Subject CN. If a validated client certificate has
 none of those fields, or if the selected value is too long or contains embedded
 control characters, the request remains allowed in legacy mode and the audit
@@ -629,13 +631,14 @@ principal falls back to `mtls-unresolved`.
 ADR-0064 per-method authorization defaults to `"tier"` since v0.24.0. Tier
 mode enforces `[security.grpc.roles]` for the authenticated principal before
 the handler runs, in addition to listener `max_tier` caps; upgrading without a
-`[security.grpc.roles]` block fails validation at startup. Legacy mode
-(`enforcement = "legacy"`) remains a supported opt-out that preserves the prior
-listener-wide behavior.
+`[security.grpc.roles]` block fails validation at startup. Legacy mode remains
+accepted today only as a temporary migration mode: role mappings are audit
+context only and the listener's `max_tier` is the authoritative authorization
+boundary.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `enforcement` | string | no | `"tier"` | ADR-0064 enforcement mode (default since v0.24.0). `"tier"` enables per-principal role enforcement in addition to listener `max_tier` caps. `"legacy"` is the opt-out that preserves prior listener `access_mode` behavior |
+| `enforcement` | string | no | `"tier"` | ADR-0064 enforcement mode (default since v0.24.0). `"tier"` enables per-principal role enforcement in addition to listener `max_tier` caps. `"legacy"` is the temporary migration mode in which roles are audit-only and the listener cap authorizes calls |
 
 `[security.grpc.roles]` maps an authenticated principal string to one of the
 built-in roles:
@@ -667,6 +670,14 @@ at startup; the error message points at this section and at the
 `enforcement = "legacy"` escape hatch. Already-staged operators see
 no behavior change.
 
+Explicit `enforcement = "legacy"` emits a validation warning, and
+`rustbgpd --check --strict` rejects any config that retains it. The original
+startup deprecation warning shipped in v0.51.0 on 2026-07-11; validation and
+strict-check enforcement followed in v0.61.0. The two-minor/90-day
+compatibility floor is therefore approximately 2026-10-09; reaching that floor
+makes Legacy eligible for a later removal decision, but does not promise
+removal on that date.
+
 The safe migration sequence (run against a pre-upgrade daemon if
 possible):
 
@@ -677,13 +688,15 @@ possible):
 3. For remote TCP, prefer native mTLS so the principal is derived from the
    client certificate; otherwise use `token_file` plus a non-secret
    `principal` label.
-4. Set `enforcement = "legacy"` while staging labels and roles, then run
-   `rustbgpd --check` against the candidate TOML.
+4. Set `enforcement = "legacy"` only while staging labels and roles, then run
+   `rustbgpd --check` against the candidate TOML. This intentionally warns and
+   cannot pass `--check --strict` until the explicit Legacy setting is removed.
 5. Remove the explicit `enforcement = "legacy"` (or change it to
    `"tier"`) and monitor `grpc_authz` logs/metrics for
    `principal_unmapped` and `role_tier_denied`.
-6. If you need to preserve the pre-v0.24.0 behavior indefinitely, set
-   `enforcement = "legacy"` explicitly and keep it there.
+6. If migration cannot finish in one change window, keep explicit Legacy as a
+   documented, time-bounded exception and retain the narrowest practical
+   listener `max_tier` until Tier can be restored.
 
 ```toml
 # The v0.24.0 default — equivalent to omitting [security.grpc]
@@ -698,7 +711,7 @@ enforcement = "tier"
 ```
 
 ```toml
-# Pre-v0.24.0 behavior. Explicit opt-out preserved indefinitely.
+# Temporary migration mode for pre-v0.24.0 behavior; warns under --check.
 [security.grpc]
 enforcement = "legacy"
 ```

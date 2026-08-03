@@ -29,9 +29,14 @@ this inventory before the handler runs, and applies two checks in order:
    reaches `mutating`, `operator` reaches `operator_only`. A principal
    with no role entry is denied (`principal_unmapped`); a principal whose
    role sits below the method tier is denied (`role_tier_denied`).
-   `enforcement = "legacy"` remains a supported opt-out in which roles
-   are audit context only and the listener ceiling is the sole tier
-   check.
+   `enforcement = "legacy"` remains accepted today only as a temporary
+   migration mode in which roles are audit context only and the listener
+   ceiling is the authoritative tier check. Explicit Legacy warns during
+   validation and fails `rustbgpd --check --strict`. The original startup
+   deprecation warning shipped in v0.51.0 on 2026-07-11; validation and
+   strict-check enforcement followed in v0.61.0. The resulting two-minor/90-day
+   floor is approximately 2026-10-09 and establishes only eligibility for a
+   later removal decision, not a promised removal date.
 
 Principals come from the listener's authenticated identity: native mTLS
 listeners derive them from the validated client certificate (`rustbgpd:`
@@ -303,7 +308,11 @@ specific method if the model warrants it.
    legacy-permissive but can opt into per-tier enforcement) so the
    cut-over is not a breaking change for everyone on the same
    release. That opt-in path shipped as slice-5a, and the production
-   default flipped to `tier` in v0.24.0 (legacy is now the opt-out).
+   default flipped to `tier` in v0.24.0 (Legacy remains accepted today only as
+   the temporary migration mode).
+   Current status: Legacy is retained only as the temporary, warning-bearing
+   migration mode described above; this historical migration decision does not
+   promise that the compatibility mode remains indefinitely.
 7. **Audit logging.** The runtime now emits tier-decision logs and the
    low-cardinality `bgp_grpc_authz_decisions_total` metric for every RPC;
    listener `max_tier` denials use the bounded

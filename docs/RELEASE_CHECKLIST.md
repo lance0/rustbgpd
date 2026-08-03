@@ -258,6 +258,8 @@ cargo with the failing `ip netns add` diagnostic.
 ### Token auth smoke
 
 ```bash
+set -euo pipefail
+
 echo "test-token-value" > /tmp/rustbgpd-token
 cat > /tmp/rustbgpd-auth-test.toml <<'EOF'
 [global]
@@ -273,26 +275,48 @@ log_format = "json"
 [global.telemetry.grpc_uds]
 path = "/tmp/rustbgpd-auth/grpc.sock"
 token_file = "/tmp/rustbgpd-token"
+principal = "release-smoke-observer"
 
-# This smoke isolates bearer-token authn; legacy enforcement keeps it
-# independent of tier role config (tier additionally needs grpc_uds.principal
-# plus a matching [security.grpc.roles] entry).
-[security.grpc]
-enforcement = "legacy"
+# Omit explicit enforcement so the smoke exercises the Tier default.
+[security.grpc.roles]
+"release-smoke-observer" = "observer"
 EOF
 
+cleanup_grpc_auth_smoke() {
+  if [ -n "${DAEMON_PID:-}" ]; then
+    kill "$DAEMON_PID" 2>/dev/null || true
+    wait "$DAEMON_PID" 2>/dev/null || true
+  fi
+  rm -rf /tmp/rustbgpd-auth /tmp/rustbgpd-token \
+    /tmp/rustbgpd-auth-test.toml /tmp/rustbgpd-auth-unauthenticated.log \
+    /tmp/rustbgpd-auth-mrt-denied.log
+}
+trap cleanup_grpc_auth_smoke EXIT
+
+./target/release/rustbgpd --check --strict /tmp/rustbgpd-auth-test.toml
 ./target/release/rustbgpd /tmp/rustbgpd-auth-test.toml &
 DAEMON_PID=$!
 sleep 2
 
-# Without token — should fail
-./target/release/rbgp -s unix:///tmp/rustbgpd-auth/grpc.sock health 2>&1 | grep -i "error\|unauthenticated"
+# Without token — must fail authentication.
+if ./target/release/rbgp -s unix:///tmp/rustbgpd-auth/grpc.sock health \
+  >/tmp/rustbgpd-auth-unauthenticated.log 2>&1; then
+  echo "unauthenticated health unexpectedly succeeded" >&2
+  exit 1
+fi
+grep -qi "unauthenticated" /tmp/rustbgpd-auth-unauthenticated.log
 
-# With token — should succeed
+# With token — health is within the observer role and must succeed.
 ./target/release/rbgp -s unix:///tmp/rustbgpd-auth/grpc.sock --token-file /tmp/rustbgpd-token health
 
-kill $DAEMON_PID
-rm -rf /tmp/rustbgpd-auth /tmp/rustbgpd-token /tmp/rustbgpd-auth-test.toml
+# The same authenticated observer must be denied the operator-only MRT trigger.
+if ./target/release/rbgp -s unix:///tmp/rustbgpd-auth/grpc.sock \
+  --token-file /tmp/rustbgpd-token mrt-dump \
+  >/tmp/rustbgpd-auth-mrt-denied.log 2>&1; then
+  echo "observer mrt-dump unexpectedly succeeded" >&2
+  exit 1
+fi
+grep -qi "permission denied" /tmp/rustbgpd-auth-mrt-denied.log
 ```
 
 ### gRPC authorization audit smoke
@@ -311,6 +335,10 @@ confirm both audit surfaces move:
 # Metrics should expose bounded-label decision counters, with no method path or
 # principal labels:
 curl -fsS http://127.0.0.1:19179/metrics | grep bgp_grpc_authz_decisions_total
+
+# Cleanup only after the audit smoke has consumed the running daemon.
+cleanup_grpc_auth_smoke
+trap - EXIT
 ```
 
 For external audit prep, verify the published inventory is still fenced to the
