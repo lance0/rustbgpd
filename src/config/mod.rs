@@ -1330,45 +1330,14 @@ const TRANSACTION_SESSION_RESHAPE_SECTION: &str = "effective neighbor session re
 const TRANSACTION_EXTERNAL_POLICY_INPUTS_SECTION: &str =
     "[policy] external inputs (rpol_files / datasets; deploy files and apply via SIGHUP reload)";
 
-/// Detect removed config keys in a TOML document that failed typed
-/// deserialization and return a migration error naming the
-/// replacement. Returns `None` when the failure has some other cause
-/// (including TOML that is not even syntactically valid — the normal
-/// parse diagnostic covers that).
-fn retired_key_error(content: &str) -> Option<String> {
-    let table: toml::Table = content.parse().ok()?;
-    let nested = |path: &[&str]| -> bool {
-        let (last, parents) = path.split_last().expect("retired-key path is non-empty");
-        let mut current = &table;
-        for key in parents {
-            match current.get(*key) {
-                Some(toml::Value::Table(t)) => current = t,
-                _ => return false,
-            }
-        }
-        current.contains_key(*last)
-    };
-    if nested(&["global", "telemetry", "looking_glass"]) {
-        return Some(
-            "error: [global.telemetry.looking_glass] has been removed: the in-daemon \
-             birdwatcher looking glass HTTP server is gone. Run the external adapter \
-             instead — examples/birdwatcher-adapter serves the same birdwatcher REST \
-             endpoints from the daemon's gRPC API. Remove the \
-             [global.telemetry.looking_glass] section from this config."
-                .to_string(),
-        );
-    }
-    if nested(&["policy", "import"]) || nested(&["policy", "export"]) {
-        return Some(
-            "error: the global inline policy fallback ([[policy.import]] / \
-             [[policy.export]]) has been removed. Migrate the statements to named \
-             policies ([policy.definitions.<name>] or .rpol files via [policy] \
-             rpol_files) referenced from [policy] import_chain / export_chain — see \
-             docs/CONFIGURATION.md \"Named policy definitions\". Per-neighbor and per-group \
-             inline policy (import_policy / export_policy) is unchanged."
-                .to_string(),
-        );
-    }
+/// Detect a retired config key in a TOML document that failed typed
+/// deserialization and return its time-bounded migration pointer.
+///
+/// There are currently no active pointers. Keep this insertion seam so a
+/// future removal can add one without disturbing the ordinary diagnostic
+/// path; retired-key pointers live for the window set by ADR-0122 and then
+/// return to the generic unknown-field error.
+fn retired_key_error(_content: &str) -> Option<String> {
     None
 }
 

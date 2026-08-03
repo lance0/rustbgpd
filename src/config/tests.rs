@@ -16781,26 +16781,24 @@ fn send_hold_time_change_is_a_runtime_neighbor_change() {
     );
 }
 
-// ── Retired config keys (LAN-194 removal wave) ──────
+// ── Expired retired-key pointers (ADR-0122) ─────────
 
 #[test]
-fn retired_global_inline_policy_fails_load_with_migration_error() {
+fn retired_global_inline_policy_uses_generic_unknown_field_error() {
     let toml_str = format!(
         "{}\n[[policy.import]]\nprefix = \"10.0.0.0/8\"\nge = 8\nle = 24\naction = \"permit\"\n",
         valid_toml()
     );
     let err = Config::load_toml_with_diagnostics(&toml_str, "test.toml").unwrap_err();
     assert!(
-        err.contains("has been removed"),
-        "must say the surface is removed: {err}"
+        err.contains("unknown field") && err.contains("import"),
+        "must use the ordinary typed-config diagnostic: {err}"
     );
     assert!(
-        err.contains("[[policy.import]]") && err.contains("[[policy.export]]"),
-        "must name the retired keys: {err}"
-    );
-    assert!(
-        err.contains("import_chain") && err.contains("rpol"),
-        "must point at the migration targets: {err}"
+        !err.contains("global inline policy fallback")
+            && !err.contains("Named policy definitions")
+            && !err.contains("Per-neighbor and per-group"),
+        "the expired bespoke migration pointer must stay removed: {err}"
     );
 }
 
@@ -16820,26 +16818,22 @@ fn per_neighbor_inline_policy_still_loads() {
     assert!(!config.neighbors[0].import_policy.is_empty());
 }
 
-// ── In-daemon looking glass removal (Item: surface reduction) ────────
+// ── In-daemon looking glass pointer expiry ───────────────────────────
 
 #[test]
-fn retired_looking_glass_fails_load_with_migration_error() {
+fn retired_looking_glass_uses_generic_unknown_field_error() {
     let toml_str = format!(
         "{}\n[global.telemetry.looking_glass]\naddr = \"127.0.0.1:8080\"\n",
         valid_toml()
     );
     let err = Config::load_toml_with_diagnostics(&toml_str, "test.toml").unwrap_err();
     assert!(
-        err.contains("has been removed"),
-        "must say the surface is removed: {err}"
+        err.contains("unknown field") && err.contains("looking_glass"),
+        "must use the ordinary typed-config diagnostic: {err}"
     );
     assert!(
-        err.contains("[global.telemetry.looking_glass]"),
-        "must name the retired key: {err}"
-    );
-    assert!(
-        err.contains("birdwatcher-adapter"),
-        "must point at the external adapter: {err}"
+        !err.contains("birdwatcher-adapter") && !err.contains("has been removed"),
+        "the expired bespoke migration pointer must stay removed: {err}"
     );
 }
 

@@ -11,6 +11,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Removed
 
+- Expired migration pointers for `[global.telemetry.looking_glass]` and the
+  global `[[policy.import]]` / `[[policy.export]]` fallback. These keys were
+  removed in v0.51.0 and now produce the ordinary unknown-field diagnostic;
+  the supported external looking-glass adapter and named-policy surfaces are
+  unchanged.
+
 - **BREAKING: `security.grpc.enforcement = "legacy"` no longer boots.** The
   pre-v0.24.0 gRPC authorization mode — roles recorded as audit context but
   never enforced, listener `max_tier` as the only ceiling — is removed as a
