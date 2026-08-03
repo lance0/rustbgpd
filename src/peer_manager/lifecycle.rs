@@ -1,8 +1,8 @@
 use std::collections::BTreeSet;
 
 use rustbgpd_api::peer_types::{
-    ConfigEvent, DynamicPeerBounceOutcome, DynamicRangeTarget, NeighborCreateSpec,
-    OutboundRefreshError, PeerKey, PeerLifecycleError, PeerManagerNeighborConfig,
+    ConfigEvent, DynamicPeerBounceOutcome, DynamicRangeTarget, OutboundRefreshError, PeerKey,
+    PeerLifecycleError, PeerManagerNeighborConfig, PresenceAwareNeighborCreate,
     SessionLifecycleEventType, SetGshutError,
 };
 use rustbgpd_rib::{RibCommandError, RibUpdate};
@@ -487,14 +487,9 @@ impl PeerManager {
 
     pub(super) async fn runtime_create_peer(
         &mut self,
-        spec: NeighborCreateSpec,
+        spec: Box<PresenceAwareNeighborCreate>,
     ) -> Result<(), PeerLifecycleError> {
-        let NeighborCreateSpec::PresenceAware(raw) = &spec else {
-            return Err(PeerLifecycleError::Invalid(
-                "runtime create requires a presence-aware neighbor spec".to_string(),
-            ));
-        };
-        let peer = PeerKey::new(raw.address, raw.interface.clone());
+        let peer = PeerKey::new(spec.address, spec.interface.clone());
         if self.peers.contains_key(&peer) {
             return Err(PeerLifecycleError::AlreadyExists(peer));
         }

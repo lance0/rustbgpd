@@ -308,16 +308,11 @@ impl PeerSession {
                         new.as_str(),
                     );
 
-                    // Publish operator-facing lifecycle state changes over
-                    // one channel per session so PeerManager can preserve
-                    // per-session order. Existing callers that do not opt
-                    // into the lifecycle channel keep the legacy StateChanged
-                    // notification behavior on the lossless path.
-                    if self.session_lifecycle_tx.is_some() {
-                        self.try_send_lifecycle_state_changed(old, new);
-                    } else {
-                        self.send_lossless_state_changed(old, new);
-                    }
+                    // Publish operator-facing lifecycle state changes over one
+                    // bounded channel per session so PeerManager can preserve
+                    // per-session order. Constructors without that optional
+                    // channel intentionally emit no lifecycle notification.
+                    self.try_send_lifecycle_state_changed(old, new);
 
                     // Notify PeerManager for lossless collision detection.
                     // Read from the FSM's negotiated (set at OpenConfirm),
@@ -793,24 +788,6 @@ impl PeerSession {
         }
 
         follow_up
-    }
-
-    fn send_lossless_state_changed(&self, old: SessionState, new: SessionState) {
-        if let Some(ref notify_tx) = self.session_notify_tx
-            && let Err(e) = notify_tx.send(SessionNotification::StateChanged {
-                session_id: self.session_identity.id,
-                role: self.session_identity.role,
-                peer_addr: self.peer_ip,
-                old,
-                new,
-            })
-        {
-            warn!(
-                peer = %self.peer_label,
-                error = %e,
-                "failed to send StateChanged notification"
-            );
-        }
     }
 
     fn try_send_lifecycle_state_changed(&self, old: SessionState, new: SessionState) {

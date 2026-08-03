@@ -195,22 +195,21 @@ and must be visible in CLI/API documentation when implementation ships.
 
 ### Raw carrier and ownership
 
-An internal discriminated carrier preserves the compatibility split:
+A direct boxed raw carrier preserves presence until actor resolution:
 
 ```text
-NeighborCreateSpec
-├── Legacy(PeerManagerNeighborConfig)
-└── PresenceAware(NeighborCreateIntent)
+Box<PresenceAwareNeighborCreate>
 ```
 
 The presence-aware form uses option/list/block shapes that map losslessly to a
 raw config `Neighbor`; it is not a partially resolved transport config. The
-same `NeighborCreateSpec` crosses both ownership boundaries:
+same boxed raw carrier crosses both ownership boundaries:
 
-1. `ConfigEvent::NeighborAdded` carries it to the config bridge.
+1. `ConfigEvent::PresenceAwareNeighborAdded` carries it to the config bridge.
 2. The bridge applies it to a cloned raw `Config`, runs `Config::validate`,
    and stages the exact candidate TOML.
-3. The PeerManager add command carries the same spec to the actor.
+3. `PeerManagerCommand::RuntimeCreatePeer` carries the same raw value to the
+   actor.
 4. PeerManager applies it to its actor-owned `current_config`, selects the raw
    neighbor, and invokes the existing resolver before spawning the session.
 5. Only after runtime apply succeeds does the already-staged config publish.
@@ -219,10 +218,9 @@ The existing stage-then-apply-then-commit and cancellation-shielding behavior
 does not change. A persistence, validation, or runtime failure creates neither
 a durable neighbor nor a live peer.
 
-The legacy form continues through today's conversion without reinterpretation.
-Internal startup, reconfigure, delete rollback, and tests that already carry a
-resolved `PeerManagerNeighborConfig` remain legacy unless a separate design
-explicitly moves them.
+Legacy `AddNeighbor`, startup, reconfigure, and delete rollback continue through
+their existing resolved `PeerManagerNeighborConfig` paths without entering this
+presence-aware carrier.
 
 ### Validation ordering
 

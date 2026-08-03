@@ -246,23 +246,6 @@ impl Default for SessionIdentity {
 /// [`SessionLifecycleNotification`] instead.
 #[derive(Debug)]
 pub enum SessionNotification {
-    /// BGP FSM state changed.
-    ///
-    /// Kept for compatibility with tests and external users of the transport
-    /// crate. New peer sessions publish state changes over the bounded
-    /// [`SessionLifecycleNotification`] channel when one is configured.
-    StateChanged {
-        /// Peer-manager scoped session generation.
-        session_id: u64,
-        /// Role the session had when spawned.
-        role: SessionRole,
-        /// IP address of the remote peer.
-        peer_addr: IpAddr,
-        /// Previous FSM state.
-        old: SessionState,
-        /// New FSM state.
-        new: SessionState,
-    },
     /// Session received a valid OPEN and transitioned to `OpenConfirm`.
     OpenReceived {
         /// Peer-manager scoped session generation.

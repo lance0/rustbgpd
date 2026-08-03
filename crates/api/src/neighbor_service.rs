@@ -12,10 +12,9 @@ use tonic::{Request, Response, Status};
 
 use crate::actor_read::{peer_manager_read, rib_manager_read};
 use crate::peer_types::{
-    ConfigEvent, DynamicRangeError, NeighborCreateAddPath, NeighborCreateSpec,
-    OutboundRefreshError, PeerInfo, PeerKey, PeerLifecycleError, PeerManagerCommand,
-    PeerManagerNeighborConfig, PresenceAwareNeighborCreate, RemovedDynamicRange,
-    Rfc8212PolicyStatus,
+    ConfigEvent, DynamicRangeError, NeighborCreateAddPath, OutboundRefreshError, PeerInfo, PeerKey,
+    PeerLifecycleError, PeerManagerCommand, PeerManagerNeighborConfig, PresenceAwareNeighborCreate,
+    RemovedDynamicRange, Rfc8212PolicyStatus,
 };
 use crate::proto;
 use crate::server::{
@@ -363,7 +362,7 @@ async fn add_static_peer(
 
 async fn add_presence_aware_peer(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
-    spec: NeighborCreateSpec,
+    spec: Box<PresenceAwareNeighborCreate>,
 ) -> Result<(), Status> {
     let (reply_tx, reply_rx) = oneshot::channel();
     peer_mgr_tx
@@ -502,7 +501,7 @@ const CREATE_ADD_PATH_PATHS: [&str; 4] = [
 )]
 fn parse_presence_aware_create(
     intent: proto::NeighborCreateIntent,
-) -> Result<NeighborCreateSpec, Status> {
+) -> Result<Box<PresenceAwareNeighborCreate>, Status> {
     let config = intent
         .config
         .ok_or_else(|| Status::invalid_argument("intent.config is required"))?;
@@ -643,34 +642,32 @@ fn parse_presence_aware_create(
         })
     };
 
-    Ok(NeighborCreateSpec::PresenceAware(Box::new(
-        PresenceAwareNeighborCreate {
-            address,
-            interface,
-            remote_asn: config.remote_asn,
-            description: (!config.description.trim().is_empty()).then_some(config.description),
-            peer_group: (!config.peer_group.trim().is_empty()).then_some(config.peer_group),
-            hold_time,
-            min_hold_time,
-            send_hold_time: config.send_hold_time,
-            max_prefixes: (config.max_prefixes > 0).then_some(config.max_prefixes),
-            max_prefix_restart_seconds: config.max_prefix_restart_seconds,
-            remove_private_as,
-            local_role,
-            families,
-            required_families,
-            route_server_client: selected
-                .contains("route_server_client")
-                .then_some(config.route_server_client),
-            per_client_best: selected
-                .contains("per_client_best")
-                .then_some(config.per_client_best),
-            strict_role: selected
-                .contains("strict_role")
-                .then_some(config.strict_role),
-            add_path,
-        },
-    )))
+    Ok(Box::new(PresenceAwareNeighborCreate {
+        address,
+        interface,
+        remote_asn: config.remote_asn,
+        description: (!config.description.trim().is_empty()).then_some(config.description),
+        peer_group: (!config.peer_group.trim().is_empty()).then_some(config.peer_group),
+        hold_time,
+        min_hold_time,
+        send_hold_time: config.send_hold_time,
+        max_prefixes: (config.max_prefixes > 0).then_some(config.max_prefixes),
+        max_prefix_restart_seconds: config.max_prefix_restart_seconds,
+        remove_private_as,
+        local_role,
+        families,
+        required_families,
+        route_server_client: selected
+            .contains("route_server_client")
+            .then_some(config.route_server_client),
+        per_client_best: selected
+            .contains("per_client_best")
+            .then_some(config.per_client_best),
+        strict_role: selected
+            .contains("strict_role")
+            .then_some(config.strict_role),
+        add_path,
+    }))
 }
 
 #[expect(
@@ -2190,10 +2187,7 @@ mod tests {
         )
         .intent
         .unwrap();
-        let NeighborCreateSpec::PresenceAware(raw) = parse_presence_aware_create(intent).unwrap()
-        else {
-            panic!("presence-aware parser returned legacy")
-        };
+        let raw = parse_presence_aware_create(intent).unwrap();
         assert_eq!(raw.families, Some(vec![(Afi::Ipv6, Safi::Unicast)]));
         assert_eq!(
             raw.required_families,
@@ -4368,6 +4362,12 @@ mod tests {
             ConfigEvent::PresenceAwareNeighborAdded { spec, ack } => (spec, ack.unwrap()),
             _ => panic!("expected PresenceAwareNeighborAdded"),
         };
+        assert_eq!(persisted.peer_group.as_deref(), Some("ix-members"));
+        assert_eq!(persisted.description, None);
+        assert_eq!(persisted.hold_time, None);
+        assert_eq!(persisted.families, None);
+        assert_eq!(persisted.route_server_client, None);
+        assert_eq!(persisted.add_path, None);
         assert!(
             matches!(peer_mgr_rx.try_recv(), Err(TryRecvError::Empty)),
             "the actor command must wait for the persistence stage acknowledgement"
@@ -4376,14 +4376,7 @@ mod tests {
 
         match peer_mgr_rx.recv().await.unwrap() {
             PeerManagerCommand::RuntimeCreatePeer { spec, reply } => {
-                let (
-                    NeighborCreateSpec::PresenceAware(persisted),
-                    NeighborCreateSpec::PresenceAware(applied),
-                ) = (persisted, spec)
-                else {
-                    panic!("both ownership boundaries must carry raw presence-aware intent")
-                };
-                assert_eq!(applied, persisted);
+                assert_eq!(spec, persisted);
                 assert!(
                     tokio::time::timeout(Duration::from_millis(20), &mut call)
                         .await
