@@ -1179,16 +1179,18 @@ fn aspa_validation_context_uses_negotiated_asn_and_local_role() {
     );
     assert!(context.first_as_check_exempt);
 }
+/// Load-bearing context proof: restoring the configured-role condition makes
+/// the roleless neighbor ASN `None`, failing the exact negotiated-ASN assertion.
 #[test]
-fn aspa_validation_context_preserves_roleless_legacy_behavior() {
+fn aspa_validation_context_carries_neighbor_asn_without_a_role() {
     let mut session = make_test_session(65001, 65002);
     session.negotiated = Some(negotiated_session(65099, false));
     let context = session.aspa_validation_context();
-    assert_eq!(context.neighbor_asn, None);
+    assert_eq!(context.neighbor_asn, Some(65099));
     assert_eq!(context.local_role, None);
     assert!(!context.first_as_check_exempt);
 }
-fn aspa_first_as_update(prefix: Ipv4Prefix, first_asn: u32) -> UpdateMessage {
+fn aspa_first_as_update(prefix: Ipv4Prefix, first_asn: u32, four_octet_as: bool) -> UpdateMessage {
     UpdateMessage::build(
         &[Ipv4NlriEntry { path_id: 0, prefix }],
         &[],
@@ -1199,26 +1201,24 @@ fn aspa_first_as_update(prefix: Ipv4Prefix, first_asn: u32) -> UpdateMessage {
             }),
             PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
         ],
-        true,
+        four_octet_as,
         false,
         Ipv4UnicastMode::Body,
     )
 }
-/// Load-bearing proof: deleting the role-aware first-AS branch in
-/// `process_update` leaves the second announcement installed, so the exact
-/// withdrawal and known-prefix assertions fail.
-#[tokio::test]
-async fn aspa_first_as_mismatch_withdraws_replacement_and_keeps_session_established() {
+async fn assert_aspa_first_as_mismatch_withdraws_replacement(four_octet_as: bool) {
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
-    session.config.peer.local_role = Some(BgpRole::Peer);
     let (client, _server) = connected_stream_pair().await;
     session.test_install_stream(client);
     establish_test_session(&mut session, 65002).await;
     while rib_rx.try_recv().is_ok() {}
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.four_octet_as = four_octet_as;
+    install_test_negotiated_session(&mut session, negotiated);
 
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
     session
-        .process_update(aspa_first_as_update(prefix, 65002))
+        .process_update(aspa_first_as_update(prefix, 65002, four_octet_as))
         .await;
     let RibUpdate::RoutesReceived { announced, .. } = rib_rx
         .try_recv()
@@ -1230,7 +1230,7 @@ async fn aspa_first_as_mismatch_withdraws_replacement_and_keeps_session_establis
     assert_eq!(session.known_prefix_count(), 1);
 
     session
-        .process_update(aspa_first_as_update(prefix, 65003))
+        .process_update(aspa_first_as_update(prefix, 65003, four_octet_as))
         .await;
     let RibUpdate::RoutesReceived {
         announced,
@@ -1252,6 +1252,20 @@ async fn aspa_first_as_mismatch_withdraws_replacement_and_keeps_session_establis
     );
     assert_single_malformed_disposition(&session, "treat_as_withdraw");
 }
+/// Load-bearing roleless-peer proof: restoring the configured-role gate leaves
+/// the mismatched replacement installed, failing the exact withdrawal and
+/// known-prefix assertions in the shared exercise.
+#[tokio::test]
+async fn aspa_first_as_mismatch_enforced_without_configured_role() {
+    assert_aspa_first_as_mismatch_withdraws_replacement(true).await;
+}
+/// Load-bearing RFC 6793 OLD-peer proof: restoring the negotiated
+/// four-octet-AS gate leaves the mismatched two-octet path installed, failing
+/// the exact withdrawal and known-prefix assertions in the shared exercise.
+#[tokio::test]
+async fn aspa_first_as_mismatch_enforced_for_old_peer() {
+    assert_aspa_first_as_mismatch_withdraws_replacement(false).await;
+}
 /// Load-bearing transparent-IX control: removing the RS-client exemption (or
 /// applying the first-AS check to every eBGP session) makes this mismatched
 /// route disappear instead of being announced.
@@ -1263,7 +1277,7 @@ async fn aspa_first_as_mismatch_exempts_route_server_client() {
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
 
     session
-        .process_update(aspa_first_as_update(prefix, 65003))
+        .process_update(aspa_first_as_update(prefix, 65003, true))
         .await;
     let RibUpdate::RoutesReceived {
         announced,
@@ -1279,28 +1293,19 @@ async fn aspa_first_as_mismatch_exempts_route_server_client() {
     assert!(withdrawn.is_empty());
     assert_eq!(session.known_prefix_count(), 1);
 }
-/// Load-bearing compatibility controls: removing either the eBGP or
-/// configured-role guard makes its corresponding mismatched path return a
-/// violation.
+/// Load-bearing scope controls: removing either the eBGP or unicast-family
+/// guard makes its corresponding mismatched path return a violation.
 #[test]
-fn aspa_first_as_mismatch_preserves_roleless_and_ibgp_compatibility() {
+fn aspa_first_as_mismatch_preserves_ibgp_and_family_scope() {
     let attrs = [PathAttribute::AsPath(AsPath {
         segments: vec![AsPathSegment::AsSequence(vec![65003])],
     })];
-
-    let mut roleless_ebgp = make_test_session(65001, 65002);
-    install_test_negotiated_session(&mut roleless_ebgp, negotiated_session(65002, false));
-    assert_eq!(
-        roleless_ebgp.aspa_first_as_mismatch(true, true, true, &attrs),
-        None,
-        "roleless eBGP keeps legacy first-AS behavior"
-    );
 
     let mut internal_role_session = make_test_session(65001, 65001);
     internal_role_session.config.peer.local_role = Some(BgpRole::Peer);
     install_test_negotiated_session(&mut internal_role_session, negotiated_session(65001, false));
     assert_eq!(
-        internal_role_session.aspa_first_as_mismatch(true, false, true, &attrs),
+        internal_role_session.aspa_first_as_mismatch(false, true, &attrs),
         None,
         "the ASPA first-AS precondition is not applied to iBGP"
     );
@@ -1309,19 +1314,14 @@ fn aspa_first_as_mismatch_preserves_roleless_and_ibgp_compatibility() {
     external_role_session.config.peer.local_role = Some(BgpRole::Peer);
     install_test_negotiated_session(&mut external_role_session, negotiated_session(65002, false));
     assert_eq!(
-        external_role_session.aspa_first_as_mismatch(false, true, true, &attrs),
-        None,
-        "the draft check requires four-octet-AS capability"
-    );
-    assert_eq!(
-        external_role_session.aspa_first_as_mismatch(true, true, false, &attrs),
+        external_role_session.aspa_first_as_mismatch(true, false, &attrs),
         None,
         "the draft check is scoped to IPv4/IPv6 unicast announcements"
     );
 
     let empty_path = [PathAttribute::AsPath(AsPath { segments: vec![] })];
     assert_eq!(
-        external_role_session.aspa_first_as_mismatch(true, true, true, &empty_path),
+        external_role_session.aspa_first_as_mismatch(true, true, &empty_path),
         Some((None, 65002)),
         "an AS_PATH with no ordered first AS fails the neighbor-AS check"
     );
@@ -1332,7 +1332,7 @@ fn aspa_first_as_mismatch_preserves_roleless_and_ibgp_compatibility() {
         ],
     })];
     assert_eq!(
-        external_role_session.aspa_first_as_mismatch(true, true, true, &split_sequence),
+        external_role_session.aspa_first_as_mismatch(true, true, &split_sequence),
         Some((Some(65003), 65002)),
         "the first ordered ASN may be in a later AS_SEQUENCE"
     );
@@ -1343,7 +1343,7 @@ fn aspa_first_as_mismatch_preserves_roleless_and_ibgp_compatibility() {
         ],
     })];
     assert_eq!(
-        external_role_session.aspa_first_as_mismatch(true, true, true, &with_as_set),
+        external_role_session.aspa_first_as_mismatch(true, true, &with_as_set),
         None,
         "AS_SET disposition remains outside the neighbor-AS gate"
     );
@@ -13928,6 +13928,103 @@ async fn import_policy_filters_rpki_invalid_with_snapshot() {
         assert_eq!(entry.rpki, rustbgpd_wire::RpkiValidation::Invalid);
     }
 }
+/// Load-bearing edge-ingress proof: removing the transport iBGP gate makes
+/// both the IPv4 body and IPv6 `MP_REACH` paths evaluate `Invalid` at import
+/// policy, so the permit-Unknown policy drops them and this exact two-route
+/// assertion fails.
+#[tokio::test]
+async fn ibgp_import_policy_sees_unknown_aspa_for_ipv4_and_ipv6() {
+    use rustbgpd_rpki::{AspaTable, ValidationSnapshot};
+    use tokio::sync::watch;
+
+    let mut peer_config = PeerConfig::new(65001, 65001, Ipv4Addr::new(10, 0, 0, 1));
+    peer_config.families = vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
+    let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
+    let (_cmd_tx, cmd_rx) = mpsc::channel(8);
+    let (rib_tx, mut rib_rx) = mpsc::channel(64);
+    let snapshot = ValidationSnapshot {
+        vrp_table: None,
+        aspa_table: Some(Arc::new(AspaTable::new(vec![]))),
+    };
+    let (_watch_tx, watch_rx) = watch::channel(snapshot);
+    let mut permit_unknown_statement = retention_statement(None, PolicyAction::Permit);
+    permit_unknown_statement.match_aspa_validation = Some(rustbgpd_wire::AspaValidation::Unknown);
+    let permit_unknown = PolicyChain::new(vec![Policy {
+        entries: vec![permit_unknown_statement],
+        default_action: PolicyAction::Deny,
+    }]);
+    let mut session = PeerSession::new(
+        config,
+        BgpMetrics::new(),
+        cmd_rx,
+        rib_tx,
+        Some(permit_unknown),
+        None,
+        None,
+        None,
+        Some(watch_rx),
+        false,
+    );
+    let mut negotiated = negotiated_session(65001, false);
+    negotiated.negotiated_families = vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
+    install_test_negotiated_session(&mut session, negotiated);
+
+    let v4 = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
+    let v6 = Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32);
+    let attrs = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            // No local-AS loop, but the leftmost AS does not match the iBGP
+            // neighbor ASN; applying eBGP ASPA semantics would be Invalid.
+            segments: vec![AsPathSegment::AsSequence(vec![65002, 65003])],
+        }),
+        PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+        PathAttribute::MpReachNlri(rustbgpd_wire::MpReachNlri {
+            afi: Afi::Ipv6,
+            safi: Safi::Unicast,
+            next_hop: IpAddr::V6("2001:db8::1".parse().unwrap()),
+            link_local_next_hop: None,
+            announced: vec![rustbgpd_wire::NlriEntry {
+                path_id: 0,
+                prefix: Prefix::V6(v6),
+            }],
+            flowspec_announced: vec![],
+            evpn_announced: vec![],
+            bgpls_announced: vec![],
+            labeled_announced: vec![],
+            vpn_announced: vec![],
+            rtc_announced: vec![],
+        }),
+    ];
+    session
+        .process_update(UpdateMessage::build(
+            &[Ipv4NlriEntry {
+                path_id: 0,
+                prefix: v4,
+            }],
+            &[],
+            &attrs,
+            true,
+            false,
+            Ipv4UnicastMode::Body,
+        ))
+        .await;
+
+    let RibUpdate::RoutesReceived { announced, .. } =
+        rib_rx.try_recv().expect("both iBGP routes reach the RIB")
+    else {
+        panic!("expected RoutesReceived");
+    };
+    assert_eq!(announced.len(), 2);
+    assert!(announced.iter().any(|route| route.prefix == Prefix::V4(v4)));
+    assert!(announced.iter().any(|route| route.prefix == Prefix::V6(v6)));
+    assert!(
+        announced
+            .iter()
+            .all(|route| route.aspa_state == rustbgpd_wire::AspaValidation::Unknown)
+    );
+}
+
 /// Verify that import policy `match_aspa_validation = "invalid"` + `action = "deny"`
 /// drops ASPA-invalid routes when a `ValidationSnapshot` with an ASPA table is provided.
 #[tokio::test]

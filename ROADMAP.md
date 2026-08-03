@@ -806,8 +806,9 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
   equal-cost sibling index for wide full-table multipath; platform-diversity
   interop for weighted multipath.
 - **ASPA verification — test hardening.** Role-aware upstream/downstream
-  verification now ships with the draft-v25 first-AS precondition, §6.2
-  IPv4/IPv6-unicast family gate, best-path preference, and
+  verification now ships with the draft-v27 first-AS precondition for
+  roleless and RFC 6793 OLD eBGP peers, the transparent-IX exception, §6.2
+  IPv4/IPv6-unicast edge-ingress/iBGP-Unknown gate, best-path preference, and
   `match_aspa_validation` import/export policy. Direct policy-match unit coverage
   now pins all ASPA verdicts plus combined RPKI+ASPA predicates. A compact
   offline subset of the NIST-BRIO ASPA demo corpus (b7.1.2) is imported as

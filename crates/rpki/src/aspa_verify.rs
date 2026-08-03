@@ -53,7 +53,7 @@ fn leftmost_as_matches_neighbor(hops: &[u32], neighbor_asn: Option<u32>) -> bool
 }
 
 /// Verify an `AS_PATH` using the role-aware ASPA procedures from
-/// `draft-ietf-sidrops-aspa-verification-26` §5.4 and §5.5.
+/// `draft-ietf-sidrops-aspa-verification-27` §5.4 and §5.5.
 ///
 /// With no configured role, this preserves rustbgpd's legacy upstream-only
 /// behavior. When the local role is [`BgpRole::Customer`], routes are treated
@@ -67,7 +67,7 @@ pub fn verify(path: &AsPath, table: &AspaTable, context: AspaValidationContext) 
 }
 
 /// Verify an `AS_PATH` using upstream ASPA verification per
-/// `draft-ietf-sidrops-aspa-verification-26` §5.4.
+/// `draft-ietf-sidrops-aspa-verification-27` §5.4.
 ///
 /// The compressed path is indexed as `hop[0]` = neighbor AS (closest),
 /// `hop[N-1]` = origin AS (farthest). The algorithm walks from origin

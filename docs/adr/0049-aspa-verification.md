@@ -62,7 +62,7 @@ multiple CAs may issue ASPAs for the same customer.
 ### Role-aware verification
 
 ASPA verification is selected from the configured BGP Role (RFC 9234), matching
-draft-ietf-sidrops-aspa-verification-25 §6.3:
+draft-ietf-sidrops-aspa-verification-27 §6.3:
 
 - local role `customer` (routes received from a provider) uses downstream
   verification (§5.5);
@@ -75,7 +75,7 @@ can revalidate with the same direction used at import time.
 
 ### Verification algorithm
 
-Per draft-ietf-sidrops-aspa-verification:
+Per draft-ietf-sidrops-aspa-verification-27:
 
 1. Compress AS_PATH: flatten segments, remove consecutive duplicates
 2. Empty AS_PATH -> Invalid (per spec step 1)
@@ -191,6 +191,8 @@ ASPA table changes. Set on ingress and updated on ASPA table changes.
   ASPA is only available when the cache supports RTR v2
 - No new ASPA-specific config is needed — it uses the same RTR cache servers
   as RPKI ROV and the existing BGP Roles configuration to select direction
+- iBGP routes deliberately carry `Unknown`: ASPA is an edge-ingress signal,
+  and draft -27 §6.2 says its use on internal sessions is NOT RECOMMENDED
 
 ## Amendments
 
@@ -250,3 +252,25 @@ subset of the NIST-BRIO ASPA demo corpus (b7.1.2) now pins upstream and
 downstream Valid / Invalid / Unknown verifier outcomes, including the documented
 ASPA-Valid forged-origin / forged-segment limitations. Keep expanding focused
 `match_aspa_validation` policy coverage as demand warrants.
+
+### 2026-08-03 — Edge-ingress applicability and RFC 6793 peers
+
+The implementation is aligned with
+`draft-ietf-sidrops-aspa-verification-27` on three applicability boundaries:
+
+- The §5 neighbor-AS check applies to eligible eBGP unicast routes even when no
+  BGP Role is configured. Roles select upstream versus downstream verification;
+  they are not a prerequisite for the neighbor-AS check. A local
+  `rs-client` remains exempt for a transparent IX as required by §5.
+- A peer that did not negotiate the four-octet-AS capability is not exempt.
+  rustbgpd is the RFC 6793 NEW speaker and applies the check to the effective
+  AS_PATH after `AS_PATH` / `AS4_PATH` reconstruction.
+- IPv4/IPv6-unicast routes learned over iBGP are assigned `Unknown` before
+  import policy. Initial insertion and later ASPA-cache revalidation preserve
+  that state. This is rustbgpd's edge-ingress policy based on draft -27 §6.2's
+  NOT RECOMMENDED language, not a protocol MUST.
+
+The first two corrections can newly treat a roleless or RFC 6793 OLD-peer
+eBGP UPDATE with a mismatched first AS as withdraw. The iBGP correction can
+change prior ASPA-derived best-path rankings by replacing computed Valid or
+Invalid states with Unknown; no best-path algorithm or retention rule changed.

@@ -56,6 +56,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   route-collector example keeps its explicit observer boundary, Docker Compose
   keeps authenticated TCP, and the three commented TCP recipes now include a
   complete token, principal, and role mapping.
+- **ASPA applicability now follows draft -27 at the session boundary.** The
+  first-AS check now covers roleless eBGP and RFC 6793 OLD peers after AS_PATH
+  reconstruction while preserving the transparent-IX `rs-client` exception.
+  IPv4/IPv6-unicast routes learned over iBGP now remain ASPA `Unknown` before
+  import policy and across cache revalidation, matching rustbgpd's
+  edge-ingress policy. Existing iBGP routes can consequently change from a
+  computed Valid/Invalid ranking to Unknown after upgrade.
 
 - **Implicit `local-operator` identity for owner-only UDS listeners
   (ADR-0064 amendment).** Under the default tier enforcement, a UDS
