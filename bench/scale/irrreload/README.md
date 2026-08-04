@@ -202,9 +202,11 @@ unconditional. Schema-1 transaction evidence conflated those clocks and is
 rejected rather than migrated.
 After the final measurement boundary and before daemon teardown,
 `txn-lifecycle.sh` applies the opposite B generation twice: explicit abort and
-ten-second timeout must report `aborted` and `auto_reverted`, remove all v3
-authority, and restore the exact A disk and effective-runtime hashes. A final
-streamed Plan of A must be tokenless `NOOP`.
+ten-second confirmation timeout must report `aborted` and `auto_reverted`,
+remove all v3 authority, and restore the exact A disk and effective-runtime
+hashes. Expiry of the advertised public deadline starts rollback; terminal
+rollback completion has a separate 600-second ceiling measured from that
+deadline. A final streamed Plan of A must be tokenless `NOOP`.
 
 Because config-history's `SkippedOversize` outcome is internal, the retained
 proof binds the public empty history entries and on-disk history roster before

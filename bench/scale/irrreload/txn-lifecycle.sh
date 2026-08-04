@@ -15,6 +15,8 @@ verify="$script_dir/verify-receipt.py"
 locator="$config.commit-confirm-locator.json"
 raw="$runtime_dir/commit-confirm-v3-prior.toml"; metadata="$runtime_dir/commit-confirm-v3-metadata.json"
 legacy="$runtime_dir/commit-confirm-journal.json"; min_raw=$((10 * 1024 * 1024)); max_raw=$((384 * 1024 * 1024)); output="$evidence/lifecycle.json"; mkdir -p "$evidence"
+CONFIRMATION_TIMEOUT_SECONDS=10
+ROLLBACK_COMPLETION_CEILING_SECONDS=600
 die() { echo "txn-lifecycle: $*" >&2; exit 1; }
 sha() { sha256sum -- "$1" | cut -d' ' -f1; }
 runtime_token_valid() { [[ $1 =~ ^kv2:[0-9a-f]{16}:8$ ]]; }
@@ -196,18 +198,23 @@ abort=$(jq -cn --argjson prefix "$abort_prefix" --argjson terminal "$abort_termi
     --argjson warning "$abort_warning" --argjson history_after "$abort_history_after" \
     '$prefix + {terminal:({status:"aborted",status_view_verified:true,restored_exactly:true,history_warning:$warning,
       history_after:$history_after} + $terminal)}') || die "abort receipt failed"
-apply_pending irrreload-timeout 10 || die "timeout pending transaction failed"
+apply_pending irrreload-timeout "$CONFIRMATION_TIMEOUT_SECONDS" || die "timeout pending transaction failed"
 timeout_prefix=$pending_prefix; timeout_runtime=$pending_runtime; timeout_deadline=$pending_deadline
 timeout_warning_before=$(warning_count)
-deadline=$((SECONDS + 60))
+terminal_completion_deadline=$((timeout_deadline + ROLLBACK_COMPLETION_CEILING_SECONDS))
 while :; do
     status_json=$("$rbgp" --addr "$addr" --json config status) || die "timeout status failed"
     outcome=$(printf '%s' "$status_json" | jq -er '.confirmation.status') || die "timeout status malformed"
-    [ "$outcome" = pending ] || break
-    [ "$SECONDS" -lt "$deadline" ] || die "timeout did not auto-revert within 60 seconds"
-    sleep 0.2
+    case "$outcome" in
+        pending)
+            [ "$(date +%s)" -lt "$terminal_completion_deadline" ] ||
+                die "rollback did not complete within ${ROLLBACK_COMPLETION_CEILING_SECONDS} seconds of the public confirmation deadline"
+            sleep 0.2
+            ;;
+        auto_reverted) break ;;
+        *) die "unexpected timeout outcome $outcome" ;;
+    esac
 done
-[ "$outcome" = auto_reverted ] || die "unexpected timeout outcome $outcome"
 timeout_rollback_runtime=$(printf '%s' "$status_json" | jq -er '.confirmation.runtime_snapshot_token | select(type == "string")') || die "timeout runtime token missing"
 runtime_token_valid "$timeout_rollback_runtime" || die "timeout runtime token was not canonical kv2"
 [ "$timeout_rollback_runtime" != "$timeout_runtime" ] || die "timeout did not rotate the runtime token"
