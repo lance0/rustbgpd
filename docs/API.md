@@ -573,12 +573,23 @@ confirmation, other persisted runtime config mutators fail with
 `confirm_id` to make the change permanent, or `AbortConfigTransaction` to roll
 back immediately. If the timer expires first, the daemon re-applies the
 pre-commit runtime snapshot through the same transaction executor and persists
-the rollback. The confirm window is durable. Before commit, the daemon journals the
-pre-commit config to `<runtime_state_dir>/commit-confirm-journal.json`; a
-restart that finds an unconfirmed journal reverts at boot before adopting the
-on-disk config, saves the unconfirmed candidate as `<config>.unconfirmed`, and
-fails closed on torn, unusable, or unremovable journal state. `GetConfigTransactionStatus`
-reports the current pending transaction or the last terminal lifecycle result.
+the rollback. The confirm window is durable. Before commit, the v3 writer
+publishes the exact accepted normalized prior to
+`<runtime_state_dir>/commit-confirm-v3-prior.toml`, its provenance and
+file-identity metadata to `commit-confirm-v3-metadata.json`, then the sole boot
+authority to `<absolute lexical config path>.commit-confirm-locator.json`.
+Startup checks that locator before candidate contents and verifies the complete
+chain before restoring; unsafe, torn, or mismatched state fails closed.
+Confirm and successful rollback become terminal only after locator unlink and
+parent-directory `fsync`. Subsequent verified exact metadata/raw cleanup and
+pending-directory `fsync` are warning-only; locator-free residue cannot re-arm
+the transaction.
+Production writes v3; the v2 locator and locator-free v1 formats are frozen
+compatibility readers without conversion or dual-write. Finish a live v1/v2
+transaction before upgrade. Before downgrade, finish or abort v3 rather than
+deleting a live locator; only after terminal cleanup verify v3 and v2 pending
+state is absent. `GetConfigTransactionStatus` reports the pending transaction
+or last terminal lifecycle result.
 A failed abort/auto-revert rollback is not terminal: the transaction stays
 pending with an `ABORT_FAILED`/`AUTO_REVERT_FAILED` status and the mutation
 fence stays closed until the abort is retried successfully, the candidate is

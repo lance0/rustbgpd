@@ -803,9 +803,9 @@ a field rename, edit the config file by hand.
 
 ### Persistent state on disk
 
-Runtime state lives in `runtime_state_dir` (default `/var/lib/rustbgpd`). One
-commit-confirm v2 authority file instead lives beside the lexical launch config
-so startup can find it before trusting the unconfirmed candidate:
+Runtime state lives in `runtime_state_dir` (default `/var/lib/rustbgpd`). The
+v3 commit-confirm locator instead lives beside the lexical launch config so
+startup finds the sole pending authority before trusting candidate contents:
 
 Assign a distinct `runtime_state_dir` to every concurrently running rustbgpd
 daemon. The directory is single-writer runtime state; sharing it between live
@@ -815,24 +815,28 @@ processes is unsupported even when their configuration files differ.
 |---|---|---|
 | `gr-restart.toml` | Graceful Restart coordination marker. Written on clean shutdown, read on startup to set the R-bit in OPEN. | Yes |
 | `warm-bundle-v1/` | Optional owner-private shutdown checkpoint (`manifest.json` plus a content-addressed MRT artifact). Published only when `warm_cache_checkpoint_on_shutdown = true`; not restored on startup. | Yes |
-| `<absolute lexical config path>.commit-confirm-locator.json` | Sole v2 pending authority, published only after the journal is durable and checked before candidate contents are parsed. Launch-target metadata may be inspected while binding authority. Durable removal is the terminal point. | Until the transaction is terminal |
-| `<runtime_state_dir>/commit-confirm-journal.json` | Owner-private accepted prior snapshot: normalized TOML, external-source manifest, and digests. Exact residue cleanup after terminal locator removal is warning-only. | Until terminal cleanup; safe residue may remain |
+| `<runtime_state_dir>/commit-confirm-journal.json` | Frozen locator-free v1 authority and v2 compatibility journal; secret-bearing normalized TOML. Production does not write it. | Until legacy recovery or verified residue cleanup |
+| `<runtime_state_dir>/commit-confirm-v3-prior.toml` | Fixed v3 raw accepted prior; secret-bearing normalized TOML. Published first. | Until terminal cleanup; safe residue may remain |
+| `<runtime_state_dir>/commit-confirm-v3-metadata.json` | Fixed confidential provenance, digest, and file-identity metadata; no raw TOML. Published after the raw prior. | Until terminal cleanup; safe residue may remain |
+| `<absolute lexical config path>.commit-confirm-locator.json` | Confidential paths/digests and sole v3 pending boot authority; no raw TOML. Published last and checked before candidate contents. | Until durable unlink and parent sync make the transaction terminal |
 | `config-history/*` | Last 20 owner-private, secret-bearing legacy TOML and v2 JSON records for `rbgp config history`; newest is index 0. V2 records hash but do not archive external sources and are rollback-eligible only when live sources exactly reproduce recorded provenance. Move this directory aside before downgrading to a version without v2 support. | Yes |
 | `fib-owned.json` | FIB ownership receipt — which kernel routes the daemon installed (ADR-0061). Used to drain orphan installs on next start. | Yes |
 | `grpc.sock` | gRPC UDS endpoint (if `[global.telemetry.grpc_uds]` configured). | Recreated on start |
 
-The lexical config and journal paths are resolved to absolute identities. A
-writer or present v2 object requires daemon-owned real parents that are not
-group- or world-writable. Locator absence carries no authority and therefore
-adds no v2 ownership or mode requirement to ordinary startup; confirmed writes
-still require the documented ownership change.
-Locator, journal, and exact staging files must be daemon-owned regular files
-with mode `0600`; symlinks and special files fail closed. Do not downgrade or start an
-older binary until both the v2 locator and locator-free v2 journal residue are
-absent. Separately move the complete v2 config-history directory aside before
-the older binary starts. Production writes only v2 pending state; locator-free
-v1 journals remain a fail-closed compatibility lane, but a live v1 transaction
-must terminate before upgrade. V2 never converts or dual-writes it.
+The lexical config, metadata, and raw-prior paths resolve to absolute
+identities. A writer or present pending object requires daemon-owned real
+parents that are not group- or world-writable; locator absence carries no
+authority or ordinary-startup storage requirement. Pending and staging files
+must be daemon-owned regular files with mode `0600`; symlinks and special files
+fail closed. Locator unlink plus parent `fsync` is terminal; only subsequent
+verified metadata/raw cleanup and pending-directory `fsync` are warning-only.
+
+Production writes v3. The v2 locator and locator-free v1 lanes are frozen
+compatibility readers without conversion or dual-write. Finish or abort live
+v1/v2 state before upgrade. Before downgrade, finish or abort v3 and never
+delete its live locator manually; after it is terminal, verify the locator and
+both fixed v3 files are absent. Also verify v2 locator/journal residue is absent
+and move the complete v2 config-history directory aside for an older binary.
 
 Routing state is **not restored**. The optional shutdown checkpoint contains
 only eligible post-import-policy Adj-RIB-In views for future use; Loc-RIB,
