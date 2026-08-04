@@ -1010,6 +1010,101 @@ fn irr_reload_counterbalanced_receipt_protocol_is_load_bearing() {
 }
 
 #[test]
+/// Red proof: removing any runner's explicit `mkdir -m 0700` makes the
+/// structural lookup fail. Replacing it with umask-dependent `mkdir -p` makes
+/// the same assertion fail, while the executed command proves mode 0700 under
+/// a caller umask of 002.
+fn remaining_receipt_runtime_directories_are_owner_only() {
+    let root = env!("CARGO_MANIFEST_DIR");
+    let persistence = std::fs::read_to_string(format!(
+        "{root}/bench/scale/config-persistence/run-receipt.sh"
+    ))
+    .expect("read config-persistence receipt");
+    let private_parent = "mkdir -m 0700 -- \"${RUNDIR}\"";
+    assert_eq!(
+        persistence.matches(private_parent).count(),
+        1,
+        "config-persistence must create its predictable /tmp parent owner-only"
+    );
+    let private_parent_pos = persistence
+        .find(private_parent)
+        .expect("config-persistence private parent creation");
+    let config_child_pos = persistence
+        .find("mkdir -p \"${CONFDIR}\"")
+        .expect("config-persistence config child creation");
+    assert!(
+        private_parent_pos < config_child_pos,
+        "private parent must exist before creating children beneath it"
+    );
+    let fixture = tempfile::tempdir().expect("config-persistence parent fixture");
+    let runtime = fixture.path().join("runtime-parent");
+    let output = std::process::Command::new("bash")
+        .args([
+            "-c",
+            &format!(
+                "set -euo pipefail\numask 002\n{private_parent}\nstat -c '%a' \"${{RUNDIR}}\""
+            ),
+        ])
+        .env("RUNDIR", &runtime)
+        .output()
+        .expect("execute config-persistence private parent creation");
+    assert!(output.status.success(), "private parent creation failed");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "700",
+        "config-persistence parent mode"
+    );
+
+    let cases = [
+        (
+            "bench/scale/irrreload/run-bmp-buffer-receipt.sh",
+            "run",
+            "mkdir -m 0700 -- \"$run\" || return 1",
+        ),
+        (
+            "bench/scale/config-persistence/run-receipt.sh",
+            "STATEDIR",
+            "mkdir -m 0700 -- \"${STATEDIR}\"",
+        ),
+        (
+            "bench/scale/outbound-prefix-limits/run-receipt.sh",
+            "RUNDIR",
+            "mkdir -m 0700 -- \"${RUNDIR}\"",
+        ),
+    ];
+
+    for (relative, variable, create) in cases {
+        let script = std::fs::read_to_string(format!("{root}/{relative}"))
+            .unwrap_or_else(|error| panic!("read {relative}: {error}"));
+        assert_eq!(
+            script.matches(create).count(),
+            1,
+            "{relative} must create its daemon runtime directory owner-only"
+        );
+
+        let fixture = tempfile::tempdir().expect("runtime fixture parent");
+        let runtime = fixture.path().join("runtime");
+        let shell = format!("set -euo pipefail\numask 002\n{create}\nstat -c '%a' \"${variable}\"");
+        let output = std::process::Command::new("bash")
+            .args(["-c", &shell])
+            .env(variable, &runtime)
+            .output()
+            .unwrap_or_else(|error| panic!("execute {relative} directory creation: {error}"));
+        assert!(
+            output.status.success(),
+            "{relative} directory creation failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "700",
+            "{relative} runtime directory mode"
+        );
+    }
+}
+
+#[test]
 /// Red proof: moving the atomic `ack` publish before the `/proc` starttime
 /// comparison or process.tsv capture fails the source-order assertions;
 /// removing the mismatch guard makes the wrong-start invocation create ack.

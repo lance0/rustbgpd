@@ -99,7 +99,9 @@ run_once() {
     local pre="$run/pre-churn" final="$run/final" sink_start="$run/sink-start" sink_stop="$run/sink-stop"
     ACTIVE_TMP=$run
     require_ports_free
-    mkdir -p "$run" "$out"
+    rm -rf -- "$run" || return 1
+    mkdir -p "$out" || return 1
+    mkdir -m 0700 -- "$run" || return 1
     python3 "$GEN" rustbgpd "$N_MEMBERS" "$TOTAL_PREFIXES" "$run" \
         --seed "$SEED" --min-list 1000 --max-list 40000 \
         --changed-fraction 0.1 --port "$BGP_PORT" --render-bin "$RENDER" \
