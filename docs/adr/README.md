@@ -132,6 +132,7 @@ consequences so future contributors understand *why*, not just *what*.
 | [0121](0121-config-history-external-policy-provenance.md) | Config-history external-policy provenance | Accepted — history restore shipped; commit-confirm v2 designed, implementation pending | 2026-08-01 |
 | [0122](0122-compatibility-debt-inventory.md) | Compatibility-debt inventory and removal schedule | Proposed | 2026-08-03 |
 | [0123](0123-aspa-v27-mitigation-and-retention.md) | ASPA draft-v27 mitigation requires lossless retention | Proposed (behavior activation NO-GO until retention gates pass) | 2026-08-03 |
+| [0124](0124-bounded-config-history-retention.md) | Bounded config-history retention for oversized snapshots | Proposed (owner decisions recorded; implementation pending) | 2026-08-04 |
 
 ## Template
 
