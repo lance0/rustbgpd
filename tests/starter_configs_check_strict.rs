@@ -20,6 +20,9 @@ use std::process::Command;
 /// The repo's public test-only bearer token, substituted for a starter's
 /// `token_file` when that path only exists inside a container.
 const TOKEN_FIXTURE: &str = "tests/fixtures/grpc-test-only-operator.token";
+const TCP_BEGIN: &str = "# use-case-remote-tcp:begin";
+const TCP_END: &str = "# use-case-remote-tcp:end";
+const TOKEN_PLACEHOLDER: &str = "/etc/rustbgpd/grpc-token";
 
 fn repo_root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -101,6 +104,34 @@ fn assert_clean(label: &str, code: Option<i32>, stdout: &str, stderr: &str) {
     );
 }
 
+fn assert_once(source: &str, marker: &str) {
+    assert_eq!(source.matches(marker).count(), 1, "marker drift: {marker}");
+}
+fn has_line(source: &str, expected: &str) -> bool {
+    source.lines().any(|line| line == expected)
+}
+fn anchored_toml_fence<'a>(document: &'a str, marker: &str) -> &'a str {
+    assert_once(document, marker);
+    let tail = document.split_once(marker).expect("unique marker").1;
+    let fence = tail
+        .strip_prefix("\n\n```toml\n")
+        .unwrap_or_else(|| panic!("{marker} no longer directly anchors a TOML fence"));
+    fence
+        .split_once("\n```")
+        .unwrap_or_else(|| panic!("unterminated fence after {marker}"))
+        .0
+}
+
+fn enable_remote_tcp(source: &str, token_literal: &str) -> String {
+    assert_once(source, TCP_BEGIN);
+    assert_once(source, TCP_END);
+    assert_once(source, TOKEN_PLACEHOLDER);
+    let (before, tail) = source.split_once(TCP_BEGIN).expect("TCP begin marker");
+    let (recipe, after) = tail.split_once(TCP_END).expect("TCP end marker");
+    format!("{before}{}{after}", recipe.replace("\n# ", "\n"))
+        .replace(&format!("\"{TOKEN_PLACEHOLDER}\""), token_literal)
+}
+
 #[test]
 fn every_init_config_profile_passes_check_strict() {
     let profiles = profile_names();
@@ -167,6 +198,87 @@ fn every_example_config_passes_check_strict() {
         let (code, stdout, stderr) = run(&["--check", "--strict", path]);
         assert_clean(&config.display().to_string(), code, &stdout, &stderr);
     }
+}
+
+#[test]
+fn use_case_config_fences_pass_base_and_authenticated_tcp_check_strict() {
+    let document =
+        fs::read_to_string(repo_root().join("docs/USE_CASES.md")).expect("read use-case guide");
+    assert_eq!(document.matches("<!-- use-case-config:").count(), 3);
+    let bearer_header = r#"-H "authorization: Bearer $(< /etc/rustbgpd/grpc-token)""#;
+    assert_eq!(document.matches(bearer_header).count(), 2);
+    let cases = [
+        ("ddos-mitigation", "mitigation-platform", "operator"),
+        ("hosting-provider", "provisioning-system", "operator"),
+        ("route-collector", "looking-glass", "observer"),
+    ];
+    let dir = tempfile::tempdir().expect("tempdir");
+    let token = dir.path().join("use-case.token");
+    fs::copy(repo_root().join(TOKEN_FIXTURE), &token).expect("copy token fixture");
+    let token_literal = toml::Value::String(token.display().to_string()).to_string();
+    let mut checks = 0;
+    for (name, tcp_principal, tcp_role) in cases {
+        let marker = format!("<!-- use-case-config:{name} -->");
+        let fence = anchored_toml_fence(&document, &marker);
+        assert!(!has_line(fence, "[global.telemetry.grpc_tcp]"));
+        if name == "route-collector" {
+            assert!(has_line(fence, "principal = \"looking-glass\""));
+            assert!(has_line(fence, "looking-glass = \"observer\""));
+        } else {
+            assert!(!has_line(fence, "[global.telemetry.grpc_uds]"));
+            assert!(!has_line(fence, "[security.grpc.roles]"));
+        }
+        let cfg: toml::Value = toml::from_str(fence).expect("fence is TOML");
+        let policy = match name {
+            "ddos-mitigation" => Some((
+                "reject-edge-routes",
+                "distribute-mitigation",
+                "deny",
+                "permit",
+            )),
+            "route-collector" => Some(("observe-all", "deny-all", "permit", "deny")),
+            _ => None,
+        };
+        if let Some((import, export, ia, ea)) = policy {
+            assert_eq!(cfg["global"]["ebgp_requires_policy"].as_bool(), Some(true));
+            for (key, expected) in [("import_chain", import), ("export_chain", export)] {
+                let chain = cfg["policy"][key].as_array().expect("policy chain array");
+                assert_eq!(chain.len(), 1);
+                assert_eq!(chain[0].as_str(), Some(expected));
+            }
+            assert_eq!(
+                cfg["policy"]["definitions"][import]["default_action"].as_str(),
+                Some(ia)
+            );
+            assert_eq!(
+                cfg["policy"]["definitions"][export]["default_action"].as_str(),
+                Some(ea)
+            );
+        }
+        let tcp_source = enable_remote_tcp(fence, &token_literal);
+        assert!(has_line(&tcp_source, "[global.telemetry.grpc_tcp]"));
+        assert!(has_line(
+            &tcp_source,
+            &format!("token_file = {token_literal}")
+        ));
+        assert!(has_line(
+            &tcp_source,
+            &format!("principal = \"{tcp_principal}\"")
+        ));
+        assert!(has_line(
+            &tcp_source,
+            &format!("{tcp_principal} = \"{tcp_role}\"")
+        ));
+        for (variant, source) in [("base", fence), ("tcp", tcp_source.as_str())] {
+            let path = dir.path().join(format!("{name}-{variant}.toml"));
+            fs::write(&path, source).expect("write extracted fence");
+            let (code, stdout, stderr) =
+                run(&["--check", "--strict", path.to_str().expect("UTF-8")]);
+            checks += 1;
+            assert_clean(&format!("{name} {variant}"), code, &stdout, &stderr);
+        }
+    }
+    assert_eq!(checks, 6, "receipt must execute exactly six strict checks");
 }
 
 #[test]
