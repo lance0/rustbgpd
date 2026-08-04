@@ -3250,6 +3250,12 @@ Confirm handles are operator-chosen correlation IDs. They must be non-empty, at
 most 128 characters, and free of control characters; the CLI validates those
 constraints before reading the candidate file or calling the daemon.
 
+The v3 commit-confirm journal caps the current accepted normalized config it
+must retain as rollback authority at 384 MiB. If that prior exceeds the cap,
+confirmed apply returns `FAILED_PRECONDITION` with the actual and limit byte
+counts before publishing authority or mutating peer, persisted, or runtime
+state. Apply without `--confirm-id`, or reduce the canonical config size.
+
 The confirm window is durable: the daemon journals the pre-commit config
 snapshot to `<runtime_state_dir>/commit-confirm-journal.json`, including its
 accepted external-source manifest and digests, then publishes
@@ -3995,9 +4001,12 @@ equivalent canonical rendering:
   first persisted change.
 - **Formatting and key order are not preserved.** Blank lines, spacing, table
   order, and inline-vs-expanded table style are all re-derived.
-- **Defaults are written out explicitly.** Fields you left out appear with
-  their default values (`dynamic_neighbors = []`, `evpn_instances = []`, and so
-  on), so the file grows sections you never typed.
+- **Defaults are canonicalized.** Most fields you left out appear with their
+  default values (`dynamic_neighbors = []`, `evpn_instances = []`, and so on),
+  so the file grows sections you never typed. Selected default-empty
+  collections are omitted, including inline-policy `match_community`,
+  `set_community_add`, and `set_community_remove`; omission and `[]` decode
+  identically.
 - **Ownership and mode change.** The rename installs a fresh file owned by the
   daemon user at mode `0600`, whatever the previous file's owner and mode were.
 

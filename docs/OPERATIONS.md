@@ -108,14 +108,14 @@ transaction with an optimistic runtime snapshot token:
 
 > **Before the first runtime change.** Any mutation that persists rewrites the
 > config file in canonical form: comments and formatting are not preserved,
-> defaulted fields are written out explicitly, and the file ends up owned by
-> the daemon user at mode `0600`. See
+> defaults are canonicalized (selected default-empty collections may be
+> omitted), and the file ends up owned by the daemon user at mode `0600`. See
 > [Runtime changes rewrite the config file](#runtime-changes-rewrite-the-config-file).
 
 ```bash
 # What is the daemon actually running? Dump the effective config with
-# defaults materialized (hold_time, send_hold_time, GR timers, families)
-# and secrets redacted:
+# defaults resolved (hold_time, send_hold_time, GR timers, families; selected
+# default-empty policy lists omitted) and secrets redacted:
 rbgp config effective
 rbgp -j config effective
 
@@ -168,6 +168,12 @@ rbgp config abort deploy-20260605-1
 Confirm handles must be non-empty, at most 128 characters, and free of control
 characters. `--confirm-timeout` requires `--confirm-id`; the daemon default is
 600 seconds and the maximum accepted timeout is 86400 seconds.
+
+The v3 commit-confirm journal caps the current accepted normalized config it
+must retain as rollback authority at 384 MiB. If that prior exceeds the cap,
+confirmed apply returns `FAILED_PRECONDITION` with the actual and limit byte
+counts before publishing authority or mutating peer, persisted, or runtime
+state. Apply without `--confirm-id`, or reduce the canonical config size.
 
 While a confirmed transaction is applying or awaiting confirmation, SIGHUP
 reload is ignored and every persisted runtime config mutator (FIB-table and
@@ -512,8 +518,9 @@ daemon's whole config snapshot and replaces the file with it. On the **first**
 such change, expect all of the following:
 
 - comments are gone, and formatting and key order are re-derived;
-- fields you left at their defaults are written out explicitly, so the file
-  gains sections you never typed;
+- most fields you left at their defaults are written out explicitly, so the
+  file gains sections you never typed; selected default-empty inline-policy
+  community lists are omitted because omission and `[]` decode identically;
 - the temp-file + rename leaves the file owned by the daemon user at mode
   `0600`.
 
@@ -1518,7 +1525,7 @@ addresses only, never copied into the bundle.
 ```
 rustbgpd-doctor-<ts>/
 ├── manifest.json            # versions, redaction note, per-section collected/partial/unavailable status, check results
-├── config/effective.toml    # the daemon's GetEffectiveConfig dump (defaults materialized, secrets <redacted>)
+├── config/effective.toml    # GetEffectiveConfig dump (defaults resolved, selected empty lists omitted, secrets <redacted>)
 ├── peers/bfd.json           # BFD state/diagnostic/strict plus remote-AdminDown bool or null when unknown
 ├── peers/dynamic-neighbors.json # configured acceptance ranges; descriptions scrubbed client-side
 ├── peers/neighbors.json     # per-peer state, counters, flap/slow-peer status

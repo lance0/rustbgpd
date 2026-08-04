@@ -2,10 +2,11 @@
 //!
 //! Each profile is a **hand-curated, commented** TOML string — not a
 //! serialized `Config` value. Serializing the real struct would emit a
-//! wall of empty sections (the schema has no `skip_serializing_if`), and
-//! generic post-filtering risks silently dropping real fields later, so
-//! a curated template gives full control over layout and comments. The
-//! `every_profile_validates` test round-trips each template through
+//! wall of defaulted fields and empty sections despite a few deliberately
+//! sparse default-empty policy fields, and generic post-filtering risks
+//! silently dropping real fields later, so a curated template gives full
+//! control over layout and comments. The `every_profile_validates` test
+//! round-trips each template through
 //! `Config::load_toml_with_diagnostics`, so a profile that drifts out of
 //! sync with the schema fails CI rather than shipping a broken bootstrap
 //! — that test is the contract that makes the curated approach safe.

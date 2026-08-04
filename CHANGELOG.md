@@ -219,6 +219,30 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Canonical config persistence now omits three default-empty inline-policy
+  lists (`match_community`, `set_community_add`, and
+  `set_community_remove`) while preserving explicit-empty input and every
+  non-empty value. On the preserved 3.2-million-statement IRR-scale input the
+  updated serializer removed 225,350,183 bytes (214.911 MiB) of redundant
+  `=[]` text, reducing the normalized prior from 524,228,076 bytes
+  (499.943 MiB) to 298,877,893 bytes (285.032 MiB), with 98.968 MiB of
+  headroom under the unchanged 384 MiB v3 commit-confirm cap.
+  A current accepted prior that still exceeds that cap now fails confirmed
+  Apply with actionable `FAILED_PRECONDITION` byte counts before authority
+  publication or peer, persistence, and runtime mutation; true storage
+  publication failures remain `INTERNAL`.
+
+  Pre-release upgrade note: finish or abort any pending v2 or v3 confirmed
+  transaction before moving from an older development build to this one. An
+  pre-change retained prior parses, but exact byte verification rejects its
+  new canonical reserialization rather than silently adopting different
+  bytes. The persisted-file header also changed to describe the omission, so
+  this applies to every pre-change v2/v3 prior and v2 history row, not only
+  configs with affected inline statements. Move the complete
+  `config-history` directory aside before the upgrade if its bytes must be
+  preserved; later transactions repopulate rollback history in the new
+  canonical form.
+
 - BGP startup now binds its listener early but activates inbound acceptance
   only after every configured peer is registered successfully. Peer-manager
   send, reply, or registration failures are fatal instead of exposing a

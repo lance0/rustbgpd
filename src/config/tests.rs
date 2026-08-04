@@ -12960,6 +12960,62 @@ fn persisted_config_header_stays_out_of_the_token_and_the_effective_dump() {
 }
 
 #[test]
+fn policy_statement_empty_community_lists_round_trip_to_compact_toml() {
+    // Destructive proof: removing `skip_serializing_if` from any of the three
+    // default-empty vectors makes its persisted-document absence assertion
+    // red; dropping `default` makes the compact Config round trip fail;
+    // skipping a non-empty value makes the preservation assertions red.
+    let legacy_explicit_empty = format!(
+        "{}{}",
+        valid_toml(),
+        r#"
+[[neighbors.import_policy]]
+action = "permit"
+prefix = "192.0.2.0/24"
+match_community = []
+set_community_add = []
+set_community_remove = []
+"#
+    );
+    let config = parse(&legacy_explicit_empty).unwrap();
+    let compact = persisted_config_document(&config).unwrap();
+    for field in [
+        "match_community",
+        "set_community_add",
+        "set_community_remove",
+    ] {
+        assert!(!compact.contains(field), "{field} leaked into:\n{compact}");
+    }
+    assert_eq!(
+        Config::load_toml_with_diagnostics(&compact, "compacted persisted config").unwrap(),
+        config,
+        "old explicit-empty input and compact output must decode identically"
+    );
+
+    let populated = parse(&format!(
+        "{}{}",
+        valid_toml(),
+        r#"
+[[neighbors.import_policy]]
+action = "permit"
+prefix = "192.0.2.0/24"
+match_community = ["65001:100"]
+set_community_add = ["NO_EXPORT"]
+set_community_remove = ["BLACKHOLE"]
+"#
+    ))
+    .unwrap();
+    let populated_toml = persisted_config_document(&populated).unwrap();
+    assert!(populated_toml.contains("match_community = [\"65001:100\"]"));
+    assert!(populated_toml.contains("set_community_add = [\"NO_EXPORT\"]"));
+    assert!(populated_toml.contains("set_community_remove = [\"BLACKHOLE\"]"));
+    assert_eq!(
+        Config::load_toml_with_diagnostics(&populated_toml, "populated persisted config").unwrap(),
+        populated
+    );
+}
+
+#[test]
 fn runtime_snapshot_token_changes_when_only_a_secret_rotates() {
     // The token hashes the full config, secrets included, so a bare secret
     // rotation still invalidates a stale optimistic-concurrency token (ADR-0076:

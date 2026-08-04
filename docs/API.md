@@ -50,7 +50,7 @@ not by itself make it v1-stable.
 | Service | RPCs | Purpose |
 |---------|------|---------|
 | `GlobalService` | `GetGlobal` | Daemon identity |
-| `ConfigService` | `DiffRuntimeConfig`, `PlanConfigTransaction`, `StreamPlanConfigTransaction`, `StreamApplyConfigTransaction`, `ApplyConfigTransaction`, `ConfirmConfigTransaction`, `AbortConfigTransaction`, `GetConfigTransactionStatus`, `GetEffectiveConfig`, `ListConfigHistory`, `RollbackConfigTransaction` | Candidate-vs-live config diff, effective running config with defaults materialized and secrets redacted, plus the v1 config-transaction lifecycle: validate/plan, commit/apply (incl. commit-confirmed), confirm, abort, status, and the bounded recorded config history with Junos-style `rollback N` through the same transaction executor; the outside-v1 streams provide bounded large-candidate plan and apply ingress |
+| `ConfigService` | `DiffRuntimeConfig`, `PlanConfigTransaction`, `StreamPlanConfigTransaction`, `StreamApplyConfigTransaction`, `ApplyConfigTransaction`, `ConfirmConfigTransaction`, `AbortConfigTransaction`, `GetConfigTransactionStatus`, `GetEffectiveConfig`, `ListConfigHistory`, `RollbackConfigTransaction` | Candidate-vs-live config diff, effective running config with defaults resolved (selected default-empty policy lists omitted) and secrets redacted, plus the v1 config-transaction lifecycle: validate/plan, commit/apply (incl. commit-confirmed), confirm, abort, status, and the bounded recorded config history with Junos-style `rollback N` through the same transaction executor; the outside-v1 streams provide bounded large-candidate plan and apply ingress |
 | `NeighborService` | `AddNeighbor`, `DeleteNeighbor`, `ListNeighbors`, `GetNeighborState`, `EnableNeighbor`, `DisableNeighbor`, `SoftResetIn`, `RefreshOutbound`, `SetGracefulShutdown`, `AddDynamicNeighbor`, `DeleteDynamicNeighbor`, `ListDynamicNeighbors` | Peer lifecycle, inbound soft reset, single-peer outbound re-advertisement, RFC 8326 graceful-shutdown toggle, and dynamic-neighbor CRUD — `AddDynamicNeighbor` / `DeleteDynamicNeighbor` add and remove `[[dynamic_neighbors]]` prefix ranges at runtime (queued to the config file), `ListDynamicNeighbors` for visibility |
 | `PolicyService` | `ListPolicies`, `GetPolicy`, `SetPolicy`, `DeletePolicy`, `ListNeighborSets`, `GetNeighborSet`, `SetNeighborSet`, `DeleteNeighborSet`, `GetGlobalPolicyChains`, `GetNeighborPolicyChains`, `SetGlobalImportChain`, `SetGlobalExportChain`, `ClearGlobalImportChain`, `ClearGlobalExportChain`, `SetNeighborImportChain`, `SetNeighborExportChain`, `ClearNeighborImportChain`, `ClearNeighborExportChain`, `ExplainImportPolicy`, `ListRejectedRoutes`, `TestPolicy`, `GetPolicyStats` | Named policy CRUD, neighbor sets, global/per-neighbor chain attachment, import-policy decision explain (per-term traces for `.rpol` members), retained rejected-route views with reject reasons, read-only candidate-policy dry runs over the live RIB, and live per-term hit counters |
 | `PeerGroupService` | `ListPeerGroups`, `GetPeerGroup`, `SetPeerGroup`, `DeletePeerGroup`, `SetNeighborPeerGroup`, `ClearNeighborPeerGroup` | Peer-group CRUD and neighbor membership assignment |
@@ -430,7 +430,8 @@ Live runtime config diagnostics and transaction planning. Diff / plan
 callers submit candidate TOML and receive only redacted diff / plan
 output; `GetEffectiveConfig` is the one deliberate full-document export
 — it returns the effective running config as normalized TOML with
-defaults materialized and secret material replaced with `<redacted>`
+defaults resolved (selected default-empty policy lists may be omitted) and
+secret material replaced with `<redacted>`
 before it leaves the daemon (`rbgp config effective`).
 
 | RPC | Description |
@@ -443,7 +444,7 @@ before it leaves the daemon (`rbgp config effective`).
 | `ConfirmConfigTransaction` | Confirm a pending confirmed transaction before its timer expires |
 | `AbortConfigTransaction` | Abort a pending confirmed transaction and roll back immediately |
 | `GetConfigTransactionStatus` | Return redacted confirmed-transaction lifecycle state |
-| `GetEffectiveConfig` | Return the effective running config as normalized TOML — defaults materialized, secrets redacted (`rbgp config effective`) |
+| `GetEffectiveConfig` | Return the effective running config as normalized TOML — defaults resolved, selected default-empty policy lists omitted, secrets redacted (`rbgp config effective`) |
 | `ListConfigHistory` | List the bounded mixed-generation config history — newest row at index 0, then older entries; per-entry timestamp, normalized-TOML SHA-256, config-source SHA-256 over that TOML digest plus the canonical accepted rpol/dataset source roster, provenance status, and one-line summary; never config documents (`rbgp config history`). Valid v2 rows are `RECORDED`; retained legacy rows are `LEGACY_TOML_ONLY` with no source digest; corrupt or duplicate-sequence rows are `UNREADABLE` with both digests empty. |
 | `RollbackConfigTransaction` | Restore an eligible legacy TOML-only or provenance-verified v2 row through the same transaction executor as apply — same plan/impact classification and receipts (`rbgp config rollback N`). Unreadable rows and v2 provenance mismatches fail closed before planning or mutation. |
 
@@ -579,6 +580,11 @@ A failed abort/auto-revert rollback is not terminal: the transaction stays
 pending with an `ABORT_FAILED`/`AUTO_REVERT_FAILED` status and the mutation
 fence stays closed until the abort is retried successfully, the candidate is
 confirmed, or a restart boot-reverts from the retained journal.
+
+V3 commit-confirm caps the current accepted normalized prior at 384 MiB. An
+oversized prior makes Apply return `FAILED_PRECONDITION`, including actual and
+limit byte counts, before authority publication or peer, persistence, and
+runtime mutation. Ordinary unconfirmed Apply remains available.
 
 `GetConfigTransactionStatus` (and the apply response) carries a
 `ConfigTransactionConfirmation`:

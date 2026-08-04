@@ -1836,7 +1836,8 @@ pub struct PolicyStatementConfig {
     pub le: Option<u8>,
     /// Community match criteria, e.g. `["65001:100"]`, `["RT:65001:100"]`,
     /// or `["NO_EXPORT"]`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(extend("default" = []))]
     pub match_community: Vec<String>,
     /// `AS_PATH` regex pattern (Cisco/Quagga style: `_` = boundary anchor).
     pub match_as_path: Option<String>,
@@ -1874,10 +1875,12 @@ pub struct PolicyStatementConfig {
     /// Rewrite next-hop: `"self"` or an IP address.
     pub set_next_hop: Option<String>,
     /// Add communities to matching routes.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(extend("default" = []))]
     pub set_community_add: Vec<String>,
     /// Remove communities from matching routes.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(extend("default" = []))]
     pub set_community_remove: Vec<String>,
     /// Prepend `AS_PATH` on matching routes.
     pub set_as_path_prepend: Option<AsPathPrependConfig>,

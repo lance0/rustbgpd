@@ -60,7 +60,8 @@ rbgp config diff /etc/rustbgpd/candidate.toml
 
 Not sure what a value on the live RR *currently* is (an inherited
 peer-group timer, a defaulted `hold_time`)? Dump the effective running
-config first — defaults materialized, secrets redacted:
+config first — defaults resolved, selected default-empty policy lists omitted,
+secrets redacted:
 
 ```bash
 rbgp config effective

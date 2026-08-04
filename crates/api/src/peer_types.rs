@@ -628,8 +628,9 @@ pub struct WarmCheckpointCapture {
     pub local_asn: u32,
     /// Authoritative local router ID from the live runtime config snapshot.
     pub local_router_id: std::net::Ipv4Addr,
-    /// Deterministic effective config with defaults materialized and secrets
-    /// redacted, captured from the live peer-manager config actor.
+    /// Deterministic effective config with defaults resolved, selected
+    /// default-empty policy lists omitted, and secrets redacted, captured from
+    /// the live peer-manager config actor.
     pub effective_config_toml: String,
     /// Largest positive local GR restart retention among current resolved,
     /// enabled static neighbors. `None` means no marker/cache is useful.

@@ -545,11 +545,12 @@ enum ConfigAction {
         confirm_timeout_seconds: Option<u32>,
     },
 
-    /// Dump the daemon's effective running config (defaults materialized)
+    /// Dump the daemon's effective running config (defaults resolved)
     ///
     /// Prints the live post-defaults config as normalized TOML: peer-group
     /// inheritance and computed defaults (hold_time, send_hold_time, GR
-    /// timers, families) are resolved to the values the daemon is using.
+    /// timers, families) are resolved to the values the daemon is using;
+    /// selected default-empty policy lists are omitted.
     /// Secret material (md5_password, tcp_ao key) is replaced with
     /// `<redacted>` before it leaves the daemon; a dump containing the
     /// placeholder fails `rustbgpd --check` loudly, so restore real secrets
