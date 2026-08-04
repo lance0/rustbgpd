@@ -71,6 +71,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Commit-confirmed transactions now start their public and in-process
+  confirmation deadlines after a successful Apply, preserving the full
+  requested window even when a large candidate takes longer than the timeout
+  to commit. Pre-apply v3 rollback authority remains published before mutation
+  and boot recovery remains unconditional.
+
 - Persisted configuration now sorts all map-valued sections without changing
   their runtime `HashMap` types, making equivalent writes byte- and
   digest-stable regardless of insertion order.

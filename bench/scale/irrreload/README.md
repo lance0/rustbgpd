@@ -194,6 +194,12 @@ explicit use of that Plan's UUID-v4 single-use token, pending commit-confirm,
 the canonical config-adjacent v3 locator plus fixed owner-only raw/metadata
 files, full locator→metadata→raw path/digest/device/inode linkage, raw size in
 `(10 MiB, 384 MiB]`, legacy-journal absence, and confirmed terminal cleanup.
+Schema-2 transaction evidence records the authority's informational
+pre-apply deadline separately from the Apply/Status deadline that starts after
+commit, and requires the former to predate the latter. The authority deadline
+need not remain unexpired when a slow Apply returns: boot recovery is
+unconditional. Schema-1 transaction evidence conflated those clocks and is
+rejected rather than migrated.
 After the final measurement boundary and before daemon teardown,
 `txn-lifecycle.sh` applies the opposite B generation twice: explicit abort and
 ten-second timeout must report `aborted` and `auto_reverted`, remove all v3

@@ -791,7 +791,8 @@ def validate_file_identity(value, expected_name: str, context: str) -> None:
         fail(f"{context}: invalid v3 file identity")
 
 
-def validate_authority(value, confirm_id: str, deadline: int, context: str) -> None:
+def validate_authority(value, confirm_id: str, context: str) -> int:
+    deadline = value.get("deadline_unix_seconds") if isinstance(value, dict) else None
     if (
         set(value or {})
         != {
@@ -807,7 +808,8 @@ def validate_authority(value, confirm_id: str, deadline: int, context: str) -> N
         or value.get("schema") != 1
         or value.get("version") != 3
         or value.get("confirm_id") != confirm_id
-        or value.get("deadline_unix_seconds") != deadline
+        or type(deadline) is not int
+        or deadline <= 0
         or value.get("linkage_verified") is not True
     ):
         fail(f"{context}: v3 authority linkage receipt is invalid")
@@ -816,6 +818,7 @@ def validate_authority(value, confirm_id: str, deadline: int, context: str) -> N
     validate_file_identity(value["raw"], "commit-confirm-v3-prior.toml", context)
     if not 10 * 1024 * 1024 < value["raw"]["bytes"] <= 384 * 1024 * 1024:
         fail(f"{context}: v3 raw snapshot is outside (10 MiB, 384 MiB]")
+    return deadline
 
 
 def validate_state(
@@ -840,7 +843,9 @@ def validate_state(
     validate_content(value["config"], context)
     validate_content(value["runtime"], context)
     if pending:
-        validate_authority(value["authority"], confirm_id, deadline, context)
+        authority_deadline = validate_authority(value["authority"], confirm_id, context)
+        if authority_deadline >= deadline:
+            fail(f"{context}: v3 authority deadline did not predate the live deadline")
 
 
 def validate_plan_apply(prefix, confirm_id: str, timeout: int, context: str) -> int:
@@ -853,7 +858,7 @@ def validate_plan_apply(prefix, confirm_id: str, timeout: int, context: str) -> 
         "plan_token_present": True,
         "runtime_snapshot_token_present": True,
         }
-        or not isinstance(deadline, int)
+        or type(deadline) is not int
         or deadline <= 0
         or apply
         != {
@@ -894,7 +899,7 @@ def validate_transaction_evidence(
     actual_ids = []
     for number, cycle in enumerate(cycles, 1):
         reject_transaction_tokens(cycle)
-        if set(cycle) != {"schema", "cycle", "candidate", "plan", "apply", "history", "pending", "confirmed"} or cycle.get("schema") != 1 or cycle.get("cycle") != number:
+        if set(cycle) != {"schema", "cycle", "candidate", "plan", "apply", "history", "pending", "confirmed"} or cycle.get("schema") != 2 or cycle.get("cycle") != number:
             fail(f"{cdir}: transaction cycle roster/order is invalid")
         validate_content(cycle["candidate"], f"cycle {number} candidate")
         if not 10 * 1024 * 1024 < cycle["candidate"]["bytes"] <= 384 * 1024 * 1024:
@@ -976,7 +981,7 @@ def validate_transaction_evidence(
 
     lifecycle = read_json(cdir / "transactions/lifecycle.json")
     reject_transaction_tokens(lifecycle)
-    if set(lifecycle or {}) != {"schema", "generations", "baseline", "abort", "timeout", "restored_current_plan", "final_state"} or lifecycle.get("schema") != 1:
+    if set(lifecycle or {}) != {"schema", "generations", "baseline", "abort", "timeout", "restored_current_plan", "final_state"} or lifecycle.get("schema") != 2:
         fail(f"{cdir}: lifecycle roster is invalid")
     generations = lifecycle.get("generations", {})
     if set(generations) != {"current", "opposite"}:
@@ -1477,7 +1482,7 @@ def make_transaction_evidence(cdir: Path, pid: int) -> None:
                 "process": process, "config": content(digest), "runtime": content(digest)}
 
     def pending(digest, confirm_id, deadline, inode):
-        return {"authority": authority(confirm_id, deadline, inode),
+        return {"authority": authority(confirm_id, deadline - 1, inode),
                 "legacy_absent": True, **base_state(digest)}
 
     def terminal(digest):
@@ -1493,7 +1498,7 @@ def make_transaction_evidence(cdir: Path, pid: int) -> None:
         deadline = 1_000 + number
         cycles.append(
             {
-                "schema": 1,
+                "schema": 2,
                 "cycle": number,
                 "candidate": content(digest),
                 "plan": {"transport": "streamed", "status": "committable", "plan_token_present": True, "runtime_snapshot_token_present": True},
@@ -1521,7 +1526,7 @@ def make_transaction_evidence(cdir: Path, pid: int) -> None:
                 "history_after": history, **terminal("a")}}
 
     lifecycle = {
-        "schema": 1,
+        "schema": 2,
         "generations": {"current": content("a"), "opposite": content("b")},
         "baseline": base_state("a"),
         "abort": phase("abort", 600, 5, 6, 200),
@@ -2012,12 +2017,26 @@ def self_test() -> None:
                     swap_state_markers(state)
             mutate_lifecycle(root, swap_lifecycle)
 
+        def swap_cycle_deadlines(row):
+            public = row["apply"]["deadline_unix_seconds"]
+            authority = row["pending"]["authority"]["deadline_unix_seconds"]
+            row["apply"]["deadline_unix_seconds"] = authority
+            row["pending"]["authority"]["deadline_unix_seconds"] = public
+
         txn_rejected("transaction-cycle-roster", lambda root: mutate_cycle(root, 0, lambda row: row.update({"cycle": 2})))
         txn_rejected("transaction-plan-token", lambda root: mutate_cycle(root, 0, lambda row: row["apply"].update({"explicit_plan_token": False})))
         txn_rejected("transaction-confirm", lambda root: mutate_cycle(root, 0, lambda row: row["confirmed"].update({"status": "pending"})))
         txn_rejected("transaction-v3-pending", lambda root: mutate_cycle(root, 0, lambda row: row["pending"]["authority"]["raw"].update({"bytes": 1024})))
         txn_rejected("transaction-v3-linkage", lambda root: mutate_cycle(root, 0, lambda row: row["pending"]["authority"].update({"linkage_verified": False})))
-        txn_rejected("transaction-v3-deadline", lambda root: mutate_cycle(root, 0, lambda row: row["pending"]["authority"].update({"deadline_unix_seconds": 9999})))
+        txn_rejected("transaction-apply-deadline-missing", lambda root: mutate_cycle(root, 0, lambda row: row["apply"].pop("deadline_unix_seconds")))
+        txn_rejected("transaction-apply-deadline-bool", lambda root: mutate_cycle(root, 0, lambda row: row["apply"].update({"deadline_unix_seconds": True})))
+        txn_rejected("transaction-v3-deadline-missing", lambda root: mutate_cycle(root, 0, lambda row: row["pending"]["authority"].pop("deadline_unix_seconds")))
+        txn_rejected("transaction-v3-deadline-bool", lambda root: mutate_cycle(root, 0, lambda row: row["pending"]["authority"].update({"deadline_unix_seconds": True})))
+        txn_rejected("transaction-v3-deadline-stale", lambda root: mutate_cycle(root, 0, lambda row: row["pending"]["authority"].update({"deadline_unix_seconds": row["apply"]["deadline_unix_seconds"]})))
+        txn_rejected("transaction-v3-deadline-swapped", lambda root: mutate_cycle(root, 0, swap_cycle_deadlines))
+        txn_rejected("transaction-v3-deadline-tamper", lambda root: mutate_cycle(root, 0, lambda row: row["pending"]["authority"].update({"deadline_unix_seconds": 9999})))
+        txn_rejected("transaction-schema-v1", lambda root: mutate_cycle(root, 0, lambda row: row.update({"schema": 1})))
+        txn_rejected("transaction-lifecycle-schema-v1", lambda root: mutate_lifecycle(root, lambda value: value.update({"schema": 1})))
         txn_rejected("transaction-v3-cleanup", lambda root: mutate_cycle(root, 0, lambda row: row["confirmed"].update({"v3_absent": False})))
         txn_rejected("transaction-history", lambda root: mutate_cycle(root, 0, lambda row: row["history"]["after"]["entries"].append({"index": 0})))
         txn_rejected("transaction-abort", lambda root: mutate_lifecycle(root, lambda value: value["abort"]["terminal"].update({"status": "confirmed"})))
@@ -2278,7 +2297,7 @@ def self_test() -> None:
         grouped_pair_drift("cross-role-source-identity", "binaries", "rbgp", "a" * 64)
         expected = {"default-roster", "mixed-roster", "mode-flags", "topology-mutation", "barrier-marker", "final-barrier-marker", "live-topology-gauge", "route-gauge", "route-family", "one-scrape-drift", "add-path", "config-count", "dirty-commit", "origin-only", "head-matches-false", "mismatched-commit", "commit-malformed", "scripts-null", "scripts-empty-map", "binary-malformed", "fingerprint-recompute", "canonical-changed-fraction", "canonical-control-secs", "canonical-bird-threads", "repeat-image-identity", "cell-root-provenance", "nonoverlap-order", "quiet-spacing", "preflight-raw", "cell-status", "cell-provenance", "evidence-roster", "scenario-roster", "scenario-duplicate", "scenario-unsafe-path", "scenario-retained-config", "cell-root-rows", "reload-log-rows", "percentile-order", "percentile-positive", "first-generation-bound", "observer-gap-bound", "row-invariants", "rss-raw", "seal-checksum", "exact-root-roster", "symlink-anywhere", "writable-root", "grouped-output-isolation", "output-exact-roster", "output-audit-call", "ordering", "reused-identity", "cross-role-environment", "cross-role-source-identity"}
         expected |= {"current-down", "reestablished", "flapped", "counter-malformed", "establishment-roster", "flap-roster", "row-session-loss"}
-        expected |= set("""v3-inspector-linkage v3-inspector-mode v3-inspector-target v3-inspector-canonical v3-inspector-field-order v3-inspector-nested-order v3-inspector-raw-utf8 transaction-cycle-roster transaction-plan-token transaction-confirm transaction-v3-pending transaction-v3-linkage transaction-v3-deadline transaction-v3-cleanup transaction-history transaction-abort transaction-timeout transaction-noop transaction-opposite
+        expected |= set("""v3-inspector-linkage v3-inspector-mode v3-inspector-target v3-inspector-canonical v3-inspector-field-order v3-inspector-nested-order v3-inspector-raw-utf8 transaction-cycle-roster transaction-plan-token transaction-confirm transaction-v3-pending transaction-v3-linkage transaction-apply-deadline-missing transaction-apply-deadline-bool transaction-v3-deadline-missing transaction-v3-deadline-bool transaction-v3-deadline-stale transaction-v3-deadline-swapped transaction-v3-deadline-tamper transaction-schema-v1 transaction-lifecycle-schema-v1 transaction-v3-cleanup transaction-history transaction-abort transaction-timeout transaction-noop transaction-opposite
 transaction-token-leak transaction-warning-log transaction-warning-binding transaction-applied-generation transaction-scenario-generation transaction-cross-root-generation transaction-port-gate transaction-disk-gate transaction-swap-gate transaction-fallback-shape
 transaction-mixed-binary transaction-process-reuse transaction-file-tamper transaction-extra-file""".split())
         missing = expected - proofs.keys()

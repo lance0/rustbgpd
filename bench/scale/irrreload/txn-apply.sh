@@ -193,7 +193,8 @@ printf '%s' "$status_json" | jq -e --arg id "$confirm_id" --arg runtime "$apply_
       .deadline_unix_seconds == $deadline and .runtime_snapshot_token == $runtime)' >/dev/null ||
     die "pending status view was incoherent"
 pending=$(pending_json "$confirm_id") || die "pending v3/history/process evidence failed"
-[ "$(printf '%s' "$pending" | jq -er '.authority.deadline_unix_seconds')" -eq "$apply_deadline" ] || die "v3 deadline did not match apply"
+authority_deadline=$(printf '%s' "$pending" | jq -er '.authority.deadline_unix_seconds') || die "v3 authority deadline missing"
+[ "$authority_deadline" -lt "$apply_deadline" ] || die "v3 authority deadline did not predate the live deadline"
 warning=$(warning_json "$warning_before") || die "missing oversize-history warning"
 
 confirm_json=$("$rbgp" --addr "$addr" --json config confirm "$confirm_id") || die "confirm failed"
@@ -218,15 +219,16 @@ history_after=$(history_json) || die "cannot capture history after confirm"
 
 row=$(jq -cn --argjson cycle "$cycle" --arg candidate_sha256 "$candidate_sha" \
     --argjson candidate_bytes "$candidate_bytes" --arg candidate_marker "$candidate_marker" --arg confirm_id "$confirm_id" \
+    --argjson apply_deadline "$apply_deadline" \
     --argjson pending "$pending" --argjson terminal "$terminal" \
     --argjson history_before "$history_before" --argjson history_after "$history_after" \
     --argjson warning "$warning" \
-    '{schema:1,cycle:$cycle,candidate:{sha256:$candidate_sha256,bytes:$candidate_bytes,marker:$candidate_marker},
+    '{schema:2,cycle:$cycle,candidate:{sha256:$candidate_sha256,bytes:$candidate_bytes,marker:$candidate_marker},
       plan:{transport:"streamed",status:"committable",plan_token_present:true,
             runtime_snapshot_token_present:true},
       apply:{transport:"streamed",explicit_plan_token:true,status:"committable",
              confirmation_status:"pending",confirm_id:$confirm_id,timeout_seconds:600,
-             deadline_unix_seconds:$pending.authority.deadline_unix_seconds,
+             deadline_unix_seconds:$apply_deadline,
              runtime_token_coherent:true},
       history:{before:$history_before,after:$history_after,outcome:"skipped_oversize",warning:$warning},
       pending:$pending,confirmed:({status:"confirmed",status_view_verified:true} + $terminal)}') || die "cannot encode evidence"
