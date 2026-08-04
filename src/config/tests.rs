@@ -12913,6 +12913,257 @@ fn runtime_snapshot_token_is_stable_and_changes_with_config() {
     assert!(token_a.starts_with("kv1:"));
 }
 
+fn persistence_order_fixture(reverse: bool, bulk_statement_count: usize) -> Config {
+    let source = format!(
+        "{}\n[policy.definitions.seed]\n[[policy.definitions.seed.statements]]\n\
+         action = \"permit\"\nprefix = \"2001:db8:1234:5678::/64\"\nge = 64\n",
+        valid_toml()
+    );
+    let mut config = parse_schema_only(&source).unwrap();
+    let statement = config
+        .policy
+        .definitions
+        .remove("seed")
+        .unwrap()
+        .statements
+        .remove(0);
+    let mut names = ["alpha", "beta", "gamma", "zeta"];
+    if reverse {
+        names.reverse();
+    }
+    for name in names {
+        let hold_time = match name {
+            "alpha" => 30,
+            "beta" => 45,
+            "gamma" => 60,
+            "zeta" => 90,
+            _ => unreachable!(),
+        };
+        config.peer_groups.insert(
+            name.to_string(),
+            PeerGroupConfig {
+                hold_time: Some(hold_time),
+                ..PeerGroupConfig::default()
+            },
+        );
+        let role = match name {
+            "alpha" => GrpcRoleConfig::Observer,
+            "beta" | "gamma" => GrpcRoleConfig::Automation,
+            "zeta" => GrpcRoleConfig::Operator,
+            _ => unreachable!(),
+        };
+        config.security.grpc.roles.insert(name.to_string(), role);
+        let mut statements = if name == "zeta" {
+            vec![statement.clone(); bulk_statement_count]
+        } else {
+            Vec::new()
+        };
+        if statements.len() == 2 {
+            statements[1].action = "deny".to_string();
+            statements[1].prefix = Some("198.51.100.0/24".to_string());
+            statements[1].ge = Some(24);
+        }
+        config.policy.definitions.insert(
+            name.to_string(),
+            NamedPolicyConfig {
+                default_action: "permit".to_string(),
+                statements,
+            },
+        );
+        config.policy.neighbor_sets.insert(
+            name.to_string(),
+            NeighborSetConfig {
+                addresses: vec![format!("192.0.2.{hold_time}")],
+                ..NeighborSetConfig::default()
+            },
+        );
+        config.policy.datasets.insert(
+            name.to_string(),
+            DatasetFileConfig {
+                path: format!("/var/lib/rustbgpd/{name}.set"),
+            },
+        );
+    }
+    config
+}
+
+fn reverse_insertion_persistence_pair() -> (Config, Config) {
+    for _ in 0..128 {
+        let left = persistence_order_fixture(false, 2);
+        let right = persistence_order_fixture(true, 2);
+        let all_raw_orders_differ = left.peer_groups.keys().collect::<Vec<_>>()
+            != right.peer_groups.keys().collect::<Vec<_>>()
+            && left.security.grpc.roles.keys().collect::<Vec<_>>()
+                != right.security.grpc.roles.keys().collect::<Vec<_>>()
+            && left.policy.definitions.keys().collect::<Vec<_>>()
+                != right.policy.definitions.keys().collect::<Vec<_>>()
+            && left.policy.neighbor_sets.keys().collect::<Vec<_>>()
+                != right.policy.neighbor_sets.keys().collect::<Vec<_>>()
+            && left.policy.datasets.keys().collect::<Vec<_>>()
+                != right.policy.datasets.keys().collect::<Vec<_>>();
+        if all_raw_orders_differ {
+            return (left, right);
+        }
+    }
+    panic!("failed to construct distinct raw HashMap iteration orders");
+}
+
+#[test]
+fn persisted_config_sorts_every_hash_map_and_round_trips_to_a_fixpoint() {
+    use sha2::{Digest as _, Sha256};
+
+    // Load-bearing: every pair has reverse insertion and provably distinct raw
+    // iteration order. Removing any serialize_with link makes the bytes differ.
+    let (left, right) = reverse_insertion_persistence_pair();
+    let left_document = persisted_config_document(&left).unwrap();
+    let right_document = persisted_config_document(&right).unwrap();
+    assert_eq!(left_document, right_document);
+    assert_eq!(
+        Sha256::digest(left_document.as_bytes()),
+        Sha256::digest(right_document.as_bytes())
+    );
+
+    let reloaded: Config = toml::from_str(&left_document).unwrap();
+    assert_eq!(persisted_config_document(&reloaded).unwrap(), left_document);
+    let statements = &reloaded.policy.definitions["zeta"].statements;
+    assert_eq!(statements[0].action, "permit");
+    assert_eq!(statements[1].action, "deny");
+}
+
+#[cfg(target_os = "linux")]
+fn linux_vm_hwm_bytes() -> usize {
+    fs::read_to_string("/proc/self/status")
+        .unwrap()
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("VmHWM:")?
+                .split_whitespace()
+                .next()?
+                .parse::<usize>()
+                .ok()
+        })
+        .unwrap()
+        * 1024
+}
+
+#[cfg(target_os = "linux")]
+fn persistence_probe_fixture() -> Config {
+    let mut config = persistence_order_fixture(false, 1);
+    let statement = config.policy.definitions["zeta"].statements[0].clone();
+    config.policy.definitions.clear();
+    for member in 0..320 {
+        config.policy.definitions.insert(
+            format!("member-{member:03}"),
+            NamedPolicyConfig {
+                default_action: "permit".to_string(),
+                statements: vec![statement.clone(); 10_000],
+            },
+        );
+    }
+    config
+}
+
+#[cfg(target_os = "linux")]
+fn run_persistence_probe_child(arm: &str, receipt: &Path) {
+    use std::time::Instant;
+
+    let config = persistence_probe_fixture();
+    let baseline = linux_vm_hwm_bytes();
+    let started = Instant::now();
+    assert!(matches!(arm, "direct" | "sorted"));
+    let rendered = persisted_config_document(&config).unwrap();
+    let elapsed = started.elapsed().as_nanos();
+    let direct_maps =
+        super::schema::PERSISTENCE_PROBE_DIRECT_MAPS.swap(0, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(direct_maps == 0, arm == "sorted");
+    let peak = linux_vm_hwm_bytes();
+    let growth = peak.saturating_sub(baseline);
+    let bytes = rendered.len();
+    let round_tripped: Config = toml::from_str(&rendered).unwrap();
+    drop(rendered);
+    assert_eq!(round_tripped, config);
+    fs::write(
+        receipt,
+        format!("{bytes},{elapsed},{baseline},{peak},{growth}"),
+    )
+    .unwrap();
+    eprintln!(
+        "arm={arm} bytes={bytes} elapsed_ns={elapsed} baseline={baseline} peak={peak} growth={growth}"
+    );
+}
+
+#[cfg(target_os = "linux")]
+fn assert_persistence_probe_receipts(direct: &[u128], sorted: &[u128]) {
+    const MIB: usize = 1024 * 1024;
+
+    assert_eq!(direct[0], sorted[0]);
+    assert!(direct[4] >= direct[0] / 2);
+    assert!(sorted[4] >= sorted[0] / 2);
+    let allowance = ((direct[4] * 5) / 100).max((64 * MIB) as u128);
+    assert!(sorted[4] <= direct[4] + allowance);
+    assert!(sorted[1] <= direct[1] * 115 / 100 + 250_000_000);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn persistence_probe_comparison_rejects_vacuous_sorted_hwm() {
+    // Load-bearing: replacing the two per-arm growth assertions with `||`
+    // makes the zero-growth sorted receipt pass and this test fail.
+    let direct = [342_422_054, 2_500_000_000, 0, 0, 1_740_000_000];
+    let sorted = [342_422_054, 2_500_000_000, 0, 0, 0];
+    assert!(
+        std::panic::catch_unwind(|| assert_persistence_probe_receipts(&direct, &sorted)).is_err()
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "release-only fresh-process 3.2M-statement persistence A/B"]
+#[allow(
+    clippy::assertions_on_constants,
+    reason = "the ignored scale probe must reject accidental debug-profile runs"
+)]
+fn persisted_config_release_scale_probe() {
+    use std::process::Command;
+
+    const ARM: &str = "RUSTBGPD_PERSISTENCE_PROBE_ARM";
+    const RECEIPT: &str = "RUSTBGPD_PERSISTENCE_PROBE_RECEIPT";
+    assert!(!cfg!(debug_assertions), "run with --release");
+    if let (Ok(arm), Ok(receipt)) = (std::env::var(ARM), std::env::var(RECEIPT)) {
+        run_persistence_probe_child(&arm, Path::new(&receipt));
+        return;
+    }
+    let executable = std::env::current_exe().unwrap();
+    let direct_file = NamedTempFile::new().unwrap();
+    let sorted_file = NamedTempFile::new().unwrap();
+    for (arm, receipt) in [("direct", &direct_file), ("sorted", &sorted_file)] {
+        assert!(
+            Command::new(&executable)
+                .args([
+                    "config::tests::persisted_config_release_scale_probe",
+                    "--ignored",
+                    "--exact",
+                    "--nocapture"
+                ])
+                .env(ARM, arm)
+                .env(RECEIPT, receipt.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    let read = |path: &Path| -> Vec<u128> {
+        fs::read_to_string(path)
+            .unwrap()
+            .split(',')
+            .map(|value| value.parse().unwrap())
+            .collect()
+    };
+    let direct = read(direct_file.path());
+    let sorted = read(sorted_file.path());
+    assert_persistence_probe_receipts(&direct, &sorted);
+}
+
 /// The maintenance header belongs to files the daemon writes, and nowhere
 /// else. Two neighbouring canonical renderings sit right next to the persist
 /// path and must stay clean of it: the commit-confirm snapshot token and the

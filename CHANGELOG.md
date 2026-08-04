@@ -71,6 +71,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Persisted configuration now sorts all map-valued sections without changing
+  their runtime `HashMap` types, making equivalent writes byte- and
+  digest-stable regardless of insertion order.
+
 - `rbgp config effective` and `rbgp doctor` now accept a byte-exact effective
   config document larger than tonic's 4 MiB client default, up to a finite
   384 MiB of normalized TOML plus its protobuf envelope. The allowance is

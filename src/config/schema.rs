@@ -6,6 +6,7 @@ use std::num::NonZeroU32;
 use std::path::PathBuf;
 
 use schemars::{JsonSchema, Schema, SchemaGenerator};
+use serde::ser::SerializeMap as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use rustbgpd_wire::BgpRole;
@@ -18,6 +19,37 @@ pub(super) const DEFAULT_HOLD_TIME: u16 = rustbgpd_fsm::DEFAULT_HOLD_TIME;
 pub(super) const DEFAULT_DYNAMIC_NEIGHBOR_LIMIT: u32 = 100;
 pub(super) const DEFAULT_CONNECT_RETRY_SECS: u32 = 5;
 pub(super) const BGP_PORT: u16 = 179;
+
+#[cfg(test)]
+pub(super) static PERSISTENCE_PROBE_DIRECT_MAPS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+fn serialize_sorted_hash_map<K, V, S>(map: &HashMap<K, V>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    K: Ord + Serialize,
+    V: Serialize,
+    S: Serializer,
+{
+    #[cfg(test)]
+    if matches!(
+        std::env::var("RUSTBGPD_PERSISTENCE_PROBE_ARM").as_deref(),
+        Ok("direct")
+    ) {
+        PERSISTENCE_PROBE_DIRECT_MAPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut map_out = serializer.serialize_map(Some(map.len()))?;
+        for (key, value) in map {
+            map_out.serialize_entry(key, value)?;
+        }
+        return map_out.end();
+    }
+    let mut entries: Vec<_> = map.iter().collect();
+    entries.sort_unstable_by_key(|(key, _)| *key);
+    let mut map_out = serializer.serialize_map(Some(entries.len()))?;
+    for (key, value) in entries {
+        map_out.serialize_entry(key, value)?;
+    }
+    map_out.end()
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -33,7 +65,7 @@ pub struct Config {
     #[serde(default)]
     pub neighbors: Vec<Neighbor>,
     /// Named peer groups providing inherited defaults for neighbors.
-    #[serde(default)]
+    #[serde(default, serialize_with = "serialize_sorted_hash_map")]
     pub peer_groups: HashMap<String, PeerGroupConfig>,
     /// Routing policy: inline statements, named definitions, chains,
     /// and `.rpol` files.
@@ -315,7 +347,7 @@ pub struct GrpcSecurityConfig {
     #[serde(default)]
     pub enforcement: GrpcEnforcementConfig,
     /// Per-principal role assignments (principal name -> role).
-    #[serde(default)]
+    #[serde(default, serialize_with = "serialize_sorted_hash_map")]
     pub roles: HashMap<String, GrpcRoleConfig>,
 }
 
@@ -1543,10 +1575,10 @@ fn default_bfd_multiplier() -> u32 {
 #[serde(deny_unknown_fields)]
 pub struct PolicyConfig {
     /// Named policy definitions, reusable across neighbors and directions.
-    #[serde(default)]
+    #[serde(default, serialize_with = "serialize_sorted_hash_map")]
     pub definitions: HashMap<String, NamedPolicyConfig>,
     /// Named neighbor-set definitions for policy matching.
-    #[serde(default)]
+    #[serde(default, serialize_with = "serialize_sorted_hash_map")]
     pub neighbor_sets: HashMap<String, NeighborSetConfig>,
     /// Global import policy chain (references named definitions).
     #[serde(default)]
@@ -1612,7 +1644,7 @@ pub struct PolicyConfig {
     /// entry and every entry needs a declaration — both directions are
     /// load errors. Relative paths resolve against the config file's
     /// directory and are rewritten absolute at load, like `rpol_files`.
-    #[serde(default)]
+    #[serde(default, serialize_with = "serialize_sorted_hash_map")]
     pub datasets: HashMap<String, DatasetFileConfig>,
     /// Live dataset handles (name → shared handle), populated at load,
     /// not serialized. `PartialEq` is handle identity: a SIGHUP reload
