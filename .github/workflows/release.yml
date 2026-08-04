@@ -79,7 +79,11 @@ jobs:
         run: |
           rustup target add aarch64-unknown-linux-gnu
           apt-get update
-          apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu
+          # libc6-dev-arm64-cross is a Recommends of the cross gcc, so
+          # --no-install-recommends drops it — without the aarch64 libc
+          # headers every C dependency (ring, jemalloc) fails at
+          # bits/libc-header-start.h.
+          apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross
 
       - name: Install protobuf compiler
         # Bullseye's packaged protoc (3.12) predates the proto3
