@@ -13093,6 +13093,30 @@ fn run_persistence_probe_child(arm: &str, receipt: &Path) {
 }
 
 #[cfg(target_os = "linux")]
+fn assert_persistence_probe_receipts(direct: &[u128], sorted: &[u128]) {
+    const MIB: usize = 1024 * 1024;
+
+    assert_eq!(direct[0], sorted[0]);
+    assert!(direct[4] >= direct[0] / 2);
+    assert!(sorted[4] >= sorted[0] / 2);
+    let allowance = ((direct[4] * 5) / 100).max((64 * MIB) as u128);
+    assert!(sorted[4] <= direct[4] + allowance);
+    assert!(sorted[1] <= direct[1] * 115 / 100 + 250_000_000);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn persistence_probe_comparison_rejects_vacuous_sorted_hwm() {
+    // Load-bearing: replacing the two per-arm growth assertions with `||`
+    // makes the zero-growth sorted receipt pass and this test fail.
+    let direct = [342_422_054, 2_500_000_000, 0, 0, 1_740_000_000];
+    let sorted = [342_422_054, 2_500_000_000, 0, 0, 0];
+    assert!(
+        std::panic::catch_unwind(|| assert_persistence_probe_receipts(&direct, &sorted)).is_err()
+    );
+}
+
+#[cfg(target_os = "linux")]
 #[test]
 #[ignore = "release-only fresh-process 3.2M-statement persistence A/B"]
 #[allow(
@@ -13104,7 +13128,6 @@ fn persisted_config_release_scale_probe() {
 
     const ARM: &str = "RUSTBGPD_PERSISTENCE_PROBE_ARM";
     const RECEIPT: &str = "RUSTBGPD_PERSISTENCE_PROBE_RECEIPT";
-    const MIB: usize = 1024 * 1024;
     assert!(!cfg!(debug_assertions), "run with --release");
     if let (Ok(arm), Ok(receipt)) = (std::env::var(ARM), std::env::var(RECEIPT)) {
         run_persistence_probe_child(&arm, Path::new(&receipt));
@@ -13138,11 +13161,7 @@ fn persisted_config_release_scale_probe() {
     };
     let direct = read(direct_file.path());
     let sorted = read(sorted_file.path());
-    assert_eq!(direct[0], sorted[0]);
-    assert!(direct[4] >= direct[0] / 2 || sorted[4] >= sorted[0] / 2);
-    let allowance = ((direct[4] * 5) / 100).max((64 * MIB) as u128);
-    assert!(sorted[4] <= direct[4] + allowance);
-    assert!(sorted[1] <= direct[1] * 115 / 100 + 250_000_000);
+    assert_persistence_probe_receipts(&direct, &sorted);
 }
 
 /// The maintenance header belongs to files the daemon writes, and nowhere
