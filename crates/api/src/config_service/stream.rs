@@ -1995,4 +1995,38 @@ mod tests {
         );
         assert!(!has_token(&state, token));
     }
+
+    // The streamed-candidate contract is 384 MiB of TOML spooled in 1 MiB
+    // chunks, with at most 256 live plan tokens that expire after 30 minutes
+    // (docs/API.md; the CLI pins the matching finite decode ceiling in
+    // crates/cli/src/connection.rs). Any widened or unbounded replacement
+    // makes this red.
+    #[test]
+    fn streaming_spool_contract_constants_are_pinned() {
+        assert_eq!(MAX_CANDIDATE_BYTES, 384 * 1024 * 1024);
+        assert_eq!(MAX_CHUNK_BYTES, 1024 * 1024);
+        assert_eq!(MAX_LIVE_PLAN_TOKENS, 256);
+        assert_eq!(PLAN_TOKEN_TTL, Duration::from_mins(30));
+    }
+
+    // create_spool's post-create validation (unsafe streamed config storage)
+    // is defense-in-depth behind O_CREAT|O_EXCL with mode 0600 inside this
+    // already-validated directory; it is unreachable without process-global
+    // umask manipulation or filesystem mocking, so only the directory branch
+    // is exercised here.
+    #[test]
+    fn prepare_rejects_group_visible_spool_directory_and_spools_nothing() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let runtime = TempDir::new().unwrap();
+        let spool = runtime.path().join(SPOOL_DIRECTORY);
+        std::fs::create_dir(&spool).unwrap();
+        std::fs::set_permissions(&spool, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let directory = File::open(runtime.path()).unwrap();
+        let Err(error) = StreamPlanState::prepare(&directory) else {
+            panic!("group-visible spool directory must be rejected");
+        };
+        assert!(error.contains("unsafe type, owner, or mode"), "{error}");
+        assert!(spool_is_anonymous(runtime.path()));
+    }
 }
