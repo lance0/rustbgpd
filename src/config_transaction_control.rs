@@ -700,7 +700,7 @@ impl ConfigTransactionController {
         }
 
         let timeout = Duration::from_secs(u64::from(confirmed.timeout_seconds));
-        let deadline_unix_seconds = SystemTime::now()
+        let authority_deadline_unix_seconds = SystemTime::now()
             .checked_add(timeout)
             .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
             .map_or(0, |duration| duration.as_secs());
@@ -724,7 +724,7 @@ impl ConfigTransactionController {
             match launch.publish(
                 pending_dir,
                 &confirmed.confirm_id,
-                deadline_unix_seconds,
+                authority_deadline_unix_seconds,
                 &prior_snapshot,
             ) {
                 Ok(files) => Some(Arc::new(files)),
@@ -760,7 +760,7 @@ impl ConfigTransactionController {
                     .publish(
                         journal_path,
                         &confirmed.confirm_id,
-                        deadline_unix_seconds,
+                        authority_deadline_unix_seconds,
                         &prior_snapshot,
                     )
                     .map_err(|error| {
@@ -775,7 +775,7 @@ impl ConfigTransactionController {
                 journal_path,
                 &crate::confirm_journal::ConfirmJournal {
                     confirm_id: confirmed.confirm_id.clone(),
-                    deadline_unix_seconds,
+                    deadline_unix_seconds: authority_deadline_unix_seconds,
                     rollback_toml: rollback_toml
                         .clone()
                         .expect("legacy confirmed apply retains rollback TOML"),
@@ -846,7 +846,14 @@ impl ConfigTransactionController {
             return Ok(response);
         }
 
+        // The durable authority must predate mutation, but its timestamp is
+        // informational: boot recovery is unconditional. Start the live and
+        // public confirmation window only after the candidate has committed.
         let deadline = tokio::time::Instant::now() + timeout;
+        let deadline_unix_seconds = SystemTime::now()
+            .checked_add(timeout)
+            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+            .map_or(0, |duration| duration.as_secs());
         let pending = PendingConfirmedTransaction {
             confirm_id: confirmed.confirm_id.clone(),
             rollback_toml,
@@ -5430,8 +5437,12 @@ remote_asn = 65010
         source: std::path::PathBuf,
         journal: std::path::PathBuf,
         locator: std::path::PathBuf,
+        raw: std::path::PathBuf,
+        metadata: std::path::PathBuf,
         fib_state: Arc<Mutex<Vec<FibTableConfig>>>,
         seen_preloaded: Arc<Mutex<Option<Arc<AcceptedConfigSnapshot>>>>,
+        first_ack_released_at: Arc<Mutex<Option<tokio::time::Instant>>>,
+        confirmation: proto::ConfigTransactionConfirmation,
         ack_task: tokio::task::JoinHandle<()>,
     }
 
@@ -5518,7 +5529,11 @@ remote_asn = 65010
         clippy::too_many_lines,
         reason = "the focused harness keeps one complete external-source FIB transaction fixture"
     )]
-    async fn external_fib_harness(timeout_seconds: u32, use_v3: bool) -> DiskBackedFibHarness {
+    async fn external_fib_harness(
+        timeout_seconds: u32,
+        use_v3: bool,
+        first_ack_delay: Option<Duration>,
+    ) -> DiskBackedFibHarness {
         use std::os::unix::fs::PermissionsExt as _;
 
         let root = tempfile::tempdir().unwrap();
@@ -5627,19 +5642,9 @@ families = ["ipv4_unicast"]
         });
 
         let (config_tx, mut config_rx) = mpsc::channel(8);
-        let ack_task = tokio::spawn(async move {
-            while let Some(event) = config_rx.recv().await {
-                match event {
-                    ConfigEvent::FibTablesReplaced { ack: Some(ack), .. }
-                    | ConfigEvent::ConfigTransactionCommitted { ack: Some(ack), .. } => {
-                        ack.accept().await;
-                    }
-                    _ => panic!("unexpected persistence event in v2 FIB harness"),
-                }
-            }
-        });
-
         let journal = state_dir.join(crate::confirm_journal::JOURNAL_FILE_NAME);
+        let raw = state_dir.join(crate::confirm_journal::v3::RAW_FILE_NAME);
+        let metadata = state_dir.join(crate::confirm_journal::v3::METADATA_FILE_NAME);
         let v2_launch = crate::confirm_journal::v2::LaunchIdentity::resolve(&config_path).unwrap();
         let locator = v2_launch.locator_path();
         let controller = ConfigTransactionController::new_accepted(
@@ -5665,6 +5670,43 @@ families = ["ipv4_unicast"]
         } else {
             controller.with_confirm_v2_launch(v2_launch)
         };
+        let ack_controller = controller.clone();
+        let ack_locator = locator.clone();
+        let ack_raw = raw.clone();
+        let ack_metadata = metadata.clone();
+        let first_ack_released_at = Arc::new(Mutex::new(None));
+        let ack_released_at = Arc::clone(&first_ack_released_at);
+        let ack_task = tokio::spawn(async move {
+            let mut first_ack_delay = first_ack_delay;
+            while let Some(event) = config_rx.recv().await {
+                match event {
+                    ConfigEvent::FibTablesReplaced { ack: Some(ack), .. }
+                    | ConfigEvent::ConfigTransactionCommitted { ack: Some(ack), .. } => {
+                        if let Some(delay) = first_ack_delay.take() {
+                            let state = ack_controller.state.lock().await;
+                            assert_eq!(state.applying_confirm_id.as_deref(), Some("external-fib"));
+                            assert!(state.pending.is_none());
+                            drop(state);
+                            assert!(
+                                ack_locator.exists() && ack_raw.exists() && ack_metadata.exists()
+                            );
+                            tokio::time::sleep(delay).await;
+                            let authority: serde_json::Value =
+                                serde_json::from_slice(&std::fs::read(&ack_metadata).unwrap())
+                                    .unwrap();
+                            let now = SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap()
+                                .as_secs();
+                            assert!(authority["deadline_unix_seconds"].as_u64().unwrap() <= now);
+                            *ack_released_at.lock().await = Some(tokio::time::Instant::now());
+                        }
+                        ack.accept().await;
+                    }
+                    _ => panic!("unexpected persistence event in v2 FIB harness"),
+                }
+            }
+        });
         let response = controller
             .clone()
             .apply(confirmed_dynamic_request(
@@ -5678,6 +5720,7 @@ families = ["ipv4_unicast"]
             response.status,
             proto::ConfigTransactionPlanStatus::Committable as i32
         );
+        let confirmation = response.confirmation.unwrap();
         assert_eq!(*fib_state.lock().await, vec![replacement]);
         if use_v3 {
             let state = controller.state.lock().await;
@@ -5692,8 +5735,12 @@ families = ["ipv4_unicast"]
             source,
             journal,
             locator,
+            raw,
+            metadata,
             fib_state,
             seen_preloaded,
+            first_ack_released_at,
+            confirmation,
             ack_task,
         }
     }
@@ -5702,7 +5749,88 @@ families = ["ipv4_unicast"]
     async fn v3_pending_retains_prior_without_duplicate_toml() {
         // Destructive proof: restoring the eager `to_string()` allocation
         // makes the harness assertion observe both full representations.
-        let harness = external_fib_harness(60, true).await;
+        let harness = external_fib_harness(60, true, None).await;
+        harness.ack_task.abort();
+    }
+
+    #[tokio::test]
+    async fn slow_v3_apply_starts_full_confirmation_window_after_commit() {
+        // Destructive proofs: the delayed-ack harness asserts authority exists
+        // while Apply is unfinished; moving the public wall deadline before
+        // the ack collapses the distinct authority/public values, and moving
+        // the live monotonic deadline before the ack violates its exact lower
+        // bound. Dropping the timer fails the bounded terminal wait. Rebuilding
+        // the prior from mutated source bytes breaks the Arc and FIB assertions.
+        let harness = external_fib_harness(1, true, Some(Duration::from_millis(1_100))).await;
+        let authority: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&harness.metadata).unwrap()).unwrap();
+        let authority_deadline = authority["deadline_unix_seconds"].as_u64().unwrap();
+        assert!(harness.confirmation.deadline_unix_seconds > authority_deadline);
+        let ack_released_at = harness.first_ack_released_at.lock().await.unwrap();
+        assert!(
+            harness
+                .controller
+                .state
+                .lock()
+                .await
+                .pending
+                .as_ref()
+                .unwrap()
+                .deadline
+                >= ack_released_at + Duration::from_secs(1)
+        );
+        assert_eq!(
+            harness
+                .controller
+                .status()
+                .await
+                .unwrap()
+                .confirmation
+                .unwrap()
+                .deadline_unix_seconds,
+            harness.confirmation.deadline_unix_seconds
+        );
+        let prior = harness
+            .controller
+            .state
+            .lock()
+            .await
+            .pending
+            .as_ref()
+            .unwrap()
+            .prior_snapshot
+            .clone()
+            .unwrap();
+        std::fs::write(&harness.source, "policy p { term rest { reject } }\n").unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let status = harness
+                    .controller
+                    .status()
+                    .await
+                    .unwrap()
+                    .confirmation
+                    .unwrap();
+                if status.status == proto::ConfigTransactionConfirmationStatus::AutoReverted as i32
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("post-commit timer must auto-revert");
+        assert!(Arc::ptr_eq(
+            &prior,
+            harness.seen_preloaded.lock().await.as_ref().unwrap()
+        ));
+        assert_eq!(*harness.fib_state.lock().await, vec![table("edge", 1000)]);
+        assert!(
+            !harness.locator.exists()
+                && !harness.metadata.exists()
+                && !harness.raw.exists()
+                && !harness.journal.exists()
+        );
         harness.ack_task.abort();
     }
 
@@ -5712,7 +5840,7 @@ families = ["ipv4_unicast"]
         // retained Arc rereads the mutated rpol file and fails; dual-writing
         // v1 changes the dispatch prefix; journal-first cleanup leaves the
         // locator present at successful return.
-        let harness = external_fib_harness(60, false).await;
+        let harness = external_fib_harness(60, false, None).await;
         assert!(
             std::fs::read(&harness.journal)
                 .unwrap()
@@ -5822,7 +5950,7 @@ families = ["ipv4_unicast"]
         // Destructive proof: removing the preloaded timeout lane or rebuilding
         // provenance from current external bytes leaves the replacement table
         // active and the locator armed after the timer fires.
-        let harness = external_fib_harness(1, false).await;
+        let harness = external_fib_harness(1, false, None).await;
         let prior = harness
             .controller
             .state
@@ -5854,7 +5982,7 @@ families = ["ipv4_unicast"]
         // Destructive proof: retaining v1's journal-as-authority rule or
         // clearing in-memory pending state before locator durability leaves
         // the locator present when the RPC reports permanent success.
-        let harness = external_fib_harness(60, false).await;
+        let harness = external_fib_harness(60, false, None).await;
         harness
             .controller
             .clone()

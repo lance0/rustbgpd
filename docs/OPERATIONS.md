@@ -172,7 +172,13 @@ rbgp config abort deploy-20260605-1
 
 Confirm handles must be non-empty, at most 128 characters, and free of control
 characters. `--confirm-timeout` requires `--confirm-id`; the daemon default is
-600 seconds and the maximum accepted timeout is 86400 seconds.
+600 seconds and the maximum accepted timeout is 86400 seconds. The full window
+starts after Apply commits, so a large candidate does not consume its own
+confirmation time while it is still applying. Durable rollback authority is
+published first; its stored deadline is derived at that pre-apply publication
+and may already be past when a slow Apply returns, while `config status`
+reports the live post-commit deadline. Boot recovery ignores the authority
+deadline and reverts unconditionally.
 
 The v3 commit-confirm journal caps the current accepted normalized config it
 must retain as rollback authority at 384 MiB. If that prior exceeds the cap,

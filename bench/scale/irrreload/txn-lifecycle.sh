@@ -112,7 +112,7 @@ terminal_json() {
     jq -cn --argjson state "$state" '{v3_absent:true,legacy_absent:true} + $state'
 }
 apply_pending() {
-    local id=$1 timeout=$2 plan_json plan_rc runtime_token plan_token apply_json apply_runtime status_json pending history_before warning_before warning now
+    local id=$1 timeout=$2 plan_json plan_rc runtime_token plan_token apply_json apply_runtime status_json pending history_before warning_before warning now authority_deadline
     history_before=$(history_json) || return 1
     [ "$(printf '%s' "$history_before" | jq -er '.entries | length')" -eq 0 ] || return 1
     warning_before=$(warning_count)
@@ -144,7 +144,8 @@ apply_pending() {
         '.confirmation | select(.status == "pending" and .confirm_id == $id and .timeout_seconds == $timeout and
           .deadline_unix_seconds == $deadline and .runtime_snapshot_token == $runtime)' >/dev/null || return 1
     pending=$(pending_json "$id") || return 1
-    [ "$(printf '%s' "$pending" | jq -er '.authority.deadline_unix_seconds')" -eq "$pending_deadline" ] || return 1
+    authority_deadline=$(printf '%s' "$pending" | jq -er '.authority.deadline_unix_seconds') || return 1
+    [ "$authority_deadline" -lt "$pending_deadline" ] || return 1
     warning=$(warning_json "$warning_before") || return 1
     pending_runtime=$apply_runtime
     pending_prefix=$(jq -cn --arg id "$id" --argjson timeout_seconds "$timeout" \
@@ -239,7 +240,7 @@ tmp="$output.tmp"
 jq -n --argjson baseline "$current_state" --argjson current "$current_input" \
     --argjson opposite "$opposite_input" --argjson abort "$abort" --argjson timeout "$timeout" \
     --argjson final_state "$final_state" \
-    '{schema:1,generations:{current:$current,opposite:$opposite},baseline:$baseline,
+    '{schema:2,generations:{current:$current,opposite:$opposite},baseline:$baseline,
       abort:$abort,timeout:$timeout,restored_current_plan:{transport:"streamed",status:"noop",
       plan_token_present:false},final_state:$final_state}' >"$tmp" || die "cannot encode lifecycle evidence"
 mv "$tmp" "$output" || die "cannot publish lifecycle evidence"

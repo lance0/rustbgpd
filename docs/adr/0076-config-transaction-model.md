@@ -224,8 +224,9 @@ daemon down) was the one the mechanism could not revert. That hole is closed:
 
 - **Journal at commit.** Before the confirmed candidate commits, the daemon
   atomically persists (write temp file, fsync, rename, fsync directory) a
-  revert journal — `confirm_id`, deadline, and the full pre-commit config TOML
-  snapshot — to `<runtime_state_dir>/commit-confirm-journal.json`. If the
+  revert journal — `confirm_id`, an informational pre-apply deadline, and the
+  full pre-commit config TOML snapshot — to
+  `<runtime_state_dir>/commit-confirm-journal.json`. If the
   journal cannot be written, the confirmed apply is refused up front; a
   confirm window never runs unprotected. Confirm deletes the journal (and the
   confirm fails, keeping the fence and timer armed, if deletion fails — a
@@ -233,6 +234,12 @@ daemon down) was the one the mechanism could not revert. That hole is closed:
   Abort and timeout auto-revert delete it after a successful rollback; a
   FAILED rollback deliberately retains it so the next boot repairs what the
   running process could not.
+- **Start the live window after commit.** The public Unix deadline and the
+  in-process monotonic timer are minted together only after a committable Apply
+  succeeds, so validation, persistence, and runtime fan-out do not consume the
+  operator's requested confirmation window. The already-published journal is
+  not rewritten: its deadline is publication metadata, and boot recovery below
+  is unconditional.
 - **Boot-time revert, unconditionally.** Before adopting the on-disk config,
   startup checks for the journal. If an unconfirmed journal exists, the daemon
   boots from the journal's pre-transaction config, restores it to the config
@@ -261,9 +268,9 @@ saved aside; confirm-then-SIGKILL retains the new config with no pending
 authority; in-process timeout auto-revert consumes the pending state; and a
 torn locator-free v1 journal still refuses boot naming both legacy files.
 
-ADR-0121 now supersedes the v1 **discovery, payload, and terminal-cleanup
-contract** above. The shipped v2 writer stores the immutable accepted prior
-snapshot, including its external-source manifest and digests, in the
+ADR-0121 subsequently superseded the v1 **discovery, payload, and
+terminal-cleanup contract** above. Its v2 writer stores the immutable accepted
+prior snapshot, including its external-source manifest and digests, in the
 owner-private runtime-state journal, then publishes an owner-private locator
 adjacent to the stable lexical launch-config path. The locator is the sole v2
 pending authority and is checked before candidate contents are parsed. Boot and live
@@ -274,9 +281,15 @@ reuse it through the ordinary #1370-gated planner and apply path. Launch-target
 metadata may be inspected while binding boot authority. Abort, timeout, and
 boot restore durably restore while both files remain, then remove and sync the
 locator. Confirm starts with that locator removal. Exact journal cleanup after
-the terminal point is warning-only. Production writes only v2. The
+the terminal point is warning-only. That amendment wrote only v2. The
 locator-free v1 reader is a fail-closed compatibility lane; a live v1
 transaction must terminate before upgrade and v2 never converts or dual-writes
 it. Before downgrade, both the v2 locator and locator-free v2 journal residue
 must be absent; v2 config history separately requires its complete directory
 to be moved aside.
+
+The later disk-backed v3 implementation supersedes only v2's pending-authority
+storage. Production writes v3 raw prior, compact metadata, and a config-adjacent
+locator; v1 and v2 remain frozen recovery readers. The live confirmation-window
+and unconditional boot-revert decisions above apply unchanged across all three
+storage formats.

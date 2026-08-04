@@ -608,7 +608,7 @@ runtime mutation. Ordinary unconfirmed Apply remains available.
 | `status` | `ConfigTransactionConfirmationStatus` | Lifecycle state (see below). |
 | `confirm_id` | string | The operator-supplied handle for the transaction. |
 | `timeout_seconds` | uint32 | Effective confirm timeout applied (echoed). |
-| `deadline_unix_seconds` | uint64 | Absolute auto-revert deadline; `0` when not pending. |
+| `deadline_unix_seconds` | uint64 | Absolute live auto-revert deadline, minted after Apply commits and retained in the last terminal lifecycle record. Pre-commit durable authority carries a separate informational deadline derived at publication because boot recovery is unconditional. |
 | `committed_sections` | repeated string | Sections the confirmed apply committed. |
 | `runtime_snapshot_token` | string | Post-commit token for the pending change. |
 | `human_text` | string | Redacted human-readable summary. |
