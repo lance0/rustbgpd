@@ -64,6 +64,13 @@ jobs:
     # The image also pins the release toolchain (rustc 1.95).
     container: rust:1.95-bullseye
 
+    # Container jobs default `run` steps to sh (dash on Debian), which
+    # rejects `set -o pipefail`; the runner-hosted jobs default to bash
+    # already.
+    defaults:
+      run:
+        shell: bash
+
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
