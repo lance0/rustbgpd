@@ -4697,33 +4697,6 @@ async fn run<T>(
             }
         };
     let tcp_ao_listener_handle = Some(listener.tcp_ao_rotation_handle());
-    let listener_peer_mgr_tx = peer_mgr_tx.clone();
-    let listener_gate = daemon_gate.clone();
-    tokio::spawn(async move {
-        while let Some(conn) = accept_rx.recv().await {
-            // Coordinated shutdown has begun: drop (close) the socket
-            // instead of admitting a session into teardown.
-            if listener_gate.is_shutting_down() {
-                info!(
-                    peer = %conn.peer_addr,
-                    "rejecting inbound BGP connection: daemon is shutting down"
-                );
-                continue;
-            }
-            if let Err(e) = listener_peer_mgr_tx
-                .send(PeerManagerCommand::AcceptInbound {
-                    stream: conn.stream,
-                    peer_addr: conn.peer_addr,
-                    tcp_ao_info: conn.tcp_ao_info,
-                    tcp_ao_generation: conn.tcp_ao_generation,
-                })
-                .await
-            {
-                warn!(error = %e, "failed to forward inbound connection to peer manager");
-            }
-        }
-    });
-    tokio::spawn(listener.run());
 
     // ADR-0113: install the configured outbound prefix maxima before the
     // first session can register, so a limited peer admits its initial feed
@@ -4747,7 +4720,7 @@ async fn run<T>(
             "adding peer from config"
         );
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        let _ = peer_mgr_tx
+        if let Err(error) = peer_mgr_tx
             .send(PeerManagerCommand::AddPeer {
                 config: PeerManagerNeighborConfig {
                     address: transport_config.remote_addr.ip(),
@@ -4800,13 +4773,57 @@ async fn run<T>(
                 sync_config_snapshot: false,
                 reply: reply_tx,
             })
-            .await;
+            .await
+        {
+            fatal_startup_error(
+                "failed to send configured peer to peer manager during startup",
+                format!("{label}: {error}"),
+            );
+        }
         match reply_rx.await {
             Ok(Ok(())) => {}
-            Ok(Err(e)) => error!(label = %label, error = %e, "failed to add peer"),
-            Err(e) => error!(label = %label, error = %e, "peer manager reply dropped"),
+            Ok(Err(error)) => fatal_startup_error(
+                "failed to add configured peer during startup",
+                format!("{label}: {error}"),
+            ),
+            Err(error) => fatal_startup_error(
+                "peer manager dropped configured-peer reply during startup",
+                format!("{label}: {error}"),
+            ),
         }
     }
+
+    // Activate BGP ingress only after the complete configured-peer roster is
+    // installed. The listener socket is already bound above so startup still
+    // reserves the address and fails fast, but no connection can reach a
+    // partially initialized peer manager.
+    let listener_peer_mgr_tx = peer_mgr_tx.clone();
+    let listener_gate = daemon_gate.clone();
+    tokio::spawn(async move {
+        while let Some(conn) = accept_rx.recv().await {
+            // Coordinated shutdown has begun: drop (close) the socket
+            // instead of admitting a session into teardown.
+            if listener_gate.is_shutting_down() {
+                info!(
+                    peer = %conn.peer_addr,
+                    "rejecting inbound BGP connection: daemon is shutting down"
+                );
+                continue;
+            }
+            if let Err(e) = listener_peer_mgr_tx
+                .send(PeerManagerCommand::AcceptInbound {
+                    stream: conn.stream,
+                    peer_addr: conn.peer_addr,
+                    tcp_ao_info: conn.tcp_ao_info,
+                    tcp_ao_generation: conn.tcp_ao_generation,
+                })
+                .await
+            {
+                warn!(error = %e, "failed to forward inbound connection to peer manager");
+            }
+        }
+    });
+    tokio::spawn(listener.run());
 
     // Spawn telemetry HTTP server (if configured). `/metrics` serves
     // Prometheus text; `/livez` and `/readyz` provide minimal probe bodies.
@@ -5475,6 +5492,61 @@ mod tests {
                 "stream_plan_runtime_state_directory: stream_plan_runtime_state_authority("
             )
         );
+    }
+
+    #[test]
+    fn bgp_ingress_activation_follows_complete_initial_peer_registration() {
+        // Load-bearing startup-order proof: moving either ingress spawn above
+        // the configured-peer loop makes this test fail. Binding remains
+        // earlier so address reservation and bind errors are still fail-fast.
+        let source = include_str!("main.rs");
+        let production = source.split_once("\n#[cfg(test)]\nmod tests").unwrap().0;
+        let listener_bind = production
+            .find("BgpListener::bind_with_options(listen_addr, accept_tx, listener_options)")
+            .expect("BGP listener bind must remain explicit");
+        let peer_registration = production
+            .find("for neighbor in peer_configs {")
+            .expect("initial configured-peer registration loop must remain explicit");
+        let post_registration_barrier = production
+            .find("// Activate BGP ingress only after the complete configured-peer roster is")
+            .expect("post-registration BGP ingress barrier must remain explicit");
+        let accept_forwarding_loop = production
+            .find("while let Some(conn) = accept_rx.recv().await {")
+            .expect("BGP accept forwarding loop must remain explicit");
+        let listener_run_spawn = production
+            .find("tokio::spawn(listener.run());")
+            .expect("BGP listener run spawn must remain explicit");
+        let metrics_startup = production
+            .find("// Spawn telemetry HTTP server (if configured).")
+            .expect("metrics/readiness startup boundary must remain explicit");
+        let peer_registration_loop = &production[peer_registration..post_registration_barrier];
+
+        assert!(listener_bind < peer_registration);
+        assert!(
+            peer_registration_loop.ends_with("\n    }\n\n    "),
+            "ingress barrier must follow the rustfmt-indented closing brace of the peer loop"
+        );
+        assert_eq!(
+            peer_registration_loop
+                .matches("fatal_startup_error(")
+                .count(),
+            3,
+            "every configured-peer registration failure must remain fatal"
+        );
+        for fatal_message in [
+            "failed to send configured peer to peer manager during startup",
+            "failed to add configured peer during startup",
+            "peer manager dropped configured-peer reply during startup",
+        ] {
+            assert!(
+                peer_registration_loop.contains(fatal_message),
+                "configured-peer loop lost fatal startup arm: {fatal_message}"
+            );
+        }
+        assert!(post_registration_barrier < accept_forwarding_loop);
+        assert!(post_registration_barrier < listener_run_spawn);
+        assert!(accept_forwarding_loop < metrics_startup);
+        assert!(listener_run_spawn < metrics_startup);
     }
 
     #[test]
