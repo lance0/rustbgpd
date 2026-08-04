@@ -33,7 +33,7 @@ rbgp config apply config.toml \
 rbgp config status
 rbgp config confirm deploy-123
 rbgp config abort deploy-123
-rbgp config effective                       # dump running post-defaults config (redacted TOML; -j for JSON)
+rbgp config effective                       # dump running post-defaults config (redacted TOML; -j for JSON; bounded to 384 MiB)
 rbgp config history                         # list applied config transactions
 rbgp config rollback <n>                    # roll back to a prior history entry (1 = previous applied config)
 

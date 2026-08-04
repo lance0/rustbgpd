@@ -20,7 +20,6 @@ use crate::connection::Connection;
 use crate::error::CliError;
 use crate::output::{self, JsonNeighbor};
 use crate::proto::bfd_service_client::BfdServiceClient;
-use crate::proto::config_service_client::ConfigServiceClient;
 use crate::proto::control_service_client::ControlServiceClient;
 use crate::proto::event_service_client::EventServiceClient;
 use crate::proto::global_service_client::GlobalServiceClient;
@@ -164,9 +163,11 @@ impl Reporter {
     }
 }
 
-/// Bundle contents buffered in memory (every section is small and
-/// bounded), then written as one gzipped tarball under a single root
-/// directory so extraction never splatters files into the cwd.
+/// Bundle contents buffered in memory, then written as one gzipped tarball
+/// under a single root directory so extraction never splatters files into
+/// the cwd. Most sections are small; the bounded effective config can be up
+/// to 384 MiB and is moved into the bundle exactly once after its checks and
+/// deployment probes have borrowed it.
 struct Bundle {
     files: Vec<(String, Vec<u8>)>,
 }
@@ -493,6 +494,17 @@ fn parse_state_dir(effective_toml: &str) -> Option<String> {
             .as_str()?
             .to_string(),
     )
+}
+
+fn deploy_config_source<'a>(
+    effective_toml: Option<&'a str>,
+    local_config_source: Option<&'a (String, String)>,
+) -> Option<(&'a str, &'a str)> {
+    effective_toml
+        .map(|toml_text| (toml_text, "effective config"))
+        .or_else(|| {
+            local_config_source.map(|(toml_text, source)| (toml_text.as_str(), source.as_str()))
+        })
 }
 
 fn tcp_ao_configured_targets(effective_toml: &str) -> Vec<String> {
@@ -1698,10 +1710,7 @@ pub(crate) async fn run(
 
             // config/effective.toml: the daemon's own redacted, normalized
             // dump (same RPC as `rbgp config effective`). Never the raw file.
-            let mut config_client = ConfigServiceClient::with_interceptor(
-                connection.channel(),
-                connection.interceptor(),
-            );
+            let mut config_client = connection.effective_config_client();
             match config_client
                 .get_effective_config(GetEffectiveConfigRequest {})
                 .await
@@ -1721,7 +1730,6 @@ pub(crate) async fn run(
                         reporter.record(check.name, check.status, check.detail);
                     }
                     state_dir = parse_state_dir(&toml_text);
-                    bundle.add("config/effective.toml", toml_text.clone().into_bytes());
                     effective_toml = Some(toml_text);
                     sections.insert(
                         "config",
@@ -2073,19 +2081,20 @@ pub(crate) async fn run(
     // otherwise the local config file (the path a local daemon process
     // was started with, else the packaged default). The local file is
     // only parsed for probe targets — it is never copied into the bundle.
-    let config_source: Option<(String, String)> = match &effective_toml {
-        Some(toml_text) => Some((toml_text.clone(), "effective config".to_string())),
-        None => {
-            let path = daemon_limits
-                .first()
-                .and_then(|(pid, _)| proc_cmdline_config_path(*pid))
-                .unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG_PATH));
-            fs::read_to_string(&path)
-                .ok()
-                .map(|text| (text, path.display().to_string()))
-        }
+    let local_config_source: Option<(String, String)> = if effective_toml.is_none() {
+        let path = daemon_limits
+            .first()
+            .and_then(|(pid, _)| proc_cmdline_config_path(*pid))
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG_PATH));
+        fs::read_to_string(&path)
+            .ok()
+            .map(|text| (text, path.display().to_string()))
+    } else {
+        None
     };
-    match &config_source {
+    let config_source =
+        deploy_config_source(effective_toml.as_deref(), local_config_source.as_ref());
+    match config_source {
         Some((toml_text, source)) => {
             let targets = deploy_targets(toml_text);
             if !daemon_reachable && let Some(port) = targets.listen_port {
@@ -2116,6 +2125,12 @@ pub(crate) async fn run(
             );
             sections.insert("probes", "skipped: no config source".to_string());
         }
+    }
+
+    // Checks and probes above only borrow the potentially large document;
+    // transfer its allocation directly into the bundle after the last read.
+    if let Some(toml_text) = effective_toml.take() {
+        bundle.add("config/effective.toml", toml_text.into_bytes());
     }
 
     // ---- config freshness (local daemon processes only) ---------------
@@ -2267,6 +2282,44 @@ mod tests {
     use crate::connection::connect;
     use crate::test_support::spawn_mock_server;
     use tonic::Code;
+
+    /// The effective config can approach 384 MiB. Reintroducing either the
+    /// bundle copy or the probe-source copy adds `toml_text.clone()` to the
+    /// production half and makes this structural allocation fence red.
+    #[test]
+    fn effective_config_is_borrowed_for_probes_then_moved_into_bundle() {
+        let source = include_str!("doctor.rs");
+        let production = source.split("#[cfg(test)]").next().unwrap();
+
+        assert_eq!(production.matches("toml_text.clone()").count(), 0);
+        assert_eq!(production.matches("effective_toml.clone()").count(), 0);
+        assert_eq!(
+            production
+                .matches(
+                    "deploy_config_source(effective_toml.as_deref(), local_config_source.as_ref())"
+                )
+                .count(),
+            1
+        );
+        assert_eq!(production.matches("effective_toml.take()").count(), 1);
+        assert_eq!(production.matches("toml_text.into_bytes()").count(), 1);
+    }
+
+    #[test]
+    fn deploy_probe_config_prefers_effective_and_preserves_local_fallback() {
+        // Removing the local fallback makes the second assertion red;
+        // reversing precedence makes the first assertion red.
+        let local = ("local".to_string(), "/etc/rustbgpd/config.toml".to_string());
+        assert_eq!(
+            deploy_config_source(Some("effective"), Some(&local)),
+            Some(("effective", "effective config"))
+        );
+        assert_eq!(
+            deploy_config_source(None, Some(&local)),
+            Some(("local", "/etc/rustbgpd/config.toml"))
+        );
+        assert_eq!(deploy_config_source(None, None), None);
+    }
 
     /// Load-bearing proof: removing the remote-AdminDown branch makes the
     /// permitted warning red; defaulting absent presence to false makes the

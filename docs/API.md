@@ -431,8 +431,11 @@ callers submit candidate TOML and receive only redacted diff / plan
 output; `GetEffectiveConfig` is the one deliberate full-document export
 — it returns the effective running config as normalized TOML with
 defaults resolved (selected default-empty policy lists may be omitted) and
-secret material replaced with `<redacted>`
-before it leaves the daemon (`rbgp config effective`).
+secret material replaced with `<redacted>` before it leaves the daemon
+(`rbgp config effective`). The two shipped
+full-document consumers (`rbgp config effective` and `rbgp doctor`) accept
+at most 384 MiB of TOML plus its protobuf envelope; other config RPC clients
+retain tonic's 4 MiB decode default.
 
 | RPC | Description |
 |-----|-------------|

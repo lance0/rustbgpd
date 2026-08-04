@@ -71,6 +71,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `rbgp config effective` and `rbgp doctor` now accept a byte-exact effective
+  config document larger than tonic's 4 MiB client default, up to a finite
+  384 MiB of normalized TOML plus its protobuf envelope. The allowance is
+  method-specific; unrelated `ConfigService` RPC clients keep the default
+  decode ceiling. Doctor borrows that document for its checks and probes,
+  then moves the same allocation into the bundle instead of retaining
+  full-document copies.
+
 - The ordinary example configs now rely on the default owner-only gRPC Unix
   socket instead of repeating an explicit principal and role map. Socket
   access and operator authority are unchanged; audit identity changes from
