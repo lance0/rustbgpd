@@ -46,7 +46,6 @@ analyzers, test harnesses, MRT readers, etc.
 | 7999 | `BLACKHOLE` well-known community (`0xFFFF_029A`, rendered as `65535:666`) |
 | 8092 | Large communities (3× u32) |
 | 8097 | Origin Validation State Extended Community (type 0x43): `ORIGIN_VALIDATION_{VALID,NOT_FOUND,INVALID}` `ExtendedCommunity` constants with `OV_*` textual rendering. Codec only — RPKI-to-community stamping lives in the daemon |
-| 8203 | Admin shutdown communication |
 | 8277 | IPv4/IPv6 labeled-unicast NLRI codec (SAFI 4): label-stack + prefix encode/decode, Add-Path and withdraw forms. Inert codec substrate |
 | 8326 | `GRACEFUL_SHUTDOWN` well-known community (`0xFFFF_0000`) |
 | 8365 | EVPN over VXLAN encapsulation |
@@ -55,6 +54,7 @@ analyzers, test harnesses, MRT readers, etc.
 | 8654 | Extended messages (up to 65535 bytes). `encode_message_with_limit()` and the per-message `encode_with_limit()` helpers (on `NotificationMessage` / `RouteRefreshMessage`) encode against a caller-supplied size ceiling; the default `encode()` keeps the 4096-byte base limit |
 | 8950 | Extended next hop (IPv4 NLRI over IPv6 NH); optional acceptance of a link-local-primary `MP_REACH_NLRI` next-hop for unnumbered peers via `UpdateValidationOptions` |
 | 8955/8956 | FlowSpec: 13 component types, numeric/bitmask operators; §6.1-compliant `NEXT_HOP` validation (the irrelevant-next-hop case is accepted, not rejected); `FlowSpecRule::validate_encoded_len` rejects rules above the 12-bit `MAX_FLOWSPEC_NLRI_RULE_LEN` (4095 bytes) before they reach the wire |
+| 9003 | Administrative Shutdown Communication (obsoletes RFC 8203) |
 | 9012 | BGP Encapsulation extended community (§4.1) — VXLAN sub-type used by EVPN encap |
 | 9072 | Extended Optional Parameters Length for BGP OPEN: classic encoding through 255 optional-parameter octets, extended aggregate and per-parameter lengths above that boundary, and permissive extended-format receive at smaller lengths |
 | 9135 | EVPN integrated routing for IRB |

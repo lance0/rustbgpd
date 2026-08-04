@@ -427,7 +427,7 @@ evolving API.**
 | Dimension | Current state |
 |-----------|---------------|
 | **Target use case** | Data-center fabric pilots, IXP route servers, programmable BGP control planes, lab/test environments |
-| **Maturity** | Public alpha (v0.62.0) |
+| **Maturity** | Public alpha (v0.63.0) |
 | **Adopter support** | Reporting channels, compatibility boundaries, and proof limits are documented in [SUPPORT.md](SUPPORT.md). |
 | **Narrow stable contract** | The machine-pinned [route-server / route-reflector v1 contract](docs/v1-stable-contract.md) covers only its inventoried control-plane roles and surfaces; the project and all unlisted features remain alpha. |
 | **Implemented** | Dual-stack BGP/MP-BGP, Add-Path, GR/LLGR, RPKI/RTR, ASPA path verification, FlowSpec, BMP, MRT, BFD, EVPN/VXLAN (alpha), and full gRPC/CLI management. Linux FIB integration is default-off and scoped to RFC 7999 discard routes and configured unicast tables (including ECMP and weighted multipath); broader routing-suite features remain future work. |

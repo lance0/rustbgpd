@@ -9,6 +9,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.63.0] — 2026-08-04
+
 ### Added
 
 - ASPA-invalid policy rejections retain the first proven `NotProviderPlus` hop;
@@ -38,6 +40,74 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   from an older daemon; explicit `--plan-token` Apply fails closed when the
   daemon cannot honor that binding. Existing unary request/response behavior
   remains unchanged.
+
+
+- **Lag-aware `rbgp top` route events.** The optional event panel now uses the
+  typed `WatchEvents` route stream, renders policy source/target/reason and
+  Add-Path ID, and shows exact missed-event counts. Older daemons fall back only
+  when `WatchEvents` is unimplemented and retain an explicit degraded warning.
+
+- **Actionable authorization denials and `rbgp doctor` authz triage.** gRPC
+  PERMISSION_DENIED messages now name the principal, its current role (or
+  that it is unmapped), the required tier, and the exact
+  `[security.grpc.roles]` / listener `max_tier` config change (restart
+  required) that would permit the call; `rbgp` appends a one-line hint
+  pointing at the config surface. `rbgp doctor` gains a `daemon.authz.*`
+  check family: read-RPC reachability with denial as a first-class
+  diagnosed FAIL, the client-side connection identity shape, and the
+  daemon's enforcement mode from the effective config (skipped against
+  daemons that do not expose it).
+
+- **Provenance-bearing commit-confirm authority (LAN-798, ADR-0121).** New
+  confirmed transactions publish an owner-private raw normalized prior, then
+  compact provenance/file-identity metadata, then the config-adjacent locator
+  as the sole pending boot authority. Crash/restart restore verifies and directly
+  adopts that retained accepted snapshot before opening candidate contents or
+  mutating the candidate or backup; launch-target metadata may be inspected
+  while binding the authority. Live abort and timeout instead reuse the same
+  prior object through the ordinary #1370-gated planner and apply path. Abort,
+  timeout, and boot restore durably restore while all three objects remain;
+  confirm, successful rollback, and boot restore become terminal only after
+  locator removal and parent-directory sync. Later exact metadata/raw cleanup
+  is warning-only.
+  Production writes v3 only while retaining frozen v2 locator and locator-free
+  v1 recovery readers without conversion or dual-write. Finish pending state
+  before upgrade or downgrade, and remove format-specific safe residue before
+  starting an older binary; v2 config history separately requires moving the
+  complete history directory aside. Locator absence is authority-free and does
+  not impose pending-storage ownership or mode policy on an ordinary launch
+  path; confirmed writes and any present pending object still require the
+  documented daemon-owned private directory.
+
+- **Config-history provenance schema and rendering.** `ListConfigHistory` and
+  `rbgp config history` now expose an additive config-source digest over the
+  normalized-TOML digest plus the canonical accepted rpol/dataset source roster,
+  together with an explicit provenance status. Successful best-effort history
+  records of newly accepted snapshots use owner-private v2 JSON; legacy and v2
+  rows share one index. Rollback now accepts v2 rows only after one detached
+  load exactly reproduces the recorded TOML, manifest, and source digests;
+  unreadable rows and legacy rows with external declarations fail closed.
+
+- Native `.deb` and `.rpm` packages on every tagged release, for
+  Debian 11+/Ubuntu 22.04+ and RHEL/Rocky/Alma 9+ on amd64 and arm64.
+  The package installs the daemon, `rbgp`, and `rs-config-render` to
+  `/usr/bin`, the hardened systemd unit, man pages and completions,
+  creates the `rustbgpd` service user, and drops a non-overwriting
+  starter config at `/etc/rustbgpd/config.toml` — install, edit the
+  config, `systemctl enable --now rustbgpd`.
+
+- Per-architecture SHA-256 manifests cover each release tarball and its native
+  packages. The install docs select the exact downloaded filename from the
+  manifest, so tarball-only verification does not fail on absent `.deb` or
+  `.rpm` files.
+
+- The container image declares a `HEALTHCHECK` probing `rbgp --json
+  health` over the daemon's local gRPC socket, so `docker ps` and
+  orchestrators report container health without extra wiring.
+
+- The release tarballs now also ship the `birdwatcher-adapter` binary
+  and the systemd unit + kernel-dataplane drop-in under
+  `share/systemd/`.
 
 ### Removed
 
@@ -144,76 +214,6 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   ends with a minimal copy-pasteable TOML block fixing that specific
   config, with the operator's own principal strings interpolated.
 
-### Added
-
-- **Lag-aware `rbgp top` route events.** The optional event panel now uses the
-  typed `WatchEvents` route stream, renders policy source/target/reason and
-  Add-Path ID, and shows exact missed-event counts. Older daemons fall back only
-  when `WatchEvents` is unimplemented and retain an explicit degraded warning.
-
-- **Actionable authorization denials and `rbgp doctor` authz triage.** gRPC
-  PERMISSION_DENIED messages now name the principal, its current role (or
-  that it is unmapped), the required tier, and the exact
-  `[security.grpc.roles]` / listener `max_tier` config change (restart
-  required) that would permit the call; `rbgp` appends a one-line hint
-  pointing at the config surface. `rbgp doctor` gains a `daemon.authz.*`
-  check family: read-RPC reachability with denial as a first-class
-  diagnosed FAIL, the client-side connection identity shape, and the
-  daemon's enforcement mode from the effective config (skipped against
-  daemons that do not expose it).
-
-- **Provenance-bearing commit-confirm authority (LAN-798, ADR-0121).** New
-  confirmed transactions publish an owner-private raw normalized prior, then
-  compact provenance/file-identity metadata, then the config-adjacent locator
-  as the sole pending boot authority. Crash/restart restore verifies and directly
-  adopts that retained accepted snapshot before opening candidate contents or
-  mutating the candidate or backup; launch-target metadata may be inspected
-  while binding the authority. Live abort and timeout instead reuse the same
-  prior object through the ordinary #1370-gated planner and apply path. Abort,
-  timeout, and boot restore durably restore while all three objects remain;
-  confirm, successful rollback, and boot restore become terminal only after
-  locator removal and parent-directory sync. Later exact metadata/raw cleanup
-  is warning-only.
-  Production writes v3 only while retaining frozen v2 locator and locator-free
-  v1 recovery readers without conversion or dual-write. Finish pending state
-  before upgrade or downgrade, and remove format-specific safe residue before
-  starting an older binary; v2 config history separately requires moving the
-  complete history directory aside. Locator absence is authority-free and does
-  not impose pending-storage ownership or mode policy on an ordinary launch
-  path; confirmed writes and any present pending object still require the
-  documented daemon-owned private directory.
-
-- **Config-history provenance schema and rendering.** `ListConfigHistory` and
-  `rbgp config history` now expose an additive config-source digest over the
-  normalized-TOML digest plus the canonical accepted rpol/dataset source roster,
-  together with an explicit provenance status. Successful best-effort history
-  records of newly accepted snapshots use owner-private v2 JSON; legacy and v2
-  rows share one index. Rollback now accepts v2 rows only after one detached
-  load exactly reproduces the recorded TOML, manifest, and source digests;
-  unreadable rows and legacy rows with external declarations fail closed.
-
-- Native `.deb` and `.rpm` packages on every tagged release, for
-  Debian 11+/Ubuntu 22.04+ and RHEL/Rocky/Alma 9+ on amd64 and arm64.
-  The package installs the daemon, `rbgp`, and `rs-config-render` to
-  `/usr/bin`, the hardened systemd unit, man pages and completions,
-  creates the `rustbgpd` service user, and drops a non-overwriting
-  starter config at `/etc/rustbgpd/config.toml` — install, edit the
-  config, `systemctl enable --now rustbgpd`.
-
-- Per-architecture SHA-256 manifests cover each release tarball and its native
-  packages. The install docs select the exact downloaded filename from the
-  manifest, so tarball-only verification does not fail on absent `.deb` or
-  `.rpm` files.
-
-- The container image declares a `HEALTHCHECK` probing `rbgp --json
-  health` over the daemon's local gRPC socket, so `docker ps` and
-  orchestrators report container health without extra wiring.
-
-- The release tarballs now also ship the `birdwatcher-adapter` binary
-  and the systemd unit + kernel-dataplane drop-in under
-  `share/systemd/`.
-
-### Changed
 
 - `rbgp config diff`, `plan`, and `apply` now preflight the fully populated
   protobuf request against tonic's 4,194,304-byte unary-message limit. Oversized
@@ -242,6 +242,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   RHEL/Rocky/Alma 9+; previously they required the newer glibc of the
   CI build host and failed to start on Debian stable and RHEL 9
   derivatives.
+
+- `rustbgpd-wire` 0.16.2: doc-only patch release. The ASPA verification
+  rustdoc now cites `draft-ietf-sidrops-aspa-verification-27`, and the
+  README Supported RFCs table lists RFC 9003 (which obsoletes the
+  previously listed RFC 8203) for administrative shutdown communication.
+  No code or public API change.
 
 ### Fixed
 
