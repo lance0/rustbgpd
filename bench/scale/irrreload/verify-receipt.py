@@ -538,7 +538,7 @@ def validate_quiet(path: Path) -> None:
         or len({(row.get("pswpin"), row.get("pswpout")) for row in data}) != 1
         or any(not row.get("pswpin", "").isdigit() or not row.get("pswpout", "").isdigit() for row in data)
     ):
-        fail(f"{path}: quiet samples are too close or not below load 2")
+        fail(f"{path}: quiet samples fail spacing, load, port, disk, or swap gates")
 
 
 def validate_process(path: Path) -> tuple[int, int]:

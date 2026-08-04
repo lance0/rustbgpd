@@ -5,7 +5,6 @@
 # Usage: txn-lifecycle.sh RBGP ADDR CURRENT OPPOSITE CONFIG RUNTIME_DIR EVIDENCE_DIR PID DAEMON_LOG
 set -u
 set -o pipefail
-
 if [ $# -ne 9 ]; then
     echo "usage: txn-lifecycle.sh RBGP ADDR CURRENT OPPOSITE CONFIG RUNTIME_DIR EVIDENCE_DIR PID DAEMON_LOG" >&2
     exit 2
@@ -15,8 +14,7 @@ script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 verify="$script_dir/verify-receipt.py"
 locator="$config.commit-confirm-locator.json"
 raw="$runtime_dir/commit-confirm-v3-prior.toml"; metadata="$runtime_dir/commit-confirm-v3-metadata.json"
-legacy="$runtime_dir/commit-confirm-journal.json"; min_raw=$((10 * 1024 * 1024)); max_raw=$((384 * 1024 * 1024)); output="$evidence/lifecycle.json"
-
+legacy="$runtime_dir/commit-confirm-journal.json"; min_raw=$((10 * 1024 * 1024)); max_raw=$((384 * 1024 * 1024)); output="$evidence/lifecycle.json"; mkdir -p "$evidence"
 die() { echo "txn-lifecycle: $*" >&2; exit 1; }
 sha() { sha256sum -- "$1" | cut -d' ' -f1; }
 runtime_token_valid() { [[ $1 =~ ^kv2:[0-9a-f]{16}:8$ ]]; }
