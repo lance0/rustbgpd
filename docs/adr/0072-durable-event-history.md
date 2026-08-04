@@ -615,9 +615,20 @@ drain. A submitted append keeps the same future rather than being resubmitted. T
 deadline also bounds final sidecar flush, storage shutdown, and the wait for thread
 join; non-waiting runtime teardown bounds process exit if that thread stays wedged.
 
-Actor-observed queued expiry is definite `shutdown_timeout` loss; the manager's
-outer abort latches degradation without turning racy depth gauges into drop counts.
-Submitted append outcome is unknown; post-confirmation timeout is finalization only.
+Producer acceptance is one lock-free per-category ledger transition after an mpsc
+slot has been reserved. Closing the ledger prevents new acceptance without racing a
+sender that already owns a slot. Actor receive transfers ownership out of that
+ledger; after the actor terminates, only the manager consumes any accepted handoffs
+that never reached the actor and records them as definite `shutdown_timeout` loss.
+The producer publishes its proposed queue depth before the admission CAS. Admission
+uses acquire-release on success and acquire on failure; manager close uses an
+acquire-release RMW. If close wins, the producer publishes a corrective zero and
+returns `Closed`; if admission wins, its reserved permit is sent. That order keeps a
+late producer from restoring a stale positive gauge after terminal finalization.
+
+Actor-observed queued expiry is also definite `shutdown_timeout` loss. A submitted
+append outcome is unknown and latches degradation without being counted as a
+definite per-category drop; post-confirmation timeout is finalization only.
 
 ### Observability
 

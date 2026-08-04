@@ -21,8 +21,8 @@ use std::time::{Duration, Instant};
 use criterion::{BatchSize, Criterion, Throughput, criterion_group, criterion_main};
 use prometheus::Encoder;
 use rustbgpd_event_history::{
-    EhmState, EventHistoryConfig, EventHistoryHandle, EventHistoryManager, EventHistorySender,
-    SynchronousMode,
+    Category, EhmState, EnvelopePeers, EventEnvelope, EventHistoryConfig, EventHistoryHandle,
+    EventHistoryManager, EventHistorySender, PayloadCodec, Severity, SynchronousMode,
 };
 use rustbgpd_rib::{
     EvpnRibRoute, EvpnRouteEvent, RibManager, RouteEvent, RouteEventType, RouteOrigin,
@@ -342,6 +342,69 @@ fn assert_healthy(state: &Arc<EhmState>, metrics: &BgpMetrics) {
     );
 }
 
+fn direct_sender(c: &mut Criterion) {
+    let mut group = c.benchmark_group("event_history_direct_sender");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_secs(1));
+    group.measurement_time(Duration::from_secs(3));
+    group.throughput(Throughput::Elements(
+        u64::try_from(EVENTS_PER_SAMPLE).expect("sample size fits u64"),
+    ));
+
+    let mut ehm = EhmHarness::new(true);
+    let event = EventEnvelope {
+        timestamp_ns: 1_783_915_200_000_000_000,
+        category: Category::Route,
+        event_type: "added".into(),
+        peers: EnvelopePeers::default(),
+        afi_safi: Some("ipv4-unicast".into()),
+        prefix: Some("198.18.0.0/32".into()),
+        rd: None,
+        evpn_route_type: None,
+        severity: Severity::Info,
+        payload_codec: PayloadCodec::Opaque,
+        payload: vec![0x5a; 96],
+    };
+    let sender = ehm.sender.clone();
+    let state = ehm.handle.state().clone();
+    let metrics = ehm.metrics.clone();
+    let runtime = &ehm.runtime;
+    let committed_rx = ehm
+        .committed_rx
+        .as_mut()
+        .expect("direct sender subscribes before publishing");
+    let last_cursor = &mut ehm.last_cursor;
+
+    group.bench_function("route_256", |bencher| {
+        bencher.iter_custom(|iterations| {
+            let mut elapsed = Duration::ZERO;
+            for _ in 0..iterations {
+                fence_queue(&sender);
+                assert_healthy(&state, &metrics);
+                let started = Instant::now();
+                for _ in 0..EVENTS_PER_SAMPLE {
+                    sender
+                        .try_send(event.clone())
+                        .expect("direct EHM sender remains admitted");
+                }
+                elapsed += started.elapsed();
+                let expected_last = last_cursor
+                    .checked_add(u64::try_from(EVENTS_PER_SAMPLE).expect("sample size fits u64"))
+                    .expect("cursor space");
+                fence_committed_through(runtime, committed_rx, &state, last_cursor, expected_last);
+            }
+            assert_eq!(
+                state.latest_event_id(),
+                *last_cursor,
+                "direct sender benchmark did not exercise durable EHM commits"
+            );
+            elapsed
+        });
+    });
+    group.finish();
+    ehm.shutdown();
+}
+
 fn manager_self_time(c: &mut Criterion) {
     let mut group = c.benchmark_group("event_history_manager_self_time");
     group.sample_size(10);
@@ -469,5 +532,5 @@ fn sqlite_end_to_end(c: &mut Criterion) {
     ehm.shutdown();
 }
 
-criterion_group!(benches, manager_self_time, sqlite_end_to_end);
+criterion_group!(benches, direct_sender, manager_self_time, sqlite_end_to_end);
 criterion_main!(benches);

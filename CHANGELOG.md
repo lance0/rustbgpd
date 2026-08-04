@@ -81,6 +81,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Coordinated shutdown drains event history under one five-second deadline and
   latches abandoned work; submitted-append timeouts remain unknown, not drops.
 
+- Event-history shutdown now closes a lock-free per-category acceptance ledger
+  before draining. Accepted producer handoffs cannot disappear between queue
+  reservation and actor receive, terminal loss is counted by category, and a
+  late producer cannot restore a stale positive queue-depth gauge.
+
 - gNMI STREAM/ON_CHANGE now emits the exact `session-state` leaf delete when a
   subscribed peer disappears. The idempotent delete works after `updates_only`
   synchronization, the path becomes present again when the peer reappears, and
