@@ -688,6 +688,33 @@ exit 8
 }
 
 #[test]
+/// Red proof: restoring the old 60-second wait or reusing the confirmation
+/// timeout as the rollback-completion bound fails these distinct contracts.
+fn irr_reload_transaction_lifecycle_separates_confirmation_and_rollback_bounds() {
+    let lifecycle = std::fs::read_to_string(format!(
+        "{}/bench/scale/irrreload/txn-lifecycle.sh",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .expect("read transaction lifecycle helper");
+
+    for required in [
+        "CONFIRMATION_TIMEOUT_SECONDS=10",
+        "ROLLBACK_COMPLETION_CEILING_SECONDS=600",
+        "apply_pending irrreload-timeout \"$CONFIRMATION_TIMEOUT_SECONDS\"",
+        "terminal_completion_deadline=$((timeout_deadline + ROLLBACK_COMPLETION_CEILING_SECONDS))",
+        "pending)",
+        "auto_reverted) break",
+        "*) die \"unexpected timeout outcome $outcome\"",
+    ] {
+        assert!(
+            lifecycle.contains(required),
+            "missing timeout bound contract: {required}"
+        );
+    }
+    assert!(!lifecycle.contains("SECONDS + 60"));
+}
+
+#[test]
 /// Red proof: including the cell name or native rendering in the canonical
 /// dataset digest makes the four-cell equality fail. Omitting or changing any
 /// canonical record field fails the independently pinned seed-61 digest; a
