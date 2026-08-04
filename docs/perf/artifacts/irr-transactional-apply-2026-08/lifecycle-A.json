@@ -1,0 +1,294 @@
+{
+  "schema": 2,
+  "generations": {
+    "current": {
+      "sha256": "1c2cbced545d561283e68ae62beee4de739c60c450d50e52904db9656c0f6fd5",
+      "bytes": 295624985,
+      "marker": "65400:1000"
+    },
+    "opposite": {
+      "sha256": "6264b9a6aa636d8d6f9c661310451a18688db8ac9d5836c61978296ea2205f7f",
+      "bytes": 295624973,
+      "marker": "65400:2000"
+    }
+  },
+  "baseline": {
+    "history_entries": 0,
+    "history_outcome": "skipped_oversize",
+    "process": {
+      "pid": 3938981,
+      "starttime": 268028788,
+      "vmrss_kib": 14318644,
+      "vmhwm_kib": 38315048
+    },
+    "config": {
+      "sha256": "ef5cc53501622dd2b2ec40c0b28378875ed8cdd083e8fad9b955062b0b85f9e5",
+      "bytes": 298877893,
+      "marker": "65400:1000"
+    },
+    "runtime": {
+      "sha256": "fad94efe1e0c47b0e18767c86779744329f27edac239d5f17cc53020500cfc28",
+      "bytes": 298983184,
+      "marker": "65400:1000"
+    }
+  },
+  "abort": {
+    "candidate_role": "opposite",
+    "plan": {
+      "transport": "streamed",
+      "status": "committable",
+      "plan_token_present": true,
+      "runtime_snapshot_token_present": true
+    },
+    "apply": {
+      "transport": "streamed",
+      "explicit_plan_token": true,
+      "status": "committable",
+      "confirmation_status": "pending",
+      "confirm_id": "irrreload-abort",
+      "timeout_seconds": 600,
+      "deadline_unix_seconds": 1785851665,
+      "runtime_token_coherent": true
+    },
+    "history_before": {
+      "entries": [],
+      "files": []
+    },
+    "apply_history_warning": {
+      "count_before": 5,
+      "count_after": 6,
+      "bytes": 298877881
+    },
+    "pending": {
+      "authority": {
+        "confirm_id": "irrreload-abort",
+        "deadline_unix_seconds": 1785851579,
+        "linkage_verified": true,
+        "locator": {
+          "bytes": 502,
+          "device": 66306,
+          "inode": 216689031,
+          "mode": "0600",
+          "name": "config.toml.commit-confirm-locator.json",
+          "owner_current_uid": true,
+          "sha256": "069ea5285277d926e0075aecdc3d12ae3beb1423b6647496c2e69da4f440b8fa"
+        },
+        "metadata": {
+          "bytes": 567,
+          "device": 66306,
+          "inode": 216689029,
+          "mode": "0600",
+          "name": "commit-confirm-v3-metadata.json",
+          "owner_current_uid": true,
+          "sha256": "c598d6a1c119cd2a4e0dd826a9c22138f177ac1f2a5c3c100e288616175a1128"
+        },
+        "raw": {
+          "bytes": 298877893,
+          "device": 66306,
+          "inode": 216689028,
+          "mode": "0600",
+          "name": "commit-confirm-v3-prior.toml",
+          "owner_current_uid": true,
+          "sha256": "ef5cc53501622dd2b2ec40c0b28378875ed8cdd083e8fad9b955062b0b85f9e5"
+        },
+        "schema": 1,
+        "version": 3
+      },
+      "legacy_absent": true,
+      "history_entries": 0,
+      "history_outcome": "skipped_oversize",
+      "process": {
+        "pid": 3938981,
+        "starttime": 268028788,
+        "vmrss_kib": 17444112,
+        "vmhwm_kib": 38315048
+      },
+      "config": {
+        "sha256": "009dfcbd0e989e6747b8f99a50e77318ad93bb5023d4a4542316e1257a721287",
+        "bytes": 298877881,
+        "marker": "65400:2000"
+      },
+      "runtime": {
+        "sha256": "b3acd5dc38384b5def59335d763bfb32ad0ca793cd3d369964d10e9caf096ae4",
+        "bytes": 298983172,
+        "marker": "65400:2000"
+      }
+    },
+    "terminal": {
+      "status": "aborted",
+      "status_view_verified": true,
+      "restored_exactly": true,
+      "history_warning": {
+        "count_before": 6,
+        "count_after": 7,
+        "bytes": 298877893
+      },
+      "history_after": {
+        "entries": [],
+        "files": []
+      },
+      "v3_absent": true,
+      "legacy_absent": true,
+      "history_entries": 0,
+      "history_outcome": "skipped_oversize",
+      "process": {
+        "pid": 3938981,
+        "starttime": 268028788,
+        "vmrss_kib": 16368964,
+        "vmhwm_kib": 38315048
+      },
+      "config": {
+        "sha256": "ef5cc53501622dd2b2ec40c0b28378875ed8cdd083e8fad9b955062b0b85f9e5",
+        "bytes": 298877893,
+        "marker": "65400:1000"
+      },
+      "runtime": {
+        "sha256": "fad94efe1e0c47b0e18767c86779744329f27edac239d5f17cc53020500cfc28",
+        "bytes": 298983184,
+        "marker": "65400:1000"
+      }
+    }
+  },
+  "timeout": {
+    "candidate_role": "opposite",
+    "plan": {
+      "transport": "streamed",
+      "status": "committable",
+      "plan_token_present": true,
+      "runtime_snapshot_token_present": true
+    },
+    "apply": {
+      "transport": "streamed",
+      "explicit_plan_token": true,
+      "status": "committable",
+      "confirmation_status": "pending",
+      "confirm_id": "irrreload-timeout",
+      "timeout_seconds": 10,
+      "deadline_unix_seconds": 1785851274,
+      "runtime_token_coherent": true
+    },
+    "history_before": {
+      "entries": [],
+      "files": []
+    },
+    "apply_history_warning": {
+      "count_before": 7,
+      "count_after": 8,
+      "bytes": 298877881
+    },
+    "pending": {
+      "authority": {
+        "confirm_id": "irrreload-timeout",
+        "deadline_unix_seconds": 1785851195,
+        "linkage_verified": true,
+        "locator": {
+          "bytes": 504,
+          "device": 66306,
+          "inode": 216689031,
+          "mode": "0600",
+          "name": "config.toml.commit-confirm-locator.json",
+          "owner_current_uid": true,
+          "sha256": "d8694abc1bd4ae85ae342425eb508397c269c966d4e5319776aaf38a51bbd50d"
+        },
+        "metadata": {
+          "bytes": 569,
+          "device": 66306,
+          "inode": 216689029,
+          "mode": "0600",
+          "name": "commit-confirm-v3-metadata.json",
+          "owner_current_uid": true,
+          "sha256": "d97b45b95a1c763d91ee96d7e43f6d3980daf780d72ed25b6cd8ffaacbf67069"
+        },
+        "raw": {
+          "bytes": 298877893,
+          "device": 66306,
+          "inode": 216689028,
+          "mode": "0600",
+          "name": "commit-confirm-v3-prior.toml",
+          "owner_current_uid": true,
+          "sha256": "ef5cc53501622dd2b2ec40c0b28378875ed8cdd083e8fad9b955062b0b85f9e5"
+        },
+        "schema": 1,
+        "version": 3
+      },
+      "legacy_absent": true,
+      "history_entries": 0,
+      "history_outcome": "skipped_oversize",
+      "process": {
+        "pid": 3938981,
+        "starttime": 268028788,
+        "vmrss_kib": 18089524,
+        "vmhwm_kib": 38315048
+      },
+      "config": {
+        "sha256": "009dfcbd0e989e6747b8f99a50e77318ad93bb5023d4a4542316e1257a721287",
+        "bytes": 298877881,
+        "marker": "65400:2000"
+      },
+      "runtime": {
+        "sha256": "b3acd5dc38384b5def59335d763bfb32ad0ca793cd3d369964d10e9caf096ae4",
+        "bytes": 298983172,
+        "marker": "65400:2000"
+      }
+    },
+    "terminal": {
+      "status": "auto_reverted",
+      "status_view_verified": true,
+      "restored_exactly": true,
+      "history_warning": {
+        "count_before": 8,
+        "count_after": 9,
+        "bytes": 298877893
+      },
+      "history_after": {
+        "entries": [],
+        "files": []
+      },
+      "v3_absent": true,
+      "legacy_absent": true,
+      "history_entries": 0,
+      "history_outcome": "skipped_oversize",
+      "process": {
+        "pid": 3938981,
+        "starttime": 268028788,
+        "vmrss_kib": 16824936,
+        "vmhwm_kib": 38315048
+      },
+      "config": {
+        "sha256": "ef5cc53501622dd2b2ec40c0b28378875ed8cdd083e8fad9b955062b0b85f9e5",
+        "bytes": 298877893,
+        "marker": "65400:1000"
+      },
+      "runtime": {
+        "sha256": "fad94efe1e0c47b0e18767c86779744329f27edac239d5f17cc53020500cfc28",
+        "bytes": 298983184,
+        "marker": "65400:1000"
+      }
+    }
+  },
+  "restored_current_plan": {
+    "transport": "streamed",
+    "status": "noop",
+    "plan_token_present": false
+  },
+  "final_state": {
+    "history_entries": 0,
+    "history_outcome": "skipped_oversize",
+    "process": {
+      "pid": 3938981,
+      "starttime": 268028788,
+      "vmrss_kib": 14908816,
+      "vmhwm_kib": 38315048
+    },
+    "config": {
+      "sha256": "ef5cc53501622dd2b2ec40c0b28378875ed8cdd083e8fad9b955062b0b85f9e5",
+      "bytes": 298877893,
+      "marker": "65400:1000"
+    },
+    "runtime": {
+      "sha256": "fad94efe1e0c47b0e18767c86779744329f27edac239d5f17cc53020500cfc28",
+      "bytes": 298983184,
+      "marker": "65400:1000"
+    }
+  }
+}

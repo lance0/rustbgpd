@@ -4,7 +4,9 @@ Reload stall + completion under live sessions with a realistic multi-MB
 IRR-generated member policy. The full-shape comparison covers rustbgpd's
 SIGHUP parse-then-swap path versus BIRD 3.3.x and OpenBGPD 9.x. The streamed
 gRPC transactional path runs the same canonical shape as a separate two-root
-receipt; its rows never enter the cross-daemon comparison.
+receipt; its rows never enter the cross-daemon comparison. That transaction
+campaign is complete: the published receipt is
+[`docs/perf/irr-transactional-apply-2026-08.md`](../../../docs/perf/irr-transactional-apply-2026-08.md).
 
 This directory is the campaign runner and protocol. The instrument is the
 existing `bench/scale/reloadstall` harness — real BGP stub
