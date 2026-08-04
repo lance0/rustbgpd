@@ -219,6 +219,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- BGP startup now binds its listener early but activates inbound acceptance
+  only after every configured peer is registered successfully. Peer-manager
+  send, reply, or registration failures are fatal instead of exposing a
+  partial roster that rejects configured sessions as unknown.
+
 - `rbgp rib received <peer> --rejected` now shows the retained ASPA
   validation state beside RPKI in its human-readable table; unavailable
   validation facts render as `-`, matching the existing RPKI convention.
