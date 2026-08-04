@@ -153,7 +153,7 @@ This is the "MRT reader / monitor / analyzer" consumer. Links only
 ```toml
 # Cargo.toml
 [dependencies]
-rustbgpd-wire = "0.16.1"
+rustbgpd-wire = "0.16.2"
 bytes = "1"
 ```
 
@@ -213,7 +213,7 @@ intentional split (ADR-0002: inherent methods, no I/O in the FSM).
 ```toml
 # Cargo.toml
 [dependencies]
-rustbgpd-wire = "0.16.1"
+rustbgpd-wire = "0.16.2"
 rustbgpd-fsm = "0.3.1"
 bytes = "1"
 tokio = { version = "1", features = ["net", "io-util", "time", "rt"] }
@@ -312,14 +312,14 @@ once that crate is published.
 **Status: `wire` → `fsm` are published; `rpki` is next; `rib`, `bmp`, `mrt`,
 and `policy` are later.**
 
-1. **`rustbgpd-wire` (published as `0.16.1`).** This is the
+1. **`rustbgpd-wire` (published as `0.16.2`).** This is the
    foundation — dependent crate versions cannot publish before their wire
    dependency exists on crates.io. `0.15.0` brought `Capability::PathsLimit`
    with its `PathsLimitFamily` entry type (experimental capability code 76),
    the `Ord` implementation on `EvpnRouteKey`, and `#[non_exhaustive]` across
    the registry-tracking enums. The `0.16.0` release is additive at the API
    level with six binary decode-acceptance changes plus the separate additive
-   Route Distinguisher text-parser change described in §2.3. `0.16.1` is a
+   Route Distinguisher text-parser change described in §2.3. `0.16.2` is a
    documentation/rustdoc-only release correcting RFC 7606 retained-attribute
    wording; it has no library-code, public-API, or decode-behavior change.
 
@@ -417,7 +417,7 @@ To be the de facto Rust BGP codec, the concrete gaps:
 
 ## 7. Published-crate release boundary
 
-`rustbgpd-wire 0.16.1` and `rustbgpd-fsm 0.3.1` are published and are the
+`rustbgpd-wire 0.16.2` and `rustbgpd-fsm 0.3.1` are published and are the
 versions the §3 dependency examples name. The ordering rules that govern every
 future publish are:
 
