@@ -617,6 +617,11 @@ docker run --rm --entrypoint rbgp rustbgpd:dev --help
 6. **Annotated** tag (lightweight tags break the release-history convention
    here): `git tag -a vX.Y.Z -m "vX.Y.Z — <one-line headline>"`
 7. Push: `git push origin main && git push origin vX.Y.Z`
+   - If this cycle touched `.github/workflows/release.yml`, run the
+     dispatch dry-run to green **before pushing the tag** (after the
+     workflow change is on `main`): `gh workflow run release.yml -f
+     dry_run=true` — workflow edits otherwise meet their first
+     execution on the live tag.
 8. Verify CI passes on the tag (build matrix x86_64 + aarch64, doc, GHCR
    push, release.yml binary build + GitHub Release creation). Both
    publication workflows are fail-closed: `release.yml` and
