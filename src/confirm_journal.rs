@@ -19,6 +19,7 @@
 #![deny(unsafe_code)]
 
 pub(crate) mod v2;
+pub(crate) mod v3;
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read as _, Write as _};
@@ -69,9 +70,9 @@ pub struct BootRevert {
 
 /// The operator-facing facts of a boot revert (for the banner, log, metric).
 ///
-/// A `BootRevert` is only produced when the revert fully succeeded — config
-/// restored AND journal consumed. A journal-cleanup failure fails startup
-/// (LAN-219), so there is no "booted anyway" residual state to carry here.
+/// A `BootRevert` is only produced after restore reaches its terminal point:
+/// v1 consumes its journal; v2/v3 durably remove locator authority and report
+/// any later pending-residue cleanup failure as warning-only.
 #[derive(Debug, Clone)]
 pub struct BootRevertNotice {
     pub confirm_id: String,
@@ -81,11 +82,11 @@ pub struct BootRevertNotice {
     /// state the daemon was in before this restart is uncertain (the banner
     /// says so), even though the boot revert itself succeeded.
     pub rollback_failed: bool,
-    /// V2 locator-carried target paths are sensitive and must not be rendered
+    /// V2/v3 locator-carried target paths are sensitive and must not be rendered
     /// by ordinary startup logs or banners.
     pub redact_paths: bool,
-    /// V2 journal cleanup follows the durable terminal locator removal and is
-    /// warning-only.  V1 never reports this state because its cleanup remains
+    /// V2/v3 pending cleanup follows durable terminal locator removal and is
+    /// warning-only. V1 never reports this state because its cleanup remains
     /// part of its legacy terminal operation.
     pub journal_cleanup_failed: bool,
 }

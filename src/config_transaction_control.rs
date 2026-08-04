@@ -59,6 +59,7 @@ pub struct ConfigTransactionController {
     accepted_rx: Option<watch::Receiver<Arc<AcceptedConfigSnapshot>>>,
     peer_mgr_internal_tx: Option<mpsc::UnboundedSender<InternalCommand>>,
     confirm_v2_launch: Option<crate::confirm_journal::v2::LaunchIdentity>,
+    confirm_v3_launch: Option<crate::confirm_journal::v3::LaunchIdentity>,
 }
 
 #[derive(Default)]
@@ -81,7 +82,7 @@ struct ConfirmedState {
 #[derive(Clone)]
 struct PendingConfirmedTransaction {
     confirm_id: String,
-    rollback_toml: String,
+    rollback_toml: Option<String>,
     rollback_expected_runtime_snapshot_token: String,
     timeout_seconds: u32,
     deadline: tokio::time::Instant,
@@ -94,13 +95,16 @@ struct PendingConfirmedTransaction {
     /// not repair; the operator resolves it by retrying abort, confirming the
     /// candidate, or restarting (boot revert from the retained journal).
     rollback_failed: Option<proto::ConfigTransactionConfirmationStatus>,
-    /// The exact immutable pre-transaction object encoded in the v2 journal
-    /// and reused by live abort/timeout planning.  `None` is test-only legacy
-    /// v1 coverage.
+    /// The exact immutable pre-transaction object retained by disk-backed
+    /// authority and reused by live abort/timeout planning. `None` is
+    /// test-only legacy v1 coverage.
     prior_snapshot: Option<Arc<AcceptedConfigSnapshot>>,
     /// Pinned locator/journal descriptors retained through the live pending
     /// lifecycle.  The locator is the terminal authority.
     v2_files: Option<Arc<crate::confirm_journal::v2::PendingFiles>>,
+    /// Disk-backed v3 authority. The raw object owns the prior bytes; live
+    /// rollback reuses `prior_snapshot` and retains no duplicate full String.
+    v3_files: Option<Arc<crate::confirm_journal::v3::PendingFiles>>,
 }
 
 #[derive(Clone, Debug)]
@@ -131,6 +135,7 @@ impl ConfigTransactionController {
             accepted_rx: None,
             peer_mgr_internal_tx: None,
             confirm_v2_launch: None,
+            confirm_v3_launch: None,
         }
     }
 
@@ -147,6 +152,7 @@ impl ConfigTransactionController {
             accepted_rx: Some(accepted_rx),
             peer_mgr_internal_tx: None,
             confirm_v2_launch: None,
+            confirm_v3_launch: None,
         }
     }
 
@@ -160,11 +166,21 @@ impl ConfigTransactionController {
     }
 
     #[must_use]
+    #[cfg(test)]
     pub(crate) fn with_confirm_v2_launch(
         mut self,
         launch: crate::confirm_journal::v2::LaunchIdentity,
     ) -> Self {
         self.confirm_v2_launch = Some(launch);
+        self
+    }
+
+    #[must_use]
+    pub(crate) fn with_confirm_v3_launch(
+        mut self,
+        launch: crate::confirm_journal::v3::LaunchIdentity,
+    ) -> Self {
+        self.confirm_v3_launch = Some(launch);
         self
     }
 
@@ -250,7 +266,7 @@ impl ConfigTransactionController {
                     if request.confirm_timeout_seconds > 0 {
                         validate_confirm_timeout_seconds(request.confirm_timeout_seconds)?;
                     }
-                    if self.confirm_v2_launch.is_none() {
+                    if self.confirm_v2_launch.is_none() && self.confirm_v3_launch.is_none() {
                         self.reject_confirmed_external_sources(&normalized_toml)
                             .await?;
                     }
@@ -311,7 +327,10 @@ impl ConfigTransactionController {
     ) -> Result<proto::ConfigTransactionApplyResponse, ConfigTransactionApplyError> {
         let confirmed = parse_confirmed_apply_mode(&request)?;
         if let Some(confirmed) = confirmed {
-            if preloaded.is_none() && self.confirm_v2_launch.is_none() {
+            if preloaded.is_none()
+                && self.confirm_v2_launch.is_none()
+                && self.confirm_v3_launch.is_none()
+            {
                 self.reject_confirmed_external_sources(&request.candidate_toml)
                     .await?;
             }
@@ -531,7 +550,7 @@ impl ConfigTransactionController {
                     // A confirmed gNMI candidate is derived from the live
                     // config. Fence external declarations before that
                     // construction can consult any rpol or dataset path.
-                    if self.confirm_v2_launch.is_none() {
+                    if self.confirm_v2_launch.is_none() && self.confirm_v3_launch.is_none() {
                         self.reject_confirmed_current_external_sources()
                             .await
                             .map_err(apply_error_to_gnmi_set_error)?;
@@ -602,7 +621,7 @@ impl ConfigTransactionController {
         confirmed: Option<ConfirmedApplyMode>,
     ) -> Result<proto::ConfigTransactionApplyResponse, ConfigTransactionApplyError> {
         if let Some(confirmed) = confirmed {
-            if self.confirm_v2_launch.is_none() {
+            if self.confirm_v2_launch.is_none() && self.confirm_v3_launch.is_none() {
                 self.reject_confirmed_external_sources(&request.candidate_toml)
                     .await?;
             }
@@ -647,10 +666,12 @@ impl ConfigTransactionController {
             .await
             .map_err(ConfigTransactionApplyError::Unavailable)?;
         let rollback_config = prior_snapshot.config();
-        // The immutable accepted snapshot owns the exact normalized bytes and
-        // source manifest used by both the journal and live rollback.  Never
-        // rerender or reconstruct provenance after this point.
-        let rollback_toml = prior_snapshot.normalized_toml().to_string();
+        // V3 keeps this Arc as the sole live owner of the prior bytes. Frozen
+        // v1/v2 test lanes retain their historical String representation.
+        let rollback_toml = self
+            .confirm_v3_launch
+            .is_none()
+            .then(|| prior_snapshot.normalized_toml().to_string());
 
         // ADR-0113: a confirmed transaction may TIGHTEN an outbound prefix
         // maximum, because its automatic undo only loosens and a loosening is
@@ -680,7 +701,46 @@ impl ConfigTransactionController {
         // inside the confirm window is repaired by the boot-time revert. If
         // the journal cannot be written, refuse the confirmed apply up front
         // (nothing has committed yet) rather than run an unprotected window.
-        let v2_files = if let Some(launch) = &self.confirm_v2_launch {
+        let v3_files = if let Some(launch) = &self.confirm_v3_launch {
+            let pending_dir = self
+                .deps
+                .confirm_journal_path
+                .as_ref()
+                .and_then(|path| path.parent())
+                .ok_or_else(|| {
+                    ConfigTransactionApplyError::Internal(
+                        "refusing confirmed apply: v3 pending storage is unavailable".to_string(),
+                    )
+                })?;
+            match launch.publish(
+                pending_dir,
+                &confirmed.confirm_id,
+                deadline_unix_seconds,
+                &prior_snapshot,
+            ) {
+                Ok(files) => Some(Arc::new(files)),
+                Err(error) => {
+                    if error.authority_retained() {
+                        self.state.lock().await.ambiguous_failure_confirm_id =
+                            Some(confirmed.confirm_id.clone());
+                    }
+                    return Err(ConfigTransactionApplyError::Internal(format!(
+                        "refusing confirmed apply: v3 pending authority publication failed ({:?}); {}",
+                        error.kind(),
+                        if error.authority_retained() {
+                            "locator authority may be durable and config mutations are blocked until restart"
+                        } else {
+                            "the candidate and runtime remain untouched"
+                        }
+                    )));
+                }
+            }
+        } else {
+            None
+        };
+        let v2_files = if v3_files.is_some() {
+            None
+        } else if let Some(launch) = &self.confirm_v2_launch {
             let journal_path = self.deps.confirm_journal_path.as_ref().ok_or_else(|| {
                 ConfigTransactionApplyError::Internal(
                     "refusing confirmed apply: v2 journal storage is unavailable".to_string(),
@@ -707,7 +767,9 @@ impl ConfigTransactionController {
                 &crate::confirm_journal::ConfirmJournal {
                     confirm_id: confirmed.confirm_id.clone(),
                     deadline_unix_seconds,
-                    rollback_toml: rollback_toml.clone(),
+                    rollback_toml: rollback_toml
+                        .clone()
+                        .expect("legacy confirmed apply retains rollback TOML"),
                     rollback_failed: false,
                 },
             )
@@ -756,6 +818,7 @@ impl ConfigTransactionController {
                 // up anyway.
                 self.cleanup_uncommitted_authority(
                     &confirmed.confirm_id,
+                    v3_files.as_deref(),
                     v2_files.as_deref(),
                     "confirmed apply failed",
                 )
@@ -766,6 +829,7 @@ impl ConfigTransactionController {
         if response.status != proto::ConfigTransactionPlanStatus::Committable as i32 {
             self.cleanup_uncommitted_authority(
                 &confirmed.confirm_id,
+                v3_files.as_deref(),
                 v2_files.as_deref(),
                 "confirmed apply did not commit",
             )
@@ -784,8 +848,10 @@ impl ConfigTransactionController {
             committed_sections: response.committed_sections.clone(),
             runtime_snapshot_token: response.runtime_snapshot_token.clone(),
             rollback_failed: None,
-            prior_snapshot: self.confirm_v2_launch.as_ref().map(|_| prior_snapshot),
+            prior_snapshot: (self.confirm_v2_launch.is_some() || self.confirm_v3_launch.is_some())
+                .then_some(prior_snapshot),
             v2_files,
+            v3_files,
         };
         let confirmation = pending_confirmation_proto(
             &pending,
@@ -872,7 +938,17 @@ impl ConfigTransactionController {
         // timer stay armed — a leftover journal would boot-revert a config
         // the operator explicitly confirmed.
         let matched = self.matching_pending(&confirm_id).await?;
-        if let Some(files) = &matched.v2_files {
+        if let Some(files) = &matched.v3_files {
+            let residue_cleanup_failed = files.terminal_cleanup().map_err(|error| {
+                ConfigTransactionApplyError::Internal(format!(
+                    "confirm not recorded: durable v3 locator removal failed ({:?}); the transaction is still pending and will roll back on timeout",
+                    error.kind()
+                ))
+            })?;
+            if residue_cleanup_failed {
+                warn!("confirmed transaction is terminal, but exact v3 residue cleanup failed");
+            }
+        } else if let Some(files) = &matched.v2_files {
             let journal_cleanup_failed = files.terminal_cleanup().map_err(|error| {
                 ConfigTransactionApplyError::Internal(format!(
                     "confirm not recorded: durable v2 locator removal failed ({:?}); the transaction is still pending and will roll back on timeout",
@@ -1438,7 +1514,15 @@ impl ConfigTransactionController {
         pending: &PendingConfirmedTransaction,
     ) -> Result<proto::ConfigTransactionApplyResponse, ConfigTransactionApplyError> {
         let request = proto::ApplyConfigTransactionRequest {
-            candidate_toml: pending.rollback_toml.clone(),
+            candidate_toml: pending.prior_snapshot.as_ref().map_or_else(
+                || {
+                    pending
+                        .rollback_toml
+                        .clone()
+                        .expect("legacy pending transaction retains rollback TOML")
+                },
+                |prior| prior.normalized_toml().to_string(),
+            ),
             expected_runtime_snapshot_token: pending
                 .rollback_expected_runtime_snapshot_token
                 .clone(),
@@ -1513,9 +1597,31 @@ impl ConfigTransactionController {
     async fn cleanup_uncommitted_authority(
         &self,
         confirm_id: &str,
+        v3_files: Option<&crate::confirm_journal::v3::PendingFiles>,
         v2_files: Option<&crate::confirm_journal::v2::PendingFiles>,
         context: &'static str,
     ) -> Result<(), ConfigTransactionApplyError> {
+        if let Some(files) = v3_files {
+            return match files.terminal_cleanup() {
+                Ok(residue_cleanup_failed) => {
+                    if residue_cleanup_failed {
+                        warn!(
+                            context,
+                            "v3 locator is durably absent, but exact pending residue cleanup failed"
+                        );
+                    }
+                    Ok(())
+                }
+                Err(error) => {
+                    self.state.lock().await.ambiguous_failure_confirm_id =
+                        Some(confirm_id.to_string());
+                    Err(ConfigTransactionApplyError::Internal(format!(
+                        "v3 commit-confirm operation is nonterminal because durable locator removal failed ({:?}); config mutations remain blocked",
+                        error.kind()
+                    )))
+                }
+            };
+        }
         let Some(files) = v2_files else {
             self.remove_confirm_journal_best_effort(context);
             return Ok(());
@@ -1555,7 +1661,17 @@ impl ConfigTransactionController {
         abort_timer: bool,
     ) -> Result<(), ConfigTransactionApplyError> {
         let matched = self.matching_pending(confirm_id).await?;
-        if let Some(files) = &matched.v2_files {
+        if let Some(files) = &matched.v3_files {
+            let residue_cleanup_failed = files.terminal_cleanup().map_err(|error| {
+                ConfigTransactionApplyError::Internal(format!(
+                    "rollback restored the prior config but remains nonterminal because durable v3 locator removal failed ({:?})",
+                    error.kind()
+                ))
+            })?;
+            if residue_cleanup_failed {
+                warn!("rollback is terminal, but exact v3 residue cleanup failed");
+            }
+        } else if let Some(files) = &matched.v2_files {
             let journal_cleanup_failed = files.terminal_cleanup().map_err(|error| {
                 ConfigTransactionApplyError::Internal(format!(
                     "rollback restored the prior config but remains nonterminal because durable v2 locator removal failed ({:?})",
@@ -1613,7 +1729,14 @@ impl ConfigTransactionController {
             // generic never-confirmed message. Best-effort: the journal
             // (with the proven rollback snapshot) is already on disk, and
             // failing to annotate it must not mask the rollback failure.
-            if let Some(files) = &pending.v2_files {
+            if let Some(files) = &pending.v3_files {
+                if let Err(error) = files.record_rollback_failed() {
+                    warn!(
+                        error_kind = ?error.kind(),
+                        "failed to record rollback failure in the v3 commit-confirm metadata"
+                    );
+                }
+            } else if let Some(files) = &pending.v2_files {
                 if let Err(error) = files.record_rollback_failed() {
                     warn!(
                         error_kind = ?error.kind(),
@@ -1626,7 +1749,10 @@ impl ConfigTransactionController {
                     &crate::confirm_journal::ConfirmJournal {
                         confirm_id: pending.confirm_id.clone(),
                         deadline_unix_seconds: pending.deadline_unix_seconds,
-                        rollback_toml: pending.rollback_toml.clone(),
+                        rollback_toml: pending
+                            .rollback_toml
+                            .clone()
+                            .expect("legacy pending transaction retains rollback TOML"),
                         rollback_failed: true,
                     },
                 )
@@ -5061,7 +5187,151 @@ remote_asn = 65010
             .expect("journal must parse")
     }
 
-    struct V2FibHarness {
+    #[tokio::test]
+    async fn v3_publication_failure_never_enters_peer_or_persister_apply() {
+        // Destructive proof: moving publication below planning/staging makes
+        // one of these receiver assertions observe a command before failure.
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let state_dir = root.path().join("state");
+        std::fs::create_dir(&state_dir).unwrap();
+        std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let config_path = root.path().join("rustbgpd.toml");
+        let previous = base_toml("");
+        std::fs::write(&config_path, &previous).unwrap();
+        let accepted = Arc::new(AcceptedConfigSnapshot::load(&config_path, None).unwrap());
+        let (_accepted_tx, accepted_rx) = watch::channel(accepted);
+        let (peer_tx, mut peer_rx) = mpsc::channel(8);
+        let peer_apply_seen = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let seen = Arc::clone(&peer_apply_seen);
+        let runtime = previous.clone();
+        tokio::spawn(async move {
+            while let Some(command) = peer_rx.recv().await {
+                match command {
+                    PeerManagerCommand::RuntimeConfigSnapshot { reply } => {
+                        let _ =
+                            reply.send(Ok(rustbgpd_api::peer_types::RuntimeConfigSnapshotReply {
+                                toml: runtime.clone(),
+                                rpol_files: Vec::new(),
+                                rpol: rustbgpd_policy::rpol::RpolPolicySet::default(),
+                            }));
+                    }
+                    _ => {
+                        seen.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                }
+            }
+        });
+        let (config_tx, mut config_rx) = mpsc::channel(8);
+        let journal = state_dir.join(crate::confirm_journal::JOURNAL_FILE_NAME);
+        let launch = crate::confirm_journal::v3::LaunchIdentity::resolve(&config_path).unwrap();
+
+        // An unsafe fixed-slot occupant blocks publication and is never
+        // removed based on its name alone.
+        std::fs::create_dir(state_dir.join(crate::confirm_journal::v3::RAW_FILE_NAME)).unwrap();
+        let controller = ConfigTransactionController::new_accepted(
+            FibTableControlDeps {
+                confirm_journal_path: Some(journal),
+                ..deps_value(None, peer_tx, Some(config_tx), Vec::new())
+            },
+            BgpMetrics::new(),
+            accepted_rx,
+        )
+        .with_confirm_v3_launch(launch);
+        let error = controller
+            .apply(confirmed_dynamic_request(
+                dynamic_candidate_toml(),
+                "publisher-failure",
+                60,
+            ))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ConfigTransactionApplyError::Internal(_)));
+        assert!(!peer_apply_seen.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(config_rx.try_recv().is_err());
+        assert_eq!(std::fs::read_to_string(config_path).unwrap(), previous);
+    }
+
+    #[tokio::test]
+    async fn v3_uncertain_locator_publication_arms_controller_mutation_fence() {
+        // Destructive proof: treating the post-rename failure as ordinary
+        // leaves this state unfenced even though boot authority is present.
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let state_dir = root.path().join("state");
+        std::fs::create_dir(&state_dir).unwrap();
+        std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let config_path = root.path().join("rustbgpd.toml");
+        let previous = base_toml("");
+        std::fs::write(&config_path, &previous).unwrap();
+        let accepted = Arc::new(AcceptedConfigSnapshot::load(&config_path, None).unwrap());
+        let (_accepted_tx, accepted_rx) = watch::channel(accepted);
+        let (peer_tx, mut peer_rx) = mpsc::channel(8);
+        let peer_apply_seen = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let seen = Arc::clone(&peer_apply_seen);
+        let runtime = previous.clone();
+        tokio::spawn(async move {
+            while let Some(command) = peer_rx.recv().await {
+                match command {
+                    PeerManagerCommand::RuntimeConfigSnapshot { reply } => {
+                        let _ =
+                            reply.send(Ok(rustbgpd_api::peer_types::RuntimeConfigSnapshotReply {
+                                toml: runtime.clone(),
+                                rpol_files: Vec::new(),
+                                rpol: rustbgpd_policy::rpol::RpolPolicySet::default(),
+                            }));
+                    }
+                    _ => {
+                        seen.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                }
+            }
+        });
+        let (config_tx, mut config_rx) = mpsc::channel(8);
+        let journal = state_dir.join(crate::confirm_journal::JOURNAL_FILE_NAME);
+        let launch = crate::confirm_journal::v3::LaunchIdentity::resolve(&config_path)
+            .unwrap()
+            .fail_locator_directory_sync_for_test();
+        let locator = launch.locator_path();
+        let controller = ConfigTransactionController::new_accepted(
+            FibTableControlDeps {
+                confirm_journal_path: Some(journal),
+                ..deps_value(None, peer_tx, Some(config_tx), Vec::new())
+            },
+            BgpMetrics::new(),
+            accepted_rx,
+        )
+        .with_confirm_v3_launch(launch);
+        assert!(
+            controller
+                .clone()
+                .apply(confirmed_dynamic_request(
+                    dynamic_candidate_toml(),
+                    "uncertain-locator",
+                    60,
+                ))
+                .await
+                .is_err()
+        );
+        assert!(locator.exists());
+        assert_eq!(
+            controller
+                .state
+                .lock()
+                .await
+                .ambiguous_failure_confirm_id
+                .as_deref(),
+            Some("uncertain-locator")
+        );
+        assert!(!peer_apply_seen.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(config_rx.try_recv().is_err());
+    }
+
+    struct DiskBackedFibHarness {
         _root: tempfile::TempDir,
         controller: ConfigTransactionController,
         source: std::path::PathBuf,
@@ -5155,7 +5425,7 @@ remote_asn = 65010
         clippy::too_many_lines,
         reason = "the focused harness keeps one complete external-source FIB transaction fixture"
     )]
-    async fn v2_external_fib_harness(timeout_seconds: u32) -> V2FibHarness {
+    async fn external_fib_harness(timeout_seconds: u32, use_v3: bool) -> DiskBackedFibHarness {
         use std::os::unix::fs::PermissionsExt as _;
 
         let root = tempfile::tempdir().unwrap();
@@ -5277,8 +5547,8 @@ families = ["ipv4_unicast"]
         });
 
         let journal = state_dir.join(crate::confirm_journal::JOURNAL_FILE_NAME);
-        let launch = crate::confirm_journal::v2::LaunchIdentity::resolve(&config_path).unwrap();
-        let locator = launch.locator_path();
+        let v2_launch = crate::confirm_journal::v2::LaunchIdentity::resolve(&config_path).unwrap();
+        let locator = v2_launch.locator_path();
         let controller = ConfigTransactionController::new_accepted(
             FibTableControlDeps {
                 fib_cmd_tx: Some(fib_tx),
@@ -5294,8 +5564,14 @@ families = ["ipv4_unicast"]
             BgpMetrics::new(),
             accepted_rx,
         )
-        .with_preloaded_planner(internal_tx)
-        .with_confirm_v2_launch(launch);
+        .with_preloaded_planner(internal_tx);
+        let controller = if use_v3 {
+            controller.with_confirm_v3_launch(
+                crate::confirm_journal::v3::LaunchIdentity::resolve(&config_path).unwrap(),
+            )
+        } else {
+            controller.with_confirm_v2_launch(v2_launch)
+        };
         let response = controller
             .clone()
             .apply(confirmed_dynamic_request(
@@ -5310,8 +5586,14 @@ families = ["ipv4_unicast"]
             proto::ConfigTransactionPlanStatus::Committable as i32
         );
         assert_eq!(*fib_state.lock().await, vec![replacement]);
+        if use_v3 {
+            let state = controller.state.lock().await;
+            let pending = state.pending.as_ref().unwrap();
+            assert!(pending.rollback_toml.is_none() && pending.prior_snapshot.is_some());
+            assert!(pending.v3_files.is_some() && pending.v2_files.is_none());
+        }
 
-        V2FibHarness {
+        DiskBackedFibHarness {
             _root: root,
             controller,
             source,
@@ -5324,12 +5606,20 @@ families = ["ipv4_unicast"]
     }
 
     #[tokio::test]
+    async fn v3_pending_retains_prior_without_duplicate_toml() {
+        // Destructive proof: restoring the eager `to_string()` allocation
+        // makes the harness assertion observe both full representations.
+        let harness = external_fib_harness(60, true).await;
+        harness.ack_task.abort();
+    }
+
+    #[tokio::test]
     async fn v2_external_fib_abort_reuses_exact_prior_and_is_terminal() {
         // Destructive proof: restoring from rollback TOML instead of the
         // retained Arc rereads the mutated rpol file and fails; dual-writing
         // v1 changes the dispatch prefix; journal-first cleanup leaves the
         // locator present at successful return.
-        let harness = v2_external_fib_harness(60).await;
+        let harness = external_fib_harness(60, false).await;
         assert!(
             std::fs::read(&harness.journal)
                 .unwrap()
@@ -5439,7 +5729,7 @@ families = ["ipv4_unicast"]
         // Destructive proof: removing the preloaded timeout lane or rebuilding
         // provenance from current external bytes leaves the replacement table
         // active and the locator armed after the timer fires.
-        let harness = v2_external_fib_harness(1).await;
+        let harness = external_fib_harness(1, false).await;
         let prior = harness
             .controller
             .state
@@ -5471,7 +5761,7 @@ families = ["ipv4_unicast"]
         // Destructive proof: retaining v1's journal-as-authority rule or
         // clearing in-memory pending state before locator durability leaves
         // the locator present when the RPC reports permanent success.
-        let harness = v2_external_fib_harness(60).await;
+        let harness = external_fib_harness(60, false).await;
         harness
             .controller
             .clone()

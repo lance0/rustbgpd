@@ -4,18 +4,21 @@
 //! default runtime-dir UDS listener, then SIGKILLs the daemon to prove the
 //! boot-time revert journal closes the "confirmed-by-restart" hole:
 //!
-//! - unconfirmed window + SIGKILL → restart follows the config-adjacent v2
+//! - unconfirmed window + SIGKILL → restart follows the config-adjacent v3
 //!   locator, boots the PREVIOUS config, saves the unconfirmed candidate aside,
-//!   consumes both pending files, and prints a path-redacted loud banner;
-//! - confirm + SIGKILL → the new config is retained and no v2 pending files
+//!   consumes the fixed pending files, and prints a path-redacted loud banner;
+//! - confirm + SIGKILL → the new config is retained and no v3 pending files
 //!   remain;
-//! - in-process timeout auto-revert → both v2 pending files are consumed;
+//! - in-process timeout auto-revert → all v3 pending files are consumed;
+//! - an upgrade with v2 authority pending → startup dispatches v2 before
+//!   loading the unconfirmed candidate;
 //! - v2 history survives restart and restores only after source verification
 //!   is available;
 //! - a torn legacy journal with no v2 locator → boot still refuses, naming
 //!   both legacy files.
 
 use std::fs::File;
+use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
@@ -24,6 +27,8 @@ use std::time::{Duration, Instant};
 
 const JOURNAL_FILE_NAME: &str = "commit-confirm-journal.json";
 const LOCATOR_SUFFIX: &str = ".commit-confirm-locator.json";
+const V3_RAW_FILE_NAME: &str = "commit-confirm-v3-prior.toml";
+const V3_METADATA_FILE_NAME: &str = "commit-confirm-v3-metadata.json";
 
 struct Daemon {
     child: Child,
@@ -132,6 +137,8 @@ struct Lab {
     config_path: PathBuf,
     candidate_path: PathBuf,
     journal_path: PathBuf,
+    raw_path: PathBuf,
+    metadata_path: PathBuf,
     locator_path: PathBuf,
     grpc_addr: String,
     dir: PathBuf,
@@ -176,7 +183,7 @@ remote_asn = 65010
 /// Set up config + candidate files in `dir` and return the paths.
 fn lab(dir: &Path) -> Lab {
     // Causal destructive-red proof: removing either privacy clamp makes the
-    // real v2 publisher reject the locator or journal parent before candidate
+    // real v3 publisher reject the locator or pending parent before candidate
     // persistence, so every confirmed-apply scenario fails at `apply`.
     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
         .expect("failed to make config parent owner-only");
@@ -215,21 +222,82 @@ fn lab(dir: &Path) -> Lab {
         config_path,
         candidate_path,
         journal_path: runtime_dir.join(JOURNAL_FILE_NAME),
+        raw_path: runtime_dir.join(V3_RAW_FILE_NAME),
+        metadata_path: runtime_dir.join(V3_METADATA_FILE_NAME),
         locator_path,
         grpc_addr: format!("unix://{}", runtime_dir.join("grpc.sock").display()),
         dir: dir.to_path_buf(),
     }
 }
 
-fn large_candidate_lab(dir: &Path) -> Lab {
+fn large_prior_lab(dir: &Path) -> Lab {
     let lab = lab(dir);
-    let candidate = format!(
-        "{}\n# {}",
-        std::fs::read_to_string(&lab.candidate_path).unwrap(),
-        "x".repeat(8 * 1024 * 1024 + 1)
-    );
+    let mut members = String::new();
+    for index in 1..=320 {
+        use std::fmt::Write as _;
+        writeln!(
+            members,
+            r#"
+[[neighbors]]
+address = "2001:db8::{index:x}"
+remote_asn = 65010
+peer_group = "ix-members"
+description = {:?}
+"#,
+            "member-shape-".repeat(2_700)
+        )
+        .unwrap();
+    }
+    let runtime_dir = lab
+        .journal_path
+        .parent()
+        .expect("journal has runtime parent");
+    let prior = base_toml(runtime_dir, &members);
+    let candidate = base_toml(runtime_dir, &format!("{members}\n{DYNAMIC_NEIGHBOR_EXTRA}"));
+    assert!(prior.len() > 10 * 1024 * 1024);
+    std::fs::write(&lab.config_path, prior).expect("failed to write large normalized prior input");
     std::fs::write(&lab.candidate_path, candidate).expect("failed to write large candidate");
     lab
+}
+
+fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut out, byte| {
+            write!(out, "{byte:02x}").unwrap();
+            out
+        })
+}
+
+fn write_v2_pending_authority(lab: &Lab, envelope: &serde_json::Value, confirm_id: &str) {
+    let prior = envelope["normalized_toml"].as_str().unwrap();
+    let prior_hex = envelope["sha256"].as_str().unwrap();
+    let source_hex = envelope["source_sha256"].as_str().unwrap();
+    let manifest = &envelope["manifest"];
+    assert_eq!(manifest["toml_sha256"], prior_hex);
+    assert_eq!(manifest["rpol_units"].as_array().map(Vec::len), Some(0));
+    assert_eq!(manifest["datasets"].as_array().map(Vec::len), Some(0));
+    let prior_json = serde_json::to_string(prior).unwrap();
+    let journal = format!(
+        "{{\"version\":2,\"confirm_id\":{confirm_id:?},\"deadline_unix_seconds\":9,\"rollback_failed\":false,\"prior\":{{\"sha256\":\"{prior_hex}\",\"source_sha256\":\"{source_hex}\",\"normalized_toml\":{prior_json},\"manifest\":{{\"toml_sha256\":\"{prior_hex}\",\"rpol_units\":[],\"datasets\":[]}}}}}}\n"
+    );
+    let path_wire = |path: &Path| {
+        format!(
+            "{{\"encoding\":\"unix-bytes-hex\",\"value\":\"{}\"}}",
+            hex(path.as_os_str().as_bytes())
+        )
+    };
+    let locator = format!(
+        "{{\"version\":2,\"confirm_id\":{confirm_id:?},\"journal_path\":{},\"config_target\":{},\"prior_sha256\":\"{prior_hex}\",\"prior_source_sha256\":\"{source_hex}\"}}\n",
+        path_wire(&lab.journal_path),
+        path_wire(&lab.config_path),
+    );
+    std::fs::write(&lab.journal_path, journal).unwrap();
+    std::fs::set_permissions(&lab.journal_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    std::fs::write(&lab.locator_path, locator).unwrap();
+    std::fs::set_permissions(&lab.locator_path, std::fs::Permissions::from_mode(0o600)).unwrap();
 }
 
 impl Lab {
@@ -237,6 +305,44 @@ impl Lab {
         let mut daemon = Daemon::spawn(&self.config_path, self.dir.join(stderr_name));
         wait_until_serving(&self.grpc_addr, &mut daemon);
         daemon
+    }
+
+    fn assert_no_v3_authority(&self, context: &str) {
+        assert!(!self.locator_path.exists(), "{context}: locator remains");
+        assert!(!self.raw_path.exists(), "{context}: raw prior remains");
+        assert!(!self.metadata_path.exists(), "{context}: metadata remains");
+    }
+
+    fn apply_plain(&self, candidate: &Path) {
+        let plan = rbgp_json(
+            &self.grpc_addr,
+            &[
+                "--json",
+                "config",
+                "plan",
+                "--from-file",
+                candidate.to_str().unwrap(),
+            ],
+        );
+        let token = plan["runtime_snapshot_token"].as_str().unwrap();
+        let output = rbgp(
+            &self.grpc_addr,
+            &[
+                "--json",
+                "config",
+                "apply",
+                "--from-file",
+                candidate.to_str().unwrap(),
+                "--expected-runtime-snapshot-token",
+                token,
+            ],
+        );
+        assert!(
+            output.status.success(),
+            "plain apply failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     /// Plan + confirmed-apply the dynamic-neighbor candidate; asserts the
@@ -264,7 +370,7 @@ impl Lab {
             .as_str()
             .expect("plan must return a runtime snapshot token");
 
-        let apply = rbgp_json(
+        let apply_output = rbgp(
             &self.grpc_addr,
             &[
                 "--json",
@@ -280,6 +386,21 @@ impl Lab {
                 timeout_seconds,
             ],
         );
+        assert!(
+            apply_output.status.success(),
+            "confirmed apply failed\nstdout:\n{}\nstderr:\n{}\ndaemon logs:\n{}",
+            String::from_utf8_lossy(&apply_output.stdout),
+            String::from_utf8_lossy(&apply_output.stderr),
+            std::fs::read_dir(&self.dir)
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "log"))
+                .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        let apply: serde_json::Value =
+            serde_json::from_slice(&apply_output.stdout).expect("apply output must be JSON");
         assert_eq!(apply["status"], "committable", "apply: {apply}");
         assert_eq!(apply["confirmation"]["status"], "pending", "apply: {apply}");
 
@@ -291,22 +412,24 @@ impl Lab {
             "commit must persist the candidate:\n{on_disk}"
         );
         assert!(
-            self.journal_path.exists(),
-            "confirmed apply must write the v2 revert journal"
+            !self.journal_path.exists(),
+            "v3 must not reuse the legacy path"
         );
         assert!(
             self.locator_path.exists(),
-            "confirmed apply must publish the v2 locator last"
+            "confirmed apply must publish the v3 locator last"
         );
-        let journal = std::fs::read(&self.journal_path).unwrap();
+        let raw = std::fs::read(&self.raw_path).unwrap();
+        let metadata = std::fs::read(&self.metadata_path).unwrap();
         let locator = std::fs::read(&self.locator_path).unwrap();
+        assert!(!raw.is_empty(), "real-binary writer must publish the prior");
         assert!(
-            journal.starts_with(b"{\"version\":2,"),
-            "real-binary writer must emit only the canonical v2 journal"
+            metadata.starts_with(b"{\"version\":3,"),
+            "real-binary writer must emit canonical v3 metadata"
         );
         assert!(
-            locator.starts_with(b"{\"version\":2,"),
-            "real-binary writer must emit the canonical v2 locator"
+            locator.starts_with(b"{\"version\":3,"),
+            "real-binary writer must emit the canonical v3 locator"
         );
     }
 }
@@ -314,7 +437,7 @@ impl Lab {
 #[test]
 fn streamed_confirmed_apply_above_eight_mib_aborts_to_previous_config() {
     let temp = tempfile::tempdir().expect("failed to create temp dir");
-    let lab = large_candidate_lab(temp.path());
+    let lab = large_prior_lab(temp.path());
     // Load-bearing streamed-path proof: this candidate cannot traverse the
     // legacy unary RPC's four-MiB decoder. Reverting either CLI streaming call
     // site makes the confirmed apply fail before commit.
@@ -324,6 +447,13 @@ fn streamed_confirmed_apply_above_eight_mib_aborts_to_previous_config() {
     );
 
     let mut daemon = lab.spawn("daemon.stderr.log");
+    assert_eq!(
+        rbgp_json(&lab.grpc_addr, &["--json", "config", "history"])["entries"]
+            .as_array()
+            .map(Vec::len),
+        Some(0),
+        "oversize boot snapshot must explicitly leave bounded history empty"
+    );
     let human_plan = rbgp(
         &lab.grpc_addr,
         &[
@@ -341,26 +471,77 @@ fn streamed_confirmed_apply_above_eight_mib_aborts_to_previous_config() {
         .expect("streamed plan human output must expose its single-use plan token");
     assert!(!exposed_token.is_empty());
     lab.apply_confirmed("stream-abort", "600");
+    assert!(
+        std::fs::metadata(&lab.raw_path).unwrap().len() > 10 * 1024 * 1024,
+        "real-binary writer must publish a genuinely normalized prior above 10 MiB"
+    );
     let abort = rbgp_json(
         &lab.grpc_addr,
         &["--json", "config", "abort", "stream-abort"],
     );
     assert_eq!(abort["confirmation"]["status"], "aborted", "{abort}");
+    assert_eq!(
+        rbgp_json(&lab.grpc_addr, &["--json", "config", "history"])["entries"]
+            .as_array()
+            .map(Vec::len),
+        Some(0),
+        "oversize candidate and rollback must leave history unchanged"
+    );
     let persisted = std::fs::read_to_string(&lab.config_path).unwrap();
     assert!(
         !persisted.contains("192.0.2.0/24"),
         "abort must restore the pre-transaction config"
     );
-    assert!(
-        !lab.journal_path.exists() && !lab.locator_path.exists(),
-        "abort must consume journal and locator authority"
-    );
+    lab.assert_no_v3_authority("abort must consume v3 authority");
     let ranges = rbgp_json(&lab.grpc_addr, &["--json", "dynamic-neighbor", "list"]);
     assert_eq!(
         ranges.as_array().map(Vec::len),
         Some(0),
         "aborted daemon must run the previous config: {ranges}"
     );
+    daemon.assert_still_running();
+}
+
+#[test]
+fn unsafe_fixed_raw_slot_refuses_before_real_binary_apply() {
+    let temp = tempfile::tempdir().expect("failed to create temp dir");
+    let lab = lab(temp.path());
+    let previous = std::fs::read(&lab.config_path).unwrap();
+    let mut daemon = lab.spawn("daemon.stderr.log");
+    let plan = rbgp_json(
+        &lab.grpc_addr,
+        &[
+            "--json",
+            "config",
+            "plan",
+            "--from-file",
+            lab.candidate_path.to_str().unwrap(),
+        ],
+    );
+    let token = plan["runtime_snapshot_token"].as_str().unwrap();
+    std::fs::create_dir(&lab.raw_path).unwrap();
+    let apply = rbgp(
+        &lab.grpc_addr,
+        &[
+            "--json",
+            "config",
+            "apply",
+            "--from-file",
+            lab.candidate_path.to_str().unwrap(),
+            "--expected-runtime-snapshot-token",
+            token,
+            "--confirm-id",
+            "unsafe-raw",
+            "--confirm-timeout",
+            "60",
+        ],
+    );
+    assert!(!apply.status.success());
+    assert_eq!(std::fs::read(&lab.config_path).unwrap(), previous);
+    assert!(lab.raw_path.is_dir(), "unsafe replacement must survive");
+    assert!(!lab.locator_path.exists() && !lab.metadata_path.exists());
+    let ranges = rbgp_json(&lab.grpc_addr, &["--json", "dynamic-neighbor", "list"]);
+    assert_eq!(ranges.as_array().map(Vec::len), Some(0));
     daemon.assert_still_running();
 }
 
@@ -388,14 +569,7 @@ fn sigkill_in_confirm_window_boots_previous_config_and_saves_candidate_aside() {
         saved_aside.contains("192.0.2.0/24"),
         "saved-aside file must hold the unconfirmed candidate:\n{saved_aside}"
     );
-    assert!(
-        !lab.journal_path.exists(),
-        "boot revert must consume the journal"
-    );
-    assert!(
-        !lab.locator_path.exists(),
-        "boot revert must durably remove locator authority first"
-    );
+    lab.assert_no_v3_authority("boot revert must consume v3 authority");
     let stderr = daemon.stderr();
     assert!(
         stderr.contains("commit-confirm boot revert")
@@ -407,10 +581,12 @@ fn sigkill_in_confirm_window_boots_previous_config_and_saves_candidate_aside() {
         backup_path.to_string_lossy().as_ref(),
         lab.config_path.to_string_lossy().as_ref(),
         lab.journal_path.to_string_lossy().as_ref(),
+        lab.raw_path.to_string_lossy().as_ref(),
+        lab.metadata_path.to_string_lossy().as_ref(),
     ] {
         assert!(
             !stderr.contains(secret),
-            "v2 boot banner must redact persisted path {secret:?}:\n{stderr}"
+            "v3 boot banner must redact persisted path {secret:?}:\n{stderr}"
         );
     }
 
@@ -436,14 +612,7 @@ fn confirm_then_sigkill_retains_new_config_and_leaves_no_journal() {
         &["--json", "config", "confirm", "kill-confirmed"],
     );
     assert_eq!(confirm["confirmation"]["status"], "confirmed", "{confirm}");
-    assert!(
-        !lab.journal_path.exists(),
-        "confirm must consume the revert journal"
-    );
-    assert!(
-        !lab.locator_path.exists(),
-        "confirm must durably remove locator authority"
-    );
+    lab.assert_no_v3_authority("confirm must consume v3 authority");
     daemon.sigkill();
 
     let mut daemon = lab.spawn("second.stderr.log");
@@ -488,19 +657,53 @@ fn in_process_timeout_auto_revert_consumes_journal() {
         thread::sleep(Duration::from_millis(200));
     }
 
-    assert!(
-        !lab.journal_path.exists(),
-        "timeout auto-revert must consume the revert journal"
-    );
-    assert!(
-        !lab.locator_path.exists(),
-        "timeout auto-revert must durably remove locator authority"
-    );
+    lab.assert_no_v3_authority("timeout auto-revert must consume v3 authority");
     let on_disk = std::fs::read_to_string(&lab.config_path).unwrap();
     assert!(
         !on_disk.contains("192.0.2.0/24"),
         "auto-revert must restore the pre-transaction config:\n{on_disk}"
     );
+    daemon.assert_still_running();
+}
+
+#[test]
+fn real_binary_boot_dispatches_v2_authority_before_candidate_load() {
+    // Destructive proof: deleting or reordering main's v3-then-v2 fallback
+    // boots the dynamic-neighbor candidate instead of restoring this prior.
+    let temp = tempfile::tempdir().expect("failed to create temp dir");
+    let lab = lab(temp.path());
+    let daemon = lab.spawn("prior.stderr.log");
+    let effective = rbgp(&lab.grpc_addr, &["config", "effective"]);
+    assert!(effective.status.success());
+    let prior_path = lab.dir.join("normalized-prior.toml");
+    std::fs::write(&prior_path, effective.stdout).unwrap();
+    lab.apply_plain(&lab.candidate_path);
+    lab.apply_plain(&prior_path);
+    let history_dir = lab.journal_path.parent().unwrap().join("config-history");
+    let latest = std::fs::read_dir(&history_dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with("v2-"))
+        .max_by_key(|entry| entry.file_name())
+        .unwrap();
+    let envelope: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(latest.path()).unwrap()).unwrap();
+    daemon.sigkill();
+
+    std::fs::copy(&lab.candidate_path, &lab.config_path).unwrap();
+    write_v2_pending_authority(&lab, &envelope, "upgrade-v2");
+    let mut daemon = lab.spawn("revert.stderr.log");
+    assert!(!lab.locator_path.exists() && !lab.journal_path.exists());
+    assert!(
+        !std::fs::read_to_string(&lab.config_path)
+            .unwrap()
+            .contains("192.0.2.0/24")
+    );
+    let backup = std::fs::read_to_string(lab.dir.join("rustbgpd.toml.unconfirmed")).unwrap();
+    assert!(backup.contains("192.0.2.0/24"));
+    let ranges = rbgp_json(&lab.grpc_addr, &["--json", "dynamic-neighbor", "list"]);
+    assert_eq!(ranges.as_array().map(Vec::len), Some(0));
+    assert!(daemon.stderr().contains("upgrade-v2"));
     daemon.assert_still_running();
 }
 

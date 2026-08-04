@@ -311,13 +311,21 @@ impl ConfigPersister {
     /// rather than at each call site.
     fn record_history(&self) {
         self.record_last_persist();
-        if let Some(dir) = self.history_dir()
-            && let Err(error) = crate::config_history::record_accepted(&dir, &self.current)
-        {
-            warn!(
-                error = %error,
-                "failed to record applied config in the config history"
-            );
+        if let Some(dir) = self.history_dir() {
+            match crate::config_history::record_accepted(&dir, &self.current) {
+                Ok(crate::config_history::RecordOutcome::SkippedOversize) => warn!(
+                    bytes = self.current.normalized_toml().len(),
+                    "applied config exceeds the bounded history entry size; history was left unchanged"
+                ),
+                Ok(
+                    crate::config_history::RecordOutcome::Recorded
+                    | crate::config_history::RecordOutcome::Deduplicated,
+                ) => {}
+                Err(error) => warn!(
+                    error = %error,
+                    "failed to record applied config in the config history"
+                ),
+            }
         }
     }
 
