@@ -80,7 +80,8 @@ with reason), **owner decision** (genuinely an owner-level call).
 
 | # | Item | State | What is owed |
 |---|------|-------|--------------|
-| D1 | Legacy v1 config-history rows, the mixed-format reader (`src/config_history.rs`, `src/config_history/v2.rs`, #1409/#1413), and the v1 commit-confirm boot-revert path. | ADR-0121 §9 keeps legacy rows readable (`LEGACY_TOML_ONLY`, rollback only when no external inputs) and preserves the v1 journal boot revert; LAN-798 (In Progress) is activating commit-confirm v2. No EOL is stated anywhere: legacy *rows* age out via the 20-entry retention, but the legacy reader code and the v1 journal lane live until someone decides. | An EOL release for (a) the legacy row-payload lane in the mixed reader and (b) the locator-absent v1 journal fallback, decided on the LAN-798 thread after v2 activation ships and soaks one release. |
+| D1 | Legacy v1 config-history rows, the mixed-format reader (`src/config_history.rs`, `src/config_history/v2.rs`, #1409/#1413), and the frozen v1 commit-confirm recovery reader (the legacy lane in `src/confirm_journal.rs`, kept by #1433 as bounded legacy recovery). | EOL recorded: **v0.64**. v1 stopped being a write format when commit-confirm v2 activated (#1433, after the v0.62.0 tag), so v0.62.0 is the last tagged release that wrote a v1 journal and v0.63 is the last release that can read one. Legacy history *rows* still age out via the 20-entry retention; ADR-0121 §9's bounded semantics (`LEGACY_TOML_ONLY`, rollback only when no external inputs) hold until removal. | The v0.64 removal PR: delete the v1 recovery lane and the legacy row-payload lane in the mixed reader, with the reader's upgrade-recovery tests deleted in the same PR; after removal, boot on encountering an orphaned v1-format journal must refuse cleanly with an actionable message (delete the stale journal or recover on ≤v0.63), never silently ignore it. CHANGELOG Removed entry with migration steps. |
+| D3 | Frozen v2 commit-confirm recovery reader (`src/confirm_journal/v2.rs`, kept by #1448 for pending-authority upgrade recovery when v3 became the write format). | EOL recorded: **v0.64**. v2 was never a tagged release's write format: it activated after the v0.62.0 tag (#1433) and was superseded by v3 (#1448) before any tag, so the reader only serves pending state written by v0.63-development-window daemons and the upgrade into v0.63 — both dead one release after v0.63. | Removed in the same v0.64 PR as D1: delete the v2 recovery lane and its upgrade-recovery tests together; after removal, boot on encountering an orphaned v2-format locator/journal must refuse cleanly with an actionable message, never silently ignore it. |
 | D2 | Unary `PlanConfigTransaction` / `ApplyConfigTransaction` (`proto/rustbgpd.proto:115,124`) vs the accepted streaming Plan/Apply direction (LAN-794). | LAN-794's accepted contract keeps unary byte- and behavior-compatible and gives the CLI an `UNIMPLEMENTED`-only bounded unary fallback once streaming ships. Whether unary remains the permanent small-candidate path or becomes a deprecated shim is unstated. | After streaming phase 2 lands: decide whether unary Plan/Apply is (a) kept as the documented small-candidate path or (b) scheduled for removal. Both RPCs are in the pinned ConfigService surface, so (b) is a blessed-surface change. |
 
 #### Internal / examples (remove-now follow-up)
@@ -96,8 +97,9 @@ with reason), **owner decision** (genuinely an owner-level call).
   PR that introduces them.
 - The three-minor / N-1 lifetime policies convert future removals from
   per-item debates into scheduled cleanups.
-- Two genuinely open calls (D1, D2) and one recorded-pledge conflict (L1)
-  are surfaced for the owner instead of being silently perpetuated.
+- One genuinely open call (D2) and one recorded-pledge conflict (L1)
+  are surfaced for the owner instead of being silently perpetuated; D1 and
+  D3 now carry recorded commit-confirm reader EOLs (v0.64).
 - Scheduled removals (C1, A1, A3) touch the blessed v1 surface; each needs
   the re-bless procedure and a CHANGELOG migration note, which this ADR's
   mechanics columns pre-write.
