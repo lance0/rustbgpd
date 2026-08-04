@@ -1712,9 +1712,10 @@ branch is between features.
   [docs/adr/0122-compatibility-debt-inventory.md](docs/adr/0122-compatibility-debt-inventory.md)
   is the single inventory of retained compat shims under the alpha
   posture, grouped by surface with per-item removal releases and
-  mechanics. Immediate remove-now items: the two v0.51.0 retired-key
+  mechanics. The remove-now items — the two v0.51.0 retired-key
   migration pointers and the redundant example-config UDS authorization
-  ceremony made unnecessary by #1429. Scheduled: the dead
+  ceremony made unnecessary by #1429 — landed in v0.63.0 (#1435).
+  Remaining scheduled: the dead
   `enforcement = "legacy"` enum variant, the `rbgp rib diff`
   older-daemon fallbacks, and three superseded proto fields. Two calls
   are owner-gated there (legacy config-history reader EOL, unary vs
