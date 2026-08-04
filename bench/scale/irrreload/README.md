@@ -2,9 +2,9 @@
 
 Reload stall + completion under live sessions with a realistic multi-MB
 IRR-generated member policy. The full-shape comparison covers rustbgpd's
-SIGHUP parse-then-swap path versus BIRD 3.3.x and OpenBGPD 9.x. The gRPC
-transactional path is a separate, explicitly smaller receipt because its
-single-message candidate cannot carry the full dataset.
+SIGHUP parse-then-swap path versus BIRD 3.3.x and OpenBGPD 9.x. The streamed
+gRPC transactional path runs the same canonical shape as a separate two-root
+receipt; its rows never enter the cross-daemon comparison.
 
 This directory is the campaign runner and protocol. The instrument is the
 existing `bench/scale/reloadstall` harness — real BGP stub
@@ -29,11 +29,11 @@ policy generations:
 
 ## Shape (a harness parameter, stated exactly)
 
-| Parameter | Smoke (`SMOKE=1`) | Full cross-daemon | Bounded transaction |
+| Parameter | Smoke (`SMOKE=1`) | Full cross-daemon | Full transaction |
 |---|---|---|---|
-| Members (`N_MEMBERS`) | 10 | 320 | 10 |
-| Announced base table (`TOTAL_PREFIXES`) | 100 | 183,040 (572/member) | 5,720 (572/member) |
-| Per-member IRR filter list (`MIN_LIST`–`MAX_LIST`) | 100 | log-uniform 1,000–40,000 | log-uniform 1,000–12,000 |
+| Members (`N_MEMBERS`) | 10 | 320 | 320 |
+| Announced base table (`TOTAL_PREFIXES`) | 100 | 183,040 (572/member) | 183,040 (572/member) |
+| Per-member IRR filter list (`MIN_LIST`–`MAX_LIST`) | 100 | log-uniform 1,000–40,000 | log-uniform 1,000–40,000 |
 | Per-member change probability (`CHANGED_FRACTION`) | 10% | 10% | 10% |
 | Seed (`SEED`) | 61 | 61 | 61 |
 | Reload cycles per cell (`RELOADS`) | 1 | 4 | 4 |
@@ -43,8 +43,7 @@ identical across cells at the same shape (the generator never consults the
 cell when building the dataset). The manifest carries a canonical
 `dataset_sha256`; the full campaign rejects a cell whose digest differs.
 `CHANGED_FRACTION` is a Bernoulli probability, not an exact cohort size: seed
-61 changes 36/320 IRR filter lists at the full shape and 1/10 at the bounded
-transaction shape. Separately, the global A/B export marker changes output
+61 changes 36/320 IRR filter lists at the full shape. Separately, the global A/B export marker changes output
 for all observers, so `peers_changed=320` and the first-generation timing
 percentiles cover 320 observers in the full receipt—not only the 36 members
 whose input lists changed.
@@ -85,7 +84,7 @@ CONFIRM_BENCH_CRON_PAUSED=1 CONFIRM_NO_MAIN_PUSHES=1 ARTIFACTS_DIR=/tmp/bmp-buff
 |---|---|---|
 | `rustbgpd-sighup` | `.rpol` per-member IRR filters rendered by `tools/rs-config-render` (the production IRR pipeline renderer) from a synthetic `arouteserver template-context` document, concatenated into one swapped file | copy generation file over live, `SIGHUP` |
 | `rustbgpd-sighup-grouped-control` | the same `.rpol` policy and canonical dataset, with `per_client_best = false` so all 320 members share one update group | copy generation file over live, `SIGHUP`; standalone diagnostic control only |
-| `rustbgpd-txn` | same dataset as inline `[policy.definitions]` chain-engine statements in a full candidate config TOML | copy candidate, `rbgp config plan` + `config apply` with the plan's snapshot token (`txn-apply.sh`) |
+| `rustbgpd-txn` | same dataset as inline `[policy.definitions]` chain-engine statements in a full candidate config TOML | copy candidate; streamed JSON Plan; explicit streamed Apply with the returned single-use plan token, snapshot token, and commit-confirm; assert pending v3 state, then confirm (`txn-apply.sh`) |
 | `bird` | per-member prefix-set `define`s + import filters in the swapped include file | copy include, `birdc configure` |
 | `openbgpd` | per-member `prefix-set`s + `source-as`/`prefix-set` allow rules in the swapped include file | copy include, `bgpctl reload` |
 
@@ -185,6 +184,25 @@ fingerprint without hostnames, usernames, absolute paths, or other host-unique
 identifiers.
 Successful cells may delete their generated scenario only after retaining its
 generator `manifest.json` alongside that provenance.
+
+The full transaction cell retains only compact lifecycle evidence, never plan
+or runtime token contents and never the multi-MiB candidate or v3 raw snapshot.
+Each of its four measured B/A/B/A reloads proves a streamed committable Plan,
+explicit use of that Plan's UUID-v4 single-use token, pending commit-confirm,
+the canonical config-adjacent v3 locator plus fixed owner-only raw/metadata
+files, full locator→metadata→raw path/digest/device/inode linkage, raw size in
+`(10 MiB, 384 MiB]`, legacy-journal absence, and confirmed terminal cleanup.
+After the final measurement boundary and before daemon teardown,
+`txn-lifecycle.sh` applies the opposite B generation twice: explicit abort and
+ten-second timeout must report `aborted` and `auto_reverted`, remove all v3
+authority, and restore the exact A disk and effective-runtime hashes. A final
+streamed Plan of A must be tokenless `NOOP`.
+
+Because config-history's `SkippedOversize` outcome is internal, the retained
+proof binds the public empty history entries and on-disk history roster before
+and after every persist to the daemon's exact oversize warning (including a
+byte count above 10 MiB). The verifier requires nine such warnings: boot, four
+measured applies, abort apply/restore, and timeout apply/restore.
 Offline verification recomputes the canonical provenance fingerprint, requires
 the exact full-workload knobs and repeat tool/image identities, and re-parses
 `scenario.sha256` against the manifest's safe `runtime_files` roster. Any
@@ -222,7 +240,7 @@ must precede the harness's first wire-measurement trigger. The retained
 `ready`, `ack`, timestamps, config, and raw scrapes are all in the cell's
 checksum chain and are independently re-parsed by the four-root verifier.
 
-**Run count and order**: four fresh artifact roots in fixed A/B/B/A order:
+**Cross-daemon run count and order**: four fresh artifact roots in fixed A/B/B/A order:
 comparison A, grouped-control A, grouped-control B, comparison B. Each cell
 gets a fresh daemon PID/start identity. This counterbalances host drift around
 the diagnostic control without putting the control in the competitor table.
@@ -231,11 +249,20 @@ identities, source/dataset/shape mismatches, non-quiet cells, broken seals, or
 grouped rows in `comparison.csv`; it writes grouped rows only to
 `grouped-control.csv`. The repeats are not statistically independent trials.
 
-**Host-quiet preconditions** (full measured mode enforces): clean `HEAD`
+**Transaction run count and order**: two fresh full-shape roots in strict A/B
+order. `verify-receipt.py transactions` requires the same clean commit,
+dataset, shape, scripts, binaries, and platform, non-overlapping roots, and
+distinct daemon PID/start identities. It independently checks all four cycles,
+abort/timeout restoration, history-warning sequence, exact file roster,
+quiet-host evidence, seals, and the absence of retained token contents.
+
+**Host-quiet preconditions** (every full measured mode enforces): clean `HEAD`
 exactly at `origin/main`, the canonical shape/seed, no `SKIP_PREFLIGHT`, a
 passing `tests/soak/preflight.sh`, and exclusive ownership of the shared host
 lock. Before every cell, two retained 1-minute-load samples at least 30 seconds
-apart must both be below 2.0; cells retain their daemon PID/start identity.
+apart must both be below 2.0, ports 1790 and 9179 must be free, the artifact
+filesystem must have at least 40 GiB available, and `pswpin`/`pswpout` must not
+move between samples; cells retain their daemon PID/start identity.
 Successful roots carry `COMPLETED` plus an exact `SHA256SUMS` roster and become
 read-only. `SMOKE=1` skips the quiet gates because it is not a measurement.
 
@@ -271,16 +298,12 @@ Documented asymmetries (the honesty notes for the eventual receipt):
   `.rpol` route-server representation. Cross-daemon comparisons should use
   the SIGHUP cell; the txn cell answers "what does the transactional seam
   cost for the same semantic change", not engine-vs-engine.
-- **The txn cell is size-capped and separate today.** The candidate travels inside one
-  gRPC message and the daemon's tonic server uses the default ~4 MiB
-  decode limit, and the chain-engine TOML encoding is several times larger
-  than the equivalent `.rpol`. The measured default therefore excludes it.
-  Running `rustbgpd-txn` alone selects the bounded 10-member shape above; the
-  runner rejects any candidate whose encoded apply request (candidate plus
-  the required fixed-shape snapshot token) would exceed 4 MiB before starting
-  the daemon. `txn-apply.sh` rejects an unexpected token shape rather than
-  invalidating that bound. Its rows and artifact root never enter the
-  cross-daemon table.
+- **The txn cell is streamed and separate.** Plan and Apply send bounded chunks
+  and accept a candidate up to 384 MiB, so `rustbgpd-txn` alone now selects the
+  canonical 320-member shape. The runner rejects a measured candidate at or
+  below the 10 MiB history boundary or above the streaming ceiling before
+  starting measurements. The 10-member transaction remains smoke-only. Its
+  rows and artifact roots never enter the cross-daemon table.
 - **Hygiene depth differs slightly.** The rustbgpd SIGHUP cell carries the
   full rendered `rs-hygiene` (including the AS_SET-segment reject term);
   the chain engine and the BIRD/OpenBGPD cells carry the shared core
@@ -320,9 +343,13 @@ python3 bench/scale/irrreload/verify-receipt.py campaigns \
   /tmp/irrreload-comparison-A /tmp/irrreload-grouped-A \
   /tmp/irrreload-grouped-B /tmp/irrreload-comparison-B
 
-# Separate bounded transaction receipt, also repeated into fresh roots:
+# Separate full-shape transaction receipt, repeated into fresh roots:
 ARTIFACTS_DIR=/tmp/irrreload-txn-runA bench/scale/irrreload/run-irr-reload.sh rustbgpd-txn
 ARTIFACTS_DIR=/tmp/irrreload-txn-runB bench/scale/irrreload/run-irr-reload.sh rustbgpd-txn
+
+python3 bench/scale/irrreload/verify-receipt.py transactions \
+  --output-dir /tmp/irrreload-txn-verified \
+  /tmp/irrreload-txn-runA /tmp/irrreload-txn-runB
 ```
 
 The runner builds what it needs (`rustbgpd`, `rbgp`, `rs-config-render`,

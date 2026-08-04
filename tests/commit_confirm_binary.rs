@@ -38,9 +38,12 @@ struct Daemon {
 impl Daemon {
     fn spawn(config_path: &Path, stderr_path: PathBuf) -> Self {
         let stderr = File::create(&stderr_path).expect("failed to create daemon stderr log");
+        let stdout = stderr
+            .try_clone()
+            .expect("failed to clone daemon audit log handle");
         let child = Command::new(env!("CARGO_BIN_EXE_rustbgpd"))
             .arg(config_path)
-            .stdout(Stdio::null())
+            .stdout(Stdio::from(stdout))
             .stderr(Stdio::from(stderr))
             .spawn()
             .expect("failed to spawn rustbgpd binary");
@@ -65,6 +68,14 @@ impl Daemon {
                 self.stderr_path.display()
             )
         })
+    }
+
+    fn grpc_audit_method_count(&self, method: &str) -> usize {
+        self.stderr()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter(|event| event["fields"]["method"].as_str() == Some(method))
+            .count()
     }
 
     /// SIGKILL — no shutdown coordination, simulating a crash inside the
@@ -347,7 +358,8 @@ impl Lab {
 
     /// Plan + confirmed-apply the dynamic-neighbor candidate; asserts the
     /// transaction commits and enters the pending confirm window.
-    fn apply_confirmed(&self, confirm_id: &str, timeout_seconds: &str) {
+    fn apply_confirmed(&self, daemon: &Daemon, confirm_id: &str, timeout_seconds: &str) {
+        let plan_audits_before = daemon.grpc_audit_method_count("StreamPlanConfigTransaction");
         let plan = rbgp_json(
             &self.grpc_addr,
             &[
@@ -366,6 +378,11 @@ impl Lab {
             !plan_token.is_empty(),
             "streamed plan token must not be empty"
         );
+        assert_eq!(
+            daemon.grpc_audit_method_count("StreamPlanConfigTransaction"),
+            plan_audits_before + 1,
+            "the reviewed streamed Plan must emit exactly one production audit event"
+        );
         let token = plan["runtime_snapshot_token"]
             .as_str()
             .expect("plan must return a runtime snapshot token");
@@ -380,6 +397,8 @@ impl Lab {
                 self.candidate_path.to_str().unwrap(),
                 "--expected-runtime-snapshot-token",
                 token,
+                "--plan-token",
+                plan_token,
                 "--confirm-id",
                 confirm_id,
                 "--confirm-timeout",
@@ -403,6 +422,11 @@ impl Lab {
             serde_json::from_slice(&apply_output.stdout).expect("apply output must be JSON");
         assert_eq!(apply["status"], "committable", "apply: {apply}");
         assert_eq!(apply["confirmation"]["status"], "pending", "apply: {apply}");
+        assert_eq!(
+            daemon.grpc_audit_method_count("StreamPlanConfigTransaction"),
+            plan_audits_before + 1,
+            "explicit Apply must consume the reviewed Plan token without an implicit second Plan"
+        );
 
         // Commit persisted the (unconfirmed) candidate to the config file and
         // journaled the revert state.
@@ -470,7 +494,7 @@ fn streamed_confirmed_apply_above_eight_mib_aborts_to_previous_config() {
         .find_map(|line| line.strip_prefix("plan_token: "))
         .expect("streamed plan human output must expose its single-use plan token");
     assert!(!exposed_token.is_empty());
-    lab.apply_confirmed("stream-abort", "600");
+    lab.apply_confirmed(&daemon, "stream-abort", "600");
     assert!(
         std::fs::metadata(&lab.raw_path).unwrap().len() > 10 * 1024 * 1024,
         "real-binary writer must publish a genuinely normalized prior above 10 MiB"
@@ -551,7 +575,7 @@ fn sigkill_in_confirm_window_boots_previous_config_and_saves_candidate_aside() {
     let lab = lab(temp.path());
 
     let daemon = lab.spawn("first.stderr.log");
-    lab.apply_confirmed("kill-window", "600");
+    lab.apply_confirmed(&daemon, "kill-window", "600");
     daemon.sigkill();
 
     // Restart: boot must revert BEFORE adopting the on-disk (unconfirmed)
@@ -606,7 +630,7 @@ fn confirm_then_sigkill_retains_new_config_and_leaves_no_journal() {
     let lab = lab(temp.path());
 
     let daemon = lab.spawn("first.stderr.log");
-    lab.apply_confirmed("kill-confirmed", "600");
+    lab.apply_confirmed(&daemon, "kill-confirmed", "600");
     let confirm = rbgp_json(
         &lab.grpc_addr,
         &["--json", "config", "confirm", "kill-confirmed"],
@@ -637,7 +661,7 @@ fn in_process_timeout_auto_revert_consumes_journal() {
     let lab = lab(temp.path());
 
     let mut daemon = lab.spawn("daemon.stderr.log");
-    lab.apply_confirmed("timeout-revert", "2");
+    lab.apply_confirmed(&daemon, "timeout-revert", "2");
 
     // Poll for the auto-revert (2s timer + rollback work).
     let deadline = Instant::now() + Duration::from_secs(30);
