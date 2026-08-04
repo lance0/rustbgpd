@@ -37,7 +37,8 @@ if [ -n "$(git status --porcelain)" ]; then
 fi
 
 rm -rf "${OUT}" "${RUNDIR}"
-mkdir -p "${OUT}" "${RUNDIR}"
+mkdir -p "${OUT}"
+mkdir -m 0700 -- "${RUNDIR}"
 {
     echo "commit ${commit}"
     echo "tree $(git rev-parse "HEAD^{tree}")"
