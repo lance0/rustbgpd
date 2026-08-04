@@ -68,6 +68,25 @@ fn send_update_group_snapshot(
     let _ = reply.send(snapshot);
 }
 
+#[cfg(test)]
+static SNAPSHOT_PEER_ORDER_KEY_CALLS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+fn snapshot_peer_order_key(peer: &IpAddr) -> [u8; 17] {
+    #[cfg(test)]
+    SNAPSHOT_PEER_ORDER_KEY_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+    let mut key = [0; 17];
+    match peer {
+        IpAddr::V4(addr) => key[1..5].copy_from_slice(&addr.octets()),
+        IpAddr::V6(addr) => {
+            key[0] = 1;
+            key[1..].copy_from_slice(&addr.octets());
+        }
+    }
+    key
+}
+
 fn materialize_update_group_snapshot(
     reply: &tokio::sync::oneshot::Sender<UpdateGroupSnapshot>,
     peers: &mut [IpAddr],
@@ -76,10 +95,7 @@ fn materialize_update_group_snapshot(
     if reply.is_closed() {
         return None;
     }
-    peers.sort_by_key(|peer| match peer {
-        IpAddr::V4(addr) => (0, addr.octets().to_vec()),
-        IpAddr::V6(addr) => (1, addr.octets().to_vec()),
-    });
+    peers.sort_by_key(snapshot_peer_order_key);
 
     let mut rows = Vec::with_capacity(peers.len());
     for &peer in peers.iter() {
@@ -3601,6 +3617,71 @@ mod tests {
             IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)),
             IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
         ]
+    }
+
+    #[test]
+    fn snapshot_peer_order_key_is_fixed_stack_storage() {
+        fn require_copy<T: Copy>(value: T) -> T {
+            value
+        }
+
+        let v4: [u8; 17] = snapshot_peer_order_key(&IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7)));
+        let v6: [u8; 17] =
+            snapshot_peer_order_key(&IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 1, 2, 3, 4, 5, 6)));
+        assert_eq!(v4, [0, 192, 0, 2, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(
+            v6,
+            [
+                1, 0x20, 0x01, 0x0d, 0xb8, 0, 1, 0, 2, 0, 3, 0, 4, 0, 5, 0, 6
+            ]
+        );
+        assert_eq!(std::mem::size_of_val(&require_copy(v4)), 17);
+        assert_eq!(std::mem::align_of_val(&v6), 1);
+        assert!(!std::mem::needs_drop::<[u8; 17]>());
+    }
+
+    #[test]
+    fn snapshot_materializer_uses_stack_key_for_fixed_mixed_roster() {
+        let (reply, _receiver) = tokio::sync::oneshot::channel::<UpdateGroupSnapshot>();
+        let mut peers = Vec::with_capacity(1_000);
+        for index in (0..500_u32).rev() {
+            peers.push(IpAddr::V6(Ipv6Addr::from(
+                0x2001_0db8_0000_0000_0000_0000_0000_0000_u128 + u128::from(index),
+            )));
+            peers.push(IpAddr::V4(Ipv4Addr::from(0x0a00_0000 + index)));
+        }
+        let expected = (0..500_u32)
+            .map(|index| IpAddr::V4(Ipv4Addr::from(0x0a00_0000 + index)))
+            .chain((0..500_u128).map(|index| {
+                IpAddr::V6(Ipv6Addr::from(
+                    0x2001_0db8_0000_0000_0000_0000_0000_0000_u128 + index,
+                ))
+            }))
+            .collect::<Vec<_>>();
+        SNAPSHOT_PEER_ORDER_KEY_CALLS.store(0, std::sync::atomic::Ordering::Relaxed);
+        let mut builds = 0;
+
+        let snapshot = materialize_update_group_snapshot(&reply, &mut peers, |peer| {
+            builds += 1;
+            test_snapshot_row(peer)
+        })
+        .expect("open snapshot query materializes");
+
+        assert_eq!(snapshot.peers.len(), 1_000);
+        assert_eq!(builds, 1_000);
+        assert!(
+            SNAPSHOT_PEER_ORDER_KEY_CALLS.load(std::sync::atomic::Ordering::Relaxed) >= 1_000,
+            "the materializer must route every peer through the stack key helper"
+        );
+        assert_eq!(
+            snapshot
+                .peers
+                .into_iter()
+                .map(|row| row.peer)
+                .collect::<Vec<_>>(),
+            expected,
+            "snapshot order is independently derived from the legacy family/address contract"
+        );
     }
 
     #[test]
