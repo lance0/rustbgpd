@@ -629,10 +629,29 @@ wait_ready() {
             return 1
         fi
         if [ "${daemon_pid:-0}" -gt 0 ] && ss -ltnH "sport = :$PORT" | grep -q .; then
-            return 0
+            case $cell in
+            rustbgpd-sighup | rustbgpd-txn | "$GROUPED_CELL")
+                curl -fsS --max-time 2 'http://127.0.0.1:9179/readyz' >/dev/null 2>&1 &&
+                    return 0
+                ;;
+            *)
+                return 0
+                ;;
+            esac
         fi
         if [ "$waited" -ge "$START_TIMEOUT" ]; then
-            echo "cell $cell: no listener on :$PORT after ${START_TIMEOUT}s" >&2
+            case $cell in
+            rustbgpd-sighup | rustbgpd-txn | "$GROUPED_CELL")
+                if [ "${daemon_pid:-0}" -gt 0 ] && ss -ltnH "sport = :$PORT" | grep -q .; then
+                    echo "cell $cell: startup readiness did not complete after ${START_TIMEOUT}s; rustbgpd also requires http://127.0.0.1:9179/readyz" >&2
+                else
+                    echo "cell $cell: no listener on :$PORT after ${START_TIMEOUT}s" >&2
+                fi
+                ;;
+            *)
+                echo "cell $cell: no listener on :$PORT after ${START_TIMEOUT}s" >&2
+                ;;
+            esac
             return 1
         fi
         sleep 1
