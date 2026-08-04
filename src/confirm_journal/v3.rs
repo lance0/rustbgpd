@@ -1466,8 +1466,8 @@ log_format = "json"
     #[test]
     fn file_metadata_and_raw_caps_are_exact() {
         // Destructive proof: changing `>` to `>=`, dropping owner/mode/type,
-        // lifting the raw cap, or bypassing the shared prior-length predicate
-        // changes one of these exact boundary verdicts without a huge allocation.
+        // or lifting the raw cap changes one of these exact boundary verdicts
+        // without a huge allocation.
         assert!(normalized_prior_length_within_limit(
             MAX_RAW_BYTES,
             MAX_RAW_BYTES
@@ -1502,6 +1502,44 @@ log_format = "json"
         assert!(validate_file_metadata_values(false, owner, 0o100_600, 1, 1, owner).is_err());
         assert!(validate_file_metadata_values(true, owner + 1, 0o100_600, 1, 1, owner).is_err());
         assert!(validate_file_metadata_values(true, owner, 0o100_640, 1, 1, owner).is_err());
+    }
+
+    #[test]
+    fn publisher_enforces_the_shared_prior_limit_at_exact_and_plus_one() {
+        // Destructive proof: restoring publish's old direct MAX_RAW_BYTES
+        // comparison makes the injected plus-one case publish successfully;
+        // changing the shared inclusive predicate makes the exact case fail.
+        let exact = fixture();
+        let exact_len = exact.prior.normalized_toml().len();
+        exact
+            .launch
+            .clone()
+            .with_max_raw_bytes_for_test(exact_len)
+            .publish(&exact.state, "exact-limit", 9, &exact.prior)
+            .expect("a prior exactly at the injected limit must publish");
+
+        let plus_one = fixture();
+        let plus_one_len = plus_one.prior.normalized_toml().len();
+        let error = plus_one
+            .launch
+            .clone()
+            .with_max_raw_bytes_for_test(
+                plus_one_len
+                    .checked_sub(1)
+                    .expect("canonical persisted config must not be empty"),
+            )
+            .publish(&plus_one.state, "plus-one", 9, &plus_one.prior)
+            .expect_err("a prior one byte above the injected limit must fail");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            error
+                .error
+                .to_string()
+                .contains("raw normalized prior exceeds")
+        );
+        assert!(!plus_one.launch.locator_path().exists());
+        assert!(!plus_one.raw.exists());
+        assert!(!plus_one.metadata.exists());
     }
 
     #[test]

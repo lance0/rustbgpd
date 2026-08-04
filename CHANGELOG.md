@@ -234,13 +234,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   Pre-release upgrade note: finish or abort any pending v2 or v3 confirmed
   transaction before moving from an older development build to this one. An
-  older retained prior containing these explicit empty lists parses, but exact
-  byte verification rejects its newly compact reserialization rather than
-  silently adopting different bytes. For the same reason, pre-change v2
-  history rows containing affected inline statements are no longer eligible
-  for rollback. Move the complete `config-history` directory aside before the
-  upgrade if its bytes must be preserved; later transactions repopulate
-  rollback history in the new canonical form.
+  pre-change retained prior parses, but exact byte verification rejects its
+  new canonical reserialization rather than silently adopting different
+  bytes. The persisted-file header also changed to describe the omission, so
+  this applies to every pre-change v2/v3 prior and v2 history row, not only
+  configs with affected inline statements. Move the complete
+  `config-history` directory aside before the upgrade if its bytes must be
+  preserved; later transactions repopulate rollback history in the new
+  canonical form.
 
 - BGP startup now binds its listener early but activates inbound acceptance
   only after every configured peer is registered successfully. Peer-manager

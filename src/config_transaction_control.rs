@@ -5281,7 +5281,9 @@ remote_asn = 65010
         std::fs::write(&config_path, &previous).unwrap();
         let accepted = Arc::new(AcceptedConfigSnapshot::load(&config_path, None).unwrap());
         let prior_bytes = accepted.normalized_toml().len();
-        let limit = prior_bytes - 1;
+        let limit = prior_bytes
+            .checked_sub(1)
+            .expect("canonical persisted config must not be empty");
         let (_accepted_tx, accepted_rx) = watch::channel(accepted);
         let (peer_tx, mut peer_rx) = mpsc::channel(8);
         let peer_mutation_seen = Arc::new(std::sync::atomic::AtomicBool::new(false));
