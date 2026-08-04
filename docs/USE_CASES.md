@@ -14,8 +14,8 @@ exist for RFC 7999 discard routes and explicit `[[fib_tables]]` unicast route
 tables.
 
 Note: rustbgpd defaults to a local UDS gRPC listener. The `grpcurl` examples
-below that target `localhost:50051` are paired with config snippets that
-explicitly enable `[global.telemetry.grpc_tcp]`.
+below that target `localhost:50051` require an authenticated TCP listener;
+complete opt-in `[global.telemetry.grpc_tcp]` recipes appear below.
 
 ---
 
@@ -94,37 +94,43 @@ Traffic dropped at line rate
 
 **Example config** ([`examples/ddos-mitigation/config.toml`](../examples/ddos-mitigation/config.toml)):
 
+<!-- use-case-config:ddos-mitigation -->
+
 ```toml
 [global]
 asn = 65500
 router_id = "10.255.0.1"
 listen_port = 179
+ebgp_requires_policy = true
 
 [global.telemetry]
 prometheus_addr = "127.0.0.1:9179"
 log_format = "json"
 
-# Local gRPC over a filesystem-gated Unix socket — the working default under
-# the tier authorization mode.
-[global.telemetry.grpc_uds]
-path = "/var/lib/rustbgpd/grpc.sock"
-# Audit principal for this socket; mapped to a role in [security.grpc.roles].
-principal = "operator"
-
-[security.grpc]
-enforcement = "tier"
-
-[security.grpc.roles]
-operator = "operator"
+# Local automation uses the implicit owner-only UDS and local-operator principal.
 
 # Remote mitigation-platform access over TCP. Under tier a TCP listener needs
 # a bearer token + matching principal (or native mTLS); create the token file
 # first, then uncomment.
+# use-case-remote-tcp:begin
 # [global.telemetry.grpc_tcp]
 # enabled = true
 # address = "127.0.0.1:50051"
 # token_file = "/etc/rustbgpd/grpc-token"
-# principal = "operator"
+# principal = "mitigation-platform"
+# [security.grpc.roles]
+# mitigation-platform = "operator"
+# use-case-remote-tcp:end
+
+[policy]
+import_chain = ["reject-edge-routes"]
+export_chain = ["distribute-mitigation"]
+
+[policy.definitions.reject-edge-routes]
+default_action = "deny"
+
+[policy.definitions.distribute-mitigation]
+default_action = "permit"
 
 # Edge routers that enforce FlowSpec rules
 [[neighbors]]
@@ -278,6 +284,8 @@ selected unicast best routes into explicit non-reserved kernel tables.
 
 **Example config** ([`examples/hosting-provider/config.toml`](../examples/hosting-provider/config.toml)):
 
+<!-- use-case-config:hosting-provider -->
+
 ```toml
 [global]
 asn = 65100
@@ -288,10 +296,18 @@ listen_port = 1179           # non-standard port (edge routers own 179)
 prometheus_addr = "127.0.0.1:9179"
 log_format = "json"
 
-[global.telemetry.grpc_tcp]
-enabled = true
-address = "127.0.0.1:50051"
+# Local provisioning uses the implicit owner-only UDS and local-operator principal.
+
+# Uncomment this complete recipe for authenticated remote provisioning.
+# use-case-remote-tcp:begin
+# [global.telemetry.grpc_tcp]
+# enabled = true
+# address = "127.0.0.1:50051"
 # token_file = "/etc/rustbgpd/grpc-token"
+# principal = "provisioning-system"
+# [security.grpc.roles]
+# provisioning-system = "operator"
+# use-case-remote-tcp:end
 
 # RPKI validation — don't announce prefixes we can't prove we hold
 [rpki]
@@ -386,7 +402,7 @@ grpcurl -plaintext -d '{
 }' localhost:50051 rustbgpd.v1.PolicyService/SetGlobalExportChain
 
 # Stream route changes in real time for the controller
-grpcurl -plaintext localhost:50051 rustbgpd.v1.RibService/WatchRoutes
+grpcurl -plaintext -H "authorization: Bearer $(< /etc/rustbgpd/grpc-token)" localhost:50051 rustbgpd.v1.RibService/WatchRoutes
 ```
 
 ---
@@ -430,19 +446,35 @@ IX peer C  ──┘
 
 **Example config** ([`examples/route-collector/config.toml`](../examples/route-collector/config.toml)):
 
+<!-- use-case-config:route-collector -->
+
 ```toml
 [global]
 asn = 65534
 router_id = "10.255.0.1"
 listen_port = 179
+ebgp_requires_policy = true
 
 [global.telemetry]
 prometheus_addr = "0.0.0.0:9179"
 log_format = "json"
 
-[global.telemetry.grpc_tcp]
-enabled = true
-address = "0.0.0.0:50051"
+[global.telemetry.grpc_uds]
+path = "/var/lib/rustbgpd/grpc.sock"
+principal = "looking-glass"
+
+[security.grpc.roles]
+looking-glass = "observer"
+
+# Uncomment this complete recipe for an authenticated remote looking glass.
+# Bearer tokens do not encrypt traffic; prefer an mTLS proxy off-box.
+# use-case-remote-tcp:begin
+# [global.telemetry.grpc_tcp]
+# enabled = true
+# address = "0.0.0.0:50051"
+# token_file = "/etc/rustbgpd/grpc-token"
+# principal = "looking-glass"
+# use-case-remote-tcp:end
 
 # RPKI — annotate every route with validation state
 [rpki]
@@ -462,11 +494,16 @@ sys_name = "rustbgpd-collector"
 [[bmp.collectors]]
 address = "10.0.0.100:5000"
 
-# Peers — import everything, export nothing
+# Peers — deliberately import everything and export nothing
 [policy]
+import_chain = ["observe-all"]
 export_chain = ["deny-all"]
 
+[policy.definitions.observe-all]
+default_action = "permit"
+
 [policy.definitions.deny-all]
+default_action = "deny"
 [[policy.definitions.deny-all.statements]]
 action = "deny"
 prefix = "0.0.0.0/0"
@@ -504,11 +541,8 @@ rbgp rib received 10.0.0.1
 # Explain why a route was selected as best
 rbgp rib --prefix 10.0.0.0/24 --explain
 
-# Trigger an on-demand MRT dump
-rbgp mrt-dump
-
 # Stream all route changes (pipe to your analysis tool)
-grpcurl -plaintext localhost:50051 rustbgpd.v1.RibService/WatchRoutes
+grpcurl -plaintext -H "authorization: Bearer $(< /etc/rustbgpd/grpc-token)" localhost:50051 rustbgpd.v1.RibService/WatchRoutes
 ```
 
 ---
