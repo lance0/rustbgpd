@@ -3256,26 +3256,31 @@ confirmed apply returns `FAILED_PRECONDITION` with the actual and limit byte
 counts before publishing authority or mutating peer, persisted, or runtime
 state. Apply without `--confirm-id`, or reduce the canonical config size.
 
-The confirm window is durable: the daemon journals the pre-commit config
-snapshot to `<runtime_state_dir>/commit-confirm-journal.json`, including its
-accepted external-source manifest and digests, then publishes
-`<absolute lexical config path>.commit-confirm-locator.json` before the
-candidate commits. That config-adjacent locator is the sole v2 pending
-authority and is checked before candidate contents are parsed. A restart verifies and
-reuses the exact accepted prior snapshot, restores its recorded config target,
-and saves the unconfirmed candidate as `<recorded-target>.unconfirmed`.
-Confirm and successful rollback become terminal after durable locator removal;
-later exact journal-residue cleanup is warning-only. Files and their parent
-directories must satisfy the storage contract: v2 locator, journal, and staging
-files are daemon-owned regular files with mode `0600`. A writer or present v2
-object requires daemon-owned real parents that are not group- or
-world-writable. Locator absence carries no authority and does not impose this
-v2 storage policy on an ordinary launch path. Before downgrade, both the
-v2 locator and any locator-free v2 journal residue must be absent; v2 config
-history separately requires moving the complete history directory aside. A
-locator-free v1 journal remains a fail-closed compatibility lane, but a live v1
-transaction must terminate before upgrade. Production writes only v2 and never
-converts or dual-writes v1 state.
+The confirm window is durable: before the candidate commits, the v3 writer
+publishes `<runtime_state_dir>/commit-confirm-v3-prior.toml`, then
+`<runtime_state_dir>/commit-confirm-v3-metadata.json`, then
+`<absolute lexical config path>.commit-confirm-locator.json`. The raw prior is
+the exact accepted normalized TOML. Metadata binds its provenance, digests,
+length, device, and inode; the config-adjacent locator is the sole pending boot
+authority. A restart checks that locator before candidate contents, verifies
+the complete chain, restores the recorded target, and saves the unconfirmed
+candidate as `<recorded-target>.unconfirmed`.
+
+Confirm and successful rollback become terminal after locator removal and its
+parent-directory `fsync`; later metadata/raw removal and pending-directory
+`fsync` are warning-only. All pending and staging files are daemon-owned regular
+files with mode `0600`, and a writer or present pending object requires
+daemon-owned real parents that are not group- or world-writable. Locator
+absence carries no authority and does not impose this storage policy on an
+ordinary launch path.
+
+Production writes v3 only. Startup retains the frozen v2 locator reader and the
+locator-free v1 fail-closed reader without conversion or dual-write. Finish or
+abort a live v1/v2 transaction before upgrade. Before downgrade, finish or
+abort v3, then ensure the locator and both fixed v3 residue files are absent;
+also ensure any v2 locator or locator-free v2 journal residue is absent. V2
+config history separately requires moving the complete history directory
+aside.
 See `docs/OPERATIONS.md` (config transactions) for the boot-revert and storage
 semantics.
 

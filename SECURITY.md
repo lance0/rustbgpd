@@ -54,19 +54,22 @@ input from the network. It runs under continuous fuzzing in CI.
 - **No unbounded allocations.** All channels are bounded. Per-peer
   prefix limits enforced at insertion. UPDATE attribute sizes enforced
   at decode time.
-- **Commit-confirm state is authenticated local authority.** The v2 pending
-  journal is secret-bearing because it contains normalized config and accepted
-  external-source identity. The locator is confidential because it carries
-  paths and digests. Both are bounded canonical records in daemon-owned regular
-  `0600` files; a writer or present v2 object requires a daemon-owned parent
-  that is not group- or world-writable. Locator absence carries no authority
-  and therefore adds no v2 ownership or mode requirement to an ordinary
-  launch path. Reads are descriptor-relative, no-follow, same-FD operations;
-  unsafe, changed, oversized, or mismatched state fails closed before candidate
-  contents are opened and before candidate or backup mutation. Launch-target
-  metadata may be inspected to bind the authority. Diagnostics do not expose
-  locator-carried paths or digests. Durable locator removal, not journal
-  deletion, is the terminal transaction boundary.
+- **Commit-confirm state is authenticated local authority.** Production writes
+  v3 in durability order: secret-bearing normalized configuration at
+  `<runtime_state_dir>/commit-confirm-v3-prior.toml`, confidential provenance
+  and file-identity metadata at `commit-confirm-v3-metadata.json`, then the
+  confidential config-adjacent `commit-confirm-locator.json`. Metadata and the
+  locator contain paths and digests, not raw TOML; the locator is the sole boot
+  authority. All are bounded daemon-owned regular `0600` files, and a writer or
+  present pending object requires daemon-owned real parents that are not group-
+  or world-writable. Reads are descriptor-relative, no-follow, same-FD
+  operations; unsafe, changed, oversized, or mismatched state fails closed
+  before candidate contents are opened or candidate/backup mutation. Durable
+  locator unlink plus parent `fsync` is terminal; only later verified exact
+  metadata/raw cleanup and pending-directory `fsync` can fail warning-only.
+  Locator absence carries no v2/v3 authority; locator-free v1 remains boot
+  authority. Startup retains the v2 locator and locator-free v1 readers
+  without converting or dual-writing either format.
 - **No `unsafe` code in shipped paths, with two scoped exceptions.** Every
   workspace crate root carries `#![deny(unsafe_code)]`, so `unsafe` cannot enter
   a crate without a visible, reviewed opt-out. There are two:

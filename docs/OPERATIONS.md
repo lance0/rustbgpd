@@ -184,8 +184,12 @@ While a confirmed transaction is applying or awaiting confirmation, SIGHUP
 reload is ignored and every persisted runtime config mutator (FIB-table and
 dynamic-neighbor CRUD, neighbor lifecycle, a further `config apply`) is rejected
 with `FAILED_PRECONDITION`, so a pending timeout rollback cannot be overwritten
-by a later ad hoc change. The fence clears once the transaction is confirmed,
-aborted, or auto-reverted.
+by a later ad hoc change. The fence clears only after the transaction is
+terminal, including durable locator removal and parent-directory sync. If that
+authority removal fails after a confirm or otherwise successful rollback, the
+operation remains nonterminal and config mutations stay blocked; failure only
+in the later exact metadata/raw cleanup or pending-directory `fsync` is
+warning-only.
 
 `rbgp config status` reports the lifecycle outcome: `pending` (timer running),
 `confirmed`, `aborted`, `auto_reverted` (timer expired and the pre-commit
@@ -201,41 +205,52 @@ failure, or compound rollback failure) likewise retains the journal and blocks
 all config mutations until a restart boot-reverts.
 
 Commit-confirmed also survives a daemon restart or crash inside the confirm
-window. Before the candidate commits, the daemon writes the exact accepted
-pre-commit snapshot to
-`<runtime_state_dir>/commit-confirm-journal.json`, including normalized TOML,
-the external-source manifest, and both digests. It then publishes the sole v2
-pending authority at `<absolute lexical config path>.commit-confirm-locator.json`.
-Both files use write-temp + `fsync` + rename + parent-directory `fsync`, and
-the locator is never published before the journal is durable. A publication
-failure refuses the confirmed apply before candidate persistence.
+window. Before the candidate commits, the v3 writer publishes three objects in
+order: the exact accepted normalized TOML at
+`<runtime_state_dir>/commit-confirm-v3-prior.toml`, provenance and fixed-file
+identity metadata at
+`<runtime_state_dir>/commit-confirm-v3-metadata.json`, then the sole pending
+boot authority at
+`<absolute lexical config path>.commit-confirm-locator.json`. Each object uses
+write-temp + `fsync` + rename + parent-directory `fsync`; raw prior durability
+precedes metadata durability, and both precede the locator. A publication
+failure refuses the confirmed apply before candidate persistence unless the
+locator rename may already be durable, in which case mutations stay fenced
+until restart.
 
 Startup checks the config-adjacent locator before opening or parsing candidate
 contents. It may inspect launch-target metadata while pinning and binding the
 authority. If the locator is present, the daemon verifies it, the complete
-journal, config-target binding, retained TOML, external sources, and digests,
+metadata and raw prior, config-target binding, retained TOML, external sources,
+file identity, and digests,
 then directly adopts that accepted snapshot for boot restore. The revert is
 unconditional, regardless of how much confirm time remained, because the
 operator's confirming session died with the old process (the NETCONF RFC 6241
-§8.4 rule: session loss cancels a confirmed commit). The unconfirmed candidate is saved once as
-`<recorded-target>.unconfirmed`; the loud boot banner names the transaction but
-redacts locator-carried paths and digests. A damaged, unsafe, oversized, or
-mismatched locator/journal refuses boot before candidate contents are opened
-and before candidate or backup mutation.
+§8.4 rule: session loss cancels a confirmed commit). The unconfirmed candidate
+is saved once as `<recorded-target>.unconfirmed`; the loud boot banner names
+the transaction but redacts locator-carried paths and digests. A damaged,
+unsafe, oversized, or
+mismatched locator, metadata, or raw prior refuses boot before candidate
+contents are opened and before candidate or backup mutation.
 
-Abort, timeout, and boot restore durably restore the verified prior config while
-both files remain. They then unlink the locator and `fsync` its parent; only
-that durable locator absence is terminal. Confirm performs no restore and
-starts by unlinking and syncing the locator. Exact journal cleanup follows all
-terminal paths; failure there is a warning and safe residue cannot re-arm the
-transaction. An exact canonical v2 journal found without its locator is
-likewise residue and is removed only after all owner/mode/path checks. Production does
-not scan directories, infer another journal, convert v1, or dual-write. With no
-locator, an existing v1 TOML-only journal is handled by the fail-closed legacy
-boot lane, but a live v1 transaction must terminate before upgrade. Before
-downgrade or starting an older binary, both the v2 locator and locator-free v2
-journal residue must be absent. Separately move the complete v2 config-history
-directory aside before the older binary starts.
+Abort, timeout, and boot restore durably restore the verified prior config
+while all three objects remain. They then unlink the locator and `fsync` its
+parent; only that durable locator absence is terminal. Confirm performs no
+restore and starts by unlinking and syncing the locator. Exact metadata
+removal, raw-prior removal, and pending-directory `fsync` follow all terminal
+paths; failure there is a warning and locator-free residue cannot re-arm the
+transaction. A later confirmed apply removes only verified residue at those
+two fixed v3 names.
+
+Production writes v3 only. Startup checks v3 first, delegates a canonical v2
+locator unchanged to the frozen v2 recovery reader, then retains the
+locator-free v1 fail-closed reader; it does not convert or dual-write either
+legacy format. A live v1 or v2 transaction must terminate before upgrade.
+Before downgrade or starting an older binary, finish or abort any pending v3
+transaction; do not remove its locator by hand. After it is terminal, ensure
+the locator and both fixed v3 residue files are absent. Also ensure the frozen
+v2 locator and locator-free v2 journal residue are absent, and separately move
+the complete v2 config-history directory aside before the older binary starts.
 
 The boot-revert save-aside moves the unconfirmed candidate to
 `<config>.unconfirmed` with an atomic hard-link + unlink, so it never clobbers
@@ -248,14 +263,15 @@ intact, rather than risk an unsafe revert. Keep the config and
 for containerized deployments that bind-mount the config from an exotic
 backend.
 
-The lexical config and journal paths are resolved to absolute identities. A
-writer or present v2 object requires daemon-owned real parents that are not
-group- or world-writable. Locator absence carries no authority and therefore
-does not impose that v2 storage policy on an ordinary launch path; confirmed
-writes remain unavailable until the config directory is private, writable,
-and daemon-owned. Locator, journal, and staging
+The lexical config, metadata, and raw-prior paths are resolved to absolute
+identities. A writer or present pending object requires daemon-owned real
+parents that are not group- or world-writable. Locator absence carries no
+authority and therefore does not impose that storage policy on an ordinary
+launch path; confirmed writes remain unavailable until the config directory is
+private, writable, and daemon-owned. Locator, metadata, raw-prior, and staging
 files must be regular files owned by the daemon UID with mode `0600`; symlinks
-and special files fail closed. Keep writable state private and on local storage.
+and special files fail closed. Keep writable state private and on local
+storage.
 
 ### The transactional quartet: check, compare, commit confirmed, rollback
 
