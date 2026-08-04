@@ -135,13 +135,15 @@ measurements — none of them is timed into any reported number; they
 only bound how long the harness waits before declaring a cell broken):
 
 - **Daemon-start readiness**: the runner polls at 1 s cadence until
-  the cell's daemon holds a listener on the BGP port (containers: also
-  until `docker inspect` reports a nonzero daemon PID, retried — a
-  single immediate inspect can race a slow start and record pid=0),
-  with a hard ceiling of `START_TIMEOUT` (default **600 s**). A
-  multi-MB IRR policy parse legitimately takes far longer than a
-  small-config boot; the poll returns as soon as the daemon is ready,
-  so a generous ceiling costs nothing on fast starts.
+  the cell's daemon holds a listener on the BGP port; rustbgpd cells
+  also require a successful `http://127.0.0.1:9179/readyz` after
+  initial peer registration, while BIRD and OpenBGPD remain
+  listener-only (containers: also until `docker inspect` reports a
+  nonzero daemon PID, retried — a single immediate inspect can race a
+  slow start and record pid=0), with a hard ceiling of `START_TIMEOUT`
+  (default **600 s**). A multi-MB IRR policy parse legitimately takes
+  far longer than a small-config boot; the poll returns as soon as the
+  daemon is ready, so a generous ceiling costs nothing on fast starts.
 - **Stub connect**: each stub retries its TCP connect at 500 ms
   cadence for up to **120 s** (`CONNECT_WINDOW` in the reloadstall
   harness) before failing the cell — refused connects while the daemon

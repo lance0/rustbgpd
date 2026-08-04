@@ -187,6 +187,93 @@ fn irr_reload_campaign_seals_resume_rows_and_rss_evidence() {
 }
 
 #[test]
+/// Red proof: removing the rustbgpd `/readyz` request, moving it before the
+/// BGP-listener gate, or restoring the listener-only early return makes the
+/// source contract or executable failure fixture turn red. BIRD remains gated
+/// only by its BGP listener.
+fn irr_reload_rustbgpd_startup_requires_readyz_after_bgp_listener() {
+    let runner = std::fs::read_to_string(format!(
+        "{}/bench/scale/irrreload/run-irr-reload.sh",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .expect("read IRR reload runner");
+    let wait_ready = runner
+        .split_once("wait_ready() {")
+        .and_then(|(_, rest)| rest.split_once("run_cell() {"))
+        .map(|(body, _)| format!("wait_ready() {{{body}"))
+        .expect("wait_ready function body");
+    let bgp_listener = wait_ready
+        .find("ss -ltnH \"sport = :$PORT\" | grep -q .; then")
+        .expect("BGP listener gate");
+    let rustbgpd_cells = wait_ready
+        .find("rustbgpd-sighup | rustbgpd-txn | \"$GROUPED_CELL\")")
+        .expect("rustbgpd cell branch");
+    let readyz = wait_ready
+        .find("curl -fsS --max-time 2 'http://127.0.0.1:9179/readyz' >/dev/null 2>&1 &&")
+        .expect("rustbgpd readiness gate");
+    assert!(
+        bgp_listener < rustbgpd_cells && rustbgpd_cells < readyz,
+        "rustbgpd must pass BGP and /readyz gates before startup succeeds"
+    );
+
+    let fixture_dir = tempfile::tempdir().expect("fixture directory");
+    let run_fixture = |cell: &str, readyz_rc: u8, ss_rc: u8| {
+        std::process::Command::new("bash")
+            .arg("-c")
+            .arg(format!(
+                r#"{wait_ready}
+ss() {{ [ "$SS_RC" -eq 0 ] && printf 'LISTEN\n'; }}
+curl() {{ return "$READYZ_RC"; }}
+container=
+daemon_pid=$$
+PORT=1790
+START_TIMEOUT=0
+GROUPED_CELL=rustbgpd-sighup-grouped-control
+wait_ready "$CELL" "$CDIR"
+"#
+            ))
+            .env("CELL", cell)
+            .env("CDIR", fixture_dir.path())
+            .env("READYZ_RC", readyz_rc.to_string())
+            .env("SS_RC", ss_rc.to_string())
+            .output()
+            .expect("run readiness fixture")
+    };
+
+    let rustbgpd_blocked = run_fixture("rustbgpd-txn", 22, 0);
+    let blocked_stderr = String::from_utf8_lossy(&rustbgpd_blocked.stderr);
+    assert!(
+        !rustbgpd_blocked.status.success(),
+        "rustbgpd passed with /readyz failing\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&rustbgpd_blocked.stdout),
+        blocked_stderr
+    );
+    assert!(
+        blocked_stderr.contains("startup readiness did not complete after 0s; rustbgpd also requires http://127.0.0.1:9179/readyz"),
+        "rustbgpd readiness timeout was misleading: {blocked_stderr}"
+    );
+    let rustbgpd_no_listener = run_fixture("rustbgpd-txn", 0, 1);
+    let no_listener_stderr = String::from_utf8_lossy(&rustbgpd_no_listener.stderr);
+    assert!(!rustbgpd_no_listener.status.success());
+    assert_eq!(
+        no_listener_stderr.trim(),
+        "cell rustbgpd-txn: no listener on :1790 after 0s"
+    );
+    assert!(!no_listener_stderr.contains("/readyz"));
+
+    let rustbgpd_ready = run_fixture("rustbgpd-txn", 0, 0);
+    assert!(
+        rustbgpd_ready.status.success(),
+        "rustbgpd did not become ready"
+    );
+    let bird_ready = run_fixture("bird", 22, 0);
+    assert!(
+        bird_ready.status.success(),
+        "BIRD startup unexpectedly required /readyz"
+    );
+}
+
+#[test]
 /// Red proof: removing or moving the empty-sample guard after the CSV append
 /// makes this fail, restoring the teardown race's bogus terminal `0,0` row.
 fn rss_sampler_drops_empty_teardown_samples_before_append() {
