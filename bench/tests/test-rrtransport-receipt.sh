@@ -206,6 +206,15 @@ expect_red changed-hash mutate -c 'import pathlib,sys;(pathlib.Path(sys.argv[1])
 [[ $("$runner" --classify-child-exe /expected /expected Z) == exited ]]
 [[ $("$runner" --classify-child-exe /expected /expected absent) == retry_expected_absent ]]
 
+# Exercise the real /proc reader after a process has exited. This goes red if
+# child_identity reverts to Bash's fatal optimized $(<file) reader; scripted
+# observation tests cannot catch shell-level failures while opening procfs.
+sleep 0.01 &
+exited_pid=$!
+wait "$exited_pid"
+[[ ! -e /proc/$exited_pid ]]
+[[ $("$runner" --child-identity-fixture "$exited_pid") == absent ]]
+
 direct_fixture() {
   local name=$1 expected=$2 expected_status=$3 actual status=0 stderr; shift 3
   stderr=$tmp/$name.stderr

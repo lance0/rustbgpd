@@ -128,7 +128,7 @@ classify_child_exe() {
 
 child_identity() {
   local process=$1 stat_line stat_fields
-  stat_line=$(<"/proc/$process/stat") 2>/dev/null || return 1
+  stat_line=$(command cat -- "/proc/$process/stat" 2>/dev/null) || return 1
   stat_line=${stat_line##*) }
   read -r -a stat_fields <<<"$stat_line"
   (( ${#stat_fields[@]} >= 20 )) || return 1
@@ -728,6 +728,15 @@ case ${1:-} in
   --classify-child-exe)
     [[ $# == 4 ]] || exit 2
     classify_child_exe "$2" "$3" "$4"
+    exit
+    ;;
+  --child-identity-fixture)
+    [[ $# == 2 ]] || exit 2
+    if child_identity "$2"; then
+      printf 'present\t%s\n' "$identity_starttime"
+    else
+      echo absent
+    fi
     exit
     ;;
   --sample-direct-rss-observations)
