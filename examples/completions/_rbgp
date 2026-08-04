@@ -3716,7 +3716,7 @@ _rbgp__subcmd__config_commands() {
 'status:Show pending or last confirmed-transaction lifecycle state' \
 'history:List retained config-history rows (newest first)' \
 'rollback:Roll back to an eligible config snapshot (Junos \`rollback N\`)' \
-'effective:Dump the daemon'\''s effective running config (defaults materialized)' \
+'effective:Dump the daemon'\''s effective running config (defaults resolved)' \
 'import:Import a BIRD 2 / FRR / GoBGP config into a rustbgpd config.toml' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
@@ -3758,7 +3758,7 @@ _rbgp__subcmd__config__subcmd__help_commands() {
 'status:Show pending or last confirmed-transaction lifecycle state' \
 'history:List retained config-history rows (newest first)' \
 'rollback:Roll back to an eligible config snapshot (Junos \`rollback N\`)' \
-'effective:Dump the daemon'\''s effective running config (defaults materialized)' \
+'effective:Dump the daemon'\''s effective running config (defaults resolved)' \
 'import:Import a BIRD 2 / FRR / GoBGP config into a rustbgpd config.toml' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
@@ -4513,7 +4513,7 @@ _rbgp__subcmd__help__subcmd__config_commands() {
 'status:Show pending or last confirmed-transaction lifecycle state' \
 'history:List retained config-history rows (newest first)' \
 'rollback:Roll back to an eligible config snapshot (Junos \`rollback N\`)' \
-'effective:Dump the daemon'\''s effective running config (defaults materialized)' \
+'effective:Dump the daemon'\''s effective running config (defaults resolved)' \
 'import:Import a BIRD 2 / FRR / GoBGP config into a rustbgpd config.toml' \
     )
     _describe -t commands 'rbgp help config commands' commands "$@"
