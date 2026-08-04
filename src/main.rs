@@ -2519,48 +2519,72 @@ fn main() -> ExitCode {
         process::exit(1);
     }
 
-    // The v2 locator is config-adjacent and must be resolved before a real
+    // The v2/v3 locator is config-adjacent and must be resolved before a real
     // daemon boot opens, sizes, or parses the candidate.  One-shot validation
     // and diff modes remain read-only and therefore do not inspect or consume
     // pending commit-confirm state.
-    let launch_identity = if !check_only && diff_path.is_none() {
-        Some(
-            confirm_journal::v2::LaunchIdentity::resolve(Path::new(&config_path)).unwrap_or_else(
-                |error| {
-                    eprintln!(
-                        "error: invalid launch config identity for commit-confirm authority: {error}"
-                    );
-                    process::exit(1);
-                },
-            ),
-        )
+    let launch_identities = if !check_only && diff_path.is_none() {
+        let v2 = confirm_journal::v2::LaunchIdentity::resolve(Path::new(&config_path))
+            .unwrap_or_else(|error| {
+                eprintln!(
+                    "error: invalid launch config identity for commit-confirm authority: {error}"
+                );
+                process::exit(1);
+            });
+        let v3 = confirm_journal::v3::LaunchIdentity::resolve(Path::new(&config_path))
+            .unwrap_or_else(|error| {
+                eprintln!(
+                    "error: invalid launch config identity for commit-confirm authority: {error}"
+                );
+                process::exit(1);
+            });
+        Some((v2, v3))
     } else {
         None
     };
     let mut boot_revert_notice = None;
-    let mut accepted = if let Some(identity) = &launch_identity {
-        match identity.boot_revert_check() {
+    let mut accepted = if let Some((v2_identity, v3_identity)) = &launch_identities {
+        match v3_identity.boot_revert_check() {
             Ok(Some(revert)) => {
                 boot_revert_notice = Some(confirm_journal::BootRevertNotice {
                     confirm_id: revert.notice.confirm_id,
                     backup_path: PathBuf::new(),
                     rollback_failed: revert.notice.rollback_failed,
                     redact_paths: true,
-                    journal_cleanup_failed: revert.notice.journal_cleanup_failed,
+                    journal_cleanup_failed: revert.notice.residue_cleanup_failed,
                 });
                 revert.accepted
             }
-            Ok(None) => match AcceptedConfigSnapshot::load(Path::new(&config_path), None) {
-                Ok(snapshot) => Arc::new(snapshot),
-                Err(diagnostic) => {
-                    eprintln!("{diagnostic}");
+            Ok(None) => match v2_identity.boot_revert_check() {
+                Ok(Some(revert)) => {
+                    boot_revert_notice = Some(confirm_journal::BootRevertNotice {
+                        confirm_id: revert.notice.confirm_id,
+                        backup_path: PathBuf::new(),
+                        rollback_failed: revert.notice.rollback_failed,
+                        redact_paths: true,
+                        journal_cleanup_failed: revert.notice.journal_cleanup_failed,
+                    });
+                    revert.accepted
+                }
+                Ok(None) => match AcceptedConfigSnapshot::load(Path::new(&config_path), None) {
+                    Ok(snapshot) => Arc::new(snapshot),
+                    Err(diagnostic) => {
+                        eprintln!("{diagnostic}");
+                        process::exit(1);
+                    }
+                },
+                Err(message) => {
+                    eprintln!(
+                        "error: {message}; locator: {}",
+                        v2_identity.locator_path().display()
+                    );
                     process::exit(1);
                 }
             },
             Err(message) => {
                 eprintln!(
                     "error: {message}; locator: {}",
-                    identity.locator_path().display()
+                    v3_identity.locator_path().display()
                 );
                 process::exit(1);
             }
@@ -2702,7 +2726,9 @@ fn main() -> ExitCode {
     let grpc_server_failed = rt.block_on(run(
         accepted,
         boot_revert_notice,
-        launch_identity.expect("daemon boot resolved launch config identity"),
+        launch_identities
+            .expect("daemon boot resolved launch config identity")
+            .1,
         profiler,
     ));
     shutdown_daemon_runtime(rt);
@@ -2923,7 +2949,7 @@ fn resolve_rib_channel_capacity_from(env: Option<&str>) -> usize {
 async fn run<T>(
     accepted: Arc<AcceptedConfigSnapshot>,
     boot_revert_notice: Option<confirm_journal::BootRevertNotice>,
-    launch_identity: confirm_journal::v2::LaunchIdentity,
+    launch_identity: confirm_journal::v3::LaunchIdentity,
     profiler: Option<T>,
 ) -> bool {
     let mut config = accepted.config();
@@ -3212,12 +3238,12 @@ async fn run<T>(
         }
         if notice.journal_cleanup_failed {
             warn!(
-                "commit-confirm boot revert reached durable terminal locator removal, but exact journal residue cleanup failed"
+                "commit-confirm boot revert reached durable terminal locator removal, but exact pending residue cleanup failed"
             );
         }
         // A `BootRevertNotice` exists only after the revert is terminal. V1
-        // still requires journal consumption; v2 becomes terminal at durable
-        // locator absence and reports later journal cleanup as a warning.
+        // still requires journal consumption; v2/v3 become terminal at durable
+        // locator absence and report later pending cleanup as a warning.
         metrics.record_config_transaction_lifecycle("boot_revert", "success");
     }
     let router_id: Ipv4Addr = config.global.router_id.parse().unwrap_or_else(|e| {
@@ -4396,7 +4422,7 @@ async fn run<T>(
                 .clone(),
         )
         .with_preloaded_planner(peer_mgr_internal_tx.clone())
-        .with_confirm_v2_launch(launch_identity);
+        .with_confirm_v3_launch(launch_identity);
     // Process-wide availability gate (LAN-286): BGP-listener bind failure
     // turns readiness red; coordinated shutdown turns readiness red AND
     // stops admitting persisted config mutations and inbound BGP sessions.

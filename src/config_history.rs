@@ -48,8 +48,24 @@ pub struct MixedHistoryEntry {
     row: v2::StoredRow,
 }
 
-pub fn record_accepted(dir: &Path, snapshot: &AcceptedConfigSnapshot) -> io::Result<bool> {
-    v2::record_v2(dir, snapshot.normalized_toml(), stored_manifest(snapshot))
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RecordOutcome {
+    Recorded,
+    Deduplicated,
+    SkippedOversize,
+}
+
+pub fn record_accepted(dir: &Path, snapshot: &AcceptedConfigSnapshot) -> io::Result<RecordOutcome> {
+    if snapshot.normalized_toml().len() > v2::MAX_TOML {
+        return Ok(RecordOutcome::SkippedOversize);
+    }
+    v2::record_v2(dir, snapshot.normalized_toml(), stored_manifest(snapshot)).map(|recorded| {
+        if recorded {
+            RecordOutcome::Recorded
+        } else {
+            RecordOutcome::Deduplicated
+        }
+    })
 }
 
 pub(crate) fn stored_manifest(snapshot: &AcceptedConfigSnapshot) -> v2::Manifest {
@@ -525,6 +541,69 @@ path = "customers.txt"
         assert_eq!(envelope.manifest.datasets.len(), 1);
         assert_eq!(envelope.manifest.datasets[0].name, "customers");
         assert_eq!(envelope.manifest.datasets[0].kind, v2::DatasetKind::Asn);
+    }
+
+    #[test]
+    fn record_outcome_is_explicit_and_oversize_never_mutates_history() {
+        // Destructive proof: routing oversize through `record_v2`, reporting
+        // it as deduplicated, or evicting before the size check changes either
+        // the explicit result or the byte-identical retained roster.
+        let dir = tempfile::tempdir().unwrap();
+        let small_toml = crate::test_support::tier_authorized_uds_test_config(
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+[global.telemetry]
+log_format = "json"
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+"#,
+        );
+        let small = AcceptedConfigSnapshot::from_config_for_test(
+            crate::config::Config::load_toml_with_diagnostics(&small_toml, "small").unwrap(),
+        );
+        assert_eq!(
+            record_accepted(dir.path(), &small).unwrap(),
+            RecordOutcome::Recorded
+        );
+        assert_eq!(
+            record_accepted(dir.path(), &small).unwrap(),
+            RecordOutcome::Deduplicated
+        );
+        let roster = || {
+            let mut entries = fs::read_dir(dir.path())
+                .unwrap()
+                .map(|entry| {
+                    let entry = entry.unwrap();
+                    (entry.file_name(), fs::read(entry.path()).unwrap())
+                })
+                .collect::<Vec<_>>();
+            entries.sort_by(|left, right| left.0.cmp(&right.0));
+            entries
+        };
+        let roster_before = roster();
+
+        let large_toml = small_toml.replacen(
+            "remote_asn = 65002\n",
+            &format!(
+                "remote_asn = 65002\ndescription = {:?}\n",
+                "x".repeat(v2::MAX_TOML + 1)
+            ),
+            1,
+        );
+        let large = AcceptedConfigSnapshot::from_config_for_test(
+            crate::config::Config::load_toml_with_diagnostics(&large_toml, "oversize").unwrap(),
+        );
+        assert!(large.normalized_toml().len() > v2::MAX_TOML);
+        assert_eq!(
+            record_accepted(dir.path(), &large).unwrap(),
+            RecordOutcome::SkippedOversize
+        );
+        let roster_after = roster();
+        assert_eq!(roster_after, roster_before);
     }
 
     /// Red proof: removing any of the three exact equality checks in
