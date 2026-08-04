@@ -644,8 +644,9 @@ run_cell() {
     local cell=$1
     local cdir="$ART/$cell"
     local run="/tmp/irr-$cell"
-    rm -rf "$run"
-    mkdir -p "$cdir" "$run"
+    rm -rf -- "$run" || return 1
+    mkdir -p "$cdir" || return 1
+    mkdir -m 0700 -- "$run" || return 1
     local daemon_pid="" daemon_start="" container="" reload_cmd="" pid_arg="" topology_mode="" barrier="" final_barrier="" final_acked=false
     local live a b entries generator_cell=$cell
     CELL_SCENARIO_SHA256=""

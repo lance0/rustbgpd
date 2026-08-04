@@ -751,7 +751,8 @@ fn irr_reload_manifest_seals_a_cell_independent_dataset_digest() {
 /// fixture pass; changing the default/control rosters or their explicit mode
 /// flags fails the executed dry-protocol assertions. Removing the pre-trigger
 /// topology call, quiet double-sample, source fence, identity fence, or final
-/// immutable seal fails the corresponding structural assertion below.
+/// immutable seal or owner-only runtime-directory creation fails the
+/// corresponding structural assertion below.
 fn irr_reload_counterbalanced_receipt_protocol_is_load_bearing() {
     let root = env!("CARGO_MANIFEST_DIR");
     let runner = format!("{root}/bench/scale/irrreload/run-irr-reload.sh");
@@ -894,6 +895,21 @@ fn irr_reload_counterbalanced_receipt_protocol_is_load_bearing() {
     assert!(
         script.contains("if [ -z \"$SMOKE\" ]; then\n    if [ -n \"${SKIP_PREFLIGHT:-}\" ]; then"),
         "every full campaign, including rustbgpd-txn, must enter the preflight gate"
+    );
+    let private_runtime = "rm -rf -- \"$run\" || return 1\n    mkdir -p \"$cdir\" || return 1\n    mkdir -m 0700 -- \"$run\" || return 1";
+    let private_runtime_pos = script
+        .find(private_runtime)
+        .expect("runtime directory must be atomically created owner-only");
+    let generation_pos = script
+        .find("gen_scenario rustbgpd")
+        .expect("rustbgpd scenario generation");
+    assert!(
+        private_runtime_pos < generation_pos,
+        "runtime directory must be private before generation and daemon start"
+    );
+    assert!(
+        !script.contains("mkdir -p \"$cdir\" \"$run\""),
+        "caller umask must not control runtime-state directory permissions"
     );
     let load_gate = script
         .split_once("load_gate() {")
