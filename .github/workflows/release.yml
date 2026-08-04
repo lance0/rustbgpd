@@ -3,6 +3,20 @@ name: Release Binaries
 on:
   push:
     tags: ["v*"]
+  # Dry-run dispatch: exercise every job (version gate, tests, both
+  # matrix builds, packaging, assertions, checksums, artifact upload)
+  # without publishing anything. Workflow edits otherwise meet their
+  # first execution on a live tag push, costing tag delete/recreate
+  # cycles when they fail. The publish step is guarded on the push
+  # event itself, so a dispatch run can never create a release
+  # regardless of the input value.
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build and verify everything; publish nothing"
+        type: boolean
+        required: true
+        default: true
 
 # Read-only default; the `release` job alone escalates to the
 # contents scope needed to create the release.
@@ -21,8 +35,12 @@ jobs:
       - name: Assert tag matches workspace version
         run: |
           set -euo pipefail
-          tag_version="${GITHUB_REF_NAME#v}"
           manifest_version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml","rb"))["workspace"]["package"]["version"])')"
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "dry-run dispatch: no tag ref exists, skipping the tag/version equality check; workspace version is ${manifest_version}"
+            exit 0
+          fi
+          tag_version="${GITHUB_REF_NAME#v}"
           if [ "$tag_version" != "$manifest_version" ]; then
             echo "::error file=Cargo.toml::tag ${GITHUB_REF_NAME} does not match [workspace.package] version ${manifest_version}; refusing to publish"
             exit 1
@@ -211,7 +229,14 @@ jobs:
           echo "0660ca602b2d2d2ae4781a06c692b3eeb9d437ffea05b831d76e41f4a3188783  /tmp/nfpm.tgz" | sha256sum -c
           tar -C /tmp -xzf /tmp/nfpm.tgz nfpm
           deb_arch=${{ matrix.suffix == 'linux-amd64' && 'amd64' || 'arm64' }}
-          scripts/build-packages.sh staging "$deb_arch" "${GITHUB_REF_NAME#v}" dist /tmp/nfpm
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            # No tag ref in a dry run; package as the workspace version.
+            # (sed, not python3/tomllib: bullseye's python3 is 3.9.)
+            version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n1)"
+          else
+            version="${GITHUB_REF_NAME#v}"
+          fi
+          scripts/build-packages.sh staging "$deb_arch" "$version" dist /tmp/nfpm
 
       - name: Compute per-arch checksums
         run: |
@@ -258,7 +283,13 @@ jobs:
         # list boundaries) so the release page renders cleanly.
         run: |
           set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            # No tag ref in a dry run; extract the workspace version's
+            # section so the CHANGELOG gate is exercised too.
+            version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml","rb"))["workspace"]["package"]["version"])')"
+          else
+            version="${GITHUB_REF_NAME#v}"
+          fi
           awk -v v="$version" '
             $0 ~ "^## \\[" v "\\]" { in_section=1; print; next }
             in_section && /^## \[/ { exit }
@@ -274,6 +305,11 @@ jobs:
           cat release-notes.md
 
       - name: Create GitHub Release
+        # The only externally visible step in the workflow. Guarded on
+        # the push event itself (not the dry_run input) so a dispatch
+        # run can never publish: without a tag ref, action-gh-release
+        # would otherwise act on the branch ref.
+        if: github.event_name == 'push'
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3
         with:
           body_path: release-notes.md
