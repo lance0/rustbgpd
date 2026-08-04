@@ -32,12 +32,17 @@ const LOCATOR_SUFFIX: &str = ".commit-confirm-locator.json";
 pub(crate) const RAW_FILE_NAME: &str = "commit-confirm-v3-prior.toml";
 pub(crate) const METADATA_FILE_NAME: &str = "commit-confirm-v3-metadata.json";
 
+const fn normalized_prior_length_within_limit(length: usize, limit: usize) -> bool {
+    length <= limit
+}
+
 /// Stable lexical identity captured before the candidate config is opened.
 #[derive(Clone, Debug)]
 pub(crate) struct LaunchIdentity {
     lexical_config: PathBuf,
     #[cfg(test)]
     fail_publish_step: Option<PublishStep>,
+    max_raw_bytes: usize,
 }
 
 impl LaunchIdentity {
@@ -56,7 +61,16 @@ impl LaunchIdentity {
             lexical_config,
             #[cfg(test)]
             fail_publish_step: None,
+            max_raw_bytes: MAX_RAW_BYTES,
         })
+    }
+
+    pub(crate) fn normalized_prior_limit_bytes(&self) -> usize {
+        self.max_raw_bytes
+    }
+
+    pub(crate) fn accepts_normalized_prior_length(&self, length: usize) -> bool {
+        normalized_prior_length_within_limit(length, self.normalized_prior_limit_bytes())
     }
 
     pub(crate) fn locator_path(&self) -> PathBuf {
@@ -185,6 +199,12 @@ impl LaunchIdentity {
         self
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_max_raw_bytes_for_test(mut self, max_raw_bytes: usize) -> Self {
+        self.max_raw_bytes = max_raw_bytes;
+        self
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "one ordered raw-metadata-locator durability transaction"
@@ -206,10 +226,10 @@ impl LaunchIdentity {
         }
         validate_confirm_id(confirm_id).map_err(PublishError::ordinary)?;
         let raw_bytes = prior.normalized_toml().as_bytes();
-        if raw_bytes.len() > MAX_RAW_BYTES {
+        if !self.accepts_normalized_prior_length(raw_bytes.len()) {
             return Err(PublishError::ordinary(limit(
                 "raw normalized prior",
-                MAX_RAW_BYTES,
+                self.normalized_prior_limit_bytes(),
             )));
         }
         let raw_sha256: [u8; 32] = Sha256::digest(raw_bytes).into();
@@ -1446,7 +1466,16 @@ log_format = "json"
     #[test]
     fn file_metadata_and_raw_caps_are_exact() {
         // Destructive proof: changing `>` to `>=`, dropping owner/mode/type,
-        // or lifting the raw cap changes one of these exact boundary verdicts.
+        // lifting the raw cap, or bypassing the shared prior-length predicate
+        // changes one of these exact boundary verdicts without a huge allocation.
+        assert!(normalized_prior_length_within_limit(
+            MAX_RAW_BYTES,
+            MAX_RAW_BYTES
+        ));
+        assert!(!normalized_prior_length_within_limit(
+            MAX_RAW_BYTES + 1,
+            MAX_RAW_BYTES
+        ));
         let owner = nix::unistd::geteuid().as_raw();
         assert!(
             validate_file_metadata_values(

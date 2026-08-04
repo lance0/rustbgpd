@@ -740,8 +740,9 @@ fn format_unix_utc(unix_seconds: u64) -> String {
 }
 
 /// Dump the daemon's effective running config: normalized TOML with
-/// defaults materialized and secrets redacted server-side. `--json`
-/// re-renders the same document as JSON; the daemon only ships TOML.
+/// defaults resolved, selected default-empty policy lists omitted, and secrets
+/// redacted server-side. `--json` re-renders the same document as JSON; the
+/// daemon only ships TOML.
 pub async fn effective(connection: Connection, json: bool) -> Result<(), CliError> {
     let mut client =
         ConfigServiceClient::with_interceptor(connection.channel(), connection.interceptor());

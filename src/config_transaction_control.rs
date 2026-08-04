@@ -665,6 +665,15 @@ impl ConfigTransactionController {
             .accepted_prior_snapshot()
             .await
             .map_err(ConfigTransactionApplyError::Unavailable)?;
+        if let Some(launch) = &self.confirm_v3_launch {
+            let prior_bytes = prior_snapshot.normalized_toml().len();
+            if !launch.accepts_normalized_prior_length(prior_bytes) {
+                return Err(ConfigTransactionApplyError::FailedPrecondition(format!(
+                    "refusing confirmed apply: current accepted normalized config is {prior_bytes} bytes, exceeding the v3 commit-confirm prior limit of {} bytes; apply the candidate without confirmation or reduce the canonical config size",
+                    launch.normalized_prior_limit_bytes()
+                )));
+            }
+        }
         let rollback_config = prior_snapshot.config();
         // V3 keeps this Arc as the sole live owner of the prior bytes. Frozen
         // v1/v2 test lanes retain their historical String representation.
@@ -5252,6 +5261,88 @@ remote_asn = 65010
         assert!(!peer_apply_seen.load(std::sync::atomic::Ordering::SeqCst));
         assert!(config_rx.try_recv().is_err());
         assert_eq!(std::fs::read_to_string(config_path).unwrap(), previous);
+    }
+
+    #[tokio::test]
+    async fn oversized_v3_prior_is_a_precondition_failure_before_publication_or_mutation() {
+        // Destructive proof: deleting the controller preflight changes this
+        // stable failure to INTERNAL in the publisher; moving it after
+        // publication or apply makes the empty-authority or mutation
+        // assertions red.
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let state_dir = root.path().join("state");
+        std::fs::create_dir(&state_dir).unwrap();
+        std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let config_path = root.path().join("rustbgpd.toml");
+        let previous = base_toml("");
+        std::fs::write(&config_path, &previous).unwrap();
+        let accepted = Arc::new(AcceptedConfigSnapshot::load(&config_path, None).unwrap());
+        let prior_bytes = accepted.normalized_toml().len();
+        let limit = prior_bytes - 1;
+        let (_accepted_tx, accepted_rx) = watch::channel(accepted);
+        let (peer_tx, mut peer_rx) = mpsc::channel(8);
+        let peer_mutation_seen = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let seen = Arc::clone(&peer_mutation_seen);
+        let runtime = previous.clone();
+        let peer_task = tokio::spawn(async move {
+            while let Some(command) = peer_rx.recv().await {
+                match command {
+                    PeerManagerCommand::RuntimeConfigSnapshot { reply } => {
+                        let _ =
+                            reply.send(Ok(rustbgpd_api::peer_types::RuntimeConfigSnapshotReply {
+                                toml: runtime.clone(),
+                                rpol_files: Vec::new(),
+                                rpol: rustbgpd_policy::rpol::RpolPolicySet::default(),
+                            }));
+                    }
+                    _ => {
+                        seen.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                }
+            }
+        });
+        let (config_tx, mut config_rx) = mpsc::channel(8);
+        let journal = state_dir.join(crate::confirm_journal::JOURNAL_FILE_NAME);
+        let launch = crate::confirm_journal::v3::LaunchIdentity::resolve(&config_path)
+            .unwrap()
+            .with_max_raw_bytes_for_test(limit);
+        let locator = launch.locator_path();
+        let controller = ConfigTransactionController::new_accepted(
+            FibTableControlDeps {
+                confirm_journal_path: Some(journal),
+                ..deps_value(None, peer_tx, Some(config_tx), Vec::new())
+            },
+            BgpMetrics::new(),
+            accepted_rx,
+        )
+        .with_confirm_v3_launch(launch);
+
+        let error = controller
+            .clone()
+            .apply(confirmed_dynamic_request(
+                dynamic_candidate_toml(),
+                "oversized-prior",
+                60,
+            ))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            ConfigTransactionApplyError::FailedPrecondition(ref message)
+                if message.contains(&format!("{prior_bytes} bytes"))
+                    && message.contains(&format!("limit of {limit} bytes"))
+                    && message.contains("without confirmation")
+        ));
+        assert_eq!(std::fs::read_to_string(&config_path).unwrap(), previous);
+        assert!(!locator.exists());
+        assert!(std::fs::read_dir(&state_dir).unwrap().next().is_none());
+        drop(controller);
+        assert!(config_rx.recv().await.is_none());
+        peer_task.await.unwrap();
+        assert!(!peer_mutation_seen.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     #[tokio::test]

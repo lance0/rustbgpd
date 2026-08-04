@@ -2359,9 +2359,10 @@ pub const REDACTED_SECRET: &str = "<redacted>";
 /// Header the daemon writes at the top of every config file it maintains.
 ///
 /// A runtime mutation rewrites the operator's file in canonical form: the
-/// comments and formatting they wrote are gone and defaulted fields are
-/// materialized. The file itself is the only place that fact is guaranteed to
-/// reach whoever opens it next, so it says so.
+/// comments and formatting they wrote are gone, defaults are canonicalized,
+/// and selected default-empty collections may be omitted. The file itself is
+/// the only place that fact is guaranteed to reach whoever opens it next, so
+/// it says so.
 ///
 /// Deliberately carries no version and no timestamp — either would change the
 /// bytes on every write, defeating the applied-config history's content-hash
@@ -2369,9 +2370,9 @@ pub const REDACTED_SECRET: &str = "<redacted>";
 pub const PERSISTED_CONFIG_HEADER: &str = "\
 # This file is maintained by rustbgpd. Runtime configuration changes
 # rewrite it in canonical form: comments and formatting from the
-# previous file are not preserved, and defaulted fields are written
-# out explicitly. Keep an annotated copy under version control if you
-# need one.
+# previous file are not preserved; defaults are canonicalized and
+# default-empty collections may be omitted. Keep an annotated copy
+# under version control if you need one.
 ";
 
 /// The exact document the daemon writes for `config`:
