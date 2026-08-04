@@ -133,6 +133,7 @@ consequences so future contributors understand *why*, not just *what*.
 | [0122](0122-compatibility-debt-inventory.md) | Compatibility-debt inventory and removal schedule | Proposed | 2026-08-03 |
 | [0123](0123-aspa-v27-mitigation-and-retention.md) | ASPA draft-v27 mitigation requires lossless retention | Proposed (behavior activation NO-GO until retention gates pass) | 2026-08-03 |
 | [0124](0124-bounded-config-history-retention.md) | Bounded config-history retention for oversized snapshots | Proposed (owner decisions recorded; implementation pending) | 2026-08-04 |
+| [0125](0125-v1-stability-contract.md) | v1.0 stability contract | Proposed (decision draft for the project owner; nothing freezes until Accepted) | 2026-08-04 |
 
 ## Template
 
