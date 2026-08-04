@@ -2377,6 +2377,8 @@ pub const PERSISTED_CONFIG_HEADER: &str = "\
 
 /// The exact document the daemon writes for `config`:
 /// [`PERSISTED_CONFIG_HEADER`] followed by the canonical TOML rendering.
+/// Persisted `HashMap` fields borrow and sort their entries during serde
+/// output, so equivalent runtime maps produce byte-identical documents.
 ///
 /// Every durable config write and every applied-config history entry goes
 /// through here, so a new persist call site cannot omit the header.
