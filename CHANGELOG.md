@@ -14,6 +14,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - ASPA-invalid policy rejections retain the first proven `NotProviderPlus` hop;
   cache refresh emits one bounded top-eight summary without changing routing.
 
+- Additive `BGP_EVENT_TYPE_PEER_ADDED` / `BGP_EVENT_TYPE_PEER_REMOVED` session
+  event types, emitted when a peer is authoritatively added to or removed from
+  the managed peer set. They flow through `WatchEvents`, `ListSessionEvents`,
+  and `SubscribeFromEvent`, and `rbgp watch` accepts and renders the
+  `peer_added` / `peer_removed` spellings. `PeerAdded` carries empty
+  `old_state` and `idle` `new_state`; existing event types and numbering are
+  unchanged.
+
 - Outside-v1 `StreamPlanConfigTransaction` and `StreamApplyConfigTransaction`
   gRPC ingress for
   large config candidates. It requires an authenticated listener, accepts
