@@ -24,7 +24,6 @@ fn emitted_1000_peer_scenario_is_all_ebgp_and_daemon_valid() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-
     let config_path = dir.path().join("config.toml");
     let config_text = std::fs::read_to_string(&config_path).expect("read config");
     let config: toml::Value = toml::from_str(&config_text).expect("parse generated TOML");
@@ -132,7 +131,7 @@ fn irr_reload_campaign_seals_resume_rows_and_rss_evidence() {
         "rustbgpd-txn must use a separate measured campaign",
         "TXN_MAX_CANDIDATE_BYTES",
         "if [ \"$candidate_bytes\" -gt \"$TXN_MAX_CANDIDATE_BYTES\" ]; then",
-        "candidate exceeds the ${TXN_MAX_CANDIDATE_BYTES}-byte tonic request budget",
+        "candidate exceeds the ${TXN_MAX_CANDIDATE_BYTES}-byte streamed request budget",
         "cleanup_active_processes",
         "terminate_process_group \"$pid\"",
         "ACTIVE_HARNESS_PID",
@@ -470,17 +469,19 @@ fn run_irr_protocol(args: &[&str], smoke: bool) -> String {
 }
 
 #[test]
-/// Red proof: restoring the measured four-cell default makes the first
-/// assertion fail; removing the separate bounded transaction preset makes
-/// the second fail. The smoke assertion keeps all four plumbing paths gated.
-fn irr_reload_protocol_separates_full_scale_from_bounded_transaction() {
+/// Red proof: shrinking the measured transaction path or admitting it into the
+/// cross-daemon table fails these exact protocol assertions. Smoke retains the
+/// explicit ten-member plumbing proof.
+fn irr_reload_protocol_separates_full_transaction_from_smoke() {
     let measured = run_irr_protocol(&[], false);
     assert!(measured.contains("cells=rustbgpd-sighup,bird,openbgpd\n"));
     assert!(measured.contains("shape=320,183040,1000,40000\n"));
 
     let transaction = run_irr_protocol(&["rustbgpd-txn"], false);
     assert!(transaction.contains("cells=rustbgpd-txn\n"));
-    assert!(transaction.contains("shape=10,5720,1000,12000\n"));
+    assert!(transaction.contains("campaign_kind=full-transaction\n"));
+    assert!(transaction.contains("shape=320,183040,1000,40000\n"));
+    assert!(transaction.contains("txn_max_candidate_bytes=402653184\n"));
 
     let smoke = run_irr_protocol(&[], true);
     assert!(smoke.contains("cells=rustbgpd-sighup,rustbgpd-txn,bird,openbgpd\n"));
@@ -505,99 +506,81 @@ fn irr_reload_protocol_separates_full_scale_from_bounded_transaction() {
 }
 
 #[test]
-/// Red proof: increasing the bounded preset beyond tonic's default message
-/// ceiling fails the real Plan/Apply protobuf encoded-size assertions;
-/// selecting a seed/shape with no real IRR-list delta fails the changed-member
-/// assertion.
-fn irr_reload_bounded_transaction_preset_fits_tonic_request() {
-    use prost::Message;
-    use rustbgpd_api::proto::{ApplyConfigTransactionRequest, PlanConfigTransactionRequest};
-
+/// A fake CLI accepts Apply only when txn-apply passes the exact UUID returned
+/// by Plan. Presence-only checks or an automatically replanned Apply turn red.
+fn irr_reload_transaction_helper_uses_exact_streamed_plan_token() {
+    use std::os::unix::fs::PermissionsExt as _;
     let root = env!("CARGO_MANIFEST_DIR");
-    let generator = format!("{root}/bench/scale/reloadstall/gen-irr-scenario.py");
-    let protocol = run_irr_protocol(&["rustbgpd-txn"], false);
-    let shape = protocol
-        .lines()
-        .find_map(|line| line.strip_prefix("shape="))
-        .expect("resolved transaction shape")
-        .split(',')
-        .collect::<Vec<_>>();
-    assert_eq!(shape.len(), 4);
-    let candidate_budget = protocol
-        .split_whitespace()
-        .find_map(|field| field.strip_prefix("txn_max_candidate_bytes="))
-        .expect("resolved transaction message budget")
-        .parse::<u64>()
-        .expect("numeric transaction message budget");
+    let helper = format!("{root}/bench/scale/irrreload/txn-apply.sh");
     let dir = tempfile::tempdir().expect("tempdir");
-    let output = std::process::Command::new("python3")
-        .args([&generator, "rustbgpd-txn", shape[0], shape[1]])
-        .arg(dir.path())
-        .args([
-            "--port",
-            "1790",
-            "--seed",
-            "61",
-            "--min-list",
-            shape[2],
-            "--max-list",
-            shape[3],
-            "--changed-fraction",
-            "0.1",
-        ])
-        .output()
-        .expect("generate bounded transaction scenario");
-    assert!(output.status.success());
-    let manifest: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(dir.path().join("manifest.json")).expect("read manifest"),
+    let fake = dir.path().join("rbgp");
+    std::fs::write(
+        &fake,
+        r#"#!/usr/bin/env bash
+set -u
+if [[ " $* " == *" config plan "* ]]; then
+  printf '%s\n' '{"status":"committable","runtime_snapshot_token":"kv2:0123456789abcdef:8","plan_token":"12345678-1234-4123-8123-123456789abc"}'
+  exit 2
+fi
+if [[ " $* " == *" config apply "* ]]; then
+  exact=false
+  while [ $# -gt 0 ]; do
+    if [ "$1" = --plan-token ] && [ "${2:-}" = 12345678-1234-4123-8123-123456789abc ]; then exact=true; fi
+    shift
+  done
+  [ "$exact" = true ] || exit 9
+  printf '%s\n' '{"status":"committable","confirmation":null}'
+  exit 0
+fi
+exit 8
+"#,
     )
-    .expect("parse manifest");
-    assert_eq!(manifest["changed_members"].as_array().unwrap().len(), 1);
-    const TONIC_DECODE_LIMIT: usize = 4 * 1024 * 1024;
-    const SNAPSHOT_TOKEN: &str = "kv2:0123456789abcdef:8";
-    assert_eq!(SNAPSHOT_TOKEN.len(), 22);
-    for candidate in ["config.toml", "candidate.toml", "gen-a.toml", "gen-b.toml"] {
-        let bytes = manifest["file_bytes"][candidate]
-            .as_u64()
-            .expect("candidate byte count");
-        assert!(bytes <= candidate_budget, "{candidate}: {bytes}");
-        let candidate_toml = "x".repeat(bytes as usize);
-        let plan = PlanConfigTransactionRequest {
-            candidate_toml: candidate_toml.clone(),
-            expected_runtime_snapshot_token: String::new(),
-        };
-        let apply = ApplyConfigTransactionRequest {
-            candidate_toml,
-            expected_runtime_snapshot_token: SNAPSHOT_TOKEN.to_owned(),
-            client_request_id: String::new(),
-            comment: String::new(),
-            confirm_id: String::new(),
-            confirm_timeout_seconds: 0,
-        };
+    .expect("write fake rbgp");
+    let mut permissions = std::fs::metadata(&fake).unwrap().permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&fake, permissions).unwrap();
+    let candidate = dir.path().join("candidate.toml");
+    std::fs::write(
+        &candidate,
+        "[global]\nasn = 65000\nrouter_id = \"192.0.2.1\"\n",
+    )
+    .unwrap();
+    let config = dir.path().join("config.toml");
+    let evidence = dir.path().join("evidence");
+    let daemon_log = dir.path().join("daemon.log");
+    let pid = std::process::id().to_string();
+    let output = std::process::Command::new("bash")
+        .arg(&helper)
+        .args([
+            fake.as_os_str(),
+            std::ffi::OsStr::new("unix:///tmp/fake.sock"),
+            candidate.as_os_str(),
+            config.as_os_str(),
+            dir.path().as_os_str(),
+            evidence.as_os_str(),
+            std::ffi::OsStr::new(&pid),
+            daemon_log.as_os_str(),
+        ])
+        .env("TXN_SMOKE", "1")
+        .output()
+        .expect("run transaction helper");
+    assert!(
+        output.status.success(),
+        "helper failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let helper_source = std::fs::read_to_string(&helper).expect("read transaction helper");
+    for guard in [
+        "trap cleanup_pending EXIT",
+        "active_confirm_id=$confirm_id",
+        "active_confirm_id=\nterminal=",
+    ] {
         assert!(
-            plan.encoded_len() <= TONIC_DECODE_LIMIT,
-            "{candidate}: plan"
-        );
-        assert!(
-            apply.encoded_len() <= TONIC_DECODE_LIMIT,
-            "{candidate}: apply"
+            helper_source.contains(guard),
+            "missing pending cleanup guard: {guard}"
         );
     }
-    let at_budget = "x".repeat(candidate_budget as usize);
-    let exact_apply = ApplyConfigTransactionRequest {
-        candidate_toml: at_budget,
-        expected_runtime_snapshot_token: SNAPSHOT_TOKEN.to_owned(),
-        client_request_id: String::new(),
-        comment: String::new(),
-        confirm_id: String::new(),
-        confirm_timeout_seconds: 0,
-    };
-    assert_eq!(exact_apply.encoded_len(), TONIC_DECODE_LIMIT);
-    let over_limit = ApplyConfigTransactionRequest {
-        candidate_toml: "x".repeat(candidate_budget as usize + 1),
-        ..exact_apply
-    };
-    assert_eq!(over_limit.encoded_len(), TONIC_DECODE_LIMIT + 1);
 
     let runner = format!("{root}/bench/scale/irrreload/run-irr-reload.sh");
     let rejected = std::process::Command::new("bash")
@@ -606,14 +589,14 @@ fn irr_reload_bounded_transaction_preset_fits_tonic_request() {
         .env("DRY_RUN_PROTOCOL", "1")
         .env(
             "TXN_MAX_CANDIDATE_BYTES",
-            (candidate_budget + 1).to_string(),
+            (384_u64 * 1024 * 1024 + 1).to_string(),
         )
         .output()
         .expect("run over-limit protocol");
     assert_eq!(rejected.status.code(), Some(2));
     assert!(
         String::from_utf8_lossy(&rejected.stderr)
-            .contains("TXN_MAX_CANDIDATE_BYTES exceeds the safe apply-request ceiling")
+            .contains("TXN_MAX_CANDIDATE_BYTES exceeds the streamed candidate ceiling")
     );
 }
 
@@ -878,14 +861,14 @@ fn irr_reload_counterbalanced_receipt_protocol_is_load_bearing() {
 
     let script = std::fs::read_to_string(&runner).expect("read runner");
     assert!(
-        script.lines().count() <= 950,
+        script.lines().count() <= 1_050,
         "runner parsing belongs in Python"
     );
     for guard in [
         "RELOADSTALL_PRE_CHURN_EVIDENCE_DIR=\"$barrier\"",
         "RELOADSTALL_EVIDENCE_DIR=\"$final_barrier\"",
         "jq -cS . | sha256sum",
-        "320,183040,1000,40000,61,4,0.1,1790,30,4194275,7200,600,8",
+        "320,183040,1000,40000,61,4,0.1,1790,30,402653184,7200,600,8",
         "capture_topology \"$topology_mode\" \"$cdir\" \"$run\" \"$hpid\" \"$barrier\"",
         "ack_pre_churn \"$barrier\" true \"$cdir\"",
         "--peers \"$N_MEMBERS\" --total \"$TOTAL_PREFIXES\"",
@@ -894,14 +877,33 @@ fn irr_reload_counterbalanced_receipt_protocol_is_load_bearing() {
         "rm -f \"$cdir/topology.json\" \"$cdir\"/metrics-{1,2,3}.prom",
         "bind_first_trigger \"$cdir\"",
         "full measured campaigns require a clean HEAD exactly at origin/main",
-        "printf 'sample\\tepoch_s\\tload1\\n'",
+        "printf 'sample\\tepoch_s\\tload1\\tpswpin\\tpswpout",
         "[ \"$sample\" -gt 2 ] || sleep 30",
         "daemon PID/start identity changed",
+        "transactions/cycles.jsonl transactions/lifecycle.json",
+        "txn-lifecycle.sh",
+        "shlex.join(sys.argv[1:])",
+        "env TXN_SMOKE=1",
+        "pswpin\\tpswpout\\tport1790_free\\tport9179_free\\tdisk_available_kib",
+        "[ \"$disk_kib\" -ge $((40 * 1024 * 1024)) ]",
         "find . -type f ! -name SHA256SUMS",
         "chmod -R a-w \"$ART\"",
     ] {
         assert!(script.contains(guard), "missing protocol guard: {guard}");
     }
+    assert!(
+        script.contains("if [ -z \"$SMOKE\" ]; then\n    if [ -n \"${SKIP_PREFLIGHT:-}\" ]; then"),
+        "every full campaign, including rustbgpd-txn, must enter the preflight gate"
+    );
+    let load_gate = script
+        .split_once("load_gate() {")
+        .and_then(|(_, rest)| rest.split_once("capture_topology() {"))
+        .map(|(body, _)| body)
+        .expect("load_gate body must remain structurally inspectable");
+    assert!(
+        !load_gate.contains("TXN_ONLY"),
+        "full transaction campaigns must not bypass quiet-host sampling"
+    );
 }
 
 #[test]

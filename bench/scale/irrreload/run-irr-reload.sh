@@ -8,8 +8,8 @@
 #   rustbgpd-sighup  bare release binary; rs-config-render-derived .rpol
 #                    member policy; SIGHUP parse-then-swap reloads
 #   rustbgpd-txn     bare release binary; same dataset as inline
-#                    [policy.definitions] chains; gRPC `rbgp config
-#                    plan`+`apply` transactional reloads (txn-apply.sh)
+#                    [policy.definitions] chains; streamed Plan + explicit
+#                    plan-token Apply + commit-confirm (txn-apply.sh)
 #   bird             BIRD 3.3.x in docker --network=host; `birdc configure`
 #   openbgpd         OpenBGPD 9.x in docker --network=host; `bgpctl reload`
 #
@@ -36,6 +36,7 @@ HARNESS="$RSTALL/target/release/reloadstall"
 GEN="$RSTALL/gen-irr-scenario.py"
 SAMPLER="$REPO/bench/scale/matrix/rss-sampler.sh"
 TXN_APPLY="$REPO/bench/scale/irrreload/txn-apply.sh"
+TXN_LIFECYCLE="$REPO/bench/scale/irrreload/txn-lifecycle.sh"
 VERIFY="$REPO/bench/scale/irrreload/verify-receipt.py"
 RBGP="$REPO/target/release/rbgp"
 RENDER="$REPO/target/release/rs-config-render"
@@ -81,18 +82,6 @@ if [ -n "$SMOKE" ]; then
     CONTROL_SECS="${CONTROL_SECS:-5}"
     CELL_TIMEOUT="${CELL_TIMEOUT:-900}"
     COOL_DOWN=5
-elif [ "$TXN_ONLY" = true ]; then
-    # The transaction candidate is carried in one tonic request. This
-    # separate representative shape stays below the default 4 MiB decode
-    # ceiling; the runner also checks the exact generated protobuf payload.
-    N_MEMBERS="${N_MEMBERS:-10}"
-    TOTAL_PREFIXES="${TOTAL_PREFIXES:-5720}"
-    MIN_LIST="${MIN_LIST:-1000}"
-    MAX_LIST="${MAX_LIST:-12000}"
-    RELOADS="${RELOADS:-4}"
-    CONTROL_SECS="${CONTROL_SECS:-30}"
-    CELL_TIMEOUT="${CELL_TIMEOUT:-7200}"
-    COOL_DOWN=300
 else
     # The measured shape: 320 members, 572 announced /24s each (the IXP
     # matrix per-member slice), IRR filter lists log-uniform 1k-40k entries.
@@ -117,26 +106,24 @@ cleanup_preflight_log() { [ -z "$PREFLIGHT_LOG" ] || rm -f "$PREFLIGHT_LOG"; }
 trap cleanup_preflight_log EXIT
 RSS_LIMIT_KIB=$((100 * 1024 * 1024)) # abort a cell past 100 GiB (precommitted)
 TOPOLOGY_CAPTURE_TIMEOUT=50
-TONIC_MAX_DECODE_BYTES=4194304
-# candidate_toml plus the fixed snapshot token fits tonic's 4 MiB ceiling.
-TXN_SAFE_CANDIDATE_BYTES=4194275
-TXN_MAX_CANDIDATE_BYTES="${TXN_MAX_CANDIDATE_BYTES:-$TXN_SAFE_CANDIDATE_BYTES}"
+TXN_STREAM_MAX_BYTES=$((384 * 1024 * 1024))
+TXN_MAX_CANDIDATE_BYTES="${TXN_MAX_CANDIDATE_BYTES:-$TXN_STREAM_MAX_BYTES}"
 case $TXN_MAX_CANDIDATE_BYTES in
 '' | *[!0-9]*)
     echo "TXN_MAX_CANDIDATE_BYTES must be an integer" >&2
     exit 2
     ;;
 esac
-if [ "$TXN_MAX_CANDIDATE_BYTES" -gt "$TXN_SAFE_CANDIDATE_BYTES" ]; then
-    echo "TXN_MAX_CANDIDATE_BYTES exceeds the safe apply-request ceiling" >&2
-    echo "maximum: $TXN_SAFE_CANDIDATE_BYTES bytes under tonic's $TONIC_MAX_DECODE_BYTES-byte limit" >&2
+if [ "$TXN_MAX_CANDIDATE_BYTES" -gt "$TXN_STREAM_MAX_BYTES" ]; then
+    echo "TXN_MAX_CANDIDATE_BYTES exceeds the streamed candidate ceiling" >&2
+    echo "maximum: $TXN_STREAM_MAX_BYTES bytes" >&2
     exit 2
 fi
 
 if [ -n "$SMOKE" ]; then
     CAMPAIGN_KIND=smoke
 elif [ "$TXN_ONLY" = true ]; then
-    CAMPAIGN_KIND=transaction-bounded
+    CAMPAIGN_KIND=full-transaction
 elif [ "$GROUPED_ONLY" = true ]; then
     CAMPAIGN_KIND=full-grouped-control
 else
@@ -161,14 +148,14 @@ if [ -n "${DRY_RUN_PROTOCOL:-}" ]; then
     exit 0
 fi
 
-for tool in docker jq python3 cargo curl flock ss sha256sum git awk timeout find sort setsid stdbuf cmp mktemp; do
+for tool in docker jq python3 cargo curl flock ss sha256sum git awk timeout find sort setsid stdbuf cmp mktemp stat df env; do
     command -v "$tool" >/dev/null || {
         echo "missing required tool: $tool" >&2
         exit 1
     }
 done
 
-if [ -z "$SMOKE" ] && [ "$TXN_ONLY" != true ]; then
+if [ -z "$SMOKE" ]; then
     if [ -n "${SKIP_PREFLIGHT:-}" ]; then
         echo "full measured campaigns cannot set SKIP_PREFLIGHT" >&2
         exit 2
@@ -182,7 +169,7 @@ if [ -z "$SMOKE" ] && [ "$TXN_ONLY" != true ]; then
         exit 2
     fi
     if [ "$N_MEMBERS,$TOTAL_PREFIXES,$MIN_LIST,$MAX_LIST,$SEED,$RELOADS,$CHANGED_FRACTION,$PORT,$CONTROL_SECS,$TXN_MAX_CANDIDATE_BYTES,$CELL_TIMEOUT,$START_TIMEOUT,$BIRD_THREADS" != \
-        "320,183040,1000,40000,61,4,0.1,1790,30,4194275,7200,600,8" ]; then
+        "320,183040,1000,40000,61,4,0.1,1790,30,402653184,7200,600,8" ]; then
         echo "full measured campaigns require canonical workload knobs" >&2
         exit 2
     fi
@@ -271,6 +258,7 @@ CAMPAIGN_PROVENANCE=$(jq -cn \
     --arg generator_sha256 "$(hash_file "$GEN")" \
     --arg sampler_sha256 "$(hash_file "$SAMPLER")" \
     --arg txn_apply_sha256 "$(hash_file "$TXN_APPLY")" \
+    --arg txn_lifecycle_sha256 "$(hash_file "$TXN_LIFECYCLE")" \
     --arg harness_sha256 "$(hash_file "$HARNESS")" \
     --arg daemon_sha256 "$(hash_file "$DAEMON")" \
     --arg cli_sha256 "$(hash_file "$RBGP")" \
@@ -292,7 +280,7 @@ CAMPAIGN_PROVENANCE=$(jq -cn \
     --arg cpu_model "$(awk -F: '/^model name/ { sub(/^[[:space:]]+/, "", $2); print $2; exit }' /proc/cpuinfo)" \
     --arg bird_image "$BIRD_IMAGE" --arg bird_image_id "$BIRD_IMAGE_ID" \
     --arg openbgpd_image "$OPENBGPD_IMAGE" --arg openbgpd_image_id "$OPENBGPD_IMAGE_ID" \
-    '{schema:3,started_at_epoch_ns:$started_at_epoch_ns,git:{commit:$commit,dirty:$dirty,dirty_state_sha256:$dirty_state_sha256,origin_main:$origin_main,head_matches_origin_main:$head_matches_origin_main},scripts:{runner:$run_script_sha256,verifier:$verifier_sha256,generator:$generator_sha256,rss_sampler:$sampler_sha256,txn_apply:$txn_apply_sha256},binaries:{reloadstall:$harness_sha256,rustbgpd:$daemon_sha256,rbgp:$cli_sha256,rs_config_render:$renderer_sha256},environment:{rustc:$rustc,cargo:$cargo,python:$python,jq:$jq,docker:$docker,kernel:$kernel,cpu_model:$cpu_model},inputs:{campaign_kind:$campaign_kind,cells:$cells,smoke:$smoke,n_members:$n_members,total_prefixes:$total_prefixes,min_list:$min_list,max_list:$max_list,seed:$seed,changed_fraction:$changed_fraction,port:$port,reloads:$reloads,control_secs:$control_secs,txn_max_candidate_bytes:$txn_max_candidate_bytes,cell_timeout:$cell_timeout,start_timeout:$start_timeout,bird_threads:$bird_threads,skip_preflight:$skip_preflight,bird_image:$bird_image,bird_image_id:$bird_image_id,openbgpd_image:$openbgpd_image,openbgpd_image_id:$openbgpd_image_id}}') || exit 1
+    '{schema:3,started_at_epoch_ns:$started_at_epoch_ns,git:{commit:$commit,dirty:$dirty,dirty_state_sha256:$dirty_state_sha256,origin_main:$origin_main,head_matches_origin_main:$head_matches_origin_main},scripts:{runner:$run_script_sha256,verifier:$verifier_sha256,generator:$generator_sha256,rss_sampler:$sampler_sha256,txn_apply:$txn_apply_sha256,txn_lifecycle:$txn_lifecycle_sha256},binaries:{reloadstall:$harness_sha256,rustbgpd:$daemon_sha256,rbgp:$cli_sha256,rs_config_render:$renderer_sha256},environment:{rustc:$rustc,cargo:$cargo,python:$python,jq:$jq,docker:$docker,kernel:$kernel,cpu_model:$cpu_model},inputs:{campaign_kind:$campaign_kind,cells:$cells,smoke:$smoke,n_members:$n_members,total_prefixes:$total_prefixes,min_list:$min_list,max_list:$max_list,seed:$seed,changed_fraction:$changed_fraction,port:$port,reloads:$reloads,control_secs:$control_secs,txn_max_candidate_bytes:$txn_max_candidate_bytes,cell_timeout:$cell_timeout,start_timeout:$start_timeout,bird_threads:$bird_threads,skip_preflight:$skip_preflight,bird_image:$bird_image,bird_image_id:$bird_image_id,openbgpd_image:$openbgpd_image,openbgpd_image_id:$openbgpd_image_id}}') || exit 1
 CAMPAIGN_FINGERPRINT=$(printf '%s' "$CAMPAIGN_PROVENANCE" | jq -cS . | sha256sum | cut -d' ' -f1) || exit 1
 SEALED_CAMPAIGN_PROVENANCE=$(printf '%s\n' "$CAMPAIGN_PROVENANCE" | jq -cS \
     --arg fingerprint "$CAMPAIGN_FINGERPRINT" '. + {fingerprint:$fingerprint}') || exit 1
@@ -396,10 +384,15 @@ seal_cell_evidence() {
     local -a evidence_files=(
         daemon.log final-evidence/ready final-evidence/ack manifest.json process.tsv provenance.json reloadstall.log rows.csv rss.csv scenario.sha256
     )
-    if [ -z "$SMOKE" ] && [ "$TXN_ONLY" != true ]; then
+    if [ -z "$SMOKE" ]; then
         evidence_files+=(quiet.tsv)
     fi
     case ${cdir##*/} in
+    rustbgpd-txn)
+        if [ -z "$SMOKE" ]; then
+            evidence_files+=(transactions/cycles.jsonl transactions/lifecycle.json)
+        fi
+        ;;
     rustbgpd-sighup | "$GROUPED_CELL")
         evidence_files+=(config.toml topology.json topology.tsv metrics-1.prom metrics-2.prom metrics-3.prom pre-churn/ready pre-churn/ack)
         ;;
@@ -494,19 +487,36 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 load_gate() {
-    local cell=$1 load sample=1 quiet
+    local cell=$1 load sample=1 quiet pswpin pswpout disk_kib first_pswpin first_pswpout port1790 port9179
     quiet="$ART/$cell/quiet.tsv"
     [ -n "$SMOKE" ] && return 0
-    [ "$TXN_ONLY" = true ] && return 0
     mkdir -p "$ART/$cell"
-    printf 'sample\tepoch_s\tload1\n' >"$quiet"
+    printf 'sample\tepoch_s\tload1\tpswpin\tpswpout\tport1790_free\tport9179_free\tdisk_available_kib\n' >"$quiet"
     while [ "$sample" -le 2 ]; do
         load=$(cut -d' ' -f1 /proc/loadavg)
-        if awk -v l="$load" 'BEGIN { exit !(l < 2.0) }'; then
-            printf '%s\t%s\t%s\n' "$sample" "$(date +%s)" "$load" >>"$quiet"
+        pswpin=$(awk '$1 == "pswpin" {print $2}' /proc/vmstat)
+        pswpout=$(awk '$1 == "pswpout" {print $2}' /proc/vmstat)
+        disk_kib=$(df -Pk "$ART" | awk 'NR == 2 {print $4}')
+        port1790=$(ss -ltnH 'sport = :1790') || { echo "load_gate: cannot inspect port 1790" >&2; exit 1; }
+        port9179=$(ss -ltnH 'sport = :9179') || { echo "load_gate: cannot inspect port 9179" >&2; exit 1; }
+        if awk -v l="$load" 'BEGIN { exit !(l < 2.0) }' &&
+            [ -z "$port1790" ] && [ -z "$port9179" ] &&
+            [ "$disk_kib" -ge $((40 * 1024 * 1024)) ]; then
+            printf '%s\t%s\t%s\t%s\t%s\ttrue\ttrue\t%s\n' \
+                "$sample" "$(date +%s)" "$load" "$pswpin" "$pswpout" "$disk_kib" >>"$quiet"
+            if [ "$sample" -eq 1 ]; then
+                first_pswpin=$pswpin
+                first_pswpout=$pswpout
+            elif [ "$pswpin" != "$first_pswpin" ] || [ "$pswpout" != "$first_pswpout" ]; then
+                echo "load_gate: swap activity observed; restarting quiet samples"
+                printf 'sample\tepoch_s\tload1\tpswpin\tpswpout\tport1790_free\tport9179_free\tdisk_available_kib\n' >"$quiet"
+                sample=1
+                sleep 30
+                continue
+            fi
             sample=$((sample + 1))
         else
-            echo "load_gate: 1-min loadavg $load >= 2.0, waiting 30s"
+            echo "load_gate: waiting for load <2, free ports 1790/9179, and 40 GiB free on ART"
         fi
         [ "$sample" -gt 2 ] || sleep 30
     done
@@ -671,10 +681,13 @@ run_cell() {
         for candidate in "$run/config.toml" "$run/candidate.toml" \
             "$run/gen-a.toml" "$run/gen-b.toml"; do
             candidate_bytes=$(wc -c <"$candidate") || return 1
+            if [ -z "$SMOKE" ] && [ "$candidate_bytes" -le $((10 * 1024 * 1024)) ]; then
+                echo "cell $cell: $(basename "$candidate") is not above the 10 MiB history bound" >&2
+                return 1
+            fi
             if [ "$candidate_bytes" -gt "$TXN_MAX_CANDIDATE_BYTES" ]; then
                 echo "cell $cell: $(basename "$candidate") is ${candidate_bytes} bytes" >&2
-                echo "candidate exceeds the ${TXN_MAX_CANDIDATE_BYTES}-byte tonic request budget" >&2
-                echo "use a smaller separate transaction shape and a fresh ARTIFACTS_DIR" >&2
+                echo "candidate exceeds the ${TXN_MAX_CANDIDATE_BYTES}-byte streamed request budget" >&2
                 return 1
             fi
         done
@@ -684,7 +697,18 @@ run_cell() {
         ACTIVE_DAEMON_PID=$daemon_pid
         live="$run/candidate.toml" a="$run/gen-a.toml" b="$run/gen-b.toml"
         pid_arg=$daemon_pid
-        reload_cmd="$TXN_APPLY $RBGP unix://$run/grpc.sock $run/candidate.toml"
+        if [ -n "$SMOKE" ]; then
+            reload_cmd=$(python3 -c 'import shlex,sys; print(shlex.join(sys.argv[1:]))' \
+                env TXN_SMOKE=1 "$TXN_APPLY" "$RBGP" "unix://$run/grpc.sock" \
+                "$run/candidate.toml" "$run/config.toml" "$run" "$cdir/transactions" \
+                "$daemon_pid" "$cdir/daemon.log") || return 1
+        else
+            mkdir -p "$cdir/transactions" || return 1
+            reload_cmd=$(python3 -c 'import shlex,sys; print(shlex.join(sys.argv[1:]))' \
+                "$TXN_APPLY" "$RBGP" "unix://$run/grpc.sock" "$run/candidate.toml" \
+                "$run/config.toml" "$run" "$cdir/transactions" "$daemon_pid" \
+                "$cdir/daemon.log") || return 1
+        fi
         ;;
     bird)
         gen_scenario bird "$run" --threads "$BIRD_THREADS" \
@@ -795,6 +819,15 @@ run_cell() {
     elif [ -n "$topology_mode" ] && ! bind_first_trigger "$cdir"; then
         echo "cell $cell: first reload trigger was missing or preceded topology proof" >&2
         rc=93
+    fi
+
+    if [ "$cell" = rustbgpd-txn ] && [ -z "$SMOKE" ] && [ "$rc" -eq 0 ]; then
+        if ! "$TXN_LIFECYCLE" "$RBGP" "unix://$run/grpc.sock" "$run/gen-a.toml" \
+            "$run/gen-b.toml" "$run/config.toml" "$run" "$cdir/transactions" \
+            "$daemon_pid" "$cdir/daemon.log"; then
+            echo "cell $cell: abort/timeout lifecycle proof failed" >&2
+            rc=91
+        fi
     fi
 
     if [ -n "$container" ]; then
