@@ -744,8 +744,7 @@ fn format_unix_utc(unix_seconds: u64) -> String {
 /// redacted server-side. `--json` re-renders the same document as JSON; the
 /// daemon only ships TOML.
 pub async fn effective(connection: Connection, json: bool) -> Result<(), CliError> {
-    let mut client =
-        ConfigServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let mut client = connection.effective_config_client();
     let resp = client
         .get_effective_config(GetEffectiveConfigRequest {})
         .await?

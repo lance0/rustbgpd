@@ -18,6 +18,7 @@ use tonic::{Request, Status};
 use tower::service_fn;
 
 use crate::error::CliError;
+use crate::proto::config_service_client::ConfigServiceClient;
 use crate::proto::rib_service_client::RibServiceClient;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -36,6 +37,20 @@ const BEARER_PREFIX: &str = "Bearer ";
 /// `usize::MAX`: a response above the ceiling still fails closed with
 /// `out of range` instead of buffering without bound.
 pub(crate) const LISTING_MAX_DECODE_BYTES: usize = 64 * 1024 * 1024;
+
+/// Decode ceiling for the normalized TOML returned by
+/// `ConfigService.GetEffectiveConfig`.
+///
+/// The document is deliberately a byte-exact full export rather than a
+/// paged surface. Keep the allowance finite and method-specific: 384 MiB of
+/// TOML plus the protobuf string field's one-byte tag and five-byte length
+/// varint at that size. Other `ConfigService` RPCs retain tonic's 4 MiB
+/// client default.
+pub(crate) const EFFECTIVE_CONFIG_MAX_TOML_BYTES: usize = 384 * 1024 * 1024;
+const EFFECTIVE_CONFIG_PROTOBUF_ENVELOPE_BYTES: usize =
+    1 + prost::encoding::encoded_len_varint(EFFECTIVE_CONFIG_MAX_TOML_BYTES as u64);
+pub(crate) const EFFECTIVE_CONFIG_MAX_DECODE_BYTES: usize =
+    EFFECTIVE_CONFIG_MAX_TOML_BYTES + EFFECTIVE_CONFIG_PROTOBUF_ENVELOPE_BYTES;
 
 #[derive(Clone)]
 pub(crate) struct Connection {
@@ -69,6 +84,15 @@ impl Connection {
         self.rib_client_with_decode_limit(LISTING_MAX_DECODE_BYTES)
     }
 
+    /// A `ConfigService` client only for `GetEffectiveConfig`, with room for
+    /// one full bounded normalized-config document. Other config operations
+    /// continue to use the generated client's default decode ceiling.
+    pub(crate) fn effective_config_client(
+        &self,
+    ) -> ConfigServiceClient<InterceptedService<Channel, AuthInterceptor>> {
+        self.config_client_with_decode_limit(EFFECTIVE_CONFIG_MAX_DECODE_BYTES)
+    }
+
     /// Shared constructor core; tests drive it with a small cap to prove
     /// the ceiling is enforced rather than advisory.
     fn rib_client_with_decode_limit(
@@ -76,6 +100,16 @@ impl Connection {
         limit: usize,
     ) -> RibServiceClient<InterceptedService<Channel, AuthInterceptor>> {
         RibServiceClient::with_interceptor(self.channel(), self.interceptor())
+            .max_decoding_message_size(limit)
+    }
+
+    /// Shared constructor core; tests inject a small cap to prove the limit
+    /// is enforced rather than advisory.
+    fn config_client_with_decode_limit(
+        &self,
+        limit: usize,
+    ) -> ConfigServiceClient<InterceptedService<Channel, AuthInterceptor>> {
+        ConfigServiceClient::with_interceptor(self.channel(), self.interceptor())
             .max_decoding_message_size(limit)
     }
 }
@@ -467,6 +501,185 @@ mod tests {
             .await
             .expect_err("server must reject the tokenless client");
         assert_eq!(err.code(), tonic::Code::Unauthenticated, "{err}");
+    }
+
+    fn effective_config_fixture(payload_len: usize) -> String {
+        "#".repeat(payload_len)
+    }
+
+    // Removing the production cap from `effective_config_client` makes this
+    // real >4 MiB loopback response fail with OutOfRange.
+    #[tokio::test]
+    async fn effective_config_client_decodes_response_over_default_ceiling() {
+        let handle = crate::test_support::spawn_mock_server(None).await;
+        let toml = effective_config_fixture(5 * 1024 * 1024);
+        let response = server_proto::GetEffectiveConfigResponse { toml };
+        assert!(
+            response.encoded_len() > 4 * 1024 * 1024,
+            "fixture must exceed tonic's default decode ceiling"
+        );
+        let expected_len = response.toml.len();
+        *handle.state.config_effective_toml.lock().await = Some(response.toml);
+
+        let connection = connect(&handle.addr, None).await.unwrap();
+        let got = connection
+            .effective_config_client()
+            .get_effective_config(crate::proto::GetEffectiveConfigRequest {})
+            .await
+            .expect("bounded effective-config client must decode a >4 MiB document")
+            .into_inner();
+        assert_eq!(got.toml.len(), expected_len);
+    }
+
+    // Replacing the finite cap with an unbounded/default-ignoring constructor
+    // makes this injected 1 KiB ceiling stop rejecting the response.
+    #[tokio::test]
+    async fn effective_config_client_ceiling_is_enforced() {
+        let handle = crate::test_support::spawn_mock_server(None).await;
+        let toml = effective_config_fixture(2048);
+        let response = server_proto::GetEffectiveConfigResponse { toml };
+        assert!(response.encoded_len() > 1024);
+        *handle.state.config_effective_toml.lock().await = Some(response.toml);
+
+        let connection = connect(&handle.addr, None).await.unwrap();
+        let err = connection
+            .config_client_with_decode_limit(1024)
+            .get_effective_config(crate::proto::GetEffectiveConfigRequest {})
+            .await
+            .expect_err("a 1 KiB cap must reject a >1 KiB effective config");
+        assert_eq!(err.code(), tonic::Code::OutOfRange, "{err}");
+    }
+
+    // The method-specific constructor must preserve the ordinary auth
+    // interceptor. Replacing it with an unintercepted client makes the
+    // authenticated request fail; weakening server auth makes the bare
+    // request stop returning Unauthenticated.
+    #[tokio::test]
+    async fn effective_config_client_carries_bearer_token() {
+        let handle = crate::test_support::spawn_mock_server(Some("effective-secret")).await;
+        let dir = tempfile::tempdir().unwrap();
+        let token_path = dir.path().join("token.txt");
+        fs::write(&token_path, "effective-secret\n").unwrap();
+
+        let connection = connect(&handle.addr, Some(token_path.to_str().unwrap()))
+            .await
+            .unwrap();
+        connection
+            .effective_config_client()
+            .get_effective_config(crate::proto::GetEffectiveConfigRequest {})
+            .await
+            .expect("authenticated effective-config call must succeed");
+
+        let bare = connect(&handle.addr, None).await.unwrap();
+        let err = bare
+            .effective_config_client()
+            .get_effective_config(crate::proto::GetEffectiveConfigRequest {})
+            .await
+            .expect_err("server must reject the tokenless client");
+        assert_eq!(err.code(), tonic::Code::Unauthenticated, "{err}");
+    }
+
+    // The cap is 384 MiB of TOML plus exactly the protobuf string-field
+    // envelope at that payload size (one-byte tag + five-byte varint). Any
+    // global/unbounded replacement or omitted envelope makes this red.
+    #[allow(
+        clippy::assertions_on_constants,
+        reason = "constant assertions are mutation fences for the finite protocol budget"
+    )]
+    #[test]
+    fn effective_config_decode_ceiling_has_exact_finite_envelope() {
+        assert_eq!(
+            prost::encoding::encoded_len_varint(EFFECTIVE_CONFIG_MAX_TOML_BYTES as u64),
+            5
+        );
+        assert_eq!(EFFECTIVE_CONFIG_PROTOBUF_ENVELOPE_BYTES, 6);
+        assert_eq!(EFFECTIVE_CONFIG_MAX_DECODE_BYTES, 384 * 1024 * 1024 + 6);
+        assert!(EFFECTIVE_CONFIG_MAX_DECODE_BYTES < usize::MAX);
+
+        let production = include_str!("connection.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let constructors = production
+            .split("pub(crate) fn effective_config_client")
+            .nth(1)
+            .unwrap();
+        assert_eq!(
+            constructors
+                .matches("self.config_client_with_decode_limit(EFFECTIVE_CONFIG_MAX_DECODE_BYTES)")
+                .count(),
+            1,
+            "production helper must consume the finite effective-config cap"
+        );
+        let config_constructor = constructors
+            .split("fn config_client_with_decode_limit")
+            .nth(1)
+            .unwrap();
+        assert_eq!(
+            config_constructor
+                .matches(".max_decoding_message_size(limit)")
+                .count(),
+            1,
+            "ConfigService constructor must enforce its supplied limit"
+        );
+        assert!(!config_constructor.contains("usize::MAX"));
+    }
+
+    fn collect_production_rust_sources(dir: &Path, sources: &mut Vec<(PathBuf, String)>) {
+        for entry in fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                collect_production_rust_sources(&path, sources);
+                continue;
+            }
+            if path.extension().and_then(|ext| ext.to_str()) != Some("rs")
+                || path.file_name().and_then(|name| name.to_str()) == Some("test_support.rs")
+            {
+                continue;
+            }
+            let mut source = fs::read_to_string(&path).unwrap();
+            if let Some(test_module) = source.rfind("#[cfg(test)]\nmod tests {") {
+                source.truncate(test_module);
+            }
+            sources.push((path, source));
+        }
+    }
+
+    // Both and only the full-document consumers anywhere in the CLI source
+    // tree must use the bounded helper. Reverting either command to a raw
+    // generated client, or adding a third production callsite in any file,
+    // changes these counts; test-only modules and test_support.rs are removed.
+    #[test]
+    fn effective_config_surface_inventory_uses_bounded_client() {
+        let mut sources = Vec::new();
+        collect_production_rust_sources(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut sources,
+        );
+        let constructors: usize = sources
+            .iter()
+            .map(|(_, source)| source.matches(".effective_config_client()").count())
+            .sum();
+        let calls: usize = sources
+            .iter()
+            .map(|(_, source)| source.matches(".get_effective_config(").count())
+            .sum();
+        assert_eq!(constructors, 2, "inventoried bounded constructor sites");
+        assert_eq!(calls, 2, "inventoried effective-config RPC calls");
+
+        let mut callsite_files: Vec<_> = sources
+            .iter()
+            .filter(|(_, source)| source.contains(".get_effective_config("))
+            .map(|(path, _)| path.strip_prefix(env!("CARGO_MANIFEST_DIR")).unwrap())
+            .collect();
+        callsite_files.sort_unstable();
+        assert_eq!(
+            callsite_files,
+            [
+                Path::new("src/commands/config.rs"),
+                Path::new("src/commands/doctor.rs")
+            ]
+        );
     }
 
     // Inventory fence over the full unary listing surfaces. Every listing

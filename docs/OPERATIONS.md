@@ -134,6 +134,11 @@ rbgp config apply /tmp/new-config.toml \
   --expected-runtime-snapshot-token kv1:...
 ```
 
+`rbgp config effective` downloads this byte-exact full document with a finite
+384 MiB TOML ceiling (plus the protobuf envelope). The same method-specific
+allowance covers the effective-config copy collected by `rbgp doctor`; other
+config RPCs retain the ordinary 4 MiB client decode limit.
+
 `rbgp config plan` and `config apply` stream the candidate in bounded frames;
 they are not limited by tonic's 4,194,304-byte unary-message ceiling. The plan
 receipt includes a single-use `plan_token` bound to the candidate digest,
@@ -1525,7 +1530,7 @@ addresses only, never copied into the bundle.
 ```
 rustbgpd-doctor-<ts>/
 ├── manifest.json            # versions, redaction note, per-section collected/partial/unavailable status, check results
-├── config/effective.toml    # GetEffectiveConfig dump (defaults resolved, selected empty lists omitted, secrets <redacted>)
+├── config/effective.toml    # GetEffectiveConfig dump (resolved defaults, selected empty lists omitted, secrets <redacted>; 384 MiB max)
 ├── peers/bfd.json           # BFD state/diagnostic/strict plus remote-AdminDown bool or null when unknown
 ├── peers/dynamic-neighbors.json # configured acceptance ranges; descriptions scrubbed client-side
 ├── peers/neighbors.json     # per-peer state, counters, flap/slow-peer status
