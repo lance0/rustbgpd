@@ -1,4 +1,141 @@
 use super::*;
+use crate::manager::helpers::AspaInvalidHopSummary;
+
+/// Red proof: retention, eviction/admission accounting, or counts/order break exact output.
+#[test]
+fn aspa_invalid_hop_summary_keeps_smallest_pairs_and_exact_suppression() {
+    let mut summary = AspaInvalidHopSummary::default();
+    for customer_asn in 2..=9 {
+        summary.observe(rustbgpd_rpki::AspaInvalidHop {
+            customer_asn,
+            provider_asn: customer_asn + 100,
+        });
+    }
+    for _ in 0..2 {
+        summary.observe(rustbgpd_rpki::AspaInvalidHop {
+            customer_asn: 9,
+            provider_asn: 109,
+        });
+    }
+    summary.observe(rustbgpd_rpki::AspaInvalidHop {
+        customer_asn: 1,
+        provider_asn: 101,
+    });
+    for _ in 0..2 {
+        summary.observe(rustbgpd_rpki::AspaInvalidHop {
+            customer_asn: 10,
+            provider_asn: 110,
+        });
+        summary.observe(rustbgpd_rpki::AspaInvalidHop {
+            customer_asn: 1,
+            provider_asn: 101,
+        });
+    }
+    assert_eq!(summary.routes, 15);
+    assert_eq!(summary.suppressed_routes, 5);
+    let rendered = summary.render();
+    assert_eq!(
+        rendered,
+        "1>101:3, 2>102:1, 3>103:1, 4>104:1, 5>105:1, 6>106:1, 7>107:1, 8>108:1"
+    );
+    assert!(rendered.len() <= 512);
+}
+
+/// Red proof: deleting/splitting the event or skipping unchanged Invalid breaks exact fields.
+#[test]
+fn aspa_cache_update_emits_one_bounded_completion_event() {
+    use std::collections::BTreeMap;
+    use std::sync::{Arc as StdArc, Mutex};
+
+    use rustbgpd_rpki::{AspaRecord, AspaTable};
+    use tracing::field::{Field, Visit};
+    use tracing::span::{Attributes, Id, Record};
+    use tracing::{Event, Metadata, Subscriber};
+
+    #[derive(Default)]
+    struct Fields(BTreeMap<String, String>);
+    impl Visit for Fields {
+        fn record_u64(&mut self, field: &Field, value: u64) {
+            self.0.insert(field.name().to_string(), value.to_string());
+        }
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            self.0
+                .insert(field.name().to_string(), format!("{value:?}"));
+        }
+    }
+
+    struct Capture(StdArc<Mutex<Vec<Fields>>>);
+    impl Subscriber for Capture {
+        fn enabled(&self, _: &Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &Attributes<'_>) -> Id {
+            Id::from_u64(1)
+        }
+        fn record(&self, _: &Id, _: &Record<'_>) {}
+        fn record_follows_from(&self, _: &Id, _: &Id) {}
+        fn event(&self, event: &Event<'_>) {
+            let mut fields = Fields::default();
+            event.record(&mut fields);
+            self.0.lock().unwrap().push(fields);
+        }
+        fn enter(&self, _: &Id) {}
+        fn exit(&self, _: &Id) {}
+    }
+
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer = IpAddr::V4(Ipv4Addr::new(1, 0, 0, 8));
+    let mut first = make_route_with_as_path(
+        Ipv4Prefix::new(Ipv4Addr::new(10, 0, 1, 0), 24),
+        Ipv4Addr::new(1, 0, 0, 8),
+        vec![65002, 65003],
+    );
+    first.aspa_state = rustbgpd_wire::AspaValidation::Valid;
+    let mut unchanged = make_route_with_as_path(
+        Ipv4Prefix::new(Ipv4Addr::new(10, 0, 2, 0), 24),
+        Ipv4Addr::new(1, 0, 0, 8),
+        vec![65004, 65005],
+    );
+    unchanged.aspa_state = rustbgpd_wire::AspaValidation::Invalid;
+    let mut rib = crate::adj_rib_in::AdjRibIn::new(peer);
+    rib.insert(first);
+    rib.insert(unchanged);
+    manager.ribs.insert(peer, rib);
+
+    let captured = StdArc::new(Mutex::new(Vec::new()));
+    let table = Arc::new(AspaTable::new(vec![
+        AspaRecord {
+            customer_asn: 65003,
+            provider_asns: vec![99],
+        },
+        AspaRecord {
+            customer_asn: 65005,
+            provider_asns: vec![99],
+        },
+    ]));
+    tracing::subscriber::with_default(Capture(StdArc::clone(&captured)), || {
+        manager.handle_aspa_cache_update(table);
+    });
+
+    let events = captured.lock().unwrap();
+    assert_eq!(events.len(), 1);
+    let fields = &events[0].0;
+    for (name, value) in [
+        ("records", "2"),
+        ("routes_scanned", "2"),
+        ("changed_routes", "1"),
+        ("affected_prefixes", "1"),
+        ("invalid_hop_routes", "2"),
+        ("suppressed_routes", "0"),
+    ] {
+        assert_eq!(fields.get(name).map(String::as_str), Some(value), "{name}");
+    }
+    assert_eq!(
+        fields.get("invalid_hops").map(String::as_str),
+        Some("65003>65002:1, 65005>65004:1")
+    );
+}
 
 #[test]
 fn validate_route_rpki_valid() {

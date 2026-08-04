@@ -1,9 +1,10 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::fmt::Write;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 
 use rustbgpd_policy::RouteFamily;
-use rustbgpd_rpki::{AspaTable, VrpTable};
+use rustbgpd_rpki::{AspaInvalidHop, AspaTable, AspaVerificationResult, VrpTable};
 use rustbgpd_wire::{
     Afi, AspaValidation, LlgrFamily, Prefix, RpkiValidation, Safi, VpnAddressFamily, VpnRouteKey,
 };
@@ -284,12 +285,73 @@ pub(super) fn validate_route_aspa(
     route: &crate::route::Route,
     table: &AspaTable,
 ) -> AspaValidation {
+    validate_route_aspa_detailed(route, table).state
+}
+
+pub(super) fn validate_route_aspa_detailed(
+    route: &crate::route::Route,
+    table: &AspaTable,
+) -> AspaVerificationResult {
     if !route.is_ebgp() {
-        return AspaValidation::Unknown;
+        return AspaVerificationResult {
+            state: AspaValidation::Unknown,
+            invalid_hop: None,
+        };
     }
     match route.as_path() {
-        Some(path) => rustbgpd_rpki::aspa_verify::verify(path, table, route.aspa_context),
-        None => AspaValidation::Unknown,
+        Some(path) => rustbgpd_rpki::aspa_verify::verify_detailed(path, table, route.aspa_context),
+        None => AspaVerificationResult {
+            state: AspaValidation::Unknown,
+            invalid_hop: None,
+        },
+    }
+}
+
+const MAX_ASPA_INVALID_HOPS: usize = 8;
+
+#[derive(Default)]
+pub(super) struct AspaInvalidHopSummary {
+    pairs: BTreeMap<AspaInvalidHop, u64>,
+    pub(super) routes: u64,
+    pub(super) suppressed_routes: u64,
+}
+
+impl AspaInvalidHopSummary {
+    pub(super) fn observe(&mut self, hop: AspaInvalidHop) {
+        self.routes += 1;
+        if let Some(count) = self.pairs.get_mut(&hop) {
+            *count += 1;
+            return;
+        }
+        if self.pairs.len() < MAX_ASPA_INVALID_HOPS {
+            self.pairs.insert(hop, 1);
+            return;
+        }
+        let Some((&largest, _)) = self.pairs.last_key_value() else {
+            return;
+        };
+        if hop < largest {
+            self.suppressed_routes += self.pairs.remove(&largest).unwrap_or(0);
+            self.pairs.insert(hop, 1);
+        } else {
+            self.suppressed_routes += 1;
+        }
+    }
+
+    pub(super) fn render(&self) -> String {
+        let mut rendered = String::new();
+        for (index, (hop, count)) in self.pairs.iter().enumerate() {
+            if index != 0 {
+                rendered.push_str(", ");
+            }
+            let _ = write!(
+                rendered,
+                "{}>{}:{count}",
+                hop.customer_asn, hop.provider_asn
+            );
+        }
+        debug_assert!(rendered.len() <= 512);
+        rendered
     }
 }
 

@@ -58,6 +58,7 @@ pub mod vrp_manager;
 use std::sync::Arc;
 
 pub use aspa::{AspaRecord, AspaTable};
+pub use aspa_verify::{AspaInvalidHop, AspaVerificationResult};
 pub use rtr_client::{RtrClient, RtrClientConfig, VrpUpdate};
 pub use vrp::{VrpEntry, VrpTable};
 pub use vrp_manager::{AspaTableUpdate, RpkiTableUpdate, VrpManager};
@@ -111,14 +112,25 @@ impl ValidationSnapshot {
         family: (rustbgpd_wire::Afi, rustbgpd_wire::Safi),
         context: rustbgpd_wire::AspaValidationContext,
     ) -> rustbgpd_wire::AspaValidation {
+        self.validate_aspa_detailed(as_path, family, context).state
+    }
+
+    /// Detailed form of [`Self::validate_aspa`] for bounded diagnostics.
+    #[must_use]
+    pub fn validate_aspa_detailed(
+        &self,
+        as_path: Option<&rustbgpd_wire::AsPath>,
+        family: (rustbgpd_wire::Afi, rustbgpd_wire::Safi),
+        context: rustbgpd_wire::AspaValidationContext,
+    ) -> AspaVerificationResult {
         use rustbgpd_wire::{Afi, AspaValidation, Safi};
         // §6.2 family gate.
         if !matches!(family, (Afi::Ipv4 | Afi::Ipv6, Safi::Unicast)) {
-            return AspaValidation::Unknown;
+            return AspaVerificationResult::state(AspaValidation::Unknown);
         }
         match (&self.aspa_table, as_path) {
-            (Some(table), Some(path)) => aspa_verify::verify(path, table, context),
-            _ => AspaValidation::Unknown,
+            (Some(table), Some(path)) => aspa_verify::verify_detailed(path, table, context),
+            _ => AspaVerificationResult::state(AspaValidation::Unknown),
         }
     }
 }

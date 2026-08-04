@@ -652,6 +652,7 @@ impl PeerSession {
             large_communities_dropped: 0,
             rpki: rustbgpd_wire::RpkiValidation::NotFound,
             aspa: rustbgpd_wire::AspaValidation::Unknown,
+            aspa_invalid_hop: None,
             rejected_at: SystemTime::now(),
         };
         // Bound before the caller clones it across every rejected
@@ -684,6 +685,7 @@ impl PeerSession {
             large_communities_dropped: 0,
             rpki: rustbgpd_wire::RpkiValidation::NotFound,
             aspa: rustbgpd_wire::AspaValidation::Unknown,
+            aspa_invalid_hop: None,
             rejected_at: SystemTime::now(),
         };
         prototype.enforce_bounds();
@@ -1774,15 +1776,21 @@ impl PeerSession {
         // to import policy and stores Unknown for every iBGP unicast route.
         let validate_aspa = |family| {
             if !is_ebgp {
-                return rustbgpd_wire::AspaValidation::Unknown;
+                return rustbgpd_rpki::AspaVerificationResult {
+                    state: rustbgpd_wire::AspaValidation::Unknown,
+                    invalid_hop: None,
+                };
             }
-            validation
-                .as_ref()
-                .map_or(rustbgpd_wire::AspaValidation::Unknown, |v| {
-                    v.validate_aspa(parsed_as_path, family, aspa_context)
-                })
+            validation.as_ref().map_or(
+                rustbgpd_rpki::AspaVerificationResult {
+                    state: rustbgpd_wire::AspaValidation::Unknown,
+                    invalid_hop: None,
+                },
+                |v| v.validate_aspa_detailed(parsed_as_path, family, aspa_context),
+            )
         };
-        let body_aspa_state = validate_aspa((Afi::Ipv4, Safi::Unicast));
+        let body_aspa = validate_aspa((Afi::Ipv4, Safi::Unicast));
+        let body_aspa_state = body_aspa.state;
         let unnumbered_ipv4_body_forbidden = self.is_scoped_link_local_peer();
         if unnumbered_ipv4_body_forbidden
             && (!parsed.announced.is_empty() || !parsed.withdrawn.is_empty())
@@ -1907,6 +1915,7 @@ impl PeerSession {
                             reject_entry.next_hop = Some(body_next_hop);
                             reject_entry.rpki = rpki_state;
                             reject_entry.aspa = body_aspa_state;
+                            reject_entry.aspa_invalid_hop = body_aspa.invalid_hop;
                             rejected_retained.push((prefix, entry.path_id, reject_entry));
                         }
                         denied_unicast.push((prefix, entry.path_id));
@@ -2007,7 +2016,8 @@ impl PeerSession {
                     // anything outside IPv4/IPv6 unicast — so FlowSpec and
                     // EVPN announcements below propagate `Unknown` even when
                     // an ASPA table is loaded, without any extra branching.
-                    let mp_aspa_state = validate_aspa(family);
+                    let mp_aspa = validate_aspa(family);
+                    let mp_aspa_state = mp_aspa.state;
                     if mp.safi == Safi::FlowSpec {
                         // FlowSpec announced routes — no next-hop (NH len = 0)
                         for rule in &mp.flowspec_announced {
@@ -2550,6 +2560,7 @@ impl PeerSession {
                                 reject_entry.next_hop = Some(mp.next_hop);
                                 reject_entry.rpki = mp_rpki_state;
                                 reject_entry.aspa = mp_aspa_state;
+                                reject_entry.aspa_invalid_hop = mp_aspa.invalid_hop;
                                 rejected_retained.push((entry.prefix, entry.path_id, reject_entry));
                             }
                             denied_unicast.push((entry.prefix, entry.path_id));
