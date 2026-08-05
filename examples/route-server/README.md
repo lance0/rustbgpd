@@ -39,8 +39,10 @@ its generic deny, and test both the exception and an unauthorized control.
 - **member-alpha** negotiates **Add-Path send**: it receives up to the eight
   best export-permitted candidates, subject to configured and negotiated
   Paths-Limit, and runs its own best-path selection. Preferred where the
-  member edge supports Add-Path receive — these peers stay
-  update-group-shareable.
+  member edge supports Add-Path receive. Like `per_client_best`, Add-Path
+  send places the member on the per-peer distribution path (the
+  `add_path_send` reason in `rbgp neighbor <addr>`); update-group sharing
+  applies to members using neither mitigation.
 - **member-beta** cannot do Add-Path, so it sets **`per_client_best = true`**
   (requires `route_server_client`): when its export policy denies the best
   path, the route server advertises the best *permitted* candidate instead
