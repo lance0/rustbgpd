@@ -206,6 +206,47 @@ def family_rows(data, name: str, peers: set[str], families: tuple[str, ...]):
     return {(labels["peer"], labels["afi_safi"]): value for labels, value in found}
 
 
+def member_addr(member: int) -> str:
+    """The harness stub source address for member index `member`."""
+    return f"127.1.{member // 200}.{member % 200 + 1}"
+
+
+def load_overlap(manifest_path: Path | None, peers: int, total: int):
+    """Read and validate the manifest's LAN-892 overlap allocation.
+
+    Returns (fraction, pairs) where pairs is [(prefix_index, second_member)].
+    An absent manifest or absent overlap keys is the historical disjoint
+    shape (F=0). The declared fraction must reproduce the allocation size
+    exactly, every pair must be in range with a second announcer distinct
+    from the slice owner, and prefixes may gain at most one second announcer.
+    """
+    manifest = read_json(manifest_path) if manifest_path is not None else {}
+    fraction = manifest.get("overlap_fraction", 0.0)
+    pairs = manifest.get("overlap_pairs", [])
+    per_peer = total // peers
+    if isinstance(fraction, bool) or not isinstance(fraction, (int, float)) or not 0 <= fraction < 1:
+        fail("manifest overlap_fraction is out of range")
+    if not isinstance(pairs, list) or (fraction == 0) != (pairs == []):
+        fail("manifest overlap_fraction and overlap_pairs disagree")
+    if len(pairs) != round(fraction * total):
+        fail("manifest overlap allocation does not match its declared fraction")
+    seen = set()
+    validated = []
+    for pair in pairs:
+        if (
+            not isinstance(pair, list)
+            or len(pair) != 2
+            or any(isinstance(value, bool) or not isinstance(value, int) for value in pair)
+        ):
+            fail("malformed overlap pair")
+        idx, second = pair
+        if not 0 <= idx < total or not 0 <= second < peers or idx // per_peer == second or idx in seen:
+            fail("invalid overlap pair (range, own-slice second announcer, or duplicate)")
+        seen.add(idx)
+        validated.append((idx, second))
+    return fraction, validated
+
+
 def validate_topology(
     mode: str,
     peers: int,
@@ -214,9 +255,16 @@ def validate_topology(
     timestamps: Path,
     metric_paths: list[Path],
     output: Path,
+    manifest: Path | None = None,
 ) -> None:
     if mode not in ("private", "grouped") or len(metric_paths) != 3:
         fail("topology requires private/grouped mode and exactly three scrapes")
+    overlap_fraction, overlap_pairs = load_overlap(manifest, peers, total)
+    announced_extra = [0] * peers
+    own_overlapped = [0] * peers
+    for idx, second in overlap_pairs:
+        announced_extra[second] += 1
+        own_overlapped[idx // (total // peers)] += 1
     config_text = config.read_text()
     if "[neighbors.add_path]" in config_text:
         fail("topology proof requires Add-Path disabled")
@@ -272,21 +320,65 @@ def validate_topology(
             fail("Loc-RIB aggregate mismatch")
         per_peer = total // peers
         adj_in = family_rows(data, "bgp_rib_prefixes", identities, ("all", "flowspec"))
-        if any(
-            adj_in[(peer, family)] != (per_peer if family == "all" else 0)
-            for peer in identities
-            for family in ("all", "flowspec")
-        ):
+        if any(adj_in[(peer, "flowspec")] != 0 for peer in identities):
             fail("Adj-RIB-In aggregate/non-all roster mismatch")
         out_families = ("all", "bgpls", "evpn", "flowspec", "labeled", "rtc", "vpn")
         adj_out = family_rows(data, "bgp_rib_adj_out_prefixes", identities, out_families)
-        expected_out = total - per_peer
         if any(
-            adj_out[(peer, family)] != (expected_out if family == "all" else 0)
+            adj_out[(peer, family)] != 0
             for peer in identities
             for family in out_families
+            if family != "all"
         ):
             fail("Adj-RIB-Out aggregate/non-all roster mismatch")
+        if not overlap_pairs:
+            # Disjoint announcements: the historical exact expectations.
+            if any(adj_in[(peer, "all")] != per_peer for peer in identities):
+                fail("Adj-RIB-In aggregate/non-all roster mismatch")
+            if any(adj_out[(peer, "all")] != total - per_peer for peer in identities):
+                fail("Adj-RIB-Out aggregate/non-all roster mismatch")
+        else:
+            # Overlap shape: per-member expectations from the manifest
+            # allocation, keyed by the deterministic stub addressing.
+            member_of = {member_addr(member): member for member in range(peers)}
+            if set(member_of) != identities:
+                fail("overlap topology requires the harness stub peer roster")
+            for peer in identities:
+                member = member_of[peer]
+                if adj_in[(peer, "all")] != per_peer + announced_extra[member]:
+                    fail("Adj-RIB-In does not reflect the manifest overlap allocation")
+            if mode == "private":
+                # Per-client best must deliver the runner-up path for every
+                # overlapped prefix the observer itself announces: only
+                # exclusively-announced prefixes stay suppressed.
+                if any(
+                    adj_out[(peer, "all")]
+                    != total - (per_peer - own_overlapped[member_of[peer]])
+                    for peer in identities
+                ):
+                    fail("per-client-best Adj-RIB-Out must deliver runner-up paths")
+            else:
+                # One shared group: each prefix is suppressed exactly at its
+                # best-path announcer. Which announcer wins an overlapped
+                # prefix is a daemon tie-break, so bound per member and pin
+                # the exact global suppression count.
+                suppressed = 0
+                for peer in identities:
+                    member = member_of[peer]
+                    value = adj_out[(peer, "all")]
+                    lower = total - (per_peer + announced_extra[member])
+                    upper = total - (per_peer - own_overlapped[member])
+                    if not lower <= value <= upper:
+                        fail("grouped Adj-RIB-Out outside announcer bounds")
+                    suppressed += total - value
+                if suppressed != total:
+                    fail("grouped suppression must total one best announcer per prefix")
+        achieved = sum(adj_in[(peer, "all")] for peer in identities) - total
+        if achieved != len(overlap_pairs):
+            fail(
+                f"achieved overlap ({achieved} second paths) does not match "
+                f"the manifest allocation ({len(overlap_pairs)})"
+            )
         if mode == "private":
             one(data, "bgp_update_groups", 0)
             one(data, "bgp_update_group_fallback_peers", peers)
@@ -331,11 +423,97 @@ def validate_topology(
                 "peers": peers,
                 "scrape_epoch_ns": epoch_ns,
                 "group_id": group_id,
+                "overlap_fraction": overlap_fraction,
+                "overlap_pairs": len(overlap_pairs),
             },
             sort_keys=True,
         )
         + "\n"
     )
+
+
+def read_received_view(path: Path, peers: int, total: int) -> list[set[int]]:
+    """Parse the harness's final-generation received-view dump.
+
+    Returns each observer's MISSING base-prefix set (complement of what it
+    observed with the final generation marker, before own-announcement
+    exclusion).
+    """
+    lines = path.read_text().splitlines()
+    if not lines or lines[0] != f"received_view_v1\ttotal={total}\tpeers={peers}":
+        fail(f"{path}: received-view header mismatch")
+    if len(lines) != peers + 1:
+        fail(f"{path}: received-view observer roster mismatch")
+    missing = []
+    for expected_observer, line in enumerate(lines[1:]):
+        parts = line.split("\t")
+        if len(parts) != 3 or parts[0] != str(expected_observer):
+            fail(f"{path}: malformed received-view row")
+        try:
+            indices = [int(value) for value in parts[2].split(",")] if parts[2] else []
+        except ValueError:
+            fail(f"{path}: non-integer received-view index")
+        if (
+            parts[1] != str(len(indices))
+            or any(not 0 <= value < total for value in indices)
+            or sorted(set(indices)) != indices
+        ):
+            fail(f"{path}: received-view indices invalid")
+        missing.append(set(indices))
+    return missing
+
+
+def received_view_delta(private_cell: Path, grouped_cell: Path) -> dict:
+    """Observer-side per-client-best vs grouped received-view delta.
+
+    Counts (member, prefix) pairs where per-client-best delivered a runner-up
+    path that grouped mode suppressed, from the two cells' retained
+    received-view dumps over the SAME scenario. Every delta pair must be an
+    overlapped prefix observed at one of its announcers, grouped deliveries
+    must be a pointwise subset of per-client-best deliveries, and the total
+    must equal the manifest allocation (exactly one suppressed announcer —
+    the best-path one — per overlapped prefix).
+    """
+    manifests = [read_json(cell / "manifest.json") for cell in (private_cell, grouped_cell)]
+    shared = (
+        "dataset_sha256",
+        "n_members",
+        "total_prefixes",
+        "seed",
+        "overlap_fraction",
+        "overlap_pairs",
+    )
+    if any(manifests[0].get(key) != manifests[1].get(key) for key in shared):
+        fail("received-view delta cells do not share one scenario")
+    if manifests[0].get("path_hiding") is not True or manifests[1].get("path_hiding") is not False:
+        fail("received-view delta requires one private cell and one grouped cell")
+    peers, total = manifests[0].get("n_members"), manifests[0].get("total_prefixes")
+    if not isinstance(peers, int) or not isinstance(total, int) or peers <= 0 or total <= 0:
+        fail("received-view delta manifests lack a valid shape")
+    fraction, pairs = load_overlap(private_cell / "manifest.json", peers, total)
+    per_peer = total // peers
+    announcers = {idx: {idx // per_peer, second} for idx, second in pairs}
+    private_missing = read_received_view(private_cell / "received-view.tsv", peers, total)
+    grouped_missing = read_received_view(grouped_cell / "received-view.tsv", peers, total)
+    delta = 0
+    for member in range(peers):
+        if not private_missing[member] <= grouped_missing[member]:
+            fail("grouped mode delivered a prefix per-client-best did not")
+        for idx in grouped_missing[member] - private_missing[member]:
+            if member not in announcers.get(idx, ()):
+                fail("received-view delta pair is outside the overlap allocation")
+            delta += 1
+    if delta != len(pairs):
+        fail(
+            f"received-view delta ({delta}) does not equal the overlap "
+            f"allocation ({len(pairs)})"
+        )
+    return {
+        "status": "pass",
+        "overlap_fraction": fraction,
+        "overlap_pairs": len(pairs),
+        "suppressed_runner_up_pairs": delta,
+    }
 
 
 def sha256(path: Path) -> str:
@@ -1172,11 +1350,22 @@ def validate_root(root: Path, kind: str):
         "cells",
         "bird_image_id",
         "openbgpd_image_id",
+        "overlap_fraction",
     }
     if set(inputs) != expected_input_keys or any(
         inputs.get(key) != value for key, value in CANONICAL_FULL_INPUTS.items()
     ):
         fail(f"{root}: full workload inputs are not exact and canonical")
+    # The overlap fraction is a legitimate campaign dimension (LAN-892), not
+    # a canonical constant: require a well-formed value and bind every cell
+    # manifest to it below. Cross-root equality rides the inputs identity.
+    inputs_overlap = inputs.get("overlap_fraction")
+    if (
+        not isinstance(inputs_overlap, str)
+        or not re.fullmatch(r"[0-9]+([.][0-9]+)?", inputs_overlap)
+        or not 0 <= float(inputs_overlap) < 1
+    ):
+        fail(f"{root}: overlap_fraction input is not a decimal in [0, 1)")
     selected_image = re.compile(r"sha256:[0-9a-f]{64}")
     expected_image_id = selected_image.fullmatch if kind == "comparison" else None
     if (
@@ -1256,6 +1445,9 @@ def validate_root(root: Path, kind: str):
         )
         if manifest.get("dataset_sha256") != dataset or manifest.get("admit_churn") is not True:
             fail(f"{root}: {cell} manifest dataset/churn mismatch")
+        if manifest.get("overlap_fraction", 0.0) != float(inputs_overlap):
+            fail(f"{root}: {cell} manifest overlap does not match campaign inputs")
+        load_overlap(cdir / "manifest.json", 320, 183040)
         manifest_shape = tuple(
             int(manifest.get(name, -1))
             for name in ("n_members", "total_prefixes", "min_list", "max_list", "seed")
@@ -1285,6 +1477,7 @@ def validate_root(root: Path, kind: str):
                 marker_path = cdir / "pre-churn" / marker
                 if marker_path.is_symlink() or not marker_path.is_file() or marker_path.read_text() != f"{marker}\n":
                     fail(f"{root}: {cell} pre-churn {marker} is not an exact regular marker")
+            read_received_view(cdir / "received-view.tsv", 320, 183040)
             topology = read_json(cdir / "topology.json")
             expected_mode = "private" if cell == "rustbgpd-sighup" else "grouped"
             with tempfile.NamedTemporaryFile() as revalidated:
@@ -1296,11 +1489,12 @@ def validate_root(root: Path, kind: str):
                     cdir / "topology.tsv",
                     [cdir / f"metrics-{sample}.prom" for sample in range(1, 4)],
                     Path(revalidated.name),
+                    cdir / "manifest.json",
                 )
                 raw_topology = read_json(Path(revalidated.name))
             scrapes = topology.get("scrape_epoch_ns", [])
             if (
-                any(topology.get(key) != raw_topology.get(key) for key in ("status", "mode", "peers", "scrape_epoch_ns", "group_id"))
+                any(topology.get(key) != raw_topology.get(key) for key in ("status", "mode", "peers", "scrape_epoch_ns", "group_id", "overlap_fraction", "overlap_pairs"))
                 or topology.get("status") != "pass"
                 or topology.get("mode") != expected_mode
                 or topology.get("peers") != 320
@@ -1401,6 +1595,20 @@ def validate_campaigns(roots: list[Path], output_dir: Path) -> None:
     identities = [identity for entry in campaigns for identity in entry["identities"]]
     if len(identities) != len(set(identities)):
         fail("daemon PID/start identity was reused across campaign cells")
+    # Received-view delta (LAN-892): per repeat, the observer-side count of
+    # (member, prefix) pairs where per-client-best delivered a runner-up path
+    # that the grouped control suppressed, over the shared scenario.
+    deltas = {
+        label: received_view_delta(
+            comparison_root / "rustbgpd-sighup", grouped_root / GROUPED_CELL
+        )
+        for label, comparison_root, grouped_root in (
+            ("A", roots[0], roots[1]),
+            ("B", roots[3], roots[2]),
+        )
+    }
+    if deltas["A"] != deltas["B"]:
+        fail("A/B repeats disagree on the received-view delta")
     output_dir.mkdir(parents=True, exist_ok=False)
     write_combined(
         output_dir / "comparison.csv", (campaigns[0], campaigns[3]), COMPARISON_CELLS
@@ -1417,6 +1625,7 @@ def validate_campaigns(roots: list[Path], output_dir: Path) -> None:
                 "dataset_sha256": campaigns[0]["dataset"],
                 "comparison_rows": len(campaigns[0]["rows"]) + len(campaigns[3]["rows"]),
                 "grouped_control_rows": len(campaigns[1]["rows"]) + len(campaigns[2]["rows"]),
+                "received_view_delta": deltas["A"],
             },
             sort_keys=True,
         )
@@ -1558,6 +1767,7 @@ def make_fixture(root: Path, kind: str, started: int, identity_seed: int) -> Non
         "environment": {key: "fixture" for key in ("rustc", "cargo", "python", "jq", "docker", "kernel", "cpu_model")},
         "inputs": {
             **CANONICAL_FULL_INPUTS,
+            "overlap_fraction": "0",
             "campaign_kind": {"comparison": "full-cross-daemon", "grouped": "full-grouped-control", "transaction": "full-transaction"}[kind],
             "cells": ",".join(cells),
             "bird_image_id": image_id if kind == "comparison" else "not-selected",
@@ -1620,7 +1830,12 @@ def make_fixture(root: Path, kind: str, started: int, identity_seed: int) -> Non
         if cell in ("rustbgpd-sighup", GROUPED_CELL):
             topology_mode = "private" if cell == "rustbgpd-sighup" else "grouped"
             group_id = None if topology_mode == "private" else 7
-            (cdir / "topology.json").write_text(json.dumps({"status": "pass", "mode": topology_mode, "peers": 320, "scrape_epoch_ns": [1_000_000_000, 2_000_000_000, 3_000_000_000], "group_id": group_id, "first_reload_wall_us": 4_000_000}))
+            (cdir / "topology.json").write_text(json.dumps({"status": "pass", "mode": topology_mode, "peers": 320, "scrape_epoch_ns": [1_000_000_000, 2_000_000_000, 3_000_000_000], "group_id": group_id, "first_reload_wall_us": 4_000_000, "overlap_fraction": 0.0, "overlap_pairs": 0}))
+            received_rows = [f"received_view_v1\ttotal=183040\tpeers=320"]
+            for observer in range(320):
+                own = ",".join(str(index) for index in range(observer * 572, (observer + 1) * 572))
+                received_rows.append(f"{observer}\t572\t{own}")
+            (cdir / "received-view.tsv").write_text("\n".join(received_rows) + "\n")
             (cdir / "config.toml").write_text("per_client_best = true\n" * (320 if cell == "rustbgpd-sighup" else 0))
             (cdir / "topology.tsv").write_text("phase\tepoch_ns\nscrape1\t1000000000\nscrape2\t2000000000\nscrape3\t3000000000\n")
             metrics = ["bgp_rib_outbound_registered_peers 320", "bgp_rib_ingest_channel_depth 0", "bgp_rib_policy_transition_in_progress 0", 'bgp_rib_loc_prefixes{afi_safi="all"} 183040']
@@ -1940,6 +2155,154 @@ def self_test() -> None:
         wrong_count = topology_dir / "wrong-count.toml"
         wrong_count.write_text("per_client_best = true\n")
         topology_rejected("config-count", "none", wrong_count)
+
+        # --- Overlap topology (LAN-892): 2 members x 4 prefixes, prefix 0
+        # gains member 1 as second announcer (fraction 1/8). ---
+        overlap_dir = base / "overlap"
+        overlap_dir.mkdir()
+        addr = [member_addr(member) for member in range(2)]
+
+        def overlap_manifest(name, fraction=0.125, pairs=((0, 1),)):
+            path = overlap_dir / f"{name}.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "overlap_fraction": fraction,
+                        "overlap_pairs": [list(pair) for pair in pairs],
+                    }
+                )
+            )
+            return path
+
+        def overlap_metric_text(mode, adj_in, adj_out):
+            lines = [
+                "bgp_rib_outbound_registered_peers 2",
+                "bgp_rib_ingest_channel_depth 0",
+                "bgp_rib_policy_transition_in_progress 0",
+                'bgp_rib_loc_prefixes{afi_safi="all"} 8',
+            ]
+            for member, peer in enumerate(addr):
+                lines += [
+                    f'bgp_peer_session_established{{interface="eth0",peer="{peer}"}} 1',
+                    f'bgp_session_established_total{{peer="{peer}"}} 1',
+                    f'bgp_peer_outbound_queue_depth{{peer="{peer}"}} 0',
+                    f'bgp_rib_prefixes{{afi_safi="all",peer="{peer}"}} {adj_in[member]}',
+                    f'bgp_rib_prefixes{{afi_safi="flowspec",peer="{peer}"}} 0',
+                ]
+                lines += [
+                    f'bgp_rib_adj_out_prefixes{{afi_safi="{family}",peer="{peer}"}} '
+                    f'{adj_out[member] if family == "all" else 0}'
+                    for family in ("all", "bgpls", "evpn", "flowspec", "labeled", "rtc", "vpn")
+                ]
+            if mode == "private":
+                lines += ["bgp_update_groups 0", "bgp_update_group_fallback_peers 2"]
+                lines += [f'bgp_peer_update_group{{peer="{peer}"}} -1' for peer in addr]
+            else:
+                lines += [
+                    "bgp_update_groups 1",
+                    "bgp_update_group_fallback_peers 0",
+                    'bgp_update_group_members{group="7"} 2',
+                ]
+                lines += [f'bgp_peer_update_group{{peer="{peer}"}} 7' for peer in addr]
+            return "\n".join(lines) + "\n"
+
+        def overlap_topology(name, mode, adj_in, adj_out, manifest_path):
+            config = overlap_dir / f"{name}.toml"
+            config.write_text("per_client_best = true\n" * (2 if mode == "private" else 0))
+            paths = []
+            for sample in range(1, 4):
+                path = overlap_dir / f"{name}-{sample}.prom"
+                path.write_text(overlap_metric_text(mode, adj_in, adj_out))
+                paths.append(path)
+            validate_topology(
+                mode, 2, 8, config, timestamps, paths, overlap_dir / f"{name}.json", manifest_path
+            )
+
+        good_overlap = overlap_manifest("good")
+        # Private: runner-up delivery leaves only exclusive announcements
+        # suppressed. Grouped: member 0 wins the overlapped prefix.
+        overlap_topology("private-green", "private", (4, 5), (5, 4), good_overlap)
+        overlap_topology("grouped-green", "grouped", (4, 5), (4, 4), good_overlap)
+
+        def overlap_rejected(name, mode, adj_in, adj_out, manifest_path):
+            try:
+                overlap_topology(f"bad-{name}", mode, adj_in, adj_out, manifest_path)
+            except InvalidReceipt:
+                proofs[name] = True
+                return
+            fail(f"red overlap fixture unexpectedly accepted: {name}")
+
+        overlap_rejected(
+            "overlap-fraction-mismatch", "private", (4, 5), (5, 4),
+            overlap_manifest("fraction-mismatch", fraction=0.25),
+        )
+        overlap_rejected(
+            "overlap-pair-own-slice", "private", (4, 5), (5, 4),
+            overlap_manifest("own-slice", pairs=((0, 0),)),
+        )
+        overlap_rejected("overlap-achieved", "private", (4, 4), (5, 4), good_overlap)
+        overlap_rejected("overlap-private-runner-up", "private", (4, 5), (4, 4), good_overlap)
+        overlap_rejected("overlap-grouped-bounds", "grouped", (4, 5), (4, 5), good_overlap)
+        overlap_rejected("overlap-grouped-sum", "grouped", (4, 5), (5, 4), good_overlap)
+
+        # --- Received-view delta (LAN-892) over the same tiny shape. ---
+        def delta_cell(name, path_hiding, missing, dataset="d" * 64):
+            cell = base / f"delta-{name}"
+            cell.mkdir()
+            (cell / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "dataset_sha256": dataset,
+                        "n_members": 2,
+                        "total_prefixes": 8,
+                        "seed": 61,
+                        "path_hiding": path_hiding,
+                        "overlap_fraction": 0.125,
+                        "overlap_pairs": [[0, 1]],
+                    }
+                )
+            )
+            rows = ["received_view_v1\ttotal=8\tpeers=2"]
+            for observer, indices in enumerate(missing):
+                joined = ",".join(str(index) for index in sorted(indices))
+                rows.append(f"{observer}\t{len(indices)}\t{joined}")
+            (cell / "received-view.tsv").write_text("\n".join(rows) + "\n")
+            return cell
+
+        private_view = delta_cell("private", True, [{1, 2, 3}, {4, 5, 6, 7}])
+        grouped_view = delta_cell("grouped", False, [{0, 1, 2, 3}, {4, 5, 6, 7}])
+        result = received_view_delta(private_view, grouped_view)
+        if result["suppressed_runner_up_pairs"] != 1 or result["status"] != "pass":
+            fail("received-view delta green fixture did not pass")
+
+        def delta_rejected(name, private_cell, grouped_cell):
+            try:
+                received_view_delta(private_cell, grouped_cell)
+            except InvalidReceipt:
+                proofs[name] = True
+                return
+            fail(f"red received-view fixture unexpectedly accepted: {name}")
+
+        delta_rejected(
+            "received-view-scenario",
+            private_view,
+            delta_cell("other-dataset", False, [{0, 1, 2, 3}, {4, 5, 6, 7}], dataset="e" * 64),
+        )
+        delta_rejected(
+            "received-view-subset",
+            delta_cell("private-undelivered", True, [{0, 1, 2, 3}, {4, 5, 6, 7}]),
+            delta_cell("grouped-over", False, [{1, 2, 3}, {4, 5, 6, 7}]),
+        )
+        delta_rejected(
+            "received-view-delta-count",
+            delta_cell("private-count", True, [{1, 2, 3}, {4, 5, 6, 7}]),
+            delta_cell("grouped-count", False, [{1, 2, 3}, {4, 5, 6, 7}]),
+        )
+        delta_rejected(
+            "received-view-outside-allocation",
+            delta_cell("private-outside", True, [{1, 2, 3}, {4, 5, 6, 7}]),
+            delta_cell("grouped-outside", False, [{1, 2, 3}, {1, 4, 5, 6, 7}]),
+        )
         names = ("comparison-a", "grouped-a", "grouped-b", "comparison-b")
         kinds = ("comparison", "grouped", "grouped", "comparison")
         roots = [base / name for name in names]
@@ -2149,6 +2512,18 @@ def self_test() -> None:
             alter_json(manifest_path, lambda data: data["runtime_files"].append("extra.conf"))
             rebind_scenario_manifest(cdir)
         rejected("scenario-roster", break_scenario_roster)
+        def break_overlap_input_binding(root):
+            # Internally valid manifest overlap (1 pair at the canonical
+            # total) while the campaign inputs still declare overlap 0.
+            cdir = root / "bird"
+            alter_json(
+                cdir / "manifest.json",
+                lambda data: data.update(
+                    {"overlap_fraction": 1 / 183040, "overlap_pairs": [[0, 1]]}
+                ),
+            )
+            rebind_scenario_manifest(cdir)
+        rejected("overlap-input-binding", break_overlap_input_binding)
         def break_scenario_duplicate(root):
             cdir = root / "bird"
             alter_json(cdir / "manifest.json", lambda data: data["runtime_files"].append("bird.conf"))
@@ -2297,6 +2672,12 @@ def self_test() -> None:
         grouped_pair_drift("cross-role-source-identity", "binaries", "rbgp", "a" * 64)
         expected = {"default-roster", "mixed-roster", "mode-flags", "topology-mutation", "barrier-marker", "final-barrier-marker", "live-topology-gauge", "route-gauge", "route-family", "one-scrape-drift", "add-path", "config-count", "dirty-commit", "origin-only", "head-matches-false", "mismatched-commit", "commit-malformed", "scripts-null", "scripts-empty-map", "binary-malformed", "fingerprint-recompute", "canonical-changed-fraction", "canonical-control-secs", "canonical-bird-threads", "repeat-image-identity", "cell-root-provenance", "nonoverlap-order", "quiet-spacing", "preflight-raw", "cell-status", "cell-provenance", "evidence-roster", "scenario-roster", "scenario-duplicate", "scenario-unsafe-path", "scenario-retained-config", "cell-root-rows", "reload-log-rows", "percentile-order", "percentile-positive", "first-generation-bound", "observer-gap-bound", "row-invariants", "rss-raw", "seal-checksum", "exact-root-roster", "symlink-anywhere", "writable-root", "grouped-output-isolation", "output-exact-roster", "output-audit-call", "ordering", "reused-identity", "cross-role-environment", "cross-role-source-identity"}
         expected |= {"current-down", "reestablished", "flapped", "counter-malformed", "establishment-roster", "flap-roster", "row-session-loss"}
+        expected |= set(
+            """overlap-fraction-mismatch overlap-pair-own-slice overlap-achieved
+            overlap-private-runner-up overlap-grouped-bounds overlap-grouped-sum
+            overlap-input-binding received-view-scenario received-view-subset
+            received-view-delta-count received-view-outside-allocation""".split()
+        )
         expected |= set("""v3-inspector-linkage v3-inspector-mode v3-inspector-target v3-inspector-canonical v3-inspector-field-order v3-inspector-nested-order v3-inspector-raw-utf8 transaction-cycle-roster transaction-plan-token transaction-confirm transaction-v3-pending transaction-v3-linkage transaction-apply-deadline-missing transaction-apply-deadline-bool transaction-v3-deadline-missing transaction-v3-deadline-bool transaction-v3-deadline-stale transaction-v3-deadline-swapped transaction-v3-deadline-tamper transaction-schema-v1 transaction-lifecycle-schema-v1 transaction-v3-cleanup transaction-history transaction-abort transaction-timeout transaction-noop transaction-opposite
 transaction-token-leak transaction-warning-log transaction-warning-binding transaction-applied-generation transaction-scenario-generation transaction-cross-root-generation transaction-port-gate transaction-disk-gate transaction-swap-gate transaction-fallback-shape
 transaction-mixed-binary transaction-process-reuse transaction-file-tamper transaction-extra-file""".split())
@@ -2318,7 +2699,16 @@ def main() -> int:
     topology.add_argument("--config", type=Path, required=True)
     topology.add_argument("--timestamps", type=Path, required=True)
     topology.add_argument("--output", type=Path, required=True)
+    topology.add_argument(
+        "--manifest",
+        type=Path,
+        help="scenario manifest carrying the overlap allocation (absent = disjoint)",
+    )
     topology.add_argument("metrics", nargs=3, type=Path)
+    delta_parser = subparsers.add_parser("received-view-delta")
+    delta_parser.add_argument("--private-cell", required=True, type=Path)
+    delta_parser.add_argument("--grouped-cell", required=True, type=Path)
+    delta_parser.add_argument("--output", type=Path)
     campaigns = subparsers.add_parser("campaigns")
     campaigns.add_argument("--output-dir", required=True, type=Path)
     campaigns.add_argument("roots", nargs=4, type=Path)
@@ -2337,7 +2727,12 @@ def main() -> int:
     args = parser.parse_args()
     try:
         if args.command == "topology":
-            validate_topology(args.mode, args.peers, args.total, args.config, args.timestamps, args.metrics, args.output)
+            validate_topology(args.mode, args.peers, args.total, args.config, args.timestamps, args.metrics, args.output, args.manifest)
+        elif args.command == "received-view-delta":
+            result = received_view_delta(args.private_cell, args.grouped_cell)
+            if args.output is not None:
+                args.output.write_text(json.dumps(result, sort_keys=True) + "\n")
+            print(json.dumps(result, sort_keys=True))
         elif args.command == "campaigns":
             validate_campaigns(args.roots, args.output_dir)
         elif args.command == "transactions":

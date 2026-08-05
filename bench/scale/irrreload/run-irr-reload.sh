@@ -24,8 +24,14 @@
 #             host lock, two quiet samples per cell, and 300 s cool-downs.
 #
 # Knobs (env): N_MEMBERS TOTAL_PREFIXES MIN_LIST MAX_LIST SEED
-#              CHANGED_FRACTION PORT RELOADS CONTROL_SECS BIRD_THREADS
-#              CELL_TIMEOUT START_TIMEOUT ARTIFACTS_DIR TXN_MAX_CANDIDATE_BYTES
+#              CHANGED_FRACTION OVERLAP_FRACTION PORT RELOADS CONTROL_SECS
+#              BIRD_THREADS CELL_TIMEOUT START_TIMEOUT ARTIFACTS_DIR
+#              TXN_MAX_CANDIDATE_BYTES
+#
+# OVERLAP_FRACTION (default 0) selects the LAN-892 overlap shape: that
+# fraction of base prefixes is announced by a second member, so per-client
+# best and grouped update-group modes stop being behaviorally identical by
+# construction. 0 reproduces the historical disjoint scenario byte-for-byte.
 #
 set -u
 set -o pipefail
@@ -96,6 +102,11 @@ else
 fi
 SEED="${SEED:-61}"
 CHANGED_FRACTION="${CHANGED_FRACTION:-0.1}"
+OVERLAP_FRACTION="${OVERLAP_FRACTION:-0}"
+awk -v f="$OVERLAP_FRACTION" 'BEGIN { exit !(f ~ /^[0-9]+([.][0-9]+)?$/ && f + 0 >= 0 && f + 0 < 1) }' || {
+    echo "OVERLAP_FRACTION must be a decimal in [0, 1)" >&2
+    exit 2
+}
 PORT="${PORT:-1790}"
 # Hard readiness ceiling only; startup is not a reported measurement.
 START_TIMEOUT="${START_TIMEOUT:-600}"
@@ -143,6 +154,7 @@ if [ -n "${DRY_RUN_PROTOCOL:-}" ]; then
     printf 'rustbgpd_grouped_control=path_hiding:false,admit_churn:true,standalone:true\n'
     printf 'competitor_path_hiding=applicable:false,requested:true\n'
     printf 'shape=%s,%s,%s,%s\n' "$N_MEMBERS" "$TOTAL_PREFIXES" "$MIN_LIST" "$MAX_LIST"
+    printf 'overlap_fraction=%s\n' "$OVERLAP_FRACTION"
     printf 'reloads=%s control_secs=%s txn_max_candidate_bytes=%s\n' \
         "$RELOADS" "$CONTROL_SECS" "$TXN_MAX_CANDIDATE_BYTES"
     exit 0
@@ -267,7 +279,8 @@ CAMPAIGN_PROVENANCE=$(jq -cn \
     --arg smoke "$SMOKE" --arg n_members "$N_MEMBERS" \
     --arg total_prefixes "$TOTAL_PREFIXES" --arg min_list "$MIN_LIST" \
     --arg max_list "$MAX_LIST" --arg seed "$SEED" \
-    --arg changed_fraction "$CHANGED_FRACTION" --arg port "$PORT" \
+    --arg changed_fraction "$CHANGED_FRACTION" \
+    --arg overlap_fraction "$OVERLAP_FRACTION" --arg port "$PORT" \
     --arg reloads "$RELOADS" --arg control_secs "$CONTROL_SECS" \
     --arg campaign_kind "$CAMPAIGN_KIND" \
     --arg txn_max_candidate_bytes "$TXN_MAX_CANDIDATE_BYTES" \
@@ -280,7 +293,7 @@ CAMPAIGN_PROVENANCE=$(jq -cn \
     --arg cpu_model "$(awk -F: '/^model name/ { sub(/^[[:space:]]+/, "", $2); print $2; exit }' /proc/cpuinfo)" \
     --arg bird_image "$BIRD_IMAGE" --arg bird_image_id "$BIRD_IMAGE_ID" \
     --arg openbgpd_image "$OPENBGPD_IMAGE" --arg openbgpd_image_id "$OPENBGPD_IMAGE_ID" \
-    '{schema:3,started_at_epoch_ns:$started_at_epoch_ns,git:{commit:$commit,dirty:$dirty,dirty_state_sha256:$dirty_state_sha256,origin_main:$origin_main,head_matches_origin_main:$head_matches_origin_main},scripts:{runner:$run_script_sha256,verifier:$verifier_sha256,generator:$generator_sha256,rss_sampler:$sampler_sha256,txn_apply:$txn_apply_sha256,txn_lifecycle:$txn_lifecycle_sha256},binaries:{reloadstall:$harness_sha256,rustbgpd:$daemon_sha256,rbgp:$cli_sha256,rs_config_render:$renderer_sha256},environment:{rustc:$rustc,cargo:$cargo,python:$python,jq:$jq,docker:$docker,kernel:$kernel,cpu_model:$cpu_model},inputs:{campaign_kind:$campaign_kind,cells:$cells,smoke:$smoke,n_members:$n_members,total_prefixes:$total_prefixes,min_list:$min_list,max_list:$max_list,seed:$seed,changed_fraction:$changed_fraction,port:$port,reloads:$reloads,control_secs:$control_secs,txn_max_candidate_bytes:$txn_max_candidate_bytes,cell_timeout:$cell_timeout,start_timeout:$start_timeout,bird_threads:$bird_threads,skip_preflight:$skip_preflight,bird_image:$bird_image,bird_image_id:$bird_image_id,openbgpd_image:$openbgpd_image,openbgpd_image_id:$openbgpd_image_id}}') || exit 1
+    '{schema:3,started_at_epoch_ns:$started_at_epoch_ns,git:{commit:$commit,dirty:$dirty,dirty_state_sha256:$dirty_state_sha256,origin_main:$origin_main,head_matches_origin_main:$head_matches_origin_main},scripts:{runner:$run_script_sha256,verifier:$verifier_sha256,generator:$generator_sha256,rss_sampler:$sampler_sha256,txn_apply:$txn_apply_sha256,txn_lifecycle:$txn_lifecycle_sha256},binaries:{reloadstall:$harness_sha256,rustbgpd:$daemon_sha256,rbgp:$cli_sha256,rs_config_render:$renderer_sha256},environment:{rustc:$rustc,cargo:$cargo,python:$python,jq:$jq,docker:$docker,kernel:$kernel,cpu_model:$cpu_model},inputs:{campaign_kind:$campaign_kind,cells:$cells,smoke:$smoke,n_members:$n_members,total_prefixes:$total_prefixes,min_list:$min_list,max_list:$max_list,seed:$seed,changed_fraction:$changed_fraction,overlap_fraction:$overlap_fraction,port:$port,reloads:$reloads,control_secs:$control_secs,txn_max_candidate_bytes:$txn_max_candidate_bytes,cell_timeout:$cell_timeout,start_timeout:$start_timeout,bird_threads:$bird_threads,skip_preflight:$skip_preflight,bird_image:$bird_image,bird_image_id:$bird_image_id,openbgpd_image:$openbgpd_image,openbgpd_image_id:$openbgpd_image_id}}') || exit 1
 CAMPAIGN_FINGERPRINT=$(printf '%s' "$CAMPAIGN_PROVENANCE" | jq -cS . | sha256sum | cut -d' ' -f1) || exit 1
 SEALED_CAMPAIGN_PROVENANCE=$(printf '%s\n' "$CAMPAIGN_PROVENANCE" | jq -cS \
     --arg fingerprint "$CAMPAIGN_FINGERPRINT" '. + {fingerprint:$fingerprint}') || exit 1
@@ -394,7 +407,7 @@ seal_cell_evidence() {
         fi
         ;;
     rustbgpd-sighup | "$GROUPED_CELL")
-        evidence_files+=(config.toml topology.json topology.tsv metrics-1.prom metrics-2.prom metrics-3.prom pre-churn/ready pre-churn/ack)
+        evidence_files+=(config.toml topology.json topology.tsv metrics-1.prom metrics-2.prom metrics-3.prom pre-churn/ready pre-churn/ack received-view.tsv)
         ;;
     esac
     : >"$cdir/evidence.sha256.tmp"
@@ -552,6 +565,7 @@ capture_topology() {
             [ "$sample" -eq 3 ] || sleep 1
         done
         if python3 "$VERIFY" topology --mode "$mode" --peers "$N_MEMBERS" --total "$TOTAL_PREFIXES" \
+            --manifest "$run/manifest.json" \
             --config "$cdir/config.toml" --timestamps "$cdir/topology.tsv" \
             --output "$cdir/topology.json" "$cdir"/metrics-{1,2,3}.prom 2>"$cdir/topology.error"; then
             rm -f "$cdir/topology.error"
@@ -608,7 +622,8 @@ gen_scenario() {
     shift 2
     python3 "$GEN" "$cell" "$N_MEMBERS" "$TOTAL_PREFIXES" "$run" \
         --port "$PORT" --seed "$SEED" --min-list "$MIN_LIST" \
-        --max-list "$MAX_LIST" --changed-fraction "$CHANGED_FRACTION" "$@"
+        --max-list "$MAX_LIST" --changed-fraction "$CHANGED_FRACTION" \
+        --overlap-fraction "$OVERLAP_FRACTION" "$@"
 }
 
 wait_ready() {
@@ -772,14 +787,19 @@ run_cell() {
     # Background so the precommitted RSS abort criterion can kill the cell.
     final_barrier="$run/final-evidence"
     [ ! -e "$final_barrier" ] || return 1
+    local -a henv=(RELOADSTALL_EVIDENCE_DIR="$final_barrier")
+    # The generator emits overlap.tsv only at OVERLAP_FRACTION > 0; every
+    # cell's stubs must announce the same second-announcer allocation.
+    [ ! -f "$run/overlap.tsv" ] || henv+=(RELOADSTALL_OVERLAP_FILE="$run/overlap.tsv")
     if [ -n "$topology_mode" ]; then
         barrier="$run/pre-churn-evidence"
         [ ! -e "$barrier" ] || return 1
-        setsid env RELOADSTALL_PRE_CHURN_EVIDENCE_DIR="$barrier" \
-            RELOADSTALL_EVIDENCE_DIR="$final_barrier" \
+        henv+=(RELOADSTALL_PRE_CHURN_EVIDENCE_DIR="$barrier"
+            RELOADSTALL_RECEIVED_VIEW_FILE="$cdir/received-view.tsv")
+        setsid env "${henv[@]}" \
             timeout "$CELL_TIMEOUT" stdbuf -oL -eL "$HARNESS" "${hargs[@]}" >"$cdir/reloadstall.log" 2>&1 &
     else
-        setsid env RELOADSTALL_EVIDENCE_DIR="$final_barrier" \
+        setsid env "${henv[@]}" \
             timeout "$CELL_TIMEOUT" stdbuf -oL -eL "$HARNESS" "${hargs[@]}" >"$cdir/reloadstall.log" 2>&1 &
     fi
     local hpid=$!

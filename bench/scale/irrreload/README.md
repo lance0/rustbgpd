@@ -41,6 +41,7 @@ policy generations:
 | Announced base table (`TOTAL_PREFIXES`) | 100 | 183,040 (572/member) | 183,040 (572/member) |
 | Per-member IRR filter list (`MIN_LIST`–`MAX_LIST`) | 100 | log-uniform 1,000–40,000 | log-uniform 1,000–40,000 |
 | Per-member change probability (`CHANGED_FRACTION`) | 10% | 10% | 10% |
+| Announcement overlap (`OVERLAP_FRACTION`) | 0 | 0 (canonical) / >0 (LAN-892) | 0 |
 | Seed (`SEED`) | 61 | 61 | 61 |
 | Reload cycles per cell (`RELOADS`) | 1 | 4 | 4 |
 
@@ -57,6 +58,98 @@ The multi-MB configs are **not** committed; they reproduce from the generator
 and pinned inputs. Padding prefixes are /24s from
 30.0.0.0–99.255.255.0 (disjoint from the announced table, the churn range,
 and the bogon list).
+
+## Announcement overlap (LAN-892)
+
+The canonical scenario announces disjoint per-member slices: the Loc-RIB is
+the sum of the per-peer Adj-RIB-Ins and no prefix ever has two candidate
+paths, so `per_client_best` and the grouped control are behaviorally
+identical by construction. `OVERLAP_FRACTION=F` (default 0) makes the
+comparison real: `round(F x TOTAL_PREFIXES)` base prefixes, drawn uniformly
+under a seed-derived RNG stream, each gain exactly ONE second announcing
+member (drawn uniformly from the other members). The second announcer's
+stub announces the prefix, its IRR filter lists admit it in both
+generations, and the allocation is recorded in the scenario manifest
+(`overlap_fraction`, `overlap_pairs`) and in the `overlap.tsv` runtime file
+the harness consumes. `F=0` reproduces the historical generator output
+byte-for-byte (no new files or manifest keys; the seed-61 canonical dataset
+digest is unchanged and pinned in
+`tests/reloadstall_scenario_emitted_check.rs`).
+
+Model limits, stated plainly: every overlapped prefix has exactly two
+announcers (real route servers see heavier tails), the second announcer is
+uniform over members (real overlap concentrates in large transit/CDN
+members), and both paths are equal-preference single-hop routes decided by
+daemon tie-break.
+
+**Topology proof under overlap.** The pre-reload topology gate computes its
+expectations from the manifest allocation instead of assuming disjointness:
+Loc-RIB stays exactly `TOTAL_PREFIXES` (one best route per prefix);
+per-peer Adj-RIB-In must equal that member's announced count (slice +
+second-announcer extras), which also pins the ACHIEVED overlap fraction
+against the manifest (sum of Adj-RIB-Ins = total + overlapped count); in
+`per_client_best` mode each member's Adj-RIB-Out must include the
+runner-up path for every overlapped prefix it announces (only exclusively
+announced prefixes stay suppressed — this is the mode's differentiator and
+is asserted exactly); in grouped mode the winning announcer per overlapped
+prefix is a daemon tie-break, so each member's Adj-RIB-Out is bounded by
+its announced/exclusive counts and the global suppression must total
+exactly one best announcer per prefix. The F=0 case reproduces the
+historical exact assertions verbatim.
+
+**Received-view delta.** The receipt's headline observable for LAN-892 is
+the count of (member, prefix) pairs where per-client-best delivered a
+runner-up path that grouped mode suppressed. It is computed observer-side:
+after the final measured reload, with stub sessions still live, the harness
+dumps each observer's final-generation received view (base prefixes seen
+with the generation marker, BEFORE own-announcement exclusion) to
+`received-view.tsv` (`RELOADSTALL_RECEIVED_VIEW_FILE`), retained in each
+rustbgpd cell's sealed evidence. `verify-receipt.py received-view-delta`
+(and the four-root `campaigns` verifier, per A/B repeat) compares the
+private and grouped cells' views over the same sealed scenario: grouped
+deliveries must be a pointwise subset of per-client-best deliveries, every
+delta pair must be an overlapped prefix observed at one of its announcers,
+and the total must equal the manifest allocation exactly (one suppressed
+best-path announcer per overlapped prefix). Any deviation — mismatched
+scenarios, tampered views, a runner-up that never reached the wire — makes
+the verifier red. No daemon-side gauge is used for this number; the
+Adj-RIB-Out gauges above corroborate it from the daemon side.
+
+**Choosing F.** Public evidence on how much of a route server's table is
+announced by 2+ members is thin. The one published point estimate we found
+is preliminary and single-IXP: an ACM SIGCOMM 2025 poster crawling Alice
+Looking Glass snapshots at 16 major IXPs reports that at one of the largest
+European IXPs roughly 50% of prefixes have alternative paths (Alhamwy,
+Khoulani, Hohlfeld, "POSTER: Crawling Alice Looking Glasses at IXPs to
+Quantify BGP Route Diversity", ACM SIGCOMM 2025 Posters and Demos,
+doi:10.1145/3744969.3748457). The path-hiding mechanism this dimension
+exercises is documented in Richter et al., "Peering at Peerings: On the
+Role of IXP Route Servers" (IMC 2014), which describes route servers
+suppressing alternative paths under a single shared RIB. Because the 50%
+figure is a poster-stage measurement of one IXP (and counts prefixes with
+one or more alternatives, where this model generates exactly one), we do
+not bless a single value: LAN-892 campaigns should run a sensitivity pair —
+`OVERLAP_FRACTION=0.1` (conservative low-diversity bound) and
+`OVERLAP_FRACTION=0.5` (the published large-IXP point estimate). The F>0
+campaigns are the LAN-892 receipt's shape; F=0 remains the canonical
+cross-daemon comparison shape.
+
+```bash
+# LAN-892 overlap campaign (quiet host only), one sensitivity point:
+OVERLAP_FRACTION=0.5 ARTIFACTS_DIR=/tmp/irrreload-ov50-comparison-A bench/scale/irrreload/run-irr-reload.sh
+OVERLAP_FRACTION=0.5 ARTIFACTS_DIR=/tmp/irrreload-ov50-grouped-A bench/scale/irrreload/run-irr-reload.sh rustbgpd-sighup-grouped-control
+OVERLAP_FRACTION=0.5 ARTIFACTS_DIR=/tmp/irrreload-ov50-grouped-B bench/scale/irrreload/run-irr-reload.sh rustbgpd-sighup-grouped-control
+OVERLAP_FRACTION=0.5 ARTIFACTS_DIR=/tmp/irrreload-ov50-comparison-B bench/scale/irrreload/run-irr-reload.sh
+
+python3 bench/scale/irrreload/verify-receipt.py campaigns \
+  --output-dir /tmp/irrreload-ov50-verified \
+  /tmp/irrreload-ov50-comparison-A /tmp/irrreload-ov50-grouped-A \
+  /tmp/irrreload-ov50-grouped-B /tmp/irrreload-ov50-comparison-B
+# verification.json carries received_view_delta; standalone form:
+python3 bench/scale/irrreload/verify-receipt.py received-view-delta \
+  --private-cell /tmp/irrreload-ov50-comparison-A/rustbgpd-sighup \
+  --grouped-cell /tmp/irrreload-ov50-grouped-A/rustbgpd-sighup-grouped-control
+```
 
 ## BMP Loc-RIB dump buffer receipt
 

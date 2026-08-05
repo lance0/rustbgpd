@@ -23,6 +23,17 @@
 //!   <daemon_pid>; a nonzero exit fails the run like a failed SIGHUP.
 //! - `daemon_pid` 0: skip in-harness RSS sampling (an outer sampler owns
 //!   it; RSS columns report 0). Requires `reload_cmd` or `--flapstorm`.
+//! - `RELOADSTALL_OVERLAP_FILE` (env, reload mode only): a generator-emitted
+//!   `member<TAB>global prefix index` allocation of overlap second
+//!   announcers (LAN-892). Listed stubs additionally announce those base
+//!   prefixes; completion targets exclude each observer's own announced set
+//!   (slice + extras), which both update-group modes are guaranteed to
+//!   deliver.
+//! - `RELOADSTALL_RECEIVED_VIEW_FILE` (env, reload mode with
+//!   RELOADSTALL_EVIDENCE_DIR): before the final evidence boundary, dump
+//!   each observer's final-generation received view (base prefixes seen
+//!   with the marker, BEFORE own-announcement exclusion) so the verifier
+//!   can compute the per-client-best vs grouped received-view delta.
 //! - `--flapstorm K` (anywhere in argv): alternative mode replacing the
 //!   reload loop. After convergence + the control window, close the first
 //!   K stub sockets simultaneously, timestamp every survivor's receipt of
@@ -138,10 +149,19 @@ struct Stub {
 #[derive(Default)]
 struct GenerationProgress {
     seen: Vec<u64>,
+    /// Every base prefix observed with the active generation marker BEFORE
+    /// own-announcement exclusion — the LAN-892 received view. With overlap,
+    /// per-client-best delivers runner-up paths for prefixes the observer
+    /// itself announces; those are excluded from completion but must still be
+    /// evidenced for the received-view delta.
+    received: Vec<u64>,
     unique: u64,
     target: u64,
     excluded_start: usize,
     excluded_end: usize,
+    /// Sorted extra own-announced indices (overlap second-announcer role),
+    /// excluded from completion alongside the contiguous own slice.
+    excluded_extra: Vec<usize>,
     completed_at_us: Option<u64>,
     first_marker_base_at_us: Option<u64>,
 }
@@ -151,16 +171,34 @@ impl GenerationProgress {
         self.seen.clear();
         self.seen
             .resize(usize::try_from(total_prefixes).unwrap().div_ceil(64), 0);
+        self.received.clear();
+        self.received.resize(self.seen.len(), 0);
         self.unique = 0;
         self.target = target;
         self.excluded_start = usize::try_from(excluded_start).unwrap();
         self.excluded_end = usize::try_from(excluded_start + excluded_len).unwrap();
+        self.excluded_extra.clear();
         self.completed_at_us = None;
         self.first_marker_base_at_us = None;
     }
 
+    /// Exclude the observer's extra own-announced prefixes (overlap second-
+    /// announcer role) from completion, shrinking the target to match. Call
+    /// after `reset`; the generator guarantees these are outside the
+    /// contiguous own slice.
+    fn exclude_extra(&mut self, extra: &[u32]) {
+        self.excluded_extra = extra.iter().map(|&idx| idx as usize).collect();
+        self.excluded_extra.sort_unstable();
+        self.target = self.target.saturating_sub(extra.len() as u64);
+    }
+
     fn observe(&mut self, prefix_index: usize, t_us: u64) {
-        if (self.excluded_start..self.excluded_end).contains(&prefix_index) {
+        if let Some(slot) = self.received.get_mut(prefix_index / 64) {
+            *slot |= 1u64 << (prefix_index % 64);
+        }
+        if (self.excluded_start..self.excluded_end).contains(&prefix_index)
+            || self.excluded_extra.binary_search(&prefix_index).is_ok()
+        {
             return;
         }
         let word = prefix_index / 64;
@@ -188,6 +226,10 @@ struct Ctx {
     per_peer: u32,
     daemon: SocketAddr,
     obs: Vec<Obs>,
+    /// Per-stub extra announced base indices beyond the contiguous own slice
+    /// (`RELOADSTALL_OVERLAP_FILE`, the LAN-892 overlap dimension). Empty
+    /// vectors when overlap is off — the historical disjoint shape.
+    extras: Vec<Vec<u32>>,
     /// Daemon UPDATEs the stub failed to decode — a daemon defect that
     /// invalidates the run (see the reader and the exit check in `main`).
     parse_errors: AtomicU64,
@@ -336,6 +378,92 @@ fn withdraw_msg(prefixes: &[Ipv4Prefix]) -> Message {
 fn own_slice(ctx: &Ctx, i: u32) -> Vec<Ipv4Prefix> {
     let lo = i * ctx.per_peer;
     (lo..lo + ctx.per_peer).map(base_prefix).collect()
+}
+
+/// Everything stub `i` announces: its own slice plus its overlap
+/// second-announcer prefixes (LAN-892; empty extras reproduce the
+/// historical disjoint announcements exactly).
+fn announced_prefixes(ctx: &Ctx, i: u32) -> Vec<Ipv4Prefix> {
+    let mut prefixes = own_slice(ctx, i);
+    prefixes.extend(ctx.extras[i as usize].iter().copied().map(base_prefix));
+    prefixes
+}
+
+/// Parse the generator's overlap allocation (`member<TAB>global prefix index`
+/// per line): the extra base prefixes each stub announces beyond its own
+/// slice. Rejects out-of-range members and prefixes, own-slice entries
+/// (already announced), and duplicates.
+fn parse_overlap_file(
+    text: &str,
+    n_peers: u32,
+    total: u32,
+    per_peer: u32,
+) -> Result<Vec<Vec<u32>>, String> {
+    let mut extras = vec![Vec::new(); n_peers as usize];
+    for (index, line) in text.lines().enumerate() {
+        let number = index + 1;
+        let (member, idx) = line
+            .split_once('\t')
+            .ok_or(format!("overlap line {number}: missing tab separator"))?;
+        let member: u32 = member
+            .parse()
+            .map_err(|_| format!("overlap line {number}: invalid member index"))?;
+        let idx: u32 = idx
+            .parse()
+            .map_err(|_| format!("overlap line {number}: invalid prefix index"))?;
+        if member >= n_peers {
+            return Err(format!(
+                "overlap line {number}: member {member} out of range"
+            ));
+        }
+        if idx >= total {
+            return Err(format!(
+                "overlap line {number}: prefix index {idx} out of range"
+            ));
+        }
+        if idx / per_peer == member {
+            return Err(format!(
+                "overlap line {number}: prefix {idx} is in member {member}'s own slice"
+            ));
+        }
+        let list: &mut Vec<u32> = &mut extras[member as usize];
+        if list.contains(&idx) {
+            return Err(format!(
+                "overlap line {number}: duplicate ({member}, {idx})"
+            ));
+        }
+        list.push(idx);
+    }
+    for list in &mut extras {
+        list.sort_unstable();
+    }
+    Ok(extras)
+}
+
+/// Dump every observer's LAN-892 received view (final-generation base
+/// prefixes seen, before own-announcement exclusion) as
+/// `observer<TAB>missing_count<TAB>comma-joined missing indices`.
+fn write_received_view(ctx: &Ctx, path: &Path) -> std::io::Result<()> {
+    let total = usize::try_from(ctx.n_peers * ctx.per_peer).unwrap();
+    let mut out = format!(
+        "received_view_v1\ttotal={}\tpeers={}\n",
+        ctx.n_peers * ctx.per_peer,
+        ctx.n_peers
+    );
+    for (i, observer) in ctx.obs.iter().enumerate() {
+        let generation = observer.generation.lock().unwrap();
+        let missing: Vec<String> = (0..total)
+            .filter(|&idx| {
+                generation
+                    .received
+                    .get(idx / 64)
+                    .is_none_or(|slot| slot & (1u64 << (idx % 64)) == 0)
+            })
+            .map(|idx| idx.to_string())
+            .collect();
+        out.push_str(&format!("{i}\t{}\t{}\n", missing.len(), missing.join(",")));
+    }
+    std::fs::write(path, out)
 }
 
 async fn establish_stub(ctx: Arc<Ctx>, i: u32) -> Result<Stub, String> {
@@ -606,7 +734,7 @@ async fn establish_stub(ctx: Arc<Ctx>, i: u32) -> Result<Stub, String> {
                         let tx = tx_for_reader.clone();
                         let rc = Arc::clone(&rctx);
                         tokio::spawn(async move {
-                            let slice = own_slice(&rc, i);
+                            let slice = announced_prefixes(&rc, i);
                             for m in announce_msgs(i, &slice) {
                                 if tx.send(m).await.is_err() {
                                     break;
@@ -841,7 +969,7 @@ async fn run_flapstorm(ctx: &Arc<Ctx>, stubs: &mut [Stub], k: u32, pid: i32) {
         let t_reann = now_us(ctx);
         println!("flap {round} reannounce wall_us={}", wall_us());
         for i in 0..k {
-            let slice = own_slice(ctx, i);
+            let slice = announced_prefixes(ctx, i);
             for m in announce_msgs(i, &slice) {
                 if stubs[i as usize].tx.send(m).await.is_err() {
                     eprintln!("flap {round} re-announce send failed for stub {i}");
@@ -1082,6 +1210,8 @@ fn main() {
     let evidence_dir = std::env::var_os("RELOADSTALL_EVIDENCE_DIR").map(PathBuf::from);
     let pre_churn_evidence_dir =
         std::env::var_os("RELOADSTALL_PRE_CHURN_EVIDENCE_DIR").map(PathBuf::from);
+    let overlap_file = std::env::var_os("RELOADSTALL_OVERLAP_FILE").map(PathBuf::from);
+    let received_view_file = std::env::var_os("RELOADSTALL_RECEIVED_VIEW_FILE").map(PathBuf::from);
     assert!(n_peers >= CHURNERS, "n_peers must be at least {CHURNERS}");
     assert!(
         (1..=n_peers).contains(&changed_peers),
@@ -1116,6 +1246,42 @@ fn main() {
     }
     let per_peer = total / n_peers;
     assert_eq!(total % n_peers, 0, "total must divide evenly");
+    // Overlap and the received-view dump are reload-mode instruments only:
+    // flapstorm and convergence-only completion accounting assumes the
+    // historical disjoint announcements.
+    assert!(
+        overlap_file.is_none() || (reloads > 0 && flapstorm.is_none() && !convergence_only),
+        "RELOADSTALL_OVERLAP_FILE requires the reload mode (reloads > 0)"
+    );
+    assert!(
+        received_view_file.is_none()
+            || (reloads > 0
+                && flapstorm.is_none()
+                && !convergence_only
+                && changed_peers == n_peers
+                && evidence_dir.is_some()),
+        "RELOADSTALL_RECEIVED_VIEW_FILE requires the all-changed reload mode \
+         with RELOADSTALL_EVIDENCE_DIR (the dump precedes the final boundary)"
+    );
+    let extras = match overlap_file.as_deref() {
+        Some(path) => {
+            let text = std::fs::read_to_string(path).unwrap_or_else(|error| {
+                eprintln!(
+                    "cannot read RELOADSTALL_OVERLAP_FILE {}: {error}",
+                    path.display()
+                );
+                std::process::exit(2);
+            });
+            parse_overlap_file(&text, n_peers, total, per_peer).unwrap_or_else(|error| {
+                eprintln!(
+                    "invalid RELOADSTALL_OVERLAP_FILE {}: {error}",
+                    path.display()
+                );
+                std::process::exit(2);
+            })
+        }
+        None => vec![Vec::new(); n_peers as usize],
+    };
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(24)
@@ -1141,6 +1307,7 @@ fn main() {
                     flap_mode: AtomicU32::new(FLAP_OFF),
                 })
                 .collect(),
+            extras,
             parse_errors: AtomicU64::new(0),
         });
         println!(
@@ -1175,19 +1342,29 @@ fn main() {
         );
 
         let expected = u64::from(total - per_peer);
+        // Per-observer completion target: overlap second announcers also
+        // exclude their extra announced prefixes (a member never depends on
+        // receiving what it announces; grouped mode may legitimately
+        // suppress those toward the best-path announcer).
+        let targets: Vec<u64> = ctx
+            .extras
+            .iter()
+            .map(|extra| expected - extra.len() as u64)
+            .collect();
         let exact_initial = convergence_only || needs_first_exact_bitmap(reloads, flapstorm); // FIRST_EXACT_ARM:
         if exact_initial {
             for (i, observer) in ctx.obs.iter().enumerate() {
                 let own_start = u32::try_from(i).unwrap() * per_peer;
                 let mut generation = observer.generation.lock().unwrap();
                 generation.reset(total, expected, own_start, per_peer);
+                generation.exclude_extra(&ctx.extras[i]);
                 let mode = &observer.flap_mode;
                 mode.store(FLAP_TRACK_ANNOUNCES, Ordering::Release);
             }
         }
         // --- Announce base table (FIRST_EXACT_SEND). ---
         for i in 0..n_peers {
-            let slice = own_slice(&ctx, i);
+            let slice = announced_prefixes(&ctx, i);
             for m in announce_msgs(i, &slice) {
                 stubs[i as usize].tx.send(m).await.unwrap();
             }
@@ -1208,7 +1385,11 @@ fn main() {
                     }
                 })
                 .collect();
-            if *counts.iter().min().unwrap() >= expected {
+            if counts
+                .iter()
+                .zip(&targets)
+                .all(|(count, target)| count >= target)
+            {
                 break counts;
             }
             let sum: u64 = counts.iter().sum();
@@ -1227,7 +1408,7 @@ fn main() {
                 let below: Vec<(usize, u64)> = counts
                     .iter()
                     .enumerate()
-                    .filter(|&(_, &c)| c < expected)
+                    .filter(|&(i, &c)| c < targets[i])
                     .map(|(i, &c)| (i, c))
                     .collect();
                 eprintln!(
@@ -1257,7 +1438,11 @@ fn main() {
                 } else {
                     "reload"
                 },
-                unique.iter().filter(|&&count| count >= expected).count(),
+                unique
+                    .iter()
+                    .zip(&targets)
+                    .filter(|(count, target)| count >= target)
+                    .count(),
                 unique.iter().min().unwrap(),
                 unique.iter().max().unwrap()
             );
@@ -1394,12 +1579,9 @@ fn main() {
                 .enumerate()
             {
                 observer.expected_community.store(0, Ordering::Release);
-                observer.generation.lock().unwrap().reset(
-                    total,
-                    expected,
-                    u32::try_from(i).unwrap() * per_peer,
-                    per_peer,
-                );
+                let mut generation = observer.generation.lock().unwrap();
+                generation.reset(total, expected, u32::try_from(i).unwrap() * per_peer, per_peer);
+                generation.exclude_extra(&ctx.extras[i]);
             }
             // The tracker stays disarmed until its trigger timestamp exists,
             // so a delayed UPDATE from an older A/B generation cannot become
@@ -1648,6 +1830,12 @@ fn main() {
             std::process::exit(1);
         }
         println!("final sessions_up {up}/{n_peers} parse_errors={parse_errors}");
+        if let Some(path) = received_view_file.as_deref() {
+            if let Err(error) = write_received_view(&ctx, path) {
+                eprintln!("FAIL: received-view dump failed: {error}");
+                std::process::exit(1);
+            }
+        }
         if let Err(error) = await_evidence_capture(evidence_dir, EVIDENCE_TIMEOUT).await {
             eprintln!("FAIL: final evidence handshake failed: {error}");
             std::process::exit(1);
@@ -1986,6 +2174,53 @@ mod tests {
         assert!(!stable_marker_is_fresh(99, 100));
         assert!(stable_marker_is_fresh(100, 100));
         assert!(stable_marker_is_fresh(101, 100));
+    }
+
+    #[test]
+    fn overlap_file_parses_and_rejects_malformed_allocations() {
+        let extras = parse_overlap_file("1\t0\n0\t7\n1\t5\n", 4, 8, 2).unwrap();
+        assert_eq!(extras, vec![vec![7], vec![0, 5], vec![], vec![]]);
+        assert!(parse_overlap_file("", 4, 8, 2)
+            .unwrap()
+            .iter()
+            .all(Vec::is_empty));
+        for (bad, why) in [
+            ("1 0", "missing tab"),
+            ("x\t0", "member parse"),
+            ("1\tx", "index parse"),
+            ("4\t0", "member out of range"),
+            ("1\t8", "prefix out of range"),
+            ("1\t3", "own-slice prefix"),
+            ("1\t0\n1\t0", "duplicate"),
+        ] {
+            assert!(parse_overlap_file(bad, 4, 8, 2).is_err(), "{why}");
+        }
+    }
+
+    #[test]
+    fn received_view_records_before_exclusion_and_extras_shrink_target() {
+        let mut progress = GenerationProgress::default();
+        progress.reset(8, 6, 2, 2); // observer 1 of 4, per_peer 2
+        progress.exclude_extra(&[5]);
+        assert_eq!(progress.target, 5);
+
+        progress.observe(2, 10); // own slice: excluded from completion
+        progress.observe(5, 20); // overlap extra: excluded from completion
+        assert_eq!(progress.unique, 0);
+        for idx in [0, 1, 4, 6, 7] {
+            progress.observe(idx, 30);
+        }
+        assert_eq!(progress.unique, 5);
+        assert_eq!(progress.completed_at_us, Some(30));
+        // The received view keeps every delivered prefix, including the
+        // excluded own announcements (the per-client-best runner-up path).
+        let received: Vec<usize> = (0..8)
+            .filter(|idx| progress.received[idx / 64] & (1 << (idx % 64)) != 0)
+            .collect();
+        assert_eq!(received, vec![0, 1, 2, 4, 5, 6, 7]);
+        progress.reset(8, 6, 2, 2);
+        assert!(progress.excluded_extra.is_empty(), "reset clears extras");
+        assert!(progress.received.iter().all(|&slot| slot == 0));
     }
 
     #[test]
