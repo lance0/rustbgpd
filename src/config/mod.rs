@@ -102,6 +102,11 @@ impl StagedDatasetCommit {
     }
 }
 
+/// Saturating whole-millisecond elapsed time for structured log fields.
+fn elapsed_ms(started: std::time::Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
 impl Config {
     fn peer_group_for_neighbor(
         &self,
@@ -161,6 +166,7 @@ impl Config {
         mut capture: Option<&mut source_provenance::SourceCapture>,
         prior_manifest: Option<&source_provenance::SourceManifest>,
     ) -> Result<Self, String> {
+        let load_started = std::time::Instant::now();
         let mut config: Config = match toml::from_str(content) {
             Ok(c) => c,
             Err(e) => {
@@ -175,11 +181,13 @@ impl Config {
                     .unwrap_or_else(|| format!("error: {error}")));
             }
         };
+        let toml_parse_ms = elapsed_ms(load_started);
         // Compile referenced .rpol files before validation: chain
         // references resolve against the combined TOML + rpol policy
         // namespace, and rpol compile diagnostics (already
         // ariadne-rendered against the .rpol source) are config load
         // errors in their own right.
+        let phase_started = std::time::Instant::now();
         let rpol_result = match capture.as_deref_mut() {
             Some(capture) => config.load_rpol_files_capturing(base_dir, Some(capture)),
             None => config.load_rpol_files(base_dir),
@@ -191,12 +199,14 @@ impl Config {
                     .unwrap_or_else(|| format!("error: {other}")),
             });
         }
+        let rpol_load_ms = elapsed_ms(phase_started);
         // Bind dataset declarations to their snapshot files (LAN-305)
         // before validation: chain references probe datasets, so the
         // resolver needs the handles. With `prior_datasets` (the
         // SIGHUP reload path) existing handles are reused — content
         // swaps happen inside them and a failed refresh keeps the
         // prior snapshot instead of failing the load.
+        let phase_started = std::time::Instant::now();
         let dataset_result = match capture {
             Some(capture) => config.bind_datasets_capturing(
                 base_dir,
@@ -210,10 +220,26 @@ impl Config {
         if let Err(error) = dataset_result {
             return Err(format!("error: {error}"));
         }
+        let dataset_bind_ms = elapsed_ms(phase_started);
+        let phase_started = std::time::Instant::now();
         if let Err(error) = config.validate() {
             return Err(diagnostic::render_diagnostic(content, source_name, &error)
                 .unwrap_or_else(|| format!("error: {error}")));
         }
+        let validate_ms = elapsed_ms(phase_started);
+        // LAN-888: phase-attributed load timing so the daemon log alone
+        // answers where a slow config load (notably an IRR-scale SIGHUP
+        // reload) spends its time. One Instant pair per phase — no
+        // per-entry work.
+        tracing::info!(
+            source = source_name,
+            elapsed_ms = elapsed_ms(load_started),
+            toml_parse_ms,
+            rpol_load_ms,
+            dataset_bind_ms,
+            validate_ms,
+            "config source loaded"
+        );
         // Canonicalize static neighbor address spellings. Reload diffs and
         // runtime lookups compare the config string against
         // `IpAddr::to_string()`, so a representation-only respelling

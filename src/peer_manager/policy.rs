@@ -2448,6 +2448,7 @@ impl PeerManager {
         // touched. A mid-fanout apply failure attempts to restore already-updated
         // peers to their captured priors; a compound rollback failure is surfaced
         // and may leave the existing per-peer retry intent armed.
+        let resolve_started = Instant::now();
         let mut targets: Vec<ResolvedPeerPolicy> = Vec::new();
         for peer_key in peers {
             let Some(managed) = self.peers.get(&peer_key) else {
@@ -2503,6 +2504,14 @@ impl PeerManager {
                 export_policy,
             });
         }
+        // LAN-888: the resolve loop above is where per-peer chain
+        // lowering/monomorphization happens on an rpol registry swap —
+        // stamp it separately from the apply fan-out that follows.
+        info!(
+            peers = targets.len(),
+            elapsed_ms = u64::try_from(resolve_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            "resolved live peer policy chains"
+        );
         let applied = self
             .apply_resolved_policy_snapshot(targets)
             .await
