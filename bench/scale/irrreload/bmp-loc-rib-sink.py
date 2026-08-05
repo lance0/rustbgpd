@@ -254,8 +254,22 @@ class ReceiptState:
     churn_withdrawals: int = 0
     eors: list[tuple[int, int]] = field(default_factory=list)
     post_eor_churn: bool = False
+    frames: int = 0
+
+    def boundary_detail(self, prefix: str, body: bytes) -> str:
+        """Failure context for a dump/live boundary breach: the offending
+        prefix, its per-peer-header BMP timestamp, and where in the dump
+        stream it landed (frame index, EoRs and dump rows seen so far)."""
+        seconds = int.from_bytes(body[34:38], "big")
+        microseconds = int.from_bytes(body[38:42], "big")
+        return (
+            f"prefix={prefix} bmp_timestamp={seconds}.{microseconds:06d}"
+            f" frame_index={self.frames} eors_seen={len(self.eors)}"
+            f" base_rows_seen={len(self.base_seen)}"
+        )
 
     def observe(self, frame: bytes) -> None:
+        self.frames += 1
         msg_type = frame[5]
         body = frame[BMP_HEADER:]
         if msg_type == 4:
@@ -300,7 +314,10 @@ class ReceiptState:
                 if kind == "base":
                     raise ReceiptError(f"base-table withdrawal during dump: {prefix}")
                 if len(self.eors) != len(EXPECTED_EORS):
-                    raise ReceiptError("churn withdrawal appeared before dump End-of-RIB")
+                    raise ReceiptError(
+                        "churn withdrawal appeared before dump End-of-RIB: "
+                        + self.boundary_detail(prefix, body)
+                    )
                 self.churn_withdrawals += 1
                 self.post_eor_churn = True
             for prefix in announced:
@@ -313,7 +330,10 @@ class ReceiptState:
                     self.base_seen.add(index)
                 else:
                     if len(self.eors) != len(EXPECTED_EORS):
-                        raise ReceiptError("churn announcement appeared before dump End-of-RIB")
+                        raise ReceiptError(
+                            "churn announcement appeared before dump End-of-RIB: "
+                            + self.boundary_detail(prefix, body)
+                        )
                     self.churn_announces += 1
                     self.post_eor_churn = True
             return
@@ -569,10 +589,13 @@ def sample_rm(update: bytes, *, peer_type: int = 3) -> bytes:
     return bytes([3]) + struct.pack("!I", BMP_HEADER + len(body)) + bytes([0]) + body
 
 
-def expect_rejected(name: str, action) -> None:
+def expect_rejected(name: str, action, contains: tuple[str, ...] = ()) -> None:
     try:
         action()
-    except ReceiptError:
+    except ReceiptError as error:
+        for fragment in contains:
+            if fragment not in str(error):
+                raise AssertionError(f"{name}: error lacks {fragment!r}: {error}") from error
         print(f"proof:{name}")
         return
     raise AssertionError(f"mutation was accepted: {name}")
@@ -643,6 +666,17 @@ def self_test() -> int:
     expect_rejected(
         "dump-before-live-order",
         lambda: before_eor.observe(sample_rm(sample_update(announced="172.16.0.0/24"))),
+        contains=(
+            "prefix=172.16.0.0/24",
+            "bmp_timestamp=0.000000",
+            "frame_index=5",
+            "eors_seen=0",
+        ),
+    )
+    expect_rejected(
+        "churn-withdrawal-before-eor",
+        lambda: primed_state().observe(sample_rm(sample_update(withdrawn="172.16.0.0/24"))),
+        contains=("prefix=172.16.0.0/24", "bmp_timestamp=", "frame_index="),
     )
     oversized = bytes([3]) + struct.pack("!I", MAX_FRAME_BYTES + 1) + bytes([0])
     expect_rejected("frame-bound", lambda: validated_frame_length(oversized))
