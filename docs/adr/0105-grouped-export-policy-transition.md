@@ -2,6 +2,18 @@
 
 **Status:** Accepted
 **Date:** 2026-07-14
+**Amended:** 2026-08-04 (LAN-886) — pre-commit phases carry a 60-second
+aggregate ownership budget (twice the 30-second readiness stall bound): a
+transition still short of `CommitMembers` at that age hands the cohort to
+the authoritative per-peer path fail-closed, because every other pre-commit
+fallback trigger is an invalidation event and a slow-but-healthy transition
+otherwise fences the actor indefinitely. The stalled readiness verdict is
+the early warning; this handoff is the remedy. `CommitMembers` remains
+exempt (first emission bars fallback). The same incident removed the per-member policy
+fingerprint rendering from runtime classification: group identity is the
+interned chain content, and the rendering — O(chain size) per member, tens
+of megabytes at IRR scale — was consumed only by the observational
+snapshot/planning surfaces, which now use a cached streaming digest.
 
 ## Context
 

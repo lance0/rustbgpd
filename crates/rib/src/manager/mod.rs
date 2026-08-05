@@ -624,7 +624,20 @@ const SLOW_POLICY_TRANSITION: std::time::Duration = std::time::Duration::from_se
 
 /// Readiness stays live during bounded transition progress, but fails closed
 /// once ownership is far beyond any legitimate transition receipt.
-const MAX_HEALTHY_POLICY_TRANSITION_AGE: std::time::Duration = std::time::Duration::from_secs(30);
+pub(in crate::manager) const MAX_HEALTHY_POLICY_TRANSITION_AGE: std::time::Duration =
+    std::time::Duration::from_secs(30);
+
+/// Aggregate pre-commit ownership budget for one clean policy transition:
+/// still short of `CommitMembers` at this age, the transition hands the
+/// cohort to the authoritative per-peer path fail-closed (LAN-886 — before
+/// this budget existed, every pre-commit fallback trigger was an
+/// invalidation event, so a slow-but-healthy transition fenced the actor
+/// and all wire output until session teardown finally closed an outbound
+/// channel). Twice the readiness bound by construction: the stalled
+/// readiness verdict at [`MAX_HEALTHY_POLICY_TRANSITION_AGE`] is the early
+/// warning, this handoff is the remedy.
+pub(in crate::manager) const MAX_PRECOMMIT_POLICY_TRANSITION_OWNERSHIP: std::time::Duration =
+    MAX_HEALTHY_POLICY_TRANSITION_AGE.saturating_mul(2);
 
 /// Registration material for one live transport session of a peer
 /// address, captured at `PeerUp`. Held in `RibManager::live_sessions` so

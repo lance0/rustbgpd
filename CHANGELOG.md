@@ -9,6 +9,28 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Grouped export-policy reloads no longer wedge at IRR scale (LAN-886). The
+  update-group classifier rendered each member's whole policy chain into a
+  planning-fingerprint string — tens of megabytes per rendering for an
+  IRR-scale member policy — once per member in the fenced Classify and
+  Validate phases, so a 320-member SIGHUP reload fenced the RIB actor for the
+  entire observation window with zero wire output and only completed
+  (`fallback_handoff`) after session teardown closed an outbound channel.
+  Runtime classification now skips the rendering entirely (group identity is
+  the interned chain content); the observational snapshot and planning
+  surfaces keep their chain-content dimension through a cached streaming
+  digest (`PolicyChain::groupability_fingerprint`) instead of the full
+  rendering. Session registration paid the same per-peer rendering cost, so
+  large-fleet convergence drops it too. Additionally, pre-commit transition
+  phases now carry a 60 s aggregate ownership budget (twice the 30 s
+  readiness stall bound): a transition still short of `CommitMembers` at
+  that age hands the cohort to the authoritative per-peer path fail-closed
+  instead of fencing the actor until an invalidation event — previously
+  nothing could trigger the fallback while sessions stayed healthy. Transition phase entries and per-member probe
+  decisions are now logged at debug level.
+
 ## [0.63.0] — 2026-08-04
 
 ### Added

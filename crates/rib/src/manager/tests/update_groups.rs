@@ -4597,6 +4597,177 @@ async fn commit_flush_never_falls_back_after_first_emission() {
     assert_eq!(manager.grouped_member_of(peers[9]), Some(destination));
 }
 
+/// The observational snapshot surface keeps its chain-content dimension
+/// (planning comparisons diff live rows against candidate rows on it),
+/// while runtime classification skips the rendering entirely (LAN-886).
+/// The digest must agree across distinct instances of content-equal
+/// chains and differ across different chain content.
+#[tokio::test]
+async fn snapshot_rows_carry_content_stable_policy_fingerprints() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let shared = community_chain(0xFDE8_2114);
+    let distinct = community_chain(0xFDE8_2115);
+    let chains = [shared.clone(), shared.clone(), distinct.clone()];
+    let mut peers = Vec::new();
+    for (index, chain) in chains.into_iter().enumerate() {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 44, 0, u8::try_from(index + 1).unwrap()));
+        peers.push(peer);
+        let (outbound_tx, _outbound_rx) = mpsc::channel(8);
+        manager.handle_update(RibUpdate::PeerUp {
+            peer,
+            session_id: 0,
+            peer_asn: 65_000,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            outbound_tx,
+            export_policy: Some(chain),
+            sendable_families: ipv4_sendable(),
+            is_ebgp: false,
+            route_reflector_client: true,
+            orr_vantage: None,
+            per_client_best: false,
+            interpret_rfc1997: true,
+            add_path_send_families: vec![],
+            add_path_send_max: 0,
+            negotiated_orf_recv: vec![],
+            negotiated_llgr_families: vec![],
+        });
+    }
+    let (reply, response) = oneshot::channel();
+    manager.handle_query_update_group_snapshot(reply);
+    let snapshot = response.await.unwrap();
+    let fingerprint_of = |peer: IpAddr| {
+        snapshot
+            .peers
+            .iter()
+            .find(|row| row.peer == peer)
+            .expect("snapshot row per registered peer")
+            .input
+            .policy_fingerprint
+            .clone()
+            .expect("snapshot rows carry the planning fingerprint")
+    };
+    assert_eq!(
+        fingerprint_of(peers[0]),
+        fingerprint_of(peers[1]),
+        "content-equal chain instances share one planning fingerprint"
+    );
+    assert_ne!(
+        fingerprint_of(peers[0]),
+        fingerprint_of(peers[2]),
+        "different chain content yields a different planning fingerprint"
+    );
+}
+
+/// LAN-886: a transition whose PRE-COMMIT phases outlive the ownership
+/// budget must hand the cohort back fail-closed while every session is
+/// still healthy. Before the budget existed, every pre-commit fallback
+/// trigger was an invalidation event (session/channel loss, table drift),
+/// so a slow-but-healthy transition fenced the actor — and all wire
+/// output — until session teardown finally invalidated it: the grouped
+/// IRR-scale reload wedged for the entire 600 s observation window and
+/// completed `fallback_handoff` one second AFTER teardown. On the
+/// pre-budget logic this test fails at the poll below with `continue`.
+#[tokio::test(start_paused = true)]
+async fn healthy_transition_past_precommit_budget_hands_off_fail_closed() {
+    use crate::manager::distribution::CleanPolicyTransitionAdvance;
+    const MEMBER_COUNT: usize = 4;
+    const ROUTE_COUNT: usize = 3;
+    let (mut manager, peers, mut receivers) =
+        direct_clean_transition_manager(MEMBER_COUNT, ROUTE_COUNT, None);
+    let next_policy = community_chain(0xFDE8_2112);
+    let mut response = start_clean_transition(&mut manager, &peers, &next_policy);
+    let source = manager.grouped_member_of(peers[0]).expect("grouped");
+
+    // Healthy pre-commit progress first: classification completes.
+    let (kind, outcome) = step_parked_transition(&mut manager);
+    assert_eq!((kind, outcome), ("bounded", "continue"));
+
+    // The fenced pre-commit work outlives the ownership budget (paused
+    // time models the LAN-886 shape, where per-member classification cost
+    // stretched the phases past any healthy observation window).
+    tokio::time::advance(super::super::MAX_PRECOMMIT_POLICY_TRANSITION_OWNERSHIP).await;
+
+    let pending = manager
+        .pending_clean_policy_transition
+        .take()
+        .expect("transition still owned");
+    match manager.advance_clean_policy_transition(pending) {
+        CleanPolicyTransitionAdvance::Fallback(mut failed) => {
+            failed
+                .discard_uncommitted_transition(&mut manager)
+                .expect("fallback cleanup succeeds");
+            // Mirror the run loop's fallback arm: the caller receives the
+            // authoritative per-peer handoff.
+            let reply = failed.take_reply().expect("fallback owns the caller reply");
+            reply
+                .send(Ok(
+                    crate::update::ExportPolicyCohortOutcome::RequiresAuthoritativePerPeerApply,
+                ))
+                .expect("caller awaits the handoff");
+        }
+        CleanPolicyTransitionAdvance::Continue(_) => {
+            panic!("healthy transition past its pre-commit budget must hand off, not continue")
+        }
+        CleanPolicyTransitionAdvance::Committed(_) => {
+            panic!("healthy transition past its pre-commit budget must hand off, not commit")
+        }
+    }
+    assert_eq!(
+        response.try_recv().unwrap(),
+        Ok(crate::update::ExportPolicyCohortOutcome::RequiresAuthoritativePerPeerApply)
+    );
+    // Fail-closed: nothing externally visible happened — no envelope
+    // reached any member and every membership is unchanged.
+    for receiver in &mut receivers {
+        assert!(receiver.try_recv().is_err());
+    }
+    for &peer in &peers {
+        assert_eq!(manager.grouped_member_of(peer), Some(source));
+    }
+}
+
+/// The pre-commit budget must never abort `CommitMembers`: once the first
+/// batch has emitted, an over-budget transition still runs to `Committed`
+/// (an envelope may already be on a member's wire — the phase-level
+/// invariant of ADR-0105 §3.6).
+#[tokio::test(start_paused = true)]
+async fn over_budget_commit_flush_still_completes() {
+    const MEMBER_COUNT: usize = 2 * super::super::COMMIT_MEMBERS_PER_POLL + 1;
+    const ROUTE_COUNT: usize = 2;
+    let (mut manager, peers, _receivers) =
+        direct_clean_transition_manager(MEMBER_COUNT, ROUTE_COUNT, None);
+    let next_policy = community_chain(0xFDE8_2113);
+    let mut response = start_clean_transition(&mut manager, &peers, &next_policy);
+
+    // Drive to the first parked commit poll (first batch already emitted).
+    loop {
+        let (kind, outcome) = step_parked_transition(&mut manager);
+        assert_eq!(outcome, "continue", "{kind} poll must park mid-transition");
+        if kind == "commit" {
+            break;
+        }
+    }
+    tokio::time::advance(super::super::MAX_PRECOMMIT_POLICY_TRANSITION_OWNERSHIP).await;
+    loop {
+        let (kind, outcome) = step_parked_transition(&mut manager);
+        assert_eq!(kind, "commit");
+        match outcome {
+            "committed" => break,
+            "continue" => {}
+            other => panic!("over-budget commit flush must complete, not {other}"),
+        }
+    }
+    assert_eq!(
+        response.try_recv().unwrap(),
+        Ok(crate::update::ExportPolicyCohortOutcome::Committed)
+    );
+    let destination = manager.grouped_member_of(peers[0]).expect("grouped");
+    for &peer in &peers {
+        assert_eq!(manager.grouped_member_of(peer), Some(destination));
+    }
+}
+
 /// Fence integrity across the batched flush: a primary route update and a
 /// second cohort enqueued behind an owned transition are processed only
 /// after its terminal commit, in order — every member observes

@@ -1039,7 +1039,7 @@ export_policy_chain = ["dataset-export"]
         .expect("export chain resolved");
     assert!(policy.references_dataset("customers"));
     let live_input = rustbgpd_rib::UpdateGroupClassifierInput {
-        policy_fingerprint: Some(format!("{policy:?}")),
+        policy_fingerprint: Some(policy.groupability_fingerprint().to_string()),
         policy_provenance: Some(policy.groupability_provenance().to_string()),
         policy_requires_peer_context: policy.requires_peer_context(),
         target_is_ebgp: true,

@@ -1256,6 +1256,12 @@ pub struct PolicyChain {
     /// from zero — stats read as "since this chain instance was
     /// installed".
     hits: OnceLock<Arc<PolicyHitCounters>>,
+    /// Lazily-computed content fingerprint for update-group planning
+    /// identity ([`groupability_fingerprint`](Self::groupability_fingerprint)).
+    /// Derived state like `compiled` (excluded from
+    /// `PartialEq`/`Clone`/`Debug`); fresh on `Clone`, carried by
+    /// [`share`](Self::share).
+    fingerprint: OnceLock<Arc<str>>,
 }
 
 impl Clone for PolicyChain {
@@ -1268,6 +1274,7 @@ impl Clone for PolicyChain {
             policies: self.policies.clone(),
             compiled: OnceLock::new(),
             hits: OnceLock::new(),
+            fingerprint: OnceLock::new(),
         }
     }
 }
@@ -1314,6 +1321,44 @@ pub fn is_rfc8212_reserved_policy_name(name: &str) -> bool {
 }
 
 impl PolicyChain {
+    /// Process-local content fingerprint for update-group planning identity.
+    ///
+    /// Equal for content-equal chains (`PartialEq` on `policies`), and
+    /// computed by streaming the chain's Debug rendering through a hasher —
+    /// never materializing it. That matters at IRR scale, where the rendering
+    /// of one member policy is tens of megabytes: `format!("{chain:?}")` as a
+    /// planning identity took ~1 s per call and, called once per member per
+    /// fenced classification pass, wedged grouped export-policy reloads for
+    /// the whole fleet-observation window (LAN-886). Cached per instance
+    /// like `compiled` (fresh on `Clone`, carried by [`share`](Self::share)).
+    ///
+    /// Identity is process-local diagnostics (live-vs-candidate planning
+    /// comparisons inside one daemon): the 128-bit digest is not stable
+    /// across releases and must not be persisted.
+    #[must_use]
+    pub fn groupability_fingerprint(&self) -> Arc<str> {
+        Arc::clone(self.fingerprint.get_or_init(|| {
+            use std::hash::Hasher as _;
+
+            struct HashWriter(std::collections::hash_map::DefaultHasher);
+            impl fmt::Write for HashWriter {
+                fn write_str(&mut self, fragment: &str) -> fmt::Result {
+                    self.0.write(fragment.as_bytes());
+                    Ok(())
+                }
+            }
+
+            let mut low = HashWriter(std::collections::hash_map::DefaultHasher::new());
+            let mut high = HashWriter(std::collections::hash_map::DefaultHasher::new());
+            high.0.write_u8(1);
+            for writer in [&mut low, &mut high] {
+                // `HashWriter::write_str` is infallible, so this cannot fail.
+                let _ = fmt::write(writer, format_args!("{:?}", self.policies));
+            }
+            Arc::from(format!("{:016x}{:016x}", high.0.finish(), low.0.finish()))
+        }))
+    }
+
     /// Stable origin label for update-group planning diagnostics.
     #[must_use]
     pub fn groupability_provenance(&self) -> &'static str {
@@ -1334,6 +1379,7 @@ impl PolicyChain {
             policies: policies.into_iter().map(NamedPolicy::from).collect(),
             compiled: OnceLock::new(),
             hits: OnceLock::new(),
+            fingerprint: OnceLock::new(),
         }
     }
 
@@ -1344,6 +1390,7 @@ impl PolicyChain {
             policies,
             compiled: OnceLock::new(),
             hits: OnceLock::new(),
+            fingerprint: OnceLock::new(),
         }
     }
 
@@ -1383,6 +1430,11 @@ impl PolicyChain {
                 .map(Arc::clone)
                 .map_or_else(OnceLock::new, OnceLock::from),
             hits: OnceLock::from(hits),
+            fingerprint: self
+                .fingerprint
+                .get()
+                .map(Arc::clone)
+                .map_or_else(OnceLock::new, OnceLock::from),
         }
     }
 
