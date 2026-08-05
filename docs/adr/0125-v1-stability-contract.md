@@ -1,11 +1,11 @@
 # ADR-0125: v1.0 stability contract
 
-**Status:** Proposed (decision draft for the project owner; nothing freezes until Accepted)
+**Status:** Proposed (nothing freezes until Accepted)
 **Date:** 2026-08-04
 
 ## Decisions required
 
-Every owner call embedded in this draft, in one place. Each is expanded in
+Every open decision in this proposal, in one place. Each is expanded in
 the section named in the last column.
 
 | # | Decision | Recommended default | Where |
@@ -94,7 +94,7 @@ classifications carry forward):
 ### The evidence bar for tagging
 
 Each criterion states what it is, its honest current state, and whether it is
-an owner decision or already satisfied. The gap list below restates these as
+an open decision or already satisfied. The gap list below restates these as
 a backlog.
 
 **E1 — External pilot feedback incorporated (DR1).** At least one external
@@ -181,15 +181,15 @@ The actionable backlog seed: criterion → current state → what closes it.
 | E1 external pilot | Zero pilots; cookbook + tooling shipped, unused externally | One sanitized external shadow run with explained differences and a rollback record; incorporate resulting feedback |
 | E2 RS/RR soaks | Archived soaks are EVPN-shaped; eight precommitted gates uninjected | Run the two scheduled scenarios (SIGHUP reload, max-prefix trip/timed restart) through the authorized soak window; archive receipts |
 | E3 comparative IRR row | IXP matrix predates IRR scale; IRR receipt single-stack | One same-harness IRR-scale reload row vs BIRD and OpenBGPD, losses published |
-| E4 debt schedule | ADR-0122 removals scheduled (v0.64/v0.65), not landed; D2/L1 open | Land scheduled removal PRs; owner decides D2 and L1 |
-| E5 RFC 8212 | Opt-in shipped; ADR-0119 representation unimplemented | Owner decision; if activating, ADR-0119's production-mutation proofs |
+| E4 debt schedule | ADR-0122 removals scheduled (v0.64/v0.65), not landed; D2/L1 open | Land scheduled removal PRs; decide D2 and L1 |
+| E5 RFC 8212 | Opt-in shipped; ADR-0119 representation unimplemented | Open decision; if activating, ADR-0119's production-mutation proofs |
 | E6 security posture | Fuzz/audit/reporting in place | SECURITY.md 1.x supported-versions row; keep artifact build floor |
 | E7 upgrade chain | Chain contiguous through the current anchor | Extend to the v1.0 anchor at tag time (existing process) |
 | DR6 re-bless list | Streaming ingress, history/rollback RPCs outside v1 | Deliberate re-bless review for each, or defer to a 1.x minor |
 
 ## Consequences
 
-- "What would 1.0 take?" has one answer with an owner-editable decision
+- "What would 1.0 take?" has one answer with an explicit decision
   table, instead of an unstated bar. The gap list is directly convertible to
   tracked work.
 - The tag stays honest: it cannot happen before the evidence exists, and the
