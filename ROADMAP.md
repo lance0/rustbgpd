@@ -592,6 +592,13 @@ rollback record; the 1,000-peer route-server scale receipt
 is [retained](docs/perf/route-server-1000-2026-07.md). The ARouteServer target
 ships as `tools/rs-config-render`. The current external adapter already serves
 the Birdwatcher-shaped status, peer, accepted-route, and filtered-route subset.
+The open design program on this track is
+[ADR-0126](docs/adr/0126-shared-group-per-client-best.md) (Proposed):
+shared-group per-client best-path, delivering the `per_client_best`
+path-hiding mitigation inside update groups so rendered `path_hiding = true`
+fleets group instead of running fully ungrouped — gated on byte-identical
+per-member views at grouped-class cost per the
+[realistic-mix receipt](docs/perf/irr-reload-realistic-mix-2026-08.md).
 
 **Researched and rejected** (recorded so they aren't re-litigated):
 confederations (RFC 5065 — no demand signal in two years of issues and
