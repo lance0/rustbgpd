@@ -16264,6 +16264,80 @@ fn rpol_files_load_resolve_and_evaluate_in_chains() {
     assert_eq!(eval.matched_policy.as_deref(), Some("bogon-filter"));
 }
 
+/// LAN-888: a config load emits one phase-attributed timing line
+/// (`config source loaded` with `toml_parse_ms` / `rpol_load_ms` /
+/// `dataset_bind_ms` / `validate_ms` nested inside `elapsed_ms`), and the
+/// once-per-`RpolFile` set-table intern stamps its own line — so a SIGHUP
+/// reload's daemon log attributes where load time went with no harness.
+#[test]
+fn config_load_emits_phase_timing_fields() {
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone)]
+    struct Sink(Arc<Mutex<Vec<u8>>>);
+    impl Write for Sink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let sink = Sink(Arc::new(Mutex::new(Vec::new())));
+    let writer_sink = sink.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .json()
+        .with_writer(move || writer_sink.clone())
+        .finish();
+
+    let dir = rpol_config_dir(RPOL_SOURCE, r#""customer-in(200)", "bogon-filter""#);
+    tracing::subscriber::with_default(subscriber, || {
+        // Sibling tests reach these callsites with no subscriber installed,
+        // which caches `Interest::never()` process-wide, and a scoped
+        // subscriber does not invalidate that cache. Warm the callsites, then
+        // re-register them against this subscriber; a callsite is registered
+        // once, so the measured load below cannot lose the race afterwards.
+        drop(load_dir(&dir).expect("config with rpol files loads"));
+        tracing::callsite::rebuild_interest_cache();
+        sink.0.lock().unwrap().clear();
+
+        let config = load_dir(&dir).expect("config with rpol files loads");
+        // Chain resolution reaches the once-per-file set-table intern
+        // regardless of whether validation already built it.
+        config
+            .effective_policy_chains_for_neighbor(&config.neighbors[0])
+            .expect("chains resolve");
+    });
+
+    let output = String::from_utf8(sink.0.lock().unwrap().clone()).expect("utf8 log output");
+    let loaded = output
+        .lines()
+        .find(|line| line.contains("config source loaded"))
+        .unwrap_or_else(|| panic!("config load emits its timing line; captured: {output}"));
+    let json: serde_json::Value = serde_json::from_str(loaded).expect("structured log line");
+    let fields = &json["fields"];
+    let phase = |name: &str| {
+        fields[name]
+            .as_u64()
+            .unwrap_or_else(|| panic!("{name} must be a u64 field on: {loaded}"))
+    };
+    assert!(
+        phase("toml_parse_ms")
+            + phase("rpol_load_ms")
+            + phase("dataset_bind_ms")
+            + phase("validate_ms")
+            <= phase("elapsed_ms"),
+        "phase timings must nest inside the total: {loaded}"
+    );
+    assert!(
+        output.contains("interned rpol set tables built"),
+        "set-table intern build must stamp its own timing line"
+    );
+}
+
 /// The real startup roster resolves neighbors through bounded set-interning
 /// chunks. Common `.rpol` set content within one chunk must share its backing
 /// index, distinct content must not alias, and allocation identity must remain

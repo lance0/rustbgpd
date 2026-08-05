@@ -142,8 +142,19 @@ impl RpolFile {
 
     /// The unit's interned set tables, built on first use.
     fn tables(&self) -> &lower::SetTables {
-        self.tables
-            .get_or_init(|| lower::SetTables::build(&self.file))
+        self.tables.get_or_init(|| {
+            // LAN-888: this build is the expensive interning step at IRR
+            // scale, and *when* it fires (config load vs first chain
+            // resolve) is exactly what reload attribution needs — one
+            // timestamped line per `RpolFile` lifetime, self-locating.
+            let started = std::time::Instant::now();
+            let tables = lower::SetTables::build(&self.file);
+            tracing::info!(
+                elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                "interned rpol set tables built"
+            );
+            tables
+        })
     }
 
     /// The main file's source text.

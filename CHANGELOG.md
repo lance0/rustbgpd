@@ -79,6 +79,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Structured phase timing for the SIGHUP policy-reload path (LAN-888). A
+  config load now logs one `config source loaded` line with `toml_parse_ms`,
+  `rpol_load_ms`, `dataset_bind_ms`, and `validate_ms` alongside the total
+  `elapsed_ms`; the once-per-file rpol set-table intern logs
+  `interned rpol set tables built` with `elapsed_ms` at the moment it fires;
+  and an rpol registry swap logs `resolved live peer policy chains` with
+  `elapsed_ms` for the per-peer chain re-resolution before the snapshot
+  apply fan-out. Together with the existing partitioned-snapshot and RIB
+  export-policy transition lines, the daemon log alone attributes where a
+  reload spends its time. Measurement only — no behavior change.
+
 - ASPA-invalid policy rejections retain the first proven `NotProviderPlus` hop;
   cache refresh emits one bounded top-eight summary without changing routing.
 
