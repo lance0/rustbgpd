@@ -18,6 +18,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from dataclasses import dataclass, field
 
@@ -441,7 +442,14 @@ def wait_for_scrape_release(
     deadline: float,
     captured: int,
 ) -> int:
-    """Keep proving the completed generation is live until the scrape releases it."""
+    """Keep proving the completed generation is live until the scrape releases it.
+
+    The stop-file is checked on every iteration, after at most one frame of
+    pending data: continuous post-EoR churn keeps the socket readable, so a
+    stop check gated on an idle socket would starve for as long as the churn
+    lasts. A failure already queued ahead of the stop (FIN, Termination, a
+    boundary breach) still wins, because the data branch runs first.
+    """
     try:
         while True:
             if time.monotonic() >= deadline:
@@ -451,7 +459,7 @@ def wait_for_scrape_release(
                 if frame is None:
                     raise ReceiptError("complete generation closed before metrics scrape")
                 state.observe(frame)
-            elif stop_file.is_file():
+            if stop_file.is_file():
                 return captured
     except (OSError, ReceiptError):
         generation_open.unlink(missing_ok=True)
@@ -763,6 +771,53 @@ def self_test() -> int:
     prove_pre_scrape_disconnect("complete-fin-before-scrape", None)
     termination = bytes([3]) + struct.pack("!I", BMP_HEADER) + bytes([5])
     prove_pre_scrape_disconnect("termination-before-scrape", termination)
+
+    def prove_stop_under_continuous_churn() -> None:
+        churn_state = primed_state()
+        churn_state.observe(sample_rm(sample_update(announced="20.0.0.0/24")))
+        churn_state.observe(sample_rm(sample_update(announced="20.0.1.0/24")))
+        for family in EXPECTED_EORS:
+            churn_state.observe(sample_rm(sample_update(eor=family)))
+        churn_state.observe(sample_rm(sample_update(announced="172.16.0.0/24")))
+        assert churn_state.complete()
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            stop = root / "stop"
+            open_marker = root / "generation-open"
+            open_marker.write_text("open\n")
+            receiver, sender = socket.socketpair()
+            receiver.settimeout(0.1)
+            churn_frame = sample_rm(sample_update(withdrawn="172.16.0.0/24"))
+            halt = threading.Event()
+
+            def feed() -> None:
+                # Saturate the socket: sendall blocks whenever the buffer
+                # is full, so the receiver never observes an idle socket.
+                while not halt.is_set():
+                    try:
+                        sender.sendall(churn_frame)
+                    except OSError:
+                        return
+
+            feeder = threading.Thread(target=feed, daemon=True)
+            feeder.start()
+            try:
+                time.sleep(0.2)
+                stop.write_text("stop\n")
+                started = time.monotonic()
+                wait_for_scrape_release(
+                    receiver, churn_state, stop, open_marker, time.monotonic() + 5, 0
+                )
+                elapsed = time.monotonic() - started
+                assert elapsed < 1.0, f"stop-file starved under continuous churn: {elapsed:.2f}s"
+            finally:
+                halt.set()
+                receiver.close()
+                sender.close()
+                feeder.join(timeout=1)
+        print("proof:stop-under-continuous-churn")
+
+    prove_stop_under_continuous_churn()
     return 0
 
 
