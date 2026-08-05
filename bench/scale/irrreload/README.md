@@ -7,6 +7,10 @@ gRPC transactional path runs the same canonical shape as a separate two-root
 receipt; its rows never enter the cross-daemon comparison. That transaction
 campaign is complete: the published receipt is
 [`docs/perf/irr-transactional-apply-2026-08.md`](../../../docs/perf/irr-transactional-apply-2026-08.md).
+The full cross-daemon comparison campaign (four sealed roots, A/B/B/A,
+plus the standalone grouped control) is also complete: the published
+receipt is
+[`docs/perf/irr-reload-comparison-2026-08.md`](../../../docs/perf/irr-reload-comparison-2026-08.md).
 
 This directory is the campaign runner and protocol. The instrument is the
 existing `bench/scale/reloadstall` harness — real BGP stub
