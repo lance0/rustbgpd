@@ -139,7 +139,10 @@ enabled = false
 
 # Add-Path-capable member: sees up to the eight best export-permitted
 # candidates, subject to configured and negotiated Paths-Limit (preferred
-# path-hiding mitigation), and stays update-group-shareable.
+# path-hiding mitigation). Like `per_client_best`, Add-Path send places
+# the member on the per-peer distribution path (the `add_path_send`
+# fallback reason); update-group sharing applies to members using
+# neither mitigation.
 [[neighbors]]
 address = "198.51.100.2"
 remote_asn = 64501

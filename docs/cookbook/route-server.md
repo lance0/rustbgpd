@@ -127,7 +127,9 @@ import_chain = [
 # Add-Path-capable member: receives up to the eight best export-permitted
 # candidates, subject to configured and negotiated Paths-Limit, and runs
 # its own best-path selection (the preferred path-hiding mitigation).
-# These peers stay update-group-shareable.
+# Like per_client_best, Add-Path send places the member on the per-peer
+# distribution path (the add_path_send fallback reason); update-group
+# sharing applies to members using neither mitigation.
 [[neighbors]]
 address = "198.51.100.2"
 remote_asn = 64501
@@ -324,9 +326,20 @@ Prometheus (`prometheus_addr`, `/metrics`; dashboards in
 |--------|---------------|
 | `bgp_session_state_transitions_total` | flat outside member churn |
 | `sum without (af) (bgp_rpki_vrp_count)` | per-target IPv4 + IPv6 total; non-zero once the RTR cache syncs (`rbgp doctor` warns when configured caches have no visible VRPs) |
-| `bgp_update_group_fallback_peers` | ≥ your `per_client_best` member count (they never group) |
+| `bgp_update_group_fallback_peers` | ≥ your `per_client_best` + Add-Path send member count (both path-hiding mitigations distribute per-peer) |
 | `bgp_rib_outbound_registered_peers` | = established member count |
 | `bgp_policy_generation_loaded_timestamp_seconds` | recent — ages past your render/SIGHUP cadence when the filter pipeline is stuck; see "Policy artifact freshness" in [`OPERATIONS.md`](../OPERATIONS.md) for the alert expressions |
+
+Groups of one are the silent degradation shape: distinct per-member
+export-chain *content* — most commonly per-member literal chains from
+arouteserver-style expansion — puts every member in its own group, at
+full per-peer cost, while `bgp_update_group_fallback_peers` stays 0 and
+`bgp_update_groups` climbs toward the session count. On a fleet whose
+members should share chains, treat `bgp_update_groups` approaching the
+session count as a misconfiguration signal. The fix is one shared
+export chain plus the member-set control communities above for
+per-member steering — they are evaluated at emit time and work inside
+a shared group.
 
 ## Member support: the filtered-route view
 
