@@ -50,8 +50,16 @@ live at 172.16-23.x and must propagate for the inter-UPDATE gap baseline.
 Usage:
     gen-irr-scenario.py <cell> <n_members> <total_prefixes> <out_dir>
         [--port 1790] [--seed 61] [--min-list 1000] [--max-list 40000]
-        [--changed-fraction 0.1] [--render-bin PATH] [--threads 8]
-        [--conf-dir DIR] [--path-hiding true|false] [--admit-churn true|false]
+        [--changed-fraction 0.1] [--overlap-fraction 0.0] [--render-bin PATH]
+        [--threads 8] [--conf-dir DIR] [--path-hiding true|false]
+        [--admit-churn true|false]
+
+With --overlap-fraction F > 0, round(F * total_prefixes) base prefixes gain a
+second announcing member (drawn uniformly, seed-deterministic); the second
+announcer's filter lists admit them, an overlap.tsv runtime file carries the
+allocation for the harness stubs, and the manifest records
+overlap_fraction/overlap_pairs. F=0 output is byte-identical to the
+pre-overlap generator (no new files or manifest keys).
 
 Emits into <out_dir> (per cell):
   rustbgpd      config.toml, member.rpol (live, = gen-a), gen-a.rpol,
@@ -117,6 +125,9 @@ class Member:
         self.addr = addr
         self.list_a = list_a
         self.list_b = list_b
+        # Global base-table indices this member announces IN ADDITION to its
+        # own contiguous slice (the --overlap-fraction second-announcer role).
+        self.announced_extra = []
 
     def prefixes(self, gen: str) -> list[str]:
         return self.list_a if gen == "a" else self.list_b
@@ -156,6 +167,52 @@ def build_dataset(args) -> list[Member]:
     return members
 
 
+def apply_overlap(args, members: list[Member]) -> list[tuple[int, int]]:
+    """Overlap model (LAN-892): a fraction F of the announced base table is
+    announced by exactly TWO members instead of one.
+
+    round(F * total_prefixes) distinct base prefixes are drawn uniformly;
+    each gains ONE second announcer drawn uniformly from the other members.
+    The second announcer's filter lists admit the prefix in both generations
+    (announced prefixes are never generation-churned). The draw uses a
+    seed-derived RNG stream separate from build_dataset's, so F=0 leaves the
+    generator's output byte-identical to the pre-overlap generator and any
+    F>0 allocation is deterministic under the seed.
+    """
+    count = round(args.overlap_fraction * args.total_prefixes)
+    if count == 0:
+        return []
+    per_peer = args.total_prefixes // args.n_members
+    rng = random.Random(f"irr-overlap-{args.seed}")
+    pairs = []
+    extras: dict[int, list[str]] = {}
+    for idx in sorted(rng.sample(range(args.total_prefixes), count)):
+        owner = idx // per_peer
+        second = rng.randrange(args.n_members - 1)
+        if second >= owner:
+            second += 1
+        pairs.append((idx, second))
+        members[second].announced_extra.append(idx)
+        extras.setdefault(second, []).append(base_prefix(idx))
+    for member_idx, prefixes in extras.items():
+        member = members[member_idx]
+        # list_b may alias list_a for unchanged members; capture that before
+        # rebinding so the extras land exactly once in each generation.
+        aliased = member.list_b is member.list_a
+        member.list_a = member.list_a + prefixes
+        member.list_b = member.list_a if aliased else member.list_b + prefixes
+    return pairs
+
+
+def write_overlap_file(out: pathlib.Path, pairs: list[tuple[int, int]]) -> list[str]:
+    """Emit the harness's second-announcer allocation (member<TAB>prefix idx)."""
+    if not pairs:
+        return []
+    lines = [f"{second}\t{idx}" for idx, second in pairs]
+    (out / "overlap.tsv").write_text("\n".join(lines) + "\n")
+    return ["overlap.tsv"]
+
+
 def check_sun_len(rundir: pathlib.Path) -> str:
     """gRPC UDS path must fit sun_path (~108 bytes); fail early like siblings."""
     sock = f"{rundir}/grpc.sock"
@@ -175,10 +232,17 @@ def canonical_member_record(member: Member) -> bytes:
         "list_a": member.list_a,
         "list_b": member.list_b,
     }
+    # Emitted only when the member is a second announcer, so the F=0 canonical
+    # stream (and its pinned seed-61 digest) is byte-identical to the
+    # pre-overlap generator.
+    if member.announced_extra:
+        record["announced_extra"] = member.announced_extra
     return json.dumps(record, sort_keys=True, separators=(",", ":")).encode() + b"\n"
 
 
-def write_manifest(out: pathlib.Path, args, members, files: list[str]) -> None:
+def write_manifest(
+    out: pathlib.Path, args, members, files: list[str], overlap: list[tuple[int, int]]
+) -> None:
     dataset_digest = hashlib.sha256()
     for member in members:
         dataset_digest.update(canonical_member_record(member))
@@ -207,6 +271,10 @@ def write_manifest(out: pathlib.Path, args, members, files: list[str]) -> None:
         "runtime_files": files,
         "file_bytes": {f: (out / f).stat().st_size for f in files},
     }
+    if overlap:
+        # Keys are absent at F=0 so the default manifest stays byte-identical.
+        manifest["overlap_fraction"] = args.overlap_fraction
+        manifest["overlap_pairs"] = [list(pair) for pair in overlap]
     (out / "manifest.json").write_text(json.dumps(manifest, indent=1) + "\n")
 
 
@@ -769,6 +837,13 @@ def main() -> None:
     parser.add_argument("--min-list", type=int, default=1000)
     parser.add_argument("--max-list", type=int, default=40000)
     parser.add_argument("--changed-fraction", type=float, default=0.1)
+    parser.add_argument(
+        "--overlap-fraction",
+        type=float,
+        default=0.0,
+        help="fraction of base prefixes announced by a second member "
+        "(default 0 = disjoint announcements, byte-identical legacy output)",
+    )
     parser.add_argument("--render-bin", help="rs-config-render binary (rustbgpd cell)")
     parser.add_argument("--threads", type=int, default=8, help="BIRD threads knob")
     parser.add_argument("--conf-dir", help="config dir as seen by the running daemon")
@@ -805,15 +880,21 @@ def main() -> None:
         sys.exit("total_prefixes must divide evenly by n_members (harness contract)")
     if not 1 <= args.min_list <= args.max_list:
         sys.exit("need 1 <= min_list <= max_list")
+    if not 0.0 <= args.overlap_fraction < 1.0:
+        sys.exit("need 0 <= overlap_fraction < 1")
+    if args.overlap_fraction > 0 and args.n_members < 2:
+        sys.exit("overlap needs at least two members")
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     members = build_dataset(args)
+    overlap = apply_overlap(args, members)
     if args.canonical_dataset_out is not None:
         with args.canonical_dataset_out.open("wb") as canonical:
             for member in members:
                 canonical.write(canonical_member_record(member))
     files = EMITTERS[args.cell](args, members, args.out_dir)
-    write_manifest(args.out_dir, args, members, files)
+    files += write_overlap_file(args.out_dir, overlap)
+    write_manifest(args.out_dir, args, members, files, overlap)
     total_entries = sum(len(policy_prefixes(m, "a", args.admit_churn)) for m in members)
     swapped = files[1]  # the live swap file in every cell's roster
     print(

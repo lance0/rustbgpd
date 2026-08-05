@@ -933,6 +933,17 @@ fn irr_reload_counterbalanced_receipt_protocol_is_load_bearing() {
         "grouped-output-isolation",
         "output-exact-roster",
         "output-audit-call",
+        "overlap-fraction-mismatch",
+        "overlap-pair-own-slice",
+        "overlap-achieved",
+        "overlap-private-runner-up",
+        "overlap-grouped-bounds",
+        "overlap-grouped-sum",
+        "overlap-input-binding",
+        "received-view-scenario",
+        "received-view-subset",
+        "received-view-delta-count",
+        "received-view-outside-allocation",
     ] {
         assert!(
             stdout.contains(&format!("red-proof {proof}=pass")),
@@ -957,6 +968,31 @@ fn irr_reload_counterbalanced_receipt_protocol_is_load_bearing() {
     assert!(comparison.contains("rustbgpd_private=path_hiding:true,admit_churn:true\n"));
     assert!(comparison.contains("competitor_path_hiding=applicable:false,requested:true\n"));
     assert!(comparison.contains("shape=320,183040,1000,40000\n"));
+    assert!(comparison.contains("overlap_fraction=0\n"));
+    let overlap = std::process::Command::new("bash")
+        .arg(&runner)
+        .env("DRY_RUN_PROTOCOL", "1")
+        .env("OVERLAP_FRACTION", "0.3")
+        .env_remove("SMOKE")
+        .output()
+        .expect("run overlap dry protocol");
+    assert!(overlap.status.success());
+    assert!(
+        String::from_utf8(overlap.stdout)
+            .expect("overlap UTF-8")
+            .contains("overlap_fraction=0.3\n")
+    );
+    let bad_overlap = std::process::Command::new("bash")
+        .arg(&runner)
+        .env("DRY_RUN_PROTOCOL", "1")
+        .env("OVERLAP_FRACTION", "1.5")
+        .env_remove("SMOKE")
+        .output()
+        .expect("run rejected overlap dry protocol");
+    assert!(
+        !bad_overlap.status.success(),
+        "overlap fraction outside [0, 1) must be rejected"
+    );
 
     let grouped = dry(&["rustbgpd-sighup-grouped-control"]);
     assert!(grouped.status.success());
@@ -987,6 +1023,10 @@ fn irr_reload_counterbalanced_receipt_protocol_is_load_bearing() {
         "capture_topology \"$topology_mode\" \"$cdir\" \"$run\" \"$hpid\" \"$barrier\"",
         "ack_pre_churn \"$barrier\" true \"$cdir\"",
         "--peers \"$N_MEMBERS\" --total \"$TOTAL_PREFIXES\"",
+        "--manifest \"$run/manifest.json\"",
+        "RELOADSTALL_OVERLAP_FILE=\"$run/overlap.tsv\"",
+        "RELOADSTALL_RECEIVED_VIEW_FILE=\"$cdir/received-view.tsv\"",
+        "--overlap-fraction \"$OVERLAP_FRACTION\"",
         "TOPOLOGY_CAPTURE_TIMEOUT=50",
         "deadline=$((SECONDS + TOPOLOGY_CAPTURE_TIMEOUT))",
         "rm -f \"$cdir/topology.json\" \"$cdir\"/metrics-{1,2,3}.prom",
@@ -1335,6 +1375,109 @@ fn irr_memory_path_hiding_is_explicit_but_not_dataset_identity() {
         ));
     }
     assert!(observations.windows(2).all(|pair| pair[0] == pair[1]));
+}
+
+#[test]
+/// Red proof: reverting the overlap allocation to the RNG stream used by
+/// build_dataset (or leaking overlap keys/files at F=0) fails the byte-level
+/// default assertions here or the pinned seed-61 dataset digest above; a
+/// nondeterministic draw fails the repeat-equality assertion; dropping the
+/// second announcer's filter-list admission or the manifest allocation fails
+/// the emission assertions.
+fn irr_overlap_dimension_is_deterministic_and_absent_at_default() {
+    let root = env!("CARGO_MANIFEST_DIR");
+    let generator = format!("{root}/bench/scale/reloadstall/gen-irr-scenario.py");
+    let run = |dir: &std::path::Path, overlap: &[&str]| {
+        let output = std::process::Command::new("python3")
+            .args([&generator, "bird", "8", "96"])
+            .arg(dir)
+            .args(["--min-list", "20", "--max-list", "20"])
+            .args(overlap)
+            .output()
+            .expect("run IRR generator");
+        assert!(
+            output.status.success(),
+            "generator failed\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    let read_manifest = |dir: &std::path::Path| -> serde_json::Value {
+        serde_json::from_slice(&std::fs::read(dir.join("manifest.json")).expect("manifest"))
+            .expect("manifest JSON")
+    };
+
+    let default_dir = tempfile::tempdir().expect("tempdir");
+    run(default_dir.path(), &[]);
+    let default_manifest = read_manifest(default_dir.path());
+    assert!(default_manifest.get("overlap_fraction").is_none());
+    assert!(default_manifest.get("overlap_pairs").is_none());
+    assert!(
+        !default_dir.path().join("overlap.tsv").exists(),
+        "F=0 must not emit an overlap allocation file"
+    );
+
+    let overlap_dirs = [
+        tempfile::tempdir().expect("tempdir"),
+        tempfile::tempdir().expect("tempdir"),
+    ];
+    for dir in &overlap_dirs {
+        run(dir.path(), &["--overlap-fraction", "0.25"]);
+    }
+    assert_eq!(
+        std::fs::read(overlap_dirs[0].path().join("manifest.json")).expect("manifest bytes"),
+        std::fs::read(overlap_dirs[1].path().join("manifest.json")).expect("manifest bytes"),
+        "overlap allocation must be deterministic under the seed"
+    );
+    let manifest = read_manifest(overlap_dirs[0].path());
+    assert_eq!(manifest["overlap_fraction"], 0.25);
+    let pairs = manifest["overlap_pairs"].as_array().expect("overlap pairs");
+    assert_eq!(pairs.len(), 24, "round(0.25 * 96) overlapped prefixes");
+    assert_ne!(
+        manifest["dataset_sha256"], default_manifest["dataset_sha256"],
+        "overlap must change the canonical dataset identity"
+    );
+    let roster: Vec<&str> = manifest["runtime_files"]
+        .as_array()
+        .expect("runtime roster")
+        .iter()
+        .map(|value| value.as_str().expect("runtime path"))
+        .collect();
+    assert!(roster.contains(&"overlap.tsv"));
+    let per_peer = 96 / 8;
+    let overlap_tsv =
+        std::fs::read_to_string(overlap_dirs[0].path().join("overlap.tsv")).expect("overlap.tsv");
+    let mut allocations = Vec::new();
+    for line in overlap_tsv.lines() {
+        let (member, idx) = line.split_once('\t').expect("member\tprefix line");
+        let member: u64 = member.parse().expect("member index");
+        let idx: u64 = idx.parse().expect("prefix index");
+        assert!(member < 8 && idx < 96 && idx / per_peer != member);
+        allocations.push((idx, member));
+    }
+    let manifest_pairs: Vec<(u64, u64)> = pairs
+        .iter()
+        .map(|pair| {
+            let pair = pair.as_array().expect("pair");
+            (
+                pair[0].as_u64().expect("prefix index"),
+                pair[1].as_u64().expect("second announcer"),
+            )
+        })
+        .collect();
+    assert_eq!(allocations, manifest_pairs);
+    let gen_a = std::fs::read_to_string(overlap_dirs[0].path().join("gen-a.conf")).expect("gen-a");
+    for (idx, _) in &manifest_pairs {
+        let prefix = format!(
+            "{}.{}.{}.0/24",
+            20 + (idx >> 16),
+            (idx >> 8) & 0xff,
+            idx & 0xff
+        );
+        assert!(
+            gen_a.matches(prefix.as_str()).count() >= 2,
+            "second announcer's filter list must admit {prefix}"
+        );
+    }
 }
 
 #[test]

@@ -9,6 +9,26 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- IRR reload harness: announcement-overlap dimension (LAN-892). The
+  scenario generator takes `--overlap-fraction F` (default 0 keeps the
+  historical disjoint output byte-identical): a seeded fraction of base
+  prefixes gains a second announcing member, so `per_client_best` and the
+  grouped update-group control stop being behaviorally identical by
+  construction. The reloadstall harness announces the allocation
+  (`RELOADSTALL_OVERLAP_FILE`), excludes each observer's own announced set
+  from completion, and dumps per-observer final-generation received views
+  (`RELOADSTALL_RECEIVED_VIEW_FILE`). The topology proof derives Loc-RIB,
+  Adj-RIB-In (achieved-overlap), and per-mode Adj-RIB-Out expectations
+  from the scenario manifest, and `verify-receipt.py` gains a
+  `received-view-delta` gate — the observer-side count of (member, prefix)
+  pairs where per-client-best delivered a runner-up path grouped mode
+  suppressed, cross-checked against the manifest allocation — wired into
+  the four-root campaign verifier with red-proofs for overlap-fraction
+  mismatch, manifest/input binding, achieved-overlap drift, grouped-bound
+  violations, and mismatched received-view scenarios.
+
 ### Fixed
 
 - The IRR BMP buffer-receipt sink no longer starves its stop-file check
