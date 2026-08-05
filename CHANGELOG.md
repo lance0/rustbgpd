@@ -11,6 +11,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The IRR BMP buffer-receipt sink no longer starves its stop-file check
+  under continuous post-EoR churn (LAN-889). `wait_for_scrape_release`
+  only consulted the stop-file when the collector socket was idle, so
+  live churn kept the check unreached for the whole ack window; the
+  reloadstall harness's 15 s final-evidence timeout then expired, tore
+  down the sessions, and the sink correctly rejected the resulting base
+  withdrawals — failing a semantically green run. The stop-file is now
+  checked every loop iteration (after at most one pending frame), and
+  the sink self-test pins stop delivery under a saturated socket.
 - BMP Loc-RIB dumps no longer emit routes admitted after the collector's
   connection generation started (LAN-885). The dump walk read the live
   Loc-RIB per chunk, so a route installed mid-dump at a key ahead of the
