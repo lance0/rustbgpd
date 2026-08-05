@@ -363,6 +363,10 @@ new AFI/SAFI and EVPN dataplane expansion.
   transactions, BMP/MRT/events, and the already-proven RR/controller-feed
   families. Keep its stability, migration, deprecation, and compatibility
   rules current while EVPN VTEP/IRB remains alpha and outside this contract.
+  What tagging v1.0 would mean — the frozen surfaces, the evidence bar, and
+  the post-1.0 deprecation policy — is drafted for decision in
+  [ADR-0125](docs/adr/0125-v1-stability-contract.md) (Proposed), with the
+  open owner calls in its decisions-required table.
 - **Make changed-policy reload the primary performance program.** The corrected
   700-client × 400,400-route mixed run is now measured: shared cohort work cuts
   median completion p50 116.185x and median completion maximum 149.261x, while
