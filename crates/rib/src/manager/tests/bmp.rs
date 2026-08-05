@@ -54,6 +54,7 @@ fn assert_no_event(bmp_rx: &mut mpsc::Receiver<BmpEvent>) {
 async fn drive_loc_rib_dump_from(
     tx: &mpsc::Sender<RibUpdate>,
     mut cursor: Option<BmpDumpCursor>,
+    started_at: SystemTime,
 ) -> (
     Vec<(bytes::Bytes, SystemTime, Option<BmpPathStatus>)>,
     usize,
@@ -62,9 +63,13 @@ async fn drive_loc_rib_dump_from(
     let mut requests = 0usize;
     loop {
         let (reply, chunk_rx) = oneshot::channel();
-        tx.send(RibUpdate::QueryBmpLocRibDump { cursor, reply })
-            .await
-            .unwrap();
+        tx.send(RibUpdate::QueryBmpLocRibDump {
+            cursor,
+            started_at,
+            reply,
+        })
+        .await
+        .unwrap();
         let chunk = tokio::time::timeout(Duration::from_secs(2), chunk_rx)
             .await
             .expect("dump chunk within timeout")
@@ -356,7 +361,7 @@ async fn query_bmp_loc_rib_dump_streams_routes_then_eor_per_family() {
     tokio::time::sleep(Duration::from_millis(1200)).await;
 
     let dump_started = SystemTime::now();
-    let (messages, requests) = drive_loc_rib_dump_from(&tx, None).await;
+    let (messages, requests) = drive_loc_rib_dump_from(&tx, None, dump_started).await;
     // Two resumable requests: the unicast phase, then the VPN phase
     // closing with the End-of-RIB markers.
     assert_eq!(requests, 2, "unicast chunk, then VPN + EoR chunk");
@@ -470,7 +475,7 @@ async fn dump_timestamps_equal_stored_install_time() {
     // could not accidentally pass.
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let (messages, _) = drive_loc_rib_dump_from(&tx, None).await;
+    let (messages, _) = drive_loc_rib_dump_from(&tx, None, SystemTime::now()).await;
     let (route_msgs, _) = messages.split_at(2);
     for (pdu, timestamp, _) in route_msgs {
         let parsed = decode_pdu(pdu);
@@ -531,7 +536,17 @@ async fn loc_rib_dump_chunks_stream_complete_table() {
     .await
     .unwrap();
 
-    let (messages, requests) = drive_loc_rib_dump_from(&tx, None).await;
+    // Barrier: a serviced stats query proves the actor has applied the
+    // install batch before the generation-start stamp is taken.
+    let (barrier_reply, barrier_rx) = oneshot::channel();
+    tx.send(RibUpdate::QueryBmpLocRibStats {
+        reply: barrier_reply,
+    })
+    .await
+    .unwrap();
+    barrier_rx.await.unwrap();
+
+    let (messages, requests) = drive_loc_rib_dump_from(&tx, None, SystemTime::now()).await;
     // Three bounded unicast chunks (256 + 256 + 88), then the VPN
     // phase closing the dump with the four EoR markers.
     assert_eq!(requests, 4, "dump streams across multiple chunk requests");
@@ -557,11 +572,11 @@ async fn loc_rib_dump_chunks_stream_complete_table() {
 /// Live RIB commands interleave between dump chunk requests, and the
 /// key-based cursor is robust to mutations mid-dump: a stats query
 /// fired between chunks is serviced before the dump resumes, a route
-/// inserted behind the cursor stays off the dump (the live stream
-/// covers it — the accepted race), a route inserted ahead of the
-/// cursor is picked up, and a not-yet-dumped route withdrawn between
-/// chunks never appears. The dump still completes with the
-/// End-of-RIB set.
+/// inserted mid-dump stays off the dump whether its key sorts behind
+/// or ahead of the cursor (post-`started_at` installs are live-stream
+/// territory, held back until End-of-RIB — LAN-885), and a
+/// not-yet-dumped route withdrawn between chunks never appears. The
+/// dump still completes with the End-of-RIB set.
 #[expect(
     clippy::too_many_lines,
     reason = "one mid-dump mutation walk: chunk, mutate, live query, resume, membership asserts"
@@ -604,11 +619,24 @@ async fn loc_rib_dump_interleaves_live_commands_between_chunks() {
     .await
     .unwrap();
 
+    // Barrier: a serviced stats query proves the actor has applied the
+    // install batch, so the routes' stored install times all precede
+    // the generation-start stamp taken next.
+    let (barrier_reply, barrier_rx) = oneshot::channel();
+    tx.send(RibUpdate::QueryBmpLocRibStats {
+        reply: barrier_reply,
+    })
+    .await
+    .unwrap();
+    barrier_rx.await.unwrap();
+
     // First chunk by hand (the forwarder's opening request): exactly
     // the chunk-size smallest prefixes, with a resume cursor.
+    let dump_started = SystemTime::now();
     let (reply, chunk_rx) = oneshot::channel();
     tx.send(RibUpdate::QueryBmpLocRibDump {
         cursor: None,
+        started_at: dump_started,
         reply,
     })
     .await
@@ -620,9 +648,10 @@ async fn loc_rib_dump_interleaves_live_commands_between_chunks() {
     assert_eq!(first.messages.len(), BMP_DUMP_CHUNK_SIZE);
     let cursor = first.next.expect("table larger than one chunk");
 
-    // Mutate the table between chunk requests: one prefix sorting
-    // before the cursor (dump must skip it), one after (dump must pick
-    // it up), and withdraw a not-yet-dumped prefix.
+    // Mutate the table between chunk requests: one post-start prefix
+    // sorting before the cursor and one after (the dump must skip
+    // both — they belong to the held-back live stream), and withdraw
+    // a not-yet-dumped prefix.
     let low = Ipv4Prefix::new(Ipv4Addr::new(1, 0, 0, 0), 24);
     let high = Ipv4Prefix::new(Ipv4Addr::new(240, 0, 0, 0), 24);
     let withdrawn_mid = prefixes[BMP_DUMP_CHUNK_SIZE + 10];
@@ -664,7 +693,7 @@ async fn loc_rib_dump_interleaves_live_commands_between_chunks() {
     );
 
     // Resume the dump to completion from the first chunk's cursor.
-    let (rest, _) = drive_loc_rib_dump_from(&tx, Some(cursor)).await;
+    let (rest, _) = drive_loc_rib_dump_from(&tx, Some(cursor), dump_started).await;
     let mut messages = first.messages;
     messages.extend(rest);
 
@@ -673,19 +702,161 @@ async fn loc_rib_dump_interleaves_live_commands_between_chunks() {
         .iter()
         .copied()
         .filter(|&p| p != withdrawn_mid)
-        .chain(std::iter::once(high))
         .collect();
     expected.sort_unstable();
     let mut sorted = dumped.clone();
     sorted.sort_unstable();
     assert_eq!(
         sorted, expected,
-        "surviving + ahead-of-cursor routes exactly once; behind-cursor \
-         insert and mid-dump withdrawal absent"
+        "surviving pre-start routes exactly once; post-start inserts \
+         and the mid-dump withdrawal absent"
     );
     assert!(
-        !dumped.contains(&low),
-        "insertion behind the cursor is live-stream territory, not dump"
+        !dumped.contains(&low) && !dumped.contains(&high),
+        "post-start insertion is live-stream territory regardless of \
+         which side of the cursor its key sorts on (LAN-885)"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// LAN-885 dump/live boundary: a Loc-RIB mutation admitted after the
+/// collector's generation started must never be emitted as dump
+/// content, even when its key sorts ahead of the cursor — the BMP
+/// manager holds its live delta back for post-End-of-RIB replay, and
+/// the walker emitting it would put a post-generation-start update on
+/// the wire before the dump's `EoR` (the red 2026-08-04 IRR receipt).
+/// Covers a fresh insert, an attribute replace of a not-yet-dumped
+/// route (install-time refresh), and a post-start VPN install.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one boundary walk: install, stamp, chunk, post-start churn, resume, membership asserts"
+)]
+#[tokio::test]
+async fn loc_rib_dump_excludes_routes_admitted_after_dump_start() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let peer = Ipv4Addr::new(10, 0, 0, 1);
+    let total = BMP_DUMP_CHUNK_SIZE + 8;
+    let prefixes: Vec<Ipv4Prefix> = (0..total)
+        .map(|i| {
+            Ipv4Prefix::new(
+                Ipv4Addr::new(
+                    10,
+                    u8::try_from(i / 256).unwrap(),
+                    u8::try_from(i % 256).unwrap(),
+                    0,
+                ),
+                24,
+            )
+        })
+        .collect();
+    tx.send(RibUpdate::RoutesReceived {
+        peer: IpAddr::V4(peer),
+        session_id: 0,
+        announced: prefixes
+            .iter()
+            .map(|&p| make_route_with_lp(p, peer, 100))
+            .collect(),
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    // Barrier: a serviced stats query proves the actor has applied the
+    // install batch, so the routes' stored install times all precede
+    // the generation-start stamp taken next.
+    let (barrier_reply, barrier_rx) = oneshot::channel();
+    tx.send(RibUpdate::QueryBmpLocRibStats {
+        reply: barrier_reply,
+    })
+    .await
+    .unwrap();
+    barrier_rx.await.unwrap();
+
+    // Generation start: the instant the BMP manager begins holding
+    // live deltas back. Everything installed above precedes it.
+    let dump_started = SystemTime::now();
+    let (reply, chunk_rx) = oneshot::channel();
+    tx.send(RibUpdate::QueryBmpLocRibDump {
+        cursor: None,
+        started_at: dump_started,
+        reply,
+    })
+    .await
+    .unwrap();
+    let first = tokio::time::timeout(Duration::from_secs(2), chunk_rx)
+        .await
+        .expect("first chunk within timeout")
+        .expect("RIB manager replies");
+    let cursor = first.next.expect("table larger than one chunk");
+
+    // Post-start churn, all sorting ahead of the cursor: a fresh
+    // prefix, a replace (changed local-pref refreshes the stored
+    // install time) of a route the dump has not reached yet, and a
+    // fresh VPN route ahead of the (not yet started) VPN phase.
+    let fresh = Ipv4Prefix::new(Ipv4Addr::new(240, 0, 0, 0), 24);
+    let replaced = prefixes[BMP_DUMP_CHUNK_SIZE + 4];
+    tx.send(RibUpdate::RoutesReceived {
+        peer: IpAddr::V4(peer),
+        session_id: 0,
+        announced: vec![
+            make_route_with_lp(fresh, peer, 100),
+            make_route_with_lp(replaced, peer, 200),
+        ],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    tx.send(RibUpdate::VpnRoutesReceived {
+        peer: IpAddr::V4(peer),
+        session_id: 0,
+        announced: vec![make_vpn_rib_route(peer, 42, 1042, 100)],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let (rest, _) = drive_loc_rib_dump_from(&tx, Some(cursor), dump_started).await;
+    let mut messages = first.messages;
+    messages.extend(rest);
+
+    let dumped = dumped_unicast_prefixes(&messages);
+    assert!(
+        !dumped.contains(&fresh),
+        "post-start insert ahead of the cursor leaked into dump content"
+    );
+    assert!(
+        !dumped.contains(&replaced),
+        "post-start replace of a not-yet-dumped route leaked its new \
+         state into dump content (the held-back live delta covers it)"
+    );
+    let mut expected: Vec<Ipv4Prefix> = prefixes
+        .iter()
+        .copied()
+        .filter(|&p| p != replaced)
+        .collect();
+    expected.sort_unstable();
+    let mut sorted = dumped.clone();
+    sorted.sort_unstable();
+    assert_eq!(sorted, expected, "pre-start routes dumped exactly once");
+    // No VPN announce made it either: dump rows + the four EoR markers
+    // account for every message.
+    assert_eq!(
+        messages.len(),
+        expected.len() + 4,
+        "post-start VPN install leaked into dump content"
     );
 
     drop(tx);

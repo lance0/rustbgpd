@@ -124,10 +124,12 @@ impl BmpLocRibConfig {
 /// position, it stays valid across route insertions and removals
 /// between chunks: each chunk is "the smallest keys strictly greater
 /// than the cursor", so a surviving route is emitted exactly once and
-/// mutations land on the live stream. The BMP manager holds a
-/// collector's live Loc-RIB messages back until the dump's End-of-RIB,
-/// so on the wire the deltas always follow the snapshot rows they
-/// supersede (dump → `EoR` → live; no dump-vs-live reordering).
+/// mutations land on the live stream — routes installed after the
+/// request's `started_at` are excluded from dump content (LAN-885).
+/// The BMP manager holds a collector's live Loc-RIB messages back
+/// until the dump's End-of-RIB, so on the wire the deltas always
+/// follow the snapshot rows they supersede (dump → `EoR` → live; no
+/// dump-vs-live reordering).
 #[derive(Debug, Clone, Copy)]
 pub enum BmpDumpCursor {
     /// Resuming the unicast Loc-RIB walk after this prefix.
@@ -150,6 +152,14 @@ pub enum BmpDumpCursor {
 pub struct BmpDumpRequest {
     /// Resume position; `None` starts a fresh dump.
     pub cursor: Option<BmpDumpCursor>,
+    /// When this collector's connection generation began — the instant
+    /// the BMP manager started holding back live Loc-RIB deltas for
+    /// post-End-of-RIB replay. The dump walk emits only routes
+    /// installed at or before this instant; anything newer reaches the
+    /// collector exclusively via the held-back live replay, so no
+    /// post-generation-start update can precede the dump's End-of-RIB
+    /// on the wire (LAN-885).
+    pub started_at: SystemTime,
     /// Reply channel for this chunk.
     pub reply: oneshot::Sender<BmpDumpChunk>,
 }

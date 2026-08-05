@@ -66,10 +66,23 @@ terminate_group() {
     [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null || kill -TERM -- "-$pid" 2>/dev/null || true
 }
 cleanup() {
+    local rc=$?
     terminate_group "$ACTIVE_SINK"
     terminate_group "$ACTIVE_HARNESS"
     terminate_group "$ACTIVE_DAEMON"
-    [ -z "$ACTIVE_TMP" ] || rm -rf "$ACTIVE_TMP"
+    if [ -n "$ACTIVE_TMP" ]; then
+        if [ "$rc" -eq 0 ]; then
+            rm -rf "$ACTIVE_TMP"
+        else
+            # A red run keeps its raw root (sink capture, generated
+            # scenario, partial sink state, pre-churn evidence) inside
+            # the artifact dir instead of losing it to cleanup.
+            local keep
+            keep="$ART/FAILED-$(basename "$ACTIVE_TMP")"
+            mv -- "$ACTIVE_TMP" "$keep" 2>/dev/null ||
+                echo "failed to preserve red run root $ACTIVE_TMP" >&2
+        fi
+    fi
 }
 trap cleanup EXIT
 trap 'exit 130' INT

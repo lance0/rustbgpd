@@ -3411,6 +3411,7 @@ async fn run<T>(
                     if dump_rib_tx
                         .send(RibUpdate::QueryBmpLocRibDump {
                             cursor: request.cursor,
+                            started_at: request.started_at,
                             reply: request.reply,
                         })
                         .await

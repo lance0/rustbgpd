@@ -11,6 +11,21 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- BMP Loc-RIB dumps no longer emit routes admitted after the collector's
+  connection generation started (LAN-885). The dump walk read the live
+  Loc-RIB per chunk, so a route installed mid-dump at a key ahead of the
+  cursor was emitted as dump content — a post-generation-start update on
+  the wire before the dump's End-of-RIB, violating the RFC 9069
+  dump→EoR→live ordering the held-back live buffer exists to guarantee
+  (caught by the IRR-scale BMP buffer receipt). Every dump chunk request
+  now carries the generation-start timestamp and the walk skips routes
+  whose stored install time is newer; those routes reach the collector
+  exclusively via the post-EoR replay of the live buffer. Applies to the
+  unicast and VPN dump phases; live-buffer overflow semantics are
+  unchanged. The buffer-receipt runner also preserves a failed run's raw
+  root (`FAILED-*` under the artifact dir) instead of deleting it, and
+  the receipt sink names the offending prefix, BMP timestamp, and frame
+  position when it detects a boundary breach.
 - Grouped export-policy reloads no longer wedge at IRR scale (LAN-886). The
   update-group classifier rendered each member's whole policy chain into a
   planning-fingerprint string — tens of megabytes per rendering for an

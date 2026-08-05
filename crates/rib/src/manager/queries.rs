@@ -271,10 +271,11 @@ impl RibManager {
     /// one pass over the unordered Loc-RIB map. That makes the cursor
     /// robust to mutations between chunks — a route that survives the
     /// dump is emitted exactly once, a removed route simply stops
-    /// matching, and an insertion behind the cursor reaches the
-    /// collector via the live stream (which the BMP manager holds back
-    /// until the dump's End-of-RIB, so deltas always follow the
-    /// snapshot rows on the wire). A phase yielding fewer than `N`
+    /// matching, and any route installed after `started_at` (behind
+    /// *or ahead of* the cursor) reaches the collector only via the
+    /// live stream, which the BMP manager holds back until the dump's
+    /// End-of-RIB — so no post-generation-start update can precede the
+    /// `EoR` on the wire (LAN-885). A phase yielding fewer than `N`
     /// keys is exhausted:
     /// unicast hands over to VPN, VPN closes the dump with one
     /// End-of-RIB per streamed family (dump→EoR→live ordering).
@@ -285,6 +286,7 @@ impl RibManager {
     pub(super) fn handle_query_bmp_loc_rib_dump(
         &self,
         cursor: Option<rustbgpd_bmp::BmpDumpCursor>,
+        started_at: std::time::SystemTime,
         reply: tokio::sync::oneshot::Sender<rustbgpd_bmp::BmpDumpChunk>,
     ) {
         use crate::bmp_sync;
@@ -319,6 +321,18 @@ impl RibManager {
                     else {
                         continue;
                     };
+                    // LAN-885: the walk reads the live table, so a route
+                    // admitted after the collector's generation began must
+                    // not become dump content — its held-back live delta
+                    // replays after End-of-RIB instead. Emitting it here
+                    // would leak a post-generation-start update across the
+                    // dump/live boundary. (Stored wall-clock install times:
+                    // a backward clock step mid-dump could readmit such a
+                    // route — accepted; a monotonic install sequence is the
+                    // upgrade path.)
+                    if installed_at > started_at {
+                        continue;
+                    }
                     if let Some(pdu) = bmp_sync::synthesize_unicast_announce(route) {
                         let status = bmp_sync::loc_rib_path_status(
                             route.is_stale || route.is_llgr_stale,
@@ -343,6 +357,11 @@ impl RibManager {
                     else {
                         continue;
                     };
+                    // LAN-885: same post-generation-start exclusion as the
+                    // unicast phase above.
+                    if installed_at > started_at {
+                        continue;
+                    }
                     if let Some(pdu) = bmp_sync::synthesize_vpn_announce(route) {
                         let status = bmp_sync::loc_rib_path_status(
                             route.is_stale || route.is_llgr_stale,

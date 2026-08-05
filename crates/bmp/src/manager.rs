@@ -108,6 +108,11 @@ enum CollectorPhase {
         /// before the client confirms it reached TCP. They must follow the
         /// initial dump's terminal End-of-RIB, never precede it.
         loc_rib_buffer: Vec<Bytes>,
+        /// When this generation began holding live deltas back. Carried
+        /// on every dump chunk request so the RIB walk excludes routes
+        /// installed after it — those must arrive only via the post-EoR
+        /// replay of the buffer (LAN-885).
+        started_at: std::time::SystemTime,
     },
     Active {
         generation: u64,
@@ -752,6 +757,7 @@ impl BmpManager {
             sender,
             loc_rib_peer_up,
             loc_rib_buffer: Vec::new(),
+            started_at: std::time::SystemTime::now(),
         };
         self.loc_rib_suppressed.remove(&collector_id);
         info!(
@@ -783,19 +789,20 @@ impl BmpManager {
             return;
         };
         let old_phase = std::mem::replace(&mut collector.phase, CollectorPhase::Disconnected);
-        let loc_rib_buffer = match old_phase {
+        let (loc_rib_buffer, started_at) = match old_phase {
             CollectorPhase::BootstrapPending {
                 generation: current,
                 sender,
                 loc_rib_peer_up,
                 loc_rib_buffer,
+                started_at,
             } if current == generation => {
                 collector.phase = CollectorPhase::Active {
                     generation,
                     sender,
                     loc_rib_peer_up,
                 };
-                loc_rib_buffer
+                (loc_rib_buffer, started_at)
             }
             other => {
                 collector.phase = other;
@@ -807,7 +814,7 @@ impl BmpManager {
             collector_id,
             generation, "BMP collector bootstrap completed"
         );
-        self.start_loc_rib_dump(collector_id, generation, loc_rib_buffer);
+        self.start_loc_rib_dump(collector_id, generation, loc_rib_buffer, started_at);
     }
 
     fn handle_collector_disconnected(
@@ -917,7 +924,13 @@ impl BmpManager {
     /// fenced by the collector's connection generation so a reconnect
     /// mid-dump can never leak stale dump rows into the new
     /// connection's stream (LAN-289).
-    fn start_loc_rib_dump(&mut self, collector_id: usize, generation: u64, buffered: Vec<Bytes>) {
+    fn start_loc_rib_dump(
+        &mut self,
+        collector_id: usize,
+        generation: u64,
+        buffered: Vec<Bytes>,
+        started_at: std::time::SystemTime,
+    ) {
         let Some(ref cfg) = self.loc_rib else {
             return;
         };
@@ -950,6 +963,7 @@ impl BmpManager {
                 addr_label,
                 generation: generation_fence,
                 dump_generation: generation,
+                started_at,
             },
             self.dump_done_tx.clone(),
             collector_id,
@@ -1028,6 +1042,10 @@ struct DumpForwarder {
     /// The generation this dump was started for; the forwarder aborts
     /// as soon as the live value moves past it.
     dump_generation: u64,
+    /// When the generation began holding live Loc-RIB deltas back;
+    /// carried on every chunk request so the RIB walk never emits a
+    /// route installed after it as dump content (LAN-885).
+    started_at: std::time::SystemTime,
 }
 
 impl DumpForwarder {
@@ -1083,7 +1101,11 @@ async fn stream_loc_rib_dump(f: DumpForwarder) -> Option<DumpOutcome> {
         let (reply, chunk_rx) = tokio::sync::oneshot::channel();
         match tokio::time::timeout(
             LOC_RIB_DUMP_REQUEST_TIMEOUT,
-            f.dump_tx.send(BmpDumpRequest { cursor, reply }),
+            f.dump_tx.send(BmpDumpRequest {
+                cursor,
+                started_at: f.started_at,
+                reply,
+            }),
         )
         .await
         {
@@ -1230,6 +1252,7 @@ mod tests {
             addr_label: collector_addr(0).to_string(),
             generation: Arc::new(AtomicU64::new(1)),
             dump_generation: 1,
+            started_at: std::time::SystemTime::now(),
         }
     }
 
@@ -2114,6 +2137,7 @@ mod tests {
         dump_tx
             .try_send(BmpDumpRequest {
                 cursor: None,
+                started_at: std::time::SystemTime::now(),
                 reply,
             })
             .unwrap();
@@ -3029,6 +3053,7 @@ mod tests {
             sender,
             loc_rib_peer_up: true,
             loc_rib_buffer: vec![Bytes::new(); LOC_RIB_DUMP_LIVE_BUFFER_CAP],
+            started_at: std::time::SystemTime::now(),
         };
         assert_eq!(manager.collectors[0].phase.generation(), Some(7));
         assert!(!receiver.is_closed(), "CAP rows keep the generation live");

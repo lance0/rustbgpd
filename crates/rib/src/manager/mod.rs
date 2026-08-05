@@ -2429,8 +2429,12 @@ impl RibManager {
             } => {
                 self.handle_query_warm_mrt_snapshot(&views, &budget, reply);
             }
-            RibUpdate::QueryBmpLocRibDump { cursor, reply } => {
-                self.handle_query_bmp_loc_rib_dump(cursor, reply);
+            RibUpdate::QueryBmpLocRibDump {
+                cursor,
+                started_at,
+                reply,
+            } => {
+                self.handle_query_bmp_loc_rib_dump(cursor, started_at, reply);
             }
             RibUpdate::QueryBmpLocRibStats { reply } => {
                 self.handle_query_bmp_loc_rib_stats(reply);
