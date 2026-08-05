@@ -318,7 +318,7 @@ enum CleanPolicyTransitionPhase {
         cursor: usize,
         probe_cache: SharedUnicastProbeCache,
         prepared: Vec<PreparedCleanPolicyTransitionPeer>,
-        active_probe: Option<CleanPolicyTransitionProbe>,
+        active_probe: Option<Box<CleanPolicyTransitionProbe>>,
         full_probe_count: usize,
     },
     Validate {
@@ -1232,6 +1232,27 @@ impl RibManager {
             .phase
             .take()
             .expect("pending clean transition always owns one phase");
+        // Fail closed while sessions are healthy (LAN-886): every other
+        // pre-commit fallback trigger is an invalidation event (session or
+        // channel loss, table drift), so without a time budget a
+        // slow-but-healthy transition fences the actor — and therefore all
+        // wire output — until teardown finally invalidates it. Pre-commit
+        // phases mutate nothing externally visible, so handing the cohort to
+        // the authoritative per-peer path here is safe; `CommitMembers` is
+        // exempt because its first batch may already be on a member's wire.
+        if !matches!(phase, CleanPolicyTransitionPhase::CommitMembers { .. })
+            && pending.elapsed() >= super::MAX_PRECOMMIT_POLICY_TRANSITION_OWNERSHIP
+        {
+            warn!(
+                member_count = pending.member_count(),
+                elapsed_ms = u64::try_from(pending.elapsed().as_millis()).unwrap_or(u64::MAX),
+                "clean export-policy transition exceeded its pre-commit ownership budget; \
+                 handing the cohort to the authoritative per-peer path"
+            );
+            // Dropping the phase releases any reserved outbound permits.
+            drop(phase);
+            return CleanPolicyTransitionAdvance::Fallback(pending);
+        }
         match phase {
             CleanPolicyTransitionPhase::Classify {
                 mut cursor,
@@ -1327,6 +1348,13 @@ impl RibManager {
                                 // exactly like one it created itself.
                                 pending.created_destination = Some(destination);
                             }
+                            debug!(
+                                destination,
+                                maintained = true,
+                                elapsed_ms = u64::try_from(pending.elapsed().as_millis())
+                                    .unwrap_or(u64::MAX),
+                                "clean policy transition entering BuildInventory"
+                            );
                             pending.phase = Some(CleanPolicyTransitionPhase::BuildInventory {
                                 source,
                                 destination,
@@ -1381,6 +1409,13 @@ impl RibManager {
                         memo,
                     });
                 } else {
+                    debug!(
+                        destination,
+                        maintained = false,
+                        elapsed_ms =
+                            u64::try_from(pending.elapsed().as_millis()).unwrap_or(u64::MAX),
+                        "clean policy transition entering BuildInventory"
+                    );
                     pending.phase = Some(CleanPolicyTransitionPhase::BuildInventory {
                         source,
                         destination,
@@ -1461,10 +1496,17 @@ impl RibManager {
                         inventory,
                     });
                 } else {
+                    let inventory = inventory.finish();
+                    debug!(
+                        announce_len = inventory.announce.len(),
+                        elapsed_ms =
+                            u64::try_from(pending.elapsed().as_millis()).unwrap_or(u64::MAX),
+                        "clean policy transition entering ProbeAndPrepare"
+                    );
                     pending.phase = Some(CleanPolicyTransitionPhase::ProbeAndPrepare {
                         source,
                         destination,
-                        inventory: inventory.finish(),
+                        inventory,
                         cursor: 0,
                         probe_cache: SharedUnicastProbeCache::default(),
                         prepared: Vec::with_capacity(pending.replacements.len()),
@@ -1582,12 +1624,22 @@ impl RibManager {
                             if snapshot.owner_id() != encoder.owner_id() {
                                 return CleanPolicyTransitionAdvance::Fallback(pending);
                             }
-                            if let Some(maximum) = probe_cache.reuse_grouped_exact_export_maximum(
+                            let reuse = probe_cache.reuse_grouped_exact_export_maximum(
                                 destination,
                                 &inventory.announce,
                                 &inventory.next_hop_override,
                                 snapshot.as_ref(),
-                            ) {
+                            );
+                            debug!(
+                                %peer,
+                                reused = reuse.is_some(),
+                                cursor,
+                                full_probe_count,
+                                elapsed_ms =
+                                    u64::try_from(pending.elapsed().as_millis()).unwrap_or(u64::MAX),
+                                "clean policy transition member probe decision"
+                            );
+                            if let Some(maximum) = reuse {
                                 if maximum.is_err() {
                                     return CleanPolicyTransitionAdvance::Fallback(pending);
                                 }
@@ -1601,7 +1653,7 @@ impl RibManager {
                                 });
                                 cursor += 1;
                             } else {
-                                active_probe = Some(CleanPolicyTransitionProbe {
+                                active_probe = Some(Box::new(CleanPolicyTransitionProbe {
                                     peer,
                                     session_id,
                                     export_policy,
@@ -1610,7 +1662,7 @@ impl RibManager {
                                     permit,
                                     cursor: 0,
                                     encoded_lengths: Vec::with_capacity(inventory.announce.len()),
-                                });
+                                }));
                             }
                         }
                     }
@@ -1623,6 +1675,12 @@ impl RibManager {
                 }
 
                 if cursor == pending.replacements.len() && active_probe.is_none() {
+                    debug!(
+                        full_probe_count,
+                        elapsed_ms =
+                            u64::try_from(pending.elapsed().as_millis()).unwrap_or(u64::MAX),
+                        "clean policy transition entering Validate"
+                    );
                     pending.phase = Some(CleanPolicyTransitionPhase::Validate {
                         source,
                         destination,
@@ -1680,6 +1738,10 @@ impl RibManager {
                 if !all_current {
                     return CleanPolicyTransitionAdvance::Fallback(pending);
                 }
+                debug!(
+                    elapsed_ms = u64::try_from(pending.elapsed().as_millis()).unwrap_or(u64::MAX),
+                    "clean policy transition entering CommitMembers"
+                );
                 pending.phase = Some(CleanPolicyTransitionPhase::CommitMembers {
                     source,
                     destination,

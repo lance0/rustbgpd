@@ -55,7 +55,10 @@ fn candidate_input(
 ) -> UpdateGroupClassifierInput {
     let policy = candidate.export_policy.as_ref();
     UpdateGroupClassifierInput {
-        policy_fingerprint: policy.map(|chain| format!("{chain:?}")),
+        // Same planning-identity digest the RIB snapshot rows carry —
+        // live-vs-candidate comparisons only match when both sides render
+        // chain content through `groupability_fingerprint` (LAN-886).
+        policy_fingerprint: policy.map(|chain| chain.groupability_fingerprint().to_string()),
         policy_provenance: policy.map(|chain| chain.groupability_provenance().to_string()),
         policy_requires_peer_context: policy.is_some_and(PolicyChain::requires_peer_context),
         target_is_ebgp: candidate.transport_config.peer.remote_asn != local_asn,

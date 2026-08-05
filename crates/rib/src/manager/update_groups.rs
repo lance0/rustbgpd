@@ -3084,6 +3084,7 @@ impl RibManager {
             peer,
             chain,
             orf_negotiated || self.peer_orf_filters.contains_key(&peer),
+            false,
         );
         let fingerprint = match classify_update_group(input) {
             UpdateGroupClassification::PolicyPeerContext => {
@@ -3232,11 +3233,22 @@ impl RibManager {
         self.refresh_group_residue_gauge();
     }
 
+    /// Build the classifier input for one peer.
+    ///
+    /// `with_policy_fingerprint` gates the O(chain-size) planning-identity
+    /// digest: runtime classification (registration, policy edits, the
+    /// fenced clean-transition phases) passes `false` because runtime group
+    /// identity is the interned chain content, not the fingerprint — at IRR
+    /// scale rendering the fingerprint per member wedged grouped reloads for
+    /// the whole observation window (LAN-886). The observational snapshot
+    /// surface passes `true` so live-vs-candidate planning comparisons keep
+    /// their chain-content dimension.
     fn update_group_classifier_input(
         &self,
         peer: IpAddr,
         chain: Option<&PolicyChain>,
         orf_installed: bool,
+        with_policy_fingerprint: bool,
     ) -> UpdateGroupClassifierInput {
         let sendable = self.peer_sendable_families.get(&peer);
         let mut sendable_families = sendable
@@ -3256,7 +3268,9 @@ impl RibManager {
         llgr_families.sort_unstable();
         llgr_families.dedup();
         UpdateGroupClassifierInput {
-            policy_fingerprint: chain.map(|value| format!("{value:?}")),
+            policy_fingerprint: with_policy_fingerprint
+                .then(|| chain.map(|value| value.groupability_fingerprint().to_string()))
+                .flatten(),
             policy_provenance: chain.map(|value| value.groupability_provenance().to_string()),
             policy_requires_peer_context: chain.is_some_and(PolicyChain::requires_peer_context),
             target_is_ebgp: self.peer_is_ebgp.get(&peer).copied().unwrap_or(false),
@@ -3309,6 +3323,7 @@ impl RibManager {
                     peer,
                     chain,
                     orf_negotiated || self.peer_orf_filters.contains_key(&peer),
+                    true,
                 );
                 UpdateGroupPeerSnapshot {
                     peer,
