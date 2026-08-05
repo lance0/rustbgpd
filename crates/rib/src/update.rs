@@ -2209,6 +2209,12 @@ pub enum RibUpdate {
         /// Resume position from the previous chunk's reply; `None`
         /// starts a fresh dump.
         cursor: Option<rustbgpd_bmp::BmpDumpCursor>,
+        /// When the collector's connection generation began holding
+        /// live Loc-RIB deltas back. Routes installed after this
+        /// instant are excluded from dump content — they reach the
+        /// collector only via the post-End-of-RIB live replay
+        /// (LAN-885).
+        started_at: std::time::SystemTime,
         /// Reply channel for this chunk (from the BMP manager's
         /// `BmpDumpRequest`).
         reply: oneshot::Sender<rustbgpd_bmp::BmpDumpChunk>,
