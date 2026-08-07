@@ -1513,6 +1513,10 @@ impl CompiledChain {
             MatchExpr::NeighborIn(set) => {
                 set.matches(ctx.peer_address, ctx.peer_asn, ctx.peer_group)
             }
+            // `!=` mirrors `==`: an absent peer field matches neither.
+            MatchExpr::NeighborNe(set) => {
+                set.matches_ne(ctx.peer_address, ctx.peer_asn, ctx.peer_group)
+            }
             MatchExpr::RouteTypeIs(route_type) => ctx.route_type == Some(*route_type),
             // `!=` mirrors `==`: an absent route-type matches neither.
             MatchExpr::RouteTypeNe(route_type) => ctx.route_type.is_some_and(|t| t != *route_type),

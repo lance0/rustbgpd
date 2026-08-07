@@ -244,6 +244,30 @@ impl NeighborSetMatch {
             || peer_asn.is_some_and(|asn| self.remote_asns.contains(&asn))
             || peer_group.is_some_and(|group| self.peer_groups.iter().any(|name| name == group))
     }
+
+    /// The `!=` mirror of [`matches`](Self::matches): every populated
+    /// dimension's peer field must be present and miss the set —
+    /// `!=` mirrors `==`, so an absent field satisfies neither
+    /// (LAN-209 class, LAN-895). Like `matches`, an empty set never
+    /// matches.
+    #[must_use]
+    pub fn matches_ne(
+        &self,
+        peer_address: Option<IpAddr>,
+        peer_asn: Option<u32>,
+        peer_group: Option<&str>,
+    ) -> bool {
+        if self.addresses.is_empty() && self.remote_asns.is_empty() && self.peer_groups.is_empty() {
+            return false;
+        }
+        (self.addresses.is_empty()
+            || peer_address.is_some_and(|addr| !self.addresses.contains(&addr)))
+            && (self.remote_asns.is_empty()
+                || peer_asn.is_some_and(|asn| !self.remote_asns.contains(&asn)))
+            && (self.peer_groups.is_empty()
+                || peer_group
+                    .is_some_and(|group| !self.peer_groups.iter().any(|name| name == group)))
+    }
 }
 
 /// What to do with the next-hop attribute.

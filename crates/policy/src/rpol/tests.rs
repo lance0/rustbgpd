@@ -1419,6 +1419,9 @@ fn absent_route_attribute_matches_neither_eq_nor_ne() {
         ("route.route-type", "external"),
         ("route.evpn-route-type", "3"),
         ("route.family", "evpn"),
+        ("peer.address", "192.0.2.1"),
+        ("peer.asn", "65010"),
+        ("peer.group", "\"leaf\""),
     ];
     let absent = absent_ctx();
     for (field, literal) in fields {
@@ -1525,6 +1528,125 @@ fn route_type_ne_absent_does_not_match() {
         PolicyAction::Permit,
         "absent route-type must not match `!= external`"
     );
+}
+
+#[test]
+fn peer_address_ne_absent_does_not_match() {
+    // A route evaluated without peer identity must match neither `==`
+    // nor `!=` — `Not(NeighborIn)` used to match when the peer address
+    // was absent (LAN-895).
+    let chain = reject_if("peer.address != 192.0.2.1");
+    assert_eq!(
+        chain.policies[0].terms[0].guard,
+        MatchExpr::NeighborNe(Box::new(crate::engine::NeighborSetMatch {
+            addresses: vec!["192.0.2.1".parse().unwrap()],
+            ..Default::default()
+        }))
+    );
+    let base = absent_ctx();
+    // Present and differing → matches → reject.
+    let differing = RouteContext {
+        peer_address: Some("198.51.100.7".parse().unwrap()),
+        ..base
+    };
+    assert_eq!(chain.evaluate(&differing).action, PolicyAction::Deny);
+    // Present and equal → no match → accept.
+    let equal = RouteContext {
+        peer_address: Some("192.0.2.1".parse().unwrap()),
+        ..base
+    };
+    assert_eq!(chain.evaluate(&equal).action, PolicyAction::Permit);
+    // Absent → must NOT match → accept (this was the bug).
+    assert_eq!(
+        chain.evaluate(&base).action,
+        PolicyAction::Permit,
+        "absent peer address must not match `peer.address != 192.0.2.1`"
+    );
+}
+
+#[test]
+fn peer_asn_ne_absent_does_not_match() {
+    // An unknown peer ASN must match neither `==` nor `!=` —
+    // `Not(NeighborIn)` used to match when it was absent (LAN-895).
+    let chain = reject_if("peer.asn != 65010");
+    assert_eq!(
+        chain.policies[0].terms[0].guard,
+        MatchExpr::NeighborNe(Box::new(crate::engine::NeighborSetMatch {
+            remote_asns: vec![65010],
+            ..Default::default()
+        }))
+    );
+    let base = absent_ctx();
+    // Present and differing → matches → reject.
+    let differing = RouteContext {
+        peer_asn: Some(65020),
+        ..base
+    };
+    assert_eq!(chain.evaluate(&differing).action, PolicyAction::Deny);
+    // Present and equal → no match → accept.
+    let equal = RouteContext {
+        peer_asn: Some(65010),
+        ..base
+    };
+    assert_eq!(chain.evaluate(&equal).action, PolicyAction::Permit);
+    // Absent → must NOT match → accept (this was the bug).
+    assert_eq!(
+        chain.evaluate(&base).action,
+        PolicyAction::Permit,
+        "absent peer ASN must not match `peer.asn != 65010`"
+    );
+}
+
+#[test]
+fn peer_group_ne_absent_does_not_match() {
+    // An ungrouped peer (peer_group None — the routine live case) must
+    // match neither `==` nor `!=` — `Not(NeighborIn)` used to match
+    // every ungrouped peer (LAN-895).
+    let chain = reject_if(r#"peer.group != "leaf""#);
+    assert_eq!(
+        chain.policies[0].terms[0].guard,
+        MatchExpr::NeighborNe(Box::new(crate::engine::NeighborSetMatch {
+            peer_groups: vec!["leaf".to_string()],
+            ..Default::default()
+        }))
+    );
+    let base = absent_ctx();
+    // Present and differing → matches → reject.
+    let differing = RouteContext {
+        peer_group: Some("spine"),
+        ..base
+    };
+    assert_eq!(chain.evaluate(&differing).action, PolicyAction::Deny);
+    // Present and equal → no match → accept.
+    let equal = RouteContext {
+        peer_group: Some("leaf"),
+        ..base
+    };
+    assert_eq!(chain.evaluate(&equal).action, PolicyAction::Permit);
+    // Absent → must NOT match → accept (this was the bug).
+    assert_eq!(
+        chain.evaluate(&base).action,
+        PolicyAction::Permit,
+        "ungrouped peer must not match `peer.group != \"leaf\"`"
+    );
+}
+
+#[test]
+fn peer_ne_still_requires_peer_context() {
+    // The dedicated Ne node reads peer identity exactly like
+    // `NeighborIn`, so it must keep disqualifying peers from
+    // update-group sharing.
+    for guard in [
+        "peer.address != 192.0.2.1",
+        "peer.asn != 65010",
+        r#"peer.group != "leaf""#,
+    ] {
+        let chain = reject_if(guard);
+        assert!(
+            chain.requires_peer_context(),
+            "`{guard}` must require peer context"
+        );
+    }
 }
 
 // ── asn-sets and origin-as predicates (LAN-249) ────────────────────
