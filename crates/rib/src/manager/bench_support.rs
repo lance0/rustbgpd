@@ -344,8 +344,13 @@ impl RibManager {
     }
 
     /// Register synthetic eBGP route-server clients on the production
-    /// per-client-best fallback. The explicit seam keeps the grouping
-    /// disqualifier visible instead of adding a positional flag to callers.
+    /// per-client-best per-peer fallback. Since the ADR-0126 Phase 3
+    /// classifier flip a unicast-only per-client-best peer GROUPS, so the
+    /// fallback these fixtures promise requires a non-unicast-only session:
+    /// each peer also negotiates VPNv4 (no VPN routes exist in any fixture,
+    /// so the wire stays pure IPv4-unicast). The explicit seam keeps the
+    /// grouping disqualifier visible instead of adding a positional flag to
+    /// callers.
     #[must_use]
     pub fn bench_register_per_client_best_route_server_peers<F>(
         &mut self,
@@ -445,6 +450,17 @@ impl RibManager {
             let (tx, mut rx) = mpsc::channel(channel_capacity);
             self.pending_peer_export_encoders
                 .insert((peer, session_id), make_exact_export_encoder(peer_asn));
+            // ADR-0126 Decision 1: a unicast-only per-client-best session
+            // classifies Groupable, so a per-client-best fixture peer must
+            // negotiate a non-unicast-only family to stay on the per-peer
+            // fallback these fixtures measure. No fixture seeds VPN routes,
+            // so the negotiated-but-empty family never reaches an envelope,
+            // a receipt counter, or a family gauge.
+            let sendable_families = if per_client_best {
+                vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv4, Safi::MplsVpn)]
+            } else {
+                vec![(Afi::Ipv4, Safi::Unicast)]
+            };
             self.handle_peer_up(
                 peer,
                 session_id,
@@ -452,7 +468,7 @@ impl RibManager {
                 Ipv4Addr::new(192, 0, 2, 1), // shared bgp-id (irrelevant to fanout cost)
                 tx,
                 export_policy.cloned(),
-                vec![(Afi::Ipv4, Safi::Unicast)],
+                sendable_families,
                 is_ebgp,
                 is_rr_client,
                 None, // no ORR vantage
