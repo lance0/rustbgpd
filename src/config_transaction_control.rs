@@ -2723,6 +2723,11 @@ async fn commit_peer_session_reshape_locked(
             );
         }
     };
+    if let Some(error) =
+        dynamic_bounce_listener_auth_error(&previous, candidate, &targets.dynamic_bounce_ranges)
+    {
+        return Err(rollback_snapshot_after_error(peer_mgr_tx, previous_toml, error.into()).await);
+    }
     let reconfigured = targets.static_targets.len();
 
     let priors = match send_apply_peer_reshape_snapshot(peer_mgr_tx, targets.static_targets).await {
@@ -3135,6 +3140,42 @@ fn dynamic_range_listener_auth_inventory(
             (group.md5_password.is_some() || gtsm).then(|| (key, group.md5_password.clone(), gtsm))
         })
         .collect()
+}
+
+/// A peer-group field reshape reaches the listener fence in
+/// `apply_peer_reshape_snapshot` only through its *static* members, so a group
+/// whose members are all `[[dynamic_neighbors]]` ranges resolves zero static
+/// targets and skips it entirely — the post-persist bounce would then reset
+/// live sessions into a listener still pinned to the old MD5/GTSM inventory.
+/// Compare the previous and candidate inventories over the bounced ranges and
+/// refuse instead. Scoped to those ranges so an untouched protected range
+/// elsewhere in the config cannot fence an unrelated reshape.
+fn dynamic_bounce_listener_auth_error(
+    previous: &Config,
+    candidate: &Config,
+    ranges: &[DynamicRangeTarget],
+) -> Option<ConfigTransactionApplyError> {
+    if ranges.is_empty() {
+        return None;
+    }
+    let scope: std::collections::BTreeSet<_> = ranges
+        .iter()
+        .map(|range| (range.addr, range.prefix_len))
+        .collect();
+    let scoped = |config: &Config| {
+        dynamic_range_listener_auth_inventory(config)
+            .into_iter()
+            .filter(|(key, _, _)| scope.contains(key))
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    (scoped(previous) != scoped(candidate)).then(|| {
+        peer_lifecycle_error_to_apply_error(PeerLifecycleError::RestartRequired(
+            "peer-group reshape changes md5_password or ttl_security for a \
+             [[dynamic_neighbors]] range; inbound listener enforcement is updated only by \
+             startup or SIGHUP reload — apply this change through the config file and SIGHUP"
+                .to_string(),
+        ))
+    })
 }
 
 /// A neighbor added at runtime cannot get its inbound MD5 key or GTSM
@@ -3684,7 +3725,7 @@ mod tests {
         let transaction_helper = concat!("tier_transaction", "_test_config");
         assert!(!this_surface.contains(legacy_toml));
         assert!(!this_surface.contains(legacy_variant));
-        assert_eq!(this_surface.matches(transaction_helper).count(), 12);
+        assert_eq!(this_surface.matches(transaction_helper).count(), 13);
 
         let peer_manager_tests = include_str!("peer_manager/tests.rs");
         assert!(!peer_manager_tests.contains(legacy_toml));
@@ -4810,6 +4851,33 @@ log_format = "json"
 
 [peer_groups.ix]
 hold_time = {hold_time}
+
+[[dynamic_neighbors]]
+prefix = "10.30.0.0/16"
+peer_group = "ix"
+remote_asn = 65030
+"#
+        ))
+    }
+
+    /// The same dynamic-only peer group varying `md5_password` instead of
+    /// `hold_time`: a session reshape that also moves the startup/SIGHUP-pinned
+    /// listener key inventory for the range's prefix.
+    fn dynamic_peer_group_md5_reshape_toml(md5_password: &str) -> String {
+        tier_transaction_test_config(&format!(
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[peer_groups.ix]
+hold_time = 90
+md5_password = "{md5_password}"
 
 [[dynamic_neighbors]]
 prefix = "10.30.0.0/16"
@@ -7899,6 +7967,66 @@ default_action = "permit"
                 .contains("1 live dynamic session(s) signaled to reset"),
             "{}",
             response.human_text
+        );
+    }
+
+    /// LAN-911: a peer-group field reshape whose only members are
+    /// `[[dynamic_neighbors]]` ranges resolves zero static targets, so the
+    /// MD5/GTSM fence in `apply_peer_reshape_snapshot` never runs. Changing
+    /// the group's `md5_password` must still be refused restart-required
+    /// rather than bouncing the live sessions into a listener still pinned to
+    /// the old key.
+    #[tokio::test]
+    async fn dynamic_range_peer_group_auth_reshape_is_refused_restart_required() {
+        let previous_toml = dynamic_peer_group_md5_reshape_toml("old-secret");
+        let candidate_toml = dynamic_peer_group_md5_reshape_toml("new-secret");
+        let snapshot_toml = Arc::new(Mutex::new(previous_toml.clone()));
+        let peers = Arc::new(Mutex::new(Vec::new()));
+        let bounce_calls = Arc::new(Mutex::new(Vec::new()));
+        let (peer_tx, peer_rx) = mpsc::channel(8);
+        tokio::spawn(fake_snapshot_peer_manager_recording_bounces(
+            peer_rx,
+            peer_session_reshape_plan(),
+            snapshot_toml.clone(),
+            peers.clone(),
+            bounce_calls.clone(),
+        ));
+        let (config_tx, mut config_rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            if let Some(ConfigEvent::ConfigTransactionCommitted { ack: Some(ack), .. }) =
+                config_rx.recv().await
+            {
+                ack.accept().await;
+            }
+        });
+
+        let err = apply_config_transaction(
+            deps(None, peer_tx, Some(config_tx), Vec::new()),
+            proto::ApplyConfigTransactionRequest {
+                candidate_toml,
+                expected_runtime_snapshot_token: "kv1:old:1".to_string(),
+                client_request_id: String::new(),
+                comment: String::new(),
+                confirm_id: String::new(),
+                confirm_timeout_seconds: 0,
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            matches!(
+                err,
+                ConfigTransactionApplyError::FailedPrecondition(ref message)
+                    if message.contains("md5_password or ttl_security")
+            ),
+            "{err:?}"
+        );
+        assert_eq!(*snapshot_toml.lock().await, previous_toml);
+        assert!(peers.lock().await.is_empty());
+        assert!(
+            bounce_calls.lock().await.is_empty(),
+            "a refused reshape must not signal dynamic session resets"
         );
     }
 

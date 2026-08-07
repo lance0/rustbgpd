@@ -61,6 +61,23 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   members, and any member already refuses the delete with
   `still referenced`.
 
+- **A peer-group `md5_password` / `ttl_security` config transaction on a
+  group whose members are only `[[dynamic_neighbors]]` ranges is now
+  refused restart-required** (LAN-911). Those fields classify as session
+  reset, so such an edit planned as an effective-neighbor session
+  reshape rather than a `[[dynamic_neighbors]]` change. The reshape
+  executor runs the LAN-902 listener fence over its *static* targets
+  only, and a dynamic-only group resolves none — the transaction
+  committed and then bounced the range's live sessions, which
+  reconnected against a listener still pinned to the previous key and
+  could not re-establish inbound. The reshape executor now compares the
+  previous and candidate listener MD5/GTSM inventories for the ranges it
+  is about to bounce and fails with the same restart-required error as
+  the other LAN-902 paths, before any live mutation or persist. Reshapes
+  that leave inbound authentication unchanged (hold time, families,
+  policy) still bounce the ranges as before, and mixed groups were
+  already refused through their static members.
+
 ### Added
 
 - `WatchRoutes` now signals subscriber lag in-band with a synthetic
