@@ -469,8 +469,13 @@ pub(super) async fn stream_plan_config_transaction(
         audit,
         response_tx,
     ));
-    response_rx
+    // Outer bound for parity with StreamApplyConfigTransaction: the detached
+    // task's async work is deadline-limited internally, but token issuance
+    // runs outside that window and a wedged/never-scheduled task must not
+    // hang the RPC past the total deadline.
+    timeout_at(deadline, response_rx)
         .await
+        .map_err(|_| Status::deadline_exceeded("streamed config plan exceeded total deadline"))?
         .map_err(|_| Status::internal("streamed config planner task did not complete"))?
         .map(Response::new)
 }
@@ -1834,6 +1839,33 @@ mod tests {
             .send(Ok(sample_plan(RuntimeConfigTransactionStatus::Committable)))
             .unwrap();
         task.await.unwrap();
+        assert!(state.tokens.lock().unwrap().is_empty());
+    }
+
+    /// After handoff the plan RPC is bounded by the total deadline — a wedged
+    /// planner surfaces `DEADLINE_EXCEEDED` to the client instead of hanging
+    /// (parity with `StreamApplyConfigTransaction`'s response deadline).
+    #[tokio::test(start_paused = true)]
+    async fn plan_response_is_bounded_by_total_deadline_after_handoff() {
+        let runtime = TempDir::new().unwrap();
+        let state = state_at(runtime.path(), StreamLimits::default());
+        let (peer_tx, mut peer_rx) = mpsc::channel(1);
+        let listener = spawn_listener(Arc::clone(&state), peer_tx, true).await;
+        let mut client = listener.client.clone();
+        let request = tokio::spawn(async move {
+            client
+                .stream_plan_config_transaction(futures::stream::iter(frames(b"stalled", None)))
+                .await
+        });
+        let PeerManagerCommand::PlanConfigTransaction { reply, .. } = peer_rx.recv().await.unwrap()
+        else {
+            panic!("unexpected peer-manager command");
+        };
+        tokio::time::advance(Duration::from_secs(30 * 60 + 1)).await;
+        let error = request.await.unwrap().unwrap_err();
+        assert_eq!(error.code(), tonic::Code::DeadlineExceeded);
+        assert!(error.message().contains("total deadline"));
+        drop(reply);
         assert!(state.tokens.lock().unwrap().is_empty());
     }
 
