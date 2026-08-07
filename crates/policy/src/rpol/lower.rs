@@ -1009,6 +1009,13 @@ fn lower_cmp(
                 MatchExpr::EvpnRouteTypeIs(evpn_type)
             }
         }
+        // `negate_if` (i.e. `Not(Eq)`) is safe for rpki/aspa ONLY
+        // because their context fields are non-optional total enums —
+        // "absent" is an explicit value (`NotFound` / `Unknown`), so
+        // `Not` is a true complement. Fields whose context value is an
+        // `Option` (peer.*, next-hop, prefix, …) must lower `!=` to a
+        // dedicated Ne node instead: `Not` matches on absence (LAN-209,
+        // LAN-895).
         Field::Rpki => {
             let node = MatchExpr::RpkiIs(match rhs_ident(rhs) {
                 "valid" => rustbgpd_wire::RpkiValidation::Valid,
@@ -1075,32 +1082,49 @@ fn lower_cmp(
             }
             _ => unreachable!("typechecked: next-hop compares an IP or peer.address"),
         },
+        // `!=` gets a dedicated Ne node rather than `Not(Eq)` (LAN-895):
+        // an absent peer field (peer.group on an ungrouped peer;
+        // peer-less explain dry-runs) must match neither `==` nor `!=`
+        // (LAN-209 class), and `Not(NeighborIn)` would wrongly match
+        // when it is absent.
         Field::PeerAddress => {
             let Rhs::Ip(addr, _) = rhs else {
                 unreachable!("typechecked: peer.address compares an IP")
             };
-            let node = MatchExpr::NeighborIn(Box::new(NeighborSetMatch {
+            let set = Box::new(NeighborSetMatch {
                 addresses: vec![*addr],
                 ..NeighborSetMatch::default()
-            }));
-            negate_if(op == CmpOp::Ne, node)
+            });
+            if op == CmpOp::Ne {
+                MatchExpr::NeighborNe(set)
+            } else {
+                MatchExpr::NeighborIn(set)
+            }
         }
         Field::PeerAsn => {
-            let node = MatchExpr::NeighborIn(Box::new(NeighborSetMatch {
+            let set = Box::new(NeighborSetMatch {
                 remote_asns: vec![rhs_u32(rhs, env)],
                 ..NeighborSetMatch::default()
-            }));
-            negate_if(op == CmpOp::Ne, node)
+            });
+            if op == CmpOp::Ne {
+                MatchExpr::NeighborNe(set)
+            } else {
+                MatchExpr::NeighborIn(set)
+            }
         }
         Field::PeerGroup => {
             let Rhs::Str(group) = rhs else {
                 unreachable!("typechecked: peer.group compares a string")
             };
-            let node = MatchExpr::NeighborIn(Box::new(NeighborSetMatch {
+            let set = Box::new(NeighborSetMatch {
                 peer_groups: vec![group.node.clone()],
                 ..NeighborSetMatch::default()
-            }));
-            negate_if(op == CmpOp::Ne, node)
+            });
+            if op == CmpOp::Ne {
+                MatchExpr::NeighborNe(set)
+            } else {
+                MatchExpr::NeighborIn(set)
+            }
         }
         // `!=` gets a dedicated Ne node rather than `Not(Eq)`: a
         // prefixless route (BGP-LS / RTC NLRIs) must match neither `==`

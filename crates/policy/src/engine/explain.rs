@@ -824,6 +824,12 @@ fn binding(expr: &MatchExpr) -> u8 {
         {
             0
         }
+        // A multi-member `Ne` set renders as an internal `&&`.
+        MatchExpr::NeighborNe(set)
+            if set.addresses.len() + set.remote_asns.len() + set.peer_groups.len() > 1 =>
+        {
+            1
+        }
         MatchExpr::And(_) => 1,
         _ => 2,
     }
@@ -937,6 +943,24 @@ fn render_prec(expr: &MatchExpr, tables: &CompiledChain, min_binding: u8) -> Str
                 "false".to_string()
             } else {
                 parts.join(" || ")
+            }
+        }
+        MatchExpr::NeighborNe(set) => {
+            let mut parts: Vec<String> = Vec::new();
+            for addr in &set.addresses {
+                parts.push(format!("peer.address != {addr}"));
+            }
+            for asn in &set.remote_asns {
+                parts.push(format!("peer.asn != {asn}"));
+            }
+            for group in &set.peer_groups {
+                parts.push(format!("peer.group != {group:?}"));
+            }
+            if parts.is_empty() {
+                // An empty neighbor set never matches.
+                "false".to_string()
+            } else {
+                parts.join(" && ")
             }
         }
         MatchExpr::RouteTypeIs(route_type) => {

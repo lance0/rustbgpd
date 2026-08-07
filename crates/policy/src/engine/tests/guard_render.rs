@@ -132,6 +132,27 @@ fn every_node_type_renders_its_golden_form() {
             "peer.group == \"edge\"",
         ),
         (
+            MatchExpr::NeighborNe(Box::new(NeighborSetMatch {
+                addresses: vec![IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))],
+                ..NeighborSetMatch::default()
+            })),
+            "peer.address != 10.0.0.2",
+        ),
+        (
+            MatchExpr::NeighborNe(Box::new(NeighborSetMatch {
+                remote_asns: vec![65001],
+                ..NeighborSetMatch::default()
+            })),
+            "peer.asn != 65001",
+        ),
+        (
+            MatchExpr::NeighborNe(Box::new(NeighborSetMatch {
+                peer_groups: vec!["edge".to_string()],
+                ..NeighborSetMatch::default()
+            })),
+            "peer.group != \"edge\"",
+        ),
+        (
             MatchExpr::RouteTypeIs(RouteType::Internal),
             "route.route-type == internal",
         ),
@@ -158,6 +179,7 @@ fn every_node_type_renders_its_golden_form() {
         (MatchExpr::Or(vec![]), "false"),
         // An empty neighbor set never matches.
         (MatchExpr::NeighborIn(Box::default()), "false"),
+        (MatchExpr::NeighborNe(Box::default()), "false"),
     ];
     for (expr, expected) in cases {
         assert_eq!(render_expr(&expr, &tables), expected, "node {expr:?}");
