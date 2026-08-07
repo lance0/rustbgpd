@@ -65,14 +65,14 @@ jobs:
       contents: read
       checks: write
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
 
       # rustsec/audit-check is the canonical action; it caches the
       # advisory DB and posts findings as PR review comments.
       # Pinned to a release tag rather than `@v2` floating so the
       # action contents are reproducible.
       - name: Run cargo audit
-        uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
+        uses: rustsec/audit-check@v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -83,12 +83,12 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
 
       # EmbarkStudios' official action; installs a pinned cargo-deny
       # and runs the four checks against deny.toml. Pinned to a
       # release tag for reproducibility, matching the audit job.
       - name: Run cargo deny
-        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check advisories bans licenses sources

@@ -93,9 +93,9 @@ class ScaleSplitContractTests(unittest.TestCase):
             with self.subTest(seam=old):
                 self.mutate(old, new, occurrence[0] if occurrence else 0)
         for pin, occurrence in (
-            ("actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1", 2),
+            ("actions/checkout@v7", 2),
             ("dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c", 2),
-            ("Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32", 2),
+            ("Swatinem/rust-cache@v2", 2),
         ):
             with self.subTest(pin=pin):
                 self.mutate(pin, "changed@main", occurrence)
@@ -115,9 +115,9 @@ class ScaleSplitContractTests(unittest.TestCase):
             with self.subTest(seam=old):
                 self.mutate(old, new, occurrence[0] if occurrence else 0)
         for pin in (
-            "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+            "actions/checkout@v7",
             "dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c",
-            "Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32",
+            "Swatinem/rust-cache@v2",
         ):
             with self.subTest(pin=pin):
                 self.mutate(pin, "changed@main", 1)

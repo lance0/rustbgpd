@@ -23,13 +23,9 @@ GROUP = "group: ${{ github.workflow }}-${{ github.ref }}"
 PRIMER_GROUP = "group: rustbgpd-dev-image-${{ github.sha }}"
 IMPORT = "cache-from: type=gha,scope=rustbgpd-dev"
 EXPORT = "cache-to: type=gha,scope=rustbgpd-dev,mode=max,ignore-error=true"
-CHECKOUT = "uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7"
-BUILDX = (
-    "uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4"
-)
-BUILD_PUSH = (
-    "uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7"
-)
+CHECKOUT = "uses: actions/checkout@v7"
+BUILDX = "uses: docker/setup-buildx-action@v4"
+BUILD_PUSH = "uses: docker/build-push-action@v7"
 GOBGP_VERSION = "3.37.0"
 GOBGP_CHECKSUMS = {
     "amd64": "e20b2a155fe14450b9fe37e5c1a1d1bfe101eb479645f5bbea860a8fde30e522",
@@ -54,15 +50,15 @@ CALL_HASHES = {
 }
 PINS = collections.Counter(
     {
-        "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7": 77,
+        "actions/checkout@v7": 77,
         "dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # stable": 3,
-        "Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2": 5,
+        "Swatinem/rust-cache@v2": 5,
         "dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # 1.95": 2,
-        "docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4": 42,
-        "docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7": 43,
-        "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7": 1,
-        "rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0": 1,
-        "EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1": 1,
+        "docker/setup-buildx-action@v4": 42,
+        "docker/build-push-action@v7": 43,
+        "actions/upload-artifact@v7": 1,
+        "rustsec/audit-check@v2.0.0": 1,
+        "EmbarkStudios/cargo-deny-action@v2": 1,
     }
 )
 

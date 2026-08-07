@@ -30,7 +30,7 @@ jobs:
     # hosted receipts establish a safe tighter bound.
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
         with:
           # Need history so the wire-readme freshness gate can diff
           # against the previous commit / PR base.
@@ -78,7 +78,7 @@ jobs:
           toolchain: stable
           components: rustfmt, clippy
       - uses: ./.github/actions/install-protobuf
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@v2
       - name: Prove exact fail-closed fuzz target inventory
         run: |
           python3 -m unittest -v scripts/test_check_fuzz_target_inventory.py
@@ -259,14 +259,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # stable
         with:
           toolchain: stable
       - uses: ./.github/actions/install-protobuf
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace
       - run: cargo doc --workspace --lib --no-deps
         env:
@@ -277,7 +277,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
         with:
           # test-rrharness-driver resolves a retained pin commit and creates a
           # detached worktree at that exact revision.
@@ -287,7 +287,7 @@ jobs:
           toolchain: stable
           components: rustfmt, clippy
       - uses: ./.github/actions/install-protobuf
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@v2
       - name: Install receipt-tool dependencies
         run: |
           sudo apt-get update
@@ -407,12 +407,12 @@ jobs:
     # file alongside `Cargo.toml` and `Dockerfile`.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # 1.95
         with:
           toolchain: "1.95"
       - uses: ./.github/actions/install-protobuf
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@v2
         with:
           # Distinct cache key from the `check` job so MSRV builds don't
           # share artifacts compiled by stable rustc.
@@ -445,15 +445,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+        uses: docker/setup-buildx-action@v4
 
       # Pre-build the harness image with GHA cache so the warm path
       # (no Dockerfile change) skips the `apt-get install` rebuild.
       - name: Build netns-test harness image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: crates/evpn-linux/tests/docker/Dockerfile

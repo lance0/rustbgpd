@@ -31,7 +31,7 @@ jobs:
     # for this release — nothing may be built or published from it.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
       - name: Assert tag matches workspace version
         run: |
           set -euo pipefail
@@ -54,12 +54,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # stable
         with:
           toolchain: stable
       - uses: ./.github/actions/install-protobuf
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace
 
   build:
@@ -90,7 +90,7 @@ jobs:
         shell: bash
 
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
 
       - name: Install cross-compilation target and tools
         if: matrix.target == 'aarch64-unknown-linux-gnu'
@@ -247,7 +247,7 @@ jobs:
           cat checksums-${{ matrix.suffix }}.txt
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@v7
         with:
           name: binaries-${{ matrix.suffix }}
           path: dist/
@@ -260,10 +260,10 @@ jobs:
     permissions:
       contents: write  # create the GitHub release
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
 
       - name: Download all artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
@@ -310,7 +310,7 @@ jobs:
         # run can never publish: without a tag ref, action-gh-release
         # would otherwise act on the branch ref.
         if: github.event_name == 'push'
-        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3
+        uses: softprops/action-gh-release@v3
         with:
           body_path: release-notes.md
           files: artifacts/*
