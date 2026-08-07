@@ -436,15 +436,37 @@ pub(crate) struct StagedWrite {
 
 impl StagedWrite {
     /// Publish the staged bytes: rename into place and fsync the directory.
-    pub(crate) fn commit(self) -> io::Result<()> {
-        commit_staged(&self.tmp, &self.target)
-            .map_err(|error| name_write_failure(&self.target, &error))
+    pub(crate) fn commit(mut self) -> io::Result<()> {
+        let result = commit_staged(&self.tmp, &self.target)
+            .map_err(|error| name_write_failure(&self.target, &error));
+        if result.is_ok() {
+            // The rename consumed the temp file. Clear the path so `Drop`
+            // cannot remove a live file a later stage re-creates under the
+            // same name.
+            self.tmp = PathBuf::new();
+        }
+        result
     }
 
-    /// Drop the staged bytes. Best effort: a leftover temp file is harmless
-    /// (the next stage truncates it) and there is nothing useful to report.
+    /// Drop the staged bytes without publishing them; [`Drop`] removes the
+    /// temp file.
     pub(crate) fn discard(self) {
-        let _ = fs::remove_file(&self.tmp);
+        drop(self);
+    }
+}
+
+/// Best-effort removal of the temp file on every path that does not publish
+/// it — an explicit [`StagedWrite::discard`], a failed [`StagedWrite::commit`]
+/// (including an `fsync_dir` failure after the rename, where removing the
+/// already-renamed-away temp path is a harmless no-op), or a caller error
+/// path dropping the stage. The payload embeds config snapshots that may
+/// carry TCP-MD5/TCP-AO secrets, so an unpublished temp file must not
+/// outlive its stage.
+impl Drop for StagedWrite {
+    fn drop(&mut self) {
+        if !self.tmp.as_os_str().is_empty() {
+            let _ = fs::remove_file(&self.tmp);
+        }
     }
 }
 
@@ -755,6 +777,51 @@ log_format = "json"
         write_atomic(&path, b"secret2").unwrap();
         assert_eq!(fs::metadata(&path).unwrap().mode() & 0o777, 0o600);
         assert_eq!(fs::read_to_string(&path).unwrap(), "secret2");
+    }
+
+    #[test]
+    fn staged_write_commit_publishes_and_leaves_no_temp_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("rustbgpd.toml");
+
+        stage_atomic(&target, b"secret").unwrap().commit().unwrap();
+
+        assert_eq!(fs::read_to_string(&target).unwrap(), "secret");
+        assert!(!dir.path().join("rustbgpd.toml.tmp").exists());
+    }
+
+    #[test]
+    fn staged_write_failed_commit_removes_the_temp_file() {
+        // Force the publishing rename to fail by making the destination a
+        // directory: `rename(2)` of a file over a directory is EISDIR.
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("rustbgpd.toml");
+        fs::create_dir(&target).unwrap();
+        let tmp = dir.path().join("rustbgpd.toml.tmp");
+
+        let staged = stage_atomic(&target, b"secret").unwrap();
+        assert!(tmp.exists());
+        staged.commit().unwrap_err();
+
+        assert!(
+            !tmp.exists(),
+            "a failed commit must not leak the secret-bearing temp file"
+        );
+        assert!(target.is_dir(), "the destination must be left untouched");
+    }
+
+    #[test]
+    fn dropped_staged_write_removes_the_temp_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("rustbgpd.toml");
+        let tmp = dir.path().join("rustbgpd.toml.tmp");
+
+        let staged = stage_atomic(&target, b"secret").unwrap();
+        assert!(tmp.exists());
+        drop(staged);
+
+        assert!(!tmp.exists());
+        assert!(!target.exists());
     }
 
     #[test]
