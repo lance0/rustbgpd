@@ -13,12 +13,26 @@
 //! (full-table announce + tombstone over-withdraw — the safe
 //! direction) where the per-peer path diffs against Adj-RIB-Out. The
 //! folded end state must still be identical.
+//!
+//! The `oracle_pcb_*` scenarios pin today's UNGROUPED per-client-best
+//! streams under overlapping announcements. Until the ADR-0126 Phase 3
+//! classifier flip, BOTH sides classify `per_client_best` peers to the
+//! per-peer path, so these compare ungrouped-vs-ungrouped and their
+//! value is freezing the expected streams; after the flip the normal
+//! side classifies these peers into groups and the same scenarios
+//! become the grouping equivalence proof. One expected conversion at
+//! that point: `oracle_pcb_best_source_withdraw_promotes_runner_up`
+//! asserts exact streams, and the grouped side's promotion handling
+//! (the winner's source flipping into the former runner-up's slot) is
+//! an as-built over-announce class — the flip PR converts that
+//! scenario to the folded-state comparison (the dirty-resync pattern)
+//! rather than weakening the emit path.
 
 use std::collections::BTreeMap;
 
 use rustbgpd_policy::{
-    NeighborSetMatch, NextHopAction, Policy, PolicyAction, PolicyChain, PolicyStatement,
-    RouteModifications,
+    CommunityMatch, NeighborSetMatch, NextHopAction, Policy, PolicyAction, PolicyChain,
+    PolicyStatement, RouteModifications,
 };
 use rustbgpd_wire::RtcNlri;
 
@@ -396,6 +410,10 @@ pub(super) struct Oracle {
 pub(super) struct OraclePeerFeatures {
     pub(super) add_path_send_max: u32,
     pub(super) negotiated_orf_recv: Vec<(Afi, Safi)>,
+    /// RFC 7947 §2.3.2 per-client best-path (ADR-0101). Disqualifies
+    /// grouping today; becomes a group-key bit at the ADR-0126 Phase 3
+    /// classifier flip.
+    pub(super) per_client_best: bool,
 }
 
 impl Oracle {
@@ -509,7 +527,7 @@ impl Oracle {
         };
         self.tx
             .send(RibUpdate::PeerUp {
-                per_client_best: false,
+                per_client_best: features.per_client_best,
                 interpret_rfc1997: true,
                 session_id,
                 peer: IpAddr::V4(peer),
@@ -2636,4 +2654,373 @@ async fn rtc_membership_flip_at_scale_emits_delta_only_zero_evals() {
 
     o.check_vpn_invariant("post narrow").await;
     drop(o.finish().await);
+}
+
+// ---------------------------------------------------------------------
+// ADR-0126 Phase 3 pre-flip pins: per-client-best overlap scenarios.
+// See the module doc — ungrouped-vs-ungrouped today, the grouping
+// equivalence proof after the classifier flip.
+// ---------------------------------------------------------------------
+
+/// Community tagged onto a Loc-RIB best so a member chain can deny it:
+/// 65000:99 (mirrors the `per_client_best` unit fixtures).
+const PCB_DENIED_COMMUNITY: u32 = 0xFDE8_0063;
+
+/// Export chain denying routes tagged 65000:99, permitting the rest.
+fn deny_tagged_chain() -> PolicyChain {
+    PolicyChain::new(vec![Policy {
+        entries: vec![PolicyStatement {
+            prefix: None,
+            ge: None,
+            le: None,
+            action: PolicyAction::Deny,
+            match_community: vec![CommunityMatch::Standard {
+                value: PCB_DENIED_COMMUNITY,
+            }],
+            match_as_path: None,
+            match_neighbor_set: None,
+            match_route_type: None,
+            match_evpn_route_type: None,
+            match_rpki_validation: None,
+            match_aspa_validation: None,
+            match_as_path_length_ge: None,
+            match_as_path_length_le: None,
+            match_local_pref_ge: None,
+            match_local_pref_le: None,
+            match_med_ge: None,
+            match_med_le: None,
+            match_next_hop: None,
+            modifications: RouteModifications::default(),
+        }],
+        default_action: PolicyAction::Permit,
+    }])
+}
+
+/// An eBGP route-server candidate: no `LOCAL_PREF`, ranked by AS-path
+/// length, optional standard communities.
+fn rs_route(prefix: Ipv4Prefix, src: Ipv4Addr, asns: Vec<u32>, communities: Vec<u32>) -> Route {
+    let mut attributes = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(asns)],
+        }),
+    ];
+    if !communities.is_empty() {
+        attributes.push(PathAttribute::Communities(communities));
+    }
+    Route {
+        prefix: Prefix::V4(prefix),
+        next_hop: IpAddr::V4(src),
+        link_local_next_hop: None,
+        next_hop_scope: None,
+        peer: IpAddr::V4(src),
+        attributes: Arc::new(attributes),
+        received_at: Instant::now(),
+        origin_type: RouteOrigin::Ebgp,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        is_stale: false,
+        is_llgr_stale: false,
+        path_id: 0,
+        validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+        aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+    }
+}
+
+/// An overlap candidate ranked by AS-path length: rank 1 wins best
+/// path, higher ranks lose in order.
+fn ranked(prefix: Ipv4Prefix, src: Ipv4Addr, rank: u32) -> Route {
+    rs_route(prefix, src, vec![65000 + rank; rank as usize], vec![])
+}
+
+/// Bring up a per-client-best route-server member (eBGP, no RR).
+async fn pcb_peer_up(
+    o: &mut Oracle,
+    peer: Ipv4Addr,
+    export_policy: Option<PolicyChain>,
+    capacity: usize,
+) {
+    o.peer_up_families_generation_with_features(
+        peer,
+        SESSION,
+        true,
+        false,
+        export_policy,
+        capacity,
+        ipv4_sendable(),
+        OraclePeerFeatures {
+            per_client_best: true,
+            ..OraclePeerFeatures::default()
+        },
+    )
+    .await;
+}
+
+/// The member's final advertised source for a prefix in the folded state.
+fn folded_src(state: &FoldedState, member: Ipv4Addr, prefix: Ipv4Prefix) -> Option<IpAddr> {
+    state
+        .get(&IpAddr::V4(member))
+        .and_then(|table| table.get(&(Prefix::V4(prefix), 0)))
+        .map(|(_, src, _, _)| *src)
+}
+
+/// The ordered sequence of announce sources on a member's wire.
+fn src_seq(streams: &Streams, member: Ipv4Addr) -> Vec<IpAddr> {
+    streams[&IpAddr::V4(member)]
+        .iter()
+        .flat_map(|msg| &msg.announce)
+        .map(|entry| entry.3)
+        .collect()
+}
+
+/// Steady state under overlap: three members announce p1 with
+/// rank-differentiated paths, two announce p2. Each member's stream
+/// shows the runner-up substitution — the source of the best receives
+/// the second-best candidate, everyone else the best.
+#[tokio::test]
+async fn oracle_pcb_steady_state_overlap_substitutes_runner_up() {
+    let scenario = async |o: &mut Oracle| {
+        pcb_peer_up(o, A, None, 64).await;
+        pcb_peer_up(o, B, None, 64).await;
+        pcb_peer_up(o, C, None, 64).await;
+        // p1: three overlapping candidates, ranked A > B > C.
+        o.routes(A, vec![ranked(pfx(1, 0), A, 1)], vec![]).await;
+        o.routes(B, vec![ranked(pfx(1, 0), B, 2)], vec![]).await;
+        o.routes(C, vec![ranked(pfx(1, 0), C, 3)], vec![]).await;
+        // p2: two candidates, ranked B > C (A sources nothing).
+        o.routes(B, vec![ranked(pfx(2, 0), B, 1)], vec![]).await;
+        o.routes(C, vec![ranked(pfx(2, 0), C, 2)], vec![]).await;
+    };
+    let (grouped, ungrouped) = run_grouped_and_ungrouped(None, scenario).await;
+    assert_eq!(
+        grouped, ungrouped,
+        "per-client-best streams must be identical on both oracle sides"
+    );
+    let folded = fold(&grouped);
+    // p1: A (source of the best) gets the runner-up; B and C get the best.
+    assert_eq!(folded_src(&folded, A, pfx(1, 0)), Some(IpAddr::V4(B)));
+    assert_eq!(folded_src(&folded, B, pfx(1, 0)), Some(IpAddr::V4(A)));
+    assert_eq!(folded_src(&folded, C, pfx(1, 0)), Some(IpAddr::V4(A)));
+    // p2: B (source of the best) gets the runner-up; A and C get the best.
+    assert_eq!(folded_src(&folded, A, pfx(2, 0)), Some(IpAddr::V4(B)));
+    assert_eq!(folded_src(&folded, B, pfx(2, 0)), Some(IpAddr::V4(C)));
+    assert_eq!(folded_src(&folded, C, pfx(2, 0)), Some(IpAddr::V4(B)));
+}
+
+/// The winner's source withdraws: the runner-up promotes. The former
+/// best's source (already holding the runner-up) sees nothing; the
+/// promoted winner's source flips into the former runner-up's slot as
+/// an implicit replace; everyone else gets the promoted winner. No
+/// withdraw ever reaches any wire.
+///
+/// NOTE (ADR-0126 Phase 3): after the classifier flip the grouped
+/// side's promotion handling is an as-built over-announce class —
+/// convert this scenario to the folded-state comparison then (see the
+/// module doc).
+#[tokio::test]
+async fn oracle_pcb_best_source_withdraw_promotes_runner_up() {
+    let scenario = async |o: &mut Oracle| {
+        pcb_peer_up(o, A, None, 64).await;
+        pcb_peer_up(o, B, None, 64).await;
+        pcb_peer_up(o, C, None, 64).await;
+        o.routes(A, vec![ranked(pfx(1, 0), A, 1)], vec![]).await;
+        o.routes(B, vec![ranked(pfx(1, 0), B, 2)], vec![]).await;
+        o.routes(C, vec![ranked(pfx(1, 0), C, 3)], vec![]).await;
+        // The winner's source withdraws: B's candidate promotes.
+        o.routes(A, vec![], vec![pfx(1, 0)]).await;
+    };
+    let (grouped, ungrouped) = run_grouped_and_ungrouped(None, scenario).await;
+    assert_eq!(
+        grouped, ungrouped,
+        "per-client-best streams must be identical on both oracle sides"
+    );
+    // A held the runner-up substitution already; the promotion changes
+    // nothing on its wire.
+    assert_eq!(src_seq(&grouped, A), vec![IpAddr::V4(B)]);
+    // B: the winner, then — as the promoted winner's source — the
+    // implicit replace into the former runner-up's slot (C's route).
+    assert_eq!(src_seq(&grouped, B), vec![IpAddr::V4(A), IpAddr::V4(C)]);
+    // C: the winner, then the promoted winner.
+    assert_eq!(src_seq(&grouped, C), vec![IpAddr::V4(A), IpAddr::V4(B)]);
+    for member in [A, B, C] {
+        assert!(
+            grouped[&IpAddr::V4(member)]
+                .iter()
+                .all(|msg| msg.withdraw.is_empty()),
+            "promotion is an implicit replace at path_id 0 — never withdraw+announce"
+        );
+    }
+}
+
+/// Divergence 2: the shared export chain denies the Loc-RIB best, so
+/// every member receives the first PERMITTED candidate — with the
+/// source substitution on top (the permitted winner's source gets the
+/// next permitted candidate).
+#[tokio::test]
+async fn oracle_pcb_filtered_best_delivers_first_permitted_candidate() {
+    let scenario = async |o: &mut Oracle| {
+        pcb_peer_up(o, A, Some(deny_tagged_chain()), 64).await;
+        pcb_peer_up(o, B, Some(deny_tagged_chain()), 64).await;
+        pcb_peer_up(o, C, Some(deny_tagged_chain()), 64).await;
+        // A's candidate is the Loc-RIB best AND carries the denied tag.
+        o.routes(
+            A,
+            vec![rs_route(
+                pfx(1, 0),
+                A,
+                vec![65001],
+                vec![PCB_DENIED_COMMUNITY],
+            )],
+            vec![],
+        )
+        .await;
+        o.routes(B, vec![ranked(pfx(1, 0), B, 2)], vec![]).await;
+        o.routes(C, vec![ranked(pfx(1, 0), C, 3)], vec![]).await;
+    };
+    let (grouped, ungrouped) = run_grouped_and_ungrouped(None, scenario).await;
+    assert_eq!(
+        grouped, ungrouped,
+        "per-client-best streams must be identical on both oracle sides"
+    );
+    let folded = fold(&grouped);
+    // The permitted winner is B's route; B itself walks on to C's.
+    assert_eq!(folded_src(&folded, A, pfx(1, 0)), Some(IpAddr::V4(B)));
+    assert_eq!(folded_src(&folded, B, pfx(1, 0)), Some(IpAddr::V4(C)));
+    assert_eq!(folded_src(&folded, C, pfx(1, 0)), Some(IpAddr::V4(B)));
+}
+
+/// Lane-only churn: the best stands while the runner-up candidate
+/// changes attributes and then withdraws. Only the best's source (the
+/// one member holding the substitution) sees wire deltas; the other
+/// members' streams stay at the single initial winner announce.
+#[tokio::test]
+async fn oracle_pcb_lane_only_churn_reaches_only_the_best_source() {
+    let scenario = async |o: &mut Oracle| {
+        pcb_peer_up(o, A, None, 64).await;
+        pcb_peer_up(o, B, None, 64).await;
+        pcb_peer_up(o, C, None, 64).await;
+        o.routes(A, vec![ranked(pfx(1, 0), A, 1)], vec![]).await;
+        o.routes(B, vec![ranked(pfx(1, 0), B, 2)], vec![]).await;
+        o.routes(C, vec![ranked(pfx(1, 0), C, 3)], vec![]).await;
+        // Runner-up attribute churn at the same rank: the winner stands.
+        let mut tweaked = ranked(pfx(1, 0), B, 2);
+        Arc::make_mut(&mut tweaked.attributes).push(PathAttribute::Med(50));
+        o.routes(B, vec![tweaked], vec![]).await;
+        // Runner-up withdraws: the substitution refills from the third
+        // candidate; the winner still stands.
+        o.routes(B, vec![], vec![pfx(1, 0)]).await;
+    };
+    let (grouped, ungrouped) = run_grouped_and_ungrouped(None, scenario).await;
+    assert_eq!(
+        grouped, ungrouped,
+        "per-client-best streams must be identical on both oracle sides"
+    );
+    // A (source of the standing best) sees every lane delta: the
+    // initial substitution, the attribute churn, the refill from C.
+    assert_eq!(
+        src_seq(&grouped, A),
+        vec![IpAddr::V4(B), IpAddr::V4(B), IpAddr::V4(C)]
+    );
+    // The non-source members hold the unchanged winner throughout.
+    assert_eq!(src_seq(&grouped, B), vec![IpAddr::V4(A)]);
+    assert_eq!(src_seq(&grouped, C), vec![IpAddr::V4(A)]);
+    for member in [A, B, C] {
+        assert!(
+            grouped[&IpAddr::V4(member)]
+                .iter()
+                .all(|msg| msg.withdraw.is_empty()),
+            "lane churn under a standing best must never reach a wire as a withdraw"
+        );
+    }
+}
+
+/// Dirty-member resync with overlap (the file's dirty-resync pattern):
+/// the jammed member misses both an overlapped announce and the
+/// winner's withdrawal-driven promotion; the timer resync must deliver
+/// the promoted runner-up and the recovered announce. Folded-state
+/// comparison (resync over-emission is stream-visible by design).
+#[tokio::test]
+async fn oracle_pcb_dirty_resync_with_overlap_converges() {
+    tokio::time::pause();
+    let scenario = async |o: &mut Oracle| {
+        pcb_peer_up(o, A, None, 64).await;
+        pcb_peer_up(o, B, None, 64).await;
+        // C gets a capacity-1 channel so a second update fails try_reserve.
+        pcb_peer_up(o, C, None, 1).await;
+        // Drain the initial-dump EoR so the channel starts empty.
+        let eor = o.drain_one(C).await;
+        assert!(eor.announce.is_empty() && !eor.end_of_rib.is_empty());
+
+        // p1 best from A lands in C's channel (fills it).
+        o.routes(A, vec![ranked(pfx(1, 0), A, 1)], vec![]).await;
+        // The p1 runner-up changes nothing for C (the winner stands);
+        // the p2 announce fails against the full channel → C dirty.
+        o.routes(
+            B,
+            vec![ranked(pfx(1, 0), B, 2), ranked(pfx(2, 0), B, 1)],
+            vec![],
+        )
+        .await;
+        // The winner's source withdraws WHILE C is dirty: the resync
+        // must deliver the promoted runner-up.
+        o.routes(A, vec![], vec![pfx(1, 0)]).await;
+
+        // Free the channel and let the resync timer fire.
+        let first = o.drain_one(C).await;
+        assert_eq!(first.announce.len(), 1, "p1 was delivered before the jam");
+        tokio::time::advance(Duration::from_secs(2)).await;
+        o.quiesce().await;
+    };
+    let (grouped, ungrouped) = run_grouped_and_ungrouped(None, scenario).await;
+    assert_eq!(
+        fold(&grouped),
+        fold(&ungrouped),
+        "final advertised state must converge on both paths"
+    );
+    let folded = fold(&grouped);
+    // C converges to the promoted winner and the recovered announce.
+    assert_eq!(folded_src(&folded, C, pfx(1, 0)), Some(IpAddr::V4(B)));
+    assert_eq!(folded_src(&folded, C, pfx(2, 0)), Some(IpAddr::V4(B)));
+    // A (source of the withdrawn best) keeps the substituted runner-up.
+    assert_eq!(folded_src(&folded, A, pfx(1, 0)), Some(IpAddr::V4(B)));
+    // B's own candidate is all that remains for p1: split horizon.
+    assert_eq!(folded_src(&folded, B, pfx(1, 0)), None);
+}
+
+/// RFC 2918 route refresh under overlap: refreshing the member that
+/// sources the winner must replay the substituted runner-up, not the
+/// Loc-RIB best; refreshing a non-source member replays the winner.
+#[tokio::test]
+async fn oracle_pcb_route_refresh_replays_runner_up_substitution() {
+    let scenario = async |o: &mut Oracle| {
+        pcb_peer_up(o, A, None, 64).await;
+        pcb_peer_up(o, B, None, 64).await;
+        pcb_peer_up(o, C, None, 64).await;
+        o.routes(A, vec![ranked(pfx(1, 0), A, 1)], vec![]).await;
+        o.routes(B, vec![ranked(pfx(1, 0), B, 2)], vec![]).await;
+        o.routes(C, vec![ranked(pfx(1, 0), C, 3)], vec![]).await;
+        // Refresh the winner's source, then a non-source member.
+        o.route_refresh(A, Afi::Ipv4, Safi::Unicast).await;
+        o.route_refresh(C, Afi::Ipv4, Safi::Unicast).await;
+    };
+    let (grouped, ungrouped) = run_grouped_and_ungrouped(None, scenario).await;
+    assert_eq!(
+        grouped, ungrouped,
+        "per-client-best streams must be identical on both oracle sides"
+    );
+    // A: the initial substitution, then the refresh replay of the SAME
+    // substituted runner-up (never A's own winner).
+    assert_eq!(src_seq(&grouped, A), vec![IpAddr::V4(B), IpAddr::V4(B)]);
+    // C: the initial winner, then the refresh replay of the winner.
+    assert_eq!(src_seq(&grouped, C), vec![IpAddr::V4(A), IpAddr::V4(A)]);
+    // B was not refreshed: exactly the initial winner announce.
+    assert_eq!(src_seq(&grouped, B), vec![IpAddr::V4(A)]);
+    for member in [A, B, C] {
+        assert!(
+            grouped[&IpAddr::V4(member)]
+                .iter()
+                .all(|msg| msg.withdraw.is_empty()),
+            "refresh replay must not withdraw anything"
+        );
+    }
 }
