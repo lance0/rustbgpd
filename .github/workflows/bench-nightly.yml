@@ -65,7 +65,7 @@ jobs:
         with:
           fetch-depth: 0 # full history + tags for `git describe` and the A/B worktrees
 
-      - uses: dtolnay/rust-toolchain@master # stable
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # stable
 
         with:
 

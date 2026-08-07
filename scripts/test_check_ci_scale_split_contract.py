@@ -94,7 +94,7 @@ class ScaleSplitContractTests(unittest.TestCase):
                 self.mutate(old, new, occurrence[0] if occurrence else 0)
         for pin, occurrence in (
             ("actions/checkout@v7", 2),
-            ("dtolnay/rust-toolchain@master", 2),
+            ("dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c", 2),
             ("Swatinem/rust-cache@v2", 2),
         ):
             with self.subTest(pin=pin):
@@ -116,7 +116,7 @@ class ScaleSplitContractTests(unittest.TestCase):
                 self.mutate(old, new, occurrence[0] if occurrence else 0)
         for pin in (
             "actions/checkout@v7",
-            "dtolnay/rust-toolchain@master",
+            "dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c",
             "Swatinem/rust-cache@v2",
         ):
             with self.subTest(pin=pin):
