@@ -905,11 +905,14 @@ impl BmpManager {
         self.metrics.clear_bmp_loc_rib_dump_live_buffer(&addr_label);
         if let DumpOutcome::Failed(failure) = done.outcome {
             self.loc_rib_suppressed.insert(done.collector_id);
+            // The discarded held-back live messages are real drops too:
+            // count them alongside what the failure itself lost.
+            let buffered_dropped = u64::try_from(dump.buffered.len()).unwrap_or(u64::MAX);
             self.metrics.record_bmp_collector_drop(
                 &addr_label,
                 "loc_rib_dump",
                 failure.reason(),
-                failure.dropped(),
+                failure.dropped().saturating_add(buffered_dropped),
             );
             warn!(
                 collector = %collector.addr,
@@ -1057,8 +1060,9 @@ impl BmpManager {
 impl Drop for BmpManager {
     fn drop(&mut self) {
         for collector in &self.collectors {
-            self.metrics
-                .reap_bmp_loc_rib_dump_live_buffer(&collector.addr.to_string());
+            let addr_label = collector.addr.to_string();
+            self.metrics.reap_bmp_loc_rib_dump_live_buffer(&addr_label);
+            self.metrics.reap_bmp_collector_series(&addr_label);
         }
     }
 }
@@ -1877,7 +1881,7 @@ mod tests {
             .map_or(0, |m| m.gauge.value() as i64)
     }
 
-    fn gauge_series_exists(metrics: &BgpMetrics, name: &str, collector: SocketAddr) -> bool {
+    fn collector_series_exists(metrics: &BgpMetrics, name: &str, collector: SocketAddr) -> bool {
         metrics.registry().gather().into_iter().any(|f| {
             f.name() == name
                 && f.metric.iter().any(|m| {
@@ -1925,7 +1929,7 @@ mod tests {
         let (bad_sender, _bad_receiver) = mpsc::channel(1);
         let (bad_bootstrap, _bad_bootstrap_rx) = tokio::sync::oneshot::channel();
         manager.handle_collector_connected(0, collector_addr(1), bad_sender, bad_bootstrap);
-        assert!(!gauge_series_exists(
+        assert!(!collector_series_exists(
             &metrics,
             "bmp_loc_rib_dump_live_buffer_depth",
             addr
@@ -1968,6 +1972,12 @@ mod tests {
         metrics.reset_bmp_loc_rib_dump_live_buffer(&addr1.to_string());
         metrics.observe_bmp_loc_rib_dump_live_buffer(&addr0.to_string(), 3);
         metrics.observe_bmp_loc_rib_dump_live_buffer(&addr1.to_string(), 5);
+        for addr in [addr0, addr1] {
+            let label = addr.to_string();
+            metrics.record_bmp_collector_drop(&label, "fan_out", "channel_full", 1);
+            metrics.record_bmp_replay_attempt(&label);
+            metrics.record_bmp_control_event_drop(&label, "collector_connected", "channel_full");
+        }
         let (_event_tx, event_rx) = mpsc::channel(1);
         let (_control_tx, control_rx) = mpsc::channel(1);
         let manager = BmpManager::new(
@@ -1982,9 +1992,12 @@ mod tests {
         for name in [
             "bmp_loc_rib_dump_live_buffer_depth",
             "bmp_loc_rib_dump_live_buffer_high_watermark",
+            "bmp_collector_drops_total",
+            "bmp_replay_attempts_total",
+            "bmp_control_event_drops_total",
         ] {
-            assert!(!gauge_series_exists(&metrics, name, addr0));
-            assert!(gauge_series_exists(&metrics, name, addr1));
+            assert!(!collector_series_exists(&metrics, name, addr0), "{name}");
+            assert!(collector_series_exists(&metrics, name, addr1), "{name}");
         }
         assert_eq!(
             gauge_value(&metrics, "bmp_loc_rib_dump_live_buffer_depth", addr1),
@@ -2004,7 +2017,7 @@ mod tests {
             vec![(addr, loc_rib_filter(), BmpVersion::V3)],
             metrics.clone(),
         ));
-        assert!(!gauge_series_exists(
+        assert!(!collector_series_exists(
             &metrics,
             "bmp_loc_rib_dump_live_buffer_depth",
             addr
@@ -2917,25 +2930,21 @@ mod tests {
             .unwrap();
         wait_until_received(&event_tx, 16).await;
         drop(request.reply);
-        for _ in 0..40 {
-            if metric_value_with_labels(
-                &metrics,
-                "bmp_collector_drops_total",
-                &[("phase", "loc_rib_dump"), ("reason", "reply_closed")],
-            ) == 1
-            {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        assert_eq!(
+        // One dropped dump stream plus one discarded held-back live message.
+        let dump_drops = || {
             metric_value_with_labels(
                 &metrics,
                 "bmp_collector_drops_total",
                 &[("phase", "loc_rib_dump"), ("reason", "reply_closed")],
-            ),
-            1
-        );
+            )
+        };
+        for _ in 0..40 {
+            if dump_drops() == 2 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(dump_drops(), 2);
         assert_live_buffer_gauges(&metrics, collector_addr(0), 0, 1);
         event_tx
             .send(BmpEvent::LocRibRouteMonitoring {

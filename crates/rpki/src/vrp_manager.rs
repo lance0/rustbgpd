@@ -127,7 +127,13 @@ impl VrpManager {
                     aspa_withdrawn = aspa_withdrawn.len(),
                     "incremental update from cache"
                 );
-                // VRP incremental
+                // VRP incremental. Withdrawals apply before announcements —
+                // wire order within the serial was already discarded by the
+                // RTR client's flag-bit split. This assumes the cache sends
+                // net deltas per serial (RFC 8210 semantics); a pathological
+                // "announce X then withdraw X" in one serial would leave X
+                // present. Robustness-only: correct caches never send both
+                // sides for one record in one serial.
                 let table = self.server_tables.entry(server).or_default();
                 for w in &withdrawn {
                     table.remove(w);

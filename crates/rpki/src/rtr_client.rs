@@ -788,6 +788,11 @@ impl RtrClient {
             // are only collected once it is set.
             let mut pending_session: Option<u16> = None;
             let mut records: usize = 0;
+            // PDUs are split by flag bit; wire order within the transaction
+            // is discarded. Safe against a correct cache, which sends net
+            // deltas per serial (RFC 8210) — the VRP manager applies all
+            // withdrawals before all announcements, so an "announce X then
+            // withdraw X" pair in one serial would resolve to X present.
             let mut announced = Vec::new();
             let mut withdrawn = Vec::new();
             let mut aspa_announced: Vec<AspaRecord> = Vec::new();

@@ -1290,6 +1290,12 @@ impl RibManager {
             timestamp,
             path_status,
         }) {
+            let reason = match e {
+                tokio::sync::mpsc::error::TrySendError::Full(_) => "channel_full",
+                tokio::sync::mpsc::error::TrySendError::Closed(_) => "channel_closed",
+            };
+            self.metrics
+                .record_bmp_loc_rib_source_drop("route_monitoring", reason);
             warn!(error = %e, "BMP event channel full or closed, dropping Loc-RIB route monitoring");
         }
     }
