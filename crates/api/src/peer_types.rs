@@ -156,6 +156,9 @@ pub struct SessionNotificationEvent {
     pub event_type: SessionNotificationEventType,
     /// Peer address associated with the event.
     pub peer: IpAddr,
+    /// Operator-facing peer label. Scoped IPv6 link-local peers render as
+    /// `address%interface`, matching lifecycle events so streams correlate.
+    pub peer_label: Option<String>,
     /// Unix epoch seconds, string-shaped to match `RouteEvent`.
     pub timestamp: String,
     /// BGP NOTIFICATION error code.
@@ -184,6 +187,10 @@ pub struct PolicyEvent {
     pub target: String,
     /// Peer address when this mutation is scoped to one peer.
     pub peer: Option<IpAddr>,
+    /// Operator-facing peer label for `peer`. Scoped IPv6 link-local peers
+    /// render as `address%interface`, matching lifecycle events so streams
+    /// correlate.
+    pub peer_label: Option<String>,
     /// Number of currently managed peers the runtime mutation touched.
     pub affected_peer_count: usize,
     /// Unix epoch seconds, string-shaped to match `RouteEvent`.

@@ -1185,6 +1185,7 @@ fn test_policy_event(target: &str, peer: Option<IpAddr>) -> PolicyEvent {
         target_type: "policy",
         target: target.to_string(),
         peer,
+        peer_label: None,
         affected_peer_count: usize::from(peer.is_some()),
         timestamp: "1".to_string(),
         reason: format!("policy set policy {target}"),
@@ -7745,6 +7746,86 @@ async fn notification_event_reason_includes_bounded_failure_cause() {
     assert_eq!(event.subcode, 8);
     assert_eq!(event.description, "Out of Resources");
     assert_eq!(event.shutdown_reason, None);
+}
+
+/// Cross-stream correlation: notification events for interface-scoped
+/// (link-local) peers must carry the same scoped peer label that lifecycle
+/// events publish, not the bare address.
+#[tokio::test]
+async fn notification_event_uses_scoped_peer_label_for_interface_scoped_peer() {
+    let mut mgr = test_peer_manager();
+    let addr: IpAddr = "fe80::2".parse().unwrap();
+    insert_test_scoped_managed_peer(
+        &mut mgr,
+        addr,
+        "eth0",
+        10,
+        7,
+        fake_peer_handle(
+            addr,
+            SessionState::Established,
+            None,
+            Arc::new(FakePeerCounters::default()),
+        ),
+    );
+    let mut events = mgr.session_events_tx.subscribe();
+    mgr.publish_notification_event(rustbgpd_transport::SessionNotificationEvent {
+        session_id: 7,
+        peer_addr: addr,
+        role: rustbgpd_transport::SessionRole::Primary,
+        direction: rustbgpd_transport::SessionNotificationDirection::Received,
+        code: rustbgpd_wire::notification::NotificationCode::Cease.as_u8(),
+        subcode: rustbgpd_wire::notification::cease_subcode::ADMINISTRATIVE_RESET,
+        description: "Administrative Reset".to_string(),
+        shutdown_reason: None,
+        failure_cause: None,
+    });
+
+    let rustbgpd_api::peer_types::SessionEvent::Notification(event) = events.try_recv().unwrap()
+    else {
+        panic!("expected notification event");
+    };
+    assert!(
+        event.reason.contains("fe80::2%eth0"),
+        "notification reason must use the scoped peer label, got: {}",
+        event.reason
+    );
+    assert_eq!(event.peer_label.as_deref(), Some("fe80::2%eth0"));
+    assert_eq!(event.peer, addr);
+}
+
+/// Policy events scoped to an interface-scoped peer carry the scoped label so
+/// they correlate with the lifecycle stream.
+#[tokio::test]
+async fn policy_event_uses_scoped_peer_label_for_interface_scoped_peer() {
+    let mut mgr = test_peer_manager();
+    let addr: IpAddr = "fe80::2".parse().unwrap();
+    insert_test_scoped_managed_peer(
+        &mut mgr,
+        addr,
+        "eth0",
+        10,
+        7,
+        fake_peer_handle(
+            addr,
+            SessionState::Established,
+            None,
+            Arc::new(FakePeerCounters::default()),
+        ),
+    );
+    let mut events = mgr.policy_events_tx.subscribe();
+    mgr.publish_policy_config_event(
+        &ConfigEvent::SetNeighborImportChain {
+            address: addr,
+            policy_names: Vec::new(),
+            ack: None,
+        },
+        1,
+    );
+
+    let event = events.try_recv().unwrap();
+    assert_eq!(event.peer, Some(addr));
+    assert_eq!(event.peer_label.as_deref(), Some("fe80::2%eth0"));
 }
 
 /// Successful configured-peer installs publish their current admin event only

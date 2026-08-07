@@ -190,12 +190,17 @@ impl PeerManager {
         if target_type == "neighbor" {
             return;
         }
+        // Scoped label so link-local peers correlate with lifecycle events.
+        let peer_label = peer
+            .and_then(|address| self.unique_peer_key_for_address(address))
+            .map(|key| key.label());
         let reason = format!("policy {operation} {target_type} {target}");
         self.publish_policy_event(PolicyEvent {
             operation,
             target_type,
             target,
             peer,
+            peer_label,
             affected_peer_count,
             timestamp: Self::session_event_timestamp(),
             reason,
@@ -288,9 +293,17 @@ impl PeerManager {
             TransportNotificationDirection::Sent => "sent",
             TransportNotificationDirection::Received => "received",
         };
+        // Scoped label so link-local peers correlate with lifecycle events.
+        let peer_label = self
+            .peer_key_for_session(event.session_id)
+            .or_else(|| self.unique_peer_key_for_address(event.peer_addr))
+            .map(|key| key.label());
+        let rendered_peer = peer_label
+            .clone()
+            .unwrap_or_else(|| event.peer_addr.to_string());
         let mut reason = format!(
-            "BGP NOTIFICATION {direction} for peer {}: {}/{} ({})",
-            event.peer_addr, event.code, event.subcode, event.description
+            "BGP NOTIFICATION {direction} for peer {rendered_peer}: {}/{} ({})",
+            event.code, event.subcode, event.description
         );
         if let Some(cause) = event.failure_cause {
             use std::fmt::Write as _;
@@ -299,6 +312,7 @@ impl PeerManager {
         self.publish_session_event(SessionEvent::Notification(SessionNotificationEvent {
             event_type,
             peer: event.peer_addr,
+            peer_label,
             timestamp: Self::session_event_timestamp(),
             code: event.code,
             subcode: event.subcode,
