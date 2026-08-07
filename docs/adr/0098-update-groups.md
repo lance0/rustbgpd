@@ -123,7 +123,9 @@ up, with a key built only from RIB-staging inputs.
   per (prefix × peer); joins and refreshes reconstruct from per-entry
   policy-label residue (refresh family-scoped). Totals match the
   per-peer path; per-(prefix × peer) prometheus lookups disappear for
-  grouped members.
+  grouped members. That equality holds for single-best grouped members;
+  per-client-best groups extend the carve-out with a known over-replay
+  (ADR-0126 Decision 2).
 - **`pending_extra_withdraws`.** A dirty member that regroups carries
   the old group's tombstones as extra (over-)withdraws into the
   destination resync — a case the design's lifecycle sketch glossed.

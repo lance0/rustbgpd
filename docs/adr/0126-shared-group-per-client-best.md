@@ -107,30 +107,45 @@ structurally, and no phase of this design reintroduces it.
 **Counter recording:** every evaluation the walk performs enters the
 group's eval accumulator — the winner's permit, the runner-up's permit,
 and every candidate denied ahead of either. This is not a two-eval
-special case. The walk visits candidates in best-path order and the
+special case: the walk visits candidates in best-path order and the
 winner is the first permitted one, so each candidate it steps over was a
 real chain evaluation, and the ungrouped per-client-best path records
-those denials too: `distribute_multipath_prefix` records the evaluation
-before it branches on the verdict. Recording only the winner's
-evaluation would undercount grouped members against the per-peer totals
-the ADR-0098 counter carve-out promises.
+those denials too — `distribute_multipath_prefix` records the evaluation
+before it branches on the verdict.
 
 No new machinery is needed. `GroupEvalAccumulator::record` is already
 per-evaluation — one call bumps `totals` and the candidate's `per_source`
 row — so the winner walk calls it for the runner-up exactly as it does
 for every other candidate it evaluates: no new accumulator shape and no
-new replay path. `apply_group_policy_counters` then replays
-`totals − own-sourced` unchanged, which flows the runner-up's evaluation
-to every member except the one that sourced it. For `source(w)` — the
-one member whose ungrouped walk actually reaches past the winner — that
-is precisely the evaluation its per-peer path records. The other members
-receive it too, where their ungrouped walk would have stopped at `w`: the
-ADR-0098 carve-out extends to cover the walk's tail, the runner-up permit
-and any denials between it and the winner, replayed group-wide as
-aggregate integer adds rather than recorded per (prefix × peer). The
-extension is bounded by the lane's O(overlapped prefixes) population and
-does not touch the equivalence verdict — the differential oracle compares
-per-member streams and folded state, never counters.
+new replay path, and `apply_group_policy_counters` replays
+`totals − own-sourced` unchanged.
+
+That replay makes this a judgment call between over-replay and
+undercount, not a parity result. `per_source` is keyed by the
+candidate's **source** peer, so subtracting `per_source[member]` can
+withhold an evaluation only from the member that sourced that candidate;
+no term can withhold it from anyone else, and adding one means per-member
+walk bookkeeping — the O(members × candidates) cost this design exists
+to delete. The two reachable options are:
+
+- **Winner only** — exact for the N−1 members that did not source `w`;
+  undercounts `source(w)` by one permit. Split horizon removed `w` from
+  its own candidate list, so its ungrouped walk ran past `w` and
+  recorded `r`'s permit, while the group would hand it the winner
+  evaluation minus its own-sourced rows, which is nothing.
+- **Every evaluation** (this decision) — exact for `source(w)`;
+  over-replays the entire `w`-to-`r` segment, the intervening denials
+  and the runner-up permit alike, to every member that sourced none of
+  them and whose ungrouped walk stopped at `w`.
+
+Over is the observability-safe direction: an undercount hides an
+evaluation a member genuinely performed, while an over-replay shows
+evaluations other members did not perform — the same posture as the
+dirty-resync over-emit ADR-0098 records as an as-built deviation. The
+divergence is bounded by the lane's O(overlapped prefixes) population,
+lands as aggregate integer adds rather than records per (prefix × peer),
+and does not touch the equivalence verdict: the differential oracle
+compares per-member streams and folded state, never counters.
 
 ### 3. The exception lane: a per-prefix runner-up sidecar
 
