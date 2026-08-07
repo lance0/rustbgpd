@@ -389,6 +389,26 @@ byte counts.
   dynamic-prefix keys on Linux, including live successor installation,
   selection, and deprecated-key deletion on SIGHUP — see SECURITY.md and
   ADR-0062.)
+- **Runtime neighbor or dynamic-range deletion leaves its inbound MD5
+  key — host-scoped or prefix-scoped — installed on the listener until
+  SIGHUP.** Inbound TCP MD5 is enforced by keys installed on the
+  listening socket, and that inventory is built at startup and replaced
+  only by SIGHUP reload. Deleting an MD5-protected static neighbor — or
+  an MD5-protected dynamic range — through a runtime path (`rbgp`
+  neighbor delete, a config transaction) removes the peer but leaves its
+  host- or prefix-scoped key installed. This is fail-closed, not a
+  bypass: an inbound connection from that address must still sign with
+  the old password, and having signed it matches no configured neighbor
+  or range and is dropped as unconfigured. Nothing reaches the daemon
+  that could not before. The operationally surprising case is
+  delete-then-re-add at runtime: the runtime neighbor-add surface cannot
+  carry `md5_password`, so the re-added peer is plaintext while the
+  listener still demands the old signature, and its inbound half stays
+  wedged with correct-looking config on both ends — the same shape config
+  load rejects for a plaintext neighbor inside an MD5-protected range.
+  SIGHUP after any such change converges the listener. TCP-AO is not
+  affected: protected-owner removal is already refused restart-required.
+  See ADR-0016 and `docs/DESIGN.md`.
 - **Non-negotiated Add-Path NLRI is not detected.** If a peer violates
   negotiation and sends Add-Path-encoded NLRI for a family where Add-Path
   was not negotiated, the wire format is ambiguous — the 4-byte path ID
