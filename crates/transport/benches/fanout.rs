@@ -57,13 +57,15 @@
 //! makes no performance claim.
 //!
 //! `per_client_best_full_resync` covers the authoritative private fallback at
-//! 4,096 IPv4 routes and 8/64 eBGP route-server clients. Routes are sourced
-//! round-robin from that same fleet, so every resync proves both self-source
-//! exclusion and the singleton per-target candidate arm. Setup output is
-//! drained before one export-policy replacement per peer is timed; selection,
-//! exact-encoder, private commit, enqueue, inventory, and residue receipts are
-//! checked afterward. This is instrumentation only and makes no performance
-//! claim.
+//! 4,096 IPv4 routes and 8/64 eBGP route-server clients. Since the ADR-0126
+//! Phase 3 classifier flip that fallback requires a non-unicast-only session,
+//! so each fixture peer also negotiates VPNv4 (route-free — the wire stays
+//! pure IPv4-unicast). Routes are sourced round-robin from that same fleet, so
+//! every resync proves both self-source exclusion and the singleton per-target
+//! candidate arm. Setup output is drained before one export-policy replacement
+//! per peer is timed; selection, exact-encoder, private commit, enqueue,
+//! inventory, and residue receipts are checked afterward. This is
+//! instrumentation only and makes no performance claim.
 //!
 //! Gated behind `bench-internals`; run with:
 //!   cargo bench -p rustbgpd-transport --features bench-internals --bench fanout
