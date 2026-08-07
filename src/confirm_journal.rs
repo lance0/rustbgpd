@@ -283,6 +283,11 @@ pub fn boot_revert_check(
 /// Read the journal with a hard byte cap (LAN-221). Even if `metadata().len()`
 /// under-reports (a lying special file slipped past `is_file`, or the file grew
 /// after the size guard), never buffer more than the sanity cap.
+///
+/// Unlike the v2/v3 readers, this legacy lane does not re-verify the bytes
+/// read against the file's metadata length (changed-while-reading guard) —
+/// defense-in-depth only, deliberately not backported: the whole v1 recovery
+/// lane is scheduled for removal in v0.64 (ADR-0122 D1).
 fn read_journal_bounded(path: &Path) -> io::Result<String> {
     let mut reader = File::open(path)?.take(MAX_JOURNAL_BYTES + 1);
     let mut buf = String::new();

@@ -381,11 +381,19 @@ async fn run_loop<F>(
                             persist_owned_state(&config, &owned);
                             let _ = reply.send(Ok(()));
                         } else {
-                            // Revert and re-persist under the previous signature so
-                            // any still-owned routes stay adoptable on restart and
-                            // keep getting retried by the periodic reconcile.
+                            // Revert. A pre-plan bail (`!reached_apply`) never
+                            // touched `owned` and never persisted, so the on-disk
+                            // state is already correct — rewriting it would only
+                            // persist under a signature the reconcile never acted
+                            // on. The orphan case DID mutate owned state (and the
+                            // reconcile persisted it under the NEW signature), so
+                            // re-persist under the reverted signature to keep
+                            // still-owned routes adoptable on restart and retried
+                            // by the periodic reconcile.
                             config.tables = previous;
-                            persist_owned_state(&config, &owned);
+                            if reached_apply {
+                                persist_owned_state(&config, &owned);
+                            }
                             let _ = reply.send(Err(if reached_apply {
                                 "FIB table change left owned routes outside the new \
                                  set (a withdraw failed); reverted to keep them owned"
@@ -3409,6 +3417,52 @@ mod tests {
 
         assert!(statuses.is_empty());
         assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn replace_tables_pre_apply_bail_does_not_rewrite_owned_state() {
+        // A ReplaceTables whose reconcile bails before the apply phase (kernel
+        // dump failure here) leaves `owned` untouched, so the cancel path must
+        // not rewrite the owned-state file: persisting would stamp a signature
+        // the reconcile never acted on.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fib-owned.json");
+        let mut config = config();
+        config.owned_state_path = Some(path.clone());
+        let (rib_tx, _query_count, _events_tx) = rib_with_events(Vec::new());
+        let (status_tx, _status_rx) = watch::channel(Vec::new());
+        let (event_tx, _) = broadcast::channel(16);
+        let shutdown = CancellationToken::new();
+        let handle = spawn_with_fib(
+            config,
+            rib_tx.clone(),
+            rib_tx,
+            FakeFib {
+                fail_dump: Some("netlink unavailable".to_string()),
+                ..FakeFib::default()
+            },
+            metrics(),
+            status_tx,
+            event_tx,
+            shutdown.clone(),
+        );
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        handle
+            .command_sender()
+            .send(FibRuntimeCommand::ReplaceTables {
+                tables: vec![table("edge2", 1001, 200, &["ipv4_unicast"])],
+                reply: reply_tx,
+            })
+            .await
+            .unwrap();
+        let result = reply_rx.await.unwrap();
+        assert!(result.is_err(), "pre-apply bail must reject the swap");
+        assert!(
+            !path.exists(),
+            "pre-apply bail must not rewrite the owned-state file"
+        );
+        handle.shutdown().await;
     }
 
     #[tokio::test]
