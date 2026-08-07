@@ -2385,13 +2385,21 @@ impl RibManager {
                     self.loc_rib.iter_vpn().cloned().collect();
                 #[cfg(feature = "bench-internals")]
                 let (rows, capacity) = (routes.len(), routes.capacity());
+                // The handler duration must be captured BEFORE the reply is
+                // sent: once the reply lands, the service task can finish the
+                // whole RPC while this thread is preempted, and a
+                // capture-after-send handler time can exceed the caller's
+                // wall-clock measurement (the vpn_query bench subtracts the
+                // two and relies on strict nesting).
+                #[cfg(feature = "bench-internals")]
+                let handler_ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
                 let _ = reply.send(routes);
                 #[cfg(feature = "bench-internals")]
                 if let Some(receipts) = &self.vpn_query_bench_receipts {
                     self.vpn_query_bench_dispatches =
                         self.vpn_query_bench_dispatches.saturating_add(1);
                     let _ = receipts.try_send((
-                        u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                        handler_ns,
                         rows,
                         capacity,
                         self.vpn_query_bench_dispatches,
