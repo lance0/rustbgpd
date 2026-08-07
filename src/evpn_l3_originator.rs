@@ -67,8 +67,8 @@ use rustbgpd_evpn::{
     EvpnIpPrefixValue, IpVrf, IpVrfDataplaneStatus, IpVrfId, IpVrfTable, LocalIpRouteObservation,
     RouteSource,
 };
-use rustbgpd_rib::RibUpdate;
 use rustbgpd_rib::route::{EvpnRibRoute, RouteOrigin};
+use rustbgpd_rib::{RibCommandError, RibUpdate};
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::EvpnRouteKey;
 use tokio::sync::{mpsc, oneshot, watch};
@@ -699,10 +699,12 @@ async fn inject_one(
 }
 
 /// Issue a `WithdrawEvpn` over the RIB channel and wait for the
-/// acknowledgement. Returns `true` only when the RIB replied
-/// `Ok(())`. Callers must keep the entry in their in-memory
-/// `originated` map when this returns `false` so the next reconcile
-/// pass retries.
+/// acknowledgement. Returns `true` when the RIB replied `Ok(())` —
+/// or `NotFound`, which means the route is already absent (exactly
+/// the state the withdraw wanted, e.g. after a prior withdraw whose
+/// oneshot reply was dropped). Callers must keep the entry in their
+/// in-memory `originated` map when this returns `false` so the next
+/// reconcile pass retries.
 async fn withdraw_one(
     rib_tx: &mpsc::Sender<RibUpdate>,
     vrf_id: IpVrfId,
@@ -723,6 +725,24 @@ async fn withdraw_one(
     }
     match reply_rx.await {
         Ok(Ok(())) => {
+            counts.dec(vrf_id);
+            true
+        }
+        // The RIB doesn't hold this key: the route is already gone
+        // (e.g. a prior withdraw whose oneshot reply was dropped).
+        // Converge to RIB reality — untrack and decrement — instead of
+        // treating it as a failure: a `false` here keeps the entry in
+        // `originated` and every later reconcile retries the withdraw,
+        // gets `NotFound`, and fails forever. In the key-change branch
+        // of `originate_one` that also blocks re-origination of the
+        // new key, so the VRF's Type 5 route never updates. Mirrors
+        // the Type 2 (`rib_write`) and IMET NotFound handling.
+        Ok(Err(RibCommandError::NotFound(message))) => {
+            warn!(
+                %message,
+                vrf_id = ?vrf_id,
+                "L3 originator: withdraw target already absent — treating as withdrawn"
+            );
             counts.dec(vrf_id);
             true
         }
@@ -974,6 +994,17 @@ mod tests {
     enum ReplyMode {
         Ok,
         Reject,
+        NotFound,
+    }
+
+    impl ReplyMode {
+        fn response(self) -> Result<(), RibCommandError> {
+            match self {
+                ReplyMode::Ok => Ok(()),
+                ReplyMode::Reject => Err(RibCommandError::internal("test rejection")),
+                ReplyMode::NotFound => Err(RibCommandError::not_found("EVPN route key not found")),
+            }
+        }
     }
 
     /// Spawn a RIB-channel responder that records every Inject /
@@ -994,19 +1025,11 @@ mod tests {
                     RibUpdate::InjectEvpn { route, reply } => {
                         let key = route.key();
                         calls.push(RibCall::Inject(key));
-                        let response = match mode.inject {
-                            ReplyMode::Ok => Ok(()),
-                            ReplyMode::Reject => Err(RibCommandError::internal("test rejection")),
-                        };
-                        let _ = reply.send(response);
+                        let _ = reply.send(mode.inject.response());
                     }
                     RibUpdate::WithdrawEvpn { key, reply } => {
                         calls.push(RibCall::Withdraw(key));
-                        let response = match mode.withdraw {
-                            ReplyMode::Ok => Ok(()),
-                            ReplyMode::Reject => Err(RibCommandError::internal("test rejection")),
-                        };
-                        let _ = reply.send(response);
+                        let _ = reply.send(mode.withdraw.response());
                     }
                     _other => {
                         calls.push(RibCall::Other);
@@ -1676,6 +1699,127 @@ mod tests {
                 .iter()
                 .filter(|c| matches!(c, RibCall::Withdraw(_)))
                 .all(|c| matches!(c, RibCall::Withdraw(k) if *k == predicted)),
+        );
+    }
+
+    /// Regression: a withdraw the RIB answers with `NotFound` must converge
+    /// the originator to RIB reality — untrack the entry and decrement the
+    /// per-VRF count exactly once — instead of treating it as a failure.
+    /// The RIB doesn't hold the key when the route is already gone (e.g. a
+    /// prior withdraw whose oneshot reply was dropped); keeping the entry
+    /// meant every later reconcile retried the withdraw, got `NotFound`,
+    /// and returned false forever. Mirrors the IMET regression
+    /// `controller_untracks_key_when_withdraw_not_found`.
+    #[tokio::test]
+    async fn withdraw_not_found_untracks_entry_and_decrements_count_once() {
+        let v = vrf(100, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+        let predicted = predicted_key(&v, observation(100, [10, 1, 0, 0], 24).prefix);
+        let mut h = Harness::with_responder_mode(
+            vec![v],
+            RibResponderMode {
+                inject: ReplyMode::Ok,
+                withdraw: ReplyMode::NotFound,
+            },
+        );
+
+        h.status_tx.send_replace(vec![ready_status(100)]);
+        let mut obs_map = HashMap::new();
+        obs_map.insert(
+            IpVrfId::new(100).unwrap(),
+            vec![observation(100, [10, 1, 0, 0], 24)],
+        );
+        h.obs_tx.send_replace(Arc::new(obs_map));
+        let originated = Harness::drive_one(BTreeMap::new(), &mut h.cfg).await;
+        assert_eq!(originated.len(), 1);
+        assert_eq!(h.cfg.originated_counts.count(IpVrfId::new(100).unwrap()), 1);
+
+        // Observation disappears; the RIB answers the withdraw `NotFound`
+        // (the route is already gone). Absence is the withdraw's goal.
+        let mut empty_map = HashMap::new();
+        empty_map.insert(IpVrfId::new(100).unwrap(), vec![]);
+        h.obs_tx.send_replace(Arc::new(empty_map));
+        let originated = Harness::drive_one(originated, &mut h.cfg).await;
+        assert!(
+            originated.is_empty(),
+            "NotFound withdraw must untrack the entry, not retry forever"
+        );
+        assert_eq!(
+            h.cfg.originated_counts.count(IpVrfId::new(100).unwrap()),
+            0,
+            "NotFound withdraw must decrement the per-VRF count"
+        );
+
+        // A further pass must not retry the withdraw or touch the count.
+        let originated = Harness::drive_one(originated, &mut h.cfg).await;
+        assert!(originated.is_empty());
+        assert_eq!(
+            h.cfg.originated_counts.count(IpVrfId::new(100).unwrap()),
+            0,
+            "the count must be decremented exactly once"
+        );
+        let calls = h.collect_calls().await;
+        assert_eq!(
+            calls,
+            vec![RibCall::Inject(predicted), RibCall::Withdraw(predicted)],
+            "exactly one withdraw — no NotFound retry loop"
+        );
+    }
+
+    /// Regression for the key-change branch of `originate_one`: when the
+    /// stale key's withdraw answers `NotFound`, the originator must still
+    /// re-originate the NEW key. Treating `NotFound` as a failure blocked
+    /// the re-injection forever, so the VRF's Type 5 route never updated.
+    #[tokio::test]
+    async fn redefine_withdraw_not_found_reinjects_new_key() {
+        let old = vrf(100, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+        let new = redefined_vrf(100, 999, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+        let prefix = observation(100, [10, 1, 0, 0], 24).prefix;
+        let old_key = predicted_key(&old, prefix);
+        let new_key = predicted_key(&new, prefix);
+        let mut h = Harness::with_responder_mode(
+            vec![old],
+            RibResponderMode {
+                inject: ReplyMode::Ok,
+                withdraw: ReplyMode::NotFound,
+            },
+        );
+
+        h.status_tx.send_replace(vec![ready_status(100)]);
+        let mut obs_map = HashMap::new();
+        obs_map.insert(
+            IpVrfId::new(100).unwrap(),
+            vec![observation(100, [10, 1, 0, 0], 24)],
+        );
+        h.obs_tx.send_replace(Arc::new(obs_map));
+        let originated = Harness::drive_one(BTreeMap::new(), &mut h.cfg).await;
+
+        // Redefine the VRF (new RD → new key). The stale key's withdraw
+        // answers NotFound; the new key must still be injected.
+        let mut redefined = IpVrfTable::new();
+        redefined.insert(new).unwrap();
+        h.cfg.ip_vrfs = Arc::new(redefined);
+        let originated = Harness::drive_one(originated, &mut h.cfg).await;
+
+        assert_eq!(
+            originated
+                .get(&(IpVrfId::new(100).unwrap(), prefix))
+                .map(|e| e.key),
+            Some(new_key),
+            "NotFound on the stale key must not block re-origination of the new key"
+        );
+        assert_eq!(
+            h.cfg.originated_counts.count(IpVrfId::new(100).unwrap()),
+            1,
+            "one dec for the absent stale key, one inc for the new inject"
+        );
+        let calls = h.collect_calls().await;
+        assert_eq!(
+            calls,
+            vec![
+                RibCall::Inject(old_key),
+                RibCall::Withdraw(old_key),
+                RibCall::Inject(new_key),
+            ]
         );
     }
 
