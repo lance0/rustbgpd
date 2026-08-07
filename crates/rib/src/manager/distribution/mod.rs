@@ -735,7 +735,10 @@ pub(super) fn no_export_export_suppressed(
 /// RFC 9234 §5 egress rule for IPv4/IPv6 unicast: a route that already
 /// carries OTC must not be propagated toward a Provider, Peer, or Route
 /// Server. The local role names our side of those relationships.
-fn otc_egress_blocked(route: &crate::route::Route, local_role: Option<BgpRole>) -> bool {
+pub(in crate::manager) fn otc_egress_blocked(
+    route: &crate::route::Route,
+    local_role: Option<BgpRole>,
+) -> bool {
     matches!(
         local_role,
         Some(BgpRole::Customer | BgpRole::Peer | BgpRole::RouteServerClient)
@@ -1194,7 +1197,17 @@ impl RibManager {
                 .all(|family| !self.selection_deferred(*family))
         });
         let current_session = self.outbound_session_ids.get(&peer).copied();
+        // Members of a per-client-best group are excluded from the ADR-0105
+        // narrow fast path outright: its clean predicate (zero
+        // policy-filtered routes on both sides) contradicts the
+        // mitigation's reason to exist. Re-inclusion is demand-gated
+        // (ADR-0126 Decision 8).
+        let not_per_client_best_group = self
+            .grouped_member_of(peer)
+            .and_then(|gid| self.group_ribs.get(&gid))
+            .is_none_or(|group| !group.per_client_best);
         only_unicast
+            && not_per_client_best_group
             && no_private_family_state
             && no_selection_gate
             && self.outbound_peers.contains_key(&peer)
@@ -2193,14 +2206,23 @@ impl RibManager {
         // RFC 9234 egress enforcement for every concrete-peer selection
         // shape. Single-best group staging applies the same gate before its
         // shared table commit; this central pass covers private single-best,
-        // ORR, Add-Path, and per-client-best without duplicating their tails.
+        // ORR, Add-Path, and per-client-best without duplicating their tails
+        // — including per-client-best GROUP members, whose winner walk
+        // stages the first permitted candidate regardless of OTC and defers
+        // egress enforcement here (ADR-0126 Decision 5), matching the
+        // ungrouped per-client-best path.
         if announce
             .iter()
             .any(|route| otc_egress_blocked(route, local_role))
         {
+            let per_client_best_member = self
+                .grouped_member_of(peer)
+                .and_then(|gid| self.group_ribs.get(&gid))
+                .is_some_and(|group| group.per_client_best);
             debug_assert!(
-                grouped_unicast_count.is_none(),
-                "group staging must reject OTC before its shared table commit"
+                grouped_unicast_count.is_none() || per_client_best_member,
+                "single-best group staging must reject OTC before its shared table commit; \
+                 per-client-best groups defer to this backstop by design"
             );
             debug_assert_eq!(announce.len(), next_hop_override.len());
             let mut permitted = Vec::with_capacity(announce.len());
@@ -2214,11 +2236,28 @@ impl RibManager {
                 .zip(next_hop_override.iter().cloned())
             {
                 if otc_egress_blocked(&route, local_role) {
-                    if self
-                        .adj_ribs_out
-                        .get(&peer)
-                        .and_then(|rib_out| rib_out.get(&route.prefix, route.path_id))
-                        .is_some()
+                    // A per-client-best group member's prior wire view is
+                    // group-derived (no per-peer unicast Adj-RIB-Out), so
+                    // the previously-advertised gate below cannot see it. A
+                    // NEWLY blocked identity — one still pending its
+                    // diagnostic, reconciled from the group residue before
+                    // this send at every seam — may be replacing a
+                    // delivered clean advertisement: convert it to a
+                    // withdraw once. Over-withdraw is the safe direction
+                    // (RFC 4271 no-op when nothing was delivered); a steady
+                    // blocked identity replays silently on refresh/join,
+                    // matching the ungrouped path's Adj-RIB-Out-gated
+                    // silence.
+                    let group_wire_may_hold = per_client_best_member
+                        && self.pending_otc_blocked.get(&peer).is_some_and(|pending| {
+                            pending.contains_key(&(route.prefix, route.path_id))
+                        });
+                    if (group_wire_may_hold
+                        || self
+                            .adj_ribs_out
+                            .get(&peer)
+                            .and_then(|rib_out| rib_out.get(&route.prefix, route.path_id))
+                            .is_some())
                         && withdrawn_keys.insert((route.prefix, route.path_id))
                     {
                         withdraw.push((route.prefix, route.path_id));
@@ -4233,6 +4272,14 @@ impl RibManager {
                         .extend(group.policy_filtered_for_member(peer, &effective_prefixes));
                     group_otc_blocked = if resync {
                         group.otc_blocked_for_member(peer, None)
+                    } else if group.per_client_best {
+                        // The staging pass just refreshed the residue for
+                        // exactly its staged prefixes, and the residue
+                        // derivation substitutes the lane runner-up toward
+                        // `source(w)` — the per-member outcome of the
+                        // pre-commit backstop (ADR-0126), which the flat
+                        // pass vector below cannot express.
+                        group.otc_blocked_for_member(peer, Some(&effective_prefixes))
                     } else {
                         group_stage
                             .get(&gid)

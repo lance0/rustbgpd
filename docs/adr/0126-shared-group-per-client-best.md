@@ -230,6 +230,22 @@ divergence (ADR-0101 Decision 3) applies per member at the same emit
 seams; lane entries carry source attributes so tag transitions extend to
 them.
 
+RFC 9234 OTC egress for per-client-best groups is enforced at the
+central pre-commit backstop, matching the ungrouped per-client-best
+path's semantics: the winner walk stages the first permitted candidate
+regardless of OTC, and every member emission — steady-state, refresh,
+join, and resync alike — passes through the backstop, which strips a
+blocked route and converts it to a withdraw where a delivered
+advertisement may be replaced (over-withdraw remains the safe
+direction). The in-walk gate serves single-best staging only. A blocked
+winner therefore stays in the group table and a blocked runner-up stays
+in the lane; the group's OTC residue derivation covers both — the
+recorded winner for non-source members, the lane entry toward
+`source(w)` — so per-member diagnostics and the replay reconciliations
+see exactly the backstop's outcome. The differential-oracle comparison
+is post-backstop on both sides, so byte-identity holds with OTC-blocked
+routes invisible to both.
+
 ### 6. The OpenBGPD bug family, as non-goals-to-avoid with mechanisms
 
 - **Stale second-best after best withdrawal** (issue #21): impossible by

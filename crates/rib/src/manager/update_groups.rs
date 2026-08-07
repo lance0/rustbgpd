@@ -1448,14 +1448,40 @@ impl GroupRibOut {
         member: IpAddr,
         prefixes: Option<&HashSet<Prefix>>,
     ) -> Vec<Route> {
-        self.otc_blocked
+        let mut blocked: Vec<Route> = self
+            .otc_blocked
             .values()
             .filter(|route| {
                 route.peer != member
                     && prefixes.is_none_or(|prefixes| prefixes.contains(&route.prefix))
             })
             .cloned()
-            .collect()
+            .collect();
+        // ADR-0126: the member sourcing a staged winner receives the
+        // lane runner-up instead (adv(m)), so ITS blocked entry at that
+        // slot is the runner-up when that carries OTC — derived from
+        // the lane here rather than stored (both slots share the
+        // `(prefix, 0)` residue key). `local_role` is group-uniform
+        // (snapshot on this group), so one verdict covers every member;
+        // the own-source filter above already withholds the winner from
+        // `source(w)`. Together the two terms reproduce the pre-commit
+        // backstop's per-member outcome, blocked(adv(m)), exactly.
+        if self.per_client_best {
+            blocked.extend(
+                self.runner_up
+                    .iter()
+                    .filter(|(prefix, entry)| {
+                        entry.winner_source == member
+                            && prefixes.is_none_or(|prefixes| prefixes.contains(prefix))
+                            && super::distribution::otc_egress_blocked(
+                                &entry.route,
+                                self.local_role,
+                            )
+                    })
+                    .map(|(_, entry)| entry.route.clone()),
+            );
+        }
+        blocked
     }
 
     fn count_slot(prefix: &Prefix) -> usize {
@@ -1927,7 +1953,13 @@ impl RibManager {
         destination: usize,
     ) -> Option<Vec<(Prefix, u32)>> {
         let clean = |group: &GroupRibOut| {
-            group.dirty_members.is_empty()
+            // Per-client-best groups are excluded from the ADR-0105 narrow
+            // fast path outright — its clean predicate (zero
+            // policy-filtered routes on both sides) contradicts the
+            // mitigation's reason to exist. Re-inclusion is demand-gated
+            // (ADR-0126 Decision 8).
+            !group.per_client_best
+                && group.dirty_members.is_empty()
                 && group.tombstones.is_empty()
                 && group.vpn_tombstones.is_empty()
                 && group.table.vpn_len() == 0
@@ -2304,6 +2336,7 @@ impl RibManager {
                         group.is_ebgp,
                         group.interpret_rfc1997,
                         group.is_rr_client,
+                        group.local_role,
                         self.cluster_id,
                         Some(&group.sendable),
                         Some(&group.llgr),
@@ -2314,6 +2347,7 @@ impl RibManager {
                         &mut withdraw,
                         &mut nh_flags,
                         &mut labeled_filtered,
+                        &mut out.otc_blocked,
                     );
                     // The winner announce (at most one — the walk
                     // stages a single `path_id 0` winner), captured
@@ -3787,6 +3821,20 @@ impl RibManager {
             return None;
         };
         let source = *source;
+        // A per-client-best source group never takes the ADR-0105 fast
+        // path — nor its unfenced destination prestage, whose only
+        // preflight is this function. Checked on the source cell: the
+        // ADR-0126 Phase 3 `per_client_best` key bit keeps source and
+        // destination in agreement, and `begin_policy_transition_group`
+        // only ever creates plain destination cells. Re-inclusion is
+        // demand-gated (ADR-0126 Decision 8).
+        if self
+            .group_ribs
+            .get(&source)
+            .is_some_and(|group| group.per_client_best)
+        {
+            return None;
+        }
         let GroupMembership::Grouped(destination) =
             self.compute_update_group_membership_for_policy(peer, policy)
         else {
@@ -8660,5 +8708,503 @@ mod tests {
             out.deltas[0].prefix, p,
             "all-affected extras never reach a plain group"
         );
+    }
+
+    // --- ADR-0126 Decision 5: RFC 9234 OTC egress for per-client-best
+    // --- groups is enforced at the central pre-commit backstop — the
+    // --- walk records blocked staged output, never acts on it.
+
+    fn with_otc_attr(mut route: Route) -> Route {
+        let mut attrs = (*route.attributes).clone();
+        attrs.push(PathAttribute::OnlyToCustomer(64_496));
+        route.attributes = Arc::new(attrs);
+        route
+    }
+
+    /// [`per_client_best_group`] under a role RFC 9234 blocks OTC
+    /// egress for. `local_role` is group-uniform (in the group key), so
+    /// the snapshot is the walk's only role input.
+    fn per_client_best_customer_group() -> GroupRibOut {
+        let mut group = per_client_best_group(None);
+        group.local_role = Some(BgpRole::Customer);
+        group
+    }
+
+    /// Register `member` on the UNGROUPED per-client-best path — the
+    /// grouped path's correctness oracle — with the staging knobs of
+    /// [`per_client_best_group`] (iBGP RR client) so both sides run
+    /// the same export gates.
+    fn register_ungrouped_pcb_peer(
+        m: &mut RibManager,
+        member: IpAddr,
+    ) -> tokio::sync::mpsc::Receiver<crate::update::OutboundRouteUpdate> {
+        let (outbound_tx, mut outbound_rx) = tokio::sync::mpsc::channel(8);
+        m.handle_update(crate::update::RibUpdate::PeerUp {
+            peer: member,
+            session_id: 0,
+            peer_asn: TARGET_ASN,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            outbound_tx,
+            export_policy: None,
+            sendable_families: vec![(Afi::Ipv4, Safi::Unicast)],
+            is_ebgp: false,
+            route_reflector_client: true,
+            orr_vantage: None,
+            per_client_best: true,
+            interpret_rfc1997: true,
+            add_path_send_families: vec![],
+            add_path_send_max: 0,
+            negotiated_orf_recv: vec![],
+            negotiated_llgr_families: vec![],
+        });
+        while outbound_rx.try_recv().is_ok() {}
+        outbound_rx
+    }
+
+    /// Feed inbound routes through the REAL chunked distribution pass.
+    fn receive_routes(m: &mut RibManager, source: IpAddr, announced: Vec<Route>) {
+        m.handle_update(crate::update::RibUpdate::RoutesReceived {
+            peer: source,
+            session_id: 0,
+            announced,
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+        });
+        while m.process_next_route_chunk() {}
+    }
+
+    /// Every queued envelope folded to the wire-relevant fields.
+    #[derive(Debug, PartialEq, Default)]
+    struct DrainedWire {
+        announced: Vec<(Prefix, IpAddr)>,
+        withdrawn: Vec<(Prefix, u32)>,
+        otc_blocked: Vec<(Prefix, IpAddr)>,
+    }
+
+    fn drain_wire(
+        rx: &mut tokio::sync::mpsc::Receiver<crate::update::OutboundRouteUpdate>,
+    ) -> DrainedWire {
+        let mut wire = DrainedWire::default();
+        while let Ok(update) = rx.try_recv() {
+            wire.announced
+                .extend(update.announce.iter().map(|r| (r.prefix, r.peer)));
+            wire.withdrawn.extend(update.withdraw.iter().copied());
+            wire.otc_blocked
+                .extend(update.otc_blocked.iter().map(|r| (r.prefix, r.peer)));
+        }
+        wire
+    }
+
+    /// No in-walk gate (ADR-0126 Decision 5): a blocked winner stays
+    /// staged in the table and the pass RECORDS it — into the pass
+    /// output and, committed, the persistent residue — including on a
+    /// later equality-suppressed restage. `source(w)` never sees its
+    /// own winner in the residue derivation.
+    #[test]
+    fn pcb_otc_blocked_winner_stays_staged_and_residue_recorded() {
+        let mut m = staging_manager();
+        let p = prefix(1);
+        seed(&mut m, with_otc_attr(cand(p, OTHER1, 300)));
+        seed(&mut m, cand(p, OTHER2, 200));
+        m.group_ribs
+            .insert(PCB_GID, per_client_best_customer_group());
+
+        let out = stage_pcb(&mut m, &[p]);
+
+        assert_eq!(out.deltas.len(), 1);
+        assert!(
+            out.deltas[0].new.is_some(),
+            "blocked winner is staged, not withdrawn"
+        );
+        let group = m.group_ribs.get(&PCB_GID).unwrap();
+        let staged = group
+            .table
+            .get(&p, 0)
+            .expect("blocked winner stays in the table");
+        assert_eq!(staged.peer, OTHER1);
+        assert!(
+            staged
+                .attributes
+                .iter()
+                .any(|attr| matches!(attr, PathAttribute::OnlyToCustomer(_))),
+            "the staged form keeps the OTC attribute"
+        );
+        assert_eq!(lane_source(&m, p), Some(OTHER2));
+        assert_eq!(out.otc_blocked.len(), 1);
+        assert_eq!(out.otc_blocked[0].peer, OTHER1);
+        let blocked = group.otc_blocked_for_member(MEMBER, None);
+        assert_eq!(
+            blocked.iter().map(|r| r.peer).collect::<Vec<_>>(),
+            vec![OTHER1],
+            "non-source members see the blocked winner"
+        );
+        assert!(
+            group.otc_blocked_for_member(OTHER1, None).is_empty(),
+            "source(w) receives the clean runner-up — nothing blocked for it"
+        );
+
+        // Equality-suppressed restage: no delta, residue re-recorded.
+        let out = stage_pcb(&mut m, &[p]);
+        assert!(out.deltas.is_empty());
+        assert_eq!(out.otc_blocked.len(), 1);
+        let group = m.group_ribs.get(&PCB_GID).unwrap();
+        assert_eq!(group.otc_blocked_for_member(MEMBER, None).len(), 1);
+    }
+
+    /// A blocked runner-up is DERIVED from the lane at consumption
+    /// (both slots share the `(prefix, 0)` residue key, so it is never
+    /// stored): only `source(w)` — whose adv(m) is the runner-up —
+    /// sees it, prefix scoping applies, and with BOTH slots blocked
+    /// each member sees exactly blocked(adv(m)).
+    #[test]
+    fn pcb_otc_blocked_runner_up_derived_toward_winner_source() {
+        let mut m = staging_manager();
+        let p = prefix(1);
+        seed(&mut m, cand(p, OTHER1, 300));
+        seed(&mut m, with_otc_attr(cand(p, OTHER2, 200)));
+        m.group_ribs
+            .insert(PCB_GID, per_client_best_customer_group());
+
+        let out = stage_pcb(&mut m, &[p]);
+
+        assert!(out.otc_blocked.is_empty(), "a clean winner records nothing");
+        let group = m.group_ribs.get(&PCB_GID).unwrap();
+        assert!(
+            group.otc_blocked_for_member(MEMBER, None).is_empty(),
+            "non-source members receive the clean winner"
+        );
+        assert_eq!(
+            group
+                .otc_blocked_for_member(OTHER1, None)
+                .iter()
+                .map(|r| r.peer)
+                .collect::<Vec<_>>(),
+            vec![OTHER2],
+            "source(w)'s derived view is the blocked runner-up"
+        );
+        assert!(
+            group
+                .otc_blocked_for_member(OTHER1, Some(&HashSet::from([prefix(2)])))
+                .is_empty(),
+            "prefix scoping applies to the lane term"
+        );
+
+        // Both slots blocked: winner rides the residue map, runner-up
+        // the lane — per member exactly blocked(adv(m)).
+        seed(&mut m, with_otc_attr(cand(p, OTHER1, 300)));
+        let out = stage_pcb(&mut m, &[p]);
+        assert_eq!(out.otc_blocked.len(), 1);
+        let group = m.group_ribs.get(&PCB_GID).unwrap();
+        assert_eq!(
+            group
+                .otc_blocked_for_member(MEMBER, None)
+                .iter()
+                .map(|r| r.peer)
+                .collect::<Vec<_>>(),
+            vec![OTHER1]
+        );
+        assert_eq!(
+            group
+                .otc_blocked_for_member(OTHER1, None)
+                .iter()
+                .map(|r| r.peer)
+                .collect::<Vec<_>>(),
+            vec![OTHER2]
+        );
+    }
+
+    /// Backstop parity through the REAL commit path: a delivered clean
+    /// winner replaced by an OTC-carrying one is stripped at the
+    /// pre-commit backstop and converted to exactly the withdraw the
+    /// ungrouped per-client-best path emits for identical inputs —
+    /// while the group table keeps the blocked winner — and the
+    /// refresh/join replays of the steady blocked state are silent on
+    /// both sides.
+    #[test]
+    fn pcb_otc_transition_emission_matches_ungrouped_per_client_best() {
+        let p = prefix(1);
+        let run = |grouped: bool| -> Vec<DrainedWire> {
+            let mut m = staging_manager();
+            let mut rx = if grouped {
+                register_pcb_member(&mut m, MEMBER, per_client_best_customer_group())
+            } else {
+                register_ungrouped_pcb_peer(&mut m, MEMBER)
+            };
+            m.peer_local_roles.insert(MEMBER, Some(BgpRole::Customer));
+            let mut passes = Vec::new();
+            receive_routes(&mut m, OTHER1, vec![cand(p, OTHER1, 300)]);
+            passes.push(drain_wire(&mut rx));
+            receive_routes(&mut m, OTHER1, vec![with_otc_attr(cand(p, OTHER1, 300))]);
+            passes.push(drain_wire(&mut rx));
+            m.send_route_refresh_response(MEMBER, Afi::Ipv4, Safi::Unicast);
+            passes.push(drain_wire(&mut rx));
+            m.send_initial_table(MEMBER);
+            passes.push(drain_wire(&mut rx));
+            if grouped {
+                let group = m.group_ribs.get(&PCB_GID).unwrap();
+                assert_eq!(
+                    group.table.get(&p, 0).map(|r| r.peer),
+                    Some(OTHER1),
+                    "the blocked winner stays staged behind the stripped emissions"
+                );
+            }
+            passes
+        };
+        let grouped = run(true);
+        let ungrouped = run(false);
+        assert_eq!(grouped, ungrouped, "grouped-vs-ungrouped wire divergence");
+        assert_eq!(grouped[0].announced, vec![(p, OTHER1)]);
+        assert!(grouped[0].withdrawn.is_empty() && grouped[0].otc_blocked.is_empty());
+        assert_eq!(
+            grouped[1],
+            DrainedWire {
+                announced: vec![],
+                withdrawn: vec![(p, 0)],
+                otc_blocked: vec![(p, OTHER1)],
+            },
+            "the blocked replacement converts to a withdraw plus its diagnostic"
+        );
+        assert_eq!(
+            grouped[2],
+            DrainedWire::default(),
+            "a steady blocked identity replays silently on refresh"
+        );
+        assert_eq!(
+            grouped[3],
+            DrainedWire::default(),
+            "a same-session join replay of the steady blocked state stays silent"
+        );
+    }
+
+    /// The one deliberate deviation from the ungrouped path, pinned: a
+    /// NEWLY blocked identity that was never delivered. The ungrouped
+    /// path's Adj-RIB-Out gate keeps it silent; a group member's prior
+    /// wire view is group-derived, so the backstop emits one defensive
+    /// withdraw (an RFC 4271 no-op — over-withdraw is the safe
+    /// direction) alongside the diagnostic. Steady-state replays are
+    /// silent on both sides afterwards.
+    #[test]
+    fn pcb_otc_fresh_blocked_prefix_emits_one_defensive_withdraw() {
+        let p = prefix(1);
+        let run = |grouped: bool| -> (DrainedWire, DrainedWire) {
+            let mut m = staging_manager();
+            let mut rx = if grouped {
+                register_pcb_member(&mut m, MEMBER, per_client_best_customer_group())
+            } else {
+                register_ungrouped_pcb_peer(&mut m, MEMBER)
+            };
+            m.peer_local_roles.insert(MEMBER, Some(BgpRole::Customer));
+            receive_routes(&mut m, OTHER1, vec![with_otc_attr(cand(p, OTHER1, 300))]);
+            let pass = drain_wire(&mut rx);
+            m.send_route_refresh_response(MEMBER, Afi::Ipv4, Safi::Unicast);
+            (pass, drain_wire(&mut rx))
+        };
+        let (grouped_pass, grouped_refresh) = run(true);
+        let (ungrouped_pass, ungrouped_refresh) = run(false);
+        assert_eq!(
+            grouped_pass,
+            DrainedWire {
+                announced: vec![],
+                withdrawn: vec![(p, 0)],
+                otc_blocked: vec![(p, OTHER1)],
+            },
+            "grouped: one defensive withdraw beside the diagnostic"
+        );
+        assert_eq!(
+            ungrouped_pass,
+            DrainedWire {
+                announced: vec![],
+                withdrawn: vec![],
+                otc_blocked: vec![(p, OTHER1)],
+            },
+            "ungrouped: the Adj-RIB-Out gate keeps the fresh case silent"
+        );
+        assert_eq!(grouped_refresh, DrainedWire::default());
+        assert_eq!(ungrouped_refresh, DrainedWire::default());
+    }
+
+    /// Lane variant through the real path: a blocked runner-up
+    /// substituting toward `source(w)` is stripped/suppressed exactly
+    /// like the ungrouped outcome (which stages the same route as the
+    /// member's first non-own permitted candidate) — modulo the pinned
+    /// defensive withdraw on the fresh edge — and its diagnostic is
+    /// the LANE route.
+    #[test]
+    fn pcb_otc_blocked_lane_substitution_matches_ungrouped_toward_winner_source() {
+        let p = prefix(1);
+        let run = |grouped: bool| -> (DrainedWire, DrainedWire) {
+            let mut m = staging_manager();
+            let mut rx = if grouped {
+                register_pcb_member(&mut m, MEMBER, per_client_best_customer_group())
+            } else {
+                register_ungrouped_pcb_peer(&mut m, MEMBER)
+            };
+            m.peer_local_roles.insert(MEMBER, Some(BgpRole::Customer));
+            // The member sources the winner; its derived view is the
+            // runner-up. The winner pass's emission toward the member
+            // is not under test — drained and discarded.
+            receive_routes(&mut m, MEMBER, vec![cand(p, MEMBER, 300)]);
+            let _ = drain_wire(&mut rx);
+            receive_routes(&mut m, OTHER2, vec![with_otc_attr(cand(p, OTHER2, 200))]);
+            let pass = drain_wire(&mut rx);
+            m.send_route_refresh_response(MEMBER, Afi::Ipv4, Safi::Unicast);
+            (pass, drain_wire(&mut rx))
+        };
+        let (grouped_pass, grouped_refresh) = run(true);
+        let (ungrouped_pass, ungrouped_refresh) = run(false);
+        assert!(grouped_pass.announced.is_empty() && ungrouped_pass.announced.is_empty());
+        assert_eq!(
+            grouped_pass.otc_blocked,
+            vec![(p, OTHER2)],
+            "the diagnostic is the LANE route toward source(w)"
+        );
+        assert_eq!(ungrouped_pass.otc_blocked, vec![(p, OTHER2)]);
+        assert_eq!(
+            grouped_pass.withdrawn,
+            vec![(p, 0)],
+            "fresh blocked edge: the pinned defensive withdraw"
+        );
+        assert!(ungrouped_pass.withdrawn.is_empty());
+        assert_eq!(grouped_refresh, DrainedWire::default());
+        assert_eq!(ungrouped_refresh, DrainedWire::default());
+    }
+
+    /// A SINGLE-BEST group reaching the backstop with an OTC-blocked
+    /// announce is still a bug — its in-walk gate must reject before
+    /// the shared table commit; only per-client-best groups defer to
+    /// the backstop.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "single-best group staging must reject OTC")]
+    fn single_best_group_otc_at_backstop_trips_debug_assert() {
+        let mut m = staging_manager();
+        let (outbound_tx, _outbound_rx) = tokio::sync::mpsc::channel(8);
+        m.outbound_peers.insert(MEMBER, outbound_tx);
+        m.peer_export_encoders
+            .insert(MEMBER, super::super::permissive_test_exact_export_encoder());
+        m.peer_local_roles.insert(MEMBER, Some(BgpRole::Customer));
+        m.update_groups
+            .members
+            .insert(MEMBER, GroupMembership::Grouped(PCB_GID));
+        m.group_ribs.insert(PCB_GID, empty_group());
+        let announce: Arc<[Route]> = vec![with_otc_attr(route(prefix(1), OTHER1))].into();
+        let nh: Arc<[Option<NextHopAction>]> = vec![None].into();
+        let _ = m.try_send_and_commit_outbound_update(
+            MEMBER,
+            nh,
+            announce,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+    }
+
+    /// The per-client-best counterpart of the assert test: the same
+    /// backstop entry does NOT panic — the blocked announce strips,
+    /// the pending-gated conversion emits its withdraw, and the
+    /// diagnostic delivers (clearing the pending edge).
+    #[test]
+    fn per_client_best_group_otc_at_backstop_strips_with_pending_gated_withdraw() {
+        let mut m = staging_manager();
+        let (outbound_tx, mut outbound_rx) = tokio::sync::mpsc::channel(8);
+        m.outbound_peers.insert(MEMBER, outbound_tx);
+        m.peer_export_encoders
+            .insert(MEMBER, super::super::permissive_test_exact_export_encoder());
+        m.peer_local_roles.insert(MEMBER, Some(BgpRole::Customer));
+        m.update_groups
+            .members
+            .insert(MEMBER, GroupMembership::Grouped(PCB_GID));
+        m.group_ribs
+            .insert(PCB_GID, per_client_best_customer_group());
+        let blocked = with_otc_attr(route(prefix(1), OTHER1));
+        m.pending_otc_blocked
+            .entry(MEMBER)
+            .or_default()
+            .insert((prefix(1), 0), blocked.clone());
+        let announce: Arc<[Route]> = vec![blocked].into();
+        let nh: Arc<[Option<NextHopAction>]> = vec![None].into();
+        assert!(m.try_send_and_commit_outbound_update(
+            MEMBER,
+            nh,
+            announce,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        ));
+        let update = outbound_rx.try_recv().unwrap();
+        assert!(
+            update.announce.is_empty(),
+            "the blocked announce is stripped"
+        );
+        assert_eq!(
+            update.withdraw,
+            vec![(prefix(1), 0)],
+            "a pending (newly blocked) identity converts to a withdraw"
+        );
+        assert_eq!(update.otc_blocked.len(), 1);
+        assert!(
+            !m.pending_otc_blocked.contains_key(&MEMBER),
+            "the delivered diagnostic retires the pending edge"
+        );
+    }
+
+    /// ADR-0105 exclusion (ADR-0126 Decision 8): a per-client-best
+    /// group on EITHER side rejects the clean-transition inventory
+    /// even when every other clean term holds; plain groups with the
+    /// same tables stay eligible.
+    #[test]
+    fn per_client_best_groups_are_excluded_from_clean_transition_inventory() {
+        let mut m = staging_manager();
+        let build = |per_client_best: bool| {
+            let mut group = if per_client_best {
+                per_client_best_group(None)
+            } else {
+                empty_group()
+            };
+            group.apply_delta(&announce_delta(prefix(1), OTHER1, None));
+            group
+        };
+        m.group_ribs.insert(1, build(false));
+        m.group_ribs.insert(2, build(false));
+        m.group_ribs.insert(3, build(true));
+        m.group_ribs.insert(4, build(true));
+        assert!(
+            m.begin_clean_policy_transition_inventory(1, 2).is_some(),
+            "plain groups stay eligible"
+        );
+        for (source, destination) in [(3, 4), (3, 2), (1, 4)] {
+            assert!(
+                m.begin_clean_policy_transition_inventory(source, destination)
+                    .is_none(),
+                "a per-client-best side must reject the fast path ({source} -> {destination})"
+            );
+        }
     }
 }
