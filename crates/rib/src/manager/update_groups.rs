@@ -1330,6 +1330,24 @@ pub(in crate::manager) struct GroupRibOut {
     vpn_policy_denied: FxHashMap<VpnRouteKey, VpnDenialRecord>,
     /// Persistent RFC 9234 denial residue for join/resync diagnostics.
     otc_blocked: FxHashMap<(Prefix, u32), Route>,
+    /// Count aggregates beside `otc_blocked`, per unicast family
+    /// `[v4, v6]`: total blocked staged winners plus their per-source
+    /// split — the winner term of the Decision 4 count synthesis's
+    /// OTC subtraction (the synthesis reports the backstop's outcome,
+    /// not the raw table). Rebuilt from the residue map at its one
+    /// mutation seam ([`Self::record_otc_blocked`]); kept zero for
+    /// plain groups, whose in-walk gate rejects blocked routes before
+    /// the table — their residue names never-staged routes, so
+    /// subtracting it would double-count.
+    otc_blocked_totals: [usize; 2],
+    otc_blocked_sources: FxHashMap<IpAddr, [usize; 2]>,
+    /// Lane sibling of `otc_blocked_sources`: per-winner-source counts
+    /// of lane entries whose runner-up is OTC-blocked toward this
+    /// group — the substitution term of the same subtraction (the
+    /// member sourcing the winner receives the runner-up, so ITS
+    /// suppressed slot is the lane's, never the winner's). Maintained
+    /// entirely by [`Self::apply_lane`], exactly like `lane_counts`.
+    lane_otc_blocked_counts: FxHashMap<IpAddr, [usize; 2]>,
     /// Per-member advertised VPN counts `[vpnv4, vpnv6]`, maintained
     /// ONLY for RTC-negotiated groups (Φ makes the counts non-derivable
     /// from `source_counts`; design §2.4) at the emit seams: staging
@@ -1413,6 +1431,9 @@ impl GroupRibOut {
             vpn_staged_labels: FxHashMap::default(),
             vpn_policy_denied: FxHashMap::default(),
             otc_blocked: FxHashMap::default(),
+            otc_blocked_totals: [0; 2],
+            otc_blocked_sources: FxHashMap::default(),
+            lane_otc_blocked_counts: FxHashMap::default(),
             vpn_member_counts: FxHashMap::default(),
             runner_up: FxHashMap::default(),
             lane_counts: FxHashMap::default(),
@@ -1454,6 +1475,22 @@ impl GroupRibOut {
                 .cloned()
                 .map(|route| ((route.prefix, route.path_id), route)),
         );
+        // Rebuild the count aggregates from the refreshed map — one
+        // mutation seam keeps them exact, at O(blocked residue) per
+        // pass (zero in the overwhelmingly common no-OTC case). Only
+        // a per-client-best group's residue describes STAGED winners;
+        // a plain group's names routes its in-walk gate kept out of
+        // the table, so its aggregates stay zero and the count
+        // synthesis provably subtracts nothing.
+        self.otc_blocked_totals = [0; 2];
+        self.otc_blocked_sources.clear();
+        if self.per_client_best {
+            for route in self.otc_blocked.values() {
+                let slot = Self::count_slot(&route.prefix);
+                self.otc_blocked_totals[slot] += 1;
+                self.otc_blocked_sources.entry(route.peer).or_default()[slot] += 1;
+            }
+        }
     }
 
     pub(in crate::manager) fn otc_blocked_for_member(
@@ -1592,21 +1629,38 @@ impl GroupRibOut {
     /// row increments, the outgoing entry's decrements — so a
     /// winner-source flip under an unchanged runner-up moves the count
     /// even though no [`LaneDelta`] was encoded.
+    /// `lane_otc_blocked_counts` rides the same transitions for
+    /// entries the RFC 9234 backstop suppresses (`local_role` is a
+    /// group-uniform snapshot, so the verdict never changes under an
+    /// unmoved entry).
     fn apply_lane(&mut self, prefix: Prefix, entry: Option<RunnerUp>) {
         let slot = Self::count_slot(&prefix);
         let outgoing = match entry {
             Some(entry) => {
                 self.lane_counts.entry(entry.winner_source).or_default()[slot] += 1;
+                if super::distribution::otc_egress_blocked(&entry.route, self.local_role) {
+                    self.lane_otc_blocked_counts
+                        .entry(entry.winner_source)
+                        .or_default()[slot] += 1;
+                }
                 self.runner_up.insert(prefix, entry)
             }
             None => self.runner_up.remove(&prefix),
         };
-        if let Some(old) = outgoing
-            && let Some(counts) = self.lane_counts.get_mut(&old.winner_source)
-        {
-            counts[slot] = counts[slot].saturating_sub(1);
-            if counts.iter().all(|&n| n == 0) {
-                self.lane_counts.remove(&old.winner_source);
+        if let Some(old) = outgoing {
+            if let Some(counts) = self.lane_counts.get_mut(&old.winner_source) {
+                counts[slot] = counts[slot].saturating_sub(1);
+                if counts.iter().all(|&n| n == 0) {
+                    self.lane_counts.remove(&old.winner_source);
+                }
+            }
+            if super::distribution::otc_egress_blocked(&old.route, self.local_role)
+                && let Some(counts) = self.lane_otc_blocked_counts.get_mut(&old.winner_source)
+            {
+                counts[slot] = counts[slot].saturating_sub(1);
+                if counts.iter().all(|&n| n == 0) {
+                    self.lane_otc_blocked_counts.remove(&old.winner_source);
+                }
             }
         }
     }
@@ -1743,10 +1797,59 @@ impl GroupRibOut {
         })
     }
 
+    /// [`Self::adv_entry`] minus the RFC 9234 pre-commit backstop's
+    /// outcome: `None` when the resolved slot's route is OTC-blocked
+    /// toward this group (`local_role` is group-uniform, so one
+    /// verdict covers every member). Operator-facing surfaces — the
+    /// advertised-route queries and the count synthesis's rejection
+    /// overlays — read this form: the backstop strips a blocked route
+    /// from every emission, so the ungrouped path's Adj-RIB-Out never
+    /// holds it and reported state must not either. Enforcement and
+    /// replay seams keep reading [`Self::adv_entry`]: their emissions
+    /// pass through the backstop itself. A plain group's staged
+    /// entries are never blocked (its in-walk gate rejects them), so
+    /// this reduces to `adv_entry` there.
+    pub(in crate::manager) fn adv_entry_post_backstop(
+        &self,
+        member: IpAddr,
+        prefix: &Prefix,
+        path_id: u32,
+    ) -> Option<AdvEntry<'_>> {
+        self.adv_entry(member, prefix, path_id)
+            .filter(|entry| !super::distribution::otc_egress_blocked(entry.route, self.local_role))
+    }
+
+    /// Per-family count of `member`'s `adv(m)` slots the RFC 9234
+    /// backstop suppresses: the blocked staged winners it does not
+    /// source plus its blocked lane substitutions — the subtraction
+    /// the count synthesis applies so it reports the backstop's
+    /// outcome. Zero for plain groups: the aggregates are only
+    /// maintained where the residue describes staged winners.
+    fn otc_suppressed_counts(&self, member: IpAddr) -> [usize; 2] {
+        if !self.per_client_best {
+            return [0; 2];
+        }
+        let own = self
+            .otc_blocked_sources
+            .get(&member)
+            .copied()
+            .unwrap_or_default();
+        let lane = self
+            .lane_otc_blocked_counts
+            .get(&member)
+            .copied()
+            .unwrap_or_default();
+        [
+            self.otc_blocked_totals[0].saturating_sub(own[0]) + lane[0],
+            self.otc_blocked_totals[1].saturating_sub(own[1]) + lane[1],
+        ]
+    }
+
     /// Number of unicast routes `member` currently has advertised: the
     /// group table minus the member's own-sourced entries plus its
-    /// lane substitutions (the family-summed count of
-    /// [`Self::adv_entry`], ADR-0126 Decision 4). O(1).
+    /// lane substitutions, minus the slots the RFC 9234 backstop
+    /// suppresses (the family-summed count of
+    /// [`Self::adv_entry_post_backstop`], ADR-0126 Decision 4). O(1).
     pub(in crate::manager) fn advertised_count_for(&self, member: IpAddr) -> usize {
         let own = self
             .source_counts
@@ -1756,7 +1859,8 @@ impl GroupRibOut {
             .lane_counts
             .get(&member)
             .map_or(0, |counts| counts[0] + counts[1]);
-        self.table.len().saturating_sub(own) + lane
+        let otc = self.otc_suppressed_counts(member);
+        (self.table.len().saturating_sub(own) + lane).saturating_sub(otc[0] + otc[1])
     }
 
     /// Number of VPN routes `member` currently has advertised. Non-RTC
@@ -1828,7 +1932,8 @@ impl GroupRibOut {
 
     /// Per-family synthesized advertised counts for a member (BMP RFC
     /// 8671 stat type 17 input): table minus own-sourced plus the
-    /// member's lane substitutions per unicast slot (ADR-0126
+    /// member's lane substitutions minus its RFC 9234
+    /// backstop-suppressed slots, per unicast slot (ADR-0126
     /// Decision 4). Zero-count families omitted.
     pub(in crate::manager) fn family_counts_for(&self, member: IpAddr) -> Vec<((Afi, Safi), u64)> {
         const FAMILIES: [(Afi, Safi); 4] = [
@@ -1840,6 +1945,7 @@ impl GroupRibOut {
         let totals = self.family_totals;
         let own = self.source_counts.get(&member).copied().unwrap_or_default();
         let lane = self.lane_counts.get(&member).copied().unwrap_or_default();
+        let otc = self.otc_suppressed_counts(member);
         // RTC group: the VPN slots come from the maintained per-member
         // counters (Φ-filtered), not the table synthesis.
         let rtc_vpn = self.rtc_negotiated().then(|| {
@@ -1854,7 +1960,10 @@ impl GroupRibOut {
             .filter_map(|(slot, &family)| {
                 let count = match (slot, rtc_vpn) {
                     (2 | 3, Some(counts)) => counts[slot - 2].max(0).unsigned_abs(),
-                    (0 | 1, _) => (totals[slot].saturating_sub(own[slot]) + lane[slot]) as u64,
+                    (0 | 1, _) => {
+                        ((totals[slot].saturating_sub(own[slot]) + lane[slot])
+                            .saturating_sub(otc[slot])) as u64
+                    }
                     _ => totals[slot].saturating_sub(own[slot]) as u64,
                 };
                 (count > 0).then_some((family, count))
@@ -3209,7 +3318,8 @@ impl RibManager {
 
     /// Borrowed synthesized advertised-route view for a grouped peer
     /// (`adv(m)` per staged key — the table entry or its lane
-    /// substitution, [`GroupRibOut::adv_entry`] — minus this member's
+    /// substitution, minus the slots the RFC 9234 backstop strips,
+    /// [`GroupRibOut::adv_entry_post_backstop`] — minus this member's
     /// exact-export rejections, intersected with what its outbound
     /// maxima admitted); `None` for ungrouped peers.
     pub(in crate::manager) fn grouped_advertised_routes_iter(
@@ -3223,7 +3333,9 @@ impl RibManager {
             // The substitution sits at the same (prefix, path_id 0)
             // slot, so the member-local overlays key identically for
             // the staged entry and its lane replacement.
-            let route = group.adv_entry(peer, &staged.prefix, staged.path_id)?.route;
+            let route = group
+                .adv_entry_post_backstop(peer, &staged.prefix, staged.path_id)?
+                .route;
             (!rejected.is_some_and(|keys| {
                 keys.contains(&ExactExportKey::Unicast(route.prefix, route.path_id))
             }) && limits.is_none_or(|limits| limits.admits_grouped(&route.prefix)))
@@ -3249,7 +3361,9 @@ impl RibManager {
                 .table
                 .iter_ordered_from(after)
                 .filter_map(move |staged| {
-                    let route = group.adv_entry(peer, &staged.prefix, staged.path_id)?.route;
+                    let route = group
+                        .adv_entry_post_backstop(peer, &staged.prefix, staged.path_id)?
+                        .route;
                     // A lane substitution keeps the staged entry's prefix
                     // position, so the persistent prefix-index ordering is
                     // unchanged — but the cursor a caller resumes with
@@ -3295,11 +3409,15 @@ impl RibManager {
             keys.iter()
                 .filter(|key| match key {
                     // A rejected key reduces the count only while the
-                    // member's derived view (`adv_entry`) holds a
-                    // route at that slot — staged or lane-substituted.
-                    ExactExportKey::Unicast(prefix, path_id) => {
-                        group.adv_entry(peer, prefix, *path_id).is_some()
-                    }
+                    // member's derived view holds a route at that slot
+                    // — staged or lane-substituted — that the RFC 9234
+                    // backstop delivers: a slot the backstop strips was
+                    // already subtracted by the synthesis's OTC term,
+                    // so subtracting its rejection too would count the
+                    // one missing slot twice.
+                    ExactExportKey::Unicast(prefix, path_id) => group
+                        .adv_entry_post_backstop(peer, prefix, *path_id)
+                        .is_some(),
                     _ => false,
                 })
                 .count()
@@ -3348,11 +3466,17 @@ impl RibManager {
             for key in rejected {
                 let family = match key {
                     // Subtract only while the member's derived view
-                    // (`adv_entry`) holds a route at the rejected slot
-                    // — the lane substitution shares the staged key's
-                    // prefix, so the family is identical either way.
+                    // holds a backstop-delivered route at the rejected
+                    // slot — the lane substitution shares the staged
+                    // key's prefix, so the family is identical either
+                    // way, and a backstop-stripped slot was already
+                    // subtracted by the synthesis's OTC term (the
+                    // `grouped_advertised_count` double-subtraction
+                    // rule, per family).
                     ExactExportKey::Unicast(prefix, path_id)
-                        if group.adv_entry(peer, prefix, *path_id).is_some() =>
+                        if group
+                            .adv_entry_post_backstop(peer, prefix, *path_id)
+                            .is_some() =>
                     {
                         Some(super::helpers::prefix_family(prefix))
                     }
@@ -9113,6 +9237,347 @@ mod tests {
         assert!(ungrouped_pass.withdrawn.is_empty());
         assert_eq!(grouped_refresh, DrainedWire::default());
         assert_eq!(ungrouped_refresh, DrainedWire::default());
+    }
+
+    /// The Decision 4 count synthesis reports the backstop's outcome:
+    /// `advertised_count_for` and `family_counts_for` agree with a
+    /// brute-force fold over `adv_entry_post_backstop` for every
+    /// member — across a blocked winner with a clean lane, a clean
+    /// winner with a blocked lane, a laneless blocked winner, and a
+    /// clean control — and stay in agreement as blocked slots flip
+    /// clean (the residue rebuild and the lane decrement seams).
+    #[test]
+    fn pcb_otc_counts_agree_with_post_backstop_fold() {
+        let mut m = staging_manager();
+        let (p1, p2, p3, p4) = (prefix(1), prefix(2), prefix(3), prefix(4));
+        // p1: blocked winner OTHER1, clean runner-up OTHER2.
+        seed(&mut m, with_otc_attr(cand(p1, OTHER1, 300)));
+        seed(&mut m, cand(p1, OTHER2, 200));
+        // p2: clean winner MEMBER, blocked runner-up OTHER2.
+        seed(&mut m, cand(p2, MEMBER, 300));
+        seed(&mut m, with_otc_attr(cand(p2, OTHER2, 200)));
+        // p3: clean winner OTHER1 (control).
+        seed(&mut m, cand(p3, OTHER1, 300));
+        // p4: blocked winner OTHER1, empty lane.
+        seed(&mut m, with_otc_attr(cand(p4, OTHER1, 300)));
+        m.group_ribs
+            .insert(PCB_GID, per_client_best_customer_group());
+        let _ = stage_pcb(&mut m, &[p1, p2, p3, p4]);
+
+        let assert_agreement = |m: &RibManager| {
+            let group = m.group_ribs.get(&PCB_GID).unwrap();
+            for member in [MEMBER, OTHER1, OTHER2] {
+                let folded = group
+                    .table
+                    .iter()
+                    .filter_map(|staged| {
+                        group.adv_entry_post_backstop(member, &staged.prefix, staged.path_id)
+                    })
+                    .count();
+                assert_eq!(
+                    group.advertised_count_for(member),
+                    folded,
+                    "synthesized count diverged from the post-backstop fold for {member}"
+                );
+                let family_total: u64 = group
+                    .family_counts_for(member)
+                    .iter()
+                    .map(|(_, count)| *count)
+                    .sum();
+                assert_eq!(
+                    family_total,
+                    u64::try_from(folded).unwrap(),
+                    "family counts diverged from the post-backstop fold for {member}"
+                );
+            }
+        };
+        assert_agreement(&m);
+        // Hand-computed over the four staged slots. MEMBER: p1 and p4
+        // blocked winners suppressed, p2 own-sourced with a blocked
+        // lane suppressed — only p3. OTHER1: its own p1 slot
+        // substitutes the CLEAN lane entry, p2's clean winner counts,
+        // p3/p4 own-sourced with no lane. OTHER2: p1/p4 suppressed,
+        // p2 and p3 clean winners count.
+        let group = m.group_ribs.get(&PCB_GID).unwrap();
+        assert_eq!(group.advertised_count_for(MEMBER), 1);
+        assert_eq!(group.advertised_count_for(OTHER1), 2);
+        assert_eq!(group.advertised_count_for(OTHER2), 2);
+        assert_eq!(
+            group.family_counts_for(MEMBER),
+            vec![((Afi::Ipv4, Safi::Unicast), 1)]
+        );
+
+        // p2's runner-up flips clean: the blocked-lane row retires and
+        // MEMBER's substituted slot counts again.
+        seed(&mut m, cand(p2, OTHER2, 210));
+        let _ = stage_pcb(&mut m, &[p2]);
+        assert_agreement(&m);
+        let group = m.group_ribs.get(&PCB_GID).unwrap();
+        assert_eq!(group.advertised_count_for(MEMBER), 2);
+
+        // p1's winner flips clean: the residue rebuild drops its row;
+        // only p4's laneless blocked winner stays suppressed.
+        seed(&mut m, cand(p1, OTHER1, 300));
+        let _ = stage_pcb(&mut m, &[p1]);
+        assert_agreement(&m);
+        let group = m.group_ribs.get(&PCB_GID).unwrap();
+        assert_eq!(group.advertised_count_for(MEMBER), 3);
+        assert_eq!(group.advertised_count_for(OTHER2), 3);
+    }
+
+    /// The advertised iterators yield adv(m) minus the backstop's
+    /// strip: a blocked winner disappears toward non-source members, a
+    /// blocked lane substitution disappears toward `source(w)`, while
+    /// clean winners and a clean substitution flow unchanged. The
+    /// ordered variant and the materialized wrapper agree.
+    #[test]
+    fn pcb_advertised_iterators_skip_backstop_stripped_slots() {
+        let mut m = staging_manager();
+        let (p1, p2, p3, p4) = (prefix(1), prefix(2), prefix(3), prefix(4));
+        seed(&mut m, with_otc_attr(cand(p1, OTHER1, 300)));
+        seed(&mut m, cand(p1, OTHER2, 200));
+        seed(&mut m, cand(p2, MEMBER, 300));
+        seed(&mut m, with_otc_attr(cand(p2, OTHER2, 200)));
+        seed(&mut m, cand(p3, OTHER1, 300));
+        seed(&mut m, with_otc_attr(cand(p4, OTHER1, 300)));
+        m.group_ribs
+            .insert(PCB_GID, per_client_best_customer_group());
+        let _ = stage_pcb(&mut m, &[p1, p2, p3, p4]);
+        for peer in [MEMBER, OTHER1, OTHER2] {
+            m.update_groups
+                .members
+                .insert(peer, GroupMembership::Grouped(PCB_GID));
+        }
+
+        let rows = |peer: IpAddr| -> Vec<(Prefix, IpAddr)> {
+            let mut rows: Vec<(Prefix, IpAddr)> = m
+                .grouped_advertised_routes_iter(peer)
+                .unwrap()
+                .map(|r| (r.prefix, r.peer))
+                .collect();
+            rows.sort();
+            rows
+        };
+        assert_eq!(rows(MEMBER), vec![(p3, OTHER1)]);
+        assert_eq!(
+            rows(OTHER1),
+            vec![(p1, OTHER2), (p2, MEMBER)],
+            "source(w)'s clean lane substitution stays visible"
+        );
+        assert_eq!(rows(OTHER2), vec![(p2, MEMBER), (p3, OTHER1)]);
+
+        let ordered: Vec<(Prefix, IpAddr)> = m
+            .grouped_advertised_routes_ordered_iter(MEMBER, None)
+            .unwrap()
+            .map(|r| (r.prefix, r.peer))
+            .collect();
+        assert_eq!(ordered, vec![(p3, OTHER1)]);
+        let materialized = m.grouped_advertised_routes(OTHER1).unwrap();
+        assert_eq!(materialized.len(), 2);
+    }
+
+    /// Seam-interplay pin: a slot that is BOTH exact-export-rejected
+    /// and OTC-blocked subtracts ONCE. The synthesis's OTC term
+    /// already removed it, so the rejection overlay must skip it — in
+    /// the count and in the per-family BMP stat 17 synthesis alike —
+    /// while a rejected CLEAN slot still subtracts.
+    #[test]
+    fn pcb_rejected_and_otc_blocked_slot_subtracts_once() {
+        let mut m = staging_manager();
+        let (p1, p2) = (prefix(1), prefix(2));
+        seed(&mut m, with_otc_attr(cand(p1, OTHER1, 300)));
+        seed(&mut m, cand(p2, OTHER1, 300));
+        m.group_ribs
+            .insert(PCB_GID, per_client_best_customer_group());
+        let _ = stage_pcb(&mut m, &[p1, p2]);
+        m.update_groups
+            .members
+            .insert(MEMBER, GroupMembership::Grouped(PCB_GID));
+
+        assert_eq!(m.grouped_advertised_count(MEMBER), Some(1));
+        assert_eq!(
+            m.grouped_family_counts(MEMBER),
+            Some(vec![((Afi::Ipv4, Safi::Unicast), 1)])
+        );
+
+        // Rejecting the blocked slot changes nothing: the route was
+        // never on the member's wire and the OTC term already
+        // subtracted it.
+        m.peer_unexportable
+            .entry(MEMBER)
+            .or_default()
+            .insert(ExactExportKey::Unicast(p1, 0));
+        assert_eq!(
+            m.grouped_advertised_count(MEMBER),
+            Some(1),
+            "a rejected+blocked slot must not subtract twice"
+        );
+        assert_eq!(
+            m.grouped_family_counts(MEMBER),
+            Some(vec![((Afi::Ipv4, Safi::Unicast), 1)])
+        );
+
+        // A rejected clean slot still subtracts.
+        m.peer_unexportable
+            .entry(MEMBER)
+            .or_default()
+            .insert(ExactExportKey::Unicast(p2, 0));
+        assert_eq!(m.grouped_advertised_count(MEMBER), Some(0));
+        assert_eq!(m.grouped_family_counts(MEMBER), Some(vec![]));
+    }
+
+    /// The subtraction is role-gated: under a non-blocking role (none
+    /// here; Provider and internal peers take the same RFC 9234
+    /// predicate) OTC-carrying winners and substitutions flow through
+    /// every query and count unchanged.
+    #[test]
+    fn pcb_otc_subtraction_is_role_gated() {
+        let mut m = staging_manager();
+        let (p1, p2) = (prefix(1), prefix(2));
+        seed(&mut m, with_otc_attr(cand(p1, OTHER1, 300)));
+        seed(&mut m, cand(p1, OTHER2, 200));
+        seed(&mut m, cand(p2, MEMBER, 300));
+        seed(&mut m, with_otc_attr(cand(p2, OTHER2, 200)));
+        m.group_ribs.insert(PCB_GID, per_client_best_group(None));
+        let _ = stage_pcb(&mut m, &[p1, p2]);
+        m.update_groups
+            .members
+            .insert(MEMBER, GroupMembership::Grouped(PCB_GID));
+
+        let group = m.group_ribs.get(&PCB_GID).unwrap();
+        assert!(
+            group.otc_blocked.is_empty(),
+            "a non-blocking role records no residue"
+        );
+        assert_eq!(group.advertised_count_for(MEMBER), 2);
+        assert_eq!(m.grouped_advertised_count(MEMBER), Some(2));
+        let mut rows: Vec<(Prefix, IpAddr)> = m
+            .grouped_advertised_routes_iter(MEMBER)
+            .unwrap()
+            .map(|r| (r.prefix, r.peer))
+            .collect();
+        rows.sort();
+        assert_eq!(rows, vec![(p1, OTHER1), (p2, OTHER2)]);
+    }
+
+    /// A plain group in a blocking role never stages a blocked route
+    /// (its in-walk gate rejects it), so its residue names
+    /// never-staged routes — the count synthesis and the iterators
+    /// must subtract exactly nothing and stay identical to the
+    /// table-derived view.
+    #[test]
+    fn plain_group_otc_residue_subtracts_nothing_from_counts() {
+        let mut m = staging_manager();
+        let (p1, p2) = (prefix(1), prefix(2));
+        seed(&mut m, with_otc_attr(cand(p1, OTHER1, 300)));
+        seed(&mut m, cand(p2, OTHER1, 300));
+        let _ = m.recompute_best(&HashSet::from([p1, p2]));
+        let mut group = empty_group();
+        group.local_role = Some(BgpRole::Customer);
+        m.group_ribs.insert(PCB_GID, group);
+        let _ = stage_pcb(&mut m, &[p1, p2]);
+        m.update_groups
+            .members
+            .insert(MEMBER, GroupMembership::Grouped(PCB_GID));
+
+        let group = m.group_ribs.get(&PCB_GID).unwrap();
+        assert!(
+            group.table.get(&p1, 0).is_none(),
+            "the in-walk gate keeps the blocked best out of a plain table"
+        );
+        assert!(
+            !group.otc_blocked.is_empty(),
+            "the diagnostic residue is recorded regardless"
+        );
+        assert_eq!(group.advertised_count_for(MEMBER), 1);
+        assert_eq!(m.grouped_advertised_count(MEMBER), Some(1));
+        assert_eq!(
+            m.grouped_family_counts(MEMBER),
+            Some(vec![((Afi::Ipv4, Safi::Unicast), 1)])
+        );
+        let rows: Vec<Prefix> = m
+            .grouped_advertised_routes_iter(MEMBER)
+            .unwrap()
+            .map(|r| r.prefix)
+            .collect();
+        assert_eq!(rows, vec![p2]);
+    }
+
+    /// Grouped-vs-ungrouped parity for the operator-facing query
+    /// surfaces under RFC 9234 — the missing OTC × query × BMP
+    /// intersection: with a blocked winner, a blocked lane
+    /// substitution toward `source(w)`, and a clean control prefix,
+    /// the grouped member's advertised-routes query, advertised
+    /// count, and per-family stat 17 synthesis all equal the
+    /// ungrouped per-client-best path's post-backstop Adj-RIB-Out.
+    /// The announced wire agrees too (withdraw parity modulo the
+    /// pinned fresh-blocked defensive withdraw is covered by the
+    /// dedicated backstop tests above).
+    #[test]
+    fn pcb_otc_query_surfaces_match_ungrouped_post_backstop() {
+        let (p1, p2, p3) = (prefix(1), prefix(2), prefix(3));
+        let feed = |m: &mut RibManager| {
+            // p1: blocked winner OTHER1 over a clean OTHER2 runner-up.
+            receive_routes(m, OTHER1, vec![with_otc_attr(cand(p1, OTHER1, 300))]);
+            receive_routes(m, OTHER2, vec![cand(p1, OTHER2, 200)]);
+            // p2: MEMBER sources the winner; its derived view is the
+            // BLOCKED runner-up.
+            receive_routes(m, MEMBER, vec![cand(p2, MEMBER, 300)]);
+            receive_routes(m, OTHER2, vec![with_otc_attr(cand(p2, OTHER2, 200))]);
+            // p3: clean control.
+            receive_routes(m, OTHER1, vec![cand(p3, OTHER1, 300)]);
+        };
+
+        let mut grouped = staging_manager();
+        let mut grouped_rx =
+            register_pcb_member(&mut grouped, MEMBER, per_client_best_customer_group());
+        grouped
+            .peer_local_roles
+            .insert(MEMBER, Some(BgpRole::Customer));
+        feed(&mut grouped);
+        let mut grouped_wire = drain_wire(&mut grouped_rx);
+
+        let mut ungrouped = staging_manager();
+        let mut ungrouped_rx = register_ungrouped_pcb_peer(&mut ungrouped, MEMBER);
+        ungrouped
+            .peer_local_roles
+            .insert(MEMBER, Some(BgpRole::Customer));
+        feed(&mut ungrouped);
+        let mut ungrouped_wire = drain_wire(&mut ungrouped_rx);
+
+        // The ungrouped Adj-RIB-Out is the oracle: post-backstop,
+        // blocked routes were never committed.
+        let oracle_rib = ungrouped.adj_ribs_out.get(&MEMBER).unwrap();
+        let mut oracle: Vec<(Prefix, IpAddr)> =
+            oracle_rib.iter().map(|r| (r.prefix, r.peer)).collect();
+        oracle.sort();
+        assert_eq!(oracle, vec![(p3, OTHER1)]);
+
+        let mut rows: Vec<(Prefix, IpAddr)> = grouped
+            .grouped_advertised_routes(MEMBER)
+            .unwrap()
+            .iter()
+            .map(|r| (r.prefix, r.peer))
+            .collect();
+        rows.sort();
+        assert_eq!(rows, oracle, "advertised-routes query divergence");
+        assert_eq!(
+            grouped.grouped_advertised_count(MEMBER),
+            Some(oracle_rib.len()),
+            "advertised-count divergence"
+        );
+        assert_eq!(
+            grouped.grouped_family_counts(MEMBER),
+            Some(oracle_rib.family_counts()),
+            "BMP stat 17 family-count divergence"
+        );
+
+        grouped_wire.announced.sort();
+        ungrouped_wire.announced.sort();
+        assert_eq!(
+            grouped_wire.announced, ungrouped_wire.announced,
+            "announced wire divergence"
+        );
     }
 
     /// A SINGLE-BEST group reaching the backstop with an OTC-blocked
