@@ -76,7 +76,11 @@ peer-context chains, Add-Path send (a negotiated capability outranks the
 fallback per family, ADR-0101 Decision 1), and ORF still disqualify with
 their existing reasons; ORR remains mutually exclusive by validation.
 Non-shareable or non-unicast-only combinations keep today's per-peer
-fallback with an operator-visible reason.
+fallback with an operator-visible reason; when `per_client_best` is
+configured but the key is not unicast-only (VPN/RTC families negotiated),
+that reason is the existing `per_client_best` disqualification string,
+reused unchanged — no new reason surface, the fallback behavior is
+documented instead.
 
 ### 2. Group winner = first permitted candidate in best-path order
 
@@ -113,6 +117,10 @@ captured source attributes, exactly the group table's per-entry payload —
   re-open the Add-Path rank problems of ADR-0099 Decision 5.
 - Not a per-member map: O(members × prefixes) is the shape grouping
   exists to delete.
+- Not a candidate reference re-derived at emit: replay — refresh, join,
+  resync, channel-full drain — must deliver `adv(m)` with zero policy
+  re-evaluation, which requires the post-policy form; the cost is
+  bounded by the lane's O(overlapped prefixes) population.
 
 State is O(overlapped prefixes) — populated only where a distinct-source
 permitted runner-up exists (18,304 / 91,520 entries at the receipt's two
@@ -221,14 +229,24 @@ per-client-best distribution mode; a lane-size gauge
 claim; the received-view-delta verifier is the campaign-level equivalence
 instrument.
 
+Rendered-default timing: `rs-config-render` fleets group immediately at
+ship, conditional on the acceptance gate below — both prongs, not the
+flip alone. The default flips in the release that lands Phase 3 only if
+the received-view-delta verifier proves byte-identical per-member views
+**and** the receipt meets the committed ≥4× sampler RSS-peak reduction.
+If the receipt misses that target, the rendered default holds one
+release behind an opt-out and flips only on a passing receipt.
+
 ## Open decisions
+
+Former open decisions 1 (fallback reason), 3 (rendered-default timing),
+and 4 (lane storage form) are decided and folded into the design above —
+Decisions 1, 9, and 3 respectively. Decisions 2 and 5 remain open calls
+for the owner:
 
 | # | Question | Options | Leaning |
 |---|---|---|---|
-| 1 | Fallback reason when `per_client_best` is set but the key is not unicast-only (VPN/RTC families negotiated) | reuse `per_client_best` / new `per_client_best_families` / reject at validation | reuse `per_client_best` — surface unchanged, documented |
 | 2 | Counter replay for the second permit evaluation | record both evals in group totals / record winner's only | record both; extend the ADR-0098 counter carve-out (oracle compares streams and state, never counters) |
-| 3 | Rendered-default timing: do `rs-config-render` fleets group immediately at ship? | immediate / one release behind an opt-out | immediate — the oracle plus the acceptance receipt are the earn-the-default evidence ADR-0101 Decision 1 asked for |
-| 4 | Lane storage form | full post-policy `Route` shell / candidate reference re-derived at emit | full shell — replay without policy re-evaluation requires the post-policy form; bounded at O(overlapped prefixes) |
 | 5 | ADR-0105 fast-path re-inclusion | never / demand-gated | demand-gated: revisit only with a measured fleet regularly reloading per-client-best cohorts and a receipt |
 
 ## Acceptance gate
@@ -257,6 +275,15 @@ shape, F ∈ {0.1, 0.5}:
 4. **Receipt:** rerun the realistic-mix campaign, gate as above; amend this
    ADR to Accepted with the measured rows; confirm `rs-config-render`
    keeps `path_hiding = true` with grouped output.
+
+Risk concentrates in Phase 2, not Phase 3. The runner-up lane is new
+group-shared mutable state, correctly excluded from the ADR-0105 fast
+path — that path's clean predicate (zero policy-filtered routes on both
+sides) contradicts the mitigation's reason to exist. The dirty-resync
+over-withdraw path and the channel-full `pending_extra_withdraws` seam
+must both handle the lane arms before the classifier flips; defects in
+this design will concentrate at the emit seams, not the classifier
+flip.
 
 ## Non-goals
 
