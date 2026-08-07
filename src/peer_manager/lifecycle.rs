@@ -761,6 +761,31 @@ impl PeerManager {
         Ok(())
     }
 
+    /// Runtime (RPC / config-transaction) entry to [`Self::delete_peer`].
+    /// The peer's inbound MD5 key and GTSM selector live on the BGP listener,
+    /// which only startup and SIGHUP reload can update — a runtime delete
+    /// would leave the stale host key installed (fail-closed, but a
+    /// delete-then-re-add wedges the re-added peer's inbound half until
+    /// SIGHUP). SIGHUP reconcile removals use [`Self::delete_peer`] directly:
+    /// the reload coordinator replaces the listener inventory in the same
+    /// coordinated apply.
+    pub(super) async fn delete_peer_runtime(
+        &mut self,
+        peer: PeerKey,
+        sync_config_snapshot: bool,
+    ) -> Result<PeerManagerNeighborConfig, PeerLifecycleError> {
+        if self.peers.get(&peer).is_some_and(|managed| {
+            managed.transport_config.md5_password.is_some() || managed.transport_config.ttl_security
+        }) {
+            return Err(PeerLifecycleError::RestartRequired(format!(
+                "peer {peer} resolves md5_password or ttl_security; inbound listener \
+                 enforcement is updated only by startup or SIGHUP reload — remove this \
+                 neighbor through the config file and SIGHUP"
+            )));
+        }
+        self.delete_peer(peer, sync_config_snapshot).await
+    }
+
     pub(super) async fn delete_peer(
         &mut self,
         peer: PeerKey,
