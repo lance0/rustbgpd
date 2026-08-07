@@ -254,7 +254,7 @@ gRPC request
 2. Checks for GR restart marker file (`runtime_state_dir/gr-restart.toml`). If present and not expired, static peers will advertise `R=1` in OPEN.
 3. Spawns RibManager task (owns all routing state).
 4. Spawns PeerManager task (owns neighbor lifecycle).
-5. Spawns BgpListener (accepts inbound TCP on port 179).
+5. Spawns BgpListener (accepts inbound TCP on `listen_port` on both address families — `0.0.0.0` and `[::]` — behind one accept loop; a family that cannot bind is logged and skipped).
 6. Spawns gRPC API server. Optionally spawns Prometheus metrics server (if `prometheus_addr` configured).
 7. Optionally spawns BMP manager + per-collector clients, MRT manager, RPKI VRP manager + RTR clients.
 8. For each configured neighbor, sends `AddPeer` to PeerManager → PeerManager spawns a PeerSession task.

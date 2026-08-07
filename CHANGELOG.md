@@ -11,6 +11,22 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Security
 
+- **The BGP listener was IPv4-only: inbound IPv6 sessions could not
+  establish, and IPv6 peers' listener-side authentication was silently
+  skipped** (LAN-907). The listener bound only `0.0.0.0:{listen_port}`, so
+  an IPv6 peer could establish only when rustbgpd was the active opener,
+  and every IPv6 peer's listener-side TCP MD5 key, TCP-AO MKT, and GTSM
+  selector was dropped by the listener-family filter — the inbound
+  enforcement added for IPv4 (LAN-902 below) was fully open for IPv6. The
+  daemon now always binds both families (`0.0.0.0` and `[::]`, with
+  `IPV6_V6ONLY` set so v4-mapped connections cannot race the IPv4 socket)
+  behind one accept loop, and installs each authentication entry on the
+  socket matching the peer's address family — startup, SIGHUP MD5/GTSM
+  inventory replacement, and live TCP-AO rotation included. No config
+  change is needed: existing configs gain IPv6 inbound automatically. If
+  one family cannot be bound (for example IPv6 disabled on the host), a
+  warning names the family and the other keeps serving; startup fails only
+  when neither binds.
 - **Inbound TCP MD5 and GTSM were not enforced on the BGP listener**
   (LAN-902). `md5_password` and `ttl_security` were installed only on
   active-open (outbound) sockets. The listener accepted unsigned inbound
