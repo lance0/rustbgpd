@@ -871,19 +871,27 @@ impl RibManager {
         explanation
     }
     /// Materialize the member-specific wire view used to explain a grouped
-    /// unicast export. Rejected rows remain absent until an exact encoder
-    /// accepts them again, just as they do in live group projections.
+    /// unicast export — `adv(m)` per staged key (ADR-0126 Decision 4): the
+    /// staged entry minus own-sourced slots, with the exception-lane
+    /// runner-up substituting at an own-sourced slot of a per-client-best
+    /// group. Rejected rows remain absent until an exact encoder accepts
+    /// them again, just as they do in live group projections (the
+    /// substitution shares the staged slot's key, so the member-local
+    /// rejection overlay applies identically).
     fn grouped_unicast_explain_view(&self, peer: IpAddr) -> Option<AdjRibOut> {
         let group = self
             .grouped_member_of(peer)
             .and_then(|gid| self.group_ribs.get(&gid))?;
         let rejected = self.peer_unexportable.get(&peer);
         let mut view = AdjRibOut::new(peer);
-        for route in group.table.iter().filter(|route| {
-            let key = ExactExportKey::Unicast(route.prefix, route.path_id);
-            route.peer != peer && !rejected.is_some_and(|keys| keys.contains(&key))
-        }) {
-            view.insert(route.clone());
+        for staged in group.table.iter() {
+            let key = ExactExportKey::Unicast(staged.prefix, staged.path_id);
+            if rejected.is_some_and(|keys| keys.contains(&key)) {
+                continue;
+            }
+            if let Some(entry) = group.adv_entry(peer, &staged.prefix, staged.path_id) {
+                view.insert(entry.route.clone());
+            }
         }
         Some(view)
     }
@@ -897,12 +905,17 @@ impl RibManager {
     /// table (its real advertised state) with split horizon applied
     /// against the member, exactly like the source-flip matrix does at
     /// emit time. ORR-vantage, Add-Path-send, and per-client-best peers
-    /// (never grouped — all three disqualify) take the dedicated explain
-    /// that shares its candidate collection and gate helpers with the
-    /// live ORR/multipath bodies — a per-client-best peer's explain
-    /// ranks the same filtered-best candidate walk live staging
-    /// performs, so it reports the advertised runner-up (not a false
-    /// "denied") when the Loc-RIB best is policy-denied.
+    /// take the dedicated explain that shares its candidate collection
+    /// and gate helpers with the live ORR/multipath bodies — a
+    /// per-client-best peer's explain ranks the same filtered-best
+    /// candidate walk live staging performs, so it reports the
+    /// advertised runner-up (not a false "denied") when the Loc-RIB
+    /// best is policy-denied OR own-sourced. A GROUPED per-client-best
+    /// member (ADR-0126) takes this same dedicated arm — the group's
+    /// winner walk and the ungrouped walk select identically per member
+    /// — with its advertised-state diff materialized from the group's
+    /// `adv(m)` view (lane substitution included) instead of the empty
+    /// private Adj-RIB-Out.
     #[expect(
         clippy::too_many_lines,
         reason = "the explain path mirrors the complete live unicast gate ladder"
@@ -948,13 +961,21 @@ impl RibManager {
         let add_path_send_max = self.add_path_send_max_for_prefix(peer, &prefix);
         let per_client_best = self.peer_per_client_best.contains(&peer);
 
+        // A grouped member has no private unicast Adj-RIB-Out, so its
+        // advertised-state diff runs against the materialized group
+        // view (`adv(m)`) on BOTH explain arms below.
+        let member_of = self.grouped_member_of(peer);
+        let grouped_rib_out = self.grouped_unicast_explain_view(peer);
+
         if orr_ctx.is_some() || add_path_send_max > 0 || per_client_best {
-            let explanation = Self::explain_single_best_prefix(
+            let mut explanation = Self::explain_single_best_prefix(
                 &self.loc_rib,
                 &self.ribs,
                 &self.unicast_prefix_peers,
                 &self.peer_is_rr_client,
-                self.adj_ribs_out.get(&peer),
+                grouped_rib_out
+                    .as_ref()
+                    .or_else(|| self.adj_ribs_out.get(&peer)),
                 prefix,
                 peer,
                 peer_asn,
@@ -974,6 +995,7 @@ impl RibManager {
                 per_client_best,
                 source,
             );
+            explanation.update_group_id = member_of.map(|gid| gid as u64);
             return self.apply_exact_export_overlay_to_explain(
                 peer,
                 &ExactExportKey::Unicast(prefix, explanation.path_id),
@@ -981,12 +1003,9 @@ impl RibManager {
             );
         }
 
-        // Dry run of the live single-best staging body. A grouped member has
-        // no private unicast Adj-RIB-Out, so materialize its exact wire view:
-        // shared table minus own-sourced and member-local unexportable rows.
-        let member_of = self.grouped_member_of(peer);
+        // Dry run of the live single-best staging body against the
+        // member's exact wire view.
         let empty_rib_out;
-        let grouped_rib_out = self.grouped_unicast_explain_view(peer);
         let rib_out = if let Some(grouped) = grouped_rib_out.as_ref() {
             grouped
         } else if let Some(out) = self.adj_ribs_out.get(&peer) {

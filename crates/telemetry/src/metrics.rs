@@ -293,6 +293,7 @@ pub struct BgpMetrics {
     update_group_regroups: IntCounter,
     update_group_fallback_peers: IntGauge,
     update_group_residue_entries: IntGauge,
+    update_group_runner_up_entries: IntGauge,
     update_group_interned_chains: IntGauge,
     update_group_keys: IntGauge,
     exact_export_rejections: IntCounterVec,
@@ -1109,6 +1110,16 @@ impl BgpMetrics {
              withdraws. Bounded in practice by the resync timer; a sustained \
              climb means a wedged member is accumulating residue its resync \
              never clears.",
+        )
+        .expect("valid metric definition");
+
+        let update_group_runner_up_entries = IntGauge::new(
+            "bgp_update_group_runner_up_entries",
+            "Exception-lane runner-up entries currently staged across \
+             per-client-best update groups (RFC 7947 path-hiding mitigation \
+             inside shared staging). Populated only for prefixes with a \
+             distinct-source permitted runner-up, so it tracks announcement \
+             overlap: O(overlapped prefixes), never O(members).",
         )
         .expect("valid metric definition");
 
@@ -2133,6 +2144,9 @@ impl BgpMetrics {
             .register(Box::new(update_group_residue_entries.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(update_group_runner_up_entries.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(update_group_interned_chains.clone()))
             .expect("metric not already registered");
         registry
@@ -2492,6 +2506,7 @@ impl BgpMetrics {
             update_group_regroups,
             update_group_fallback_peers,
             update_group_residue_entries,
+            update_group_runner_up_entries,
             update_group_interned_chains,
             update_group_keys,
             exact_export_rejections,
@@ -3340,6 +3355,12 @@ impl BgpMetrics {
     /// members.
     pub fn set_update_group_residue_entries(&self, count: i64) {
         self.update_group_residue_entries.set(count);
+    }
+
+    /// Set the total exception-lane runner-up entry count across
+    /// per-client-best update groups (ADR-0126).
+    pub fn set_update_group_runner_up_entries(&self, count: i64) {
+        self.update_group_runner_up_entries.set(count);
     }
 
     /// Set the number of export-chain contents interned by the

@@ -709,7 +709,16 @@ async fn otc_is_rejected_before_grouped_and_private_adj_rib_out_commit() {
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             outbound_tx: out_tx,
             export_policy: None,
-            sendable_families: ipv4_sendable(),
+            // The private peer must stay on the per-peer path: since the
+            // ADR-0126 classifier flip a unicast-only per-client-best
+            // session groups, so the private side negotiates VPNv4 too —
+            // the residual `per_client_best` fallback — which leaves its
+            // IPv4-unicast OTC flow under test unchanged.
+            sendable_families: if per_client_best {
+                vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv4, Safi::MplsVpn)]
+            } else {
+                ipv4_sendable()
+            },
             is_ebgp: true,
             route_reflector_client: false,
             orr_vantage: None,
@@ -946,7 +955,15 @@ async fn assert_otc_backpressure_dedup(per_client_best: bool) {
         peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: out_tx,
         export_policy: None,
-        sendable_families: ipv4_sendable(),
+        // Keep the per-client-best variant genuinely private post
+        // ADR-0126: a non-unicast-only session takes the residual
+        // fallback (the grouped per-client-best backpressure path is
+        // covered by the update-group OTC suite).
+        sendable_families: if per_client_best {
+            vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv4, Safi::MplsVpn)]
+        } else {
+            ipv4_sendable()
+        },
         is_ebgp: true,
         route_reflector_client: false,
         orr_vantage: None,

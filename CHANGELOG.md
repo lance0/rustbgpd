@@ -112,6 +112,22 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Per-client best-path peers with shareable export chains and
+  unicast-only sessions now join update groups (ADR-0126): the RFC 7947
+  §2.3 path-hiding mitigation is computed once per group — first
+  export-permitted candidate staged as the shared winner, per-prefix
+  runner-up substituted toward the winner's source — instead of once
+  per member, at shared-export cost. Per-member wire output is
+  unchanged; existing fleets regroup in place with no session resets
+  and an empty diff when converged. Peers with non-shareable
+  (peer-context) chains, and per-client-best sessions negotiating
+  VPNv4/VPNv6 or RT-Constrain, keep the per-peer path with the existing
+  fallback reasons. `rbgp neighbor` reports `group:N` for grouped
+  members (the per-client-best distribution mode is still named); a new
+  `bgp_update_group_runner_up_entries` gauge tracks the staged
+  runner-up lane, which grows with announcement overlap, never with
+  member count.
+
 - Inbound connections that previously slipped through the unenforced
   listener are now rejected (LAN-902): an unsigned inbound connection
   from a peer or dynamic range configured with `md5_password` no longer

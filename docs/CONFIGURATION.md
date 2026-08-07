@@ -1729,13 +1729,18 @@ Notes:
 - Requires `route_server_client = true` (and therefore eBGP); validation
   rejects it otherwise. It is mutually exclusive with `orr_vantage` by
   construction (ORR requires an iBGP route-reflector client).
-- Per-client-best peers are excluded from update-group sharing (their
-  selected route is per-member); `rbgp neighbor <peer>` reports the
-  `per_client_best` ungrouped reason and the peer counts toward
-  `bgp_update_group_fallback_peers`. Prefer Add-Path for large fleets.
-- Selection cost is O(candidate paths × export-policy evaluations) per
-  changed prefix for such peers — the same cost BIRD pays in filter runs
-  for `secondary`.
+- Per-client-best peers with shareable export chains and unicast-only
+  sessions join update groups (ADR-0126): the candidate walk runs once
+  per group — the first permitted candidate is the shared winner, and
+  the member sourcing it receives the staged runner-up instead — so
+  the mitigation costs one extra export evaluation per overlapped
+  changed prefix, not O(members). `rbgp neighbor <peer>` reports
+  `group:N` for such members; `bgp_update_group_runner_up_entries`
+  tracks the staged runner-up lane (grows with announcement overlap,
+  never with member count). A peer-context export chain, or a session
+  negotiating VPNv4/VPNv6 or RT-Constrain, keeps the peer on the
+  per-peer path with the existing `per_client_best` ungrouped reason,
+  counted in `bgp_update_group_fallback_peers`.
 
 #### Route-server control communities (RFC 7947 §2.3.2 / RFC 8195, `rs_control_communities`)
 
@@ -1962,7 +1967,7 @@ A peer falls back to the plain per-peer path (with identical semantics
 |--------|---------|
 | `policy_peer_context` | Its export chain matches on neighbor address/ASN/group, so verdicts can differ per peer |
 | `add_path_send` | Add-Path send is negotiated (candidate ranks are per-target) |
-| `per_client_best` | RFC 7947 §2.3.2 per-client best-path is enabled (the filtered best is per-member) |
+| `per_client_best` | RFC 7947 §2.3.2 per-client best-path on a session that also negotiates VPNv4/VPNv6 or RT-Constrain (unicast-only per-client-best sessions with shareable chains group instead, ADR-0126) |
 | `orr_vantage` | The peer is bound to an ORR vantage (per-vantage bests, ADR-0095) |
 | `orf_installed` | The peer negotiated ORF-receive (peer-pushed outbound filters) |
 | `slow_peer` | Slow-peer isolation moved the peer onto its own path; it can rejoin a group after the backlog clears |
@@ -1977,9 +1982,12 @@ fallback reason on its `Update Group` line. Metrics:
 `bgp_update_groups`, `bgp_update_group_members{group}`,
 `bgp_update_group_regroups_total`, `bgp_update_group_fallback_peers`,
 `bgp_update_group_interned_chains` and `bgp_update_group_keys`
-(registry growth — append-only for the process lifetime), and
+(registry growth — append-only for the process lifetime),
 `bgp_update_group_residue_entries` (withdrawal residue held while a
-member is dirty; returns to zero when its resync completes).
+member is dirty; returns to zero when its resync completes), and
+`bgp_update_group_runner_up_entries` (staged per-client-best runner-up
+lane entries across groups, ADR-0126 — grows with announcement
+overlap, never with member count).
 
 To compare two configured peers without depending on process-local `group:N`
 identifiers, query their live memberships directly:

@@ -269,6 +269,14 @@ fn update_group_comparison_to_proto(
             UpdateGroupComparisonDifference::NegotiatedFamilies => {
                 proto::UpdateGroupComparisonDifference::NegotiatedFamilies
             }
+            // ADR-0126: the `per_client_best` key axis has no proto
+            // value yet — the stable v1 message graph is frozen, and
+            // UNSPECIFIED is proto3's forward-compatible reading for a
+            // difference this schema revision cannot name. Give it a
+            // dedicated value at the next stable-surface revision.
+            UpdateGroupComparisonDifference::PerClientBest => {
+                proto::UpdateGroupComparisonDifference::Unspecified
+            }
             UpdateGroupComparisonDifference::LlgrFamilies => {
                 proto::UpdateGroupComparisonDifference::LlgrFamilies
             }

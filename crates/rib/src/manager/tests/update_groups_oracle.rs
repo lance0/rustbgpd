@@ -14,19 +14,20 @@
 //! direction) where the per-peer path diffs against Adj-RIB-Out. The
 //! folded end state must still be identical.
 //!
-//! The `oracle_pcb_*` scenarios pin today's UNGROUPED per-client-best
-//! streams under overlapping announcements. Until the ADR-0126 Phase 3
-//! classifier flip, BOTH sides classify `per_client_best` peers to the
-//! per-peer path, so these compare ungrouped-vs-ungrouped and their
-//! value is freezing the expected streams; after the flip the normal
-//! side classifies these peers into groups and the same scenarios
-//! become the grouping equivalence proof. One expected conversion at
-//! that point: `oracle_pcb_best_source_withdraw_promotes_runner_up`
-//! asserts exact streams, and the grouped side's promotion handling
-//! (the winner's source flipping into the former runner-up's slot) is
-//! an as-built over-announce class — the flip PR converts that
-//! scenario to the folded-state comparison (the dirty-resync pattern)
-//! rather than weakening the emit path.
+//! The `oracle_pcb_*` scenarios are the ADR-0126 grouping equivalence
+//! proof for per-client-best fleets under overlapping announcements:
+//! since the Phase 3 classifier flip the normal side classifies these
+//! peers into a per-client-best group while the forced side stays on
+//! the per-peer path — the streams they pinned before the flip are now
+//! compared grouped-vs-ungrouped for real. One scenario is compared by
+//! folded state instead of exact streams:
+//! `oracle_pcb_best_source_withdraw_promotes_runner_up`, because the
+//! grouped side's promotion handling (the winner's source flipping
+//! into the former runner-up's slot) is an as-built over-announce
+//! class — the promoted winner is re-announced to the member that
+//! already held it as the runner-up substitution (the withdrawn
+//! winner's source), an idempotent implicit replace the per-peer
+//! path equality-suppresses.
 
 use std::collections::BTreeMap;
 
@@ -410,9 +411,10 @@ pub(super) struct Oracle {
 pub(super) struct OraclePeerFeatures {
     pub(super) add_path_send_max: u32,
     pub(super) negotiated_orf_recv: Vec<(Afi, Safi)>,
-    /// RFC 7947 §2.3.2 per-client best-path (ADR-0101). Disqualifies
-    /// grouping today; becomes a group-key bit at the ADR-0126 Phase 3
-    /// classifier flip.
+    /// RFC 7947 §2.3.2 per-client best-path (ADR-0101). A group-key
+    /// bit for unicast-only sessions since the ADR-0126 Phase 3
+    /// classifier flip, so the oracle's normal side groups these peers
+    /// while the forced side keeps the per-peer correctness oracle.
     pub(super) per_client_best: bool,
 }
 
@@ -2807,16 +2809,18 @@ async fn oracle_pcb_steady_state_overlap_substitutes_runner_up() {
     assert_eq!(folded_src(&folded, C, pfx(2, 0)), Some(IpAddr::V4(B)));
 }
 
-/// The winner's source withdraws: the runner-up promotes. The former
-/// best's source (already holding the runner-up) sees nothing; the
+/// The winner's source withdraws: the runner-up promotes. The
 /// promoted winner's source flips into the former runner-up's slot as
-/// an implicit replace; everyone else gets the promoted winner. No
-/// withdraw ever reaches any wire.
+/// an implicit replace; everyone else converges on the promoted
+/// winner. No withdraw ever reaches any wire.
 ///
-/// NOTE (ADR-0126 Phase 3): after the classifier flip the grouped
-/// side's promotion handling is an as-built over-announce class —
-/// convert this scenario to the folded-state comparison then (see the
-/// module doc).
+/// Folded-state comparison (the dirty-resync pattern), per the module
+/// doc: the grouped side's source-flip arm re-announces the promoted
+/// winner toward the withdrawn winner's source — which already held
+/// that route as the lane substitution — where the per-peer path
+/// equality-suppresses against its Adj-RIB-Out. An idempotent
+/// over-announce (RFC 4271 implicit replace), so the folded end state
+/// must still be identical.
 #[tokio::test]
 async fn oracle_pcb_best_source_withdraw_promotes_runner_up() {
     let scenario = async |o: &mut Oracle| {
@@ -2830,18 +2834,20 @@ async fn oracle_pcb_best_source_withdraw_promotes_runner_up() {
         o.routes(A, vec![], vec![pfx(1, 0)]).await;
     };
     let (grouped, ungrouped) = run_grouped_and_ungrouped(None, scenario).await;
+    let folded = fold(&grouped);
     assert_eq!(
-        grouped, ungrouped,
-        "per-client-best streams must be identical on both oracle sides"
+        folded,
+        fold(&ungrouped),
+        "final advertised state must converge on both paths"
     );
-    // A held the runner-up substitution already; the promotion changes
-    // nothing on its wire.
-    assert_eq!(src_seq(&grouped, A), vec![IpAddr::V4(B)]);
-    // B: the winner, then — as the promoted winner's source — the
-    // implicit replace into the former runner-up's slot (C's route).
-    assert_eq!(src_seq(&grouped, B), vec![IpAddr::V4(A), IpAddr::V4(C)]);
-    // C: the winner, then the promoted winner.
-    assert_eq!(src_seq(&grouped, C), vec![IpAddr::V4(A), IpAddr::V4(B)]);
+    // A (source of the withdrawn best) holds the promoted winner it
+    // already had as the substitution.
+    assert_eq!(folded_src(&folded, A, pfx(1, 0)), Some(IpAddr::V4(B)));
+    // B — the promoted winner's source — ends on the former
+    // runner-up's slot content (C's route).
+    assert_eq!(folded_src(&folded, B, pfx(1, 0)), Some(IpAddr::V4(C)));
+    // C converges on the promoted winner.
+    assert_eq!(folded_src(&folded, C, pfx(1, 0)), Some(IpAddr::V4(B)));
     for member in [A, B, C] {
         assert!(
             grouped[&IpAddr::V4(member)]

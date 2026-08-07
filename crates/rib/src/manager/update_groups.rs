@@ -162,6 +162,13 @@ pub(super) struct GroupKey {
     /// part of the key, so a PE fleet with distinct RT sets still shares
     /// one group (design §2, option b).
     rtc_negotiated: bool,
+    /// RFC 7947 §2.3.2 per-client best-path (ADR-0126 Decision 1): a
+    /// mitigated group stages the first *permitted* candidate where a
+    /// plain group stages Loc-RIB-best-or-nothing, so the two must
+    /// never share a staged table. Set only on unicast-only keys — the
+    /// classifier keeps VPN/RTC per-client-best combinations on the
+    /// per-peer fallback with the existing `per_client_best` reason.
+    per_client_best: bool,
     /// Exact set of families the peer advertised LLGR for (RFC 9494
     /// export-restriction input), sorted raw `(afi, safi)` values.
     llgr_families: Vec<(u16, u8)>,
@@ -200,9 +207,10 @@ pub(super) enum GroupMembership {
     /// Add-Path send negotiated: the multipath candidate set is
     /// per-target (ranks shift when the target's own path is excluded).
     AddPathSend,
-    /// RFC 7947 §2.3.2 per-client best-path: the filtered best is
-    /// per-target (the member sourcing the Loc-RIB best gets the
-    /// runner-up), so no shared staged winner exists.
+    /// RFC 7947 §2.3.2 per-client best-path on a NON-unicast-only key
+    /// (VPN/RTC families negotiated) — the residual fallback since the
+    /// ADR-0126 Phase 3 classifier flip; unicast-only per-client-best
+    /// peers group on the `per_client_best` key bit instead.
     PerClientBest,
     /// ORR vantage bound: per-vantage winners are per-target
     /// (ADR-0095 Decision 5).
@@ -256,6 +264,7 @@ fn grouped_differences(left: &GroupKey, right: &GroupKey) -> Vec<UpdateGroupComp
         sendable_vpnv4: left_vpnv4,
         sendable_vpnv6: left_vpnv6,
         rtc_negotiated: left_rtc,
+        per_client_best: left_pcb,
         llgr_families: left_llgr,
     } = left;
     let GroupKey {
@@ -269,6 +278,7 @@ fn grouped_differences(left: &GroupKey, right: &GroupKey) -> Vec<UpdateGroupComp
         sendable_vpnv4: right_vpnv4,
         sendable_vpnv6: right_vpnv6,
         rtc_negotiated: right_rtc,
+        per_client_best: right_pcb,
         llgr_families: right_llgr,
     } = right;
     let mut differences = Vec::new();
@@ -294,6 +304,9 @@ fn grouped_differences(left: &GroupKey, right: &GroupKey) -> Vec<UpdateGroupComp
         || left_rtc != right_rtc
     {
         differences.push(UpdateGroupComparisonDifference::NegotiatedFamilies);
+    }
+    if left_pcb != right_pcb {
+        differences.push(UpdateGroupComparisonDifference::PerClientBest);
     }
     if left_llgr != right_llgr {
         differences.push(UpdateGroupComparisonDifference::LlgrFamilies);
@@ -1356,9 +1369,9 @@ pub(in crate::manager) struct GroupRibOut {
     pub(in crate::manager) llgr: Vec<(Afi, Safi)>,
     /// ADR-0126 staging mode: `true` stages the first export-permitted
     /// candidate (winner walk + runner-up lane) instead of
-    /// Loc-RIB-best-or-nothing. Dark until the Phase 3 classifier flip
-    /// — every production constructor passes `false`, so only tests
-    /// can build a per-client-best group.
+    /// Loc-RIB-best-or-nothing. Derived from the group key's
+    /// `per_client_best` bit (Decision 1) — group-uniform like every
+    /// other snapshot field here.
     pub(in crate::manager) per_client_best: bool,
 }
 
@@ -2283,6 +2296,9 @@ impl RibManager {
             out.build_shared_emit();
             staged.insert(gid, out);
         }
+        // The staging commit is the one lane mutation site outside the
+        // membership lifecycle (which refreshes via the gauge sweep).
+        self.refresh_lane_gauge();
         staged
     }
 
@@ -2321,11 +2337,8 @@ impl RibManager {
             for prefix in prefixes {
                 let old_source = group.table.get(prefix, 0).map(|r| r.peer);
                 if group.per_client_best {
-                    // ADR-0126 Phase 1: first-permitted winner walk +
-                    // runner-up lane. Reachable only from a
-                    // test-constructed group until the Phase 3
-                    // classifier flip — no production configuration
-                    // creates a per-client-best group.
+                    // ADR-0126 Decision 2: first-permitted winner walk
+                    // + runner-up lane.
                     let deltas_before = out.deltas.len();
                     let stage = Self::distribute_group_per_client_best_prefix(
                         &self.ribs,
@@ -3610,10 +3623,11 @@ impl RibManager {
                     .get(&peer)
                     .cloned()
                     .unwrap_or_default(),
-                // Dark until the ADR-0126 Phase 3 classifier flip: the
-                // classifier still disqualifies per-client-best peers,
-                // so no join can require the mitigated staging mode.
-                false,
+                // ADR-0126 Decision 1: the staging mode derives from
+                // the group key's `per_client_best` bit.
+                self.update_groups
+                    .group_key(gid)
+                    .is_some_and(|key| key.per_client_best),
                 self.loc_rib.len(),
             );
             self.group_ribs.insert(gid, group);
@@ -3805,6 +3819,7 @@ impl RibManager {
             sendable_vpnv4: fingerprint.sendable_vpnv4,
             sendable_vpnv6: fingerprint.sendable_vpnv6,
             rtc_negotiated: fingerprint.rtc_negotiated,
+            per_client_best: fingerprint.per_client_best,
             llgr_families: fingerprint.llgr_families,
         };
         GroupMembership::Grouped(self.update_groups.group_for(key))
@@ -3824,10 +3839,10 @@ impl RibManager {
         // A per-client-best source group never takes the ADR-0105 fast
         // path — nor its unfenced destination prestage, whose only
         // preflight is this function. Checked on the source cell: the
-        // ADR-0126 Phase 3 `per_client_best` key bit keeps source and
-        // destination in agreement, and `begin_policy_transition_group`
-        // only ever creates plain destination cells. Re-inclusion is
-        // demand-gated (ADR-0126 Decision 8).
+        // ADR-0126 `per_client_best` key bit keeps source and
+        // destination in agreement, so rejecting the source here also
+        // keeps every destination cell the prestage creates plain.
+        // Re-inclusion is demand-gated (ADR-0126 Decision 8).
         if self
             .group_ribs
             .get(&source)
@@ -3875,10 +3890,14 @@ impl RibManager {
                 .get(&peer)
                 .cloned()
                 .unwrap_or_default(),
-            // Dark until the ADR-0126 Phase 3 classifier flip (per-
-            // client-best groups are also excluded from this fast
-            // path outright per ADR-0126 Decision 8).
-            false,
+            // ADR-0126 Decision 1: derived from the key bit. In
+            // practice always false here — per-client-best SOURCE
+            // groups never pass the fast-path preflight (Decision 8),
+            // and the key bit keeps source and destination in
+            // agreement.
+            self.update_groups
+                .group_key(gid)
+                .is_some_and(|key| key.per_client_best),
             self.loc_rib.len(),
         );
         self.group_ribs.insert(gid, group);
@@ -4152,6 +4171,26 @@ impl RibManager {
                 None => self.metrics.remove_update_group_members(&id.to_string()),
             }
         }
+        // Group lifecycle (join builds a lane, the last leave drops
+        // it) mutates lane state too, so the membership seams refresh
+        // the lane gauge alongside the staging seam.
+        self.refresh_lane_gauge();
+    }
+
+    /// Re-derive the ADR-0126 exception-lane gauge: total runner-up
+    /// entries across per-client-best groups — the observable for the
+    /// design's O(overlapped prefixes) state claim (Decision 9).
+    /// Called from every lane mutation seam — the staging commit and
+    /// the group-lifecycle refresh — never behind a growth-only guard
+    /// (the gate-metric rule). O(groups) integer sums.
+    pub(in crate::manager) fn refresh_lane_gauge(&self) {
+        let entries = self
+            .group_ribs
+            .values()
+            .map(|group| group.runner_up.len())
+            .sum::<usize>();
+        self.metrics
+            .set_update_group_runner_up_entries(i64::try_from(entries).unwrap_or(i64::MAX));
     }
 
     /// TEST ONLY: answer `RibUpdate::TestQueryVpnAdvertised` — the
@@ -4521,6 +4560,7 @@ mod tests {
             sendable_vpnv4: false,
             sendable_vpnv6: false,
             rtc_negotiated: false,
+            per_client_best: false,
             llgr_families: vec![(1, 1)],
         }
     }
@@ -4730,6 +4770,7 @@ mod tests {
         check!(sendable_vpnv4 = true => D::NegotiatedFamilies);
         check!(sendable_vpnv6 = true => D::NegotiatedFamilies);
         check!(rtc_negotiated = true => D::NegotiatedFamilies);
+        check!(per_client_best = true => D::PerClientBest);
         check!(llgr_families = vec![(2, 1)] => D::LlgrFamilies);
         let mut combined = base.clone();
         combined.chain = None;
@@ -5904,10 +5945,8 @@ mod tests {
     /// The `join_group` table-build seam: lane commits live in the
     /// staging pass's commit block, so a full-table build pass whose
     /// output is DISCARDED (exactly what `join_group` runs before the
-    /// first member replays) still leaves a fully populated lane.
-    /// `join_group` itself passes `per_client_best = false` until the
-    /// ADR-0126 Phase 3 classifier flip, so the pass is driven
-    /// directly here.
+    /// first member replays) still leaves a fully populated lane. The
+    /// pass is driven directly here against a fixture group cell.
     #[test]
     fn pcb_table_build_pass_populates_lane() {
         let mut m = staging_manager();
@@ -7581,10 +7620,10 @@ mod tests {
 
     /// Register `member` as a live outbound peer (real `PeerUp`, IPv4
     /// unicast, the permissive test exact encoder unless one is
-    /// pending) and point its membership at the constructed group —
-    /// the ONLY way a per-client-best member can exist until the
-    /// ADR-0126 Phase 3 classifier flip. The registration's own dump
-    /// is drained so a test observes only what it triggers.
+    /// pending) and point its membership at the constructed group,
+    /// bypassing the classifier so the fixture controls the group cell
+    /// exactly. The registration's own dump is drained so a test
+    /// observes only what it triggers.
     fn register_pcb_member(
         m: &mut RibManager,
         member: IpAddr,
@@ -8733,11 +8772,15 @@ mod tests {
     /// Register `member` on the UNGROUPED per-client-best path — the
     /// grouped path's correctness oracle — with the staging knobs of
     /// [`per_client_best_group`] (iBGP RR client) so both sides run
-    /// the same export gates.
+    /// the same export gates. Since the ADR-0126 Phase 3 flip a
+    /// unicast-only per-client-best peer classifies Groupable, so the
+    /// slow-isolation override (which changes membership only, never
+    /// an export gate) keeps this fixture on the per-peer path.
     fn register_ungrouped_pcb_peer(
         m: &mut RibManager,
         member: IpAddr,
     ) -> tokio::sync::mpsc::Receiver<crate::update::OutboundRouteUpdate> {
+        m.slow_isolated_peers.insert(member);
         let (outbound_tx, mut outbound_rx) = tokio::sync::mpsc::channel(8);
         m.handle_update(crate::update::RibUpdate::PeerUp {
             peer: member,
