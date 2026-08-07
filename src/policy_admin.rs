@@ -388,6 +388,11 @@ pub fn peer_group_references(config: &Config, name: &str) -> Vec<String> {
             refs.push(format!("neighbor {}", neighbor.address));
         }
     }
+    for range in &config.dynamic_neighbors {
+        if range.peer_group == name {
+            refs.push(format!("dynamic_neighbors {}", range.prefix));
+        }
+    }
     for (set_name, set) in &config.policy.neighbor_sets {
         if set.peer_groups.iter().any(|group| group == name) {
             refs.push(format!("neighbor_set {set_name}"));
@@ -1008,6 +1013,27 @@ remote_asn = 65002
 
         let refs = peer_group_references(&config, "fabric");
         assert_eq!(refs, vec!["fib_table edge"]);
+    }
+
+    #[test]
+    fn peer_group_references_include_dynamic_neighbor_ranges() {
+        // A group referenced only by a [[dynamic_neighbors]] range must
+        // still count as referenced: DeletePeerGroup / SIGHUP refuse the
+        // delete iff this list is non-empty, and deleting it would drop
+        // every future dynamic peer from the range at accept time.
+        let mut config = minimal_config();
+        config
+            .dynamic_neighbors
+            .push(crate::config::DynamicNeighborConfig {
+                prefix: "192.0.2.0/24".to_string(),
+                peer_group: "fabric".to_string(),
+                remote_asn: 0,
+                description: None,
+                tcp_ao: None,
+            });
+
+        let refs = peer_group_references(&config, "fabric");
+        assert_eq!(refs, vec!["dynamic_neighbors 192.0.2.0/24"]);
     }
 
     #[test]

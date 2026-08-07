@@ -36,6 +36,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   mismatch, manifest/input binding, achieved-overlap drift, grouped-bound
   violations, and mismatched received-view scenarios.
 
+- `bmp_loc_rib_source_drops_total{event, reason}`: RFC 9069 Loc-RIB
+  events (route monitoring, periodic stats) dropped at the
+  RIB/PeerManager→BmpManager channel. This path previously only warned;
+  `bmp_source_drops_total` covers only the PeerSession→BmpManager path.
+
 ### Changed
 
 - GTSM (RFC 5082) now enforces strict TTL/Hop-Limit 255 on receive
@@ -47,6 +52,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Low-severity defect batch (LAN-906): a staged config write no longer
+  leaks its secret-bearing temp file when the publishing rename or
+  directory fsync fails (`StagedWrite` now removes the temp file on every
+  non-publishing path); `bmp_collector_drops_total` counts the held-back
+  live Loc-RIB messages discarded by a failed dump alongside the dump
+  stream itself instead of undercounting by up to the buffer size;
+  deleting a peer group referenced only by a `[[dynamic_neighbors]]`
+  range is now refused with `StillReferenced` instead of silently
+  orphaning the range; and collector-labeled BMP counter series
+  (`bmp_collector_drops_total`, `bmp_replay_attempts_total`,
+  `bmp_control_event_drops_total`) are reaped on BMP manager teardown
+  like the live-buffer gauges already were.
 - API service consistency batch (LAN-898): every peer-manager read now
   carries a 2-second server-side deadline (`DEADLINE_EXCEEDED` instead of
   hanging `ListPeers`/`GetPeerState`, gNMI Get/Subscribe snapshots, and

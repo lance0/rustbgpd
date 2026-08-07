@@ -573,6 +573,11 @@ impl PeerManager {
             return;
         };
         if let Err(e) = bmp_tx.try_send(BmpEvent::LocRibStats { per_family }) {
+            let reason = match e {
+                tokio::sync::mpsc::error::TrySendError::Full(_) => "channel_full",
+                tokio::sync::mpsc::error::TrySendError::Closed(_) => "channel_closed",
+            };
+            self.metrics.record_bmp_loc_rib_source_drop("stats", reason);
             warn!(
                 error = %e,
                 "BMP event channel full or closed, dropping periodic Loc-RIB stats report"

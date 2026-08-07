@@ -185,8 +185,11 @@ thread_local! {
 /// **Adding a `peer`-labeled Vec metric?** Add it to the reap list in
 /// [`Self::reap_peer_series`] too, so the series are removed when the
 /// peer is deleted. Families without a `peer` label are process-global
-/// (or keyed by another identity such as VNI, VRF, or BMP collector)
-/// and are intentionally not reaped.
+/// (or keyed by another identity such as VNI or VRF) and are
+/// intentionally not reaped — except `collector`-labeled BMP families,
+/// which [`Self::reap_bmp_collector_series`] and
+/// [`Self::reap_bmp_loc_rib_dump_live_buffer`] remove on BMP manager
+/// teardown.
 #[derive(Debug, Clone)]
 pub struct BgpMetrics {
     registry: Registry,
@@ -392,6 +395,7 @@ pub struct BgpMetrics {
 
     // ── BMP exporter ───────────────────────────────────────────
     bmp_source_drops: IntCounterVec,
+    bmp_loc_rib_source_drops: IntCounterVec,
     bmp_collector_drops: IntCounterVec,
     bmp_replay_attempts: IntCounterVec,
     bmp_control_event_drops: IntCounterVec,
@@ -1792,6 +1796,15 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
+        let bmp_loc_rib_source_drops = IntCounterVec::new(
+            Opts::new(
+                "bmp_loc_rib_source_drops_total",
+                "RFC 9069 Loc-RIB events dropped at the RIB/PeerManager→BmpManager channel, by event (route_monitoring, stats) and bounded reason (channel_full, channel_closed)",
+            ),
+            &["event", "reason"],
+        )
+        .expect("valid metric definition");
+
         let bmp_collector_drops = IntCounterVec::new(
             Opts::new(
                 "bmp_collector_drops_total",
@@ -2354,6 +2367,9 @@ impl BgpMetrics {
             .register(Box::new(bmp_source_drops.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(bmp_loc_rib_source_drops.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(bmp_collector_drops.clone()))
             .expect("metric not already registered");
         registry
@@ -2554,6 +2570,7 @@ impl BgpMetrics {
             evpn_foreign_nhid_range_conflicts,
             evpn_runtime_decomposed_fail_stops,
             bmp_source_drops,
+            bmp_loc_rib_source_drops,
             bmp_collector_drops,
             bmp_replay_attempts,
             bmp_control_event_drops,
@@ -2697,19 +2714,27 @@ impl BgpMetrics {
         let _ = self.peer_session_established.remove_label_values(labels);
     }
 
-    /// Remove every series of one Vec metric whose `peer` label equals
-    /// `peer`.
+    fn reap_peer_series_from_vec<T: prometheus::core::MetricVecBuilder>(
+        vec: &prometheus::core::MetricVec<T>,
+        peer: &str,
+    ) {
+        Self::reap_label_series_from_vec(vec, "peer", peer);
+    }
+
+    /// Remove every series of one Vec metric whose `label` label equals
+    /// `value`.
     ///
     /// The prometheus crate has no wildcard removal —
     /// `remove_label_values` needs the exact, complete label-value
     /// tuple in the declared label order. So: collect the family proto,
-    /// select the metrics whose `peer` label matches, rebuild each full
+    /// select the metrics whose `label` label matches, rebuild each full
     /// tuple in the order of the family's declared `variable_labels`
     /// (the proto sorts label pairs by name, which may differ), and
     /// remove them one by one.
-    fn reap_peer_series_from_vec<T: prometheus::core::MetricVecBuilder>(
+    fn reap_label_series_from_vec<T: prometheus::core::MetricVecBuilder>(
         vec: &prometheus::core::MetricVec<T>,
-        peer: &str,
+        label: &str,
+        value: &str,
     ) {
         use prometheus::core::Collector;
 
@@ -2722,7 +2747,7 @@ impl BgpMetrics {
                 let labels = metric.get_label();
                 if !labels
                     .iter()
-                    .any(|label| label.name() == "peer" && label.value() == peer)
+                    .any(|pair| pair.name() == label && pair.value() == value)
                 {
                     continue;
                 }
@@ -4306,6 +4331,16 @@ impl BgpMetrics {
             .inc();
     }
 
+    /// Record an RFC 9069 Loc-RIB event dropped at the
+    /// RIB/PeerManager→BmpManager channel. `event` is `route_monitoring`
+    /// or `stats`; `reason` is `channel_full` or `channel_closed`. Both
+    /// label sets are bounded, so this family needs no reaping.
+    pub fn record_bmp_loc_rib_source_drop(&self, event: &str, reason: &str) {
+        self.bmp_loc_rib_source_drops
+            .with_label_values(&[event, reason])
+            .inc();
+    }
+
     /// Record `count` BMP messages dropped at the BmpManager→BmpClient
     /// channel. `count = 1` for fan-out drops; replay aborts pass the
     /// remaining cached-PeerUp count so an early break still surfaces
@@ -4379,6 +4414,18 @@ impl BgpMetrics {
         let _ = self
             .bmp_loc_rib_dump_live_buffer_high_watermark
             .remove_label_values(labels);
+    }
+
+    /// Remove every collector-labeled BMP counter series for `collector`.
+    ///
+    /// Counterpart of [`Self::reap_bmp_loc_rib_dump_live_buffer`] for the
+    /// counter families, called from the same collector-teardown site
+    /// (`BmpManager`'s `Drop`) so a collector that leaves the config does
+    /// not keep its series alive in a long-lived registry.
+    pub fn reap_bmp_collector_series(&self, collector: &str) {
+        Self::reap_label_series_from_vec(&self.bmp_collector_drops, "collector", collector);
+        Self::reap_label_series_from_vec(&self.bmp_replay_attempts, "collector", collector);
+        Self::reap_label_series_from_vec(&self.bmp_control_event_drops, "collector", collector);
     }
 
     // ── Event history outbox (ADR-0072) ─────────────────────────
@@ -6043,6 +6090,27 @@ mod tests {
         let text = gather_text(&m);
         assert!(!text.contains("collector=\"127.0.0.1:11000\""));
         assert!(text.contains("collector=\"127.0.0.1:11001\""));
+    }
+
+    #[test]
+    fn bmp_loc_rib_source_drop_counter() {
+        let m = BgpMetrics::new();
+        m.record_bmp_loc_rib_source_drop("route_monitoring", "channel_full");
+        m.record_bmp_loc_rib_source_drop("route_monitoring", "channel_full");
+        m.record_bmp_loc_rib_source_drop("stats", "channel_closed");
+
+        assert_eq!(
+            m.bmp_loc_rib_source_drops
+                .with_label_values(&["route_monitoring", "channel_full"])
+                .get(),
+            2
+        );
+        assert_eq!(
+            m.bmp_loc_rib_source_drops
+                .with_label_values(&["stats", "channel_closed"])
+                .get(),
+            1
+        );
     }
 
     #[test]
