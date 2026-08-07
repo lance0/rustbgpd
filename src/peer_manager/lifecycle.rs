@@ -515,6 +515,16 @@ impl PeerManager {
             .resolve_neighbor(neighbor)
             .map_err(|error| PeerLifecycleError::Invalid(error.to_string()))?;
         let config = Self::peer_manager_config_from_resolved(resolved, false);
+        // Inbound MD5/GTSM enforcement lives on the BGP listener, which only
+        // startup and SIGHUP reload can update — a runtime-created neighbor
+        // resolving to either would have an unprotected inbound half.
+        if config.md5_password.is_some() || config.ttl_security {
+            return Err(PeerLifecycleError::RestartRequired(format!(
+                "peer {peer} resolves md5_password or ttl_security; inbound listener \
+                 enforcement is updated only by startup or SIGHUP reload — add this neighbor \
+                 through the config file and SIGHUP"
+            )));
+        }
 
         let previous_config = std::mem::replace(&mut self.current_config, next_config);
         match self.add_peer(config, false).await {
@@ -771,6 +781,29 @@ impl PeerManager {
         self.delete_peer_checked(peer, false, next_tcp_ao, false)
             .await
             .map(|_| ())
+    }
+
+    /// Runtime (config-transaction) entry to [`Self::reconfigure_peer`].
+    /// Unlike SIGHUP reload — which replaces the listener MD5/GTSM inventory
+    /// in the same coordinated apply — runtime paths cannot update the BGP
+    /// listener, so a change to either field must fail loudly instead of
+    /// leaving the listener enforcing the old inventory.
+    pub(super) async fn reconfigure_peer_runtime(
+        &mut self,
+        config: PeerManagerNeighborConfig,
+    ) -> Result<PeerManagerNeighborConfig, PeerLifecycleError> {
+        let peer = PeerKey::new(config.address, config.interface.clone());
+        if let Some(managed) = self.peers.get(&peer)
+            && (managed.transport_config.md5_password != config.md5_password
+                || managed.transport_config.ttl_security != config.ttl_security)
+        {
+            return Err(PeerLifecycleError::RestartRequired(format!(
+                "peer {peer} changes md5_password or ttl_security; inbound listener \
+                 enforcement is updated only by startup or SIGHUP reload — apply this change \
+                 through the config file and SIGHUP"
+            )));
+        }
+        self.reconfigure_peer(config).await
     }
 
     pub(super) async fn reconfigure_peer(
@@ -1069,6 +1102,20 @@ impl PeerManager {
             if managed.transport_config.tcp_ao != target.tcp_ao {
                 return Err(PeerLifecycleError::RestartRequired(format!(
                     "peer reshape target {peer} changes tcp_ao; TCP-AO changes require a daemon restart"
+                )));
+            }
+            // Inbound MD5 keys and GTSM selectors live on the BGP listener,
+            // which only startup and the SIGHUP reload coordinator can
+            // update. A runtime reshape that changed them would leave the
+            // listener enforcing the old inventory (stale password accepted
+            // inbound, new password rejected).
+            if managed.transport_config.md5_password != target.md5_password
+                || managed.transport_config.ttl_security != target.ttl_security
+            {
+                return Err(PeerLifecycleError::RestartRequired(format!(
+                    "peer reshape target {peer} changes md5_password or ttl_security; inbound \
+                     listener enforcement is updated only by startup or SIGHUP reload — apply \
+                     this change through the config file and SIGHUP"
                 )));
             }
             // Defense in depth: the transaction executor already gates dynamic

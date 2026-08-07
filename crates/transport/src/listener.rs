@@ -111,11 +111,62 @@ pub enum TcpAoListenerOwnerKind {
     Dynamic,
 }
 
+/// TCP MD5 (RFC 2385) key to install on the inbound listener socket.
+///
+/// Host-length selectors (`/32`, `/128`) key one static neighbor via
+/// `TCP_MD5SIG`; shorter selectors key a dynamic-neighbor range via
+/// `TCP_MD5SIG_EXT` + `TCP_MD5SIG_FLAG_PREFIX`. The kernel resolves
+/// overlapping keys by longest prefix match and copies the matched key onto
+/// each accepted child, so established inbound sessions keep verifying and
+/// signing after listener inventory changes.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Md5ListenerKey {
+    /// Remote network address matched by this key.
+    pub peer: IpAddr,
+    /// Prefix length for the remote network.
+    pub prefix_len: u8,
+    /// MD5 password shared with the covered peers.
+    pub password: crate::config::TransportAuthSecret,
+}
+
+impl std::fmt::Debug for Md5ListenerKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Md5ListenerKey")
+            .field("peer", &self.peer)
+            .field("prefix_len", &self.prefix_len)
+            .field("password", &"<redacted>")
+            .finish()
+    }
+}
+
+/// GTSM (RFC 5082) enforcement selector for inbound accepts.
+///
+/// The listener carries one entry per configured static neighbor and dynamic
+/// range — including `enforce: false` entries — so a static neighbor without
+/// `ttl_security` inside an enforcing dynamic range resolves to its own
+/// policy: exact static match wins, then longest dynamic prefix match.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TtlSecurityListenerPolicy {
+    /// Configuration owner kind for match precedence.
+    pub owner: TcpAoListenerOwnerKind,
+    /// Remote network address matched by this selector.
+    pub peer: IpAddr,
+    /// Prefix length for the remote network.
+    pub prefix_len: u8,
+    /// Whether matched inbound connections require TTL/Hop-Limit 255.
+    pub enforce: bool,
+}
+
 /// Socket options installed before the BGP listener enters `listen(2)`.
 #[derive(Clone, Default)]
 pub struct ListenerSocketOptions {
     /// Static-neighbor TCP-AO MKTs for passive opens.
     pub tcp_ao_keys: Vec<TcpAoListenerKey>,
+    /// TCP MD5 keys for passive opens: host keys for static neighbors,
+    /// prefix keys for dynamic-neighbor ranges.
+    pub md5_keys: Vec<Md5ListenerKey>,
+    /// GTSM selectors applied to accepted children.
+    pub ttl_security: Vec<TtlSecurityListenerPolicy>,
 }
 
 /// BGP inbound listener. Accepts TCP connections and forwards them
@@ -124,6 +175,11 @@ pub struct BgpListener {
     listener: TcpListener,
     accept_tx: mpsc::Sender<AcceptedConnection>,
     tcp_ao_keys: TcpAoListenerKeyIndex,
+    /// TCP MD5 keys currently installed on the listening socket, kept for
+    /// reload-time inventory replacement.
+    md5_keys: Vec<Md5ListenerKey>,
+    /// GTSM selectors applied to accepted children.
+    ttl_security: Vec<TtlSecurityListenerPolicy>,
     /// Latest generation installed in the listener kernel inventory. This may
     /// lead the globally committed generation while sessions are applying.
     tcp_ao_generation: TcpAoRotationGeneration,
@@ -207,6 +263,11 @@ enum TcpAoListenerCommand {
     AcknowledgeGlobalCommit {
         generation: TcpAoRotationGeneration,
         reply: oneshot::Sender<std::io::Result<TcpAoRotationStatus>>,
+    },
+    ReplaceInboundAuth {
+        md5_keys: Vec<Md5ListenerKey>,
+        ttl_security: Vec<TtlSecurityListenerPolicy>,
+        reply: oneshot::Sender<std::io::Result<()>>,
     },
 }
 
@@ -530,6 +591,52 @@ impl TcpAoListenerHandle {
         self.status_rx.borrow().clone()
     }
 
+    /// Replace the listener's TCP MD5 kernel inventory and GTSM selector set
+    /// with the reload-desired state. Established children are unaffected;
+    /// converging replacement semantics make a retry of a partial failure
+    /// safe.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the listener task is unavailable, the control
+    /// deadline expires, or a kernel key install/remove fails (a partial
+    /// application is safe to retry with the identical inventory).
+    pub async fn replace_inbound_auth(
+        &self,
+        md5_keys: Vec<Md5ListenerKey>,
+        ttl_security: Vec<TtlSecurityListenerPolicy>,
+    ) -> std::io::Result<()> {
+        tokio::time::timeout(TCP_AO_ROTATION_CONTROL_TIMEOUT, async {
+            let (reply, response) = oneshot::channel();
+            self.tx
+                .send(TcpAoListenerCommand::ReplaceInboundAuth {
+                    md5_keys,
+                    ttl_security,
+                    reply,
+                })
+                .await
+                .map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::BrokenPipe,
+                        "BGP listener control task exited",
+                    )
+                })?;
+            response.await.map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "BGP listener inbound-auth reply dropped",
+                )
+            })?
+        })
+        .await
+        .map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "BGP listener inbound-auth replacement timed out",
+            )
+        })?
+    }
+
     /// Mark a later global phase (currently established-session apply) failed
     /// after this listener installed but did not globally commit the desired
     /// generation. A retry reuses the same immutable generation.
@@ -769,6 +876,34 @@ impl TcpAoListenerKeyIndex {
     }
 }
 
+/// Resolve whether GTSM is enforced for one inbound peer address, matching
+/// accept-time neighbor resolution: an exact static selector wins, otherwise
+/// the longest covering dynamic selector, otherwise no enforcement.
+fn resolve_ttl_security(policies: &[TtlSecurityListenerPolicy], addr: IpAddr) -> bool {
+    let covers = |policy: &TtlSecurityListenerPolicy| match (policy.peer, addr) {
+        (IpAddr::V4(network), IpAddr::V4(addr)) if policy.prefix_len <= 32 => {
+            mask_v4(network.into(), policy.prefix_len) == mask_v4(addr.into(), policy.prefix_len)
+        }
+        (IpAddr::V6(network), IpAddr::V6(addr)) if policy.prefix_len <= 128 => {
+            mask_v6(network.into(), policy.prefix_len) == mask_v6(addr.into(), policy.prefix_len)
+        }
+        _ => false,
+    };
+    let host_len = if addr.is_ipv4() { 32 } else { 128 };
+    let static_exact = policies.iter().find(|policy| {
+        policy.owner == TcpAoListenerOwnerKind::Static
+            && policy.prefix_len == host_len
+            && covers(policy)
+    });
+    let dynamic_longest = policies
+        .iter()
+        .filter(|policy| policy.owner == TcpAoListenerOwnerKind::Dynamic && covers(policy))
+        .max_by_key(|policy| policy.prefix_len);
+    static_exact
+        .or(dynamic_longest)
+        .is_some_and(|policy| policy.enforce)
+}
+
 fn mask_v4(addr: u32, prefix_len: u8) -> u32 {
     if prefix_len == 0 {
         0
@@ -823,6 +958,12 @@ impl BgpListener {
             addr = %bound_addr,
             requested_addr = %addr,
             tcp_ao_keys,
+            md5_keys = options.md5_keys.len(),
+            ttl_security_selectors = options
+                .ttl_security
+                .iter()
+                .filter(|policy| policy.enforce)
+                .count(),
             "BGP listener bound"
         );
         let (rotation_tx, rotation_rx) = mpsc::channel(4);
@@ -831,6 +972,8 @@ impl BgpListener {
             listener,
             accept_tx,
             tcp_ao_keys: TcpAoListenerKeyIndex::new(options.tcp_ao_keys),
+            md5_keys: options.md5_keys,
+            ttl_security: options.ttl_security,
             tcp_ao_generation: TcpAoRotationGeneration::STARTUP,
             previous_tcp_ao_generation: None,
             tcp_ao_committed_generation: TcpAoRotationGeneration::STARTUP,
@@ -880,6 +1023,22 @@ impl BgpListener {
                         accept_backoff = ACCEPT_BACKOFF_INITIAL;
                         let peer_ip = peer_addr.ip();
                         debug!(%peer_ip, "inbound TCP connection");
+                        // GTSM before any byte of this connection is handed
+                        // to the peer manager. The shared listener socket
+                        // cannot carry per-peer IP_MINTTL, so the accepted
+                        // child gets it here; segments the kernel queued
+                        // between the handshake and this setsockopt are not
+                        // re-filtered, but every later segment (including any
+                        // KEEPALIVE required to reach Established) is.
+                        if resolve_ttl_security(&self.ttl_security, peer_ip)
+                            && let Err(err) = crate::socket_opts::set_gtsm(
+                                &socket2::SockRef::from(&stream),
+                                peer_addr,
+                            )
+                        {
+                            warn!(peer = %peer_ip, error = %err, "rejecting inbound connection: GTSM TTL policy could not be installed");
+                            continue;
+                        }
                         let tcp_ao_info = match self.inspect_tcp_ao_accept(&stream, peer_ip) {
                             Ok(info) => info,
                             Err(err) => {
@@ -960,6 +1119,13 @@ impl BgpListener {
                 reply,
             } => {
                 let _ = reply.send(self.mark_awaiting_peer_generation(generation, detail));
+            }
+            TcpAoListenerCommand::ReplaceInboundAuth {
+                md5_keys,
+                ttl_security,
+                reply,
+            } => {
+                let _ = reply.send(self.replace_inbound_auth(md5_keys, ttl_security));
             }
             TcpAoListenerCommand::MarkDependentFailure {
                 generation,
@@ -1671,6 +1837,26 @@ impl BgpListener {
         Ok(status)
     }
 
+    /// Replace the listener MD5 kernel inventory and the GTSM selector set
+    /// with the reload-desired state. MD5 password changes are inherently
+    /// session-disruptive (both ends must move together), so unlike TCP-AO
+    /// rotation this is a plain converging replacement: adds are kernel
+    /// replaces and a retried partial application converges.
+    fn replace_inbound_auth(
+        &mut self,
+        md5_keys: Vec<Md5ListenerKey>,
+        ttl_security: Vec<TtlSecurityListenerPolicy>,
+    ) -> std::io::Result<()> {
+        apply_md5_inventory(
+            &socket2::SockRef::from(&self.listener),
+            &self.md5_keys,
+            &md5_keys,
+        )?;
+        self.md5_keys = md5_keys;
+        self.ttl_security = ttl_security;
+        Ok(())
+    }
+
     fn inspect_tcp_ao_accept(
         &self,
         stream: &TcpStream,
@@ -2195,6 +2381,7 @@ fn plan_add_only_listener_generation<'a>(
 
     let desired_options = ListenerSocketOptions {
         tcp_ao_keys: desired.to_vec(),
+        ..ListenerSocketOptions::default()
     };
     validate_listener_tcp_ao_capacity(&desired_options)?;
     let mut additions = Vec::new();
@@ -2363,11 +2550,87 @@ where
             debug!(peer = %key.peer, send_id = config.send_id, "TCP-AO listener key configured");
         }
     }
+    for key in &options.md5_keys {
+        // Like the MKTs above, these are peer/prefix-scoped: an inbound peer
+        // covered by a key must sign (unsigned segments are dropped in the
+        // kernel before the handshake completes), while uncovered peers on
+        // the shared listener are unaffected. The kernel copies the matched
+        // key onto each accepted child, so established sessions keep
+        // verifying and signing without per-accept work here.
+        install_listener_md5_key(&socket, key)?;
+        debug!(peer = %key.peer, prefix_len = key.prefix_len, "TCP MD5 listener key configured");
+    }
     socket.listen(DEFAULT_LISTEN_BACKLOG)?;
     socket.set_nonblocking(true)?;
 
     let std_listener: std::net::TcpListener = socket.into();
     TcpListener::from_std(std_listener)
+}
+
+/// Install one listener MD5 key: host-length selectors through `TCP_MD5SIG`,
+/// range selectors through `TCP_MD5SIG_EXT` prefix keying. Reinstalling an
+/// existing selector replaces its password.
+fn install_listener_md5_key(socket: &Socket, key: &Md5ListenerKey) -> std::io::Result<()> {
+    let host_len = if key.peer.is_ipv4() { 32 } else { 128 };
+    let result = if key.prefix_len >= host_len {
+        crate::socket_opts::set_tcp_md5sig(
+            socket,
+            SocketAddr::new(key.peer, 0),
+            key.password.as_ref(),
+        )
+    } else {
+        crate::socket_opts::set_tcp_md5sig_prefix(
+            socket,
+            key.peer,
+            key.prefix_len,
+            key.password.as_ref(),
+        )
+    };
+    result.map_err(|err| {
+        std::io::Error::new(
+            err.kind(),
+            format!(
+                "failed to install listener TCP MD5 key for {}/{}: {err}",
+                key.peer, key.prefix_len
+            ),
+        )
+    })
+}
+
+/// Converge the listening socket's kernel MD5 inventory from `current` to
+/// `desired`: install new or re-passworded selectors (kernel add is a
+/// replace), then delete selectors no longer present. Deleting a key does not
+/// affect established children, which own kernel copies of the key they were
+/// accepted under.
+fn apply_md5_inventory(
+    socket: &Socket,
+    current: &[Md5ListenerKey],
+    desired: &[Md5ListenerKey],
+) -> std::io::Result<()> {
+    for key in desired {
+        if !current.contains(key) {
+            install_listener_md5_key(socket, key)?;
+        }
+    }
+    for key in current {
+        let selector_retained = desired
+            .iter()
+            .any(|kept| kept.peer == key.peer && kept.prefix_len == key.prefix_len);
+        if !selector_retained {
+            crate::socket_opts::remove_tcp_md5sig(socket, key.peer, key.prefix_len).map_err(
+                |err| {
+                    std::io::Error::new(
+                        err.kind(),
+                        format!(
+                            "failed to remove listener TCP MD5 key for {}/{}: {err}",
+                            key.peer, key.prefix_len
+                        ),
+                    )
+                },
+            )?;
+        }
+    }
+    Ok(())
 }
 
 fn validate_listener_tcp_ao_capacity(options: &ListenerSocketOptions) -> std::io::Result<()> {
@@ -2556,7 +2819,10 @@ mod tests {
                 }
             })
             .collect();
-        ListenerSocketOptions { tcp_ao_keys }
+        ListenerSocketOptions {
+            tcp_ao_keys,
+            ..ListenerSocketOptions::default()
+        }
     }
 
     #[test]
@@ -3720,6 +3986,7 @@ mod tests {
                 prefix_len: 32,
                 config: TcpAoKeyring(vec![tcp_ao_config().0.remove(0), second]),
             }],
+            ..ListenerSocketOptions::default()
         };
 
         let listener = bind_socket2_listener_with(
@@ -3775,6 +4042,7 @@ mod tests {
                 prefix_len: 32,
                 config: TcpAoKeyring(vec![tcp_ao_config().0.remove(0), second]),
             }],
+            ..ListenerSocketOptions::default()
         };
 
         let err = bind_socket2_listener_with(
@@ -3862,6 +4130,7 @@ mod tests {
             accept_tx,
             ListenerSocketOptions {
                 tcp_ao_keys: vec![owner.clone()],
+                ..ListenerSocketOptions::default()
             },
         )
         .await
@@ -4056,6 +4325,7 @@ mod tests {
                         config: static_config.clone(),
                     },
                 ],
+                ..ListenerSocketOptions::default()
             },
         )
         .await

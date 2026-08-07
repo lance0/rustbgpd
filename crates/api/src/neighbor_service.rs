@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use rustbgpd_transport::RemovePrivateAs;
 use rustbgpd_wire::{Afi, BgpRole, Safi};
-use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::sync::{Mutex, mpsc};
 use tonic::{Request, Response, Status};
 
 use crate::actor_read::{peer_manager_read, rib_manager_read};
@@ -18,8 +18,8 @@ use crate::peer_types::{
 };
 use crate::proto;
 use crate::server::{
-    AccessMode, ConfigMutationGateFn, check_config_mutation_gate, persist_then_apply,
-    read_only_rejection,
+    AccessMode, ConfigMutationGateFn, check_config_mutation_gate, peer_manager_request,
+    persist_then_apply, read_only_rejection,
 };
 use rustbgpd_rib::{
     EffectiveDistributionMode, NeighborRibSnapshot, NeighborRibSnapshotResponse, RibUpdate,
@@ -322,60 +322,40 @@ async fn add_dynamic_range(
     remote_asn: u32,
     description: Option<String>,
 ) -> Result<(), Status> {
-    let (reply_tx, reply_rx) = oneshot::channel();
-    peer_mgr_tx
-        .send(PeerManagerCommand::AddDynamicRange {
-            prefix,
-            peer_group,
-            remote_asn,
-            description,
-            reply: reply_tx,
-        })
-        .await
-        .map_err(|_| Status::internal("peer manager unavailable"))?;
-
-    reply_rx
-        .await
-        .map_err(|_| Status::internal("peer manager dropped reply"))?
-        .map_err(dynamic_range_error_status)
+    peer_manager_request(peer_mgr_tx, |reply| PeerManagerCommand::AddDynamicRange {
+        prefix,
+        peer_group,
+        remote_asn,
+        description,
+        reply,
+    })
+    .await?
+    .map_err(dynamic_range_error_status)
 }
 
 async fn add_static_peer(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
     config: PeerManagerNeighborConfig,
 ) -> Result<(), Status> {
-    let (reply_tx, reply_rx) = oneshot::channel();
-    peer_mgr_tx
-        .send(PeerManagerCommand::AddPeer {
-            config,
-            sync_config_snapshot: true,
-            reply: reply_tx,
-        })
-        .await
-        .map_err(|_| Status::internal("peer manager unavailable"))?;
-
-    reply_rx
-        .await
-        .map_err(|_| Status::internal("peer manager dropped reply"))?
-        .map_err(peer_lifecycle_error_status)
+    peer_manager_request(peer_mgr_tx, |reply| PeerManagerCommand::AddPeer {
+        config,
+        sync_config_snapshot: true,
+        reply,
+    })
+    .await?
+    .map_err(peer_lifecycle_error_status)
 }
 
 async fn add_presence_aware_peer(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
     spec: Box<PresenceAwareNeighborCreate>,
 ) -> Result<(), Status> {
-    let (reply_tx, reply_rx) = oneshot::channel();
-    peer_mgr_tx
-        .send(PeerManagerCommand::RuntimeCreatePeer {
-            spec,
-            reply: reply_tx,
-        })
-        .await
-        .map_err(|_| Status::internal("peer manager unavailable"))?;
-    reply_rx
-        .await
-        .map_err(|_| Status::internal("peer manager dropped reply"))?
-        .map_err(peer_lifecycle_error_status)
+    peer_manager_request(peer_mgr_tx, |reply| PeerManagerCommand::RuntimeCreatePeer {
+        spec,
+        reply,
+    })
+    .await?
+    .map_err(peer_lifecycle_error_status)
 }
 
 async fn delete_static_peer(
@@ -383,39 +363,24 @@ async fn delete_static_peer(
     peer: PeerKey,
     sync_config_snapshot: bool,
 ) -> Result<PeerManagerNeighborConfig, Status> {
-    let (reply_tx, reply_rx) = oneshot::channel();
-    peer_mgr_tx
-        .send(PeerManagerCommand::DeletePeer {
-            peer,
-            sync_config_snapshot,
-            reply: reply_tx,
-        })
-        .await
-        .map_err(|_| Status::internal("peer manager unavailable"))?;
-
-    reply_rx
-        .await
-        .map_err(|_| Status::internal("peer manager dropped reply"))?
-        .map_err(peer_lifecycle_error_status)
+    peer_manager_request(peer_mgr_tx, |reply| PeerManagerCommand::DeletePeer {
+        peer,
+        sync_config_snapshot,
+        reply,
+    })
+    .await?
+    .map_err(peer_lifecycle_error_status)
 }
 
 async fn delete_dynamic_range(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
     prefix: String,
 ) -> Result<RemovedDynamicRange, Status> {
-    let (reply_tx, reply_rx) = oneshot::channel();
-    peer_mgr_tx
-        .send(PeerManagerCommand::DeleteDynamicRange {
-            prefix,
-            reply: reply_tx,
-        })
-        .await
-        .map_err(|_| Status::internal("peer manager unavailable"))?;
-
-    reply_rx
-        .await
-        .map_err(|_| Status::internal("peer manager dropped reply"))?
-        .map_err(dynamic_range_error_status)
+    peer_manager_request(peer_mgr_tx, |reply| {
+        PeerManagerCommand::DeleteDynamicRange { prefix, reply }
+    })
+    .await?
+    .map_err(dynamic_range_error_status)
 }
 
 pub(crate) fn family_to_string(afi: Afi, safi: Safi) -> String {
@@ -1453,19 +1418,12 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         let req = request.into_inner();
         let peer = peer_key(&req.address, &req.interface)?;
 
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.peer_mgr_tx
-            .send(PeerManagerCommand::EnablePeer {
-                peer,
-                reply: reply_tx,
-            })
-            .await
-            .map_err(|_| Status::internal("peer manager unavailable"))?;
-
-        reply_rx
-            .await
-            .map_err(|_| Status::internal("peer manager dropped reply"))?
-            .map_err(peer_lifecycle_error_status)?;
+        peer_manager_request(&self.peer_mgr_tx, |reply| PeerManagerCommand::EnablePeer {
+            peer,
+            reply,
+        })
+        .await?
+        .map_err(peer_lifecycle_error_status)?;
 
         Ok(Response::new(proto::EnableNeighborResponse {}))
     }
@@ -1488,20 +1446,13 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             parse_families_proto(&req.families)?
         };
 
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.peer_mgr_tx
-            .send(PeerManagerCommand::SoftResetIn {
-                peer,
-                families,
-                reply: reply_tx,
-            })
-            .await
-            .map_err(|_| Status::internal("peer manager unavailable"))?;
-
-        reply_rx
-            .await
-            .map_err(|_| Status::internal("peer manager dropped reply"))?
-            .map_err(peer_lifecycle_error_status)?;
+        peer_manager_request(&self.peer_mgr_tx, |reply| PeerManagerCommand::SoftResetIn {
+            peer,
+            families,
+            reply,
+        })
+        .await?
+        .map_err(peer_lifecycle_error_status)?;
 
         Ok(Response::new(proto::SoftResetInResponse {}))
     }
@@ -1516,19 +1467,11 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         let req = request.into_inner();
         let peer = peer_key(&req.address, &req.interface)?;
 
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.peer_mgr_tx
-            .send(PeerManagerCommand::RefreshOutbound {
-                peer,
-                reply: reply_tx,
-            })
-            .await
-            .map_err(|_| Status::internal("peer manager unavailable"))?;
-
-        reply_rx
-            .await
-            .map_err(|_| Status::internal("peer manager dropped reply"))?
-            .map_err(outbound_refresh_error_status)?;
+        peer_manager_request(&self.peer_mgr_tx, |reply| {
+            PeerManagerCommand::RefreshOutbound { peer, reply }
+        })
+        .await?
+        .map_err(outbound_refresh_error_status)?;
 
         Ok(Response::new(proto::RefreshOutboundResponse {
             scheduled: true,
@@ -1553,20 +1496,13 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             ))
         };
 
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.peer_mgr_tx
-            .send(PeerManagerCommand::DisablePeer {
-                peer,
-                reason,
-                reply: reply_tx,
-            })
-            .await
-            .map_err(|_| Status::internal("peer manager unavailable"))?;
-
-        reply_rx
-            .await
-            .map_err(|_| Status::internal("peer manager dropped reply"))?
-            .map_err(peer_lifecycle_error_status)?;
+        peer_manager_request(&self.peer_mgr_tx, |reply| PeerManagerCommand::DisablePeer {
+            peer,
+            reason,
+            reply,
+        })
+        .await?
+        .map_err(peer_lifecycle_error_status)?;
 
         Ok(Response::new(proto::DisableNeighborResponse {}))
     }
@@ -1730,28 +1666,23 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             Some(peer_key(&req.address, &req.interface)?)
         };
 
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.peer_mgr_tx
-            .send(PeerManagerCommand::SetGracefulShutdown {
+        peer_manager_request(&self.peer_mgr_tx, |reply| {
+            PeerManagerCommand::SetGracefulShutdown {
                 peer,
                 enabled: req.enabled,
-                reply: reply_tx,
-            })
-            .await
-            .map_err(|_| Status::internal("peer manager unavailable"))?;
-
-        reply_rx
-            .await
-            .map_err(|_| Status::internal("peer manager dropped reply"))?
-            .map_err(|e| match e {
-                // PeerNotFound is the operator-typo case — distinguish
-                // from session/RIB dispatch failures so clients can
-                // react appropriately.
-                crate::peer_types::SetGshutError::PeerNotFound(peer) => {
-                    Status::not_found(format!("peer {peer} not found"))
-                }
-                crate::peer_types::SetGshutError::Internal(msg) => Status::internal(msg),
-            })?;
+                reply,
+            }
+        })
+        .await?
+        .map_err(|e| match e {
+            // PeerNotFound is the operator-typo case — distinguish
+            // from session/RIB dispatch failures so clients can
+            // react appropriately.
+            crate::peer_types::SetGshutError::PeerNotFound(peer) => {
+                Status::not_found(format!("peer {peer} not found"))
+            }
+            crate::peer_types::SetGshutError::Internal(msg) => Status::internal(msg),
+        })?;
 
         Ok(Response::new(proto::SetGracefulShutdownResponse {}))
     }
@@ -1764,6 +1695,7 @@ mod tests {
     use prost::Message;
     use proto::neighbor_service_server::NeighborService as _;
     use tokio::sync::mpsc::error::TryRecvError;
+    use tokio::sync::oneshot;
 
     fn make_service() -> NeighborService {
         let (tx, _rx) = mpsc::channel(16);

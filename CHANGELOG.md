@@ -9,6 +9,26 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+
+- **Inbound TCP MD5 and GTSM were not enforced on the BGP listener**
+  (LAN-902). `md5_password` and `ttl_security` were installed only on
+  active-open (outbound) sockets. The listener accepted unsigned inbound
+  connections for MD5-configured peers, and low-TTL inbound connections
+  for GTSM-configured peers. Dynamic neighbors are passive-only, so an
+  inherited peer-group `md5_password` was accepted in config, reported as
+  configured, and enforced on no socket at any point — a complete silent
+  authentication bypass for the dynamic-peering surface; for static
+  peers the inbound half of every session was unauthenticated even when
+  the outbound half was protected. The listener now installs host-scoped
+  MD5 keys for static neighbors and prefix-scoped keys
+  (`TCP_MD5SIG_EXT`, Linux >= 4.13) for dynamic ranges before
+  `listen()`, and applies strict RFC 5082 `IP_MINTTL` /
+  `IPV6_MINHOPCOUNT` 255 to accepted connections, resolved per peer
+  (exact static match first, then longest dynamic-range match). SIGHUP
+  reload replaces the listener inventory alongside session
+  reconciliation.
+
 ### Added
 
 - `WatchRoutes` now signals subscriber lag in-band with a synthetic
@@ -42,6 +62,30 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `bmp_source_drops_total` covers only the PeerSession→BmpManager path.
 
 ### Changed
+
+- Inbound connections that previously slipped through the unenforced
+  listener are now rejected (LAN-902): an unsigned inbound connection
+  from a peer or dynamic range configured with `md5_password` no longer
+  completes the TCP handshake, and inbound segments arriving with
+  TTL/Hop-Limit below 255 for a `ttl_security` peer are dropped after
+  accept. A peer that was silently interoperating unsigned (or through
+  intermediate hops) against a protected selector will no longer
+  establish — fix that peer's configuration or remove the protection.
+  Conversely, correctly signed inbound connections — previously dropped
+  by the kernel because the listener had no key — now establish.
+  Runtime mutation paths that cannot update the listener now fail
+  loudly instead of pretending: changing `md5_password`/`ttl_security`
+  on an existing peer group via `SetPeerGroup`, changing them on a
+  neighbor via a config transaction, adding a neighbor resolving either
+  via a config transaction, and adding a dynamic range whose peer group
+  carries either via `rbgp`/gRPC are all rejected with
+  restart-required/`FAILED_PRECONDITION` errors directing the change
+  through the config file and SIGHUP reload, which updates the listener
+  atomically with the sessions. A config declaring a plaintext static
+  neighbor (or a plaintext more-specific dynamic range) inside an
+  MD5-protected dynamic range is now rejected at load: the kernel's
+  longest-prefix key match would demand a signature those peers never
+  send.
 
 - GTSM (RFC 5082) now enforces strict TTL/Hop-Limit 255 on receive
   (`IP_MINTTL` / `IPV6_MINHOPCOUNT` raised from 254), matching RFC 5082
@@ -83,6 +127,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   peer label so link-local peers correlate across event streams; and
   `StreamPlanConfigTransaction` bounds its post-handoff response wait by
   the total deadline, matching `StreamApplyConfigTransaction`.
+- Every peer-manager mutation request now carries a 10-minute server-side
+  deadline (LAN-903). The shared mutation helper behind peer-group,
+  policy-definition, and neighbor catalog mutations — plus the neighbor
+  session-control RPCs — awaited the actor reply unbounded; because
+  catalog mutations run on a cancellation-shielded task holding the
+  daemon-wide runtime-config lock, one wedged reply blocked all catalog
+  mutations, SIGHUP reloads, and config transactions until daemon
+  restart. The deadline surfaces as `DEADLINE_EXCEEDED` and releases the
+  lock. It is deliberately mutation-class rather than the 2-second read
+  deadline: one legitimate large-fleet catalog mutation can occupy the
+  actor for ~215 s rebuilding the resolved-policy snapshot
+  (`docs/perf/irr-reload-realistic-mix-2026-08.md`).
 - The BGP listener accept loop classifies `accept(2)` errors instead of
   hot-continuing: resource exhaustion (`EMFILE`/`ENFILE`/`ENOMEM`/
   `ENOBUFS`) backs off progressively (100 ms doubling to 1 s, reset on
