@@ -371,6 +371,16 @@ pub(in crate::manager) struct GroupDelta {
     /// made on the source route, exactly like the ungrouped path's
     /// pre-policy gate; only the scrub reads the post-policy `new`.
     pub(in crate::manager) source_attrs: Option<Arc<Vec<PathAttribute>>>,
+    /// ADR-0126 Decision 5: the RECOMPUTED (post-pass) exception-lane
+    /// entry for this delta's prefix, carried on per-client-best
+    /// announce deltas so [`emit_group_deltas_for_member`] stays a
+    /// self-contained free fn. The `member == source(w_new)` arm reads
+    /// it directly: a member becoming the winner's source receives the
+    /// runner-up substitution (or a withdraw when the lane is empty)
+    /// instead of the shared announce. Always `None` for plain groups,
+    /// for withdraw deltas (no winner ⇒ no runner-up), and for
+    /// non-zero-path residue withdraws.
+    pub(in crate::manager) lane: Option<RunnerUp>,
 }
 
 /// Capture a source route's attributes for RFC 7947 decisions at the
@@ -438,23 +448,42 @@ pub(in crate::manager) struct AdvEntry<'a> {
 /// lane empties) plus the source of the lane entry it replaced — the
 /// old RUNNER-UP's source, never the winner's (that is
 /// [`RunnerUp::winner_source`]) — read BEFORE commit; the same
-/// `(new, old_source)` shape as
-/// [`GroupDelta`]. Carried beside the winner deltas so the lane-only
-/// case (runner-up flips or retires while the winner is unchanged) has
-/// a first-class encoding; the member-emit arm consuming these lands
-/// in ADR-0126 Phase 2.
+/// `(new, old_source)` shape as [`GroupDelta`]. Carried beside the
+/// winner deltas so the lane-only case (runner-up flips or retires
+/// while the winner is unchanged) has a first-class encoding, consumed
+/// per member by [`emit_lane_deltas_for_member`].
 #[derive(Debug, Clone)]
-#[allow(
-    dead_code,
-    reason = "the emit-side consumers land with ADR-0126 Phase 2; until then only \
-              the Phase 1 test matrix reads the transition, so the lib target \
-              sees the fields as unread (an `expect` would be unfulfilled in the \
-              test target)"
-)]
 pub(in crate::manager) struct LaneDelta {
     pub(in crate::manager) prefix: Prefix,
     pub(in crate::manager) new: Option<RunnerUp>,
     pub(in crate::manager) old_source: Option<IpAddr>,
+    /// The ONE member this transition emits toward, resolved at
+    /// staging time (every Decision 5 lane arm is member-scoped
+    /// "toward `source(w)`"): the new entry's [`RunnerUp::winner_source`]
+    /// for an announce, the REPLACED entry's for a retire — which is
+    /// how a retire knows its target after the lane emptied (the
+    /// prior entry is read before commit). `None` when the same
+    /// pass's winner announce delta supersedes the lane arm — its
+    /// `member == source(w_new)` matrix arm already rewrites the
+    /// target's slot from [`GroupDelta::lane`], so a lane emission on
+    /// top would double-announce or compose announce+withdraw. The
+    /// precedence: the winner-delta arms own every member slot they
+    /// rewrite; the lane arm owns exactly the slots they skip
+    /// (`source(w)` under an unchanged winner source, and the old
+    /// `source(w)` on all-candidates-gone).
+    pub(in crate::manager) emit_target: Option<IpAddr>,
+    /// Captured source attributes of the REPLACED lane entry — the
+    /// was-side input for rs-control verdict flips across the
+    /// transition, mirroring [`RsTagTransition::prior_source_attrs`].
+    pub(in crate::manager) prior_source_attrs: Option<Arc<Vec<PathAttribute>>>,
+    /// The post-policy lane route is content-equal across the
+    /// transition (`routes_equal`) — the transition was recorded only
+    /// because the SOURCE control communities moved. The emit arm then
+    /// mirrors [`emit_rs_tag_transitions`]: nothing toward a non-rs
+    /// target (its wire form is unchanged — the per-peer path would
+    /// equality-suppress), withdraw/re-announce toward an rs-control
+    /// target exactly when its suppress/prepend verdict flips.
+    pub(in crate::manager) content_unchanged: bool,
 }
 
 /// Outcome of one per-client-best group walk over a prefix (ADR-0126
@@ -605,14 +634,16 @@ pub(in crate::manager) struct GroupStageOutput {
     pub(in crate::manager) rs_transitions: Vec<RsTagTransition>,
     /// Exception-lane transitions of this pass ([`LaneDelta`]) —
     /// per-client-best groups only, always empty for plain groups.
-    /// Deliberately outside `deltas` and the shared emission: no
-    /// existing emit-side consumer reads the lane, and the one member
-    /// that acts on a lane transition (`source(w)`) gets its arm in
-    /// ADR-0126 Phase 2.
+    /// Deliberately outside `deltas` and the shared emission: exactly
+    /// one member acts on a lane transition (its
+    /// [`LaneDelta::emit_target`]), via
+    /// [`emit_lane_deltas_for_member`] in the per-member walk.
     pub(in crate::manager) lane_deltas: Vec<LaneDelta>,
     /// Members whose emission differs from the shared one: the new
-    /// source of an announce delta (announce → skip/withdraw) or the
-    /// old source of a withdraw delta (withdraw → skip).
+    /// source of an announce delta (announce → substitution/withdraw),
+    /// the old source of a withdraw delta (withdraw → skip/lane
+    /// withdraw), or a consumed lane transition's `emit_target`
+    /// (member-scoped emission the shared payload does not carry).
     exceptions: HashSet<IpAddr>,
 }
 
@@ -658,6 +689,19 @@ impl GroupStageOutput {
         }) || self.rs_transitions.iter().any(|transition| {
             attrs_tagged(transition.prior_source_attrs.as_ref())
                 || attrs_tagged(transition.source_attrs.as_ref())
+        }) || self.lane_deltas.iter().any(|delta| {
+            // ADR-0126: a tagged lane source must push `source(w)`
+            // onto the per-member walk — the substituted announce
+            // applies suppress/prepend/scrub from the LANE entry's
+            // source attributes, which the shared payload cannot.
+            delta.new.as_ref().is_some_and(|entry| {
+                attrs_tagged(entry.source_attrs.as_ref())
+                    || rs_control_route_tagged(
+                        entry.route.communities(),
+                        entry.route.large_communities(),
+                        rs_asn,
+                    )
+            })
         })
     }
 
@@ -667,6 +711,9 @@ impl GroupStageOutput {
     /// another peer's, so the member's emission is a withdraw while the
     /// key stays IN the group table. Recorded into the member's extra
     /// (over-)withdraws when its emission is lost to a full channel.
+    /// The ADR-0126 lane arms (a lost lane emission toward
+    /// `source(w)`) land in a later Phase 2 PR alongside the
+    /// dirty-resync lane assembly.
     pub(in crate::manager) fn member_scoped_withdraws(
         &self,
         member: IpAddr,
@@ -696,6 +743,18 @@ impl GroupStageOutput {
                     self.exceptions.insert(source);
                 }
                 self.shared_withdraw.push((delta.prefix, delta.path_id));
+            }
+        }
+        // A consumed lane transition emits toward its target alone —
+        // the shared payload carries nothing for it, so the target
+        // must take the per-member walk (ADR-0126 Decision 5). A
+        // superseded transition (`emit_target` = None) needs no entry:
+        // its target is either the winner announce's `route.peer`
+        // (inserted above) or exactly served by the shared payload
+        // (the flip-away arm announces `w'` to it).
+        for delta in &self.lane_deltas {
+            if let Some(target) = delta.emit_target {
+                self.exceptions.insert(target);
             }
         }
         self.shared_announce = announce.into();
@@ -777,12 +836,24 @@ impl GroupEvalAccumulator {
 
 /// Per-member emit for one shared staging pass — the source-flip matrix
 /// (design §3). Announce / withdraw / skip is decided per delta entry
-/// from `(member == new source, member == old source)` alone:
+/// from `(member == new source, member == old source, lane)` alone:
 ///
-/// | entry             | member == `new.peer`                                      | member == `old_source`                       | else     |
-/// |-------------------|-----------------------------------------------------------|----------------------------------------------|----------|
-/// | announce (`Some`) | old exists ∧ `old_source` ≠ member → withdraw; else skip  | announce (member was excluded, now eligible) | announce |
-/// | withdraw (`None`) | —                                                          | skip (member never had it)                   | withdraw |
+/// | entry             | member == `new.peer`                                                          | member == `old_source`                       | else     |
+/// |-------------------|-------------------------------------------------------------------------------|----------------------------------------------|----------|
+/// | announce (`Some`) | `old_source` = member → skip (lane arms own the slot); else lane → announce `r`; else old exists → withdraw | announce (member was excluded, now eligible) | announce |
+/// | withdraw (`None`) | —                                                                             | skip (lane retire arm owns the slot)         | withdraw |
+///
+/// The `member == new.peer` column is the ADR-0126 Decision 5 arm: a
+/// member BECOMING the winner's source has its slot rewritten here —
+/// announce the runner-up substitution ([`GroupDelta::lane`], an
+/// implicit replace at `path_id 0`) when the lane holds one, withdraw
+/// the displaced other-sourced entry otherwise. A member that ALREADY
+/// was the source (`old_source` = member) holds the lane substitution,
+/// which transitions only with the lane — its emissions ride
+/// [`emit_lane_deltas_for_member`] (same for the retiring source of a
+/// withdraw delta, whose lane-retire withdraw rides the same arm).
+/// For a plain group `lane` is always `None`, reducing every cell to
+/// the historical matrix above it.
 ///
 /// `nh_override_flags` stays aligned with `announce` by pushing in the
 /// same arm. A free function so the risk-2 unit matrix can drive it
@@ -812,14 +883,45 @@ pub(in crate::manager) fn emit_group_deltas_for_member(
                 let (source_communities, source_large_communities) =
                     source_control_input(delta.source_attrs.as_ref());
                 if route.peer == member {
-                    // Split horizon applied at emit: the new best is the
-                    // member's own route. If the member previously held a
-                    // different source's advertisement for this key it
-                    // must be withdrawn (per-peer semantics: best ==
-                    // target ⇒ withdraw existing); if the old entry was
-                    // also member-sourced (or absent) the member never
-                    // had it — skip.
-                    if delta.old_source.is_some_and(|source| source != member) {
+                    // Split horizon applied at emit: the new best is
+                    // the member's own route.
+                    if delta.old_source == Some(member) {
+                        // The member already was the source: its wire
+                        // holds the lane substitution (or nothing),
+                        // which moves only with the lane — the
+                        // LaneDelta arms own this slot.
+                    } else if let Some(entry) = &delta.lane {
+                        // ADR-0126 Decision 5: the member becoming
+                        // `source(w)` receives the runner-up — an
+                        // implicit replace of whatever other-sourced
+                        // entry its wire held. rs-control decides on
+                        // the LANE entry's source attributes.
+                        let (lane_communities, lane_large_communities) =
+                            source_control_input(entry.source_attrs.as_ref());
+                        if rs_control_suppressed(
+                            lane_communities,
+                            lane_large_communities,
+                            rs_control,
+                        ) {
+                            if delta.old_source.is_some() {
+                                withdraw.push((delta.prefix, delta.path_id));
+                            }
+                        } else {
+                            let mut route = entry.route.clone();
+                            rs_control_route_rewrite(
+                                &mut route,
+                                lane_large_communities,
+                                rs_control,
+                            );
+                            nh_override_flags.push(entry.nh.clone());
+                            announce.push(route);
+                        }
+                    } else if delta.old_source.is_some() {
+                        // Empty lane: the member previously held a
+                        // different source's advertisement for this
+                        // key — withdraw it (per-peer semantics: best
+                        // == target ⇒ withdraw existing). Absent old
+                        // entry ⇒ the member never had it — skip.
                         withdraw.push((delta.prefix, delta.path_id));
                     }
                 } else if rs_control_suppressed(
@@ -844,10 +946,103 @@ pub(in crate::manager) fn emit_group_deltas_for_member(
                 // A member never receives its own-sourced entries, so a
                 // withdrawal of one is a no-op for it (and a withdraw
                 // delta with no old entry — unreachable by construction
-                // — would be a no-op for everyone).
+                // — would be a no-op for everyone). A per-client-best
+                // old source whose wire held the lane substitution gets
+                // its withdraw from the lane-retire arm
+                // (`emit_lane_deltas_for_member`) — all-candidates-gone
+                // recomputes the lane empty, which always records the
+                // retire when an entry existed.
                 if delta.old_source.is_some_and(|source| source != member) {
                     withdraw.push((delta.prefix, delta.path_id));
                 }
+            }
+        }
+    }
+}
+
+/// Per-member emit for a pass's exception-lane transitions (ADR-0126
+/// Decision 5, the lane arm): each [`LaneDelta`] is member-scoped —
+/// it emits toward its [`LaneDelta::emit_target`] (`source(w)`) alone
+/// and toward nobody else. Announce the new runner-up `r'` (an
+/// implicit replace at `path_id 0`, with its next-hop flag) or
+/// withdraw `(prefix, 0)` on a retire. A transition whose winner
+/// announce delta superseded it (`emit_target` = None — the
+/// winner-delta arms already rewrote the target's slot) emits
+/// nothing here; the exhaustive steady-state matrix proves no
+/// double-announce or announce+withdraw composition escapes.
+///
+/// rs-control divergence applies from the LANE entry's source
+/// attributes: a suppressed substitution withdraws whatever the
+/// target's wire held (over-withdraw is the safe direction, as in the
+/// winner matrix), and a content-equal tag-only transition
+/// ([`LaneDelta::content_unchanged`]) mirrors
+/// [`emit_rs_tag_transitions`] — nothing toward a non-rs target,
+/// withdraw/re-announce toward an rs target exactly on a
+/// suppress/prepend verdict flip. A no-op for every member other
+/// than the target, and for plain groups (no lane deltas exist).
+pub(in crate::manager) fn emit_lane_deltas_for_member(
+    lane_deltas: &[LaneDelta],
+    member: IpAddr,
+    rs_control: Option<(u32, u32)>,
+    announce: &mut Vec<Route>,
+    withdraw: &mut Vec<(Prefix, u32)>,
+    nh_override_flags: &mut Vec<Option<NextHopAction>>,
+) {
+    use super::distribution::rs_control::{
+        rs_control_prepend_count, rs_control_route_rewrite, rs_control_suppressed,
+    };
+    for delta in lane_deltas {
+        if delta.emit_target != Some(member) {
+            continue;
+        }
+        match &delta.new {
+            Some(entry) => {
+                let (communities, large_communities) =
+                    source_control_input(entry.source_attrs.as_ref());
+                let now = rs_control_suppressed(communities, large_communities, rs_control);
+                if delta.content_unchanged {
+                    // Tag-only transition: the target's wire form is
+                    // unchanged unless its rs-control verdict flips.
+                    let (prior_communities, prior_large_communities) =
+                        source_control_input(delta.prior_source_attrs.as_ref());
+                    let was = rs_control_suppressed(
+                        prior_communities,
+                        prior_large_communities,
+                        rs_control,
+                    );
+                    if now {
+                        if !was {
+                            withdraw.push((delta.prefix, 0));
+                        }
+                    } else if was
+                        || rs_control.is_some_and(|(rs_asn, member_asn)| {
+                            rs_control_prepend_count(prior_large_communities, rs_asn, member_asn)
+                                != rs_control_prepend_count(large_communities, rs_asn, member_asn)
+                        })
+                    {
+                        let mut route = entry.route.clone();
+                        rs_control_route_rewrite(&mut route, large_communities, rs_control);
+                        nh_override_flags.push(entry.nh.clone());
+                        announce.push(route);
+                    }
+                } else if now {
+                    // Suppressed substitution: displace whatever the
+                    // target's wire held (its old runner-up).
+                    if delta.old_source.is_some() {
+                        withdraw.push((delta.prefix, 0));
+                    }
+                } else {
+                    let mut route = entry.route.clone();
+                    rs_control_route_rewrite(&mut route, large_communities, rs_control);
+                    nh_override_flags.push(entry.nh.clone());
+                    announce.push(route);
+                }
+            }
+            None => {
+                // Retire: an entry existed (a retire transition is
+                // recorded only when one did), and the target's wire
+                // held it at the path-id-free slot.
+                withdraw.push((delta.prefix, 0));
             }
         }
     }
@@ -2060,6 +2255,7 @@ impl RibManager {
                     // test-constructed group until the Phase 3
                     // classifier flip — no production configuration
                     // creates a per-client-best group.
+                    let deltas_before = out.deltas.len();
                     let stage = Self::distribute_group_per_client_best_prefix(
                         &self.ribs,
                         &self.unicast_prefix_peers,
@@ -2080,6 +2276,10 @@ impl RibManager {
                         &mut nh_flags,
                         &mut labeled_filtered,
                     );
+                    // The winner announce (at most one — the walk
+                    // stages a single `path_id 0` winner), captured
+                    // for the lane-transition supersession decision.
+                    let winner_announce = announce.first().map(|route| route.peer);
                     for (route, nh) in announce.drain(..).zip(nh_flags.drain(..)) {
                         out.deltas.push(GroupDelta {
                             prefix: *prefix,
@@ -2088,6 +2288,7 @@ impl RibManager {
                             old_source,
                             policy_label: stage.winner_label.clone(),
                             source_attrs: stage.winner_source_attrs.clone(),
+                            lane: stage.runner_up.clone(),
                         });
                     }
                     for (p, path_id) in withdraw.drain(..) {
@@ -2098,7 +2299,20 @@ impl RibManager {
                             old_source,
                             policy_label: None,
                             source_attrs: None,
+                            lane: None,
                         });
+                    }
+                    // Winner-side tag-only transition, mirroring the
+                    // plain arm's hook below: the pass staged nothing
+                    // for this prefix (winner equality-suppressed)
+                    // while the WINNER's source control communities
+                    // moved — rs-control members' verdicts on the
+                    // staged entry may flip with no wire change.
+                    if out.deltas.len() == deltas_before
+                        && let Some(transition) =
+                            group.rs_tag_transition(*prefix, stage.winner_source_attrs.as_ref())
+                    {
+                        out.rs_transitions.push(transition);
                     }
                     // Lane transition (ADR-0126 Decision 5), equality-
                     // suppressed against the PRIOR lane entry:
@@ -2114,20 +2328,57 @@ impl RibManager {
                     // recomputed lane commits below regardless
                     // (Decision 6).
                     let prior = group.runner_up.get(prefix);
-                    let unchanged = match (prior, &stage.runner_up) {
-                        (Some(old), Some(new)) => {
-                            routes_equal(&old.route, &new.route)
-                                && source_control_input(old.source_attrs.as_ref())
-                                    == source_control_input(new.source_attrs.as_ref())
-                        }
-                        (None, None) => true,
-                        _ => false,
+                    let (content_unchanged, control_unchanged) = match (prior, &stage.runner_up) {
+                        (Some(old), Some(new)) => (
+                            routes_equal(&old.route, &new.route),
+                            source_control_input(old.source_attrs.as_ref())
+                                == source_control_input(new.source_attrs.as_ref()),
+                        ),
+                        (None, None) => (true, true),
+                        _ => (false, true),
                     };
-                    if !unchanged {
+                    if !(content_unchanged && control_unchanged) {
+                        // The member the transition emits toward: the
+                        // new entry's winner source, or the REPLACED
+                        // entry's for a retire (how the retire arm
+                        // knows `source(w)` — lane-only when the
+                        // winner is unchanged, the OLD winner source
+                        // on all-candidates-gone). Cleared when the
+                        // winner announce delta's own arms already
+                        // rewrite the target's slot: toward its NEW
+                        // source (which reads `GroupDelta::lane`
+                        // directly), and toward any OTHER member as
+                        // the flip-away `w'` announce.
+                        let target = stage
+                            .runner_up
+                            .as_ref()
+                            .map(|entry| entry.winner_source)
+                            .or_else(|| prior.map(|entry| entry.winner_source));
+                        let emit_target = target.filter(|target| match winner_announce {
+                            Some(source) => {
+                                if stage.runner_up.is_some() {
+                                    // Announce lane arm: superseded
+                                    // unless the winner source is
+                                    // unchanged (same-source content
+                                    // change — the winner arm skips
+                                    // its own source's slot).
+                                    old_source == Some(*target)
+                                } else {
+                                    // Retire arm: superseded when the
+                                    // winner flipped away from the
+                                    // target (it receives `w'`).
+                                    source == *target
+                                }
+                            }
+                            None => true,
+                        });
                         out.lane_deltas.push(LaneDelta {
                             prefix: *prefix,
                             new: stage.runner_up.clone(),
                             old_source: prior.map(|entry| entry.route.peer),
+                            emit_target,
+                            prior_source_attrs: prior.and_then(|entry| entry.source_attrs.clone()),
+                            content_unchanged,
                         });
                     }
                     lane_updates.push((*prefix, stage.runner_up));
@@ -2183,6 +2434,7 @@ impl RibManager {
                         old_source,
                         policy_label: label.clone(),
                         source_attrs: source_attrs.clone(),
+                        lane: None,
                     });
                 }
                 for (p, path_id) in withdraw.drain(..) {
@@ -2193,6 +2445,7 @@ impl RibManager {
                         old_source,
                         policy_label: None,
                         source_attrs: None,
+                        lane: None,
                     });
                 }
                 if out.deltas.len() == deltas_before
@@ -4570,6 +4823,7 @@ mod tests {
             old_source: old,
             policy_label: None,
             source_attrs,
+            lane: None,
         }
     }
 
@@ -4581,6 +4835,7 @@ mod tests {
             old_source: old,
             policy_label: None,
             source_attrs: None,
+            lane: None,
         }
     }
 
@@ -5606,6 +5861,7 @@ mod tests {
             old_source: None,
             policy_label: Some(Arc::from("staged")),
             source_attrs: Some(Arc::new(vec![PathAttribute::Communities(vec![7])])),
+            lane: None,
         });
         let adv = group
             .adv_entry(MEMBER, &p, 0)
@@ -5744,6 +6000,7 @@ mod tests {
             old_source: None,
             policy_label: None,
             source_attrs: None,
+            lane: None,
         });
         let mut r6 = w6;
         r6.peer = OTHER2;
@@ -5926,6 +6183,7 @@ mod tests {
             old_source: None,
             policy_label: Some(Arc::from("win")),
             source_attrs: None,
+            lane: None,
         });
         group.apply_lane(
             p1,
@@ -5938,6 +6196,7 @@ mod tests {
             old_source: None,
             policy_label: Some(Arc::from("win")),
             source_attrs: None,
+            lane: None,
         });
         let mut m = staging_manager();
         m.group_ribs.insert(PCB_GID, group);
@@ -5987,6 +6246,572 @@ mod tests {
         assert!((permits(MEMBER, "win") - 1.0).abs() < f64::EPSILON);
         assert!((permits(OTHER1, "win") - 1.0).abs() < f64::EPSILON);
         assert!(permits(OTHER1, "lane").abs() < f64::EPSILON);
+    }
+
+    // --- ADR-0126 Phase 2 (steady-state emit): the Decision 5 matrix
+    // --- arms + member-scoped lane emission, proven against adv(m).
+
+    const FOURTH: IpAddr = IpAddr::V4(Ipv4Addr::new(10, 9, 0, 4));
+    const RS_ASN: u32 = 65000;
+    const TARGET_ASN: u32 = 64512;
+
+    /// Fixed per-source LP so every (winner, lane) state in the
+    /// steady-state matrix is a pure seed-set choice: OTHER1 = 300
+    /// outranks OTHER2 = 200 outranks MEMBER = 100.
+    fn matrix_lp(src: IpAddr) -> u32 {
+        if src == OTHER1 {
+            300
+        } else if src == OTHER2 {
+            200
+        } else {
+            100
+        }
+    }
+
+    /// Winner-delta + lane-delta + tag-transition walks for one member
+    /// — the per-member exception path of the fanout driver, in its
+    /// exact call order.
+    fn emit_walk(
+        out: &GroupStageOutput,
+        member: IpAddr,
+        rs_control: Option<(u32, u32)>,
+    ) -> (Vec<Route>, Vec<(Prefix, u32)>) {
+        let mut announce = Vec::new();
+        let mut withdraw = Vec::new();
+        let mut nh_flags = Vec::new();
+        emit_group_deltas_for_member(
+            &out.deltas,
+            member,
+            rs_control,
+            &mut announce,
+            &mut withdraw,
+            &mut nh_flags,
+        );
+        emit_lane_deltas_for_member(
+            &out.lane_deltas,
+            member,
+            rs_control,
+            &mut announce,
+            &mut withdraw,
+            &mut nh_flags,
+        );
+        emit_rs_tag_transitions(
+            &out.rs_transitions,
+            member,
+            rs_control,
+            &mut announce,
+            &mut withdraw,
+            &mut nh_flags,
+        );
+        assert_eq!(
+            nh_flags.len(),
+            announce.len(),
+            "nh flags must stay aligned with announces"
+        );
+        (announce, withdraw)
+    }
+
+    /// [`emit_walk`] plus the driver's dispatch property: when the
+    /// pre-built shared payload covers the member
+    /// (`shared_applies_to`), the walk must produce exactly the shared
+    /// emission — the exception-routing invariant (a member NOT in
+    /// `exceptions` is exactly served by the shared payload).
+    fn member_emission(out: &GroupStageOutput, member: IpAddr) -> (Vec<Route>, Vec<(Prefix, u32)>) {
+        let (announce, withdraw) = emit_walk(out, member, None);
+        if out.shared_applies_to(member) {
+            assert_eq!(
+                announce.len(),
+                out.shared_announce.len(),
+                "shared/walk announce count diverged for {member}"
+            );
+            for (walked, shared) in announce.iter().zip(out.shared_announce.iter()) {
+                assert!(
+                    routes_equal(walked, shared),
+                    "shared/walk announce diverged for {member}"
+                );
+            }
+            assert_eq!(
+                withdraw, out.shared_withdraw,
+                "shared/walk withdraw diverged for {member}"
+            );
+        }
+        (announce, withdraw)
+    }
+
+    /// ADR-0126 Decision 5 steady-state reference matrix. Every
+    /// (winner-source × lane) group state over sources {OTHER1,
+    /// OTHER2, MEMBER} — (∅,∅), (A,∅), (A,B), (A,C), (B,∅), (B,C)
+    /// with runner-up source ≠ winner source by construction —
+    /// crossed as (old → new) transitions, staged through the REAL
+    /// per-client-best pass and emitted per member exactly as the
+    /// fanout driver would (shared payload where it applies, the
+    /// per-member walks otherwise — [`member_emission`] asserts both
+    /// agree). After folding each pass's emission, every member's
+    /// simulated wire must equal adv(m) (`adv_entry`, Decision 4); no
+    /// duplicate announce, duplicate withdraw, or announce+withdraw
+    /// composition may escape; a lane-only transition emits exactly
+    /// one member-scoped delta toward `source(w)`; an identity
+    /// transition emits nothing at all.
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the exhaustive steady-state matrix folds every transition inline"
+    )]
+    fn pcb_steady_state_emission_matrix_matches_adv() {
+        type State = (Option<IpAddr>, Option<IpAddr>);
+        const A: IpAddr = OTHER1;
+        const B: IpAddr = OTHER2;
+        const C: IpAddr = MEMBER;
+        let members = [A, B, C, FOURTH];
+        let states: [State; 6] = [
+            (None, None),
+            (Some(A), None),
+            (Some(A), Some(B)),
+            (Some(A), Some(C)),
+            (Some(B), None),
+            (Some(B), Some(C)),
+        ];
+        for &old_state in &states {
+            for &new_state in &states {
+                let p = prefix(9);
+                let mut m = staging_manager();
+                m.group_ribs.insert(PCB_GID, per_client_best_group(None));
+                let mut wires: HashMap<IpAddr, HashMap<(Prefix, u32), Route>> =
+                    members.iter().map(|&peer| (peer, HashMap::new())).collect();
+                for (pass, state) in [(1u8, old_state), (2, new_state)] {
+                    if pass == 2 {
+                        for src in [A, B, C] {
+                            unseed(&mut m, src, p);
+                        }
+                    }
+                    for src in state.0.into_iter().chain(state.1) {
+                        seed(&mut m, cand(p, src, matrix_lp(src)));
+                    }
+                    let mut out = stage_pcb(&mut m, &[p]);
+                    out.build_shared_emit();
+                    let group = m.group_ribs.get(&PCB_GID).unwrap();
+                    let mut emitted: HashMap<IpAddr, usize> = HashMap::new();
+                    for &member in &members {
+                        let case =
+                            format!("{old_state:?} -> {new_state:?}, pass {pass}, member {member}");
+                        let (announce, withdraw) = member_emission(&out, member);
+                        let announce_keys: Vec<(Prefix, u32)> =
+                            announce.iter().map(|r| (r.prefix, r.path_id)).collect();
+                        let unique: HashSet<(Prefix, u32)> =
+                            announce_keys.iter().copied().collect();
+                        assert_eq!(
+                            unique.len(),
+                            announce_keys.len(),
+                            "{case}: duplicate announce"
+                        );
+                        let unique_withdraw: HashSet<(Prefix, u32)> =
+                            withdraw.iter().copied().collect();
+                        assert_eq!(
+                            unique_withdraw.len(),
+                            withdraw.len(),
+                            "{case}: duplicate withdraw"
+                        );
+                        assert!(
+                            unique.is_disjoint(&unique_withdraw),
+                            "{case}: announce+withdraw of one key"
+                        );
+                        emitted.insert(member, announce.len() + withdraw.len());
+                        let wire = wires.get_mut(&member).unwrap();
+                        for key in &withdraw {
+                            wire.remove(key);
+                        }
+                        for route in announce {
+                            wire.insert((route.prefix, route.path_id), route);
+                        }
+                        let adv: HashMap<(Prefix, u32), &Route> = group
+                            .table
+                            .iter()
+                            .filter_map(|staged| {
+                                group
+                                    .adv_entry(member, &staged.prefix, staged.path_id)
+                                    .map(|adv| ((staged.prefix, staged.path_id), adv.route))
+                            })
+                            .collect();
+                        assert_eq!(
+                            wire.keys().copied().collect::<HashSet<_>>(),
+                            adv.keys().copied().collect::<HashSet<_>>(),
+                            "{case}: wire keys diverged from adv(m)"
+                        );
+                        for (key, advertised) in &adv {
+                            assert!(
+                                routes_equal(&wire[key], advertised),
+                                "{case}: wire route diverged from adv(m) at {key:?}"
+                            );
+                        }
+                    }
+                    if pass == 2 {
+                        let case = format!("{old_state:?} -> {new_state:?}");
+                        if old_state == new_state {
+                            assert!(
+                                emitted.values().all(|&n| n == 0),
+                                "{case}: identity transition must emit nothing"
+                            );
+                        } else if old_state.0 == new_state.0 && old_state.0.is_some() {
+                            let winner = old_state.0.unwrap();
+                            for &member in &members {
+                                assert_eq!(
+                                    emitted[&member],
+                                    usize::from(member == winner),
+                                    "{case}: lane-only scoping for {member}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// A lane-only transition (winner untouched) is member-scoped:
+    /// `source(w)` — and nobody else — receives the delta, the target
+    /// leaves the shared payload (exception routing), and the wire
+    /// delta is exactly announce-`r'` / withdraw-`(prefix, 0)`.
+    #[test]
+    fn pcb_lane_only_transition_targets_winner_source_only() {
+        let mut m = staging_manager();
+        let p = prefix(1);
+        seed(&mut m, cand(p, OTHER1, 300));
+        seed(&mut m, cand(p, OTHER2, 200));
+        m.group_ribs.insert(PCB_GID, per_client_best_group(None));
+        let _ = stage_pcb(&mut m, &[p]);
+
+        // Content flip: the runner-up is replaced in place.
+        seed(&mut m, cand(p, OTHER2, 250));
+        let mut out = stage_pcb(&mut m, &[p]);
+        out.build_shared_emit();
+        assert!(
+            out.deltas.is_empty(),
+            "winner must stay equality-suppressed"
+        );
+        assert_eq!(out.lane_deltas.len(), 1);
+        assert_eq!(out.lane_deltas[0].emit_target, Some(OTHER1));
+        assert!(
+            !out.shared_applies_to(OTHER1),
+            "the lane target must not ride the shared payload"
+        );
+        assert!(out.shared_announce.is_empty() && out.shared_withdraw.is_empty());
+        let (announce, withdraw) = member_emission(&out, OTHER1);
+        assert_eq!(announce.len(), 1);
+        assert_eq!((announce[0].peer, announce[0].path_id), (OTHER2, 0));
+        assert!(withdraw.is_empty());
+        for member in [OTHER2, MEMBER, FOURTH] {
+            let (announce, withdraw) = member_emission(&out, member);
+            assert!(
+                announce.is_empty() && withdraw.is_empty(),
+                "lane-only emission leaked to {member}"
+            );
+        }
+
+        // Retire: the runner-up disappears.
+        unseed(&mut m, OTHER2, p);
+        let mut out = stage_pcb(&mut m, &[p]);
+        out.build_shared_emit();
+        assert!(out.deltas.is_empty());
+        assert_eq!(out.lane_deltas.len(), 1);
+        assert!(out.lane_deltas[0].new.is_none());
+        assert_eq!(out.lane_deltas[0].emit_target, Some(OTHER1));
+        let (announce, withdraw) = member_emission(&out, OTHER1);
+        assert!(announce.is_empty());
+        assert_eq!(withdraw, vec![(p, 0)]);
+        for member in [OTHER2, MEMBER, FOURTH] {
+            let (announce, withdraw) = member_emission(&out, member);
+            assert!(
+                announce.is_empty() && withdraw.is_empty(),
+                "lane retire leaked to {member}"
+            );
+        }
+    }
+
+    /// All-candidates-gone with a populated lane: every member
+    /// withdraws the slot — the old `source(w)` included, whose wire
+    /// held the runner-up at the same path-id-free key (its withdraw
+    /// rides the lane-retire arm, exactly once — the winner withdraw
+    /// arm skips it, so no duplicate composes).
+    #[test]
+    fn pcb_all_gone_with_lane_withdraws_old_winner_source() {
+        let mut m = staging_manager();
+        let p = prefix(1);
+        seed(&mut m, cand(p, OTHER1, 300));
+        seed(&mut m, cand(p, OTHER2, 200));
+        m.group_ribs.insert(PCB_GID, per_client_best_group(None));
+        let _ = stage_pcb(&mut m, &[p]);
+
+        unseed(&mut m, OTHER1, p);
+        unseed(&mut m, OTHER2, p);
+        let mut out = stage_pcb(&mut m, &[p]);
+        out.build_shared_emit();
+        assert_eq!(out.deltas.len(), 1);
+        assert!(out.deltas[0].new.is_none());
+        assert_eq!(out.lane_deltas.len(), 1);
+        assert_eq!(out.lane_deltas[0].emit_target, Some(OTHER1));
+        for member in [OTHER1, OTHER2, MEMBER, FOURTH] {
+            let (announce, withdraw) = member_emission(&out, member);
+            assert!(announce.is_empty(), "{member}: nothing to announce");
+            assert_eq!(
+                withdraw,
+                vec![(p, 0)],
+                "{member}: exactly one withdraw of the slot"
+            );
+        }
+    }
+
+    /// rs-control applies to the lane substitution from the LANE
+    /// entry's SOURCE attributes — on the winner-delta arm (pass 1:
+    /// the new source's slot reads `GroupDelta::lane`) and the
+    /// lane-delta arm alike: an announced substitution is rewritten
+    /// (control communities scrubbed) toward an rs-control target
+    /// while a transparent target receives it untouched, and a
+    /// suppressing tag collapses the substitution to a withdraw of
+    /// the held runner-up (over-withdraw is the safe direction).
+    #[test]
+    fn pcb_lane_emission_applies_rs_control() {
+        let rs = Some((RS_ASN, TARGET_ASN));
+        // Announce-override form RS:TARGET — control-space (scrubbed)
+        // but not suppressing.
+        let scrub_comm = (RS_ASN << 16) | TARGET_ASN;
+        // Target-specific deny form 0:TARGET.
+        let deny_comm = TARGET_ASN;
+        let mut m = staging_manager();
+        let p = prefix(1);
+        seed(&mut m, cand(p, OTHER1, 300));
+        seed(&mut m, cand_with_comm(p, OTHER2, 200, scrub_comm));
+        m.group_ribs.insert(PCB_GID, per_client_best_group(None));
+        let out = stage_pcb(&mut m, &[p]);
+
+        // Pass 1: the winner announce supersedes the lane delta — the
+        // winner arm substitutes toward its own source, rs-aware.
+        assert_eq!(out.lane_deltas[0].emit_target, None);
+        let (announce, withdraw) = emit_walk(&out, OTHER1, rs);
+        assert_eq!((announce.len(), withdraw.len()), (1, 0));
+        assert_eq!(announce[0].peer, OTHER2);
+        assert!(
+            announce[0].communities().is_empty(),
+            "control community must be scrubbed toward the rs target"
+        );
+        let (announce, _) = emit_walk(&out, OTHER1, None);
+        assert_eq!(
+            announce[0].communities(),
+            &[scrub_comm],
+            "transparent target receives the untouched substitution"
+        );
+
+        // Lane-only content+tag change to a suppressing form: the rs
+        // target's substitution collapses to a withdraw of the held
+        // runner-up; a transparent target still gets the announce.
+        seed(&mut m, cand_with_comm(p, OTHER2, 250, deny_comm));
+        let out = stage_pcb(&mut m, &[p]);
+        assert!(out.deltas.is_empty());
+        assert_eq!(out.lane_deltas[0].emit_target, Some(OTHER1));
+        let (announce, withdraw) = emit_walk(&out, OTHER1, rs);
+        assert!(announce.is_empty());
+        assert_eq!(withdraw, vec![(p, 0)]);
+        let (announce, withdraw) = emit_walk(&out, OTHER1, None);
+        assert_eq!((announce.len(), withdraw.len()), (1, 0));
+        assert_eq!(announce[0].communities(), &[deny_comm]);
+    }
+
+    /// A tag-only lane transition (post-policy content equal, SOURCE
+    /// control communities moved): nothing toward a transparent
+    /// target — its wire form is unchanged and the per-peer path
+    /// would equality-suppress — while an rs-control target whose
+    /// suppression verdict flips gets exactly the re-announce /
+    /// withdraw.
+    #[test]
+    fn pcb_lane_tag_only_transition_emits_only_on_verdict_flips() {
+        let rs = Some((RS_ASN, TARGET_ASN));
+        let deny_comm = TARGET_ASN;
+        let mut m = staging_manager();
+        let p = prefix(1);
+        seed(&mut m, cand(p, OTHER1, 300));
+        seed(&mut m, cand_with_comm(p, OTHER2, 200, deny_comm));
+        m.group_ribs.insert(
+            PCB_GID,
+            per_client_best_group(Some(strip_communities_chain(vec![deny_comm]))),
+        );
+        let _ = stage_pcb(&mut m, &[p]);
+
+        // Tag off: content-equal post-policy, the verdict flips to
+        // announce for the rs target.
+        seed(&mut m, cand(p, OTHER2, 200));
+        let out = stage_pcb(&mut m, &[p]);
+        assert!(out.deltas.is_empty());
+        assert_eq!(out.lane_deltas.len(), 1);
+        assert!(out.lane_deltas[0].content_unchanged);
+        assert_eq!(out.lane_deltas[0].emit_target, Some(OTHER1));
+        let (announce, withdraw) = emit_walk(&out, OTHER1, None);
+        assert!(
+            announce.is_empty() && withdraw.is_empty(),
+            "transparent target: wire form unchanged, nothing may emit"
+        );
+        let (announce, withdraw) = emit_walk(&out, OTHER1, rs);
+        assert_eq!(
+            (announce.len(), withdraw.len()),
+            (1, 0),
+            "suppression lifted: re-announce toward the rs target"
+        );
+
+        // Tag back on: the verdict flips to suppressed — withdraw.
+        seed(&mut m, cand_with_comm(p, OTHER2, 200, deny_comm));
+        let out = stage_pcb(&mut m, &[p]);
+        assert_eq!(out.lane_deltas.len(), 1);
+        assert!(out.lane_deltas[0].content_unchanged);
+        let (announce, withdraw) = emit_walk(&out, OTHER1, None);
+        assert!(announce.is_empty() && withdraw.is_empty());
+        let (announce, withdraw) = emit_walk(&out, OTHER1, rs);
+        assert!(announce.is_empty());
+        assert_eq!(withdraw, vec![(p, 0)]);
+    }
+
+    /// `has_tagged_route` scans the lane: a control-tagged lane
+    /// source must push `source(w)` onto the per-member walk even
+    /// when every staged winner is untagged.
+    #[test]
+    fn has_tagged_route_scans_lane_deltas() {
+        let scrub_comm = (RS_ASN << 16) | TARGET_ASN;
+        let p = prefix(1);
+        let mut m = staging_manager();
+        seed(&mut m, cand(p, OTHER1, 300));
+        seed(&mut m, cand_with_comm(p, OTHER2, 200, scrub_comm));
+        m.group_ribs.insert(PCB_GID, per_client_best_group(None));
+        let out = stage_pcb(&mut m, &[p]);
+        assert!(
+            out.has_tagged_route(RS_ASN),
+            "a tagged lane source must divert rs members to the walk"
+        );
+        assert!(
+            !out.has_tagged_route(RS_ASN + 1),
+            "another rs identity sees no control form"
+        );
+
+        let mut m = staging_manager();
+        seed(&mut m, cand(p, OTHER1, 300));
+        seed(&mut m, cand(p, OTHER2, 200));
+        m.group_ribs.insert(PCB_GID, per_client_best_group(None));
+        let out = stage_pcb(&mut m, &[p]);
+        assert!(
+            !out.has_tagged_route(RS_ASN),
+            "an untagged pass keeps the shared emission"
+        );
+    }
+
+    /// The winner-side rs-tag transition for per-client-best groups
+    /// (the zero-delta, source-attrs-moved case Phase 1 deliberately
+    /// skipped): recorded by the pcb staging arm, committed to the
+    /// source-attr residue, and emitted toward rs-control members
+    /// through the existing transition emitter.
+    #[test]
+    fn pcb_winner_rs_tag_transition_recorded_and_emitted() {
+        let deny_comm = TARGET_ASN;
+        // Control-space form naming another target — lifts the
+        // suppression toward TARGET_ASN.
+        let other_comm = TARGET_ASN + 1;
+        let mut m = staging_manager();
+        let p = prefix(1);
+        seed(&mut m, cand_with_comm(p, OTHER1, 300, deny_comm));
+        m.group_ribs.insert(
+            PCB_GID,
+            per_client_best_group(Some(strip_communities_chain(vec![deny_comm, other_comm]))),
+        );
+        let out = stage_pcb(&mut m, &[p]);
+        assert_eq!(out.deltas.len(), 1);
+        assert!(out.rs_transitions.is_empty());
+
+        // The winner's source tag moves while the chain erases it
+        // post-policy: zero deltas, one recorded transition, residue
+        // committed.
+        seed(&mut m, cand_with_comm(p, OTHER1, 300, other_comm));
+        let out = stage_pcb(&mut m, &[p]);
+        assert!(
+            out.deltas.is_empty(),
+            "content-equal winner reinstall stays suppressed"
+        );
+        assert_eq!(out.rs_transitions.len(), 1);
+        let transition = &out.rs_transitions[0];
+        assert_eq!(
+            source_control_input(transition.prior_source_attrs.as_ref()).0,
+            &[deny_comm]
+        );
+        assert_eq!(
+            source_control_input(transition.source_attrs.as_ref()).0,
+            &[other_comm]
+        );
+        let group = m.group_ribs.get(&PCB_GID).unwrap();
+        assert_eq!(group.source_control((p, 0)).0, &[other_comm]);
+
+        // Suppression toward TARGET_ASN was on (0:TARGET) and lifts:
+        // the rs member re-announces, a transparent member sees
+        // nothing.
+        let (announce, withdraw) = emit_walk(&out, MEMBER, Some((RS_ASN, TARGET_ASN)));
+        assert_eq!((announce.len(), withdraw.len()), (1, 0));
+        let (announce, withdraw) = emit_walk(&out, MEMBER, None);
+        assert!(announce.is_empty() && withdraw.is_empty());
+    }
+
+    /// Darkness, emit side: a per-client-best group whose lane is
+    /// empty (no overlapped sources) stages and emits exactly like a
+    /// plain group over the same table — delta shape, per-member walk
+    /// output, and exception routing alike.
+    #[test]
+    fn pcb_empty_lane_emits_like_plain_group() {
+        const PLAIN_GID: usize = 92;
+        let mut m = staging_manager();
+        let (p1, p2) = (prefix(1), prefix(2));
+        seed(&mut m, cand(p1, OTHER1, 300));
+        seed(&mut m, cand(p2, OTHER2, 300));
+        let _ = m.recompute_best(&HashSet::from([p1, p2]));
+        m.group_ribs.insert(PCB_GID, per_client_best_group(None));
+        m.group_ribs.insert(PLAIN_GID, empty_group());
+        let prefixes: HashSet<Prefix> = HashSet::from([p1, p2]);
+        let mut memo = super::super::distribution::ExportMemo::default();
+        let mut pcb = m.stage_group_prefixes(PCB_GID, &prefixes, &mut memo);
+        let mut plain = m.stage_group_prefixes(PLAIN_GID, &prefixes, &mut memo);
+        pcb.build_shared_emit();
+        plain.build_shared_emit();
+
+        assert!(pcb.lane_deltas.is_empty());
+        let shape = |out: &GroupStageOutput| {
+            let mut rows: Vec<(Prefix, u32, Option<IpAddr>)> = out
+                .deltas
+                .iter()
+                .map(|d| (d.prefix, d.path_id, d.new.as_ref().map(|(r, _)| r.peer)))
+                .collect();
+            rows.sort();
+            rows
+        };
+        assert_eq!(shape(&pcb), shape(&plain));
+        for member in [OTHER1, OTHER2, MEMBER] {
+            assert_eq!(
+                pcb.shared_applies_to(member),
+                plain.shared_applies_to(member),
+                "exception routing diverged for {member}"
+            );
+            let keys = |routes: &[Route]| {
+                let mut keys: Vec<(Prefix, u32, IpAddr)> = routes
+                    .iter()
+                    .map(|r| (r.prefix, r.path_id, r.peer))
+                    .collect();
+                keys.sort();
+                keys
+            };
+            let (pcb_announce, mut pcb_withdraw) = emit_walk(&pcb, member, None);
+            let (plain_announce, mut plain_withdraw) = emit_walk(&plain, member, None);
+            assert_eq!(
+                keys(&pcb_announce),
+                keys(&plain_announce),
+                "announce set diverged for {member}"
+            );
+            pcb_withdraw.sort();
+            plain_withdraw.sort();
+            assert_eq!(
+                pcb_withdraw, plain_withdraw,
+                "withdraw set diverged for {member}"
+            );
+        }
     }
 
     /// Dirty-member resync: full-table announce minus own-sourced;
