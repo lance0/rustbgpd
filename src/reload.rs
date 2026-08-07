@@ -9,6 +9,7 @@ use std::fmt::Display;
 use std::net::IpAddr;
 use std::ops::Deref;
 use std::sync::Arc;
+use std::time::Instant;
 
 use rustbgpd_api::peer_types::{
     CatalogMutationError, ConfigEvent, ConfigPersistAck, ConfigPersistError, FibTableSnapshot,
@@ -112,6 +113,30 @@ pub(crate) async fn apply_outbound_prefix_limits(
             Err(error)
         }
     }
+}
+
+/// SIGHUP wrapper around [`apply_outbound_prefix_limits`]: skip the RIB
+/// round-trips entirely when the desired maxima equal the live ones.
+///
+/// LAN-888: the preflight is two awaited sends through the RIB manager's
+/// update channel, FIFO behind any in-flight redistribution backlog — on
+/// repeat IRR-scale reloads in per-client-best mode that queue wait
+/// dominated the whole SIGHUP→snapshot window (~78 s of a ~79 s reload).
+/// The ADR-0113 check only ever rejects a *lowering* below current
+/// advertised usage, so an unchanged limit set cannot be rejected and the
+/// preflight is a no-op by construction; activation would re-install the
+/// identical set. The common rpol-content-only reload therefore never
+/// touches the RIB here.
+pub(crate) async fn apply_outbound_prefix_limits_if_changed(
+    rib_tx: &mpsc::Sender<rustbgpd_rib::RibUpdate>,
+    live: &Config,
+    desired: &Config,
+) -> Result<(), String> {
+    if live.outbound_prefix_limits() == desired.outbound_prefix_limits() {
+        info!("outbound prefix maxima unchanged; skipping RIB preflight");
+        return Ok(());
+    }
+    apply_outbound_prefix_limits(rib_tx, desired).await
 }
 
 /// Build a `PeerManagerNeighborConfig` from transport config components.
@@ -1838,12 +1863,24 @@ pub(crate) async fn reload_config_with_tcp_ao(
     // materially changed ones, so an rpol-content-only reload is fully
     // applied by this single step.
     if policy_diff.rpol_changed {
+        // LAN-888: stamp the registry-clone cost and the dispatch moment.
+        // The gap between this line and the peer manager's receipt log is
+        // pure command-channel queue wait — the only piece of the
+        // SIGHUP→snapshot window no other span can see.
+        let clone_started = Instant::now();
+        let rpol_files = new_config.policy.rpol_files.clone();
+        let rpol = new_config.policy.rpol.clone();
+        let dataset_bindings = new_config.policy.dataset_bindings.clone();
+        info!(
+            clone_ms = u64::try_from(clone_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            "rpol policy sync dispatched"
+        );
         let (ack_tx, ack_rx) = oneshot::channel();
         let send_failed = peer_mgr_tx
             .send(PeerManagerCommand::SyncRpolPolicies {
-                rpol_files: new_config.policy.rpol_files.clone(),
-                rpol: new_config.policy.rpol.clone(),
-                dataset_bindings: new_config.policy.dataset_bindings.clone(),
+                rpol_files,
+                rpol,
+                dataset_bindings,
                 reply: ack_tx,
             })
             .await
@@ -5213,6 +5250,34 @@ hold_time = 90
     ) -> (Option<ReloadedConfig>, Vec<String>) {
         let (mut outcomes, tags) = drive_reloads(initial_toml, new_toml, 1).await;
         (outcomes.pop().unwrap(), tags)
+    }
+
+    /// LAN-888: a reload whose outbound prefix maxima equal the live
+    /// ones must not touch the RIB at all — the closed channel here
+    /// fails any attempted round-trip. A changed maximum must reach
+    /// for the RIB and surface its unavailability.
+    #[tokio::test]
+    async fn unchanged_outbound_prefix_limits_skip_the_rib_preflight() {
+        let (rib_tx, rib_rx) = mpsc::channel::<rustbgpd_rib::RibUpdate>(1);
+        drop(rib_rx);
+        let live =
+            Config::load_toml_with_diagnostics(baseline_toml(), "limits-preflight-live").unwrap();
+        let desired_same =
+            Config::load_toml_with_diagnostics(baseline_toml(), "limits-preflight-same").unwrap();
+        apply_outbound_prefix_limits_if_changed(&rib_tx, &live, &desired_same)
+            .await
+            .expect("unchanged maxima must skip the RIB preflight entirely");
+
+        let raised = baseline_toml().replace(
+            "hold_time = 90",
+            "hold_time = 90\nmax_prefixes_out_ipv4 = 100",
+        );
+        let desired_raised =
+            Config::load_toml_with_diagnostics(&raised, "limits-preflight-raised").unwrap();
+        let error = apply_outbound_prefix_limits_if_changed(&rib_tx, &live, &desired_raised)
+            .await
+            .expect_err("changed maxima must attempt the RIB preflight");
+        assert!(error.contains("RIB manager unavailable"), "{error}");
     }
 
     /// ADR-0096: an rpol-content-only reload sends `SyncRpolPolicies`
