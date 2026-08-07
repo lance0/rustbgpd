@@ -2408,7 +2408,15 @@ impl PeerManager {
         rpol: rustbgpd_policy::rpol::RpolPolicySet,
         dataset_bindings: rustbgpd_policy::datasets::DatasetBindings,
     ) -> Result<(), CatalogMutationError> {
+        // LAN-888: the manager-side config snapshot clone carries the full
+        // prior rpol registry — stamp it so the receipt→resolve gap can't
+        // hide it.
+        let clone_started = Instant::now();
         let mut next_config = self.current_config.clone();
+        info!(
+            elapsed_ms = u64::try_from(clone_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            "rpol sync config snapshot cloned"
+        );
         next_config.policy.rpol_files = rpol_files;
         next_config.policy.rpol = rpol;
         // LAN-305: the new registry's `dataset` declarations resolve

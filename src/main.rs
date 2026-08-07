@@ -5017,8 +5017,12 @@ async fn run<T>(
                             return None;
                         }
                     };
-                    if let Err(error) =
-                        reload::apply_outbound_prefix_limits(&limits_rib_tx, &desired).await
+                    if let Err(error) = reload::apply_outbound_prefix_limits_if_changed(
+                        &limits_rib_tx,
+                        &snapshot,
+                        desired.config_ref(),
+                    )
+                    .await
                     {
                         error!(error = %error, "SIGHUP reload rejected");
                         return None;

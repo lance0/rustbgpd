@@ -1134,6 +1134,9 @@ impl PeerManager {
                             let _ = reply.send(());
                         }
                         PeerManagerCommand::SyncRpolPolicies { rpol_files, rpol, dataset_bindings, reply } => {
+                            // LAN-888: receipt stamp — the gap back to the
+                            // reload flow's dispatch log is FIFO queue wait.
+                            info!("rpol policy sync command received");
                             let result = self.sync_rpol_policies(rpol_files, rpol, dataset_bindings).await;
                             let _ = reply.send(result);
                         }
