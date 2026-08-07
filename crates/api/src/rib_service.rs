@@ -1285,6 +1285,19 @@ pub(crate) fn route_event_to_proto(event: rustbgpd_rib::RouteEvent) -> proto::Ro
     }
 }
 
+/// Synthetic in-band lag marker for `WatchRoutes`, mirroring the
+/// `BGP_EVENT_TYPE_STREAM_LAGGED` contract on the `BgpEvent` streams: a
+/// subscriber that fell behind the broadcast buffer sees the gap instead of a
+/// silent skip. Prefix/peer fields stay empty; `reason` carries the count.
+fn stream_lag_route_event(missed: u64) -> proto::RouteEvent {
+    proto::RouteEvent {
+        event_type: proto::RouteEventType::StreamLagged.into(),
+        timestamp: rustbgpd_rib::event::unix_timestamp_now(),
+        reason: format!("route event stream lagged; missed {missed} event(s)"),
+        ..Default::default()
+    }
+}
+
 fn route_event_matches_watch_filter(
     event: &rustbgpd_rib::RouteEvent,
     afi_safi_filter: i32,
@@ -1618,9 +1631,9 @@ impl proto::rib_service_server::RibService for RibService {
                 metrics.record_event_stream_lagged("watch_routes", "route", missed);
                 debug!(
                     missed,
-                    "WatchRoutes subscriber lagged, skipping missed events"
+                    "WatchRoutes subscriber lagged, emitting missed-event signal"
                 );
-                None
+                Some(Ok(stream_lag_route_event(missed)))
             }
         });
 
@@ -3934,7 +3947,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn watch_routes_lagged_subscriber_increments_metric() {
+    async fn watch_routes_lagged_subscriber_emits_marker_and_increments_metric() {
         let metrics = BgpMetrics::new();
         let (svc, events_tx) = make_watch_routes_service(metrics.clone());
 
@@ -3952,6 +3965,18 @@ mod tests {
                 ))
                 .unwrap();
         }
+
+        // The gap must be visible in-band: first item is the lag marker, then
+        // the surviving events resume.
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(event.event_type, proto::RouteEventType::StreamLagged as i32);
+        assert!(event.prefix.is_empty());
+        assert!(event.peer_address.is_empty());
+        assert_eq!(event.reason, "route event stream lagged; missed 4 event(s)");
 
         let event = tokio::time::timeout(std::time::Duration::from_secs(1), stream.next())
             .await

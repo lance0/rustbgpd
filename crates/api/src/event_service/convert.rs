@@ -230,7 +230,10 @@ fn session_lifecycle_event_to_bgp_event(event: SessionLifecycleEvent) -> proto::
 
 fn session_notification_event_to_bgp_event(event: SessionNotificationEvent) -> proto::BgpEvent {
     let event_type = session_notification_event_type_to_bgp_event_type(event.event_type);
-    let peer_address = event.peer.to_string();
+    let peer_address = event
+        .peer_label
+        .clone()
+        .unwrap_or_else(|| event.peer.to_string());
     let direction = match event.event_type {
         SessionNotificationEventType::Sent => "sent",
         SessionNotificationEventType::Received => "received",
@@ -265,17 +268,20 @@ fn session_notification_event_to_bgp_event(event: SessionNotificationEvent) -> p
     }
 }
 
+#[must_use]
 pub fn policy_event_to_bgp_event(event: PolicyEvent) -> proto::BgpEvent {
     let PolicyEvent {
         operation,
         target_type,
         target,
         peer,
+        peer_label,
         affected_peer_count,
         timestamp,
         reason,
     } = event;
-    let peer_address = peer.map_or_else(String::new, |peer| peer.to_string());
+    let peer_address =
+        peer_label.unwrap_or_else(|| peer.map_or_else(String::new, |peer| peer.to_string()));
     let policy = proto::PolicyEvent {
         event_type: proto::BgpEventType::PolicyChanged as i32,
         operation: operation.to_string(),

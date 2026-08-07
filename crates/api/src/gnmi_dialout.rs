@@ -691,7 +691,12 @@ mod tests {
 
     fn test_service() -> GnmiService {
         let (peer_tx, _session_events, _policy_events) = spawn_fake_peer_manager();
-        GnmiService::new(65000, "192.0.2.1".to_string(), peer_tx)
+        GnmiService::new(
+            65000,
+            "192.0.2.1".to_string(),
+            crate::server::AccessMode::ReadWrite,
+            peer_tx,
+        )
     }
 
     fn test_target(name: &str, addr: SocketAddr) -> DialoutTarget {
@@ -880,7 +885,12 @@ mod tests {
                 }
             }
         });
-        let service = GnmiService::new(65000, "192.0.2.1".to_string(), peer_tx);
+        let service = GnmiService::new(
+            65000,
+            "192.0.2.1".to_string(),
+            crate::server::AccessMode::ReadWrite,
+            peer_tx,
+        );
 
         // Global + neighbor paths: the snapshot both carries a real leaf
         // update and requires the (failable) peer snapshot.

@@ -1807,6 +1807,10 @@ service RibService {
   rpc DeleteFibTable(DeleteFibTableRequest) returns (ListFibTablesResponse);
   rpc ListFibTables(ListFibTablesRequest) returns (ListFibTablesResponse);
   rpc ListRouteEvents(ListRouteEventsRequest) returns (ListRouteEventsResponse);
+  // Streams live route events. When a subscriber falls behind the broadcast
+  // buffer, dropped events are signalled in-band with a
+  // ROUTE_EVENT_TYPE_STREAM_LAGGED marker event (same contract as
+  // WatchRouteEvents' BGP_EVENT_TYPE_STREAM_LAGGED).
   rpc WatchRoutes(WatchRoutesRequest) returns (stream RouteEvent);
   rpc WatchRouteEvents(WatchRoutesRequest) returns (stream BgpEvent);
   rpc ListFlowSpecRoutes(ListFlowSpecRequest) returns (ListFlowSpecResponse);
@@ -2438,6 +2442,11 @@ enum RouteEventType {
   ROUTE_EVENT_TYPE_WITHDRAWN = 2;
   ROUTE_EVENT_TYPE_BEST_CHANGED = 3;
   ROUTE_EVENT_TYPE_POLICY_FILTERED = 4;
+  // Synthetic in-band marker on WatchRoutes: the subscriber lagged behind the
+  // broadcast buffer and events were dropped. `reason` carries the missed
+  // count; prefix/peer fields are empty. Collectors that require a gapless
+  // view must resynchronize (e.g. ListRoutes) when they observe this marker.
+  ROUTE_EVENT_TYPE_STREAM_LAGGED = 5;
 }
 
 message RouteEvent {

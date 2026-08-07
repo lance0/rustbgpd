@@ -405,6 +405,7 @@ pub(crate) fn notification_event(
     SessionEvent::Notification(SessionNotificationEvent {
         event_type,
         peer,
+        peer_label: None,
         timestamp: "789".to_string(),
         code: 6,
         subcode: 7,
@@ -423,6 +424,7 @@ pub(crate) fn policy_event(peer: Option<IpAddr>) -> PolicyEvent {
         target_type: "policy",
         target: "audit-policy".to_string(),
         peer,
+        peer_label: None,
         affected_peer_count: 2,
         timestamp: "789".to_string(),
         reason: "policy set policy audit-policy".to_string(),
