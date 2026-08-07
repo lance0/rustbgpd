@@ -75,6 +75,27 @@ pub(crate) trait DaemonEvpnRuntimeConverger: Send + Sync {
         candidate: &'a rustbgpd_evpn::EvpnRuntimeCandidate,
         plan: &'a rustbgpd_evpn::EvpnRuntimePlan,
     ) -> DaemonEvpnRuntimeConvergeFuture<'a>;
+
+    /// The availability preconditions [`Self::converge`] would enforce for
+    /// this plan's route — actor presence and openness — with no side
+    /// effects. The `validate_only` dry-run runs this after the shape gate
+    /// so a "validated" verdict is not contradicted by a commit of the
+    /// identical candidate failing its actor precondition (LAN-897, e.g.
+    /// an L2VNI add on an RR-only daemon that spawned no dataplane
+    /// actors). The default has no preconditions: test convergers
+    /// converge unconditionally.
+    ///
+    /// # Errors
+    /// The routed converge method's precondition error.
+    fn validate_availability(
+        &self,
+        current: &rustbgpd_evpn::EvpnRuntimeModel,
+        candidate: &rustbgpd_evpn::EvpnRuntimeCandidate,
+        plan: &rustbgpd_evpn::EvpnRuntimePlan,
+    ) -> Result<(), DaemonEvpnRuntimeConvergeError> {
+        let _ = (current, candidate, plan);
+        Ok(())
+    }
 }
 
 fn apply_task_join_error(context: &str, error: &JoinError) -> GrpcEvpnRuntimeApplyError {
@@ -390,6 +411,29 @@ pub(crate) struct EvpnRuntimeActorConverger {
     es_drain: crate::evpn_es_drain::EvpnEsDrainState,
 }
 
+/// The actor controls an L2VNI-family converge route (add, delete,
+/// redefine, mixed update, tenant teardown) publishes to, acquired
+/// (present + open) up front so a missing/closed actor fails before any
+/// side effect. The LAN-897 dry-run availability gate acquires the same
+/// set and drops it, so validate and commit agree on preconditions.
+struct L2vniFamilyActors<'a> {
+    dataplane: &'a evpn_dataplane::EvpnDataplaneRuntimeControl,
+    originator: &'a evpn_originator::EvpnOriginatorRuntimeControl,
+    svi: Option<&'a evpn_svi::EvpnSviRuntimeControl>,
+    segment: Option<&'a evpn_segment::EvpnSegmentRuntimeControl>,
+}
+
+/// Same contract as [`L2vniFamilyActors`] for the additive build-up
+/// route, where every actor is conditional on which domains the
+/// candidate adds rows in.
+struct AdditiveBuildUpActors<'a> {
+    dataplane: Option<&'a evpn_dataplane::EvpnDataplaneRuntimeControl>,
+    originator: Option<&'a evpn_originator::EvpnOriginatorRuntimeControl>,
+    svi: Option<&'a evpn_svi::EvpnSviRuntimeControl>,
+    segment: Option<&'a evpn_segment::EvpnSegmentRuntimeControl>,
+    l3_originator: Option<&'a evpn_l3_originator::EvpnL3OriginatorRuntimeControl>,
+}
+
 impl EvpnRuntimeActorConverger {
     #[allow(
         clippy::too_many_arguments,
@@ -455,24 +499,12 @@ impl EvpnRuntimeActorConverger {
         let candidate_ip_vrfs = Arc::new(candidate.ip_vrfs().clone());
         let ip_vrf_metadata_changed = current.ip_vrfs() != candidate.ip_vrfs();
 
-        let dataplane = self.require_l2vni_dataplane("add")?;
-        let originator = self.require_l2vni_originator("add")?;
-        let svi_required = instance.advertise_svi_mac;
-        let svi = self.svi.as_ref();
-        if svi_required && svi.is_none() {
-            return Err(DaemonEvpnRuntimeConvergeError::unsupported(
-                "L2VNI runtime add with advertise_svi_mac=true requires an active SVI actor; \
-                 live SVI actor-spawn is not supported yet",
-            ));
-        }
-        if let Some(svi) = svi
-            && !svi.is_open()
-        {
-            return Err(DaemonEvpnRuntimeConvergeError::failed(
-                "EVPN SVI runtime control is closed",
-            ));
-        }
-        let segment = self.open_segment_runtime_control()?;
+        let L2vniFamilyActors {
+            dataplane,
+            originator,
+            svi,
+            segment,
+        } = self.l2vni_add_actors(&instance)?;
 
         let imet_outcome = self
             .imet_controller
@@ -594,6 +626,277 @@ impl EvpnRuntimeActorConverger {
         Ok(originator)
     }
 
+    /// Availability preconditions shared by every L2VNI-family converge
+    /// route: required dataplane + Type 2 originator, an SVI actor when
+    /// the touched instances demand one (open when merely present), and
+    /// an open segment control when one exists. `svi_requirement` names
+    /// the operation in the missing-SVI-actor rejection.
+    fn require_l2vni_family_actors(
+        &self,
+        operation: &str,
+        svi_required: bool,
+        svi_requirement: &str,
+    ) -> Result<L2vniFamilyActors<'_>, DaemonEvpnRuntimeConvergeError> {
+        let dataplane = self.require_l2vni_dataplane(operation)?;
+        let originator = self.require_l2vni_originator(operation)?;
+        let svi = self.svi.as_ref();
+        if svi_required && svi.is_none() {
+            return Err(DaemonEvpnRuntimeConvergeError::unsupported(format!(
+                "{svi_requirement} requires an active SVI actor; \
+                 live SVI actor-spawn is not supported yet"
+            )));
+        }
+        if let Some(svi) = svi
+            && !svi.is_open()
+        {
+            return Err(DaemonEvpnRuntimeConvergeError::failed(
+                "EVPN SVI runtime control is closed",
+            ));
+        }
+        let segment = self.open_segment_runtime_control()?;
+        Ok(L2vniFamilyActors {
+            dataplane,
+            originator,
+            svi,
+            segment,
+        })
+    }
+
+    fn l2vni_add_actors(
+        &self,
+        added: &rustbgpd_evpn::EvpnInstance,
+    ) -> Result<L2vniFamilyActors<'_>, DaemonEvpnRuntimeConvergeError> {
+        self.require_l2vni_family_actors(
+            "add",
+            added.advertise_svi_mac,
+            "L2VNI runtime add with advertise_svi_mac=true",
+        )
+    }
+
+    fn l2vni_delete_actors(
+        &self,
+        deleted: &rustbgpd_evpn::EvpnInstance,
+    ) -> Result<L2vniFamilyActors<'_>, DaemonEvpnRuntimeConvergeError> {
+        self.require_l2vni_family_actors(
+            "delete",
+            deleted.advertise_svi_mac,
+            "L2VNI runtime delete with advertise_svi_mac=true",
+        )
+    }
+
+    fn l2vni_redefine_actors(
+        &self,
+        old: &rustbgpd_evpn::EvpnInstance,
+        new: &rustbgpd_evpn::EvpnInstance,
+    ) -> Result<L2vniFamilyActors<'_>, DaemonEvpnRuntimeConvergeError> {
+        // Either the committed or candidate side may carry advertise_svi_mac,
+        // so the SVI actor is required if either does (turning it off still
+        // needs the actor to withdraw the stale SVI MAC).
+        self.require_l2vni_family_actors(
+            "redefine",
+            new.advertise_svi_mac || old.advertise_svi_mac,
+            "L2VNI runtime redefine with advertise_svi_mac=true",
+        )
+    }
+
+    fn l2vni_swap_actors(
+        &self,
+        changes: &L2VniMixedChanges,
+    ) -> Result<L2vniFamilyActors<'_>, DaemonEvpnRuntimeConvergeError> {
+        let svi_required = changes
+            .added
+            .iter()
+            .chain(changes.deleted.iter())
+            .chain(changes.redefined.iter().flat_map(|(old, new)| [old, new]))
+            .any(|instance| instance.advertise_svi_mac);
+        self.require_l2vni_family_actors(
+            "mixed L2VNI update",
+            svi_required,
+            "mixed L2VNI runtime update with advertise_svi_mac=true",
+        )
+    }
+
+    fn tenant_teardown_actors(
+        &self,
+        deleted: &[rustbgpd_evpn::EvpnInstance],
+        ip_vrf_changed: bool,
+    ) -> Result<
+        (
+            L2vniFamilyActors<'_>,
+            Option<&evpn_l3_originator::EvpnL3OriginatorRuntimeControl>,
+        ),
+        DaemonEvpnRuntimeConvergeError,
+    > {
+        let actors = self.require_l2vni_family_actors(
+            "tenant teardown",
+            deleted.iter().any(|inst| inst.advertise_svi_mac),
+            "tenant teardown of an advertise_svi_mac L2VNI",
+        )?;
+        let l3_originator = if ip_vrf_changed {
+            let l3 = self.l3_originator.as_ref().ok_or_else(|| {
+                DaemonEvpnRuntimeConvergeError::unsupported(
+                    "tenant teardown with IP-VRF changes requires an active EVPN Type 5 \
+                     originator; live Type 5 actor-spawn is not supported yet",
+                )
+            })?;
+            if !l3.is_open() {
+                return Err(DaemonEvpnRuntimeConvergeError::failed(
+                    "EVPN Type 5 originator runtime control is closed",
+                ));
+            }
+            Some(l3)
+        } else {
+            None
+        };
+        Ok((actors, l3_originator))
+    }
+
+    /// Availability preconditions shared by the single IP-VRF converge
+    /// routes (add, delete, redefine): required dataplane + open, and
+    /// required Type 5 originator + open.
+    fn require_ip_vrf_actors(
+        &self,
+        operation: &str,
+    ) -> Result<
+        (
+            &evpn_dataplane::EvpnDataplaneRuntimeControl,
+            &evpn_l3_originator::EvpnL3OriginatorRuntimeControl,
+        ),
+        DaemonEvpnRuntimeConvergeError,
+    > {
+        let dataplane = self.dataplane.as_ref().ok_or_else(|| {
+            DaemonEvpnRuntimeConvergeError::unsupported(format!(
+                "IP-VRF runtime {operation} requires an active EVPN dataplane actor; \
+                 no-EVPN startup actor-spawn is not supported yet"
+            ))
+        })?;
+        let l3_originator = self.l3_originator.as_ref().ok_or_else(|| {
+            DaemonEvpnRuntimeConvergeError::unsupported(format!(
+                "IP-VRF runtime {operation} requires an active EVPN Type 5 originator; \
+                 live Type 5 actor-spawn is not supported yet"
+            ))
+        })?;
+        if !dataplane.is_open() {
+            return Err(DaemonEvpnRuntimeConvergeError::failed(
+                "EVPN dataplane runtime control is closed",
+            ));
+        }
+        if !l3_originator.is_open() {
+            return Err(DaemonEvpnRuntimeConvergeError::failed(
+                "EVPN Type 5 originator runtime control is closed",
+            ));
+        }
+        Ok((dataplane, l3_originator))
+    }
+
+    /// Availability preconditions shared by the single Ethernet Segment
+    /// converge routes: required segment actor + open, plus an open
+    /// Type 2 originator when one exists (RR / no-local-MAC deployments
+    /// have none and are left untouched).
+    fn require_ethernet_segment_actors(
+        &self,
+        operation: &str,
+    ) -> Result<
+        (
+            &evpn_segment::EvpnSegmentRuntimeControl,
+            Option<&evpn_originator::EvpnOriginatorRuntimeControl>,
+        ),
+        DaemonEvpnRuntimeConvergeError,
+    > {
+        let segment = self.require_segment_runtime_control(operation)?;
+        let originator = self.originator.as_ref();
+        if let Some(originator) = originator
+            && !originator.is_open()
+        {
+            return Err(DaemonEvpnRuntimeConvergeError::failed(
+                "EVPN Type 2 originator runtime control is closed",
+            ));
+        }
+        Ok((segment, originator))
+    }
+
+    /// Availability preconditions of the additive build-up route: each
+    /// actor is required only for the domains the candidate adds rows
+    /// in, mirroring the publishes `converge_additive_build_up` makes.
+    fn require_additive_build_up_actors(
+        &self,
+        current: &rustbgpd_evpn::EvpnRuntimeModel,
+        candidate: &rustbgpd_evpn::EvpnRuntimeCandidate,
+        plan: &rustbgpd_evpn::EvpnRuntimePlan,
+        added_instances: &[rustbgpd_evpn::EvpnInstance],
+    ) -> Result<AdditiveBuildUpActors<'_>, DaemonEvpnRuntimeConvergeError> {
+        let l2_changed = !plan.evpn_instances.added.is_empty();
+        let ip_vrf_rows_changed = !plan.ip_vrfs.added.is_empty();
+        let ip_vrf_metadata_changed = current.ip_vrfs() != candidate.ip_vrfs();
+        let es_changed = !plan.ethernet_segments.added.is_empty()
+            || !plan.ethernet_segments.redefined.is_empty();
+
+        let dataplane = if l2_changed || ip_vrf_metadata_changed || ip_vrf_rows_changed {
+            Some(self.require_l2vni_dataplane("additive build-up")?)
+        } else {
+            None
+        };
+        let originator = if l2_changed {
+            Some(self.require_l2vni_originator("additive build-up")?)
+        } else if es_changed {
+            if let Some(originator) = self.originator.as_ref()
+                && !originator.is_open()
+            {
+                return Err(DaemonEvpnRuntimeConvergeError::failed(
+                    "EVPN Type 2 originator runtime control is closed",
+                ));
+            }
+            self.originator.as_ref()
+        } else {
+            None
+        };
+        let svi_required = added_instances.iter().any(|inst| inst.advertise_svi_mac);
+        let svi = self.svi.as_ref();
+        if svi_required && svi.is_none() {
+            return Err(DaemonEvpnRuntimeConvergeError::unsupported(
+                "additive L2VNI build-up with advertise_svi_mac=true requires an active SVI actor; \
+                 live SVI actor-spawn is not supported yet",
+            ));
+        }
+        if let Some(svi) = svi
+            && !svi.is_open()
+        {
+            return Err(DaemonEvpnRuntimeConvergeError::failed(
+                "EVPN SVI runtime control is closed",
+            ));
+        }
+        let segment = if es_changed {
+            Some(self.require_segment_runtime_control("additive build-up")?)
+        } else if l2_changed {
+            self.open_segment_runtime_control()?
+        } else {
+            None
+        };
+        let l3_originator = if ip_vrf_rows_changed {
+            let l3 = self.l3_originator.as_ref().ok_or_else(|| {
+                DaemonEvpnRuntimeConvergeError::unsupported(
+                    "additive IP-VRF build-up requires an active EVPN Type 5 originator; \
+                     live Type 5 actor-spawn is not supported yet",
+                )
+            })?;
+            if !l3.is_open() {
+                return Err(DaemonEvpnRuntimeConvergeError::failed(
+                    "EVPN Type 5 originator runtime control is closed",
+                ));
+            }
+            Some(l3)
+        } else {
+            None
+        };
+        Ok(AdditiveBuildUpActors {
+            dataplane,
+            originator,
+            svi,
+            segment,
+            l3_originator,
+        })
+    }
+
     fn rollback_l2vni_runtime_models(
         &self,
         dataplane: &evpn_dataplane::EvpnDataplaneRuntimeControl,
@@ -689,68 +992,17 @@ impl EvpnRuntimeActorConverger {
         let candidate_vni_to_esi = evpn_vni_to_esi_map(candidate.ethernet_segments());
 
         let l2_changed = !plan.evpn_instances.added.is_empty();
-        let ip_vrf_rows_changed = !plan.ip_vrfs.added.is_empty();
         let ip_vrf_metadata_changed = current.ip_vrfs() != candidate.ip_vrfs();
         let es_changed = !plan.ethernet_segments.added.is_empty()
             || !plan.ethernet_segments.redefined.is_empty();
 
-        let dataplane = if l2_changed || ip_vrf_metadata_changed || ip_vrf_rows_changed {
-            Some(self.require_l2vni_dataplane("additive build-up")?)
-        } else {
-            None
-        };
-        let originator = if l2_changed {
-            Some(self.require_l2vni_originator("additive build-up")?)
-        } else if es_changed {
-            if let Some(originator) = self.originator.as_ref()
-                && !originator.is_open()
-            {
-                return Err(DaemonEvpnRuntimeConvergeError::failed(
-                    "EVPN Type 2 originator runtime control is closed",
-                ));
-            }
-            self.originator.as_ref()
-        } else {
-            None
-        };
-        let svi_required = added_instances.iter().any(|inst| inst.advertise_svi_mac);
-        let svi = self.svi.as_ref();
-        if svi_required && svi.is_none() {
-            return Err(DaemonEvpnRuntimeConvergeError::unsupported(
-                "additive L2VNI build-up with advertise_svi_mac=true requires an active SVI actor; \
-                 live SVI actor-spawn is not supported yet",
-            ));
-        }
-        if let Some(svi) = svi
-            && !svi.is_open()
-        {
-            return Err(DaemonEvpnRuntimeConvergeError::failed(
-                "EVPN SVI runtime control is closed",
-            ));
-        }
-        let segment = if es_changed {
-            Some(self.require_segment_runtime_control("additive build-up")?)
-        } else if l2_changed {
-            self.open_segment_runtime_control()?
-        } else {
-            None
-        };
-        let l3_originator = if ip_vrf_rows_changed {
-            let l3 = self.l3_originator.as_ref().ok_or_else(|| {
-                DaemonEvpnRuntimeConvergeError::unsupported(
-                    "additive IP-VRF build-up requires an active EVPN Type 5 originator; \
-                     live Type 5 actor-spawn is not supported yet",
-                )
-            })?;
-            if !l3.is_open() {
-                return Err(DaemonEvpnRuntimeConvergeError::failed(
-                    "EVPN Type 5 originator runtime control is closed",
-                ));
-            }
-            Some(l3)
-        } else {
-            None
-        };
+        let AdditiveBuildUpActors {
+            dataplane,
+            originator,
+            svi,
+            segment,
+            l3_originator,
+        } = self.require_additive_build_up_actors(current, candidate, plan, &added_instances)?;
 
         let mut originated_instances = Vec::with_capacity(added_instances.len());
         for instance in &added_instances {
@@ -930,29 +1182,12 @@ impl EvpnRuntimeActorConverger {
         let candidate_ip_vrfs = Arc::new(candidate.ip_vrfs().clone());
         let ip_vrf_metadata_changed = current.ip_vrfs() != candidate.ip_vrfs();
 
-        let dataplane = self.require_l2vni_dataplane("mixed L2VNI update")?;
-        let originator = self.require_l2vni_originator("mixed L2VNI update")?;
-        let svi_required = changes
-            .added
-            .iter()
-            .chain(changes.deleted.iter())
-            .chain(changes.redefined.iter().flat_map(|(old, new)| [old, new]))
-            .any(|instance| instance.advertise_svi_mac);
-        let svi = self.svi.as_ref();
-        if svi_required && svi.is_none() {
-            return Err(DaemonEvpnRuntimeConvergeError::unsupported(
-                "mixed L2VNI runtime update with advertise_svi_mac=true requires an active SVI actor; \
-                 live SVI actor-spawn is not supported yet",
-            ));
-        }
-        if let Some(svi) = svi
-            && !svi.is_open()
-        {
-            return Err(DaemonEvpnRuntimeConvergeError::failed(
-                "EVPN SVI runtime control is closed",
-            ));
-        }
-        let segment = self.open_segment_runtime_control()?;
+        let L2vniFamilyActors {
+            dataplane,
+            originator,
+            svi,
+            segment,
+        } = self.l2vni_swap_actors(&changes)?;
 
         let mut originated_added = Vec::with_capacity(changes.added.len());
         for instance in &changes.added {
@@ -1241,24 +1476,12 @@ impl EvpnRuntimeActorConverger {
         let candidate_ip_vrfs = Arc::new(candidate.ip_vrfs().clone());
         let ip_vrf_metadata_changed = current.ip_vrfs() != candidate.ip_vrfs();
 
-        let dataplane = self.require_l2vni_dataplane("delete")?;
-        let originator = self.require_l2vni_originator("delete")?;
-        let svi_required = deleted_instance.advertise_svi_mac;
-        let svi = self.svi.as_ref();
-        if svi_required && svi.is_none() {
-            return Err(DaemonEvpnRuntimeConvergeError::unsupported(
-                "L2VNI runtime delete with advertise_svi_mac=true requires an active SVI actor; \
-                 live SVI actor-spawn is not supported yet",
-            ));
-        }
-        if let Some(svi) = svi
-            && !svi.is_open()
-        {
-            return Err(DaemonEvpnRuntimeConvergeError::failed(
-                "EVPN SVI runtime control is closed",
-            ));
-        }
-        let segment = self.open_segment_runtime_control()?;
+        let L2vniFamilyActors {
+            dataplane,
+            originator,
+            svi,
+            segment,
+        } = self.l2vni_delete_actors(&deleted_instance)?;
 
         if ip_vrf_metadata_changed && !dataplane.replace_ip_vrfs(candidate_ip_vrfs) {
             return Err(DaemonEvpnRuntimeConvergeError::failed(
@@ -1359,40 +1582,15 @@ impl EvpnRuntimeActorConverger {
         let candidate_vni_to_esi = evpn_vni_to_esi_map(candidate.ethernet_segments());
         let ip_vrf_changed = current.ip_vrfs() != candidate.ip_vrfs();
 
-        let dataplane = self.require_l2vni_dataplane("tenant teardown")?;
-        let originator = self.require_l2vni_originator("tenant teardown")?;
-        let svi_required = deleted_instances.iter().any(|inst| inst.advertise_svi_mac);
-        let svi = self.svi.as_ref();
-        if svi_required && svi.is_none() {
-            return Err(DaemonEvpnRuntimeConvergeError::unsupported(
-                "tenant teardown of an advertise_svi_mac L2VNI requires an active SVI actor; \
-                 live SVI actor-spawn is not supported yet",
-            ));
-        }
-        if let Some(svi) = svi
-            && !svi.is_open()
-        {
-            return Err(DaemonEvpnRuntimeConvergeError::failed(
-                "EVPN SVI runtime control is closed",
-            ));
-        }
-        let segment = self.open_segment_runtime_control()?;
-        let l3_originator = if ip_vrf_changed {
-            let l3 = self.l3_originator.as_ref().ok_or_else(|| {
-                DaemonEvpnRuntimeConvergeError::unsupported(
-                    "tenant teardown with IP-VRF changes requires an active EVPN Type 5 \
-                     originator; live Type 5 actor-spawn is not supported yet",
-                )
-            })?;
-            if !l3.is_open() {
-                return Err(DaemonEvpnRuntimeConvergeError::failed(
-                    "EVPN Type 5 originator runtime control is closed",
-                ));
-            }
-            Some(l3)
-        } else {
-            None
-        };
+        let (
+            L2vniFamilyActors {
+                dataplane,
+                originator,
+                svi,
+                segment,
+            },
+            l3_originator,
+        ) = self.tenant_teardown_actors(&deleted_instances, ip_vrf_changed)?;
 
         // Each step publishes a candidate snapshot to a level-triggered actor;
         // on failure, `rollback_tenant_teardown` republishes the committed
@@ -1610,27 +1808,12 @@ impl EvpnRuntimeActorConverger {
         let candidate_instances = Arc::new(candidate.instances().clone());
         let candidate_vni_to_esi = evpn_vni_to_esi_map(candidate.ethernet_segments());
 
-        let dataplane = self.require_l2vni_dataplane("redefine")?;
-        let originator = self.require_l2vni_originator("redefine")?;
-        // Either the committed or candidate side may carry advertise_svi_mac,
-        // so the SVI actor is required if either does (turning it off still
-        // needs the actor to withdraw the stale SVI MAC).
-        let svi_required = new_instance.advertise_svi_mac || old_instance.advertise_svi_mac;
-        let svi = self.svi.as_ref();
-        if svi_required && svi.is_none() {
-            return Err(DaemonEvpnRuntimeConvergeError::unsupported(
-                "L2VNI runtime redefine with advertise_svi_mac=true requires an active SVI actor; \
-                 live SVI actor-spawn is not supported yet",
-            ));
-        }
-        if let Some(svi) = svi
-            && !svi.is_open()
-        {
-            return Err(DaemonEvpnRuntimeConvergeError::failed(
-                "EVPN SVI runtime control is closed",
-            ));
-        }
-        let segment = self.open_segment_runtime_control()?;
+        let L2vniFamilyActors {
+            dataplane,
+            originator,
+            svi,
+            segment,
+        } = self.l2vni_redefine_actors(&old_instance, &new_instance)?;
 
         // IMET (Type 3) is the only explicit, non-watch consumer. The
         // controller tracks one key per VNI, so a redefine must withdraw the
@@ -1762,28 +1945,7 @@ impl EvpnRuntimeActorConverger {
             )));
         }
 
-        let dataplane = self.dataplane.as_ref().ok_or_else(|| {
-            DaemonEvpnRuntimeConvergeError::unsupported(
-                "IP-VRF runtime add requires an active EVPN dataplane actor; \
-                 no-EVPN startup actor-spawn is not supported yet",
-            )
-        })?;
-        let l3_originator = self.l3_originator.as_ref().ok_or_else(|| {
-            DaemonEvpnRuntimeConvergeError::unsupported(
-                "IP-VRF runtime add requires an active EVPN Type 5 originator; \
-                 live Type 5 actor-spawn is not supported yet",
-            )
-        })?;
-        if !dataplane.is_open() {
-            return Err(DaemonEvpnRuntimeConvergeError::failed(
-                "EVPN dataplane runtime control is closed",
-            ));
-        }
-        if !l3_originator.is_open() {
-            return Err(DaemonEvpnRuntimeConvergeError::failed(
-                "EVPN Type 5 originator runtime control is closed",
-            ));
-        }
+        let (dataplane, l3_originator) = self.require_ip_vrf_actors("add")?;
 
         if !dataplane.replace_ip_vrfs(candidate_ip_vrfs.clone()) {
             return Err(DaemonEvpnRuntimeConvergeError::failed(
@@ -1812,28 +1974,7 @@ impl EvpnRuntimeActorConverger {
         let _deleted_name = validate_single_ip_vrf_delete(current, candidate, plan)?;
         let candidate_ip_vrfs = Arc::new(candidate.ip_vrfs().clone());
 
-        let dataplane = self.dataplane.as_ref().ok_or_else(|| {
-            DaemonEvpnRuntimeConvergeError::unsupported(
-                "IP-VRF runtime delete requires an active EVPN dataplane actor; \
-                 no-EVPN startup actor-spawn is not supported yet",
-            )
-        })?;
-        let l3_originator = self.l3_originator.as_ref().ok_or_else(|| {
-            DaemonEvpnRuntimeConvergeError::unsupported(
-                "IP-VRF runtime delete requires an active EVPN Type 5 originator; \
-                 live Type 5 actor-spawn is not supported yet",
-            )
-        })?;
-        if !dataplane.is_open() {
-            return Err(DaemonEvpnRuntimeConvergeError::failed(
-                "EVPN dataplane runtime control is closed",
-            ));
-        }
-        if !l3_originator.is_open() {
-            return Err(DaemonEvpnRuntimeConvergeError::failed(
-                "EVPN Type 5 originator runtime control is closed",
-            ));
-        }
+        let (dataplane, l3_originator) = self.require_ip_vrf_actors("delete")?;
 
         if !dataplane.replace_ip_vrfs(candidate_ip_vrfs.clone()) {
             return Err(DaemonEvpnRuntimeConvergeError::failed(
@@ -1867,28 +2008,7 @@ impl EvpnRuntimeActorConverger {
             )));
         }
 
-        let dataplane = self.dataplane.as_ref().ok_or_else(|| {
-            DaemonEvpnRuntimeConvergeError::unsupported(
-                "IP-VRF runtime redefine requires an active EVPN dataplane actor; \
-                 no-EVPN startup actor-spawn is not supported yet",
-            )
-        })?;
-        let l3_originator = self.l3_originator.as_ref().ok_or_else(|| {
-            DaemonEvpnRuntimeConvergeError::unsupported(
-                "IP-VRF runtime redefine requires an active EVPN Type 5 originator; \
-                 live Type 5 actor-spawn is not supported yet",
-            )
-        })?;
-        if !dataplane.is_open() {
-            return Err(DaemonEvpnRuntimeConvergeError::failed(
-                "EVPN dataplane runtime control is closed",
-            ));
-        }
-        if !l3_originator.is_open() {
-            return Err(DaemonEvpnRuntimeConvergeError::failed(
-                "EVPN Type 5 originator runtime control is closed",
-            ));
-        }
+        let (dataplane, l3_originator) = self.require_ip_vrf_actors("redefine")?;
 
         if !dataplane.replace_ip_vrfs(candidate_ip_vrfs.clone()) {
             return Err(DaemonEvpnRuntimeConvergeError::failed(
@@ -1944,7 +2064,7 @@ impl EvpnRuntimeActorConverger {
         candidate: &rustbgpd_evpn::EvpnRuntimeCandidate,
         operation: &str,
     ) -> Result<(), DaemonEvpnRuntimeConvergeError> {
-        let segment = self.require_segment_runtime_control(operation)?;
+        let (segment, originator) = self.require_ethernet_segment_actors(operation)?;
         // ES add/delete/redefine leaves the instance table unchanged
         // (`plan.evpn_instances.has_changes() == false`), so clone it once
         // and share the Arc across the segment + originator publishes.
@@ -1962,12 +2082,7 @@ impl EvpnRuntimeActorConverger {
         // entry (the ADR-0084 GC below runs only after every publish
         // succeeded); it is inert here — the originator keys drain
         // through the published vni->esi map, which no longer maps it.
-        let republished_originator = if let Some(originator) = self.originator.as_ref() {
-            if !originator.is_open() {
-                return Err(DaemonEvpnRuntimeConvergeError::failed(
-                    "EVPN Type 2 originator runtime control is closed",
-                ));
-            }
+        let republished_originator = if let Some(originator) = originator {
             if !originator.replace_runtime_model(
                 candidate_instances.clone(),
                 evpn_vni_to_esi_map(candidate.ethernet_segments()),
@@ -1987,7 +2102,7 @@ impl EvpnRuntimeActorConverger {
         // on the full desired snapshot, mirroring the L2VNI/IP-VRF paths.
         let candidate_segments = Arc::new(candidate.ethernet_segments().to_vec());
         if !segment.replace_segments(candidate_segments) {
-            if republished_originator && let Some(originator) = self.originator.as_ref() {
+            if republished_originator && let Some(originator) = originator {
                 // Roll the originator back to the committed vni->esi map.
                 let _ = originator.replace_runtime_model(
                     Arc::new(current.instances().clone()),
@@ -2098,6 +2213,26 @@ fn redefine_imet_failure(
     }
 }
 
+/// The supported converge route [`route_supported_plan_shape`] classified
+/// a plan into, carrying the routed validator's output where the
+/// actor-availability gate needs it (see
+/// [`DaemonEvpnRuntimeConverger::validate_availability`]).
+enum SupportedPlanRoute {
+    TenantTeardown(Vec<rustbgpd_evpn::EvpnInstance>),
+    IpVrfRelink,
+    AdditiveBuildUp(Vec<rustbgpd_evpn::EvpnInstance>),
+    L2vniMixed(L2VniMixedChanges),
+    SingleL2vniDelete(Box<rustbgpd_evpn::EvpnInstance>),
+    SingleL2vniRedefine(rustbgpd_evpn::EvpnInstanceId),
+    SingleL2vniAdd(rustbgpd_evpn::EvpnInstanceId),
+    SingleIpVrfDelete,
+    SingleIpVrfRedefine,
+    SingleIpVrfAdd,
+    SingleEthernetSegmentDelete,
+    SingleEthernetSegmentRedefine,
+    SingleEthernetSegmentAdd,
+}
+
 /// Pure shape gate mirroring [`EvpnRuntimeActorConverger::converge`]'s
 /// dispatch: routes `plan` to the same shape detector + validator the
 /// dispatch would pick, without any actor side effects. Used by the
@@ -2115,17 +2250,31 @@ pub(crate) fn validate_supported_plan_shape(
     candidate: &rustbgpd_evpn::EvpnRuntimeCandidate,
     plan: &rustbgpd_evpn::EvpnRuntimePlan,
 ) -> Result<(), DaemonEvpnRuntimeConvergeError> {
+    route_supported_plan_shape(current, candidate, plan).map(drop)
+}
+
+/// [`validate_supported_plan_shape`] with the classified route kept, so
+/// the LAN-897 availability gate can run the routed converge method's
+/// actor preconditions without re-implementing the routing ladder.
+fn route_supported_plan_shape(
+    current: &rustbgpd_evpn::EvpnRuntimeModel,
+    candidate: &rustbgpd_evpn::EvpnRuntimeCandidate,
+    plan: &rustbgpd_evpn::EvpnRuntimePlan,
+) -> Result<SupportedPlanRoute, DaemonEvpnRuntimeConvergeError> {
     if is_tenant_teardown_plan(plan, current) {
-        return validate_tenant_teardown(current, candidate, plan).map(drop);
+        return validate_tenant_teardown(current, candidate, plan)
+            .map(SupportedPlanRoute::TenantTeardown);
     }
     if is_ip_vrf_relink_plan(plan) {
-        return validate_ip_vrf_relink(current, candidate, plan);
+        return validate_ip_vrf_relink(current, candidate, plan)
+            .map(|()| SupportedPlanRoute::IpVrfRelink);
     }
     if is_additive_build_up_plan(plan) {
-        return validate_additive_build_up(current, candidate, plan).map(drop);
+        return validate_additive_build_up(current, candidate, plan)
+            .map(SupportedPlanRoute::AdditiveBuildUp);
     }
     if is_l2vni_mixed_plan(plan) {
-        return validate_l2vni_mixed(current, candidate, plan).map(drop);
+        return validate_l2vni_mixed(current, candidate, plan).map(SupportedPlanRoute::L2vniMixed);
     }
     validate_no_unexpected_relink(current, candidate, plan)?;
     if plan.evpn_instances.has_changes() {
@@ -2133,45 +2282,53 @@ pub(crate) fn validate_supported_plan_shape(
             && !plan.evpn_instances.deleted.is_empty()
             && plan.evpn_instances.redefined.is_empty()
         {
-            return validate_single_l2vni_delete(current, candidate, plan).map(drop);
+            return validate_single_l2vni_delete(current, candidate, plan)
+                .map(|deleted| SupportedPlanRoute::SingleL2vniDelete(Box::new(deleted)));
         }
         if plan.evpn_instances.added.is_empty()
             && plan.evpn_instances.deleted.is_empty()
             && !plan.evpn_instances.redefined.is_empty()
         {
-            return validate_single_l2vni_redefine(current, candidate, plan).map(drop);
+            return validate_single_l2vni_redefine(current, candidate, plan)
+                .map(SupportedPlanRoute::SingleL2vniRedefine);
         }
-        return validate_single_l2vni_add(current, candidate, plan).map(drop);
+        return validate_single_l2vni_add(current, candidate, plan)
+            .map(SupportedPlanRoute::SingleL2vniAdd);
     }
     if plan.ip_vrfs.has_changes() {
         if plan.ip_vrfs.added.is_empty()
             && !plan.ip_vrfs.deleted.is_empty()
             && plan.ip_vrfs.redefined.is_empty()
         {
-            return validate_single_ip_vrf_delete(current, candidate, plan).map(drop);
+            return validate_single_ip_vrf_delete(current, candidate, plan)
+                .map(|_| SupportedPlanRoute::SingleIpVrfDelete);
         }
         if plan.ip_vrfs.added.is_empty()
             && plan.ip_vrfs.deleted.is_empty()
             && !plan.ip_vrfs.redefined.is_empty()
         {
-            return validate_single_ip_vrf_redefine(current, candidate, plan).map(drop);
+            return validate_single_ip_vrf_redefine(current, candidate, plan)
+                .map(|_| SupportedPlanRoute::SingleIpVrfRedefine);
         }
-        return validate_single_ip_vrf_add(plan).map(drop);
+        return validate_single_ip_vrf_add(plan).map(|_| SupportedPlanRoute::SingleIpVrfAdd);
     }
     if plan.ethernet_segments.has_changes() {
         if plan.ethernet_segments.added.is_empty()
             && !plan.ethernet_segments.deleted.is_empty()
             && plan.ethernet_segments.redefined.is_empty()
         {
-            return validate_single_ethernet_segment_delete(current, candidate, plan).map(drop);
+            return validate_single_ethernet_segment_delete(current, candidate, plan)
+                .map(|_| SupportedPlanRoute::SingleEthernetSegmentDelete);
         }
         if plan.ethernet_segments.added.is_empty()
             && plan.ethernet_segments.deleted.is_empty()
             && !plan.ethernet_segments.redefined.is_empty()
         {
-            return validate_single_ethernet_segment_redefine(current, candidate, plan).map(drop);
+            return validate_single_ethernet_segment_redefine(current, candidate, plan)
+                .map(|_| SupportedPlanRoute::SingleEthernetSegmentRedefine);
         }
-        return validate_single_ethernet_segment_add(current, candidate, plan).map(drop);
+        return validate_single_ethernet_segment_add(current, candidate, plan)
+            .map(|_| SupportedPlanRoute::SingleEthernetSegmentAdd);
     }
     Err(DaemonEvpnRuntimeConvergeError::unsupported(
         "ApplyEvpnRuntime has no supported changes in this candidate",
@@ -2273,6 +2430,71 @@ impl DaemonEvpnRuntimeConverger for EvpnRuntimeActorConverger {
                 "ApplyEvpnRuntime has no supported changes in this candidate",
             ))
         })
+    }
+
+    fn validate_availability(
+        &self,
+        current: &rustbgpd_evpn::EvpnRuntimeModel,
+        candidate: &rustbgpd_evpn::EvpnRuntimeCandidate,
+        plan: &rustbgpd_evpn::EvpnRuntimePlan,
+    ) -> Result<(), DaemonEvpnRuntimeConvergeError> {
+        // Route exactly as `converge` would (via the shared classifier),
+        // then acquire — and drop — the same actor set the routed
+        // `converge_*` method acquires through the same `require_*`
+        // helpers. No publish, no IMET mutation: availability only.
+        match route_supported_plan_shape(current, candidate, plan)? {
+            SupportedPlanRoute::TenantTeardown(deleted) => {
+                let ip_vrf_changed = current.ip_vrfs() != candidate.ip_vrfs();
+                self.tenant_teardown_actors(&deleted, ip_vrf_changed)
+                    .map(drop)
+            }
+            SupportedPlanRoute::IpVrfRelink => {
+                self.require_l2vni_dataplane("ip_vrf relink").map(drop)
+            }
+            SupportedPlanRoute::AdditiveBuildUp(added) => self
+                .require_additive_build_up_actors(current, candidate, plan, &added)
+                .map(drop),
+            SupportedPlanRoute::L2vniMixed(changes) => self.l2vni_swap_actors(&changes).map(drop),
+            SupportedPlanRoute::SingleL2vniDelete(deleted) => {
+                self.l2vni_delete_actors(&deleted).map(drop)
+            }
+            SupportedPlanRoute::SingleL2vniRedefine(vni) => {
+                let Some(new_instance) = candidate.instances().get(vni) else {
+                    return Err(DaemonEvpnRuntimeConvergeError::unsupported(format!(
+                        "candidate did not contain redefined L2VNI {vni}"
+                    )));
+                };
+                let Some(old_instance) = current.instances().get(vni) else {
+                    return Err(DaemonEvpnRuntimeConvergeError::unsupported(format!(
+                        "committed model did not contain redefined L2VNI {vni}"
+                    )));
+                };
+                self.l2vni_redefine_actors(old_instance, new_instance)
+                    .map(drop)
+            }
+            SupportedPlanRoute::SingleL2vniAdd(vni) => {
+                let Some(added) = candidate.instances().get(vni) else {
+                    return Err(DaemonEvpnRuntimeConvergeError::unsupported(format!(
+                        "candidate did not contain added L2VNI {vni}"
+                    )));
+                };
+                self.l2vni_add_actors(added).map(drop)
+            }
+            SupportedPlanRoute::SingleIpVrfDelete => self.require_ip_vrf_actors("delete").map(drop),
+            SupportedPlanRoute::SingleIpVrfRedefine => {
+                self.require_ip_vrf_actors("redefine").map(drop)
+            }
+            SupportedPlanRoute::SingleIpVrfAdd => self.require_ip_vrf_actors("add").map(drop),
+            SupportedPlanRoute::SingleEthernetSegmentDelete => {
+                self.require_ethernet_segment_actors("delete").map(drop)
+            }
+            SupportedPlanRoute::SingleEthernetSegmentRedefine => {
+                self.require_ethernet_segment_actors("redefine").map(drop)
+            }
+            SupportedPlanRoute::SingleEthernetSegmentAdd => {
+                self.require_ethernet_segment_actors("add").map(drop)
+            }
+        }
     }
 }
 
@@ -3557,31 +3779,77 @@ where
         // reject. Re-run the same shape acceptance the commit path uses —
         // supported primitive shape, or a #268 decomposition into supported
         // steps — WITHOUT committing or touching any actor. (`converge` is
-        // skipped on purpose: it has actor side effects, and its only shape
-        // decision mirrors `validate_supported_plan_shape`.)
+        // skipped on purpose: it has actor side effects; its shape routing
+        // mirrors `validate_supported_plan_shape` and its actor
+        // preconditions are re-run side-effect-free through
+        // `validate_availability` — LAN-897.)
         let message = if plan.is_noop() {
             "candidate EVPN runtime model validated (no-op: matches the committed generation); \
              generation not advanced"
                 .to_string()
         } else {
             match validate_supported_plan_shape(&current, &candidate, &plan) {
-                Ok(()) => "candidate EVPN runtime model validated as a supported primitive shape; \
-                           generation not advanced"
-                    .to_string(),
+                Ok(()) => {
+                    if let Err(availability_error) =
+                        converger.validate_availability(&current, &candidate, &plan)
+                    {
+                        return Err(GrpcEvpnRuntimeApplyError::FailedPrecondition(format!(
+                            "EVPN runtime candidate rejected: {}; generation {} remains committed",
+                            availability_error.message(),
+                            snapshot.generation.as_u64()
+                        )));
+                    }
+                    "candidate EVPN runtime model validated as a supported primitive shape; \
+                     generation not advanced"
+                        .to_string()
+                }
                 Err(shape_error) => {
                     match crate::evpn_plan_decomposer::decompose_evpn_runtime_candidate(
                         &current, &candidate, &plan,
                     ) {
-                        Ok(steps) => format!(
-                            "candidate EVPN runtime model validated; a real apply would decompose \
-                             it into {} supported steps ({}); generation not advanced",
-                            steps.len(),
-                            steps
-                                .iter()
-                                .map(|step| step.description.clone())
-                                .collect::<Vec<_>>()
-                                .join("; ")
-                        ),
+                        Ok(steps) => {
+                            // A real apply converges each decomposed step
+                            // through the same actor preconditions; simulate
+                            // the sequence (as the decomposer does for shape)
+                            // and check availability per step.
+                            let total = steps.len();
+                            let mut model = current.clone();
+                            for (index, step) in steps.iter().enumerate() {
+                                let step_plan = model.plan_candidate(&step.candidate);
+                                if !step_plan.is_noop()
+                                    && let Err(availability_error) = converger
+                                        .validate_availability(&model, &step.candidate, &step_plan)
+                                {
+                                    return Err(GrpcEvpnRuntimeApplyError::FailedPrecondition(
+                                        format!(
+                                            "EVPN runtime candidate rejected: decomposed step \
+                                             {}/{total} ({}) would fail: {}; generation {} \
+                                             remains committed",
+                                            index + 1,
+                                            step.description,
+                                            availability_error.message(),
+                                            snapshot.generation.as_u64()
+                                        ),
+                                    ));
+                                }
+                                model = rustbgpd_evpn::EvpnRuntimeModel::startup(
+                                    step.candidate.instances().clone(),
+                                    step.candidate.ip_vrfs().clone(),
+                                    step.candidate.ethernet_segments().to_vec(),
+                                );
+                            }
+                            format!(
+                                "candidate EVPN runtime model validated; a real apply would \
+                                 decompose it into {} supported steps ({}); generation not \
+                                 advanced",
+                                steps.len(),
+                                steps
+                                    .iter()
+                                    .map(|step| step.description.clone())
+                                    .collect::<Vec<_>>()
+                                    .join("; ")
+                            )
+                        }
                         // Primitive but unsupported: surface the same shape
                         // rejection the commit path would return.
                         Err(crate::evpn_plan_decomposer::EvpnDecomposeError::AlreadyPrimitive) => {
@@ -5381,6 +5649,143 @@ table_id = 6000
             rustbgpd_evpn::EvpnRuntimeMutationState::Idle,
             "a rejected dry-run must not pin/degrade the runtime"
         );
+    }
+
+    #[tokio::test]
+    async fn apply_evpn_runtime_validate_only_agrees_with_commit_on_missing_actors() {
+        // LAN-897: on an RR-only daemon no EVPN actors are spawned, so a
+        // commit of an L2VNI add fails the dataplane-availability
+        // precondition. The dry-run of the identical candidate must reject
+        // with the same precondition — a validate_only verdict of
+        // "Validated" that a commit then contradicts breaks the dry-run's
+        // commit-predictability promise.
+        let (rib_tx, _rib_rx) = mpsc::channel::<RibUpdate>(8);
+        let converger = EvpnRuntimeActorConverger {
+            rib_tx,
+            imet_controller: Arc::new(
+                tokio::sync::Mutex::new(evpn_imet::EvpnImetController::new()),
+            ),
+            dataplane: None,
+            originator: None,
+            svi: None,
+            l3_originator: None,
+            segment: None,
+            es_drain: crate::evpn_es_drain::EvpnEsDrainState::default(),
+        };
+        let apply_lock = tokio::sync::Mutex::new(());
+
+        let commit_error = apply_evpn_runtime_request(
+            &proto::ApplyEvpnRuntimeRequest {
+                candidate_toml: l2vni_runtime_candidate_toml().to_string(),
+                validate_only: false,
+            },
+            empty_evpn_runtime_coordinator().as_ref(),
+            &apply_lock,
+            &converger,
+        )
+        .await
+        .expect_err("commit without a dataplane actor must fail");
+        let GrpcEvpnRuntimeApplyError::FailedPrecondition(commit_message) = commit_error else {
+            panic!("expected FailedPrecondition from commit, got: {commit_error:?}");
+        };
+        assert!(
+            commit_message.contains("requires an active EVPN dataplane actor"),
+            "commit must fail on the missing dataplane actor: {commit_message}"
+        );
+
+        let coordinator = empty_evpn_runtime_coordinator();
+        let dry_run_error = apply_evpn_runtime_request(
+            &proto::ApplyEvpnRuntimeRequest {
+                candidate_toml: l2vni_runtime_candidate_toml().to_string(),
+                validate_only: true,
+            },
+            coordinator.as_ref(),
+            &apply_lock,
+            &converger,
+        )
+        .await
+        .expect_err("dry-run must reject exactly what the commit rejects");
+        let GrpcEvpnRuntimeApplyError::FailedPrecondition(dry_run_message) = dry_run_error else {
+            panic!("expected FailedPrecondition from dry-run, got: {dry_run_error:?}");
+        };
+        assert!(
+            dry_run_message.contains("requires an active EVPN dataplane actor"),
+            "dry-run must carry the commit's availability precondition: {dry_run_message}"
+        );
+
+        let guard = coordinator.lock().unwrap();
+        assert_eq!(
+            guard.model().generation().as_u64(),
+            1,
+            "a rejected dry-run must not advance the generation"
+        );
+        assert_eq!(
+            guard.model().mutation_state(),
+            rustbgpd_evpn::EvpnRuntimeMutationState::Idle,
+            "a rejected dry-run must not pin/degrade the runtime"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_evpn_runtime_validate_only_validates_when_required_actors_present() {
+        // LAN-897 accept side: the availability gate must not reject a
+        // dry-run whose routed converge would find its actors. An ES add
+        // requires only the segment actor; with it spawned, validate_only
+        // must still report Validated (and converge must not run — the
+        // committed generation stays put).
+        let current = runtime_candidate_from_toml(two_l2vni_one_es_runtime_candidate_toml());
+        let coordinator = Arc::new(Mutex::new(rustbgpd_evpn::EvpnRuntimeCoordinator::new(
+            current.instances().clone(),
+            current.ip_vrfs().clone(),
+            current.ethernet_segments().to_vec(),
+        )));
+        let apply_lock = tokio::sync::Mutex::new(());
+        let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(64);
+        let injects = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let _rib = runtime_converger_rib_responder(rib_rx, injects);
+
+        let instances = Arc::new(current.instances().clone());
+        let segment_handle = evpn_segment::spawn(
+            &instances,
+            current.ethernet_segments().to_vec(),
+            rib_tx.clone(),
+            None,
+            BgpMetrics::new(),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .expect("segment actor should spawn for non-empty ES config");
+
+        let converger = EvpnRuntimeActorConverger {
+            rib_tx,
+            imet_controller: Arc::new(
+                tokio::sync::Mutex::new(evpn_imet::EvpnImetController::new()),
+            ),
+            dataplane: None,
+            originator: None,
+            svi: None,
+            l3_originator: None,
+            segment: Some(segment_handle.runtime_control()),
+            es_drain: crate::evpn_es_drain::EvpnEsDrainState::default(),
+        };
+
+        let response = apply_evpn_runtime_request(
+            &proto::ApplyEvpnRuntimeRequest {
+                candidate_toml: two_l2vni_two_es_runtime_candidate_toml().to_string(),
+                validate_only: true,
+            },
+            coordinator.as_ref(),
+            &apply_lock,
+            &converger,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            response.outcome,
+            proto::EvpnRuntimeApplyOutcome::EvpnRuntimeApplyValidated as i32
+        );
+        assert_eq!(coordinator.lock().unwrap().model().generation().as_u64(), 1);
+        segment_handle.shutdown().await;
     }
 
     #[tokio::test]
