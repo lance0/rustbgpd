@@ -1,8 +1,12 @@
 //! Acknowledgement-aware EVPN origination toward the RIB (ADR-0102).
 //!
 //! Shared by the local Type 2 MAC/MAC+IP originator
-//! ([`crate::evpn_originator`]) and the Ethernet Segment orchestrator's
-//! Type 1/4 publication ([`crate::evpn_segment`]). Both actors keep a
+//! ([`crate::evpn_originator`]), the Ethernet Segment orchestrator's
+//! Type 1/4 publication ([`crate::evpn_segment`]), and — for the
+//! bounded [`send_and_ack`] wait only, without the pending-op tracker —
+//! the Type 3 IMET controller ([`crate::evpn_imet`]), whose converge
+//! callers hold a mutex across the ack await and therefore must never
+//! wait unboundedly. The two tracker-backed actors keep a
 //! [`PendingRibOps`] tracker: every inject/withdraw sent to the RIB is
 //! recorded as *pending* under `(route identity, generation)` and only
 //! forgotten once the RIB's reply oneshot acknowledges it. A dropped
@@ -48,6 +52,12 @@ pub(crate) const RETRY_BACKOFF_BASE: Duration = Duration::from_secs(1);
 /// failure costs one attempt per 30s per route, not a hot loop.
 pub(crate) const RETRY_BACKOFF_MAX: Duration = Duration::from_secs(30);
 
+/// `NoAck` reason for a reply oneshot the RIB dropped without
+/// answering. A const (rather than an inline literal) so
+/// [`crate::evpn_imet`] can pattern-match it when mapping ack
+/// outcomes onto its caller-visible outcome enums.
+pub(crate) const NOACK_REPLY_DROPPED: &str = "reply dropped";
+
 /// Outcome of one inject/withdraw attempt against the RIB.
 #[derive(Debug)]
 pub(crate) enum RibAckOutcome {
@@ -82,7 +92,7 @@ pub(crate) async fn send_and_ack(
     match tokio::time::timeout(RIB_ACK_TIMEOUT, reply_rx).await {
         Ok(Ok(Ok(()))) => RibAckOutcome::Acked,
         Ok(Ok(Err(e))) => RibAckOutcome::Rejected(e),
-        Ok(Err(_)) => RibAckOutcome::NoAck("reply dropped"),
+        Ok(Err(_)) => RibAckOutcome::NoAck(NOACK_REPLY_DROPPED),
         Err(_) => RibAckOutcome::NoAck("ack timeout"),
     }
 }
