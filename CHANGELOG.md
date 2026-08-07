@@ -45,6 +45,22 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   reload replaces the listener inventory alongside session
   reconciliation.
 
+- **Runtime deletion of an MD5/GTSM-protected neighbor or dynamic range
+  is now refused restart-required** (LAN-910), closing the delete half of
+  the LAN-902 fence set: a runtime delete could not remove the peer's
+  host-scoped (or the range's prefix-scoped) key from the
+  startup/SIGHUP-pinned listener, leaving a stale key installed —
+  fail-closed, but a delete-then-re-add at runtime left the re-added
+  peer's inbound half wedged until SIGHUP. `DeleteNeighbor`,
+  `DeleteDynamicRange`, and `[[neighbors]]` / `[[dynamic_neighbors]]`
+  config transactions that would change the listener's protected
+  inventory now fail with the same restart-required error the create,
+  change, and TCP-AO paths already return; remove the entry from the
+  config file and SIGHUP instead. `DeletePeerGroup` needs no new fence:
+  a group's authentication reaches the listener only through its
+  members, and any member already refuses the delete with
+  `still referenced`.
+
 ### Added
 
 - `WatchRoutes` now signals subscriber lag in-band with a synthetic

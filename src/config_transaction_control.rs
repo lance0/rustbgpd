@@ -2196,7 +2196,13 @@ async fn commit_apply_family_inner(
             .await
         }
         ApplyFamily::DynamicNeighbors => {
-            commit_candidate_snapshot_locked(&deps.peer_mgr_tx, config_tx, candidate_toml).await?;
+            commit_dynamic_neighbors_locked(
+                &deps.peer_mgr_tx,
+                config_tx,
+                candidate_toml,
+                &candidate,
+            )
+            .await?;
             Ok(committable_response(
                 post_commit_runtime_snapshot_token,
                 vec![DYNAMIC_SECTION.to_string()],
@@ -2405,6 +2411,55 @@ async fn commit_candidate_snapshot_locked(
 ) -> Result<(), ApplyFailure> {
     let permit = reserve_persist_permit(config_tx).await?;
     let previous_toml = stage_config_snapshot(peer_mgr_tx, candidate_toml.clone()).await?;
+    if let Err(failure) = persist_candidate_config(permit, candidate_toml).await {
+        return Err(rollback_snapshot_after_error(peer_mgr_tx, previous_toml, failure).await);
+    }
+    // LAN-277 window (a): the candidate is durable on disk from here on — a
+    // finalization failure must not be reported as a clean no-commit failure.
+    commit_config_snapshot_stage(peer_mgr_tx)
+        .await
+        .map_err(ApplyFailure::ambiguous)?;
+    Ok(())
+}
+
+/// `[[dynamic_neighbors]]` commits replace the range set through the staged
+/// config snapshot without going through the peer manager's per-range
+/// add/delete surface, so the listener fences in `add_dynamic_range` /
+/// `delete_dynamic_range` never run for them. Refuse here instead when the
+/// transaction would change the startup/SIGHUP-pinned listener MD5/GTSM
+/// range inventory (remove or add a protected range, or reassign one across
+/// a protection boundary).
+async fn commit_dynamic_neighbors_locked(
+    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
+    config_tx: &mpsc::Sender<ConfigEvent>,
+    candidate_toml: String,
+    candidate: &Config,
+) -> Result<(), ApplyFailure> {
+    let permit = reserve_persist_permit(config_tx).await?;
+    let previous_toml = stage_config_snapshot(peer_mgr_tx, candidate_toml.clone()).await?;
+    let previous = match Config::load_toml_with_diagnostics(
+        &previous_toml,
+        "previous runtime config transaction snapshot",
+    ) {
+        Ok(previous) => previous,
+        Err(error) => {
+            let error = ConfigTransactionApplyError::Internal(error);
+            return Err(
+                rollback_snapshot_after_error(peer_mgr_tx, previous_toml, error.into()).await,
+            );
+        }
+    };
+    if dynamic_range_listener_auth_inventory(&previous)
+        != dynamic_range_listener_auth_inventory(candidate)
+    {
+        let error = peer_lifecycle_error_to_apply_error(PeerLifecycleError::RestartRequired(
+            "[[dynamic_neighbors]] transaction changes a range protected by md5_password or \
+             ttl_security; inbound listener enforcement is updated only by startup or SIGHUP \
+             reload — apply this change through the config file and SIGHUP"
+                .to_string(),
+        ));
+        return Err(rollback_snapshot_after_error(peer_mgr_tx, previous_toml, error.into()).await);
+    }
     if let Err(failure) = persist_candidate_config(permit, candidate_toml).await {
         return Err(rollback_snapshot_after_error(peer_mgr_tx, previous_toml, failure).await);
     }
@@ -3063,6 +3118,25 @@ async fn rollback_peer_reshape_and_snapshot(
     }
 }
 
+/// The listener's dynamic-range inbound-auth inventory derived from a
+/// config: effective prefix → (MD5 password, GTSM) for every range whose
+/// peer group carries either. The listener installs these at startup/SIGHUP
+/// only, so runtime commits must leave this set unchanged.
+fn dynamic_range_listener_auth_inventory(
+    config: &Config,
+) -> std::collections::BTreeSet<((std::net::IpAddr, u8), Option<String>, bool)> {
+    config
+        .dynamic_neighbors
+        .iter()
+        .filter_map(|range| {
+            let key = crate::config::effective_prefix_str(&range.prefix)?;
+            let group = config.peer_groups.get(&range.peer_group)?;
+            let gtsm = group.ttl_security == Some(true);
+            (group.md5_password.is_some() || gtsm).then(|| (key, group.md5_password.clone(), gtsm))
+        })
+        .collect()
+}
+
 /// A neighbor added at runtime cannot get its inbound MD5 key or GTSM
 /// selector onto the BGP listener (startup/SIGHUP-pinned); admitting it
 /// would leave its inbound half silently unauthenticated.
@@ -3660,6 +3734,75 @@ remote_asn = 65002
             .find("pub(crate) async fn runtime_config_snapshot(")
             .unwrap();
         assert!(reload[..legacy].ends_with("#[cfg(test)]\n"));
+    }
+
+    /// LAN-910: the `[[dynamic_neighbors]]` executor commits by snapshot
+    /// replacement, so this inventory comparison is its only listener fence —
+    /// `delete_dynamic_range`'s per-range fence never runs for transactions.
+    #[test]
+    fn dynamic_range_listener_auth_inventory_flags_protected_range_changes() {
+        const MD5_RANGE: &str = r#"
+[[dynamic_neighbors]]
+prefix = "10.9.0.0/24"
+peer_group = "md5-members"
+"#;
+        const GTSM_RANGE: &str = r#"
+[[dynamic_neighbors]]
+prefix = "10.10.0.0/24"
+peer_group = "gtsm-members"
+"#;
+        const PLAIN_RANGE: &str = r#"
+[[dynamic_neighbors]]
+prefix = "10.8.0.0/24"
+peer_group = "plain"
+"#;
+        let load = |ranges: &str| {
+            Config::load_toml_with_diagnostics(
+                &format!(
+                    r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[peer_groups.md5-members]
+md5_password = "secret"
+
+[peer_groups.gtsm-members]
+ttl_security = true
+
+[peer_groups.plain]
+{ranges}
+"#
+                ),
+                "inventory test config",
+            )
+            .expect("inventory test config must parse")
+        };
+        let full = load(&format!("{MD5_RANGE}{GTSM_RANGE}{PLAIN_RANGE}"));
+        let no_plain = load(&format!("{MD5_RANGE}{GTSM_RANGE}"));
+        let no_md5 = load(&format!("{GTSM_RANGE}{PLAIN_RANGE}"));
+        let no_gtsm = load(&format!("{MD5_RANGE}{PLAIN_RANGE}"));
+
+        assert_eq!(
+            dynamic_range_listener_auth_inventory(&full),
+            dynamic_range_listener_auth_inventory(&no_plain),
+            "removing an unprotected range must not change the listener inventory"
+        );
+        assert_ne!(
+            dynamic_range_listener_auth_inventory(&full),
+            dynamic_range_listener_auth_inventory(&no_md5),
+            "removing an MD5-protected range must change the listener inventory"
+        );
+        assert_ne!(
+            dynamic_range_listener_auth_inventory(&full),
+            dynamic_range_listener_auth_inventory(&no_gtsm),
+            "removing a GTSM-protected range must change the listener inventory"
+        );
     }
 
     #[tokio::test]
