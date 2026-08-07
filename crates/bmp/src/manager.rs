@@ -43,11 +43,13 @@ const LOC_RIB_DUMP_SEND_TIMEOUT: std::time::Duration = std::time::Duration::from
 /// certifying a snapshot that omitted live deltas.
 const LOC_RIB_DUMP_LIVE_BUFFER_CAP: usize = 8192;
 
-/// One in-flight Loc-RIB dump for a collector connection generation.
+/// One in-flight Loc-RIB dump — or a post-dump flush round of its
+/// held-back live messages — for a collector connection generation.
 struct ActiveDump {
     /// Connection generation the dump was started for.
     generation: u64,
-    /// The forwarder task, aborted when the connection is superseded.
+    /// The forwarder or flush task, aborted when the connection is
+    /// superseded.
     task: tokio::task::JoinHandle<()>,
     /// Live Loc-RIB messages held back while the dump streams, flushed
     /// in arrival order after the dump's End-of-RIB so the collector
@@ -81,6 +83,12 @@ enum DumpFailure {
     ReplyClosed,
     ChannelTimeout,
     ChannelClosed,
+    /// The post-dump flush of held-back live messages stalled past
+    /// [`LOC_RIB_DUMP_SEND_TIMEOUT`] with this many messages undelivered.
+    FlushTimeout(u64),
+    /// The collector channel closed mid-flush with this many messages
+    /// undelivered.
+    FlushClosed(u64),
 }
 
 impl DumpFailure {
@@ -92,6 +100,18 @@ impl DumpFailure {
             Self::ReplyClosed => "reply_closed",
             Self::ChannelTimeout => "channel_timeout",
             Self::ChannelClosed => "channel_closed",
+            Self::FlushTimeout(_) => "flush_timeout",
+            Self::FlushClosed(_) => "flush_closed",
+        }
+    }
+
+    /// Messages irrecoverably lost by the failure itself. Dump failures
+    /// count as one dropped stream; a flush failure knows exactly how
+    /// many held-back live messages it left undelivered.
+    const fn dropped(self) -> u64 {
+        match self {
+            Self::FlushTimeout(n) | Self::FlushClosed(n) => n,
+            _ => 1,
         }
     }
 }
@@ -186,7 +206,9 @@ pub struct BmpManager {
     /// generation starts clean and heals the suppression.
     loc_rib_suppressed: std::collections::HashSet<usize>,
     /// In-flight Loc-RIB dump (plus its held-back live messages) per
-    /// collector index. Present from dump spawn until its [`DumpDone`].
+    /// collector index. Present from dump spawn until the dump and
+    /// every follow-up flush round report [`DumpDone`] with nothing
+    /// left held back.
     active_dumps: std::collections::HashMap<usize, ActiveDump>,
     /// Cloned into each spawned dump forwarder; completions come back
     /// on `dump_done_rx` in the manager loop.
@@ -851,6 +873,17 @@ impl BmpManager {
     /// Apply a generation-current dump outcome. Only a complete terminal
     /// RIB chunk flushes buffered deltas. Failure discards them and
     /// suppresses this Loc-RIB view until a later connection generation.
+    ///
+    /// The flush runs as a follow-up task registered in
+    /// [`Self::active_dumps`]: the held-back buffer (up to
+    /// [`LOC_RIB_DUMP_LIVE_BUFFER_CAP`] messages) can exceed the
+    /// collector channel's free capacity, so delivery must await
+    /// capacity at the collector's drain rate ([`flush_held_loc_rib`])
+    /// instead of dropping whatever the burst could not fit. While a
+    /// round flushes, live events keep buffering behind it; each round's
+    /// completion arrives back here and flushes what accumulated
+    /// meanwhile, and the collector goes live once a round completes
+    /// with nothing held.
     fn handle_dump_done(&mut self, done: &DumpDone) {
         match self.active_dumps.get(&done.collector_id) {
             Some(dump) if dump.generation == done.generation => {}
@@ -876,39 +909,41 @@ impl BmpManager {
                 &addr_label,
                 "loc_rib_dump",
                 failure.reason(),
-                1,
+                failure.dropped(),
             );
             warn!(
                 collector = %collector.addr,
                 generation = done.generation,
                 reason = failure.reason(),
                 buffered_dropped = dump.buffered.len(),
-                "Loc-RIB dump failed before End-of-RIB; suppressing this view until reconnect"
+                "Loc-RIB dump or post-dump flush failed; suppressing this view until reconnect"
             );
             return;
         }
-
-        let total = dump.buffered.len();
-        for (idx, msg) in dump.buffered.into_iter().enumerate() {
-            if let Err(e) = tx.try_send(msg) {
-                let reason = trysend_reason(&e);
-                let remaining = u64::try_from(total - idx).unwrap_or(u64::MAX);
-                self.metrics.record_bmp_collector_drop(
-                    &addr_label,
-                    "loc_rib_dump",
-                    reason,
-                    remaining,
-                );
-                warn!(
-                    collector = %collector.addr,
-                    error = %e,
-                    skipped = remaining,
-                    "BMP collector channel full or closed flushing post-dump live \
-                     Loc-RIB messages; remaining messages dropped"
-                );
-                break;
-            }
+        if dump.buffered.is_empty() {
+            return;
         }
+
+        let flush = FlushForwarder {
+            collector_tx: tx.clone(),
+            addr_label,
+            generation: Arc::clone(&collector.generation),
+            dump_generation: done.generation,
+        };
+        let task = tokio::spawn(flush_held_loc_rib(
+            flush,
+            dump.buffered,
+            self.dump_done_tx.clone(),
+            done.collector_id,
+        ));
+        self.active_dumps.insert(
+            done.collector_id,
+            ActiveDump {
+                generation: done.generation,
+                task,
+                buffered: Vec::new(),
+            },
+        );
     }
 
     /// RFC 9069 table sync for a (re)connected collector that monitors
@@ -1158,6 +1193,76 @@ async fn stream_loc_rib_dump(f: DumpForwarder) -> Option<DumpOutcome> {
             return Some(DumpOutcome::Complete);
         }
     }
+}
+
+/// Everything one post-dump flush task needs, mirroring
+/// [`DumpForwarder`] for the flush leg.
+struct FlushForwarder {
+    collector_tx: mpsc::Sender<Bytes>,
+    addr_label: String,
+    /// Live connection generation shared with the manager; same fencing
+    /// contract as [`DumpForwarder::generation`].
+    generation: Arc<AtomicU64>,
+    dump_generation: u64,
+}
+
+impl FlushForwarder {
+    fn superseded(&self) -> bool {
+        self.generation.load(Ordering::SeqCst) != self.dump_generation
+    }
+}
+
+/// Deliver one completed dump's held-back live Loc-RIB messages,
+/// awaiting collector-channel capacity instead of dropping: the source
+/// is bounded (at most [`LOC_RIB_DUMP_LIVE_BUFFER_CAP`] messages) and
+/// the writer drains to a TCP socket, so a healthy collector always
+/// absorbs the burst even when it briefly outpaces the writer.
+/// [`LOC_RIB_DUMP_SEND_TIMEOUT`] per message remains the last resort
+/// for a genuinely dead or stalled collector, and the generation fence
+/// stops the task the moment the connection is superseded.
+///
+/// Runs as the collector's registered dump task so one collector's
+/// flush never blocks the manager loop, other collectors, or the churn
+/// fan-out path.
+async fn flush_held_loc_rib(
+    f: FlushForwarder,
+    buffered: Vec<Bytes>,
+    done_tx: mpsc::Sender<DumpDone>,
+    collector_id: usize,
+) {
+    let total = buffered.len();
+    let mut outcome = DumpOutcome::Complete;
+    for (idx, msg) in buffered.into_iter().enumerate() {
+        if f.superseded() {
+            return;
+        }
+        let remaining = u64::try_from(total - idx).unwrap_or(u64::MAX);
+        let failure =
+            match tokio::time::timeout(LOC_RIB_DUMP_SEND_TIMEOUT, f.collector_tx.send(msg)).await {
+                Ok(Ok(())) => continue,
+                Ok(Err(_)) => DumpFailure::FlushClosed(remaining),
+                Err(_) => DumpFailure::FlushTimeout(remaining),
+            };
+        if f.superseded() {
+            return;
+        }
+        warn!(
+            collector = %f.addr_label,
+            reason = failure.reason(),
+            skipped = remaining,
+            "BMP collector stalled or closed flushing post-dump live Loc-RIB \
+             messages; remaining messages dropped"
+        );
+        outcome = DumpOutcome::Failed(failure);
+        break;
+    }
+    let _ = done_tx
+        .send(DumpDone {
+            collector_id,
+            generation: f.dump_generation,
+            outcome,
+        })
+        .await;
 }
 
 fn buffer_loc_rib_message(buffer: &mut Vec<Bytes>, message: Bytes) -> bool {
@@ -3261,6 +3366,98 @@ mod tests {
         assert_eq!(manager.collectors[0].phase.generation(), Some(5));
         assert!(!receiver.is_closed(), "replacement remains connected");
         manager.active_dumps.remove(&0).unwrap().task.abort();
+    }
+
+    /// Load-bearing proof that the post-dump flush awaits collector-channel
+    /// capacity: the held-back buffer exceeds the channel and churn keeps
+    /// arriving while nothing drains, so a `try_send` flush cannot deliver.
+    /// Every message must arrive, held-back before churn, with zero drops.
+    #[tokio::test]
+    async fn post_dump_flush_with_concurrent_churn_delivers_everything() {
+        const HELD: usize = 64;
+        const CHURN: usize = 64;
+        // Far smaller than HELD so the flush burst can never fit at once.
+        const CHANNEL: usize = 8;
+
+        let (event_tx, event_rx) = mpsc::channel(CHURN);
+        let (control_tx, control_rx) = mpsc::channel(1);
+        let (dump_tx, _dump_rx) = mpsc::channel(1);
+        let (collector_tx, mut collector_rx) = mpsc::channel::<Bytes>(CHANNEL);
+        let metrics = BgpMetrics::new();
+        let addr = collector_addr(0);
+        let mut manager = BmpManager::new_connected_for_test(
+            event_rx,
+            control_rx,
+            vec![(addr, collector_tx, loc_rib_filter(), BmpVersion::V3)],
+            metrics.clone(),
+        )
+        .with_loc_rib(loc_rib_config(), dump_tx);
+        manager.active_dumps.insert(
+            0,
+            ActiveDump {
+                generation: 1,
+                task: tokio::spawn(async {}),
+                buffered: vec![Bytes::from_static(b"held"); HELD],
+            },
+        );
+        let done_tx = manager.dump_done_tx.clone();
+        let handle = tokio::spawn(manager.run());
+
+        done_tx
+            .send(DumpDone {
+                collector_id: 0,
+                generation: 1,
+                outcome: DumpOutcome::Complete,
+            })
+            .await
+            .unwrap();
+        // Concurrent churn: accepted by the manager while the flush is
+        // still blocked on the full channel (nothing drains yet).
+        for _ in 0..CHURN {
+            event_tx
+                .send(BmpEvent::LocRibStats { per_family: vec![] })
+                .await
+                .unwrap();
+        }
+        wait_until_received(&event_tx, CHURN).await;
+
+        let drops = |phase: &str| {
+            metric_value_with_labels(
+                &metrics,
+                "bmp_collector_drops_total",
+                &[("collector", &addr.to_string()), ("phase", phase)],
+            )
+        };
+        let total = HELD + CHURN;
+        let mut held_seen = 0_usize;
+        let mut churn_seen = 0_usize;
+        for _ in 0..total {
+            let Ok(Some(msg)) =
+                tokio::time::timeout(std::time::Duration::from_secs(10), collector_rx.recv()).await
+            else {
+                panic!(
+                    "delivery stalled after {} of {total} messages \
+                     (drops: loc_rib_dump={}, fan_out={})",
+                    held_seen + churn_seen,
+                    drops("loc_rib_dump"),
+                    drops("fan_out"),
+                )
+            };
+            if msg == Bytes::from_static(b"held") {
+                assert_eq!(churn_seen, 0, "held-back message delivered after churn");
+                held_seen += 1;
+            } else {
+                churn_seen += 1;
+            }
+        }
+        assert_eq!(held_seen, HELD);
+        assert_eq!(churn_seen, CHURN);
+        assert_eq!(drops("loc_rib_dump"), 0);
+        assert_eq!(drops("fan_out"), 0);
+
+        drop(event_tx);
+        drop(control_tx);
+        handle.await.unwrap();
     }
 
     #[tokio::test]

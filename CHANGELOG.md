@@ -31,6 +31,21 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The post-dump flush of held-back live Loc-RIB messages no longer drops
+  on a full collector channel (LAN-894). The flush `try_send`-ed the
+  entire held-back buffer (bounded at 8,192 messages) into the
+  per-collector outbound channel (capacity 4,096) in one synchronous
+  burst, so any held-back count above the channel's free space — already
+  partially consumed by concurrent churn fan-out — was silently dropped,
+  and the now-full channel made concurrent live fan-out sends drop too: a
+  collector that had just received a complete dump missed live updates.
+  The flush now runs as a per-collector task that awaits channel capacity,
+  pacing delivery at the collector's TCP drain rate while live events keep
+  buffering behind it in arrival order; the dump→EoR→live ordering, the
+  live-buffer overflow closure for a collector persistently slower than
+  churn, and a per-message send timeout for a dead collector all remain.
+  Other collectors and the churn path are never blocked by one
+  collector's flush.
 - The IRR BMP buffer-receipt sink no longer starves its stop-file check
   under continuous post-EoR churn (LAN-889). `wait_for_scrape_release`
   only consulted the stop-file when the collector socket was idle, so
