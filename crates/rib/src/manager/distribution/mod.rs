@@ -4182,6 +4182,20 @@ impl RibManager {
                                 &mut withdraw,
                                 &mut nh_override_flags,
                             );
+                            // ADR-0126 Decision 5 lane arm: a
+                            // member-scoped emission toward the ONE
+                            // member each lane transition names
+                            // (`source(w)`); a no-op for everyone
+                            // else and for plain groups (no lane
+                            // deltas exist).
+                            super::update_groups::emit_lane_deltas_for_member(
+                                &stage.lane_deltas,
+                                peer,
+                                rs_control,
+                                &mut announce,
+                                &mut withdraw,
+                                &mut nh_override_flags,
+                            );
                             super::update_groups::emit_rs_tag_transitions(
                                 &stage.rs_transitions,
                                 peer,
