@@ -62,20 +62,32 @@ impl Drop for TcpMd5Sig {
     }
 }
 
-/// Set TCP MD5 signature on a socket for a specific peer.
-///
-/// This implements RFC 2385 by calling `setsockopt(TCP_MD5SIG)` on Linux.
-/// The password is associated with a specific peer address.
+/// `setsockopt` names from `include/uapi/linux/tcp.h`. `TCP_MD5SIG` keys one
+/// exact peer address; `TCP_MD5SIG_EXT` (Linux >= 4.13) honors `tcpm_flags` /
+/// `tcpm_prefixlen`, which is the only kernel form that can key a whole
+/// dynamic-neighbor prefix on a listening socket.
+#[cfg(target_os = "linux")]
+const TCP_MD5SIG: libc::c_int = 14;
+#[cfg(target_os = "linux")]
+const TCP_MD5SIG_EXT: libc::c_int = 32;
+#[cfg(target_os = "linux")]
+const TCP_MD5SIG_FLAG_PREFIX: u8 = 0x1;
+
+/// One `setsockopt(TCP_MD5SIG[_EXT])` call. An empty `key` deletes the
+/// matching kernel MD5 key (that is the kernel's own deletion encoding).
 #[cfg(target_os = "linux")]
 #[allow(
     unsafe_code,
     clippy::cast_possible_truncation,
     reason = "Linux socket option ABI requires raw libc structs and socklen_t casts"
 )]
-pub fn set_tcp_md5sig(socket: &Socket, peer: SocketAddr, password: &str) -> io::Result<()> {
+fn tcp_md5sig_setsockopt(
+    socket: &Socket,
+    peer: SocketAddr,
+    prefix_len: Option<u8>,
+    key_bytes: &[u8],
+) -> io::Result<()> {
     use std::mem;
-
-    const TCP_MD5SIG: libc::c_int = 14;
 
     let peer_sa: socket2::SockAddr = peer.into();
     let mut sig = TcpMd5Sig::zeroed();
@@ -88,7 +100,6 @@ pub fn set_tcp_md5sig(socket: &Socket, peer: SocketAddr, password: &str) -> io::
         std::ptr::copy_nonoverlapping(sa_bytes, dst, sa_len);
     }
 
-    let key_bytes = password.as_bytes();
     if key_bytes.len() > TCP_MD5SIG_MAXKEYLEN {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -99,13 +110,21 @@ pub fn set_tcp_md5sig(socket: &Socket, peer: SocketAddr, password: &str) -> io::
     sig.tcpm_keylen = key_bytes.len() as u16;
     sig.tcpm_key[..key_bytes.len()].copy_from_slice(key_bytes);
 
+    let optname = if let Some(prefix_len) = prefix_len {
+        sig.tcpm_flags = TCP_MD5SIG_FLAG_PREFIX;
+        sig.tcpm_prefixlen = prefix_len;
+        TCP_MD5SIG_EXT
+    } else {
+        TCP_MD5SIG
+    };
+
     let fd = socket.as_raw_fd();
 
     let ret = unsafe {
         libc::setsockopt(
             fd,
             libc::IPPROTO_TCP,
-            TCP_MD5SIG,
+            optname,
             (&raw const sig).cast(),
             // Safe: size_of TcpMd5Sig is well under u32::MAX
             mem::size_of::<TcpMd5Sig>() as libc::socklen_t,
@@ -119,9 +138,93 @@ pub fn set_tcp_md5sig(socket: &Socket, peer: SocketAddr, password: &str) -> io::
     }
 }
 
+/// Set TCP MD5 signature on a socket for a specific peer.
+///
+/// This implements RFC 2385 by calling `setsockopt(TCP_MD5SIG)` on Linux.
+/// The password is associated with a specific peer address.
+///
+/// # Errors
+///
+/// Returns the kernel `setsockopt` error, or `InvalidInput` when the
+/// password exceeds the 80-byte kernel key limit.
+#[cfg(target_os = "linux")]
+pub fn set_tcp_md5sig(socket: &Socket, peer: SocketAddr, password: &str) -> io::Result<()> {
+    tcp_md5sig_setsockopt(socket, peer, None, password.as_bytes())
+}
+
+/// Set a prefix-scoped TCP MD5 key (RFC 2385) covering every peer inside
+/// `peer/prefix_len`, via `setsockopt(TCP_MD5SIG_EXT)` with
+/// `TCP_MD5SIG_FLAG_PREFIX` (Linux >= 4.13). This is the listener-side form
+/// used for dynamic-neighbor ranges: the kernel resolves overlapping keys by
+/// longest prefix match, so an exact host key still wins over a range key.
+///
+/// # Errors
+///
+/// Returns the kernel `setsockopt` error (`ENOPROTOOPT` on kernels without
+/// `TCP_MD5SIG_EXT`), or `InvalidInput` for an oversized password.
+#[cfg(target_os = "linux")]
+pub fn set_tcp_md5sig_prefix(
+    socket: &Socket,
+    peer: IpAddr,
+    prefix_len: u8,
+    password: &str,
+) -> io::Result<()> {
+    tcp_md5sig_setsockopt(
+        socket,
+        SocketAddr::new(peer, 0),
+        Some(prefix_len),
+        password.as_bytes(),
+    )
+}
+
+/// Remove the TCP MD5 key for `peer/prefix_len` from a socket. Host-length
+/// selectors (`/32`, `/128`) delete through plain `TCP_MD5SIG`, matching how
+/// they were installed. `ENOENT` (no such key) is treated as success so a
+/// retried inventory replacement converges.
+///
+/// # Errors
+///
+/// Returns any kernel `setsockopt` error other than `ENOENT`.
+#[cfg(target_os = "linux")]
+pub fn remove_tcp_md5sig(socket: &Socket, peer: IpAddr, prefix_len: u8) -> io::Result<()> {
+    let host_len = if peer.is_ipv4() { 32 } else { 128 };
+    let prefix = (prefix_len < host_len).then_some(prefix_len);
+    match tcp_md5sig_setsockopt(socket, SocketAddr::new(peer, 0), prefix, &[]) {
+        Err(err) if err.raw_os_error() == Some(libc::ENOENT) => Ok(()),
+        result => result,
+    }
+}
+
 /// Stub for non-Linux platforms.
 #[cfg(not(target_os = "linux"))]
 pub fn set_tcp_md5sig(_socket: &Socket, _peer: SocketAddr, _password: &str) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "TCP MD5 authentication is only supported on Linux",
+    ))
+}
+
+/// Stub for non-Linux platforms.
+#[cfg(not(target_os = "linux"))]
+pub fn set_tcp_md5sig_prefix(
+    _socket: &Socket,
+    _peer: std::net::IpAddr,
+    _prefix_len: u8,
+    _password: &str,
+) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "TCP MD5 authentication is only supported on Linux",
+    ))
+}
+
+/// Stub for non-Linux platforms.
+#[cfg(not(target_os = "linux"))]
+pub fn remove_tcp_md5sig(
+    _socket: &Socket,
+    _peer: std::net::IpAddr,
+    _prefix_len: u8,
+) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "TCP MD5 authentication is only supported on Linux",

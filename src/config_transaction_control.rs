@@ -2416,6 +2416,10 @@ async fn commit_candidate_snapshot_locked(
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one linear add/change/remove apply pass whose every failure arm threads the same rollback pair"
+)]
 async fn commit_static_neighbors_locked(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
     config_tx: &mpsc::Sender<ConfigEvent>,
@@ -2469,6 +2473,15 @@ async fn commit_static_neighbors_locked(
         }
     };
     for config in added {
+        if let Some(error) = runtime_added_neighbor_inbound_auth_error(&config) {
+            return Err(rollback_static_and_snapshot(
+                peer_mgr_tx,
+                applied,
+                previous_toml,
+                error.into(),
+            )
+            .await);
+        }
         if let Err(error) = add_static_peer(peer_mgr_tx, config.clone()).await {
             return Err(rollback_static_and_snapshot(
                 peer_mgr_tx,
@@ -3050,6 +3063,22 @@ async fn rollback_peer_reshape_and_snapshot(
     }
 }
 
+/// A neighbor added at runtime cannot get its inbound MD5 key or GTSM
+/// selector onto the BGP listener (startup/SIGHUP-pinned); admitting it
+/// would leave its inbound half silently unauthenticated.
+fn runtime_added_neighbor_inbound_auth_error(
+    config: &PeerManagerNeighborConfig,
+) -> Option<ConfigTransactionApplyError> {
+    (config.md5_password.is_some() || config.ttl_security).then(|| {
+        peer_lifecycle_error_to_apply_error(PeerLifecycleError::RestartRequired(format!(
+            "added neighbor {} resolves md5_password or ttl_security; inbound listener \
+             enforcement is updated only by startup or SIGHUP reload — add this \
+             neighbor through the config file and SIGHUP",
+            config.address
+        )))
+    })
+}
+
 fn resolve_static_neighbors(
     candidate: &Config,
     neighbors: &[Neighbor],
@@ -3565,7 +3594,7 @@ mod tests {
         let module_sources = [
             ("confirm_journal.rs", include_str!("confirm_journal.rs"), 2),
             ("gnmi_set_bridge.rs", include_str!("gnmi_set_bridge.rs"), 2),
-            ("main.rs", include_str!("main.rs"), 2),
+            ("main.rs", include_str!("main.rs"), 4),
             ("policy_admin.rs", include_str!("policy_admin.rs"), 3),
         ];
 

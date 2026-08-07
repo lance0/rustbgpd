@@ -201,6 +201,18 @@ impl PeerManager {
                  dynamic neighbors (static neighbors only in v1 — see ADR-0067)"
             )));
         }
+        // Inbound MD5 and GTSM for dynamic ranges are enforced on the BGP
+        // listener (prefix MD5 key, accept-time TTL selector), which only
+        // the startup bind and SIGHUP reload paths can update. Accepting
+        // this range here would report the group's authentication as
+        // configured while enforcing it on no socket.
+        if group.md5_password.is_some() || group.ttl_security == Some(true) {
+            return Err(DynamicRangeError::Invalid(format!(
+                "peer_group {peer_group:?} sets md5_password or ttl_security, which are \
+                 enforced on the startup-pinned BGP listener and cannot be installed at \
+                 runtime; restart rustbgpd with an updated configuration"
+            )));
+        }
 
         let key = crate::config::effective_prefix(addr, prefix_len);
         if self.current_config.dynamic_neighbors.iter().any(|range| {
@@ -211,6 +223,23 @@ impl PeerManager {
         }) {
             return Err(DynamicRangeError::Invalid(format!(
                 "dynamic range {}/{} overlaps a startup-pinned TCP-AO range; restart \
+                 rustbgpd with an updated configuration instead",
+                key.0, key.1
+            )));
+        }
+        if self.current_config.dynamic_neighbors.iter().any(|range| {
+            range.tcp_ao.is_none()
+                && self
+                    .current_config
+                    .peer_groups
+                    .get(&range.peer_group)
+                    .is_some_and(|existing| existing.md5_password.is_some())
+                && crate::config::effective_prefix_str(&range.prefix).is_some_and(|protected| {
+                    crate::config::dynamic_prefixes_intersect(key, protected)
+                })
+        }) {
+            return Err(DynamicRangeError::Invalid(format!(
+                "dynamic range {}/{} overlaps a startup-pinned MD5-protected range; restart \
                  rustbgpd with an updated configuration instead",
                 key.0, key.1
             )));

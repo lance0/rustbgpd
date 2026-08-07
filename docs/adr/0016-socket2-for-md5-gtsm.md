@@ -2,6 +2,16 @@
 
 **Status:** Accepted
 **Date:** 2026-02-27
+**Update (2026-08):** the decision below covered only the active-open
+(outbound) socket; the inbound half was unenforced until LAN-902. The passive
+BGP listener now installs host-scoped MD5 keys for static neighbors
+(`TCP_MD5SIG`) and prefix-scoped keys for dynamic-neighbor ranges
+(`TCP_MD5SIG_EXT` + `TCP_MD5SIG_FLAG_PREFIX`, Linux ≥ 4.13) before
+`listen()` — the kernel rejects unsigned handshakes from covered peers and
+copies the matched key onto accepted children. GTSM is applied per peer on
+each accepted socket at accept time (`IP_MINTTL` / `IPV6_MINHOPCOUNT`),
+resolved exact-static-first then longest dynamic-range match, because the
+shared listener socket cannot carry per-peer TTL policy.
 
 ## Context
 

@@ -50,8 +50,9 @@ pub use handle::{
     WarmCheckpointSessionState,
 };
 pub use listener::{
-    AcceptedConnection, BgpListener, ListenerSocketOptions, TcpAoListenerGeneration,
-    TcpAoListenerHandle, TcpAoListenerKey, TcpAoListenerOwnerKind,
+    AcceptedConnection, BgpListener, ListenerSocketOptions, Md5ListenerKey,
+    TcpAoListenerGeneration, TcpAoListenerHandle, TcpAoListenerKey, TcpAoListenerOwnerKind,
+    TtlSecurityListenerPolicy,
 };
 // ADR-0073: import-decision explain types crossing into the api +
 // binary layers (PeerManagerCommand reply, PolicyService mapping).
@@ -62,4 +63,6 @@ pub use session::import_decision_cache::{
 // LAN-472: rejected-route retention types crossing into the api +
 // binary layers (PeerManagerCommand reply, PolicyService mapping).
 pub use session::rejected_routes::{RejectedRouteEntry, RejectedRoutesReply};
-pub use socket_opts::{TcpAoInfoSnapshot, TcpAoKeyState, TcpAoSupport, probe_tcp_ao_support};
+pub use socket_opts::{
+    TcpAoInfoSnapshot, TcpAoKeyState, TcpAoSupport, probe_tcp_ao_support, set_tcp_md5sig,
+};

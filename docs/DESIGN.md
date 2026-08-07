@@ -590,7 +590,7 @@ This section defines the security stance for rustbgpd. Not all items are v1 impl
 
 **Supported platforms (v1): Linux (x86_64, aarch64).** TCP MD5, GTSM via `IP_TTL`, and certain socket options are Linux-specific. macOS and BSD may work for development builds but are not tested or supported targets. This is stated explicitly to prevent bug reports about platform-specific socket behavior.
 
-**TCP MD5 (RFC 2385):** Supported in v1. This is table stakes for any BGP daemon deployed in production — most peers will require it. Implemented via `setsockopt(TCP_MD5SIG)` on the listener and per-peer outbound sockets. Linux only.
+**TCP MD5 (RFC 2385):** Supported in v1. This is table stakes for any BGP daemon deployed in production — most peers will require it. Active-open sockets install the password via `setsockopt(TCP_MD5SIG)` before `connect()`. The passive BGP listener installs host-scoped keys for static neighbors (`TCP_MD5SIG`) and prefix-scoped keys for dynamic-neighbor ranges (`TCP_MD5SIG_EXT` with `TCP_MD5SIG_FLAG_PREFIX`, Linux ≥ 4.13) before `listen()`; the kernel resolves overlapping keys by longest prefix match, rejects unsigned segments from covered peers during the handshake, and copies the matched key onto each accepted child. SIGHUP reload replaces the listener key inventory; a changed password is inherently session-disruptive. Linux only.
 
 **TCP-AO (RFC 5925):** Staged via ADR-0062. Static-neighbor and direct
 dynamic-prefix `tcp_ao` TOML accepts ordered keyrings on Linux:
@@ -607,7 +607,7 @@ MKTs that are neither Current nor RNext while keeping the owner set, survivor
 order, key definitions, and selected key exact. Protected-owner changes and
 key edits/reordering remain restart-required.
 
-**GTSM (RFC 5082):** Supported in v1 as a configurable option (`ttl_security = true` per neighbor). Sets `IP_TTL` to 255 on outbound and requires inbound TTL exactly 255 (strict RFC 5082 §3.2, matching FRR/BIRD). Simple, effective, and prevents most remote session hijacking.
+**GTSM (RFC 5082):** Supported in v1 as a configurable option (`ttl_security = true` per neighbor or peer group). Sets TTL/Hop-Limit 255 on outbound and requires inbound TTL exactly 255 (strict RFC 5082 §3.2, matching FRR/BIRD) via `IP_MINTTL` / `IPV6_MINHOPCOUNT`. Active-open sockets are configured before `connect()`; inbound connections are configured on the accepted socket at accept time, resolved per peer (exact static neighbor first, then longest dynamic-range match), since the shared listener socket cannot carry per-peer TTL policy — handshake segments therefore precede the filter, but every later segment, including any KEEPALIVE required to reach Established, is enforced. Simple, effective, and prevents most remote session hijacking.
 
 ### Connection Rate Limiting
 

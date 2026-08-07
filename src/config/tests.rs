@@ -8794,6 +8794,90 @@ remote_asn = 65002
 }
 
 #[test]
+fn md5_dynamic_range_rejects_plaintext_static_neighbor_inside_prefix() {
+    let err = parse(&dynamic_tcp_ao_toml(
+        r#"
+[peer_groups.md5-members]
+md5_password = "range-secret"
+
+[[dynamic_neighbors]]
+prefix = "10.0.0.0/24"
+peer_group = "md5-members"
+
+[[neighbors]]
+address = "10.0.0.42"
+remote_asn = 65002
+"#,
+    ))
+    .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("has no md5_password: the kernel's prefix key would require a signature"),
+        "unexpected error: {err}"
+    );
+
+    // The same shape with a password on the inside neighbor is accepted: the
+    // kernel resolves the host key by longest prefix match.
+    parse(&dynamic_tcp_ao_toml(
+        r#"
+[peer_groups.md5-members]
+md5_password = "range-secret"
+
+[[dynamic_neighbors]]
+prefix = "10.0.0.0/24"
+peer_group = "md5-members"
+
+[[neighbors]]
+address = "10.0.0.42"
+remote_asn = 65002
+md5_password = "host-secret"
+"#,
+    ))
+    .unwrap();
+}
+
+#[test]
+fn md5_dynamic_range_rejects_nested_plaintext_dynamic_range() {
+    let err = parse(&dynamic_tcp_ao_toml(
+        r#"
+[peer_groups.md5-members]
+md5_password = "range-secret"
+
+[[dynamic_neighbors]]
+prefix = "10.0.0.0/16"
+peer_group = "md5-members"
+
+[[dynamic_neighbors]]
+prefix = "10.0.7.0/24"
+peer_group = "ix-members"
+"#,
+    ))
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("nests inside MD5-protected"),
+        "unexpected error: {err}"
+    );
+
+    // The inverse nesting is consistent: the more specific MD5 range wins
+    // both the accept-time group match and the kernel key lookup.
+    parse(&dynamic_tcp_ao_toml(
+        r#"
+[peer_groups.md5-members]
+md5_password = "range-secret"
+
+[[dynamic_neighbors]]
+prefix = "10.0.0.0/16"
+peer_group = "ix-members"
+
+[[dynamic_neighbors]]
+prefix = "10.0.7.0/24"
+peer_group = "md5-members"
+"#,
+    ))
+    .unwrap();
+}
+
+#[test]
 fn overlapping_tcp_ao_owners_require_directionally_disjoint_ids() {
     let allowed = dynamic_tcp_ao_toml(
         r#"

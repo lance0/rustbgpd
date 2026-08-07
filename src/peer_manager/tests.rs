@@ -1427,6 +1427,129 @@ fn add_dynamic_range_rejects_unknown_peer_group() {
     );
 }
 
+#[test]
+fn add_dynamic_range_rejects_listener_enforced_group_auth() {
+    let mut mgr = dynamic_test_manager();
+    // Listener MD5/GTSM inventories are startup/reload-pinned; a runtime
+    // range referencing a group with either knob would report authentication
+    // as configured while enforcing it on no socket.
+    for (name, group) in [
+        (
+            "md5-members",
+            crate::config::PeerGroupConfig {
+                md5_password: Some("secret".to_string()),
+                ..Default::default()
+            },
+        ),
+        (
+            "gtsm-members",
+            crate::config::PeerGroupConfig {
+                ttl_security: Some(true),
+                ..Default::default()
+            },
+        ),
+    ] {
+        mgr.current_config
+            .peer_groups
+            .insert(name.to_string(), group);
+        let err = mgr
+            .add_dynamic_range("10.9.0.0/24".into(), name.into(), 0, None)
+            .expect_err("listener-enforced group auth must be rejected at runtime");
+        assert!(
+            matches!(
+                &err,
+                rustbgpd_api::peer_types::DynamicRangeError::Invalid(reason)
+                    if reason.contains("startup-pinned BGP listener")
+            ),
+            "{err}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn runtime_create_peer_rejects_listener_enforced_group_auth() {
+    let mut mgr = dynamic_test_manager();
+    mgr.current_config.peer_groups.insert(
+        "gtsm-members".to_string(),
+        crate::config::PeerGroupConfig {
+            ttl_security: Some(true),
+            ..Default::default()
+        },
+    );
+    let err = mgr
+        .runtime_create_peer(Box::new(
+            rustbgpd_api::peer_types::PresenceAwareNeighborCreate {
+                address: "10.0.0.9".parse().unwrap(),
+                interface: None,
+                remote_asn: 65009,
+                description: None,
+                peer_group: Some("gtsm-members".to_string()),
+                hold_time: None,
+                min_hold_time: None,
+                send_hold_time: None,
+                max_prefixes: None,
+                max_prefix_restart_seconds: None,
+                remove_private_as: None,
+                local_role: None,
+                families: None,
+                required_families: None,
+                route_server_client: None,
+                per_client_best: None,
+                strict_role: None,
+                add_path: None,
+            },
+        ))
+        .await
+        .expect_err("runtime create resolving listener-enforced auth must be rejected");
+    assert!(
+        matches!(
+            &err,
+            rustbgpd_api::peer_types::PeerLifecycleError::RestartRequired(reason)
+                if reason.contains("startup or SIGHUP reload")
+        ),
+        "{err}"
+    );
+    assert!(
+        !mgr.current_config
+            .neighbors
+            .iter()
+            .any(|neighbor| neighbor.address == "10.0.0.9"),
+        "rejected create must not advance the config snapshot"
+    );
+}
+
+#[test]
+fn add_dynamic_range_rejects_overlap_with_md5_protected_range() {
+    let mut mgr = dynamic_test_manager();
+    mgr.current_config.peer_groups.insert(
+        "md5-members".to_string(),
+        crate::config::PeerGroupConfig {
+            md5_password: Some("secret".to_string()),
+            ..Default::default()
+        },
+    );
+    mgr.current_config
+        .dynamic_neighbors
+        .push(crate::config::DynamicNeighborConfig {
+            prefix: "10.8.0.0/16".to_string(),
+            peer_group: "md5-members".to_string(),
+            remote_asn: 0,
+            description: None,
+            tcp_ao: None,
+        });
+    let err = mgr
+        .add_dynamic_range("10.8.4.0/24".into(), "ix-members".into(), 0, None)
+        .expect_err("overlap with an MD5-protected startup range must be rejected");
+    assert!(
+        matches!(
+            &err,
+            rustbgpd_api::peer_types::DynamicRangeError::Invalid(reason)
+                if reason.contains("startup-pinned MD5-protected range")
+        ),
+        "{err}"
+    );
+}
+
 fn test_tcp_ao() -> crate::config::TcpAoConfig {
     crate::config::TcpAoConfig {
         key: "secret".to_string(),
@@ -21268,10 +21391,6 @@ impl PersistenceRig {
     /// Not `async`: everything here is either synchronous or a `tokio::spawn`,
     /// which only needs the caller's runtime, so the rig is fully wired the
     /// moment this returns.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "the integration rig setup is intentionally centralized"
-    )]
     fn start() -> Self {
         let dir = tempfile::tempdir().expect("temp config dir");
         let config_path = dir.path().join("config.toml");
@@ -21291,7 +21410,6 @@ log_format = "json"
 families = ["ipv4_unicast", "ipv6_unicast"]
 route_server_client = true
 per_client_best = true
-ttl_security = true
 graceful_restart = false
 role = "route_server"
 strict_role = true
@@ -21665,13 +21783,17 @@ async fn presence_create_preserves_raw_inheritance_over_disk_actor_and_reload() 
         assert!(raw.families.is_empty());
         assert_eq!(raw.route_server_client, None);
         assert_eq!(raw.per_client_best, None);
+        // `ttl_security` (and `md5_password`) are deliberately absent from
+        // the fixture group: a presence-create resolving either is rejected
+        // at runtime because inbound listener enforcement is
+        // startup/SIGHUP-pinned (covered by
+        // `runtime_create_peer_rejects_listener_enforced_group_auth`).
         assert_eq!(raw.ttl_security, None);
         assert_eq!(raw.graceful_restart, None);
         assert_eq!(raw.role, None);
         assert_eq!(raw.strict_role, None);
         assert_eq!(raw.add_path, None);
         let effective = snapshot.resolve_neighbor(raw).unwrap();
-        assert!(effective.transport_config.ttl_security);
         assert!(!effective.transport_config.peer.graceful_restart);
 
         let raw = snapshot
