@@ -17,19 +17,19 @@ jobs:
     # all 17 targets plus the observed 14-minute ASan build.
     timeout-minutes: 180
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
       - name: Prove exact fail-closed fuzz target inventory
         run: |
           python3 -m unittest -v scripts/test_check_fuzz_target_inventory.py
           python3 scripts/check_fuzz_target_inventory.py
       - name: Build address-sanitized fuzzers
-        uses: google/clusterfuzzlite/actions/build_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        uses: google/clusterfuzzlite/actions/build_fuzzers@v1
         with:
           language: rust
           sanitizer: address
           github-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Run code-change fuzzing
-        uses: google/clusterfuzzlite/actions/run_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        uses: google/clusterfuzzlite/actions/run_fuzzers@v1
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           fuzz-seconds: 300

@@ -20,28 +20,26 @@ ROSTER = [
 TRIGGER_HASH = "65951f4c4d1d6c4d3aae2c33705d14cdc144b3efd8bcc01653049e6d7f2fb5f8"
 PERMISSION_HASH = "9691400b3b1036bcdfe724926816dbe71b0aa22ed9b5eb89627e2eeb75079898"
 JOB_HASHES = {
-    "core": "91977c62f11648ed94441920df8c21d7a86eb07130b5f57fca8c970eec450edd",
-    "core_tests": "2e5d0d9268a7af2503d76c094a1305501ec861812091cec43b18eaf99ba89a09",
-    "scale_receipts": "91d5396ba46147fd7a489b49cbc6207f8588f350df3308c92f236f3936dbcf4f",
+    "core": "a4c0f059a81cc7f6161b27ee557a444d8ece31554461a25cb7ed425e6e348da5",
+    "core_tests": "249218c607b87f02e827acb81ca2c26d2a16eebc0aa5c4b0780d539aee17ba65",
+    "scale_receipts": "de016d9c60dc02710cd3a2d87b3d1da4d12cc077055974220b07a50f0835b27b",
     "check": "cfc655ca80392ab0699390b461e5e8e9b41410cc724201aafe75ae6da7d83213",
-    "msrv": "db1ae833d9c8fbbc47dbf2969ac291b90cf413ba9eed2b95dd4cfe34e0a4ba5d",
-    "evpn_bum_filter_kernel": "f965e7f95f30772d9d335104dda9e30c53816098bd5f1225a3cadabe7d9a23b3",
+    "msrv": "886fcc40c19b18d4c7bde52d8b735b153d0c091e0a8e1c865bcd6651daf0b7b5",
+    "evpn_bum_filter_kernel": "d427ed2c650d619d926cad0a4cbb6b558dd013ace9b18ba48757be529420863a",
 }
 COMMAND_BODY_HASH = "9e3c949873c8c0872a1a5403b69300c3a5306025af3cf893782ff1d60a1a2b2f"
 STEP_NAME = "Check standalone scale harnesses and receipt classifiers"
-CHECKOUT = "uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7"
-TOOLCHAIN = (
-    "uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # stable"
-)
-RUST_CACHE = "uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2"
+CHECKOUT = "uses: actions/checkout@v7"
+TOOLCHAIN = "uses: dtolnay/rust-toolchain@master # stable"
+RUST_CACHE = "uses: Swatinem/rust-cache@v2"
 PINS = collections.Counter(
     {
-        "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7": 5,
-        "Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2": 4,
-        "dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # stable": 3,
-        "dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # 1.95": 1,
-        "docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4": 1,
-        "docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7": 1,
+        "actions/checkout@v7": 5,
+        "Swatinem/rust-cache@v2": 4,
+        "dtolnay/rust-toolchain@master # stable": 3,
+        "dtolnay/rust-toolchain@master # 1.95": 1,
+        "docker/setup-buildx-action@v4": 1,
+        "docker/build-push-action@v7": 1,
     }
 )
 

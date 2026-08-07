@@ -47,13 +47,13 @@ jobs:
       group: rustbgpd-dev-image-${{ github.sha }}
       cancel-in-progress: false
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }}
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+        uses: docker/setup-buildx-action@v4
       - name: Prime rustbgpd:dev build cache
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        uses: docker/build-push-action@v7
         with:
           context: .
           load: false
@@ -68,7 +68,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-dataplane-host
         id: dataplane
       - name: Run M36 (deploy + test + destroy with retry)
@@ -84,7 +84,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-dataplane-host
         id: dataplane
       - name: Run M37 (deploy + test + destroy with retry)
@@ -100,7 +100,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-dataplane-host
         id: dataplane
       - name: Run M37+IP (deploy + test + destroy with retry)
@@ -116,7 +116,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-dataplane-host
         id: dataplane
       - name: Run M38 (deploy + test + destroy with retry)
@@ -132,7 +132,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-dataplane-host
         id: dataplane
       - name: Run M39 (deploy + test + destroy with retry)
@@ -149,7 +149,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-dataplane-host
         id: dataplane
       - name: Run M39b (deploy + test + destroy with retry)
@@ -166,7 +166,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-dataplane-host
         id: dataplane
       - name: Run M48 (deploy + test + destroy with retry)
@@ -183,7 +183,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-dataplane-host
         id: dataplane
       - name: Run M60 (deploy + test + destroy with retry)
@@ -199,7 +199,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-dataplane-host
         id: dataplane
       - name: Run M61 (deploy + test + destroy with retry)
@@ -216,7 +216,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-dataplane-host
         id: dataplane
       - name: Run M62 (deploy + test + destroy with retry)
@@ -232,7 +232,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-dataplane-host
         id: dataplane
       - name: Run M40 (deploy + test + destroy with retry)
@@ -248,7 +248,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-dataplane-host
         id: dataplane
       - name: Run M42 (deploy + test + destroy with retry)
@@ -264,7 +264,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-dataplane-host
         id: dataplane
       - name: Run M50 (deploy + test + destroy with retry)
@@ -280,7 +280,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-dataplane-host
         id: dataplane
       - name: Run M52 (deploy + test + destroy with retry)
@@ -296,7 +296,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-dataplane-host
         id: dataplane
       - name: Run M58 (deploy + test + destroy with retry)
@@ -312,7 +312,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-dataplane-host
         id: dataplane
       - name: Run M53 (deploy + test + destroy with retry)
@@ -328,7 +328,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-dataplane-host
         id: dataplane
       - name: Run M51 (deploy + test + destroy with retry)
@@ -344,7 +344,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-dataplane-host
         id: dataplane
 
@@ -377,13 +377,13 @@ jobs:
 
       - name: Install Rust 1.95 for the direct GET_KEYS receipt
         if: steps.tcp_ao.outputs.supported == 'true'
-        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # 1.95
+        uses: dtolnay/rust-toolchain@master # 1.95
         with:
           toolchain: "1.95"
 
       - name: Cache direct GET_KEYS receipt build
         if: steps.tcp_ao.outputs.supported == 'true'
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        uses: Swatinem/rust-cache@v2
         with:
           shared-key: m43-tcp-ao-get-keys
 
@@ -444,7 +444,7 @@ jobs:
       # image's cache separate from rustbgpd:dev's.
       - name: Build BIRD 3.3.1 TCP-AO image
         if: steps.tcp_ao.outputs.supported == 'true'
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        uses: docker/build-push-action@v7
         with:
           context: tests/interop
           file: tests/interop/Dockerfile.bird3
@@ -475,7 +475,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-dataplane-host
         id: dataplane
       - name: Run M46 (deploy + test + destroy with retry)
@@ -491,7 +491,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-dataplane-host
         id: dataplane
       - name: Run M47 (deploy + test + destroy with retry)
@@ -507,7 +507,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-dataplane-host
         id: dataplane
       - name: Run M49 (deploy + test + destroy with retry)
@@ -523,7 +523,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-dataplane-host
         id: dataplane
       - name: Run M69 (deploy + test + destroy with retry)
@@ -539,7 +539,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-dataplane-host
         id: dataplane
       # Cross-vendor proof for ADR-0089's v1 Linux topology: rustbgpd owns
@@ -559,7 +559,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-dataplane-host
         id: dataplane
       # The segment PEs run GoBGP (the failure injection needs the RFC 7432
@@ -581,7 +581,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-dataplane-host
         id: dataplane
       # rustbgpd is the receive-side DUT; GoBGP is the route source. GoBGP
@@ -605,7 +605,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-dataplane-host
         id: dataplane
       # rustbgpd is the receive-side DUT; two GoBGP PEs are route
@@ -628,7 +628,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-dataplane-host
         id: dataplane
       # All three BGP speakers are rustbgpd — the origination-side
@@ -647,7 +647,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-dataplane-host
         id: dataplane
       # The M66 sibling with the production trigger: an attachment-
@@ -668,7 +668,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-dataplane-host
         id: dataplane
       # Cross-vendor consume-side proof for native GW-IP overlay-index
@@ -688,7 +688,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
 
       # The Docker netns harness builds its own image and runs the privileged
       # tests inside `docker run --cap-add=NET_ADMIN --cap-add=SYS_ADMIN`, so the

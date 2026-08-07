@@ -158,13 +158,13 @@ jobs:
       group: rustbgpd-dev-image-${{ github.sha }}
       cancel-in-progress: false
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }}
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+        uses: docker/setup-buildx-action@v4
       - name: Prime rustbgpd:dev build cache
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        uses: docker/build-push-action@v7
         with:
           context: .
           load: false
@@ -179,7 +179,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -189,10 +189,10 @@ jobs:
           bash .github/scripts/install-grpcurl.sh
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+        uses: docker/setup-buildx-action@v4
 
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        uses: docker/build-push-action@v7
         with:
           context: .
           load: true
@@ -213,7 +213,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -223,10 +223,10 @@ jobs:
           bash .github/scripts/install-grpcurl.sh
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+        uses: docker/setup-buildx-action@v4
 
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        uses: docker/build-push-action@v7
         with:
           context: .
           load: true
@@ -247,7 +247,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -260,10 +260,10 @@ jobs:
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+        uses: docker/setup-buildx-action@v4
 
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        uses: docker/build-push-action@v7
         with:
           context: .
           load: true
@@ -284,7 +284,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -294,10 +294,10 @@ jobs:
           bash .github/scripts/install-grpcurl.sh
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+        uses: docker/setup-buildx-action@v4
 
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        uses: docker/build-push-action@v7
         with:
           context: .
           load: true
@@ -318,7 +318,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -328,10 +328,10 @@ jobs:
           bash .github/scripts/install-grpcurl.sh
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+        uses: docker/setup-buildx-action@v4
 
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        uses: docker/build-push-action@v7
         with:
           context: .
           load: true
@@ -352,7 +352,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -362,10 +362,10 @@ jobs:
           bash .github/scripts/install-grpcurl.sh
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+        uses: docker/setup-buildx-action@v4
 
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        uses: docker/build-push-action@v7
         with:
           context: .
           load: true
@@ -386,7 +386,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -397,10 +397,10 @@ jobs:
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+        uses: docker/setup-buildx-action@v4
 
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        uses: docker/build-push-action@v7
         with:
           context: .
           load: true
@@ -428,7 +428,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -439,10 +439,10 @@ jobs:
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+        uses: docker/setup-buildx-action@v4
 
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        uses: docker/build-push-action@v7
         with:
           context: .
           load: true
@@ -476,7 +476,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -487,10 +487,10 @@ jobs:
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+        uses: docker/setup-buildx-action@v4
 
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        uses: docker/build-push-action@v7
         with:
           context: .
           load: true
@@ -514,7 +514,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -525,10 +525,10 @@ jobs:
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+        uses: docker/setup-buildx-action@v4
 
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        uses: docker/build-push-action@v7
         with:
           context: .
           load: true
@@ -552,7 +552,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -563,10 +563,10 @@ jobs:
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+        uses: docker/setup-buildx-action@v4
 
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        uses: docker/build-push-action@v7
         with:
           context: .
           load: true
@@ -590,7 +590,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -601,10 +601,10 @@ jobs:
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+        uses: docker/setup-buildx-action@v4
 
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        uses: docker/build-push-action@v7
         with:
           context: .
           load: true
@@ -628,7 +628,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -639,10 +639,10 @@ jobs:
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+        uses: docker/setup-buildx-action@v4
 
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        uses: docker/build-push-action@v7
         with:
           context: .
           load: true
@@ -666,7 +666,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -677,10 +677,10 @@ jobs:
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+        uses: docker/setup-buildx-action@v4
 
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        uses: docker/build-push-action@v7
         with:
           context: .
           load: true
@@ -704,7 +704,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -718,10 +718,10 @@ jobs:
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+        uses: docker/setup-buildx-action@v4
 
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        uses: docker/build-push-action@v7
         with:
           context: .
           load: true
@@ -742,7 +742,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -752,10 +752,10 @@ jobs:
           bash .github/scripts/install-grpcurl.sh
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+        uses: docker/setup-buildx-action@v4
 
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        uses: docker/build-push-action@v7
         with:
           context: .
           load: true
@@ -776,7 +776,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -788,10 +788,10 @@ jobs:
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+        uses: docker/setup-buildx-action@v4
 
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        uses: docker/build-push-action@v7
         with:
           context: .
           load: true
@@ -826,7 +826,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -837,10 +837,10 @@ jobs:
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+        uses: docker/setup-buildx-action@v4
 
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        uses: docker/build-push-action@v7
         with:
           context: .
           load: true
@@ -868,7 +868,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -880,10 +880,10 @@ jobs:
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+        uses: docker/setup-buildx-action@v4
 
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        uses: docker/build-push-action@v7
         with:
           context: .
           load: true
@@ -908,7 +908,7 @@ jobs:
 
       - name: Upload M83 failed-attempt evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@v7
         with:
           name: m83-failed-attempts-${{ github.run_attempt }}
           path: ${{ runner.temp }}/m83-failure-artifacts
@@ -921,7 +921,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -933,10 +933,10 @@ jobs:
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+        uses: docker/setup-buildx-action@v4
 
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        uses: docker/build-push-action@v7
         with:
           context: .
           load: true
@@ -978,7 +978,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -990,10 +990,10 @@ jobs:
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+        uses: docker/setup-buildx-action@v4
 
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        uses: docker/build-push-action@v7
         with:
           context: .
           load: true
@@ -1019,7 +1019,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -1031,10 +1031,10 @@ jobs:
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+        uses: docker/setup-buildx-action@v4
 
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        uses: docker/build-push-action@v7
         with:
           context: .
           load: true
@@ -1062,7 +1062,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -1072,10 +1072,10 @@ jobs:
           bash .github/scripts/install-grpcurl.sh
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+        uses: docker/setup-buildx-action@v4
 
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        uses: docker/build-push-action@v7
         with:
           context: .
           load: true
@@ -1096,7 +1096,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
 
       # containerlab and grpcurl are installed locally to the runner;
       # both are cheap (single Go binaries). Pinned versions to keep the
@@ -1115,10 +1115,10 @@ jobs:
       # cache hits. The cargo registry / target dir gets reused via the
       # GitHub Actions cache backend (type=gha).
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+        uses: docker/setup-buildx-action@v4
 
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        uses: docker/build-push-action@v7
         with:
           context: .
           load: true
@@ -1141,7 +1141,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -1155,10 +1155,10 @@ jobs:
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+        uses: docker/setup-buildx-action@v4
 
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        uses: docker/build-push-action@v7
         with:
           context: .
           load: true
@@ -1179,7 +1179,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -1192,10 +1192,10 @@ jobs:
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+        uses: docker/setup-buildx-action@v4
 
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        uses: docker/build-push-action@v7
         with:
           context: .
           load: true
@@ -1216,7 +1216,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -1229,10 +1229,10 @@ jobs:
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+        uses: docker/setup-buildx-action@v4
 
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        uses: docker/build-push-action@v7
         with:
           context: .
           load: true
@@ -1253,7 +1253,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -1266,10 +1266,10 @@ jobs:
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+        uses: docker/setup-buildx-action@v4
 
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        uses: docker/build-push-action@v7
         with:
           context: .
           load: true
@@ -1290,7 +1290,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -1302,10 +1302,10 @@ jobs:
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+        uses: docker/setup-buildx-action@v4
 
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        uses: docker/build-push-action@v7
         with:
           context: .
           load: true
@@ -1326,7 +1326,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -1340,10 +1340,10 @@ jobs:
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+        uses: docker/setup-buildx-action@v4
 
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        uses: docker/build-push-action@v7
         with:
           context: .
           load: true
@@ -1364,7 +1364,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -1374,10 +1374,10 @@ jobs:
           bash .github/scripts/install-grpcurl.sh
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+        uses: docker/setup-buildx-action@v4
 
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        uses: docker/build-push-action@v7
         with:
           context: .
           load: true
@@ -1405,7 +1405,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -1418,10 +1418,10 @@ jobs:
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+        uses: docker/setup-buildx-action@v4
 
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        uses: docker/build-push-action@v7
         with:
           context: .
           load: true
@@ -1447,7 +1447,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -1458,10 +1458,10 @@ jobs:
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+        uses: docker/setup-buildx-action@v4
 
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        uses: docker/build-push-action@v7
         with:
           context: .
           load: true
@@ -1482,7 +1482,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -1495,10 +1495,10 @@ jobs:
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+        uses: docker/setup-buildx-action@v4
 
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        uses: docker/build-push-action@v7
         with:
           context: .
           load: true
@@ -1523,7 +1523,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -1533,10 +1533,10 @@ jobs:
           bash .github/scripts/install-grpcurl.sh
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+        uses: docker/setup-buildx-action@v4
 
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        uses: docker/build-push-action@v7
         with:
           context: .
           load: true
@@ -1557,7 +1557,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -1570,10 +1570,10 @@ jobs:
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+        uses: docker/setup-buildx-action@v4
 
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        uses: docker/build-push-action@v7
         with:
           context: .
           load: true
@@ -1594,7 +1594,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -1608,10 +1608,10 @@ jobs:
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+        uses: docker/setup-buildx-action@v4
 
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        uses: docker/build-push-action@v7
         with:
           context: .
           load: true
@@ -1632,7 +1632,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
@@ -1646,10 +1646,10 @@ jobs:
           command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+        uses: docker/setup-buildx-action@v4
 
       - name: Build rustbgpd:dev
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        uses: docker/build-push-action@v7
         with:
           context: .
           load: true

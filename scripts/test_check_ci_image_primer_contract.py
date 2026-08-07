@@ -110,7 +110,7 @@ class PrimerContractTests(unittest.TestCase):
             ),
             (
                 ".github/workflows/kernel-dataplane.yml",
-                "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+                "actions/checkout@v7",
                 "actions/checkout@main",
             ),
             (
@@ -150,15 +150,15 @@ class PrimerContractTests(unittest.TestCase):
                     "cache-to: type=gha",
                 ),
                 (
-                    "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+                    "actions/checkout@v7",
                     "actions/checkout@main",
                 ),
                 (
-                    "docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c",
+                    "docker/setup-buildx-action@v4",
                     "docker/setup-buildx-action@main",
                 ),
                 (
-                    "docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a",
+                    "docker/build-push-action@v7",
                     "docker/build-push-action@main",
                 ),
             ):
@@ -195,7 +195,7 @@ class PrimerContractTests(unittest.TestCase):
         with self.subTest(workflow=interop, seam="consumer checkout"):
             self.mutate(
                 interop,
-                "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+                "actions/checkout@v7",
                 "actions/checkout@main",
                 occurrence=1,
             )
@@ -204,7 +204,7 @@ class PrimerContractTests(unittest.TestCase):
         with self.subTest(workflow=kernel, seam="consumer checkout"):
             self.mutate(
                 kernel,
-                "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+                "actions/checkout@v7",
                 "actions/checkout@main",
                 occurrence=1,
             )
@@ -220,11 +220,11 @@ class PrimerContractTests(unittest.TestCase):
             ("target: dev", "target: release"),
             ("context: .", "context: elsewhere"),
             (
-                "docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c",
+                "docker/setup-buildx-action@v4",
                 "docker/setup-buildx-action@main",
             ),
             (
-                "docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a",
+                "docker/build-push-action@v7",
                 "docker/build-push-action@main",
             ),
             (
