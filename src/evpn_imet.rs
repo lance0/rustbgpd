@@ -59,6 +59,8 @@ use rustbgpd_wire::{
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
+use crate::evpn_ack::{NOACK_REPLY_DROPPED, RibAckOutcome, send_and_ack};
+
 /// Result of asking the IMET controller to originate one VNI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImetOriginateOutcome {
@@ -72,7 +74,11 @@ pub enum ImetOriginateOutcome {
         /// Existing Type 3 route key.
         key: EvpnRouteKey,
     },
-    /// The RIB command channel closed before the inject could be sent.
+    /// The RIB command channel closed before the inject could be sent,
+    /// or the RIB failed to acknowledge it within the ADR-0102
+    /// [`crate::evpn_ack::RIB_ACK_TIMEOUT`]. The route is not tracked;
+    /// converge callers report a failure and may retry (the inject is
+    /// idempotent per key).
     RibUnavailable {
         /// Type 3 route key that would have been injected.
         key: EvpnRouteKey,
@@ -102,7 +108,10 @@ pub enum ImetWithdrawOutcome {
         /// Requested VNI.
         vni: EvpnInstanceId,
     },
-    /// The RIB command channel closed before the withdraw could be sent.
+    /// The RIB command channel closed before the withdraw could be sent,
+    /// or the RIB failed to acknowledge it within the ADR-0102
+    /// [`crate::evpn_ack::RIB_ACK_TIMEOUT`]. The key stays tracked so a
+    /// later converge retries the withdraw.
     RibUnavailable {
         /// Type 3 route key that would have been withdrawn.
         key: EvpnRouteKey,
@@ -234,31 +243,29 @@ async fn inject_imet_route(
     rib_tx: &mpsc::Sender<RibUpdate>,
 ) -> ImetOriginateOutcome {
     let key = route.key();
-    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-    if rib_tx
-        .send(RibUpdate::InjectEvpn {
-            route,
-            reply: reply_tx,
-        })
-        .await
-        .is_err()
-    {
-        warn!(?key, "RIB channel closed; cannot originate IMET");
-        return ImetOriginateOutcome::RibUnavailable { key };
-    }
-
-    match reply_rx.await {
-        Ok(Ok(())) => {
+    // ADR-0102 `send_and_ack` bounds the wait: converge callers hold the
+    // daemon's IMET controller mutex across this await, so an unbounded
+    // wait on a wedged RIB would hold that mutex forever and lock every
+    // later EVPN runtime converge out until restart.
+    match send_and_ack(rib_tx, |reply| RibUpdate::InjectEvpn { route, reply }).await {
+        RibAckOutcome::Acked => {
             debug!(?key, vni = vni.as_u32(), "originated Type 3 IMET");
             ImetOriginateOutcome::Originated { key }
         }
-        Ok(Err(e)) => {
+        RibAckOutcome::Rejected(e) => {
             warn!(?key, vni = vni.as_u32(), error = %e, "RIB rejected IMET inject");
             ImetOriginateOutcome::Rejected { key }
         }
-        Err(_) => {
+        RibAckOutcome::NoAck(NOACK_REPLY_DROPPED) => {
             warn!(?key, vni = vni.as_u32(), "RIB IMET inject reply dropped");
             ImetOriginateOutcome::ReplyDropped { key }
+        }
+        // Channel closed or ack timeout: the RIB is unavailable as far as
+        // this converge is concerned — report a real failure rather than
+        // claiming success against a wedged RIB.
+        RibAckOutcome::NoAck(reason) => {
+            warn!(?key, vni = vni.as_u32(), reason, "cannot originate IMET");
+            ImetOriginateOutcome::RibUnavailable { key }
         }
     }
 }
@@ -267,20 +274,10 @@ async fn withdraw_imet_key(
     key: EvpnRouteKey,
     rib_tx: &mpsc::Sender<RibUpdate>,
 ) -> ImetWithdrawOutcome {
-    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-    if rib_tx
-        .send(RibUpdate::WithdrawEvpn {
-            key,
-            reply: reply_tx,
-        })
-        .await
-        .is_err()
-    {
-        warn!(?key, "RIB channel closed; cannot withdraw IMET");
-        return ImetWithdrawOutcome::RibUnavailable { key };
-    }
-    match reply_rx.await {
-        Ok(Ok(())) => {
+    // Bounded for the same converge-holds-the-mutex reason as
+    // [`inject_imet_route`].
+    match send_and_ack(rib_tx, |reply| RibUpdate::WithdrawEvpn { key, reply }).await {
+        RibAckOutcome::Acked => {
             debug!(?key, "withdrew Type 3 IMET");
             ImetWithdrawOutcome::Withdrawn { key }
         }
@@ -291,7 +288,7 @@ async fn withdraw_imet_key(
         // the RIB doesn't hold makes the VNI permanently un-deletable and
         // un-redefinable: re-origination short-circuits on AlreadyOriginated
         // and every later delete/redefine converge rejects until restart.
-        Ok(Err(rustbgpd_rib::RibCommandError::NotFound(message))) => {
+        RibAckOutcome::Rejected(rustbgpd_rib::RibCommandError::NotFound(message)) => {
             warn!(
                 ?key,
                 %message,
@@ -299,13 +296,17 @@ async fn withdraw_imet_key(
             );
             ImetWithdrawOutcome::Withdrawn { key }
         }
-        Ok(Err(e)) => {
+        RibAckOutcome::Rejected(e) => {
             debug!(?key, error = %e, "RIB IMET withdraw declined");
             ImetWithdrawOutcome::Rejected { key }
         }
-        Err(_) => {
+        RibAckOutcome::NoAck(NOACK_REPLY_DROPPED) => {
             warn!(?key, "RIB IMET withdraw reply dropped");
             ImetWithdrawOutcome::ReplyDropped { key }
+        }
+        RibAckOutcome::NoAck(reason) => {
+            warn!(?key, reason, "cannot withdraw IMET");
+            ImetWithdrawOutcome::RibUnavailable { key }
         }
     }
 }
@@ -738,6 +739,104 @@ mod tests {
         );
         drop(rib_tx);
         responder.await.unwrap();
+    }
+
+    /// Regression: converge paths (`converge_l2vni_add` / `_swap` /
+    /// `_redefine` / `_delete`) hold the daemon's IMET controller mutex
+    /// across the RIB ack await. A wedged RIB — command received, reply
+    /// neither sent nor dropped — previously parked that await forever,
+    /// holding the mutex and locking every later EVPN runtime converge out
+    /// until restart. The ADR-0102 `send_and_ack` timeout bounds the await;
+    /// the timeout maps to `RibUnavailable` so the converge reports a real
+    /// failure instead of claiming success.
+    #[tokio::test(start_paused = true)]
+    async fn stalled_rib_originate_releases_controller_lock_at_ack_timeout() {
+        let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(8);
+        let controller = Arc::new(tokio::sync::Mutex::new(EvpnImetController::new()));
+
+        // First converge: lock the controller across the originate await,
+        // exactly like converge_l2vni_add does.
+        let converge = {
+            let controller = controller.clone();
+            let rib_tx = rib_tx.clone();
+            tokio::spawn(async move {
+                controller
+                    .lock()
+                    .await
+                    .originate_instance(local_instance(100), &rib_tx)
+                    .await
+            })
+        };
+
+        // Wedged RIB: receive the inject but never answer — keep the reply
+        // sender alive (dropping it would signal "reply dropped" instead).
+        let parked_reply = match rib_rx.recv().await.expect("inject reaches the RIB") {
+            RibUpdate::InjectEvpn { reply, .. } => reply,
+            _other => panic!("expected InjectEvpn"),
+        };
+
+        // Second converge attempt: must acquire the lock once the ack
+        // timeout releases the first holder.
+        let second = tokio::time::timeout(
+            crate::evpn_ack::RIB_ACK_TIMEOUT + std::time::Duration::from_secs(1),
+            controller.lock(),
+        )
+        .await;
+        assert!(
+            second.is_ok(),
+            "a stalled RIB must not hold the IMET controller lock past the ack timeout"
+        );
+        drop(second);
+
+        let outcome = converge.await.unwrap();
+        assert!(
+            matches!(outcome, ImetOriginateOutcome::RibUnavailable { .. }),
+            "ack timeout must surface as a converge failure, got {outcome:?}"
+        );
+        assert!(
+            controller.lock().await.is_empty(),
+            "an unacknowledged originate must not be tracked"
+        );
+        drop(parked_reply);
+    }
+
+    /// Same wedged-RIB bound for the withdraw path: the ack timeout maps to
+    /// `RibUnavailable` and the key stays tracked so a later converge can
+    /// retry the withdraw.
+    #[tokio::test(start_paused = true)]
+    async fn stalled_rib_withdraw_times_out_as_rib_unavailable() {
+        let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(8);
+        let mut controller = EvpnImetController::new();
+
+        let (outcome, ()) = tokio::join!(
+            controller.originate_instance(local_instance(100), &rib_tx),
+            async {
+                if let Some(RibUpdate::InjectEvpn { reply, .. }) = rib_rx.recv().await {
+                    let _ = reply.send(Ok(()));
+                }
+            }
+        );
+        let ImetOriginateOutcome::Originated { key } = outcome else {
+            panic!("expected originate, got {outcome:?}");
+        };
+
+        let (outcome, _parked_reply) =
+            tokio::join!(controller.withdraw_instance(vni(100), &rib_tx), async {
+                match rib_rx.recv().await.expect("withdraw reaches the RIB") {
+                    RibUpdate::WithdrawEvpn { reply, .. } => reply,
+                    _other => panic!("expected WithdrawEvpn"),
+                }
+            });
+        assert_eq!(
+            outcome,
+            ImetWithdrawOutcome::RibUnavailable { key },
+            "withdraw ack timeout must report RibUnavailable, not hang"
+        );
+        assert_eq!(
+            controller.originated_key(vni(100)),
+            Some(key),
+            "an unacknowledged withdraw must keep the key tracked for retry"
+        );
     }
 
     #[tokio::test]

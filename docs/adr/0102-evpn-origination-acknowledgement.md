@@ -154,7 +154,13 @@ the RIB, tracking emitted-but-unacknowledged operations explicitly.
   future-proofing, and the log/metric trail makes it diagnosable.
 - The actors do one extra map insert/remove per operation and hold a
   clone of each in-flight action — noise next to route construction.
-- Scope: Type 3 (IMET) and SVI publication keep their existing
-  shapes; they are config-derived, re-published on reconfiguration,
-  and were not part of the observed loss class. Extending the tracker
-  to them is mechanical if evidence appears.
+- Scope: SVI publication keeps its existing shape; it is
+  config-derived, re-published on reconfiguration, and was not part
+  of the observed loss class. Extending the tracker to it is
+  mechanical if evidence appears. Type 3 (IMET) routes its
+  inject/withdraw through the bounded `send_and_ack` wait — its
+  converge callers hold the IMET controller mutex across the ack
+  await, so an unbounded wait on a wedged RIB would lock every later
+  EVPN runtime converge out — but keeps its own outcome mapping (an
+  ack timeout reports `RibUnavailable`) rather than adopting the
+  pending-op tracker.
