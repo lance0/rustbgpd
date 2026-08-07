@@ -2772,7 +2772,7 @@ fn encode_mp_reach_nlri(
             }
         }
         buf.push(0); // Reserved
-        crate::evpn::encode_evpn_nlri(&mp.evpn_announced, buf);
+        crate::evpn::encode_evpn_nlri(&mp.evpn_announced, buf)?;
         return Ok(());
     }
     if mp.afi == Afi::BgpLs && matches!(mp.safi, Safi::BgpLs | Safi::BgpLsVpn) {
@@ -2894,7 +2894,7 @@ fn encode_mp_unreach_nlri(
     }
     // EVPN: encode EVPN NLRI routes
     if mp.afi == Afi::L2Vpn && mp.safi == Safi::Evpn {
-        crate::evpn::encode_evpn_nlri(&mp.evpn_withdrawn, buf);
+        crate::evpn::encode_evpn_nlri(&mp.evpn_withdrawn, buf)?;
         return Ok(());
     }
     if mp.afi == Afi::BgpLs && matches!(mp.safi, Safi::BgpLs | Safi::BgpLsVpn) {

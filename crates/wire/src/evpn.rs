@@ -21,7 +21,7 @@
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-use crate::error::DecodeError;
+use crate::error::{DecodeError, EncodeError};
 use crate::nlri::{Ipv4Prefix, Ipv6Prefix};
 
 // ---------------------------------------------------------------------------
@@ -1160,47 +1160,46 @@ fn encode_type4_body(r: &EvpnEs, out: &mut Vec<u8>) {
     encode_ip_addr(r.originator_ip, out);
 }
 
-fn encode_type5_body(r: &EvpnIpPrefixRoute, out: &mut Vec<u8>) {
+fn encode_type5_body(r: &EvpnIpPrefixRoute, out: &mut Vec<u8>) -> Result<(), EncodeError> {
     // RFC 9136 §3 requires the GW IP to be the same family as the IP
-    // prefix. A debug assertion catches programmer bugs immediately;
-    // release builds fall back to UNSPECIFIED in the prefix family
-    // rather than silently truncating/scrambling the wrong-family
-    // address bytes.
-    debug_assert!(
-        matches!(
-            (&r.prefix, &r.gateway),
-            (EvpnIpPrefixValue::V4(_), IpAddr::V4(_)) | (EvpnIpPrefixValue::V6(_), IpAddr::V6(_))
-        ),
-        "EVPN Type 5: gateway family must match prefix family"
-    );
+    // prefix. `decode_type5` infers the family from the payload length
+    // alone, so any fallback encoding (e.g. UNSPECIFIED in the prefix
+    // family) would round-trip as a silently different route with no
+    // way to detect the corruption — refuse to encode instead.
     out.extend_from_slice(&r.rd.0);
     out.extend_from_slice(&r.esi.0);
     out.extend_from_slice(&r.ethernet_tag.0.to_be_bytes());
-    match r.prefix {
-        EvpnIpPrefixValue::V4(p) => {
+    match (r.prefix, r.gateway) {
+        (EvpnIpPrefixValue::V4(p), IpAddr::V4(gw)) => {
             out.push(p.len);
             out.extend_from_slice(&p.addr.octets());
-            if let IpAddr::V4(gw) = r.gateway {
-                out.extend_from_slice(&gw.octets());
-            } else {
-                out.extend_from_slice(&Ipv4Addr::UNSPECIFIED.octets());
-            }
+            out.extend_from_slice(&gw.octets());
         }
-        EvpnIpPrefixValue::V6(p) => {
+        (EvpnIpPrefixValue::V6(p), IpAddr::V6(gw)) => {
             out.push(p.len);
             out.extend_from_slice(&p.addr.octets());
-            if let IpAddr::V6(gw) = r.gateway {
-                out.extend_from_slice(&gw.octets());
-            } else {
-                out.extend_from_slice(&Ipv6Addr::UNSPECIFIED.octets());
-            }
+            out.extend_from_slice(&gw.octets());
+        }
+        (prefix, gateway) => {
+            return Err(EncodeError::ValueOutOfRange {
+                field: "EVPN Type 5 gateway",
+                value: format!("{gateway} (family must match prefix {prefix})"),
+            });
         }
     }
     encode_mpls_label(r.label, out);
+    Ok(())
 }
 
 /// Encode a list of EVPN NLRI entries to wire bytes.
-pub fn encode_evpn_nlri(routes: &[EvpnRoute], buf: &mut Vec<u8>) {
+///
+/// # Errors
+///
+/// Returns [`EncodeError::ValueOutOfRange`] if a route violates a wire
+/// invariant the decoder discriminates on (currently: a Type 5 gateway
+/// whose address family differs from its prefix). `buf` may hold a
+/// partial encoding after an error and must be discarded.
+pub fn encode_evpn_nlri(routes: &[EvpnRoute], buf: &mut Vec<u8>) -> Result<(), EncodeError> {
     for route in routes {
         let route_type = route.route_type();
         let len_placeholder = buf.len();
@@ -1230,7 +1229,7 @@ pub fn encode_evpn_nlri(routes: &[EvpnRoute], buf: &mut Vec<u8>) {
             EvpnRoute::MacIp(r) => encode_type2_body(r, buf),
             EvpnRoute::Imet(r) => encode_type3_body(r, buf),
             EvpnRoute::Es(r) => encode_type4_body(r, buf),
-            EvpnRoute::IpPrefix(r) => encode_type5_body(r, buf),
+            EvpnRoute::IpPrefix(r) => encode_type5_body(r, buf)?,
         }
         let body_len = buf.len() - body_start;
         debug_assert!(
@@ -1245,6 +1244,7 @@ pub fn encode_evpn_nlri(routes: &[EvpnRoute], buf: &mut Vec<u8>) {
             buf[len_placeholder + 1] = body_len as u8;
         }
     }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1266,7 +1266,7 @@ mod tests {
 
     fn roundtrip(routes: &[EvpnRoute]) {
         let mut buf = Vec::new();
-        encode_evpn_nlri(routes, &mut buf);
+        encode_evpn_nlri(routes, &mut buf).expect("encode should succeed");
         let decoded = decode_evpn_nlri(&buf).expect("decode should succeed");
         assert_eq!(routes, decoded.as_slice(), "round-trip mismatch");
     }
@@ -1576,10 +1576,10 @@ mod tests {
             originator_ip: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2)),
         });
         let mut buf = Vec::new();
-        encode_evpn_nlri(std::slice::from_ref(&imet), &mut buf);
+        encode_evpn_nlri(std::slice::from_ref(&imet), &mut buf).unwrap();
         // Append an unknown route type (99) with a 4-byte payload.
         buf.extend_from_slice(&[99u8, 4, 0xAA, 0xBB, 0xCC, 0xDD]);
-        encode_evpn_nlri(std::slice::from_ref(&imet2), &mut buf);
+        encode_evpn_nlri(std::slice::from_ref(&imet2), &mut buf).unwrap();
 
         let decoded = decode_evpn_nlri(&buf).unwrap();
         assert_eq!(decoded.len(), 2, "unknown type should be skipped");
@@ -1660,20 +1660,21 @@ mod tests {
             label: MplsLabel::new(7),
         });
         let mut buf = Vec::new();
-        encode_evpn_nlri(std::slice::from_ref(&r), &mut buf);
+        encode_evpn_nlri(std::slice::from_ref(&r), &mut buf).unwrap();
         let decoded = decode_evpn_nlri(&buf).unwrap();
         assert_eq!(decoded.len(), 1);
         assert!(matches!(decoded[0], EvpnRoute::EadPerEs(_)));
     }
 
-    /// Regression: gateway-family mismatch on Type 5 trips the
-    /// `debug_assert!` so encoder bugs surface in tests/CI rather than
-    /// silently corrupting the wire payload. Cargo runs unit tests with
-    /// debug assertions on, so this test is `#[should_panic]`.
+    /// Regression: a Type 5 gateway whose family differs from the prefix
+    /// is a hard encode error in every build profile. Release builds
+    /// previously fell back to UNSPECIFIED in the prefix family, which
+    /// round-tripped as `{prefix: V4, gateway: V4(0.0.0.0)}` — an
+    /// undetectably different route (`decode_type5` infers family from
+    /// payload length alone).
     #[test]
-    #[should_panic(expected = "gateway family must match prefix family")]
-    fn type5_encode_panics_on_family_mismatch_in_debug() {
-        let r = EvpnRoute::IpPrefix(EvpnIpPrefixRoute {
+    fn type5_encode_rejects_family_mismatch() {
+        let v4_prefix_v6_gw = EvpnRoute::IpPrefix(EvpnIpPrefixRoute {
             rd: sample_rd(),
             esi: EthernetSegmentIdentifier::ZERO,
             ethernet_tag: EthernetTagId(0),
@@ -1681,7 +1682,22 @@ mod tests {
             gateway: IpAddr::V6(Ipv6Addr::LOCALHOST),
             label: MplsLabel::new(100),
         });
-        let mut buf = Vec::new();
-        encode_evpn_nlri(&[r], &mut buf);
+        let v6_prefix_v4_gw = EvpnRoute::IpPrefix(EvpnIpPrefixRoute {
+            rd: sample_rd(),
+            esi: EthernetSegmentIdentifier::ZERO,
+            ethernet_tag: EthernetTagId(0),
+            prefix: EvpnIpPrefixValue::V6(Ipv6Prefix::new(Ipv6Addr::LOCALHOST, 128)),
+            gateway: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+            label: MplsLabel::new(100),
+        });
+        for route in [v4_prefix_v6_gw, v6_prefix_v4_gw] {
+            let mut buf = Vec::new();
+            let err = encode_evpn_nlri(std::slice::from_ref(&route), &mut buf).unwrap_err();
+            assert!(
+                matches!(err, EncodeError::ValueOutOfRange { field, .. }
+                    if field == "EVPN Type 5 gateway"),
+                "unexpected error: {err}"
+            );
+        }
     }
 }
