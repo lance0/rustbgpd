@@ -186,7 +186,7 @@ CONFIRM_BENCH_CRON_PAUSED=1 CONFIRM_NO_MAIN_PUSHES=1 ARTIFACTS_DIR=/tmp/bmp-buff
 | Cell | Policy representation | Reload mechanism |
 |---|---|---|
 | `rustbgpd-sighup` | `.rpol` per-member IRR filters rendered by `tools/rs-config-render` (the production IRR pipeline renderer) from a synthetic `arouteserver template-context` document, concatenated into one swapped file | copy generation file over live, `SIGHUP` |
-| `rustbgpd-sighup-grouped-control` | the same `.rpol` policy and canonical dataset, with `per_client_best = false` so all 320 members share one update group | copy generation file over live, `SIGHUP`; standalone diagnostic control only |
+| `rustbgpd-sighup-grouped-control` | the same `.rpol` policy and canonical dataset, with `per_client_best = false` (since the ADR-0126 classifier flip both rustbgpd cells form one 320-member update group; this control isolates the path-hiding/runner-up-lane term) | copy generation file over live, `SIGHUP`; standalone diagnostic control only |
 | `rustbgpd-txn` | same dataset as inline `[policy.definitions]` chain-engine statements in a full candidate config TOML | copy candidate; streamed JSON Plan; explicit streamed Apply with the returned single-use plan token, snapshot token, and commit-confirm; assert pending v3 state, then confirm (`txn-apply.sh`) |
 | `bird` | per-member prefix-set `define`s + import filters in the swapped include file | copy include, `birdc configure` |
 | `openbgpd` | per-member `prefix-set`s + `source-as`/`prefix-set` allow rules in the swapped include file | copy include, `bgpctl reload` |
@@ -345,10 +345,12 @@ Missing or mismatched evidence is never acknowledged and fails the cell.
 At the full shape, the scrapes must show no Add-Path config, all 320 sessions
 established, empty outbound queues, Loc-RIB exactly 183,040, exact per-peer Adj-RIB-In and
 Adj-RIB-Out family rosters/counts, and a stable exact update-group topology.
-The comparison cell requires 320 `per_client_best` peers, zero groups, 320
-fallback peers, and every peer's group gauge at `-1`. The grouped control
-requires no `per_client_best` peers, exactly one 320-member group, zero
-fallback peers, and one shared nonnegative group ID. The last accepted scrape
+Since the ADR-0126 classifier flip, both rustbgpd cells must form exactly one
+320-member update group with zero fallback peers and one shared nonnegative
+group ID. The comparison cell requires 320 `per_client_best` peers and a
+runner-up lane (`bgp_update_group_runner_up_entries`) exactly equal to the
+manifest's overlapped-pair count (ADR-0126 Decision 3); the grouped control
+requires no `per_client_best` peers and an empty lane. The last accepted scrape
 must precede the harness's first wire-measurement trigger. The retained
 `ready`, `ack`, timestamps, config, and raw scrapes are all in the cell's
 checksum chain and are independently re-parsed by the four-root verifier.
