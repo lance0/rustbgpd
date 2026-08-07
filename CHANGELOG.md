@@ -31,6 +31,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `ApplyEvpnRuntime` `validate_only` now enforces the same actor-availability
+  preconditions a commit would (LAN-897). A dry-run of e.g. an L2VNI add on an
+  RR-only daemon (no EVPN dataplane actors spawned) used to report
+  `EvpnRuntimeApplyValidated` while committing the identical candidate
+  returned `FAILED_PRECONDITION` — the validate verdict is now the commit's:
+  the routed converge method's actor preconditions (presence + openness,
+  including per-step for decomposable mixed candidates) run side-effect-free
+  through a shared availability gate, so validate and commit agree.
+
 - EVPN wire encoding no longer emits silently wrong bytes for invariant
   violations that were only debug-asserted (LAN-896). Release builds
   used to encode a Type 5 route with a gateway/prefix family mismatch
