@@ -420,23 +420,9 @@ pub(in crate::manager) struct RunnerUp {
 pub(in crate::manager) struct AdvEntry<'a> {
     pub(in crate::manager) route: &'a Route,
     /// Next-hop-override residue for the slot.
-    #[allow(
-        dead_code,
-        reason = "the replay seams that re-emit adv(m) with its next-hop residue \
-                  land in a later ADR-0126 Phase 2 PR; until then only the test \
-                  matrix reads the field, so the lib target sees it as unread \
-                  (an `expect` would be unfulfilled in the test target)"
-    )]
     pub(in crate::manager) nh: Option<&'a NextHopAction>,
     /// Captured pre-policy SOURCE attributes (RFC 7947 rs-control
     /// decisions read these, never the post-policy route).
-    #[allow(
-        dead_code,
-        reason = "the rs-control emit seams deciding on adv(m)'s source attributes \
-                  land in a later ADR-0126 Phase 2 PR; until then only the test \
-                  matrix reads the field, so the lib target sees it as unread \
-                  (an `expect` would be unfulfilled in the test target)"
-    )]
     pub(in crate::manager) source_attrs: Option<&'a Arc<Vec<PathAttribute>>>,
     /// Terminal policy label of the permitting evaluation (`None` =
     /// inline verdict) — join-time counter replay residue.
@@ -706,26 +692,50 @@ impl GroupStageOutput {
     }
 
     /// Member-scoped withdraw keys of this pass that [`Self::withdrawn_keys`]
-    /// (the tombstone feed) never records: the source-flip arm — the
-    /// member is the delta's NEW source and the displaced entry was
-    /// another peer's, so the member's emission is a withdraw while the
-    /// key stays IN the group table. Recorded into the member's extra
-    /// (over-)withdraws when its emission is lost to a full channel.
-    /// The ADR-0126 lane arms (a lost lane emission toward
-    /// `source(w)`) land in a later Phase 2 PR alongside the
-    /// dirty-resync lane assembly.
+    /// (the tombstone feed) never records, recorded into the member's
+    /// extra (over-)withdraws when its emission is lost to a full
+    /// channel:
+    ///
+    /// - the source-flip arm — the member is the delta's NEW source
+    ///   and the displaced entry was another peer's, so the key stays
+    ///   IN the group table. Under per-client-best the member's lost
+    ///   emission may actually have been a substituted ANNOUNCE
+    ///   ([`GroupDelta::lane`]) — or a genuine withdraw when the
+    ///   substitution is rs-suppressed toward it, a per-member verdict
+    ///   this method cannot see — so the key is recorded
+    ///   unconditionally: the resync's `member_retains` guard (routed
+    ///   through [`GroupRibOut::adv_entry`]) drops it exactly when the
+    ///   lane still substitutes, and the resync substitution announces
+    ///   `adv(m)` in its place;
+    /// - the ADR-0126 lane-retire arm — a retire toward its
+    ///   [`LaneDelta::emit_target`]: the target's wire held the
+    ///   substitution while the key stays IN the table, so the retire
+    ///   withdraw is invisible to the tombstone feed. A superseded
+    ///   retire (`emit_target` = None) needs no record — its target's
+    ///   slot is owned by a winner delta this pass, whose own arms
+    ///   (above, or the tombstone feed) cover the loss.
+    ///
+    /// Lost member-scoped ANNOUNCES (a lane flip or a substitution)
+    /// leave no residue on purpose: announces are idempotent and the
+    /// dirty resync re-derives them from `adv(m)`.
     pub(in crate::manager) fn member_scoped_withdraws(
         &self,
         member: IpAddr,
     ) -> impl Iterator<Item = (Prefix, u32)> + '_ {
-        self.deltas.iter().filter_map(move |delta| {
-            (delta
-                .new
-                .as_ref()
-                .is_some_and(|(route, _)| route.peer == member)
-                && delta.old_source.is_some_and(|source| source != member))
-            .then_some((delta.prefix, delta.path_id))
-        })
+        self.deltas
+            .iter()
+            .filter_map(move |delta| {
+                (delta
+                    .new
+                    .as_ref()
+                    .is_some_and(|(route, _)| route.peer == member)
+                    && delta.old_source.is_some_and(|source| source != member))
+                .then_some((delta.prefix, delta.path_id))
+            })
+            .chain(self.lane_deltas.iter().filter_map(move |delta| {
+                (delta.new.is_none() && delta.emit_target == Some(member))
+                    .then_some((delta.prefix, 0))
+            }))
     }
 
     /// Build the shared emission from the committed deltas (one `Route`
@@ -2658,7 +2668,11 @@ impl RibManager {
     /// Unicast portion of a grouped member's resync update, assembled
     /// from the group table with NO policy re-evaluation:
     ///
-    /// - plain dirty: announce the full table minus own-sourced,
+    /// - plain dirty: announce the member's derived view — `adv(m)`
+    ///   per staged key ([`GroupRibOut::adv_entry`], ADR-0126
+    ///   Decision 4: the staged winner for a non-source member, the
+    ///   lane runner-up substituting for the winner's own source —
+    ///   with the resolved entry's own nh/source-attr residue) —
     ///   withdraw `tombstones ∖ still-retained` (over-withdraw is the
     ///   safe direction — the member's missed sends are unknown);
     /// - regroup (baseline present): one-shot diff — announce entries
@@ -2695,12 +2709,21 @@ impl RibManager {
     ) {
         use super::distribution::rs_control::{rs_control_route_rewrite, rs_control_suppressed};
         let mut suppressed_withdraws: HashSet<(Prefix, u32)> = HashSet::new();
-        for route in group.table.iter() {
-            if route.peer == member {
+        for staged in group.table.iter() {
+            let key = (staged.prefix, staged.path_id);
+            // adv(m) resolves the slot ([`GroupRibOut::adv_entry`]):
+            // the staged winner for a non-source member, the lane
+            // runner-up for the winner's own source, nothing when the
+            // lane is empty — the substitution is never restated here
+            // (ADR-0126 Decision 6). The rs-control decision and the
+            // nh residue come from the RESOLVED entry: a substituted
+            // slot reads the lane's captured source attributes, not
+            // the staged winner's.
+            let Some(entry) = group.adv_entry(member, &staged.prefix, staged.path_id) else {
                 continue;
-            }
-            let key = (route.prefix, route.path_id);
-            let (source_communities, source_large_communities) = group.source_control(key);
+            };
+            let (source_communities, source_large_communities) =
+                source_control_input(entry.source_attrs);
             if rs_control_suppressed(source_communities, source_large_communities, rs_control) {
                 // Not on this member's wire going forward. Withdraw when
                 // it may be there now: always on a plain dirty resync
@@ -2713,7 +2736,7 @@ impl RibManager {
                 }
                 continue;
             }
-            let mut route = route.clone();
+            let mut route = entry.route.clone();
             rs_control_route_rewrite(&mut route, source_large_communities, rs_control);
             if !is_force
                 && let Some(base) = baseline
@@ -2721,18 +2744,24 @@ impl RibManager {
             {
                 continue;
             }
-            nh_override_flags.push(group.nh_override(key));
+            nh_override_flags.push(entry.nh.cloned());
             announce.push(route);
         }
-        // A key the member still retains (staged, not own-sourced, not
-        // source-suppressed toward it) must not be withdrawn —
-        // everything else in the candidate sets is a safe (possibly
-        // spurious) withdraw.
+        // A key the member still retains — its derived view
+        // ([`GroupRibOut::adv_entry`]) holds a non-source-suppressed
+        // route there — must not be withdrawn; everything else in the
+        // candidate sets is a safe (possibly spurious) withdraw.
+        // Routing retention through `adv_entry` makes a lane
+        // substitution retain exactly like a staged entry: a recorded
+        // lane withdraw survives the filter while the lane is empty
+        // (it must be delivered) and drops once the lane refills (the
+        // substituted announce above replaces it — over-withdraw and
+        // over-announce compose safely, announce+withdraw of one key
+        // does not).
         let member_retains = |key: &(Prefix, u32)| {
-            group.table.get(&key.0, key.1).is_some_and(|route| {
-                let (communities, large_communities) = group.source_control(*key);
-                route.peer != member
-                    && !rs_control_suppressed(communities, large_communities, rs_control)
+            group.adv_entry(member, &key.0, key.1).is_some_and(|entry| {
+                let (communities, large_communities) = source_control_input(entry.source_attrs);
+                !rs_control_suppressed(communities, large_communities, rs_control)
             })
         };
         let mut keys: HashSet<(Prefix, u32)> = suppressed_withdraws;
@@ -6998,6 +7027,454 @@ mod tests {
             withdrawn,
             HashSet::from([(k7, 0)]),
             "a key still retained (k1 via OTHER1) must not be withdrawn"
+        );
+    }
+
+    // --- ADR-0126 Phase 2: dirty-resync substitution + channel-full
+    // --- lane residue (`assemble_group_resync` routed through
+    // --- `adv_entry`; `member_scoped_withdraws` lane-retire arm).
+
+    /// `(announce, withdraw, nh_flags)` of one assembled resync.
+    type ResyncEmission = (Vec<Route>, Vec<(Prefix, u32)>, Vec<Option<NextHopAction>>);
+
+    /// Run [`RibManager::assemble_group_resync`] and return
+    /// `(announce, withdraw, nh_flags)`.
+    fn resync(
+        group: &GroupRibOut,
+        member: IpAddr,
+        rs_control: Option<(u32, u32)>,
+        is_dirty: bool,
+        is_force: bool,
+        extras: Option<&HashSet<(Prefix, u32)>>,
+    ) -> ResyncEmission {
+        let mut announce = Vec::new();
+        let mut withdraw = Vec::new();
+        let mut nh_flags = Vec::new();
+        RibManager::assemble_group_resync(
+            group,
+            member,
+            rs_control,
+            is_dirty,
+            is_force,
+            None,
+            extras,
+            &mut announce,
+            &mut withdraw,
+            &mut nh_flags,
+        );
+        assert_eq!(
+            nh_flags.len(),
+            announce.len(),
+            "nh flags must stay aligned with announces"
+        );
+        (announce, withdraw, nh_flags)
+    }
+
+    /// Assert a folded wire equals the member's `adv_entry`-derived
+    /// view — the ADR-0126 Decision 4 invariant every resync must
+    /// converge to.
+    fn assert_wire_is_adv(
+        group: &GroupRibOut,
+        member: IpAddr,
+        wire: &HashMap<(Prefix, u32), Route>,
+    ) {
+        let adv: HashMap<(Prefix, u32), &Route> = group
+            .table
+            .iter()
+            .filter_map(|staged| {
+                group
+                    .adv_entry(member, &staged.prefix, staged.path_id)
+                    .map(|adv| ((staged.prefix, staged.path_id), adv.route))
+            })
+            .collect();
+        assert_eq!(
+            wire.keys().copied().collect::<HashSet<_>>(),
+            adv.keys().copied().collect::<HashSet<_>>(),
+            "wire keys diverged from adv(m) for {member}"
+        );
+        for (key, advertised) in &adv {
+            assert!(
+                routes_equal(&wire[key], advertised),
+                "wire route diverged from adv(m) at {key:?} for {member}"
+            );
+        }
+    }
+
+    /// Fold a resync emission onto a simulated wire (withdraws first;
+    /// announces are implicit replaces).
+    fn fold_wire(
+        wire: &mut HashMap<(Prefix, u32), Route>,
+        announce: Vec<Route>,
+        withdraw: &[(Prefix, u32)],
+    ) {
+        for key in withdraw {
+            wire.remove(key);
+        }
+        for route in announce {
+            wire.insert((route.prefix, route.path_id), route);
+        }
+    }
+
+    /// Dirty-resync substitution matrix (ADR-0126 Decision 4): the
+    /// dirty member sourcing the staged winner receives the LANE entry
+    /// — route and nh residue both the lane's — where one exists;
+    /// nothing for the slot where the lane is empty (tombstone
+    /// withdraws still apply); a dirty member NOT sourcing the winner
+    /// sees the staged winners unchanged.
+    #[test]
+    fn pcb_dirty_resync_substitutes_lane_for_winner_source() {
+        let mut group = per_client_best_group(None);
+        let (k1, k2, k3, k4) = (prefix(1), prefix(2), prefix(3), prefix(4));
+        group.apply_delta(&announce_delta(k1, OTHER1, None)); // plain slot
+        group.apply_delta(&announce_delta(k2, MEMBER, None)); // winner == member, lane below
+        group.apply_delta(&announce_delta(k3, MEMBER, None)); // winner == member, lane empty
+        group.apply_lane(
+            k2,
+            Some(lane_entry(route(k2, OTHER2), MEMBER, "lane", None)),
+        );
+        group.tombstones.insert((k3, 0)); // wire may hold a displaced entry
+        group.tombstones.insert((k4, 0)); // gone from the table entirely
+
+        let (announce, withdraw, nh_flags) = resync(&group, MEMBER, None, true, false, None);
+        let announced: HashMap<Prefix, IpAddr> =
+            announce.iter().map(|r| (r.prefix, r.peer)).collect();
+        assert_eq!(
+            announced,
+            HashMap::from([(k1, OTHER1), (k2, OTHER2)]),
+            "k2 substitutes the lane entry; k3's empty lane announces nothing"
+        );
+        let k2_pos = announce.iter().position(|r| r.prefix == k2).unwrap();
+        assert!(
+            matches!(nh_flags[k2_pos], Some(NextHopAction::Self_)),
+            "the substituted slot carries the LANE's nh residue"
+        );
+        let withdrawn: HashSet<(Prefix, u32)> = withdraw.into_iter().collect();
+        assert_eq!(withdrawn, HashSet::from([(k3, 0), (k4, 0)]));
+
+        // Wire end-state == adv(m): fold onto a wire that held every
+        // tombstoned key (worst-case missed sends).
+        let mut wire: HashMap<(Prefix, u32), Route> =
+            HashMap::from([((k3, 0), route(k3, OTHER2)), ((k4, 0), route(k4, OTHER2))]);
+        let (announce, withdraw, _) = resync(&group, MEMBER, None, true, false, None);
+        fold_wire(&mut wire, announce, &withdraw);
+        assert_wire_is_adv(&group, MEMBER, &wire);
+
+        // A dirty member that does NOT source the winner is untouched
+        // by the lane: it receives the staged winners.
+        let (announce, withdraw, _) = resync(&group, OTHER1, None, true, false, None);
+        let announced: HashMap<Prefix, IpAddr> =
+            announce.iter().map(|r| (r.prefix, r.peer)).collect();
+        assert_eq!(announced, HashMap::from([(k2, MEMBER), (k3, MEMBER)]));
+        let withdrawn: HashSet<(Prefix, u32)> = withdraw.into_iter().collect();
+        assert_eq!(
+            withdrawn,
+            HashSet::from([(k4, 0)]),
+            "k3 is retained for OTHER1 via the staged winner"
+        );
+    }
+
+    /// Force-refresh (RFC 8326 `GShut`) re-announces adv(m) — the lane
+    /// substitution included — and withdraws nothing.
+    #[test]
+    fn pcb_force_resync_reannounces_substitution() {
+        let mut group = per_client_best_group(None);
+        let (k1, k2) = (prefix(1), prefix(2));
+        group.apply_delta(&announce_delta(k1, OTHER1, None));
+        group.apply_delta(&announce_delta(k2, MEMBER, None));
+        group.apply_lane(
+            k2,
+            Some(lane_entry(route(k2, OTHER2), MEMBER, "lane", None)),
+        );
+
+        let (announce, withdraw, _) = resync(&group, MEMBER, None, false, true, None);
+        let announced: HashMap<Prefix, IpAddr> =
+            announce.iter().map(|r| (r.prefix, r.peer)).collect();
+        assert_eq!(announced, HashMap::from([(k1, OTHER1), (k2, OTHER2)]));
+        assert!(withdraw.is_empty(), "force-only withdraws nothing");
+    }
+
+    /// Retention through `adv_entry`: a recorded lane withdraw is
+    /// delivered while the lane is still empty (the wire held the
+    /// retired substitution) and dropped once the lane refills — the
+    /// substituted announce replaces it, never composing
+    /// announce+withdraw of one key. Wire end-state == adv(m) both
+    /// ways.
+    #[test]
+    fn pcb_recorded_lane_withdraw_delivered_iff_lane_empty() {
+        let k = prefix(1);
+        let mut group = per_client_best_group(None);
+        group.apply_delta(&announce_delta(k, MEMBER, None));
+        let extras: HashSet<(Prefix, u32)> = HashSet::from([(k, 0)]);
+        // The member's wire still holds the retired substitution.
+        let stale_wire = HashMap::from([((k, 0), route(k, OTHER2))]);
+
+        // Lane empty: the withdraw MUST be delivered.
+        let (announce, withdraw, _) = resync(&group, MEMBER, None, true, false, Some(&extras));
+        assert!(announce.is_empty());
+        assert_eq!(withdraw, vec![(k, 0)]);
+        let mut wire = stale_wire.clone();
+        fold_wire(&mut wire, announce, &withdraw);
+        assert_wire_is_adv(&group, MEMBER, &wire);
+
+        // Lane refilled before the resync ran: the recorded withdraw
+        // is dropped and the substituted announce replaces it.
+        group.apply_lane(k, Some(lane_entry(route(k, OTHER2), MEMBER, "lane", None)));
+        let (announce, withdraw, _) = resync(&group, MEMBER, None, true, false, Some(&extras));
+        assert!(
+            withdraw.is_empty(),
+            "a still-substituted key must not be withdrawn"
+        );
+        assert_eq!(announce.len(), 1);
+        assert_eq!((announce[0].prefix, announce[0].peer), (k, OTHER2));
+        let mut wire = stale_wire;
+        fold_wire(&mut wire, announce, &withdraw);
+        assert_wire_is_adv(&group, MEMBER, &wire);
+    }
+
+    /// rs-control on the substituted resync slot decides from the
+    /// LANE entry's source attributes: a suppressing tag collapses the
+    /// substitution to a skip + dirty over-withdraw (today's
+    /// rs-suppressed staged shape), a non-suppressing control tag is
+    /// scrubbed toward the rs member and left untouched toward a
+    /// transparent one.
+    #[test]
+    fn pcb_resync_substitution_applies_rs_control() {
+        let rs = Some((RS_ASN, TARGET_ASN));
+        let scrub_comm = (RS_ASN << 16) | TARGET_ASN;
+        let deny_comm = TARGET_ASN;
+        let k = prefix(1);
+
+        // Suppressing tag: skip + withdraw, and the extras filter
+        // agrees (a suppressed substitution does not retain).
+        let mut group = per_client_best_group(None);
+        group.apply_delta(&announce_delta(k, MEMBER, None));
+        group.apply_lane(
+            k,
+            Some(lane_entry(
+                route(k, OTHER2),
+                MEMBER,
+                "lane",
+                Some(deny_comm),
+            )),
+        );
+        let extras: HashSet<(Prefix, u32)> = HashSet::from([(k, 0)]);
+        let (announce, withdraw, _) = resync(&group, MEMBER, rs, true, false, Some(&extras));
+        assert!(
+            announce.is_empty(),
+            "suppressed substitution never announces"
+        );
+        assert_eq!(withdraw, vec![(k, 0)]);
+
+        // Non-suppressing control tag: announced, rewritten from the
+        // lane's attributes.
+        let mut group = per_client_best_group(None);
+        group.apply_delta(&announce_delta(k, MEMBER, None));
+        let mut substituted = route(k, OTHER2);
+        let mut attrs = (*substituted.attributes).clone();
+        attrs.push(PathAttribute::Communities(vec![scrub_comm]));
+        substituted.attributes = Arc::new(attrs);
+        group.apply_lane(
+            k,
+            Some(lane_entry(substituted, MEMBER, "lane", Some(scrub_comm))),
+        );
+        let (announce, withdraw, _) = resync(&group, MEMBER, rs, true, false, None);
+        assert!(withdraw.is_empty());
+        assert_eq!(announce.len(), 1);
+        assert!(
+            announce[0].communities().is_empty(),
+            "control community must be scrubbed toward the rs member"
+        );
+        let (announce, _, _) = resync(&group, MEMBER, None, true, false, None);
+        assert_eq!(
+            announce[0].communities(),
+            &[scrub_comm],
+            "transparent member receives the untouched substitution"
+        );
+    }
+
+    /// Darkness at the resync seam: an empty-lane per-client-best
+    /// group resyncs byte-identically to a plain group over the same
+    /// table, tombstones, and extras.
+    #[test]
+    fn pcb_empty_lane_resync_matches_plain_group() {
+        let (k1, k2, k3) = (prefix(1), prefix(2), prefix(3));
+        let build = |mut group: GroupRibOut| {
+            group.apply_delta(&announce_delta(k1, OTHER1, None));
+            group.apply_delta(&announce_delta(k2, MEMBER, None));
+            group.tombstones.insert((k2, 0));
+            group.tombstones.insert((k3, 0));
+            group
+        };
+        let pcb = build(per_client_best_group(None));
+        let plain = build(empty_group());
+        let extras: HashSet<(Prefix, u32)> = HashSet::from([(k1, 0), (k3, 0)]);
+        for (is_dirty, is_force) in [(true, false), (false, true)] {
+            let (pcb_announce, mut pcb_withdraw, _) =
+                resync(&pcb, MEMBER, None, is_dirty, is_force, Some(&extras));
+            let (plain_announce, mut plain_withdraw, _) =
+                resync(&plain, MEMBER, None, is_dirty, is_force, Some(&extras));
+            let keys = |routes: &[Route]| {
+                let mut keys: Vec<(Prefix, u32, IpAddr)> = routes
+                    .iter()
+                    .map(|r| (r.prefix, r.path_id, r.peer))
+                    .collect();
+                keys.sort();
+                keys
+            };
+            assert_eq!(
+                keys(&pcb_announce),
+                keys(&plain_announce),
+                "announce diverged (dirty={is_dirty}, force={is_force})"
+            );
+            pcb_withdraw.sort();
+            plain_withdraw.sort();
+            assert_eq!(
+                pcb_withdraw, plain_withdraw,
+                "withdraw diverged (dirty={is_dirty}, force={is_force})"
+            );
+        }
+    }
+
+    /// The channel-full residue seam: a lane RETIRE records
+    /// `(prefix, 0)` toward its `emit_target` alone; a lane announce
+    /// records nothing (announces heal through resync); a superseded
+    /// transition records nothing (a winner delta owns its slot); the
+    /// source-flip arm keeps recording when the delta carries a lane —
+    /// the resync retention guard filters it while the substitution
+    /// stands.
+    #[test]
+    fn lane_retire_records_member_scoped_withdraw() {
+        let (p1, p2, p3) = (prefix(1), prefix(2), prefix(3));
+        let mut out = GroupStageOutput::default();
+        out.lane_deltas.push(LaneDelta {
+            prefix: p1,
+            new: None,
+            old_source: Some(OTHER2),
+            emit_target: Some(MEMBER),
+            prior_source_attrs: None,
+            content_unchanged: false,
+        });
+        out.lane_deltas.push(LaneDelta {
+            prefix: p2,
+            new: Some(lane_entry(route(p2, OTHER2), OTHER1, "lane", None)),
+            old_source: None,
+            emit_target: Some(OTHER1),
+            prior_source_attrs: None,
+            content_unchanged: false,
+        });
+        out.lane_deltas.push(LaneDelta {
+            prefix: p3,
+            new: None,
+            old_source: Some(OTHER2),
+            emit_target: None,
+            prior_source_attrs: None,
+            content_unchanged: false,
+        });
+        assert_eq!(
+            out.member_scoped_withdraws(MEMBER).collect::<Vec<_>>(),
+            vec![(p1, 0)],
+            "only the retire toward MEMBER is recorded"
+        );
+        assert!(
+            out.member_scoped_withdraws(OTHER1).next().is_none(),
+            "a lane announce leaves no residue"
+        );
+        assert!(out.member_scoped_withdraws(OTHER2).next().is_none());
+
+        let mut out = GroupStageOutput::default();
+        let mut delta = announce_delta(p1, MEMBER, Some(OTHER1));
+        delta.lane = Some(lane_entry(route(p1, OTHER1), MEMBER, "lane", None));
+        out.deltas.push(delta);
+        assert_eq!(
+            out.member_scoped_withdraws(MEMBER).collect::<Vec<_>>(),
+            vec![(p1, 0)],
+            "the source-flip arm records regardless of the lane"
+        );
+    }
+
+    /// Channel-full round trips through the REAL staging pass: a lost
+    /// per-member emission — (a) a lane retire, (b) a lane fill's
+    /// substituted announce, (c) a source flip ONTO the member with a
+    /// populated lane — recorded exactly as the channel-full site
+    /// records it (tombstones from `withdrawn_keys`, extras from
+    /// `member_scoped_withdraws`), then resynced; the victim's wire
+    /// must converge to the `adv_entry`-derived adv(m) with no
+    /// announce+withdraw composition.
+    #[test]
+    fn pcb_channel_full_lost_emission_converges_to_adv() {
+        let p = prefix(1);
+        // Mimic the fanout driver's channel-full arm for `victim`,
+        // then run its dirty resync and fold onto `wire`.
+        let lose_and_resync =
+            |m: &mut RibManager, victim: IpAddr, wire: &mut HashMap<(Prefix, u32), Route>| {
+                let out = stage_pcb(m, &[p]);
+                let group = m.group_ribs.get_mut(&PCB_GID).unwrap();
+                group.tombstones.extend(out.withdrawn_keys());
+                let extras: HashSet<(Prefix, u32)> = out.member_scoped_withdraws(victim).collect();
+                let group = m.group_ribs.get(&PCB_GID).unwrap();
+                let (announce, withdraw, _) =
+                    resync(group, victim, None, true, false, Some(&extras));
+                let announce_keys: HashSet<(Prefix, u32)> =
+                    announce.iter().map(|r| (r.prefix, r.path_id)).collect();
+                assert!(
+                    announce_keys.is_disjoint(&withdraw.iter().copied().collect()),
+                    "announce+withdraw of one key escaped for {victim}"
+                );
+                fold_wire(wire, announce, &withdraw);
+                assert_wire_is_adv(group, victim, wire);
+            };
+
+        // (a) Lane retire lost: OTHER1 sources the winner, its wire
+        // holds the substitution, the runner-up disappears.
+        let mut m = staging_manager();
+        m.group_ribs.insert(PCB_GID, per_client_best_group(None));
+        seed(&mut m, cand(p, OTHER1, 300));
+        seed(&mut m, cand(p, OTHER2, 200));
+        let out = stage_pcb(&mut m, &[p]);
+        let mut wire = HashMap::new();
+        let (announce, withdraw) = emit_walk(&out, OTHER1, None);
+        fold_wire(&mut wire, announce, &withdraw);
+        assert_eq!(wire[&(p, 0)].peer, OTHER2, "wire holds the substitution");
+        unseed(&mut m, OTHER2, p);
+        lose_and_resync(&mut m, OTHER1, &mut wire);
+        assert!(wire.is_empty(), "the retire withdraw must be delivered");
+
+        // (b) Substituted announce lost: the lane fills under an
+        // unchanged winner; the resync re-derives the announce.
+        let mut m = staging_manager();
+        m.group_ribs.insert(PCB_GID, per_client_best_group(None));
+        seed(&mut m, cand(p, OTHER1, 300));
+        let out = stage_pcb(&mut m, &[p]);
+        let mut wire = HashMap::new();
+        let (announce, withdraw) = emit_walk(&out, OTHER1, None);
+        fold_wire(&mut wire, announce, &withdraw);
+        assert!(wire.is_empty(), "winner's own source starts empty");
+        seed(&mut m, cand(p, OTHER2, 200));
+        lose_and_resync(&mut m, OTHER1, &mut wire);
+        assert_eq!(
+            wire[&(p, 0)].peer,
+            OTHER2,
+            "the substitution was re-derived"
+        );
+
+        // (c) Source flip ONTO the member with a populated lane: the
+        // recorded source-flip withdraw must be filtered (the lane
+        // substitutes) and the substituted announce delivered.
+        let mut m = staging_manager();
+        m.group_ribs.insert(PCB_GID, per_client_best_group(None));
+        seed(&mut m, cand(p, OTHER1, 300));
+        seed(&mut m, cand(p, MEMBER, 100));
+        let out = stage_pcb(&mut m, &[p]);
+        let mut wire = HashMap::new();
+        let (announce, withdraw) = emit_walk(&out, MEMBER, None);
+        fold_wire(&mut wire, announce, &withdraw);
+        assert_eq!(wire[&(p, 0)].peer, OTHER1, "wire holds the staged winner");
+        seed(&mut m, cand(p, MEMBER, 400));
+        lose_and_resync(&mut m, MEMBER, &mut wire);
+        assert_eq!(
+            wire[&(p, 0)].peer,
+            OTHER1,
+            "the new winner's source ends on the runner-up"
         );
     }
 
