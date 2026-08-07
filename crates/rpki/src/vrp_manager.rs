@@ -5,7 +5,7 @@
 //! snapshots. When either table changes, sends the updated snapshot to the
 //! RIB manager.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -32,8 +32,9 @@ pub struct AspaTableUpdate {
 
 /// Merges VRP and ASPA data from multiple RTR cache servers.
 pub struct VrpManager {
-    /// Per-server VRP entry sets.
-    server_tables: HashMap<SocketAddr, Vec<VrpEntry>>,
+    /// Per-server VRP entry sets. A set (not a list) so an incremental
+    /// withdraw is O(withdrawn) instead of O(withdrawn × table size).
+    server_tables: HashMap<SocketAddr, HashSet<VrpEntry>>,
     /// Per-server ASPA state, keyed by customer ASN.
     ///
     /// Keyed (not a record list) because 8210bis ASPA PDUs carry the
@@ -99,7 +100,8 @@ impl VrpManager {
                     aspa = aspa_records.len(),
                     "full table from cache"
                 );
-                self.server_tables.insert(server, entries);
+                self.server_tables
+                    .insert(server, entries.into_iter().collect());
                 // Later PDUs for the same customer ASN replace earlier
                 // ones within a full table (8210bis replacement semantics).
                 self.server_aspa_tables.insert(
@@ -128,7 +130,7 @@ impl VrpManager {
                 // VRP incremental
                 let table = self.server_tables.entry(server).or_default();
                 for w in &withdrawn {
-                    table.retain(|e| e != w);
+                    table.remove(w);
                 }
                 table.extend(announced);
 
@@ -155,6 +157,12 @@ impl VrpManager {
         self.rebuild_and_distribute_aspa().await;
     }
 
+    // Full rebuild (clone + sort of every entry) on every update, even a
+    // one-entry incremental. Fine at real-world shapes: RTR serial-notify
+    // deltas are tiny next to the ~600k-VRP global table, and rebuilds are
+    // O(total log total) on a single manager task off the hot path.
+    // ponytail: revisit with per-family incremental table maintenance only if
+    // caches ever stream high-rate deltas.
     async fn rebuild_and_distribute_vrp(&mut self) {
         let merged: Vec<VrpEntry> = self
             .server_tables
