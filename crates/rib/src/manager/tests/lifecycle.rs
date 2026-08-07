@@ -579,9 +579,12 @@ async fn stale_peer_down_after_replacement_peer_up_is_discarded() {
     // The stale PeerDown must not have cleared the winner session's
     // Adj-RIB-In: the route it received is still in the Loc-RIB.
     let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryEvpnRoutes { reply: reply_tx })
-        .await
-        .unwrap();
+    tx.send(RibUpdate::QueryEvpnRoutes {
+        filter: None,
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
     let evpn_routes = reply_rx.await.unwrap();
     assert!(
         evpn_routes.iter().any(|r| r.key() == imet_winner_key),

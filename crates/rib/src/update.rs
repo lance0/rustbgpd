@@ -1149,6 +1149,19 @@ pub fn route_query_key(route: &Route) -> RouteQueryKey {
 /// Row filter evaluated inside the RIB task during a paged route query.
 pub type RouteQueryFilter = Box<dyn Fn(&Route) -> bool + Send + Sync>;
 
+/// Row filter evaluated inside the RIB task while copying one non-unicast
+/// Loc-RIB table (EVPN, BGP-LS, VPN, labeled-unicast, RT-Constrain,
+/// `FlowSpec`). `None` copies every row.
+///
+/// The listing RPCs for these families all narrow their result after the
+/// fact — by peer, by address family, by route/NLRI type, by RD. Handing
+/// that predicate to the RIB task means only matching rows are cloned, so
+/// the actor is not occupied building a snapshot the caller discards. These
+/// families' Loc-RIB tables are unordered, so this bounds the copy, not the
+/// walk; unicast listings use the ordered, resumable [`RibUpdate::QueryRoutesPage`]
+/// path instead.
+pub type RibRowFilter<T> = Box<dyn Fn(&T) -> bool + Send + Sync>;
+
 /// Process-local scope-class mutation version bound into an opaque route-page
 /// token. The manager owns one conservative version each for Received, Best,
 /// and Advertised views, so a peer-specific walk may also be invalidated by an
@@ -2136,31 +2149,43 @@ pub enum RibUpdate {
     },
     /// Query `FlowSpec` routes from the Loc-RIB.
     QueryFlowSpecRoutes {
+        /// Row filter evaluated inside the RIB task; `None` copies every row.
+        filter: Option<RibRowFilter<FlowSpecRoute>>,
         /// Response channel.
         reply: oneshot::Sender<Vec<FlowSpecRoute>>,
     },
     /// Query EVPN routes from the Loc-RIB (RFC 7432).
     QueryEvpnRoutes {
+        /// Row filter evaluated inside the RIB task; `None` copies every row.
+        filter: Option<RibRowFilter<EvpnRibRoute>>,
         /// Response channel.
         reply: oneshot::Sender<Vec<EvpnRibRoute>>,
     },
     /// Query BGP-LS routes from the Loc-RIB (RFC 9552).
     QueryBgpLsRoutes {
+        /// Row filter evaluated inside the RIB task; `None` copies every row.
+        filter: Option<RibRowFilter<BgpLsRibRoute>>,
         /// Response channel.
         reply: oneshot::Sender<Vec<BgpLsRibRoute>>,
     },
     /// Query VPNv4/VPNv6 routes from the Loc-RIB (RFC 4364 / RFC 4659).
     QueryVpnRoutes {
+        /// Row filter evaluated inside the RIB task; `None` copies every row.
+        filter: Option<RibRowFilter<VpnRibRoute>>,
         /// Response channel.
         reply: oneshot::Sender<Vec<VpnRibRoute>>,
     },
     /// Query IPv4/IPv6 labeled-unicast routes from the Loc-RIB (RFC 8277).
     QueryLabeledRoutes {
+        /// Row filter evaluated inside the RIB task; `None` copies every row.
+        filter: Option<RibRowFilter<LabeledRibRoute>>,
         /// Response channel.
         reply: oneshot::Sender<Vec<LabeledRibRoute>>,
     },
     /// Query RT-Constrain routes from the Loc-RIB (RFC 4684).
     QueryRtcRoutes {
+        /// Row filter evaluated inside the RIB task; `None` copies every row.
+        filter: Option<RibRowFilter<RtcRibRoute>>,
         /// Response channel.
         reply: oneshot::Sender<Vec<RtcRibRoute>>,
     },

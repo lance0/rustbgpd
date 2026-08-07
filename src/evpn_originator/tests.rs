@@ -1231,7 +1231,7 @@ fn runtime_model_rib_responder(
                 RibUpdate::SubscribeEvpnRouteEvents { reply } => {
                     let _ = reply.send(events_tx.subscribe());
                 }
-                RibUpdate::QueryEvpnRoutes { reply } => {
+                RibUpdate::QueryEvpnRoutes { reply, .. } => {
                     let _ = reply.send(vec![]);
                 }
                 RibUpdate::InjectEvpn { route, reply } => {
@@ -1276,7 +1276,7 @@ fn runtime_model_full_route_responder(
                 RibUpdate::SubscribeEvpnRouteEvents { reply } => {
                     let _ = reply.send(events_tx.subscribe());
                 }
-                RibUpdate::QueryEvpnRoutes { reply } => {
+                RibUpdate::QueryEvpnRoutes { reply, .. } => {
                     let _ = reply.send(vec![]);
                 }
                 RibUpdate::InjectEvpn { route, reply } => {
@@ -1943,7 +1943,7 @@ async fn learn_emits_inject_then_aged_emits_withdraw() {
     let rib_responder = tokio::spawn(async move {
         while let Some(msg) = rib_rx.recv().await {
             match msg {
-                RibUpdate::QueryEvpnRoutes { reply } => {
+                RibUpdate::QueryEvpnRoutes { reply, .. } => {
                     let _ = reply.send(vec![]);
                 }
                 RibUpdate::InjectEvpn { route, reply } => {
@@ -2006,7 +2006,7 @@ async fn shutdown_drains_outstanding_originations_as_withdraws() {
     let _rib_responder = tokio::spawn(async move {
         while let Some(msg) = rib_rx.recv().await {
             match msg {
-                RibUpdate::QueryEvpnRoutes { reply } => {
+                RibUpdate::QueryEvpnRoutes { reply, .. } => {
                     let _ = reply.send(vec![]);
                 }
                 RibUpdate::InjectEvpn { route, reply } => {
@@ -2084,7 +2084,7 @@ async fn rib_rejection_increments_evpn_local_origination_error_counter() {
     let _rib_responder = tokio::spawn(async move {
         while let Some(msg) = rib_rx.recv().await {
             match msg {
-                RibUpdate::QueryEvpnRoutes { reply } => {
+                RibUpdate::QueryEvpnRoutes { reply, .. } => {
                     let _ = reply.send(vec![]);
                 }
                 RibUpdate::InjectEvpn { reply, .. } => {
@@ -2143,7 +2143,7 @@ async fn unknown_vni_observation_is_ignored() {
 
     let _rib_responder = tokio::spawn(async move {
         while let Some(msg) = rib_rx.recv().await {
-            if let RibUpdate::QueryEvpnRoutes { reply } = msg {
+            if let RibUpdate::QueryEvpnRoutes { reply, .. } = msg {
                 let _ = reply.send(vec![]);
             }
         }
@@ -2211,7 +2211,7 @@ fn rib_query_responder(
     tokio::spawn(async move {
         while let Some(msg) = rib_rx.recv().await {
             match msg {
-                RibUpdate::QueryEvpnRoutes { reply } => {
+                RibUpdate::QueryEvpnRoutes { reply, .. } => {
                     let _ = reply.send(routes.clone());
                 }
                 RibUpdate::InjectEvpn { reply, .. } | RibUpdate::WithdrawEvpn { reply, .. } => {
@@ -2236,7 +2236,7 @@ fn rib_capture_dynamic_query_responder(
     let join = tokio::spawn(async move {
         while let Some(msg) = rib_rx.recv().await {
             match msg {
-                RibUpdate::QueryEvpnRoutes { reply } => {
+                RibUpdate::QueryEvpnRoutes { reply, .. } => {
                     let _ = reply.send(routes_rx.borrow().clone());
                 }
                 RibUpdate::InjectEvpn { route, reply } => {
@@ -2310,7 +2310,7 @@ async fn handle_evpn_event_coalesces_ready_type2_events_into_one_repoll() {
     let query_count_clone = query_count.clone();
     let _responder = tokio::spawn(async move {
         while let Some(msg) = rib_rx.recv().await {
-            if let RibUpdate::QueryEvpnRoutes { reply } = msg {
+            if let RibUpdate::QueryEvpnRoutes { reply, .. } = msg {
                 query_count_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 let _ = reply.send(vec![]);
             }
@@ -2513,7 +2513,7 @@ async fn handle_evpn_event_non_macip_does_not_repoll() {
     let qc = query_count.clone();
     let _responder = tokio::spawn(async move {
         while let Some(msg) = rib_rx.recv().await {
-            if let RibUpdate::QueryEvpnRoutes { reply } = msg {
+            if let RibUpdate::QueryEvpnRoutes { reply, .. } = msg {
                 qc.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 let _ = reply.send(vec![]);
             }
@@ -2580,7 +2580,7 @@ async fn sticky_mac_observation_emits_inject_with_sticky_extcomm() {
     let _rib_responder = tokio::spawn(async move {
         while let Some(msg) = rib_rx.recv().await {
             match msg {
-                RibUpdate::QueryEvpnRoutes { reply } => {
+                RibUpdate::QueryEvpnRoutes { reply, .. } => {
                     let _ = reply.send(vec![]);
                 }
                 RibUpdate::InjectEvpn { route, reply } => {
@@ -2716,7 +2716,7 @@ fn rib_capture_responder(
                     log_clone.lock().await.push(RibAction::Withdraw(key));
                     let _ = reply.send(Ok(()));
                 }
-                RibUpdate::QueryEvpnRoutes { reply } => {
+                RibUpdate::QueryEvpnRoutes { reply, .. } => {
                     let _ = reply.send(vec![]);
                 }
                 _ => {}
@@ -3359,7 +3359,7 @@ async fn sticky_macs_propagates_to_mac_ip_route() {
     let _responder = tokio::spawn(async move {
         while let Some(msg) = rib_rx.recv().await {
             match msg {
-                RibUpdate::QueryEvpnRoutes { reply } => {
+                RibUpdate::QueryEvpnRoutes { reply, .. } => {
                     let _ = reply.send(vec![]);
                 }
                 RibUpdate::InjectEvpn { route, reply } => {
@@ -3833,7 +3833,7 @@ fn rib_capture_responder_with_routes(
                     log_clone.lock().await.push(RibAction::Withdraw(key));
                     let _ = reply.send(Ok(()));
                 }
-                RibUpdate::QueryEvpnRoutes { reply } => {
+                RibUpdate::QueryEvpnRoutes { reply, .. } => {
                     let _ = reply.send(vec![]);
                 }
                 _ => {}

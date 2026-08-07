@@ -20,10 +20,49 @@ use crate::event::{RouteEvent, RouteEventType};
 use crate::update::{
     BestPathCandidate, ExactExportKey, ExplainAdvertisedRoute, ExplainAdvertisedRouteError,
     ExplainBestPath, MrtPeerEntry, MrtSnapshotData, NeighborPolicyStats, NeighborRibSnapshot,
-    NeighborRibSnapshotResponse, RoutePage, RoutePageError, RoutePageVersion, RouteQueryFilter,
-    RouteQueryKey, RouteQueryScope, UpdateGroupPeerComparison, WarmMrtSnapshotBudget,
-    WarmMrtSnapshotView, route_query_key,
+    NeighborRibSnapshotResponse, RibRowFilter, RoutePage, RoutePageError, RoutePageVersion,
+    RouteQueryFilter, RouteQueryKey, RouteQueryScope, UpdateGroupPeerComparison,
+    WarmMrtSnapshotBudget, WarmMrtSnapshotView, route_query_key,
 };
+
+/// Copy the rows of one non-unicast Loc-RIB table that match the caller's
+/// pushed-down predicate.
+///
+/// The listing RPCs over these families (EVPN, BGP-LS, VPN, labeled-unicast,
+/// RT-Constrain, `FlowSpec`) all narrow their result afterwards. Evaluating
+/// that predicate here means the RIB task clones only the rows the caller
+/// keeps instead of materializing the whole family table and handing the API
+/// a snapshot it immediately discards.
+///
+/// These tables are keyed maps with no ordered index, so this bounds the
+/// copy, not the walk. Unicast listings resume through ordered indices via
+/// `handle_query_routes_page_versioned` instead.
+pub(super) fn filter_rows<'a, T: Clone + 'a>(
+    rows: impl Iterator<Item = &'a T>,
+    filter: Option<&RibRowFilter<T>>,
+) -> Vec<T> {
+    match filter {
+        Some(matches) => rows.filter(|row| matches(row)).cloned().collect(),
+        None => rows.cloned().collect(),
+    }
+}
+
+/// [`filter_rows`] plus the reply, sharing `send_mrt_snapshot`'s cancellation
+/// rule: an abandoned caller (dropped receiver — e.g. a canceled gRPC request
+/// whose query was already queued behind other work) skips the copy entirely.
+pub(super) fn send_filtered_rows<'a, T: Clone + 'a>(
+    rows: impl Iterator<Item = &'a T>,
+    filter: Option<&RibRowFilter<T>>,
+    reply: tokio::sync::oneshot::Sender<Vec<T>>,
+) {
+    if reply.is_closed() {
+        debug!("route listing canceled before materialization");
+        return;
+    }
+    if reply.send(filter_rows(rows, filter)).is_err() {
+        warn!("query caller dropped before receiving response");
+    }
+}
 
 pub(super) fn send_mrt_snapshot(
     reply: tokio::sync::oneshot::Sender<MrtSnapshotData>,
@@ -1770,15 +1809,6 @@ impl RibManager {
             }
         }
         let _ = reply.send(out);
-    }
-    pub(super) fn handle_query_flowspec_routes(
-        &mut self,
-        reply: tokio::sync::oneshot::Sender<Vec<crate::route::FlowSpecRoute>>,
-    ) {
-        let routes: Vec<_> = self.loc_rib.iter_flowspec().cloned().collect();
-        if reply.send(routes).is_err() {
-            warn!("FlowSpec query caller dropped before receiving response");
-        }
     }
     /// Serve `QueryOrrStatus`: per-vantage resolution/SPF/bound-peer
     /// status plus topology totals, from the cached `OrrState` (fresh by

@@ -2366,29 +2366,22 @@ impl RibManager {
                 self.handle_withdraw_evpn(key, reply);
                 self.retire_exact_export_rejections([ExactExportKey::Evpn(key)]);
             }
-            RibUpdate::QueryFlowSpecRoutes { reply } => {
-                self.handle_query_flowspec_routes(reply);
+            RibUpdate::QueryFlowSpecRoutes { filter, reply } => {
+                queries::send_filtered_rows(self.loc_rib.iter_flowspec(), filter.as_ref(), reply);
             }
-            RibUpdate::QueryEvpnRoutes { reply } => {
-                let routes: Vec<crate::route::EvpnRibRoute> =
-                    self.loc_rib.iter_evpn().cloned().collect();
-                let _ = reply.send(routes);
+            RibUpdate::QueryEvpnRoutes { filter, reply } => {
+                queries::send_filtered_rows(self.loc_rib.iter_evpn(), filter.as_ref(), reply);
             }
-            RibUpdate::QueryBgpLsRoutes { reply } => {
-                let routes: Vec<crate::route::BgpLsRibRoute> =
-                    self.loc_rib.iter_bgpls().cloned().collect();
-                let _ = reply.send(routes);
+            RibUpdate::QueryBgpLsRoutes { filter, reply } => {
+                queries::send_filtered_rows(self.loc_rib.iter_bgpls(), filter.as_ref(), reply);
             }
-            RibUpdate::QueryLabeledRoutes { reply } => {
-                let routes: Vec<crate::route::LabeledRibRoute> =
-                    self.loc_rib.iter_labeled().cloned().collect();
-                let _ = reply.send(routes);
+            RibUpdate::QueryLabeledRoutes { filter, reply } => {
+                queries::send_filtered_rows(self.loc_rib.iter_labeled(), filter.as_ref(), reply);
             }
-            RibUpdate::QueryVpnRoutes { reply } => {
+            RibUpdate::QueryVpnRoutes { filter, reply } => {
                 #[cfg(feature = "bench-internals")]
                 let started = std::time::Instant::now();
-                let routes: Vec<crate::route::VpnRibRoute> =
-                    self.loc_rib.iter_vpn().cloned().collect();
+                let routes = queries::filter_rows(self.loc_rib.iter_vpn(), filter.as_ref());
                 #[cfg(feature = "bench-internals")]
                 let (rows, capacity) = (routes.len(), routes.capacity());
                 // The handler duration must be captured BEFORE the reply is
@@ -2412,10 +2405,8 @@ impl RibManager {
                     ));
                 }
             }
-            RibUpdate::QueryRtcRoutes { reply } => {
-                let routes: Vec<crate::route::RtcRibRoute> =
-                    self.loc_rib.iter_rtc().cloned().collect();
-                let _ = reply.send(routes);
+            RibUpdate::QueryRtcRoutes { filter, reply } => {
+                queries::send_filtered_rows(self.loc_rib.iter_rtc(), filter.as_ref(), reply);
             }
             RibUpdate::QueryOrrTopology { reply } => {
                 // With vantages configured the cached topology is fresh

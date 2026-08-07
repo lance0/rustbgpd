@@ -491,7 +491,12 @@ pub(super) async fn query_evpn_routes(
 ) -> Result<Vec<EvpnRibRoute>, RibQueryError> {
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     rib_tx
-        .send(RibUpdate::QueryEvpnRoutes { reply: reply_tx })
+        // Whole-table by design: the originator reconciles against every
+        // EVPN route type it may have advertised.
+        .send(RibUpdate::QueryEvpnRoutes {
+            filter: None,
+            reply: reply_tx,
+        })
         .await
         .map_err(|_| RibQueryError::SendFailed)?;
     reply_rx.await.map_err(|_| RibQueryError::ReplyDropped)

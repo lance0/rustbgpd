@@ -1269,7 +1269,12 @@ async fn build_intent_tables(
 ) -> Result<IntentTables, RibQueryError> {
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     rib_tx
-        .send(RibUpdate::QueryEvpnRoutes { reply: reply_tx })
+        // Whole-table by design: the intent tables project every EVPN
+        // route type, so there is nothing to narrow.
+        .send(RibUpdate::QueryEvpnRoutes {
+            filter: None,
+            reply: reply_tx,
+        })
         .await
         .map_err(|_| RibQueryError::SendFailed)?;
     let routes = reply_rx.await.map_err(|_| RibQueryError::ReplyDropped)?;
@@ -2156,11 +2161,11 @@ mod tests {
     async fn remote_type5_projection_drop_metrics_track_current_snapshot() {
         let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(2);
         let _rib_responder = tokio::spawn(async move {
-            if let Some(RibUpdate::QueryEvpnRoutes { reply }) = rib_rx.recv().await {
+            if let Some(RibUpdate::QueryEvpnRoutes { reply, .. }) = rib_rx.recv().await {
                 let route = evpn_ip_prefix_route("10.1.0.0/24", "192.0.2.10", "10.0.0.9", 5000);
                 let _ = reply.send(vec![route]);
             }
-            if let Some(RibUpdate::QueryEvpnRoutes { reply }) = rib_rx.recv().await {
+            if let Some(RibUpdate::QueryEvpnRoutes { reply, .. }) = rib_rx.recv().await {
                 let _ = reply.send(vec![]);
             }
         });
@@ -2667,7 +2672,7 @@ mod tests {
         let ip_vrfs = IpVrfTable::new();
         let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(1);
         let _responder = tokio::spawn(async move {
-            if let Some(RibUpdate::QueryEvpnRoutes { reply }) = rib_rx.recv().await {
+            if let Some(RibUpdate::QueryEvpnRoutes { reply, .. }) = rib_rx.recv().await {
                 let routes = vec![
                     evpn_macip_route(100, 1, "10.0.0.2", Some(7)),
                     evpn_macip_route(100, 2, "10.0.0.3", Some(7)),
@@ -2722,7 +2727,7 @@ mod tests {
         let esi = EthernetSegmentIdentifier::new([7; 10]);
         let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(1);
         let _responder = tokio::spawn(async move {
-            if let Some(RibUpdate::QueryEvpnRoutes { reply }) = rib_rx.recv().await {
+            if let Some(RibUpdate::QueryEvpnRoutes { reply, .. }) = rib_rx.recv().await {
                 let routes = vec![
                     evpn_macip_route_with_esi(100, 1, "10.0.0.2", esi),
                     evpn_ead_per_es_route(esi, "10.0.0.2", true),
@@ -2758,7 +2763,7 @@ mod tests {
         let esi = EthernetSegmentIdentifier::new([7; 10]);
         let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(1);
         let _responder = tokio::spawn(async move {
-            if let Some(RibUpdate::QueryEvpnRoutes { reply }) = rib_rx.recv().await {
+            if let Some(RibUpdate::QueryEvpnRoutes { reply, .. }) = rib_rx.recv().await {
                 let routes = vec![
                     evpn_macip_route_with_esi(100, 1, "10.0.0.2", esi),
                     evpn_ead_per_es_route(esi, "10.0.0.2", true),
@@ -2800,7 +2805,7 @@ mod tests {
         let esi = EthernetSegmentIdentifier::new([7; 10]);
         let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(1);
         let _responder = tokio::spawn(async move {
-            if let Some(RibUpdate::QueryEvpnRoutes { reply }) = rib_rx.recv().await {
+            if let Some(RibUpdate::QueryEvpnRoutes { reply, .. }) = rib_rx.recv().await {
                 let routes = vec![
                     evpn_macip_route_with_esi(100, 1, "10.0.0.2", esi),
                     evpn_ead_per_es_route(esi, "10.0.0.3", true),
@@ -2848,7 +2853,7 @@ mod tests {
         let esi = EthernetSegmentIdentifier::new([7; 10]);
         let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(1);
         let _responder = tokio::spawn(async move {
-            if let Some(RibUpdate::QueryEvpnRoutes { reply }) = rib_rx.recv().await {
+            if let Some(RibUpdate::QueryEvpnRoutes { reply, .. }) = rib_rx.recv().await {
                 let routes = vec![evpn_macip_route_with_esi(100, 1, "10.0.0.2", esi)];
                 let _ = reply.send(routes);
             }
@@ -2875,7 +2880,7 @@ mod tests {
         let esi = EthernetSegmentIdentifier::new([7; 10]);
         let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(1);
         let _responder = tokio::spawn(async move {
-            if let Some(RibUpdate::QueryEvpnRoutes { reply }) = rib_rx.recv().await {
+            if let Some(RibUpdate::QueryEvpnRoutes { reply, .. }) = rib_rx.recv().await {
                 let mut tag1_route = evpn_macip_route_with_esi(100, 2, "10.0.0.2", esi);
                 if let EvpnRoute::MacIp(macip) = &mut tag1_route.route {
                     macip.ethernet_tag = EthernetTagId(1);
@@ -2930,7 +2935,7 @@ mod tests {
         let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(2);
         let _responder = tokio::spawn(async move {
             // Snapshot 1: the window — MAC still from dead 10.0.0.2.
-            if let Some(RibUpdate::QueryEvpnRoutes { reply }) = rib_rx.recv().await {
+            if let Some(RibUpdate::QueryEvpnRoutes { reply, .. }) = rib_rx.recv().await {
                 let routes = vec![
                     evpn_macip_route_with_esi(100, 1, "10.0.0.2", esi),
                     evpn_ead_per_es_route(esi, "10.0.0.3", true),
@@ -2942,7 +2947,7 @@ mod tests {
             }
             // Snapshot 2: reconverged — new active 10.0.0.3
             // re-advertised the MAC; the dead PE's route aged out.
-            if let Some(RibUpdate::QueryEvpnRoutes { reply }) = rib_rx.recv().await {
+            if let Some(RibUpdate::QueryEvpnRoutes { reply, .. }) = rib_rx.recv().await {
                 let routes = vec![
                     evpn_macip_route_with_esi(100, 1, "10.0.0.3", esi),
                     evpn_ead_per_es_route(esi, "10.0.0.3", true),
@@ -2981,7 +2986,7 @@ mod tests {
         let esi = EthernetSegmentIdentifier::new([7; 10]);
         let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(2);
         let _responder = tokio::spawn(async move {
-            if let Some(RibUpdate::QueryEvpnRoutes { reply }) = rib_rx.recv().await {
+            if let Some(RibUpdate::QueryEvpnRoutes { reply, .. }) = rib_rx.recv().await {
                 let routes = vec![
                     evpn_macip_route_with_esi(100, 1, "10.0.0.2", esi),
                     evpn_ead_per_es_route(esi, "10.0.0.3", true),
@@ -2989,7 +2994,7 @@ mod tests {
                 ];
                 let _ = reply.send(routes);
             }
-            if let Some(RibUpdate::QueryEvpnRoutes { reply }) = rib_rx.recv().await {
+            if let Some(RibUpdate::QueryEvpnRoutes { reply, .. }) = rib_rx.recv().await {
                 let routes = vec![
                     evpn_macip_route_with_esi(100, 1, "10.0.0.3", esi),
                     evpn_ead_per_es_route(esi, "10.0.0.3", true),
@@ -3074,7 +3079,7 @@ mod tests {
         let esi = EthernetSegmentIdentifier::new([7; 10]);
         let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(1);
         let _responder = tokio::spawn(async move {
-            if let Some(RibUpdate::QueryEvpnRoutes { reply }) = rib_rx.recv().await {
+            if let Some(RibUpdate::QueryEvpnRoutes { reply, .. }) = rib_rx.recv().await {
                 let routes = vec![
                     evpn_macip_route_with_esi(100, 1, "10.0.0.2", esi),
                     evpn_ead_per_es_route(esi, "10.0.0.2", false),
@@ -3106,7 +3111,7 @@ mod tests {
         ip_vrfs.mark_referenced_by_l2vni("blue".to_string(), vni(100));
         let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(1);
         let _responder = tokio::spawn(async move {
-            if let Some(RibUpdate::QueryEvpnRoutes { reply }) = rib_rx.recv().await {
+            if let Some(RibUpdate::QueryEvpnRoutes { reply, .. }) = rib_rx.recv().await {
                 let routes = vec![
                     evpn_macip_route_with_host_ip(
                         100,
@@ -3144,7 +3149,7 @@ mod tests {
         let overlay_mac = [0x02, 0x58, 0, 0, 0, 1];
         let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(1);
         let _responder = tokio::spawn(async move {
-            if let Some(RibUpdate::QueryEvpnRoutes { reply }) = rib_rx.recv().await {
+            if let Some(RibUpdate::QueryEvpnRoutes { reply, .. }) = rib_rx.recv().await {
                 let routes = vec![
                     evpn_ead_per_es_route(esi, "10.0.0.2", true),
                     evpn_ead_per_evi_route_with_label(esi, 42, 100, "10.0.0.2"),
@@ -3183,7 +3188,7 @@ mod tests {
         let esi = EthernetSegmentIdentifier::new([0, 0, 0, 0, 0, 0, 0, 0, 0, 59]);
         let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(1);
         let _responder = tokio::spawn(async move {
-            if let Some(RibUpdate::QueryEvpnRoutes { reply }) = rib_rx.recv().await {
+            if let Some(RibUpdate::QueryEvpnRoutes { reply, .. }) = rib_rx.recv().await {
                 let routes = vec![
                     evpn_ead_per_es_route(esi, "10.0.0.2", false),
                     evpn_ead_per_evi_route_with_label(esi, 0, 100, "10.0.0.2"),
@@ -3237,7 +3242,7 @@ mod tests {
         let esi = EthernetSegmentIdentifier::new([0, 0, 0, 0, 0, 0, 0, 0, 0, 59]);
         let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(1);
         let _responder = tokio::spawn(async move {
-            if let Some(RibUpdate::QueryEvpnRoutes { reply }) = rib_rx.recv().await {
+            if let Some(RibUpdate::QueryEvpnRoutes { reply, .. }) = rib_rx.recv().await {
                 let routes = vec![
                     evpn_ead_per_es_route(esi, "10.0.0.2", true),
                     evpn_ead_per_es_route(esi, "10.0.0.2", false),
@@ -3344,7 +3349,7 @@ mod tests {
             async move {
                 let mut first = Some(route);
                 while let Some(msg) = rib_rx.recv().await {
-                    if let RibUpdate::QueryEvpnRoutes { reply } = msg {
+                    if let RibUpdate::QueryEvpnRoutes { reply, .. } = msg {
                         let _ = reply.send(first.take().into_iter().collect());
                     }
                 }
@@ -3397,7 +3402,7 @@ mod tests {
         let shutdown = CancellationToken::new();
         let _rib_responder = tokio::spawn(async move {
             while let Some(msg) = rib_rx.recv().await {
-                if let RibUpdate::QueryEvpnRoutes { reply } = msg {
+                if let RibUpdate::QueryEvpnRoutes { reply, .. } = msg {
                     let _ = reply.send(vec![]);
                 }
             }
@@ -3489,7 +3494,7 @@ mod tests {
         // identical across polls.
         let _rib_responder = tokio::spawn(async move {
             while let Some(msg) = rib_rx.recv().await {
-                if let RibUpdate::QueryEvpnRoutes { reply } = msg {
+                if let RibUpdate::QueryEvpnRoutes { reply, .. } = msg {
                     let route = evpn_macip_route(100, 1, "10.0.0.2", Some(1));
                     let _ = reply.send(vec![route]);
                 }
@@ -3566,7 +3571,7 @@ mod tests {
 
         let _rib_responder = tokio::spawn(async move {
             while let Some(msg) = rib_rx.recv().await {
-                if let RibUpdate::QueryEvpnRoutes { reply } = msg {
+                if let RibUpdate::QueryEvpnRoutes { reply, .. } = msg {
                     let routes = vec![
                         evpn_macip_route(100, 1, "10.0.0.2", Some(1)),
                         evpn_macip_route(200, 2, "10.0.0.3", Some(1)),
@@ -3637,7 +3642,7 @@ mod tests {
 
         let _rib_responder = tokio::spawn(async move {
             while let Some(msg) = rib_rx.recv().await {
-                if let RibUpdate::QueryEvpnRoutes { reply } = msg {
+                if let RibUpdate::QueryEvpnRoutes { reply, .. } = msg {
                     let _ = reply.send(vec![]);
                 }
             }
@@ -3704,7 +3709,7 @@ mod tests {
             // update must republish cached route projection instead
             // of depending on another RIB query.
             while let Some(msg) = rib_rx.recv().await {
-                if let RibUpdate::QueryEvpnRoutes { reply } = msg {
+                if let RibUpdate::QueryEvpnRoutes { reply, .. } = msg {
                     let _ = reply.send(vec![evpn_macip_route(100, 1, "10.0.0.2", Some(1))]);
                     break;
                 }
@@ -3812,7 +3817,7 @@ mod tests {
 
         let _rib_responder = tokio::spawn(async move {
             while let Some(msg) = rib_rx.recv().await {
-                if let RibUpdate::QueryEvpnRoutes { reply } = msg {
+                if let RibUpdate::QueryEvpnRoutes { reply, .. } = msg {
                     let route = evpn_macip_route(100, 1, "10.0.0.2", Some(1));
                     let _ = reply.send(vec![route]);
                 }
@@ -3885,7 +3890,7 @@ mod tests {
 
         let _rib_responder = tokio::spawn(async move {
             while let Some(msg) = rib_rx.recv().await {
-                if let RibUpdate::QueryEvpnRoutes { reply } = msg {
+                if let RibUpdate::QueryEvpnRoutes { reply, .. } = msg {
                     let routes = vec![
                         evpn_macip_route_with_esi(100, 1, "10.0.0.2", esi),
                         evpn_ead_per_es_route(esi, "10.0.0.2", false),
@@ -3982,7 +3987,7 @@ mod tests {
         tokio::spawn(async move {
             while let Some(msg) = rib_rx.recv().await {
                 match msg {
-                    RibUpdate::QueryEvpnRoutes { reply } => {
+                    RibUpdate::QueryEvpnRoutes { reply, .. } => {
                         task_count.fetch_add(1, Ordering::SeqCst);
                         let _ = reply.send(routes.clone());
                     }
@@ -4029,7 +4034,7 @@ mod tests {
                     RibUpdate::SubscribeEvpnRouteEvents { reply } => {
                         let _ = reply.send(responder_events.subscribe());
                     }
-                    RibUpdate::QueryEvpnRoutes { reply } => {
+                    RibUpdate::QueryEvpnRoutes { reply, .. } => {
                         queries += 1;
                         let mut routes = vec![evpn_macip_route(100, 1, "10.0.0.2", Some(1))];
                         if queries > 1 {

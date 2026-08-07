@@ -12,6 +12,11 @@ priority query channel and `RibService::list_vpn_routes`. `U` is unfiltered;
 `F` filters exactly `10.0.0.1`. Every process measures exactly one case and
 writes one receipt. Semantic checksums cover RD, prefix, peer, and label.
 
+The listing filter is evaluated inside the RIB task, so `actor_rows` is the
+matching row count, not the table size: at `F` the actor copies one peer's
+1/16 share. `actor_rows` and `returned_rows` must therefore agree — a gap
+means the actor is again copying rows the service discards.
+
 Two separately compiled executables prevent allocation instrumentation from
 contaminating timing:
 
@@ -61,14 +66,19 @@ and verifies the censor receipt; every other nonzero exit is a hard failure.
 
 Peak delta must cover `actor_capacity * size_of::<VpnRibRoute>() + actor_rows *
 size_of::<MplsLabelEntry>()`; the label term is one-label deep clone and values agree.
+Both terms scale with the matching rows, not the table.
 
 Classifier precedence is exact:
 
 1. `capacity_censored`
 2. `inconclusive` (cell noise above its size-specific ceiling)
-3. `instrumentation_suspect` (filtered/unfiltered actor medians disagree by
-   more than `max(cell noise, 5%)`, or actor medians fail to increase strictly
-   with size)
+3. `instrumentation_suspect` (the filtered actor median is not below the
+   unfiltered one by more than `max(cell noise, 5%)` at some size, or actor
+   medians fail to increase strictly with size). Filtered/unfiltered parity is
+   the suspect signal: with the predicate pushed into the RIB task, a filtered
+   query that costs the actor the same as an unfiltered one means the
+   predicate never arrived, or the instrument is not reading the handler it
+   names.
 4. `urgent` (worst actor handler above 200 ms)
 5. `design_followup` (worst actor handler above 25 ms)
 6. `no_redesign`

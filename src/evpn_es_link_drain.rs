@@ -912,7 +912,7 @@ mod tests {
                     RibUpdate::SubscribeEvpnRouteEvents { reply } => {
                         let _ = reply.send(events_tx.subscribe());
                     }
-                    RibUpdate::QueryEvpnRoutes { reply } => {
+                    RibUpdate::QueryEvpnRoutes { reply, .. } => {
                         let _ = reply.send(Vec::new());
                     }
                     RibUpdate::InjectEvpn { reply, .. } | RibUpdate::WithdrawEvpn { reply, .. } => {

@@ -316,7 +316,7 @@ impl ScriptedRib {
                 }
                 while let Some(update) = rib_rx.recv().await {
                     match update {
-                        RibUpdate::QueryEvpnRoutes { reply } => {
+                        RibUpdate::QueryEvpnRoutes { reply, .. } => {
                             let _ = reply.send(vec![]);
                         }
                         RibUpdate::InjectEvpn { route, reply } => {

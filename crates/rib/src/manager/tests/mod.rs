@@ -337,17 +337,23 @@ async fn query_received_routes(tx: &mpsc::Sender<RibUpdate>, peer: IpAddr) -> Ve
 
 async fn query_evpn_routes(tx: &mpsc::Sender<RibUpdate>) -> Vec<EvpnRibRoute> {
     let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryEvpnRoutes { reply: reply_tx })
-        .await
-        .unwrap();
+    tx.send(RibUpdate::QueryEvpnRoutes {
+        filter: None,
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
     reply_rx.await.unwrap()
 }
 
 async fn query_bgpls_routes(tx: &mpsc::Sender<RibUpdate>) -> Vec<BgpLsRibRoute> {
     let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryBgpLsRoutes { reply: reply_tx })
-        .await
-        .unwrap();
+    tx.send(RibUpdate::QueryBgpLsRoutes {
+        filter: None,
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
     reply_rx.await.unwrap()
 }
 
@@ -361,25 +367,34 @@ async fn query_orr_topology(tx: &mpsc::Sender<RibUpdate>) -> crate::orr::OrrTopo
 
 async fn query_vpn_routes(tx: &mpsc::Sender<RibUpdate>) -> Vec<VpnRibRoute> {
     let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryVpnRoutes { reply: reply_tx })
-        .await
-        .unwrap();
+    tx.send(RibUpdate::QueryVpnRoutes {
+        filter: None,
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
     reply_rx.await.unwrap()
 }
 
 async fn query_labeled_routes(tx: &mpsc::Sender<RibUpdate>) -> Vec<crate::route::LabeledRibRoute> {
     let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryLabeledRoutes { reply: reply_tx })
-        .await
-        .unwrap();
+    tx.send(RibUpdate::QueryLabeledRoutes {
+        filter: None,
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
     reply_rx.await.unwrap()
 }
 
 async fn query_rtc_routes(tx: &mpsc::Sender<RibUpdate>) -> Vec<crate::route::RtcRibRoute> {
     let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryRtcRoutes { reply: reply_tx })
-        .await
-        .unwrap();
+    tx.send(RibUpdate::QueryRtcRoutes {
+        filter: None,
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
     reply_rx.await.unwrap()
 }
 
@@ -506,9 +521,12 @@ async fn query_warm_mrt_snapshot_with_budget(
 
 async fn query_flowspec_routes(tx: &mpsc::Sender<RibUpdate>) -> Vec<FlowSpecRoute> {
     let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryFlowSpecRoutes { reply: reply_tx })
-        .await
-        .unwrap();
+    tx.send(RibUpdate::QueryFlowSpecRoutes {
+        filter: None,
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
     reply_rx.await.unwrap()
 }
 
@@ -1087,6 +1105,7 @@ mod lifecycle;
 mod llgr_families;
 mod multipath_fib;
 mod no_export;
+mod non_unicast_pushdown;
 mod orf;
 mod orr;
 mod outbound_prefix_limits;
