@@ -10,7 +10,7 @@ and/or GTSM TTL security (RFC 5082). Both require `setsockopt` calls that must
 happen *before* the TCP connection is established:
 
 - `TCP_MD5SIG` (option 14) — associates an MD5 password with a peer address.
-- `IP_MINTTL` (option 21) — rejects packets with TTL below 254.
+- `IP_MINTTL` (option 21) — rejects packets with TTL below 255 (strict RFC 5082 §3.2).
 
 Tokio's `TcpStream::connect()` creates and connects in one step, providing no
 window to apply socket options.

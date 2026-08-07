@@ -144,6 +144,14 @@ impl<K: Ord + Copy> RetrySchedule<K> {
             .collect()
     }
 
+    /// Keep only the entries whose key satisfies `keep`. The actor
+    /// prunes entries whose op left the plan (withdrawn / superseded):
+    /// a stale entry's past-due deadline would otherwise pin the
+    /// retry timer in the past and busy-loop reconcile passes.
+    pub fn retain(&mut self, mut keep: impl FnMut(&K) -> bool) {
+        self.entries.retain(|k, _| keep(k));
+    }
+
     /// Number of tracked failed keys (for metrics / diagnostics).
     #[must_use]
     pub fn pending_count(&self) -> usize {
