@@ -51,7 +51,7 @@ mod test_support;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{self, Read as _, Write as _};
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::Ipv4Addr;
 use std::os::unix::fs::DirBuilderExt as _;
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
@@ -1794,14 +1794,10 @@ async fn query_warm_checkpoint_capture(
 }
 
 fn tcp_ao_listener_key_for_neighbor(
-    listen_addr: SocketAddr,
     neighbor: &config::ResolvedNeighbor,
 ) -> Option<TcpAoListenerKey> {
     let tcp_ao = neighbor.transport_config.tcp_ao.as_ref()?;
     let peer = neighbor.transport_config.remote_addr.ip();
-    if listen_addr.is_ipv4() != peer.is_ipv4() {
-        return None;
-    }
     Some(TcpAoListenerKey {
         owner: TcpAoListenerOwnerKind::Static,
         peer,
@@ -1811,14 +1807,10 @@ fn tcp_ao_listener_key_for_neighbor(
 }
 
 fn tcp_ao_listener_key_for_dynamic_range(
-    listen_addr: SocketAddr,
     range: &config::DynamicNeighborConfig,
 ) -> Option<TcpAoListenerKey> {
     let tcp_ao = range.tcp_ao.as_ref()?;
     let (peer, prefix_len) = config::effective_prefix_str(&range.prefix)?;
-    if listen_addr.is_ipv4() != peer.is_ipv4() {
-        return None;
-    }
     Some(TcpAoListenerKey {
         owner: TcpAoListenerOwnerKind::Dynamic,
         peer,
@@ -1842,15 +1834,9 @@ fn tcp_ao_listener_key_for_dynamic_range(
 
 /// Inbound TCP MD5 listener key for a static neighbor: the resolved
 /// (peer-group-inherited) password, keyed to the exact host address.
-fn md5_listener_key_for_neighbor(
-    listen_addr: SocketAddr,
-    neighbor: &config::ResolvedNeighbor,
-) -> Option<Md5ListenerKey> {
+fn md5_listener_key_for_neighbor(neighbor: &config::ResolvedNeighbor) -> Option<Md5ListenerKey> {
     let password = neighbor.transport_config.md5_password.as_ref()?;
     let peer = neighbor.transport_config.remote_addr.ip();
-    if listen_addr.is_ipv4() != peer.is_ipv4() {
-        return None;
-    }
     Some(Md5ListenerKey {
         peer,
         prefix_len: if peer.is_ipv4() { 32 } else { 128 },
@@ -1863,7 +1849,6 @@ fn md5_listener_key_for_neighbor(
 /// passive-only, so the listener key is the only socket this password can
 /// ever reach.
 fn md5_listener_key_for_dynamic_range(
-    listen_addr: SocketAddr,
     range: &config::DynamicNeighborConfig,
     peer_groups: &std::collections::HashMap<String, config::PeerGroupConfig>,
 ) -> Option<Md5ListenerKey> {
@@ -1874,9 +1859,6 @@ fn md5_listener_key_for_dynamic_range(
     }
     let password = peer_groups.get(&range.peer_group)?.md5_password.as_ref()?;
     let (peer, prefix_len) = config::effective_prefix_str(&range.prefix)?;
-    if listen_addr.is_ipv4() != peer.is_ipv4() {
-        return None;
-    }
     Some(Md5ListenerKey {
         peer,
         prefix_len,
@@ -1888,32 +1870,24 @@ fn md5_listener_key_for_dynamic_range(
 /// neighbor — including `enforce: false` — so a non-GTSM static neighbor
 /// inside an enforcing dynamic range keeps its own policy at accept time.
 fn ttl_security_listener_policy_for_neighbor(
-    listen_addr: SocketAddr,
     neighbor: &config::ResolvedNeighbor,
-) -> Option<TtlSecurityListenerPolicy> {
+) -> TtlSecurityListenerPolicy {
     let peer = neighbor.transport_config.remote_addr.ip();
-    if listen_addr.is_ipv4() != peer.is_ipv4() {
-        return None;
-    }
-    Some(TtlSecurityListenerPolicy {
+    TtlSecurityListenerPolicy {
         owner: TcpAoListenerOwnerKind::Static,
         peer,
         prefix_len: if peer.is_ipv4() { 32 } else { 128 },
         enforce: neighbor.transport_config.ttl_security,
-    })
+    }
 }
 
 /// GTSM selector for a dynamic range, resolved from its peer group.
 fn ttl_security_listener_policy_for_dynamic_range(
-    listen_addr: SocketAddr,
     range: &config::DynamicNeighborConfig,
     peer_groups: &std::collections::HashMap<String, config::PeerGroupConfig>,
 ) -> Option<TtlSecurityListenerPolicy> {
     let group = peer_groups.get(&range.peer_group)?;
     let (peer, prefix_len) = config::effective_prefix_str(&range.prefix)?;
-    if listen_addr.is_ipv4() != peer.is_ipv4() {
-        return None;
-    }
     Some(TtlSecurityListenerPolicy {
         owner: TcpAoListenerOwnerKind::Dynamic,
         peer,
@@ -4738,66 +4712,75 @@ async fn run<T>(
         .await;
     });
 
-    // Spawn BGP inbound TCP listener. The current daemon opens one
-    // listener socket from `Config::listen_addr()`; only install TCP-AO
-    // MKTs whose peer family can match that socket. Outbound active-open
-    // sockets still install their per-neighbor key independently below.
-    let listen_addr = config.listen_addr();
-    let listener_options = ListenerSocketOptions {
-        tcp_ao_keys: peer_configs
-            .iter()
-            .filter_map(|neighbor| tcp_ao_listener_key_for_neighbor(listen_addr, neighbor))
-            .chain(
-                config
-                    .dynamic_neighbors
-                    .iter()
-                    .filter_map(|range| tcp_ao_listener_key_for_dynamic_range(listen_addr, range)),
-            )
-            .collect(),
-        md5_keys: peer_configs
-            .iter()
-            .filter_map(|neighbor| md5_listener_key_for_neighbor(listen_addr, neighbor))
-            .chain(config.dynamic_neighbors.iter().filter_map(|range| {
-                md5_listener_key_for_dynamic_range(listen_addr, range, &config.peer_groups)
-            }))
-            .collect(),
-        ttl_security: peer_configs
-            .iter()
-            .filter_map(|neighbor| ttl_security_listener_policy_for_neighbor(listen_addr, neighbor))
-            .chain(config.dynamic_neighbors.iter().filter_map(|range| {
-                ttl_security_listener_policy_for_dynamic_range(
-                    listen_addr,
-                    range,
-                    &config.peer_groups,
+    // Spawn the BGP inbound TCP listener: one socket per address family
+    // (`0.0.0.0` and `[::]` at `listen_port`) behind a single accept loop.
+    // The complete both-family auth inventory is handed to the transport
+    // layer, which installs each TCP-AO MKT, MD5 key, and GTSM selector on
+    // the socket matching its peer family. Outbound active-open sockets
+    // still install their per-neighbor key independently below.
+    let listener_options =
+        ListenerSocketOptions {
+            tcp_ao_keys: peer_configs
+                .iter()
+                .filter_map(tcp_ao_listener_key_for_neighbor)
+                .chain(
+                    config
+                        .dynamic_neighbors
+                        .iter()
+                        .filter_map(tcp_ao_listener_key_for_dynamic_range),
                 )
-            }))
-            .collect(),
-    };
+                .collect(),
+            md5_keys: peer_configs
+                .iter()
+                .filter_map(md5_listener_key_for_neighbor)
+                .chain(config.dynamic_neighbors.iter().filter_map(|range| {
+                    md5_listener_key_for_dynamic_range(range, &config.peer_groups)
+                }))
+                .collect(),
+            ttl_security: peer_configs
+                .iter()
+                .map(ttl_security_listener_policy_for_neighbor)
+                .chain(config.dynamic_neighbors.iter().filter_map(|range| {
+                    ttl_security_listener_policy_for_dynamic_range(range, &config.peer_groups)
+                }))
+                .collect(),
+        };
 
     let (accept_tx, mut accept_rx) = mpsc::channel::<rustbgpd_transport::AcceptedConnection>(64);
-    let listener =
-        match BgpListener::bind_with_options(listen_addr, accept_tx, listener_options).await {
-            Ok(listener) => listener,
-            Err(e) => {
-                // Fatal. `listen_port` is mandatory, the listener is never
-                // rebound without a restart, and outbound-only operation
-                // silently drops every passive peer, every dynamic-neighbor
-                // range, and every peer that wins the connect race. Staying up
-                // in that state offered no recovery the operator could reach,
-                // and `/readyz` — the only surface that reported it — exists
-                // only when `prometheus_addr` is configured. Exit 1 (the same
-                // code as an unexpected gRPC server exit) so supervisors with
-                // Restart=on-failure retry, which also clears a transient bind
-                // failure without an operator. On the down daemon `rbgp doctor`
-                // names the cause (port in use, missing CAP_NET_BIND_SERVICE).
-                error!(
-                    %listen_addr,
-                    error = %e,
-                    "failed to bind BGP listener; inbound BGP sessions cannot be accepted — exiting"
-                );
-                process::exit(1);
-            }
-        };
+    let (listen_addr_v4, listen_addr_v6) = config.listen_addrs();
+    let listener = match BgpListener::bind_dual_with_options(
+        listen_addr_v4,
+        listen_addr_v6,
+        accept_tx,
+        listener_options,
+    )
+    .await
+    {
+        Ok(listener) => listener,
+        Err(e) => {
+            // Fatal only when NEITHER family bound (a single failed family
+            // degrades to a warning inside the transport layer and the
+            // other keeps serving). `listen_port` is mandatory, the
+            // listener is never rebound without a restart, and
+            // outbound-only operation silently drops every passive peer,
+            // every dynamic-neighbor range, and every peer that wins the
+            // connect race. Staying up in that state offered no recovery
+            // the operator could reach, and `/readyz` — the only surface
+            // that reported it — exists only when `prometheus_addr` is
+            // configured. Exit 1 (the same code as an unexpected gRPC
+            // server exit) so supervisors with Restart=on-failure retry,
+            // which also clears a transient bind failure without an
+            // operator. On the down daemon `rbgp doctor` names the cause
+            // (port in use, missing CAP_NET_BIND_SERVICE).
+            error!(
+                listen_addr_v4 = %listen_addr_v4,
+                listen_addr_v6 = %listen_addr_v6,
+                error = %e,
+                "failed to bind BGP listener on either address family; inbound BGP sessions cannot be accepted — exiting"
+            );
+            process::exit(1);
+        }
+    };
     let tcp_ao_listener_handle = Some(listener.tcp_ao_rotation_handle());
 
     // ADR-0113: install the configured outbound prefix maxima before the
@@ -5610,7 +5593,7 @@ mod tests {
         let source = include_str!("main.rs");
         let production = source.split_once("\n#[cfg(test)]\nmod tests").unwrap().0;
         let listener_bind = production
-            .find("BgpListener::bind_with_options(listen_addr, accept_tx, listener_options)")
+            .find("BgpListener::bind_dual_with_options(")
             .expect("BGP listener bind must remain explicit");
         let peer_registration = production
             .find("for neighbor in peer_configs {")
@@ -7060,22 +7043,57 @@ tcp_ao = {{ key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)"
     }
 
     #[test]
-    fn tcp_ao_listener_key_includes_peer_matching_listener_family() {
-        let config = load_config_from_toml("listener-tcp-ao-v4", &tcp_ao_neighbor_toml("10.0.0.2"));
-        let peer = config.resolved_neighbors().unwrap().pop().unwrap();
-
-        let key = tcp_ao_listener_key_for_neighbor(config.listen_addr(), &peer).unwrap();
-
+    fn tcp_ao_listener_key_covers_both_peer_families() {
+        // LAN-907: the inventory is family-complete; the transport layer
+        // routes each key to the family socket it protects. No peer is
+        // silently dropped for being outside a single listener's family.
+        let v4 = load_config_from_toml("listener-tcp-ao-v4", &tcp_ao_neighbor_toml("10.0.0.2"));
+        let peer = v4.resolved_neighbors().unwrap().pop().unwrap();
+        let key = tcp_ao_listener_key_for_neighbor(&peer).unwrap();
         assert_eq!(key.peer.to_string(), "10.0.0.2");
+
+        let v6 = load_config_from_toml("listener-tcp-ao-v6", &tcp_ao_neighbor_toml("2001:db8::2"));
+        let peer = v6.resolved_neighbors().unwrap().pop().unwrap();
+        let key = tcp_ao_listener_key_for_neighbor(&peer).unwrap();
+        assert_eq!(key.peer.to_string(), "2001:db8::2");
+        assert_eq!(key.prefix_len, 128);
     }
 
     #[test]
-    fn tcp_ao_listener_key_skips_peer_outside_listener_family() {
-        let config =
-            load_config_from_toml("listener-tcp-ao-v6", &tcp_ao_neighbor_toml("2001:db8::2"));
-        let peer = config.resolved_neighbors().unwrap().pop().unwrap();
+    fn ipv6_neighbor_auth_reaches_listener_inventory() {
+        // LAN-907 regression: these keys were silently dropped by the
+        // v4-only listener-family filter, leaving IPv6 peers' inbound MD5
+        // and GTSM enforcement fully open.
+        let config = load_config_from_toml(
+            "listener-v6-auth",
+            &tier_authorized_uds_test_config(
+                r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
 
-        assert!(tcp_ao_listener_key_for_neighbor(config.listen_addr(), &peer).is_none());
+[global.telemetry]
+log_format = "json"
+
+[[neighbors]]
+address = "2001:db8::2"
+remote_asn = 65002
+md5_password = "v6-secret"
+ttl_security = true
+"#,
+            ),
+        );
+        let neighbor = config.resolved_neighbors().unwrap().pop().unwrap();
+
+        assert!(
+            md5_listener_key_for_neighbor(&neighbor).is_some(),
+            "an IPv6 neighbor's md5_password must reach the listener inventory"
+        );
+        assert!(
+            ttl_security_listener_policy_for_neighbor(&neighbor).enforce,
+            "an IPv6 neighbor's ttl_security must reach the listener inventory"
+        );
     }
 
     #[test]
@@ -7098,16 +7116,8 @@ tcp_ao = {{ key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)"
             ),
         };
 
-        let v4 = tcp_ao_listener_key_for_dynamic_range(
-            "0.0.0.0:179".parse().unwrap(),
-            &range("192.0.2.0/24"),
-        )
-        .unwrap();
-        let v6 = tcp_ao_listener_key_for_dynamic_range(
-            "[::]:179".parse().unwrap(),
-            &range("2001:db8::/48"),
-        )
-        .unwrap();
+        let v4 = tcp_ao_listener_key_for_dynamic_range(&range("192.0.2.0/24")).unwrap();
+        let v6 = tcp_ao_listener_key_for_dynamic_range(&range("2001:db8::/48")).unwrap();
         assert_eq!(
             (v4.peer.to_string(), v4.prefix_len),
             ("192.0.2.0".to_string(), 24)
@@ -7147,31 +7157,26 @@ peer_group = "members"
 "#,
             ),
         );
-        let listen_addr = config.listen_addr();
         let neighbor = config.resolved_neighbors().unwrap().pop().unwrap();
 
         // Static: password inherited from the peer group, keyed host-length.
-        let static_key = md5_listener_key_for_neighbor(listen_addr, &neighbor).unwrap();
+        let static_key = md5_listener_key_for_neighbor(&neighbor).unwrap();
         assert_eq!(static_key.peer.to_string(), "10.0.0.2");
         assert_eq!(static_key.prefix_len, 32);
 
         // Dynamic: the group's password becomes a prefix-scoped listener key
         // even though dynamic members never active-open.
-        let dynamic_key = md5_listener_key_for_dynamic_range(
-            listen_addr,
-            &config.dynamic_neighbors[0],
-            &config.peer_groups,
-        )
-        .unwrap();
+        let dynamic_key =
+            md5_listener_key_for_dynamic_range(&config.dynamic_neighbors[0], &config.peer_groups)
+                .unwrap();
         assert_eq!(dynamic_key.peer.to_string(), "192.0.2.0");
         assert_eq!(dynamic_key.prefix_len, 24);
 
         // GTSM selectors resolve from the same sources.
-        let static_ttl = ttl_security_listener_policy_for_neighbor(listen_addr, &neighbor).unwrap();
+        let static_ttl = ttl_security_listener_policy_for_neighbor(&neighbor);
         assert_eq!(static_ttl.owner, TcpAoListenerOwnerKind::Static);
         assert!(static_ttl.enforce);
         let dynamic_ttl = ttl_security_listener_policy_for_dynamic_range(
-            listen_addr,
             &config.dynamic_neighbors[0],
             &config.peer_groups,
         )
@@ -7182,7 +7187,7 @@ peer_group = "members"
     }
 
     #[test]
-    fn md5_listener_key_skips_family_mismatch_and_unprotected_entries() {
+    fn md5_listener_key_skips_unprotected_entries() {
         let config = load_config_from_toml(
             "listener-md5-skips",
             &tier_authorized_uds_test_config(
@@ -7209,26 +7214,17 @@ peer_group = "plain"
 "#,
             ),
         );
-        let listen_addr = config.listen_addr();
         let neighbor = config.resolved_neighbors().unwrap().pop().unwrap();
 
-        assert!(md5_listener_key_for_neighbor(listen_addr, &neighbor).is_none());
+        assert!(md5_listener_key_for_neighbor(&neighbor).is_none());
         assert!(
-            md5_listener_key_for_dynamic_range(
-                listen_addr,
-                &config.dynamic_neighbors[0],
-                &config.peer_groups
-            )
-            .is_none()
+            md5_listener_key_for_dynamic_range(&config.dynamic_neighbors[0], &config.peer_groups)
+                .is_none()
         );
         // Unprotected entries still emit non-enforcing GTSM selectors so a
         // static exception inside an enforcing range resolves correctly.
-        let static_ttl = ttl_security_listener_policy_for_neighbor(listen_addr, &neighbor).unwrap();
+        let static_ttl = ttl_security_listener_policy_for_neighbor(&neighbor);
         assert!(!static_ttl.enforce);
-        // Family mismatch: a v6 listener never carries v4 keys.
-        let v6_listener: SocketAddr = "[::]:179".parse().unwrap();
-        assert!(md5_listener_key_for_neighbor(v6_listener, &neighbor).is_none());
-        assert!(ttl_security_listener_policy_for_neighbor(v6_listener, &neighbor).is_none());
     }
 
     #[test]

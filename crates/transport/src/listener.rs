@@ -169,10 +169,23 @@ pub struct ListenerSocketOptions {
     pub ttl_security: Vec<TtlSecurityListenerPolicy>,
 }
 
+/// One bound listening socket of a single address family. The listener
+/// binds one per available family; every kernel auth operation (TCP-AO
+/// MKTs, MD5 keys, GTSM verification receipts) is routed to the socket
+/// whose family matches the key's peer selector.
+struct FamilyListener {
+    is_v4: bool,
+    socket: TcpListener,
+}
+
 /// BGP inbound listener. Accepts TCP connections and forwards them
 /// to the `PeerManager` for matching against known peers.
+///
+/// One accept loop and one rotation/auth state machine serve up to two
+/// per-family sockets (IPv4 and IPv6), so generations, statuses, and the
+/// accept channel stay single-owner regardless of how many families bound.
 pub struct BgpListener {
-    listener: TcpListener,
+    listeners: Vec<FamilyListener>,
     accept_tx: mpsc::Sender<AcceptedConnection>,
     tcp_ao_keys: TcpAoListenerKeyIndex,
     /// TCP MD5 keys currently installed on the listening socket, kept for
@@ -951,25 +964,96 @@ impl BgpListener {
         accept_tx: mpsc::Sender<AcceptedConnection>,
         options: ListenerSocketOptions,
     ) -> std::io::Result<Self> {
-        let tcp_ao_keys = options.tcp_ao_keys.len();
-        let listener = bind_socket2_listener(addr, &options)?;
-        let bound_addr = listener.local_addr().unwrap_or(addr);
-        info!(
-            addr = %bound_addr,
-            requested_addr = %addr,
-            tcp_ao_keys,
-            md5_keys = options.md5_keys.len(),
-            ttl_security_selectors = options
-                .ttl_security
+        let socket = bind_socket2_listener(addr, &options)?;
+        log_bound_family(&socket, addr, &options);
+        Ok(Self::from_sockets(
+            vec![FamilyListener {
+                is_v4: addr.is_ipv4(),
+                socket,
+            }],
+            accept_tx,
+            options,
+        ))
+    }
+
+    /// Bind the daemon's dual-family listener pair: one IPv4 and one IPv6
+    /// socket sharing a single accept loop, rotation state machine, and
+    /// accept channel. `IPV6_V6ONLY` is always set on the IPv6 socket, so
+    /// v4-mapped connections can only arrive through the IPv4 socket and
+    /// each family's kernel auth inventory is installed on exactly one
+    /// socket.
+    ///
+    /// A family whose bind fails (for example IPv6 disabled on the host, or
+    /// the address family unavailable) is logged with a warning and skipped;
+    /// the listener keeps serving the family that did bind.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only when neither family can be bound, or when
+    /// pre-listen option installation fails on a bindable socket.
+    #[allow(
+        clippy::unused_async,
+        reason = "match the async bind API of the single-family constructors"
+    )]
+    pub async fn bind_dual_with_options(
+        v4_addr: SocketAddr,
+        v6_addr: SocketAddr,
+        accept_tx: mpsc::Sender<AcceptedConnection>,
+        options: ListenerSocketOptions,
+    ) -> std::io::Result<Self> {
+        debug_assert!(v4_addr.is_ipv4() && v6_addr.is_ipv6());
+        let mut sockets = Vec::new();
+        let mut failures = Vec::new();
+        for addr in [v4_addr, v6_addr] {
+            let family = if addr.is_ipv4() { "IPv4" } else { "IPv6" };
+            match bind_socket2_listener(addr, &options) {
+                Ok(socket) => {
+                    log_bound_family(&socket, addr, &options);
+                    sockets.push(FamilyListener {
+                        is_v4: addr.is_ipv4(),
+                        socket,
+                    });
+                }
+                Err(error) => {
+                    warn!(
+                        %addr,
+                        family,
+                        error = %error,
+                        "failed to bind the BGP listener for this address family; \
+                         inbound BGP sessions of this family will not be accepted"
+                    );
+                    failures.push((family, error));
+                }
+            }
+        }
+        if sockets.is_empty() {
+            let detail = failures
                 .iter()
-                .filter(|policy| policy.enforce)
-                .count(),
-            "BGP listener bound"
-        );
+                .map(|(family, error)| format!("{family}: {error}"))
+                .collect::<Vec<_>>()
+                .join("; ");
+            let kind = failures
+                .first()
+                .map_or(std::io::ErrorKind::AddrNotAvailable, |(_, error)| {
+                    error.kind()
+                });
+            return Err(std::io::Error::new(
+                kind,
+                format!("failed to bind the BGP listener on both address families ({detail})"),
+            ));
+        }
+        Ok(Self::from_sockets(sockets, accept_tx, options))
+    }
+
+    fn from_sockets(
+        listeners: Vec<FamilyListener>,
+        accept_tx: mpsc::Sender<AcceptedConnection>,
+        options: ListenerSocketOptions,
+    ) -> Self {
         let (rotation_tx, rotation_rx) = mpsc::channel(4);
         let (rotation_status_tx, _) = watch::channel(TcpAoRotationStatus::default());
-        Ok(Self {
-            listener,
+        Self {
+            listeners,
             accept_tx,
             tcp_ao_keys: TcpAoListenerKeyIndex::new(options.tcp_ao_keys),
             md5_keys: options.md5_keys,
@@ -981,7 +1065,7 @@ impl BgpListener {
             rotation_tx,
             rotation_status_tx,
             pending_tcp_ao_generation: None,
-        })
+        }
     }
 
     /// Control handle used by the serialized reload coordinator.
@@ -993,7 +1077,8 @@ impl BgpListener {
         }
     }
 
-    /// Return the local socket address the listener is bound to.
+    /// Return the local socket address of the first bound socket (IPv4
+    /// first when both families bound).
     ///
     /// This is primarily useful for tests that bind port `0`; production
     /// callers already know the configured listen address.
@@ -1002,7 +1087,23 @@ impl BgpListener {
     ///
     /// Returns an error if the OS cannot report the listener's local address.
     pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
-        self.listener.local_addr()
+        self.listeners
+            .first()
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::NotFound, "no bound listener socket")
+            })?
+            .socket
+            .local_addr()
+    }
+
+    /// Local addresses of every bound family socket, in bind order (IPv4
+    /// first when both families bound).
+    #[must_use]
+    pub fn local_addrs(&self) -> Vec<SocketAddr> {
+        self.listeners
+            .iter()
+            .filter_map(|family| family.socket.local_addr().ok())
+            .collect()
     }
 
     /// Run the accept loop until the channel is closed.
@@ -1018,7 +1119,7 @@ impl BgpListener {
                     };
                     self.handle_rotation_command(command);
                 }
-                accepted = self.listener.accept() => match accepted {
+                (socket_index, accepted) = accept_any(&self.listeners) => match accepted {
                     Ok((stream, peer_addr)) => {
                         accept_backoff = ACCEPT_BACKOFF_INITIAL;
                         let peer_ip = peer_addr.ip();
@@ -1039,7 +1140,11 @@ impl BgpListener {
                             warn!(peer = %peer_ip, error = %err, "rejecting inbound connection: GTSM TTL policy could not be installed");
                             continue;
                         }
-                        let tcp_ao_info = match self.inspect_tcp_ao_accept(&stream, peer_ip) {
+                        let tcp_ao_info = match self.inspect_tcp_ao_accept(
+                            &self.listeners[socket_index].socket,
+                            &stream,
+                            peer_ip,
+                        ) {
                             Ok(info) => info,
                             Err(err) => {
                                 warn!(peer = %peer_ip, error = %err, "rejecting TCP-AO-protected inbound connection");
@@ -1075,9 +1180,18 @@ impl BgpListener {
                         AcceptErrorClass::Fatal => {
                             // The listening socket itself is unusable
                             // (EBADF/ENOTSOCK/EINVAL/EOPNOTSUPP) — accept can
-                            // never succeed again on this fd.
-                            error!(error = %e, "BGP listener socket unusable; accept loop exiting");
-                            return;
+                            // never succeed again on this fd. Drop it and
+                            // keep serving any remaining family socket.
+                            let dropped = self.listeners.remove(socket_index);
+                            error!(
+                                error = %e,
+                                addr = ?dropped.socket.local_addr().ok(),
+                                "BGP listener socket unusable; removing it from the accept loop"
+                            );
+                            if self.listeners.is_empty() {
+                                error!("no usable BGP listener socket remains; accept loop exiting");
+                                return;
+                            }
                         }
                         AcceptErrorClass::Transient => {
                             // Per-connection failures (ECONNABORTED, EINTR,
@@ -1199,20 +1313,10 @@ impl BgpListener {
                 desired.generation,
             )?);
         }
-        let owners = desired
-            .keys
-            .iter()
-            .map(|owner| crate::socket_opts::TcpAoMktOwner {
-                owner: owner.owner,
-                peer: owner.peer,
-                prefix_len: owner.prefix_len,
-                keyring: &owner.config,
-            })
-            .collect::<Vec<_>>();
-        drop(crate::socket_opts::capture_tcp_ao_complete_owned_receipt(
-            &self.listener,
-            &owners,
-        )?);
+        for family in &self.listeners {
+            let owners = family_mkt_owners(desired.keys.as_ref(), family.is_v4);
+            verify_complete_listener_inventory(&family.socket, &owners)?;
+        }
         Ok(())
     }
 
@@ -1230,20 +1334,10 @@ impl BgpListener {
                 desired.generation,
             )?;
             retain_pending_listener_generation(&mut self.pending_tcp_ao_generation, desired)?;
-            let owners = desired
-                .keys
-                .iter()
-                .map(|owner| crate::socket_opts::TcpAoMktOwner {
-                    owner: owner.owner,
-                    peer: owner.peer,
-                    prefix_len: owner.prefix_len,
-                    keyring: &owner.config,
-                })
-                .collect::<Vec<_>>();
-            drop(crate::socket_opts::capture_tcp_ao_complete_owned_receipt(
-                &self.listener,
-                &owners,
-            )?);
+            for family in &self.listeners {
+                let owners = family_mkt_owners(desired.keys.as_ref(), family.is_v4);
+                verify_complete_listener_inventory(&family.socket, &owners)?;
+            }
             self.tcp_ao_keys = TcpAoListenerKeyIndex::new(staged);
             self.previous_tcp_ao_generation = None;
             self.tcp_ao_generation = desired.generation;
@@ -1276,20 +1370,10 @@ impl BgpListener {
             )
         })?;
         validate_selection_progress(&self.tcp_ao_keys.keys, desired.keys.as_ref())?;
-        let owners = desired
-            .keys
-            .iter()
-            .map(|owner| crate::socket_opts::TcpAoMktOwner {
-                owner: owner.owner,
-                peer: owner.peer,
-                prefix_len: owner.prefix_len,
-                keyring: &owner.config,
-            })
-            .collect::<Vec<_>>();
-        drop(crate::socket_opts::capture_tcp_ao_complete_owned_receipt(
-            &self.listener,
-            &owners,
-        )?);
+        for family in &self.listeners {
+            let owners = family_mkt_owners(desired.keys.as_ref(), family.is_v4);
+            verify_complete_listener_inventory(&family.socket, &owners)?;
+        }
         self.tcp_ao_keys = TcpAoListenerKeyIndex::new(desired.keys.to_vec());
         let status = TcpAoRotationStatus {
             desired: generation,
@@ -1334,10 +1418,10 @@ impl BgpListener {
     fn preflight_delete_generation_with<F>(
         &self,
         desired: &TcpAoListenerGeneration,
-        verify_exact: F,
+        mut verify_exact: F,
     ) -> std::io::Result<()>
     where
-        F: FnOnce(&TcpListener, &[crate::socket_opts::TcpAoMktOwner<'_>]) -> std::io::Result<()>,
+        F: FnMut(&TcpListener, &[crate::socket_opts::TcpAoMktOwner<'_>]) -> std::io::Result<()>,
     {
         if desired.generation == self.tcp_ao_generation
             && desired.keys.as_ref() == self.tcp_ao_keys.keys.as_slice()
@@ -1348,17 +1432,7 @@ impl BgpListener {
                     "TCP-AO deletion retry lacks its retained listener generation",
                 ));
             }
-            let owners = desired
-                .keys
-                .iter()
-                .map(|owner| crate::socket_opts::TcpAoMktOwner {
-                    owner: owner.owner,
-                    peer: owner.peer,
-                    prefix_len: owner.prefix_len,
-                    keyring: &owner.config,
-                })
-                .collect::<Vec<_>>();
-            return verify_exact(&self.listener, &owners);
+            return self.verify_exact_per_family(desired, &mut verify_exact);
         }
         if self.tcp_ao_generation.next() == Some(desired.generation)
             && desired.keys.as_ref() == self.tcp_ao_keys.keys.as_slice()
@@ -1373,17 +1447,7 @@ impl BgpListener {
                     "TCP-AO deletion retry changed its immutable listener inventory",
                 ));
             }
-            let owners = desired
-                .keys
-                .iter()
-                .map(|owner| crate::socket_opts::TcpAoMktOwner {
-                    owner: owner.owner,
-                    peer: owner.peer,
-                    prefix_len: owner.prefix_len,
-                    keyring: &owner.config,
-                })
-                .collect::<Vec<_>>();
-            return verify_exact(&self.listener, &owners);
+            return self.verify_exact_per_family(desired, &mut verify_exact);
         }
         if self
             .pending_tcp_ao_generation
@@ -1401,29 +1465,38 @@ impl BgpListener {
             self.tcp_ao_generation,
             desired.generation,
         )?;
-        let current = self
-            .tcp_ao_keys
-            .keys
-            .iter()
-            .map(|owner| crate::socket_opts::TcpAoMktOwner {
-                owner: owner.owner,
-                peer: owner.peer,
-                prefix_len: owner.prefix_len,
-                keyring: &owner.config,
-            })
-            .collect::<Vec<_>>();
-        let desired = desired
-            .keys
-            .iter()
-            .map(|owner| crate::socket_opts::TcpAoMktOwner {
-                owner: owner.owner,
-                peer: owner.peer,
-                prefix_len: owner.prefix_len,
-                keyring: &owner.config,
-            })
-            .collect::<Vec<_>>();
-        crate::socket_opts::preflight_tcp_ao_delete(&self.listener, &current, &desired, None)
-            .map(drop)
+        for family in &self.listeners {
+            let current = family_mkt_owners(&self.tcp_ao_keys.keys, family.is_v4);
+            let desired_owners = family_mkt_owners(desired.keys.as_ref(), family.is_v4);
+            if current.is_empty() && desired_owners.is_empty() {
+                continue;
+            }
+            crate::socket_opts::preflight_tcp_ao_delete(
+                &family.socket,
+                &current,
+                &desired_owners,
+                None,
+            )
+            .map(drop)?;
+        }
+        Ok(())
+    }
+
+    fn verify_exact_per_family<F>(
+        &self,
+        desired: &TcpAoListenerGeneration,
+        verify_exact: &mut F,
+    ) -> std::io::Result<()>
+    where
+        F: FnMut(&TcpListener, &[crate::socket_opts::TcpAoMktOwner<'_>]) -> std::io::Result<()>,
+    {
+        for family in &self.listeners {
+            // Verify even an empty family subset: this socket must then own
+            // no MKTs at all, and the verifier tolerates the no-AO case.
+            let owners = family_mkt_owners(desired.keys.as_ref(), family.is_v4);
+            verify_exact(&family.socket, &owners)?;
+        }
+        Ok(())
     }
 
     fn apply_delete_generation(
@@ -1439,7 +1512,7 @@ impl BgpListener {
         verify_exact: F,
     ) -> std::io::Result<TcpAoRotationStatus>
     where
-        F: FnOnce(&TcpListener, &[crate::socket_opts::TcpAoMktOwner<'_>]) -> std::io::Result<()>,
+        F: FnMut(&TcpListener, &[crate::socket_opts::TcpAoMktOwner<'_>]) -> std::io::Result<()>,
     {
         self.apply_delete_generation_with_operations(
             desired,
@@ -1477,25 +1550,25 @@ impl BgpListener {
         &mut self,
         desired: &TcpAoListenerGeneration,
         verify_exact: F,
-        preflight_delete: P,
-        apply_delete: D,
-        preflight_restore: RP,
-        apply_restore: RA,
+        mut preflight_delete: P,
+        mut apply_delete: D,
+        mut preflight_restore: RP,
+        mut apply_restore: RA,
     ) -> std::io::Result<TcpAoRotationStatus>
     where
-        F: FnOnce(&TcpListener, &[crate::socket_opts::TcpAoMktOwner<'_>]) -> std::io::Result<()>,
-        P: FnOnce(
+        F: FnMut(&TcpListener, &[crate::socket_opts::TcpAoMktOwner<'_>]) -> std::io::Result<()>,
+        P: FnMut(
             &TcpListener,
             &[crate::socket_opts::TcpAoMktOwner<'_>],
             &[crate::socket_opts::TcpAoMktOwner<'_>],
         ) -> Result<T, crate::socket_opts::TcpAoDeleteApplyError>,
-        D: FnOnce(
+        D: FnMut(
             &TcpListener,
             T,
             &[crate::socket_opts::TcpAoMktOwner<'_>],
         ) -> Result<(), crate::socket_opts::TcpAoDeleteApplyError>,
-        RP: FnOnce(&TcpListener, &[crate::socket_opts::TcpAoMktOwner<'_>]) -> std::io::Result<RT>,
-        RA: FnOnce(
+        RP: FnMut(&TcpListener, &[crate::socket_opts::TcpAoMktOwner<'_>]) -> std::io::Result<RT>,
+        RA: FnMut(
             &TcpListener,
             RT,
             &[crate::socket_opts::TcpAoMktOwner<'_>],
@@ -1538,29 +1611,32 @@ impl BgpListener {
             desired.generation,
         )?;
         retain_pending_listener_generation(&mut self.pending_tcp_ao_generation, desired)?;
-        let current = self
-            .tcp_ao_keys
-            .keys
-            .iter()
-            .map(|owner| crate::socket_opts::TcpAoMktOwner {
-                owner: owner.owner,
-                peer: owner.peer,
-                prefix_len: owner.prefix_len,
-                keyring: &owner.config,
-            })
-            .collect::<Vec<_>>();
-        let desired_owners = desired
-            .keys
-            .iter()
-            .map(|owner| crate::socket_opts::TcpAoMktOwner {
-                owner: owner.owner,
-                peer: owner.peer,
-                prefix_len: owner.prefix_len,
-                keyring: &owner.config,
-            })
-            .collect::<Vec<_>>();
-        let result = preflight_delete(&self.listener, &current, &desired_owners)
-            .and_then(|preflight| apply_delete(&self.listener, preflight, &desired_owners));
+        // Per-family delete: each socket sees only its family's owner
+        // subsets. Sockets already fully deleted before a later family
+        // failed are restored below alongside the partially mutated one, so
+        // the identical generation remains retryable from the exact prior
+        // inventory.
+        let mut mutated: Vec<&FamilyListener> = Vec::new();
+        let mut result = Ok(());
+        for family in &self.listeners {
+            let current = family_mkt_owners(&self.tcp_ao_keys.keys, family.is_v4);
+            let desired_owners = family_mkt_owners(desired.keys.as_ref(), family.is_v4);
+            if current.is_empty() && desired_owners.is_empty() {
+                continue;
+            }
+            match preflight_delete(&family.socket, &current, &desired_owners)
+                .and_then(|preflight| apply_delete(&family.socket, preflight, &desired_owners))
+            {
+                Ok(()) => mutated.push(family),
+                Err(error) => {
+                    if error.mutation_started() {
+                        mutated.push(family);
+                    }
+                    result = Err(error);
+                    break;
+                }
+            }
+        }
 
         match result {
             Ok(()) => {
@@ -1583,16 +1659,18 @@ impl BgpListener {
                 Ok(status)
             }
             Err(error) => {
-                let mutation_started = error.mutation_started();
                 let mut detail = error.into_inner().to_string();
-                if mutation_started {
-                    // Reconstitute the exact old listener inventory before
-                    // returning whenever possible. The removed MKTs were
-                    // already deprecated and unselected; restoring them keeps
-                    // the last committed generation usable and makes the
-                    // identical deletion retryable.
-                    let recovery = preflight_restore(&self.listener, &current)
-                        .and_then(|preflight| apply_restore(&self.listener, preflight, &current));
+                // Reconstitute the exact old listener inventory before
+                // returning whenever possible — on every socket that
+                // mutated, including sockets whose family already deleted
+                // completely before a later family failed. The removed MKTs
+                // were already deprecated and unselected; restoring them
+                // keeps the last committed generation usable and makes the
+                // identical deletion retryable.
+                for family in mutated {
+                    let current = family_mkt_owners(&self.tcp_ao_keys.keys, family.is_v4);
+                    let recovery = preflight_restore(&family.socket, &current)
+                        .and_then(|preflight| apply_restore(&family.socket, preflight, &current));
                     if let Err(recovery) = recovery {
                         detail = format!(
                             "{detail}; failed to restore the exact prior listener inventory: \
@@ -1648,53 +1726,39 @@ impl BgpListener {
                 desired.generation,
             )?;
             retain_pending_listener_generation(&mut self.pending_tcp_ao_generation, desired)?;
-            let current_owners = self
-                .tcp_ao_keys
-                .keys
-                .iter()
-                .map(|owner| crate::socket_opts::TcpAoMktOwner {
-                    owner: owner.owner,
-                    peer: owner.peer,
-                    prefix_len: owner.prefix_len,
-                    keyring: &owner.config,
-                })
-                .collect::<Vec<_>>();
-            let desired_owners = desired
-                .keys
-                .iter()
-                .map(|owner| crate::socket_opts::TcpAoMktOwner {
-                    owner: owner.owner,
-                    peer: owner.peer,
-                    prefix_len: owner.prefix_len,
-                    keyring: &owner.config,
-                })
-                .collect::<Vec<_>>();
-            let preflight = crate::socket_opts::preflight_tcp_ao_add_only(
-                &self.listener,
-                &current_owners,
-                &desired_owners,
-                None,
-            )?;
-            crate::socket_opts::apply_tcp_ao_add_only(
-                &self.listener,
-                preflight,
-                &desired_owners,
-                None,
-            )
-            .map_err(|error| {
-                let mutation_started = error.mutation_started();
-                let error = error.into_inner();
-                if mutation_started {
-                    std::io::Error::new(
-                        error.kind(),
-                        format!(
-                            "{error}; listener mutation may be partial, so affected protected passive accepts may reject until this generation is retried or the daemon restarts"
-                        ),
-                    )
-                } else {
-                    error
+            for family in &self.listeners {
+                let current_owners = family_mkt_owners(&self.tcp_ao_keys.keys, family.is_v4);
+                let desired_owners = family_mkt_owners(desired.keys.as_ref(), family.is_v4);
+                if current_owners.is_empty() && desired_owners.is_empty() {
+                    continue;
                 }
-            })?;
+                let preflight = crate::socket_opts::preflight_tcp_ao_add_only(
+                    &family.socket,
+                    &current_owners,
+                    &desired_owners,
+                    None,
+                )?;
+                crate::socket_opts::apply_tcp_ao_add_only(
+                    &family.socket,
+                    preflight,
+                    &desired_owners,
+                    None,
+                )
+                .map_err(|error| {
+                    let mutation_started = error.mutation_started();
+                    let error = error.into_inner();
+                    if mutation_started {
+                        std::io::Error::new(
+                            error.kind(),
+                            format!(
+                                "{error}; listener mutation may be partial, so affected protected passive accepts may reject until this generation is retried or the daemon restarts"
+                            ),
+                        )
+                    } else {
+                        error
+                    }
+                })?;
+            }
             Ok::<(), std::io::Error>(())
         })();
 
@@ -1747,46 +1811,29 @@ impl BgpListener {
                 "TCP-AO failed generation retry changed its immutable listener inventory",
             ));
         }
-        let current = self
-            .tcp_ao_keys
-            .keys
-            .iter()
-            .map(|owner| crate::socket_opts::TcpAoMktOwner {
-                owner: owner.owner,
-                peer: owner.peer,
-                prefix_len: owner.prefix_len,
-                keyring: &owner.config,
-            })
-            .collect::<Vec<_>>();
-        let desired = desired
-            .keys
-            .iter()
-            .map(|owner| crate::socket_opts::TcpAoMktOwner {
-                owner: owner.owner,
-                peer: owner.peer,
-                prefix_len: owner.prefix_len,
-                keyring: &owner.config,
-            })
-            .collect::<Vec<_>>();
-        crate::socket_opts::preflight_tcp_ao_add_only(&self.listener, &current, &desired, None)
-            .map(drop)
+        for family in &self.listeners {
+            let current = family_mkt_owners(&self.tcp_ao_keys.keys, family.is_v4);
+            let desired_owners = family_mkt_owners(desired.keys.as_ref(), family.is_v4);
+            if current.is_empty() && desired_owners.is_empty() {
+                continue;
+            }
+            crate::socket_opts::preflight_tcp_ao_add_only(
+                &family.socket,
+                &current,
+                &desired_owners,
+                None,
+            )
+            .map(drop)?;
+        }
+        Ok(())
     }
 
     fn acknowledge_global_commit_generation(
         &mut self,
         generation: TcpAoRotationGeneration,
     ) -> std::io::Result<TcpAoRotationStatus> {
-        self.acknowledge_global_commit_generation_with(generation, |listener, desired| {
-            let owners = desired
-                .keys
-                .iter()
-                .map(|owner| crate::socket_opts::TcpAoMktOwner {
-                    owner: owner.owner,
-                    peer: owner.peer,
-                    prefix_len: owner.prefix_len,
-                    keyring: &owner.config,
-                })
-                .collect::<Vec<_>>();
+        self.acknowledge_global_commit_generation_with(generation, |listener, is_v4, desired| {
+            let owners = family_mkt_owners(desired.keys.as_ref(), is_v4);
             verify_complete_listener_inventory(listener, &owners)
         })
     }
@@ -1794,10 +1841,10 @@ impl BgpListener {
     fn acknowledge_global_commit_generation_with<F>(
         &mut self,
         generation: TcpAoRotationGeneration,
-        verify_inventory: F,
+        mut verify_inventory: F,
     ) -> std::io::Result<TcpAoRotationStatus>
     where
-        F: FnOnce(&TcpListener, &TcpAoListenerGeneration) -> std::io::Result<()>,
+        F: FnMut(&TcpListener, bool, &TcpAoListenerGeneration) -> std::io::Result<()>,
     {
         if generation == self.tcp_ao_committed_generation {
             let status = self.rotation_status_tx.borrow().clone();
@@ -1824,7 +1871,9 @@ impl BgpListener {
                 "TCP-AO listener has no retained uncommitted generation",
             )
         })?;
-        verify_inventory(&self.listener, desired)?;
+        for family in &self.listeners {
+            verify_inventory(&family.socket, family.is_v4, desired)?;
+        }
         self.tcp_ao_committed_generation = generation;
         self.pending_tcp_ao_generation = None;
         let status = TcpAoRotationStatus {
@@ -1847,11 +1896,24 @@ impl BgpListener {
         md5_keys: Vec<Md5ListenerKey>,
         ttl_security: Vec<TtlSecurityListenerPolicy>,
     ) -> std::io::Result<()> {
-        apply_md5_inventory(
-            &socket2::SockRef::from(&self.listener),
-            &self.md5_keys,
-            &md5_keys,
-        )?;
+        // Converge each family socket from its family's current subset to
+        // its family's desired subset. A key whose family has no bound
+        // socket is unreachable by definition (that family accepts no
+        // inbound connections at all) and is skipped.
+        for family in &self.listeners {
+            let current: Vec<Md5ListenerKey> = self
+                .md5_keys
+                .iter()
+                .filter(|key| key.peer.is_ipv4() == family.is_v4)
+                .cloned()
+                .collect();
+            let desired: Vec<Md5ListenerKey> = md5_keys
+                .iter()
+                .filter(|key| key.peer.is_ipv4() == family.is_v4)
+                .cloned()
+                .collect();
+            apply_md5_inventory(&socket2::SockRef::from(&family.socket), &current, &desired)?;
+        }
         self.md5_keys = md5_keys;
         self.ttl_security = ttl_security;
         Ok(())
@@ -1859,6 +1921,7 @@ impl BgpListener {
 
     fn inspect_tcp_ao_accept(
         &self,
+        accepting_socket: &TcpListener,
         stream: &TcpStream,
         peer_ip: IpAddr,
     ) -> std::io::Result<Option<TcpAoInfoSnapshot>> {
@@ -1891,7 +1954,7 @@ impl BgpListener {
         // configured owner whose selector covers this peer. No secret-bearing
         // receipt survives this accept operation.
         let receipt = crate::socket_opts::capture_tcp_ao_accepted_generation_receipt(
-            &self.listener,
+            accepting_socket,
             &receipt_owners,
             previous_key_counts.as_deref(),
         )?;
@@ -2504,6 +2567,77 @@ impl TcpAoListenerKey {
     }
 }
 
+/// Wait for an inbound connection on any bound family socket, returning the
+/// index of the socket that accepted alongside the accept result.
+///
+/// Cancellation-safe: `TcpListener::accept` is cancel-safe, so no connection
+/// is lost when another `select!` branch wins.
+async fn accept_any(
+    listeners: &[FamilyListener],
+) -> (usize, std::io::Result<(TcpStream, SocketAddr)>) {
+    match listeners {
+        [only] => (0, only.socket.accept().await),
+        [first, second] => tokio::select! {
+            accepted = first.socket.accept() => (0, accepted),
+            accepted = second.socket.accept() => (1, accepted),
+        },
+        // Zero sockets ends the accept loop before this is polled again, and
+        // more than two families cannot be constructed.
+        _ => std::future::pending().await,
+    }
+}
+
+/// The subset of an owner/key inventory whose peer family matches one bound
+/// socket, in kernel-op owner form.
+///
+/// A rotation generation never adds or removes owners, so a family whose
+/// subset is empty for the desired inventory is empty for the current one
+/// too: that socket carries no TCP-AO inventory at all and per-family kernel
+/// operations skip it.
+fn family_mkt_owners(
+    keys: &[TcpAoListenerKey],
+    is_v4: bool,
+) -> Vec<crate::socket_opts::TcpAoMktOwner<'_>> {
+    keys.iter()
+        .filter(|key| key.peer.is_ipv4() == is_v4)
+        .map(|owner| crate::socket_opts::TcpAoMktOwner {
+            owner: owner.owner,
+            peer: owner.peer,
+            prefix_len: owner.prefix_len,
+            keyring: &owner.config,
+        })
+        .collect()
+}
+
+fn log_bound_family(
+    socket: &TcpListener,
+    requested_addr: SocketAddr,
+    options: &ListenerSocketOptions,
+) {
+    let is_v4 = requested_addr.is_ipv4();
+    let bound_addr = socket.local_addr().unwrap_or(requested_addr);
+    info!(
+        addr = %bound_addr,
+        requested_addr = %requested_addr,
+        tcp_ao_keys = options
+            .tcp_ao_keys
+            .iter()
+            .filter(|key| key.peer.is_ipv4() == is_v4)
+            .count(),
+        md5_keys = options
+            .md5_keys
+            .iter()
+            .filter(|key| key.peer.is_ipv4() == is_v4)
+            .count(),
+        ttl_security_selectors = options
+            .ttl_security
+            .iter()
+            .filter(|policy| policy.enforce && policy.peer.is_ipv4() == is_v4)
+            .count(),
+        "BGP listener bound"
+    );
+}
+
 fn bind_socket2_listener(
     addr: SocketAddr,
     options: &ListenerSocketOptions,
@@ -2526,6 +2660,13 @@ where
         Domain::IPV6
     };
     let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
+    if addr.is_ipv6() {
+        // Never rely on the host's `net.ipv6.bindv6only` default: the IPv6
+        // socket must not race the sibling IPv4 listener for v4-mapped
+        // connections, whose kernel MD5/GTSM/TCP-AO inventory lives on the
+        // IPv4 socket.
+        socket.set_only_v6(true)?;
+    }
     // Must precede bind(). The daemon is normally the active closer at
     // shutdown, so on an ordinary restart-under-traffic a connection the
     // previous generation accepted still holds the listen port in
@@ -2538,7 +2679,13 @@ where
     // listen port at once and split inbound sessions between them.
     socket.set_reuse_address(true)?;
     socket.bind(&SockAddr::from(addr))?;
-    for key in &options.tcp_ao_keys {
+    // Keys whose peer family cannot reach this socket belong to the sibling
+    // family listener and are installed there.
+    for key in options
+        .tcp_ao_keys
+        .iter()
+        .filter(|key| key.peer.is_ipv4() == addr.is_ipv4())
+    {
         // This installs a peer-specific MKT, not the socket-wide
         // `ao_required` bit. Linux tcp_ao_required() returns true for either
         // ao_info->ao_required or a matching MKT, and tcp_inbound_hash()
@@ -2550,7 +2697,11 @@ where
             debug!(peer = %key.peer, send_id = config.send_id, "TCP-AO listener key configured");
         }
     }
-    for key in &options.md5_keys {
+    for key in options
+        .md5_keys
+        .iter()
+        .filter(|key| key.peer.is_ipv4() == addr.is_ipv4())
+    {
         // Like the MKTs above, these are peer/prefix-scoped: an inbound peer
         // covered by a key must sign (unsigned segments are dropped in the
         // kernel before the handshake completes), while uncovered peers on
@@ -3211,7 +3362,9 @@ mod tests {
         assert_eq!(staged.phase, TcpAoRotationPhase::Deleting);
 
         let committed = listener
-            .acknowledge_global_commit_generation_with(generation, |_socket, _desired| Ok(()))
+            .acknowledge_global_commit_generation_with(generation, |_socket, _is_v4, _desired| {
+                Ok(())
+            })
             .unwrap();
         assert_eq!(committed.applied, generation);
         assert_eq!(committed.phase, TcpAoRotationPhase::Idle);
@@ -3538,7 +3691,7 @@ mod tests {
             });
 
         let rejected = listener
-            .acknowledge_global_commit_generation_with(generation, |_socket, _desired| {
+            .acknowledge_global_commit_generation_with(generation, |_socket, _is_v4, _desired| {
                 Err(std::io::Error::other("injected inventory rejection"))
             });
         assert!(rejected.is_err());
@@ -3564,7 +3717,9 @@ mod tests {
             "same-generation retry must not replace the queued-child predecessor"
         );
         let committed = listener
-            .acknowledge_global_commit_generation_with(generation, |_socket, _desired| Ok(()))
+            .acknowledge_global_commit_generation_with(generation, |_socket, _is_v4, _desired| {
+                Ok(())
+            })
             .unwrap();
         assert_eq!(committed.desired, generation);
         assert_eq!(committed.applied, generation);

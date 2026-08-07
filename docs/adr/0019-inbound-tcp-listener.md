@@ -2,6 +2,16 @@
 
 **Status:** Accepted
 **Date:** 2026-02-27
+**Update (2026-08, LAN-907):** the original single socket bound only
+`0.0.0.0:{listen_port}`, so inbound IPv6 sessions could never establish and
+IPv6 peers' listener-side MD5/GTSM/TCP-AO entries were silently skipped.
+`BgpListener` now always binds both families — `0.0.0.0` and `[::]` (with
+`IPV6_V6ONLY` set, so v4-mapped connections cannot race the IPv4 socket) —
+behind one accept loop, one accept channel, and one rotation/auth state
+machine, with each kernel auth key installed on the socket matching its peer
+family. There is no listen-address knob. A family that cannot be bound
+(IPv6 disabled on the host) logs a warning and the other keeps serving;
+startup fails only when neither family binds.
 
 ## Context
 
@@ -26,7 +36,8 @@ Options considered:
 
 Use option 2: `BgpListener` in the transport crate.
 
-- `BgpListener` binds to `0.0.0.0:{listen_port}` and runs an accept loop.
+- `BgpListener` binds `0.0.0.0:{listen_port}` and `[::]:{listen_port}` (see
+  the 2026-08 update above; originally IPv4 only) and runs one accept loop.
 - Accepted connections are forwarded to PeerManager via `AcceptInbound`
   command containing the `TcpStream` and peer IP.
 - `PeerManager` looks up the peer by address:
@@ -60,5 +71,5 @@ ignore stale notifications from drained candidates.
 - Inbound session reuses 100% of existing `PeerSession` code.
 
 **Negative:**
-- Single listener socket — no per-peer bind address support. Sufficient for
-  the common case (all peers on the same port).
+- One wildcard listener socket per address family — no per-peer bind address
+  support. Sufficient for the common case (all peers on the same port).

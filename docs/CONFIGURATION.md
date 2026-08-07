@@ -131,7 +131,7 @@ Required. Defines the local BGP speaker identity.
 |---------------------|--------|----------|----------------------|------------------------------------|
 | `asn`               | u32    | yes      | --                   | Local autonomous system number; AS 0 is rejected at startup |
 | `router_id`         | string | yes      | --                   | Non-zero BGP Identifier in IPv4 dotted-quad form; `0.0.0.0` is rejected at startup |
-| `listen_port`       | u16    | yes      | --                   | TCP port to listen on (typically 179) |
+| `listen_port`       | u16    | yes      | --                   | TCP port to listen on (typically 179). The daemon listens on both address families — `0.0.0.0` and `[::]` — at this port; if one family cannot be bound (for example IPv6 disabled on the host) it is logged and skipped while the other keeps serving. Startup fails only when neither family binds |
 | `dynamic_neighbor_limit` | u32 | no     | `100`                | Maximum number of auto-accepted dynamic peers (1--5000) |
 | `worker_threads`    | usize  | no       | `min(cores, 8)`      | Tokio runtime worker threads. Unset caps to `min(CPU parallelism, 8)` to avoid over-provisioning the async runtime (one worker + stack reservation per core) on a high-core host for this I/O-bound daemon — reduces virtual-address reservation and scheduler footprint (RSS-neutral in benchmarks). `0` means unset. `RUSTBGPD_WORKER_THREADS` overrides. **Restart-required** (runtime built once at startup). |
 | `runtime_state_dir` | string | no       | `"/var/lib/rustbgpd"` | Directory for daemon-owned runtime state (GR restart marker, optional warm checkpoint, FIB ownership receipt, and gRPC socket) |

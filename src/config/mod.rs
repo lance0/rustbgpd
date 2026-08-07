@@ -710,10 +710,14 @@ impl Config {
             .map(|s| s.parse().expect("validated in Config::load"))
     }
 
-    pub fn listen_addr(&self) -> SocketAddr {
-        SocketAddr::new(
-            std::net::IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-            self.global.listen_port,
+    /// The daemon's dual-family listen addresses: the IPv4 and IPv6
+    /// unspecified addresses at `listen_port`. The BGP listener always
+    /// serves both families (an unavailable family degrades to a warning at
+    /// bind time); there is no listen-address knob.
+    pub fn listen_addrs(&self) -> (SocketAddr, SocketAddr) {
+        (
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), self.global.listen_port),
+            SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), self.global.listen_port),
         )
     }
 

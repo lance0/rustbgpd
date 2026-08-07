@@ -192,25 +192,97 @@ fn metrics_listener_bind_failure_exits_nonzero() {
 #[test]
 fn bgp_listener_bind_failure_exits_nonzero() {
     let temp = private_tempdir();
-    // Hold the BGP listen port with a live listener. SO_REUSEADDR lets a
-    // new generation rebind over a closed-but-lingering endpoint, never
-    // over an active LISTEN, so this bind genuinely fails — and a daemon
-    // that cannot accept inbound sessions must exit rather than run deaf.
-    let occupied = TcpListener::bind("0.0.0.0:0").expect("bind occupied port");
-    let bgp_port = occupied.local_addr().unwrap().port();
+    // Hold the BGP listen port on BOTH address families with live
+    // listeners. SO_REUSEADDR lets a new generation rebind over a
+    // closed-but-lingering endpoint, never over an active LISTEN, so both
+    // binds genuinely fail — and a daemon that cannot accept inbound
+    // sessions on either family must exit rather than run deaf. (A single
+    // failed family degrades to a warning instead; see the test below.)
+    let (_v4_occupier, _v6_occupier, bgp_port) = {
+        let mut attempt = 0;
+        loop {
+            let v4 = TcpListener::bind("0.0.0.0:0").expect("bind occupied v4 port");
+            let port = v4.local_addr().unwrap().port();
+            // A specific [::1] listener is enough to make the daemon's
+            // wildcard [::] bind fail with AddrInUse.
+            match TcpListener::bind(("::1", port)) {
+                Ok(v6) => break (v4, v6, port),
+                Err(_) => {
+                    attempt += 1;
+                    assert!(attempt < 10, "no port occupiable on both families found");
+                }
+            }
+        }
+    };
     let config_path = write_config(temp.path(), free_port(), bgp_port);
 
     let mut daemon = spawn_daemon(temp.path(), &config_path);
     let status = daemon.wait_within(Duration::from_secs(120));
     let logs = daemon.logs();
     assert!(
-        logs.contains("failed to bind BGP listener"),
+        logs.contains("failed to bind BGP listener on either address family"),
         "the daemon must exit for the BGP listener, not some other cause\n{logs}"
     );
     assert_eq!(
         status.code(),
         Some(1),
         "BGP listener bind failure must exit 1, got {status}\n{logs}"
+    );
+}
+
+#[test]
+fn bgp_listener_single_family_bind_failure_degrades_and_serves() {
+    let temp = private_tempdir();
+    // Hold only the IPv4 side of the BGP listen port. The daemon must NOT
+    // exit: it warns about the unavailable family and keeps serving the
+    // other, then still shuts down cleanly on SIGTERM.
+    let occupied = TcpListener::bind("0.0.0.0:0").expect("bind occupied v4 port");
+    let bgp_port = occupied.local_addr().unwrap().port();
+    let grpc_port = free_port();
+    let config_path = write_config(temp.path(), grpc_port, bgp_port);
+
+    let mut daemon = spawn_daemon(temp.path(), &config_path);
+
+    // Startup completed: the gRPC listener answers while the v4 BGP bind
+    // failed, proving the daemon degraded instead of exiting.
+    let deadline = Instant::now() + Duration::from_secs(120);
+    loop {
+        if TcpStream::connect(("127.0.0.1", grpc_port)).is_ok() {
+            break;
+        }
+        if let Ok(Some(status)) = daemon.child.try_wait() {
+            panic!(
+                "rustbgpd exited instead of degrading to one listener family: {status}\n{}",
+                daemon.logs()
+            );
+        }
+        assert!(
+            Instant::now() < deadline,
+            "rustbgpd did not start within timeout\n{}",
+            daemon.logs()
+        );
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    // The IPv6 side of the port is genuinely served by the degraded daemon.
+    TcpStream::connect(("::1", bgp_port))
+        .expect("inbound IPv6 BGP connection must establish on the surviving family");
+
+    let sigterm = Command::new("kill")
+        .args(["-TERM", &daemon.child.id().to_string()])
+        .status()
+        .expect("send SIGTERM");
+    assert!(sigterm.success(), "kill -TERM failed: {sigterm}");
+    let status = daemon.wait_within(Duration::from_secs(120));
+    let logs = daemon.logs();
+    assert!(
+        logs.contains("failed to bind the BGP listener for this address family"),
+        "the degradation warning must name the failed family bind\n{logs}"
+    );
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "a single failed listener family must not fail the daemon, got {status}\n{logs}"
     );
 }
 

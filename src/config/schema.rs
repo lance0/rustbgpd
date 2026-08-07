@@ -613,7 +613,10 @@ pub struct Global {
     pub asn: u32,
     /// BGP router ID in IPv4 dotted-quad form (e.g. `"192.0.2.1"`).
     pub router_id: String,
-    /// TCP listen port for inbound BGP sessions (conventionally 179).
+    /// TCP listen port for inbound BGP sessions (conventionally 179). The
+    /// daemon listens on both address families (`0.0.0.0` and `[::]`) at
+    /// this port; a family that cannot be bound (for example IPv6 disabled
+    /// on the host) is logged and skipped while the other keeps serving.
     pub listen_port: u16,
     /// Cluster ID for route reflection (RFC 4456). Defaults to `router_id`
     /// when any neighbor is configured as a route reflector client.
