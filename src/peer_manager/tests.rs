@@ -1550,6 +1550,184 @@ fn add_dynamic_range_rejects_overlap_with_md5_protected_range() {
     );
 }
 
+/// LAN-910: the delete counterpart of the runtime-create fence. A protected
+/// peer's inbound MD5 key / GTSM selector live on the startup/SIGHUP-pinned
+/// listener; a runtime delete would leave the stale key installed and wedge
+/// a delete-then-re-add. (`delete_peer_removes` keeps proving the unprotected
+/// runtime delete path clean.)
+#[tokio::test]
+async fn delete_peer_rejects_listener_enforced_auth() {
+    let (tx, rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let mgr = PeerManager::new(
+        rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    let handle = tokio::spawn(mgr.run());
+
+    let mut md5_config = make_config(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 65002);
+    md5_config.md5_password = Some("secret".to_string().into());
+    let mut gtsm_config = make_config(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3)), 65003);
+    gtsm_config.ttl_security = true;
+
+    for config in [md5_config, gtsm_config] {
+        let addr = config.address;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(PeerManagerCommand::AddPeer {
+            config,
+            sync_config_snapshot: false,
+            reply: reply_tx,
+        })
+        .await
+        .unwrap();
+        assert!(reply_rx.await.unwrap().is_ok());
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(PeerManagerCommand::DeletePeer {
+            peer: key(addr),
+            sync_config_snapshot: false,
+            reply: reply_tx,
+        })
+        .await
+        .unwrap();
+        match reply_rx.await.unwrap() {
+            Ok(_) => panic!("runtime delete of a listener-protected peer must be refused"),
+            Err(err) => assert!(
+                matches!(
+                    &err,
+                    rustbgpd_api::peer_types::PeerLifecycleError::RestartRequired(reason)
+                        if reason.contains("startup or SIGHUP reload")
+                ),
+                "{err}"
+            ),
+        }
+    }
+
+    let (list_tx, list_rx) = oneshot::channel();
+    tx.send(PeerManagerCommand::ListPeers { reply: list_tx })
+        .await
+        .unwrap();
+    assert_eq!(
+        list_rx.await.unwrap().len(),
+        2,
+        "refused deletes must leave the peers configured"
+    );
+
+    tx.send(PeerManagerCommand::Shutdown).await.unwrap();
+    handle.await.unwrap();
+}
+
+/// LAN-910: the delete counterpart of the runtime range-add fence. The
+/// protected range models a startup-configured one (the add fence refuses to
+/// create it at runtime). (`delete_dynamic_range_removes_and_stops_future_match`
+/// keeps proving the unprotected runtime range delete clean.)
+#[test]
+fn delete_dynamic_range_rejects_listener_enforced_group_auth() {
+    let mut mgr = dynamic_test_manager();
+    for (name, group, prefix) in [
+        (
+            "md5-members",
+            crate::config::PeerGroupConfig {
+                md5_password: Some("secret".to_string()),
+                ..Default::default()
+            },
+            "10.9.0.0/24",
+        ),
+        (
+            "gtsm-members",
+            crate::config::PeerGroupConfig {
+                ttl_security: Some(true),
+                ..Default::default()
+            },
+            "10.10.0.0/24",
+        ),
+    ] {
+        mgr.current_config
+            .peer_groups
+            .insert(name.to_string(), group);
+        mgr.current_config
+            .dynamic_neighbors
+            .push(crate::config::DynamicNeighborConfig {
+                prefix: prefix.to_string(),
+                peer_group: name.to_string(),
+                remote_asn: 0,
+                description: None,
+                tcp_ao: None,
+            });
+        mgr.dynamic_ranges = PeerManager::parse_dynamic_ranges(&mgr.current_config);
+        let err = mgr
+            .delete_dynamic_range(prefix)
+            .expect_err("runtime delete of a listener-protected range must be refused");
+        assert!(
+            matches!(
+                &err,
+                rustbgpd_api::peer_types::DynamicRangeError::Invalid(reason)
+                    if reason.contains("startup or SIGHUP reload")
+            ),
+            "{err}"
+        );
+        assert!(
+            mgr.current_config
+                .dynamic_neighbors
+                .iter()
+                .any(|range| range.prefix == prefix),
+            "refused delete must keep the range configured"
+        );
+    }
+}
+
+/// LAN-910 Gap B verdict: `DeletePeerGroup` needs no `md5_password` /
+/// `ttl_security` fence
+/// of its own. A group's authentication reaches the listener only through
+/// its members (static host keys, dynamic-range prefix keys), and any such
+/// member already blocks the delete with `StillReferenced` — including
+/// `[[dynamic_neighbors]]` ranges since LAN-906. An unreferenced group
+/// contributes nothing to the listener inventory, so deleting it is safe.
+#[tokio::test]
+async fn delete_peer_group_referenced_by_md5_dynamic_range_is_refused() {
+    let mut mgr = dynamic_test_manager();
+    mgr.current_config.peer_groups.insert(
+        "md5-members".to_string(),
+        crate::config::PeerGroupConfig {
+            md5_password: Some("secret".to_string()),
+            ..Default::default()
+        },
+    );
+    mgr.current_config
+        .dynamic_neighbors
+        .push(crate::config::DynamicNeighborConfig {
+            prefix: "10.9.0.0/24".to_string(),
+            peer_group: "md5-members".to_string(),
+            remote_asn: 0,
+            description: None,
+            tcp_ao: None,
+        });
+    let err = mgr
+        .apply_peer_group_change(
+            rustbgpd_api::peer_types::ConfigEvent::DeletePeerGroup {
+                name: "md5-members".to_string(),
+                ack: None,
+            },
+            Vec::new(),
+        )
+        .await
+        .expect_err("deleting a group still referenced by a dynamic range must be refused");
+    assert!(
+        matches!(&err, CatalogMutationError::StillReferenced { .. }),
+        "{err:?}"
+    );
+    assert!(
+        mgr.current_config.peer_groups.contains_key("md5-members"),
+        "refused delete must keep the group"
+    );
+}
+
 fn test_tcp_ao() -> crate::config::TcpAoConfig {
     crate::config::TcpAoConfig {
         key: "secret".to_string(),

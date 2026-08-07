@@ -314,6 +314,28 @@ impl PeerManager {
                 key.0, key.1
             )));
         }
+        // The range's inherited MD5 prefix key and GTSM selector live on the
+        // BGP listener, which only startup and SIGHUP reload can update — a
+        // runtime delete would leave the stale prefix key installed
+        // (fail-closed, but a delete-then-re-add wedges the re-added range's
+        // inbound half until SIGHUP).
+        if self.current_config.dynamic_neighbors.iter().any(|range| {
+            crate::config::effective_prefix_str(&range.prefix) == Some(key)
+                && self
+                    .current_config
+                    .peer_groups
+                    .get(&range.peer_group)
+                    .is_some_and(|group| {
+                        group.md5_password.is_some() || group.ttl_security == Some(true)
+                    })
+        }) {
+            return Err(DynamicRangeError::Invalid(format!(
+                "dynamic range {}/{} inherits md5_password or ttl_security; inbound listener \
+                 enforcement is updated only by startup or SIGHUP reload — remove it through \
+                 the config file and SIGHUP",
+                key.0, key.1
+            )));
+        }
 
         // Snapshot the config entry being removed (owned) before mutating, so
         // rollback can restore the exact range. dynamic_ranges and
