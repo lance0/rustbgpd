@@ -73,6 +73,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   peer label so link-local peers correlate across event streams; and
   `StreamPlanConfigTransaction` bounds its post-handoff response wait by
   the total deadline, matching `StreamApplyConfigTransaction`.
+- Every peer-manager mutation request now carries a 10-minute server-side
+  deadline (LAN-903). The shared mutation helper behind peer-group,
+  policy-definition, and neighbor catalog mutations — plus the neighbor
+  session-control RPCs — awaited the actor reply unbounded; because
+  catalog mutations run on a cancellation-shielded task holding the
+  daemon-wide runtime-config lock, one wedged reply blocked all catalog
+  mutations, SIGHUP reloads, and config transactions until daemon
+  restart. The deadline surfaces as `DEADLINE_EXCEEDED` and releases the
+  lock. It is deliberately mutation-class rather than the 2-second read
+  deadline: one legitimate large-fleet catalog mutation can occupy the
+  actor for ~215 s rebuilding the resolved-policy snapshot
+  (`docs/perf/irr-reload-realistic-mix-2026-08.md`).
 - The BGP listener accept loop classifies `accept(2)` errors instead of
   hot-continuing: resource exhaustion (`EMFILE`/`ENFILE`/`ENOMEM`/
   `ENOBUFS`) backs off progressively (100 ms doubling to 1 s, reset on

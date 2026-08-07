@@ -8,7 +8,7 @@ use rustbgpd_transport::{
     SessionQueryOutcome,
 };
 use rustbgpd_wire::{Afi, Ipv4Prefix, Ipv6Prefix, Prefix, Safi};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 use tonic::{Request, Response, Status};
 
 use crate::actor_read::{peer_manager_read, rib_manager_read};
@@ -18,8 +18,8 @@ use crate::peer_types::{
 use crate::policy_helpers::{proto_statement_to_input, validate_policy_action};
 use crate::proto;
 use crate::server::{
-    AccessMode, ConfigMutationGateFn, apply_catalog_mutation, catalog_mutation_error_to_status,
-    peer_manager_request, persist_then_apply, read_only_rejection, run_shielded_catalog_mutation,
+    AccessMode, ConfigMutationGateFn, apply_catalog_mutation, peer_manager_request,
+    persist_then_apply, read_only_rejection, run_shielded_catalog_mutation,
 };
 use std::sync::Arc;
 
@@ -375,37 +375,23 @@ async fn set_policy_definition(
     name: String,
     definition: NamedPolicyDefinition,
 ) -> Result<(), Status> {
-    let (reply_tx, reply_rx) = oneshot::channel();
-    peer_mgr_tx
-        .send(PeerManagerCommand::SetPolicy {
-            name,
-            definition,
-            reply: reply_tx,
-        })
-        .await
-        .map_err(|_| Status::internal("peer manager unavailable"))?;
-    reply_rx
-        .await
-        .map_err(|_| Status::internal("peer manager dropped reply"))?
-        .map_err(|error| catalog_mutation_error_to_status(&error))
+    apply_catalog_mutation(peer_mgr_tx, |reply| PeerManagerCommand::SetPolicy {
+        name,
+        definition,
+        reply,
+    })
+    .await
 }
 
 async fn delete_policy_definition(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
     name: String,
 ) -> Result<(), Status> {
-    let (reply_tx, reply_rx) = oneshot::channel();
-    peer_mgr_tx
-        .send(PeerManagerCommand::DeletePolicy {
-            name,
-            reply: reply_tx,
-        })
-        .await
-        .map_err(|_| Status::internal("peer manager unavailable"))?;
-    reply_rx
-        .await
-        .map_err(|_| Status::internal("peer manager dropped reply"))?
-        .map_err(|error| catalog_mutation_error_to_status(&error))
+    apply_catalog_mutation(peer_mgr_tx, |reply| PeerManagerCommand::DeletePolicy {
+        name,
+        reply,
+    })
+    .await
 }
 
 /// Reject a chain mutation for a neighbor that is not configured, without
@@ -1644,6 +1630,7 @@ mod tests {
     use crate::peer_types::{CatalogMutationError, PolicyAsPathPrependConfig};
     use crate::proto::policy_service_server::PolicyService as PolicyServiceRpc;
     use tokio::sync::mpsc::error::TryRecvError;
+    use tokio::sync::oneshot;
 
     fn sample_proto_definition() -> proto::PolicyDefinition {
         proto::PolicyDefinition {

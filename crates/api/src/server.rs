@@ -577,20 +577,49 @@ where
         .map_err(|_| Status::internal(format!("{operation} task did not complete")))?
 }
 
+/// Server-side deadline for every peer-manager mutation request.
+///
+/// Reads share a 2 s bound (`actor_read::PEER_MANAGER_READ_TIMEOUT`)
+/// because they are O(peers) state lookups; mutations are a different
+/// duration class. A single catalog mutation can legitimately rebuild the
+/// resolved-policy snapshot for every live peer, and the published
+/// large-fleet receipt (`docs/perf/irr-reload-realistic-mix-2026-08.md`:
+/// 640 clients, per-client-best, F = 0.5) stamps that class of actor
+/// occupancy at ~70 s plus a 133–145 s commit fan-out — roughly 215 s
+/// daemon-side for one legitimate pass. 600 s keeps ~3x headroom over
+/// that worst receipt while still converting a wedged actor into
+/// `DEADLINE_EXCEEDED`. That bound matters doubly here: the mutation
+/// callers run inside `run_shielded_catalog_mutation`, whose detached
+/// task holds the daemon-wide runtime-config lock and outlives client
+/// cancellation, so an unbounded await wedges every catalog mutation,
+/// SIGHUP reload, and config transaction until daemon restart.
+const PEER_MANAGER_MUTATION_TIMEOUT: Duration = Duration::from_mins(10);
+
 /// Send a peer-manager command built around a oneshot reply channel and
-/// await the reply.
+/// await the reply, bounded by [`PEER_MANAGER_MUTATION_TIMEOUT`].
+///
+/// # Errors
+///
+/// Returns `DEADLINE_EXCEEDED` when the deadline expires. The command may
+/// still be applied by the actor afterwards — like any RPC deadline, the
+/// outcome is unknown — but the error propagates out of the shielded body,
+/// so the runtime-config lock guard drops instead of being held forever.
 pub(crate) async fn peer_manager_request<R>(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
     build_command: impl FnOnce(oneshot::Sender<R>) -> PeerManagerCommand,
 ) -> Result<R, Status> {
-    let (reply_tx, reply_rx) = oneshot::channel();
-    peer_mgr_tx
-        .send(build_command(reply_tx))
-        .await
-        .map_err(|_| Status::internal("peer manager unavailable"))?;
-    reply_rx
-        .await
-        .map_err(|_| Status::internal("peer manager dropped reply"))
+    tokio::time::timeout(PEER_MANAGER_MUTATION_TIMEOUT, async {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        peer_mgr_tx
+            .send(build_command(reply_tx))
+            .await
+            .map_err(|_| Status::internal("peer manager unavailable"))?;
+        reply_rx
+            .await
+            .map_err(|_| Status::internal("peer manager dropped reply"))
+    })
+    .await
+    .map_err(|_| Status::deadline_exceeded("peer manager mutation timed out"))?
 }
 
 /// Send a catalog mutation command to the peer manager and map its
@@ -2229,5 +2258,80 @@ mod tests {
         );
         assert_eq!(context.authn(), GrpcAuthnKind::Uds);
         assert_eq!(context.principal(), "uds:/run/rustbgpd/grpc.sock");
+    }
+
+    /// Load-bearing: without a server-side deadline inside
+    /// `peer_manager_request`, a wedged peer-manager actor leaves the
+    /// request pending forever and the outer test guard expires instead
+    /// of observing the production `DeadlineExceeded` status. Mirrors
+    /// `actor_read::tests::stalled_peer_manager_read_returns_deadline_exceeded`
+    /// for the mutation backbone.
+    #[tokio::test(start_paused = true)]
+    async fn stalled_peer_manager_request_returns_deadline_exceeded() {
+        let (tx, rx) = mpsc::channel(1);
+        let result = tokio::time::timeout(
+            Duration::from_hours(1),
+            peer_manager_request(&tx, |reply| PeerManagerCommand::ListPeers { reply }),
+        )
+        .await
+        .expect("peer-manager request must be bounded server-side");
+        assert_eq!(result.unwrap_err().code(), tonic::Code::DeadlineExceeded);
+        // Held so the command is accepted but never answered.
+        drop(rx);
+    }
+
+    /// The timeout must propagate out of the shielded body so the
+    /// detached task finishes and drops the runtime-config lock guard.
+    /// A timeout that leaked the lock would leave the second mutation
+    /// parked on `lock().await` until this test's own guard expires.
+    #[tokio::test(start_paused = true)]
+    async fn catalog_mutation_after_peer_manager_timeout_acquires_lock() {
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        let (tx, mut rx) = mpsc::channel(2);
+        let responder = tokio::spawn(async move {
+            // First mutation: accept the command but never answer it, so
+            // the shielded body can only finish via the server-side
+            // deadline. Holding the command keeps its reply sender alive.
+            let wedged = rx.recv().await.expect("first command");
+            // Second mutation: answer promptly.
+            match rx.recv().await.expect("second command") {
+                PeerManagerCommand::DeletePeerGroup { reply, .. } => {
+                    let _ = reply.send(Ok(()));
+                }
+                _ => panic!("unexpected command"),
+            }
+            drop(wedged);
+        });
+
+        let wedged_tx = tx.clone();
+        let first = tokio::time::timeout(
+            Duration::from_hours(1),
+            run_shielded_catalog_mutation(lock.clone(), None, "test.wedged", move || async move {
+                apply_catalog_mutation(&wedged_tx, |reply| PeerManagerCommand::DeletePeerGroup {
+                    name: "wedged".into(),
+                    reply,
+                })
+                .await
+            }),
+        )
+        .await
+        .expect("catalog mutation must be bounded server-side");
+        assert_eq!(first.unwrap_err().code(), tonic::Code::DeadlineExceeded);
+
+        let healthy_tx = tx.clone();
+        let second = tokio::time::timeout(
+            Duration::from_secs(5),
+            run_shielded_catalog_mutation(lock, None, "test.healthy", move || async move {
+                apply_catalog_mutation(&healthy_tx, |reply| PeerManagerCommand::DeletePeerGroup {
+                    name: "healthy".into(),
+                    reply,
+                })
+                .await
+            }),
+        )
+        .await
+        .expect("timed-out mutation must release the runtime-config lock");
+        second.expect("second mutation must succeed after the first times out");
+        responder.await.expect("responder task");
     }
 }
