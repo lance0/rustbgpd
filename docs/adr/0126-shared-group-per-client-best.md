@@ -204,6 +204,19 @@ remains the safe direction); advertised queries, BMP stat 17, and adj-out
 gauges synthesize from per-source counts with the one-substitution
 adjustment.
 
+The query and count synthesis reports `adv(m)` **minus OTC-blocked
+slots** — the outcome of the Decision 5 backstop, which strips a
+blocked route from every emission while the winner stays in the table
+and a blocked runner-up stays in the lane. The ungrouped path's
+Adj-RIB-Out is post-backstop by construction (a stripped route is never
+committed), so the derived views subtract the same slots to report the
+same truth: the blocked winner toward every non-source member, a
+blocked lane substitution toward `source(w)`. The OTC residue and the
+lane supply the subtraction's inputs; an exact-export rejection at a
+slot the backstop already suppressed subtracts nothing further. A plain
+group's in-walk gate keeps blocked routes out of its table, so its
+views carry no subtraction at all.
+
 ### 5. Emit: one new source-flip matrix arm plus a lane delta
 
 `GroupDelta` gains the lane transition (old runner-up, new runner-up)
