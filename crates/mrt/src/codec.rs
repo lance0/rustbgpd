@@ -696,7 +696,7 @@ fn encode_evpn_rib_generic(
         buf.extend_from_slice(&(Afi::L2Vpn as u16).to_be_bytes())?;
         buf.push(Safi::Evpn as u8)?;
         let mut nlri = Vec::new();
-        encode_evpn_nlri(std::slice::from_ref(&route.route), &mut nlri);
+        encode_evpn_nlri(std::slice::from_ref(&route.route), &mut nlri)?;
         buf.extend_from_slice(&nlri)?;
         buf.extend_from_slice(&1u16.to_be_bytes())?;
         encode_evpn_route_rib_entry(buf, route, peer_index, originated_time)?;
@@ -2429,7 +2429,7 @@ mod tests {
         // same EvpnRoute — proves the record header carries the canonical
         // EVPN NLRI TLV (route_type + length + body).
         let mut expected_nlri = Vec::new();
-        encode_evpn_nlri(std::slice::from_ref(&route.route), &mut expected_nlri);
+        encode_evpn_nlri(std::slice::from_ref(&route.route), &mut expected_nlri).unwrap();
         let nlri_start = 7; // after seq(4) + afi(2) + safi(1)
         let nlri_end = nlri_start + expected_nlri.len();
         assert_eq!(
@@ -2465,7 +2465,7 @@ mod tests {
         assert_eq!(u16::from_be_bytes([payload[4], payload[5]]), 25);
         assert_eq!(payload[6], 70);
         let mut expected_nlri = Vec::new();
-        encode_evpn_nlri(std::slice::from_ref(&route.route), &mut expected_nlri);
+        encode_evpn_nlri(std::slice::from_ref(&route.route), &mut expected_nlri).unwrap();
         assert_eq!(
             &payload[7..7 + expected_nlri.len()],
             expected_nlri.as_slice()

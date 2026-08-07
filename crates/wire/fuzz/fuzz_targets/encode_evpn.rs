@@ -201,9 +201,9 @@ fuzz_target!(|data: &[u8]| {
         return;
     }
     let mut buf = Vec::new();
-    encode_evpn_nlri(&routes, &mut buf);
+    encode_evpn_nlri(&routes, &mut buf).expect("constructed routes must encode");
     let decoded = decode_evpn_nlri(&buf).expect("constructed routes must decode");
     let mut buf2 = Vec::new();
-    encode_evpn_nlri(&decoded, &mut buf2);
+    encode_evpn_nlri(&decoded, &mut buf2).expect("decoded routes must re-encode");
     assert_eq!(buf, buf2, "encode is not a function");
 });

@@ -8,7 +8,7 @@ fuzz_target!(|data: &[u8]| {
         // Successful decode must round-trip through encode back into valid bytes
         // that decode identically.
         let mut buf = Vec::new();
-        encode_evpn_nlri(&routes, &mut buf);
+        encode_evpn_nlri(&routes, &mut buf).expect("decoded routes must re-encode");
         let redecoded = decode_evpn_nlri(&buf).expect("round-trip decode");
         assert_eq!(routes, redecoded, "evpn round-trip mismatch");
     }

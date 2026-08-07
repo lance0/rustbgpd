@@ -31,6 +31,20 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- EVPN wire encoding no longer emits silently wrong bytes for invariant
+  violations that were only debug-asserted (LAN-896). Release builds
+  used to encode a Type 5 route with a gateway/prefix family mismatch
+  by substituting UNSPECIFIED in the prefix family (round-tripping as a
+  different, undetectably corrupted route), pin an EAD-per-ES ethernet
+  tag to MAX_ET regardless of the struct field (silently rewriting a
+  key field), encode an EAD-per-EVI carrying MAX_ET verbatim (decoding
+  back as EAD-per-ES — an identity flip), and synthesize a zero-ESI
+  Type 4 fallback that the decoder itself rejects as malformed. The
+  first three are now hard encode errors — **breaking**:
+  `rustbgpd-wire`'s `encode_evpn_nlri` now returns
+  `Result<(), EncodeError>` — and the Type 4 fallback is skipped with a
+  warning instead of emitted.
+
 - The post-dump flush of held-back live Loc-RIB messages no longer drops
   on a full collector channel (LAN-894). The flush `try_send`-ed the
   entire held-back buffer (bounded at 8,192 messages) into the

@@ -1524,7 +1524,7 @@ async fn attempt_es_action(
                 );
                 return;
             };
-            let route = build_es_route(
+            let Some(route) = build_es_route(
                 ctx.inst,
                 &key,
                 ctx.esi_label,
@@ -1532,7 +1532,13 @@ async fn attempt_es_action(
                 ctx.df_preference,
                 ctx.df_dont_preempt,
                 ctx.redundancy_mode,
-            );
+            ) else {
+                // Wrong key shape is a programming bug (already logged at
+                // warn by the builder) — retrying cannot fix it, so drop
+                // the pending op instead of deferring it forever.
+                pending.forget(key, generation);
+                return;
+            };
             match send_and_ack(&runtime.rib_tx, |reply| RibUpdate::InjectEvpn {
                 route,
                 reply,
@@ -1657,6 +1663,12 @@ async fn retry_pending_rib_ops(
 /// - **Type 1 EAD-per-EVI**: no extra extcomms (the per-EVI label
 ///   lives in the route's MPLS label field; aliasing extcomms are
 ///   Gate 8b territory).
+///
+/// Returns `None` for key shapes this builder does not originate
+/// (anything other than Type 4 ES / EAD-per-ES / EAD-per-EVI): the old
+/// fallback synthesized a zero-ESI Type 4 route that the wire decoder
+/// itself rejects as malformed, so a fired fallback emitted
+/// undecodable bytes.
 fn build_es_route(
     instance: &EvpnInstance,
     key: &EvpnRouteKey,
@@ -1665,7 +1677,7 @@ fn build_es_route(
     df_preference: u32,
     df_dont_preempt: bool,
     redundancy_mode: RedundancyMode,
-) -> EvpnRibRoute {
+) -> Option<EvpnRibRoute> {
     let (route, key_specific_extcomms): (EvpnRoute, Vec<rustbgpd_wire::ExtendedCommunity>) =
         match key {
             EvpnRouteKey::Es {
@@ -1735,22 +1747,15 @@ fn build_es_route(
                 Vec::new(),
             ),
             // Other key shapes shouldn't reach this builder — Type 1/4
-            // originators only emit the three above.
+            // originators only emit the three above. A zero-ESI Type 4
+            // fallback is not an option: the decoder rejects it as
+            // malformed, so it would put undecodable bytes on the wire.
             other => {
                 warn!(
                     ?other,
-                    "EVPN segment: unexpected key shape passed to ES route builder"
+                    "EVPN segment: unexpected key shape passed to ES route builder; skipping"
                 );
-                // Synthesize a degenerate Type 4 to avoid panicking in
-                // production; callers will see the warn-level log.
-                (
-                    EvpnRoute::Es(EvpnEs {
-                        rd: instance.rd,
-                        esi: EthernetSegmentIdentifier::ZERO,
-                        originator_ip: instance.local_vtep_ip,
-                    }),
-                    Vec::new(),
-                )
+                return None;
             }
         };
 
@@ -1769,7 +1774,7 @@ fn build_es_route(
         PathAttribute::ExtendedCommunities(ext_communities),
     ];
 
-    EvpnRibRoute {
+    Some(EvpnRibRoute {
         route,
         next_hop: instance.local_vtep_ip,
         link_local_next_hop: None,
@@ -1780,7 +1785,7 @@ fn build_es_route(
         peer_router_id: std::net::Ipv4Addr::UNSPECIFIED,
         is_stale: false,
         is_llgr_stale: false,
-    }
+    })
 }
 
 fn next_hop_path_attribute(vtep_ip: IpAddr) -> PathAttribute {
@@ -1983,7 +1988,8 @@ mod tests {
             32_768,
             false,
             RedundancyMode::AllActive,
-        );
+        )
+        .expect("ES route builder accepts Type 1/4 keys");
         assert!(matches!(route.route, EvpnRoute::Es(_)));
         // Must carry: Origin, AsPath, NextHop, ExtendedCommunities.
         assert!(
@@ -2012,6 +2018,31 @@ mod tests {
         );
     }
 
+    /// Regression: a key shape the Type 1/4 originators never emit is
+    /// skipped, not "handled" by synthesizing a fallback route. The old
+    /// fallback built a zero-ESI Type 4 that the wire decoder itself
+    /// rejects ("EVPN Type 4 ES route with all-zero ESI"), so a fired
+    /// fallback put undecodable bytes on the wire.
+    #[test]
+    fn build_es_route_skips_unexpected_key_shape() {
+        let inst = instance(100);
+        let key = EvpnRouteKey::Imet {
+            rd: rd(65000, 100),
+            ethernet_tag: EthernetTagId(0),
+            originator_ip: ipa("10.0.0.1"),
+        };
+        let route = build_es_route(
+            &inst,
+            &key,
+            MplsLabel::new(123),
+            DfAlgorithm::DefaultModulo,
+            32_768,
+            false,
+            RedundancyMode::AllActive,
+        );
+        assert!(route.is_none(), "unexpected key shape must be skipped");
+    }
+
     #[test]
     fn build_ead_per_es_route_uses_max_et() {
         let inst = instance(100);
@@ -2028,7 +2059,8 @@ mod tests {
             32_768,
             false,
             RedundancyMode::AllActive,
-        );
+        )
+        .expect("ES route builder accepts Type 1/4 keys");
         match route.route {
             EvpnRoute::EadPerEs(r) => {
                 assert_eq!(r.ethernet_tag, EthernetTagId::MAX_ET);
@@ -2056,7 +2088,8 @@ mod tests {
             32_768,
             false,
             RedundancyMode::AllActive,
-        );
+        )
+        .expect("ES route builder accepts Type 1/4 keys");
         match route.route {
             EvpnRoute::EadPerEvi(r) => {
                 assert_eq!(r.ethernet_tag.0, 0);
@@ -2117,7 +2150,8 @@ mod tests {
             32_768,
             false,
             RedundancyMode::AllActive,
-        );
+        )
+        .expect("ES route builder accepts Type 1/4 keys");
         let extcomms = route
             .attributes
             .iter()
@@ -2151,7 +2185,8 @@ mod tests {
             32_768,
             false,
             RedundancyMode::AllActive,
-        );
+        )
+        .expect("ES route builder accepts Type 1/4 keys");
         let extcomms = route
             .attributes
             .iter()
@@ -2190,7 +2225,8 @@ mod tests {
             500,
             false,
             RedundancyMode::AllActive,
-        );
+        )
+        .expect("ES route builder accepts Type 1/4 keys");
         let extcomms = route
             .attributes
             .iter()
@@ -2228,7 +2264,8 @@ mod tests {
             500,
             true, // df_dont_preempt
             RedundancyMode::AllActive,
-        );
+        )
+        .expect("ES route builder accepts Type 1/4 keys");
         let df = route
             .attributes
             .iter()
@@ -2266,7 +2303,8 @@ mod tests {
             42,
             true, // df_dont_preempt
             RedundancyMode::AllActive,
-        );
+        )
+        .expect("ES route builder accepts Type 1/4 keys");
         let df = route
             .attributes
             .iter()
@@ -2308,7 +2346,8 @@ mod tests {
             32_768,
             false,
             RedundancyMode::AllActive,
-        );
+        )
+        .expect("ES route builder accepts Type 1/4 keys");
         let extcomms = route
             .attributes
             .iter()
@@ -2432,7 +2471,8 @@ mod tests {
             32_768,
             false,
             RedundancyMode::AllActive,
-        );
+        )
+        .expect("ES route builder accepts Type 1/4 keys");
         let extcomms = route
             .attributes
             .iter()
@@ -2477,7 +2517,8 @@ mod tests {
             32_768,
             false,
             RedundancyMode::SingleActive,
-        );
+        )
+        .expect("ES route builder accepts Type 1/4 keys");
         let extcomms = route
             .attributes
             .iter()
@@ -2511,7 +2552,8 @@ mod tests {
             32_768,
             false,
             RedundancyMode::AllActive,
-        );
+        )
+        .expect("ES route builder accepts Type 1/4 keys");
         let extcomms = route
             .attributes
             .iter()
