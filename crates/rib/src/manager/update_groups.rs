@@ -19,7 +19,10 @@
 //! flag, and (transiently, across a regroup) a baseline snapshot of the
 //! member's previously advertised view. **No per-peer advertised
 //! unicast storage exists for grouped peers** — a member's advertised
-//! set is `group table − own-sourced entries`.
+//! set is `group table − own-sourced entries` (plus, for a
+//! per-client-best group, the exception-lane substitution at each
+//! own-sourced slot: ADR-0126 Decision 4's `adv(m)`, derived solely by
+//! [`GroupRibOut::adv_entry`]).
 //!
 //! The one load-bearing registry property from slice 1 still holds: the
 //! export-chain key component is chain **content** (interned via
@@ -49,6 +52,7 @@ use crate::update::{
     ExactExportKey, RouteQueryKey, UpdateGroupClassification, UpdateGroupClassifierInput,
     UpdateGroupComparisonDifference, UpdateGroupComparisonMembership, UpdateGroupComparisonVerdict,
     UpdateGroupPeerComparison, UpdateGroupPeerSnapshot, UpdateGroupSnapshot, classify_update_group,
+    route_query_key,
 };
 
 fn send_update_group_snapshot(
@@ -384,13 +388,6 @@ pub(in crate::manager) fn capture_source_attrs(source: &Route) -> Option<Arc<Vec
 /// captured pre-policy SOURCE attributes, and the permitting
 /// terminal-policy label for join-time counter replay.
 #[derive(Debug, Clone)]
-#[allow(
-    dead_code,
-    reason = "the emit-side consumers land with ADR-0126 Phase 2; until then only \
-              the Phase 1 test matrix reads the lane payload, so the lib target \
-              sees the fields as unread (an `expect` would be unfulfilled in the \
-              test target)"
-)]
 pub(in crate::manager) struct RunnerUp {
     pub(in crate::manager) route: Route,
     pub(in crate::manager) nh: Option<NextHopAction>,
@@ -402,6 +399,38 @@ pub(in crate::manager) struct RunnerUp {
     /// without this field no emit, count, or replay seam could know
     /// which member the substitution targets.
     pub(in crate::manager) winner_source: IpAddr,
+}
+
+/// One slot of a member's derived advertised view — what
+/// [`GroupRibOut::adv_entry`] resolves `adv(m)` to at one staged key:
+/// the route on the member's wire plus the residue every read seam
+/// fetches alongside it. Borrowed from the group: either the staged
+/// table entry with its table residue, or the exception-lane
+/// runner-up substituting for it with the lane's own payload.
+pub(in crate::manager) struct AdvEntry<'a> {
+    pub(in crate::manager) route: &'a Route,
+    /// Next-hop-override residue for the slot.
+    #[allow(
+        dead_code,
+        reason = "the replay seams that re-emit adv(m) with its next-hop residue \
+                  land in a later ADR-0126 Phase 2 PR; until then only the test \
+                  matrix reads the field, so the lib target sees it as unread \
+                  (an `expect` would be unfulfilled in the test target)"
+    )]
+    pub(in crate::manager) nh: Option<&'a NextHopAction>,
+    /// Captured pre-policy SOURCE attributes (RFC 7947 rs-control
+    /// decisions read these, never the post-policy route).
+    #[allow(
+        dead_code,
+        reason = "the rs-control emit seams deciding on adv(m)'s source attributes \
+                  land in a later ADR-0126 Phase 2 PR; until then only the test \
+                  matrix reads the field, so the lib target sees it as unread \
+                  (an `expect` would be unfulfilled in the test target)"
+    )]
+    pub(in crate::manager) source_attrs: Option<&'a Arc<Vec<PathAttribute>>>,
+    /// Terminal policy label of the permitting evaluation (`None` =
+    /// inline verdict) — join-time counter replay residue.
+    pub(in crate::manager) policy_label: Option<&'a PolicyLabel>,
 }
 
 /// One exception-lane transition of a per-client-best staging pass
@@ -1101,19 +1130,12 @@ pub(in crate::manager) struct GroupRibOut {
     /// counts `[v4, v6]` — how many lane entries currently substitute
     /// for member m (m receives the runner-up exactly where it sourced
     /// the winner). The derived-count synthesis
-    /// (`advertised_count_for` / `family_counts_for`) gains the
-    /// `+lane` term from this map in a later ADR-0126 Phase 2 PR;
-    /// `source_counts` is keyed by staged-entry source and cannot
-    /// express it. Maintained entirely by [`Self::apply_lane`], zeroed
-    /// rows dropped (the `inc_source`/`dec_source` hygiene). Always
-    /// empty for plain groups.
-    #[allow(
-        dead_code,
-        reason = "the count-synthesis consumers land with ADR-0126 Phase 2; until \
-                  then only the Phase 1 test matrix reads the map, so the lib \
-                  target sees the field as unread (an `expect` would be \
-                  unfulfilled in the test target)"
-    )]
+    /// (`advertised_count_for` / `family_counts_for`) reads its
+    /// `+lane` term from this map; `source_counts` is keyed by
+    /// staged-entry source and cannot express it. Maintained entirely
+    /// by [`Self::apply_lane`], zeroed rows dropped (the
+    /// `inc_source`/`dec_source` hygiene). Always empty for plain
+    /// groups.
     pub(in crate::manager) lane_counts: FxHashMap<IpAddr, [usize; 2]>,
     // Group-uniform staging inputs, snapshot at group creation from the
     // first member (all members are key-equal by construction; a key
@@ -1434,14 +1456,63 @@ impl GroupRibOut {
         }
     }
 
+    /// The single ADR-0126 Decision 4 derivation of a member's
+    /// advertised slot — `adv(m)` at one staged key:
+    ///
+    /// > adv(m) = for each prefix: `w` (the staged entry) if
+    /// > `source(w) ≠ m`; else `r` (the lane entry) if the lane holds
+    /// > one; else nothing — always at `path_id 0`.
+    ///
+    /// Decision 6's "no second bookkeeping path to diverge" is a code
+    /// claim on this method: every read seam — queries, counts,
+    /// counter replay — routes through this ONE definition instead of
+    /// restating the `peer == member ⇒ skip` rule inline. For a plain
+    /// group the lane is empty by construction AND gated off by
+    /// `per_client_best`, so this reduces exactly to the historical
+    /// skip rule. Meaningful for grouped unicast only (`path_id 0`);
+    /// the VPN maps are an ADR-0126 non-goal.
+    pub(in crate::manager) fn adv_entry(
+        &self,
+        member: IpAddr,
+        prefix: &Prefix,
+        path_id: u32,
+    ) -> Option<AdvEntry<'_>> {
+        let staged = self.table.get(prefix, path_id)?;
+        if staged.peer != member {
+            let key = (*prefix, path_id);
+            return Some(AdvEntry {
+                route: staged,
+                nh: self.nh_overrides.get(&key),
+                source_attrs: self.source_attrs.get(&key),
+                policy_label: self.staged_labels.get(&key).and_then(Option::as_ref),
+            });
+        }
+        if !self.per_client_best {
+            return None;
+        }
+        let entry = self.runner_up.get(prefix)?;
+        Some(AdvEntry {
+            route: &entry.route,
+            nh: entry.nh.as_ref(),
+            source_attrs: entry.source_attrs.as_ref(),
+            policy_label: entry.policy_label.as_ref(),
+        })
+    }
+
     /// Number of unicast routes `member` currently has advertised: the
-    /// group table minus the member's own-sourced entries. O(1).
+    /// group table minus the member's own-sourced entries plus its
+    /// lane substitutions (the family-summed count of
+    /// [`Self::adv_entry`], ADR-0126 Decision 4). O(1).
     pub(in crate::manager) fn advertised_count_for(&self, member: IpAddr) -> usize {
         let own = self
             .source_counts
             .get(&member)
             .map_or(0, |counts| counts[0] + counts[1]);
-        self.table.len().saturating_sub(own)
+        let lane = self
+            .lane_counts
+            .get(&member)
+            .map_or(0, |counts| counts[0] + counts[1]);
+        self.table.len().saturating_sub(own) + lane
     }
 
     /// Number of VPN routes `member` currently has advertised. Non-RTC
@@ -1512,7 +1583,9 @@ impl GroupRibOut {
     }
 
     /// Per-family synthesized advertised counts for a member (BMP RFC
-    /// 8671 stat type 17 input). Zero-count families omitted.
+    /// 8671 stat type 17 input): table minus own-sourced plus the
+    /// member's lane substitutions per unicast slot (ADR-0126
+    /// Decision 4). Zero-count families omitted.
     pub(in crate::manager) fn family_counts_for(&self, member: IpAddr) -> Vec<((Afi, Safi), u64)> {
         const FAMILIES: [(Afi, Safi); 4] = [
             (Afi::Ipv4, Safi::Unicast),
@@ -1522,6 +1595,7 @@ impl GroupRibOut {
         ];
         let totals = self.family_totals;
         let own = self.source_counts.get(&member).copied().unwrap_or_default();
+        let lane = self.lane_counts.get(&member).copied().unwrap_or_default();
         // RTC group: the VPN slots come from the maintained per-member
         // counters (Φ-filtered), not the table synthesis.
         let rtc_vpn = self.rtc_negotiated().then(|| {
@@ -1536,6 +1610,7 @@ impl GroupRibOut {
             .filter_map(|(slot, &family)| {
                 let count = match (slot, rtc_vpn) {
                     (2 | 3, Some(counts)) => counts[slot - 2].max(0).unsigned_abs(),
+                    (0 | 1, _) => (totals[slot].saturating_sub(own[slot]) + lane[slot]) as u64,
                     _ => totals[slot].saturating_sub(own[slot]) as u64,
                 };
                 (count > 0).then_some((family, count))
@@ -2652,9 +2727,11 @@ impl RibManager {
     }
 
     /// Reconstruct a joining member's export counters from the group's
-    /// staged residue: one permit per replayed table entry (labelled by
-    /// its retained terminal policy), one deny per persistent denial —
-    /// own-sourced entries excluded on both sides, exactly what the
+    /// staged residue: one permit per `adv(m)` slot (labelled by its
+    /// retained terminal policy — the lane entry's where the member
+    /// sourced the winner of a per-client-best prefix), one deny per
+    /// persistent denial — own-sourced excluded on the denial side and
+    /// substituted-or-excluded on the permit side, exactly what the
     /// per-peer initial-dump staging would have recorded, without
     /// re-running policy. A route-refresh replay passes its `family` so
     /// only the refreshed family's entries count (the per-peer path
@@ -2679,16 +2756,21 @@ impl RibManager {
             };
             let in_family =
                 |prefix: &Prefix| family.is_none_or(|f| super::helpers::prefix_family(prefix) == f);
+            // One permit per `adv(m)` slot (`adv_entry`, ADR-0126
+            // Decision 4): the staged entry's label for a non-own
+            // slot; the LANE entry's label where the member sourced
+            // the winner — the runner-up's permit WAS evaluated
+            // (Decision 2's over-replay posture), and its retained
+            // terminal label is exactly what the walk recorded.
+            // Nothing for an own-sourced slot with no substitution.
             for route in group.table.iter() {
-                if route.peer == peer || !in_family(&route.prefix) {
+                if !in_family(&route.prefix) {
                     continue;
                 }
-                let label = group
-                    .staged_labels
-                    .get(&(route.prefix, route.path_id))
-                    .cloned()
-                    .unwrap_or(None);
-                bump(&label, PolicyAction::Permit);
+                let Some(adv) = group.adv_entry(peer, &route.prefix, route.path_id) else {
+                    continue;
+                };
+                bump(&adv.policy_label.cloned(), PolicyAction::Permit);
             }
             for (key, label) in &group.policy_filtered {
                 if key.source_peer == peer || !in_family(&key.prefix) {
@@ -2767,10 +2849,11 @@ impl RibManager {
         }
     }
 
-    /// Borrowed synthesized advertised-route view for a grouped peer (group
-    /// table minus own-sourced, minus this member's exact-export rejections,
-    /// intersected with what its outbound maxima admitted); `None` for
-    /// ungrouped peers.
+    /// Borrowed synthesized advertised-route view for a grouped peer
+    /// (`adv(m)` per staged key — the table entry or its lane
+    /// substitution, [`GroupRibOut::adv_entry`] — minus this member's
+    /// exact-export rejections, intersected with what its outbound
+    /// maxima admitted); `None` for ungrouped peers.
     pub(in crate::manager) fn grouped_advertised_routes_iter(
         &self,
         peer: IpAddr,
@@ -2778,12 +2861,15 @@ impl RibManager {
         let group = self.group_ribs.get(&self.grouped_member_of(peer)?)?;
         let rejected = self.peer_unexportable.get(&peer);
         let limits = self.outbound_prefix_limits.get(&peer);
-        Some(group.table.iter().filter(move |route| {
-            route.peer != peer
-                && !rejected.is_some_and(|keys| {
-                    keys.contains(&ExactExportKey::Unicast(route.prefix, route.path_id))
-                })
-                && limits.is_none_or(|limits| limits.admits_grouped(&route.prefix))
+        Some(group.table.iter().filter_map(move |staged| {
+            // The substitution sits at the same (prefix, path_id 0)
+            // slot, so the member-local overlays key identically for
+            // the staged entry and its lane replacement.
+            let route = group.adv_entry(peer, &staged.prefix, staged.path_id)?.route;
+            (!rejected.is_some_and(|keys| {
+                keys.contains(&ExactExportKey::Unicast(route.prefix, route.path_id))
+            }) && limits.is_none_or(|limits| limits.admits_grouped(&route.prefix)))
+            .then_some(route)
         }))
     }
 
@@ -2800,13 +2886,29 @@ impl RibManager {
         let group = self.group_ribs.get(&self.grouped_member_of(peer)?)?;
         let rejected = self.peer_unexportable.get(&peer);
         let limits = self.outbound_prefix_limits.get(&peer);
-        Some(group.table.iter_ordered_from(after).filter(move |route| {
-            route.peer != peer
-                && !rejected.is_some_and(|keys| {
-                    keys.contains(&ExactExportKey::Unicast(route.prefix, route.path_id))
-                })
-                && limits.is_none_or(|limits| limits.admits_grouped(&route.prefix))
-        }))
+        Some(
+            group
+                .table
+                .iter_ordered_from(after)
+                .filter_map(move |staged| {
+                    let route = group.adv_entry(peer, &staged.prefix, staged.path_id)?.route;
+                    // A lane substitution keeps the staged entry's prefix
+                    // position, so the persistent prefix-index ordering is
+                    // unchanged — but the cursor a caller resumes with
+                    // carries the YIELDED route's source peer, which
+                    // differs from the staged entry's at a substituted
+                    // slot. Re-filter on the yielded key so a page
+                    // boundary landing on a substitution resumes without
+                    // duplicating its prefix (the underlying iterator
+                    // filters on staged keys only).
+                    (after.is_none_or(|cursor| route_query_key(route) > cursor)
+                        && !rejected.is_some_and(|keys| {
+                            keys.contains(&ExactExportKey::Unicast(route.prefix, route.path_id))
+                        })
+                        && limits.is_none_or(|limits| limits.admits_grouped(&route.prefix)))
+                    .then_some(route)
+                }),
+        )
     }
 
     /// Materialized sibling of [`Self::grouped_advertised_routes_iter`] for
@@ -2834,10 +2936,12 @@ impl RibManager {
         let rejected = self.peer_unexportable.get(&peer).map_or(0, |keys| {
             keys.iter()
                 .filter(|key| match key {
-                    ExactExportKey::Unicast(prefix, path_id) => group
-                        .table
-                        .get(prefix, *path_id)
-                        .is_some_and(|route| route.peer != peer),
+                    // A rejected key reduces the count only while the
+                    // member's derived view (`adv_entry`) holds a
+                    // route at that slot — staged or lane-substituted.
+                    ExactExportKey::Unicast(prefix, path_id) => {
+                        group.adv_entry(peer, prefix, *path_id).is_some()
+                    }
                     _ => false,
                 })
                 .count()
@@ -2885,11 +2989,12 @@ impl RibManager {
         if let Some(rejected) = self.peer_unexportable.get(&peer) {
             for key in rejected {
                 let family = match key {
+                    // Subtract only while the member's derived view
+                    // (`adv_entry`) holds a route at the rejected slot
+                    // — the lane substitution shares the staged key's
+                    // prefix, so the family is identical either way.
                     ExactExportKey::Unicast(prefix, path_id)
-                        if group
-                            .table
-                            .get(prefix, *path_id)
-                            .is_some_and(|route| route.peer != peer) =>
+                        if group.adv_entry(peer, prefix, *path_id).is_some() =>
                     {
                         Some(super::helpers::prefix_family(prefix))
                     }
@@ -3835,7 +3940,8 @@ mod tests {
 
     use rustbgpd_policy::{Policy, PolicyStatement, RouteModifications};
     use rustbgpd_wire::{
-        Ipv4Prefix, MplsLabelEntry, Origin, PathAttribute, RouteDistinguisher, VpnNlri, VpnPrefix,
+        Ipv4Prefix, Ipv6Prefix, MplsLabelEntry, Origin, PathAttribute, RouteDistinguisher, VpnNlri,
+        VpnPrefix,
     };
 
     use super::*;
@@ -5463,6 +5569,424 @@ mod tests {
         // source runner-up occupies the lane.
         assert_eq!(group.runner_up.len(), 1);
         assert_eq!(lane_source(&m, overlapped), Some(OTHER2));
+    }
+
+    // --- ADR-0126 Phase 2 (read-only seams): the adv(m) derivation
+    // --- (`adv_entry`, Decision 4) and the derived views routed
+    // --- through it — queries, counts, and join-counter replay.
+
+    /// A lane entry with a full payload, for driving `adv_entry`
+    /// directly.
+    fn lane_entry(route: Route, winner_source: IpAddr, label: &str, comm: Option<u32>) -> RunnerUp {
+        RunnerUp {
+            route,
+            nh: Some(NextHopAction::Self_),
+            source_attrs: comm.map(|c| Arc::new(vec![PathAttribute::Communities(vec![c])])),
+            policy_label: Some(Arc::from(label)),
+            winner_source,
+        }
+    }
+
+    /// ADR-0126 Decision 4 `adv_entry` matrix: non-own passthrough
+    /// with the table residue; own-sourced + lane → the runner-up's
+    /// payload (route, nh, source attrs, label all from the lane);
+    /// own-sourced + empty lane → nothing; and the `per_client_best`
+    /// gate keeping a plain group's read path at the historical skip
+    /// rule even with a lane entry forced in.
+    #[test]
+    fn adv_entry_derivation_matrix() {
+        let p = prefix(1);
+
+        // Non-own staged entry: passthrough with its table residue.
+        let mut group = per_client_best_group(None);
+        group.apply_delta(&GroupDelta {
+            prefix: p,
+            path_id: 0,
+            new: Some((route(p, OTHER1), Some(NextHopAction::Self_))),
+            old_source: None,
+            policy_label: Some(Arc::from("staged")),
+            source_attrs: Some(Arc::new(vec![PathAttribute::Communities(vec![7])])),
+        });
+        let adv = group
+            .adv_entry(MEMBER, &p, 0)
+            .expect("non-own staged entry");
+        assert_eq!((adv.route.peer, adv.route.path_id), (OTHER1, 0));
+        assert!(matches!(adv.nh, Some(NextHopAction::Self_)));
+        assert_eq!(source_control_input(adv.source_attrs).0, &[7]);
+        assert_eq!(adv.policy_label.map(|label| &**label), Some("staged"));
+
+        // Own-sourced + lane: the runner-up substitutes with ITS
+        // payload, at the same (prefix, path_id 0) slot.
+        let mut group = per_client_best_group(None);
+        group.apply_delta(&announce_delta(p, MEMBER, None));
+        group.apply_lane(
+            p,
+            Some(lane_entry(route(p, OTHER2), MEMBER, "lane", Some(9))),
+        );
+        let adv = group.adv_entry(MEMBER, &p, 0).expect("lane substitutes");
+        assert_eq!((adv.route.peer, adv.route.path_id), (OTHER2, 0));
+        assert!(matches!(adv.nh, Some(NextHopAction::Self_)));
+        assert_eq!(source_control_input(adv.source_attrs).0, &[9]);
+        assert_eq!(adv.policy_label.map(|label| &**label), Some("lane"));
+        // Any other member still sees the staged winner (with the
+        // winner's residue: none was staged for it).
+        let adv = group.adv_entry(OTHER1, &p, 0).expect("staged winner");
+        assert_eq!(adv.route.peer, MEMBER);
+        assert!(adv.nh.is_none());
+        assert!(adv.policy_label.is_none());
+
+        // Own-sourced + empty lane: nothing.
+        let mut group = per_client_best_group(None);
+        group.apply_delta(&announce_delta(p, MEMBER, None));
+        assert!(group.adv_entry(MEMBER, &p, 0).is_none());
+
+        // Plain group: the flag gates the lane off even were one
+        // somehow populated — the plain-group read path is provably
+        // the historical `peer == member ⇒ skip` rule.
+        let mut group = empty_group();
+        group.apply_delta(&announce_delta(p, MEMBER, None));
+        group.apply_lane(p, Some(lane_entry(route(p, OTHER2), MEMBER, "lane", None)));
+        assert!(group.adv_entry(MEMBER, &p, 0).is_none());
+        assert_eq!(
+            group.adv_entry(OTHER1, &p, 0).map(|adv| adv.route.peer),
+            Some(MEMBER)
+        );
+
+        // No staged entry at all: nothing, lane or not.
+        assert!(group.adv_entry(MEMBER, &prefix(2), 0).is_none());
+    }
+
+    /// Decision 4 count synthesis: `advertised_count_for` and
+    /// `family_counts_for` (table − own + lane) agree with a
+    /// brute-force fold over `adv_entry` — the synthesis and the
+    /// materialized derivation are the same function, which IS the
+    /// Decision 4 claim.
+    #[test]
+    fn pcb_counts_agree_with_adv_entry_fold() {
+        let mut m = staging_manager();
+        let (p1, p2, p3) = (prefix(1), prefix(2), prefix(3));
+        // p1: MEMBER wins, OTHER1 runner-up; p2: OTHER1 wins, OTHER2
+        // runner-up; p3: OTHER1 wins, no runner-up.
+        seed(&mut m, cand(p1, MEMBER, 300));
+        seed(&mut m, cand(p1, OTHER1, 200));
+        seed(&mut m, cand(p2, OTHER1, 300));
+        seed(&mut m, cand(p2, OTHER2, 200));
+        seed(&mut m, cand(p3, OTHER1, 300));
+        m.group_ribs.insert(PCB_GID, per_client_best_group(None));
+        let _ = stage_pcb(&mut m, &[p1, p2, p3]);
+
+        let group = m.group_ribs.get(&PCB_GID).unwrap();
+        for member in [MEMBER, OTHER1, OTHER2] {
+            let folded = group
+                .table
+                .iter()
+                .filter_map(|staged| group.adv_entry(member, &staged.prefix, staged.path_id))
+                .count();
+            assert_eq!(
+                group.advertised_count_for(member),
+                folded,
+                "synthesized count diverged from the adv_entry fold for {member}"
+            );
+            let family_total: u64 = group
+                .family_counts_for(member)
+                .iter()
+                .map(|(_, count)| *count)
+                .sum();
+            assert_eq!(
+                family_total,
+                u64::try_from(folded).unwrap(),
+                "family counts diverged from the adv_entry fold for {member}"
+            );
+        }
+        // Hand-computed: MEMBER = 3 − 1 own + 1 lane; OTHER1 = 3 − 2
+        // own + 1 lane (p2's runner-up; its own p3 winner has none);
+        // OTHER2 sources no winner.
+        assert_eq!(group.advertised_count_for(MEMBER), 3);
+        assert_eq!(group.advertised_count_for(OTHER1), 2);
+        assert_eq!(group.advertised_count_for(OTHER2), 3);
+        assert_eq!(
+            group.family_counts_for(MEMBER),
+            vec![((Afi::Ipv4, Safi::Unicast), 3)]
+        );
+        assert_eq!(
+            group.family_counts_for(OTHER1),
+            vec![((Afi::Ipv4, Safi::Unicast), 2)]
+        );
+    }
+
+    /// The lane term is per family: a v6 substitution lands in the v6
+    /// row only, and an own-sourced v4 slot without a lane entry still
+    /// drops out of both the family row and the summed count.
+    #[test]
+    fn pcb_family_counts_lane_term_is_per_family() {
+        use crate::test_support::make_v6_route;
+        let p4 = prefix(1);
+        let p6 = Prefix::V6(Ipv6Prefix::new(
+            std::net::Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0),
+            64,
+        ));
+        let mut group = per_client_best_group(None);
+        // v4 winner sourced by MEMBER, no runner-up.
+        group.apply_delta(&announce_delta(p4, MEMBER, None));
+        // v6 winner sourced by MEMBER with a v6 runner-up in the lane.
+        let mut w6 = make_v6_route(
+            match p6 {
+                Prefix::V6(prefix) => prefix,
+                Prefix::V4(_) => unreachable!(),
+            },
+            std::net::Ipv6Addr::LOCALHOST,
+        );
+        w6.peer = MEMBER;
+        group.apply_delta(&GroupDelta {
+            prefix: p6,
+            path_id: 0,
+            new: Some((w6.clone(), None)),
+            old_source: None,
+            policy_label: None,
+            source_attrs: None,
+        });
+        let mut r6 = w6;
+        r6.peer = OTHER2;
+        group.apply_lane(p6, Some(lane_entry(r6, MEMBER, "lane", None)));
+
+        assert_eq!(
+            group.family_counts_for(MEMBER),
+            vec![((Afi::Ipv6, Safi::Unicast), 1)],
+            "only the v6 row gains the lane term"
+        );
+        assert_eq!(group.advertised_count_for(MEMBER), 1);
+        // A member sourcing nothing sees both staged winners.
+        assert_eq!(
+            group.family_counts_for(OTHER1),
+            vec![
+                ((Afi::Ipv4, Safi::Unicast), 1),
+                ((Afi::Ipv6, Safi::Unicast), 1),
+            ]
+        );
+    }
+
+    /// The advertised iterators yield adv(m): the lane route at the
+    /// winner's prefix for source(w) — `path_id` 0, nothing else changed
+    /// — while a member sourcing nothing sees the staged table
+    /// unchanged. Covers the unordered iterator, the ordered variant
+    /// (prefix ordering preserved), and the materialized wrapper.
+    #[test]
+    fn pcb_advertised_iterators_substitute_lane_entry() {
+        let mut m = staging_manager();
+        let (p1, p2, p3) = (prefix(1), prefix(2), prefix(3));
+        seed(&mut m, cand(p1, MEMBER, 300));
+        seed(&mut m, cand(p1, OTHER1, 200));
+        seed(&mut m, cand(p2, OTHER1, 300));
+        seed(&mut m, cand(p3, OTHER1, 300));
+        seed(&mut m, cand(p3, OTHER2, 200));
+        m.group_ribs.insert(PCB_GID, per_client_best_group(None));
+        let _ = stage_pcb(&mut m, &[p1, p2, p3]);
+        for peer in [MEMBER, OTHER2] {
+            m.update_groups
+                .members
+                .insert(peer, GroupMembership::Grouped(PCB_GID));
+        }
+
+        // MEMBER sources p1's winner: its view substitutes the lane
+        // route (OTHER1's candidate) there and nowhere else.
+        let mut rows: Vec<(Prefix, IpAddr, u32)> = m
+            .grouped_advertised_routes_iter(MEMBER)
+            .unwrap()
+            .map(|r| (r.prefix, r.peer, r.path_id))
+            .collect();
+        rows.sort();
+        assert_eq!(
+            rows,
+            vec![(p1, OTHER1, 0), (p2, OTHER1, 0), (p3, OTHER1, 0)]
+        );
+        // OTHER2 sources no winner: the staged table, split horizon
+        // moot, no substitution anywhere.
+        let mut rows: Vec<(Prefix, IpAddr)> = m
+            .grouped_advertised_routes_iter(OTHER2)
+            .unwrap()
+            .map(|r| (r.prefix, r.peer))
+            .collect();
+        rows.sort();
+        assert_eq!(rows, vec![(p1, MEMBER), (p2, OTHER1), (p3, OTHER1)]);
+
+        // Ordered variant: the substitution keeps the winner's prefix
+        // position, so the prefix-index order is unchanged.
+        let ordered: Vec<(Prefix, IpAddr)> = m
+            .grouped_advertised_routes_ordered_iter(MEMBER, None)
+            .unwrap()
+            .map(|r| (r.prefix, r.peer))
+            .collect();
+        assert_eq!(ordered, vec![(p1, OTHER1), (p2, OTHER1), (p3, OTHER1)]);
+
+        // Materialized wrapper delegates to the same derivation.
+        let materialized = m.grouped_advertised_routes(MEMBER).unwrap();
+        assert_eq!(materialized.len(), 3);
+        assert!(materialized.iter().all(|r| r.peer == OTHER1));
+    }
+
+    /// A page boundary ON a substituted row: the caller's cursor
+    /// carries the yielded lane route's source peer, while the staged
+    /// key ranks past it — resume must not duplicate the prefix.
+    #[test]
+    fn pcb_ordered_iterator_resumes_past_substituted_row() {
+        let mut m = staging_manager();
+        let (p1, p2) = (prefix(1), prefix(2));
+        // Winner source OTHER2 ranks ABOVE lane source MEMBER in the
+        // cursor key order, so the underlying staged-key filter alone
+        // would re-yield p1 on resume.
+        seed(&mut m, cand(p1, OTHER2, 300));
+        seed(&mut m, cand(p1, MEMBER, 200));
+        seed(&mut m, cand(p2, OTHER1, 300));
+        m.group_ribs.insert(PCB_GID, per_client_best_group(None));
+        let _ = stage_pcb(&mut m, &[p1, p2]);
+        m.update_groups
+            .members
+            .insert(OTHER2, GroupMembership::Grouped(PCB_GID));
+
+        let full: Vec<(Prefix, IpAddr)> = m
+            .grouped_advertised_routes_ordered_iter(OTHER2, None)
+            .unwrap()
+            .map(|r| (r.prefix, r.peer))
+            .collect();
+        assert_eq!(full, vec![(p1, MEMBER), (p2, OTHER1)]);
+
+        let cursor = m
+            .grouped_advertised_routes_ordered_iter(OTHER2, None)
+            .unwrap()
+            .next()
+            .map(crate::update::route_query_key)
+            .unwrap();
+        assert_eq!(cursor, (p1, MEMBER, 0));
+        let resumed: Vec<(Prefix, IpAddr)> = m
+            .grouped_advertised_routes_ordered_iter(OTHER2, Some(cursor))
+            .unwrap()
+            .map(|r| (r.prefix, r.peer))
+            .collect();
+        assert_eq!(
+            resumed,
+            vec![(p2, OTHER1)],
+            "the substituted prefix must not repeat past its own cursor"
+        );
+    }
+
+    /// The actor-level count queries synthesize adv(m): the unlimited
+    /// branch of `grouped_advertised_count` and the BMP stat-17
+    /// `grouped_family_counts` both include the lane substitution, and
+    /// the exact-export rejection overlay subtracts a substituted slot
+    /// (it is on the member's wire).
+    #[test]
+    fn pcb_grouped_count_queries_include_lane_term() {
+        let mut m = staging_manager();
+        let (p1, p2) = (prefix(1), prefix(2));
+        seed(&mut m, cand(p1, MEMBER, 300));
+        seed(&mut m, cand(p1, OTHER1, 200));
+        seed(&mut m, cand(p2, OTHER1, 300));
+        m.group_ribs.insert(PCB_GID, per_client_best_group(None));
+        let _ = stage_pcb(&mut m, &[p1, p2]);
+        m.update_groups
+            .members
+            .insert(MEMBER, GroupMembership::Grouped(PCB_GID));
+
+        assert_eq!(m.grouped_advertised_count(MEMBER), Some(2));
+        assert_eq!(
+            m.grouped_family_counts(MEMBER),
+            Some(vec![((Afi::Ipv4, Safi::Unicast), 2)])
+        );
+
+        // Reject the substituted slot: it counts against the member's
+        // view exactly like a staged-entry slot would.
+        m.peer_unexportable
+            .entry(MEMBER)
+            .or_default()
+            .insert(ExactExportKey::Unicast(p1, 0));
+        assert_eq!(m.grouped_advertised_count(MEMBER), Some(1));
+        assert_eq!(
+            m.grouped_family_counts(MEMBER),
+            Some(vec![((Afi::Ipv4, Safi::Unicast), 1)])
+        );
+    }
+
+    /// Join-counter replay delivers one permit per adv(m) slot: the
+    /// staged label for non-own entries and the LANE entry's label
+    /// where the member sourced the winner (Decision 2's over-replay
+    /// posture — the runner-up's permit WAS evaluated). Totals and
+    /// per-label attribution both match the hand-computed expectation;
+    /// a member with an own-sourced slot and no lane gets nothing for
+    /// it.
+    #[test]
+    fn pcb_join_counters_replay_lane_permit() {
+        let (p1, p2) = (prefix(1), prefix(2));
+        let mut group = per_client_best_group(None);
+        // p1: winner MEMBER (label "win"), runner-up OTHER2 in the
+        // lane (label "lane"). p2: winner OTHER1 (label "win").
+        group.apply_delta(&GroupDelta {
+            prefix: p1,
+            path_id: 0,
+            new: Some((route(p1, MEMBER), None)),
+            old_source: None,
+            policy_label: Some(Arc::from("win")),
+            source_attrs: None,
+        });
+        group.apply_lane(
+            p1,
+            Some(lane_entry(route(p1, OTHER2), MEMBER, "lane", None)),
+        );
+        group.apply_delta(&GroupDelta {
+            prefix: p2,
+            path_id: 0,
+            new: Some((route(p2, OTHER1), None)),
+            old_source: None,
+            policy_label: Some(Arc::from("win")),
+            source_attrs: None,
+        });
+        let mut m = staging_manager();
+        m.group_ribs.insert(PCB_GID, group);
+
+        // MEMBER sourced p1's winner: replay = p2's staged permit
+        // ("win") + p1's lane permit ("lane").
+        m.apply_group_join_counters(MEMBER, PCB_GID, None);
+        // OTHER1 sourced p2's winner with NO lane entry: replay =
+        // p1's staged permit only.
+        m.apply_group_join_counters(OTHER1, PCB_GID, None);
+
+        let stats = |peer: IpAddr| {
+            m.export_policy_stats
+                .get(&peer)
+                .map_or(0, |stats| stats.export_policy_routes_permitted)
+        };
+        assert_eq!(stats(MEMBER), 2);
+        assert_eq!(stats(OTHER1), 1);
+
+        // Label attribution: the substituted permit carries the LANE
+        // entry's label, not the winner's.
+        let gathered = m.metrics.registry().gather();
+        let family = gathered
+            .iter()
+            .find(|family| family.name() == "bgp_policy_routes_total")
+            .expect("policy routes counter family registered");
+        let permits = |peer: IpAddr, policy: &str| {
+            let peer_label = peer.to_string();
+            family
+                .metric
+                .iter()
+                .find(|metric| {
+                    let has = |name: &str, value: &str| {
+                        metric
+                            .get_label()
+                            .iter()
+                            .any(|label| label.name() == name && label.value() == value)
+                    };
+                    has("peer", &peer_label)
+                        && has("policy", policy)
+                        && has("direction", "export")
+                        && has("action", "permit")
+                })
+                .map_or(0.0, |metric| metric.get_counter().value())
+        };
+        assert!((permits(MEMBER, "lane") - 1.0).abs() < f64::EPSILON);
+        assert!((permits(MEMBER, "win") - 1.0).abs() < f64::EPSILON);
+        assert!((permits(OTHER1, "win") - 1.0).abs() < f64::EPSILON);
+        assert!(permits(OTHER1, "lane").abs() < f64::EPSILON);
     }
 
     /// Dirty-member resync: full-table announce minus own-sourced;
