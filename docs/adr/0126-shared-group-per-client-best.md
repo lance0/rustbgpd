@@ -104,6 +104,20 @@ plateau (per-client-best-only, F-scaling, upstream of the commit fan-out)
 belongs to the per-member candidate-multiplicity class this design removes
 structurally, and no phase of this design reintroduces it.
 
+**Staging trigger:** the pass hands per-client-best groups the same
+widened changed-prefix set the ungrouped per-client-best path enumerates
+— every prefix with any candidate change, not only Loc-RIB best flips —
+because the walk's input is the candidate list, not the Loc-RIB best. A
+candidate withdrawal or re-rank can flip the winner or retire the
+runner-up while the Loc-RIB best stands (the chain may deny that best
+outright); staging only best-flip prefixes would leave the lane stale —
+the issue-#21 class Decision 6 rules out. Plain groups keep the exact
+best-changed set: their staging input is Loc-RIB-best-or-nothing, so the
+narrow set is complete for them, and the widened set is not built at all
+when no per-client-best group exists. Winner-equality and lane
+suppression make the widened pass a no-op wherever neither slot moved,
+which is what keeps the per-candidate-change pricing above intact.
+
 **Counter recording:** every evaluation the walk performs enters the
 group's eval accumulator — the winner's permit, the runner-up's permit,
 and every candidate denied ahead of either. This is not a two-eval

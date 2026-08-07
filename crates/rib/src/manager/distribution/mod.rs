@@ -3734,8 +3734,11 @@ impl RibManager {
         // changed prefix), committed to the group tables. The per-peer
         // loop below emits the deltas per member via the source-flip
         // matrix; disqualified peers take the per-peer staging path
-        // exactly as before.
-        let group_stage = self.stage_update_groups(&best_changed, &mut export_memo);
+        // exactly as before. Plain groups stage `best_changed`;
+        // per-client-best groups stage the widened all-affected union
+        // (their winner walk reads the candidate list, not the Loc-RIB
+        // best).
+        let group_stage = self.stage_update_groups(&best_changed, &all_affected, &mut export_memo);
         let mut shared_unicast_probe_cache = SharedUnicastProbeCache::default();
         // LAN-474 emit-time filter: whether a group's pass carries any
         // control-tagged announce delta, memoized per (group, rs_asn) —
@@ -3772,12 +3775,17 @@ impl RibManager {
             // A grouped force-only resync intentionally re-announces the
             // current group table and ignores pass tombstones/deltas. Its
             // setters synchronously run an empty distribution pass, so it
-            // cannot meet a genuine best-change pass. A failed force send is
+            // cannot meet a genuine change pass — an all-affected-only
+            // pass included, since that stages real deltas for
+            // per-client-best groups. A failed force send is
             // also dirty and is valid here: dirty assembly includes the
             // tombstones needed to heal subsequent churn.
             debug_assert!(
-                member_of.is_none() || !is_force || is_dirty || best_changed.is_empty(),
-                "a grouped force-only resync cannot share a nonempty best-change pass"
+                member_of.is_none()
+                    || !is_force
+                    || is_dirty
+                    || (best_changed.is_empty() && all_affected.is_empty()),
+                "a grouped force-only resync cannot share a nonempty distribution pass"
             );
             let resync = is_dirty || is_force;
             #[cfg(feature = "bench-internals")]
@@ -3826,11 +3834,26 @@ impl RibManager {
                 }
                 all.retain(|prefix| !self.selection_deferred(prefix_family(prefix)));
                 Cow::Owned(all)
-            } else if member_of.is_some() {
+            } else if let Some(gid) = member_of {
                 // Grouped peers have no ORR / Add-Path extras (both are
-                // grouping disqualifiers): the group deltas cover
-                // exactly the best-changed set.
-                Cow::Borrowed(&best_changed)
+                // grouping disqualifiers). A plain group's deltas cover
+                // exactly the best-changed set; a per-client-best group
+                // stages from the widened all-affected set (its winner
+                // walk reads the candidate list, not the Loc-RIB best),
+                // so its members' pass scope — the empty-pass gate and
+                // the filtered-inventory and OTC reconciliations —
+                // widens the same way.
+                let group_per_client_best = self
+                    .group_ribs
+                    .get(&gid)
+                    .is_some_and(|group| group.per_client_best);
+                if group_per_client_best && !all_affected.is_empty() {
+                    let mut prefixes = best_changed.clone();
+                    prefixes.extend(all_affected.iter().copied());
+                    Cow::Owned(prefixes)
+                } else {
+                    Cow::Borrowed(&best_changed)
+                }
             } else {
                 // An RFC 9107 ORR peer selects from the per-target
                 // candidate set, not the Loc-RIB best — a candidate

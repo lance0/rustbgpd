@@ -2213,18 +2213,39 @@ impl RibManager {
     /// the per-peer loop emits them per member via the source-flip
     /// matrix. `memo` is the pass-scoped export memo shared with the
     /// ungrouped fallback staging.
+    ///
+    /// A plain group stages exactly `best_changed`: its input is
+    /// Loc-RIB-best-or-nothing, so the narrow set is complete. A
+    /// per-client-best group's winner walk reads the candidate list,
+    /// not the Loc-RIB best — a candidate change can flip the winner
+    /// or the lane while the best stands — so it stages the widened
+    /// `best_changed ∪ all_affected` set, mirroring the ungrouped
+    /// per-client-best enumeration. The union is built once, and only
+    /// when such a group exists; winner-equality and lane suppression
+    /// make the widened pass a no-op wherever neither slot moved.
     pub(in crate::manager) fn stage_update_groups(
         &mut self,
         best_changed: &HashSet<Prefix>,
+        all_affected: &HashSet<Prefix>,
         memo: &mut super::distribution::ExportMemo,
     ) -> HashMap<usize, GroupStageOutput> {
         let mut staged = HashMap::new();
-        if best_changed.is_empty() || self.group_ribs.is_empty() {
+        if self.group_ribs.is_empty() || (best_changed.is_empty() && all_affected.is_empty()) {
             return staged;
         }
+        let widened: Option<HashSet<Prefix>> = (!all_affected.is_empty()
+            && self.group_ribs.values().any(|group| group.per_client_best))
+        .then(|| best_changed.union(all_affected).copied().collect());
         let gids: Vec<usize> = self.group_ribs.keys().copied().collect();
         for gid in gids {
-            let mut out = self.stage_group_prefixes(gid, best_changed, memo);
+            let prefixes = match (&widened, self.group_ribs.get(&gid)) {
+                (Some(widened), Some(group)) if group.per_client_best => widened,
+                _ => best_changed,
+            };
+            if prefixes.is_empty() {
+                continue;
+            }
+            let mut out = self.stage_group_prefixes(gid, prefixes, memo);
             // Built here (the fanout path) and not inside the staging
             // pass: `join_group`'s table-build pass discards its output.
             out.build_shared_emit();
@@ -8433,5 +8454,211 @@ mod tests {
         group.apply_delta(&withdraw_delta(k1, Some(MEMBER)));
         assert_eq!(group.advertised_count_for(OTHER1), 1);
         assert_eq!(group.table.len(), 1);
+    }
+
+    // --- ADR-0126 staging trigger: per-client-best groups stage from
+    // --- the widened all-affected set, plain groups from
+    // --- `best_changed` exactly.
+
+    const OTHER3: IpAddr = IpAddr::V4(Ipv4Addr::new(10, 9, 0, 4));
+
+    /// Plain sibling of [`per_client_best_group`] with a caller-chosen
+    /// export chain — the staging-trigger control group.
+    fn plain_group_with_chain(chain: Option<PolicyChain>) -> GroupRibOut {
+        GroupRibOut::new(
+            chain,
+            false,
+            false,
+            true,
+            None,
+            vec![(Afi::Ipv4, Safi::Unicast)],
+            vec![],
+            false,
+            0,
+        )
+    }
+
+    /// A candidate change that leaves the Loc-RIB best untouched
+    /// (`best_changed` empty, the prefix carried by `all_affected`
+    /// alone) must still restage a per-client-best group: the walk's
+    /// input is the candidate list, not the Loc-RIB best. The chain
+    /// denies the Loc-RIB best, so the advertised winner is the
+    /// second-ranked candidate — withdrawing IT moves the wire while
+    /// the best stands.
+    #[test]
+    fn pcb_group_restages_from_all_affected_without_best_change() {
+        let mut m = staging_manager();
+        let p = prefix(1);
+        let mut rx = register_pcb_member(
+            &mut m,
+            MEMBER,
+            per_client_best_group(Some(deny_sources_chain(&[OTHER1]))),
+        );
+        seed(&mut m, cand(p, OTHER1, 300)); // Loc-RIB best, chain-denied
+        seed(&mut m, cand(p, OTHER2, 200)); // advertised winner
+        seed(&mut m, cand(p, OTHER3, 100));
+        let changed = m.recompute_best(&HashSet::from([p]));
+        m.distribute_changes(&changed, &HashSet::from([p]));
+        let (announced, _) = folded_outbound(&mut rx);
+        assert_eq!(
+            announced[&p].0, OTHER2,
+            "precondition: the winner is the second-ranked candidate"
+        );
+
+        // Withdraw the WINNER's candidate — not the Loc-RIB best, so
+        // selection reports no best change.
+        unseed(&mut m, OTHER2, p);
+        let changed = m.recompute_best(&HashSet::from([p]));
+        assert!(
+            changed.is_empty(),
+            "precondition: the Loc-RIB best is unmoved"
+        );
+        m.distribute_changes(&changed, &HashSet::from([p]));
+        let group = m.group_ribs.get(&PCB_GID).unwrap();
+        assert_eq!(
+            group.table.get(&p, 0).map(|r| r.peer),
+            Some(OTHER3),
+            "the widened pass restages the next permitted candidate"
+        );
+        let (announced, withdrawn) = folded_outbound(&mut rx);
+        assert_eq!(
+            announced.get(&p).map(|(source, _)| *source),
+            Some(OTHER3),
+            "the member receives the new winner"
+        );
+        assert!(withdrawn.is_empty());
+    }
+
+    /// The staging-trigger control: a plain group with the same
+    /// candidates and chain stages Loc-RIB-best-or-nothing, so the
+    /// same candidate withdrawal correctly restages nothing.
+    #[test]
+    fn plain_group_denied_best_does_not_restage_on_candidate_withdrawal() {
+        let mut m = staging_manager();
+        let p = prefix(1);
+        let mut rx = register_pcb_member(
+            &mut m,
+            MEMBER,
+            plain_group_with_chain(Some(deny_sources_chain(&[OTHER1]))),
+        );
+        seed(&mut m, cand(p, OTHER1, 300));
+        seed(&mut m, cand(p, OTHER2, 200));
+        seed(&mut m, cand(p, OTHER3, 100));
+        let changed = m.recompute_best(&HashSet::from([p]));
+        m.distribute_changes(&changed, &HashSet::from([p]));
+
+        unseed(&mut m, OTHER2, p);
+        let changed = m.recompute_best(&HashSet::from([p]));
+        assert!(changed.is_empty());
+        m.distribute_changes(&changed, &HashSet::from([p]));
+        let group = m.group_ribs.get(&PCB_GID).unwrap();
+        assert!(
+            group.table.get(&p, 0).is_none(),
+            "the denied Loc-RIB best stages nothing for a plain group"
+        );
+        let (announced, withdrawn) = folded_outbound(&mut rx);
+        assert!(announced.is_empty() && withdrawn.is_empty());
+    }
+
+    /// The lane-stale shape from the `OpenBGPD` issue-#21 family: the
+    /// permitted winner IS the (unmoved) Loc-RIB best and the
+    /// runner-up candidate is withdrawn — `best_changed` stays empty.
+    /// The widened pass retires the lane and withdraws the substituted
+    /// slot from `source(w)`; staging only `best_changed` would leave
+    /// the lane stale and the withdrawn route on that member's wire.
+    #[test]
+    fn pcb_lane_retires_when_runner_up_withdrawn_without_best_change() {
+        let mut m = staging_manager();
+        let p = prefix(1);
+        let mut rx = register_pcb_member(&mut m, OTHER1, per_client_best_group(None));
+        seed(&mut m, cand(p, OTHER1, 300)); // winner = Loc-RIB best, member-sourced
+        seed(&mut m, cand(p, OTHER2, 200)); // runner-up
+        let changed = m.recompute_best(&HashSet::from([p]));
+        m.distribute_changes(&changed, &HashSet::from([p]));
+        let (announced, _) = folded_outbound(&mut rx);
+        assert_eq!(
+            announced[&p].0, OTHER2,
+            "precondition: source(w) holds the lane substitution"
+        );
+        assert_eq!(lane_source(&m, p), Some(OTHER2));
+
+        unseed(&mut m, OTHER2, p);
+        let changed = m.recompute_best(&HashSet::from([p]));
+        assert!(
+            changed.is_empty(),
+            "precondition: the Loc-RIB best is unmoved"
+        );
+        m.distribute_changes(&changed, &HashSet::from([p]));
+        assert_eq!(
+            lane_source(&m, p),
+            None,
+            "the widened pass retires the lane"
+        );
+        let (announced, withdrawn) = folded_outbound(&mut rx);
+        assert!(announced.is_empty());
+        assert_eq!(
+            withdrawn,
+            vec![(p, 0)],
+            "the substituted slot is withdrawn from source(w)"
+        );
+    }
+
+    /// Cost guard for the widened pass (ADR-0126 Decision 2 pricing):
+    /// a candidate change below both slots restages the prefix through
+    /// the walk, but winner-equality and lane suppression make it a
+    /// no-op — zero deltas, zero lane transitions.
+    #[test]
+    fn pcb_widened_pass_with_unchanged_winner_and_lane_is_noop() {
+        let mut m = staging_manager();
+        let p = prefix(1);
+        seed(&mut m, cand(p, OTHER1, 300));
+        seed(&mut m, cand(p, OTHER2, 200));
+        seed(&mut m, cand(p, OTHER3, 100));
+        m.group_ribs.insert(PCB_GID, per_client_best_group(None));
+        let _ = stage_pcb(&mut m, &[p]);
+
+        // The third-ranked candidate churns — below the winner AND the
+        // lane; the prefix arrives via `all_affected` alone.
+        unseed(&mut m, OTHER3, p);
+        let mut memo = super::super::distribution::ExportMemo::default();
+        let staged = m.stage_update_groups(&HashSet::new(), &HashSet::from([p]), &mut memo);
+        let out = staged.get(&PCB_GID).expect("per-client-best group staged");
+        assert!(out.deltas.is_empty(), "unchanged winner stays suppressed");
+        assert!(
+            out.lane_deltas.is_empty(),
+            "unchanged lane stays suppressed"
+        );
+        assert_eq!(lane_source(&m, p), Some(OTHER2));
+    }
+
+    /// Plain groups keep the exact `best_changed` staging input: an
+    /// all-affected-only pass stages no plain group at all (the
+    /// widened set is never even built without a per-client-best
+    /// group), and a mixed pass never leaks all-affected extras into a
+    /// plain group's staging.
+    #[test]
+    fn plain_group_staging_keeps_best_changed_exactly() {
+        const PLAIN_GID: usize = 92;
+        let mut m = staging_manager();
+        let (p, q) = (prefix(1), prefix(2));
+        seed(&mut m, cand(p, OTHER1, 300));
+        seed(&mut m, cand(q, OTHER2, 300));
+        let _ = m.recompute_best(&HashSet::from([p, q]));
+        m.group_ribs.insert(PLAIN_GID, empty_group());
+        let mut memo = super::super::distribution::ExportMemo::default();
+        let staged = m.stage_update_groups(&HashSet::new(), &HashSet::from([p]), &mut memo);
+        assert!(
+            staged.is_empty(),
+            "an all-affected-only pass stages no plain group"
+        );
+        let staged = m.stage_update_groups(&HashSet::from([p]), &HashSet::from([p, q]), &mut memo);
+        let out = staged
+            .get(&PLAIN_GID)
+            .expect("plain group staged over best_changed");
+        assert_eq!(out.deltas.len(), 1);
+        assert_eq!(
+            out.deltas[0].prefix, p,
+            "all-affected extras never reach a plain group"
+        );
     }
 }
