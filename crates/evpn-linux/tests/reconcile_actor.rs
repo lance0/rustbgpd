@@ -3728,6 +3728,67 @@ async fn l3_permanent_route_failure_is_pruned_after_desired_withdraw() {
     h.shutdown().await;
 }
 
+// Gate 9 L3 mirror of `failed_apply_retries_on_backoff_timer`: a
+// transiently failing L3 op must not be re-attempted by wakes inside
+// its backoff window (no netlink hammering), and must retry on the
+// dedicated retry timer once the backoff elapses.
+#[tokio::test(start_paused = true)]
+async fn failed_l3_apply_backs_off_and_retries_on_timer() {
+    let mut h = Harness::spawn(ReconcileActorConfig::for_tests());
+    h.handle.set_ip_vrf_status(l3_vrf_id(), l3_ready_status());
+    h.handle.set_l3vxlan_ifindex(l3_vrf_id(), L3_IFINDEX);
+
+    let target = DataplaneOp::AddRemoteIpRoute {
+        vrf_id: l3_vrf_id(),
+        prefix: l3_prefix(),
+        table_id: L3_TABLE_ID,
+        l3vxlan_ifindex: L3_IFINDEX,
+        next_hop: ipa("10.0.0.2"),
+        router_mac: l3_router_mac(),
+    };
+    h.handle.inject_failure_io(Some(target));
+
+    let ip_vrfs = l3_ip_vrfs();
+    let prefixes = l3_desired_prefixes(&ip_vrfs);
+    h.intent_tx.send(l3_intent(1, ip_vrfs, prefixes)).unwrap();
+    let _ = wait_for_generation(&mut h, 1).await;
+    assert!(
+        !h.handle.kernel_has_l3_route(L3_TABLE_ID, l3_prefix()),
+        "transient route failure must leave the route uninstalled"
+    );
+    let after_failure = h.handle.apply_count();
+
+    // A wake inside the backoff window (no virtual time has passed)
+    // must NOT re-attempt the failed op.
+    let ip_vrfs = l3_ip_vrfs();
+    let prefixes = l3_desired_prefixes(&ip_vrfs);
+    h.intent_tx.send(l3_intent(2, ip_vrfs, prefixes)).unwrap();
+    let _ = wait_for_generation(&mut h, 2).await;
+    assert_eq!(
+        h.handle.apply_count(),
+        after_failure,
+        "transiently failed L3 op re-attempted with zero backoff"
+    );
+    assert!(!h.handle.kernel_has_l3_route(L3_TABLE_ID, l3_prefix()));
+
+    // The dedicated retry timer re-fires the pass once the backoff
+    // elapses (100 ms ± 25% jitter — allow slack), and the retry
+    // succeeds.
+    tokio::time::advance(Duration::from_millis(200)).await;
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_millis(200)).await;
+    tokio::task::yield_now().await;
+    let _ = h.try_drain_reports().await;
+    assert!(
+        h.handle.kernel_has_l3_route(L3_TABLE_ID, l3_prefix()),
+        "retry timer should have re-run the pass and installed the route; apply_count={}",
+        h.handle.apply_count()
+    );
+    assert!(h.handle.apply_count() > after_failure);
+
+    h.shutdown().await;
+}
+
 #[tokio::test]
 async fn l3_all_active_to_single_cleans_up_l3_nhg_state() {
     let mut h = Harness::spawn(ReconcileActorConfig::for_tests());

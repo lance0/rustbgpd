@@ -66,7 +66,7 @@ use crate::snapshot::{
     vlan_rows_contain,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum L3OpKey {
     Route {
         vrf_id: IpVrfId,
@@ -293,6 +293,13 @@ struct ActorState {
     /// keys so two bridge lifecycle failures cannot suppress each
     /// other or collide with non-FDB report placeholders.
     managed_retry: RetrySchedule<ManagedNetdevOpKey>,
+    /// Retry schedule for Gate 9 L3 (IP-VRF) ops, keyed by
+    /// [`L3OpKey`]. Mirrors the L2 schedules (100 ms → 5 s + jitter,
+    /// cleared on success): without it a transiently failing L3 op
+    /// (e.g. `EBUSY`) re-applied on every reconcile wake with zero
+    /// backoff, hammering netlink and blocking the ADR-0079 reap on
+    /// each pass.
+    l3_retry: RetrySchedule<L3OpKey>,
     /// Per-bridge permanent-failure suppression for managed-netdev
     /// bridge ops. Same fingerprint-equality semantics as the FDB /
     /// BUM maps: changing the desired bridge shape clears the
@@ -529,6 +536,7 @@ impl ActorState {
             nhg_permanent_failures: BTreeMap::new(),
             managed_retry: RetrySchedule::new(),
             managed_permanent_failures: BTreeMap::new(),
+            l3_retry: RetrySchedule::new(),
             pending_deletes: BTreeSet::new(),
             warned_ipv6_fallback: BTreeSet::new(),
             warned_foreign_fdb: BTreeSet::new(),
@@ -621,24 +629,32 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         }
 
         loop {
-            // Compute the next retry deadline across the five retry
+            // Compute the next retry deadline across the six retry
             // schedules — FDB ops keyed by `(VNI, MAC)`, BUM and
             // AC-gate ops keyed by ifindex (separate schedules),
-            // FDB-NHG group-level ops keyed by `AliasGroupKey`, and
+            // FDB-NHG group-level ops keyed by `AliasGroupKey`,
             // managed-netdev ops keyed by `ManagedNetdevOpKey` (LAN-290:
             // previously missing, so a transiently failed managed op
-            // only retried on the next unrelated wake). The earliest
-            // wakes the actor.
+            // only retried on the next unrelated wake), and Gate 9 L3
+            // ops keyed by `L3OpKey`. The earliest wakes the actor.
             let next_fdb = self.state.retry.earliest_due();
             let next_bum = self.state.bum_retry.earliest_due();
             let next_ac_gate = self.state.ac_gate_retry.earliest_due();
             let next_nhg = self.state.nhg_retry.earliest_due();
             let next_managed = self.state.managed_retry.earliest_due();
-            let retry_due = [next_fdb, next_bum, next_ac_gate, next_nhg, next_managed]
-                .into_iter()
-                .flatten()
-                .min()
-                .map(|due_ms| self.state.epoch + Duration::from_millis(due_ms));
+            let next_l3 = self.state.l3_retry.earliest_due();
+            let retry_due = [
+                next_fdb,
+                next_bum,
+                next_ac_gate,
+                next_nhg,
+                next_managed,
+                next_l3,
+            ]
+            .into_iter()
+            .flatten()
+            .min()
+            .map(|due_ms| self.state.epoch + Duration::from_millis(due_ms));
 
             tokio::select! {
                 biased;
@@ -1514,6 +1530,18 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             }
             self.state.last_l3_drop_counts =
                 crate::l3_diff::drop_counts_by_vrf_reason(&l3_plan.drops, intent.ip_vrfs.as_ref());
+            // Prune retry entries whose op left the plan (withdrawn or
+            // superseded) — a stale entry's past-due deadline would
+            // otherwise pin the actor's retry timer in the past and
+            // busy-loop reconcile passes. Pruned against the full plan
+            // (not the guard-gated slice) so a fail-closed pass keeps
+            // its backoff state.
+            let planned_l3_keys: BTreeSet<L3OpKey> =
+                l3_plan.ops.iter().filter_map(l3_op_key).collect();
+            self.state
+                .l3_retry
+                .retain(|key| planned_l3_keys.contains(key));
+            let l3_now_ms = self.state.now_ms();
             // Apply-time fail-stop: an `AddRemoteIpRoute` whose
             // prerequisite `AddL3Neighbor` or `AddL3VxlanFdb` failed
             // earlier in this pass MUST NOT proceed — otherwise the
@@ -1567,7 +1595,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                             // dependent route adds in this pass are
                             // fail-stopped through the prerequisite
                             // sets, and the reap is blocked.
-                            if let Some(key) = l3_key.clone() {
+                            if let Some(key) = l3_key {
                                 if !self.state.warned_foreign_l3.contains(&key) {
                                     self.state.foreign_since_report.replaces_blocked += 1;
                                     tracing::warn!(
@@ -1633,6 +1661,28 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                         "L3",
                     )
                 {
+                    record_l3_prerequisite_failure(
+                        op,
+                        &mut failed_neighbor_keys,
+                        &mut failed_fdb_keys,
+                        &mut failed_l3_group_keys,
+                    );
+                    l3_pass_had_failures = true;
+                    continue;
+                }
+                // Transient retry gating — mirror of the L2 apply path:
+                // skip until the per-op exponential backoff (100 ms →
+                // 5 s + jitter) elapses; the actor's outer `select!`
+                // re-fires on the retry timer. A deferred op fail-stops
+                // its dependents exactly like a failed apply, and the
+                // non-converged pass keeps the ADR-0079 reap blocked.
+                if let Some(key) = l3_key.as_ref()
+                    && let Some(next_due_ms) = self.state.l3_retry.next_due_for(*key)
+                    && next_due_ms > l3_now_ms
+                {
+                    let retry_in_ms =
+                        u32::try_from(next_due_ms.saturating_sub(l3_now_ms)).unwrap_or(u32::MAX);
+                    tracing::trace!(?op, retry_in_ms, "L3 op deferred (backoff not elapsed)");
                     record_l3_prerequisite_failure(
                         op,
                         &mut failed_neighbor_keys,
@@ -1716,6 +1766,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                         );
                         if let Some(key) = l3_key.as_ref() {
                             self.state.l3_permanent_failures.remove(key);
+                            self.state.l3_retry.record_success(*key);
                         }
                         // ADR-0079 claim: a successful add over an
                         // adopted key replaced the crash leftover
@@ -1763,12 +1814,6 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                     }
                     Err(e) => {
                         let class = e.class();
-                        tracing::warn!(
-                            ?class,
-                            error = %e,
-                            ?op,
-                            "L3 op failed; preserving owned state for next reconcile retry"
-                        );
                         l3_pass_had_failures = true;
                         record_l3_prerequisite_failure(
                             op,
@@ -1776,10 +1821,38 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                             &mut failed_fdb_keys,
                             &mut failed_l3_group_keys,
                         );
-                        if class == FailureClass::Permanent
-                            && let Some(key) = l3_key
-                        {
-                            self.state.l3_permanent_failures.insert(key, op.clone());
+                        match class {
+                            FailureClass::Transient | FailureClass::Conflict => {
+                                let retry_in_ms = l3_key.map(|key| {
+                                    let next_due_ms =
+                                        self.state.l3_retry.record_failure(key, l3_now_ms);
+                                    u32::try_from(next_due_ms.saturating_sub(l3_now_ms))
+                                        .unwrap_or(u32::MAX)
+                                });
+                                tracing::warn!(
+                                    ?class,
+                                    ?retry_in_ms,
+                                    error = %e,
+                                    ?op,
+                                    "L3 op failed; preserving owned state, retrying on backoff"
+                                );
+                            }
+                            FailureClass::Permanent => {
+                                if let Some(key) = l3_key {
+                                    // Drop from the transient schedule
+                                    // so we don't double-tick; the
+                                    // fingerprint suppression takes
+                                    // over until the op shape changes.
+                                    self.state.l3_retry.record_success(key);
+                                    self.state.l3_permanent_failures.insert(key, op.clone());
+                                }
+                                tracing::warn!(
+                                    ?class,
+                                    error = %e,
+                                    ?op,
+                                    "L3 op failed permanently; suppressed until op shape changes"
+                                );
+                            }
                         }
                     }
                 }
@@ -1806,6 +1879,10 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             .await;
         } else {
             self.state.last_l3_drop_counts.clear();
+            // No L3 intent — clear any leftover retry entries so a
+            // removed VRF's stale deadlines cannot keep waking the
+            // actor.
+            self.state.l3_retry.retain(|_| false);
         }
 
         let status = build_instance_status(&intent.instances, &probes);
@@ -1853,6 +1930,56 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         let mut applied = Vec::with_capacity(plan.len());
         let mut failed = Vec::new();
         let now_ms = self.state.now_ms();
+
+        // Prune retry entries whose op left the plan (withdrawn or
+        // superseded): a stale entry's past-due deadline would
+        // otherwise pin the actor's retry timer in the past and
+        // busy-loop reconcile passes. Same key-space dispatch as the
+        // gating below.
+        let mut planned_fdb: BTreeSet<(EvpnInstanceId, MacAddress)> = BTreeSet::new();
+        let mut planned_bum: BTreeSet<u32> = BTreeSet::new();
+        let mut planned_ac_gate: BTreeSet<u32> = BTreeSet::new();
+        let mut planned_nhg: BTreeSet<crate::group_state::AliasGroupKey> = BTreeSet::new();
+        let mut planned_managed: BTreeSet<ManagedNetdevOpKey> = BTreeSet::new();
+        for op in &plan.ops {
+            match op {
+                DataplaneOp::SetBumPortFlags { ifindex, .. } => {
+                    planned_bum.insert(*ifindex);
+                }
+                DataplaneOp::SetAcPortState { ifindex, .. } => {
+                    planned_ac_gate.insert(*ifindex);
+                }
+                DataplaneOp::UpdateFdbNhgMembers { group_key, .. } => {
+                    planned_nhg.insert(*group_key);
+                }
+                DataplaneOp::CreateManagedBridge { .. }
+                | DataplaneOp::RemoveManagedBridge { .. }
+                | DataplaneOp::CreateManagedVxlan { .. }
+                | DataplaneOp::RemoveManagedVxlan { .. }
+                | DataplaneOp::CreateManagedSvdVxlan { .. }
+                | DataplaneOp::RemoveManagedSvdVxlan { .. }
+                | DataplaneOp::CreateManagedVrf { .. }
+                | DataplaneOp::RemoveManagedVrf { .. }
+                | DataplaneOp::CreateManagedL3Vxlan { .. }
+                | DataplaneOp::RemoveManagedL3Vxlan { .. }
+                | DataplaneOp::CreateManagedVlanUpper { .. }
+                | DataplaneOp::RemoveManagedVlanUpper { .. } => {
+                    planned_managed.insert(managed_op_key(op).expect("managed op has a key"));
+                }
+                _ => {
+                    planned_fdb.insert((fdb_op_vni(op), fdb_op_mac(op)));
+                }
+            }
+        }
+        self.state.retry.retain(|key| planned_fdb.contains(key));
+        self.state.bum_retry.retain(|key| planned_bum.contains(key));
+        self.state
+            .ac_gate_retry
+            .retain(|key| planned_ac_gate.contains(key));
+        self.state.nhg_retry.retain(|key| planned_nhg.contains(key));
+        self.state
+            .managed_retry
+            .retain(|key| planned_managed.contains(key));
 
         for op in &plan.ops {
             // Permanent-failure suppression — dispatched per op shape

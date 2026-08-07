@@ -2374,7 +2374,11 @@ EVPN runtime model and returns a plan summary. Use `validate_only=true`
 to inspect added/deleted/redefined/unchanged EVPN instances, IP-VRFs,
 and Ethernet Segments — plus the `ip_vrf_references_changed` flag, which is
 the only non-empty plan signal for a pure `ip_vrf` relink — without changing
-the committed generation.
+the committed generation. A dry-run rejects exactly what a commit of the
+identical candidate would reject, including the actor-availability
+preconditions: an L2VNI add validated on an RR-only daemon (which spawns no
+EVPN dataplane actors) fails with the same `FAILED_PRECONDITION` the commit
+would return.
 
 ```bash
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \

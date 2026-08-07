@@ -36,6 +36,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   mismatch, manifest/input binding, achieved-overlap drift, grouped-bound
   violations, and mismatched received-view scenarios.
 
+### Changed
+
+- GTSM (RFC 5082) now enforces strict TTL/Hop-Limit 255 on receive
+  (`IP_MINTTL` / `IPV6_MINHOPCOUNT` raised from 254), matching RFC 5082
+  §3.2, FRR/BIRD, and the BFD receive path's exact-255 check. A
+  conformant directly connected peer always emits 255; a session that
+  depended on the previous one-hop-off leniency will no longer
+  establish.
+
 ### Fixed
 
 - API service consistency batch (LAN-898): every peer-manager read now
@@ -47,6 +56,36 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   peer label so link-local peers correlate across event streams; and
   `StreamPlanConfigTransaction` bounds its post-handoff response wait by
   the total deadline, matching `StreamApplyConfigTransaction`.
+- The BGP listener accept loop classifies `accept(2)` errors instead of
+  hot-continuing: resource exhaustion (`EMFILE`/`ENFILE`/`ENOMEM`/
+  `ENOBUFS`) backs off progressively (100 ms doubling to 1 s, reset on
+  the next successful accept) instead of spinning the CPU and flooding
+  the log; an unusable listening socket (`EBADF`/`ENOTSOCK`/`EINVAL`/
+  `EOPNOTSUPP`) stops the loop; per-connection failures
+  (`ECONNABORTED`, ...) continue immediately as before.
+
+- EVPN L3 (IP-VRF) reconcile ops now feed the same per-op exponential
+  retry backoff (100 ms → 5 s + jitter, cleared on success) every L2 op
+  class already had. A transiently failing L3 op (e.g. netlink `EBUSY`)
+  used to re-apply on every reconcile wake with zero backoff — and only
+  ever retried when something else woke the actor; it now defers until
+  its backoff elapses and a dedicated retry timer re-fires the pass.
+  Retry entries whose op left the plan (withdrawn or superseded) are
+  pruned across all six schedules so a stale past-due deadline cannot
+  pin the retry timer in the past and busy-loop reconcile passes.
+
+- The BFD receive path discards control packets whose UDP source port
+  falls outside the RFC 5881 §4 range 49152..=65535 —
+  defense-in-depth alongside the exact-TTL check and Your-Discriminator
+  demux that already gate the path.
+- `ApplyEvpnRuntime` `validate_only` now enforces the same actor-availability
+  preconditions a commit would (LAN-897). A dry-run of e.g. an L2VNI add on an
+  RR-only daemon (no EVPN dataplane actors spawned) used to report
+  `EvpnRuntimeApplyValidated` while committing the identical candidate
+  returned `FAILED_PRECONDITION` — the validate verdict is now the commit's:
+  the routed converge method's actor preconditions (presence + openness,
+  including per-step for decomposable mixed candidates) run side-effect-free
+  through a shared availability gate, so validate and commit agree.
 
 - EVPN wire encoding no longer emits silently wrong bytes for invariant
   violations that were only debug-asserted (LAN-896). Release builds
