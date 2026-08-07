@@ -885,7 +885,7 @@ impl PeerManager {
                             let _ = reply.send(result);
                         }
                         PeerManagerCommand::ReconfigurePeer { config, reply } => {
-                            let result = self.reconfigure_peer(config).await;
+                            let result = self.reconfigure_peer_runtime(config).await;
                             let _ = reply.send(result);
                         }
                         PeerManagerCommand::ListPeers { reply } => {

@@ -154,7 +154,7 @@ shape itself does not raise the tier.
 |-----|------|-------|
 | `ListPeerGroups` | `sensitive_read` | Exposes group templates including inherited policy chain names; `md5_password` is redacted from read responses and represented by `has_md5_password`. |
 | `GetPeerGroup` | `sensitive_read` | Single-group; `md5_password` is redacted from read responses and represented by `has_md5_password`. |
-| `SetPeerGroup` | `operator_only` | Edits propagate to every neighbor inheriting the group — blast radius is N peers, not one. This is also the current gRPC-visible credential ingress for `md5_password`. |
+| `SetPeerGroup` | `operator_only` | Edits propagate to every neighbor inheriting the group — blast radius is N peers, not one. `md5_password` may be set when creating a group, but changing `md5_password` or `ttl_security` on an existing group is rejected `FAILED_PRECONDITION`: the inbound listener key/TTL inventory is updated only by startup or SIGHUP reload. |
 | `DeletePeerGroup` | `operator_only` | Same propagation; will fail if any neighbor still references the group. |
 | `SetNeighborPeerGroup` | `mutating` | Single-neighbor reassignment. |
 | `ClearNeighborPeerGroup` | `mutating` | Single-neighbor. |
@@ -293,7 +293,9 @@ specific method if the model warrants it.
    reject at handshake, not pretend to filter per-event.
 5. **Credential ingress is narrow but not `AddNeighbor`.** The
    gRPC-visible credential-bearing field today is
-   `PeerGroupDefinition.md5_password` through `SetPeerGroup`; static
+   `PeerGroupDefinition.md5_password` through `SetPeerGroup` (group
+   creation only — changing it on an existing group is rejected because
+   the inbound listener key inventory is startup/SIGHUP-pinned); static
    neighbor TCP-AO is TOML/runtime-only and is not exposed through
    gRPC. Read paths never echo secret material back:
    `ListPeerGroups` and `GetPeerGroup` redact `md5_password` instead

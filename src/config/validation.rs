@@ -1232,6 +1232,82 @@ impl Config {
             }
         }
 
+        // Inbound MD5 for a dynamic range is enforced with a prefix-scoped
+        // kernel key on the shared listener, and the kernel resolves
+        // overlapping keys by longest prefix match. Any address whose
+        // accept-time configuration resolves to "no MD5" but whose kernel
+        // key lookup resolves to a range key would be silently forced to
+        // sign — its legitimate unsigned connection dropped with no
+        // counterpart socket ever knowing why. Reject those shapes at load.
+        for (i, dn) in self.dynamic_neighbors.iter().enumerate() {
+            if dn.tcp_ao.is_some() {
+                continue;
+            }
+            let range_has_md5 = self
+                .peer_groups
+                .get(&dn.peer_group)
+                .is_some_and(|group| group.md5_password.is_some());
+            if !range_has_md5 {
+                continue;
+            }
+            for neighbor in &self.neighbors {
+                let Ok(address) = neighbor.address.parse::<IpAddr>() else {
+                    continue;
+                };
+                let host_prefix = (address, if address.is_ipv4() { 32 } else { 128 });
+                if !dynamic_prefixes_intersect(parsed_dynamic_prefixes[i], host_prefix)
+                    || neighbor.tcp_ao.is_some()
+                {
+                    continue;
+                }
+                let neighbor_has_md5 = neighbor.md5_password.is_some()
+                    || neighbor
+                        .peer_group
+                        .as_deref()
+                        .and_then(|name| self.peer_groups.get(name))
+                        .is_some_and(|group| group.md5_password.is_some());
+                if !neighbor_has_md5 {
+                    return Err(ConfigError::InvalidDynamicNeighbor {
+                        reason: format!(
+                            "dynamic_neighbors[{i}] {:?} requires MD5 via peer_group {:?}, but \
+                             static neighbor {:?} inside the range has no md5_password: the \
+                             kernel's prefix key would require a signature this neighbor never \
+                             sends. Give the neighbor an md5_password or move it outside the \
+                             range",
+                            dn.prefix, dn.peer_group, neighbor.address
+                        ),
+                    });
+                }
+            }
+            for (j, other) in self.dynamic_neighbors.iter().enumerate() {
+                if i == j
+                    || !dynamic_prefixes_intersect(
+                        parsed_dynamic_prefixes[i],
+                        parsed_dynamic_prefixes[j],
+                    )
+                {
+                    continue;
+                }
+                let other_has_md5 = other.tcp_ao.is_none()
+                    && self
+                        .peer_groups
+                        .get(&other.peer_group)
+                        .is_some_and(|group| group.md5_password.is_some());
+                if !other_has_md5 && parsed_dynamic_prefixes[j].1 >= parsed_dynamic_prefixes[i].1 {
+                    return Err(ConfigError::InvalidDynamicNeighbor {
+                        reason: format!(
+                            "dynamic_neighbors[{j}] {:?} has no MD5 but nests inside \
+                             MD5-protected dynamic_neighbors[{i}] {:?}: members of the inner \
+                             range would resolve to a plaintext peer group while the kernel's \
+                             prefix key requires a signature. Protect the inner range or make \
+                             the ranges disjoint",
+                            other.prefix, dn.prefix
+                        ),
+                    });
+                }
+            }
+        }
+
         validate_tcp_ao_listener_capacity(self, &parsed_dynamic_prefixes)?;
 
         // Validate dynamic_neighbor_limit range

@@ -346,6 +346,45 @@ fn config_keyring_is_deletion(
             .all(|(index, key)| survivors.contains(&index) || key.deprecated)
 }
 
+/// Complete listener inbound-auth inventory (TCP MD5 keys + GTSM selectors)
+/// for one config snapshot, built from the same per-neighbor / per-range
+/// builders the startup bind path uses.
+fn listener_inbound_auth_inventory(
+    config: &Config,
+) -> Result<
+    (
+        Vec<rustbgpd_transport::Md5ListenerKey>,
+        Vec<rustbgpd_transport::TtlSecurityListenerPolicy>,
+    ),
+    String,
+> {
+    let listen_addr = config.listen_addr();
+    let resolved = config
+        .resolved_neighbors()
+        .map_err(|error| error.to_string())?;
+    let md5_keys = resolved
+        .iter()
+        .filter_map(|neighbor| crate::md5_listener_key_for_neighbor(listen_addr, neighbor))
+        .chain(config.dynamic_neighbors.iter().filter_map(|range| {
+            crate::md5_listener_key_for_dynamic_range(listen_addr, range, &config.peer_groups)
+        }))
+        .collect();
+    let ttl_security = resolved
+        .iter()
+        .filter_map(|neighbor| {
+            crate::ttl_security_listener_policy_for_neighbor(listen_addr, neighbor)
+        })
+        .chain(config.dynamic_neighbors.iter().filter_map(|range| {
+            crate::ttl_security_listener_policy_for_dynamic_range(
+                listen_addr,
+                range,
+                &config.peer_groups,
+            )
+        }))
+        .collect();
+    Ok((md5_keys, ttl_security))
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "the compiler must validate static and dynamic owner inventories together before issuing one immutable generation plan"
@@ -1563,6 +1602,41 @@ pub(crate) async fn reload_config_with_tcp_ao(
             operation = ?plan.operation,
             "TCP-AO generation applied to listener and established sessions"
         );
+    }
+
+    // Listener inbound MD5/GTSM inventory follows the same config → listener
+    // flow as the TCP-AO keys above, but as a plain converging replacement:
+    // an MD5 password change is inherently session-disruptive, so there is no
+    // multi-generation rotation to preserve. The listener is updated before
+    // sessions reconcile so a bounced peer's inbound reconnect already meets
+    // the new inventory.
+    if let Some(listener) = tcp_ao_listener {
+        let current_inventory = match listener_inbound_auth_inventory(current) {
+            Ok(inventory) => inventory,
+            Err(error) => {
+                error!(%error, "failed to compute the live listener inbound-auth inventory");
+                return None;
+            }
+        };
+        let desired_inventory = match listener_inbound_auth_inventory(&new_config) {
+            Ok(inventory) => inventory,
+            Err(error) => {
+                error!(%error, "failed to compute the desired listener inbound-auth inventory");
+                return None;
+            }
+        };
+        if current_inventory != desired_inventory {
+            let (md5_keys, ttl_security) = desired_inventory;
+            if let Err(error) = listener.replace_inbound_auth(md5_keys, ttl_security).await {
+                error!(
+                    error = %error,
+                    "listener inbound MD5/GTSM inventory replacement failed; \
+                     refusing reload (retrying the identical reload converges)"
+                );
+                return None;
+            }
+            info!("listener inbound MD5/GTSM inventory replaced");
+        }
     }
 
     let dataset_commit = desired_config.prepare_staged_datasets(&current.policy.dataset_bindings);
@@ -2869,7 +2943,7 @@ mod tests {
             (concat!("explicit_tier", "_test_toml("), 3),
             (concat!("write_tier", "_test_config("), 12),
             (concat!("load_tier", "_test_config("), 29),
-            (concat!("load_tier", "_test_toml("), 6),
+            (concat!("load_tier", "_test_toml("), 8),
             (concat!("tier_authorized_uds", "_test_config("), 2),
             (concat!("assert_tier_authorized", "_test_config("), 17),
         ];
@@ -6393,6 +6467,60 @@ hold_time = 90
         assert_eq!(
             desired.0.iter().map(|key| key.send_id).collect::<Vec<_>>(),
             [2, 1]
+        );
+    }
+
+    #[test]
+    fn listener_inbound_auth_inventory_tracks_md5_and_gtsm_changes() {
+        let base = |group_auth: &str| {
+            format!(
+                r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+[global.telemetry]
+log_format = "json"
+[peer_groups.members]
+{group_auth}
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+md5_password = "static-secret"
+[[dynamic_neighbors]]
+prefix = "192.0.2.0/24"
+peer_group = "members"
+"#
+            )
+        };
+        let current = load_tier_test_toml(&base("md5_password = \"old\""), "inbound-auth-old");
+        let desired = load_tier_test_toml(
+            &base("md5_password = \"new\"\nttl_security = true"),
+            "inbound-auth-new",
+        );
+
+        let current_inventory = listener_inbound_auth_inventory(&current).unwrap();
+        // Identical config → identical inventory: no spurious replacement.
+        assert_eq!(
+            current_inventory,
+            listener_inbound_auth_inventory(&current).unwrap()
+        );
+        let desired_inventory = listener_inbound_auth_inventory(&desired).unwrap();
+        assert_ne!(current_inventory, desired_inventory);
+
+        // The desired inventory carries the static host key, the group's
+        // range prefix key, and the enforcing range GTSM selector.
+        let (md5_keys, ttl_security) = desired_inventory;
+        let selectors: Vec<(String, u8)> = md5_keys
+            .iter()
+            .map(|key| (key.peer.to_string(), key.prefix_len))
+            .collect();
+        assert!(selectors.contains(&("10.0.0.2".to_string(), 32)));
+        assert!(selectors.contains(&("192.0.2.0".to_string(), 24)));
+        assert!(
+            ttl_security
+                .iter()
+                .any(|policy| policy.enforce && policy.prefix_len == 24)
         );
     }
 

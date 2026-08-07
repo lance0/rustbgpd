@@ -2890,6 +2890,25 @@ impl PeerManager {
             return Ok(());
         }
 
+        // Inbound MD5 keys and GTSM selectors derived from a peer group
+        // (static members' host keys, dynamic ranges' prefix keys and TTL
+        // selectors) live on the BGP listener, which only startup and the
+        // SIGHUP reload coordinator can update. Changing them on an existing
+        // group here would leave the listener enforcing the old inventory —
+        // including accepting the old password inbound.
+        if let ConfigEvent::SetPeerGroup { name, .. } = &event
+            && let Some(old_group) = self.current_config.peer_groups.get(name)
+            && let Some(new_group) = next_config.peer_groups.get(name)
+            && (old_group.md5_password != new_group.md5_password
+                || old_group.ttl_security != new_group.ttl_security)
+        {
+            return Err(CatalogMutationError::RestartRequired(format!(
+                "peer group {name:?} changes md5_password or ttl_security; inbound listener \
+                 enforcement is updated only by startup or SIGHUP reload — apply this change \
+                 through the config file and SIGHUP"
+            )));
+        }
+
         // Partition the group edit's changed fields by `ConfigFieldImpact`
         // the way `diff_neighbors` already does for neighbor edits: when
         // every changed field is reload-matrix `live`, the members'
