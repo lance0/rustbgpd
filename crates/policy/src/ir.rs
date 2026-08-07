@@ -455,6 +455,8 @@ pub struct ValueCmpNode {
 ///   siblings (`RouteTypeNe` / `EvpnRouteTypeNe` / `NextHopNe`) never
 ///   match when the corresponding context field is `None` (`!=` mirrors
 ///   `==`: an absent attribute satisfies neither).
+/// - `NeighborIn` and its `Ne` sibling `NeighborNe` likewise never
+///   match when the compared peer field is absent (LAN-895).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MatchExpr {
     /// Always matches (an unconditional term).
@@ -538,6 +540,15 @@ pub enum MatchExpr {
     /// `MatchExpr`'s size — And-children are walked as a contiguous
     /// `Vec`, so small nodes are cache locality.
     NeighborIn(Box<NeighborSetMatch>),
+    /// The evaluation peer is known and matches **no** set member.
+    /// Unlike `Not(NeighborIn(_))`, this never matches when the
+    /// compared peer field is absent (an ungrouped peer has no
+    /// `peer.group`; explain dry-runs may carry no peer at all) —
+    /// `!=` mirrors `==`, so an absent field satisfies neither
+    /// (LAN-895). Reads peer identity, so like
+    /// [`NeighborIn`](Self::NeighborIn) it counts toward
+    /// [`CompiledChain::requires_peer_context`].
+    NeighborNe(Box<NeighborSetMatch>),
     /// The route's source class equals this type.
     RouteTypeIs(RouteType),
     /// The route's source class differs from this type. Unlike
@@ -673,7 +684,7 @@ impl MatchExpr {
                 DatasetProbe::Community => 3,
                 _ => 1,
             },
-            MatchExpr::NeighborIn(_) => 2,
+            MatchExpr::NeighborIn(_) | MatchExpr::NeighborNe(_) => 2,
             MatchExpr::CommunityContains(_) | MatchExpr::CommunityInSet(_) => 3,
             MatchExpr::AsPathMatches(_) => 4,
             MatchExpr::Not(inner) => inner.cost_class(),
@@ -962,7 +973,8 @@ impl CompiledChain {
     }
 
     /// Whether evaluating this chain depends on the evaluation peer's
-    /// identity (any [`MatchExpr::NeighborIn`] node — peer address,
+    /// identity (any [`MatchExpr::NeighborIn`] /
+    /// [`MatchExpr::NeighborNe`] node — peer address,
     /// ASN, or peer-group matching — a strict-next-hop
     /// [`MatchExpr::NextHopEqPeer`] / [`MatchExpr::NextHopNePeer`]
     /// node, a [`MatchExpr::PeerAsInSet`] membership probe, a
@@ -982,6 +994,7 @@ impl CompiledChain {
     pub fn requires_peer_context(&self) -> bool {
         self.any_guard_node(&|expr| match expr {
             MatchExpr::NeighborIn(_)
+            | MatchExpr::NeighborNe(_)
             | MatchExpr::NextHopEqPeer
             | MatchExpr::NextHopNePeer
             | MatchExpr::PeerAsInSet(_)
