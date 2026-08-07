@@ -379,31 +379,35 @@ def validate_topology(
                 f"achieved overlap ({achieved} second paths) does not match "
                 f"the manifest allocation ({len(overlap_pairs)})"
             )
-        if mode == "private":
-            one(data, "bgp_update_groups", 0)
-            one(data, "bgp_update_group_fallback_peers", peers)
-            if rows(data, "bgp_update_group_members") or any(value != -1 for _, value in groups):
-                fail("private topology must have no group and every peer at group -1")
-            group_snapshot = (0, peers, tuple(sorted((labels["peer"], value) for labels, value in groups)))
-        else:
-            one(data, "bgp_update_groups", 1)
-            one(data, "bgp_update_group_fallback_peers", 0)
-            members = rows(data, "bgp_update_group_members", 1)
-            labels, member_count = members[0]
-            ids = {value for _, value in groups}
-            candidate = next(iter(ids)) if len(ids) == 1 else math.nan
-            if (
-                set(labels) != {"group"}
-                or member_count != peers
-                or not math.isfinite(candidate)
-                or candidate < 0
-                or candidate != int(candidate)
-                or labels["group"] != str(int(candidate))
-            ):
-                fail("grouped topology must have one complete nonnegative group")
-            if group_id is None:
-                group_id = int(candidate)
-            group_snapshot = (1, 0, int(candidate), tuple(sorted((labels["peer"], value) for labels, value in groups)))
+        # ADR-0126 classifier flip: shareable unicast-only per_client_best
+        # peers group instead of falling back per peer, so both modes must
+        # form exactly one complete group with no fallback peers. The
+        # Decision 3 runner-up lane is O(overlapped prefixes): one entry
+        # per manifest overlap pair in private (per-client-best) mode,
+        # exactly empty in the grouped control.
+        one(data, "bgp_update_groups", 1)
+        one(data, "bgp_update_group_fallback_peers", 0)
+        one(
+            data,
+            "bgp_update_group_runner_up_entries",
+            len(overlap_pairs) if mode == "private" else 0,
+        )
+        members = rows(data, "bgp_update_group_members", 1)
+        labels, member_count = members[0]
+        ids = {value for _, value in groups}
+        candidate = next(iter(ids)) if len(ids) == 1 else math.nan
+        if (
+            set(labels) != {"group"}
+            or member_count != peers
+            or not math.isfinite(candidate)
+            or candidate < 0
+            or candidate != int(candidate)
+            or labels["group"] != str(int(candidate))
+        ):
+            fail(f"{mode} topology must have one complete nonnegative group")
+        if group_id is None:
+            group_id = int(candidate)
+        group_snapshot = (1, 0, int(candidate), tuple(sorted((labels["peer"], value) for labels, value in groups)))
         route_snapshot = tuple(
             sorted(
                 (name, tuple(sorted(labels.items())), value)
@@ -1829,8 +1833,7 @@ def make_fixture(root: Path, kind: str, started: int, identity_seed: int) -> Non
         (final_boundary / "ack").write_text("ack\n")
         if cell in ("rustbgpd-sighup", GROUPED_CELL):
             topology_mode = "private" if cell == "rustbgpd-sighup" else "grouped"
-            group_id = None if topology_mode == "private" else 7
-            (cdir / "topology.json").write_text(json.dumps({"status": "pass", "mode": topology_mode, "peers": 320, "scrape_epoch_ns": [1_000_000_000, 2_000_000_000, 3_000_000_000], "group_id": group_id, "first_reload_wall_us": 4_000_000, "overlap_fraction": 0.0, "overlap_pairs": 0}))
+            (cdir / "topology.json").write_text(json.dumps({"status": "pass", "mode": topology_mode, "peers": 320, "scrape_epoch_ns": [1_000_000_000, 2_000_000_000, 3_000_000_000], "group_id": 7, "first_reload_wall_us": 4_000_000, "overlap_fraction": 0.0, "overlap_pairs": 0}))
             received_rows = [f"received_view_v1\ttotal=183040\tpeers=320"]
             for observer in range(320):
                 own = ",".join(str(index) for index in range(observer * 572, (observer + 1) * 572))
@@ -1844,12 +1847,8 @@ def make_fixture(root: Path, kind: str, started: int, identity_seed: int) -> Non
                 metrics += [f'bgp_session_established_total{{peer="p{peer}"}} 1']
                 metrics += [f'bgp_rib_prefixes{{afi_safi="{family}",peer="p{peer}"}} {572 if family == "all" else 0}' for family in ("all", "flowspec")]
                 metrics += [f'bgp_rib_adj_out_prefixes{{afi_safi="{family}",peer="p{peer}"}} {182468 if family == "all" else 0}' for family in ("all", "bgpls", "evpn", "flowspec", "labeled", "rtc", "vpn")]
-            if topology_mode == "private":
-                metrics += ["bgp_update_groups 0", "bgp_update_group_fallback_peers 320"]
-                metrics += [f'bgp_peer_update_group{{peer="p{peer}"}} -1' for peer in range(320)]
-            else:
-                metrics += ["bgp_update_groups 1", "bgp_update_group_fallback_peers 0", 'bgp_update_group_members{group="7"} 320']
-                metrics += [f'bgp_peer_update_group{{peer="p{peer}"}} 7' for peer in range(320)]
+            metrics += ["bgp_update_groups 1", "bgp_update_group_fallback_peers 0", "bgp_update_group_runner_up_entries 0", 'bgp_update_group_members{group="7"} 320']
+            metrics += [f'bgp_peer_update_group{{peer="p{peer}"}} 7' for peer in range(320)]
             for sample in range(1, 4):
                 (cdir / f"metrics-{sample}.prom").write_text("\n".join(metrics) + "\n")
             boundary = cdir / "pre-churn"
@@ -2069,7 +2068,7 @@ def self_test() -> None:
             "scrape3\t3000000000\n"
         )
 
-        def metric_text(mode: str, bad: str | None = None) -> str:
+        def metric_text(bad: str | None = None) -> str:
             lines = [
                 "bgp_rib_outbound_registered_peers 2",
                 "bgp_rib_ingest_channel_depth 0",
@@ -2104,12 +2103,14 @@ def self_test() -> None:
                 ]
             if bad == "counter-malformed":
                 lines.append('bgp_session_flaps_total{peer="p0"} broken')
-            if mode == "private":
+            if bad == "preflip":
+                # The pre-ADR-0126 private shape: no group, every
+                # per-client-best peer on the per-peer fallback.
                 lines += ["bgp_update_groups 0", "bgp_update_group_fallback_peers 2"]
                 lines += [f'bgp_peer_update_group{{peer="p{index}"}} -1' for index in range(2)]
             else:
                 group = 8 if bad == "drift" else 7
-                lines += [f"bgp_update_groups {2 if bad == 'group' else 1}", "bgp_update_group_fallback_peers 0", f'bgp_update_group_members{{group="{group}"}} 2']
+                lines += [f"bgp_update_groups {2 if bad == 'group' else 1}", "bgp_update_group_fallback_peers 0", f"bgp_update_group_runner_up_entries {1 if bad == 'lane' else 0}", f'bgp_update_group_members{{group="{group}"}} 2']
                 lines += [f'bgp_peer_update_group{{peer="p{index}"}} {group}' for index in range(2)]
             return "\n".join(lines) + "\n"
 
@@ -2119,10 +2120,10 @@ def self_test() -> None:
             paths = []
             for sample in range(1, 4):
                 path = topology_dir / f"{mode}-{sample}.prom"
-                path.write_text(metric_text(mode))
+                path.write_text(metric_text())
                 paths.append(path)
             validate_topology(mode, 2, 8, config, timestamps, paths, topology_dir / f"{mode}.json")
-        def topology_rejected(name: str, bad: str, config: Path | None = None):
+        def topology_rejected(name: str, bad: str, config: Path | None = None, mode: str = "grouped"):
             paths = []
             for sample in range(1, 4):
                 path = topology_dir / f"{name}-{sample}.prom"
@@ -2132,14 +2133,16 @@ def self_test() -> None:
                     effective_bad = bad if sample > 1 else None
                 else:
                     effective_bad = bad
-                path.write_text(metric_text("grouped", effective_bad))
+                path.write_text(metric_text(effective_bad))
                 paths.append(path)
             try:
-                validate_topology("grouped", 2, 8, config or topology_dir / "grouped.toml", timestamps, paths, topology_dir / f"{name}.json")
+                validate_topology(mode, 2, 8, config or topology_dir / f"{mode}.toml", timestamps, paths, topology_dir / f"{name}.json")
             except InvalidReceipt:
                 proofs[name] = True
 
         topology_rejected("live-topology-gauge", "group")
+        topology_rejected("preflip-private", "preflip", mode="private")
+        topology_rejected("lane-gauge", "lane")
         topology_rejected("route-gauge", "route-gauge")
         topology_rejected("route-family", "route-family")
         topology_rejected("one-scrape-drift", "drift")
@@ -2174,7 +2177,7 @@ def self_test() -> None:
             )
             return path
 
-        def overlap_metric_text(mode, adj_in, adj_out):
+        def overlap_metric_text(adj_in, adj_out, lane):
             lines = [
                 "bgp_rib_outbound_registered_peers 2",
                 "bgp_rib_ingest_channel_depth 0",
@@ -2194,25 +2197,26 @@ def self_test() -> None:
                     f'{adj_out[member] if family == "all" else 0}'
                     for family in ("all", "bgpls", "evpn", "flowspec", "labeled", "rtc", "vpn")
                 ]
-            if mode == "private":
-                lines += ["bgp_update_groups 0", "bgp_update_group_fallback_peers 2"]
-                lines += [f'bgp_peer_update_group{{peer="{peer}"}} -1' for peer in addr]
-            else:
-                lines += [
-                    "bgp_update_groups 1",
-                    "bgp_update_group_fallback_peers 0",
-                    'bgp_update_group_members{group="7"} 2',
-                ]
-                lines += [f'bgp_peer_update_group{{peer="{peer}"}} 7' for peer in addr]
+            lines += [
+                "bgp_update_groups 1",
+                "bgp_update_group_fallback_peers 0",
+                f"bgp_update_group_runner_up_entries {lane}",
+                'bgp_update_group_members{group="7"} 2',
+            ]
+            lines += [f'bgp_peer_update_group{{peer="{peer}"}} 7' for peer in addr]
             return "\n".join(lines) + "\n"
 
-        def overlap_topology(name, mode, adj_in, adj_out, manifest_path):
+        def overlap_topology(name, mode, adj_in, adj_out, manifest_path, lane=None):
+            if lane is None:
+                # ADR-0126 Decision 3: the lane holds one entry per
+                # overlapped prefix in private mode, none in grouped.
+                lane = 1 if mode == "private" else 0
             config = overlap_dir / f"{name}.toml"
             config.write_text("per_client_best = true\n" * (2 if mode == "private" else 0))
             paths = []
             for sample in range(1, 4):
                 path = overlap_dir / f"{name}-{sample}.prom"
-                path.write_text(overlap_metric_text(mode, adj_in, adj_out))
+                path.write_text(overlap_metric_text(adj_in, adj_out, lane))
                 paths.append(path)
             validate_topology(
                 mode, 2, 8, config, timestamps, paths, overlap_dir / f"{name}.json", manifest_path
@@ -2224,9 +2228,9 @@ def self_test() -> None:
         overlap_topology("private-green", "private", (4, 5), (5, 4), good_overlap)
         overlap_topology("grouped-green", "grouped", (4, 5), (4, 4), good_overlap)
 
-        def overlap_rejected(name, mode, adj_in, adj_out, manifest_path):
+        def overlap_rejected(name, mode, adj_in, adj_out, manifest_path, lane=None):
             try:
-                overlap_topology(f"bad-{name}", mode, adj_in, adj_out, manifest_path)
+                overlap_topology(f"bad-{name}", mode, adj_in, adj_out, manifest_path, lane)
             except InvalidReceipt:
                 proofs[name] = True
                 return
@@ -2244,6 +2248,7 @@ def self_test() -> None:
         overlap_rejected("overlap-private-runner-up", "private", (4, 5), (4, 4), good_overlap)
         overlap_rejected("overlap-grouped-bounds", "grouped", (4, 5), (4, 5), good_overlap)
         overlap_rejected("overlap-grouped-sum", "grouped", (4, 5), (5, 4), good_overlap)
+        overlap_rejected("overlap-lane-count", "private", (4, 5), (5, 4), good_overlap, lane=0)
 
         # --- Received-view delta (LAN-892) over the same tiny shape. ---
         def delta_cell(name, path_hiding, missing, dataset="d" * 64):
@@ -2672,11 +2677,13 @@ def self_test() -> None:
         grouped_pair_drift("cross-role-source-identity", "binaries", "rbgp", "a" * 64)
         expected = {"default-roster", "mixed-roster", "mode-flags", "topology-mutation", "barrier-marker", "final-barrier-marker", "live-topology-gauge", "route-gauge", "route-family", "one-scrape-drift", "add-path", "config-count", "dirty-commit", "origin-only", "head-matches-false", "mismatched-commit", "commit-malformed", "scripts-null", "scripts-empty-map", "binary-malformed", "fingerprint-recompute", "canonical-changed-fraction", "canonical-control-secs", "canonical-bird-threads", "repeat-image-identity", "cell-root-provenance", "nonoverlap-order", "quiet-spacing", "preflight-raw", "cell-status", "cell-provenance", "evidence-roster", "scenario-roster", "scenario-duplicate", "scenario-unsafe-path", "scenario-retained-config", "cell-root-rows", "reload-log-rows", "percentile-order", "percentile-positive", "first-generation-bound", "observer-gap-bound", "row-invariants", "rss-raw", "seal-checksum", "exact-root-roster", "symlink-anywhere", "writable-root", "grouped-output-isolation", "output-exact-roster", "output-audit-call", "ordering", "reused-identity", "cross-role-environment", "cross-role-source-identity"}
         expected |= {"current-down", "reestablished", "flapped", "counter-malformed", "establishment-roster", "flap-roster", "row-session-loss"}
+        expected |= {"preflip-private", "lane-gauge"}
         expected |= set(
             """overlap-fraction-mismatch overlap-pair-own-slice overlap-achieved
             overlap-private-runner-up overlap-grouped-bounds overlap-grouped-sum
-            overlap-input-binding received-view-scenario received-view-subset
-            received-view-delta-count received-view-outside-allocation""".split()
+            overlap-lane-count overlap-input-binding received-view-scenario
+            received-view-subset received-view-delta-count
+            received-view-outside-allocation""".split()
         )
         expected |= set("""v3-inspector-linkage v3-inspector-mode v3-inspector-target v3-inspector-canonical v3-inspector-field-order v3-inspector-nested-order v3-inspector-raw-utf8 transaction-cycle-roster transaction-plan-token transaction-confirm transaction-v3-pending transaction-v3-linkage transaction-apply-deadline-missing transaction-apply-deadline-bool transaction-v3-deadline-missing transaction-v3-deadline-bool transaction-v3-deadline-stale transaction-v3-deadline-swapped transaction-v3-deadline-tamper transaction-schema-v1 transaction-lifecycle-schema-v1 transaction-v3-cleanup transaction-history transaction-abort transaction-timeout transaction-noop transaction-opposite
 transaction-token-leak transaction-warning-log transaction-warning-binding transaction-applied-generation transaction-scenario-generation transaction-cross-root-generation transaction-port-gate transaction-disk-gate transaction-swap-gate transaction-fallback-shape
