@@ -137,6 +137,7 @@ candidate_bytes=$(wc -c <"$candidate") || die "cannot size candidate"
 [ "$candidate_bytes" -le "$max_raw" ] || die "candidate exceeds 384 MiB"
 if [ -z "${TXN_SMOKE:-}" ]; then
     [ "$candidate_bytes" -gt "$min_raw" ] || die "measured candidate is not above 10 MiB"
+    [ -e "$cycles" ] || : >"$cycles"
     cycle=$(( $(wc -l <"$cycles" 2>/dev/null || printf 0) + 1 ))
     if [ "$cycle" -lt 1 ] || [ "$cycle" -gt 4 ]; then
         die "unexpected measured cycle $cycle"
