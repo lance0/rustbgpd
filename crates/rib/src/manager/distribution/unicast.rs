@@ -1787,26 +1787,26 @@ impl RibManager {
                 continue;
             }
             modified.path_id = 0;
-            if winner_source.is_none() {
-                winner_source = Some(candidate.peer);
-                stage.winner_label = label;
-                stage.winner_source_attrs = capture_source_attrs(candidate);
-                let changed = rib_out
-                    .get(prefix, 0)
-                    .is_none_or(|existing| !routes_equal(existing, &modified));
-                if changed {
-                    nh_override_flags.push(nh_action);
-                    announce.push(modified);
-                }
-            } else {
+            if let Some(winner) = winner_source {
                 // Distinct source by the skip above: the runner-up.
                 stage.runner_up = Some(RunnerUp {
                     route: modified,
                     nh: nh_action,
                     source_attrs: capture_source_attrs(candidate),
                     policy_label: label,
+                    winner_source: winner,
                 });
                 break;
+            }
+            winner_source = Some(candidate.peer);
+            stage.winner_label = label;
+            stage.winner_source_attrs = capture_source_attrs(candidate);
+            let changed = rib_out
+                .get(prefix, 0)
+                .is_none_or(|existing| !routes_equal(existing, &modified));
+            if changed {
+                nh_override_flags.push(nh_action);
+                announce.push(modified);
             }
         }
 

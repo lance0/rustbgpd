@@ -396,12 +396,20 @@ pub(in crate::manager) struct RunnerUp {
     pub(in crate::manager) nh: Option<NextHopAction>,
     pub(in crate::manager) source_attrs: Option<Arc<Vec<PathAttribute>>>,
     pub(in crate::manager) policy_label: Option<PolicyLabel>,
+    /// Source of the winner this entry substitutes for. Every ADR-0126
+    /// Decision 5 lane arm is member-scoped "toward `source(w)`", and
+    /// [`LaneDelta::old_source`] carries the old RUNNER-UP's source —
+    /// without this field no emit, count, or replay seam could know
+    /// which member the substitution targets.
+    pub(in crate::manager) winner_source: IpAddr,
 }
 
 /// One exception-lane transition of a per-client-best staging pass
 /// (ADR-0126 Decision 5): the newly staged runner-up (`None` when the
-/// lane empties) plus the source of the lane entry it replaced, read
-/// BEFORE commit — the same `(new, old_source)` shape as
+/// lane empties) plus the source of the lane entry it replaced — the
+/// old RUNNER-UP's source, never the winner's (that is
+/// [`RunnerUp::winner_source`]) — read BEFORE commit; the same
+/// `(new, old_source)` shape as
 /// [`GroupDelta`]. Carried beside the winner deltas so the lane-only
 /// case (runner-up flips or retires while the winner is unchanged) has
 /// a first-class encoding; the member-emit arm consuming these lands
@@ -1089,6 +1097,24 @@ pub(in crate::manager) struct GroupRibOut {
     /// winner on every staging of the prefix. Always empty for plain
     /// groups.
     runner_up: FxHashMap<Prefix, RunnerUp>,
+    /// ADR-0126 Decision 4 count residue: per-winner-source lane-entry
+    /// counts `[v4, v6]` — how many lane entries currently substitute
+    /// for member m (m receives the runner-up exactly where it sourced
+    /// the winner). The derived-count synthesis
+    /// (`advertised_count_for` / `family_counts_for`) gains the
+    /// `+lane` term from this map in a later ADR-0126 Phase 2 PR;
+    /// `source_counts` is keyed by staged-entry source and cannot
+    /// express it. Maintained entirely by [`Self::apply_lane`], zeroed
+    /// rows dropped (the `inc_source`/`dec_source` hygiene). Always
+    /// empty for plain groups.
+    #[allow(
+        dead_code,
+        reason = "the count-synthesis consumers land with ADR-0126 Phase 2; until \
+                  then only the Phase 1 test matrix reads the map, so the lib \
+                  target sees the field as unread (an `expect` would be \
+                  unfulfilled in the test target)"
+    )]
+    pub(in crate::manager) lane_counts: FxHashMap<IpAddr, [usize; 2]>,
     // Group-uniform staging inputs, snapshot at group creation from the
     // first member (all members are key-equal by construction; a key
     // change moves peers to a different group, so these never mutate).
@@ -1149,6 +1175,7 @@ impl GroupRibOut {
             otc_blocked: FxHashMap::default(),
             vpn_member_counts: FxHashMap::default(),
             runner_up: FxHashMap::default(),
+            lane_counts: FxHashMap::default(),
             export_chain,
             is_ebgp,
             interpret_rfc1997,
@@ -1295,13 +1322,25 @@ impl GroupRibOut {
     /// 6: the lane is rebuilt from scratch every pass, so the commit
     /// is an unconditional replace-or-remove — equality suppression
     /// gates only the [`LaneDelta`] encoding, never the residue).
+    /// Keeps `lane_counts` in sync: the incoming entry's winner-source
+    /// row increments, the outgoing entry's decrements — so a
+    /// winner-source flip under an unchanged runner-up moves the count
+    /// even though no [`LaneDelta`] was encoded.
     fn apply_lane(&mut self, prefix: Prefix, entry: Option<RunnerUp>) {
-        match entry {
+        let slot = Self::count_slot(&prefix);
+        let outgoing = match entry {
             Some(entry) => {
-                self.runner_up.insert(prefix, entry);
+                self.lane_counts.entry(entry.winner_source).or_default()[slot] += 1;
+                self.runner_up.insert(prefix, entry)
             }
-            None => {
-                self.runner_up.remove(&prefix);
+            None => self.runner_up.remove(&prefix),
+        };
+        if let Some(old) = outgoing
+            && let Some(counts) = self.lane_counts.get_mut(&old.winner_source)
+        {
+            counts[slot] = counts[slot].saturating_sub(1);
+            if counts.iter().all(|&n| n == 0) {
+                self.lane_counts.remove(&old.winner_source);
             }
         }
     }
@@ -1990,11 +2029,22 @@ impl RibManager {
                     // suppressed against the PRIOR lane entry:
                     // `routes_equal` includes the source peer, so a
                     // content-equal same-source reinstall is suppressed
-                    // while a source flip never is. The recomputed lane
-                    // commits below regardless (Decision 6).
+                    // while a source flip never is. The SOURCE control
+                    // communities must also be equal: lane entries
+                    // carry source attributes so rs-control tag
+                    // transitions extend to them — a control-community
+                    // change the chain erases post-policy would
+                    // otherwise flip `source(w)`'s suppress/prepend
+                    // verdict with no recorded transition. The
+                    // recomputed lane commits below regardless
+                    // (Decision 6).
                     let prior = group.runner_up.get(prefix);
                     let unchanged = match (prior, &stage.runner_up) {
-                        (Some(old), Some(new)) => routes_equal(&old.route, &new.route),
+                        (Some(old), Some(new)) => {
+                            routes_equal(&old.route, &new.route)
+                                && source_control_input(old.source_attrs.as_ref())
+                                    == source_control_input(new.source_attrs.as_ref())
+                        }
                         (None, None) => true,
                         _ => false,
                     };
@@ -4623,6 +4673,49 @@ mod tests {
             .map(|entry| entry.route.peer)
     }
 
+    /// Sorted `(winner_source, [v4, v6])` rows of the group's
+    /// `lane_counts`.
+    fn lane_count_rows(manager: &RibManager) -> Vec<(IpAddr, [usize; 2])> {
+        let mut rows: Vec<(IpAddr, [usize; 2])> = manager
+            .group_ribs
+            .get(&PCB_GID)
+            .unwrap()
+            .lane_counts
+            .iter()
+            .map(|(&peer, &counts)| (peer, counts))
+            .collect();
+        rows.sort();
+        rows
+    }
+
+    /// [`cand`] plus one standard community — a source-attribute
+    /// difference a [`strip_communities_chain`] erases post-policy.
+    fn cand_with_comm(p: Prefix, src: IpAddr, lp: u32, comm: u32) -> Route {
+        let mut route = cand(p, src, lp);
+        let mut attrs = (*route.attributes).clone();
+        attrs.push(PathAttribute::Communities(vec![comm]));
+        route.attributes = Arc::new(attrs);
+        route
+    }
+
+    /// Permit-all chain whose modifications remove the given
+    /// communities, so candidates differing only in them converge to
+    /// one post-policy form.
+    fn strip_communities_chain(comms: Vec<u32>) -> PolicyChain {
+        PolicyChain::new(vec![Policy {
+            entries: vec![PolicyStatement {
+                action: PolicyAction::Permit,
+                match_next_hop: None,
+                modifications: RouteModifications {
+                    communities_remove: comms,
+                    ..RouteModifications::default()
+                },
+                ..deny_next_hop_statement(OTHER1)
+            }],
+            default_action: PolicyAction::Permit,
+        }])
+    }
+
     /// Winner = best permitted candidate, lane = first distinct-source
     /// permitted candidate, early exit before the third candidate.
     #[test]
@@ -4733,6 +4826,7 @@ mod tests {
                 nh: None,
                 source_attrs: None,
                 policy_label: None,
+                winner_source: OTHER1,
             }),
         );
         m.group_ribs.insert(PCB_GID, group);
@@ -4766,6 +4860,7 @@ mod tests {
                 nh: None,
                 source_attrs: None,
                 policy_label: None,
+                winner_source: OTHER1,
             }),
         );
         m.group_ribs.insert(PCB_GID, group);
@@ -5097,6 +5192,159 @@ mod tests {
                 case.name
             );
         }
+    }
+
+    /// [`RunnerUp::winner_source`] carries the source of the winner the
+    /// lane entry substitutes for — in the ordinary case AND when the
+    /// walk stepped past a denied Loc-RIB best, where the winner is
+    /// NOT the best and no seam could re-derive it from the Loc-RIB.
+    #[test]
+    fn pcb_runner_up_records_winner_source() {
+        // Ordinary: winner OTHER1, runner-up OTHER2.
+        let mut m = staging_manager();
+        let p = prefix(1);
+        seed(&mut m, cand(p, OTHER1, 300));
+        seed(&mut m, cand(p, OTHER2, 200));
+        m.group_ribs.insert(PCB_GID, per_client_best_group(None));
+        let out = stage_pcb(&mut m, &[p]);
+        let lane = out.lane_deltas[0].new.as_ref().expect("lane announce");
+        assert_eq!((lane.route.peer, lane.winner_source), (OTHER2, OTHER1));
+        let group = m.group_ribs.get(&PCB_GID).unwrap();
+        assert_eq!(
+            group.runner_up.get(&p).map(|entry| entry.winner_source),
+            Some(OTHER1)
+        );
+
+        // Denied best (the `pcb_denied_best_walks_to_first_permitted`
+        // scenario): the chain denies OTHER1, the winner walks on to
+        // OTHER2, and the lane entry substitutes for OTHER2.
+        let mut m = staging_manager();
+        seed(&mut m, cand(p, OTHER1, 300));
+        seed(&mut m, cand(p, OTHER2, 200));
+        seed(&mut m, cand(p, MEMBER, 100));
+        m.group_ribs.insert(
+            PCB_GID,
+            per_client_best_group(Some(deny_sources_chain(&[OTHER1]))),
+        );
+        let out = stage_pcb(&mut m, &[p]);
+        let lane = out.lane_deltas[0].new.as_ref().expect("lane announce");
+        assert_eq!((lane.route.peer, lane.winner_source), (MEMBER, OTHER2));
+        let group = m.group_ribs.get(&PCB_GID).unwrap();
+        assert_eq!(
+            group.runner_up.get(&p).map(|entry| entry.winner_source),
+            Some(OTHER2)
+        );
+    }
+
+    /// `lane_counts` lifecycle: insert increments the winner-source
+    /// row, a content replace under the same winner leaves it alone,
+    /// and lane removal drops the zeroed row.
+    #[test]
+    fn pcb_lane_counts_insert_replace_remove() {
+        let mut m = staging_manager();
+        let p = prefix(1);
+        seed(&mut m, cand(p, OTHER1, 300));
+        seed(&mut m, cand(p, OTHER2, 200));
+        m.group_ribs.insert(PCB_GID, per_client_best_group(None));
+
+        let _ = stage_pcb(&mut m, &[p]);
+        assert_eq!(lane_count_rows(&m), vec![(OTHER1, [1, 0])]);
+
+        // Content replace, same winner source: a lane transition is
+        // recorded, the count row is unchanged.
+        seed(&mut m, cand(p, OTHER2, 250));
+        let out = stage_pcb(&mut m, &[p]);
+        assert_eq!(out.lane_deltas.len(), 1);
+        assert_eq!(lane_count_rows(&m), vec![(OTHER1, [1, 0])]);
+
+        // Runner-up retires: the lane empties, the zeroed row drops.
+        unseed(&mut m, OTHER2, p);
+        let out = stage_pcb(&mut m, &[p]);
+        assert_eq!(out.lane_deltas.len(), 1);
+        assert!(out.lane_deltas[0].new.is_none());
+        assert!(lane_count_rows(&m).is_empty());
+    }
+
+    /// Winner source-flip under an unchanged runner-up: the lane route
+    /// is content-equal so NO [`LaneDelta`] is encoded, yet the count
+    /// must move from the old winner's row to the new one's — exactly
+    /// what `apply_lane`'s unconditional replace (Decision 6) carries.
+    #[test]
+    fn pcb_lane_count_moves_on_winner_flip_without_lane_delta() {
+        let mut m = staging_manager();
+        let p = prefix(1);
+        seed(&mut m, cand(p, OTHER1, 400));
+        seed(&mut m, cand(p, MEMBER, 200));
+        m.group_ribs.insert(PCB_GID, per_client_best_group(None));
+        let _ = stage_pcb(&mut m, &[p]);
+        assert_eq!(lane_count_rows(&m), vec![(OTHER1, [1, 0])]);
+
+        // OTHER1 retires, a NEW distinct source OTHER2 overtakes:
+        // winner OTHER1 → OTHER2, runner-up stays MEMBER.
+        unseed(&mut m, OTHER1, p);
+        seed(&mut m, cand(p, OTHER2, 300));
+        let out = stage_pcb(&mut m, &[p]);
+        assert!(
+            out.lane_deltas.is_empty(),
+            "unchanged lane route is suppressed across the winner flip"
+        );
+        assert_eq!(lane_source(&m, p), Some(MEMBER));
+        assert_eq!(lane_count_rows(&m), vec![(OTHER2, [1, 0])]);
+    }
+
+    /// ADR-0126 Decision 5: lane entries carry SOURCE attributes so
+    /// rs-control tag transitions extend to them. A control-community
+    /// change on the runner-up's source that the chain erases
+    /// post-policy must still record a [`LaneDelta`]; full equality —
+    /// post-policy route AND source-control input — stays suppressed.
+    /// (`capture_source_attrs` returns `None` for community-less
+    /// sources, so the reachable divergence needs communities on the
+    /// source; `None` vs `None` is always source-control-equal.)
+    #[test]
+    fn pcb_lane_source_attr_change_records_transition() {
+        const COMM_OLD: u32 = 0xFDE9_0001;
+        const COMM_NEW: u32 = 0xFDE9_0002;
+        let mut m = staging_manager();
+        let p = prefix(1);
+        seed(&mut m, cand(p, OTHER1, 300));
+        seed(&mut m, cand_with_comm(p, OTHER2, 200, COMM_OLD));
+        m.group_ribs.insert(
+            PCB_GID,
+            per_client_best_group(Some(strip_communities_chain(vec![COMM_OLD, COMM_NEW]))),
+        );
+        let out = stage_pcb(&mut m, &[p]);
+        assert_eq!(out.lane_deltas.len(), 1);
+        let staged = out.lane_deltas[0].new.as_ref().expect("lane announce");
+        assert_eq!(
+            source_control_input(staged.source_attrs.as_ref()).0,
+            &[COMM_OLD]
+        );
+        let staged_route = staged.route.clone();
+
+        // Content-equal reinstall, source-control input unchanged:
+        // suppressed.
+        seed(&mut m, cand_with_comm(p, OTHER2, 200, COMM_OLD));
+        let out = stage_pcb(&mut m, &[p]);
+        assert!(out.lane_deltas.is_empty(), "full equality is suppressed");
+
+        // Source control community flips; the chain strips both, so
+        // the post-policy lane route is unchanged — the transition
+        // must be recorded anyway.
+        seed(&mut m, cand_with_comm(p, OTHER2, 200, COMM_NEW));
+        let out = stage_pcb(&mut m, &[p]);
+        assert_eq!(out.lane_deltas.len(), 1);
+        let lane = out.lane_deltas[0]
+            .new
+            .as_ref()
+            .expect("announce, not a retire");
+        assert!(
+            routes_equal(&lane.route, &staged_route),
+            "post-policy lane route unchanged — only the source attrs moved"
+        );
+        assert_eq!(
+            source_control_input(lane.source_attrs.as_ref()).0,
+            &[COMM_NEW]
+        );
     }
 
     /// Darkness proof, plain-group side: a plain group over the same
