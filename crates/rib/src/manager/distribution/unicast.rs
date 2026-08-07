@@ -1,3 +1,6 @@
+use super::super::update_groups::{
+    GroupEvalAccumulator, PerClientBestPrefixStage, PolicyLabel, RunnerUp, capture_source_attrs,
+};
 use super::{
     AdjRibIn, AdjRibOut, Afi, Arc, BgpMetrics, ExplainAdvertisedRoute, ExplainDecision,
     ExplainReason, HashMap, HashSet, IpAddr, Ipv4Addr, LOCAL_PEER, LocRib, NeighborPolicyStats,
@@ -41,6 +44,10 @@ fn export_deny_attribution(
 /// explain paths so both rank the exact same set. Collection goes through
 /// the announcing-peers reverse index so only peers that actually hold the
 /// prefix are probed.
+///
+/// `target_peer` is `None` ONLY for the per-client-best GROUP walk
+/// (ADR-0126): a group has no single target, so the split-horizon
+/// exclusion is lifted out and applied per member at emit time.
 #[expect(
     clippy::too_many_arguments,
     reason = "candidate collection mirrors the per-target reflection filter inputs"
@@ -50,14 +57,14 @@ fn orr_candidates<'a>(
     prefix_peers: &'a UnicastPrefixPeers,
     peer_is_rr_client: &'a HashMap<IpAddr, bool>,
     prefix: &'a Prefix,
-    target_peer: IpAddr,
+    target_peer: Option<IpAddr>,
     target_is_ebgp: bool,
     target_is_rr_client: bool,
     cluster_id: Option<Ipv4Addr>,
 ) -> impl Iterator<Item = &'a crate::route::Route> {
     RibManager::unicast_candidates(ribs, prefix_peers, prefix).filter(move |route| {
         // Split horizon: exclude routes from the target peer
-        if route.peer == target_peer {
+        if Some(route.peer) == target_peer {
             return false;
         }
         // iBGP split-horizon / RFC 4456 reflection
@@ -86,7 +93,7 @@ fn multipath_candidates<'a>(
     prefix_peers: &'a UnicastPrefixPeers,
     peer_is_rr_client: &'a HashMap<IpAddr, bool>,
     prefix: &'a Prefix,
-    target_peer: IpAddr,
+    target_peer: Option<IpAddr>,
     target_is_ebgp: bool,
     interpret_rfc1997: bool,
     rs_control: Option<(u32, u32)>,
@@ -351,7 +358,7 @@ impl RibManager {
                 prefix_peers,
                 peer_is_rr_client,
                 &prefix,
-                target_peer,
+                Some(target_peer),
                 target_is_ebgp,
                 target_is_rr_client,
                 cluster_id,
@@ -440,7 +447,7 @@ impl RibManager {
                 prefix_peers,
                 peer_is_rr_client,
                 &prefix,
-                target_peer,
+                Some(target_peer),
                 target_is_ebgp,
                 interpret_rfc1997,
                 rs_control_asn.zip(target_peer_asn),
@@ -941,7 +948,7 @@ impl RibManager {
                 prefix_peers,
                 peer_is_rr_client,
                 &prefix,
-                target_peer,
+                Some(target_peer),
                 target_is_ebgp,
                 interpret_rfc1997,
                 rs_control_asn.zip(target_peer_asn),
@@ -1480,7 +1487,7 @@ impl RibManager {
             prefix_peers,
             peer_is_rr_client,
             prefix,
-            target_peer,
+            Some(target_peer),
             target_is_ebgp,
             interpret_rfc1997,
             rs_control_asn.zip(target_peer_asn),
@@ -1630,6 +1637,190 @@ impl RibManager {
                 }
             }
         }
+    }
+
+    /// ADR-0126 per-client-best GROUP staging walk for one prefix: the
+    /// shared-once-per-group form of the walk
+    /// [`Self::distribute_multipath_prefix`] performs per peer with
+    /// `send_max = 1, stage_path_id_zero = true`. Candidates are
+    /// collected WITHOUT the per-target split-horizon exclusion (that
+    /// stays at member emit) and walked in best-path order:
+    ///
+    /// - **winner** = the first export-permitted candidate, staged at
+    ///   `path_id 0` against the group table (the caller's
+    ///   announce/withdraw outputs, equality-suppressed as usual);
+    /// - **runner-up** = the first permitted candidate whose source
+    ///   differs from the winner's, returned as the exception-lane
+    ///   payload;
+    /// - early exit once both are found.
+    ///
+    /// Candidates sourced by the winner's peer are stepped over
+    /// between the two WITHOUT evaluation: no member's per-peer walk
+    /// evaluates them (the winner's source excludes them by split
+    /// horizon; every other member stops at the winner), so an
+    /// evaluation here would record a verdict no per-peer path
+    /// performs. Every evaluation the walk DOES perform lands in
+    /// `evals` (ADR-0126 Decision 2): the winner's permit, the
+    /// runner-up's permit, and every denial stepped over. Denials
+    /// carry their own terminal label into `policy_filtered` — this
+    /// walk evaluates several candidates per prefix, so per-key labels
+    /// cannot come from the accumulator's take-last hook.
+    ///
+    /// `rs_control` and ORR are absent by construction: control
+    /// communities diverge per TARGET (enforced at the member-emit
+    /// seams, like today's group staging), and ORR peers cannot be
+    /// per-client-best (validation-enforced). OTC egress and rs-tag
+    /// transitions for per-client-best groups land with the ADR-0126
+    /// Phase 2 emit seams.
+    #[expect(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "group per-client-best export keeps group, policy, and table diff state together"
+    )]
+    pub(in crate::manager) fn distribute_group_per_client_best_prefix(
+        ribs: &HashMap<IpAddr, AdjRibIn>,
+        prefix_peers: &UnicastPrefixPeers,
+        rib_out: &AdjRibOut,
+        peer_is_rr_client: &HashMap<IpAddr, bool>,
+        prefix: &Prefix,
+        group_is_ebgp: bool,
+        interpret_rfc1997: bool,
+        group_is_rr_client: bool,
+        cluster_id: Option<Ipv4Addr>,
+        sendable: Option<&Vec<(Afi, Safi)>>,
+        llgr: Option<&Vec<(Afi, Safi)>>,
+        export_pol: Option<&PolicyChain>,
+        memo: &mut super::ExportMemo,
+        evals: &mut GroupEvalAccumulator,
+        announce: &mut Vec<crate::route::Route>,
+        withdraw: &mut Vec<(Prefix, u32)>,
+        nh_override_flags: &mut Vec<Option<rustbgpd_policy::NextHopAction>>,
+        policy_filtered: &mut Vec<(PolicyFilteredRouteKey, Option<PolicyLabel>)>,
+    ) -> PerClientBestPrefixStage {
+        use crate::best_path::best_path_cmp;
+
+        let mut stage = PerClientBestPrefixStage::default();
+        let family = match prefix {
+            Prefix::V4(_) => (Afi::Ipv4, Safi::Unicast),
+            Prefix::V6(_) => (Afi::Ipv6, Safi::Unicast),
+        };
+        if !sendable.is_some_and(|f| f.contains(&family)) {
+            for path_id in rib_out.path_ids_for_prefix(prefix) {
+                withdraw.push((*prefix, path_id));
+            }
+            return stage;
+        }
+
+        let mut candidates: Vec<&crate::route::Route> = multipath_candidates(
+            ribs,
+            prefix_peers,
+            peer_is_rr_client,
+            prefix,
+            // Split horizon lifted out — applied per member at emit.
+            None,
+            group_is_ebgp,
+            interpret_rfc1997,
+            None,
+            group_is_rr_client,
+            cluster_id,
+            family,
+            llgr,
+        )
+        .collect();
+        candidates.sort_by(|a, b| best_path_cmp(a, b));
+
+        let needs_as_path_string = export_pol.is_some_and(PolicyChain::requires_as_path_string);
+        let mut winner_source: Option<IpAddr> = None;
+        for candidate in &candidates {
+            if winner_source == Some(candidate.peer) {
+                continue;
+            }
+            let aspath_str = needs_as_path_string.then(|| memo.aspath_str(candidate));
+            let aspath_len = candidate.as_path().map_or(0, rustbgpd_wire::AsPath::len);
+            let origin_asn = candidate
+                .as_path()
+                .and_then(rustbgpd_wire::AsPath::origin_asn);
+            let ctx = RouteContext {
+                prefix: Some(*prefix),
+                next_hop: Some(candidate.next_hop),
+                extended_communities: candidate.extended_communities(),
+                communities: candidate.communities(),
+                large_communities: candidate.large_communities(),
+                as_path_str: aspath_str.as_deref().unwrap_or(""),
+                as_path: candidate.as_path(),
+                as_path_len: aspath_len,
+                origin_asn,
+                validation_state: candidate.validation_state,
+                aspa_state: candidate.aspa_state,
+                // Group-staged chains never read peer context — a
+                // chain that does disqualifies its peers from
+                // grouping (`requires_peer_context`).
+                peer_address: None,
+                peer_asn: None,
+                peer_group: None,
+                route_type: Some(route_type(candidate.origin_type)),
+                family: Some(unicast_route_family(prefix)),
+                evpn_route_type: None,
+                local_pref: candidate.local_pref_attr(),
+                med: candidate.med_attr(),
+            };
+            let (result, evaluation) = evaluate_chain_with_attribution(export_pol, &ctx);
+            evals.record(&evaluation, candidate.peer);
+            let label = evaluation.matched_policy.clone();
+            let filtered_key = PolicyFilteredRouteKey {
+                // Group placeholder target, restamped per member.
+                target_peer: LOCAL_PEER,
+                source_peer: candidate.peer,
+                prefix: *prefix,
+                path_id: candidate.path_id,
+            };
+            if result.action != PolicyAction::Permit {
+                policy_filtered.push((filtered_key, label));
+                continue;
+            }
+            let (mut modified, nh_action) = memo.apply(candidate, &result.modifications);
+            if super::no_advertise_export_suppressed(modified.communities()) {
+                // Policy-added NO_ADVERTISE is a policy suppression —
+                // same accounting as the deny arm, matching the
+                // per-peer multipath body.
+                policy_filtered.push((filtered_key, label));
+                continue;
+            }
+            modified.path_id = 0;
+            if winner_source.is_none() {
+                winner_source = Some(candidate.peer);
+                stage.winner_label = label;
+                stage.winner_source_attrs = capture_source_attrs(candidate);
+                let changed = rib_out
+                    .get(prefix, 0)
+                    .is_none_or(|existing| !routes_equal(existing, &modified));
+                if changed {
+                    nh_override_flags.push(nh_action);
+                    announce.push(modified);
+                }
+            } else {
+                // Distinct source by the skip above: the runner-up.
+                stage.runner_up = Some(RunnerUp {
+                    route: modified,
+                    nh: nh_action,
+                    source_attrs: capture_source_attrs(candidate),
+                    policy_label: label,
+                });
+                break;
+            }
+        }
+
+        // Same residue rule as the ungrouped per-client-best arm: at
+        // most one route lives at path_id 0. Withdraw any non-zero
+        // residue, and 0 itself when no candidate was permitted — an
+        // implicit replace otherwise.
+        let staged_winner = winner_source.is_some();
+        for path_id in rib_out.path_ids_for_prefix(prefix) {
+            if path_id != 0 || !staged_winner {
+                withdraw.push((*prefix, path_id));
+            }
+        }
+        stage
     }
 
     /// Single-best export tail for one prefix. `target` selects the
@@ -2178,7 +2369,7 @@ impl RibManager {
             prefix_peers,
             peer_is_rr_client,
             prefix,
-            target_peer,
+            Some(target_peer),
             target_is_ebgp,
             target_is_rr_client,
             cluster_id,

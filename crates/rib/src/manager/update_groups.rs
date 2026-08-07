@@ -114,7 +114,7 @@ fn materialize_update_group_snapshot(
 /// group-wide per-route verdict from rebuilding the same owned label at every
 /// accumulator, delta, and residue handoff; metric/output boundaries convert
 /// only when they need an owned string.
-type PolicyLabel = Arc<str>;
+pub(in crate::manager) type PolicyLabel = Arc<str>;
 
 /// Fingerprint of every RIB-staging input that makes per-peer staged
 /// output differ (design §1). Per-peer wire preparation (next-hop
@@ -372,9 +372,74 @@ pub(in crate::manager) struct GroupDelta {
 /// Capture a source route's attributes for RFC 7947 decisions at the
 /// member-emit seams. `None` — no communities at all — keeps the
 /// common case allocation-free (the capture itself is an `Arc` clone).
-fn capture_source_attrs(source: &Route) -> Option<Arc<Vec<PathAttribute>>> {
+pub(in crate::manager) fn capture_source_attrs(source: &Route) -> Option<Arc<Vec<PathAttribute>>> {
     (!source.communities().is_empty() || !source.large_communities().is_empty())
         .then(|| Arc::clone(&source.attributes))
+}
+
+/// One staged runner-up of a per-client-best group (ADR-0126 Decision
+/// 3): the exception lane's per-prefix payload — the same shape the
+/// group table keeps per staged key: the post-policy route shell with
+/// its source peer preserved, the next-hop-override residue, the
+/// captured pre-policy SOURCE attributes, and the permitting
+/// terminal-policy label for join-time counter replay.
+#[derive(Debug, Clone)]
+#[allow(
+    dead_code,
+    reason = "the emit-side consumers land with ADR-0126 Phase 2; until then only \
+              the Phase 1 test matrix reads the lane payload, so the lib target \
+              sees the fields as unread (an `expect` would be unfulfilled in the \
+              test target)"
+)]
+pub(in crate::manager) struct RunnerUp {
+    pub(in crate::manager) route: Route,
+    pub(in crate::manager) nh: Option<NextHopAction>,
+    pub(in crate::manager) source_attrs: Option<Arc<Vec<PathAttribute>>>,
+    pub(in crate::manager) policy_label: Option<PolicyLabel>,
+}
+
+/// One exception-lane transition of a per-client-best staging pass
+/// (ADR-0126 Decision 5): the newly staged runner-up (`None` when the
+/// lane empties) plus the source of the lane entry it replaced, read
+/// BEFORE commit — the same `(new, old_source)` shape as
+/// [`GroupDelta`]. Carried beside the winner deltas so the lane-only
+/// case (runner-up flips or retires while the winner is unchanged) has
+/// a first-class encoding; the member-emit arm consuming these lands
+/// in ADR-0126 Phase 2.
+#[derive(Debug, Clone)]
+#[allow(
+    dead_code,
+    reason = "the emit-side consumers land with ADR-0126 Phase 2; until then only \
+              the Phase 1 test matrix reads the transition, so the lib target \
+              sees the fields as unread (an `expect` would be unfulfilled in the \
+              test target)"
+)]
+pub(in crate::manager) struct LaneDelta {
+    pub(in crate::manager) prefix: Prefix,
+    pub(in crate::manager) new: Option<RunnerUp>,
+    pub(in crate::manager) old_source: Option<IpAddr>,
+}
+
+/// Outcome of one per-client-best group walk over a prefix (ADR-0126
+/// Decision 2): the winner residue for the staged [`GroupDelta`] plus
+/// the recomputed exception-lane content. The winner announce/withdraw
+/// itself rides the caller's output vectors, like every other
+/// distribution body.
+#[derive(Default)]
+pub(in crate::manager) struct PerClientBestPrefixStage {
+    /// Terminal policy of the winner's permitting evaluation, captured
+    /// at its own permit point: [`GroupEvalAccumulator::take_last`]
+    /// returns the walk's LAST evaluation — the runner-up's permit or
+    /// a trailing denial — never the winner's.
+    pub(in crate::manager) winner_label: Option<PolicyLabel>,
+    /// Captured pre-policy SOURCE attributes of the winner candidate.
+    /// The first permitted candidate need not be the Loc-RIB best, so
+    /// the caller cannot capture these from the Loc-RIB.
+    pub(in crate::manager) winner_source_attrs: Option<Arc<Vec<PathAttribute>>>,
+    /// The recomputed runner-up (`None` = lane empty), rebuilt from
+    /// scratch every pass — no stale second-best by construction
+    /// (ADR-0126 Decision 6).
+    pub(in crate::manager) runner_up: Option<RunnerUp>,
 }
 
 /// Communities and large communities carried by a captured source
@@ -501,6 +566,13 @@ pub(in crate::manager) struct GroupStageOutput {
     /// control communities changed. Deliberately outside the shared
     /// emission — only rs-control members act on them.
     pub(in crate::manager) rs_transitions: Vec<RsTagTransition>,
+    /// Exception-lane transitions of this pass ([`LaneDelta`]) —
+    /// per-client-best groups only, always empty for plain groups.
+    /// Deliberately outside `deltas` and the shared emission: no
+    /// existing emit-side consumer reads the lane, and the one member
+    /// that acts on a lane transition (`source(w)`) gets its arm in
+    /// ADR-0126 Phase 2.
+    pub(in crate::manager) lane_deltas: Vec<LaneDelta>,
     /// Members whose emission differs from the shared one: the new
     /// source of an announce delta (announce → skip/withdraw) or the
     /// old source of a withdraw delta (withdraw → skip).
@@ -935,6 +1007,11 @@ pub(in crate::manager) struct ExtraWithdraws {
 /// membership/dirty bookkeeping and the group-uniform staging inputs
 /// snapshot. One instance per non-empty group; dropped when the last
 /// member leaves.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the group-uniform snapshot IS a set of independent staging \
+              predicates, mirroring the GroupKey fingerprint they derive from"
+)]
 pub(in crate::manager) struct GroupRibOut {
     /// Post-policy staged routes, source peer preserved (needed by the
     /// source-flip matrix). Only the unicast maps of the substrate are
@@ -1005,6 +1082,13 @@ pub(in crate::manager) struct GroupRibOut {
     /// dirty window may drift them; the member's resync recompute
     /// restores exactness. Non-RTC groups keep the O(1) synthesis.
     vpn_member_counts: FxHashMap<IpAddr, [i64; 2]>,
+    /// ADR-0126 Decision 3 exception lane: the per-prefix runner-up
+    /// sidecar of a per-client-best group. Populated only where a
+    /// distinct-source permitted runner-up exists — O(overlapped
+    /// prefixes), never per member — and recomputed alongside the
+    /// winner on every staging of the prefix. Always empty for plain
+    /// groups.
+    runner_up: FxHashMap<Prefix, RunnerUp>,
     // Group-uniform staging inputs, snapshot at group creation from the
     // first member (all members are key-equal by construction; a key
     // change moves peers to a different group, so these never mutate).
@@ -1017,6 +1101,12 @@ pub(in crate::manager) struct GroupRibOut {
     pub(in crate::manager) local_role: Option<BgpRole>,
     pub(in crate::manager) sendable: Vec<(Afi, Safi)>,
     pub(in crate::manager) llgr: Vec<(Afi, Safi)>,
+    /// ADR-0126 staging mode: `true` stages the first export-permitted
+    /// candidate (winner walk + runner-up lane) instead of
+    /// Loc-RIB-best-or-nothing. Dark until the Phase 3 classifier flip
+    /// — every production constructor passes `false`, so only tests
+    /// can build a per-client-best group.
+    pub(in crate::manager) per_client_best: bool,
 }
 
 /// Placeholder target for group-level policy-denial records; restamped
@@ -1027,7 +1117,9 @@ const GROUP_FILTERED_PLACEHOLDER: IpAddr = LOCAL_PEER;
 impl GroupRibOut {
     #[expect(
         clippy::too_many_arguments,
-        reason = "one constructor snapshots every group-uniform staging input"
+        clippy::fn_params_excessive_bools,
+        reason = "one constructor snapshots every group-uniform staging input; \
+                  the bools are the GroupKey's independent staging predicates"
     )]
     fn new(
         export_chain: Option<PolicyChain>,
@@ -1037,6 +1129,7 @@ impl GroupRibOut {
         local_role: Option<BgpRole>,
         sendable: Vec<(Afi, Safi)>,
         llgr: Vec<(Afi, Safi)>,
+        per_client_best: bool,
         capacity: usize,
     ) -> Self {
         Self {
@@ -1055,6 +1148,7 @@ impl GroupRibOut {
             vpn_policy_denied: FxHashMap::default(),
             otc_blocked: FxHashMap::default(),
             vpn_member_counts: FxHashMap::default(),
+            runner_up: FxHashMap::default(),
             export_chain,
             is_ebgp,
             interpret_rfc1997,
@@ -1062,6 +1156,7 @@ impl GroupRibOut {
             local_role,
             sendable,
             llgr,
+            per_client_best,
         }
     }
 
@@ -1193,6 +1288,21 @@ impl GroupRibOut {
             self.nh_overrides.remove(&key);
             self.source_attrs.remove(&key);
             self.staged_labels.remove(&key);
+        }
+    }
+
+    /// Commit one recomputed exception-lane entry (ADR-0126 Decision
+    /// 6: the lane is rebuilt from scratch every pass, so the commit
+    /// is an unconditional replace-or-remove — equality suppression
+    /// gates only the [`LaneDelta`] encoding, never the residue).
+    fn apply_lane(&mut self, prefix: Prefix, entry: Option<RunnerUp>) {
+        match entry {
+            Some(entry) => {
+                self.runner_up.insert(prefix, entry);
+            }
+            None => {
+                self.runner_up.remove(&prefix);
+            }
         }
     }
 
@@ -1802,6 +1912,11 @@ impl RibManager {
     /// — the SAME body as the per-peer path, parameterized, never
     /// copied (design risk 1). Deltas are committed before returning;
     /// tombstones extend when a member is already dirty.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one staging pass keeps the plain single-best arm and the ADR-0126 \
+                  per-client-best arm over the same commit block"
+    )]
     fn stage_group_prefixes(
         &mut self,
         gid: usize,
@@ -1810,6 +1925,7 @@ impl RibManager {
     ) -> GroupStageOutput {
         let mut out = GroupStageOutput::default();
         let mut labeled_filtered: Vec<(PolicyFilteredRouteKey, Option<PolicyLabel>)> = Vec::new();
+        let mut lane_updates: Vec<(Prefix, Option<RunnerUp>)> = Vec::new();
         {
             let Some(group) = self.group_ribs.get(&gid) else {
                 return out;
@@ -1824,6 +1940,74 @@ impl RibManager {
             let mut filtered: Vec<PolicyFilteredRouteKey> = Vec::new();
             for prefix in prefixes {
                 let old_source = group.table.get(prefix, 0).map(|r| r.peer);
+                if group.per_client_best {
+                    // ADR-0126 Phase 1: first-permitted winner walk +
+                    // runner-up lane. Reachable only from a
+                    // test-constructed group until the Phase 3
+                    // classifier flip — no production configuration
+                    // creates a per-client-best group.
+                    let stage = Self::distribute_group_per_client_best_prefix(
+                        &self.ribs,
+                        &self.unicast_prefix_peers,
+                        &group.table,
+                        &self.peer_is_rr_client,
+                        prefix,
+                        group.is_ebgp,
+                        group.interpret_rfc1997,
+                        group.is_rr_client,
+                        self.cluster_id,
+                        Some(&group.sendable),
+                        Some(&group.llgr),
+                        chain.as_ref(),
+                        memo,
+                        &mut out.evals,
+                        &mut announce,
+                        &mut withdraw,
+                        &mut nh_flags,
+                        &mut labeled_filtered,
+                    );
+                    for (route, nh) in announce.drain(..).zip(nh_flags.drain(..)) {
+                        out.deltas.push(GroupDelta {
+                            prefix: *prefix,
+                            path_id: route.path_id,
+                            new: Some((route, nh)),
+                            old_source,
+                            policy_label: stage.winner_label.clone(),
+                            source_attrs: stage.winner_source_attrs.clone(),
+                        });
+                    }
+                    for (p, path_id) in withdraw.drain(..) {
+                        out.deltas.push(GroupDelta {
+                            prefix: p,
+                            path_id,
+                            new: None,
+                            old_source,
+                            policy_label: None,
+                            source_attrs: None,
+                        });
+                    }
+                    // Lane transition (ADR-0126 Decision 5), equality-
+                    // suppressed against the PRIOR lane entry:
+                    // `routes_equal` includes the source peer, so a
+                    // content-equal same-source reinstall is suppressed
+                    // while a source flip never is. The recomputed lane
+                    // commits below regardless (Decision 6).
+                    let prior = group.runner_up.get(prefix);
+                    let unchanged = match (prior, &stage.runner_up) {
+                        (Some(old), Some(new)) => routes_equal(&old.route, &new.route),
+                        (None, None) => true,
+                        _ => false,
+                    };
+                    if !unchanged {
+                        out.lane_deltas.push(LaneDelta {
+                            prefix: *prefix,
+                            new: stage.runner_up.clone(),
+                            old_source: prior.map(|entry| entry.route.peer),
+                        });
+                    }
+                    lane_updates.push((*prefix, stage.runner_up));
+                    continue;
+                }
                 // RFC 7947 decisions at the member-emit seams are made
                 // on the pre-policy SOURCE (the Loc-RIB best this pass
                 // stages from); capture its attributes for the deltas
@@ -1901,6 +2085,12 @@ impl RibManager {
             .expect("group staged above still exists");
         for delta in &out.deltas {
             group.apply_delta(delta);
+        }
+        // Lane commits live in this commit block ON PURPOSE: the
+        // `join_group` table-build pass discards the returned output
+        // but must still leave a fully populated lane behind.
+        for (prefix, entry) in lane_updates {
+            group.apply_lane(prefix, entry);
         }
         group.commit_rs_transitions(&out.rs_transitions);
         group.record_otc_blocked(prefixes, &out.otc_blocked);
@@ -2920,6 +3110,10 @@ impl RibManager {
                     .get(&peer)
                     .cloned()
                     .unwrap_or_default(),
+                // Dark until the ADR-0126 Phase 3 classifier flip: the
+                // classifier still disqualifies per-client-best peers,
+                // so no join can require the mitigated staging mode.
+                false,
                 self.loc_rib.len(),
             );
             self.group_ribs.insert(gid, group);
@@ -3167,6 +3361,10 @@ impl RibManager {
                 .get(&peer)
                 .cloned()
                 .unwrap_or_default(),
+            // Dark until the ADR-0126 Phase 3 classifier flip (per-
+            // client-best groups are also excluded from this fast
+            // path outright per ADR-0126 Decision 8).
+            false,
             self.loc_rib.len(),
         );
         self.group_ribs.insert(gid, group);
@@ -3585,7 +3783,7 @@ fn classify_effective_distribution_mode(
 mod tests {
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-    use rustbgpd_policy::Policy;
+    use rustbgpd_policy::{Policy, PolicyStatement, RouteModifications};
     use rustbgpd_wire::{
         Ipv4Prefix, MplsLabelEntry, Origin, PathAttribute, RouteDistinguisher, VpnNlri, VpnPrefix,
     };
@@ -4184,6 +4382,24 @@ mod tests {
             None,
             vec![(Afi::Ipv4, Safi::Unicast)],
             vec![],
+            false,
+            0,
+        )
+    }
+
+    /// Per-client-best sibling of [`empty_group`] with a caller-chosen
+    /// export chain — the ONLY way a per-client-best group can exist
+    /// until the ADR-0126 Phase 3 classifier flip.
+    fn per_client_best_group(chain: Option<PolicyChain>) -> GroupRibOut {
+        GroupRibOut::new(
+            chain,
+            false,
+            false,
+            true,
+            None,
+            vec![(Afi::Ipv4, Safi::Unicast)],
+            vec![],
+            true,
             0,
         )
     }
@@ -4275,6 +4491,730 @@ mod tests {
                 }
             }
         }
+    }
+
+    // --- ADR-0126 Phase 1: per-client-best group staging (winner walk
+    // --- + exception lane), dark behind the unchanged classifier. The
+    // --- groups below exist only because these tests construct them.
+
+    use crate::adj_rib_in::AdjRibIn;
+    use crate::test_support::make_route_with_lp;
+
+    const PCB_GID: usize = 91;
+
+    fn staging_manager() -> RibManager {
+        let (_tx, rx) = tokio::sync::mpsc::channel(1);
+        let (_query_tx, query_rx) = tokio::sync::mpsc::channel(1);
+        RibManager::new(
+            rx,
+            query_rx,
+            None,
+            None,
+            rustbgpd_telemetry::BgpMetrics::new(),
+        )
+    }
+
+    /// A candidate with a controlled best-path rank (higher `lp` ranks
+    /// first) whose next hop IS its source peer, so a
+    /// [`deny_next_hop_statement`] discriminates candidates per source.
+    fn cand(p: Prefix, src: IpAddr, lp: u32) -> Route {
+        let Prefix::V4(v4) = p else { unreachable!() };
+        let IpAddr::V4(src4) = src else {
+            unreachable!()
+        };
+        make_route_with_lp(v4, src4, lp)
+    }
+
+    /// Seed one Adj-RIB-In candidate plus the announcing-peers reverse
+    /// index — everything the per-client-best walk reads.
+    fn seed(manager: &mut RibManager, route: Route) {
+        let peers = manager
+            .unicast_prefix_peers
+            .entry(route.prefix)
+            .or_default();
+        if !peers.contains(&route.peer) {
+            peers.push(route.peer);
+        }
+        manager
+            .ribs
+            .entry(route.peer)
+            .or_insert_with(|| AdjRibIn::new(route.peer))
+            .insert(route);
+    }
+
+    fn unseed(manager: &mut RibManager, peer: IpAddr, p: Prefix) {
+        if let Some(rib) = manager.ribs.get_mut(&peer) {
+            rib.withdraw(&p, 0);
+        }
+        if let Some(peers) = manager.unicast_prefix_peers.get_mut(&p) {
+            peers.retain(|entry| *entry != peer);
+        }
+    }
+
+    fn stage_pcb(manager: &mut RibManager, prefixes: &[Prefix]) -> GroupStageOutput {
+        let set: HashSet<Prefix> = prefixes.iter().copied().collect();
+        let mut memo = super::super::distribution::ExportMemo::default();
+        manager.stage_group_prefixes(PCB_GID, &set, &mut memo)
+    }
+
+    fn deny_next_hop_statement(next_hop: IpAddr) -> PolicyStatement {
+        PolicyStatement {
+            prefix: None,
+            ge: None,
+            le: None,
+            action: PolicyAction::Deny,
+            match_community: vec![],
+            match_as_path: None,
+            match_neighbor_set: None,
+            match_route_type: None,
+            match_evpn_route_type: None,
+            match_rpki_validation: None,
+            match_aspa_validation: None,
+            match_as_path_length_ge: None,
+            match_as_path_length_le: None,
+            match_local_pref_ge: None,
+            match_local_pref_le: None,
+            match_med_ge: None,
+            match_med_le: None,
+            match_next_hop: Some(next_hop),
+            modifications: RouteModifications::default(),
+        }
+    }
+
+    /// Chain denying the given sources (by their next hop), permitting
+    /// everything else.
+    fn deny_sources_chain(denied: &[IpAddr]) -> PolicyChain {
+        PolicyChain::new(vec![Policy {
+            entries: denied
+                .iter()
+                .copied()
+                .map(deny_next_hop_statement)
+                .collect(),
+            default_action: PolicyAction::Permit,
+        }])
+    }
+
+    /// (permits, denies) summed over the accumulator's totals rows.
+    fn eval_totals(evals: &GroupEvalAccumulator) -> (u64, u64) {
+        let mut permits = 0;
+        let mut denies = 0;
+        for (_, action, n) in &evals.totals {
+            match action {
+                PolicyAction::Permit => permits += n,
+                PolicyAction::Deny => denies += n,
+            }
+        }
+        (permits, denies)
+    }
+
+    /// Source peers with at least one recorded per-source row — the
+    /// candidates the walk actually evaluated.
+    fn eval_sources(evals: &GroupEvalAccumulator) -> HashSet<IpAddr> {
+        evals.per_source.keys().copied().collect()
+    }
+
+    fn lane_source(manager: &RibManager, p: Prefix) -> Option<IpAddr> {
+        manager
+            .group_ribs
+            .get(&PCB_GID)
+            .unwrap()
+            .runner_up
+            .get(&p)
+            .map(|entry| entry.route.peer)
+    }
+
+    /// Winner = best permitted candidate, lane = first distinct-source
+    /// permitted candidate, early exit before the third candidate.
+    #[test]
+    fn pcb_winner_and_lane_from_permitted_candidates() {
+        let mut m = staging_manager();
+        let p = prefix(1);
+        seed(&mut m, cand(p, OTHER1, 300));
+        seed(&mut m, cand(p, OTHER2, 200));
+        seed(&mut m, cand(p, MEMBER, 100));
+        m.group_ribs.insert(PCB_GID, per_client_best_group(None));
+
+        let out = stage_pcb(&mut m, &[p]);
+
+        assert_eq!(out.deltas.len(), 1);
+        let delta = &out.deltas[0];
+        let (winner, _) = delta.new.as_ref().expect("winner announce");
+        assert_eq!((winner.peer, winner.path_id), (OTHER1, 0));
+        assert_eq!(delta.old_source, None);
+        assert_eq!(out.lane_deltas.len(), 1);
+        assert_eq!(
+            out.lane_deltas[0].new.as_ref().map(|r| r.route.peer),
+            Some(OTHER2)
+        );
+        assert_eq!(out.lane_deltas[0].old_source, None);
+
+        let group = m.group_ribs.get(&PCB_GID).unwrap();
+        assert_eq!(group.table.get(&p, 0).map(|r| r.peer), Some(OTHER1));
+        assert_eq!(lane_source(&m, p), Some(OTHER2));
+        // Early exit: the third candidate is never evaluated.
+        assert_eq!(eval_totals(&out.evals), (2, 0));
+        assert_eq!(eval_sources(&out.evals), HashSet::from([OTHER1, OTHER2]));
+    }
+
+    /// ADR-0126 divergence 2: the chain denies the best candidate, the
+    /// walk stages the first permitted one (where plain grouped staging
+    /// stages nothing), and the denial is recorded with residue.
+    #[test]
+    fn pcb_denied_best_walks_to_first_permitted() {
+        let mut m = staging_manager();
+        let p = prefix(1);
+        seed(&mut m, cand(p, OTHER1, 300));
+        seed(&mut m, cand(p, OTHER2, 200));
+        seed(&mut m, cand(p, MEMBER, 100));
+        m.group_ribs.insert(
+            PCB_GID,
+            per_client_best_group(Some(deny_sources_chain(&[OTHER1]))),
+        );
+
+        let out = stage_pcb(&mut m, &[p]);
+
+        assert_eq!(out.deltas.len(), 1);
+        let (winner, _) = out.deltas[0].new.as_ref().expect("winner announce");
+        assert_eq!(winner.peer, OTHER2);
+        assert_eq!(lane_source(&m, p), Some(MEMBER));
+        assert_eq!(eval_totals(&out.evals), (2, 1));
+        assert_eq!(
+            eval_sources(&out.evals),
+            HashSet::from([OTHER1, OTHER2, MEMBER])
+        );
+        let group = m.group_ribs.get(&PCB_GID).unwrap();
+        let denied = PolicyFilteredRouteKey {
+            target_peer: GROUP_FILTERED_PLACEHOLDER,
+            source_peer: OTHER1,
+            prefix: p,
+            path_id: 0,
+        };
+        assert!(group.policy_filtered.contains_key(&denied));
+    }
+
+    /// A same-source remainder is stepped over WITHOUT evaluation: the
+    /// winner's source never sees its own candidates (split horizon)
+    /// and every other member stops at the winner, so no per-peer walk
+    /// records those evals.
+    #[test]
+    fn pcb_same_source_remainder_leaves_lane_empty_without_evals() {
+        let mut m = staging_manager();
+        let p = prefix(1);
+        seed(&mut m, cand(p, OTHER1, 300));
+        let mut second = cand(p, OTHER1, 200);
+        second.path_id = 1;
+        seed(&mut m, second);
+        m.group_ribs.insert(PCB_GID, per_client_best_group(None));
+
+        let out = stage_pcb(&mut m, &[p]);
+
+        assert_eq!(out.deltas.len(), 1);
+        assert_eq!(lane_source(&m, p), None);
+        assert!(out.lane_deltas.is_empty());
+        assert_eq!(eval_totals(&out.evals), (1, 0));
+        assert_eq!(eval_sources(&out.evals), HashSet::from([OTHER1]));
+    }
+
+    /// All candidates denied: nothing staged, the existing entry is
+    /// withdrawn, and the lane clears through the same transition
+    /// encoding (no early exit — every candidate is evaluated).
+    #[test]
+    fn pcb_all_denied_withdraws_and_clears_lane() {
+        let mut m = staging_manager();
+        let p = prefix(1);
+        seed(&mut m, cand(p, OTHER1, 300));
+        seed(&mut m, cand(p, OTHER2, 200));
+        let mut group = per_client_best_group(Some(empty_policy(PolicyAction::Deny)));
+        group.apply_delta(&announce_delta(p, OTHER1, None));
+        group.apply_lane(
+            p,
+            Some(RunnerUp {
+                route: route(p, OTHER2),
+                nh: None,
+                source_attrs: None,
+                policy_label: None,
+            }),
+        );
+        m.group_ribs.insert(PCB_GID, group);
+
+        let out = stage_pcb(&mut m, &[p]);
+
+        assert_eq!(out.deltas.len(), 1);
+        assert!(out.deltas[0].new.is_none(), "withdraw of path_id 0");
+        assert_eq!(out.deltas[0].old_source, Some(OTHER1));
+        assert_eq!(out.lane_deltas.len(), 1);
+        assert!(out.lane_deltas[0].new.is_none());
+        assert_eq!(out.lane_deltas[0].old_source, Some(OTHER2));
+        assert_eq!(lane_source(&m, p), None);
+        let group = m.group_ribs.get(&PCB_GID).unwrap();
+        assert!(group.table.get(&p, 0).is_none());
+        assert_eq!(eval_totals(&out.evals), (0, 2));
+    }
+
+    /// No candidates at all: same withdraw + lane-clear shape, zero
+    /// evaluations.
+    #[test]
+    fn pcb_no_candidates_stages_nothing_and_clears() {
+        let mut m = staging_manager();
+        let p = prefix(1);
+        let mut group = per_client_best_group(None);
+        group.apply_delta(&announce_delta(p, OTHER1, None));
+        group.apply_lane(
+            p,
+            Some(RunnerUp {
+                route: route(p, OTHER2),
+                nh: None,
+                source_attrs: None,
+                policy_label: None,
+            }),
+        );
+        m.group_ribs.insert(PCB_GID, group);
+
+        let out = stage_pcb(&mut m, &[p]);
+
+        assert_eq!(out.deltas.len(), 1);
+        assert!(out.deltas[0].new.is_none());
+        assert_eq!(out.lane_deltas.len(), 1);
+        assert!(out.lane_deltas[0].new.is_none());
+        assert_eq!(lane_source(&m, p), None);
+        assert_eq!(eval_totals(&out.evals), (0, 0));
+    }
+
+    /// Single candidate: winner staged, lane empty, one evaluation.
+    #[test]
+    fn pcb_single_candidate_winner_no_lane() {
+        let mut m = staging_manager();
+        let p = prefix(1);
+        seed(&mut m, cand(p, OTHER1, 300));
+        m.group_ribs.insert(PCB_GID, per_client_best_group(None));
+
+        let out = stage_pcb(&mut m, &[p]);
+
+        assert_eq!(out.deltas.len(), 1);
+        let (winner, _) = out.deltas[0].new.as_ref().expect("winner announce");
+        assert_eq!(winner.peer, OTHER1);
+        assert_eq!(lane_source(&m, p), None);
+        assert!(out.lane_deltas.is_empty());
+        assert_eq!(eval_totals(&out.evals), (1, 0));
+    }
+
+    /// The take-last hazard pin: the winner's staged label is captured
+    /// at the winner's own permit point. A trailing denial (evaluated
+    /// while searching for a runner-up) is the accumulator's LAST
+    /// evaluation — labeling the staged entry from `take_last` would
+    /// stamp the winner with the denying policy.
+    #[test]
+    fn pcb_winner_label_is_captured_at_its_permit_point() {
+        let mut m = staging_manager();
+        let p = prefix(1);
+        seed(&mut m, cand(p, OTHER1, 300));
+        seed(&mut m, cand(p, OTHER2, 200));
+        let mut chain = PolicyChain::new(vec![
+            Policy {
+                entries: vec![deny_next_hop_statement(OTHER2)],
+                default_action: PolicyAction::Permit,
+            },
+            Policy {
+                entries: Vec::new(),
+                default_action: PolicyAction::Permit,
+            },
+        ]);
+        chain.policies[0].name = Some("screen".to_string());
+        chain.policies[1].name = Some("tail".to_string());
+        m.group_ribs
+            .insert(PCB_GID, per_client_best_group(Some(chain)));
+
+        let out = stage_pcb(&mut m, &[p]);
+
+        assert_eq!(out.deltas.len(), 1);
+        // Chain permits attribute to the LAST policy; the trailing
+        // denial attributes to "screen". The winner keeps "tail".
+        assert_eq!(out.deltas[0].policy_label.as_deref(), Some("tail"));
+        let group = m.group_ribs.get(&PCB_GID).unwrap();
+        assert_eq!(
+            group
+                .staged_labels
+                .get(&(p, 0))
+                .and_then(|label| label.as_deref()),
+            Some("tail")
+        );
+        let denied = PolicyFilteredRouteKey {
+            target_peer: GROUP_FILTERED_PLACEHOLDER,
+            source_peer: OTHER2,
+            prefix: p,
+            path_id: 0,
+        };
+        assert_eq!(
+            group
+                .policy_filtered
+                .get(&denied)
+                .and_then(|label| label.as_deref()),
+            Some("screen")
+        );
+        assert_eq!(lane_source(&m, p), None);
+        assert_eq!(eval_totals(&out.evals), (1, 1));
+    }
+
+    /// The ADR-0126 Decision 5 lane/source-flip matrix: every lane
+    /// transition ({appears, content-flip, source-flip, retires,
+    /// unchanged}) crossed with the winner axis ({unchanged,
+    /// content-change, source-flip}), asserted on the pass-2 delta
+    /// encoding AND the committed lane state. A content-equal
+    /// same-source lane reinstall is suppressed (no transition); a
+    /// source flip never is (`routes_equal` includes the source peer).
+    ///
+    /// "Winner source-flip × lane unchanged" is realized with a NEW
+    /// distinct source overtaking the old winner — with a static chain
+    /// the retiring winner's lane successor is otherwise the new
+    /// winner itself, so this is the only reachable shape of that cell.
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the exhaustive lane/source-flip matrix enumerates every cell inline"
+    )]
+    fn pcb_lane_transition_matrix_exhaustive() {
+        const A: IpAddr = OTHER1;
+        const B: IpAddr = OTHER2;
+        const C: IpAddr = MEMBER;
+        struct Case {
+            name: &'static str,
+            initial: &'static [(IpAddr, u32)],
+            remove: &'static [IpAddr],
+            add: &'static [(IpAddr, u32)],
+            /// Expected pass-2 winner announce as (source,
+            /// `old_source`); `None` = equality-suppressed (winner
+            /// unchanged).
+            expect_winner: Option<(IpAddr, Option<IpAddr>)>,
+            /// Expected pass-2 lane transition as (new source or
+            /// `None` = lane empties, old lane source); outer `None` =
+            /// suppressed (no transition).
+            expect_lane: Option<(Option<IpAddr>, Option<IpAddr>)>,
+            /// Committed lane content after pass 2.
+            lane_state: Option<IpAddr>,
+        }
+        let cases = [
+            Case {
+                name: "appears/winner-unchanged",
+                initial: &[(A, 300)],
+                remove: &[],
+                add: &[(B, 200)],
+                expect_winner: None,
+                expect_lane: Some((Some(B), None)),
+                lane_state: Some(B),
+            },
+            Case {
+                name: "content-flip/winner-unchanged (lane-only delta)",
+                initial: &[(A, 300), (B, 200)],
+                remove: &[],
+                add: &[(B, 250)],
+                expect_winner: None,
+                expect_lane: Some((Some(B), Some(B))),
+                lane_state: Some(B),
+            },
+            Case {
+                name: "source-flip/winner-unchanged (lane-only delta)",
+                initial: &[(A, 300), (B, 200), (C, 100)],
+                remove: &[B],
+                add: &[],
+                expect_winner: None,
+                expect_lane: Some((Some(C), Some(B))),
+                lane_state: Some(C),
+            },
+            Case {
+                name: "retires/winner-unchanged (lane-only delta)",
+                initial: &[(A, 300), (B, 200)],
+                remove: &[B],
+                add: &[],
+                expect_winner: None,
+                expect_lane: Some((None, Some(B))),
+                lane_state: None,
+            },
+            Case {
+                name: "unchanged/winner-unchanged (content-equal reinstall suppressed)",
+                initial: &[(A, 300), (B, 200)],
+                remove: &[],
+                add: &[(B, 200)],
+                expect_winner: None,
+                expect_lane: None,
+                lane_state: Some(B),
+            },
+            Case {
+                name: "appears/winner-content-change",
+                initial: &[(A, 300)],
+                remove: &[],
+                add: &[(A, 400), (B, 200)],
+                expect_winner: Some((A, Some(A))),
+                expect_lane: Some((Some(B), None)),
+                lane_state: Some(B),
+            },
+            Case {
+                name: "content-flip/winner-content-change",
+                initial: &[(A, 300), (B, 200)],
+                remove: &[],
+                add: &[(A, 400), (B, 250)],
+                expect_winner: Some((A, Some(A))),
+                expect_lane: Some((Some(B), Some(B))),
+                lane_state: Some(B),
+            },
+            Case {
+                name: "source-flip/winner-content-change",
+                initial: &[(A, 300), (B, 200), (C, 100)],
+                remove: &[B],
+                add: &[(A, 400)],
+                expect_winner: Some((A, Some(A))),
+                expect_lane: Some((Some(C), Some(B))),
+                lane_state: Some(C),
+            },
+            Case {
+                name: "retires/winner-content-change",
+                initial: &[(A, 300), (B, 200)],
+                remove: &[B],
+                add: &[(A, 400)],
+                expect_winner: Some((A, Some(A))),
+                expect_lane: Some((None, Some(B))),
+                lane_state: None,
+            },
+            Case {
+                name: "unchanged/winner-content-change",
+                initial: &[(A, 300), (B, 200)],
+                remove: &[],
+                add: &[(A, 400)],
+                expect_winner: Some((A, Some(A))),
+                expect_lane: None,
+                lane_state: Some(B),
+            },
+            Case {
+                name: "appears/winner-source-flip",
+                initial: &[(A, 300)],
+                remove: &[A],
+                add: &[(B, 200), (C, 100)],
+                expect_winner: Some((B, Some(A))),
+                expect_lane: Some((Some(C), None)),
+                lane_state: Some(C),
+            },
+            Case {
+                name: "content-flip/winner-source-flip",
+                initial: &[(A, 400), (C, 200)],
+                remove: &[A],
+                add: &[(B, 300), (C, 250)],
+                expect_winner: Some((B, Some(A))),
+                expect_lane: Some((Some(C), Some(C))),
+                lane_state: Some(C),
+            },
+            Case {
+                name: "source-flip/winner-source-flip",
+                initial: &[(A, 400), (B, 300), (C, 200)],
+                remove: &[A],
+                add: &[],
+                expect_winner: Some((B, Some(A))),
+                expect_lane: Some((Some(C), Some(B))),
+                lane_state: Some(C),
+            },
+            Case {
+                name: "retires/winner-source-flip",
+                initial: &[(A, 400), (B, 300)],
+                remove: &[A],
+                add: &[],
+                expect_winner: Some((B, Some(A))),
+                expect_lane: Some((None, Some(B))),
+                lane_state: None,
+            },
+            Case {
+                name: "unchanged/winner-source-flip (lane suppressed across the flip)",
+                initial: &[(A, 400), (C, 200)],
+                remove: &[A],
+                add: &[(B, 300)],
+                expect_winner: Some((B, Some(A))),
+                expect_lane: None,
+                lane_state: Some(C),
+            },
+        ];
+        for case in &cases {
+            let mut m = staging_manager();
+            let p = prefix(7);
+            m.group_ribs.insert(PCB_GID, per_client_best_group(None));
+            for &(src, lp) in case.initial {
+                seed(&mut m, cand(p, src, lp));
+            }
+            let _ = stage_pcb(&mut m, &[p]);
+            for &src in case.remove {
+                unseed(&mut m, src, p);
+            }
+            for &(src, lp) in case.add {
+                seed(&mut m, cand(p, src, lp));
+            }
+
+            let out = stage_pcb(&mut m, &[p]);
+
+            let announces: Vec<&GroupDelta> =
+                out.deltas.iter().filter(|d| d.new.is_some()).collect();
+            match case.expect_winner {
+                Some((src, old)) => {
+                    assert_eq!(announces.len(), 1, "{}: winner delta count", case.name);
+                    let delta = announces[0];
+                    let (winner, _) = delta.new.as_ref().unwrap();
+                    assert_eq!(winner.peer, src, "{}: winner source", case.name);
+                    assert_eq!(delta.old_source, old, "{}: winner old_source", case.name);
+                }
+                None => {
+                    assert!(
+                        announces.is_empty(),
+                        "{}: winner delta must be suppressed",
+                        case.name
+                    );
+                }
+            }
+            assert!(
+                out.deltas.iter().all(|d| d.new.is_some()),
+                "{}: no withdraw deltas in this matrix",
+                case.name
+            );
+            match case.expect_lane {
+                Some((new, old)) => {
+                    assert_eq!(out.lane_deltas.len(), 1, "{}: lane delta count", case.name);
+                    let lane = &out.lane_deltas[0];
+                    assert_eq!(lane.prefix, p, "{}: lane prefix", case.name);
+                    assert_eq!(
+                        lane.new.as_ref().map(|entry| entry.route.peer),
+                        new,
+                        "{}: lane new source",
+                        case.name
+                    );
+                    assert_eq!(lane.old_source, old, "{}: lane old_source", case.name);
+                }
+                None => {
+                    assert!(
+                        out.lane_deltas.is_empty(),
+                        "{}: lane transition must be suppressed",
+                        case.name
+                    );
+                }
+            }
+            assert_eq!(
+                lane_source(&m, p),
+                case.lane_state,
+                "{}: committed lane state",
+                case.name
+            );
+        }
+    }
+
+    /// Darkness proof, plain-group side: a plain group over the same
+    /// candidate inputs never touches the lane — no `lane_deltas`, no
+    /// `runner_up` state — and stages the Loc-RIB best exactly as
+    /// before (the rest of this file's suite pins the full shape).
+    #[test]
+    fn plain_group_same_inputs_stages_no_lane() {
+        let mut m = staging_manager();
+        let p = prefix(1);
+        seed(&mut m, cand(p, OTHER1, 300));
+        seed(&mut m, cand(p, OTHER2, 200));
+        let _ = m.recompute_best(&HashSet::from([p]));
+        m.group_ribs.insert(PCB_GID, empty_group());
+
+        let out = stage_pcb(&mut m, &[p]);
+
+        assert!(out.lane_deltas.is_empty());
+        let group = m.group_ribs.get(&PCB_GID).unwrap();
+        assert!(group.runner_up.is_empty());
+        assert_eq!(out.deltas.len(), 1);
+        let (staged, _) = out.deltas[0].new.as_ref().expect("Loc-RIB best staged");
+        assert_eq!(staged.peer, OTHER1);
+    }
+
+    /// Darkness proof, emit side: every existing emit consumer reads
+    /// only `deltas`, so its output is identical with the lane
+    /// transitions present or cleared.
+    #[test]
+    fn pcb_emit_consumers_ignore_lane_fields() {
+        let mut m = staging_manager();
+        let p = prefix(1);
+        seed(&mut m, cand(p, OTHER1, 300));
+        seed(&mut m, cand(p, OTHER2, 200));
+        m.group_ribs.insert(PCB_GID, per_client_best_group(None));
+        let _ = stage_pcb(&mut m, &[p]);
+        // Winner content-change + lane content-change: both delta
+        // kinds present in one pass.
+        seed(&mut m, cand(p, OTHER1, 400));
+        seed(&mut m, cand(p, OTHER2, 250));
+        let mut out = stage_pcb(&mut m, &[p]);
+        assert!(!out.lane_deltas.is_empty());
+
+        let member_emit = |deltas: &[GroupDelta]| {
+            let mut announce = Vec::new();
+            let mut withdraw = Vec::new();
+            let mut nh_flags = Vec::new();
+            emit_group_deltas_for_member(
+                deltas,
+                MEMBER,
+                None,
+                &mut announce,
+                &mut withdraw,
+                &mut nh_flags,
+            );
+            let keys: Vec<(Prefix, IpAddr)> = announce.iter().map(|r| (r.prefix, r.peer)).collect();
+            (keys, withdraw, nh_flags.len())
+        };
+        let with_lane = (
+            member_emit(&out.deltas),
+            out.withdrawn_keys().collect::<Vec<_>>(),
+            out.member_scoped_withdraws(MEMBER).collect::<Vec<_>>(),
+        );
+        out.build_shared_emit();
+        let shared_with_lane: Vec<(Prefix, IpAddr)> = out
+            .shared_announce
+            .iter()
+            .map(|r| (r.prefix, r.peer))
+            .collect();
+        let shared_withdraw_with_lane = out.shared_withdraw.clone();
+
+        out.lane_deltas.clear();
+        let without_lane = (
+            member_emit(&out.deltas),
+            out.withdrawn_keys().collect::<Vec<_>>(),
+            out.member_scoped_withdraws(MEMBER).collect::<Vec<_>>(),
+        );
+        out.build_shared_emit();
+        let shared_without_lane: Vec<(Prefix, IpAddr)> = out
+            .shared_announce
+            .iter()
+            .map(|r| (r.prefix, r.peer))
+            .collect();
+
+        assert_eq!(with_lane, without_lane);
+        assert_eq!(shared_with_lane, shared_without_lane);
+        assert_eq!(shared_withdraw_with_lane, out.shared_withdraw);
+    }
+
+    /// The `join_group` table-build seam: lane commits live in the
+    /// staging pass's commit block, so a full-table build pass whose
+    /// output is DISCARDED (exactly what `join_group` runs before the
+    /// first member replays) still leaves a fully populated lane.
+    /// `join_group` itself passes `per_client_best = false` until the
+    /// ADR-0126 Phase 3 classifier flip, so the pass is driven
+    /// directly here.
+    #[test]
+    fn pcb_table_build_pass_populates_lane() {
+        let mut m = staging_manager();
+        let overlapped = prefix(1);
+        let single = prefix(2);
+        seed(&mut m, cand(overlapped, OTHER1, 300));
+        seed(&mut m, cand(overlapped, OTHER2, 200));
+        seed(&mut m, cand(single, OTHER1, 300));
+        m.group_ribs.insert(PCB_GID, per_client_best_group(None));
+
+        let _ = stage_pcb(&mut m, &[overlapped, single]);
+
+        let group = m.group_ribs.get(&PCB_GID).unwrap();
+        assert_eq!(
+            group.table.get(&overlapped, 0).map(|r| r.peer),
+            Some(OTHER1)
+        );
+        assert_eq!(group.table.get(&single, 0).map(|r| r.peer), Some(OTHER1));
+        // O(overlapped prefixes): only the prefix with a distinct-
+        // source runner-up occupies the lane.
+        assert_eq!(group.runner_up.len(), 1);
+        assert_eq!(lane_source(&m, overlapped), Some(OTHER2));
     }
 
     /// Dirty-member resync: full-table announce minus own-sourced;
@@ -4653,6 +5593,7 @@ mod tests {
             None,
             vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv4, Safi::MplsVpn)],
             vec![],
+            false,
             0,
         );
         assert!(group.stages_vpn());
@@ -4700,6 +5641,7 @@ mod tests {
                 (Afi::Ipv4, Safi::RtConstrain),
             ],
             vec![],
+            false,
             0,
         );
         assert!(rtc_group.stages_vpn());
@@ -4722,6 +5664,7 @@ mod tests {
             None,
             vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv4, Safi::MplsVpn)],
             vec![],
+            false,
             0,
         );
         let key = (prefix(1), 0);
@@ -4943,6 +5886,7 @@ mod tests {
                 (Afi::Ipv4, Safi::RtConstrain),
             ],
             vec![],
+            false,
             0,
         );
         let in_phi = vpn_route_with_rts(1, OTHER1, &[rt(1)]);
