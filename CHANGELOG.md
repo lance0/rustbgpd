@@ -11,6 +11,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `WatchRoutes` now signals subscriber lag in-band with a synthetic
+  `ROUTE_EVENT_TYPE_STREAM_LAGGED` marker event (`reason` carries the
+  missed count) instead of silently skipping dropped events, matching the
+  `BGP_EVENT_TYPE_STREAM_LAGGED` contract on `WatchRouteEvents`. The
+  `WatchEvents` policy and dataplane sources gain the same lag marker
+  their route/session/EVPN/BFD siblings already emitted (LAN-898).
+
 - IRR reload harness: announcement-overlap dimension (LAN-892). The
   scenario generator takes `--overlap-fraction F` (default 0 keeps the
   historical disjoint output byte-identical): a seeded fraction of base
@@ -30,6 +37,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   violations, and mismatched received-view scenarios.
 
 ### Fixed
+
+- API service consistency batch (LAN-898): every peer-manager read now
+  carries a 2-second server-side deadline (`DEADLINE_EXCEEDED` instead of
+  hanging `ListPeers`/`GetPeerState`, gNMI Get/Subscribe snapshots, and
+  policy explain reads behind a wedged actor); gNMI `Set` rejects
+  read-only listeners explicitly like every other mutating service;
+  notification and policy events publish the scoped `address%interface`
+  peer label so link-local peers correlate across event streams; and
+  `StreamPlanConfigTransaction` bounds its post-handoff response wait by
+  the total deadline, matching `StreamApplyConfigTransaction`.
 
 - EVPN wire encoding no longer emits silently wrong bytes for invariant
   violations that were only debug-asserted (LAN-896). Release builds
