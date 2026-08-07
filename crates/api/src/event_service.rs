@@ -316,9 +316,12 @@ impl proto::event_service_server::EventService for EventService {
                             );
                             debug!(
                                 missed,
-                                "WatchEvents policy subscriber lagged, skipping missed events"
+                                "WatchEvents policy subscriber lagged, emitting missed-event signal"
                             );
-                            None
+                            Some(Ok(stream_lag_bgp_event(
+                                proto::EventCategory::Policy,
+                                missed,
+                            )))
                         }
                         Ok(event) => {
                             let _subscriber_guard = &policy_subscriber_guard;
@@ -356,9 +359,12 @@ impl proto::event_service_server::EventService for EventService {
                             );
                             debug!(
                                 missed,
-                                "WatchEvents dataplane subscriber lagged, skipping missed events"
+                                "WatchEvents dataplane subscriber lagged, emitting missed-event signal"
                             );
-                            None
+                            Some(Ok(stream_lag_bgp_event(
+                                proto::EventCategory::Dataplane,
+                                missed,
+                            )))
                         }
                         Ok(event) => {
                             let _subscriber_guard = &dataplane_subscriber_guard;
@@ -2418,6 +2424,63 @@ mod tests {
             panic!("expected stream lag payload");
         };
         assert_eq!(lag.source_category, proto::EventCategory::Session as i32);
+        assert!(lag.missed_count > 0);
+    }
+
+    /// Cross-stream correlation: notification and policy events must render
+    /// the same scoped `address%interface` peer label lifecycle events use.
+    #[test]
+    fn notification_and_policy_events_render_scoped_peer_label() {
+        let peer: IpAddr = "fe80::1".parse().unwrap();
+        let SessionEvent::Notification(mut notification) =
+            notification_event(peer, SessionNotificationEventType::Sent)
+        else {
+            unreachable!()
+        };
+        notification.peer_label = Some("fe80::1%eth0".to_string());
+        let event = session_event_to_bgp_event(SessionEvent::Notification(notification));
+        assert_eq!(event.peer_address, "fe80::1%eth0");
+        let Some(proto::bgp_event::Payload::Notification(payload)) = event.payload else {
+            panic!("expected notification payload");
+        };
+        assert_eq!(payload.peer_address, "fe80::1%eth0");
+
+        let mut policy = policy_event(Some(peer));
+        policy.peer_label = Some("fe80::1%eth0".to_string());
+        let event = policy_event_to_bgp_event(policy);
+        assert_eq!(event.peer_address, "fe80::1%eth0");
+        let Some(proto::bgp_event::Payload::Policy(payload)) = event.payload else {
+            panic!("expected policy payload");
+        };
+        assert_eq!(payload.peer_address, "fe80::1%eth0");
+    }
+
+    #[tokio::test]
+    async fn policy_lag_emits_missed_event_signal() {
+        let (rib_tx, _) = spawn_fake_rib();
+        let (peer_tx, _, policy_events_tx) = spawn_fake_peer_manager();
+        let service = EventService::new(rib_tx, peer_tx);
+        let response = service
+            .watch_events(Request::new(proto::WatchEventsRequest {
+                categories: vec![proto::EventCategory::Policy as i32],
+                ..Default::default()
+            }))
+            .await
+            .unwrap();
+        let mut stream = response.into_inner();
+
+        for _ in 0..32 {
+            policy_events_tx.send(policy_event(None)).unwrap();
+        }
+
+        let event = stream.next().await.unwrap().unwrap();
+        assert_eq!(event.category, proto::EventCategory::Policy as i32);
+        assert_eq!(event.event_type, proto::BgpEventType::StreamLagged as i32);
+        assert_eq!(event.severity, proto::EventSeverity::Warning as i32);
+        let Some(proto::bgp_event::Payload::StreamLag(lag)) = event.payload else {
+            panic!("expected stream lag payload");
+        };
+        assert_eq!(lag.source_category, proto::EventCategory::Policy as i32);
         assert!(lag.missed_count > 0);
     }
 
