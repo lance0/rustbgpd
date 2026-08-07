@@ -33,7 +33,10 @@ class VerifyCampaign(unittest.TestCase):
         }
         self.write("manifest.json", manifest)
         for ordinal, size, case, repetition in VERIFY.expected_cells():
-            actor = size * 10 + repetition * 10
+            rows = size if case == "U" else size // 16
+            # The filtered case copies 1/16 of the table, so its actor
+            # handler must land below the unfiltered one at the same size.
+            actor = (size * 10 + repetition * 10) // (1 if case == "U" else 2)
             service = 300_000_000 + actor
             receipt = {
                 "schema": 3, "mode": "timing", "ordinal": ordinal,
@@ -45,9 +48,9 @@ class VerifyCampaign(unittest.TestCase):
                 "query": {
                     "actor_handler_ns": actor,
                     "service_method_ns": service, "post_actor_ns": 300_000_000,
-                    "actor_rows": size, "actor_capacity": size,
-                    "vpn_rib_route_size_bytes": 128, "mpls_label_entry_size_bytes": 4, "actor_snapshot_lower_bound_bytes": size * 132,
-                    "returned_rows": size if case == "U" else size // 16,
+                    "actor_rows": rows, "actor_capacity": rows,
+                    "vpn_rib_route_size_bytes": 128, "mpls_label_entry_size_bytes": 4, "actor_snapshot_lower_bound_bytes": rows * 132,
+                    "returned_rows": rows,
                     "dispatch": 1, "checksum": VERIFY.CHECKSUMS[(size, case)],
                 },
             }
@@ -162,25 +165,24 @@ class VerifyCampaign(unittest.TestCase):
 
     def test_classifier_precedence_and_thresholds(self):
         timings = {
-            (size, case): [10 * (index + 1)] * 8
+            (size, case): [(20 if case == "U" else 10) * (index + 1)] * 8
             for index, size in enumerate(VERIFY.SIZES) for case in ("U", "F")
         }
         allocation = {"peak_live_requested_bytes": 1}
         self.assertEqual(VERIFY.classify({}, timings, allocation)["classification"],
                          "no_redesign")
-        timings[(10_000, "U")] = [25_000_001] * 8
-        timings[(10_000, "F")] = [25_000_001] * 8
-        timings[(100_000, "U")] = [25_000_002] * 8
-        timings[(100_000, "F")] = [25_000_002] * 8
-        timings[(1_000_000, "U")] = [25_000_003] * 8
-        timings[(1_000_000, "F")] = [25_000_003] * 8
+        for index, size in enumerate(VERIFY.SIZES):
+            timings[(size, "U")] = [25_000_001 + index] * 8
+            timings[(size, "F")] = [12_000_001 + index] * 8
         self.assertEqual(VERIFY.classify({}, timings, allocation)["classification"],
                          "design_followup")
         for index, size in enumerate(VERIFY.SIZES):
-            for case in ("U", "F"):
-                timings[(size, case)] = [200_000_001 + index] * 8
+            timings[(size, "U")] = [200_000_001 + index] * 8
+            timings[(size, "F")] = [100_000_001 + index] * 8
         self.assertEqual(VERIFY.classify({}, timings, allocation)["classification"], "urgent")
-        timings[(10_000, "F")] = [100_000_000] * 8
+        # Filtered parity with unfiltered means the pushed-down predicate never
+        # reached the RIB task (or the instrument is not reading that handler).
+        timings[(10_000, "F")] = list(timings[(10_000, "U")])
         self.assertEqual(VERIFY.classify({}, timings, allocation)["classification"],
                          "instrumentation_suspect")
 
@@ -198,22 +200,41 @@ class VerifyCampaign(unittest.TestCase):
         self.assertEqual(VERIFY.classify({}, timings, allocation)["classification"],
                          "capacity_censored")
 
+    def test_filtered_actor_must_cost_less_than_unfiltered(self):
+        """The pushdown gate: a campaign where filtering saves the actor
+        nothing is not a result, it is a broken instrument."""
+        allocation = {"peak_live_requested_bytes": 1}
+        healthy = {
+            (size, case): [(20 if case == "U" else 10) * (index + 1)] * 8
+            for index, size in enumerate(VERIFY.SIZES) for case in ("U", "F")
+        }
+        self.assertEqual(VERIFY.classify({}, healthy, allocation)["classification"],
+                         "no_redesign")
+        for size in VERIFY.SIZES:
+            with self.subTest(size=size):
+                regressed = dict(healthy)
+                regressed[(size, "F")] = list(healthy[(size, "U")])
+                self.assertEqual(
+                    VERIFY.classify({}, regressed, allocation)["classification"],
+                    "instrumentation_suspect",
+                )
+
     def test_size_specific_noise_and_monotonic_instrumentation(self):
         allocation = {"peak_live_requested_bytes": 1}
         timings = {
-            (size, case): [100 * (index + 1)] * 8
+            (size, case): [(200 if case == "U" else 100) * (index + 1)] * 8
             for index, size in enumerate(VERIFY.SIZES) for case in ("U", "F")
         }
-        timings[(1_000_000, "U")] = [300, 318] * 4
+        timings[(1_000_000, "U")] = [600, 636] * 4
         timings[(1_000_000, "F")] = [300, 318] * 4
         self.assertEqual(VERIFY.classify({}, timings, allocation)["classification"],
                          "no_redesign")
-        timings[(10_000, "U")] = [100, 106] * 4
+        timings[(10_000, "U")] = [200, 212] * 4
         timings[(10_000, "F")] = [100, 106] * 4
         self.assertEqual(VERIFY.classify({}, timings, allocation)["classification"],
                          "inconclusive")
         timings = {
-            (size, case): [300 - index * 100] * 8
+            (size, case): [(600 if case == "U" else 300) - index * (200 if case == "U" else 100)] * 8
             for index, size in enumerate(VERIFY.SIZES) for case in ("U", "F")
         }
         self.assertEqual(VERIFY.classify({}, timings, allocation)["classification"],

@@ -332,8 +332,11 @@ async fn query(
 
 fn verify(receipt: &QueryReceipt, routes: usize, filtered: bool, dispatch: u64) {
     let expected_rows = if filtered { routes / PEERS } else { routes };
-    assert_eq!(receipt.actor_rows, routes);
-    assert!(receipt.actor_capacity >= routes);
+    // The peer filter is evaluated inside the RIB task, so the actor's
+    // snapshot is the matching rows — not the whole family table the
+    // service would then discard.
+    assert_eq!(receipt.actor_rows, expected_rows);
+    assert!(receipt.actor_capacity >= expected_rows);
     assert_eq!(
         receipt.actor_snapshot_lower_bound_bytes,
         actor_snapshot_lower_bound_bytes(receipt.actor_rows, receipt.actor_capacity)

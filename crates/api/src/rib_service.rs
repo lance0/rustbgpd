@@ -19,7 +19,7 @@ use rustbgpd_rib::{
     BgpLsFamily, BgpLsRibRoute, EvpnRibRoute, ExplainAdvertisedRoute, ExplainAdvertisedRouteError,
     ExplainBestPath, ExplainDecision, ExportGateVerdict, FlowSpecRoute, LabeledRibRoute,
     OrrLinkSnapshot, OrrNodeSnapshot, OrrStatusSnapshot, OrrTopologySnapshot, OrrVantageStatus,
-    RibUpdate, Route, RouteEventType, RoutePage, RoutePageError, RoutePageVersion,
+    RibRowFilter, RibUpdate, Route, RouteEventType, RoutePage, RoutePageError, RoutePageVersion,
     RouteQueryFilter, RouteQueryKey, RouteQueryScope, RouteSourceIdentity, RtcRibRoute,
     VpnRibRoute, route_query_key,
 };
@@ -300,6 +300,21 @@ impl RibService {
         })
         .await
     }
+}
+
+/// Hand a non-unicast listing predicate to the RIB task, or `None` when the
+/// request carries no filters at all.
+///
+/// The RIB task clones only the rows this returns true for, so a narrowed
+/// listing no longer occupies the single-threaded actor building a full
+/// family-table snapshot that this service would immediately discard.
+/// `None` is not merely an optimization for the unfiltered case: it keeps
+/// the actor's copy loop free of a per-row indirect call.
+fn row_filter<T>(
+    narrowed: bool,
+    matches: impl Fn(&T) -> bool + Send + Sync + 'static,
+) -> Option<RibRowFilter<T>> {
+    narrowed.then(|| Box::new(matches) as RibRowFilter<T>)
 }
 
 /// Validate the requested unicast route-listing address family.
@@ -1695,29 +1710,25 @@ impl proto::rib_service_server::RibService for RibService {
         let req = request.into_inner();
         validate_flowspec_afi_safi(req.afi_safi)?;
 
-        let all_routes = rib_manager_read(&self.rib_tx, |reply| RibUpdate::QueryFlowSpecRoutes {
+        // Family narrowing runs inside the RIB task, so a single-family
+        // listing never costs a copy of the other family's rows.
+        let afi_filter = match req.afi_safi {
+            x if x == proto::AddressFamily::Ipv4Flowspec as i32 => Some(Afi::Ipv4),
+            x if x == proto::AddressFamily::Ipv6Flowspec as i32 => Some(Afi::Ipv6),
+            _ => None, // unspecified = all
+        };
+        let filter = row_filter(afi_filter.is_some(), move |route: &FlowSpecRoute| {
+            afi_filter.is_none_or(|afi| route.afi == afi)
+        });
+
+        let matched = rib_manager_read(&self.rib_tx, |reply| RibUpdate::QueryFlowSpecRoutes {
+            filter,
             reply,
         })
         .await?;
 
-        // Filter by AFI if requested
-        let filtered: Vec<&FlowSpecRoute> = all_routes
-            .iter()
-            .filter(|r| {
-                if req.afi_safi == proto::AddressFamily::Ipv4Flowspec as i32 {
-                    r.afi == Afi::Ipv4
-                } else if req.afi_safi == proto::AddressFamily::Ipv6Flowspec as i32 {
-                    r.afi == Afi::Ipv6
-                } else {
-                    true // unspecified = all
-                }
-            })
-            .collect();
-
-        let routes: Vec<proto::FlowSpecRouteEntry> = filtered
-            .iter()
-            .map(|r| flowspec_route_to_proto(r))
-            .collect();
+        let routes: Vec<proto::FlowSpecRouteEntry> =
+            matched.iter().map(flowspec_route_to_proto).collect();
 
         Ok(Response::new(proto::ListFlowSpecResponse { routes }))
     }
@@ -1749,14 +1760,10 @@ impl proto::rib_service_server::RibService for RibService {
             )
         };
 
-        let all_routes =
-            rib_manager_read(&self.rib_tx, |reply| RibUpdate::QueryEvpnRoutes { reply }).await?;
-
         let type_filter = req.route_type_filter;
-
-        let routes: Vec<proto::EvpnRouteEntry> = all_routes
-            .iter()
-            .filter(|r| {
+        let filter = row_filter(
+            type_filter != 0 || peer_filter.is_some() || rd_filter.is_some(),
+            move |r: &EvpnRibRoute| {
                 if type_filter != 0 && u32::from(r.route_type()) != type_filter {
                     return false;
                 }
@@ -1779,9 +1786,16 @@ impl proto::rib_service_server::RibService for RibService {
                     }
                 }
                 true
-            })
-            .map(evpn_route_to_proto)
-            .collect();
+            },
+        );
+
+        let matched = rib_manager_read(&self.rib_tx, |reply| RibUpdate::QueryEvpnRoutes {
+            filter,
+            reply,
+        })
+        .await?;
+
+        let routes: Vec<proto::EvpnRouteEntry> = matched.iter().map(evpn_route_to_proto).collect();
 
         Ok(Response::new(proto::ListEvpnResponse { routes }))
     }
@@ -1804,14 +1818,13 @@ impl proto::rib_service_server::RibService for RibService {
         }
         let peer_filter = parse_optional_peer_filter(&req.peer_filter)?;
 
-        let all_routes =
-            rib_manager_read(&self.rib_tx, |reply| RibUpdate::QueryBgpLsRoutes { reply }).await?;
-
         let family_filter = req.afi_safi;
         let type_filter = req.nlri_type_filter;
-        let routes = all_routes
-            .iter()
-            .filter(|route| {
+        let filter = row_filter(
+            family_filter != proto::AddressFamily::Unspecified as i32
+                || peer_filter.is_some()
+                || type_filter != 0,
+            move |route: &BgpLsRibRoute| {
                 if family_filter != proto::AddressFamily::Unspecified as i32
                     && bgpls_family_to_proto(route.family) as i32 != family_filter
                 {
@@ -1824,9 +1837,16 @@ impl proto::rib_service_server::RibService for RibService {
                     return false;
                 }
                 true
-            })
-            .map(bgpls_route_to_proto)
-            .collect();
+            },
+        );
+
+        let matched = rib_manager_read(&self.rib_tx, |reply| RibUpdate::QueryBgpLsRoutes {
+            filter,
+            reply,
+        })
+        .await?;
+
+        let routes = matched.iter().map(bgpls_route_to_proto).collect();
 
         Ok(Response::new(proto::ListBgpLsResponse { routes }))
     }
@@ -1848,15 +1868,10 @@ impl proto::rib_service_server::RibService for RibService {
             )));
         }
 
-        let all_routes =
-            rib_manager_read(&self.rib_tx, |reply| RibUpdate::QueryVpnRoutes { reply }).await?;
-
-        #[cfg(feature = "bench-internals")]
-        let post_actor_started = Instant::now();
         let family_filter = req.afi_safi;
-        let routes: Vec<_> = all_routes
-            .iter()
-            .filter(|route| {
+        let filter = row_filter(
+            !family_filter.is_empty() || peer_filter.is_some(),
+            move |route: &VpnRibRoute| {
                 if !family_filter.is_empty() && vpn_family_label(route) != family_filter {
                     return false;
                 }
@@ -1864,9 +1879,18 @@ impl proto::rib_service_server::RibService for RibService {
                     return false;
                 }
                 true
-            })
-            .map(vpn_route_to_proto)
-            .collect();
+            },
+        );
+
+        let matched = rib_manager_read(&self.rib_tx, |reply| RibUpdate::QueryVpnRoutes {
+            filter,
+            reply,
+        })
+        .await?;
+
+        #[cfg(feature = "bench-internals")]
+        let post_actor_started = Instant::now();
+        let routes: Vec<_> = matched.iter().map(vpn_route_to_proto).collect();
         #[cfg(feature = "bench-internals")]
         if let Some(receipts) = &self.vpn_query_bench_receipts {
             let post_actor_ns =
@@ -1897,15 +1921,10 @@ impl proto::rib_service_server::RibService for RibService {
             )));
         }
 
-        let all_routes = rib_manager_read(&self.rib_tx, |reply| RibUpdate::QueryLabeledRoutes {
-            reply,
-        })
-        .await?;
-
         let family_filter = req.afi_safi;
-        let routes = all_routes
-            .iter()
-            .filter(|route| {
+        let filter = row_filter(
+            !family_filter.is_empty() || peer_filter.is_some(),
+            move |route: &LabeledRibRoute| {
                 if !family_filter.is_empty() && labeled_family_label(route) != family_filter {
                     return false;
                 }
@@ -1913,9 +1932,16 @@ impl proto::rib_service_server::RibService for RibService {
                     return false;
                 }
                 true
-            })
-            .map(labeled_route_to_proto)
-            .collect();
+            },
+        );
+
+        let matched = rib_manager_read(&self.rib_tx, |reply| RibUpdate::QueryLabeledRoutes {
+            filter,
+            reply,
+        })
+        .await?;
+
+        let routes = matched.iter().map(labeled_route_to_proto).collect();
 
         Ok(Response::new(proto::ListLabeledRoutesResponse { routes }))
     }
@@ -1927,14 +1953,17 @@ impl proto::rib_service_server::RibService for RibService {
         let req = request.into_inner();
         let peer_filter = parse_optional_peer_filter(&req.peer_filter)?;
 
-        let all_routes =
-            rib_manager_read(&self.rib_tx, |reply| RibUpdate::QueryRtcRoutes { reply }).await?;
+        let filter = row_filter(peer_filter.is_some(), move |route: &RtcRibRoute| {
+            peer_filter.is_none_or(|peer| route.peer == peer)
+        });
 
-        let routes = all_routes
-            .iter()
-            .filter(|route| peer_filter.is_none_or(|peer| route.peer == peer))
-            .map(rtc_route_to_proto)
-            .collect();
+        let matched = rib_manager_read(&self.rib_tx, |reply| RibUpdate::QueryRtcRoutes {
+            filter,
+            reply,
+        })
+        .await?;
+
+        let routes = matched.iter().map(rtc_route_to_proto).collect();
 
         Ok(Response::new(proto::ListRtcRoutesResponse { routes }))
     }
@@ -3049,26 +3078,41 @@ mod tests {
         (evpn, bgpls, vpn, labeled, rtc)
     }
 
+    /// The RIB actor's copy rule, for the non-unicast listing fakes.
+    fn matching<T: Clone>(rows: &[T], filter: Option<&RibRowFilter<T>>) -> Vec<T> {
+        rows.iter()
+            .filter(|row| filter.is_none_or(|matches| matches(row)))
+            .cloned()
+            .collect()
+    }
+
     fn non_unicast_service(peer: IpAddr) -> RibService {
         let routes = non_unicast_routes(peer);
         let (tx, mut rx) = mpsc::channel(16);
         tokio::spawn(async move {
             while let Some(update) = rx.recv().await {
+                // Applies the pushed-down predicate exactly as the RIB actor
+                // does, so the filter assertions below exercise the real
+                // closures rather than a fake that ignores them.
                 match update {
-                    RibUpdate::QueryEvpnRoutes { reply } => {
-                        let _ = reply.send(vec![routes.0.clone()]);
+                    RibUpdate::QueryEvpnRoutes { filter, reply } => {
+                        let _ =
+                            reply.send(matching(std::slice::from_ref(&routes.0), filter.as_ref()));
                     }
-                    RibUpdate::QueryBgpLsRoutes { reply } => {
-                        let _ = reply.send(routes.1.clone());
+                    RibUpdate::QueryBgpLsRoutes { filter, reply } => {
+                        let _ = reply.send(matching(&routes.1, filter.as_ref()));
                     }
-                    RibUpdate::QueryVpnRoutes { reply } => {
-                        let _ = reply.send(vec![routes.2.clone()]);
+                    RibUpdate::QueryVpnRoutes { filter, reply } => {
+                        let _ =
+                            reply.send(matching(std::slice::from_ref(&routes.2), filter.as_ref()));
                     }
-                    RibUpdate::QueryLabeledRoutes { reply } => {
-                        let _ = reply.send(vec![routes.3.clone()]);
+                    RibUpdate::QueryLabeledRoutes { filter, reply } => {
+                        let _ =
+                            reply.send(matching(std::slice::from_ref(&routes.3), filter.as_ref()));
                     }
-                    RibUpdate::QueryRtcRoutes { reply } => {
-                        let _ = reply.send(vec![routes.4.clone()]);
+                    RibUpdate::QueryRtcRoutes { filter, reply } => {
+                        let _ =
+                            reply.send(matching(std::slice::from_ref(&routes.4), filter.as_ref()));
                     }
                     _ => panic!("unexpected RIB update"),
                 }
@@ -3086,19 +3130,19 @@ mod tests {
             while let Some(update) = rx.recv().await {
                 actor_queries.fetch_add(1, Ordering::Relaxed);
                 match update {
-                    RibUpdate::QueryEvpnRoutes { reply } => {
+                    RibUpdate::QueryEvpnRoutes { reply, .. } => {
                         let _ = reply.send(Vec::new());
                     }
-                    RibUpdate::QueryBgpLsRoutes { reply } => {
+                    RibUpdate::QueryBgpLsRoutes { reply, .. } => {
                         let _ = reply.send(Vec::new());
                     }
-                    RibUpdate::QueryVpnRoutes { reply } => {
+                    RibUpdate::QueryVpnRoutes { reply, .. } => {
                         let _ = reply.send(Vec::new());
                     }
-                    RibUpdate::QueryLabeledRoutes { reply } => {
+                    RibUpdate::QueryLabeledRoutes { reply, .. } => {
                         let _ = reply.send(Vec::new());
                     }
-                    RibUpdate::QueryRtcRoutes { reply } => {
+                    RibUpdate::QueryRtcRoutes { reply, .. } => {
                         let _ = reply.send(Vec::new());
                     }
                     _ => panic!("unexpected RIB update"),

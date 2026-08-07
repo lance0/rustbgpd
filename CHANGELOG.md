@@ -96,6 +96,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Non-unicast route listings no longer stall the RIB actor with a
+  full-table copy the API then discards (LAN-905). `ListEvpnRoutes`,
+  `ListBgpLsRoutes`, `ListVpnRoutes`, `ListLabeledRoutes`,
+  `ListRtcRoutes`, and `ListFlowSpecRoutes` now hand their peer, address
+  family, route/NLRI type, and RD filters to the RIB task, which clones
+  only matching rows; an abandoned caller (canceled RPC) skips the scan
+  entirely. The daemon's EVPN DF-election reads narrow to Type 4 ES rows
+  the same way. Filtering a 1,000,000-route VPN table to one of 16 peers
+  drops actor occupancy from ~144 ms to ~26 ms; unfiltered listings are
+  unchanged, and no request or response message changed shape.
 - Low-severity defect batch (LAN-906): a staged config write no longer
   leaks its secret-bearing temp file when the publishing rename or
   directory fsync fails (`StagedWrite` now removes the temp file on every

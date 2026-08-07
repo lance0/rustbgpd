@@ -52,7 +52,7 @@ use rustbgpd_evpn::{
     LocalEadPerEviOriginator, LocalEsOriginator, OriginationAction, RedundancyMode,
     SameEsiBiasTable,
 };
-use rustbgpd_rib::{EvpnRouteEvent, RibUpdate, route::EvpnRibRoute};
+use rustbgpd_rib::{EvpnRouteEvent, RibRowFilter, RibUpdate, route::EvpnRibRoute};
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::{
     AsPath, EthernetSegmentIdentifier, EvpnEadPerEs, EvpnEadPerEvi, EvpnEs, EvpnRoute,
@@ -827,7 +827,17 @@ async fn reelection_sweep(
     by_esi: &mut HashMap<EthernetSegmentIdentifier, SegmentState>,
     pending: &mut PendingRibOps,
 ) {
-    let routes = match query_evpn_routes(&runtime.rib_tx).await {
+    // Every ESI's election reads only Type 4 ES rows; the sweep shares one
+    // snapshot across all of them, so narrow to that route type in the RIB
+    // task rather than copying the (Type 2 dominated) whole table.
+    let routes = match query_evpn_routes(
+        &runtime.rib_tx,
+        Some(Box::new(|route: &EvpnRibRoute| {
+            matches!(route.route, EvpnRoute::Es(_))
+        })),
+    )
+    .await
+    {
         Ok(r) => r,
         Err(e) => {
             warn!(error = %e, "EVPN segment: sweep candidate gather failed");
@@ -1250,7 +1260,19 @@ async fn gather_candidates(
     state: &SegmentState,
     rib_tx: &mpsc::Sender<RibUpdate>,
 ) -> Result<Vec<DfCandidate>, RibQueryError> {
-    let routes = query_evpn_routes(rib_tx).await?;
+    // Only this segment's Type 4 ES rows are candidates, and they are a
+    // small minority of an EVPN table dominated by Type 2. Narrowing in
+    // the RIB task keeps a DF re-election off the actor's critical path;
+    // `gather_candidates_from_routes` re-checks the same predicate, so
+    // its direct callers see identical results.
+    let esi = state.config.esi;
+    let routes = query_evpn_routes(
+        rib_tx,
+        Some(Box::new(
+            move |route: &EvpnRibRoute| matches!(&route.route, EvpnRoute::Es(es) if es.esi == esi),
+        )),
+    )
+    .await?;
     Ok(gather_candidates_from_routes(state, &routes))
 }
 
@@ -1389,10 +1411,14 @@ fn df_election_extcomm(
 
 async fn query_evpn_routes(
     rib_tx: &mpsc::Sender<RibUpdate>,
+    filter: Option<RibRowFilter<EvpnRibRoute>>,
 ) -> Result<Vec<EvpnRibRoute>, RibQueryError> {
     let (reply_tx, reply_rx) = oneshot::channel();
     rib_tx
-        .send(RibUpdate::QueryEvpnRoutes { reply: reply_tx })
+        .send(RibUpdate::QueryEvpnRoutes {
+            filter,
+            reply: reply_tx,
+        })
         .await
         .map_err(|_| RibQueryError::SendFailed)?;
     reply_rx.await.map_err(|_| RibQueryError::ReplyDropped)
@@ -1912,7 +1938,7 @@ mod tests {
                     RibUpdate::SubscribeEvpnRouteEvents { reply } => {
                         let _ = reply.send(events_tx.subscribe());
                     }
-                    RibUpdate::QueryEvpnRoutes { reply } => {
+                    RibUpdate::QueryEvpnRoutes { reply, .. } => {
                         let _ = reply.send(Vec::new());
                     }
                     RibUpdate::InjectEvpn { route, reply } => {
@@ -3581,8 +3607,17 @@ mod tests {
                     RibUpdate::SubscribeEvpnRouteEvents { reply } => {
                         let _ = reply.send(events_tx.subscribe());
                     }
-                    RibUpdate::QueryEvpnRoutes { reply } => {
-                        let _ = reply.send(routes.lock().await.clone());
+                    RibUpdate::QueryEvpnRoutes { filter, reply } => {
+                        // Applies the pushed-down predicate exactly as the RIB
+                        // actor does, so the election tests see the same rows
+                        // production would hand back.
+                        let rows = routes.lock().await;
+                        let _ = reply.send(
+                            rows.iter()
+                                .filter(|row| filter.as_ref().is_none_or(|matches| matches(row)))
+                                .cloned()
+                                .collect(),
+                        );
                     }
                     RibUpdate::InjectEvpn { route, reply } => {
                         injects.lock().await.push(route.key());

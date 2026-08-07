@@ -5455,7 +5455,7 @@ table_id = 6000
                     RibUpdate::SubscribeEvpnRouteEvents { reply } => {
                         let _ = reply.send(events_tx.subscribe());
                     }
-                    RibUpdate::QueryEvpnRoutes { reply } => {
+                    RibUpdate::QueryEvpnRoutes { reply, .. } => {
                         let _ = reply.send(vec![]);
                     }
                     RibUpdate::InjectEvpn { route, reply } => {
@@ -5486,7 +5486,7 @@ table_id = 6000
                     RibUpdate::SubscribeEvpnRouteEvents { reply } => {
                         let _ = reply.send(events_tx.subscribe());
                     }
-                    RibUpdate::QueryEvpnRoutes { reply } => {
+                    RibUpdate::QueryEvpnRoutes { reply, .. } => {
                         let _ = reply.send(vec![]);
                     }
                     RibUpdate::InjectEvpn { route, reply } => {

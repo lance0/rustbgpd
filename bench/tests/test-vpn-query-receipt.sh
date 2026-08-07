@@ -72,12 +72,15 @@ assert doc["linux_affinity"] == str(doc["declared_cpu"])
 assert doc["routes"] == 256
 assert doc["peers"] == 16
 query = doc["query"]
-assert query["actor_rows"] == 256
-assert query["actor_capacity"] >= 256
+# The peer filter is evaluated inside the RIB task, so the actor's snapshot is
+# the matching rows -- not the whole table the service would then discard.
+matched = 256 if doc["case"] == "U" else 16
+assert query["actor_rows"] == matched
+assert query["actor_capacity"] >= matched
 assert query["actor_snapshot_lower_bound_bytes"] == query["actor_capacity"] * (
     query["vpn_rib_route_size_bytes"]) + query["actor_rows"] * query["mpls_label_entry_size_bytes"]
 assert query["dispatch"] == 1
-assert query["returned_rows"] == (256 if doc["case"] == "U" else 16)
+assert query["returned_rows"] == matched
 assert query["checksum"] == (
     5102335214269610730 if doc["case"] == "U" else 7341237881033179096
 )

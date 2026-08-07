@@ -59,16 +59,19 @@ def verify_affinity(receipt, manifest, label):
             f"{label}: CPU affinity drift")
 
 
-def verify_query(query, rows, returned, label):
-    require(query.get("actor_rows") == rows, f"{label}: actor rows")
+def verify_query(query, returned, label):
+    # The listing filter is evaluated inside the RIB task, so the actor's
+    # snapshot holds exactly the rows the service returns. Any gap would mean
+    # the actor is again copying rows the service discards.
+    require(query.get("actor_rows") == returned, f"{label}: actor rows")
     capacity = query.get("actor_capacity")
-    require(type(capacity) is int and capacity >= rows, f"{label}: actor capacity")
+    require(type(capacity) is int and capacity >= returned, f"{label}: actor capacity")
     route_size = query.get("vpn_rib_route_size_bytes")
     label_size = query.get("mpls_label_entry_size_bytes")
     lower_bound = query.get("actor_snapshot_lower_bound_bytes")
     require(all(type(value) is int and value > 0
                 for value in (route_size, label_size, lower_bound))
-            and lower_bound == capacity * route_size + rows * label_size,
+            and lower_bound == capacity * route_size + returned * label_size,
             f"{label}: actor snapshot lower bound")
     require(query.get("returned_rows") == returned, f"{label}: returned rows")
     return lower_bound
@@ -106,7 +109,7 @@ def verify_receipt(receipt, expected, manifest, attempt):
     require(service >= actor, f"receipt {ordinal}: post-actor underflow")
     require(post == service - actor, f"receipt {ordinal}: post-actor decomposition")
     expected_rows = size if case == "U" else size // 16
-    verify_query(query, size, expected_rows, f"receipt {ordinal}")
+    verify_query(query, expected_rows, f"receipt {ordinal}")
     require(query.get("dispatch") == 1, f"receipt {ordinal}: dispatch")
     require(type(query.get("checksum")) is int
             and query["checksum"] == CHECKSUMS[(size, case)],
@@ -135,11 +138,14 @@ def classify(manifest, timings, allocation):
     for size in SIZES:
         u_median = medians[(size, "U")]
         f_median = medians[(size, "F")]
-        agreement = abs(u_median - f_median) / ((u_median + f_median) / 2)
+        # The filter runs inside the RIB task, so the filtered case must cost
+        # the actor materially less than the unfiltered one. Parity is the
+        # suspect signal now: it means the predicate never reached the actor
+        # (or the instrument is not reading the handler it claims to).
         tolerance = max(
             pair_noise[f"{size}:U"] + pair_noise[f"{size}:F"] + [0.05]
         )
-        instrumentation_suspect |= agreement > tolerance
+        instrumentation_suspect |= f_median >= u_median * (1 - tolerance)
     for case in ("U", "F"):
         instrumentation_suspect |= any(
             medians[(larger, case)] <= medians[(smaller, case)]
@@ -327,7 +333,7 @@ def verify(directory):
     require(type(actor) is int and actor > 0 and type(service) is int and service > 0
             and type(post) is int and post >= 0 and service - actor == post,
             "allocation timing decomposition")
-    lower_bound = verify_query(query, 1_000_000, 1_000_000, "allocation")
+    lower_bound = verify_query(query, 1_000_000, "allocation")
     require(delta >= lower_bound,
             "allocation peak delta is below the actor snapshot lower bound")
     require(type(query.get("checksum")) is int
