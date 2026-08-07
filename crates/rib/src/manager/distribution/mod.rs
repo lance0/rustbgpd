@@ -4798,12 +4798,19 @@ impl RibManager {
                     } else if is_force {
                         if let Some(group) = self.group_ribs.get(&gid) {
                             let rejected = self.peer_unexportable.get(&peer);
+                            // The member's prior wire view is adv(m)
+                            // ([`GroupRibOut::adv_entry`], ADR-0126
+                            // Decision 4): a lane-substituted slot IS
+                            // on the wire (same staged key), an
+                            // own-sourced slot without one is not.
                             prior.extend(group.table.iter().filter_map(|route| {
                                 let key = crate::update::ExactExportKey::Unicast(
                                     route.prefix,
                                     route.path_id,
                                 );
-                                (route.peer != peer
+                                (group
+                                    .adv_entry(peer, &route.prefix, route.path_id)
+                                    .is_some()
                                     && !rejected.is_some_and(|keys| keys.contains(&key)))
                                 .then_some(key)
                             }));

@@ -1823,8 +1823,13 @@ impl GroupRibOut {
             .collect()
     }
 
-    /// Snapshot of `member`'s advertised unicast view (table minus
-    /// own-sourced) — the baseline for a regroup's one-shot diff.
+    /// Snapshot of `member`'s advertised unicast view — `adv(m)` per
+    /// staged key ([`Self::adv_entry`], ADR-0126 Decision 4) — the
+    /// baseline for a regroup's one-shot diff. A substituted slot
+    /// records the LANE entry's wire form (rs-decided and rewritten
+    /// from the lane's captured source attributes, exactly how staged
+    /// entries are recorded), or the destination-side diff would
+    /// compare wire state to a route the member never received.
     fn member_view_snapshot(
         &self,
         member: IpAddr,
@@ -1834,22 +1839,25 @@ impl GroupRibOut {
         use super::distribution::rs_control::{rs_control_route_rewrite, rs_control_suppressed};
         self.table
             .iter()
-            .filter(|route| {
-                let (communities, large_communities) =
-                    self.source_control((route.prefix, route.path_id));
-                route.peer != member
-                    && !rejected.contains(&ExactExportKey::Unicast(route.prefix, route.path_id))
-                    // LAN-474: a key whose SOURCE communities suppress
-                    // it toward the member was never on its wire — the
-                    // snapshot records true wire state, not the shared
-                    // table.
-                    && !rs_control_suppressed(communities, large_communities, rs_control)
-            })
-            .map(|route| {
-                let (_, large_communities) = self.source_control((route.prefix, route.path_id));
-                let mut route = route.clone();
+            .filter_map(|staged| {
+                let key = (staged.prefix, staged.path_id);
+                // The substitution shares the staged slot's key, so the
+                // member-local rejection overlay applies identically.
+                if rejected.contains(&ExactExportKey::Unicast(key.0, key.1)) {
+                    return None;
+                }
+                let entry = self.adv_entry(member, &staged.prefix, staged.path_id)?;
+                let (communities, large_communities) = source_control_input(entry.source_attrs);
+                // LAN-474: a key whose SOURCE communities suppress it
+                // toward the member was never on its wire — the
+                // snapshot records true wire state, not the shared
+                // table.
+                if rs_control_suppressed(communities, large_communities, rs_control) {
+                    return None;
+                }
+                let mut route = entry.route.clone();
                 rs_control_route_rewrite(&mut route, large_communities, rs_control);
-                ((route.prefix, route.path_id), route)
+                Some((key, route))
             })
             .collect()
     }
@@ -7476,6 +7484,379 @@ mod tests {
             OTHER1,
             "the new winner's source ends on the runner-up"
         );
+    }
+
+    // --- ADR-0126 Phase 2 (cold replays): refresh/join replay, the
+    // --- regroup baseline snapshot, and the force-refresh prior — all
+    // --- routed through `adv_entry`.
+
+    /// The three-slot replay fixture: k1 a plain slot (OTHER1), k2
+    /// winner MEMBER with the lane holding OTHER2 (nh residue, source
+    /// communities from `lane_comm`), k3 winner MEMBER with no lane.
+    fn replay_group(lane_comm: Option<u32>) -> GroupRibOut {
+        let mut group = per_client_best_group(None);
+        group.apply_delta(&announce_delta(prefix(1), OTHER1, None));
+        group.apply_delta(&announce_delta(prefix(2), MEMBER, None));
+        group.apply_delta(&announce_delta(prefix(3), MEMBER, None));
+        group.apply_lane(
+            prefix(2),
+            Some(lane_entry(
+                route(prefix(2), OTHER2),
+                MEMBER,
+                "lane",
+                lane_comm,
+            )),
+        );
+        group
+    }
+
+    /// Register `member` as a live outbound peer (real `PeerUp`, IPv4
+    /// unicast, the permissive test exact encoder unless one is
+    /// pending) and point its membership at the constructed group —
+    /// the ONLY way a per-client-best member can exist until the
+    /// ADR-0126 Phase 3 classifier flip. The registration's own dump
+    /// is drained so a test observes only what it triggers.
+    fn register_pcb_member(
+        m: &mut RibManager,
+        member: IpAddr,
+        mut group: GroupRibOut,
+    ) -> tokio::sync::mpsc::Receiver<crate::update::OutboundRouteUpdate> {
+        let (outbound_tx, mut outbound_rx) = tokio::sync::mpsc::channel(8);
+        m.handle_update(crate::update::RibUpdate::PeerUp {
+            peer: member,
+            session_id: 0,
+            peer_asn: TARGET_ASN,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            outbound_tx,
+            export_policy: None,
+            sendable_families: vec![(Afi::Ipv4, Safi::Unicast)],
+            is_ebgp: false,
+            route_reflector_client: false,
+            orr_vantage: None,
+            per_client_best: false,
+            interpret_rfc1997: true,
+            add_path_send_families: vec![],
+            add_path_send_max: 0,
+            negotiated_orf_recv: vec![],
+            negotiated_llgr_families: vec![],
+        });
+        while outbound_rx.try_recv().is_ok() {}
+        group.members.insert(member);
+        m.group_ribs.insert(PCB_GID, group);
+        m.update_groups
+            .members
+            .insert(member, GroupMembership::Grouped(PCB_GID));
+        outbound_rx
+    }
+
+    /// Fold every queued outbound update into
+    /// `(prefix → (source, nh flag), withdraws)`.
+    #[expect(
+        clippy::type_complexity,
+        reason = "one folded wire tuple keeps the replay assertions single-call"
+    )]
+    fn folded_outbound(
+        rx: &mut tokio::sync::mpsc::Receiver<crate::update::OutboundRouteUpdate>,
+    ) -> (
+        HashMap<Prefix, (IpAddr, Option<NextHopAction>)>,
+        Vec<(Prefix, u32)>,
+    ) {
+        let mut announced = HashMap::new();
+        let mut withdrawn = Vec::new();
+        while let Ok(update) = rx.try_recv() {
+            assert_eq!(
+                update.next_hop_override.len(),
+                update.announce.len(),
+                "nh flags must stay aligned with announces"
+            );
+            for (route, nh) in update.announce.iter().zip(update.next_hop_override.iter()) {
+                announced.insert(route.prefix, (route.peer, nh.clone()));
+            }
+            withdrawn.extend(update.withdraw.iter().copied());
+        }
+        (announced, withdrawn)
+    }
+
+    /// RFC 2918 refresh replay substitution matrix through the REAL
+    /// grouped refresh arm: the member sourcing k2's winner receives
+    /// the LANE entry there (route, nh residue both the lane's), the
+    /// laneless own-sourced k3 replays nothing, and the plain k1 slot
+    /// is untouched.
+    #[test]
+    fn pcb_route_refresh_replays_lane_substitution() {
+        let mut m = staging_manager();
+        let mut rx = register_pcb_member(&mut m, MEMBER, replay_group(None));
+        m.send_route_refresh_response(MEMBER, Afi::Ipv4, Safi::Unicast);
+        let (announced, withdrawn) = folded_outbound(&mut rx);
+        assert_eq!(
+            announced.keys().copied().collect::<HashSet<_>>(),
+            HashSet::from([prefix(1), prefix(2)]),
+            "k2 substitutes the lane entry; k3's empty lane replays nothing"
+        );
+        assert_eq!(announced[&prefix(1)], (OTHER1, None));
+        assert_eq!(
+            announced[&prefix(2)],
+            (OTHER2, Some(NextHopAction::Self_)),
+            "the substituted slot carries the LANE's route and nh residue"
+        );
+        assert!(withdrawn.is_empty());
+    }
+
+    /// rs-control at the refresh replay decides the substituted slot
+    /// from the LANE entry's source attributes: a suppressing tag
+    /// removes exactly that slot from the replay.
+    #[test]
+    fn pcb_route_refresh_rs_member_suppresses_tagged_lane() {
+        let mut m = staging_manager();
+        // Community == the member's ASN ⇒ suppressed toward it.
+        let mut rx = register_pcb_member(&mut m, MEMBER, replay_group(Some(TARGET_ASN)));
+        m.peer_rs_control.insert(MEMBER, RS_ASN);
+        m.send_route_refresh_response(MEMBER, Afi::Ipv4, Safi::Unicast);
+        let (announced, withdrawn) = folded_outbound(&mut rx);
+        assert_eq!(
+            announced.keys().copied().collect::<Vec<_>>(),
+            vec![prefix(1)],
+            "the suppressed lane source removes the substituted slot"
+        );
+        assert!(withdrawn.is_empty());
+    }
+
+    /// Join / initial-dump replay substitution matrix, plus the
+    /// Decision 4 agreement the counters replay must keep: the
+    /// replayed announce set and `apply_group_join_counters`'s permit
+    /// count (run by the same dump) are the same fold over adv(m).
+    #[test]
+    fn pcb_initial_dump_replays_substitution_and_join_counters_agree() {
+        let mut m = staging_manager();
+        let mut rx = register_pcb_member(&mut m, MEMBER, replay_group(None));
+        let permitted_before = m
+            .export_policy_stats
+            .get(&MEMBER)
+            .map_or(0, |stats| stats.export_policy_routes_permitted);
+        m.send_initial_table(MEMBER);
+        let (announced, withdrawn) = folded_outbound(&mut rx);
+        assert_eq!(
+            announced.keys().copied().collect::<HashSet<_>>(),
+            HashSet::from([prefix(1), prefix(2)])
+        );
+        assert_eq!(announced[&prefix(1)], (OTHER1, None));
+        assert_eq!(announced[&prefix(2)], (OTHER2, Some(NextHopAction::Self_)));
+        assert!(withdrawn.is_empty());
+        let permitted = m
+            .export_policy_stats
+            .get(&MEMBER)
+            .map_or(0, |stats| stats.export_policy_routes_permitted)
+            - permitted_before;
+        assert_eq!(
+            permitted,
+            u64::try_from(announced.len()).unwrap(),
+            "the join replay and its counter replay diverged over adv(m)"
+        );
+    }
+
+    /// Darkness at the replay seams: an empty-lane per-client-best
+    /// group refresh-replays byte-identically to a plain group over
+    /// the same table.
+    #[test]
+    fn pcb_empty_lane_refresh_replay_matches_plain_group() {
+        let build = |mut group: GroupRibOut| {
+            group.apply_delta(&announce_delta(prefix(1), OTHER1, None));
+            group.apply_delta(&announce_delta(prefix(2), MEMBER, None));
+            group
+        };
+        let mut replays = [build(per_client_best_group(None)), build(empty_group())]
+            .into_iter()
+            .map(|group| {
+                let mut m = staging_manager();
+                let mut rx = register_pcb_member(&mut m, MEMBER, group);
+                m.send_route_refresh_response(MEMBER, Afi::Ipv4, Safi::Unicast);
+                let (announced, withdrawn) = folded_outbound(&mut rx);
+                let mut announced: Vec<_> = announced.into_iter().collect();
+                announced.sort_by_key(|(prefix, _)| *prefix);
+                (announced, withdrawn)
+            });
+        let pcb = replays.next().unwrap();
+        let plain = replays.next().unwrap();
+        assert_eq!(pcb, plain);
+    }
+
+    /// RFC 8326 `GShut` force-refresh routes through the resync arm with
+    /// `is_force = true` (the ADR-0126 Decision 4 replay set): driven
+    /// through the REAL `RefreshPeerOutbound` path, it re-announces
+    /// adv(m) — the lane substitution included, with the lane's nh
+    /// residue — and withdraws nothing.
+    #[test]
+    fn pcb_force_refresh_reannounces_lane_substitution() {
+        let mut m = staging_manager();
+        let mut rx = register_pcb_member(&mut m, MEMBER, replay_group(None));
+        let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
+        m.handle_refresh_peer_outbound(MEMBER, reply_tx);
+        let (announced, withdrawn) = folded_outbound(&mut rx);
+        assert_eq!(
+            announced.keys().copied().collect::<HashSet<_>>(),
+            HashSet::from([prefix(1), prefix(2)])
+        );
+        assert_eq!(announced[&prefix(2)], (OTHER2, Some(NextHopAction::Self_)));
+        assert!(withdrawn.is_empty(), "force-only withdraws nothing");
+    }
+
+    /// Exact-export encoder rejecting exactly one unicast prefix — the
+    /// smallest instrument that makes the force prior's owed-withdrawal
+    /// decision observable.
+    struct RejectPrefixExactExport(Prefix);
+    struct RejectPrefixSnapshot(Prefix);
+
+    impl crate::update::ExactExportSnapshot for RejectPrefixSnapshot {
+        fn owner_id(&self) -> u64 {
+            7
+        }
+
+        fn generation(&self) -> u64 {
+            1
+        }
+
+        fn probe_announcement(
+            &self,
+            candidate: crate::update::ExactExportCandidate<'_>,
+        ) -> Result<crate::update::ExactExportResult, crate::update::ExactExportError> {
+            match candidate {
+                crate::update::ExactExportCandidate::Unicast { route, .. }
+                    if route.prefix == self.0 =>
+                {
+                    Err(crate::update::ExactExportError::new(
+                        crate::update::ExactExportErrorCode::MessageTooLong,
+                        "synthetic per-prefix ceiling",
+                    ))
+                }
+                _ => Ok(crate::update::ExactExportResult {
+                    encoded_len: 64,
+                    max_len: 4_096,
+                    generation: 1,
+                }),
+            }
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    impl crate::update::ExactExportEncoder for RejectPrefixExactExport {
+        fn owner_id(&self) -> u64 {
+            7
+        }
+
+        fn snapshot(&self) -> Arc<dyn crate::update::ExactExportSnapshot> {
+            Arc::new(RejectPrefixSnapshot(self.0))
+        }
+    }
+
+    /// The force-refresh `group_prior` is adv(m): the substituted slot
+    /// IS the member's prior wire, so an exact-export rejection of the
+    /// substituted announce owes the withdrawal that removes it —
+    /// under the historical own-source skip the slot was absent from
+    /// the prior and the stale substitution leaked on the peer.
+    #[test]
+    fn pcb_force_prior_covers_substituted_slot_for_exact_rejection() {
+        let mut m = staging_manager();
+        m.handle_update(crate::update::RibUpdate::SetPeerExportEncoder {
+            peer: MEMBER,
+            session_id: 0,
+            encoder: Arc::new(RejectPrefixExactExport(prefix(2))),
+        });
+        let mut rx = register_pcb_member(&mut m, MEMBER, replay_group(None));
+        let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
+        m.handle_refresh_peer_outbound(MEMBER, reply_tx);
+        let (announced, withdrawn) = folded_outbound(&mut rx);
+        assert_eq!(
+            announced.keys().copied().collect::<Vec<_>>(),
+            vec![prefix(1)],
+            "the rejected substitution must not be announced"
+        );
+        assert_eq!(
+            withdrawn,
+            vec![(prefix(2), 0)],
+            "a rejected previously-advertised substitution owes its withdrawal"
+        );
+        assert!(
+            m.peer_unexportable
+                .get(&MEMBER)
+                .is_some_and(|keys| keys.contains(&ExactExportKey::Unicast(prefix(2), 0))),
+            "the rejection must land in the member's overlay"
+        );
+    }
+
+    /// Regroup baseline interplay (ADR-0126 Decision 4): the snapshot
+    /// records adv(m) — the LANE entry's wire form at a substituted
+    /// slot — so the destination-side one-shot diff suppresses an
+    /// unchanged substitution, announces a changed one, and withdraws
+    /// a retired one.
+    #[test]
+    fn pcb_member_view_snapshot_records_substitution_for_regroup_diff() {
+        let (k1, k2) = (prefix(1), prefix(2));
+        let mut group = per_client_best_group(None);
+        group.apply_delta(&announce_delta(k1, OTHER1, None));
+        group.apply_delta(&announce_delta(k2, MEMBER, None));
+        group.apply_lane(
+            k2,
+            Some(lane_entry(route(k2, OTHER2), MEMBER, "lane", None)),
+        );
+
+        let baseline = group.member_view_snapshot(MEMBER, None, &HashSet::new());
+        assert_eq!(baseline.len(), 2);
+        assert_eq!(
+            baseline[&(k2, 0)].peer,
+            OTHER2,
+            "the baseline records adv(m), not the staged winner"
+        );
+
+        let regroup_diff = |group: &GroupRibOut| {
+            let mut announce = Vec::new();
+            let mut withdraw = Vec::new();
+            let mut nh_flags = Vec::new();
+            RibManager::assemble_group_resync(
+                group,
+                MEMBER,
+                None,
+                false,
+                false,
+                Some(&baseline),
+                None,
+                &mut announce,
+                &mut withdraw,
+                &mut nh_flags,
+            );
+            (announce, withdraw)
+        };
+
+        // Unchanged substitution: the one-shot diff is byte-empty.
+        let (announce, withdraw) = regroup_diff(&group);
+        assert!(
+            announce.is_empty() && withdraw.is_empty(),
+            "an unchanged substitution must be equality-suppressed"
+        );
+
+        // Changed substitution: announced (implicit replace), never
+        // withdrawn.
+        group.apply_lane(
+            k2,
+            Some(lane_entry(cand(k2, OTHER2, 250), MEMBER, "lane", None)),
+        );
+        let (announce, withdraw) = regroup_diff(&group);
+        assert_eq!(announce.len(), 1);
+        assert_eq!((announce[0].prefix, announce[0].peer), (k2, OTHER2));
+        assert!(
+            !routes_equal(&announce[0], &baseline[&(k2, 0)]),
+            "the announce is the CHANGED lane content"
+        );
+        assert!(withdraw.is_empty());
+
+        // Retired substitution: the baseline key is no longer
+        // retained — withdrawn.
+        group.apply_lane(k2, None);
+        let (announce, withdraw) = regroup_diff(&group);
+        assert!(announce.is_empty());
+        assert_eq!(withdraw, vec![(k2, 0)]);
     }
 
     fn vpn_key(n: u8) -> VpnRouteKey {

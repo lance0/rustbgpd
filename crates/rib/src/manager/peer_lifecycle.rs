@@ -1218,8 +1218,8 @@ impl RibManager {
         let mut export_memo = super::distribution::ExportMemo::default();
 
         // A grouped member's initial unicast dump is a replay of the
-        // group table minus its own-sourced entries — the export tail
-        // already ran when the table was built (design §4: join pays no
+        // group table's derived view for it — the export tail already
+        // ran when the table was built (design §4: join pays no
         // per-prefix staging walk). The loop below is the ungrouped
         // path; grouped peers skip it (empty staging set).
         let member_of = self.grouped_member_of(peer);
@@ -1232,21 +1232,30 @@ impl RibManager {
             // from the source, scrub post-policy) for it; untagged
             // entries replay as-is.
             let rs_control = rs_control_asn.zip(target_peer_asn);
-            for route in group.table.iter() {
-                let (source_communities, source_large_communities) =
-                    group.source_control((route.prefix, route.path_id));
-                if route.peer == peer
-                    || self.selection_deferred(prefix_family(&route.prefix))
-                    || super::distribution::rs_control::rs_control_suppressed(
-                        source_communities,
-                        source_large_communities,
-                        rs_control,
-                    )
-                {
+            for staged in group.table.iter() {
+                if self.selection_deferred(prefix_family(&staged.prefix)) {
                     continue;
                 }
-                nh_override_flags.push(group.nh_override((route.prefix, route.path_id)));
-                let mut route = route.clone();
+                // adv(m) resolves the slot ([`GroupRibOut::adv_entry`],
+                // ADR-0126 Decision 4): the staged winner for a
+                // non-source member, the lane runner-up for the
+                // winner's own source, nothing when the lane is empty.
+                // The rs-control decision and the nh residue come from
+                // the RESOLVED entry.
+                let Some(entry) = group.adv_entry(peer, &staged.prefix, staged.path_id) else {
+                    continue;
+                };
+                let (source_communities, source_large_communities) =
+                    super::update_groups::source_control_input(entry.source_attrs);
+                if super::distribution::rs_control::rs_control_suppressed(
+                    source_communities,
+                    source_large_communities,
+                    rs_control,
+                ) {
+                    continue;
+                }
+                nh_override_flags.push(entry.nh.cloned());
+                let mut route = entry.route.clone();
                 super::distribution::rs_control::rs_control_route_rewrite(
                     &mut route,
                     source_large_communities,

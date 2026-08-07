@@ -1018,9 +1018,9 @@ impl RibManager {
             }
         } else if let Some(gid) = member_of {
             // A grouped member's refresh replay comes from the group
-            // table — family-filtered, own-sourced excluded — with NO
-            // policy re-evaluation: the export tail already ran when the
-            // table was staged (same shape as the join replay in
+            // table — family-filtered, the member's derived view — with
+            // NO policy re-evaluation: the export tail already ran when
+            // the table was staged (same shape as the join replay in
             // `send_initial_table`). BoRR/EoRR markers stay per-peer via
             // the send below. ORF disqualifies from grouping, so the
             // deferred-ORF withdraw sweep in the per-peer arm can never
@@ -1031,21 +1031,30 @@ impl RibManager {
                 // tagged entries rewritten per target (prepend from the
                 // captured source, scrub post-policy).
                 let rs_control = rs_control_asn.zip(target_peer_asn);
-                for route in group.table.iter() {
-                    let (source_communities, source_large_communities) =
-                        group.source_control((route.prefix, route.path_id));
-                    if route.peer == peer
-                        || prefix_family(&route.prefix) != family
-                        || super::distribution::rs_control::rs_control_suppressed(
-                            source_communities,
-                            source_large_communities,
-                            rs_control,
-                        )
-                    {
+                for staged in group.table.iter() {
+                    if prefix_family(&staged.prefix) != family {
                         continue;
                     }
-                    nh_override_flags.push(group.nh_override((route.prefix, route.path_id)));
-                    let mut route = route.clone();
+                    // adv(m) resolves the slot ([`GroupRibOut::adv_entry`],
+                    // ADR-0126 Decision 4): the staged winner for a
+                    // non-source member, the lane runner-up for the
+                    // winner's own source, nothing when the lane is
+                    // empty. The rs-control decision and the nh residue
+                    // come from the RESOLVED entry.
+                    let Some(entry) = group.adv_entry(peer, &staged.prefix, staged.path_id) else {
+                        continue;
+                    };
+                    let (source_communities, source_large_communities) =
+                        super::update_groups::source_control_input(entry.source_attrs);
+                    if super::distribution::rs_control::rs_control_suppressed(
+                        source_communities,
+                        source_large_communities,
+                        rs_control,
+                    ) {
+                        continue;
+                    }
+                    nh_override_flags.push(entry.nh.cloned());
+                    let mut route = entry.route.clone();
                     super::distribution::rs_control::rs_control_route_rewrite(
                         &mut route,
                         source_large_communities,
