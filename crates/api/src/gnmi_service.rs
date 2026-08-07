@@ -21,7 +21,10 @@ use crate::gnmi;
 use crate::gnmi_ext;
 use crate::peer_types::{PeerInfo, PeerManagerCommand};
 use crate::proto;
-use crate::server::{GnmiSetCommitAction, GnmiSetFn, GnmiSetOperation, GnmiSetTransaction};
+use crate::server::{
+    AccessMode, GnmiSetCommitAction, GnmiSetFn, GnmiSetOperation, GnmiSetTransaction,
+    read_only_rejection,
+};
 
 const GNMI_VERSION: &str = "0.10.0";
 const DEFAULT_NETWORK_INSTANCE: &str = "DEFAULT";
@@ -135,6 +138,9 @@ fn render_heartbeat_snapshot<'a>(
 pub struct GnmiService {
     asn: u32,
     router_id: String,
+    /// Listener access mode. `Set` is guarded explicitly like every other
+    /// mutating service, in addition to the authz tier cap on `gnmi.gNMI/Set`.
+    access_mode: AccessMode,
     peer_snapshot: PeerSnapshotFn,
     /// Bounds concurrent `Subscribe` streams; a permit is held for the lifetime
     /// of each open stream.
@@ -210,9 +216,10 @@ impl GnmiService {
     pub fn new(
         asn: u32,
         router_id: String,
+        access_mode: AccessMode,
         peer_mgr_tx: tokio::sync::mpsc::Sender<PeerManagerCommand>,
     ) -> Self {
-        Self::with_peer_snapshot(asn, router_id, move || {
+        let mut service = Self::with_peer_snapshot(asn, router_id, move || {
             let peer_mgr_tx = peer_mgr_tx.clone();
             Box::pin(async move {
                 peer_manager_read(&peer_mgr_tx, |reply| PeerManagerCommand::ListPeers {
@@ -220,7 +227,9 @@ impl GnmiService {
                 })
                 .await
             })
-        })
+        });
+        service.access_mode = access_mode;
+        service
     }
 
     fn with_peer_snapshot<F, Fut>(asn: u32, router_id: impl Into<String>, peer_snapshot: F) -> Self
@@ -231,6 +240,7 @@ impl GnmiService {
         Self {
             asn,
             router_id: router_id.into(),
+            access_mode: AccessMode::ReadWrite,
             peer_snapshot: Arc::new(move || Box::pin(peer_snapshot())),
             subscribe_slots: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_SUBSCRIPTIONS)),
             event_history: None,
@@ -333,6 +343,12 @@ impl GnmiService {
         }
     }
 
+    /// Subscription variant of [`Self::render_query`]: an absent neighbor
+    /// yields an empty snapshot instead of `NOT_FOUND`. Intentional
+    /// divergence from Get — a subscription may be opened before the peer
+    /// comes up (or across a peer's removal and re-add) and must keep
+    /// streaming once it appears, while a one-shot Get for a neighbor that
+    /// does not exist is an addressing error.
     fn render_subscription_query(
         &self,
         query: &SupportedPath,
@@ -1387,6 +1403,10 @@ fn normalize_set_path(
     Ok(full_path)
 }
 
+/// Build the all-success per-op `UpdateResult` list from the normalized
+/// request. Sound only because the Set bridge is atomic: on any failure the
+/// RPC errors and this response is discarded, so these results are never sent
+/// for a partially applied transaction.
 fn set_response_from_operations(operations: &[GnmiSetOperation]) -> gnmi::SetResponse {
     gnmi::SetResponse {
         prefix: None,
@@ -1962,6 +1982,9 @@ fn render_global_updates(
     }
 }
 
+/// Get-path neighbor rendering: an absent neighbor is `NOT_FOUND`. Subscribe
+/// intentionally diverges (empty snapshot, keeps streaming) — see
+/// `GnmiService::render_subscription_query` for the rationale.
 fn render_neighbor_updates(
     peers: &[PeerInfo],
     local_as: u32,
@@ -2429,10 +2452,19 @@ impl gnmi::g_nmi_server::GNmi for GnmiService {
         request: Request<gnmi::SetRequest>,
     ) -> Result<Response<gnmi::SetResponse>, Status> {
         set_request_summary(&request, gnmi_set_summary(request.get_ref()));
+        if let Some(status) = read_only_rejection(self.access_mode) {
+            return Err(status);
+        }
         let Some(set_handler) = &self.set_handler else {
             return Err(Status::unimplemented("gNMI Set is not supported"));
         };
         let transaction = normalize_set_request(request.into_inner())?;
+        // The bridge applies the whole request as one candidate config through
+        // the transaction controller, so Set is all-or-nothing (as the gNMI
+        // spec requires): a failed transaction surfaces as a gRPC error and no
+        // SetResponse is returned. Per-op results built from the request are
+        // therefore only ever sent when every operation was applied — partial
+        // apply is unrepresentable by construction, not misreported.
         let mut response = set_response_from_operations(&transaction.operations);
         let outcome = set_handler(transaction)
             .await
@@ -3155,6 +3187,30 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
         assert!(err.message().contains("unsupported gNMI Set origin"));
+    }
+
+    /// Read-only listeners must reject Set explicitly (like every other
+    /// mutating service), independent of the authz tier cap on
+    /// `gnmi.gNMI/Set`.
+    #[tokio::test]
+    async fn set_on_read_only_listener_is_rejected_before_hook() {
+        let hook: crate::server::GnmiSetFn = Arc::new(|_| {
+            panic!("read-only listeners must reject Set before invoking the hook");
+        });
+        let mut service = test_service(Vec::new()).with_set_handler(Some(hook));
+        service.access_mode = crate::server::AccessMode::ReadOnly;
+        let err = service
+            .set(Request::new(gnmi::SetRequest {
+                prefix: None,
+                delete: vec![relative_path(&["network-instances"])],
+                replace: Vec::new(),
+                update: Vec::new(),
+                extension: Vec::new(),
+                union_replace: Vec::new(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
     }
 
     #[tokio::test]
@@ -4054,8 +4110,13 @@ mod tests {
         let (peer_tx, peer_rx) = tokio::sync::mpsc::channel(1);
         drop(peer_rx);
         let manager = event_history_manager().await;
-        let service = GnmiService::new(65001, "192.0.2.1".to_string(), peer_tx)
-            .with_event_history(Some(manager.handle()));
+        let service = GnmiService::new(
+            65001,
+            "192.0.2.1".to_string(),
+            crate::server::AccessMode::ReadWrite,
+            peer_tx,
+        )
+        .with_event_history(Some(manager.handle()));
         assert_peer_snapshot_outage(service, "peer manager unavailable").await;
         manager.shutdown().await;
     }
@@ -4075,8 +4136,13 @@ mod tests {
             }
         });
         let manager = event_history_manager().await;
-        let service = GnmiService::new(65001, "192.0.2.1".to_string(), peer_tx)
-            .with_event_history(Some(manager.handle()));
+        let service = GnmiService::new(
+            65001,
+            "192.0.2.1".to_string(),
+            crate::server::AccessMode::ReadWrite,
+            peer_tx,
+        )
+        .with_event_history(Some(manager.handle()));
         assert_peer_snapshot_outage(service, "peer manager dropped reply").await;
         tokio::time::timeout(Duration::from_secs(2), actor)
             .await
@@ -4792,7 +4858,13 @@ mod tests {
         // Load-bearing break: clearing `updates_only` for ONCE emits data and
         // queues ListPeers instead of ending immediately after sync.
         let (peer_tx, mut peer_rx) = tokio::sync::mpsc::channel(1);
-        let mut harness = serve(GnmiService::new(65001, "192.0.2.1".into(), peer_tx)).await;
+        let mut harness = serve(GnmiService::new(
+            65001,
+            "192.0.2.1".into(),
+            crate::server::AccessMode::ReadWrite,
+            peer_tx,
+        ))
+        .await;
         let mut list = subscription_list(
             gnmi::subscription_list::Mode::Once,
             gnmi::SubscriptionMode::TargetDefined,
@@ -4823,7 +4895,13 @@ mod tests {
         // Load-bearing break: clearing `updates_only` in POLL emits data and
         // queues ListPeers during the initial phase or either explicit poll.
         let (peer_tx, mut peer_rx) = tokio::sync::mpsc::channel(1);
-        let mut harness = serve(GnmiService::new(65001, "192.0.2.1".into(), peer_tx)).await;
+        let mut harness = serve(GnmiService::new(
+            65001,
+            "192.0.2.1".into(),
+            crate::server::AccessMode::ReadWrite,
+            peer_tx,
+        ))
+        .await;
         let mut list = subscription_list(
             gnmi::subscription_list::Mode::Poll,
             gnmi::SubscriptionMode::TargetDefined,
@@ -4880,7 +4958,13 @@ mod tests {
                 }
             }
         });
-        let mut harness = serve(GnmiService::new(65001, "192.0.2.1".into(), peer_tx)).await;
+        let mut harness = serve(GnmiService::new(
+            65001,
+            "192.0.2.1".into(),
+            crate::server::AccessMode::ReadWrite,
+            peer_tx,
+        ))
+        .await;
         let mut list = subscription_list(
             gnmi::subscription_list::Mode::Stream,
             gnmi::SubscriptionMode::Sample,

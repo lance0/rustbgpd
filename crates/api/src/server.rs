@@ -1532,7 +1532,7 @@ async fn run_tcp_listener(
     ));
     if tls_enabled {
         routes.add_service(GNmiServer::with_interceptor(
-            GnmiService::new(asn, router_id.clone(), peer_mgr_tx.clone())
+            GnmiService::new(asn, router_id.clone(), access_mode, peer_mgr_tx.clone())
                 .with_set_handler(gnmi_set.clone())
                 .with_event_history(event_history.clone()),
             interceptor.clone(),
@@ -1755,7 +1755,7 @@ async fn run_uds_listener(
         interceptor.clone(),
     ));
     routes.add_service(GNmiServer::with_interceptor(
-        GnmiService::new(asn, router_id, peer_mgr_tx.clone())
+        GnmiService::new(asn, router_id, access_mode, peer_mgr_tx.clone())
             .with_set_handler(gnmi_set)
             .with_event_history(event_history.clone()),
         interceptor,

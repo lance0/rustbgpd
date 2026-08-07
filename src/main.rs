@@ -4862,6 +4862,8 @@ async fn run<T>(
         rustbgpd_api::gnmi_dialout::GnmiService::new(
             config.global.asn,
             config.global.router_id.clone(),
+            // Dial-out only renders Subscribe snapshots; it never serves Set.
+            rustbgpd_api::server::AccessMode::ReadOnly,
             peer_mgr_tx.clone(),
         )
         .with_event_history(event_history_handle.clone()),
