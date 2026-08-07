@@ -104,6 +104,34 @@ plateau (per-client-best-only, F-scaling, upstream of the commit fan-out)
 belongs to the per-member candidate-multiplicity class this design removes
 structurally, and no phase of this design reintroduces it.
 
+**Counter recording:** every evaluation the walk performs enters the
+group's eval accumulator — the winner's permit, the runner-up's permit,
+and every candidate denied ahead of either. This is not a two-eval
+special case. The walk visits candidates in best-path order and the
+winner is the first permitted one, so each candidate it steps over was a
+real chain evaluation, and the ungrouped per-client-best path records
+those denials too: `distribute_multipath_prefix` records the evaluation
+before it branches on the verdict. Recording only the winner's
+evaluation would undercount grouped members against the per-peer totals
+the ADR-0098 counter carve-out promises.
+
+No new machinery is needed. `GroupEvalAccumulator::record` is already
+per-evaluation — one call bumps `totals` and the candidate's `per_source`
+row — so the winner walk calls it for the runner-up exactly as it does
+for every other candidate it evaluates: no new accumulator shape and no
+new replay path. `apply_group_policy_counters` then replays
+`totals − own-sourced` unchanged, which flows the runner-up's evaluation
+to every member except the one that sourced it. For `source(w)` — the
+one member whose ungrouped walk actually reaches past the winner — that
+is precisely the evaluation its per-peer path records. The other members
+receive it too, where their ungrouped walk would have stopped at `w`: the
+ADR-0098 carve-out extends to cover the walk's tail, the runner-up permit
+and any denials between it and the winner, replayed group-wide as
+aggregate integer adds rather than recorded per (prefix × peer). The
+extension is bounded by the lane's O(overlapped prefixes) population and
+does not touch the equivalence verdict — the differential oracle compares
+per-member streams and folded state, never counters.
+
 ### 3. The exception lane: a per-prefix runner-up sidecar
 
 The runner-up lives in a per-group sidecar map keyed by prefix — one
@@ -212,6 +240,21 @@ and fail-closed handoff apply unchanged, and the handoff target — the
 per-peer path — remains a complete correctness fallback (Decision 9's
 oracle guarantees equivalence).
 
+The exclusion is demand-gated rather than permanent, and the Non-goals
+entry controls until the trigger fires. A per-client-best group with no
+policy-filtered routes is one that does not need the mitigation, so
+admitting the fast path today would make its correctness assumption hold
+only where the mitigation is a no-op — speed bought exactly where there
+is nothing to speed up. Re-inclusion is reconsidered only when all three
+of the following hold, with a receipt: (a) a deployed fleet runs
+per-client-best grouped at the canonical receipt shape; (b) that fleet
+reloads regularly at a measured filter-churn rate that pushes reload
+completion out of the grouped-control class (~4.5 s ceiling); and (c)
+that reload-time cost is attributable to the policy-transition path the
+fast path skips. Absent all three the exclusion stands — the same
+earn-it-with-a-receipt discipline as the acceptance gate below and the
+Decision 9 rendered-default fallback.
+
 ### 9. Migration and observability
 
 Classifier flip lands last (Phase 3): existing per-client-best fleets
@@ -239,15 +282,12 @@ release behind an opt-out and flips only on a passing receipt.
 
 ## Open decisions
 
-Former open decisions 1 (fallback reason), 3 (rendered-default timing),
-and 4 (lane storage form) are decided and folded into the design above —
-Decisions 1, 9, and 3 respectively. Decisions 2 and 5 remain open calls
-for the owner:
-
-| # | Question | Options | Leaning |
-|---|---|---|---|
-| 2 | Counter replay for the second permit evaluation | record both evals in group totals / record winner's only | record both; extend the ADR-0098 counter carve-out (oracle compares streams and state, never counters) |
-| 5 | ADR-0105 fast-path re-inclusion | never / demand-gated | demand-gated: revisit only with a measured fleet regularly reloading per-client-best cohorts and a receipt |
+None. The five questions this ADR opened — fallback reason, counter
+replay for the walk's evaluations, rendered-default timing, lane storage
+form, and ADR-0105 fast-path re-inclusion — are decided and folded into
+the design above, as Decisions 1, 2, 9, 3, and 8 respectively. What
+remains before this ADR can move to Accepted is not a decision but the
+acceptance receipt below.
 
 ## Acceptance gate
 
@@ -293,7 +333,8 @@ flip.
   this design is the RFC 7947 §2.3.2.2 delta formulation instead.
 - **VPN/RTC per-client-best staging** and ORR combinations — out of scope;
   existing validation and fallbacks stand.
-- **ADR-0105 fast-path broadening** — see open decision 5.
+- **ADR-0105 fast-path broadening** — per-client-best groups stay
+  excluded; demand-gated re-inclusion trigger in Decision 8.
 - **Sorted tables or comparator restrictions** — the BIRD `secondary`
   constraint set is exactly what the derived-view shape avoids.
 
