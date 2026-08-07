@@ -1721,6 +1721,16 @@ fn to_peer_configs_maps_correctly() {
 }
 
 #[test]
+fn listen_addrs_cover_both_families() {
+    // LAN-907: the BGP listener serves both address families at
+    // `listen_port`; there is no listen-address knob.
+    let config = parse(valid_toml()).unwrap();
+    let (v4, v6) = config.listen_addrs();
+    assert_eq!(v4, "0.0.0.0:179".parse::<SocketAddr>().unwrap());
+    assert_eq!(v6, "[::]:179".parse::<SocketAddr>().unwrap());
+}
+
+#[test]
 fn prometheus_addr_parsed() {
     let config = parse(valid_toml()).unwrap();
     assert_eq!(

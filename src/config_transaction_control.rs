@@ -3709,7 +3709,7 @@ mod tests {
         let module_sources = [
             ("confirm_journal.rs", include_str!("confirm_journal.rs"), 2),
             ("gnmi_set_bridge.rs", include_str!("gnmi_set_bridge.rs"), 2),
-            ("main.rs", include_str!("main.rs"), 4),
+            ("main.rs", include_str!("main.rs"), 5),
             ("policy_admin.rs", include_str!("policy_admin.rs"), 3),
         ];
 

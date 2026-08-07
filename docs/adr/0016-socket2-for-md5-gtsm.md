@@ -11,7 +11,10 @@ BGP listener now installs host-scoped MD5 keys for static neighbors
 copies the matched key onto accepted children. GTSM is applied per peer on
 each accepted socket at accept time (`IP_MINTTL` / `IPV6_MINHOPCOUNT`),
 resolved exact-static-first then longest dynamic-range match, because the
-shared listener socket cannot carry per-peer TTL policy.
+shared listener socket cannot carry per-peer TTL policy. Since LAN-907 the
+listener is dual-family (`0.0.0.0` + `[::]`, ADR-0019): each MD5 key, TCP-AO
+MKT, and GTSM verification is applied on the socket matching the peer's
+address family, so IPv6 peers get the same inbound enforcement as IPv4.
 
 ## Context
 

@@ -358,28 +358,21 @@ fn listener_inbound_auth_inventory(
     ),
     String,
 > {
-    let listen_addr = config.listen_addr();
     let resolved = config
         .resolved_neighbors()
         .map_err(|error| error.to_string())?;
     let md5_keys = resolved
         .iter()
-        .filter_map(|neighbor| crate::md5_listener_key_for_neighbor(listen_addr, neighbor))
+        .filter_map(crate::md5_listener_key_for_neighbor)
         .chain(config.dynamic_neighbors.iter().filter_map(|range| {
-            crate::md5_listener_key_for_dynamic_range(listen_addr, range, &config.peer_groups)
+            crate::md5_listener_key_for_dynamic_range(range, &config.peer_groups)
         }))
         .collect();
     let ttl_security = resolved
         .iter()
-        .filter_map(|neighbor| {
-            crate::ttl_security_listener_policy_for_neighbor(listen_addr, neighbor)
-        })
+        .map(crate::ttl_security_listener_policy_for_neighbor)
         .chain(config.dynamic_neighbors.iter().filter_map(|range| {
-            crate::ttl_security_listener_policy_for_dynamic_range(
-                listen_addr,
-                range,
-                &config.peer_groups,
-            )
+            crate::ttl_security_listener_policy_for_dynamic_range(range, &config.peer_groups)
         }))
         .collect();
     Ok((md5_keys, ttl_security))
@@ -537,15 +530,19 @@ fn prepare_tcp_ao_rotation_plan(
             .next()
             .ok_or_else(|| "TCP-AO rotation generation exhausted".to_string())?
     };
-    let listen_addr = current.listen_addr();
-    let mut listener_keys: Vec<TcpAoListenerKey> =
-        desired_resolved
-            .iter()
-            .filter_map(|neighbor| crate::tcp_ao_listener_key_for_neighbor(listen_addr, neighbor))
-            .chain(desired.dynamic_neighbors.iter().filter_map(|range| {
-                crate::tcp_ao_listener_key_for_dynamic_range(listen_addr, range)
-            }))
-            .collect();
+    // The generation carries the complete both-family listener inventory;
+    // the transport layer routes each key to the family socket it can
+    // actually protect.
+    let mut listener_keys: Vec<TcpAoListenerKey> = desired_resolved
+        .iter()
+        .filter_map(crate::tcp_ao_listener_key_for_neighbor)
+        .chain(
+            desired
+                .dynamic_neighbors
+                .iter()
+                .filter_map(crate::tcp_ao_listener_key_for_dynamic_range),
+        )
+        .collect();
     listener_keys.sort_by_key(|key| {
         let owner = match key.owner {
             TcpAoListenerOwnerKind::Static => 0_u8,
@@ -553,14 +550,16 @@ fn prepare_tcp_ao_rotation_plan(
         };
         (key.peer, key.prefix_len, owner)
     });
-    let mut current_listener_keys =
-        current_resolved
-            .iter()
-            .filter_map(|neighbor| crate::tcp_ao_listener_key_for_neighbor(listen_addr, neighbor))
-            .chain(current.dynamic_neighbors.iter().filter_map(|range| {
-                crate::tcp_ao_listener_key_for_dynamic_range(listen_addr, range)
-            }))
-            .collect::<Vec<_>>();
+    let mut current_listener_keys = current_resolved
+        .iter()
+        .filter_map(crate::tcp_ao_listener_key_for_neighbor)
+        .chain(
+            current
+                .dynamic_neighbors
+                .iter()
+                .filter_map(crate::tcp_ao_listener_key_for_dynamic_range),
+        )
+        .collect::<Vec<_>>();
     current_listener_keys.sort_by_key(|key| {
         let owner = match key.owner {
             TcpAoListenerOwnerKind::Static => 0_u8,
@@ -2943,7 +2942,7 @@ mod tests {
             (concat!("explicit_tier", "_test_toml("), 3),
             (concat!("write_tier", "_test_config("), 12),
             (concat!("load_tier", "_test_config("), 29),
-            (concat!("load_tier", "_test_toml("), 8),
+            (concat!("load_tier", "_test_toml("), 9),
             (concat!("tier_authorized_uds", "_test_config("), 2),
             (concat!("assert_tier_authorized", "_test_config("), 17),
         ];
@@ -5884,8 +5883,17 @@ tcp_ao = [
             panic!("opposite-family static deletion must still compile as a live generation");
         };
         assert_eq!(opposite_family.operation, TcpAoRotationOperation::Delete);
-        assert!(opposite_family.current_listener_keys.is_empty());
-        assert!(opposite_family.listener_keys.is_empty());
+        // LAN-907: the generation carries the complete both-family listener
+        // inventory; the transport layer routes the IPv6 owner to the IPv6
+        // family socket instead of silently dropping it.
+        assert_eq!(opposite_family.current_listener_keys.len(), 1);
+        assert_eq!(
+            opposite_family.current_listener_keys[0].peer.to_string(),
+            "2001:db8::2"
+        );
+        assert_eq!(opposite_family.current_listener_keys[0].config.0.len(), 2);
+        assert_eq!(opposite_family.listener_keys.len(), 1);
+        assert_eq!(opposite_family.listener_keys[0].config.0.len(), 1);
         assert_eq!(opposite_family.current_static_keyrings[0].1.0.len(), 2);
         assert_eq!(opposite_family.static_keyrings[0].1.0.len(), 1);
     }
@@ -6467,6 +6475,39 @@ hold_time = 90
         assert_eq!(
             desired.0.iter().map(|key| key.send_id).collect::<Vec<_>>(),
             [2, 1]
+        );
+    }
+
+    #[test]
+    fn listener_inbound_auth_inventory_covers_ipv6_neighbors() {
+        let config = load_tier_test_toml(
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+[global.telemetry]
+log_format = "json"
+[[neighbors]]
+address = "2001:db8::2"
+remote_asn = 65002
+md5_password = "v6-secret"
+ttl_security = true
+"#,
+            "inbound-auth-v6-probe",
+        );
+        let (md5_keys, ttl_security) = listener_inbound_auth_inventory(&config).unwrap();
+        assert!(
+            md5_keys
+                .iter()
+                .any(|key| key.peer.to_string() == "2001:db8::2"),
+            "IPv6 md5_password must appear in the reload listener inventory"
+        );
+        assert!(
+            ttl_security
+                .iter()
+                .any(|policy| policy.peer.to_string() == "2001:db8::2" && policy.enforce),
+            "IPv6 ttl_security must appear in the reload listener inventory"
         );
     }
 
