@@ -61,9 +61,19 @@ cargo build --release -p rustbgpd --bin rustbgpd -p rs-config-render --bin rs-co
 cargo build --release --manifest-path bench/scale/reloadstall/Cargo.toml --locked
 
 ACTIVE_DAEMON="" ACTIVE_HARNESS="" ACTIVE_SINK="" ACTIVE_TMP=""
+COMPLETED_RUNS=()
 terminate_group() {
     local pid=${1:-}
     [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null || kill -TERM -- "-$pid" 2>/dev/null || true
+}
+# A red run keeps its raw root (sink capture, generated scenario,
+# partial sink state, pre-churn evidence) inside the artifact dir
+# instead of losing it to cleanup.
+preserve_run_root() {
+    local run=$1 keep
+    keep="$ART/FAILED-$(basename "$run")"
+    mv -- "$run" "$keep" 2>/dev/null ||
+        echo "failed to preserve red run root $run" >&2
 }
 cleanup() {
     local rc=$?
@@ -74,14 +84,17 @@ cleanup() {
         if [ "$rc" -eq 0 ]; then
             rm -rf "$ACTIVE_TMP"
         else
-            # A red run keeps its raw root (sink capture, generated
-            # scenario, partial sink state, pre-churn evidence) inside
-            # the artifact dir instead of losing it to cleanup.
-            local keep
-            keep="$ART/FAILED-$(basename "$ACTIVE_TMP")"
-            mv -- "$ACTIVE_TMP" "$keep" 2>/dev/null ||
-                echo "failed to preserve red run root $ACTIVE_TMP" >&2
+            preserve_run_root "$ACTIVE_TMP"
         fi
+    fi
+    # Raw roots of completed runs are retained until cross-run
+    # verification passes; a failure after run_once (e.g. the verifier
+    # rejecting the pair) preserves them like any other red run.
+    if [ "$rc" -ne 0 ]; then
+        local run
+        for run in "${COMPLETED_RUNS[@]}"; do
+            [ ! -e "$run" ] || preserve_run_root "$run"
+        done
     fi
 }
 trap cleanup EXIT
@@ -191,7 +204,7 @@ run_once() {
     terminate_group "$daemon_pid"
     wait "$daemon_pid" || true
     ACTIVE_DAEMON=""
-    rm -rf "$run"
+    COMPLETED_RUNS+=("$run")
     ACTIVE_TMP=""
 }
 
@@ -200,9 +213,21 @@ jq -n --arg commit "$HEAD" \
     >"$ART/provenance.json"
 run_once a
 run_once b
-python3 "$VERIFY" verify --allow-unsealed "$ART" >"$ART/verification.json"
+# Capture the verifier's stderr and drop the partial stdout redirect on
+# failure so a red verification never leaves an empty verification.json
+# behind as if it were a result.
+if ! python3 "$VERIFY" verify --allow-unsealed "$ART" \
+    >"$ART/verification.json" 2>"$ART/verification.stderr"; then
+    rm -f "$ART/verification.json"
+    echo "cross-run verification failed:" >&2
+    cat "$ART/verification.stderr" >&2
+    exit 1
+fi
+rm -f "$ART/verification.stderr"
 printf 'pass\n' >"$ART/COMPLETED"
 (cd "$ART" && find . -type f ! -name SHA256SUMS -printf '%P\0' | sort -z | xargs -0 sha256sum) >"$ART/SHA256SUMS"
 chmod -R a-w "$ART"
 python3 "$VERIFY" verify "$ART" >/dev/null
+rm -rf -- "${COMPLETED_RUNS[@]}"
+COMPLETED_RUNS=()
 echo "sealed BMP buffer receipt: $ART"
