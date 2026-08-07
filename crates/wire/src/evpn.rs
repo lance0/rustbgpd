@@ -1196,9 +1196,11 @@ fn encode_type5_body(r: &EvpnIpPrefixRoute, out: &mut Vec<u8>) -> Result<(), Enc
 /// # Errors
 ///
 /// Returns [`EncodeError::ValueOutOfRange`] if a route violates a wire
-/// invariant the decoder discriminates on (currently: a Type 5 gateway
-/// whose address family differs from its prefix). `buf` may hold a
-/// partial encoding after an error and must be discarded.
+/// invariant the decoder discriminates on: a Type 5 gateway whose
+/// address family differs from its prefix, an EAD-per-ES route whose
+/// ethernet tag is not `MAX_ET`, or an EAD-per-EVI route whose ethernet
+/// tag is `MAX_ET`. `buf` may hold a partial encoding after an error
+/// and must be discarded.
 pub fn encode_evpn_nlri(routes: &[EvpnRoute], buf: &mut Vec<u8>) -> Result<(), EncodeError> {
     for route in routes {
         let route_type = route.route_type();
@@ -1209,21 +1211,25 @@ pub fn encode_evpn_nlri(routes: &[EvpnRoute], buf: &mut Vec<u8>) -> Result<(), E
         match route {
             EvpnRoute::EadPerEs(r) => {
                 // RFC 7432 §7.1: EAD-per-ES carries MAX_ET in the Ethernet
-                // Tag field; the decoder uses that to discriminate from
-                // EAD-per-EVI. Force MAX_ET on the wire regardless of the
-                // struct field so a buggy upstream cannot silently flip
-                // the route's identity.
-                debug_assert!(
-                    r.ethernet_tag.is_max_et(),
-                    "EVPN EAD-per-ES must carry MAX_ET ethernet tag"
-                );
-                encode_type1_body(r.rd, r.esi, EthernetTagId::MAX_ET, r.label, buf);
+                // Tag field; the decoder uses that value to discriminate
+                // from EAD-per-EVI. Encoding any other tag (or pinning it
+                // silently, as release builds used to) would let a buggy
+                // upstream flip the route's identity — hard error instead.
+                if !r.ethernet_tag.is_max_et() {
+                    return Err(EncodeError::ValueOutOfRange {
+                        field: "EVPN EAD-per-ES ethernet tag",
+                        value: format!("{} (must be MAX_ET)", r.ethernet_tag),
+                    });
+                }
+                encode_type1_body(r.rd, r.esi, r.ethernet_tag, r.label, buf);
             }
             EvpnRoute::EadPerEvi(r) => {
-                debug_assert!(
-                    !r.ethernet_tag.is_max_et(),
-                    "EVPN EAD-per-EVI must not carry MAX_ET ethernet tag"
-                );
+                if r.ethernet_tag.is_max_et() {
+                    return Err(EncodeError::ValueOutOfRange {
+                        field: "EVPN EAD-per-EVI ethernet tag",
+                        value: "MAX_ET (reserved for EAD-per-ES)".to_string(),
+                    });
+                }
                 encode_type1_body(r.rd, r.esi, r.ethernet_tag, r.label, buf);
             }
             EvpnRoute::MacIp(r) => encode_type2_body(r, buf),
@@ -1648,9 +1654,7 @@ mod tests {
     }
 
     /// Regression: an EAD-per-ES route round-trips encode → decode back
-    /// to `EadPerEs`, never silently becoming `EadPerEvi`. The encoder
-    /// pins the ethernet tag to `MAX_ET` (the per-ES discriminator
-    /// per RFC 7432 §7.1) regardless of what the struct field holds.
+    /// to `EadPerEs`, never silently becoming `EadPerEvi`.
     #[test]
     fn ead_per_es_encode_round_trips_to_per_es() {
         let r = EvpnRoute::EadPerEs(EvpnEadPerEs {
@@ -1664,6 +1668,49 @@ mod tests {
         let decoded = decode_evpn_nlri(&buf).unwrap();
         assert_eq!(decoded.len(), 1);
         assert!(matches!(decoded[0], EvpnRoute::EadPerEs(_)));
+    }
+
+    /// Regression: an EAD-per-ES route with a non-`MAX_ET` ethernet tag
+    /// is a hard encode error. Release builds previously pinned the tag
+    /// to `MAX_ET` on the wire regardless of the struct field, so a
+    /// route keyed on tag 7 round-tripped keyed on `MAX_ET` — a lossy
+    /// silent rewrite of a key field.
+    #[test]
+    fn ead_per_es_encode_rejects_non_max_et_tag() {
+        let r = EvpnRoute::EadPerEs(EvpnEadPerEs {
+            rd: sample_rd(),
+            esi: sample_esi(),
+            ethernet_tag: EthernetTagId(7),
+            label: MplsLabel::new(500),
+        });
+        let mut buf = Vec::new();
+        let err = encode_evpn_nlri(&[r], &mut buf).unwrap_err();
+        assert!(
+            matches!(err, EncodeError::ValueOutOfRange { field, .. }
+                if field == "EVPN EAD-per-ES ethernet tag"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// Regression: an EAD-per-EVI route carrying `MAX_ET` is a hard
+    /// encode error. `MAX_ET` is the per-ES discriminator (RFC 7432
+    /// §7.1), so release builds previously encoded such a route as wire
+    /// bytes that decode back as `EadPerEs` — a silent identity flip.
+    #[test]
+    fn ead_per_evi_encode_rejects_max_et_tag() {
+        let r = EvpnRoute::EadPerEvi(EvpnEadPerEvi {
+            rd: sample_rd(),
+            esi: sample_esi(),
+            ethernet_tag: EthernetTagId::MAX_ET,
+            label: MplsLabel::new(500),
+        });
+        let mut buf = Vec::new();
+        let err = encode_evpn_nlri(&[r], &mut buf).unwrap_err();
+        assert!(
+            matches!(err, EncodeError::ValueOutOfRange { field, .. }
+                if field == "EVPN EAD-per-EVI ethernet tag"),
+            "unexpected error: {err}"
+        );
     }
 
     /// Regression: a Type 5 gateway whose family differs from the prefix
