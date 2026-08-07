@@ -607,7 +607,7 @@ MKTs that are neither Current nor RNext while keeping the owner set, survivor
 order, key definitions, and selected key exact. Protected-owner changes and
 key edits/reordering remain restart-required.
 
-**GTSM (RFC 5082):** Supported in v1 as a configurable option (`ttl_security = true` per neighbor). Sets `IP_TTL` to 255 on outbound and checks inbound TTL >= 254. Simple, effective, and prevents most remote session hijacking.
+**GTSM (RFC 5082):** Supported in v1 as a configurable option (`ttl_security = true` per neighbor). Sets `IP_TTL` to 255 on outbound and requires inbound TTL exactly 255 (strict RFC 5082 §3.2, matching FRR/BIRD). Simple, effective, and prevents most remote session hijacking.
 
 ### Connection Rate Limiting
 

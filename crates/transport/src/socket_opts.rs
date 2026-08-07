@@ -3109,7 +3109,12 @@ pub fn set_gtsm(socket: &Socket, remote: SocketAddr) -> io::Result<()> {
 )]
 fn set_gtsm_v4(socket: &Socket) -> io::Result<()> {
     const IP_MINTTL: libc::c_int = 21;
-    let min_ttl: libc::c_int = 254;
+    // RFC 5082 §3.2: a directly connected peer's packets arrive with
+    // TTL 255 (the sender's stack cannot emit more, and any forwarding
+    // hop would decrement below it). Strict 255 matches FRR/BIRD and
+    // the BFD receive path's exact-255 check; 254 would accept packets
+    // that crossed one router.
+    let min_ttl: libc::c_int = 255;
 
     let fd = {
         use std::os::unix::io::AsRawFd;
@@ -3146,7 +3151,8 @@ fn set_gtsm_v4(socket: &Socket) -> io::Result<()> {
     reason = "IPv6 GTSM requires raw Linux socket options and socklen_t casts"
 )]
 fn set_gtsm_v6(socket: &Socket) -> io::Result<()> {
-    let min_hops: libc::c_int = 254;
+    // Strict RFC 5082 §3.2 Hop Limit — see the IPv4 twin above.
+    let min_hops: libc::c_int = 255;
     let fd = socket.as_raw_fd();
 
     let ret = unsafe {

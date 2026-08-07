@@ -18,6 +18,39 @@ use tracing::{debug, error, info, warn};
 const DEFAULT_LISTEN_BACKLOG: i32 = 1024;
 const TCP_AO_ROTATION_CONTROL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// First backoff after an accept failure on exhausted resources.
+const ACCEPT_BACKOFF_INITIAL: std::time::Duration = std::time::Duration::from_millis(100);
+/// Backoff cap — the loop keeps probing at this cadence while the
+/// exhaustion persists.
+const ACCEPT_BACKOFF_CAP: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// How the accept loop reacts to one `accept(2)` error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AcceptErrorClass {
+    /// Process/host resource exhaustion (EMFILE, ENFILE, ENOMEM,
+    /// ENOBUFS): the condition outlives one accept call, so retrying
+    /// immediately hot-spins. Back off before the next accept.
+    ResourceExhausted,
+    /// The listening socket is broken (EBADF, ENOTSOCK, EINVAL,
+    /// EOPNOTSUPP): no future accept on this fd can succeed.
+    Fatal,
+    /// Per-connection failure (ECONNABORTED, EINTR, EPROTO, ...):
+    /// the next accept is unaffected — continue immediately.
+    Transient,
+}
+
+fn accept_error_class(err: &std::io::Error) -> AcceptErrorClass {
+    match err.raw_os_error() {
+        Some(libc::EMFILE | libc::ENFILE | libc::ENOMEM | libc::ENOBUFS) => {
+            AcceptErrorClass::ResourceExhausted
+        }
+        Some(libc::EBADF | libc::ENOTSOCK | libc::EINVAL | libc::EOPNOTSUPP) => {
+            AcceptErrorClass::Fatal
+        }
+        _ => AcceptErrorClass::Transient,
+    }
+}
+
 /// An accepted inbound TCP connection.
 pub struct AcceptedConnection {
     /// The raw TCP stream for the accepted connection.
@@ -831,6 +864,7 @@ impl BgpListener {
 
     /// Run the accept loop until the channel is closed.
     pub async fn run(mut self) {
+        let mut accept_backoff = ACCEPT_BACKOFF_INITIAL;
         loop {
             tokio::select! {
                 command = self.rotation_rx.recv() => {
@@ -843,6 +877,7 @@ impl BgpListener {
                 }
                 accepted = self.listener.accept() => match accepted {
                     Ok((stream, peer_addr)) => {
+                        accept_backoff = ACCEPT_BACKOFF_INITIAL;
                         let peer_ip = peer_addr.ip();
                         debug!(%peer_ip, "inbound TCP connection");
                         let tcp_ao_info = match self.inspect_tcp_ao_accept(&stream, peer_ip) {
@@ -863,7 +898,34 @@ impl BgpListener {
                             return;
                         }
                     }
-                    Err(e) => error!(error = %e, "BGP listener accept error"),
+                    Err(e) => match accept_error_class(&e) {
+                        AcceptErrorClass::ResourceExhausted => {
+                            // EMFILE/ENFILE/ENOMEM/ENOBUFS persist until the
+                            // process (or host) sheds load — an immediate
+                            // re-accept would hot-spin the loop and flood the
+                            // log. Progressive backoff, reset on the next
+                            // successful accept.
+                            error!(
+                                error = %e,
+                                backoff_ms = u64::try_from(accept_backoff.as_millis()).unwrap_or(u64::MAX),
+                                "BGP listener accept failed on exhausted resources; backing off"
+                            );
+                            tokio::time::sleep(accept_backoff).await;
+                            accept_backoff = (accept_backoff * 2).min(ACCEPT_BACKOFF_CAP);
+                        }
+                        AcceptErrorClass::Fatal => {
+                            // The listening socket itself is unusable
+                            // (EBADF/ENOTSOCK/EINVAL/EOPNOTSUPP) — accept can
+                            // never succeed again on this fd.
+                            error!(error = %e, "BGP listener socket unusable; accept loop exiting");
+                            return;
+                        }
+                        AcceptErrorClass::Transient => {
+                            // Per-connection failures (ECONNABORTED, EINTR,
+                            // EPROTO, ...) — the next accept is unaffected.
+                            error!(error = %e, "BGP listener accept error");
+                        }
+                    },
                 }
             }
         }
@@ -2371,6 +2433,37 @@ mod tests {
     use crate::config::{TcpAoAlgorithm, TcpAoConfig};
     use std::cell::RefCell;
     use std::net::Ipv4Addr;
+
+    #[test]
+    fn accept_errors_classify_by_errno() {
+        for errno in [libc::EMFILE, libc::ENFILE, libc::ENOMEM, libc::ENOBUFS] {
+            assert_eq!(
+                accept_error_class(&std::io::Error::from_raw_os_error(errno)),
+                AcceptErrorClass::ResourceExhausted,
+                "errno {errno} must back off"
+            );
+        }
+        for errno in [libc::EBADF, libc::ENOTSOCK, libc::EINVAL, libc::EOPNOTSUPP] {
+            assert_eq!(
+                accept_error_class(&std::io::Error::from_raw_os_error(errno)),
+                AcceptErrorClass::Fatal,
+                "errno {errno} must stop the loop"
+            );
+        }
+        for errno in [libc::ECONNABORTED, libc::EINTR, libc::EPROTO] {
+            assert_eq!(
+                accept_error_class(&std::io::Error::from_raw_os_error(errno)),
+                AcceptErrorClass::Transient,
+                "errno {errno} must continue immediately"
+            );
+        }
+        // Errors with no OS errno (e.g. synthesized) never stall or stop
+        // the loop.
+        assert_eq!(
+            accept_error_class(&std::io::Error::other("synthetic")),
+            AcceptErrorClass::Transient
+        );
+    }
 
     fn tcp_ao_config() -> TcpAoKeyring {
         TcpAoConfig {

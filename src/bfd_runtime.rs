@@ -14,7 +14,8 @@
 //! Design: a single actor task `select!`s over the shared per-AF receive
 //! sockets and a min-deadline timer heap covering every session's transmit and
 //! detection timers. The receive path validates the RFC 5881 TTL/Hop-Limit-255
-//! requirement via `recvmsg` ancillary data, decodes, demultiplexes to the
+//! requirement via `recvmsg` ancillary data and the §4 source-port range
+//! (49152..=65535), decodes, demultiplexes to the
 //! session by Your Discriminator (RFC 5880 §6.8.6; source address only for the
 //! zero-discriminator bootstrap), and executes the resulting
 //! [`rustbgpd_bfd::Action`]s.
@@ -1133,9 +1134,21 @@ mod linux {
         if ttl != Some(255) {
             return Recv::Discard;
         }
-        let Some(src) = msg.address.and_then(socket_ip) else {
+        let Some((src, src_port)) = msg.address.and_then(socket_ip_port) else {
             return Recv::Discard;
         };
+        // RFC 5881 §4: the source port MUST be in 49152..=65535. The
+        // range's upper bound is the u16 ceiling, so only the lower
+        // bound needs checking. Defense-in-depth alongside the
+        // exact-TTL check and discriminator demux.
+        if src_port < BFD_SRC_PORT_MIN {
+            tracing::debug!(
+                %src,
+                src_port,
+                "discarding BFD control packet with out-of-range source port (RFC 5881 §4)"
+            );
+            return Recv::Discard;
+        }
         let n = msg.bytes;
         match ControlPacket::decode(&buf[..n]) {
             Ok(pkt) => Recv::Packet(src, pkt),
@@ -1143,12 +1156,12 @@ mod linux {
         }
     }
 
-    fn socket_ip(addr: nix::sys::socket::SockaddrStorage) -> Option<IpAddr> {
+    fn socket_ip_port(addr: nix::sys::socket::SockaddrStorage) -> Option<(IpAddr, u16)> {
         if let Some(v4) = addr.as_sockaddr_in() {
-            return Some(IpAddr::V4(v4.ip()));
+            return Some((IpAddr::V4(v4.ip()), v4.port()));
         }
         if let Some(v6) = addr.as_sockaddr_in6() {
-            return Some(IpAddr::V6(v6.ip()));
+            return Some((IpAddr::V6(v6.ip()), v6.port()));
         }
         None
     }
@@ -1270,11 +1283,12 @@ mod linux {
     #[cfg(test)]
     mod unit {
         use super::{
-            Deadline, FamilySockets, enable_recv_ttl, kind_key, prepare_runtime_sockets,
-            rx_socket_with,
+            BFD_SRC_PORT_MIN, Deadline, FamilySockets, enable_recv_ttl, kind_key,
+            prepare_runtime_sockets, rx_socket_with,
         };
-        use rustbgpd_bfd::TimerKind;
+        use rustbgpd_bfd::{ControlPacket, Diagnostic, SessionState, TimerKind};
         use std::net::IpAddr;
+        use std::os::fd::AsRawFd;
         use tokio::io::unix::AsyncFd;
         use tokio::time::Instant;
 
@@ -1474,6 +1488,66 @@ mod linux {
             let (pkts, drained) = super::drain_socket(rx.as_raw_fd(), 64);
             assert!(pkts.is_empty());
             assert!(drained, "second turn drains the remainder");
+        }
+
+        fn control_packet(my_discriminator: u32) -> ControlPacket {
+            ControlPacket {
+                diagnostic: Diagnostic::None,
+                state: SessionState::Down,
+                poll: false,
+                final_bit: false,
+                control_plane_independent: false,
+                auth_present: false,
+                demand: false,
+                multipoint: false,
+                detect_mult: 3,
+                my_discriminator,
+                your_discriminator: 0,
+                desired_min_tx_interval: 1_000_000,
+                required_min_rx_interval: 1_000_000,
+                required_min_echo_rx_interval: 0,
+            }
+        }
+
+        /// Bind a loopback UDP sender on the first free port in `range`.
+        fn sender_in(range: std::ops::RangeInclusive<u16>) -> std::net::UdpSocket {
+            for port in range.clone() {
+                if let Ok(s) = std::net::UdpSocket::bind(("127.0.0.1", port)) {
+                    return s;
+                }
+            }
+            panic!("no free sender port in {range:?}");
+        }
+
+        #[test]
+        fn out_of_range_source_port_is_discarded() {
+            // Real RX socket with IP_RECVTTL so the TTL-255 gate passes and
+            // the source-port gate is the discriminating check.
+            let rx = rx_socket_with(false, 0, enable_recv_ttl).expect("rx socket");
+            let rx_port = rx.local_addr().expect("addr").port();
+            let dst = ("127.0.0.1", rx_port);
+
+            // Identical valid packets, distinguished by discriminator; both
+            // senders emit TTL 255. Loopback delivery is synchronous.
+            let bad = sender_in(20000..=20200);
+            assert!(bad.local_addr().expect("addr").port() < BFD_SRC_PORT_MIN);
+            bad.set_ttl(255).expect("ttl");
+            bad.send_to(&control_packet(0xBAD).encode(), dst)
+                .expect("send");
+
+            let good = sender_in(BFD_SRC_PORT_MIN..=BFD_SRC_PORT_MIN + 200);
+            good.set_ttl(255).expect("ttl");
+            good.send_to(&control_packet(0x600D).encode(), dst)
+                .expect("send");
+
+            let (pkts, drained) = super::drain_socket(rx.as_raw_fd(), 8);
+            assert!(drained, "both datagrams fit the budget");
+            let discs: Vec<u32> = pkts.iter().map(|(_, p)| p.my_discriminator).collect();
+            assert_eq!(
+                discs,
+                vec![0x600D],
+                "RFC 5881 §4: only the in-range source port passes"
+            );
         }
     }
 
@@ -2004,6 +2078,21 @@ bfd = {{ profile = "p" }}
             tokio::net::UdpSocket::from_std(s.into()).unwrap()
         }
 
+        /// Transmit socket for the hand-rolled peer, bound to the peer
+        /// address on a port inside the RFC 5881 §4 source-port range —
+        /// the actor's receive path discards control packets from
+        /// out-of-range source ports.
+        fn peer_tx_socket() -> tokio::net::UdpSocket {
+            let s = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).unwrap();
+            let bound = (49152u16..=65535).any(|port| {
+                let addr: SocketAddr = format!("{PEER_ADDR}:{port}").parse().unwrap();
+                s.bind(&addr.into()).is_ok()
+            });
+            assert!(bound, "no free peer source port in 49152..=65535");
+            s.set_nonblocking(true).unwrap();
+            tokio::net::UdpSocket::from_std(s.into()).unwrap()
+        }
+
         // A control packet from the hand-rolled peer that drives a Down actor
         // to Up: State=Init with a non-zero my/your discriminator pair.
         fn peer_init(your_disc: u32) -> Vec<u8> {
@@ -2029,6 +2118,7 @@ bfd = {{ profile = "p" }}
 
         async fn peer_responder(
             sock: tokio::net::UdpSocket,
+            tx_sock: tokio::net::UdpSocket,
             mode_rx: watch::Receiver<u8>,
             observed_src_port: Arc<AtomicU16>,
             stop: CancellationToken,
@@ -2057,10 +2147,10 @@ bfd = {{ profile = "p" }}
                         }
                         let ttl = if mode == MODE_TTL_BAD { 1 } else { 255 };
                         if ttl != cur_ttl {
-                            sock.set_ttl(ttl).unwrap();
+                            tx_sock.set_ttl(ttl).unwrap();
                             cur_ttl = ttl;
                         }
-                        let _ = sock.send_to(&peer_init(actor_disc), actor).await;
+                        let _ = tx_sock.send_to(&peer_init(actor_disc), actor).await;
                     }
                 }
             }
@@ -2179,6 +2269,7 @@ bfd = {{ profile = "p" }}
             let observed_src_port = Arc::new(AtomicU16::new(0));
             let peer_task = tokio::spawn(peer_responder(
                 peer_socket(),
+                peer_tx_socket(),
                 mode_rx,
                 Arc::clone(&observed_src_port),
                 peer_stop.clone(),
