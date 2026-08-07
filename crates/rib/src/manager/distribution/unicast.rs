@@ -1669,9 +1669,17 @@ impl RibManager {
     /// `rs_control` and ORR are absent by construction: control
     /// communities diverge per TARGET (enforced at the member-emit
     /// seams, like today's group staging), and ORR peers cannot be
-    /// per-client-best (validation-enforced). OTC egress and rs-tag
-    /// transitions for per-client-best groups land with the ADR-0126
-    /// Phase 2 emit seams.
+    /// per-client-best (validation-enforced). RFC 9234 OTC egress is
+    /// deliberately NOT gated in this walk: per-client-best groups
+    /// enforce OTC at the central pre-commit backstop
+    /// (`try_send_and_commit_outbound_update_with_group_prior_and_otc_scope`),
+    /// matching the ungrouped per-client-best path — the in-walk gate
+    /// in [`Self::distribute_single_best_prefix`] serves single-best
+    /// staging only. A blocked winner stays staged and is RECORDED
+    /// into `otc_blocked` for the group's residue; a blocked
+    /// runner-up needs no recording — the residue derivation
+    /// (`GroupRibOut::otc_blocked_for_member`) reads it from the lane
+    /// entry itself.
     #[expect(
         clippy::too_many_arguments,
         clippy::too_many_lines,
@@ -1686,6 +1694,7 @@ impl RibManager {
         group_is_ebgp: bool,
         interpret_rfc1997: bool,
         group_is_rr_client: bool,
+        group_local_role: Option<rustbgpd_wire::BgpRole>,
         cluster_id: Option<Ipv4Addr>,
         sendable: Option<&Vec<(Afi, Safi)>>,
         llgr: Option<&Vec<(Afi, Safi)>>,
@@ -1696,6 +1705,7 @@ impl RibManager {
         withdraw: &mut Vec<(Prefix, u32)>,
         nh_override_flags: &mut Vec<Option<rustbgpd_policy::NextHopAction>>,
         policy_filtered: &mut Vec<(PolicyFilteredRouteKey, Option<PolicyLabel>)>,
+        otc_blocked: &mut Vec<crate::route::Route>,
     ) -> PerClientBestPrefixStage {
         use crate::best_path::best_path_cmp;
 
@@ -1801,6 +1811,19 @@ impl RibManager {
             winner_source = Some(candidate.peer);
             stage.winner_label = label;
             stage.winner_source_attrs = capture_source_attrs(candidate);
+            // RFC 9234 record-not-act (ADR-0126): a blocked winner
+            // stays staged — the pre-commit backstop strips it from
+            // every member emission — but its blocked identity must
+            // land in the group residue so per-member diagnostics and
+            // the replay reconciliations see the backstop's outcome.
+            // `group_local_role` is group-uniform (snapshot on
+            // `GroupRibOut`), so this one verdict covers every member.
+            // Recorded even when the announce below is
+            // equality-suppressed: the caller's `record_otc_blocked`
+            // refreshes this prefix's residue every pass.
+            if super::otc_egress_blocked(&modified, group_local_role) {
+                otc_blocked.push(modified.clone());
+            }
             let changed = rib_out
                 .get(prefix, 0)
                 .is_none_or(|existing| !routes_equal(existing, &modified));
