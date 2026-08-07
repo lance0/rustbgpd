@@ -1408,6 +1408,10 @@ async fn identical_peers_group_together_and_gauges_track_membership() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one scenario surfaces every ungrouped fallback reason side by side"
+)]
 async fn ungrouped_reasons_surface_per_disqualifier() {
     let metrics = BgpMetrics::new();
     let (tx, rx) = mpsc::channel(64);
@@ -1432,9 +1436,32 @@ async fn ungrouped_reasons_surface_per_disqualifier() {
     spec.orr_vantage = Some(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)));
     let _rx3 = peer_up(&tx, spec).await;
 
-    let mut spec = PeerUpSpec::ebgp(per_client_best_peer);
-    spec.per_client_best = true;
-    let _rx5 = peer_up(&tx, spec).await;
+    // Since the ADR-0126 flip a unicast-only per-client-best peer
+    // groups, so the residual `per_client_best` reason needs a
+    // non-unicast-only session (VPNv4 negotiated) — sent by hand, the
+    // helper hard-codes IPv4-unicast.
+    let (pcb_tx, mut pcb_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        per_client_best: true,
+        interpret_rfc1997: true,
+        session_id: 0,
+        peer: per_client_best_peer,
+        peer_asn: 65001,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: pcb_tx,
+        export_policy: None,
+        sendable_families: vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv4, Safi::MplsVpn)],
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: vec![],
+        negotiated_llgr_families: vec![],
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut pcb_rx).await;
 
     let mut spec = PeerUpSpec::ibgp(orf_negotiated_peer);
     spec.negotiated_orf_recv = ipv4_sendable();
@@ -1523,10 +1550,13 @@ async fn ungrouped_reasons_surface_per_disqualifier() {
 /// `route_server_client` is applied per-session in transport, BELOW
 /// the group staging boundary, so it is deliberately absent from the
 /// manager's fingerprint inputs and two eBGP peers with the same chain
-/// group regardless of it. Only `per_client_best` (a *selection*
-/// divergence, not an attribute-prep one) disqualifies.
+/// group regardless of it. Since the ADR-0126 Phase 3 classifier flip
+/// a shareable-chain unicast-only `per_client_best` peer GROUPS too —
+/// on its own key (the `per_client_best` bit separates mitigated from
+/// plain staging), with no fallback reason and no fallback-gauge
+/// count.
 #[tokio::test]
-async fn rs_transparent_peers_group_per_client_best_falls_back() {
+async fn rs_transparent_peers_group_per_client_best_groups_on_own_key() {
     let metrics = BgpMetrics::new();
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
@@ -1545,7 +1575,7 @@ async fn rs_transparent_peers_group_per_client_best_falls_back() {
     let _rx3 = peer_up(&tx, PeerUpSpec::ebgp(plain)).await;
     let mut spec = PeerUpSpec::ebgp(pcb);
     spec.per_client_best = true;
-    let _rx4 = peer_up(&tx, spec).await;
+    let mut rx4 = peer_up(&tx, spec).await;
 
     let g1 = query_update_group(&tx, rs1).await;
     assert!(g1.starts_with("group:"), "RS-transparent peers group: {g1}");
@@ -1555,14 +1585,31 @@ async fn rs_transparent_peers_group_per_client_best_falls_back() {
         g1,
         "transparency is transport-side; shared chain ⇒ shared group"
     );
-    assert_eq!(query_update_group(&tx, pcb).await, "per_client_best");
+    let g_pcb = query_update_group(&tx, pcb).await;
+    assert!(
+        g_pcb.starts_with("group:"),
+        "shareable-chain unicast-only per-client-best peer groups (ADR-0126): {g_pcb}"
+    );
+    assert_ne!(
+        g_pcb, g1,
+        "mitigated and unmitigated groups never share a table"
+    );
     assert_metric(
         gauge_metric_value(&metrics, "bgp_update_group_fallback_peers", &[]),
-        1.0,
+        0.0,
         "bgp_update_group_fallback_peers",
     );
+    // Grouping does not rename the selection surface: the member still
+    // reports the per-client-best distribution mode.
+    assert_eq!(
+        query_peer_outbound_state(&tx, pcb)
+            .await
+            .effective_distribution_mode,
+        crate::EffectiveDistributionMode::PerClientBest
+    );
 
-    // Shared staging feeds the grouped members identically.
+    // Shared staging feeds the grouped members identically; the
+    // per-client-best group stages the same (sole) candidate.
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
     let source = IpAddr::V4(Ipv4Addr::new(10, 0, 3, 9));
     tx.send(RibUpdate::RoutesReceived {
@@ -1583,9 +1630,70 @@ async fn rs_transparent_peers_group_per_client_best_falls_back() {
 
     let u1 = rx1.recv().await.unwrap();
     let u2 = rx2.recv().await.unwrap();
+    let u4 = rx4.recv().await.unwrap();
     assert_eq!(u1.announce.len(), 1);
     assert_eq!(u1.announce[0].prefix, Prefix::V4(prefix));
     assert_eq!(u1.announce[0].attributes, u2.announce[0].attributes);
+    assert_eq!(u4.announce.len(), 1);
+    assert_eq!(u4.announce[0].attributes, u1.announce[0].attributes);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// The ADR-0126 residual fallback, pinned: `per_client_best` on a
+/// NON-unicast-only session (`VPNv4` or RT-Constrain negotiated) keeps
+/// today's per-peer path with the SAME `per_client_best` reason — no
+/// new reason surface — and counts toward the fallback gauge.
+#[tokio::test]
+async fn per_client_best_with_vpn_or_rtc_families_keeps_fallback_reason() {
+    let metrics = BgpMetrics::new();
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    let handle = tokio::spawn(manager.run());
+
+    let vpn_peer = IpAddr::V4(Ipv4Addr::new(10, 0, 4, 1));
+    let rtc_peer = IpAddr::V4(Ipv4Addr::new(10, 0, 4, 2));
+    for (peer, families) in [
+        (
+            vpn_peer,
+            vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv4, Safi::MplsVpn)],
+        ),
+        (
+            rtc_peer,
+            vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv4, Safi::RtConstrain)],
+        ),
+    ] {
+        let (out_tx, _out_rx) = mpsc::channel(64);
+        tx.send(RibUpdate::PeerUp {
+            peer,
+            session_id: 0,
+            peer_asn: 65001,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            outbound_tx: out_tx,
+            export_policy: None,
+            sendable_families: families,
+            is_ebgp: true,
+            route_reflector_client: false,
+            orr_vantage: None,
+            per_client_best: true,
+            interpret_rfc1997: true,
+            add_path_send_families: vec![],
+            add_path_send_max: 0,
+            negotiated_orf_recv: vec![],
+            negotiated_llgr_families: vec![],
+        })
+        .await
+        .unwrap();
+    }
+
+    assert_eq!(query_update_group(&tx, vpn_peer).await, "per_client_best");
+    assert_eq!(query_update_group(&tx, rtc_peer).await, "per_client_best");
+    assert_metric(
+        gauge_metric_value(&metrics, "bgp_update_group_fallback_peers", &[]),
+        2.0,
+        "bgp_update_group_fallback_peers",
+    );
 
     drop(tx);
     handle.await.unwrap();
@@ -5842,6 +5950,221 @@ async fn slow_peer_isolation_moves_member_to_fallback_and_back() {
         "group:0",
         "isolation must not survive the session that reported it"
     );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// An eBGP route-server candidate ranked by AS-path length: rank 1
+/// wins best path, higher ranks lose in order.
+fn ranked_rs_route(prefix: Ipv4Prefix, src: Ipv4Addr, rank: u32) -> Route {
+    Route {
+        prefix: Prefix::V4(prefix),
+        next_hop: IpAddr::V4(src),
+        link_local_next_hop: None,
+        next_hop_scope: None,
+        peer: IpAddr::V4(src),
+        attributes: Arc::new(vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65000 + rank; rank as usize])],
+            }),
+        ]),
+        received_at: Instant::now(),
+        origin_type: crate::route::RouteOrigin::Ebgp,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        is_stale: false,
+        is_llgr_stale: false,
+        path_id: 0,
+        validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+        aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+    }
+}
+
+/// ADR-0126 Decision 9 migration pin: a CONVERGED ungrouped
+/// per-client-best fleet with overlapping announcements regroups
+/// through the ordinary baseline machinery (`recompute_update_group`
+/// via the slow-isolation membership seam) with a BYTE-EMPTY diff —
+/// zero announces and zero withdraws on every member's wire, no
+/// session resets — and the rebuilt group's exception lane holds
+/// exactly the substitutions the ungrouped walks were delivering
+/// (proven on the wire by the RFC 2918 refresh replay of `adv(m)`).
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one end-to-end scenario proves the ADR-0126 converged-regroup migration"
+)]
+async fn converged_per_client_best_fleet_regroups_byte_empty() {
+    tokio::time::pause();
+    let metrics = BgpMetrics::new();
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    let handle = tokio::spawn(manager.run());
+
+    let a = Ipv4Addr::new(10, 0, 5, 1);
+    let b = Ipv4Addr::new(10, 0, 5, 2);
+    let c = Ipv4Addr::new(10, 0, 5, 3);
+    let members = [a, b, c];
+    let mut receivers = Vec::new();
+    for member in members {
+        let mut spec = PeerUpSpec::ebgp(IpAddr::V4(member));
+        spec.per_client_best = true;
+        receivers.push(peer_up(&tx, spec).await);
+    }
+
+    // Move the fleet onto the per-peer path (the pre-flip shape a
+    // migrating deployment converged on) through the one membership
+    // seam that changes no staging input.
+    for member in members {
+        tx.send(RibUpdate::PeerSlowState {
+            peer: IpAddr::V4(member),
+            session_id: 0,
+            slow: true,
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            query_update_group(&tx, IpAddr::V4(member)).await,
+            "slow_peer"
+        );
+    }
+
+    // Overlapping announcements from the members themselves:
+    // p1 ranked A > B > C (winner A, runner-up B), p2 ranked B > C
+    // (winner B, runner-up C). Each member's ungrouped walk delivers
+    // the winner, with the substitution toward the winner's source.
+    let p1 = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+    let p2 = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 101, 0), 24);
+    for (source, routes) in [
+        (a, vec![ranked_rs_route(p1, a, 1)]),
+        (
+            b,
+            vec![ranked_rs_route(p1, b, 2), ranked_rs_route(p2, b, 1)],
+        ),
+        (
+            c,
+            vec![ranked_rs_route(p1, c, 3), ranked_rs_route(p2, c, 2)],
+        ),
+    ] {
+        tx.send(RibUpdate::RoutesReceived {
+            session_id: 0,
+            peer: IpAddr::V4(source),
+            announced: routes,
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+    }
+    let _ = query_best_routes(&tx).await;
+    // Converged: drain the ungrouped convergence traffic and verify
+    // each member's final wire state (fold announce/withdraw order).
+    let mut folded: HashMap<Ipv4Addr, HashMap<Prefix, IpAddr>> = HashMap::new();
+    for (member, out_rx) in members.iter().zip(receivers.iter_mut()) {
+        let table = folded.entry(*member).or_default();
+        while let Ok(update) = out_rx.try_recv() {
+            for (prefix, _) in &update.withdraw {
+                table.remove(prefix);
+            }
+            for route in update.announce.iter() {
+                table.insert(route.prefix, route.peer);
+            }
+        }
+    }
+    let expect = |m: Ipv4Addr, w1: Ipv4Addr, w2: Ipv4Addr| {
+        assert_eq!(
+            folded[&m],
+            HashMap::from([
+                (Prefix::V4(p1), IpAddr::V4(w1)),
+                (Prefix::V4(p2), IpAddr::V4(w2)),
+            ]),
+            "ungrouped converged view for {m}"
+        );
+    };
+    expect(a, b, b); // p1: substitution toward source(w); p2: winner
+    expect(b, a, c); // p2: substitution toward source(w)
+    expect(c, a, b); // non-source: both winners
+
+    // The flip: clear the isolation — each member regroups through
+    // `recompute_update_group` with an adv(m)-aware baseline.
+    for member in members {
+        tx.send(RibUpdate::PeerSlowState {
+            peer: IpAddr::V4(member),
+            session_id: 0,
+            slow: false,
+        })
+        .await
+        .unwrap();
+    }
+    let label = query_update_group(&tx, IpAddr::V4(a)).await;
+    assert!(label.starts_with("group:"), "regrouped label: {label}");
+    for member in [b, c] {
+        assert_eq!(query_update_group(&tx, IpAddr::V4(member)).await, label);
+    }
+    // The regroup diff is consumed by the distribute pass inside the
+    // slow-state handler; advance past the resync interval anyway so
+    // any deferred work would flush before the emptiness assertions.
+    for _ in 0..3 {
+        tokio::time::advance(Duration::from_secs(2)).await;
+        tokio::task::yield_now().await;
+    }
+    let _ = query_best_routes(&tx).await;
+    // Guard against a vacuous pass: every membership move must have
+    // been a REAL regroup (3 grouped→slow + 3 slow→grouped). The
+    // regroup's baseline diff is consumed synchronously by the
+    // distribute pass inside the slow-state handler — a member left
+    // pending would instead surface as over-emission below or as a
+    // stale refresh replay in the lane proof.
+    assert_metric(regroups_total(&metrics), 6.0, "regroups_total");
+    for (member, out_rx) in members.iter().zip(receivers.iter_mut()) {
+        assert!(
+            out_rx.try_recv().is_err(),
+            "converged regroup must be byte-empty on {member}'s wire"
+        );
+    }
+
+    // The rebuilt lane is the O(overlapped prefixes) sidecar: exactly
+    // the two runner-up entries the ungrouped walks were substituting.
+    assert_metric(
+        gauge_metric_value(&metrics, "bgp_update_group_runner_up_entries", &[]),
+        2.0,
+        "bgp_update_group_runner_up_entries",
+    );
+
+    // Wire-level lane proof: an RFC 2918 refresh replays adv(m); the
+    // winner sources receive their substitutions, byte-for-byte what
+    // the ungrouped path had delivered.
+    for (member, w1, w2) in [(a, b, b), (b, a, c), (c, a, b)] {
+        tx.send(RibUpdate::RouteRefreshRequest {
+            peer: IpAddr::V4(member),
+            session_id: 0,
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+        })
+        .await
+        .unwrap();
+        let _ = query_best_routes(&tx).await;
+        let idx = members.iter().position(|m| *m == member).unwrap();
+        let mut replayed = HashMap::new();
+        while let Ok(update) = receivers[idx].try_recv() {
+            assert!(update.withdraw.is_empty(), "refresh replay never withdraws");
+            for route in update.announce.iter() {
+                replayed.insert(route.prefix, route.peer);
+            }
+        }
+        assert_eq!(
+            replayed,
+            HashMap::from([
+                (Prefix::V4(p1), IpAddr::V4(w1)),
+                (Prefix::V4(p2), IpAddr::V4(w2)),
+            ]),
+            "refresh replay of adv({member}) must match the ungrouped view"
+        );
+    }
 
     drop(tx);
     handle.await.unwrap();

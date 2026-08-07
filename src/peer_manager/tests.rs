@@ -786,6 +786,7 @@ log_format = "json"
                             sendable_vpnv4: false,
                             sendable_vpnv6: false,
                             rtc_negotiated: false,
+                            per_client_best: false,
                             llgr_families: vec![],
                         },
                     ),

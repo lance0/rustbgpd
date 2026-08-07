@@ -127,9 +127,9 @@ import_chain = [
 # Add-Path-capable member: receives up to the eight best export-permitted
 # candidates, subject to configured and negotiated Paths-Limit, and runs
 # its own best-path selection (the preferred path-hiding mitigation).
-# Like per_client_best, Add-Path send places the member on the per-peer
-# distribution path (the add_path_send fallback reason); update-group
-# sharing applies to members using neither mitigation.
+# Add-Path send places the member on the per-peer distribution path
+# (the add_path_send fallback reason); per_client_best members and
+# members using neither mitigation share update groups (ADR-0126).
 [[neighbors]]
 address = "198.51.100.2"
 remote_asn = 64501
@@ -152,7 +152,10 @@ send_max = 8
 # Member without Add-Path: per_client_best advertises the best
 # export-policy-permitted candidate when the overall best is denied (RFC
 # 7947 §2.3.2 per-client best-path, the BIRD-`secondary` equivalent).
-# Requires route_server_client; excludes the peer from update-group sharing.
+# Requires route_server_client. Shareable-chain unicast-only members
+# like this one share an update group (the mitigation is computed once
+# per group, ADR-0126); VPN/RTC sessions and peer-context chains keep
+# the per-peer fallback.
 [[neighbors]]
 address = "198.51.100.3"
 remote_asn = 64502
@@ -326,7 +329,8 @@ Prometheus (`prometheus_addr`, `/metrics`; dashboards in
 |--------|---------------|
 | `bgp_session_state_transitions_total` | flat outside member churn |
 | `sum without (af) (bgp_rpki_vrp_count)` | per-target IPv4 + IPv6 total; non-zero once the RTR cache syncs (`rbgp doctor` warns when configured caches have no visible VRPs) |
-| `bgp_update_group_fallback_peers` | ≥ your `per_client_best` + Add-Path send member count (both path-hiding mitigations distribute per-peer) |
+| `bgp_update_group_fallback_peers` | ≥ your Add-Path send member count (Add-Path distributes per-peer; shareable-chain unicast-only `per_client_best` members group instead, ADR-0126) |
+| `bgp_update_group_runner_up_entries` | tracks announcement overlap across per-client-best groups (O(overlapped prefixes)); a climb toward the table size means heavy overlap, never member-count growth |
 | `bgp_rib_outbound_registered_peers` | = established member count |
 | `bgp_policy_generation_loaded_timestamp_seconds` | recent — ages past your render/SIGHUP cadence when the filter pipeline is stuck; see "Policy artifact freshness" in [`OPERATIONS.md`](../OPERATIONS.md) for the alert expressions |
 
@@ -399,8 +403,9 @@ member's own export policy denies the single best path. In `single-best`
 mode this is correct RFC 7947 behavior — the prefix is legitimately
 withheld. If the member can't do Add-Path and you want it to see the
 next-best permitted candidate instead, set `per_client_best = true` on
-it (it drops out of update-group sharing, shown as the `per_client_best`
-fallback reason).
+it (with a shareable export chain and a unicast-only session it stays
+update-grouped, shown as `group:N`; VPN/RTC sessions keep the
+`per_client_best` fallback reason).
 
 **A member's AS or your route-server ASN shows up in an AS_PATH.**
 Transparency broke. Confirm `route_server_client = true` on the member —

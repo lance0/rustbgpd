@@ -80,6 +80,12 @@ pub struct UpdateGroupFingerprint {
     pub sendable_vpnv4: bool,
     pub sendable_vpnv6: bool,
     pub rtc_negotiated: bool,
+    /// ADR-0126 Decision 1: RFC 7947 §2.3.2 per-client best-path is a
+    /// key dimension for unicast-only sessions — a mitigated group
+    /// stages the first *permitted* candidate where a plain group
+    /// stages Loc-RIB-best-or-nothing, so the two must never share a
+    /// table.
+    pub per_client_best: bool,
     pub llgr_families: Vec<(u16, u8)>,
 }
 
@@ -115,18 +121,28 @@ pub fn classify_update_group(mut input: UpdateGroupClassifierInput) -> UpdateGro
     input.sendable_families.dedup();
     input.llgr_families.sort_unstable();
     input.llgr_families.dedup();
+    let contains = |family| input.sendable_families.contains(&family);
+    // The runtime `GroupKey::is_unicast_only` predicate on classifier
+    // inputs: at least one unicast family sendable, no VPNv4/VPNv6/RTC.
+    let unicast_only = (contains((1, 1)) || contains((2, 1)))
+        && !contains((1, 128))
+        && !contains((2, 128))
+        && !contains((1, 132));
     if input.policy_requires_peer_context {
         UpdateGroupClassification::PolicyPeerContext
     } else if input.add_path_send {
         UpdateGroupClassification::AddPathSend
-    } else if input.per_client_best {
+    } else if input.per_client_best && !unicast_only {
+        // ADR-0126 Decision 1: `per_client_best` groups on unicast-only
+        // keys (the bit joins the fingerprint below). VPN/RTC
+        // participation keeps today's per-peer fallback under the SAME
+        // reason string — no new reason surface.
         UpdateGroupClassification::PerClientBest
     } else if input.orr_vantage.is_some() {
         UpdateGroupClassification::OrrVantage
     } else if input.orf_installed {
         UpdateGroupClassification::OrfInstalled
     } else {
-        let contains = |family| input.sendable_families.contains(&family);
         UpdateGroupClassification::Groupable(UpdateGroupFingerprint {
             policy_fingerprint: input.policy_fingerprint,
             target_is_ebgp: input.target_is_ebgp,
@@ -138,6 +154,7 @@ pub fn classify_update_group(mut input: UpdateGroupClassifierInput) -> UpdateGro
             sendable_vpnv4: contains((1, 128)),
             sendable_vpnv6: contains((2, 128)),
             rtc_negotiated: contains((1, 132)),
+            per_client_best: input.per_client_best,
             llgr_families: input.llgr_families,
         })
     }
@@ -188,6 +205,9 @@ pub enum UpdateGroupComparisonDifference {
     LocalRole,
     Rfc1997Mode,
     NegotiatedFamilies,
+    /// ADR-0126 Decision 1: the `per_client_best` group-key bit — a
+    /// mitigated and an unmitigated group never share a staged table.
+    PerClientBest,
     LlgrFamilies,
 }
 
@@ -313,10 +333,31 @@ mod update_group_classifier_tests {
                 },
                 None,
             ),
+            // ADR-0126 Decision 1: unicast-only per-client-best groups
+            // (the bit joins the fingerprint); VPN/RTC participation
+            // keeps the per-peer fallback under the unchanged reason.
             (
-                "per_client_best",
+                "per_client_best_unicast_only",
                 UpdateGroupClassifierInput {
                     per_client_best: true,
+                    ..input()
+                },
+                None,
+            ),
+            (
+                "per_client_best_vpn",
+                UpdateGroupClassifierInput {
+                    per_client_best: true,
+                    sendable_families: vec![(1, 1), (1, 128)],
+                    ..input()
+                },
+                Some("per_client_best"),
+            ),
+            (
+                "per_client_best_rtc",
+                UpdateGroupClassifierInput {
+                    per_client_best: true,
+                    sendable_families: vec![(1, 1), (1, 132)],
                     ..input()
                 },
                 Some("per_client_best"),
@@ -360,6 +401,43 @@ mod update_group_classifier_tests {
             let result = classify_update_group(value);
             assert_eq!(result.reason(), expected_reason, "scenario {name}");
         }
+    }
+
+    #[test]
+    fn per_client_best_key_bit_separates_mitigated_and_plain_groups() {
+        let plain = input();
+        let mut mitigated = plain.clone();
+        mitigated.per_client_best = true;
+        assert_ne!(
+            classify_update_group(plain),
+            classify_update_group(mitigated),
+            "a mitigated and an unmitigated group must never share a table (ADR-0126)"
+        );
+    }
+
+    #[test]
+    fn per_client_best_keeps_precedence_around_orf() {
+        // ORF still disqualifies a groupable per-client-best key with
+        // its own reason (ADR-0126 Decision 1: precedence above the
+        // per-client-best arm is unchanged, and the arm itself now
+        // passes unicast-only keys through).
+        let mut unicast_only = input();
+        unicast_only.per_client_best = true;
+        unicast_only.orf_installed = true;
+        assert_eq!(
+            classify_update_group(unicast_only),
+            UpdateGroupClassification::OrfInstalled
+        );
+        // A residually disqualified (VPN) per-client-best peer keeps
+        // its historical precedence over ORF.
+        let mut vpn = input();
+        vpn.per_client_best = true;
+        vpn.orf_installed = true;
+        vpn.sendable_families = vec![(1, 1), (1, 128)];
+        assert_eq!(
+            classify_update_group(vpn),
+            UpdateGroupClassification::PerClientBest
+        );
     }
 
     #[test]

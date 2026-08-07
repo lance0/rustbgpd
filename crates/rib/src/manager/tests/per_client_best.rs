@@ -358,6 +358,82 @@ async fn source_member_of_best_gets_runner_up() {
     handle.await.unwrap();
 }
 
+/// ADR-0126: a GROUPED per-client-best member takes the dedicated
+/// per-client-best explain arm, with its advertised-state diff
+/// materialized from the group's `adv(m)` view — so explain for the
+/// winner's source names the RUNNER-UP (the lane substitution on its
+/// wire), reports it in sync, and carries the update-group identity.
+#[tokio::test]
+async fn grouped_source_member_explain_names_runner_up_substitution() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    // Two shareable-chain unicast-only per-client-best members: since
+    // the classifier flip they share one mitigated group.
+    let a = IpAddr::V4(SOURCE_A);
+    let e = IpAddr::V4(SOURCE_E);
+    let mut a_rx = client_peer_up(&tx, a, None, true).await;
+    drain_eor(&mut a_rx).await;
+    let mut e_rx = client_peer_up(&tx, e, None, true).await;
+    drain_eor(&mut e_rx).await;
+    let membership = |peer| {
+        let tx = tx.clone();
+        async move {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            tx.send(RibUpdate::QueryPeerUpdateGroup {
+                peer,
+                reply: reply_tx,
+            })
+            .await
+            .unwrap();
+            reply_rx.await.unwrap()
+        }
+    };
+    let group = membership(a).await;
+    assert!(group.starts_with("group:"), "grouped member: {group}");
+    assert_eq!(membership(e).await, group);
+
+    // A sources the winner; B's route is the runner-up in the lane.
+    announce_from(
+        &tx,
+        SOURCE_A,
+        vec![ebgp_route(prefix(), SOURCE_A, vec![65001], vec![])],
+    )
+    .await;
+    announce_from(&tx, SOURCE_B, vec![runner_up_route()]).await;
+    sync(&tx).await;
+    let update = a_rx.recv().await.unwrap();
+    assert_eq!(update.announce.len(), 1);
+    assert_eq!(update.announce[0].peer, IpAddr::V4(SOURCE_B));
+
+    let explain = query_explain_advertised_route(&tx, a, Prefix::V4(prefix())).await;
+    assert_eq!(explain.decision, crate::update::ExplainDecision::Advertise);
+    assert_eq!(
+        explain.route_peer,
+        Some(IpAddr::V4(SOURCE_B)),
+        "explain for source(w) names the runner-up substitution"
+    );
+    assert!(
+        explain.already_advertised,
+        "the substitution is on the member's wire — explain must report in sync"
+    );
+    assert!(
+        explain.update_group_id.is_some(),
+        "a grouped member's explain carries its update-group identity"
+    );
+
+    // The non-source member's explain names the winner, also in sync.
+    let e_update = e_rx.recv().await.unwrap();
+    assert_eq!(e_update.announce[0].peer, IpAddr::V4(SOURCE_A));
+    let explain = query_explain_advertised_route(&tx, e, Prefix::V4(prefix())).await;
+    assert_eq!(explain.route_peer, Some(IpAddr::V4(SOURCE_A)));
+    assert!(explain.already_advertised);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
 /// The `OpenBGPd` `rde evaluate all` bug-class pins:
 /// (a) a candidate change that does NOT alter the client's filtered
 ///     best produces NO re-announcement (equality suppression);
