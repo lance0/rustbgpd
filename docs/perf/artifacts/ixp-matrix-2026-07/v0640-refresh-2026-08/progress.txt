@@ -1,0 +1,88 @@
+runA start: head=295d1f375451d4a58d605006c87770e4743f3011 version=rustbgpd 0.64.0
+=== RUN A / S2 ===
+=== cell rustbgpd start 2026-08-08T12:11:38-04:00 ===
+wrote /tmp/ixp-rustbgpd/config.toml (700 neighbors), member.rpol, gen-a.rpol, gen-b.rpol; listen_port=1790, changed_peers=700, stable_peers=0, grpc_uds=/tmp/ixp-rustbgpd/grpc.sock
+cell rustbgpd: harness rc=0 (artifacts: /home/lance/projects/rustbgpd/bench/scale/matrix/artifacts-v064-runA-s2/rustbgpd)
+=== cell rustbgpd PASS 2026-08-08T12:13:51-04:00 ===
+cool-down 300s
+=== cell bird start 2026-08-08T12:18:51-04:00 ===
+wrote /tmp/ixp-bird/bird.conf (700 neighbors, threads=8), gen.conf, gen-a.conf, gen-b.conf; listen 127.0.0.1:1790, include dir /etc/bird
+cell bird: harness rc=0 (artifacts: /home/lance/projects/rustbgpd/bench/scale/matrix/artifacts-v064-runA-s2/bird)
+=== cell bird PASS 2026-08-08T12:28:00-04:00 ===
+cool-down 300s
+=== cell openbgpd start 2026-08-08T12:33:00-04:00 ===
+wrote /tmp/ixp-openbgpd/bgpd.conf (700 neighbors), gen.conf, gen-a.conf, gen-b.conf; listen 127.0.0.1:1790, include dir /etc/bgpd
+cell openbgpd: harness rc=0 (artifacts: /home/lance/projects/rustbgpd/bench/scale/matrix/artifacts-v064-runA-s2/openbgpd)
+=== cell openbgpd PASS 2026-08-08T12:57:09-04:00 ===
+cool-down 300s
+matrix done; per-cell status under /home/lance/projects/rustbgpd/bench/scale/matrix/artifacts-v064-runA-s2/*/status
+RUNA-S2-EXIT=0
+=== RUN A / S3 (flapstorm 50) ===
+=== cell rustbgpd start 2026-08-08T13:02:09-04:00 ===
+wrote /tmp/ixp-rustbgpd/config.toml (700 neighbors), member.rpol, gen-a.rpol, gen-b.rpol; listen_port=1790, changed_peers=700, stable_peers=0, grpc_uds=/tmp/ixp-rustbgpd/grpc.sock
+cell rustbgpd: harness rc=0 (artifacts: /home/lance/projects/rustbgpd/bench/scale/matrix/artifacts-v064-runA-s3/rustbgpd)
+=== cell rustbgpd PASS 2026-08-08T13:03:52-04:00 ===
+cool-down 300s
+=== cell bird start 2026-08-08T13:08:52-04:00 ===
+wrote /tmp/ixp-bird/bird.conf (700 neighbors, threads=8), gen.conf, gen-a.conf, gen-b.conf; listen 127.0.0.1:1790, include dir /etc/bird
+cell bird: harness rc=0 (artifacts: /home/lance/projects/rustbgpd/bench/scale/matrix/artifacts-v064-runA-s3/bird)
+=== cell bird PASS 2026-08-08T13:11:56-04:00 ===
+cool-down 300s
+=== cell openbgpd start 2026-08-08T13:16:56-04:00 ===
+wrote /tmp/ixp-openbgpd/bgpd.conf (700 neighbors), gen.conf, gen-a.conf, gen-b.conf; listen 127.0.0.1:1790, include dir /etc/bgpd
+cell openbgpd: harness rc=0 (artifacts: /home/lance/projects/rustbgpd/bench/scale/matrix/artifacts-v064-runA-s3/openbgpd)
+=== cell openbgpd PASS 2026-08-08T13:25:24-04:00 ===
+cool-down 300s
+matrix done; per-cell status under /home/lance/projects/rustbgpd/bench/scale/matrix/artifacts-v064-runA-s3/*/status
+RUNA-S3-EXIT=0
+=== RUN A cell statuses ===
+bench/scale/matrix/artifacts-v064-runA-s2/bird/status:pass
+bench/scale/matrix/artifacts-v064-runA-s2/openbgpd/status:pass
+bench/scale/matrix/artifacts-v064-runA-s2/rustbgpd/status:pass
+bench/scale/matrix/artifacts-v064-runA-s3/bird/status:pass
+bench/scale/matrix/artifacts-v064-runA-s3/openbgpd/status:pass
+bench/scale/matrix/artifacts-v064-runA-s3/rustbgpd/status:pass
+runB start: head=295d1f375451d4a58d605006c87770e4743f3011 version=rustbgpd 0.64.0
+=== RUN B / S2 ===
+=== cell rustbgpd start 2026-08-08T13:30:47-04:00 ===
+wrote /tmp/ixp-rustbgpd/config.toml (700 neighbors), member.rpol, gen-a.rpol, gen-b.rpol; listen_port=1790, changed_peers=700, stable_peers=0, grpc_uds=/tmp/ixp-rustbgpd/grpc.sock
+cell rustbgpd: harness rc=0 (artifacts: /home/lance/projects/rustbgpd/bench/scale/matrix/artifacts-v064-runB-s2/rustbgpd)
+=== cell rustbgpd PASS 2026-08-08T13:33:01-04:00 ===
+cool-down 300s
+=== cell bird start 2026-08-08T13:38:01-04:00 ===
+wrote /tmp/ixp-bird/bird.conf (700 neighbors, threads=8), gen.conf, gen-a.conf, gen-b.conf; listen 127.0.0.1:1790, include dir /etc/bird
+cell bird: harness rc=0 (artifacts: /home/lance/projects/rustbgpd/bench/scale/matrix/artifacts-v064-runB-s2/bird)
+=== cell bird PASS 2026-08-08T13:47:14-04:00 ===
+cool-down 300s
+=== cell openbgpd start 2026-08-08T13:52:14-04:00 ===
+wrote /tmp/ixp-openbgpd/bgpd.conf (700 neighbors), gen.conf, gen-a.conf, gen-b.conf; listen 127.0.0.1:1790, include dir /etc/bgpd
+cell openbgpd: harness rc=0 (artifacts: /home/lance/projects/rustbgpd/bench/scale/matrix/artifacts-v064-runB-s2/openbgpd)
+=== cell openbgpd PASS 2026-08-08T14:16:34-04:00 ===
+cool-down 300s
+matrix done; per-cell status under /home/lance/projects/rustbgpd/bench/scale/matrix/artifacts-v064-runB-s2/*/status
+RUNB-S2-EXIT=0
+=== RUN B / S3 (flapstorm 50) ===
+=== cell rustbgpd start 2026-08-08T14:21:34-04:00 ===
+wrote /tmp/ixp-rustbgpd/config.toml (700 neighbors), member.rpol, gen-a.rpol, gen-b.rpol; listen_port=1790, changed_peers=700, stable_peers=0, grpc_uds=/tmp/ixp-rustbgpd/grpc.sock
+cell rustbgpd: harness rc=0 (artifacts: /home/lance/projects/rustbgpd/bench/scale/matrix/artifacts-v064-runB-s3/rustbgpd)
+=== cell rustbgpd PASS 2026-08-08T14:23:17-04:00 ===
+cool-down 300s
+=== cell bird start 2026-08-08T14:28:17-04:00 ===
+wrote /tmp/ixp-bird/bird.conf (700 neighbors, threads=8), gen.conf, gen-a.conf, gen-b.conf; listen 127.0.0.1:1790, include dir /etc/bird
+cell bird: harness rc=0 (artifacts: /home/lance/projects/rustbgpd/bench/scale/matrix/artifacts-v064-runB-s3/bird)
+=== cell bird PASS 2026-08-08T14:31:20-04:00 ===
+cool-down 300s
+=== cell openbgpd start 2026-08-08T14:36:20-04:00 ===
+wrote /tmp/ixp-openbgpd/bgpd.conf (700 neighbors), gen.conf, gen-a.conf, gen-b.conf; listen 127.0.0.1:1790, include dir /etc/bgpd
+cell openbgpd: harness rc=0 (artifacts: /home/lance/projects/rustbgpd/bench/scale/matrix/artifacts-v064-runB-s3/openbgpd)
+=== cell openbgpd PASS 2026-08-08T14:44:44-04:00 ===
+cool-down 300s
+matrix done; per-cell status under /home/lance/projects/rustbgpd/bench/scale/matrix/artifacts-v064-runB-s3/*/status
+RUNB-S3-EXIT=0
+=== RUN B cell statuses ===
+bench/scale/matrix/artifacts-v064-runB-s2/bird/status:pass
+bench/scale/matrix/artifacts-v064-runB-s2/openbgpd/status:pass
+bench/scale/matrix/artifacts-v064-runB-s2/rustbgpd/status:pass
+bench/scale/matrix/artifacts-v064-runB-s3/bird/status:pass
+bench/scale/matrix/artifacts-v064-runB-s3/openbgpd/status:pass
+bench/scale/matrix/artifacts-v064-runB-s3/rustbgpd/status:pass

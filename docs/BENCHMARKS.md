@@ -1169,6 +1169,13 @@ a comparison under identical conditions, not an absolute figure for any daemon.
 converges in 3 s against FRR's 7 s, BIRD's 5 s, and GoBGP's 20 s — the largest
 separation in the campaign, at the shape rustbgpd is designed for.
 
+*v0.64.0 spot-check (2026-08-08, same host): a single run of the three
+original shapes against the release tag (image built from the public
+`v0.64.0` tag) reproduced the rustbgpd column within its bands — totals
+8.17 / 8.24 / 12.03 s and peak RSS 37.7 / 46.7 / 203.1 MiB for
+10p × 1k / 2p × 10k / 2p × 100k. Single run, rustbgpd only; the
+four-daemon medians above remain the published comparison.*
+
 > **rustbgpd is last on memory of all four daemons at 100p × 1k — its own
 > target deployment.** 212.0 MiB against GoBGP's 193.5 MiB (1.10×), FRR's
 > 134.1 MiB (1.58×), and BIRD's 32.8 MiB (6.46×). Against BIRD the ratio runs

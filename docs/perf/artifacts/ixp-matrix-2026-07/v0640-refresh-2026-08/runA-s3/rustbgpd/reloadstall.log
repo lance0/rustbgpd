@@ -1,0 +1,29 @@
+# reloadstall peers=700 changed_peers=700 stable_peers=0 prefixes=400400 per_peer=572 pid=2336363
+established 700 at 0.7s
+first_exact_bitmap,mode=flapstorm,peers=700,total=400400,per_peer=572,expected=399828,completed=700,min_unique=399828,max_unique=399828
+converged (>= 399828/observer) at 4.8s rss_mib=464
+control_maxgap_ms: p50=19.23 p95=19.82 max=42.01 (n=700)
+control_rss_mib 404
+flapstorm_csv_header,round,peers_total,peers_flapped,prefixes,flap_prefixes,withdraw_p50_s,withdraw_p95_s,withdraw_max_s,reannounce_p50_s,reannounce_p95_s,reannounce_max_s,rss_mib,sessions_up,parse_errors
+flap 1 close wall_us=1786208570299983
+flap 1 withdraw_s: p50=0.31 p95=0.31 max=0.35 (n=650)
+flap 1 reannounce wall_us=1786208580321775
+flap 1 reannounce_s: p50=0.54 p95=0.54 max=0.56 (n=650)
+flap 1 first_reann_s: p50=0.29 p95=0.29 max=0.33 (n=650)
+flap 1 sessions_up 700/700 rss_mib=426
+flapstorm_csv,1,700,50,400400,28600,0.309025,0.314842,0.346699,0.535571,0.537548,0.562940,426,700,0
+flap 2 close wall_us=1786208590932271
+flap 2 withdraw_s: p50=0.47 p95=0.50 max=0.50 (n=650)
+flap 2 reannounce wall_us=1786208600982432
+flap 2 reannounce_s: p50=0.49 p95=0.49 max=0.53 (n=650)
+flap 2 first_reann_s: p50=0.25 p95=0.26 max=0.29 (n=650)
+flap 2 sessions_up 700/700 rss_mib=445
+flapstorm_csv,2,700,50,400400,28600,0.465060,0.496432,0.501602,0.490032,0.491657,0.527255,445,700,0
+flap 3 close wall_us=1786208611593417
+flap 3 withdraw_s: p50=0.43 p95=0.43 max=0.46 (n=650)
+flap 3 reannounce wall_us=1786208621616131
+flap 3 reannounce_s: p50=0.55 p95=0.56 max=0.58 (n=650)
+flap 3 first_reann_s: p50=0.29 p95=0.29 max=0.32 (n=650)
+flap 3 sessions_up 700/700 rss_mib=430
+flapstorm_csv,3,700,50,400400,28600,0.431002,0.432467,0.462255,0.553307,0.555249,0.582567,430,700,0
+done rss_mib=450

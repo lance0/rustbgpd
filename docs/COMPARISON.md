@@ -414,9 +414,10 @@ metric this market has actually selected on — and it is exactly what the
 [IXP receipt matrix](perf/ixp-matrix-2026-07.md) measures head-to-head at
 700 peers × 400k prefixes: rustbgpd is the only daemon of the three tested
 that holds both sub-second median UPDATE stall and single-digit-seconds
-policy-reload completion (p50 1.5–2.2 s, vs ~80 s for BIRD 3.3.1 and ~250 s
-for OpenBGPD 9.1 on the same host and wire inputs), with per-daemon wins and
-losses — including OpenBGPD's smaller raw stall — published in the receipt.
+policy-reload completion (p50 1.3–1.6 s at the v0.64.0 refresh, vs 64–85 s
+for BIRD 3.3.1 and ~250 s for OpenBGPD 9.1 on the same host and wire
+inputs), with per-daemon wins and losses — including OpenBGPD's smaller raw
+stall — published in the receipt.
 
 Reload speed is only half the operator concern; the other half is what an
 invalid config does to a running router. FRR's reload driver

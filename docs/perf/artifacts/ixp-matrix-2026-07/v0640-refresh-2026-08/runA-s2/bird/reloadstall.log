@@ -1,0 +1,92 @@
+# reloadstall peers=700 changed_peers=700 stable_peers=0 prefixes=400400 per_peer=572 pid=0
+established 700 at 18.2s
+first_exact_bitmap,mode=reload,peers=700,total=400400,per_peer=572,expected=399828,completed=700,min_unique=399828,max_unique=399828
+converged (>= 399828/observer) at 60.9s rss_mib=0
+control_maxgap_ms: p50=71.39 p95=74.41 max=77.92 (n=700)
+control_rss_mib 0
+reloadstall_csv_header,reload,peers_total,peers_changed,peers_stable,prefixes,completion_p50_s,completion_p95_s,completion_max_s,changed_maxgap_p50_ms,changed_maxgap_p95_ms,changed_maxgap_max_ms,all_observer_maxgap_p50_ms,all_observer_maxgap_p95_ms,all_observer_maxgap_max_ms,changed_first_generation_update_p50_ms,changed_first_generation_update_p95_ms,changed_first_generation_update_max_ms,rss_before_mib,rss_after_mib,stable_marker_peers,sessions_up,parse_errors
+reload 1 reload_cmd wall_us=1786206028487177 policy=/tmp/ixp-bird/gen-b.conf
+BIRD 3.3.1 ready.
+Reading configuration from /etc/bird/bird.conf
+Reconfigured
+reload 1 progress: complete=0/700
+reload 1 progress: complete=0/700
+reload 1 progress: complete=0/700
+reload 1 progress: complete=0/700
+reload 1 progress: complete=0/700
+reload 1 progress: complete=85/700
+reload 1 progress: complete=150/700
+reload 1 progress: complete=385/700
+reload 1 progress: complete=669/700
+reload 1 completion_s: p50=79.25 p95=91.13 max=91.80 (n=700)
+reload 1 maxgap_ms: p50=1760.34 p95=2373.75 max=3532.70 (n=700)
+reload 1 all_observer_maxgap_ms: p50=2084.83 p95=3777.05 max=4825.02 (n=700)
+reload 1 changed_first_generation_update_ms: p50=1189.83 p95=1930.04 max=2217.93 (n=700)
+reload 1 rss_mib before=0 after=0 comms_sample=[4286056400]
+reload 1 sessions_up 700/700
+reload 1 stable_marker_peers 0/0
+reloadstall_csv,1,700,700,0,400400,79.253111,91.125574,91.796865,1760.343,2373.750,3532.698,2084.831,3777.054,4825.015,1189.831,1930.044,2217.925,0,0,0,700,0
+reload 2 reload_cmd wall_us=1786206140356294 policy=/tmp/ixp-bird/gen-a.conf
+BIRD 3.3.1 ready.
+Reading configuration from /etc/bird/bird.conf
+Reconfigured
+reload 2 progress: complete=0/700
+reload 2 progress: complete=0/700
+reload 2 progress: complete=0/700
+reload 2 progress: complete=55/700
+reload 2 progress: complete=189/700
+reload 2 progress: complete=316/700
+reload 2 progress: complete=389/700
+reload 2 progress: complete=482/700
+reload 2 progress: complete=691/700
+reload 2 completion_s: p50=64.25 p95=89.57 max=91.22 (n=700)
+reload 2 maxgap_ms: p50=2704.36 p95=7594.75 max=11379.92 (n=700)
+reload 2 all_observer_maxgap_ms: p50=4691.19 p95=8417.07 max=11379.92 (n=700)
+reload 2 changed_first_generation_update_ms: p50=948.11 p95=1640.59 max=3462.58 (n=700)
+reload 2 rss_mib before=0 after=0 comms_sample=[4286055400]
+reload 2 sessions_up 700/700
+reload 2 stable_marker_peers 0/0
+reloadstall_csv,2,700,700,0,400400,64.248035,89.565191,91.223490,2704.355,7594.750,11379.917,4691.189,8417.072,11379.917,948.109,1640.585,3462.579,0,0,0,700,0
+reload 3 reload_cmd wall_us=1786206251622240 policy=/tmp/ixp-bird/gen-b.conf
+BIRD 3.3.1 ready.
+Reading configuration from /etc/bird/bird.conf
+Reconfigured
+reload 3 progress: complete=0/700
+reload 3 progress: complete=0/700
+reload 3 progress: complete=0/700
+reload 3 progress: complete=0/700
+reload 3 progress: complete=16/700
+reload 3 progress: complete=62/700
+reload 3 progress: complete=161/700
+reload 3 progress: complete=270/700
+reload 3 progress: complete=635/700
+reload 3 completion_s: p50=84.48 p95=91.77 max=92.58 (n=700)
+reload 3 maxgap_ms: p50=1695.16 p95=3868.32 max=6212.90 (n=700)
+reload 3 all_observer_maxgap_ms: p50=1780.04 p95=3868.74 max=6212.90 (n=700)
+reload 3 changed_first_generation_update_ms: p50=937.55 p95=1647.33 max=3896.13 (n=700)
+reload 3 rss_mib before=0 after=0 comms_sample=[4286056400]
+reload 3 sessions_up 700/700
+reload 3 stable_marker_peers 0/0
+reloadstall_csv,3,700,700,0,400400,84.478675,91.771730,92.584546,1695.165,3868.322,6212.902,1780.035,3868.736,6212.902,937.552,1647.328,3896.127,0,0,0,700,0
+reload 4 reload_cmd wall_us=1786206364250956 policy=/tmp/ixp-bird/gen-a.conf
+BIRD 3.3.1 ready.
+Reading configuration from /etc/bird/bird.conf
+Reconfigured
+reload 4 progress: complete=0/700
+reload 4 progress: complete=0/700
+reload 4 progress: complete=0/700
+reload 4 progress: complete=0/700
+reload 4 progress: complete=55/700
+reload 4 progress: complete=130/700
+reload 4 progress: complete=273/700
+reload 4 progress: complete=418/700
+reload 4 progress: complete=632/700
+reload 4 completion_s: p50=77.36 p95=92.38 max=93.17 (n=700)
+reload 4 maxgap_ms: p50=1990.06 p95=5785.69 max=9425.05 (n=700)
+reload 4 all_observer_maxgap_ms: p50=3012.06 p95=7580.01 max=9425.05 (n=700)
+reload 4 changed_first_generation_update_ms: p50=956.19 p95=1558.61 max=2766.45 (n=700)
+reload 4 rss_mib before=0 after=0 comms_sample=[4286055400]
+reload 4 sessions_up 700/700
+reload 4 stable_marker_peers 0/0
+reloadstall_csv,4,700,700,0,400400,77.356480,92.377595,93.170749,1990.056,5785.694,9425.053,3012.056,7580.008,9425.053,956.192,1558.608,2766.454,0,0,0,700,0
+done rss_mib=0

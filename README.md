@@ -23,30 +23,29 @@ reproducible receipt:
 
 - **Policy reload at IXP scale** (700 route-server clients × 400,400 routes,
   live churn, same harness / same host): new policy fully delivered to every
-  member in **1.29–1.67 s p50** vs BIRD 3.3.1's 68–85 s and OpenBGPD 9.1's
-  247–253 s — [IXP receipt matrix](docs/perf/ixp-matrix-2026-07.md)
+  member in **1.28–1.57 s p50** vs BIRD 3.3.1's 64–85 s and OpenBGPD 9.1's
+  244–251 s — [IXP receipt matrix](docs/perf/ixp-matrix-2026-07.md)
 - **Member-flap propagation** (50 members flap, 650 observers): re-announce
-  p50 **0.46–0.49 s** vs BIRD's 2.7–3.7 s and OpenBGPD's 20.9–21.4 s;
-  withdraw p50 0.25–0.48 s, also fastest — [same matrix](docs/perf/ixp-matrix-2026-07.md#s3--flapstorm-member-down--member-up-propagation)
+  p50 **0.49–0.55 s** vs BIRD's 2.9–3.7 s and OpenBGPD's 21.1–21.6 s;
+  withdraw p50 0.31–0.47 s, also fastest — [same matrix](docs/perf/ixp-matrix-2026-07.md#s3--flapstorm-member-down--member-up-propagation)
 - **Cold start**: full 400,400-route table delivered to all 700 members in
-  **4.7–5.0 s** vs 61.6–65.3 s (BIRD) and 338.8–422.1 s (OpenBGPD) —
+  **4.8–5.0 s** vs 60.9–63.3 s (BIRD) and 338.0–352.1 s (OpenBGPD) —
   [same matrix](docs/perf/ixp-matrix-2026-07.md#s1--cold-convergence)
 - **Route-reflector scale**: 1,000 RR clients × 100k routes converge on the
   wire in **1.82 s** at **419 MiB** whole-process RSS — measured 2026-07-03
   at the close of the update-groups arc,
   [1000-peer scale receipt](docs/perf/scale-receipt-2026-07.md)
 - **The losses, stated plainly**: OpenBGPD holds a smaller reload stall
-  (p50 0.24–0.28 s vs rustbgpd's 0.42–0.73 s), and BIRD keeps the settled-RSS
-  win under flap churn (337/292 MiB vs rustbgpd's 440/502 MiB at S3).
-  rustbgpd edged BIRD in S2 settled RSS in these runs (412/410 vs
-  425/417 MiB) after the explain-cache default change — a same-host pair of
-  runs, not a universal memory win — published in the
+  (p50 0.25–0.29 s vs rustbgpd's 0.42–0.60 s), and BIRD keeps the settled-RSS
+  win under flap churn (337/328 MiB vs rustbgpd's 441/451 MiB at S3).
+  S2 settled RSS is a dead heat in these runs (rustbgpd 419/419 vs BIRD's
+  422/412 MiB, one run each way) — published in the
   [same receipt](docs/perf/ixp-matrix-2026-07.md#memory), methodology and
   fairness protocol included
 
-All matrix figures above are from the v0.61.0 same-host refresh (2026-07-27);
-the original campaign, its bands, and both raw artifact sets are preserved in
-the receipt.
+All matrix figures above are from the v0.64.0 same-host refresh (2026-08-08);
+the original campaign, all earlier bands, and every raw artifact set are
+preserved in the receipt.
 
 **Status: public alpha.** Feature-complete for the initial programmable
 control-plane target and expanding toward cloud / AI-scale data-center
