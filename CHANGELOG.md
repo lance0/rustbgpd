@@ -9,6 +9,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Release tarballs and native packages now include the version-matched Grafana
+  dashboard, Prometheus alert rules, and promtool test suite. Find them under
+  `share/monitoring/` in the archive or
+  `/usr/share/doc/rustbgpd/monitoring/` after a `.deb`/`.rpm` install; the
+  canonical dashboard and rule files remain the packaging sources (LAN-928).
+
 ## [0.64.0] — 2026-08-08
 
 ### Security

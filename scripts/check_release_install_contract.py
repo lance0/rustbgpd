@@ -8,6 +8,25 @@ import sys
 from pathlib import Path
 
 
+MONITORING_PAYLOADS = (
+    (
+        "docs/grafana/rustbgpd-overview.json",
+        "share/monitoring/rustbgpd-overview.json",
+        "/usr/share/doc/rustbgpd/monitoring/rustbgpd-overview.json",
+    ),
+    (
+        "examples/prometheus/rustbgpd-alerts.yml",
+        "share/monitoring/rustbgpd-alerts.yml",
+        "/usr/share/doc/rustbgpd/monitoring/rustbgpd-alerts.yml",
+    ),
+    (
+        "examples/prometheus/rustbgpd-alerts_test.yml",
+        "share/monitoring/rustbgpd-alerts_test.yml",
+        "/usr/share/doc/rustbgpd/monitoring/rustbgpd-alerts_test.yml",
+    ),
+)
+
+
 def marked(text: str, name: str, label: str) -> str:
     start = f"<!-- release-install-contract:{name}:start -->"
     end = f"<!-- release-install-contract:{name}:end -->"
@@ -38,12 +57,15 @@ def require(errors: list[str], label: str, text: str, tokens: tuple[str, ...]) -
 def check(root: Path) -> list[str]:
     errors: list[str] = []
     read = lambda path: (root / path).read_text(encoding="utf-8")
+    monitoring_sources = tuple(source for source, _, _ in MONITORING_PAYLOADS)
+    monitoring_tar_paths = tuple(tar for _, tar, _ in MONITORING_PAYLOADS)
+    monitoring_names = tuple(Path(source).name for source in monitoring_sources)
     try:
         release = read(".github/workflows/release.yml")
         package = workflow_step(release, "Package binaries")
         assertion = workflow_step(
             release,
-            "Assert tarball has nonempty binaries, licenses, man pages, and completions",
+            "Assert tarball release payload is complete",
         )
         require(
             errors,
@@ -54,8 +76,10 @@ def check(root: Path) -> list[str]:
                 "examples/systemd/rustbgpd.service",
                 "examples/systemd/rustbgpd-dataplane.conf",
                 "staging/share/systemd/",
+                "staging/share/monitoring",
                 "rustbgpd rbgp rs-config-render birdwatcher-adapter",
-            ),
+            )
+            + monitoring_sources,
         )
         require(
             errors,
@@ -65,7 +89,8 @@ def check(root: Path) -> list[str]:
                 "birdwatcher-adapter",
                 "share/systemd/rustbgpd.service",
                 "share/systemd/rustbgpd-dataplane.conf",
-            ),
+            )
+            + monitoring_tar_paths,
         )
 
         nfpm = read("packaging/nfpm.yaml")
@@ -73,6 +98,32 @@ def check(root: Path) -> list[str]:
         expected = {"/usr/bin/rustbgpd", "/usr/bin/rbgp", "/usr/bin/rs-config-render"}
         if native_bins != expected:
             errors.append(f"packaging/nfpm.yaml: /usr/bin payload {sorted(native_bins)!r}")
+        native_files = set(
+            re.findall(
+                r"(?m)^[ \t]+- src: ([^ \t\r\n]+)\r?\n"
+                r"[ \t]+dst: ([^ \t\r\n]+)[ \t]*$",
+                nfpm,
+            )
+        )
+        expected_monitoring = {(source, native) for source, _, native in MONITORING_PAYLOADS}
+        missing_monitoring = expected_monitoring - native_files
+        if missing_monitoring:
+            errors.append(
+                "packaging/nfpm.yaml: native monitoring payloads missing exact canonical mappings "
+                f"{sorted(missing_monitoring)!r}"
+            )
+
+        for source, _, _ in MONITORING_PAYLOADS:
+            asset = root / source
+            if not asset.is_file() or asset.stat().st_size == 0:
+                errors.append(f"monitoring payload source missing or empty: {source}")
+
+        alert_test = read("examples/prometheus/rustbgpd-alerts_test.yml")
+        if not re.search(r"(?m)^rule_files:\n  - rustbgpd-alerts\.yml\s*$", alert_test):
+            errors.append(
+                "examples/prometheus/rustbgpd-alerts_test.yml: rule_files must resolve "
+                "rustbgpd-alerts.yml beside the test payload"
+            )
 
         for path in ("docs/deployment.md", "docs/QUICKSTART.md"):
             doc = read(path)
@@ -90,8 +141,33 @@ def check(root: Path) -> list[str]:
             if "examples/systemd/" in tarball:
                 errors.append(f"{path}: tarball region uses source-checkout systemd paths")
 
+            require(
+                errors,
+                f"{path} monitoring discovery",
+                doc,
+                (
+                    "share/monitoring/",
+                    "/usr/share/doc/rustbgpd/monitoring/",
+                )
+                + monitoring_names,
+            )
+
+        contract_workflow = read(".github/workflows/release-install-contract.yml")
+        for source, _, _ in MONITORING_PAYLOADS:
+            if contract_workflow.count(f"- {source}") != 2:
+                errors.append(
+                    ".github/workflows/release-install-contract.yml: expected pull/push "
+                    f"enrollment for {source}"
+                )
+
         deployment = read("docs/deployment.md")
         native = marked(deployment, "native-package", "docs/deployment.md")
+        require(
+            errors,
+            "docs/deployment.md native-package region",
+            native,
+            ("/usr/share/doc/rustbgpd/monitoring/",),
+        )
         sentence = re.search(r"installs the three binaries \((.*?)\) to `/usr/bin`", " ".join(native.split()))
         documented = re.findall(r"`([^`]+)`", sentence.group(1)) if sentence else []
         if documented != ["rustbgpd", "rbgp", "rs-config-render"]:

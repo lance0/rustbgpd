@@ -43,9 +43,20 @@ The third binary, `rs-config-render`, is the
 [IXP route-server config renderer](../tools/rs-config-render/README.md);
 nothing below uses it, but it is in the same archive, so install it here
 rather than hunting for it the day you stand up a route server. The
-tarball also ships man pages and shell completions under `share/`;
-[deployment.md](deployment.md#install) covers installing those and
-pinning a specific version instead of `latest`.
+tarball also ships man pages, shell completions, and version-matched
+monitoring payloads under `share/`. The Grafana dashboard and Prometheus
+rules live in `share/monitoring/`; verify the alert pack without changing
+its relative `rule_files` reference:
+
+```bash
+(cd share/monitoring && promtool test rules rustbgpd-alerts_test.yml)
+```
+
+Native packages install the same monitoring payloads under
+`/usr/share/doc/rustbgpd/monitoring/`. Import
+`rustbgpd-overview.json` in Grafana and load `rustbgpd-alerts.yml` from
+Prometheus. [deployment.md](deployment.md#monitoring-payloads) covers the
+paths, setup, and pinning a specific release instead of `latest`.
 
 ### Or build from source
 
