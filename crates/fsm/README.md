@@ -41,6 +41,14 @@ identities (AS 0, or the local router ID on iBGP) are rejected. The paired wire
 — see the "0.16.0 compatibility note" in the `rustbgpd-wire` README, since the
 FSM surfaces wire decode results to its callers.
 
+`rustbgpd-fsm 0.4.0` moved with `rustbgpd-wire 0.17.0`: the FSM's public API
+exposes wire types, so the incompatible wire dependency required the paired
+0.x breaking bump. The FSM makes no API changes of its own in this cut.
+The wire 0.17.0 break is on the EVPN encode path (`encode_evpn_nlri` now
+returns `Result` and rejects routes it previously encoded silently altered)
+— see the "0.17.0 compatibility note" in the `rustbgpd-wire` README.
+Upgrade both crates together so the re-exported types unify.
+
 ## Key types
 
 - **`Session`** — the state machine: `handle_event(&mut self, Event) -> Vec<Action>` (state is mutated in place on `&mut self`)

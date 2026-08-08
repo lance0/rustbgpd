@@ -214,7 +214,7 @@ intentional split (ADR-0002: inherent methods, no I/O in the FSM).
 # Cargo.toml
 [dependencies]
 rustbgpd-wire = "0.17.0"
-rustbgpd-fsm = "0.3.1"
+rustbgpd-fsm = "0.4.0"
 bytes = "1"
 tokio = { version = "1", features = ["net", "io-util", "time", "rt"] }
 ```
@@ -334,13 +334,16 @@ and `policy` are later.**
    `crates/wire/README.md` carries the itemized note under "0.17.0
    compatibility note".
 
-2. **`rustbgpd-fsm` (published as `0.3.1`).** The `0.3.1` release keeps the
-   public API backward-compatible: `PeerConfig` gains
-   `min_hold_time` and `required_families`, and `PeerConfig` is
-   `#[non_exhaustive]`, so external construction through `PeerConfig::new` is
-   unaffected. Negotiation behavior also carries conformance fixes: the last
-   duplicate Graceful Restart capability wins, and invalid OPEN identities
-   are rejected. Why the FSM was the second published crate:
+2. **`rustbgpd-fsm` (published as `0.4.0`).** The `0.4.0` release makes no
+   FSM API changes of its own — it exists because the FSM's public surface
+   re-exports `rustbgpd-wire` types (`Action` carries wire messages), so the
+   wire `0.16.2 → 0.17.0` breaking transition changes the identity of those
+   types. `0.4.0` re-pins `rustbgpd-wire ^0.17.0`; upgrade both crates
+   together, or the re-exported types stop unifying across the two wire
+   versions in one dependency tree. (History: `0.3.1` added `min_hold_time`
+   and `required_families` to the `#[non_exhaustive]` `PeerConfig`, made the
+   last duplicate Graceful Restart capability win, and rejected invalid OPEN
+   identities.) Why the FSM was the second published crate:
    - It depends *only* on `rustbgpd-wire` + `thiserror` + `bytes`. Zero
      daemon-tier coupling.
    - It is the smallest, purest building block a second consumer needs. A test
@@ -428,7 +431,7 @@ To be the de facto Rust BGP codec, the concrete gaps:
 
 ## 7. Published-crate release boundary
 
-`rustbgpd-wire 0.17.0` and `rustbgpd-fsm 0.3.1` are published and are the
+`rustbgpd-wire 0.17.0` and `rustbgpd-fsm 0.4.0` are published and are the
 versions the §3 dependency examples name. The ordering rules that govern every
 future publish are:
 

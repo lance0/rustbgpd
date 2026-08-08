@@ -106,6 +106,13 @@ rustbgpd --diff new-config.toml config.toml
 rustbgpd config.toml
 ```
 
+The daemon refuses to start when the BGP listener cannot bind on either
+address family — with the starter's `listen_port = 179` that means an
+unprivileged run exits immediately with `Permission denied`. Either run as
+root, grant the binary the bind capability
+(`sudo setcap cap_net_bind_service=+ep $(command -v rustbgpd)`), or set an
+unprivileged `listen_port` (>= 1024) in the config for lab sessions.
+
 ## 4. Verify
 
 The minimal example uses `/tmp/rustbgpd` as its runtime state directory, so point

@@ -8,9 +8,14 @@
 # only teach the shape that `rustbgpd --check` exists to flag. The two
 # chains below are the minimum: explicit, permit-all, and labeled.
 #
-# For local development, runtime_state_dir points to /tmp/rustbgpd so no
-# root access is needed. For production, use /var/lib/rustbgpd with the
-# systemd unit (examples/systemd/) which creates and owns that directory.
+# For local development, runtime_state_dir points to /tmp/rustbgpd so the
+# daemon's state needs no root access. Binding the BGP listener on port
+# 179 still requires privilege, and the daemon exits when the listener
+# cannot bind on either address family: run as root, grant the binary
+# CAP_NET_BIND_SERVICE (`sudo setcap cap_net_bind_service=+ep <binary>`),
+# or set listen_port to an unprivileged value (>= 1024) for lab use.
+# For production, use /var/lib/rustbgpd with the systemd unit
+# (examples/systemd/) which creates and owns that directory.
 
 [global]
 asn = 65001

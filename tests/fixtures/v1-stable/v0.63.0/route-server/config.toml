@@ -1,0 +1,169 @@
+# IXP route server configuration
+#
+# rustbgpd as an IX route server with two members. Every member gets:
+# - transparent route-server mode (preserve original NEXT_HOP, no AS prepend)
+# - local BGP role "route_server" (RFC 9234: OTC attached on egress,
+#   role capability negotiated when the member also sets its role)
+# - dual-stack (IPv4 + IPv6 unicast)
+# - RPKI origin validation (drop invalid, prefer valid) and import
+#   hygiene (reject AS_SET, ASPA-invalid, and a dated dual-stack
+#   special-purpose prefix snapshot — see hygiene.rpol)
+#
+# Path-hiding mitigation (RFC 7947 §2.3.2), both flavors:
+# - member-alpha negotiates Add-Path send: it sees up to the eight best
+#   export-permitted candidates, subject to configured and negotiated
+#   Paths-Limit, and runs its own selection (the preferred mitigation);
+# - member-beta cannot do Add-Path, so it opts into per_client_best:
+#   when its export policy denies the best path, the route server
+#   advertises the best *permitted* candidate instead of hiding the
+#   prefix (the BIRD-`secondary` equivalent).
+#
+# Add more [[neighbors]] blocks for additional IXP members, or manage
+# them dynamically via gRPC at runtime.
+
+[global]
+asn = 65500
+router_id = "198.51.100.1"
+listen_port = 179
+# RFC 8212: a member session with no explicit policy carries nothing in
+# that direction. The export chain below is deliberately permit-all, and
+# this knob is what keeps that a decision: delete the chain and members
+# stop receiving routes, loudly, instead of inheriting the same permit-all
+# by omission. Startup-only — SIGHUP keeps the running value, so changing
+# it takes a daemon restart.
+ebgp_requires_policy = true
+
+[global.telemetry]
+prometheus_addr = "127.0.0.1:9179"
+log_format = "json"
+
+# For remote management, prefer an mTLS proxy (see examples/envoy-mtls/).
+# For a loopback-only bearer listener, create the token file and uncomment
+# this complete principal-to-role mapping:
+# [global.telemetry.grpc_tcp]
+# address = "127.0.0.1:50051"
+# token_file = "/etc/rustbgpd/grpc-token"
+# principal = "remote-operator"
+# [security.grpc.roles]
+# remote-operator = "operator"
+
+# Local gRPC uses the implicit owner-only socket at
+# <runtime_state_dir>/grpc.sock and the local-operator identity.
+
+# --- RPKI origin validation ---
+
+[rpki]
+[[rpki.cache_servers]]
+address = "127.0.0.1:3323"       # Routinator, rpki-client, etc.
+
+# --- Named policy definitions ---
+
+[policy.definitions.reject-rpki-invalid]
+[[policy.definitions.reject-rpki-invalid.statements]]
+match_rpki_validation = "invalid"
+action = "deny"
+
+[policy.definitions.reject-long-prefixes]
+default_action = "permit"
+[[policy.definitions.reject-long-prefixes.statements]]
+prefix = "0.0.0.0/0"
+ge = 25
+le = 32
+action = "deny"
+[[policy.definitions.reject-long-prefixes.statements]]
+prefix = "::/0"
+ge = 49
+le = 128
+action = "deny"
+
+[policy.definitions.prefer-rpki-valid]
+[[policy.definitions.prefer-rpki-valid.statements]]
+match_rpki_validation = "valid"
+action = "permit"
+set_local_pref = 200
+[[policy.definitions.prefer-rpki-valid.statements]]
+match_rpki_validation = "not_found"
+action = "permit"
+set_local_pref = 100
+
+# --- Export policy: permit-all, on purpose ---
+#
+# An IX route server is transparent by design (RFC 7947): it hands each
+# member what that member's own filters selected, without imposing the
+# route server's opinion on top. So permit-all is the correct export
+# posture here — but it is *declared*, not inherited. A route server that
+# is permit-all because nobody wrote an export chain behaves identically
+# on the wire; only this chain, and this comment, record that it was a
+# choice rather than an omission.
+#
+# Per-member filtering (a member that wants a subset, or a bilateral
+# arrangement) belongs in that neighbor's `export_policy_chain`, which
+# overrides this globally applied one. member-beta's `per_client_best`
+# below is what makes such a per-member denial advertise the best
+# permitted candidate rather than hide the prefix.
+[policy.definitions.rs-transparent-export]
+default_action = "permit"
+
+[policy]
+# ixp-hygiene and reject-special-purpose live in hygiene.rpol; rpol and
+# TOML policies share one namespace and compose in one ordered chain.
+rpol_files = ["hygiene.rpol"]
+import_chain = [
+    "reject-rpki-invalid",
+    "ixp-hygiene",
+    "reject-special-purpose",
+    "reject-long-prefixes",
+    "prefer-rpki-valid",
+]
+export_chain = ["rs-transparent-export"]
+
+# Import-decision explain, off — stated rather than inherited, because on
+# a route server it is the memory decision that matters most. The cache is
+# per session, so its cost is multiplied by member count, and 4096 entries
+# cannot retain a member's full table anyway: a query for an arbitrary
+# prefix would be a coin-flip against an evicted answer. On a 1000-member
+# fleet whose members each announce more than 4096 prefixes, an enabled
+# cache at the default size saturates in the low gigabytes.
+#
+# For the member-facing "why is my route filtered?" question, prefer
+# `[policy.reject_retention]` (on by default) and
+# `rbgp rib received <member> --rejected` — it enumerates rejections with
+# reasons and does not need the prefix known in advance.
+#
+# Turn this on deliberately, with `cache_size` raised toward the member's
+# retained-prefix count, while you are diagnosing — not as a standing cost.
+[policy.explain]
+enabled = false
+
+# --- IXP member peers ---
+
+# Add-Path-capable member: sees up to the eight best export-permitted
+# candidates, subject to configured and negotiated Paths-Limit (preferred
+# path-hiding mitigation), and stays update-group-shareable.
+[[neighbors]]
+address = "198.51.100.2"
+remote_asn = 64501
+description = "member-alpha"
+hold_time = 90
+families = ["ipv4_unicast", "ipv6_unicast"]
+route_server_client = true
+role = "route_server"
+max_prefixes = 50000
+
+[neighbors.add_path]
+send = true
+send_max = 8
+
+# Member without Add-Path: per_client_best advertises the best
+# export-policy-permitted candidate when the overall best is denied
+# (RFC 7947 §2.3.2 per-client best-path). Requires route_server_client.
+[[neighbors]]
+address = "198.51.100.3"
+remote_asn = 64502
+description = "member-beta"
+hold_time = 90
+families = ["ipv4_unicast", "ipv6_unicast"]
+route_server_client = true
+per_client_best = true
+role = "route_server"
+max_prefixes = 50000

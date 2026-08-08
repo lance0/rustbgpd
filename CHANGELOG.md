@@ -9,6 +9,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.64.0] — 2026-08-08
+
 ### Security
 
 - **The BGP listener was IPv4-only: inbound IPv6 sessions could not
@@ -193,7 +195,21 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (registry clone, dispatch moment, peer-manager command receipt,
   config-snapshot clone) are also stamped with `elapsed_ms` log lines.
 
+- `rustbgpd-fsm` 0.3.1 → 0.4.0 (**breaking** by dependency): the FSM's
+  public API re-exports `rustbgpd-wire` types (`Action` carries wire
+  messages), so the wire 0.16.2 → 0.17.0 breaking transition above
+  changes the identity of those types in fsm's public surface. 0.4.0
+  re-pins `rustbgpd-wire ^0.17.0` with no fsm API changes of its own;
+  embedders upgrade both crates together (see `docs/EMBEDDING.md` §7).
+
 ### Fixed
+
+- `docs/QUICKSTART.md`, `examples/minimal/config.toml`, and the release
+  checklist now state the privilege prerequisite for binding the default
+  BGP listener port 179 (root, `CAP_NET_BIND_SERVICE`, or an unprivileged
+  `listen_port`). The daemon exits when the listener cannot bind on either
+  address family, so the documented unprivileged quickstart previously
+  failed with an unexplained `Permission denied`.
 
 - The RIB actor no longer saturates under churn on per-client-best
   fleets at high announcement overlap. Every distribution pass asked

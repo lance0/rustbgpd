@@ -47,15 +47,15 @@ class EmbeddingVersionContractTests(unittest.TestCase):
                 )
 
     def test_fsm_snippet_is_guarded(self) -> None:
-        """Red if the FSM dependency example drifts to 0.3.0."""
+        """Red if the FSM dependency example drifts to 0.3.1."""
         self.assert_fails(
-            self.replace_nth('rustbgpd-fsm = "0.3.1"', 'rustbgpd-fsm = "0.3.0"'),
+            self.replace_nth('rustbgpd-fsm = "0.4.0"', 'rustbgpd-fsm = "0.3.1"'),
             "fsm-snippet-version",
         )
 
     def test_publish_statuses_are_guarded(self) -> None:
         """Red if either numbered publish heading names an old version."""
-        mutations = (("wire", "0.17.0", "0.16.2"), ("fsm", "0.3.1", "0.3.0"))
+        mutations = (("wire", "0.17.0", "0.16.2"), ("fsm", "0.4.0", "0.3.1"))
         for package, current, old in mutations:
             with self.subTest(package=package):
                 self.assert_fails(
@@ -68,7 +68,7 @@ class EmbeddingVersionContractTests(unittest.TestCase):
     def test_current_boundary_is_guarded(self) -> None:
         """Red if §7 loses either authoritative current-version slot."""
         self.assert_fails(
-            self.replace_nth("`rustbgpd-fsm 0.3.1`", "rustbgpd-fsm 0.3.1"),
+            self.replace_nth("`rustbgpd-fsm 0.4.0`", "rustbgpd-fsm 0.4.0"),
             "current-boundary-version",
         )
 

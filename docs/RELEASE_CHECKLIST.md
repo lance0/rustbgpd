@@ -169,6 +169,13 @@ tagging. The `--workspace` flag is required to build both `rustbgpd` and
 
 ### CLI smoke
 
+The minimal example binds BGP port 179, and the daemon exits when the
+listener cannot bind on either family — on an unprivileged runner, grant
+the freshly built binary `CAP_NET_BIND_SERVICE`
+(`sudo setcap cap_net_bind_service=+ep target/release/rustbgpd`) or run
+the smoke against a copy of the config with an unprivileged
+`listen_port` (>= 1024).
+
 ```bash
 # Build both binaries
 cargo build --workspace --release

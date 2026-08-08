@@ -167,7 +167,10 @@ the current parser. The v0.61.0 route-server example continues the chain under
 `tests/fixtures/v1-stable/v0.61.0/` as the accepted consecutive
 v0.61.0-to-v0.62.0 exercise, proven the same way. The v0.62.0 route-server
 example continues the chain under `tests/fixtures/v1-stable/v0.62.0/` as the
-accepted consecutive v0.62.0-to-v0.63.0 exercise, proven the same way.
+accepted consecutive v0.62.0-to-v0.63.0 exercise, proven the same way. The
+v0.63.0 route-server example continues the chain under
+`tests/fixtures/v1-stable/v0.63.0/` as the accepted consecutive
+v0.63.0-to-v0.64.0 exercise, proven the same way.
 
 ## Release gate
 
