@@ -551,6 +551,48 @@ impl PeerManager {
         }
     }
 
+    /// Like [`Self::await_with_readiness`], but bound the transaction step by
+    /// a budget that accrues only while the step itself is being driven. Wall
+    /// time spent servicing an interleaved readiness query is not charged: a
+    /// `tokio::time::timeout` inside the step would keep counting during that
+    /// servicing, so a probe flood (or any long servicing burst) would be
+    /// deducted from a healthy session command's deadline — the mechanism
+    /// behind the cohort-setup starvation. Returns `None` when the accrued
+    /// budget elapses before the future completes.
+    async fn await_with_readiness_budget<F>(
+        &mut self,
+        future: F,
+        budget: Duration,
+    ) -> Option<F::Output>
+    where
+        F: Future,
+    {
+        tokio::pin!(future);
+        let mut remaining = budget;
+        loop {
+            let Some(readiness_rx) = self.readiness_rx.as_mut() else {
+                return tokio::time::timeout(remaining, future).await.ok();
+            };
+            let attended = tokio::time::Instant::now();
+            tokio::select! {
+                biased;
+                result = tokio::time::timeout(remaining, &mut future) => return result.ok(),
+                query = readiness_rx.recv() => {
+                    // Time until the query arrived was genuine waiting on the
+                    // step; the servicing below is not, so stop the clock.
+                    remaining = remaining.saturating_sub(attended.elapsed());
+                    match query {
+                        Some(query) => self.handle_readiness_query(query).await,
+                        None => self.readiness_rx = None,
+                    }
+                    if remaining.is_zero() {
+                        return None;
+                    }
+                }
+            }
+        }
+    }
+
     async fn receive_readiness_query(
         readiness_rx: &mut Option<mpsc::Receiver<PeerManagerReadinessQuery>>,
     ) -> Option<PeerManagerReadinessQuery> {

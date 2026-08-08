@@ -24,7 +24,14 @@ use crate::policy_admin::{
     peer_group_references, policy_references,
 };
 
-use super::{ManagedPeer, PEER_POLICY_UPDATE_TIMEOUT, PEER_QUERY_TIMEOUT, PeerManager};
+use super::{
+    ManagedPeer, PEER_POLICY_UPDATE_TIMEOUT, PEER_QUERY_TIMEOUT, PeerManager, RIB_REPLY_TIMEOUT,
+};
+
+/// Peers applied between cohort-setup progress lines. Sized so a
+/// route-server-scale fleet (hundreds of members) logs a handful of `info!`
+/// lines instead of either silence or one line per peer.
+const COHORT_SETUP_PROGRESS_INTERVAL: usize = 64;
 
 /// How `update_runtime_policies_for_peer_key` reacts when the Route Refresh
 /// send fails after the session already acked the new policy.
@@ -750,6 +757,31 @@ impl PeerManager {
         Ok(applied)
     }
 
+    /// Session policy hot-apply bounded by attention time, not wall time.
+    ///
+    /// The round trip carries no internal timeout;
+    /// `await_with_readiness_budget` charges the `PEER_POLICY_UPDATE_TIMEOUT`
+    /// budget only while this actor is actually driving the round trip. Wall
+    /// time spent servicing interleaved readiness queries is not deducted, so
+    /// a probe flood cannot spend a healthy session's deadline for it — the
+    /// cohort-setup starvation that halted high-overlap reloads.
+    async fn hot_apply_session_policy(
+        &mut self,
+        round_trip: impl Future<Output = Result<(), rustbgpd_transport::PeerCommandError>>,
+        operation: &'static str,
+    ) -> Result<(), rustbgpd_transport::PeerCommandError> {
+        match self
+            .await_with_readiness_budget(round_trip, PEER_POLICY_UPDATE_TIMEOUT)
+            .await
+        {
+            Some(result) => result,
+            None => Err(rustbgpd_transport::PeerCommandError::TimedOut {
+                operation,
+                deadline: PEER_POLICY_UPDATE_TIMEOUT,
+            }),
+        }
+    }
+
     /// Fast path for the dominant reload shape: two or more Established peers
     /// share one export-chain move. Session hot-apply still precedes the RIB
     /// commit, but one batched RIB command lets equivalent clean update-group
@@ -802,21 +834,54 @@ impl PeerManager {
         // route-server scale. Best-effort: on any error the transition
         // stages the destination itself, exactly as before. This must
         // precede the session hot-applies so a failure here costs nothing.
-        let prestaged = {
+        //
+        // A per-client-best source group is statically excluded from the
+        // clean transition and therefore from its prestage (ADR-0126
+        // Decision 8): the RIB's `clean_policy_transition_destination`
+        // preflight answers `None` for it unconditionally. The registered
+        // transport config carries the same classification, so skip the
+        // round trip outright instead of parking the reload behind a
+        // statically-dead command queued after the RIB's in-flight work.
+        // The live round trip is bounded by `RIB_REPLY_TIMEOUT` on the
+        // budget clock (readiness servicing is not charged); elapsing
+        // degrades to `prestaged = false` on the same best-effort contract.
+        let setup_started = Instant::now();
+        let prestage_excluded = self
+            .peers
+            .get(&peer_keys[0])
+            .is_some_and(|managed| managed.transport_config.per_client_best);
+        let prestaged = if prestage_excluded {
+            false
+        } else {
             let (reply_tx, reply_rx) = oneshot::channel();
-            let send_result = self
-                .rib_tx
-                .send(RibUpdate::PrepareExportPolicyDestination {
-                    peer: targets[0].address,
-                    export_policy: targets[0].export_policy.clone(),
-                    reply: reply_tx,
-                })
-                .await;
-            match send_result {
-                Err(_) => false,
-                Ok(()) => matches!(self.await_with_readiness(reply_rx).await, Ok(Ok(()))),
-            }
+            let rib_tx = self.rib_tx.clone();
+            let peer = targets[0].address;
+            let export_policy = targets[0].export_policy.clone();
+            let round_trip = async move {
+                if rib_tx
+                    .send(RibUpdate::PrepareExportPolicyDestination {
+                        peer,
+                        export_policy,
+                        reply: reply_tx,
+                    })
+                    .await
+                    .is_err()
+                {
+                    return false;
+                }
+                matches!(reply_rx.await, Ok(Ok(())))
+            };
+            self.await_with_readiness_budget(round_trip, RIB_REPLY_TIMEOUT)
+                .await
+                .unwrap_or(false)
         };
+        info!(
+            cohort_targets = targets.len(),
+            prestaged,
+            prestage_excluded,
+            elapsed_ms = u64::try_from(setup_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            "cohort destination prestage round trip"
+        );
 
         let mut captured = Vec::with_capacity(targets.len());
         for ((target, peer_key), &import_changed) in
@@ -853,12 +918,12 @@ impl PeerManager {
                     .handle
                     .commands_sender();
                 let import_result = self
-                    .await_with_readiness(
-                        rustbgpd_transport::PeerHandle::update_import_policy_with(
+                    .hot_apply_session_policy(
+                        rustbgpd_transport::PeerHandle::update_import_policy_via(
                             import_commands,
                             target.import_policy.clone(),
-                            PEER_POLICY_UPDATE_TIMEOUT,
                         ),
+                        "update_import_policy",
                     )
                     .await;
                 if let Err(error) = import_result {
@@ -903,11 +968,13 @@ impl PeerManager {
                 .handle
                 .commands_sender();
             let apply_result = self
-                .await_with_readiness(rustbgpd_transport::PeerHandle::update_export_policy_with(
-                    commands,
-                    target.export_policy.clone(),
-                    PEER_POLICY_UPDATE_TIMEOUT,
-                ))
+                .hot_apply_session_policy(
+                    rustbgpd_transport::PeerHandle::update_export_policy_via(
+                        commands,
+                        target.export_policy.clone(),
+                    ),
+                    "update_export_policy",
+                )
                 .await;
             if let Err(error) = apply_result {
                 if prestaged {
@@ -924,12 +991,12 @@ impl PeerManager {
                     .handle
                     .commands_sender();
                 let failing_restore = self
-                    .await_with_readiness(
-                        rustbgpd_transport::PeerHandle::update_export_policy_with(
+                    .hot_apply_session_policy(
+                        rustbgpd_transport::PeerHandle::update_export_policy_via(
                             restore_commands,
                             prior.policy.export_policy.clone(),
-                            PEER_POLICY_UPDATE_TIMEOUT,
                         ),
+                        "update_export_policy",
                     )
                     .await
                     .map_err(|restore_error| {
@@ -947,12 +1014,12 @@ impl PeerManager {
                         .handle
                         .commands_sender();
                     match self
-                        .await_with_readiness(
-                            rustbgpd_transport::PeerHandle::update_import_policy_with(
+                        .hot_apply_session_policy(
+                            rustbgpd_transport::PeerHandle::update_import_policy_via(
                                 import_restore_commands,
                                 prior.policy.import_policy.clone(),
-                                PEER_POLICY_UPDATE_TIMEOUT,
                             ),
+                            "update_import_policy",
                         )
                         .await
                     {
@@ -1044,6 +1111,17 @@ impl PeerManager {
                 .export_policy
                 .clone_from(&target.export_policy);
             captured.push(prior);
+            if captured.len() % COHORT_SETUP_PROGRESS_INTERVAL == 0
+                || captured.len() == targets.len()
+            {
+                info!(
+                    applied = captured.len(),
+                    cohort_targets = targets.len(),
+                    elapsed_ms =
+                        u64::try_from(setup_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                    "cohort session hot-apply progress"
+                );
+            }
             self.drain_readiness_queries().await;
         }
 
