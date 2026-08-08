@@ -335,7 +335,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   back as EAD-per-ES — an identity flip), and synthesize a zero-ESI
   Type 4 fallback that the decoder itself rejects as malformed. The
   first three are now hard encode errors — **breaking**:
-  `rustbgpd-wire`'s `encode_evpn_nlri` now returns
+  `rustbgpd-wire` 0.16.2 → 0.17.0, `encode_evpn_nlri` now returns
   `Result<(), EncodeError>` — and the Type 4 fallback is skipped with a
   warning instead of emitted.
 
