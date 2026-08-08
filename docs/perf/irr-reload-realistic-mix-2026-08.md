@@ -146,6 +146,14 @@ bound it — per-client-best-only, reload-2-onward-only, F-scaling,
 upstream of the commit fan-out — and this receipt does not speculate
 past them.
 
+*Post-publication note:* the span is closed. The ADR-0126 grouped
+per-client-best campaign reruns these cells with the fleet grouped:
+the SIGHUP-to-snapshot offset is 1.38–1.54 s across all 32 reloads at
+both overlap points — flat across F and reloads — and total
+steady-state reload completion p50 is 3.25–3.77 s. See the
+[grouped per-client-best receipt](irr-reload-grouped-per-client-best-2026-08.md)
+(its measured rows; this document's rows are unchanged).
+
 The commit fan-out ("committed partitioned resolved policy snapshot")
 is separately timed and roughly constant across reloads within a
 cell: 111.3–120.5 s per reload at F = 0.1 and 133.0–145.4 s at

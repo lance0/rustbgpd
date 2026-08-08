@@ -1,7 +1,17 @@
 # ADR-0126: Shared-group per-client best-path — path-hiding mitigation inside update groups
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-08-05
+**Amended:** 2026-08-08 (Phase 4 receipt) — the acceptance campaign at
+the canonical shape passed both gate prongs: all four grouped
+comparison roots' received views are byte-identical to the sealed
+ungrouped baseline's captures with the received-view-delta verifier
+exact at 18,304 / 91,520 pairs, sampler RSS peak fell 5.28–5.50×
+(1,972–2,098 MiB vs 10,534–11,315 MiB), and steady-state reload
+completion p50 landed at 3.25–3.77 s — inside the grouped-control
+class at both overlap points, F = 0.5 included. Measured rows,
+the campaign's three-defect arc, and preserved non-passing roots:
+[grouped per-client-best receipt](../perf/irr-reload-grouped-per-client-best-2026-08.md).
 
 ## Context
 
@@ -17,7 +27,9 @@ completion p50 87–143 s and sampler RSS peak 10.4–11.3 GiB for per-client
 best, versus 4.5 s and 2.0–2.1 GiB for the (mitigation-less) grouped control
 — while the mitigation delivers exactly the 18,304 (F = 0.1) / 91,520
 (F = 0.5) runner-up pairs the shared-RIB export hides, verified
-byte-for-byte on the wire by the received-view-delta verifier.
+byte-for-byte on the wire by the received-view-delta verifier. The current
+cost picture for the as-built grouped mitigation is the
+[grouped per-client-best receipt](../perf/irr-reload-grouped-per-client-best-2026-08.md).
 
 The semantic opening: per-client best-path for member `m` is "best
 export-permitted candidate not sourced by `m`". Under a group-shareable
@@ -342,14 +354,24 @@ the received-view-delta verifier proves byte-identical per-member views
 If the receipt misses that target, the rendered default holds one
 release behind an opt-out and flips only on a passing receipt.
 
+*Amendment (2026-08-08):* the gate passed both prongs (measured rows
+under the acceptance gate below), so `rs-config-render` fleets group at
+ship with `path_hiding = true` retained — no opt-out hold. The
+confirming evidence is the acceptance campaign itself: its rustbgpd
+comparison cells are rendered by the production `rs-config-render`
+pipeline with path hiding on — the campaign verifier checks exactly
+320 `per_client_best = true` members in the sealed cell config — and
+the sealed scrapes prove that rendered configuration forms one
+320-member update group with zero fallback peers and a runner-up lane
+equal to the manifest's overlap allocation.
+
 ## Open decisions
 
 None. The five questions this ADR opened — fallback reason, counter
 replay for the walk's evaluations, rendered-default timing, lane storage
 form, and ADR-0105 fast-path re-inclusion — are decided and folded into
-the design above, as Decisions 1, 2, 9, 3, and 8 respectively. What
-remains before this ADR can move to Accepted is not a decision but the
-acceptance receipt below.
+the design above, as Decisions 1, 2, 9, 3, and 8 respectively. The
+acceptance receipt below is measured and passed; this ADR is Accepted.
 
 ## Acceptance gate
 
@@ -360,10 +382,27 @@ shape, F ∈ {0.1, 0.5}:
   ungrouped per-client-best path — every runner-up pair (18,304 / 91,520)
   delivered, nothing else — proven by the received-view-delta verifier and
   the extended differential oracle.
+
+  *Measured (2026-08-08):* **PASS.** All four grouped comparison roots'
+  `received-view.tsv` captures are bit-identical (`cmp`) to the sealed
+  ungrouped baseline's at the same overlap point and repeat; the
+  received-view-delta verifier returned `pass` with exactly
+  18,304 / 91,520 suppressed runner-up pairs in both A/B repeats at
+  both overlap points, and the extended differential oracle
+  (`update_groups_oracle.rs`, overlapping per-client-best scenarios)
+  is green at the measured commit.
 - **Cost:** ≥4× sampler RSS-peak reduction versus the sealed per-client
   rows (10.4–11.3 GiB), and steady-state reload completion p50 in the
   grouped-control class (~4.5 s ceiling); the one-extra-evaluation overlap
   term must not move completion out of that class at F = 0.5.
+
+  *Measured (2026-08-08):* **PASS.** Sampler RSS peak 1,972–2,098 MiB
+  against the sealed 10,534–11,315 MiB — 5.28–5.41× at F = 0.1 and
+  5.30–5.50× at F = 0.5, clearing the ≥4× target with margin.
+  Steady-state reload completion p50 3.25–3.38 s at F = 0.1 and
+  3.46–3.77 s at F = 0.5 — inside the grouped-control class at both
+  points (below the control's own 4.26–4.55 s rows), so the overlap
+  term did not move completion out of the class at F = 0.5.
 
 ## Implementation phases
 
@@ -376,7 +415,10 @@ shape, F ∈ {0.1, 0.5}:
    differential-oracle extension to overlapping per-client-best fleets.
 4. **Receipt:** rerun the realistic-mix campaign, gate as above; amend this
    ADR to Accepted with the measured rows; confirm `rs-config-render`
-   keeps `path_hiding = true` with grouped output.
+   keeps `path_hiding = true` with grouped output. **Done** — the
+   [grouped per-client-best receipt](../perf/irr-reload-grouped-per-client-best-2026-08.md)
+   (2026-08-08): both prongs passed, `rs-config-render` output confirmed
+   grouped with `path_hiding = true` retained.
 
 Risk concentrates in Phase 2, not Phase 3. The runner-up lane is new
 group-shared mutable state, correctly excluded from the ADR-0105 fast

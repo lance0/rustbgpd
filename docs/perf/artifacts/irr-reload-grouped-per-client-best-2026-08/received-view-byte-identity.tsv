@@ -1,0 +1,5 @@
+overlap_fraction	grouped_root	baseline_root	file	sha256	bytes	verdict
+0.1	comparison-A2	realistic-mix comparison-A2	rustbgpd-sighup/received-view.tsv	475e3ce4fec029d99c01ad0cdf09d0da89fef85f9f8f50fd03aa140216c6cf93	1055649	identical
+0.1	comparison-B2	realistic-mix comparison-B	rustbgpd-sighup/received-view.tsv	475e3ce4fec029d99c01ad0cdf09d0da89fef85f9f8f50fd03aa140216c6cf93	1055649	identical
+0.5	comparison-A4	realistic-mix comparison-A	rustbgpd-sighup/received-view.tsv	cf90d16f1992cec7ea99137374b859e82d7b499847a4d941994466cee5de7898	587501	identical
+0.5	comparison-B4	realistic-mix comparison-B	rustbgpd-sighup/received-view.tsv	cf90d16f1992cec7ea99137374b859e82d7b499847a4d941994466cee5de7898	587501	identical
