@@ -141,7 +141,7 @@ default. Either activate per ADR-0119's proofs or record an explicit decision
 that 1.0 ships opt-in.
 
 **E6 — Security and fuzz posture line items.** Current state, largely
-satisfied: the exact fail-closed 17-target fuzz inventory runs in PR CI with
+satisfied: the exact fail-closed 19-target fuzz inventory runs in PR CI with
 the nightly libFuzzer campaign; `cargo audit` runs daily; private
 vulnerability reporting is enabled with a stated response timeline. Remaining
 for the tag: SECURITY.md's supported-versions table gains the 1.x row (DR8),

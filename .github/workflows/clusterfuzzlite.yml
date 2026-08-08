@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     # A cold run without stored corpus artifacts spent about 6m42s per target
     # waiting for each missing artifact before fuzzing. Leave enough room for
-    # all 17 targets plus the observed 14-minute ASan build.
+    # all 19 targets plus the observed 14-minute ASan build.
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@v7

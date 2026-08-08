@@ -207,11 +207,11 @@ artifacts under [`artifacts/soak/`](artifacts/soak/). Harnesses live in
 
 | Workflow | Trigger | What it re-proves |
 |----------|---------|-------------------|
-| [`ci.yml`](../.github/workflows/ci.yml) | every PR / push | fmt, clippy (warnings denied), workspace tests, rustdoc, kernel-primitive gate, the exact fail-closed 17-target fuzz inventory, and bounded timing/diagnostic MRT snapshot-allocation bench smokes |
+| [`ci.yml`](../.github/workflows/ci.yml) | every PR / push | fmt, clippy (warnings denied), workspace tests, rustdoc, kernel-primitive gate, the exact fail-closed 19-target fuzz inventory, and bounded timing/diagnostic MRT snapshot-allocation bench smokes |
 | [`interop.yml`](../.github/workflows/interop.yml) | every PR / push | The PR-gated M-series table above, one containerlab job per milestone |
 | [`kernel-dataplane.yml`](../.github/workflows/kernel-dataplane.yml) | PR, push, nightly 07:00 UTC | Privileged EVPN/FIB/BFD/TCP-AO dataplane receipts + netns selectors |
-| [`fuzz.yml`](../.github/workflows/fuzz.yml) | nightly 04:00 UTC + manual dispatch | The sole scheduled fuzz campaign: libFuzzer wire, policy, EVPN route-target, MRT snapshot, and warm-bundle manifest harnesses |
-| [`clusterfuzzlite.yml`](../.github/workflows/clusterfuzzlite.yml) | manual dispatch | On-demand official ClusterFuzzLite address-sanitized code-change fuzzing for the exact 17-target inventory; not a PR or scheduled gate |
+| [`fuzz.yml`](../.github/workflows/fuzz.yml) | nightly 04:00 UTC + manual dispatch | The sole scheduled 19-target campaign: libFuzzer wire, policy, EVPN route-target, MRT/warm-bundle, BFD, and RTR harnesses |
+| [`clusterfuzzlite.yml`](../.github/workflows/clusterfuzzlite.yml) | manual dispatch | On-demand official ClusterFuzzLite address-sanitized code-change fuzzing for the exact 19-target inventory; not a PR or scheduled gate |
 | [`bench-nightly.yml`](../.github/workflows/bench-nightly.yml) | nightly 05:00 UTC | Benchmark tracking on the bench runner |
 | [`audit.yml`](../.github/workflows/audit.yml) | daily 06:00 UTC | `cargo audit` / dependency advisories |
 | [`privileged-interop.yml`](../.github/workflows/privileged-interop.yml) | manual dispatch | Direct-`cargo` privileged netns suites |

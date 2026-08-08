@@ -2,14 +2,16 @@
 
 rustbgpd fuzzes untrusted decode surfaces with
 [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz) (libFuzzer). There are
-four fuzz crates, one per fuzzed workspace crate:
+six fuzz crates, one per fuzzed workspace crate:
 
+- `crates/bfd/fuzz` — the BFD control-packet codec (`rustbgpd-bfd`)
 - `crates/wire/fuzz` — the BGP wire codec (`rustbgpd-wire`)
 - `crates/policy/fuzz` — the `.rpol` policy-language frontend
   (`rustbgpd-policy`)
 - `crates/evpn/fuzz` — EVPN route-target parsing (`rustbgpd-evpn`)
 - `crates/mrt/fuzz` — the MRT snapshot and warm-bundle readers
   (`rustbgpd-mrt`)
+- `crates/rpki/fuzz` — the RTR PDU codec (`rustbgpd-rpki`)
 
 BMP (`crates/bmp`) is encode-only — rustbgpd never decodes BMP from the
 network — so it has no fuzz surface.
@@ -18,6 +20,7 @@ network — so it has no fuzz surface.
 
 | Target | Crate | Covers | Property |
 |---|---|---|---|
+| `decode_bfd_control` | bfd | RFC 5880 mandatory control-packet section and discard rules | decoder never panics; inputs are capped at 256 bytes |
 | `decode_message` | wire | Full message framing: header, marker, per-type dispatch (OPEN, UPDATE, NOTIFICATION, KEEPALIVE, ROUTE-REFRESH) | never panics |
 | `decode_update` | wire | UPDATE body + path attributes, incl. MP_REACH/MP_UNREACH for every family (unicast, VPNv4/v6 RD+label stacks, EVPN, BGP-LS NLRI + attr 29 TLVs, RTC, FlowSpec, labeled-unicast), 2/4-octet AS_PATH, Add-Path across all families | never panics |
 | `decode_open` | wire | OPEN body + the full optional-parameter/capability codec (MP-BGP, Add-Path, ORF, unknown caps) | lossless round-trip |
@@ -35,6 +38,7 @@ network — so it has no fuzz surface.
 | `parse_rt` | evpn | Route Target `FromStr` over arbitrary UTF-8 | Display→FromStr lossless |
 | `snapshot_reader_drain` | mrt | arbitrary MRT framing plus arbitrary records after a valid empty peer-index table | reader construction and full iteration never panic |
 | `warm_bundle_manifest` | mrt | real owner-checked `manifest.json` load through JSON decoding, V1 structure, boot identity, freshness, and safe snapshot lookup/error handling | loader never panics |
+| `decode_rtr_pdu` | rpki | RFC 8210 / 8210bis PDU framing and all supported payloads | decoder never panics; campaign inputs are capped at 65,535 bytes |
 
 "Round-trip" targets assert the promise the interop labs pin for specific
 bytes (M73 BGP-LS byte fidelity, M74 VPN preserve-verbatim) over the whole
@@ -50,8 +54,9 @@ cargo +nightly fuzz list
 cargo +nightly fuzz run decode_update fuzz/corpus/decode_update fuzz/seeds/decode_update -- -max_total_time=300 -max_len=4096
 ```
 
-Run the same `list`/`run` flow from `crates/policy`, `crates/evpn`, or
-`crates/mrt`, choosing a target and length bound for that crate.
+Run the same `list`/`run` flow from `crates/bfd`, `crates/policy`,
+`crates/evpn`, `crates/mrt`, or `crates/rpki`, choosing a target and length
+bound for that crate.
 
 A crash writes a reproducer under `fuzz/artifacts/<target>/`; replay it with
 `cargo +nightly fuzz run <target> fuzz/artifacts/<target>/<file>`.
@@ -68,7 +73,7 @@ A crash writes a reproducer under `fuzz/artifacts/<target>/`; replay it with
 ## CI
 
 `.github/workflows/fuzz.yml` runs nightly (04:00 UTC) and on manual
-dispatch: every target in all four fuzz crates for 120 seconds each, starting
+dispatch: every target in all six fuzz crates for 120 seconds each, starting
 from the tracked seeds. Crash artifacts upload on failure. Budget choice:
 all targets briefly rather than a rotating subset — every surface gets
 nightly coverage and the whole job stays bounded by per-target timers.
@@ -103,7 +108,7 @@ which cannot meet rustbgpd's fail-closed corpus-reuse rule. ClusterFuzzLite's
 Rust integration also documents AddressSanitizer as the only supported
 sanitizer, so the manual workflow does not claim unsupported coverage mode.
 
-`scripts/check_fuzz_target_inventory.py` gates the exact 17-target inventory in
+`scripts/check_fuzz_target_inventory.py` gates the exact 19-target inventory in
 the ordinary PR/push `CI / check` job, before a manual ClusterFuzzLite build,
 and again inside the shared fuzzer build path. It compares cargo metadata and
 `fuzz_targets/*.rs` against an explicit globally-unique inventory, including
@@ -116,7 +121,7 @@ so the fail-closed behavior is itself CI-proved.
 
 The standard OSS-Fuzz project files are staged in `fuzz/oss-fuzz/`
 (`project.yaml`, `Dockerfile`, `build.sh`). OSS-Fuzz and ClusterFuzzLite both
-delegate to `fuzz/build-fuzzers.sh`, which validates and builds all four fuzz
+delegate to `fuzz/build-fuzzers.sh`, which validates and builds all six fuzz
 crates with `cargo fuzz build -O --debug-assertions`. The crates share one
 Cargo target directory so compatible sanitizer build-std and dependency
 artifacts can be reused across crate builds. The integration ships each
@@ -127,11 +132,13 @@ in the upstream Rust builder image and must remain at or above the workspace
 MSRV. They also install cargo-fuzz 0.13.2 explicitly because the Ubuntu 24.04
 Rust builder does not bundle it.
 
-The shared build uses one explicit Cargo target directory for all four fuzz
+The shared build uses one explicit Cargo target directory for all six fuzz
 crates and fails unless every expected executable exists before copying it to
-the integration output. This is a build-layout invariant, not a wall-clock
-performance claim; this change carries no retained benchmark harness or
-quantitative build-speed assertion.
+the integration output. Per-target libFuzzer options travel with the binaries,
+so hosted campaigns enforce the same input bounds as the in-repository
+harnesses and nightly commands. This is a build-layout invariant, not a
+wall-clock performance claim; this change carries no retained benchmark
+harness or quantitative build-speed assertion.
 
 [google/oss-fuzz#15874](https://github.com/google/oss-fuzz/pull/15874) was
 closed on eligibility, not build correctness: upstream targets projects that

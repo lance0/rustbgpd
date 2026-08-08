@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 from collections.abc import Callable, Mapping, Sequence
@@ -13,9 +14,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_TARGETS: dict[str, tuple[str, ...]] = {
+    "crates/bfd": ("decode_bfd_control",),
     "crates/evpn": ("parse_rt",),
     "crates/mrt": ("snapshot_reader_drain", "warm_bundle_manifest"),
     "crates/policy": ("dataset_parse", "rpol_compile"),
+    "crates/rpki": ("decode_rtr_pdu",),
     "crates/wire": (
         "decode_bgpls",
         "decode_evpn",
@@ -31,7 +34,22 @@ EXPECTED_TARGETS: dict[str, tuple[str, ...]] = {
         "parse_rd",
     ),
 }
-EXPECTED_COUNT = 17
+EXPECTED_COUNT = 19
+CAMPAIGN_BOUNDS: dict[str, tuple[str, int]] = {
+    "crates/bfd": ("decode_bfd_control", 256),
+    "crates/rpki": ("decode_rtr_pdu", 65_535),
+}
+EXPECTED_SEEDS: dict[str, bytes] = {
+    "crates/bfd/fuzz/seeds/decode_bfd_control/valid_down": bytes.fromhex(
+        "204001180000000100000000000f4240000f424000000000"
+    ),
+    "crates/rpki/fuzz/seeds/decode_rtr_pdu/reset_query_v1": bytes.fromhex(
+        "0102000000000008"
+    ),
+    "crates/wire/fuzz/seeds/decode_update/malformed_next_hop_length": bytes.fromhex(
+        "00000006400303010203"
+    ),
+}
 
 
 class InventoryError(RuntimeError):
@@ -160,6 +178,73 @@ def validate_inventory(
         raise InventoryError("; ".join(errors))
 
 
+def validate_pipeline_enrollment(builder: str, workflow: str) -> None:
+    """Keep newly inventoried crates on both hosted and nightly paths."""
+    builder_roster = "for dir in " + " ".join(EXPECTED_TARGETS) + "; do"
+    if builder_roster not in builder:
+        raise InventoryError(
+            "shared hosted builder fuzz-crate roster differs from the inventory"
+        )
+
+    if 'cp "fuzz/$name.options" "$OUT/$name.options"' not in builder:
+        raise InventoryError("shared hosted builder does not copy target options")
+
+    for crate, (target, max_len) in CAMPAIGN_BOUNDS.items():
+        crate_block = re.search(
+            rf"(?ms)^      - name: [^\n]+\n        run: \|\n(?P<body>.*?cd {re.escape(crate)}.*?)(?=^      - name:|\Z)",
+            workflow,
+        )
+        if crate_block is None:
+            raise InventoryError(f"nightly workflow has no {crate} campaign")
+        body = crate_block.group("body")
+        if f"grep -Fxq {target}" not in body:
+            raise InventoryError(
+                f"nightly workflow does not require {crate}/{target}"
+            )
+        if f"-max_len={max_len}" not in body:
+            raise InventoryError(
+                f"nightly workflow does not enforce {crate}/{target} max_len={max_len}"
+            )
+        if f"{crate}/fuzz/artifacts/" not in workflow:
+            raise InventoryError(
+                f"nightly workflow does not retain {crate} failure artifacts"
+            )
+
+        options = ROOT / crate / "fuzz" / f"{target}.options"
+        expected_options = f"[libfuzzer]\nmax_len = {max_len}\n"
+        try:
+            actual_options = options.read_text()
+        except OSError as error:
+            raise InventoryError(f"cannot read {options.relative_to(ROOT)}: {error}")
+        if actual_options != expected_options:
+            raise InventoryError(
+                f"{options.relative_to(ROOT)} must set max_len = {max_len}"
+            )
+
+        harness = ROOT / crate / f"fuzz/fuzz_targets/{target}.rs"
+        try:
+            harness_text = harness.read_text()
+        except OSError as error:
+            raise InventoryError(f"cannot read {harness.relative_to(ROOT)}: {error}")
+        if f"data.len() > {max_len:_}" not in harness_text:
+            raise InventoryError(
+                f"{harness.relative_to(ROOT)} must reject inputs above {max_len} bytes"
+            )
+
+
+def validate_seed_corpus(seed_contents: Mapping[str, bytes]) -> None:
+    """Pin the three small inputs that give the new coverage deterministic roots."""
+    errors: list[str] = []
+    for path, expected in EXPECTED_SEEDS.items():
+        actual = seed_contents.get(path)
+        if actual is None:
+            errors.append(f"missing pinned seed {path}")
+        elif actual != expected:
+            errors.append(f"pinned seed bytes differ: {path}")
+    if errors:
+        raise InventoryError("; ".join(errors))
+
+
 def repository_inventory() -> dict[str, tuple[str, ...]]:
     discovered = tuple(
         sorted(
@@ -174,12 +259,25 @@ def repository_inventory() -> dict[str, tuple[str, ...]]:
         crate: enumerate_source_targets(crate) for crate in EXPECTED_TARGETS
     }
     validate_inventory(manifest_targets, source_targets, discovered)
+    try:
+        builder = (ROOT / "fuzz/build-fuzzers.sh").read_text()
+        workflow = (ROOT / ".github/workflows/fuzz.yml").read_text()
+    except OSError as error:
+        raise InventoryError(f"cannot read fuzz pipeline configuration: {error}")
+    validate_pipeline_enrollment(builder, workflow)
+    seed_contents: dict[str, bytes] = {}
+    for path in EXPECTED_SEEDS:
+        try:
+            seed_contents[path] = (ROOT / path).read_bytes()
+        except OSError as error:
+            raise InventoryError(f"cannot read pinned seed {path}: {error}")
+    validate_seed_corpus(seed_contents)
     return manifest_targets
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Verify the exact 17-target cargo-fuzz inventory."
+        description="Verify the exact 19-target cargo-fuzz inventory."
     )
     parser.add_argument(
         "--print-targets",

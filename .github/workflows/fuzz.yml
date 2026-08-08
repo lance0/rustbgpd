@@ -109,6 +109,42 @@ jobs:
             [ -d "fuzz/seeds/$t" ] && seeds="fuzz/seeds/$t"
             cargo fuzz run "$t" "fuzz/corpus/$t" $seeds -- -max_total_time=120 -max_len=65536
           done
+      - name: Fuzz BFD control decoder (2 minutes)
+        run: |
+          cd crates/bfd
+          targets=$(cargo fuzz list)
+          if [ -z "$targets" ]; then
+            echo "fuzz-target enumeration returned no targets" >&2
+            exit 1
+          fi
+          if ! grep -Fxq decode_bfd_control <<<"$targets"; then
+            echo "required BFD fuzz target decode_bfd_control is missing" >&2
+            exit 1
+          fi
+          for t in $targets; do
+            mkdir -p "fuzz/corpus/$t"
+            seeds=()
+            [ -d "fuzz/seeds/$t" ] && seeds+=("fuzz/seeds/$t")
+            cargo fuzz run "$t" "fuzz/corpus/$t" "${seeds[@]}" -- -max_total_time=120 -max_len=256
+          done
+      - name: Fuzz RTR PDU decoder (2 minutes)
+        run: |
+          cd crates/rpki
+          targets=$(cargo fuzz list)
+          if [ -z "$targets" ]; then
+            echo "fuzz-target enumeration returned no targets" >&2
+            exit 1
+          fi
+          if ! grep -Fxq decode_rtr_pdu <<<"$targets"; then
+            echo "required RTR fuzz target decode_rtr_pdu is missing" >&2
+            exit 1
+          fi
+          for t in $targets; do
+            mkdir -p "fuzz/corpus/$t"
+            seeds=()
+            [ -d "fuzz/seeds/$t" ] && seeds+=("fuzz/seeds/$t")
+            cargo fuzz run "$t" "fuzz/corpus/$t" "${seeds[@]}" -- -max_total_time=120 -max_len=65535
+          done
       - name: Upload crash artifacts
         if: failure()
         uses: actions/upload-artifact@v7
@@ -119,3 +155,5 @@ jobs:
             crates/policy/fuzz/artifacts/
             crates/evpn/fuzz/artifacts/
             crates/mrt/fuzz/artifacts/
+            crates/bfd/fuzz/artifacts/
+            crates/rpki/fuzz/artifacts/
