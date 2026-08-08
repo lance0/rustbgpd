@@ -1003,6 +1003,16 @@ query with a new live watch.
 |--------|-------------------|
 | `gnmi_dialout_connected{target}` | 1 while the dial-out Publish stream to this `[gnmi_dialout]` target is established, 0 while disconnected/retrying. Refreshed on both transitions; the series exists (at 0) from startup even when the collector is down, and is reaped when the target is removed from config (SIGHUP) |
 
+### BMP
+
+| Metric | What it tells you |
+|--------|-------------------|
+| `bmp_loc_rib_source_drops_total{event,reason}` | RFC 9069 Loc-RIB events dropped before they reached the BMP manager, at the internal RIB/PeerManager→BmpManager channel. `event` is `route_monitoring` (a Loc-RIB route install/withdraw that will never reach any collector's Loc-RIB view) or `stats` (one periodic Loc-RIB statistics report skipped; the next tick reports current totals). `reason` is `channel_full` (the BMP manager is not draining as fast as RIB churn produces events) or `channel_closed` (BMP teardown). Both label sets are bounded; the series is process-global, not per-collector. A dropped `route_monitoring` event silently diverges every connected Loc-RIB collector until its next reconnect-triggered table dump, so alert on any sustained `channel_full` increase and correlate with the per-collector `bmp_collector_drops_total` and the `bmp_loc_rib_dump_live_buffer_*` gauges to find the slow consumer; each increment also emits a warn log line |
+
+The sibling `bmp_source_drops_total{peer,reason}` counts the same kind of
+loss on the per-peer PeerSession→BmpManager path (RFC 7854 Adj-RIB
+monitoring) with the same `reason` vocabulary.
+
 ### Durable Event Cursor (ADR-0072)
 
 The durable outbox (`SubscribeFromEvent` RPC, CLI

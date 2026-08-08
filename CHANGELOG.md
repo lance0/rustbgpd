@@ -110,6 +110,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   RIB/PeerManager→BmpManager channel. This path previously only warned;
   `bmp_source_drops_total` covers only the PeerSession→BmpManager path.
 
+- Structured phase timing for the SIGHUP policy-reload path (LAN-888). A
+  config load now logs one `config source loaded` line with `toml_parse_ms`,
+  `rpol_load_ms`, `dataset_bind_ms`, and `validate_ms` alongside the total
+  `elapsed_ms`; the once-per-file rpol set-table intern logs
+  `interned rpol set tables built` with `elapsed_ms` at the moment it fires;
+  and an rpol registry swap logs `resolved live peer policy chains` with
+  `elapsed_ms` for the per-peer chain re-resolution before the snapshot
+  apply fan-out. Together with the existing partitioned-snapshot and RIB
+  export-policy transition lines, the daemon log alone attributes where a
+  reload spends its time. Measurement only — no behavior change.
+
 ### Changed
 
 - ADR-0126 (shared-group per-client best-path) is Accepted: the Phase 4
@@ -170,6 +181,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   conformant directly connected peer always emits 255; a session that
   depended on the previous one-hop-off leniency will no longer
   establish.
+
+- SIGHUP reloads skip the outbound prefix-limit RIB preflight when the
+  configured maxima are unchanged. The preflight is two awaited
+  round-trips through the RIB manager's update channel — FIFO behind
+  whatever redistribution backlog the previous reload left in flight,
+  tens of seconds at IRR scale — and it only ever rejects a lowering
+  below current advertised usage, so an unchanged limit set can never be
+  rejected: an rpol-content-only reload now never touches the RIB before
+  the policy sync. The previously silent stretches of that window
+  (registry clone, dispatch moment, peer-manager command receipt,
+  config-snapshot clone) are also stamped with `elapsed_ms` log lines.
 
 ### Fixed
 
@@ -375,21 +397,41 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   instead of fencing the actor until an invalidation event — previously
   nothing could trigger the fallback while sessions stayed healthy. Transition phase entries and per-member probe
   decisions are now logged at debug level.
+- Policy `peer.address` / `peer.asn` / `peer.group` `!=` matchers no
+  longer match routes with absent peer context. `!=` lowered to a
+  negated `==` match, and `==` evaluates false when the compared peer
+  field is unset — so the negation matched every such route:
+  `peer.group` is routinely unset for ungrouped peers, and policy
+  explain dry-runs may carry no peer identity at all. `!=` now lowers to
+  a dedicated matcher that matches only when the peer field is present
+  and outside the compared set, mirroring the `==` absence rule, and
+  policy explain renders it as its own node. Update-group
+  disqualification for peer-context policies is unchanged.
+- Two EVPN convergence defects. A Type 5 (IP-prefix) withdraw the RIB
+  applied but whose reply was lost left the route stuck in the
+  originator's tracking map: every later reconcile retried the withdraw,
+  got NotFound, and failed forever — in the key-change path this also
+  blocked re-origination of a redefined IP-VRF's new route. NotFound now
+  resolves as withdrawn (absence is the withdraw's goal) on the single
+  path every withdraw site routes through, matching the existing Type 2
+  and IMET handling. Separately, IMET inject/withdraw RIB acks were
+  awaited unbounded while every EVPN runtime converge path holds the
+  IMET controller mutex, so a wedged RIB actor locked all subsequent
+  EVPN runtime converges out until restart; both operations now bound
+  the wait at the standard RIB ack timeout and report the converge as
+  failed instead of claiming success against a RIB that never answered.
+- FIB `ReplaceTables` no longer rewrites the owned-state file when the
+  reconcile bailed before the apply phase: that cancel path never
+  touches owned state, so the persist only stamped a plan signature
+  nothing had acted on. The orphan-revert case keeps its repair persist.
+- RPKI incremental VRP withdraws are no longer quadratic: per-server VRP
+  tables are stored as hash sets instead of vectors, making an
+  incremental withdraw O(withdrawn records) instead of
+  O(withdrawn × table size) against a full-table cache.
 
 ## [0.63.0] — 2026-08-04
 
 ### Added
-
-- Structured phase timing for the SIGHUP policy-reload path (LAN-888). A
-  config load now logs one `config source loaded` line with `toml_parse_ms`,
-  `rpol_load_ms`, `dataset_bind_ms`, and `validate_ms` alongside the total
-  `elapsed_ms`; the once-per-file rpol set-table intern logs
-  `interned rpol set tables built` with `elapsed_ms` at the moment it fires;
-  and an rpol registry swap logs `resolved live peer policy chains` with
-  `elapsed_ms` for the per-peer chain re-resolution before the snapshot
-  apply fan-out. Together with the existing partitioned-snapshot and RIB
-  export-policy transition lines, the daemon log alone attributes where a
-  reload spends its time. Measurement only — no behavior change.
 
 - ASPA-invalid policy rejections retain the first proven `NotProviderPlus` hop;
   cache refresh emits one bounded top-eight summary without changing routing.
